@@ -6,26 +6,16 @@ import {
 	type LocalStepStatus,
 	localStepStragglerSampleSize,
 	type LocalStepWakeOutcome,
-	type LocalStepWakeResponse
+	type LocalStepWakeResponse,
+	requiredLocalStepFrom
 } from '@cupboard/protocol/deployment';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import {
-	and,
-	asc,
-	count,
-	eq,
-	gt,
-	gte,
-	isNull,
-	lt,
-	lte,
-	or,
-	type SQL
-} from 'drizzle-orm';
+import { and, asc, count, eq, gt, gte, lte, or, type SQL } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { belowCurrentLocalStep } from '../do/local-step.ts';
+import { readRecordedTransitions } from '../db/deployment-transitions.ts';
+import { belowLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
@@ -39,38 +29,50 @@ const resumableTenant = or(
 	eq(d1Schema.tenant.status, 'suspended')
 );
 
-const straggler = and(resumableTenant, belowCurrentLocalStep);
+// The tenants a wake selects: those that can still be woken and have not
+// reached the step the transitions require now.
+function stragglerFilter(requiredStep: LocalStep): SQL | undefined {
+	return and(resumableTenant, belowLocalStep(requiredStep));
+}
+
+/**
+ * The local step every active tenant must reach now: the settle step of the
+ * first incomplete transition that has one, else this build's final step.
+ * Before the cache-identity contraction an object can report at most step 4,
+ * so counting tenants against step 5 then would never reach zero.
+ */
+export async function requiredLocalStep(env: Env): Promise<LocalStep> {
+	return requiredLocalStepFrom(
+		await readRecordedTransitions(controlDatabase(env))
+	);
+}
 
 /**
  * Reports how many active or suspended tenants have reached the required step,
- * and lists some of those that have not.
+ * and lists some of those that have not. The step is the caller's, or else the
+ * one the recorded transitions require now.
  */
 export async function controlLocalStepStatus(
 	env: Env,
-	requiredStep: LocalStep = currentLocalStep
+	requiredStep?: LocalStep
 ): Promise<LocalStepStatus> {
 	const database = controlDatabase(env);
+	const required = requiredStep ?? (await requiredLocalStep(env));
 	const ready = await countTenants(
 		database,
-		and(resumableTenant, gte(d1Schema.tenant.localStep, requiredStep))
+		and(resumableTenant, gte(d1Schema.tenant.localStep, required))
 	);
-	const pendingFilter = and(
-		resumableTenant,
-		or(
-			isNull(d1Schema.tenant.localStep),
-			lt(d1Schema.tenant.localStep, requiredStep)
-		)
-	);
+	const pendingFilter = stragglerFilter(required);
 	const pending = await countTenants(database, pendingFilter);
 	const stragglers = await selectStragglers(
 		database,
 		localStepStragglerSampleSize,
-		undefined,
 		pendingFilter
 	);
 
 	return {
-		current: requiredStep,
+		current: currentLocalStep,
+		required,
 		ready,
 		pending,
 		stragglers: stragglers.map(({ id }) => id)
@@ -78,7 +80,7 @@ export async function controlLocalStepStatus(
 }
 
 /**
- * Wakes up to `limit` tenants that have not reached the current step, so each
+ * Wakes up to `limit` tenants that have not reached the required step, so each
  * applies its pending migrations and records how far it has come.
  *
  * A tenant that records no step is counted as failed. It stays in the
@@ -90,6 +92,7 @@ export async function controlLocalStepWake(
 	limit: number
 ): Promise<LocalStepWakeResponse> {
 	const database = controlDatabase(env);
+	const straggler = stragglerFilter(await requiredLocalStep(env));
 	const previous = await database
 		.select()
 		.from(d1Schema.localStepWakeCursor)
@@ -99,6 +102,7 @@ export async function controlLocalStepWake(
 	const first = await selectStragglers(
 		database,
 		limit,
+		straggler,
 		after === undefined ? undefined : gt(d1Schema.tenant.id, after)
 	);
 	const wrapped =
@@ -107,6 +111,7 @@ export async function controlLocalStepWake(
 			: await selectStragglers(
 					database,
 					limit - first.length,
+					straggler,
 					lte(d1Schema.tenant.id, after)
 				);
 	const stragglers = [...first, ...wrapped];
@@ -198,8 +203,8 @@ async function countTenants(
 function selectStragglers(
 	database: Database,
 	limit: number,
-	position?: SQL,
-	filter: SQL | undefined = straggler
+	filter: SQL | undefined,
+	position?: SQL
 ): Promise<{ id: TenantId }[]> {
 	// A stable order lets the persisted cursor resume after the last attempted tenant.
 	return database

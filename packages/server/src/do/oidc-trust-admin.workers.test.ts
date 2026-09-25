@@ -20,7 +20,7 @@ import {
 	currentServer,
 	initialise,
 	issueServerSignedToken,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -447,16 +447,16 @@ describe('stored spelling of a rule', () => {
 	it.each([
 		{
 			name: 'the selector spelling until the deployment is contracted',
-			phase: 'native-reads' as const,
+			state: 'expanded' as const,
 			stored: selectorSpelling
 		},
 		{
 			name: 'the scope spelling once the deployment is contracted',
-			phase: 'contracted' as const,
+			state: 'complete' as const,
 			stored: permittedGrants
 		}
-	])('stores a rule in $name', async ({ phase, stored }) => {
-		await recordDeploymentPhase(phase);
+	])('stores a rule in $name', async ({ state, stored }) => {
+		await recordTransition('cache-identity', state);
 		const token = await adminToken();
 		await createCache(token, 'ci', 'private');
 		await createCache(token, 'docs', 'public');

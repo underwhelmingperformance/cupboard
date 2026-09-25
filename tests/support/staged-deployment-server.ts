@@ -4,9 +4,9 @@ import path from 'node:path';
 
 import type { CacheListResponse } from '@cupboard/protocol/caches';
 import {
-	contractionMigrations,
+	buildRequiresCompleteBefore,
 	currentLocalStep,
-	type ParsedDeploymentPhaseResponse,
+	type ParsedDeploymentTransitionsResponse,
 	type ParsedLocalStepStatus,
 	type ParsedLocalStepWakeResponse
 } from '@cupboard/protocol/deployment';
@@ -30,10 +30,16 @@ import type { CloudflareApi } from '../../packages/cli/src/deploy/cloudflare-api
 import { databaseIdSchema } from '../../packages/cli/src/deploy/identifiers.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
 import {
+	planTransitions,
+	type TransitionHooks,
+	type TransitionWalk
+} from '../../packages/cli/src/deploy/transitions.ts';
+import {
 	cacheNameSchema,
 	storePathHashSchema,
 	tenantIdSchema
 } from '../../packages/nix-store/src/scalars.ts';
+import { byCodeUnit } from '../../packages/nix-store/src/store-path.ts';
 import { tenantMemberKey } from '../../packages/server/src/control/tenant-member-key.ts';
 import {
 	type FixtureTenant,
@@ -184,14 +190,27 @@ const catalogueVersionSchema = z.strictObject({
 	version: z.number().int().nullable()
 });
 const terminalD1SnapshotSchema = z.strictObject({
-	lastD1Migration: z.string(),
-	phase: z.string(),
+	phase: z.string().nullable(),
 	resumableTenantsBelowStep: z.number().int().nonnegative()
 });
+const nameRowsSchema = z.array(z.strictObject({ name: z.string() }));
+const transitionRowsSchema = z.array(
+	z.strictObject({ id: z.string(), state: z.string() })
+);
 
 export interface TerminalDeploymentSnapshot {
-	readonly lastD1Migration: string;
-	readonly phase: string;
+	/**
+	The migrations `d1_migrations` records, in name order.
+	*/
+	readonly appliedD1Migrations: readonly string[];
+	/**
+	The recorded state of each schema transition, by id.
+	*/
+	readonly transitions: Readonly<Record<string, string>>;
+	/**
+	The phase the deploy keeps writing for the preceding release.
+	*/
+	readonly phase: string | null;
 	readonly resumableTenantsBelowStep: number;
 	readonly legacyNarInfoPresent: boolean;
 }
@@ -202,11 +221,12 @@ interface FixtureBundles {
 }
 
 /**
- * The control procedures a test reads after a deploy: the recorded phase, how
- * far the tenants have come, and a way to wake the ones that are behind.
+ * The control procedures a test reads after a deploy: the recorded schema
+ * transitions, how far the tenants have come, and a way to wake the ones that
+ * are behind.
  */
 export interface DeploymentClient {
-	phase(): Promise<ParsedDeploymentPhaseResponse>;
+	transitions(): Promise<ParsedDeploymentTransitionsResponse>;
 	localStepStatus(): Promise<ParsedLocalStepStatus>;
 	wakeLocalStep(limit: number): Promise<ParsedLocalStepWakeResponse>;
 }
@@ -493,7 +513,7 @@ export class StagedDeploymentServer {
 		});
 
 		return {
-			phase: () => rpc.deployment.phase(),
+			transitions: () => rpc.deployment.transitions(),
 			localStepStatus: () => rpc.localStep.status({}),
 			wakeLocalStep: (limit) => rpc.localStep.wake({ limit })
 		};
@@ -724,30 +744,50 @@ export class StagedDeploymentServer {
 		return this.artifact.buildVersion;
 	}
 
-	get finalD1Migration(): string {
-		const migration = this.artifact.d1Migrations.at(-1);
-
-		if (migration === undefined) {
+	/**
+	Every D1 migration the artifact carries, in name order.
+	*/
+	get d1MigrationNames(): readonly string[] {
+		if (this.artifact.d1Migrations.length === 0) {
 			throw new ArtifactD1MigrationMissingError();
 		}
 
-		return migration.name;
+		return this.artifact.d1Migrations
+			.map((migration) => migration.name)
+			.toSorted(byCodeUnit);
 	}
 
 	/**
-	 * The last migration a deploy applies before both Workers serve this build.
-	 * The rest wait for the preceding release to drain.
+	 * The schema transition walk `cupboard deploy` runs, over this harness's
+	 * D1 database and Workers. The serving check reads the control Worker's
+	 * build version, as `deployCurrent` does; `hooks` supplies the clock and
+	 * the tenant settlement a test wants, and without `settleTenants` the walk
+	 * only checks readiness.
 	 */
-	get finalPreCutoverD1Migration(): string {
-		const migration = this.artifact.d1Migrations.findLast(
-			(candidate) => !contractionMigrations.includes(candidate.name)
-		);
+	transitionWalk(hooks: Partial<TransitionHooks> = {}): TransitionWalk {
+		return {
+			api: {
+				queryBatch: (id, statements) => this.api.d1QueryBatch(id, statements),
+				queryRows: (id, sql) => this.api.d1QueryRows(id, sql)
+			},
+			databaseId,
+			transitions: planTransitions(this.artifact.d1Migrations),
+			requiresCompleteBefore: buildRequiresCompleteBefore,
+			hooks: {
+				now: () => new Date(),
+				awaitServing: async () => {
+					const control = await this.controlServingVersion();
 
-		if (migration === undefined) {
-			throw new ArtifactD1MigrationMissingError();
-		}
-
-		return migration.name;
+					if (control !== this.artifact.buildVersion) {
+						throw new RuntimeVersionMismatchError(
+							this.artifact.buildVersion,
+							control
+						);
+					}
+				},
+				...hooks
+			}
+		};
 	}
 
 	get api(): Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> {
@@ -837,7 +877,6 @@ export class StagedDeploymentServer {
 		const result = await database
 			.prepare(
 				`SELECT
-					(SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1) AS lastD1Migration,
 					(SELECT phase FROM deployment_phase WHERE id = 'current') AS phase,
 					(SELECT count(*) FROM tenant
 						WHERE status IN ('active', 'suspended')
@@ -846,13 +885,28 @@ export class StagedDeploymentServer {
 			.bind(currentLocalStep)
 			.first();
 		const d1 = terminalD1SnapshotSchema.parse(result);
+		const appliedRows = await database
+			.prepare('SELECT name FROM d1_migrations ORDER BY name')
+			.all();
+		const applied = nameRowsSchema.parse(appliedRows.results);
+		const transitionRows = await database
+			.prepare('SELECT id, state FROM deployment_transition ORDER BY id')
+			.all();
+		const transitions = transitionRowsSchema.parse(transitionRows.results);
 		const tenant = tenantIdSchema.parse('upgrade-active');
 		const bucket = await this.bucket();
 		const legacyNarInfo = await bucket.head(
 			`t/${tenant}/narinfo/${legacyCacheName}/${pathHash}`
 		);
 
-		return { ...d1, legacyNarInfoPresent: legacyNarInfo !== null };
+		return {
+			appliedD1Migrations: applied.map((row) => row.name),
+			transitions: Object.fromEntries(
+				transitions.map((row) => [row.id, row.state])
+			),
+			...d1,
+			legacyNarInfoPresent: legacyNarInfo !== null
+		};
 	}
 
 	/**
@@ -923,10 +977,10 @@ export class StagedDeploymentServer {
 		await this.connectDeploymentClient();
 
 		return {
-			phase: async () => {
+			transitions: async () => {
 				const client = await this.connectDeploymentClient();
 
-				return client.phase();
+				return client.transitions();
 			},
 			localStepStatus: async () => {
 				const client = await this.connectDeploymentClient();

@@ -63,10 +63,10 @@ import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { boundedSubrequest } from './deadline.ts';
-import { DeploymentPhaseGate } from './deployment-phase-gate.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
 import { currentRowBudgetMeter } from './row-budget.ts';
+import { TransitionGate } from './transition-gate.ts';
 
 // Cloudflare accepts at most 100 operations in one purge request, on every
 // plan. See the "Hostname, tag, prefix URL, and purge everything limits" table
@@ -164,8 +164,8 @@ export class ServerContext {
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
 	// One gate per object, so every service answers from the same reading of
-	// the deployment phase.
-	readonly phases: DeploymentPhaseGate;
+	// the schema transitions.
+	readonly transitions: TransitionGate;
 	grantsContracted = false;
 	readonly cacheRepository: CacheRepository;
 	readonly subrequestsPerInvocation: number;
@@ -200,7 +200,7 @@ export class ServerContext {
 			{ schema }
 		);
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
-		this.phases = new DeploymentPhaseGate(this.d1);
+		this.transitions = new TransitionGate(this.d1);
 		this.subrequestsPerInvocation = subrequestsPerInvocation(env);
 		this.cacheRepository = new CacheRepository(this.db);
 	}

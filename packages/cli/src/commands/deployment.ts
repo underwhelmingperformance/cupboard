@@ -1,15 +1,15 @@
 import {
-	currentLocalStep,
-	expansionLocalStep,
-	localStepWakeBodySchema
+	localStepWakeBodySchema,
+	type ParsedDeploymentTransitionsResponse
 } from '@cupboard/protocol/deployment';
+import { formatTimestamp, type Reporter } from '@cupboard/reporter';
 import { type Command, InvalidArgumentError } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { settleTenants } from '../deploy/settlement.ts';
+import { type SettlementClient, settleTenants } from '../deploy/settlement.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 function parseBatchLimit(value: string): number {
@@ -27,6 +27,82 @@ interface ResumeOptions {
 	readonly maxPasses: number;
 }
 
+export interface DeploymentClient {
+	transitions(): Promise<ParsedDeploymentTransitionsResponse>;
+	readonly localStep: SettlementClient;
+}
+
+export interface DeploymentResumeOptions {
+	readonly limit: number;
+	readonly maxPasses: number;
+	readonly signal?: AbortSignal;
+}
+
+/**
+ * Shows each recorded schema transition, the local step they require of every
+ * active tenant now, and how many tenants have reached it.
+ */
+export async function runDeploymentStatus(
+	reporter: Reporter,
+	client: DeploymentClient
+): Promise<void> {
+	const transitions = await client.transitions();
+	const status = await client.localStep.status({
+		requiredStep: transitions.requiredLocalStep
+	});
+	const transitionRows =
+		transitions.transitions.length === 0
+			? [{ label: 'Transitions', value: 'none recorded' }]
+			: transitions.transitions.map((transition) => ({
+					label: `Transition ${transition.id}`,
+					value: `${transition.state} since ${formatTimestamp(transition.updatedAt)}`
+				}));
+
+	reporter.result({
+		kind: 'deployment-status',
+		data: { ...transitions, ...status },
+		rows: [
+			...transitionRows,
+			{ label: 'Required local step', value: String(status.required) },
+			{ label: 'Ready tenants', value: String(status.ready) },
+			{ label: 'Pending tenants', value: String(status.pending) },
+			{
+				label: 'Pending sample',
+				value: status.stragglers.join(', ') || '(none)'
+			}
+		]
+	});
+}
+
+/**
+ * Advances bounded batches of tenants to the step the recorded transitions
+ * require now, then reports whether the deployment can continue.
+ */
+export async function runDeploymentResume(
+	reporter: Reporter,
+	client: DeploymentClient,
+	options: DeploymentResumeOptions
+): Promise<void> {
+	const { requiredLocalStep } = await client.transitions();
+	const status = await settleTenants(client.localStep, reporter, {
+		requiredStep: requiredLocalStep,
+		limit: options.limit,
+		maxPasses: options.maxPasses,
+		...(options.signal !== undefined && { signal: options.signal })
+	});
+	reporter.result({
+		kind: 'deployment-readiness',
+		data: status,
+		rows: [
+			{ label: 'Ready tenants', value: String(status.ready) },
+			{ label: 'Local step', value: String(status.required) }
+		]
+	});
+	reporter.info(
+		'Tenant work is complete for this transition. Re-run cupboard deploy to finish the deployment.'
+	);
+}
+
 export function registerDeploymentCommands(
 	program: Command,
 	options: ProgramOptions = {}
@@ -34,39 +110,26 @@ export function registerDeploymentCommands(
 	const deployment = program
 		.command('deployment')
 		.description('Inspect and resume tenant migration work.');
-	const client = (url: URL) =>
-		controlRpc(url, {
+	const client = (url: URL): DeploymentClient => {
+		const rpc = controlRpc(url, {
 			credential: cachedOwnerProvider(url, { signal: options.signal }),
 			signal: options.signal
 		});
+
+		return {
+			transitions: () => rpc.deployment.transitions(),
+			localStep: rpc.localStep
+		};
+	};
 	deployment
 		.command('status')
-		.description('Show the deployment phase and pending tenant work.')
+		.description('Show the schema transitions and pending tenant work.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
-			const rpc = client(url);
-			const phase = await rpc.deployment.phase();
-			const requiredStep =
-				phase.phase?.name === 'contracted'
-					? currentLocalStep
-					: expansionLocalStep;
-			const status = await rpc.localStep.status({ requiredStep });
-			commandUi(program, options)
-				.reporter()
-				.result({
-					kind: 'deployment-status',
-					data: { ...phase, ...status },
-					rows: [
-						{ label: 'Phase', value: phase.phase?.name ?? 'not recorded' },
-						{ label: 'Required local step', value: String(requiredStep) },
-						{ label: 'Ready tenants', value: String(status.ready) },
-						{ label: 'Pending tenants', value: String(status.pending) },
-						{
-							label: 'Pending sample',
-							value: status.stragglers.join(', ') || '(none)'
-						}
-					]
-				});
+			await runDeploymentStatus(
+				commandUi(program, options).reporter(),
+				client(url)
+			);
 		});
 	deployment
 		.command('resume')
@@ -87,28 +150,14 @@ export function registerDeploymentCommands(
 			20
 		)
 		.action(async (url: URL, request: ResumeOptions) => {
-			const rpc = client(url);
-			const phase = await rpc.deployment.phase();
-			const reporter = commandUi(program, options).reporter();
-			const status = await settleTenants(rpc.localStep, reporter, {
-				requiredStep:
-					phase.phase?.name === 'contracted'
-						? currentLocalStep
-						: expansionLocalStep,
-				limit: request.limit,
-				maxPasses: request.maxPasses,
-				...(options.signal !== undefined && { signal: options.signal })
-			});
-			reporter.result({
-				kind: 'deployment-readiness',
-				data: status,
-				rows: [
-					{ label: 'Ready tenants', value: String(status.ready) },
-					{ label: 'Local step', value: String(status.current) }
-				]
-			});
-			reporter.info(
-				'Tenant work is complete for this phase. Re-run cupboard deploy to finish the deployment.'
+			await runDeploymentResume(
+				commandUi(program, options).reporter(),
+				client(url),
+				{
+					limit: request.limit,
+					maxPasses: request.maxPasses,
+					...(options.signal !== undefined && { signal: options.signal })
+				}
 			);
 		});
 }

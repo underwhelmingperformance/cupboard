@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto';
 
-import { contractionMigrations } from '@cupboard/protocol/deployment';
-
 import type { DatabaseId } from './identifiers.ts';
 
 /**
@@ -40,32 +38,6 @@ export function parseD1Migrations(
 				.map((statement) => statement.trim())
 				.filter((statement) => statement.length > 0)
 		}));
-}
-
-/**
- * Files that follow the first contraction but have no phase classification.
- * Applying these as preparation would violate journal order; applying them
- * after upload could leave the new Workers without schema they require.
- */
-export function unclassifiedD1Migrations(
-	migrations: readonly D1Migration[]
-): readonly string[] {
-	const contractions = [...contractionMigrations].toSorted((left, right) =>
-		left.localeCompare(right)
-	);
-	const [boundary] = contractions;
-
-	if (boundary === undefined) {
-		return [];
-	}
-
-	return migrations
-		.filter(
-			(migration) =>
-				migration.name.localeCompare(boundary) >= 0 &&
-				!contractionMigrations.includes(migration.name)
-		)
-		.map((migration) => migration.name);
 }
 
 export interface D1MigrationApi {

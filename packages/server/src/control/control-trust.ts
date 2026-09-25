@@ -1,8 +1,4 @@
-import {
-	deploymentPhaseNameSchema,
-	deploymentPhaseRowId,
-	hasReachedPhase
-} from '@cupboard/protocol/deployment';
+import { hasReachedTransitionState } from '@cupboard/protocol/deployment';
 import {
 	type CacheAccessLookup,
 	oidcTrustDisplaySchema,
@@ -27,6 +23,7 @@ import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { readRecordedTransitions } from '../db/deployment-transitions.ts';
 import {
 	ControlTrustSubjectRequiredError,
 	OidcIssuerTransportRequiredError,
@@ -193,31 +190,23 @@ export async function getControlTrust(
 	return summaryFromRow(row, canUseLoopbackHttp);
 }
 
-// An unrecognised stored phase is treated as pre-contraction, as in the
-// tenant-object gate.
+// A stored transition this build does not define is treated as
+// pre-contraction, as in the tenant-object gate.
 async function hasContracted(database: Database): Promise<boolean> {
-	const row = await database
-		.select({ name: d1Schema.deploymentPhase.phase })
-		.from(d1Schema.deploymentPhase)
-		.where(eq(d1Schema.deploymentPhase.id, deploymentPhaseRowId))
-		.get();
-	const parsed = deploymentPhaseNameSchema.safeParse(row?.name);
+	const recorded = await readRecordedTransitions(database);
 
-	return hasReachedPhase(
-		parsed.success ? parsed.data : undefined,
-		'contracted'
-	);
+	return hasReachedTransitionState(recorded.get('cache-identity'), 'complete');
 }
 
 // The control plane cannot resolve a tenant cache's access.
 const noTenantCaches = (): ReturnType<CacheAccessLookup> => undefined;
 
 /**
- * The stored form of a control rule's grants. Until a deploy records
- * `contracted`, the previous build's control Worker can still serve after a
- * rollback, and it parses a rule strictly in the selector spelling; a rule is
- * stored in that spelling so it keeps reading every rule. From `contracted` on
- * the scope spelling is stored.
+ * The stored form of a control rule's grants. Until a deploy records the
+ * `cache-identity` transition complete, the previous build's control Worker
+ * can still serve after a rollback, and it parses a rule strictly in the
+ * selector spelling; a rule is stored in that spelling so it keeps reading
+ * every rule. From the contraction on the scope spelling is stored.
  */
 async function storedGrantsJson(
 	database: Database,

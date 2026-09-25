@@ -1,6 +1,7 @@
 import { capturingReporter } from '@cupboard/cli-ui/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	currentLocalStep,
 	expansionLocalStep,
 	type LocalStepStatus
 } from '@cupboard/protocol/deployment';
@@ -12,13 +13,15 @@ import { type SettlementClient, settleTenants } from './settlement.ts';
 
 const tenant = tenantIdSchema.parse('pending');
 const pending: LocalStepStatus = {
-	current: expansionLocalStep,
+	current: currentLocalStep,
+	required: expansionLocalStep,
 	ready: 0,
 	pending: 1,
 	stragglers: [tenant]
 };
 const ready: LocalStepStatus = {
-	current: expansionLocalStep,
+	current: currentLocalStep,
+	required: expansionLocalStep,
 	ready: 1,
 	pending: 0,
 	stragglers: []

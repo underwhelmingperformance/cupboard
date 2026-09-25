@@ -13,19 +13,20 @@ import { type ServerContext } from './context.ts';
  * Spells the grants a tenant stores: the cache bindings of its trust rules
  * and the issued grants its refresh-token families record.
  *
- * Until a deploy records `contracted`, a rollback can restore the preceding
- * build, which strictly parses cache selectors in stored grants. A row in the
- * scope spelling fails that build's parse: every token exchange under such a
- * rule is refused, and a refresh under such a family revokes it. So below
- * `contracted` a grant is stored in the selector spelling, derived from the
- * scope and the access the cache has now; `storedPermittedGrantsSchema` and
- * `storedAuthorizationDetailsSchema` read either spelling. From `contracted`
- * on, the scope spelling is stored.
+ * Until a deploy records the `cache-identity` transition complete, a rollback
+ * can restore the preceding build, which strictly parses cache selectors in
+ * stored grants. A row in the scope spelling fails that build's parse: every
+ * token exchange under such a rule is refused, and a refresh under such a
+ * family revokes it. So before then a grant is stored in the selector
+ * spelling, derived from the scope and the access the cache has now;
+ * `storedPermittedGrantsSchema` and `storedAuthorizationDetailsSchema` read
+ * either spelling. From the contraction on, the scope spelling is stored.
  *
- * The gate answers from a reading up to `phaseCacheMs` old, so the selector
- * spelling can still be written until the local contraction finishes. The
- * synchronous write methods check that state again because a prepared value
- * can cross the contraction while its caller awaits another operation.
+ * The gate answers from a reading up to `transitionCacheMs` old, so the
+ * selector spelling can still be written until the local contraction
+ * finishes. The synchronous write methods check that state again because a
+ * prepared value can cross the contraction while its caller awaits another
+ * operation.
  */
 export class StoredGrantSpelling {
 	constructor(private readonly context: ServerContext) {}
@@ -47,7 +48,9 @@ export class StoredGrantSpelling {
 	async permittedGrantsJson(
 		grants: readonly PermittedGrant[]
 	): Promise<string> {
-		if (await this.context.phases.hasReached('contracted')) {
+		if (
+			await this.context.transitions.hasReached('cache-identity', 'complete')
+		) {
 			return JSON.stringify(grants);
 		}
 
@@ -63,7 +66,9 @@ export class StoredGrantSpelling {
 	async authorizationDetailsJson(
 		grants: AuthorizationDetails
 	): Promise<string> {
-		if (await this.context.phases.hasReached('contracted')) {
+		if (
+			await this.context.transitions.hasReached('cache-identity', 'complete')
+		) {
 			return JSON.stringify(grants);
 		}
 

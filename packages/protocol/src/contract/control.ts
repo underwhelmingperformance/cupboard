@@ -12,7 +12,7 @@ import {
 	controlKeyRotateResponseSchema
 } from '../control-keys.ts';
 import {
-	deploymentPhaseResponseSchema,
+	deploymentTransitionsResponseSchema,
 	localStepStatusQuerySchema,
 	localStepStatusSchema,
 	localStepWakeBodySchema,
@@ -230,20 +230,22 @@ export const controlContract = {
 			.output(membershipRebuildResponseSchema)
 	},
 
-	// `cupboard deploy` records which phase the deployed build runs in, and an
-	// operator reads it from here.
+	// `cupboard deploy` records how far each schema transition has got, and an
+	// operator reads the recorded states, with the local step they require of
+	// every active tenant, from here.
 	deployment: {
-		phase: controlProcedure
+		transitions: controlProcedure
 			.meta({ requires: 'deployment:read', replaySafety: 'replay-safe' })
-			.route({ method: 'GET', path: '/deployment/phase' })
-			.output(deploymentPhaseResponseSchema)
+			.route({ method: 'GET', path: '/deployment/transitions' })
+			.output(deploymentTransitionsResponseSchema)
 	},
 
 	// A release that changes each tenant's local state needs every active
 	// tenant's Durable Object to report the step it has reached, and `cupboard
-	// deploy` records a phase only once every active tenant has. `status`
-	// reports how far the tenants have come and `wake` advances a bounded batch
-	// of those that have not; an object records its step only when woken here.
+	// deploy` contracts a transition only once every active tenant has reached
+	// its settle step. `status` reports how far the tenants have come and `wake`
+	// advances a bounded batch of those that have not; an object records its
+	// step only when woken here.
 	localStep: {
 		status: controlProcedure
 			.meta({ requires: 'local-step:read', replaySafety: 'replay-safe' })

@@ -1,11 +1,9 @@
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
-	contractionMigrations,
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
-	type ParsedLocalStepWakeResponse,
-	settledDeploymentPhase
+	type ParsedLocalStepWakeResponse
 } from '@cupboard/protocol/deployment';
 import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
@@ -14,14 +12,14 @@ import { cacheCreateAuthorizationDetails } from '../../packages/cli/src/auth/att
 import { githubPullRequestClaims } from '../../packages/cli/src/commands/github/claims.ts';
 import { pullRequestCacheName } from '../../packages/cli/src/commands/github/convention.ts';
 import { githubPrAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
-import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
 import {
-	type LocalStepReadiness,
 	type PhaseApi,
-	readLocalStepReadiness,
-	recordDeploymentPhase,
-	recordPhaseWhenTenantsReady
+	readLocalStepReadiness
 } from '../../packages/cli/src/deploy/phase.ts';
+import {
+	completeTransitions,
+	prepareTransitions
+} from '../../packages/cli/src/deploy/transitions.ts';
 import { LocalStepUnreachedError } from '../../packages/cli/src/errors.ts';
 import {
 	predecessorDurableObjectMigration,
@@ -44,6 +42,25 @@ const repository = {
 };
 
 const resumableFixtureTenants = 2 + sleepingFixtureTenants.length;
+
+// The clock every walk records with, so the recorded timestamps are known.
+const deployedAt = new Date('2026-01-01T00:00:00.000Z');
+
+const completedTransitions = {
+	transitions: [
+		{
+			id: 'cache-identity',
+			state: 'complete',
+			updatedAt: deployedAt.toISOString()
+		},
+		{
+			id: 'deployment-transitions',
+			state: 'complete',
+			updatedAt: deployedAt.toISOString()
+		}
+	],
+	requiredLocalStep: currentLocalStep
+};
 
 async function wakeUntilStep(
 	server: StagedDeploymentServer,
@@ -81,65 +98,38 @@ function phaseApi(server: StagedDeploymentServer): PhaseApi {
 }
 
 /**
- * Applies the D1 migrations and swaps in the Workers built from the working
- * tree, as `cupboard deploy` does before it records a phase. `recordPhase` is
- * the step it takes after both Workers serve.
+ * Walks the schema transitions as `cupboard deploy` does before it uploads
+ * the Workers, then swaps in the Workers built from the working tree.
  */
 async function deployOverPredecessor(
-	server: StagedDeploymentServer
+	server: StagedDeploymentServer,
+	now = deployedAt
 ): Promise<void> {
-	await applyD1Migrations(
-		phaseApi(server),
-		stagedDeploymentDatabaseId,
-		server.artifact.d1Migrations.filter(
-			(migration) => !contractionMigrations.includes(migration.name)
-		)
-	);
+	await prepareTransitions(server.transitionWalk({ now: () => now }), false);
 	await server.deployCurrent();
 }
 
-function recordPhase(
-	server: StagedDeploymentServer
-): Promise<LocalStepReadiness> {
-	return recordPhaseWhenTenantsReady(
-		phaseApi(server),
-		stagedDeploymentDatabaseId,
-		'native-reads',
-		expansionLocalStep,
-		new Date()
-	);
-}
-
-async function contractOverPredecessor(
+/**
+ * Walks the transitions as the deploy does once both Workers serve the build:
+ * checks the tenants have reached the settle step, contracts and records the
+ * transition complete.
+ */
+function contractOverPredecessor(
 	server: StagedDeploymentServer,
-	now = new Date()
-): Promise<void> {
-	await recordPhase(server);
-	await applyD1Migrations(
-		phaseApi(server),
-		stagedDeploymentDatabaseId,
-		server.artifact.d1Migrations.filter((migration) =>
-			contractionMigrations.includes(migration.name)
-		)
-	);
-	await recordDeploymentPhase(
-		phaseApi(server),
-		stagedDeploymentDatabaseId,
-		settledDeploymentPhase,
-		currentLocalStep,
-		now
-	);
+	now = deployedAt
+): Promise<unknown> {
+	return completeTransitions(server.transitionWalk({ now: () => now }));
 }
 
 /**
- * The tenants a refused phase record names, or undefined when the record was
- * not refused.
+ * The tenants a refused contraction names, or undefined when it was not
+ * refused.
  */
-async function refusedPhaseRecord(
+async function refusedContraction(
 	server: StagedDeploymentServer
 ): Promise<{ pending: number; stragglers: readonly string[] } | undefined> {
 	try {
-		await recordPhase(server);
+		await contractOverPredecessor(server);
 	} catch (error) {
 		if (error instanceof LocalStepUnreachedError) {
 			return { pending: error.pending, stragglers: error.stragglers };
@@ -167,10 +157,11 @@ it('upgrades a populated predecessor deployment', async () => {
 		await deployOverPredecessor(server);
 
 		// No tenant has been woken since the swap, so none has recorded step 1 and
-		// the phase is refused.
-		const refused = await refusedPhaseRecord(server);
+		// the contraction is refused.
+		const refused = await refusedContraction(server);
 
 		const client = await server.deploymentClient();
+		const expanded = await client.transitions();
 		const wake = await wakeUntilStep(server, client, expansionLocalStep);
 
 		await contractOverPredecessor(server);
@@ -180,14 +171,13 @@ it('upgrades a populated predecessor deployment', async () => {
 			currentLocalStep
 		);
 
-		const recorded = await client.phase();
-
 		expect({
 			refused,
+			expanded,
 			wake,
 			contractionWake,
 			status: await client.localStepStatus(),
-			phase: recorded.phase?.name,
+			recorded: await client.transitions(),
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
 			refused: {
@@ -197,6 +187,23 @@ it('upgrades a populated predecessor deployment', async () => {
 					...sleepingFixtureTenants,
 					'upgrade-suspended'
 				]
+			},
+			// Before the upload the deploy expanded both transitions and completed
+			// the one with no contract; the tenants then had step 4 to reach.
+			expanded: {
+				transitions: [
+					{
+						id: 'cache-identity',
+						state: 'expanded',
+						updatedAt: deployedAt.toISOString()
+					},
+					{
+						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: deployedAt.toISOString()
+					}
+				],
+				requiredLocalStep: expansionLocalStep
 			},
 			wake: {
 				didAdvance: true,
@@ -234,14 +241,19 @@ it('upgrades a populated predecessor deployment', async () => {
 			},
 			status: {
 				current: currentLocalStep,
+				required: currentLocalStep,
 				ready: resumableFixtureTenants,
 				pending: 0,
 				stragglers: []
 			},
-			phase: settledDeploymentPhase,
+			recorded: completedTransitions,
 			terminal: {
-				lastD1Migration: server.finalD1Migration,
-				phase: settledDeploymentPhase,
+				appliedD1Migrations: server.d1MigrationNames,
+				transitions: {
+					'cache-identity': 'complete',
+					'deployment-transitions': 'complete'
+				},
+				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
 			}
@@ -277,6 +289,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 		}).toStrictEqual({
 			before: {
 				current: currentLocalStep,
+				required: expansionLocalStep,
 				ready: 0,
 				pending: resumableFixtureTenants,
 				stragglers: [
@@ -287,6 +300,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 			},
 			after: {
 				current: currentLocalStep,
+				required: currentLocalStep,
 				ready: resumableFixtureTenants,
 				pending: 0,
 				stragglers: []
@@ -336,7 +350,7 @@ it('serves a suspended predecessor private cache immediately after resume', asyn
 	}
 });
 
-it('records the same phase when an interrupted deploy is run again', async () => {
+it('records the same transitions when an interrupted deploy is run again', async () => {
 	const server = await StagedDeploymentServer.start(process.cwd());
 
 	try {
@@ -346,36 +360,33 @@ it('records the same phase when an interrupted deploy is run again', async () =>
 		const first = await server.deploymentClient();
 
 		await wakeUntilStep(server, first, expansionLocalStep);
-		await contractOverPredecessor(server, new Date('2026-01-01T00:00:00.000Z'));
+		await contractOverPredecessor(server);
 		await wakeUntilStep(server, first, currentLocalStep);
-		const initial = await first.phase();
+		const initial = await first.transitions();
 
 		// A rerun repeats every step against the state the first run left.
+		const rerunAt = new Date('2026-01-02T00:00:00.000Z');
 		await server.restart();
-		await deployOverPredecessor(server);
-		await contractOverPredecessor(server, new Date('2026-01-02T00:00:00.000Z'));
+		await deployOverPredecessor(server, rerunAt);
+		await contractOverPredecessor(server, rerunAt);
 
 		const client = await server.deploymentClient();
-		const recorded = await client.phase();
+		const recorded = await client.transitions();
 
 		expect({
-			initial: initial.phase,
-			repeated: recorded.phase,
+			initial,
+			repeated: recorded,
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
-			initial: {
-				name: settledDeploymentPhase,
-				requiredLocalStep: currentLocalStep,
-				updatedAt: '2026-01-01T00:00:00.000Z'
-			},
-			repeated: {
-				name: settledDeploymentPhase,
-				requiredLocalStep: currentLocalStep,
-				updatedAt: '2026-01-01T00:00:00.000Z'
-			},
+			initial: completedTransitions,
+			repeated: completedTransitions,
 			terminal: {
-				lastD1Migration: server.finalD1Migration,
-				phase: settledDeploymentPhase,
+				appliedD1Migrations: server.d1MigrationNames,
+				transitions: {
+					'cache-identity': 'complete',
+					'deployment-transitions': 'complete'
+				},
+				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
 			}

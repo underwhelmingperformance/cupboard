@@ -1,6 +1,10 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { controlContract } from '@cupboard/protocol/contract';
 import {
+	currentLocalStep,
+	expansionLocalStep
+} from '@cupboard/protocol/deployment';
+import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
@@ -21,7 +25,7 @@ import {
 	currentOrigin,
 	issueControlAdminToken,
 	issueServerSignedToken,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -162,7 +166,7 @@ describe('control contract round trip', () => {
 	it.each([
 		{
 			name: 'the selector spelling until the deployment is contracted',
-			phase: 'native-reads' as const,
+			state: 'expanded' as const,
 			stored: [
 				{
 					type: 'cupboard_cache',
@@ -188,20 +192,20 @@ describe('control contract round trip', () => {
 		},
 		{
 			name: 'the scope spelling once the deployment is contracted',
-			phase: 'contracted' as const,
+			state: 'complete' as const,
 			stored: controlRuleGrants
 		}
-	])('stores a control rule in $name', async ({ phase, stored }) => {
+	])('stores a control rule in $name', async ({ state, stored }) => {
 		const { results: triggers } = await env.CUPBOARD_DB.prepare(
 			"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'control_trust_native_grants_%'"
 		).all<{ name: string; sql: string }>();
-		if (phase === 'native-reads') {
+		if (state === 'expanded') {
 			for (const trigger of triggers) {
 				await env.CUPBOARD_DB.prepare(`DROP TRIGGER ${trigger.name}`).run();
 			}
 		}
 		try {
-			await recordDeploymentPhase(phase);
+			await recordTransition('cache-identity', state);
 			const client = controlClient(await issueControlAdminToken());
 
 			const added = await client.oidcTrust.add({
@@ -225,7 +229,7 @@ describe('control contract round trip', () => {
 				read: fetched.permittedGrants
 			}).toStrictEqual({ stored, read: controlRuleGrants });
 		} finally {
-			if (phase === 'native-reads') {
+			if (state === 'expanded') {
 				for (const trigger of triggers) {
 					await env.CUPBOARD_DB.prepare(trigger.sql).run();
 				}
@@ -547,6 +551,77 @@ describe('control contract round trip', () => {
 			}
 		});
 	});
+
+	it('reports the recorded transitions in walk order with the step they require', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const before = await client.deployment.transitions();
+
+		await recordTransition('deployment-transitions', 'complete');
+		await recordTransition('cache-identity', 'expanded');
+		const expanded = await client.deployment.transitions();
+
+		await recordTransition('cache-identity', 'complete');
+		const complete = await client.deployment.transitions();
+
+		expect({ before, expanded, complete }).toStrictEqual({
+			before: { transitions: [], requiredLocalStep: expansionLocalStep },
+			expanded: {
+				transitions: [
+					{
+						id: 'cache-identity',
+						state: 'expanded',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					},
+					{
+						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				requiredLocalStep: expansionLocalStep
+			},
+			complete: {
+				transitions: [
+					{
+						id: 'cache-identity',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					},
+					{
+						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				requiredLocalStep: currentLocalStep
+			}
+		});
+	});
+
+	// A rollback past a release that added a transition leaves its row behind.
+	// This build has no behaviour for it, so the procedure says so rather than
+	// reporting a state it cannot vouch for.
+	it.each([
+		{ name: 'transition id', id: 'later-transition', state: 'complete' },
+		{ name: 'state', id: 'cache-identity', state: 'later-state' }
+	])(
+		'refuses to report a $name this build does not define',
+		async ({ id, state }) => {
+			await env.CUPBOARD_DB.prepare(
+				'INSERT INTO deployment_transition (id, state, updated_at) VALUES (?, ?, ?)'
+			)
+				.bind(id, state, '2026-01-01T00:00:00.000Z')
+				.run();
+			const client = controlClient(await issueControlAdminToken());
+			const [error] = await safe(client.deployment.transitions());
+
+			expect(error).toBeInstanceOf(ORPCError);
+			expect(error).toMatchObject({
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				message: `The deployment records transition '${id}' in state '${state}', which this server version does not know`
+			});
+		}
+	);
 
 	it('returns UNAUTHORIZED when the control token is missing', async () => {
 		const client = controlClient();

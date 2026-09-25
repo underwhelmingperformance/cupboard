@@ -28,7 +28,7 @@ import {
 	narDigestHex,
 	pushPath,
 	putNarBytes,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	sigstoreBundleBytes,
 	testPushId,
@@ -130,7 +130,7 @@ describe('tenant contract round trip', () => {
 	});
 
 	it('updates one cache property at a time through the derived client', async () => {
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 		await useTestServer('contract-cache-update');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);

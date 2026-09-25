@@ -54,23 +54,48 @@ export class SigningKeyNotFoundError extends CliError {
 	}
 }
 
-export class UnclassifiedD1MigrationError extends CliError {
-	constructor(public readonly migrations: readonly string[]) {
+/**
+ * The artifact's D1 migrations are not the ones the schema transitions list,
+ * in their order. A migration added without a transition, or listed under the
+ * wrong one, is caught here before the deploy changes anything.
+ */
+export class MisclassifiedD1MigrationsError extends CliError {
+	constructor(
+		public readonly expected: readonly string[],
+		public readonly found: readonly string[]
+	) {
 		super(
-			`D1 migrations are not classified: ${migrations.join(', ')}. Each sorts after the first contraction. Add it to contractionMigrations if it must run after the Workers settle, or move it before the contractions if the new Workers need it when they start.`
+			`The D1 migrations do not match the schema transitions. The transitions list, in order: ${expected.join(', ') || '(none)'}. The artifact contains: ${found.join(', ') || '(none)'}. Add each new migration to the transition it expands or contracts in @cupboard/protocol/deployment.`
 		);
-		this.name = 'UnclassifiedD1MigrationError';
+		this.name = 'MisclassifiedD1MigrationsError';
 	}
 }
 
 /**
- * The recorded phase describes the code that is running, so a deploy records it
- * only when every script serves the build it just uploaded. A script fails this
- * check when it still serves an earlier build, or when a gradual deployment
- * splits its traffic across two versions.
+ * This build cannot serve the schema from before a transition's contract, and
+ * the deployment has not completed that transition. The release that can
+ * complete it has to be deployed first.
+ */
+export class TransitionIncompleteError extends CliError {
+	constructor(
+		public readonly transition: string,
+		public readonly completedBy: string | undefined
+	) {
+		super(
+			`This build needs the '${transition}' schema transition complete before it can deploy, and the deployment has not completed it. Deploy ${completedBy ?? 'the release that completes it'} first, then this build.`
+		);
+		this.name = 'TransitionIncompleteError';
+	}
+}
+
+/**
+ * A transition is continued only once every script serves the build the deploy
+ * just uploaded, because the contract removes what the earlier build reads. A
+ * script fails this check when it still serves an earlier build, or when a
+ * gradual deployment splits its traffic across two versions.
  *
  * The deploy has already uploaded the Workers when it throws this. Running the
- * deploy again once the rollout has finished records the phase.
+ * deploy again once the rollout has finished continues the transitions.
  */
 export class DeploymentPhaseUnsettledError extends CliError {
 	constructor(
@@ -80,17 +105,17 @@ export class DeploymentPhaseUnsettledError extends CliError {
 		const verb = scripts.length === 1 ? 'is' : 'are';
 
 		super(
-			`${scripts.join(' and ')} ${verb} not serving ${buildVersion} from a single version, so the deployment phase was not recorded. Re-run the deploy once the rollout has settled.`
+			`${scripts.join(' and ')} ${verb} not serving ${buildVersion} from a single version, so the schema transitions were not continued. Re-run the deploy once the rollout has settled.`
 		);
 		this.name = 'DeploymentPhaseUnsettledError';
 	}
 }
 
 /**
- * Active tenants have not recorded the local step this build requires, so the
- * deploy did not record its phase. The Workers are already uploaded when this
+ * Active tenants have not recorded the local step the deployment requires of
+ * them now, so the deploy stopped. The Workers are already uploaded when this
  * is thrown; the control Worker's sweep records the step for the tenants that
- * are behind, and running the deploy again then records the phase.
+ * are behind, and running the deploy again then continues.
  */
 export class LocalStepUnreachedError extends CliError {
 	constructor(
@@ -105,7 +130,7 @@ export class LocalStepUnreachedError extends CliError {
 				: stragglers.join(', ');
 
 		super(
-			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment phase was not recorded. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
+			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment cannot continue until they have. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
 		);
 		this.name = 'LocalStepUnreachedError';
 	}

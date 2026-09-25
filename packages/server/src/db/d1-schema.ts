@@ -12,8 +12,9 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import type {
-	DeploymentPhaseName,
-	LocalStep
+	LocalStep,
+	TransitionId,
+	TransitionState
 } from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
@@ -393,26 +394,26 @@ export const tenantMaintenanceEligibility = sqliteTable(
 );
 
 // One row per schema transition a deploy has started, keyed by the transition
-// id. `expanded` means the transition's expand migrations are applied;
-// `complete` means its contract migrations are too. `cupboard deploy` creates
-// this table before it walks the transitions (the deploy has to record the
-// first transition on databases older than the migration that also creates
-// it) and writes the rows; the Workers will read them to gate behaviour on a
-// transition being complete.
+// id from `@cupboard/protocol/deployment`. `expanded` means the transition's
+// expand migrations are applied; `complete` means its contract migrations are
+// too. `cupboard deploy` creates this table before it walks the transitions
+// (the deploy has to record the first transition on databases older than the
+// migration that also creates it) and writes the rows. The Workers read them
+// to gate behaviour on a transition being complete, and the control Worker
+// reports them through `deployment.transitions`.
 export const deploymentTransition = sqliteTable('deployment_transition', {
-	id: text('id').primaryKey(),
-	state: text('state').notNull(),
+	id: text('id').$type<TransitionId>().primaryKey(),
+	state: text('state').$type<TransitionState>().notNull(),
 	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
 
-// This table has one row, under the `id` `current`. It records which phase the
-// deployed build runs in, and the local step every tenant must reach before the
-// release advances past that phase. `cupboard deploy` writes the row and reads
-// it again on its next run. The control Worker reports it through
-// `deployment.phase`; a release that adds phases reads it to choose behaviour.
+// The one-row table the preceding release read its deployment phase from.
+// `cupboard deploy` still writes it for the `cache-identity` transition, so a
+// rollback to that release reads a correct phase; nothing in this build reads
+// it. Dropping it is a later transition's contract.
 export const deploymentPhase = sqliteTable('deployment_phase', {
 	id: text('id').primaryKey(),
-	phase: text('phase').$type<DeploymentPhaseName>().notNull(),
+	phase: text('phase').notNull(),
 	requiredLocalStep: integer('required_local_step')
 		.$type<LocalStep>()
 		.notNull(),

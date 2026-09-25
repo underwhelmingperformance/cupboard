@@ -98,7 +98,7 @@ import {
 	readStoredNarInfo,
 	recordClaimedMissingObject,
 	recordClaimedVerification,
-	recordDeploymentPhase,
+	recordTransition,
 	removeRoot,
 	resetTestServer,
 	resolvedCache,
@@ -519,7 +519,7 @@ describe('upload flow', () => {
 	])(
 		"creates a missing named cache on its first push with the $defaultAccess default cache's access",
 		async ({ defaultAccess }) => {
-			await recordDeploymentPhase('contracted');
+			await recordTransition('cache-identity', 'complete');
 			const init = await bootstrap();
 			await putTestCache(init.token, defaultCache(), defaultAccess);
 			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

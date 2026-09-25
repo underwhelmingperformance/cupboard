@@ -30,10 +30,12 @@ export function localStep(value: number): LocalStep {
  * Step 1 projects missing cache lifecycle rows into D1. Steps 2 and 3 move
  * private-cache objects and later cache generations to their current R2 keys.
  * Step 4 imports legacy retention and grace policies in bounded batches.
- * Step 5 rewrites stored grants after D1 records `contracted`.
+ * Step 5 rewrites stored grants once the `cache-identity` transition is
+ * complete.
  *
- * Objects report at most step 4 before contraction. They remain below this
- * watermark afterwards, so the control plane wakes them for the grant rewrite.
+ * Objects report at most step 4 before that transition completes. They remain
+ * below this watermark afterwards, so the control plane wakes them for the
+ * grant rewrite.
  */
 export const currentLocalStep: LocalStep = localStep(5);
 
@@ -43,89 +45,190 @@ The local data work that must finish before the deploy contracts D1.
 export const expansionLocalStep: LocalStep = localStep(4);
 
 /**
- * A deploy records one of these phase names. They are listed in the order a
- * release records them.
- *
- * The control Worker reports the recorded phase through `deployment.phase`. A
- * release that changes what a tenant Durable Object stores adds the phases it
- * needs and reads the recorded one to choose behaviour. A build that needs no
- * such coordination runs in `current`.
- *
- * `contracted` is the phase in which a deploy rewrites or removes what the
- * previous build still reads. A deploy records it only once the new build
- * receives all traffic and the D1 contraction has run. A rollback cannot
- * restore the previous build by redeploying it, so new writes can use the
- * scope format. Tenants then finish their local grant conversion and report
- * step 5.
+ * The schema transitions a deployment passes through, each identified here.
+ * A transition is a group of D1 migrations: the expand migrations, which the
+ * Workers of the build that adds them can run against, and the contract
+ * migrations, which remove what the preceding build still reads once nothing
+ * serves it. `cupboard deploy` walks the list in order and records how far
+ * each transition has got in `deployment_transition`.
  */
-export const deploymentPhaseNameSchema = z.enum([
-	'current',
-	'expanded',
-	'native-reads',
-	'contracted'
+export const transitionIdSchema = z.enum([
+	'cache-identity',
+	'deployment-transitions'
 ]);
-export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
-
-// The phases in the order a release records them. `hasReachedPhase` compares
-// positions in this list.
-const phaseOrder: readonly DeploymentPhaseName[] =
-	deploymentPhaseNameSchema.options;
+export type TransitionId = z.infer<typeof transitionIdSchema>;
 
 /**
- * Whether the recorded phase has reached the one asked about.
- *
- * A deployment with no phase row has reached none of them: no deploy has
- * recorded one, so nothing has confirmed the state any phase describes.
+ * `expanded` means the transition's expand migrations are applied. `complete`
+ * means the contract migrations are applied too, or the transition has none.
+ * A transition with no row is not expanded.
  */
-export function hasReachedPhase(
-	recorded: DeploymentPhaseName | undefined,
-	wanted: DeploymentPhaseName
+export const transitionStateSchema = z.enum(['expanded', 'complete']);
+export type TransitionState = z.infer<typeof transitionStateSchema>;
+
+// The states in the order a deploy records them. A record never lowers one.
+const transitionStateOrder: readonly TransitionState[] =
+	transitionStateSchema.options;
+
+export function transitionStateRank(state: TransitionState): number {
+	return transitionStateOrder.indexOf(state);
+}
+
+/**
+ * Whether the recorded state has reached the one asked about. A transition
+ * with no recorded state has reached none of them.
+ */
+export function hasReachedTransitionState(
+	recorded: TransitionState | undefined,
+	wanted: TransitionState
 ): boolean {
 	if (recorded === undefined) {
 		return false;
 	}
 
-	return phaseOrder.indexOf(recorded) >= phaseOrder.indexOf(wanted);
+	return transitionStateRank(recorded) >= transitionStateRank(wanted);
 }
 
-// The final D1 phase. Tenant grant conversion continues as local step 5.
-export const settledDeploymentPhase: DeploymentPhaseName = 'contracted';
+export interface SchemaTransition {
+	readonly id: TransitionId;
+	/**
+	The D1 migration files applied before the Workers are uploaded.
+	*/
+	readonly expand: readonly string[];
+	/**
+	 * The D1 migration files applied once both Workers serve the build and the
+	 * tenants have settled.
+	 */
+	readonly contract: readonly string[];
+	/**
+	The local step every active tenant must reach before the contract.
+	*/
+	readonly settleStep?: LocalStep;
+	/**
+	 * The expand migrations do not depend on the contracts of earlier
+	 * transitions, so the deploy may apply them before those contracts.
+	 * `check:migrations` verifies the claim by replay.
+	 */
+	readonly independent?: true;
+	/**
+	 * The earliest release that can complete this transition, named when a
+	 * build refuses to start from before it.
+	 */
+	readonly completedBy?: string;
+}
 
 /**
- * D1 migrations applied after both Workers run this build and active tenants
- * finish the expansion work. Every contraction must follow every expansion in
- * journal order; an unlisted migration after this boundary is refused.
+ * Every D1 migration belongs to exactly one transition, and the transitions
+ * are listed in the order the deploy walks them. Concatenating each
+ * transition's expand then contract, in this order, must give the migration
+ * files sorted by name; `check:migrations` and the deploy both verify that.
+ *
+ * The migrations before the cache-identity contract belong to that
+ * transition because they are what it expanded for; there is no separate
+ * baseline.
  */
-export const contractionMigrations: readonly string[] = [
-	'0028_cache_identity_contract.sql',
-	'0029_cache_grant_contract.sql',
-	'0030_cache_credential_lifecycle.sql'
+export const schemaTransitions: readonly SchemaTransition[] = [
+	{
+		id: 'cache-identity',
+		expand: [
+			'0000_blob_state.sql',
+			'0001_blob_ref_tenant_blob.sql',
+			'0002_blob_state_delete_after.sql',
+			'0003_control_auth_key.sql',
+			'0004_control_trust.sql',
+			'0005_tenant_registry.sql',
+			'0006_manifest_state.sql',
+			'0007_tenant_read_verifier.sql',
+			'0008_tenant_usage.sql',
+			'0009_tenant_last_maintained.sql',
+			'0010_next_pepper_potts.sql',
+			'0011_concerned_winter_soldier.sql',
+			'0012_spicy_may_parker.sql',
+			'0013_common_mac_gargan.sql',
+			'0014_reshape_eligibility_projection.sql',
+			'0015_lying_thor_girl.sql',
+			'0016_global_admin_audience.sql',
+			'0017_object_incarnations.sql',
+			'0018_tenant_cache_read_credential.sql',
+			'0019_nar_read_authority.sql',
+			'0020_tenant_local_step.sql',
+			'0021_deployment_phase.sql',
+			'0022_cache_access_expand.sql',
+			'0023_cache_access_legacy_write_mirror.sql',
+			'0024_cache_access_backfill.sql',
+			'0025_cache_incarnation_expand.sql',
+			'0026_cache_identity_contract_assertions.sql',
+			'0027_cache_identity_compatible_contract.sql'
+		],
+		contract: [
+			'0028_cache_identity_contract.sql',
+			'0029_cache_grant_contract.sql',
+			'0030_cache_credential_lifecycle.sql'
+		],
+		settleStep: expansionLocalStep,
+		completedBy: 'v0.0.34'
+	},
+	{
+		id: 'deployment-transitions',
+		expand: ['0031_deployment_transitions.sql'],
+		contract: [],
+		independent: true
+	}
 ];
 
-// The `deployment_phase` table has one row, and this is its `id`. `cupboard
-// deploy` writes that row.
-export const deploymentPhaseRowId = 'current';
+/**
+ * The transition every earlier transition must be complete before this build
+ * can deploy. A build sets it once its Workers can no longer serve the schema
+ * an earlier transition's contract removes. This build sets none: it serves
+ * every state the transitions above pass through.
+ */
+export const buildRequiresCompleteBefore: TransitionId | undefined = undefined;
 
-export const deploymentPhaseSchema = z.strictObject({
-	name: deploymentPhaseNameSchema,
-	// The local step every active tenant must reach before the release may
-	// advance past this phase.
-	requiredLocalStep: localStepSchema,
+/**
+ * The local step every active tenant must reach now: the settle step of the
+ * first incomplete transition that has one, or `currentLocalStep` when every
+ * such transition is complete. Objects cannot report past a transition's
+ * settle step before its contract lands, so counting tenants against
+ * `currentLocalStep` before then would never reach zero.
+ */
+export function requiredLocalStepFrom(
+	recorded: ReadonlyMap<TransitionId, TransitionState>
+): LocalStep {
+	for (const transition of schemaTransitions) {
+		if (transition.settleStep === undefined) {
+			continue;
+		}
+
+		if (!hasReachedTransitionState(recorded.get(transition.id), 'complete')) {
+			return transition.settleStep;
+		}
+	}
+
+	return currentLocalStep;
+}
+
+export const deploymentTransitionSchema = z.strictObject({
+	id: transitionIdSchema,
+	state: transitionStateSchema,
 	updatedAt: isoTimestampSchema
 });
-export type ParsedDeploymentPhase = z.output<typeof deploymentPhaseSchema>;
-export type DeploymentPhase = z.input<typeof deploymentPhaseSchema>;
-
-// The phase is absent until a deploy records one. A deployment set up before
-// phases existed has no phase row.
-export const deploymentPhaseResponseSchema = z.strictObject({
-	phase: deploymentPhaseSchema.optional()
-});
-export type ParsedDeploymentPhaseResponse = z.output<
-	typeof deploymentPhaseResponseSchema
+export type ParsedDeploymentTransition = z.output<
+	typeof deploymentTransitionSchema
 >;
-export type DeploymentPhaseResponse = z.input<
-	typeof deploymentPhaseResponseSchema
+export type DeploymentTransition = z.input<typeof deploymentTransitionSchema>;
+
+// The transitions a deploy has recorded, in the order they are walked, and the
+// local step they require of every active tenant now. A deployment set up
+// before any deploy of a build with transitions has recorded none.
+export const deploymentTransitionsResponseSchema = z.strictObject({
+	transitions: z.array(deploymentTransitionSchema),
+	requiredLocalStep: localStepSchema
+});
+export type ParsedDeploymentTransitionsResponse = z.output<
+	typeof deploymentTransitionsResponseSchema
+>;
+export type DeploymentTransitionsResponse = z.input<
+	typeof deploymentTransitionsResponseSchema
 >;
 
 export const localStepStragglerSampleSize = 20;
@@ -135,9 +238,12 @@ export const localStepStatusQuerySchema = z.strictObject({
 });
 
 export const localStepStatusSchema = z.strictObject({
-	// The step this build asks of every active tenant.
+	// The final step this build asks of every active tenant.
 	current: localStepSchema,
-	// Active tenants that have reported `current` or later.
+	// The step the counts below are measured against: the query's
+	// `requiredStep`, or else the step the recorded transitions require now.
+	required: localStepSchema,
+	// Active tenants that have reported `required` or later.
 	ready: z.number().int().nonnegative(),
 	// Active tenants that have not, whether they reported an earlier step or
 	// have not reported since the column was added.

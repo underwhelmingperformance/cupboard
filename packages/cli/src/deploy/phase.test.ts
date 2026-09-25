@@ -12,10 +12,16 @@ import {
 	databaseIdSchema
 } from './identifiers.ts';
 import {
+	ensureTransitionTable,
 	type PhaseApi,
-	readDeploymentPhase,
+	readCompatibilityPhase,
 	readLocalStepReadiness,
-	recordDeploymentPhase
+	readRecordedTransitions,
+	reconcileTransitionStates,
+	recordCompatibilityPhase,
+	recordTransition,
+	type TransitionStates,
+	UnknownDeploymentTransitionError
 } from './phase.ts';
 
 const databaseId = databaseIdSchema.parse('database');
@@ -113,6 +119,36 @@ function sqliteBackedApi(
 	};
 }
 
+/**
+ * A `PhaseApi` over an empty in-memory SQLite database, so the statements the
+ * deploy sends run as D1 would run them.
+ */
+function sqliteApi(): PhaseApi & { readonly database: DatabaseSync } {
+	const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+	const database = new DatabaseSync(':memory:');
+
+	return {
+		database,
+		queryBatch: (_id, statements) => {
+			for (const statement of statements) {
+				database.exec(statement);
+			}
+			return Promise.resolve();
+		},
+		queryRows: (_id, statement) =>
+			Promise.resolve(
+				database
+					.prepare(statement)
+					.all()
+					.flatMap((row) =>
+						Object.values(row).filter(
+							(value): value is string => typeof value === 'string'
+						)
+					)
+			)
+	};
+}
+
 describe('local step readiness', () => {
 	it.each([[], ['invalid'], ['-1'], ['1.5'], ['9007199254740992']])(
 		'rejects an invalid readiness count %j',
@@ -146,72 +182,257 @@ describe('local step readiness', () => {
 	});
 });
 
-describe('deployment phase records', () => {
-	it('preserves a completed phase and its timestamp across reruns', async () => {
-		const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
-		const database = new DatabaseSync(':memory:');
-		database.exec(
-			'CREATE TABLE deployment_phase (id TEXT PRIMARY KEY, phase TEXT NOT NULL, required_local_step INTEGER NOT NULL, updated_at TEXT NOT NULL)'
-		);
-		const api: PhaseApi = {
-			queryBatch: (_id, statements) => {
-				for (const statement of statements) {
-					database.exec(statement);
-				}
-				return Promise.resolve();
-			},
-			queryRows: (_id, statement) =>
-				Promise.resolve(
-					database
-						.prepare(statement)
-						.all()
-						.flatMap((row) =>
-							Object.values(row).filter(
-								(value): value is string => typeof value === 'string'
-							)
-						)
-				)
-		};
+describe('transition records', () => {
+	it('reads no transitions before a deploy has created the table', async () => {
+		const api = sqliteApi();
+
+		try {
+			await expect(
+				readRecordedTransitions(api, databaseId)
+			).resolves.toStrictEqual([]);
+		} finally {
+			api.database.close();
+		}
+	});
+
+	it('preserves a completed transition and its timestamp across reruns', async () => {
+		const api = sqliteApi();
+
 		try {
 			const initial = new Date('2026-01-01T00:00:00.000Z');
 			const later = new Date('2026-01-02T00:00:00.000Z');
-			await recordDeploymentPhase(
+			await ensureTransitionTable(api, databaseId);
+			await ensureTransitionTable(api, databaseId);
+			await recordTransition(
+				api,
+				databaseId,
+				'cache-identity',
+				'expanded',
+				initial
+			);
+			const expanded = await readRecordedTransitions(api, databaseId);
+			await recordTransition(
+				api,
+				databaseId,
+				'cache-identity',
+				'complete',
+				later
+			);
+			await recordTransition(
+				api,
+				databaseId,
+				'cache-identity',
+				'complete',
+				new Date('2026-01-03T00:00:00.000Z')
+			);
+			const repeated = await readRecordedTransitions(api, databaseId);
+			await recordTransition(
+				api,
+				databaseId,
+				'cache-identity',
+				'expanded',
+				new Date('2026-01-04T00:00:00.000Z')
+			);
+			const lowered = await readRecordedTransitions(api, databaseId);
+
+			expect({ expanded, repeated, lowered }).toStrictEqual({
+				expanded: [
+					{
+						id: 'cache-identity',
+						state: 'expanded',
+						updatedAt: initial.toISOString()
+					}
+				],
+				repeated: [
+					{
+						id: 'cache-identity',
+						state: 'complete',
+						updatedAt: later.toISOString()
+					}
+				],
+				lowered: [
+					{
+						id: 'cache-identity',
+						state: 'complete',
+						updatedAt: later.toISOString()
+					}
+				]
+			});
+		} finally {
+			api.database.close();
+		}
+	});
+
+	it('records each transition in its own row', async () => {
+		const api = sqliteApi();
+
+		try {
+			const now = new Date('2026-01-01T00:00:00.000Z');
+			await ensureTransitionTable(api, databaseId);
+			await recordTransition(
+				api,
+				databaseId,
+				'deployment-transitions',
+				'complete',
+				now
+			);
+			await recordTransition(
+				api,
+				databaseId,
+				'cache-identity',
+				'expanded',
+				now
+			);
+
+			const rows = await readRecordedTransitions(api, databaseId);
+
+			expect(rows.map(({ id, state }) => `${id}:${state}`)).toStrictEqual([
+				'cache-identity:expanded',
+				'deployment-transitions:complete'
+			]);
+		} finally {
+			api.database.close();
+		}
+	});
+
+	it.each([
+		{ name: 'id', id: 'later-transition', state: 'complete' },
+		{ name: 'state', id: 'cache-identity', state: 'later-state' }
+	])(
+		'refuses a stored transition $name this build does not define',
+		async ({ id, state }) => {
+			const api = sqliteApi();
+
+			try {
+				await ensureTransitionTable(api, databaseId);
+				api.database
+					.prepare('INSERT INTO deployment_transition VALUES (?, ?, ?)')
+					.run(id, state, '2026-01-01T00:00:00.000Z');
+
+				let caught: unknown;
+
+				try {
+					await readRecordedTransitions(api, databaseId);
+				} catch (error) {
+					caught = error;
+				}
+
+				expect(caught).toBeInstanceOf(UnknownDeploymentTransitionError);
+				expect(caught).toMatchObject({ transition: id, state });
+			} finally {
+				api.database.close();
+			}
+		}
+	);
+});
+
+describe('reconcileTransitionStates', () => {
+	const none: TransitionStates = new Map();
+	const expanded: TransitionStates = new Map([['cache-identity', 'expanded']]);
+	const complete: TransitionStates = new Map([['cache-identity', 'complete']]);
+
+	it.each([
+		{ name: 'no phase', stored: none, phase: undefined, expected: none },
+		{ name: 'current', stored: none, phase: 'current', expected: expanded },
+		{
+			name: 'native-reads',
+			stored: none,
+			phase: 'native-reads',
+			expected: expanded
+		},
+		{
+			name: 'contracted',
+			stored: none,
+			phase: 'contracted',
+			expected: complete
+		},
+		{
+			name: 'contracted over expanded',
+			stored: expanded,
+			phase: 'contracted',
+			expected: complete
+		},
+		{
+			name: 'native-reads over complete',
+			stored: complete,
+			phase: 'native-reads',
+			expected: complete
+		},
+		{
+			name: 'a phase this build does not list',
+			stored: none,
+			phase: 'later-phase',
+			expected: expanded
+		}
+	])('implies $name', ({ stored, phase, expected }) => {
+		expect(reconcileTransitionStates(stored, phase)).toStrictEqual(expected);
+	});
+});
+
+describe('compatibility phase records', () => {
+	it('preserves a completed phase and its timestamp across reruns', async () => {
+		const api = sqliteApi();
+		api.database.exec(
+			'CREATE TABLE deployment_phase (id TEXT PRIMARY KEY, phase TEXT NOT NULL, required_local_step INTEGER NOT NULL, updated_at TEXT NOT NULL)'
+		);
+		try {
+			const initial = new Date('2026-01-01T00:00:00.000Z');
+			const later = new Date('2026-01-02T00:00:00.000Z');
+			await recordCompatibilityPhase(
 				api,
 				databaseId,
 				'contracted',
 				localStep(5),
 				initial
 			);
-			await recordDeploymentPhase(
+			await recordCompatibilityPhase(
 				api,
 				databaseId,
 				'contracted',
 				localStep(5),
 				later
 			);
-			const repeated = await readDeploymentPhase(api, databaseId);
-			await recordDeploymentPhase(
+			// SQLite rows have no prototype; copy them into plain objects to compare.
+			const repeated = {
+				...api.database
+					.prepare('SELECT phase, updated_at FROM deployment_phase')
+					.get()
+			};
+			await recordCompatibilityPhase(
 				api,
 				databaseId,
 				'native-reads',
 				localStep(4),
 				later
 			);
-			const lowered = await readDeploymentPhase(api, databaseId);
-			expect({ repeated, lowered }).toStrictEqual({
-				repeated: {
-					name: 'contracted',
-					requiredLocalStep: 5,
-					updatedAt: initial.toISOString()
-				},
-				lowered: {
-					name: 'contracted',
-					requiredLocalStep: 5,
-					updatedAt: initial.toISOString()
-				}
+			const lowered = {
+				...api.database
+					.prepare('SELECT phase, updated_at FROM deployment_phase')
+					.get()
+			};
+			expect({
+				repeated,
+				lowered,
+				read: await readCompatibilityPhase(api, databaseId)
+			}).toStrictEqual({
+				repeated: { phase: 'contracted', updated_at: initial.toISOString() },
+				lowered: { phase: 'contracted', updated_at: initial.toISOString() },
+				read: 'contracted'
 			});
 		} finally {
-			database.close();
+			api.database.close();
+		}
+	});
+
+	it('reads no phase before the table exists', async () => {
+		const api = sqliteApi();
+
+		try {
+			await expect(
+				readCompatibilityPhase(api, databaseId)
+			).resolves.toBeUndefined();
+		} finally {
+			api.database.close();
 		}
 	});
 });

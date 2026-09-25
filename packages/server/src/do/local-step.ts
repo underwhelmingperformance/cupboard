@@ -28,13 +28,15 @@ import {
 } from './object-move.ts';
 
 /**
- * Matches a tenant row whose object has not recorded the current step. A null
- * step means it has not been woken since the column was added.
+ * Matches a tenant row whose object has not recorded `step`. A null step means
+ * it has not been woken since the column was added.
  */
-export const belowCurrentLocalStep: SQL | undefined = or(
-	isNull(d1Schema.tenant.localStep),
-	lt(d1Schema.tenant.localStep, currentLocalStep)
-);
+export function belowLocalStep(step: LocalStep): SQL | undefined {
+	return or(
+		isNull(d1Schema.tenant.localStep),
+		lt(d1Schema.tenant.localStep, step)
+	);
+}
 
 /**
  * The result of one `recordLocalStep` call. `unconfigured` and `incomplete`
@@ -118,22 +120,20 @@ export async function recordLocalStep(
 		return { kind: 'incomplete', projected: retentionMigrationBatchSize };
 	}
 
-	await context.phases.refresh();
-	const isContracted = await context.phases.hasReached('contracted');
+	await context.transitions.refresh();
+	const isContracted = await context.transitions.hasReached(
+		'cache-identity',
+		'complete'
+	);
 	if (isContracted && contractCacheGrants(context).status === 'pending') {
 		return { kind: 'incomplete', projected: grantContractionBatchSize };
 	}
 	const reached = isContracted ? currentLocalStep : expansionLocalStep;
 
-	const needsAdvance = or(
-		isNull(d1Schema.tenant.localStep),
-		lt(d1Schema.tenant.localStep, reached)
-	);
-
 	await context.d1
 		.update(d1Schema.tenant)
 		.set({ localStep: reached })
-		.where(and(eq(d1Schema.tenant.id, tenant), needsAdvance))
+		.where(and(eq(d1Schema.tenant.id, tenant), belowLocalStep(reached)))
 		.run();
 
 	await Promise.all([

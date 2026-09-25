@@ -1,8 +1,7 @@
 import {
+	buildRequiresCompleteBefore,
 	currentLocalStep,
-	expansionLocalStep,
-	type LocalStep,
-	settledDeploymentPhase
+	type LocalStep
 } from '@cupboard/protocol/deployment';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
@@ -18,17 +17,16 @@ import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
-import { applyD1Migrations, type D1MigrationApi } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
-import {
-	type PhaseApi,
-	readDeploymentPhase,
-	readLocalStepReadiness,
-	recordDeploymentPhase,
-	recordPhaseWhenTenantsReady
-} from './phase.ts';
+import { type PhaseApi, readLocalStepReadiness } from './phase.ts';
 import type { DeploySecrets } from './secrets.ts';
 import type { DeploymentPlan } from './transition.ts';
+import {
+	completeTransitions,
+	prepareTransitions,
+	type TransitionEvent,
+	type TransitionWalk
+} from './transitions.ts';
 import {
 	buildScriptMetadata,
 	type ResolvedResources,
@@ -201,10 +199,18 @@ export function choicePlanRows(
 	];
 }
 
+interface ReconciledResources {
+	readonly resources: ResolvedResources;
+	// The D1 databases this run created. A fresh database has no old Workers
+	// to drain and no tenants, so every schema transition completes before the
+	// upload.
+	readonly freshDatabases: ReadonlySet<string>;
+}
+
 async function reconcileResources(
 	dependencies: DeployDependencies,
 	plan: ResourcePlan
-): Promise<ResolvedResources> {
+): Promise<ReconciledResources> {
 	const { api, reporter } = dependencies;
 
 	return reporter.phase('Reconciling resources', async (context) => {
@@ -217,8 +223,13 @@ async function reconcileResources(
 		await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));
 
 		const d1 = new Map<string, DatabaseId>();
+		const freshDatabases = new Set<string>();
 
 		for (const name of plan.d1Databases) {
+			if ((await api.findD1Database(name)) === undefined) {
+				freshDatabases.add(name);
+			}
+
 			d1.set(name, await api.ensureD1Database(name));
 		}
 
@@ -236,7 +247,7 @@ async function reconcileResources(
 				plan.queues.length
 		);
 
-		return { d1, kv };
+		return { resources: { d1, kv }, freshDatabases };
 	});
 }
 
@@ -388,34 +399,26 @@ async function performDeploy(
 	const { api, reporter, options, plan } = dependencies;
 	const { artifact } = plan;
 
-	const resources = await reconcileResources(
+	const { resources, freshDatabases } = await reconcileResources(
 		dependencies,
 		collectResources(artifact.config)
 	);
 
-	const databaseId = resources.d1.get(
-		artifact.config.tenant.d1Databases[0]?.databaseName ?? ''
-	);
+	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
+	const databaseId =
+		d1Name === undefined ? undefined : resources.d1.get(d1Name);
 
-	if (databaseId !== undefined) {
-		// The read must come before a migration or an upload. A phase this build
-		// does not define stops the deploy here, before this build's Workers are
-		// put in front of storage a newer build shaped.
-		await readDeploymentPhase(d1QueryApiOf(api), databaseId);
-
-		const applied = await applyD1Migrations(
-			d1QueryApiOf(api),
-			databaseId,
-			plan.preparation
+	if (databaseId !== undefined && d1Name !== undefined) {
+		// The walk reads the recorded transitions before a migration or an
+		// upload. A transition this build does not define stops the deploy here,
+		// before this build's Workers are put in front of storage a newer build
+		// shaped.
+		await reporter.phase('Preparing schema transitions', (context) =>
+			prepareTransitions(
+				transitionWalk(dependencies, databaseId, context),
+				freshDatabases.has(d1Name)
+			)
 		);
-
-		if (applied.length > 0) {
-			reporter.success(
-				`Applying D1 migrations · applied ${String(applied.length)}`
-			);
-		} else {
-			reporter.step('Applying D1 migrations · no migrations to apply');
-		}
 	}
 
 	const withBuildVersion = (metadata: ScriptMetadata): ScriptMetadata => ({
@@ -560,8 +563,9 @@ async function performDeploy(
 	await configureTriggers(dependencies);
 
 	if (databaseId !== undefined) {
-		await settlePhase(dependencies, databaseId);
-		await contractSchema(dependencies, databaseId);
+		await reporter.phase('Completing schema transitions', (context) =>
+			completeTransitions(transitionWalk(dependencies, databaseId, context))
+		);
 		if (dependencies.settleTenants !== undefined) {
 			const readiness = await readLocalStepReadiness(
 				d1QueryApiOf(api),
@@ -574,7 +578,6 @@ async function performDeploy(
 		}
 	}
 
-	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
 	const d1Database =
 		databaseId === undefined || d1Name === undefined
 			? undefined
@@ -611,12 +614,59 @@ async function performDeploy(
 	return rows;
 }
 
-// The D1 query surface the migration and phase readers share.
-function d1QueryApiOf(api: CloudflareApi): PhaseApi & D1MigrationApi {
+// The D1 query surface the transition walk and the readiness reads share.
+function d1QueryApiOf(api: CloudflareApi): PhaseApi {
 	return {
 		queryBatch: (database, statements) =>
 			api.d1QueryBatch(database, statements),
 		queryRows: (database, sql) => api.d1QueryRows(database, sql)
+	};
+}
+
+function transitionEventText(event: TransitionEvent): string {
+	switch (event.kind) {
+		case 'reconciled': {
+			return `${event.state} (from the recorded phase)`;
+		}
+
+		case 'deferred': {
+			return 'deferred until the earlier transitions contract';
+		}
+
+		case 'expanded': {
+			return `expanded · applied ${String(event.applied.length)}`;
+		}
+
+		case 'settled': {
+			return `tenants at local step ${String(event.step)}`;
+		}
+
+		case 'complete': {
+			return `complete · applied ${String(event.applied.length)}`;
+		}
+	}
+}
+
+function transitionWalk(
+	dependencies: DeployDependencies,
+	databaseId: DatabaseId,
+	context: PhaseContext
+): TransitionWalk {
+	const { api, plan } = dependencies;
+
+	return {
+		api: d1QueryApiOf(api),
+		databaseId,
+		transitions: plan.transitions,
+		requiresCompleteBefore: buildRequiresCompleteBefore,
+		hooks: {
+			now: dependencies.now ?? (() => new Date()),
+			awaitServing: () => awaitServing(api, plan.artifact),
+			settleTenants: dependencies.settleTenants,
+			report: (event) => {
+				context.fact(event.transition, transitionEventText(event));
+			}
+		}
 	};
 }
 
@@ -654,99 +704,33 @@ async function servingBuildVersion(
 }
 
 /**
- * Records the phase the deployment now runs in, once both Workers serve this
- * build from a single version and every active tenant has recorded the step
- * this build requires. `LocalStepUnreachedError` names the tenants that have
- * not.
+ * Confirms both Workers serve this build from a single version before a
+ * transition contracts what the earlier build reads.
  *
  * The deployments API reports the configured allocation, not whether old
- * requests have finished. Contracted schemas must reject incompatible writes. If a script is still split across
- * versions, or still serves an earlier build, this throws
- * {@link DeploymentPhaseUnsettledError} and leaves the row unchanged.
+ * requests have finished; contracted schemas must reject incompatible writes.
+ * If a script is still split across versions, or still serves an earlier
+ * build, this throws {@link DeploymentPhaseUnsettledError} and the walk
+ * leaves the transitions where they are.
  */
-async function settlePhase(
-	dependencies: DeployDependencies,
-	databaseId: DatabaseId
+async function awaitServing(
+	api: CloudflareApi,
+	artifact: DeploymentArtifact
 ): Promise<void> {
-	const { api, reporter, plan } = dependencies;
-	const { artifact } = plan;
-	const phaseApi = d1QueryApiOf(api);
-	const now = dependencies.now ?? (() => new Date());
+	const unsettled: ScriptName[] = [];
 
-	return reporter.phase('Recording the deployment phase', async (context) => {
-		const recorded = await readDeploymentPhase(phaseApi, databaseId);
+	for (const scriptName of [
+		artifact.config.control.name,
+		artifact.config.tenant.name
+	]) {
+		const serving = await servingBuildVersion(api, scriptName);
 
-		if (recorded !== undefined) {
-			context.fact('from', recorded.name);
+		if (serving !== artifact.buildVersion) {
+			unsettled.push(scriptName);
 		}
+	}
 
-		const unsettled: ScriptName[] = [];
-
-		for (const scriptName of [
-			artifact.config.control.name,
-			artifact.config.tenant.name
-		]) {
-			const serving = await servingBuildVersion(api, scriptName);
-
-			if (serving !== artifact.buildVersion) {
-				unsettled.push(scriptName);
-			}
-		}
-
-		if (unsettled.length > 0) {
-			throw new DeploymentPhaseUnsettledError(unsettled, artifact.buildVersion);
-		}
-
-		if (dependencies.settleTenants !== undefined) {
-			const pending = await readLocalStepReadiness(
-				phaseApi,
-				databaseId,
-				expansionLocalStep
-			);
-			if (pending.pending > 0) {
-				await dependencies.settleTenants(expansionLocalStep);
-			}
-		}
-
-		const readiness = await recordPhaseWhenTenantsReady(
-			phaseApi,
-			databaseId,
-			'native-reads',
-			expansionLocalStep,
-			now()
-		);
-
-		context.fact('tenants behind', String(readiness.pending));
-		context.fact(
-			'phase',
-			recorded?.name === 'contracted' ? 'contracted' : 'native-reads'
-		);
-	});
-}
-
-/**
-Applies D1 contractions once the deployment has settled.
-*/
-async function contractSchema(
-	dependencies: DeployDependencies,
-	databaseId: DatabaseId
-): Promise<void> {
-	const { api, reporter, plan } = dependencies;
-	const phaseApi = d1QueryApiOf(api);
-	await reporter.phase('Contracting the schema', async (context) => {
-		const contractions = plan.contraction;
-		const applied =
-			contractions.length === 0
-				? []
-				: await applyD1Migrations(phaseApi, databaseId, contractions);
-		await recordDeploymentPhase(
-			phaseApi,
-			databaseId,
-			settledDeploymentPhase,
-			currentLocalStep,
-			dependencies.now?.() ?? new Date()
-		);
-		context.fact('migrations', String(applied.length));
-		context.fact('phase', settledDeploymentPhase);
-	});
+	if (unsettled.length > 0) {
+		throw new DeploymentPhaseUnsettledError(unsettled, artifact.buildVersion);
+	}
 }
