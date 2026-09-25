@@ -998,36 +998,40 @@ export function registerGithubCommands(
 	const github = program
 		.command('github')
 		.description(
-			'Configure and check tenant state for publication from GitHub.'
+			"Set up and check a tenant for cupboard's GitHub flake publish workflow."
 		);
 
 	github
 		.command('setup')
 		.description(
-			'Configure the pull-request reuse view and trust rules for cache-aware flake publication.'
+			"Add the trust rules and reuse view that cupboard's flake publish workflow needs for a GitHub repository."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
 			'--repo <owner/name>',
-			'GitHub repository that will publish.'
+			'the GitHub repository that will publish'
 		)
-		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
+		.option(
+			'--branch <name>',
+			'the branch whose runs publish to the default cache',
+			'main'
+		)
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
-			'Match job_workflow_ref to a full commit id, a tag ref for a release GitHub reports as immutable, or a tag pattern such as @refs/tags/v*. A pattern also trusts matching tags created later.'
+			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later.'
 		)
 		.option(
 			'-y, --yes',
-			'Remove conflicting trust rules without prompting; retain uncertain and superseded rules.'
+			'remove conflicting trust rules without asking. Rules that only might conflict, and rules for a different workflow reference, are kept.'
 		)
 		.option(
 			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.',
+			'user name of the tenant read credential. With a credential, the reuse view is private.',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'Basic read credential for tenants whose reads are private.'
+			'password of the tenant read credential'
 		)
 		.action(async (url: URL, options: GithubSetupOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -1059,30 +1063,31 @@ export function registerGithubCommands(
 	github
 		.command('check')
 		.description(
-			"Check tenant state against the quickstart's modelled pull-request and branch publications: trust rules and grants, reuse-view configuration and root-prefix nesting."
+			"Check that the tenant will accept the pull-request and branch runs of cupboard's flake publish workflow for a GitHub repository."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.requiredOption(
-			'--repo <owner/name>',
-			'GitHub repository whose tenant configuration to check.'
+		.requiredOption('--repo <owner/name>', 'the GitHub repository to check')
+		.option(
+			'--branch <name>',
+			'the branch whose runs publish to the default cache',
+			'main'
 		)
-		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
-			"Exact full commit id or tag ref for a release GitHub reports as immutable, as used by the caller's workflow."
+			"the workflow reference in the repository's workflow file, as owner/repo/path@ref, where the ref is a full commit ID or the tag of a release that GitHub reports as immutable"
 		)
 		.option(
 			'--root-prefix <value>',
-			"root-prefix value passed by the caller's workflow."
+			"the root-prefix value that the repository's workflow passes"
 		)
 		.option(
 			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.',
+			'user name of the tenant read credential, for reading private caches',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'Basic read credential for tenants whose reads are private.'
+			'password of the tenant read credential'
 		)
 		.action(async (url: URL, options: GithubCheckOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();

@@ -28,9 +28,11 @@ export function registerCheckCommand(
 ): void {
 	program
 		.command('check')
-		.description('Check every committed path against its stored objects.')
+		.description(
+			'Check that every store path in the tenant still has all of its stored files.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.option('--deep', 'recompute and compare each stored NAR file hash')
+		.option('--deep', 'also read every stored NAR and check its hash (slower)')
 		.action(async (url: URL, options: CheckOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
@@ -45,8 +47,8 @@ export function registerCheckCommand(
 /**
  * Checks every committed path, one page per request. The server checks a page
  * and names the last row it checked, so the command passes that cursor back
- * until the report returns it empty. Any discrepancy fails the command with
- * {@link CheckDiscrepanciesError} once the report is rendered.
+ * until the report returns it empty. If there are any discrepancies, the
+ * command prints them and then fails with {@link CheckDiscrepanciesError}.
  */
 export async function runCheck(
 	isDeep: boolean,
@@ -99,7 +101,8 @@ export async function runCheck(
 		reporter.warn(discrepancy.kind, describeDiscrepancy(discrepancy));
 	}
 
-	// Fail after reporting, so a CI job can gate on a clean check.
+	// Fail after printing the report, so a CI job stops when the check finds a
+	// problem.
 	throw new CheckDiscrepanciesError(discrepancies.length);
 }
 

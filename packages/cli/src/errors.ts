@@ -33,9 +33,10 @@ const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 /**
- * The exit code for a failed HTTP response: 77 for a refused credential, 75
- * for a timeout, rate limiting or a server error that a retry may clear, and 1
- * otherwise. A 507 is the tenant's storage quota, which a retry does not clear.
+ * Chooses the exit code for a failed HTTP response. A refused credential exits
+ * 77. A timeout, rate limit or server error exits 75, because a retry may
+ * succeed. Anything else exits 1. That includes 507, which means the tenant is
+ * over its storage quota, so retrying won't help.
  */
 function httpStatusExitCode(status: number): number {
 	if (status === unauthorisedStatusCode || status === forbiddenStatusCode) {
@@ -58,8 +59,9 @@ function httpStatusExitCode(status: number): number {
 }
 
 /**
- * The exit code a failure maps to: a coded error's own code, the status class
- * of an admin-API (oRPC) error response, or the generic 1 for anything else.
+ * Chooses the exit code for a failure. A coded error uses its own code. An
+ * admin API (oRPC) error uses the exit code for its HTTP status. Anything else
+ * exits 1.
  */
 export function failureExitCode(error: unknown): number {
 	if (error instanceof CodedError) {
@@ -74,9 +76,9 @@ export function failureExitCode(error: unknown): number {
 }
 
 /**
- * The most significant categorised failure among `causes`: authentication,
- * then transient, then unavailable. Undefined when none has one of those
- * categories.
+ * Picks the most important failure among `causes`. An authentication failure
+ * comes first, then a transient failure, then an unavailable service. Returns
+ * undefined if none of the causes is one of these.
  */
 function categorisedFailure(
 	causes: readonly unknown[]
@@ -510,16 +512,18 @@ export class ScopeForbiddenError extends CliError {
 	}
 }
 
-// The quota is the tenant's, set by the operator. Deleting a path frees its
-// bytes once no other path in the tenant uses them; removing a root leaves the
-// paths it kept for garbage collection to reclaim.
+// The operator sets each tenant's quota. Deleting a path frees its space once
+// no other path in the tenant shares the same data. Removing a root doesn't
+// free space immediately. Garbage collection reclaims the root's paths later.
 const overQuotaAdvice =
-	"Ask the deployment's operator to raise the tenant's quota " +
-	'(`cupboard tenant set-quota`), or free space: delete paths you no longer ' +
-	'need (`cupboard delete`), or remove roots (`cupboard root remove`) and ' +
-	'let garbage collection reclaim what they kept.';
+	"To make room, ask the operator to raise the tenant's quota with " +
+	'`cupboard tenant set-quota`. Or free some space yourself: delete paths ' +
+	'that you no longer need with `cupboard delete`, or remove roots with ' +
+	'`cupboard root remove` so that garbage collection can reclaim the paths ' +
+	'that those roots kept.';
 
-// The server's own explanation, ended as a sentence so the advice can follow.
+// End the server's explanation with a full stop, so the advice after it reads
+// as a new sentence.
 function quotaExplanation(detail: string): string {
 	const trimmed = detail.trim();
 
@@ -538,23 +542,24 @@ export class QuotaExceededError extends CliError {
 }
 
 /**
-The operator tried to suspend, resume or change the quota of a tenant whose
-removal has begun. Removal runs to completion, so the tenant can only finish
-as offboarded.
+The operator tried to suspend, resume or change the quota of a tenant that is
+being removed. Removal always runs to the end, so the tenant will end up
+offboarded whatever happens.
 */
 export class TenantRemovalInProgressError extends CliError {
 	constructor(public readonly tenant: string) {
 		super(
 			`Tenant ${tenant} is being removed, so its status and quota can no ` +
-				'longer be changed. Removal cannot be undone; `cupboard tenant list` ' +
-				'shows its progress.'
+				"longer be changed. Removal can't be undone. Run `cupboard tenant " +
+				'list` to check on the removal.'
 		);
 		this.name = 'TenantRemovalInProgressError';
 	}
 }
 
 /**
-The operator asked for a quota below what the tenant already stores.
+The operator asked for a quota that is smaller than what the tenant already
+stores.
 */
 export class QuotaBelowUsageError extends CliError {
 	constructor(
@@ -563,8 +568,9 @@ export class QuotaBelowUsageError extends CliError {
 	) {
 		super(
 			`Tenant ${tenant} already stores ${formatBytes(usedBytes)} ` +
-				`(${String(usedBytes)} bytes), more than the requested quota. ` +
-				'Choose a larger quota, or free space first.'
+				`(${String(usedBytes)} bytes), which is more than the requested ` +
+				"quota. Choose a larger quota, or ask the tenant's administrators to " +
+				'free some space first.'
 		);
 		this.name = 'QuotaBelowUsageError';
 	}
@@ -726,10 +732,10 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 }
 
 /**
- * Some paths of a push did not finish. The exit code is the most significant
- * category among the per-path causes (authentication, then transient, then
- * unavailable), so a push whose paths failed only transiently exits 75 and a
- * caller can retry it; any other mix exits 1.
+ * Some paths in a push didn't finish. The exit code comes from the most
+ * important of the failures, as {@link categorisedFailure} ranks them. So a
+ * push whose paths only failed for transient reasons exits 75, and the caller
+ * can retry it. Other failures exit 1.
  */
 export class PushIncompleteError extends CliError {
 	constructor(
@@ -1379,8 +1385,8 @@ export class UnknownCacheCredentialError extends CliUsageError {
 
 /**
  * `cupboard check` found committed paths whose stored objects are missing or
- * do not match. The report is already rendered; failing the command lets a CI
- * job gate on the result.
+ * don't match. The report has already been printed. The command still fails,
+ * so that a CI job fails when the check finds a problem.
  */
 export class CheckDiscrepanciesError extends CliError {
 	constructor(public readonly count: number) {

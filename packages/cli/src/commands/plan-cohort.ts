@@ -288,102 +288,105 @@ export function registerPlanCommands(
 ): void {
 	const plan = program
 		.command('plan')
-		.description('Plan a build against this store.');
+		.description(
+			"Internal steps of cupboard's flake publish workflow, not for direct use."
+		);
 
 	plan
 		.command('cohort')
 		.description(
-			"Report a cohort's realisation and publication partition, and " +
-				'whether this store has room to build it.'
+			'Internal step of the flake publish workflow, not for direct use. ' +
+				"Decide which of a cohort's targets to build and which the cache " +
+				'already has, and check that the store has room for the build.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[cache]', 'named cache when the URL does not select one')
+		.argument('[cache]', 'cache name, if the URL is a tenant URL')
 		.requiredOption(
 			'--targets-file <path>',
-			"JSON file describing the cohort's targets"
+			"JSON file that describes the cohort's targets"
 		)
 		.option(
 			'--reuse-view <name>',
-			'named tenant reuse view to probe for substitutable paths'
+			'reuse view to query for store paths that other caches already have'
 		)
 		.option(
 			'--read-user <user>',
-			'username for private cache reads',
+			'user name of the read credential for a private cache',
 			parseReadUser
 		)
-		.option('--read-password <password>', 'password for private cache reads')
+		.option(
+			'--read-password <password>',
+			'password of the read credential for a private cache'
+		)
 		.option(
 			'--view-read-user <user>',
-			'username for private reuse-view reads',
+			'user name of the read credential for a private reuse view',
 			parseReadUser
 		)
 		.option(
 			'--view-read-password <password>',
-			'password for private reuse-view reads'
+			'password of the read credential for a private reuse view'
 		)
 		.option(
 			'--ttl <duration>',
-			'retention TTL refreshed when a target is already retained',
+			'TTL for the roots that the plan sets for targets that the cache already has',
 			parseTtl
 		)
-		.option('--permanent', 'retain refreshed roots permanently')
+		.option('--permanent', 'keep those roots permanently')
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
 		)
-		.option(
-			'--plan-file <path>',
-			'destination for the detailed JSON partition and capacity result'
-		)
+		.option('--plan-file <path>', 'file to write the detailed plan to, as JSON')
 		.option(
 			'--store <uri>',
-			'remote ssh-ng store to query for path availability and sizes (default: the local daemon)',
+			'remote ssh-ng store to query for store paths and their sizes (default: the local Nix daemon)',
 			parseStoreUri
 		)
 		.option(
 			'--store-path <path>',
-			`store path for the capacity probe (default: ${defaultStorePath})`
+			`directory whose free space to check (default: ${defaultStorePath})`
 		)
 		.option(
 			'--require-attested',
-			'rebuild a cached target unless the cache also holds its build provenance'
+			'build a target even if the cache has it, unless the cache also has its build provenance attestation'
 		)
 		.option(
 			'--unknown-ceiling <count>',
-			'unknown-availability paths tolerated on a trusted connection',
+			'maximum number of store paths whose availability is still unknown after the store checks them again (default: 0)',
 			parseCount
 		)
 		.option(
 			'--unknown-ceiling-untrusted-fallback <count>',
-			'unknown-availability paths tolerated when the connection is not trusted',
+			'the same maximum when the store refuses to check them again (default: 5)',
 			parseCount
 		)
 		.option(
 			'--headroom-absolute-minimum <bytes>',
-			'minimum capacity headroom in bytes',
+			'minimum free space to leave in the store, in bytes',
 			parseCount
 		)
 		.option(
 			'--headroom-fraction <fraction>',
-			'capacity headroom as a fraction of the store capacity',
+			"free space to leave in the store, as a fraction of the store's capacity",
 			parseFraction
 		)
 		.option(
 			'--cohort-split-possible',
-			'record that this cohort could still be split across separate build/publish attempts'
+			'record in the plan that this cohort could still be split into smaller build and publish attempts'
 		)
 		.option(
 			'--remote-store-configured',
-			'record that a remote store is configured for this workflow'
+			'record in the plan that the workflow uses a remote store'
 		)
 		.option(
 			'--component-publication-applicable',
-			'record that component publication applies to this cohort'
+			'record in the plan that component publication applies to this cohort'
 		)
 		.action(
 			async (

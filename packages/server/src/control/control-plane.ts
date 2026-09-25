@@ -638,8 +638,8 @@ export async function controlTenantResume(
 	return { id: summary.id, status: summary.status };
 }
 
-// The quota lives in the tenant's D1 usage row, which each charge reads and
-// checks in its own batch, so no cached state needs invalidating.
+// The quota is stored in the tenant's usage row in D1. Every charge reads and
+// checks that row in its own batch, so there's no cached copy to invalidate.
 export function controlTenantSetQuota(
 	env: Env,
 	id: TenantId,

@@ -36,7 +36,7 @@ export interface WhoamiOptions extends ProviderSignInOptions {
 export class NoCachedSessionError extends CliError {
 	constructor(public readonly url: string) {
 		super(
-			`No session is cached for ${url}. Sign in with \`cupboard login ${url}\`.`
+			`You aren't signed in to ${url}. Sign in with \`cupboard login ${url}\`.`
 		);
 		this.name = 'NoCachedSessionError';
 	}
@@ -49,16 +49,17 @@ export class NoCachedSessionError extends CliError {
 export class WhoamiProviderWithUrlError extends CliUsageError {
 	constructor() {
 		super(
-			'--provider signs in with the identity provider only and takes no URL; ' +
-				'drop the URL, or drop --provider to show the cached session.'
+			"--provider doesn't take a URL, because it only signs in to your " +
+				'identity provider. Leave out the URL, or leave out --provider to ' +
+				'show your session for that URL.'
 		);
 		this.name = 'WhoamiProviderWithUrlError';
 	}
 }
 
 /**
- * What `whoami` reads, injectable so it is testable without real files or a
- * browser.
+ * What `whoami` reads. Tests pass their own versions, so they don't need real
+ * files or a browser.
  */
 export interface WhoamiDependencies {
 	readonly listSessions: () => Promise<readonly CachedSession[]>;
@@ -73,13 +74,13 @@ export type WhoamiInput =
 	| { readonly kind: 'provider'; readonly options: ProviderSignInOptions };
 
 /**
- * The cached sessions and, when one is cached, the Cloudflare sign-in that
- * can start new sessions silently.
+ * The saved sessions, and the saved Cloudflare sign-in if there is one. That
+ * sign-in can start new sessions without opening a browser.
  */
 interface WhoamiSessions {
 	readonly sessions: readonly SessionIdentity[];
 	/**
-	Present when a Cloudflare sign-in is cached; its subject when recorded.
+	Present when a Cloudflare sign-in is saved. Includes its subject if known.
 	*/
 	readonly cloudflareSignIn?: { readonly subject?: string };
 }
@@ -133,7 +134,7 @@ async function reportSessions(
 	if (grant !== undefined && rows.length > 0) {
 		rows.push({
 			label: 'Cloudflare sign-in',
-			value: grant.subject ?? 'cached'
+			value: grant.subject ?? 'saved'
 		});
 	}
 
@@ -151,8 +152,9 @@ async function reportSessions(
 		data,
 		rows,
 		empty:
-			'No sessions are cached. Sign in with `cupboard login <url>`, or run ' +
-			'`cupboard whoami --provider` to see the identity you would sign in as.'
+			"You aren't signed in anywhere. Sign in with `cupboard login <url>`. " +
+			'To see which identity you would sign in with, run ' +
+			'`cupboard whoami --provider`.'
 	});
 }
 
@@ -189,16 +191,17 @@ async function reportProvider(
 		rows: providerRows(identity)
 	});
 	reporter.info(
-		'Send the issuer, audience and subject to a tenant administrator: a ' +
-			'trust rule matching them lets you sign in. The claims were decoded ' +
-			'locally without checking the signature, and nothing was sent to cupboard.'
+		'To get access, send the issuer, audience and subject to a tenant ' +
+			'administrator. They can add a trust rule that lets you sign in. ' +
+			"Nothing was sent to cupboard, and the token's signature wasn't checked."
 	);
 }
 
 /**
- * Resolves the command line: `--provider` (or any sign-in option, which implies
- * it) asks the identity provider and takes no URL; otherwise the cached
- * sessions are shown, all of them or the one for the URL.
+ * Works out what to show from the command line. `--provider` asks the identity
+ * provider and doesn't take a URL. Any of the sign-in options turns
+ * `--provider` on. Otherwise whoami shows all the saved sessions, or only the
+ * session for the given URL.
  */
 export function whoamiInput(
 	url: URL | undefined,
@@ -223,8 +226,9 @@ export function whoamiInput(
 }
 
 /**
- * Shows the identity of the cached sessions, or of the person as their identity
- * provider sees them, so they can ask for access before any rule admits them.
+ * Shows who the saved sessions are signed in as. With `--provider`, it shows
+ * who the identity provider says you are instead, so you can ask for access
+ * before any trust rule lets you in.
  */
 export async function runWhoami(
 	input: WhoamiInput,
@@ -247,18 +251,18 @@ export function registerWhoamiCommand(
 	const command = program
 		.command('whoami')
 		.description(
-			'Show who the cached sessions sign in as or, with --provider, the ' +
-				'identity a trust rule must match to admit you.'
+			'Show who you are signed in as. With --provider, show the identity ' +
+				'an administrator needs to give you access.'
 		)
 		.argument(
 			'[url]',
-			'deployment or tenant URL whose session to show (default: every cached session)',
+			'only show your session for this deployment or tenant URL',
 			parseWorkerUrl
 		)
 		.option(
 			'--provider',
-			'sign in with the identity provider without contacting cupboard, and ' +
-				'show the claims a trust rule matches (implied by the options below)'
+			'sign in to your identity provider and show your identity, without ' +
+				'contacting cupboard (implied by the options below)'
 		);
 
 	const signInOptions = providerSignInOptions({ provider: true });
@@ -272,16 +276,19 @@ export function registerWhoamiCommand(
 			'after',
 			[
 				'',
-				'Without --provider, whoami reads only the cached sessions and sends',
-				'nothing over the network. With it, whoami signs in exactly as `login`',
-				'does, but never sends the ID token to cupboard: send the issuer,',
-				'audience and subject it prints to a tenant administrator.',
+				'Without --provider, whoami only looks at the sessions saved on this',
+				'machine. It does not use the network.',
 				'',
-				'Claims are decoded locally and their signatures are not checked; the',
-				'output is for display, and the server verifies every token it is given.',
+				'With --provider, whoami signs you in the same way as `login`, but',
+				'does not contact cupboard. Use it before you have access: send the',
+				'issuer, audience and subject it prints to a tenant administrator, who',
+				'can then add a trust rule for you.',
+				'',
+				'whoami decodes tokens without checking their signatures. This is fine',
+				'for showing them, because cupboard checks every token it receives.',
 				'',
 				'Examples:',
-				'  # Who are my cached sessions signed in as?',
+				'  # Who am I signed in as?',
 				'  cupboard whoami',
 				'',
 				'  # What identity would a trust rule need to match for me?',

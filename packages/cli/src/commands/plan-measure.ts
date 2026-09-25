@@ -53,20 +53,20 @@ export function registerPlanMeasureCommand(
 	plan
 		.command('measure')
 		.description(
-			'Measure the paths this store must download to realise each target.'
+			'Internal step of the flake publish workflow, not for direct use. Measure how much this store must download to build or fetch each target.'
 		)
 		.requiredOption(
 			'--targets-file <path>',
-			'JSON file naming each target and the installable to price'
+			'JSON file that lists each target and its installable'
 		)
 		.option(
 			'--store <uri>',
-			'remote ssh-ng store to query for the target sizes (default: the local daemon)',
+			'remote ssh-ng store to query (default: the local Nix daemon)',
 			parseStoreUri
 		)
 		.option(
 			'--measure-file <path>',
-			'destination for the JSON per-target size measurements'
+			"file to write each target's measured size to, as JSON"
 		)
 		.action(async (options: PlanMeasureOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();

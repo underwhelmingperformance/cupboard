@@ -225,8 +225,8 @@ const maxTimerDelayMs = 2 ** 31 - 1;
 // condition of its own as one of these two.
 const retryableErrorStatuses = new Set([429, 503]);
 
-// The status the server gives a commit that would take the tenant over its
-// storage quota.
+// The server answers with this status when a commit would take the tenant
+// over its storage quota.
 const overQuotaStatus = 507;
 
 // Cap `Retry-After` above the reconnect back-off ceiling so valid server delays

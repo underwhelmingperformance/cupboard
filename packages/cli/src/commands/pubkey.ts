@@ -12,7 +12,8 @@ export function registerPubkeyCommand(
 	program
 		.command('pubkey')
 		.description(
-			'Print the current public signing key for this cupboard deployment.'
+			"Print the tenant's public signing keys, one per line (more than one " +
+				'during a key rotation).'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {

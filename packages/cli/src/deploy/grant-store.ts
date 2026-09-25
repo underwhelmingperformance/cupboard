@@ -91,8 +91,8 @@ export async function writeCachedGrant(
 }
 
 /**
- * Deletes the cached Cloudflare grant under its renewal lock, so a concurrent
- * refresh cannot write it back.
+ * Deletes the saved Cloudflare sign-in. It takes the same lock as renewal, so a
+ * refresh running at the same time can't write it back.
  */
 export async function removeCachedGrant(
 	signal?: AbortSignal

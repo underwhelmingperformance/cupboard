@@ -61,13 +61,13 @@ export async function readSecretFile(
 }
 
 /**
- * Whether a removal deleted something or found nothing to delete.
+ * Whether a removal deleted a file or found nothing there.
  */
 export type Removal = 'removed' | 'absent';
 
 /**
- * Deletes a secret file. A missing file is not an error, so removal is
- * idempotent; other failures propagate.
+ * Deletes a secret file. A missing file isn't an error, so it's safe to call
+ * twice. Any other failure is thrown.
  */
 export async function removeSecretFile(file: string): Promise<Removal> {
 	try {
@@ -84,7 +84,8 @@ export async function removeSecretFile(file: string): Promise<Removal> {
 }
 
 /**
- * The names of the entries in a directory, or none when it does not exist.
+ * Lists the names in a directory, or returns an empty list if the directory
+ * doesn't exist.
  */
 export async function listSecretDirectory(
 	directory: string

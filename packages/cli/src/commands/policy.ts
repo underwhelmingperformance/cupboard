@@ -34,12 +34,14 @@ export function registerPolicyCommands(
 	const policy = program
 		.command('policy')
 		.description(
-			'Inspect or remove legacy policies while retention migration is pending.'
+			"List and remove old retention policies that an upgrade hasn't imported yet."
 		);
 
 	policy
 		.command('list')
-		.description('List legacy retention and grace policies awaiting migration.')
+		.description(
+			"List the old retention and grace policies that haven't been imported yet."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -55,10 +57,10 @@ export function registerPolicyCommands(
 	policy
 		.command('remove')
 		.description(
-			'Remove a legacy retention policy and restart the pending migration.'
+			'Remove an old retention policy, so that the import can continue without it.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<id>', 'policy id')
+		.argument('<id>', 'retention policy ID')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -73,10 +75,10 @@ export function registerPolicyCommands(
 	policy
 		.command('remove-grace')
 		.description(
-			'Remove a legacy grace policy and restart the pending migration.'
+			'Remove an old grace policy, so that the import can continue without it.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<id>', 'grace policy id')
+		.argument('<id>', 'grace policy ID')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });

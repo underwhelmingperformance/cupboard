@@ -682,9 +682,9 @@ async function runPushFlow(
 	// one. A vanished intermediate is not a failure: it is recorded as collected
 	// and the run continues.
 	const failures: PushFailure[] = [];
-	// The error behind each failure, in the same order, so the exit code can
-	// tell a push that failed only transiently (and is worth retrying) from one
-	// that failed for good. The reported summary carries only the reasons.
+	// Keep the error behind each failure, in the same order as `failures`. The
+	// exit code uses them to tell a push that is worth retrying from one that
+	// failed for good. The printed summary only shows the reasons.
 	const failureCauses: unknown[] = [];
 	const collected: CollectedPath[] = [];
 

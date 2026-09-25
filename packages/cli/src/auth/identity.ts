@@ -6,30 +6,31 @@ import { decodeJwtPayload } from './jwt.ts';
 import type { CachedSession } from './token-store.ts';
 
 /**
- * Whom a cached session speaks for, read from its access token. A tenant
- * session's audience is its tenant URL; a deployment (control) session's
- * audience is a client id, not a URL.
+ * Who a saved session signs in as, read from its access token. A tenant
+ * session's audience is its tenant URL. A deployment (control-plane) session's
+ * audience is a client ID instead.
  */
 export interface SessionIdentity {
 	/**
-	The tenant or deployment URL the session was issued for: the token's issuer.
+	The URL of the session's tenant or deployment. It is the token's issuer.
 	*/
 	readonly url: string;
 	readonly kind: 'tenant' | 'deployment';
 	/**
-	The OIDC subject the session was issued to, if the token names one.
+	The OIDC subject of the session, if the token has one.
 	*/
 	readonly subject?: string;
 	/**
-	The trust rule that admitted the sign-in, when the token records it.
+	The trust rule that let this sign-in through, if the token records it.
 	*/
 	readonly rule?: string;
 	/**
-	When the cached access token expires, as an ISO 8601 timestamp.
+	When the saved access token expires, as an ISO 8601 timestamp.
 	*/
 	readonly accessTokenExpiresAt?: string;
 	/**
-	Whether the session holds a refresh token, so it can be renewed silently.
+	Whether the session has a refresh token, which lets the CLI renew it without
+	asking you to sign in again.
 	*/
 	readonly renewable: boolean;
 }
@@ -45,10 +46,11 @@ const sessionClaimsSchema = z.object({
 });
 
 /**
- * Describes a cached session from its access token's claims, or returns
- * undefined when the token names no issuer. The claims are decoded without
- * verifying the signature: they only describe the session to its owner, and
- * the server verifies the token whenever it is used.
+ * Describes a saved session from its access token's claims. Returns undefined
+ * if the token has no issuer.
+ *
+ * The signature isn't checked. The result is only shown to the person who owns
+ * the session, and the server checks the token every time it's used.
  */
 export function sessionIdentity(
 	session: CachedSession
@@ -77,8 +79,9 @@ export function sessionIdentity(
 }
 
 /**
- * The identity a trust rule has to match to admit a person: the claims of the
- * ID token their identity provider issued, as a tenant administrator needs them.
+ * A person's identity, as their identity provider reports it in an ID token.
+ * A tenant administrator needs these values to write a trust rule for the
+ * person.
  */
 export interface ProviderIdentity {
 	readonly issuer: string;
@@ -89,13 +92,12 @@ export interface ProviderIdentity {
 	*/
 	readonly expiresAt?: string;
 	/**
-	 * The token's string-valued claims other than those that change with every
-	 * sign-in. A trust rule's claims match only string values, so these are the
-	 * ones it can name.
+	 * The token's string claims, except the ones that change at every sign-in.
+	 * A trust rule can only match string claims.
 	 */
 	readonly claims: Readonly<Record<string, string>>;
 	/**
-	The identity half of a trust rule that matches exactly this person.
+	The identity part of a trust rule that matches this person and no one else.
 	*/
 	readonly rule: {
 		readonly issuer: string;
@@ -103,13 +105,14 @@ export interface ProviderIdentity {
 		readonly claims: { readonly sub: string };
 	};
 	/**
-	Always false: the token is decoded locally and its signature not checked.
+	Always false, because the token is decoded locally without checking its
+	signature.
 	*/
 	readonly verified: false;
 }
 
-// Claims that are the token's envelope or differ on every sign-in, so a rule
-// cannot usefully pin them.
+// Claims that describe the token itself or change on every sign-in. A rule
+// that matched them would stop working the next time you signed in.
 const perTokenClaims: ReadonlySet<string> = new Set([
 	'iss',
 	'aud',
@@ -142,20 +145,21 @@ const idTokenClaimsSchema = z
 export class UnreadableIdTokenError extends CliError {
 	constructor() {
 		super(
-			'The identity provider returned an ID token without an issuer, ' +
-				'audience and subject, so there is no identity to show.'
+			"The identity provider's ID token is missing its issuer, audience or " +
+				"subject, so cupboard can't show your identity."
 		);
 		this.name = 'UnreadableIdTokenError';
 	}
 }
 
 /**
- * Describes the identity in an OIDC ID token, for a person to send to a tenant
- * administrator. The claims are decoded without verifying the signature; the
- * token came straight from the provider over TLS and is only displayed.
+ * Describes the identity in an OIDC ID token, so the person can send it to a
+ * tenant administrator. The signature isn't checked. The token came straight
+ * from the provider over TLS, and it's only displayed.
  *
- * The rule's audience is the client the person signs in with when the token
- * names it, since that is the audience `cupboard login` will present.
+ * If the token's audience includes the client ID used for sign-in, the rule's
+ * audience is that client ID, because `cupboard login` uses it as the
+ * audience. Otherwise the rule uses the token's first audience.
  */
 export function providerIdentity(
 	idToken: string,

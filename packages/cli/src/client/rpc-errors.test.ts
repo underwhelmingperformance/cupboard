@@ -74,8 +74,8 @@ describe('translateRpcError', () => {
 				tenant: 'beta',
 				message:
 					'Tenant beta is being removed, so its status and quota can no ' +
-					'longer be changed. Removal cannot be undone; `cupboard tenant ' +
-					'list` shows its progress.'
+					"longer be changed. Removal can't be undone. Run `cupboard tenant " +
+					'list` to check on the removal.'
 			});
 		}
 	});
@@ -91,8 +91,9 @@ describe('translateRpcError', () => {
 
 		expect(translated).toBeInstanceOf(QuotaBelowUsageError);
 		expect(translated instanceof Error ? translated.message : '').toBe(
-			'Tenant beta already stores 2 MB (2000000 bytes), more than the ' +
-				'requested quota. Choose a larger quota, or free space first.'
+			'Tenant beta already stores 2 MB (2000000 bytes), which is more than ' +
+				"the requested quota. Choose a larger quota, or ask the tenant's " +
+				'administrators to free some space first.'
 		);
 	});
 
@@ -105,11 +106,12 @@ describe('translateRpcError', () => {
 		);
 
 		expect(translated instanceof Error ? translated.message : '').toBe(
-			"This upload would exceed the tenant's storage quota. Ask the " +
-				"deployment's operator to raise the tenant's quota (`cupboard " +
-				'tenant set-quota`), or free space: delete paths you no longer need ' +
-				'(`cupboard delete`), or remove roots (`cupboard root remove`) and ' +
-				'let garbage collection reclaim what they kept.'
+			"This upload would exceed the tenant's storage quota. To make room, " +
+				"ask the operator to raise the tenant's quota with `cupboard tenant " +
+				'set-quota`. Or free some space yourself: delete paths that you no ' +
+				'longer need with `cupboard delete`, or remove roots with `cupboard ' +
+				'root remove` so that garbage collection can reclaim the paths that ' +
+				'those roots kept.'
 		);
 	});
 

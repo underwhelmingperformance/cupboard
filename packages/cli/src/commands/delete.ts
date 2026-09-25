@@ -32,11 +32,13 @@ export function registerDeleteCommand(
 ): void {
 	program
 		.command('delete')
-		.description('Delete a single store path from the cache.')
+		.description(
+			'Delete one store path from a cache immediately, even if a root keeps it.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
 			'<arguments...>',
-			'optional cache name followed by the store path to delete'
+			'an optional cache name, then the store path to delete'
 		)
 		.option('-y, --yes', 'delete without the confirmation prompt')
 		.action(async (url: URL, positionals: string[], options: DeleteOptions) => {

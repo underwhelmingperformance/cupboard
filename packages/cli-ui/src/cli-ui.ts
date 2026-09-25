@@ -135,9 +135,9 @@ export interface ConfirmOptions {
 	*/
 	readonly detail?: string;
 	/**
-	 * Proceed without asking, in every mode. An interactive run skips the prompt;
-	 * a non-interactive run resolves `yes` only when this is set, so a piped or
-	 * CI invocation never blocks on a prompt it cannot show.
+	 * Proceed without asking. This skips the prompt in an interactive terminal
+	 * too. A non-interactive run can only proceed when this is set. Without it, a
+	 * piped or CI run fails with an error, because it can't show a prompt.
 	 */
 	readonly assumeYes?: boolean;
 }
@@ -400,8 +400,8 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		async confirm(request) {
-			// `--yes` answers the prompt in every mode, including an interactive
-			// terminal, so a scripted run never stops to ask.
+			// Check `--yes` before prompting, so a scripted run never stops to
+			// ask, even in a terminal.
 			if (request.assumeYes ?? isAssumeYesDefault) {
 				reporter.info(`${request.message} (proceeding: --yes)`);
 				return 'yes';

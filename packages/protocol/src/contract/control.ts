@@ -55,8 +55,8 @@ const controlProcedure = oc
 		FORBIDDEN: {}
 	});
 
-// Removal has begun and can only run to completion, so a status or quota change
-// is refused.
+// Once a tenant's removal has started, it always runs to the end. So the
+// server refuses to change the tenant's status or quota.
 const tenantOffboardingError = {
 	TENANT_OFFBOARDING: {
 		status: StatusCodes.CONFLICT,
@@ -141,7 +141,8 @@ export const controlContract = {
 			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
 
-		// Setting the same quota again leaves the same result, so a retry is safe.
+		// Setting the same quota twice has the same result as setting it once, so a
+		// retry is safe.
 		setQuota: controlProcedure
 			.meta({
 				requires: 'tenant:set-quota',

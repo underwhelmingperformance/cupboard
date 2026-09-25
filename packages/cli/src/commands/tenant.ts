@@ -149,18 +149,26 @@ export function registerTenantCommands(
 ): void {
 	const tenant = program
 		.command('tenant')
-		.description('Provision and manage tenants (operator only).');
+		.description(
+			'Create, suspend and remove tenants, and manage their quotas and read credentials (operator only).'
+		);
 
 	tenant
 		.command('create')
-		.description('Provision a new tenant.')
+		.description('Create a tenant.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
-		.requiredOption('--owner-issuer <issuer>', 'the owner OIDC issuer')
-		.requiredOption('--owner-subject <subject>', 'the owner OIDC subject')
+		.requiredOption(
+			'--owner-issuer <issuer>',
+			"the OIDC issuer of the owner's identity"
+		)
+		.requiredOption(
+			'--owner-subject <subject>',
+			"the OIDC subject of the owner's identity"
+		)
 		.requiredOption(
 			'--owner-audience <audience>',
-			'the owner OIDC audience (client id)'
+			"the OIDC audience (client ID) of the owner's identity"
 		)
 		.requiredOption(
 			'--access <mode>',
@@ -169,13 +177,13 @@ export function registerTenantCommands(
 		)
 		.option(
 			'--read-user <user>',
-			'the user for the tenant-wide fallback read credential',
+			'user name for the tenant read credential (default: cupboard)',
 			parseReadUser
 		)
-		.option('--no-read-password', 'do not create a fallback read credential')
+		.option('--no-read-password', 'do not create a tenant read credential')
 		.option(
 			'--quota-bytes <bytes>',
-			'the storage quota in bytes (unlimited by default)',
+			'storage quota in bytes (unlimited by default)',
 			parseQuotaBytes
 		)
 		.action(async (url: URL, id: string, options: CreateOptions) => {
@@ -207,7 +215,7 @@ export function registerTenantCommands(
 
 	tenant
 		.command('list')
-		.description('List provisioned tenants.')
+		.description('List every tenant and its state, including removed tenants.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -216,7 +224,9 @@ export function registerTenantCommands(
 
 	tenant
 		.command('suspend')
-		.description('Suspend a tenant: new reads and writes stop immediately.')
+		.description(
+			'Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.'
+		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'suspend without the confirmation prompt')
@@ -246,11 +256,11 @@ export function registerTenantCommands(
 	tenant
 		.command('set-quota')
 		.description(
-			"Set a tenant's storage quota; it cannot be below what the tenant already stores."
+			"Set a tenant's storage quota. It can't be less than the tenant already stores."
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
-		.argument('<bytes>', 'the storage quota in bytes', parseQuotaBytes)
+		.argument('<bytes>', 'storage quota in bytes', parseQuotaBytes)
 		.action(async (url: URL, id: string, bytes: number) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			await runTenantSetQuota(
@@ -278,10 +288,16 @@ export function registerTenantCommands(
 
 	tenant
 		.command('rotate-credential')
-		.description('Replace the tenant-wide fallback read credential.')
+		.description(
+			'Replace the tenant read credential, and print the new password.'
+		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
-		.option('--read-user <user>', 'the read user', parseReadUser)
+		.option(
+			'--read-user <user>',
+			'user name for the new credential (default: cupboard)',
+			parseReadUser
+		)
 		.action(async (url: URL, id: string, options: RotateCredentialOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			await runTenantRotateCredential(
@@ -294,7 +310,7 @@ export function registerTenantCommands(
 
 	tenant
 		.command('clear-credential')
-		.description('Clear the tenant-wide fallback read credential.')
+		.description('Remove the tenant read credential.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: URL, id: string) => {
@@ -309,14 +325,14 @@ export function registerTenantCommands(
 	tenant
 		.command('rotate-cache-credential')
 		.description(
-			"Set one cache's own read credential to a newly generated password."
+			'Create or replace the cache read credential for one cache, and print the password.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.argument('[cache]', 'named cache; omit it for the default cache')
 		.option(
 			'--read-user <user>',
-			'the Basic-auth user this cache requires from readers',
+			'user name for the new credential (default: cupboard)',
 			parseReadUser
 		)
 		.action(
@@ -340,7 +356,7 @@ export function registerTenantCommands(
 	tenant
 		.command('clear-cache-credential')
 		.description(
-			"Clear one cache's own read credential; readers then use the tenant credential."
+			'Remove the cache read credential for one cache. The cache then accepts the tenant read credential again.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
@@ -358,10 +374,12 @@ export function registerTenantCommands(
 	tenant
 		.command('remove')
 		.alias('delete')
-		.description('Begin offboarding a tenant.')
+		.description(
+			'Remove a tenant. Reads and writes stop immediately, and its data is deleted over the following hours.'
+		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
-		.option('-y, --yes', 'offboard without the confirmation prompt')
+		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			await runTenantRemove(
@@ -482,8 +500,8 @@ export async function runTenantResume(
 }
 
 /**
- * Sets or removes a tenant's quota and reports it with the charged bytes it
- * counts against. The next upload is checked against the new quota.
+ * Sets or removes a tenant's quota, then prints it alongside how much the
+ * tenant is charged for now. The new quota applies from the next upload.
  */
 export async function runTenantSetQuota(
 	id: TenantId,

@@ -474,8 +474,8 @@ describe('command help', () => {
 		expect(help).toContain('--closure');
 		expect(help).toContain('--intermediate-paths-file');
 		expect(help).toContain(
-			'cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\\n' +
-				'    --root github:acme/infra/main'
+			'cupboard push --github-oidc https://cupboard.example.workers.dev/t/acme ./result \\\n' +
+				'    --root github:acme/app/main'
 		);
 	});
 
@@ -577,8 +577,8 @@ describe('command help', () => {
 	it('shows local and remote examples for attest verify', () => {
 		const help = helpFor(['attest', 'verify']);
 
-		expect(help).toContain('Local mode');
-		expect(help).toContain('Remote mode');
+		expect(help).toContain('Verify local bundle files');
+		expect(help).toContain('Verify the bundles that a cache has');
 	});
 
 	it('notes that most commands need a login', () => {
@@ -615,20 +615,20 @@ describe('command help', () => {
 
 		expect(help).toContain('--access <mode>');
 		expect(unwrapped(help)).toContain(
-			'read access for the first cache: public or private (you are asked ' +
-				'when it is omitted)'
+			"read access for the first tenant's default cache: public or " +
+				'private (you are asked if you leave it out)'
 		);
 	});
 
 	it('describes immediate read and write suspension', () => {
 		expect(helpFor(['tenant', 'suspend'])).toContain(
-			'Suspend a tenant: new reads and writes stop immediately.'
+			'Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.'
 		);
 	});
 
 	it('sets a tenant quota in bytes and clears it with its own command', () => {
 		expect(unwrapped(helpFor(['tenant', 'set-quota']))).toContain(
-			"Set a tenant's storage quota; it cannot be below what the tenant " +
+			"Set a tenant's storage quota. It can't be less than the tenant " +
 				'already stores.'
 		);
 		expect(helpFor(['tenant', 'set-quota'])).toContain('<bytes>');
@@ -704,7 +704,7 @@ describe('command help', () => {
 		const help = helpFor(['cache', 'create']);
 
 		expect(help).toContain('Create a named cache.');
-		expect(help).toContain('cache name when the URL does not select one');
+		expect(help).toContain('cache name, if the URL is a tenant URL');
 		expect(help).toContain('--root-ttl <duration>');
 		expect(help).toContain('--grace <duration>');
 	});

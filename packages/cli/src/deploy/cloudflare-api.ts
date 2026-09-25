@@ -81,8 +81,8 @@ export class QueueConsumerIdMissingError extends CliError {
 }
 
 /**
- * The queue consumer a Worker already has on a queue, as far as a deploy
- * needs to know it to keep the same resources.
+ * A Worker's existing consumer on a queue. It only includes the settings that
+ * a deploy needs to keep the same resources.
  */
 export interface LiveQueueConsumer {
 	readonly deadLetterQueue: string | undefined;
@@ -174,14 +174,14 @@ export interface CloudflareApi {
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	findD1Database(name: string): Promise<DatabaseId | undefined>;
 	/**
-	 * The name of the database with this id, or `undefined` when it does not
+	 * The name of the database with this ID, or `undefined` if it doesn't
 	 * exist.
 	 */
 	d1DatabaseName(databaseId: DatabaseId): Promise<string | undefined>;
 	ensureD1Database(name: string): Promise<DatabaseId>;
 	ensureKvNamespace(title: string): Promise<KvNamespaceId>;
 	/**
-	 * The title of the namespace with this id, or `undefined` when it does not
+	 * The title of the namespace with this ID, or `undefined` if it doesn't
 	 * exist.
 	 */
 	kvNamespaceTitle(namespaceId: KvNamespaceId): Promise<string | undefined>;
@@ -222,15 +222,15 @@ export interface CloudflareApi {
 		settings: QueueConsumerSettings
 	): Promise<void>;
 	/**
-	 * The script's consumer on the named queue, or `undefined` when the queue
-	 * does not exist or the script does not consume it.
+	 * The script's consumer on the named queue. Returns `undefined` if the
+	 * queue doesn't exist or the script doesn't consume from it.
 	 */
 	findQueueConsumer(
 		queueName: string,
 		scriptName: ScriptName
 	): Promise<LiveQueueConsumer | undefined>;
 	/**
-	 * The script's cron triggers, or `undefined` when the script is not
+	 * The script's cron triggers, or `undefined` if the script isn't
 	 * deployed.
 	 */
 	listSchedules(scriptName: ScriptName): Promise<string[] | undefined>;
@@ -349,8 +349,8 @@ const liveConsumerSchema = z.object({
 type LiveConsumer = z.infer<typeof liveConsumerSchema>;
 
 /**
- * The live consumer parsed, when it is a Worker consumer delivering to this
- * script.
+ * Parses a live queue consumer. Returns it only if it's a Worker consumer that
+ * delivers to this script.
  */
 function asWorkerConsumer(
 	consumer: unknown,

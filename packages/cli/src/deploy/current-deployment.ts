@@ -16,7 +16,7 @@ import { renameResources, withCrons, withKvTitles } from './overrides.ts';
 import { configuredOwner, type OwnerBinding } from './owner.ts';
 
 /**
- * The Cloudflare reads that establish what an existing deployment uses.
+ * The Cloudflare API calls used to find out what an existing deployment uses.
  */
 export type CurrentDeploymentApi = Pick<
 	CloudflareApi,
@@ -30,22 +30,23 @@ export type CurrentDeploymentApi = Pick<
 >;
 
 /**
- * What the deployment on an account already runs with, as the starting point
- * for a deploy's plan.
+ * What the deployment on an account already runs with. A deploy's plan starts
+ * from this.
  */
 export interface CurrentDeployment {
 	/**
-	 * The build's configuration with the resource names and cron triggers the
-	 * deployed Workers use in place of the build's defaults. It equals the
-	 * build's configuration when nothing is deployed yet.
+	 * The build's configuration, with the build's default resource names and
+	 * cron triggers replaced by those that the deployed Workers use. If nothing
+	 * is deployed yet, this is just the build's configuration.
 	 */
 	readonly config: DeploymentConfig;
 	/**
-	 * The signup gate the deployed control Worker holds, when it names one.
+	 * The signup gate the deployed control Worker has, if it has one.
 	 */
 	readonly signupGate: OwnerBinding | undefined;
 	/**
-	 * The operator the deployment's database records, when one has claimed it.
+	 * The operator recorded in the deployment's database, if anyone has claimed
+	 * the deployment.
 	 */
 	readonly operator: OwnerBinding | undefined;
 }
@@ -56,8 +57,8 @@ const r2Binding = z.looseObject({
 	bucket_name: z.string()
 });
 
-// The settings endpoint has reported a D1 binding's database as `id` and,
-// more recently, as `database_id`.
+// The settings endpoint used to report a D1 binding's database as `id`. Newer
+// responses call it `database_id`, so accept either.
 const d1Binding = z.looseObject({
 	type: z.literal('d1'),
 	name: z.string(),
@@ -92,8 +93,8 @@ const liveBinding = z.union([
 ]);
 
 /**
- * A deployed Worker's resource bindings and plain-text variables, keyed by
- * binding name.
+ * A deployed Worker's resource bindings and plain-text variables, by binding
+ * name.
  */
 interface LiveBindings {
 	readonly buckets: Map<string, string>;
@@ -155,8 +156,8 @@ function recordBinding(live: LiveBindings, binding: LiveBinding): void {
 }
 
 /**
- * Reads the bindings this deploy manages out of a script's live settings.
- * Bindings of other types, and any this parser does not recognise, are left
+ * Reads the bindings that deploys manage from a script's live settings. Other
+ * kinds of binding, and bindings that this parser doesn't recognise, are left
  * out.
  */
 export function parseLiveBindings(bindings: readonly unknown[]): LiveBindings {
@@ -175,8 +176,8 @@ export function parseLiveBindings(bindings: readonly unknown[]): LiveBindings {
 
 type Renames = Record<EditableResourceKind, Map<string, string>>;
 
-// The first deployed name seen for a resource wins, so two Workers that
-// disagree cannot rename a resource twice.
+// If the two Workers disagree about a resource's name, use the first one seen.
+// This stops the same resource being renamed twice.
 function noteRename(
 	renames: Map<string, string>,
 	from: string,
@@ -267,8 +268,9 @@ function applyRenames(
 }
 
 /**
- * Dead-letter queues are consumer settings, not bindings, so they are read
- * from the control Worker's consumers after the consumed queues are known.
+ * A dead-letter queue is a setting on a queue consumer, not a binding. This
+ * function reads each dead-letter queue from the control Worker's queue
+ * consumers, after the consumed queues are known.
  */
 async function adoptDeadLetterQueues(
 	api: CurrentDeploymentApi,
@@ -292,13 +294,13 @@ async function adoptDeadLetterQueues(
 	return renameResources(config, 'queue', renames);
 }
 
-// `d1QueryRows` returns one string per row, so the row is read as one JSON
-// object.
+// `d1QueryRows` returns each row as a single string, so the query builds the
+// row as one JSON object.
 const operatorQuery =
 	"SELECT json_object('issuer', issuer, 'subject', subject, 'audience', audience) FROM global_admin WHERE id = 'singleton';";
 
-// The table is created by a D1 migration, so a database that has not yet run
-// it has no table to query.
+// A D1 migration creates this table. A database that hasn't run the migration
+// yet doesn't have it, so check before querying.
 const operatorTableQuery =
 	"SELECT tbl_name FROM sqlite_master WHERE type = 'table' AND tbl_name = 'global_admin';";
 
@@ -309,8 +311,8 @@ const operatorRowSchema = z.object({
 });
 
 /**
- * The operator the deployment's database records, or `undefined` when the
- * database does not exist yet or nobody has claimed the deployment.
+ * The operator recorded in the deployment's database. Returns `undefined` if
+ * the database doesn't exist yet or nobody has claimed the deployment.
  */
 export async function readOperator(
 	api: Pick<CloudflareApi, 'findD1Database' | 'd1QueryRows'>,
@@ -338,10 +340,10 @@ export async function readOperator(
 }
 
 /**
- * Reads what the deployment on this account already uses: the resources its
- * Workers are bound to, the control Worker's cron triggers and signup gate,
- * and its operator. A deploy that starts its plan from these keeps the same
- * resources and settings unless they are changed deliberately.
+ * Reads the current settings of the deployment on this account: the resources
+ * bound to its Workers, the control Worker's cron triggers and signup gate,
+ * and the operator. A deploy that starts its plan from these settings keeps
+ * the same resources and settings unless you change them in the plan.
  */
 export async function readCurrentDeployment(
 	api: CurrentDeploymentApi,

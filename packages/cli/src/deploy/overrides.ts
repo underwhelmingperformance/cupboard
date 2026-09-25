@@ -64,10 +64,11 @@ const renamers: Record<
 };
 
 /**
- * Renames resources of one kind everywhere both Workers reference them, so
- * bindings, producers, consumers and dead-letter queues stay consistent. The
- * renames apply at once, so one never feeds another. Names that are not keys
- * of `renames` are untouched.
+ * Renames resources of one kind everywhere either Worker refers to them, so
+ * bindings, producers, consumers and dead-letter queues stay consistent. All
+ * the renames are applied together, so a name that one rename produces is
+ * never renamed again by another. Names that aren't keys of `renames` are left
+ * alone.
  */
 export function renameResources(
 	config: DeploymentConfig,
@@ -99,8 +100,8 @@ export function renameResource(
 }
 
 /**
- * Sets the KV namespace titles by binding name, in both Workers. Bindings
- * that are not keys of `titles` keep their title.
+ * Sets KV namespace titles by binding name, in both Workers. A binding that
+ * isn't a key of `titles` keeps its title.
  */
 export function withKvTitles(
 	config: DeploymentConfig,

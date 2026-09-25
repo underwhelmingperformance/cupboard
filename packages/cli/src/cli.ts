@@ -117,25 +117,26 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	const program = command
 		.name('cupboard')
 		.description(
-			'Operate a multi-tenant Nix binary cache hosted on Cloudflare Workers: ' +
-				'push store paths, manage tenants and keys, and configure Nix clients.'
+			'Deploy and manage cupboard, a multi-tenant Nix binary cache on ' +
+				'Cloudflare Workers. Push store paths, manage tenants and keys, and ' +
+				'configure Nix clients.'
 		)
 		.version(cupboardVersion)
 		.option(
 			'--output-mode <mode>',
-			'force the output mode: terminal (spinner), json (line-delimited) or github (workflow commands)',
+			'choose the output format: terminal (interactive, with progress), json (one JSON object per line) or github (GitHub Actions workflow commands)',
 			parseOutputMode
 		)
 		.option('--colour', 'force ANSI colour output')
 		.option('--no-colour', 'disable ANSI colour output')
 		.option(
 			'--result-file <path>',
-			'append machine-readable result events (JSONL) to this file'
+			"append the command's results to this file, one JSON object per line"
 		)
 		.addHelpText(
 			'after',
-			'\nMost commands act on a deployment and need a session first: ' +
-				'run `cupboard login <url>`.'
+			'\nMost commands need you to sign in first with ' +
+				'`cupboard login <url>`.'
 		)
 		// Throw a CommanderError with commander's own error text suppressed, so a
 		// usage error (unknown command, missing argument) reaches the top-level
@@ -248,10 +249,10 @@ export function failureColour(program: Command): boolean | undefined {
 }
 
 /**
- * The process exit code a thrown value maps to: the abort code for a Ctrl-C, a
- * usage error for a commander failure or a refused confirmation, and otherwise
- * {@link failureExitCode}: a coded error's own code, an admin-API error's
- * status class, or the catch-all 1.
+ * Chooses the process exit code for a thrown value. Ctrl-C gets the abort
+ * code. A commander failure or a refused confirmation is a usage error.
+ * Anything else goes to {@link failureExitCode}, which uses the error's own
+ * code, the status class of an admin API error, or 1.
  */
 export function cliExitCode(error: unknown, abortExitCode: number): number {
 	if (isAbortError(error)) {

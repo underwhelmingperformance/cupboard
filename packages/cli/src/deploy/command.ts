@@ -195,23 +195,27 @@ function bucketNameOf(config: DeploymentConfig): string {
 }
 
 /**
- * Why the server refused the admin claim, by status class: another identity
- * already holds the operator role, an ownership or claim-secret mismatch, a
- * server-side fault to read in the logs, or a likely-stale login, which is the
- * only case where re-running `cupboard init` signs in again.
+ * Why the server refused the admin claim, based on the response status:
+ *
+ * - `already-claimed`: someone else is already the operator.
+ * - `ownership-or-secret`: the identity or the claim secret doesn't match.
+ * - `server-error`: the server failed. Its logs explain the failure.
+ * - `stale-login`: the sign-in is probably out of date. This is the only case
+ *   where running `cupboard init` again helps, because it signs in again.
  */
 export type ClaimRefusalReason =
 	'already-claimed' | 'ownership-or-secret' | 'server-error' | 'stale-login';
 
-// http-status-codes exposes its codes as an enum; widen the codes compared
-// against a response's numeric status so the comparisons stay number to number.
+// http-status-codes exports its codes as an enum. Widen the codes that are
+// compared with a response's status to `number`, so each comparison is
+// between two numbers.
 const forbidden: number = StatusCodes.FORBIDDEN;
 const conflict: number = StatusCodes.CONFLICT;
 const serverError: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 export function claimRefusalReason(status: number): ClaimRefusalReason {
-	// The sign-up endpoint answers 409 when the deployment already has an
-	// operator other than the caller.
+	// The sign-up endpoint answers 409 when someone other than the caller is
+	// already the operator.
 	if (status === conflict) {
 		return 'already-claimed';
 	}
@@ -237,7 +241,7 @@ export function claimRefusalAdvice(
 			return (
 				'This deployment already has an operator. Ask them to add you with ' +
 				'`cupboard control-oidc-trust add`, then sign in with ' +
-				'`cupboard login`; see docs/operator/operators.md.'
+				'`cupboard login`. See docs/operator/operators.md.'
 			);
 		}
 
@@ -455,8 +459,8 @@ export interface PlanReviewWorld {
 	readonly skipReview: boolean;
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
 	/**
-	 * The resource choices and admin a plan on another account starts from,
-	 * read from the deployment already on that account.
+	 * When the plan moves to another account, this gives the resources and admin
+	 * to start from. They're read from the deployment already on that account.
 	 */
 	readonly startFor?: (
 		accountId: CloudflareAccountId
@@ -1153,9 +1157,9 @@ async function deployFlow(
 		return created;
 	};
 
-	// Read each account's deployment once. The plan starts from the resources,
-	// cron triggers and signup gate it already uses, so accepting the plan as
-	// shown keeps them.
+	// Read each account's current deployment only once. The plan starts from the
+	// resources, cron triggers and signup gate that the deployment already uses,
+	// so accepting the plan unchanged keeps them.
 	const currentDeployments = new Map<
 		CloudflareAccountId,
 		Promise<CurrentDeployment>
@@ -1658,9 +1662,9 @@ async function deployFlow(
 
 		case 'operator-kept': {
 			ui.info(
-				`${outcome.operator.subject} is the operator of this deployment. ` +
-					'This deploy had no Cloudflare identity to sign in with, so the ' +
-					'operator and the caches are unchanged.'
+				`${outcome.operator.subject} is still the operator of this deployment. ` +
+					"This deploy didn't have a Cloudflare identity to sign in with, so it " +
+					"didn't change the operator or the caches."
 			);
 			ui.outro('Deployed.');
 			return;

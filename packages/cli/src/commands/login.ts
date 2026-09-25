@@ -44,8 +44,8 @@ import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { CliError } from '../errors.ts';
 
 /**
- * How to sign in with an identity provider: the options `login` and
- * `whoami --provider` share.
+ * How to sign in with an identity provider. `login` and `whoami --provider`
+ * both take these options.
  */
 export interface ProviderSignInOptions {
 	readonly oidcIssuer: string;
@@ -193,23 +193,27 @@ export async function cacheLoginSession(
 }
 
 /**
- * Signs in with the identity provider and returns its OIDC ID token, without
- * contacting cupboard. The built-in client against its own issuer uses the
- * deploy's cached grant: silent while a cached login can be renewed, the
- * browser only as a last resort. Any other provider runs the loopback flow,
- * or the device flow with `headless`.
+ * Signs in with the identity provider and returns its OIDC ID token. It doesn't
+ * contact cupboard.
  *
- * Sign-in is interactive, so its prompts are shown the moment they happen, not
- * held behind a spinner the user is meant to act on.
+ * When you sign in with Cloudflare using cupboard's own client, this reuses the
+ * saved Cloudflare sign-in, which `init` also uses. If that sign-in can be
+ * renewed, no browser is needed. The browser opens only when there is no
+ * saved sign-in or the saved sign-in can't be renewed.
+ * Other providers open a browser and wait for the redirect back to this
+ * machine, or use the device flow with `headless`.
+ *
+ * Sign-in needs the user to act, so its prompts are printed straight away
+ * rather than hidden behind a spinner.
  */
 export async function providerIdToken(
 	options: ProviderSignInOptions,
 	reporter: Pick<Reporter, 'info' | 'warn'>,
 	signal?: AbortSignal
 ): Promise<string> {
-	// cupboard's own client has exact-match registered redirect URLs, so the
-	// loopback server must bind one of them; any other client keeps the
-	// ephemeral-port default.
+	// cupboard's own OAuth client accepts only its registered redirect URLs, and
+	// they must match exactly, so the local server must listen on one of them.
+	// Other clients use any free port.
 	const isCupboardClient = options.clientId === cloudflareOauthClientId;
 	const scope = loginScopeForClient(options.clientId);
 
@@ -267,8 +271,9 @@ export async function providerIdToken(
 }
 
 /**
- * The identity-provider options `login` and `whoami` share, so both sign in
- * the same way. `implies` names an option that giving any of them turns on.
+ * The identity provider options that `login` and `whoami` share, so both sign
+ * in the same way. If you pass `implies`, any of these options also turns on
+ * the options listed in `implies`.
  */
 export function providerSignInOptions(
 	implies?: Readonly<Record<string, boolean>>
@@ -279,11 +284,12 @@ export function providerSignInOptions(
 		),
 		new Option(
 			'--client-id <id>',
-			'registered public OAuth client id (PKCE, no client secret)'
+			'the public OAuth client ID to sign in with (PKCE, no client secret)'
 		).default(cloudflareOauthClientId),
 		new Option(
 			'--headless',
-			'use the device flow instead of opening a browser (for SSH/containers)'
+			'sign in with a code in a browser on another device, instead of opening ' +
+				'one here (for SSH or containers)'
 		)
 	];
 
@@ -299,7 +305,7 @@ export function registerLoginCommand(
 	const command = program
 		.command('login')
 		.description(
-			'Authenticate as the owner via OIDC and cache an admin access token.'
+			'Sign in to a tenant or the deployment, and save the session on this machine.'
 		)
 		.argument(
 			'<url>',

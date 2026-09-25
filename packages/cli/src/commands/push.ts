@@ -312,17 +312,15 @@ export function registerPushCommand(
 ): void {
 	program
 		.command('push')
-		.description(
-			'Push one or more store paths to the configured cupboard cache.'
-		)
+		.description('Publish store paths to a cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
 			'[paths...]',
-			'an optional cache name, then the Nix store paths to push'
+			'an optional cache name, then the store paths to push'
 		)
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -331,48 +329,48 @@ export function registerPushCommand(
 		)
 		.option(
 			'--root <name>',
-			'retain the pushed paths under this named retention root (e.g. github:owner/repo/main)',
+			'keep the pushed paths under this retention root, replacing its targets (e.g. github:acme/app/main)',
 			parseRootName
 		)
 		.option(
 			'--ttl <duration>',
-			'expire the retained paths after this duration (e.g. 7d, 12h)',
+			'expire the root or pins after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--permanent', 'retain the target root or pins permanently')
+		.option('--permanent', 'keep the root or pins permanently')
 		.option(
 			'--no-retain',
-			"publish without any retention root or per-path pin; the paths are kept only by the destination cache's configured retention grace"
+			"publish without a root or pins, so that only the cache's grace period keeps the paths"
 		)
 		.option(
 			'--closure',
-			'publish the complete realised closure of the requested paths (default: exactly the requested paths)'
+			'publish the whole closure of the given paths (by default, only the given paths)'
 		)
 		.option(
 			'--intermediate-paths-file <path>',
-			'newline-delimited store paths to publish alongside the targets without retaining them as targets'
+			'file of extra store paths, one per line, to publish without adding them to the root'
 		)
 		.option(
 			'--reference-paths-file <path>',
-			'newline-delimited store paths the tenant already holds, published from the reference source with no local store read or NAR upload'
+			'file of store paths, one per line, to publish by reference from --reference-source. The tenant must already store their NARs, so nothing is read from the local store or uploaded.'
 		)
 		.option(
 			'--reference-source <url>',
-			'served cache endpoint the reference paths are read from (required with --reference-paths-file)',
+			'cache URL to read the narinfos of the --reference-paths-file paths from (required with --reference-paths-file)',
 			parseWorkerUrl
 		)
 		.option(
 			'--read-user <user>',
-			'username for private reference-source reads',
+			'user name of the read credential for a private --reference-source',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'password for private reference-source reads'
+			'password of the read credential for a private --reference-source'
 		)
 		.option(
 			'--run-root <name>',
-			'bind a run root: every pushed path also joins this root as it commits. Independent of --root, and valid with --no-retain (the commits join the run root while the push declares no target root)',
+			'also add each pushed path to this run root as soon as the cache accepts it. This works independently of --root, and also with --no-retain.',
 			parseRootName
 		)
 		.option(
@@ -380,90 +378,90 @@ export function registerPushCommand(
 			'expire the run root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--run-root-permanent', 'retain the run root permanently')
+		.option('--run-root-permanent', 'keep the run root permanently')
 		.option(
 			'--store <uri>',
-			'read path metadata and NAR bytes from this remote ssh-ng store (default: the store Nix itself would use)',
+			'read the store paths from this remote ssh-ng store (default: the store that Nix uses)',
 			parseStoreUri
 		)
 		.option(
 			'--receipt-file <path>',
-			'write a build receipt (JSON) for the published paths to this file, attributing each subject to the store given by --store'
+			'write a build receipt (JSON) for the published paths to this file, recording --store as the build store. Requires --store, and one each of --already-held or --no-already-held and --claimable or --no-claimable.'
 		)
 		.option(
 			'--already-held <path>',
-			'a store path the build store held before this run built anything; a receipt claims none of them',
+			'a store path that was already in the build store before the build started (repeatable). The receipt does not record it as built by this run.',
 			collect
 		)
 		.option(
 			'--no-already-held',
-			'state that the build store held nothing before this run built anything'
+			'declare that there are no --already-held paths'
 		)
 		.option(
 			'--claimable <path>',
-			'a store path whose realisation this build invocation observed; only these paths may become receipt subjects',
+			'a store path that this build is known to have realised (repeatable). The receipt can record only these paths as built by this run.',
 			collect
 		)
 		.option(
 			'--no-claimable',
-			'state that this invocation observed no realisation evidence, so the receipt has no subjects'
+			'declare that there are no --claimable paths, so the receipt records none of the paths as built by this run'
 		)
 		.option(
 			'--copied-from-file <path>',
-			'a JSON file, written by the build, recording the stores each path was copied from'
+			'JSON file, written by the build, that lists the stores each path was copied from'
 		)
 		.option(
 			'--attestation <bundle>',
-			'path to a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
+			'a Sigstore bundle file to attach to the pushed paths that it covers (repeatable)',
 			collect,
 			[]
 		)
-		.option('--no-attest', 'skip attestation attachment for this push')
+		.option('--no-attest', 'do not attach any attestations')
 		.option(
 			'--no-wait',
-			'return once uploaded and committed, without waiting for deferred blobs to become servable (retention is still recorded)'
+			'return once the cache has accepted the paths and set the roots or pins, without waiting for it to verify the uploaded NARs'
 		)
 		.option(
 			'--wait-timeout <duration>',
-			'how long to wait for commit capacity, and separately how long to wait for deferred blobs to become servable (e.g. 10m, 1h); default 10m',
+			'time limit for each of the two waits: for the cache to accept the push, and then for it to verify the uploaded NARs (e.g. 10m, 1h; default 10m)',
 			parseWaitTimeout
 		)
 		.option(
 			'--upload-concurrency <n>',
-			'how many blob uploads to run at once (default 6)',
+			'number of NAR uploads to run in parallel (default 6)',
 			parseUploadConcurrency
 		)
 		.option(
 			'--dry-run',
-			'show what would be uploaded, reused, and retained without changing anything'
+			'show what would be uploaded, reused and retained, without changing anything'
 		)
 		.addHelpText(
 			'after',
 			[
 				'',
 				'Examples:',
-				'  # Push a build result to a tenant, pinning it under a named root',
-				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
-				'    --root github:acme/infra/main',
+				'  # Push a build result to a tenant and keep it under a root',
+				'  cupboard push https://cupboard.example.workers.dev/t/acme ./result \\',
+				'    --root github:acme/app/main',
 				'',
 				'  # Preview a push without uploading anything',
-				'  cupboard push https://cache.example.workers.dev/t/acme ./result --dry-run',
+				'  cupboard push https://cupboard.example.workers.dev/t/acme ./result --dry-run',
 				'',
 				'  # Push from CI with a GitHub Actions OIDC token',
-				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
-				'    --root github:acme/infra/main',
+				'  cupboard push --github-oidc https://cupboard.example.workers.dev/t/acme ./result \\',
+				'    --root github:acme/app/main',
 				'',
-				'  # Push a shared intermediate without pinning it',
-				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
+				'  # Push a shared intermediate without a root or pin',
+				'  cupboard push --github-oidc https://cupboard.example.workers.dev/t/acme ./result \\',
 				'    --no-retain',
 				'',
-				'  # Publish the complete realised closure of the result',
-				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
-				'    --root github:acme/infra/main --closure',
+				'  # Publish the whole closure of the result',
+				'  cupboard push https://cupboard.example.workers.dev/t/acme ./result \\',
+				'    --root github:acme/app/main --closure',
 				'',
-				'  # Publish build-time intermediates alongside the target, unrooted',
-				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
-				'    --root github:acme/infra/main --intermediate-paths-file intermediates.txt'
+				'  # Publish build-time intermediates as well, without adding them to the root',
+				'  cupboard push https://cupboard.example.workers.dev/t/acme ./result \\',
+				'    --root github:acme/app/main --intermediate-paths-file intermediates.txt'
 			].join('\n')
 		)
 		.action(async (url: URL, paths: string[], options: PushOptions) => {

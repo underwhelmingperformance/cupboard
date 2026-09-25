@@ -46,8 +46,9 @@ export const tenantReadCredentialSchema = z.strictObject({
 });
 export type TenantReadCredential = z.output<typeof tenantReadCredentialSchema>;
 
-// A tenant's storage quota in bytes. It covers the tenant's unique compressed
-// NAR objects and unique attestation CAS objects, each counted once.
+// A tenant's storage quota, in bytes. It counts the tenant's compressed NAR
+// objects and attestation CAS objects. Each object is counted once, however
+// many paths share it.
 export const tenantQuotaBytesSchema = countSchema;
 
 // The caller selects the initial access of the default cache and supplies the
@@ -60,7 +61,7 @@ export const tenantCreateBodySchema = z.strictObject({
 	ownerSubject: z.string().min(1).brand('OidcSubject'),
 	ownerAudience: z.string().min(1).brand('OidcAudience'),
 	read: tenantReadCredentialSchema.optional(),
-	// Omission means unlimited storage.
+	// Leave it out for unlimited storage.
 	quotaBytes: tenantQuotaBytesSchema.optional()
 });
 export type TenantCreateBody = z.output<typeof tenantCreateBodySchema>;
@@ -93,7 +94,7 @@ export type TenantMutateResponseInput = z.input<
 	typeof tenantMutateResponseSchema
 >;
 
-// A tenant's storage limit: a number of bytes, or none.
+// A tenant's storage limit. It's either a number of bytes or unlimited.
 export const tenantQuotaSchema = z.discriminatedUnion('kind', [
 	z.strictObject({
 		kind: z.literal('limited'),
@@ -103,16 +104,16 @@ export const tenantQuotaSchema = z.discriminatedUnion('kind', [
 ]);
 export type TenantQuota = z.output<typeof tenantQuotaSchema>;
 
-// An operator sets or removes a tenant's quota. A limit cannot be below what
-// the tenant already stores.
+// What an operator sends to set or remove a tenant's quota. A limit can't be
+// less than what the tenant already stores.
 export const tenantSetQuotaBodySchema = z.strictObject({
 	id: tenantIdSchema,
 	quota: tenantQuotaSchema
 });
 export type TenantSetQuotaBody = z.output<typeof tenantSetQuotaBodySchema>;
 
-// The tenant's quota after the change, and the charged bytes it counts
-// against.
+// The tenant's quota after the change, and how many bytes the tenant is
+// currently charged for.
 export const tenantQuotaResponseSchema = z.strictObject({
 	id: tenantIdSchema,
 	quota: tenantQuotaSchema,

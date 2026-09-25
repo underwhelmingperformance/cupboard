@@ -107,8 +107,8 @@ export async function writeCachedSession(
 }
 
 /**
- * Deletes the cached session for a target, under the same lock that guards its
- * renewal, so a concurrent refresh cannot write it back.
+ * Deletes the saved session for a target. It takes the same lock as renewal,
+ * so a refresh running at the same time can't write the session back.
  */
 export async function removeCachedSession(
 	target: URL,
@@ -119,8 +119,8 @@ export async function removeCachedSession(
 	return withSecretFileLock(file, () => removeSecretFile(file), signal);
 }
 
-// A session file is named by the SHA-256 of its target; anything else in the
-// directory (lock directories, temporary files) is not a session.
+// A session file's name is the SHA-256 of its target. Anything else in the
+// directory, such as a lock directory or a temporary file, isn't a session.
 const sessionFileNamePattern = /^[0-9a-f]{64}$/u;
 
 async function sessionFiles(): Promise<readonly string[]> {
@@ -133,8 +133,8 @@ async function sessionFiles(): Promise<readonly string[]> {
 }
 
 /**
- * Every cached session that parses, whatever its target. The target is not
- * recoverable from the file name, so callers read it from the access token.
+ * Reads every saved session that parses, for any target. The file name is a
+ * hash, so callers get the target from the access token instead.
  */
 export async function listCachedSessions(): Promise<readonly CachedSession[]> {
 	const sessions: CachedSession[] = [];
@@ -153,8 +153,8 @@ export async function listCachedSessions(): Promise<readonly CachedSession[]> {
 }
 
 /**
- * Deletes every cached session, each under its own lock. Returns how many were
- * removed.
+ * Deletes every saved session, taking each one's lock in turn. Returns how many
+ * it removed.
  */
 export async function removeAllCachedSessions(
 	signal?: AbortSignal

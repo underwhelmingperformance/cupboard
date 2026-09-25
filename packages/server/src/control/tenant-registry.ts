@@ -431,9 +431,10 @@ export async function listTenants(
 	return rows.map((row) => toSummary(row));
 }
 
-// The statuses each operator move may start from. Suspension applies only to a
-// live tenant, so it cannot pull an offboarding tenant out of the drain, which
-// selects `offboarding` rows. Offboarding is idempotent, and nothing leaves
+// The statuses a tenant can be in before each operator change. Only a live
+// tenant can be suspended, because suspending a tenant that is being removed
+// would take it out of the drain. The drain only picks `offboarding` rows.
+// Offboarding a tenant twice is harmless, and nothing moves a tenant out of
 // `offboarded`.
 const statusMoveSources = {
 	suspended: ['active', 'suspended'],
@@ -451,8 +452,8 @@ export async function setTenantStatus(
 	id: TenantId,
 	status: 'suspended' | 'offboarding'
 ): Promise<TenantSummary> {
-	// The conditional update moves only a tenant in one of the permitted source
-	// statuses. If it matches no row, the following read says why.
+	// The update only changes a tenant that is in one of the allowed starting
+	// statuses. If it matches no row, the read after it finds out why.
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set({ status })
@@ -486,8 +487,9 @@ export async function setTenantStatus(
 	throw new TenantRetiredError(id);
 }
 
-// Only a suspended tenant can return to active. An active tenant is a conflict,
-// a tenant being removed stays in removal, and an offboarded tenant is terminal.
+// Only a suspended tenant can go back to active. An active tenant is a
+// conflict. A tenant that is being removed stays that way, and an offboarded
+// tenant can't change status at all.
 export async function resumeTenant(
 	database: Database,
 	id: TenantId
@@ -523,10 +525,13 @@ export async function resumeTenant(
 }
 
 /**
- * Sets or removes a live tenant's storage quota and returns it with the charged
- * bytes it counts against. The usage row holds the quota that every charge's D1
- * batch checks, so the next charge sees the new value. A limit below the charged
- * bytes is refused, because the row's CHECK forbids usage above the quota.
+ * Sets or removes a live tenant's storage quota. Returns the new quota and how
+ * many bytes the tenant is currently charged for.
+ *
+ * The quota is stored in the usage row, and every charge checks that row in its
+ * D1 batch, so the next charge sees the new value. A limit smaller than the
+ * charged bytes is refused, because the row's CHECK constraint doesn't allow
+ * usage above the quota.
  */
 export async function setTenantQuota(
 	database: Database,
@@ -540,12 +545,12 @@ export async function setTenantQuota(
 		.from(d1Schema.tenant)
 		.where(liveTenantFilter(id));
 	const isLimited = quota.kind === 'limited';
-	// Only a limit has to hold the charged bytes.
+	// Only a limit needs to be at least the charged bytes.
 	const fitsQuota = isLimited ? lte(usedBytes, quota.bytes) : undefined;
 	const usageOfTenant = eq(d1Schema.tenantUsage.tenant, id);
-	// The UPDATE checks the tenant's status and its usage itself, and the read
-	// that follows runs in the same D1 transaction, so it explains a refusal
-	// from the state the UPDATE saw.
+	// The UPDATE checks the tenant's status and usage itself. The read after it
+	// runs in the same D1 transaction, so if the UPDATE is refused, the read
+	// sees the same state and can explain why.
 	const update = database
 		.update(d1Schema.tenantUsage)
 		.set({
@@ -589,8 +594,8 @@ export async function setTenantQuota(
 		throw new TenantUsageMissingError(id);
 	}
 
-	// Every other row the UPDATE skipped is a live tenant whose usage is above
-	// the requested limit; clearing the quota has no such condition.
+	// Any other row the UPDATE skipped is a live tenant that already uses more
+	// than the requested limit. Clearing the quota can't fail this way.
 	throw new TenantQuotaBelowUsageError(id, tenant.usedBytes);
 }
 

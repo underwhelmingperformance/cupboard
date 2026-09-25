@@ -137,8 +137,8 @@ export class AttestationPredicateTypeMismatchError extends Error {
 }
 
 /**
- * The `--trusted-root` file is neither one JSON document nor JSON Lines of
- * them, as `gh attestation trusted-root` prints.
+ * The `--trusted-root` file is neither a single JSON document nor JSON Lines,
+ * the one-document-per-line format that `gh attestation trusted-root` prints.
  */
 export class TrustedRootFormatError extends Error {
 	constructor(
@@ -146,21 +146,23 @@ export class TrustedRootFormatError extends Error {
 		public readonly detail: string
 	) {
 		super(
-			`Trusted root ${file} is neither a JSON document nor JSON Lines: ${detail}`
+			`Couldn't read the trusted roots in ${file} (${detail}). The file ` +
+				'should contain one JSON trusted root, or one per line as ' +
+				'`gh attestation trusted-root` prints.'
 		);
 		this.name = 'TrustedRootFormatError';
 	}
 }
 
 /**
- * A bundle verified against none of several trusted roots. Each root's own
- * failure is kept, in file order, and the first is the cause.
+ * None of several trusted roots verified a bundle. Each root's failure is kept,
+ * in the order the roots appear in the file. The first failure is the cause.
  */
 export class TrustedRootsRejectedError extends Error {
 	constructor(public readonly failures: readonly unknown[]) {
 		super(
-			`The bundle did not verify against any of the ${String(failures.length)} ` +
-				`trusted roots: ${failures.map((failure) => failureMessage(failure)).join('; ')}`,
+			`None of the ${String(failures.length)} trusted roots verified the bundle. ` +
+				`Their errors, in order: ${failures.map((failure) => failureMessage(failure)).join('; ')}`,
 			{ cause: failures[0] }
 		);
 		this.name = 'TrustedRootsRejectedError';
@@ -248,8 +250,8 @@ export function verificationPolicy(
 /**
  * Verify a Sigstore DSSE bundle against the trusted root and an identity
  * policy, returning the signer, the in-toto predicate type and subject digests,
- * and the raw predicate. A `trustedRoot` file holding several roots, as JSON
- * Lines, verifies the bundle if any one of them does.
+ * and the raw predicate. If the `trustedRoot` file contains several roots, one
+ * per line, the bundle passes if any one of them verifies it.
  */
 export async function verifyBundle(
 	bytes: Uint8Array,
@@ -388,9 +390,10 @@ function verifierOptions(options: BundleVerifyOptions): VerifierOptions {
 }
 
 /**
- * Sigstore's verifier takes one trusted root, so each root is tried in turn and
- * the first that verifies the bundle wins. One root rethrows its own failure
- * unchanged; several report every root's failure.
+ * Sigstore's verifier only takes one trusted root, so try each root in turn
+ * and stop at the first that verifies the bundle. With a single root, its
+ * failure is rethrown unchanged. With several, the error lists every root's
+ * failure.
  */
 function verifyAgainstAnyRoot(
 	roots: readonly TrustedRoot[],
@@ -432,8 +435,9 @@ async function trustedRoots(
 }
 
 /**
- * Reads a trusted-root file as one JSON document, which may span lines, or
- * else as JSON Lines with one root per non-blank line, the form
+ * Reads a trusted-root file. It first tries the whole file as one JSON
+ * document, which may span several lines. If that fails, it reads the file as
+ * JSON Lines, with one root on each non-blank line. That's the format
  * `gh attestation trusted-root` prints.
  */
 function parseTrustedRoots(file: string, text: string): readonly unknown[] {
