@@ -45,32 +45,35 @@ export function registerPlanReprobeCommand(
 	plan
 		.command('reprobe')
 		.description(
-			'Confirm which planned targets still require realisation immediately before dispatch.'
+			'Internal step of the flake publish workflow, not for direct use. Just before the build starts, check which planned targets still need to be built.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[cache]', 'named cache when the URL does not select one')
+		.argument('[cache]', 'cache name, if the URL is a tenant URL')
 		.requiredOption(
 			'--targets-file <path>',
-			"JSON file describing the build set's targets"
+			'JSON file that describes the targets to be built'
 		)
 		.option(
 			'--reuse-view <name>',
-			'named tenant reuse view to probe for substitutable paths'
+			'reuse view to query for store paths that other caches already have'
 		)
 		.option(
 			'--read-user <user>',
-			'username for private cache reads',
+			'user name of the read credential for a private cache',
 			parseReadUser
 		)
-		.option('--read-password <password>', 'password for private cache reads')
+		.option(
+			'--read-password <password>',
+			'password of the read credential for a private cache'
+		)
 		.option(
 			'--view-read-user <user>',
-			'username for private reuse-view reads',
+			'user name of the read credential for a private reuse view',
 			parseReadUser
 		)
 		.option(
 			'--view-read-password <password>',
-			'password for private reuse-view reads'
+			'password of the read credential for a private reuse view'
 		)
 		.action(
 			async (

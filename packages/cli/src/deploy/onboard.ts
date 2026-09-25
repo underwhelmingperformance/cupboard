@@ -198,12 +198,13 @@ export interface OnboardOptions {
 	*/
 	readonly authority: DeployAuthority;
 	/**
-	 * The slug of the first cache. When this is absent, the operator is asked,
-	 * or, without a terminal, the first cache is skipped.
+	 * The slug of the first tenant. When this is absent, the operator is asked,
+	 * or, without a terminal, the first tenant is skipped.
 	 */
 	readonly cacheSlug?: string;
 	/**
-	 * Read access for the first cache. Prompt for access when this is absent.
+	 * Read access for the first tenant's default cache. Prompt for access when
+	 * this is absent.
 	 */
 	readonly cacheAccess: CacheAccessMode | undefined;
 	readonly buildVersion: string;
@@ -291,9 +292,9 @@ export function slugProblemText(value: string): string | undefined {
  * deployment for the operator with the claim secret and their
  * id_token, caches the admin token for the other commands and deletes the
  * secret. An update uses the admin token that the deploy checked before it
- * changed anything. A slug is chosen for the first cache (the create call
+ * changed anything. A slug is chosen for the first tenant (the create call
  * fails with a conflict when the slug is taken, and the deploy then asks for
- * another slug), and the new cache's `/pubkey` is polled, since the first
+ * another slug), and the new tenant's `/pubkey` is polled, since the first
  * successful request creates the signing key.
  */
 export async function onboardDeployment(
@@ -424,7 +425,7 @@ export async function onboardDeployment(
 	if (existing.length > 0 && options.cacheSlug !== undefined) {
 		ui.info(
 			`--cache ${options.cacheSlug} was not applied, because the deployment ` +
-				'already has a cache.'
+				'already has a tenant.'
 		);
 	}
 
@@ -475,7 +476,7 @@ export async function onboardDeployment(
 			'confirmed'
 		);
 	} else {
-		ui.info(`The cache "${sole.id}" already exists; nothing to create.`);
+		ui.info(`The tenant "${sole.id}" already exists; nothing to create.`);
 		slug = sole.id;
 	}
 
@@ -1161,8 +1162,8 @@ export class OwnerAudienceUnknownError extends CliError {
 	constructor(public readonly owner: OwnerBinding) {
 		super(
 			`The control database records no audience for the admin ` +
-				`${principalLabel(owner)}, so the first cache cannot make the admin ` +
-				'its owner. Create the cache with `cupboard tenant create`, passing ' +
+				`${principalLabel(owner)}, so the first tenant cannot make the admin ` +
+				'its owner. Create the tenant with `cupboard tenant create`, passing ' +
 				'`--owner-issuer`, `--owner-subject` and `--owner-audience`.'
 		);
 		this.name = 'OwnerAudienceUnknownError';
@@ -1179,8 +1180,8 @@ export class FirstCacheSlugTakenError extends CliError {
 		options: { readonly cause: unknown }
 	) {
 		super(
-			`The cache slug "${slug}" from --cache is already taken, so the first ` +
-				'cache was not created. Re-run `cupboard init` with another --cache.',
+			`The tenant slug "${slug}" from --cache is already taken, so the first ` +
+				'tenant was not created. Re-run `cupboard init` with another --cache.',
 			options
 		);
 		this.name = 'FirstCacheSlugTakenError';
@@ -1201,10 +1202,11 @@ interface FirstTenantRequest {
 }
 
 /**
- * Create the first cache under the requested slug, or ask for one, and ask
- * for access if none was supplied. If another caller takes the slug first,
- * ask for another slug and reuse the chosen access and read credential.
- * Without a terminal, the prompts return `undefined`, so no cache is created.
+ * Create the first tenant under the requested slug, or ask for one, and ask
+ * for its default cache's access if none was supplied. If another caller takes
+ * the slug first, ask for another slug and reuse the chosen access and read
+ * credential. Without a terminal, the prompts return `undefined`, so no tenant
+ * is created.
  */
 async function createFirstTenant(
 	ui: DeployUi,
@@ -1222,7 +1224,7 @@ async function createFirstTenant(
 		const slug =
 			requestedSlug ??
 			(await ui.prefixedText({
-				message: 'Choose a slug for the first cache',
+				message: 'Choose a slug for the first tenant',
 				prefix: `${url}/t/`,
 				problem: slugProblemText
 			}));

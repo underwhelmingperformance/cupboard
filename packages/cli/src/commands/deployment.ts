@@ -207,7 +207,8 @@ export function registerDeploymentCommands(
 	deployment
 		.command('resume')
 		.description(
-			'Wake the pending tenants and wait for them, then report whether deployment can continue.'
+			'Wake the tenants that are still migrating, wait while they finish, and ' +
+				'report whether the deploy can finish.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {

@@ -540,9 +540,9 @@ export async function setTenantQuota(
 	const isLimited = quota.kind === 'limited';
 	const fitsQuota = isLimited ? lte(usedBytes, quota.bytes) : undefined;
 	const usageOfTenant = eq(d1Schema.tenantUsage.tenant, id);
-	// The UPDATE checks the tenant's status and its usage itself, and the read
-	// that follows runs in the same D1 transaction, so it explains a refusal
-	// from the state the UPDATE saw.
+	// The UPDATE checks the tenant's status and usage itself. The read after it
+	// runs in the same D1 transaction, so if the UPDATE is refused, the read
+	// sees the same state and can explain why.
 	const update = database
 		.update(d1Schema.tenantUsage)
 		.set({
@@ -586,8 +586,8 @@ export async function setTenantQuota(
 		throw new TenantUsageMissingError(id);
 	}
 
-	// Every other row the UPDATE skipped is a live tenant whose usage is above
-	// the requested limit; clearing the quota has no such condition.
+	// Any other row the UPDATE skipped is a live tenant that already uses more
+	// than the requested limit. Clearing the quota can't fail this way.
 	throw new TenantQuotaBelowUsageError(id, tenant.usedBytes);
 }
 

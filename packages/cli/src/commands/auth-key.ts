@@ -35,11 +35,15 @@ export function registerAuthKeyCommands(
 ): void {
 	const authKey = program
 		.command('auth-key')
-		.description('Manage the access-token signing keys and rotation.');
+		.description(
+			"Manage and rotate the keys that sign the tenant's access tokens."
+		);
 
 	authKey
 		.command('list')
-		.description('List the auth signing-key set.')
+		.description(
+			"List the tenant's access-token keys and any scheduled retirements."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -54,7 +58,7 @@ export function registerAuthKeyCommands(
 	authKey
 		.command('rotate')
 		.description(
-			'Add a new active auth key and schedule the previous one for retirement.'
+			'Add a new access-token key, and schedule the old one to retire once its tokens have expired.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -69,9 +73,11 @@ export function registerAuthKeyCommands(
 
 	authKey
 		.command('retire')
-		.description('Retire a superseded auth key once its tokens have expired.')
+		.description(
+			'Retire an old access-token key now. Tokens that it signed stop working immediately.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<kid>', 'auth key id')
+		.argument('<kid>', 'access-token key ID')
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: URL, kid: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });

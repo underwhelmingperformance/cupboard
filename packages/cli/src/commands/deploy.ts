@@ -37,7 +37,7 @@ function parseInstanceName(value: string): InstanceName {
 function parseCacheSlug(value: string): string {
 	if (!cacheNameSchema.safeParse(value).success) {
 		throw new InvalidArgumentError(
-			'Cache slug must use lowercase letters, digits, ".", "_" or "-", ' +
+			'Tenant slug must use lowercase letters, digits, ".", "_" or "-", ' +
 				'starting with a letter or digit (63 characters at most).'
 		);
 	}
@@ -53,26 +53,29 @@ export function registerDeployCommand(
 		.command('init')
 		.alias('deploy')
 		.description(
-			'Provision, deploy and initialise this cupboard on a Cloudflare ' +
-				'account, ready for nix.conf.'
+			'Deploy cupboard to a Cloudflare account, or upgrade an existing ' +
+				'deployment.'
 		)
 		.option('--domain <host>', 'custom domain to serve the cache on')
 		.option(
 			'--instance-name <name>',
-			'name used in newly generated signing keys',
+			"the first part of every signing key's name, such as cupboard in cupboard-acme-1",
 			parseInstanceName
 		)
-		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
+		.option(
+			'--account <id>',
+			'Cloudflare account ID (by default, the only account you can access, or the one you choose)'
+		)
 		.option(
 			'--cache <slug>',
-			'slug of the first cache on a new deployment (you are asked when it ' +
-				'is omitted; without a terminal, no cache is created)',
+			'slug of the first tenant on a new deployment (you are asked if you ' +
+				'leave it out; without a terminal, no tenant is created)',
 			parseCacheSlug
 		)
 		.option(
 			'--access <mode>',
-			'read access for the first cache: public or private (you are asked ' +
-				'when it is omitted)',
+			"read access for the first tenant's default cache: public or " +
+				'private (you are asked if you leave it out)',
 			parseCacheAccess
 		)
 		.option(
@@ -82,12 +85,12 @@ export function registerDeployCommand(
 		)
 		.option(
 			'--client-id <id>',
-			"registered public OAuth client id for the admin login on a first deploy, and for the admin login on an update when the database does not record the admin's client (PKCE, no client secret)",
+			"the public OAuth client ID to sign in as the admin with, on a first deploy, and on an update when the database does not record the admin's client (PKCE, no client secret)",
 			cloudflareOauthClientId
 		)
 		.option(
 			'--headless',
-			'use the device flow instead of a browser for the admin login, on a first deploy or when an update logs you in as the admin; the Cloudflare login for the account can still open a browser'
+			'sign in as the admin with a code in a browser on another device, instead of opening one here, on a first deploy or when an update signs you in as the admin. Signing in to Cloudflare for the account can still open a browser.'
 		)
 		.option(
 			'--github-oidc',
@@ -101,15 +104,21 @@ export function registerDeployCommand(
 		)
 		.option(
 			'--no-wrangler',
-			"do not use a logged-in wrangler's stored token; log in directly"
+			"sign in to Cloudflare in the browser instead of using wrangler's stored token"
 		)
 		.option(
 			'--workers-plan <plan>',
-			'configure the internal-service subrequest allowance for this Workers plan and skip subscription lookup: free or paid',
+			"your account's Workers plan, free or paid, which sets cupboard's limit on calls to other Cloudflare services (by default, looked up from the account)",
 			parseWorkersPlan
 		)
-		.option('--dry-run', 'show the plan without making any changes')
-		.option('--from-tree', 'bundle the working tree even from a built binary')
+		.option(
+			'--dry-run',
+			'show what would be deployed without changing anything'
+		)
+		.option(
+			'--from-tree',
+			'when the released binary runs inside a cupboard checkout, deploy Workers built from the working tree instead of the embedded ones'
+		)
 		.option('-y, --yes', 'skip the confirmation prompt')
 		.action(async (cliOptions: DeployCliOptions) => {
 			// Loaded on demand so the deploy stack (the Cloudflare SDK, esbuild) stays

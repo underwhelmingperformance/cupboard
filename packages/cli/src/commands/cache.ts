@@ -147,13 +147,11 @@ export function registerCacheCommands(
 ): void {
 	const cache = program
 		.command('cache')
-		.description(
-			'Manage caches: list, create, inspect, update properties and remove.'
-		);
+		.description("Create, inspect, configure and remove a tenant's caches.");
 
 	cache
 		.command('list')
-		.description('List caches and their properties.')
+		.description("List the tenant's caches and their settings.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const { tenantUrl } = cacheCommandTarget(url, undefined);
@@ -167,7 +165,7 @@ export function registerCacheCommands(
 		.command('create')
 		.description('Create a named cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[name]', 'cache name when the URL does not select one')
+		.argument('[name]', 'cache name, if the URL is a tenant URL')
 		.requiredOption(
 			'--access <mode>',
 			'read access: public or private',
@@ -175,26 +173,22 @@ export function registerCacheCommands(
 		)
 		.option(
 			'--priority <n>',
-			'Nix substituter priority (lower is preferred)',
+			'substituter priority to advertise to Nix; Nix tries lower numbers first (default: 40)',
 			parsePriority
 		)
 		.option(
 			'--root-ttl <duration>',
-			'default TTL for roots (e.g. 14d, 12h)',
+			"default TTL for the cache's roots (e.g. 14d, 12h)",
 			parseTtl
 		)
-		.option(
-			'--grace <duration>',
-			'retention grace period (e.g. 24h, 0s)',
-			parseGrace
-		)
+		.option('--grace <duration>', 'grace period (e.g. 24h, 0s)', parseGrace)
 		.option(
 			'--if-absent',
-			'report the existing cache instead of failing when it is already there'
+			'if the cache already exists, show it and succeed instead of failing'
 		)
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -250,16 +244,22 @@ export function registerCacheCommands(
 
 	cache
 		.command('set-root-ttl')
-		.description("Set a cache's default root TTL or a root-prefix override.")
+		.description(
+			"Set a cache's default root TTL, or the TTL for roots whose names start with a prefix."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.option(
 			'--root-prefix <prefix>',
-			'root-name prefix to override',
+			'set the TTL only for roots whose names start with this prefix',
 			parseRootName
 		)
-		.option('--root-ttl <duration>', 'root TTL (e.g. 14d, 12h)', parseTtl)
-		.option('--permanent', 'retain roots permanently')
+		.option(
+			'--root-ttl <duration>',
+			'TTL for the roots (e.g. 14d, 12h)',
+			parseTtl
+		)
+		.option('--permanent', 'keep the roots permanently')
 		.action(
 			async (
 				url: URL,
@@ -284,12 +284,14 @@ export function registerCacheCommands(
 
 	cache
 		.command('clear-root-ttl')
-		.description("Clear a cache's default root TTL or a root-prefix override.")
+		.description(
+			"Clear a cache's default root TTL, or the TTL for a root-name prefix."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.option(
 			'--root-prefix <prefix>',
-			'root-name prefix override to clear',
+			'clear the TTL for this root-name prefix only',
 			parseRootName
 		)
 		.action(
@@ -313,12 +315,14 @@ export function registerCacheCommands(
 
 	cache
 		.command('set-grace')
-		.description("Set a cache's retention grace period.")
+		.description(
+			"Set a cache's grace period, which keeps store paths for a time even when no root keeps them."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.requiredOption(
 			'--grace <duration>',
-			'retention grace period (e.g. 24h, 0s)',
+			'grace period (e.g. 24h, 0s)',
 			parseGrace
 		)
 		.action(
@@ -342,7 +346,7 @@ export function registerCacheCommands(
 
 	cache
 		.command('clear-grace')
-		.description("Clear a cache's retention grace period.")
+		.description("Remove a cache's grace period.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.action(async (url: URL, name: string | undefined) => {
@@ -355,7 +359,7 @@ export function registerCacheCommands(
 
 	cache
 		.command('set-access')
-		.description("Set a cache's read access.")
+		.description('Make a cache public or private.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.requiredOption(
@@ -384,12 +388,12 @@ export function registerCacheCommands(
 
 	cache
 		.command('set-priority')
-		.description("Set a cache's Nix substituter priority.")
+		.description('Set the substituter priority that a cache advertises to Nix.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.requiredOption(
 			'--priority <n>',
-			'Nix substituter priority (lower is preferred)',
+			'substituter priority to advertise to Nix; Nix tries lower numbers first',
 			parsePriority
 		)
 		.action(
@@ -413,12 +417,14 @@ export function registerCacheCommands(
 
 	cache
 		.command('set-retirement')
-		.description('Opt a named cache in or out of retirement when empty.')
+		.description(
+			'Choose whether a named cache removes itself once it is empty.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[name]', 'cache name when the URL does not select one')
+		.argument('[name]', 'cache name, if the URL is a tenant URL')
 		.requiredOption(
 			'--when-empty <choice>',
-			'true to retire when empty, false to keep the cache',
+			'true to remove the cache once it is empty, false to keep it',
 			isRetirementEnabled
 		)
 		.action(
@@ -449,12 +455,12 @@ export function registerCacheCommands(
 		.command('remove')
 		.description('Remove a named cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[name]', 'cache name when the URL does not select one')
-		.option('--force', 'remove even when the cache still holds store paths')
+		.argument('[name]', 'cache name, if the URL is a tenant URL')
+		.option('--force', 'remove the cache even if it still has store paths')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -506,7 +512,7 @@ export function registerCacheCommands(
 
 	cache
 		.command('inspect')
-		.description("Show one cache's properties and store-path count.")
+		.description("Show one cache's settings and how many store paths it has.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.action(async (url: URL, name: string | undefined) => {

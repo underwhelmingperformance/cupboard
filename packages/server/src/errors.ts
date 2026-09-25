@@ -543,7 +543,7 @@ export class TenantQuotaBelowUsageError extends ServerHttpError {
 		public readonly usedBytes: number
 	) {
 		super(
-			`Tenant '${id}' already stores ${String(usedBytes)} bytes, more than the requested quota`
+			`Tenant '${id}' already stores ${String(usedBytes)} bytes, which is more than the requested quota`
 		);
 		this.name = 'TenantQuotaBelowUsageError';
 	}
