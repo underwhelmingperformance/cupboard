@@ -29,6 +29,7 @@ import {
 	githubPrAddBody,
 	githubTagAddBody,
 	type OidcTrustClient,
+	ruleOptionsGiven,
 	runOidcTrustAdd,
 	runOidcTrustList,
 	runOidcTrustRemove,
@@ -234,6 +235,13 @@ const controlRule: OidcTrustAddBodyInput = {
 	permittedGrants: [{ type: 'cupboard_wildcard' }]
 };
 
+const tenantRule: OidcTrustAddBodyInput = {
+	issuer: 'https://token.actions.githubusercontent.com',
+	audience: tenantUrl,
+	claims: { repository_owner_id: '5678' },
+	permittedGrants: [ciGrant]
+};
+
 /**
  * Runs `add --from-file` through the command line with the rule written to a
  * temporary file. Returns 'added', or the error that the command threw.
@@ -276,18 +284,37 @@ describe('oidc-trust add --from-file', () => {
 		);
 	});
 
-	it('sends a control-plane rule from the file', async () => {
-		const outcome = await addFromFile(
-			'control-oidc-trust',
-			'https://cupboard.example.workers.dev',
-			controlRule
-		);
+	const fileCases: readonly {
+		readonly name: string;
+		readonly command: 'oidc-trust' | 'control-oidc-trust';
+		readonly url: string;
+		readonly rule: OidcTrustAddBodyInput;
+	}[] = [
+		{
+			name: 'a control-plane rule',
+			command: 'control-oidc-trust',
+			url: 'https://cupboard.example.workers.dev',
+			rule: controlRule
+		},
+		{
+			name: 'a tenant rule',
+			command: 'oidc-trust',
+			url: tenantUrl,
+			rule: tenantRule
+		}
+	];
 
-		expect({ outcome, calls: mocks.add.mock.calls }).toStrictEqual({
-			outcome: 'added',
-			calls: [[controlRule]]
-		});
-	});
+	it.each(fileCases)(
+		'sends $name from the file',
+		async ({ command, url, rule }) => {
+			const outcome = await addFromFile(command, url, rule);
+
+			expect({ outcome, calls: mocks.add.mock.calls }).toStrictEqual({
+				outcome: 'added',
+				calls: [[rule]]
+			});
+		}
+	);
 
 	it('refuses a control-plane rule without an exact sub claim before sending it', async () => {
 		const outcome = await addFromFile(
@@ -373,6 +400,24 @@ describe('runOidcTrustRemove', () => {
 			results: [],
 			cancellations: ['The trust rule was left in place.']
 		});
+	});
+});
+
+describe('ruleOptionsGiven', () => {
+	const none = { claim: [], allow: [], capture: [] };
+
+	it.each([
+		{ options: none, expected: [] },
+		{
+			options: { ...none, issuer: 'https://idp.example.com', allow: ['push'] },
+			expected: ['--issuer', '--allow']
+		},
+		{
+			options: { ...none, claim: ['sub=me'], templateSource: 'github-pr' },
+			expected: ['--claim', '--template-source']
+		}
+	])('lists $expected', ({ options, expected }) => {
+		expect(ruleOptionsGiven(options)).toStrictEqual(expected);
 	});
 });
 
