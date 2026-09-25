@@ -111,6 +111,11 @@ export type PushStore = Pick<
 
 export interface PushDependencies {
 	readonly nix?: PushStore;
+	/**
+	 * Opens the system store when `nix` is absent and the publication has local
+	 * entries. Defaults to `Nix.open`.
+	 */
+	readonly openStore?: () => PushStore;
 	readonly client: PushClient;
 	/**
 	 * Include the complete realised closure of each publication entry. By
@@ -345,11 +350,12 @@ export async function runPush(
 		dependencies.retention ?? { kind: 'inherit' },
 		dependencies.retain ?? true
 	);
+	const openStore = dependencies.openStore ?? (() => Nix.open());
 	// A reference-only publication reads no local metadata and needs no store
 	// on the system, so the store client only opens once a local entry needs it.
 	const nix =
 		dependencies.nix ??
-		(publication.localEntries.length > 0 ? Nix.open() : undefined);
+		(publication.localEntries.length > 0 ? openStore() : undefined);
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
 	// NAR metadata must describe the bytes supplied by the selected store. A
