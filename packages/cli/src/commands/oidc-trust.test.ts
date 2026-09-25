@@ -24,6 +24,7 @@ import {
 	githubPrAddBody,
 	githubTagAddBody,
 	type OidcTrustClient,
+	ruleOptionsGiven,
 	runOidcTrustAdd,
 	runOidcTrustList,
 	runOidcTrustRemove,
@@ -293,6 +294,24 @@ describe('runOidcTrustRemove', () => {
 			results: [],
 			cancellations: ['The trust rule was left in place.']
 		});
+	});
+});
+
+describe('ruleOptionsGiven', () => {
+	const none = { claim: [], allow: [], capture: [] };
+
+	it.each([
+		{ options: none, expected: [] },
+		{
+			options: { ...none, issuer: 'https://idp.example.com', allow: ['push'] },
+			expected: ['--issuer', '--allow']
+		},
+		{
+			options: { ...none, claim: ['sub=me'], templateSource: 'github-pr' },
+			expected: ['--claim', '--template-source']
+		}
+	])('lists $expected', ({ options, expected }) => {
+		expect(ruleOptionsGiven(options)).toStrictEqual(expected);
 	});
 });
 

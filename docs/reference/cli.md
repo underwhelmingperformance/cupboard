@@ -1820,8 +1820,10 @@ Arguments:
                                https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --issuer <issuer>            OIDC issuer URL
-  --audience <audience>        expected token audience
+  --issuer <issuer>            OIDC issuer URL (required unless you use
+                               --from-file)
+  --audience <audience>        expected token audience (required unless you use
+                               --from-file)
   --claim <key=value>          a claim the token must match exactly (repeatable)
                                (default: [])
   --job-workflow-ref <ref>     pin the job_workflow_ref claim: the workflow file
@@ -1840,8 +1842,9 @@ Options:
   --template-source <name>     a built-in capture source: github-pr (binds
                                {repository_id} and {pr}) or github-tag (binds
                                {tag}) from token claims
-  --from-file <path>           read the rule body (permitted grants and claims)
-                               from a JSON file
+  --from-file <path>           read the whole rule, including its issuer and
+                               audience, from a JSON file. Can't be combined
+                               with the other rule options.
   -h, --help                   display help for command
 
 Example:

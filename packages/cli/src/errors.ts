@@ -176,6 +176,24 @@ export class LocalStepUnreachedError extends CliError {
 	}
 }
 
+export class TrustRuleFileConflictError extends CliUsageError {
+	constructor(public readonly options: readonly string[]) {
+		super(
+			`--from-file contains the whole rule, so it can't be combined with ${options.join(', ')}.`
+		);
+		this.name = 'TrustRuleFileConflictError';
+	}
+}
+
+export class TrustRuleOptionsRequiredError extends CliUsageError {
+	constructor(public readonly options: readonly string[]) {
+		super(
+			`A trust rule needs ${options.join(' and ')}. Pass them, or pass the whole rule with --from-file.`
+		);
+		this.name = 'TrustRuleOptionsRequiredError';
+	}
+}
+
 export class InvalidCacheNameError extends CliUsageError {
 	constructor(public readonly cache: string) {
 		super(`Invalid cache name: ${cache}`);
