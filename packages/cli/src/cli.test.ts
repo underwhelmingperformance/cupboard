@@ -25,6 +25,8 @@ import {
 	PushIncompleteError,
 	RootRetentionOptionError,
 	transientExitCode,
+	TrustRuleFileConflictError,
+	TrustRuleOptionsRequiredError,
 	UploadWaitTimeoutError
 } from './errors.ts';
 import { RootTargetLimitError } from './push/push.ts';
@@ -552,6 +554,54 @@ describe('command help', () => {
 				'https://cupboard.example.workers.dev'
 			])
 		).rejects.toMatchObject({ code: 'commander.missingMandatoryOptionValue' });
+	});
+
+	it.each([
+		{
+			name: 'rule options alongside --from-file',
+			args: [
+				'--from-file',
+				'rule.json',
+				'--issuer',
+				'https://token.actions.githubusercontent.com',
+				'--allow',
+				'push'
+			],
+			expected: {
+				name: 'TrustRuleFileConflictError',
+				options: ['--issuer', '--allow']
+			}
+		},
+		{
+			name: 'no --issuer or --audience without --from-file',
+			args: ['--allow', 'push'],
+			expected: {
+				name: 'TrustRuleOptionsRequiredError',
+				options: ['--issuer', '--audience']
+			}
+		}
+	])('refuses $name for a tenant trust rule', async ({ args, expected }) => {
+		let refusal: unknown = 'accepted';
+
+		try {
+			await buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'oidc-trust',
+				'add',
+				'https://cupboard.example.workers.dev/t/acme',
+				...args
+			]);
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect(
+			refusal instanceof TrustRuleFileConflictError ||
+				refusal instanceof TrustRuleOptionsRequiredError
+				? { name: refusal.name, options: refusal.options }
+				: refusal
+		).toStrictEqual(expected);
 	});
 
 	it('shows local and remote examples for attest verify', () => {

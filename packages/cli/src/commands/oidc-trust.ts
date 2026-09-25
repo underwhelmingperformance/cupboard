@@ -22,7 +22,11 @@ import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
-import { InvalidClaimError } from '../errors.ts';
+import {
+	InvalidClaimError,
+	TrustRuleFileConflictError,
+	TrustRuleOptionsRequiredError
+} from '../errors.ts';
 import { principalLabel } from '../principal.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
@@ -80,13 +84,50 @@ function withAttest(
 	return attest === false ? base : [...base, 'attest'];
 }
 
+/**
+ * The rule options given on the command line, as they are spelt there. A rule
+ * file replaces all of them, so none may be combined with `--from-file`.
+ */
+export function ruleOptionsGiven(options: OidcTrustAddOptions): string[] {
+	const given: [string, boolean][] = [
+		['--issuer', options.issuer !== undefined],
+		['--audience', options.audience !== undefined],
+		['--claim', options.claim.length > 0],
+		['--job-workflow-ref', options.jobWorkflowRef !== undefined],
+		['--allow', options.allow.length > 0],
+		['--cache', options.cache !== undefined],
+		['--cache-template', options.cacheTemplate !== undefined],
+		['--root', options.root !== undefined],
+		['--root-template', options.rootTemplate !== undefined],
+		['--capture', options.capture.length > 0],
+		['--template-source', options.templateSource !== undefined]
+	];
+
+	return given.filter(([, isGiven]) => isGiven).map(([option]) => option);
+}
+
 // JSON input accepts the complete rule schema, including admin, domain, and
 // control grants that have no dedicated flags.
 async function addBodyFor(
 	options: OidcTrustAddOptions
 ): Promise<OidcTrustAddBodyInput> {
 	if (options.fromFile !== undefined) {
+		const conflicts = ruleOptionsGiven(options);
+
+		if (conflicts.length > 0) {
+			throw new TrustRuleFileConflictError(conflicts);
+		}
+
 		return loadAddBody(options.fromFile, oidcTrustAddBodySchema);
+	}
+
+	const { issuer, audience } = options;
+
+	if (issuer === undefined || audience === undefined) {
+		throw new TrustRuleOptionsRequiredError([
+			...(issuer === undefined ? ['--issuer'] : []),
+			...(audience === undefined ? ['--audience'] : [])
+		]);
 	}
 
 	const substitutions = collectSubstitutions({
@@ -95,8 +136,8 @@ async function addBodyFor(
 	});
 
 	return buildAddBody({
-		issuer: options.issuer,
-		audience: options.audience,
+		issuer,
+		audience,
 		claims: claimsForAdd(options.claim, options.jobWorkflowRef),
 		permittedGrants: [
 			buildCacheGrant({
@@ -140,9 +181,9 @@ interface ControlOidcTrustAddOptions {
 	readonly fromFile: string;
 }
 
-interface OidcTrustAddOptions {
-	readonly issuer: string;
-	readonly audience: Audience;
+export interface OidcTrustAddOptions {
+	readonly issuer?: string;
+	readonly audience?: Audience;
 	readonly claim: readonly string[];
 	readonly allow: readonly string[];
 	readonly cache?: string;
@@ -608,10 +649,13 @@ function registerTenantRuleAdd(
 			'Add a trust rule by hand: the issuer and claims a token must carry, and the access to grant.'
 		)
 		.argument('<url>', plane.urlArgument, parseWorkerUrl)
-		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
-		.requiredOption(
+		.option(
+			'--issuer <issuer>',
+			'OIDC issuer URL (required unless you use --from-file)'
+		)
+		.option(
 			'--audience <audience>',
-			'expected token audience',
+			'expected token audience (required unless you use --from-file)',
 			parseAudience
 		)
 		.option(
@@ -655,7 +699,7 @@ function registerTenantRuleAdd(
 		)
 		.option(
 			'--from-file <path>',
-			'read the rule body (permitted grants and claims) from a JSON file'
+			"read the whole rule, including its issuer and audience, from a JSON file. Can't be combined with the other rule options."
 		)
 		.addHelpText(
 			'after',
