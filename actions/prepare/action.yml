@@ -1,91 +1,90 @@
 name: Prepare a cupboard publish runner
 description:
-  Configure a runner for flake publication with private-input SSH, optional
-  disk-space reclamation, Nix installation and configuration, and optional
-  remote builders.
+  Prepares a runner for the flake publish workflow. It sets up SSH for private
+  flake inputs, can free disk space, installs and configures Nix, and can set up
+  remote builders or a remote store.
 inputs:
   ssh-key:
     description:
-      SSH key for private flake inputs. When empty, the isolated Git SSH policy
-      still disables ambient identities.
+      SSH private key for fetching private flake inputs. Even when it is empty,
+      Git's SSH configuration does not use the runner's own keys or SSH agent.
     required: false
   input-known-hosts:
     description:
-      known_hosts lines for private flake input hosts. Required when ssh-key is
-      supplied.
+      known_hosts lines for the hosts that serve private flake inputs. Required
+      when ssh-key is set.
     required: false
   nix-config:
     description:
-      Flake installable that evaluates to nix.conf text. The action writes it
-      after its own settings, so these values override them. Leave empty to
-      write no settings of your own.
+      Flake installable that evaluates to nix.conf text. The action writes this
+      text after its own settings, so these values override them. Leave empty to
+      add no settings.
     required: false
   maximise-space:
     description:
-      When true, reclaim disk space before installing Nix by removing Xcode on
-      macOS or running nothing-but-nix on Linux.
+      When true, free disk space before installing Nix. On macOS the action
+      removes Xcode, and on Linux it runs nothing-but-nix.
     required: false
     default: 'false'
   remote:
     description:
-      When true, apply the builders, builder-ssh-key, builder-ssh-config and
-      builder-known-hosts inputs to this job. A true value with no builders is
-      refused, so a job that expects remote builders fails instead of building
-      locally, and builder credentials are refused when this input is false.
+      When true, apply builders, builder-ssh-key, builder-ssh-config and
+      builder-known-hosts to this job. The action refuses true without builders,
+      so a job that expects remote builders fails instead of building locally.
+      It also refuses builder credentials when this input is false.
     required: false
     default: 'false'
   store:
     description:
-      Direct ssh-ng store for this job. It is mutually exclusive with remote
-      builder mode. Leave it empty to use the runner's own store. Supply the
-      private key through store-ssh-key; the URI must not set the ssh-key
-      parameter.
+      ssh-ng:// URI of a remote store for this job. Cannot be combined with
+      remote. Leave empty to use the runner's own store. Supply the private key
+      as store-ssh-key, not as an ssh-key parameter in the URI.
     required: false
   builders:
     description:
-      One-line nix.conf builders specification. Separate multiple entries with
-      semicolons. Leave it empty to skip remote builders. Set the machine
-      SSH-key column to -, and supply the private key through builder-ssh-key
-      instead of an ssh-key URI parameter.
+      Nix builders specification on one line, as in nix.conf. Separate several
+      builders with semicolons. Leave empty for no remote builders. Put - in the
+      SSH key column, and supply the private key as builder-ssh-key instead of
+      an ssh-key parameter in the URI.
     required: false
   builder-ssh-key:
-    description: SSH private key authenticating to the remote builders.
+    description: SSH private key for the remote builders.
     required: false
   builder-ssh-config:
     description:
-      ssh_config text appended after the action's mandatory policy for remote
-      builders. A strict allowlist permits Host blocks with endpoint, transport
-      tuning, algorithm, liveness and SetEnv directives. Commands, proxies,
-      forwarding, identity sources, verbose logging, Include and Match are
-      rejected.
+      ssh_config text for the remote builders. The action adds it after its own
+      required settings. Every setting must be inside a Host block. Only
+      HostName, User, Port, connection tuning, algorithm, keep-alive and SetEnv
+      settings are accepted. Settings that run commands, use proxies, forward
+      connections, load other identities, share connections, change the log
+      level, or use Include or Match are refused.
     required: false
   builder-known-hosts:
     description:
-      known_hosts lines that pin every enabled remote builder. Required when
-      remote is true.
+      known_hosts lines for every remote builder. Required when remote is true.
     required: false
   store-ssh-key:
-    description: SSH private key authenticating to a direct ssh-ng store.
+    description: SSH private key for the remote store.
     required: false
   store-ssh-config:
     description:
-      ssh_config text appended after the action's mandatory policy for the
-      direct store. A strict allowlist permits Host blocks with endpoint,
-      transport tuning, algorithm, liveness and SetEnv directives. Commands,
-      proxies, forwarding, identity sources, verbose logging, Include and Match
-      are rejected.
+      ssh_config text for the remote store. The action adds it after its own
+      required settings. Every setting must be inside a Host block. Only
+      HostName, User, Port, connection tuning, algorithm, keep-alive and SetEnv
+      settings are accepted. Settings that run commands, use proxies, forward
+      connections, load other identities, share connections, change the log
+      level, or use Include or Match are refused.
     required: false
   store-known-hosts:
     description:
-      known_hosts lines for the direct store. Required unless the store uses the
-      default SSH port and its URI supplies base64-ssh-public-host-key.
+      known_hosts lines for the remote store. Required unless the store uses
+      port 22 and its URI includes base64-ssh-public-host-key.
     required: false
   store-ambient-identity:
     description:
-      When true, authenticate the direct store with the runner's SSH agent or
-      default identity files instead of a job-scoped store-ssh-key. This mode is
-      only for explicitly provisioned self-hosted runners and is mutually
-      exclusive with store-ssh-key.
+      When true, connect to the remote store with the runner's SSH agent or
+      default key files instead of store-ssh-key. Only use this on a self-hosted
+      runner that is set up for this job. Cannot be combined with store-ssh-key.
     required: false
     default: 'false'
 runs:
