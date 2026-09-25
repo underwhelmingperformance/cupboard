@@ -34,7 +34,7 @@ release. We publish the advisory once the release is out, with a CVE if one is
 warranted, and credit you unless you'd rather we didn't. We aim to release a fix
 within 90 days of the report; if it will take longer, we'll agree a disclosure
 date with you. A fix to the Worker reaches a deployment only when its operator
-redeploys; see [docs/deploying.md](./docs/deploying.md).
+redeploys; see [Upgrading](./docs/operator/upgrading.md).
 
 If we decide the report isn't a vulnerability, we'll explain why in the advisory
 before closing it.

@@ -15,7 +15,8 @@ const actionsDirectory = path.join(repositoryRoot, 'actions');
 const githubActionsDocumentationPath = path.join(
 	repositoryRoot,
 	'docs',
-	'github-actions.md'
+	'ci',
+	'custom-jobs.md'
 );
 
 const manifestSchema = z.object({
@@ -238,18 +239,6 @@ describe('documentation action pins', () => {
 			.toArray();
 
 		expect(checkoutUses).toStrictEqual([
-			{
-				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
-				version: 'v7.0.1'
-			},
-			{
-				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
-				version: 'v7.0.1'
-			},
-			{
-				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
-				version: 'v7.0.1'
-			},
 			{
 				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
 				version: 'v7.0.1'
