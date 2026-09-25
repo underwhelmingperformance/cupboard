@@ -13,12 +13,16 @@ import {
 	type PlanReviewWorld,
 	type PlanState,
 	R2CredentialsRejectedError,
+	type R2KeyAction,
+	r2KeyActionFor,
 	reviewPlan,
 	verifyR2Credentials
 } from './command.ts';
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
+import type { StartingPlan } from './existing-deployment.ts';
 import { cloudflareAccountIdSchema } from './identifiers.ts';
+import { renameResource } from './overrides.ts';
 import { deployerOwner, type OwnerBinding } from './owner.ts';
 import {
 	r2AccessKeyIdSchema,
@@ -442,6 +446,8 @@ describe('reviewPlan', () => {
 			readonly skipReview?: boolean;
 			readonly deployer?: OwnerBinding;
 			readonly canReplaceR2Credentials?: boolean;
+			readonly startingPlan?: StartingPlan;
+			readonly requestedDomain?: string;
 		}
 	): { world: PlanReviewWorld; rendered: PlanState[] } {
 		const rendered: PlanState[] = [];
@@ -457,6 +463,11 @@ describe('reviewPlan', () => {
 				accounts: () => Promise.resolve(accounts),
 				deployer: options?.deployer,
 				skipReview: options?.skipReview ?? false,
+				startingPlanFor: () =>
+					Promise.resolve(
+						options?.startingPlan ?? { config, routedDomain: undefined }
+					),
+				requestedDomain: options?.requestedDomain,
 				...(options?.canReplaceR2Credentials !== undefined && {
 					canReplaceR2Credentials: () =>
 						Promise.resolve(options.canReplaceR2Credentials ?? false)
@@ -553,6 +564,105 @@ describe('reviewPlan', () => {
 			...initial,
 			accountId: 'acc-2'
 		});
+	});
+
+	it.each<[string, string | undefined, string | undefined, string | undefined]>(
+		[
+			[
+				"uses the custom domain routed to the other account's control Worker",
+				'cache.example.net',
+				undefined,
+				'cache.example.net'
+			],
+			[
+				"clears the domain when the other account's control Worker has no custom domain",
+				undefined,
+				undefined,
+				undefined
+			],
+			[
+				'keeps the domain given with `--domain`',
+				'cache.example.net',
+				'flag.example.com',
+				'flag.example.com'
+			]
+		]
+	)(
+		"restarts from the other account's deployment and %s",
+		async (_name, routedDomain, requestedDomain, expectedDomain) => {
+			const other = renameResource(config, 'bucket', 'cupboard-blobs', 'other');
+			const { world: w } = world(
+				scriptedUi({
+					menuChoices: ['account', 'deploy'],
+					accountChoice: 'acc-2'
+				}),
+				{
+					startingPlan: { config: other, routedDomain },
+					...(requestedDomain !== undefined && { requestedDomain })
+				}
+			);
+
+			expect(
+				await reviewPlan({ ...initial, domain: 'cache.example.com' }, w)
+			).toStrictEqual({
+				...initial,
+				accountId: 'acc-2',
+				domain: expectedDomain,
+				config: other
+			});
+		}
+	);
+
+	it('discards a requested R2 credentials replacement when switching account', async () => {
+		const { world: w } = world(
+			scriptedUi({
+				menuChoices: ['account', 'deploy'],
+				accountChoice: 'acc-2'
+			})
+		);
+
+		expect(
+			await reviewPlan({ ...initial, replaceR2Credentials: true }, w)
+		).toStrictEqual({ ...initial, accountId: 'acc-2' });
+	});
+
+	it('keeps the edits when the same account is chosen again', async () => {
+		const edited: PlanState = {
+			...initial,
+			domain: 'cache.example.com',
+			config: renameResource(config, 'bucket', 'cupboard-blobs', 'mine'),
+			replaceR2Credentials: true
+		};
+		const { world: w } = world(
+			scriptedUi({
+				menuChoices: ['account', 'deploy'],
+				accountChoice: 'acc-1'
+			})
+		);
+
+		expect(await reviewPlan(edited, w)).toStrictEqual(edited);
+	});
+
+	it('rejects an empty cron trigger list', async () => {
+		const offered: Parameters<DeployUi['editText']>[0][] = [];
+		const ui: DeployUi = {
+			...scriptedUi({ menuChoices: ['crons', 'deploy'] }),
+			editText: (options) => {
+				offered.push(options);
+
+				return Promise.resolve({ kind: 'cancelled' });
+			}
+		};
+		const { world: w } = world(ui);
+
+		await reviewPlan(initial, w);
+
+		expect(
+			offered.map((options) => ({
+				emptyClears: options.emptyClears,
+				acceptsBlank: options.problem?.('  ') === undefined
+			}))
+		).toStrictEqual([{ emptyClears: undefined, acceptsBlank: false }]);
 	});
 
 	it('keeps the state when an edit is cancelled', async () => {
@@ -656,6 +766,61 @@ describe('reviewPlan', () => {
 			...initial,
 			replaceR2Credentials: false
 		});
+	});
+});
+
+describe('r2KeyActionFor', () => {
+	const existing = renameResource(
+		config,
+		'bucket',
+		'cupboard-blobs',
+		'my-blobs'
+	);
+	const renamed = renameResource(existing, 'bucket', 'my-blobs', 'newer');
+
+	it.each<[string, Parameters<typeof r2KeyActionFor>[0], R2KeyAction]>([
+		[
+			'keeps the credentials when the plan keeps the existing bucket',
+			{
+				isAlreadySet: true,
+				isReplaceRequested: false,
+				existing,
+				agreed: existing
+			},
+			{ kind: 'keep' }
+		],
+		[
+			'offers to keep the credentials when the plan renames the existing bucket',
+			{
+				isAlreadySet: true,
+				isReplaceRequested: false,
+				existing,
+				agreed: renamed
+			},
+			{ kind: 'obtain', keep: { previousBucket: 'my-blobs' } }
+		],
+		[
+			'obtains credentials when the Worker has none',
+			{
+				isAlreadySet: false,
+				isReplaceRequested: false,
+				existing,
+				agreed: existing
+			},
+			{ kind: 'obtain' }
+		],
+		[
+			'obtains credentials when a replacement was requested',
+			{
+				isAlreadySet: true,
+				isReplaceRequested: true,
+				existing,
+				agreed: existing
+			},
+			{ kind: 'obtain' }
+		]
+	])('%s', (_name, options, expected) => {
+		expect(r2KeyActionFor(options)).toStrictEqual(expected);
 	});
 });
 

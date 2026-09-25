@@ -19,6 +19,7 @@ import type { WorkerConfig } from './config.ts';
 import type { DeployDependencies } from './deploy-run.ts';
 import {
 	collectResources,
+	hasMatchingBindings,
 	runDeploy as runPlannedDeploy
 } from './deploy-run.ts';
 import {
@@ -238,6 +239,9 @@ function recordingApi(
 				return Promise.resolve();
 			},
 			findD1Database: () => Promise.resolve(undefined),
+			findD1DatabaseName: () => Promise.resolve(undefined),
+			listSchedules: () => Promise.resolve([]),
+			findConsumerDeadLetterQueue: () => Promise.resolve(undefined),
 			ensureD1Database(name) {
 				calls.push(`d1:${name}`);
 				return Promise.resolve(databaseId('db-id'));
@@ -372,6 +376,30 @@ describe('collectResources', () => {
 			kvTitles: ['cupboard-tenant-cache'],
 			queues: ['cupboard-maintenance', 'cupboard-maintenance-dlq']
 		});
+	});
+});
+
+describe('hasMatchingBindings', () => {
+	const planned = [{ type: 'd1', name: 'DB', database_id: 'db-id' }];
+
+	it.each<[string, unknown, boolean]>([
+		[
+			'matches a live D1 binding that has only `id`',
+			{ type: 'd1', name: 'DB', id: 'db-id' },
+			true
+		],
+		[
+			'matches a live D1 binding that has both fields',
+			{ type: 'd1', name: 'DB', database_id: 'db-id', id: 'db-id' },
+			true
+		],
+		[
+			'does not match a live D1 binding with another database id',
+			{ type: 'd1', name: 'DB', id: 'other-id' },
+			false
+		]
+	])('%s', (_name, live, expected) => {
+		expect(hasMatchingBindings(planned, [live])).toBe(expected);
 	});
 });
 

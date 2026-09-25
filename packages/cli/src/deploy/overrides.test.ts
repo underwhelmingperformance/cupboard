@@ -4,6 +4,7 @@ import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
 import {
 	renameResource,
+	renameResources,
 	withCrons,
 	withSignupGate,
 	withWorkersInvocationAllowance
@@ -85,6 +86,30 @@ describe('renameResource', () => {
 		expect(renameResource(config, 'queue', 'nope', 'chores')).toStrictEqual(
 			config
 		);
+	});
+});
+
+describe('renameResources', () => {
+	it('renames each reference once when a new name equals another old name', () => {
+		const renamed = renameResources(config, {
+			queue: new Map([
+				['cupboard-maintenance', 'cupboard-maintenance-dlq'],
+				['cupboard-maintenance-dlq', 'cupboard-maintenance']
+			])
+		});
+
+		expect(renamed).toStrictEqual({
+			...config,
+			control: {
+				...config.control,
+				queueProducers: [{ binding: 'Q', queue: 'cupboard-maintenance-dlq' }],
+				queueConsumers: config.control.queueConsumers.map((consumer) => ({
+					...consumer,
+					queue: 'cupboard-maintenance-dlq',
+					deadLetterQueue: 'cupboard-maintenance'
+				}))
+			}
+		});
 	});
 });
 

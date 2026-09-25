@@ -14,7 +14,11 @@ import { DeploymentPhaseUnsettledError } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
-import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
+import {
+	type CloudflareApi,
+	liveD1BindingSchema,
+	type WorkerSecret
+} from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
@@ -302,11 +306,14 @@ async function findZoneId(
 }
 
 /**
- * Whether the bindings a deployed script reports match what this deploy would
- * upload. The live list keeps its secrets across uploads, so `secret_text`
- * entries are left out of the comparison. Any other difference counts as a
- * mismatch, including an extra field the API adds of its own, and the cost of
- * treating that as a mismatch is at most one redundant upload.
+ * Whether the bindings that a deployed script reports match the bindings that
+ * this deploy would upload. The live bindings include the script's secrets,
+ * which persist across uploads, so `secret_text` entries are left out of the
+ * comparison. A live D1 binding can have its database id in `id`, so D1
+ * bindings are compared by their normalised `database_id`. Any other difference
+ * counts as a mismatch, including a field that the API adds. Treating such a
+ * difference as a mismatch costs one redundant upload on each deploy while the
+ * difference persists.
  */
 export function hasMatchingBindings(
 	planned: readonly unknown[] | undefined,
@@ -316,7 +323,9 @@ export function hasMatchingBindings(
 		return false;
 	}
 
-	const keptLive = live.filter((binding) => !isSecretBinding(binding));
+	const keptLive = live
+		.filter((binding) => !isSecretBinding(binding))
+		.map((binding) => normaliseD1Binding(binding));
 
 	if (keptLive.length !== planned.length) {
 		return false;
@@ -335,6 +344,12 @@ function canonicalise(bindings: readonly unknown[]): string[] {
 	return bindings
 		.map((binding) => canonicalJson(binding))
 		.toSorted((a, b) => a.localeCompare(b));
+}
+
+function normaliseD1Binding(binding: unknown): unknown {
+	const parsed = liveD1BindingSchema.safeParse(binding);
+
+	return parsed.success ? parsed.data : binding;
 }
 
 function isSecretBinding(binding: unknown): boolean {

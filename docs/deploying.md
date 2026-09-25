@@ -7,6 +7,43 @@ built and published.
 
 [releases]: ./releases.md
 
+## Resource names and cron triggers
+
+Before it changes anything, `cupboard deploy` shows the deployment plan and a
+menu for editing it. In that menu you can choose the names of the R2 bucket, the
+D1 database, the maintenance queue and its dead-letter queue that the Workers
+use, and change the control Worker's cron triggers. The list of cron triggers
+cannot be empty, because the control Worker runs maintenance only when a cron
+trigger fires.
+
+On an account that already has a control Worker, the deployment plan starts from
+the existing deployment. The deploy reads the bucket, the database and the
+maintenance queue from the control Worker's bindings, the dead-letter queue from
+its queue consumer, and the cron triggers from its schedules. Accepting the plan
+as shown, or deploying with `--yes`, keeps the existing resources and cron
+triggers. On an account without a control Worker, the plan starts from the
+release's defaults.
+
+Earlier versions of `cupboard deploy` started every plan from the release's
+defaults, so accepting the plan could point the Workers at new, empty resources
+with the default names. To use the original resources again, enter their names
+in the menu.
+
+A release that changes a default resource name or cron trigger does not change
+an existing deployment. There is one exception: when the control Worker has no
+schedules, for example after a first deploy that failed before it set them, the
+plan uses the release's cron triggers. To use a new default in any other case,
+change the value in the menu.
+
+`--dry-run` does not sign in to Cloudflare, so its plan shows the release's
+defaults.
+
+Choosing a different account in the menu restarts the deployment plan from that
+account's existing deployment. The switch discards the resource, cron trigger
+and domain edits made so far, and any request to replace the R2 credentials. It
+keeps the Admin setting. The plan then shows the domain given with `--domain`,
+or otherwise the custom domain routed to that account's control Worker.
+
 ## Workers plan and subrequest allowance
 
 Cupboard limits each invocation to its configured number of internal-service

@@ -46,6 +46,10 @@ import {
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import {
+	type StartingPlan,
+	startingPlanLookup
+} from './existing-deployment.ts';
+import {
 	readCachedGrant,
 	withCachedGrantLock,
 	writeCachedGrant
@@ -415,6 +419,10 @@ export function planMenuEntries(
 }
 
 function cronsListProblem(value: string): string | undefined {
+	if (value.trim() === '') {
+		return 'at least one cron trigger is required, because the control Worker runs maintenance only when a cron trigger fires';
+	}
+
 	const parts = value.split(',').map((cron) => cron.trim());
 
 	for (const part of parts) {
@@ -435,6 +443,19 @@ export interface PlanReviewWorld {
 	readonly deployer: OwnerBinding | undefined;
 	readonly skipReview: boolean;
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
+	/**
+	 * The configuration that the plan starts from on an account, and the custom
+	 * domain routed to that account's control Worker. Switching account
+	 * restarts the plan from these values for the chosen account.
+	 */
+	readonly startingPlanFor: (
+		accountId: CloudflareAccountId
+	) => Promise<StartingPlan>;
+	/**
+	 * The domain given with `--domain`. It takes precedence over the routed
+	 * custom domain on every account.
+	 */
+	readonly requestedDomain: string | undefined;
 }
 
 async function editOwner(
@@ -539,7 +560,19 @@ async function applyPlanEdit(
 	if (choice === 'account') {
 		const chosen = await ui.chooseAccount(await world.accounts());
 
-		return chosen === undefined ? state : { ...state, accountId: chosen };
+		if (chosen === undefined || chosen === state.accountId) {
+			return state;
+		}
+
+		const starting = await world.startingPlanFor(chosen);
+		const { replaceR2Credentials: _replaceR2Credentials, ...kept } = state;
+
+		return {
+			...kept,
+			accountId: chosen,
+			config: starting.config,
+			domain: world.requestedDomain ?? starting.routedDomain
+		};
 	}
 
 	if (choice === 'domain') {
@@ -584,22 +617,19 @@ async function applyPlanEdit(
 
 	if (choice === 'crons') {
 		const edit = await ui.editText({
-			message: 'Cron triggers, comma separated (empty for none)',
+			message: 'Cron triggers, comma separated',
 			initial: state.config.control.crons.join(', '),
 			placeholder: '0 * * * *',
-			emptyClears: true,
 			problem: cronsListProblem
 		});
 
-		if (edit.kind === 'set') {
-			const crons = edit.value.split(',').map((cron) => cron.trim());
-
-			return { ...state, config: withCrons(state.config, crons) };
+		if (edit.kind !== 'set') {
+			return state;
 		}
 
-		return edit.kind === 'clear'
-			? { ...state, config: withCrons(state.config, []) }
-			: state;
+		const crons = edit.value.split(',').map((cron) => cron.trim());
+
+		return { ...state, config: withCrons(state.config, crons) };
 	}
 
 	const separator = choice.indexOf(':');
@@ -685,6 +715,46 @@ export function envR2Credentials(
 		accessKeyId: r2AccessKeyIdSchema.parse(accessKeyId),
 		secretAccessKey: r2SecretAccessKeySchema.parse(secretAccessKey)
 	};
+}
+
+/**
+ * What a deploy does about the R2 credentials when the environment does not
+ * supply them. It keeps the credentials on the Worker, or it obtains new ones.
+ * When the plan changes the bucket that the current credentials were created
+ * for, `obtain` includes a `keep` field, and the deploy asks the operator
+ * whether to keep those credentials.
+ */
+export type R2KeyAction =
+	| { readonly kind: 'keep' }
+	| {
+			readonly kind: 'obtain';
+			readonly keep?: { readonly previousBucket: string };
+	  };
+
+/**
+ * Decides what a deploy does about the R2 credentials. `existing` is the
+ * existing deployment's configuration. The Worker's current credentials are
+ * assumed to be scoped to its bucket, so they are treated as stale only when
+ * `agreed` uses another bucket.
+ */
+export function r2KeyActionFor(options: {
+	readonly isAlreadySet: boolean;
+	readonly isReplaceRequested: boolean;
+	readonly existing: DeploymentConfig;
+	readonly agreed: DeploymentConfig;
+}): R2KeyAction {
+	const previousBucket = bucketNameOf(options.existing);
+	const isBucketRenamed = bucketNameOf(options.agreed) !== previousBucket;
+
+	if (!options.isAlreadySet) {
+		return { kind: 'obtain' };
+	}
+
+	if (isBucketRenamed) {
+		return { kind: 'obtain', keep: { previousBucket } };
+	}
+
+	return { kind: options.isReplaceRequested ? 'obtain' : 'keep' };
 }
 
 export type R2Settlement =
@@ -1093,16 +1163,6 @@ async function deployFlow(
 
 	ui.success(`Authenticated with Cloudflare (${credentialSource})`);
 
-	// A domain already routed to the control Worker is part of the current
-	// deployment, so the plan starts from it; `--domain` overrides it.
-	const currentDomain =
-		initialDomain ??
-		(await ui
-			.reporter()
-			.phase('Checking the custom domain', () =>
-				api.findCustomDomain(artifact.config.control.name)
-			));
-
 	// From the environment when set; otherwise settled after the plan review,
 	// so a created key is scoped to the bucket and account as finally agreed.
 	let r2Credentials = envR2Credentials(process.env);
@@ -1273,6 +1333,12 @@ async function deployFlow(
 	};
 
 	const deployer = subject === undefined ? undefined : deployerOwner(subject);
+	const startingPlanFor = startingPlanLookup({
+		apiFor,
+		defaults: artifact.config,
+		phase: (label, read) => ui.reporter().phase(label, read)
+	});
+	const startingPlan = await startingPlanFor(accountId);
 	const initialOwner = defaultOwnerChoice(artifact.config, subject);
 
 	if (cliOptions.yes === true && initialOwner.kind === 'none') {
@@ -1308,8 +1374,8 @@ async function deployFlow(
 	const agreed = await reviewPlan(
 		{
 			accountId,
-			domain: currentDomain,
-			config: artifact.config,
+			config: startingPlan.config,
+			domain: initialDomain ?? startingPlan.routedDomain,
 			owner: initialOwner
 		},
 		{
@@ -1346,7 +1412,9 @@ async function deployFlow(
 			deployer,
 			skipReview: cliOptions.yes === true,
 			canReplaceR2Credentials: async (state) =>
-				r2Credentials === undefined && (await isR2AlreadySetFor(state))
+				r2Credentials === undefined && (await isR2AlreadySetFor(state)),
+			startingPlanFor,
+			requestedDomain: initialDomain
 		}
 	);
 
@@ -1355,15 +1423,20 @@ async function deployFlow(
 		return;
 	}
 
+	const agreedStartingPlan = await startingPlanFor(agreed.accountId);
 	const agreedBucket = bucketNameOf(agreed.config);
-	const isBucketRenamed = agreedBucket !== bucketNameOf(artifact.config);
 	let wasCreatedNow = false;
 
 	if (r2Credentials === undefined) {
 		const isAlreadySet = await isR2AlreadySetFor(agreed);
-		const isReplaceRequested = agreed.replaceR2Credentials === true;
+		const r2Key = r2KeyActionFor({
+			isAlreadySet,
+			isReplaceRequested: agreed.replaceR2Credentials === true,
+			existing: agreedStartingPlan.config,
+			agreed: agreed.config
+		});
 
-		if (isAlreadySet && !isBucketRenamed && !isReplaceRequested) {
+		if (r2Key.kind === 'keep') {
 			// The values cannot be read back. Once a cache exists, onboarding has
 			// the Worker test its stored pair.
 			ui.info('Keeping the R2 credentials already set on the Worker.');
@@ -1379,10 +1452,7 @@ async function deployFlow(
 					accountId: agreed.accountId,
 					bucketName: agreedBucket
 				}),
-				...(isAlreadySet &&
-					isBucketRenamed && {
-						keep: { previousBucket: bucketNameOf(artifact.config) }
-					})
+				...(r2Key.keep !== undefined && { keep: r2Key.keep })
 			});
 
 			if (settlement.kind === 'cancelled') {
@@ -1395,15 +1465,10 @@ async function deployFlow(
 				wasCreatedNow = settlement.created;
 			}
 		} else {
-			if (!isAlreadySet) {
-				throw new R2CredentialsRequiredError();
-			}
-
-			ui.warn(
-				'The cache bucket was renamed, and the R2 key already on the ' +
-					'Worker may be scoped to the old name. Re-run interactively to ' +
-					'replace it.'
-			);
+			// A run without a terminal needs `--yes`, which skips the review. The
+			// plan then has the existing bucket and no request to replace the
+			// credentials, so `obtain` means that the Worker has no R2 credentials.
+			throw new R2CredentialsRequiredError();
 		}
 	}
 
@@ -1562,7 +1627,8 @@ async function deployFlow(
 
 			// Only a genuinely new custom domain warrants the DNS caveat.
 			const dnsNote =
-				agreed.domain !== undefined && currentDomain !== agreed.domain
+				agreed.domain !== undefined &&
+				agreedStartingPlan.routedDomain !== agreed.domain
 					? ' A freshly added custom domain can take a while to resolve in DNS.'
 					: '';
 

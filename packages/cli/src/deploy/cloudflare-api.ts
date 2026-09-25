@@ -85,6 +85,29 @@ export interface WorkerSecret {
 	readonly text: string;
 }
 
+/**
+ * A D1 binding in a script's live settings. The database id can be in
+ * `database_id`, in `id`, or in both. When both fields are present, the schema
+ * uses `database_id`. The parsed binding has the id in `database_id` only, so
+ * it compares equal to the binding that an upload sends.
+ */
+export const liveD1BindingSchema = z.union([
+	z
+		.looseObject({
+			type: z.literal('d1'),
+			name: z.string(),
+			database_id: databaseIdSchema
+		})
+		.transform(({ id: _id, ...binding }) => binding),
+	z
+		.looseObject({
+			type: z.literal('d1'),
+			name: z.string(),
+			id: databaseIdSchema
+		})
+		.transform(({ id, ...binding }) => ({ ...binding, database_id: id }))
+]);
+
 export interface ScriptConfiguration {
 	readonly buildVersion?: string;
 	readonly bindings: readonly unknown[];
@@ -165,9 +188,23 @@ export interface CloudflareApi {
 	 */
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	findD1Database(name: string): Promise<DatabaseId | undefined>;
+	/**
+	 * `undefined` when Cloudflare reports no database with this id.
+	 */
+	findD1DatabaseName(databaseId: DatabaseId): Promise<string | undefined>;
 	ensureD1Database(name: string): Promise<DatabaseId>;
 	ensureKvNamespace(title: string): Promise<KvNamespaceId>;
 	ensureQueue(name: string): Promise<QueueId>;
+	/**
+	 * The dead-letter queue of the script's consumer on the queue `queueName`,
+	 * or `undefined` when the queue does not exist, the script has no consumer
+	 * on it, or the consumer has no dead-letter queue. Cloudflare reports a
+	 * missing dead-letter queue as an empty name.
+	 */
+	findConsumerDeadLetterQueue(
+		queueName: string,
+		scriptName: ScriptName
+	): Promise<string | undefined>;
 
 	d1QueryBatch(
 		databaseId: DatabaseId,
@@ -203,6 +240,11 @@ export interface CloudflareApi {
 		scriptName: ScriptName,
 		settings: QueueConsumerSettings
 	): Promise<void>;
+	/**
+	 * The script's cron triggers, in the order that Cloudflare reports them.
+	 * Empty when the script is not deployed.
+	 */
+	listSchedules(scriptName: ScriptName): Promise<string[]>;
 	ensureSchedules(
 		scriptName: ScriptName,
 		crons: readonly string[]
@@ -314,6 +356,7 @@ const liveConsumerSchema = z.object({
 		})
 		.optional()
 });
+type LiveConsumer = z.infer<typeof liveConsumerSchema>;
 
 const liveSubscriptionSchema = z.object({
 	state: z.string().optional(),
@@ -448,6 +491,62 @@ export function createCloudflareApi(
 		}
 	};
 
+	const findQueueId = async (name: string): Promise<QueueId | undefined> => {
+		const existing = await findCloudflareItem(
+			client.queues.list(account),
+			(queue) => queue.queue_name === name,
+			'Cloudflare queue list'
+		);
+
+		return existing?.queue_id === undefined
+			? undefined
+			: queueIdSchema.parse(existing.queue_id);
+	};
+
+	const listSchedules = async (scriptName: ScriptName): Promise<string[]> => {
+		try {
+			const current = await client.workers.scripts.schedules.get(
+				scriptName,
+				account
+			);
+
+			return current.schedules.map((schedule) => schedule.cron);
+		} catch (error) {
+			if (error instanceof NotFoundError) {
+				return [];
+			}
+
+			throw error;
+		}
+	};
+
+	const findWorkerConsumer = async (
+		queueId: QueueId,
+		scriptName: ScriptName
+	): Promise<LiveConsumer | undefined> => {
+		const existing = await findCloudflareItem(
+			client.queues.consumers.list(queueId, account),
+			(consumer) => {
+				const parsed = liveConsumerSchema.safeParse(consumer);
+
+				return (
+					parsed.success &&
+					(parsed.data.type === undefined || parsed.data.type === 'worker') &&
+					[
+						parsed.data.script_name,
+						parsed.data.script,
+						parsed.data.service
+					].includes(scriptName)
+				);
+			},
+			'Cloudflare queue consumer list'
+		);
+
+		return existing === undefined
+			? undefined
+			: liveConsumerSchema.parse(existing);
+	};
+
 	return {
 		async listAccounts() {
 			const accounts = await filterCloudflareItems(
@@ -552,6 +651,20 @@ export function createCloudflareApi(
 				: databaseIdSchema.parse(existing.uuid);
 		},
 
+		async findD1DatabaseName(databaseId) {
+			try {
+				const database = await client.d1.database.get(databaseId, account);
+
+				return database.name;
+			} catch (error) {
+				if (error instanceof NotFoundError) {
+					return;
+				}
+
+				throw error;
+			}
+		},
+
 		async ensureD1Database(name) {
 			const existing = await findCloudflareItem(
 				client.d1.database.list({ ...account, name }),
@@ -585,14 +698,10 @@ export function createCloudflareApi(
 		},
 
 		async ensureQueue(name) {
-			const existing = await findCloudflareItem(
-				client.queues.list(account),
-				(queue) => queue.queue_name === name,
-				'Cloudflare queue list'
-			);
+			const existing = await findQueueId(name);
 
-			if (existing?.queue_id !== undefined) {
-				return queueIdSchema.parse(existing.queue_id);
+			if (existing !== undefined) {
+				return existing;
 			}
 
 			const created = await client.queues.create({
@@ -601,6 +710,19 @@ export function createCloudflareApi(
 			});
 
 			return queueIdSchema.parse(created.queue_id ?? '');
+		},
+
+		async findConsumerDeadLetterQueue(queueName, scriptName) {
+			const queueId = await findQueueId(queueName);
+
+			if (queueId === undefined) {
+				return;
+			}
+
+			const consumer = await findWorkerConsumer(queueId, scriptName);
+			const deadLetterQueue = consumer?.dead_letter_queue;
+
+			return deadLetterQueue === '' ? undefined : deadLetterQueue;
 		},
 
 		async d1QueryBatch(databaseId, statements) {
@@ -747,56 +869,33 @@ export function createCloudflareApi(
 				})
 			};
 
-			const existing = await findCloudflareItem(
-				client.queues.consumers.list(queueId, account),
-				(consumer) => {
-					const parsed = liveConsumerSchema.safeParse(consumer);
-
-					return (
-						parsed.success &&
-						(parsed.data.type === undefined || parsed.data.type === 'worker') &&
-						[
-							parsed.data.script_name,
-							parsed.data.script,
-							parsed.data.service
-						].includes(scriptName)
-					);
-				},
-				'Cloudflare queue consumer list'
-			);
+			const existing = await findWorkerConsumer(queueId, scriptName);
 
 			if (existing === undefined) {
 				await client.queues.consumers.create(queueId, body);
 				return;
 			}
 
-			const parsedExisting = liveConsumerSchema.parse(existing);
-
-			if (isConsumerSettled(parsedExisting, settings)) {
+			if (isConsumerSettled(existing, settings)) {
 				return;
 			}
 
-			if (
-				parsedExisting.consumer_id === undefined ||
-				parsedExisting.consumer_id === ''
-			) {
+			if (existing.consumer_id === undefined || existing.consumer_id === '') {
 				throw new QueueConsumerIdMissingError(queueId, scriptName);
 			}
 
 			// This endpoint is PUT, so omitted settings return to their platform
 			// defaults when a deployment removes them.
-			await client.queues.consumers.update(parsedExisting.consumer_id, {
+			await client.queues.consumers.update(existing.consumer_id, {
 				...body,
 				queue_id: queueId
 			});
 		},
 
+		listSchedules,
+
 		async ensureSchedules(scriptName, crons) {
-			const current = await client.workers.scripts.schedules.get(
-				scriptName,
-				account
-			);
-			const live = current.schedules.map((schedule) => schedule.cron);
+			const live = await listSchedules(scriptName);
 
 			if (
 				live.length === crons.length &&
