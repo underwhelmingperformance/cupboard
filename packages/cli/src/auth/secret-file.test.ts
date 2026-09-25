@@ -1,8 +1,10 @@
+import type { Stats } from 'node:fs';
 import {
 	lstat,
 	mkdir,
 	mkdtemp,
 	readdir,
+	readFile,
 	rm,
 	symlink,
 	writeFile
@@ -12,7 +14,12 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { writeSecretFile } from './secret-file.ts';
+import {
+	SecretDirectoryNotDirectoryError,
+	SecretDirectoryOwnerError,
+	SecretDirectorySymlinkError,
+	writeSecretFile
+} from './secret-file.ts';
 
 const temporaryDirectories: string[] = [];
 
@@ -21,6 +28,29 @@ async function temporaryDirectory(): Promise<string> {
 	temporaryDirectories.push(directory);
 
 	return directory;
+}
+
+// The writer accepts a symlink only when root owns it. The owner of a symlink
+// that a test creates depends on who runs the tests, so the tests pass an
+// `inspect` function that returns the symlink's `lstat` metadata with a chosen
+// uid. Both acceptance and rejection are then exercised whether the tests run as
+// root or as another user.
+const rootUid = 0;
+const unprivilegedUid = 65_534;
+
+function reportOwner(
+	link: string,
+	uid: number
+): (file: string) => Promise<Stats> {
+	return async (file) => {
+		const stats = await lstat(file);
+
+		if (file === link) {
+			stats.uid = uid;
+		}
+
+		return stats;
+	};
 }
 
 afterEach(async () => {
@@ -103,8 +133,10 @@ describe('writeSecretFile', () => {
 		await symlink(target, linked);
 
 		await expect(
-			writeSecretFile(path.join(linked, 'session'), 'secret')
-		).rejects.toThrow(/symbolic link/u);
+			writeSecretFile(path.join(linked, 'session'), 'secret', undefined, {
+				inspect: reportOwner(linked, unprivilegedUid)
+			})
+		).rejects.toStrictEqual(new SecretDirectorySymlinkError(linked));
 
 		const targetStats = await lstat(target);
 		const targetMode = targetStats.mode & 0o777;
@@ -122,10 +154,59 @@ describe('writeSecretFile', () => {
 		await symlink(target, linked);
 
 		await expect(
-			writeSecretFile(path.join(linked, 'nested', 'session'), 'secret')
-		).rejects.toThrow(/symbolic link/u);
+			writeSecretFile(
+				path.join(linked, 'nested', 'session'),
+				'secret',
+				undefined,
+				{
+					inspect: reportOwner(linked, unprivilegedUid)
+				}
+			)
+		).rejects.toStrictEqual(new SecretDirectorySymlinkError(linked));
 
 		expect(await readdir(target)).toStrictEqual([]);
+	});
+
+	it('refuses a secret directory that is not a directory', async () => {
+		const base = await temporaryDirectory();
+		const directory = path.join(base, 'config');
+		const regularFile = path.join(base, 'file');
+		await writeFile(regularFile, '');
+
+		await expect(
+			writeSecretFile(path.join(directory, 'session'), 'secret', undefined, {
+				inspect: (file) => lstat(file === directory ? regularFile : file)
+			})
+		).rejects.toStrictEqual(new SecretDirectoryNotDirectoryError(directory));
+	});
+
+	it('writes through a root-owned symlinked parent', async () => {
+		const base = await temporaryDirectory();
+		const target = path.join(base, 'target');
+		const linked = path.join(base, 'config');
+		const secret = path.join(target, 'nested', 'session');
+		await mkdir(target);
+		await symlink(target, linked);
+
+		await writeSecretFile(
+			path.join(linked, 'nested', 'session'),
+			'secret',
+			undefined,
+			{
+				inspect: reportOwner(linked, rootUid)
+			}
+		);
+
+		const secretStats = await lstat(secret);
+		expect({
+			entries: await readdir(path.dirname(secret)),
+			contents: await readFile(secret, 'utf8'),
+			mode: secretStats.mode & 0o777
+		}).toStrictEqual({
+			entries: ['session'],
+			contents: 'secret',
+			mode: 0o600
+		});
 	});
 
 	it('refuses a secret directory not owned by the current user', async () => {
@@ -138,7 +219,7 @@ describe('writeSecretFile', () => {
 		try {
 			await expect(
 				writeSecretFile(path.join(directory, 'session'), 'secret')
-			).rejects.toThrow(/not owned/u);
+			).rejects.toStrictEqual(new SecretDirectoryOwnerError(directory));
 		} finally {
 			process.getuid = originalGetuid;
 		}

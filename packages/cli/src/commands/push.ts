@@ -49,7 +49,7 @@ import {
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 import { PublicationCollection } from '../push/publication.ts';
-import { runPush } from '../push/push.ts';
+import { type PushStore, runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseReadUser } from '../read-user.ts';
 import { parseRootName } from '../root-name.ts';
@@ -306,10 +306,28 @@ function parseUploadConcurrency(value: string): number {
 	return Number(value);
 }
 
+interface PushCommandDependencies {
+	/**
+	 * Returns the token provider for the push. Defaults to `authenticateForPush`,
+	 * which uses GitHub Actions OIDC with `--github-oidc` and otherwise the owner
+	 * session cached by `cupboard login`.
+	 */
+	readonly authenticate?: typeof authenticateForPush;
+	/**
+	 * Opens the system store when `--store` is omitted and the publication has
+	 * local entries. When this dependency is not supplied, `runPush` opens the
+	 * system store with `Nix.open`.
+	 */
+	readonly openStore?: () => PushStore;
+}
+
 export function registerPushCommand(
 	program: Command,
-	programOptions: ProgramOptions = {}
+	programOptions: ProgramOptions = {},
+	dependencies: PushCommandDependencies = {}
 ): void {
+	const authenticate = dependencies.authenticate ?? authenticateForPush;
+
 	program
 		.command('push')
 		.description(
@@ -511,7 +529,7 @@ export function registerPushCommand(
 				minimumPayload: canAcceptEmptyPayload ? 0 : 1,
 				payloadDescription: 'a store path',
 				authorise: (target) =>
-					authenticateForPush(
+					authenticate(
 						CupboardClient.fromUrl(target.tenantUrl, {
 							cache: target.cache,
 							signal: programOptions.signal
@@ -563,6 +581,10 @@ export function registerPushCommand(
 						})
 					})
 				}),
+				...(options.store === undefined &&
+					dependencies.openStore !== undefined && {
+						openStore: dependencies.openStore
+					}),
 				...(options.closure !== undefined && { closure: options.closure }),
 				...(options.referenceSource !== undefined && {
 					referenceSource: {

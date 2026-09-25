@@ -9,9 +9,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
+	cacheNameSchema,
 	type CacheScope,
 	rootNameSchema,
+	storePathSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { Command } from 'commander';
@@ -19,6 +22,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import type { ProgramOptions } from '../cli.ts';
+import type { TokenProvider } from '../client/credentials.ts';
 import {
 	BuildStoreRequiresAlreadyHeldError,
 	BuildStoreRequiresClaimableError,
@@ -34,6 +38,7 @@ import {
 	RunRootRetentionWithoutRunRootError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
+import type { PushStore } from '../push/push.ts';
 
 import {
 	observedCopiesFrom,
@@ -299,7 +304,55 @@ describe('receiptBuildStore', () => {
 	});
 });
 
-function silentProgram(programOptions: ProgramOptions): Command {
+const fixedToken: TokenProvider = {
+	get: () => Promise.resolve('test-token'),
+	refresh: () => Promise.resolve('test-token')
+};
+
+function unexpectedStoreCall(method: string): never {
+	throw new Error(`unexpected call to ${method} on the test store`);
+}
+
+function storeWithEveryPath(): PushStore {
+	return {
+		storeKind: 'local-filesystem',
+		resolveClosure: () => unexpectedStoreCall('resolveClosure'),
+		queryValidPathsInfo: (storePaths) =>
+			Promise.resolve(
+				storePaths.map((storePath) => ({
+					storePath: storePathSchema.parse(storePath),
+					narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, 1)),
+					narSize: 1,
+					references: [],
+					signatures: [],
+					ultimate: true
+				}))
+			),
+		narFromPath: () => unexpectedStoreCall('narFromPath')
+	};
+}
+
+// A push that gets past validation contacts the cache and the reference
+// source. The tests that check what validation accepts pass the command an
+// already-aborted signal, which is what an interrupt gives a real push. The
+// run then stops at its first remote call and makes no DNS lookup.
+const interrupted: ProgramOptions = {
+	signal: AbortSignal.abort(new CliAbortError())
+};
+
+interface PushRun {
+	readonly result: unknown;
+	// The cache for each token provider request, in order.
+	readonly tokenProviderRequests: readonly CacheScope[];
+	readonly openStoreCalls: number;
+}
+
+async function parsePush(
+	arguments_: readonly string[],
+	programOptions: ProgramOptions = {}
+): Promise<PushRun> {
+	const tokenProviderRequests: CacheScope[] = [];
+	let openStoreCalls = 0;
 	const program = new Command();
 
 	program.exitOverride();
@@ -311,32 +364,28 @@ function silentProgram(programOptions: ProgramOptions): Command {
 			return;
 		}
 	});
-	registerPushCommand(program, programOptions);
+	registerPushCommand(program, programOptions, {
+		authenticate: (client) => {
+			tokenProviderRequests.push(client.cache);
 
-	return program;
-}
+			return Promise.resolve(fixedToken);
+		},
+		openStore: () => {
+			openStoreCalls += 1;
 
-// A push that gets past validation contacts the cache and the reference
-// source. The tests that check what validation accepts pass the command an
-// already-aborted signal, which is what an interrupt gives a real push. The
-// run then stops at its first remote call and makes no DNS lookup.
-const interrupted: ProgramOptions = {
-	signal: AbortSignal.abort(new CliAbortError())
-};
+			return storeWithEveryPath();
+		}
+	});
 
-async function parsePush(
-	arguments_: readonly string[],
-	programOptions: ProgramOptions = {}
-): Promise<unknown> {
+	let result: unknown;
 	try {
-		await silentProgram(programOptions).parseAsync(['push', ...arguments_], {
-			from: 'user'
-		});
-
-		return { kind: 'parsed' as const };
+		await program.parseAsync(['push', ...arguments_], { from: 'user' });
+		result = { kind: 'parsed' as const };
 	} catch (error: unknown) {
-		return error;
+		result = error;
 	}
+
+	return { result, tokenProviderRequests, openStoreCalls };
 }
 
 describe('pushCommandAuthorizationDetails', () => {
@@ -435,7 +484,7 @@ describe('push command', () => {
 		);
 
 		try {
-			const result = await parsePush(
+			const run = await parsePush(
 				[
 					'https://cache.example.workers.dev/t/acme',
 					'--reference-paths-file',
@@ -449,34 +498,46 @@ describe('push command', () => {
 
 			// The run reached its first remote call, so positional parsing accepted
 			// the reference paths as a publication in their own right.
-			expect(result).toBeInstanceOf(CliAbortError);
+			expect(run).toStrictEqual({
+				result: new CliAbortError(),
+				tokenProviderRequests: [defaultCache],
+				openStoreCalls: 0
+			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
 	});
 
 	it('rejects a publication with no paths of any kind', async () => {
-		const result = await parsePush([
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'--dry-run'
 		]);
 
-		expect(result).toBeInstanceOf(CommandPayloadRequiredError);
+		expect(run).toStrictEqual({
+			result: new CommandPayloadRequiredError('a store path'),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
 	it('accepts an empty named-root replacement past publication validation', async () => {
-		const result = await parsePush(
+		const run = await parsePush(
 			['https://cache.example.workers.dev/t/acme', '--root', 'main'],
 			interrupted
 		);
 
 		// The run reached its first remote call, so a root replacement with no
 		// paths is not an empty publication.
-		expect(result).toBeInstanceOf(CliAbortError);
+		expect(run).toStrictEqual({
+			result: new CliAbortError(),
+			tokenProviderRequests: [defaultCache],
+			openStoreCalls: 0
+		});
 	});
 
-	it('accepts a named cache URL before authentication starts', async () => {
-		const result = await parsePush(
+	it('requests a token provider for a named cache URL and opens the injected store', async () => {
+		const run = await parsePush(
 			[
 				'https://cache.example.workers.dev/t/acme/cache/release',
 				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -484,11 +545,17 @@ describe('push command', () => {
 			interrupted
 		);
 
-		expect(result).toBeInstanceOf(CliAbortError);
+		expect(run).toStrictEqual({
+			result: new CliAbortError(),
+			tokenProviderRequests: [
+				{ kind: 'named', name: cacheNameSchema.parse('release') }
+			],
+			openStoreCalls: 1
+		});
 	});
 
 	it('rejects --no-retain combined with --root before authenticating', async () => {
-		const result = await parsePush([
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			'--no-retain',
@@ -496,38 +563,44 @@ describe('push command', () => {
 			'main'
 		]);
 
-		expect(result).toBeInstanceOf(NoRetainConflictError);
+		expect(run).toStrictEqual({
+			result: new NoRetainConflictError('--root'),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
-	it('rejects a mutating GitHub OIDC push naming neither --root nor --no-retain', async () => {
-		const result = await parsePush([
+	it('rejects a mutating GitHub OIDC push with neither --root nor --no-retain', async () => {
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			'--github-oidc'
 		]);
 
-		expect(result).toBeInstanceOf(OidcRetentionChoiceRequiredError);
+		expect(run).toStrictEqual({
+			result: new OidcRetentionChoiceRequiredError(),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
-	it('rejects a --store URI that names no ssh-ng destination', async () => {
-		const result = await parsePush([
+	it('rejects a --store URI without an ssh-ng destination', async () => {
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			'--store',
 			'daemon'
 		]);
 
-		expect(result).toBeInstanceOf(InvalidStoreUriError);
-
-		if (!(result instanceof InvalidStoreUriError)) {
-			return;
-		}
-
-		expect(result.value).toBe('daemon');
+		expect(run).toStrictEqual({
+			result: new InvalidStoreUriError('daemon'),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
 	it('parses an ssh-ng --store URI and still validates retention first', async () => {
-		const result = await parsePush([
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			'--store',
@@ -537,18 +610,26 @@ describe('push command', () => {
 			'main'
 		]);
 
-		expect(result).toBeInstanceOf(NoRetainConflictError);
+		expect(run).toStrictEqual({
+			result: new NoRetainConflictError('--root'),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
 	it('rejects --run-root-ttl without --run-root before authenticating', async () => {
-		const result = await parsePush([
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			'--run-root-ttl',
 			'1h'
 		]);
 
-		expect(result).toBeInstanceOf(RunRootTtlWithoutRunRootError);
+		expect(run).toStrictEqual({
+			result: new RunRootTtlWithoutRunRootError(),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
 	it.each([
@@ -564,54 +645,94 @@ describe('push command', () => {
 			]
 		}
 	])('rejects $name', async ({ extraArguments }) => {
-		const result = await parsePush([
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			...extraArguments
 		]);
 
-		expect(result).toBeInstanceOf(ReferenceSourcePairError);
+		expect(run).toStrictEqual({
+			result: new ReferenceSourcePairError(),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
 	it.each([
 		['--read-user', 'reader'],
 		['--read-password', 'secret']
 	])('rejects an unpaired %s before authenticating', async (option, value) => {
-		const result = await parsePush([
+		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 			option,
 			value
 		]);
 
-		expect(result).toBeInstanceOf(ReadCredentialPairError);
+		expect(run).toStrictEqual({
+			result: new ReadCredentialPairError(),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
 	});
 
-	it('rejects a reference paths file naming a non-store path', async () => {
+	it.each([
+		{
+			name: 'a target that is not a store path',
+			pushArguments: (_directory: string, missing: string) => [
+				'https://cache.example.workers.dev/t/acme',
+				missing
+			]
+		},
+		{
+			name: 'a reference paths file listing a non-store path',
+			pushArguments: (directory: string, missing: string) => {
+				const file = path.join(directory, 'references.txt');
+				writeFileSync(
+					file,
+					`/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\n${missing}\n`
+				);
+
+				return [
+					'https://cache.example.workers.dev/t/acme',
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+					'--reference-paths-file',
+					file,
+					'--reference-source',
+					'https://cache.example.workers.dev/t/acme/reuse/reuse'
+				];
+			}
+		},
+		{
+			name: 'an intermediate paths file listing a non-store path',
+			pushArguments: (directory: string, missing: string) => {
+				const file = path.join(directory, 'intermediates.txt');
+				writeFileSync(
+					file,
+					`/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\n${missing}\n`
+				);
+
+				return [
+					'https://cache.example.workers.dev/t/acme',
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+					'--closure',
+					'--intermediate-paths-file',
+					file
+				];
+			}
+		}
+	])('rejects $name', async ({ pushArguments }) => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
-		const file = path.join(directory, 'references.txt');
-		writeFileSync(
-			file,
-			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\n./result\n'
-		);
+		const missing = path.join(directory, 'missing');
 
 		try {
-			const result = await parsePush([
-				'https://cache.example.workers.dev/t/acme',
-				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-				'--reference-paths-file',
-				file,
-				'--reference-source',
-				'https://cache.example.workers.dev/t/acme/reuse/reuse'
-			]);
+			const run = await parsePush(pushArguments(directory, missing));
 
-			expect(result).toBeInstanceOf(InvalidStorePathError);
-
-			if (!(result instanceof InvalidStorePathError)) {
-				return;
-			}
-
-			expect(result.storePath).toBe('./result');
+			expect(run).toStrictEqual({
+				result: new InvalidStorePathError(missing),
+				tokenProviderRequests: [defaultCache],
+				openStoreCalls: 0
+			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
@@ -625,24 +746,22 @@ describe('push command', () => {
 		symlinkSync(target, link);
 
 		try {
-			const result = await parsePush([
+			const run = await parsePush([
 				'https://cache.example.workers.dev/t/acme',
 				link
 			]);
 
-			expect(result).toBeInstanceOf(InvalidStorePathError);
-
-			if (!(result instanceof InvalidStorePathError)) {
-				return;
-			}
-
-			expect(result.storePath).toBe(realpathSync(target));
+			expect(run).toStrictEqual({
+				result: new InvalidStorePathError(realpathSync(target)),
+				tokenProviderRequests: [defaultCache],
+				openStoreCalls: 0
+			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
 	});
 
-	it('resolves symlinks named by a path file before validation', async () => {
+	it('rejects an intermediate paths file listing a symlink outside the store', async () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
 		const target = path.join(directory, 'out');
 		const link = path.join(directory, 'intermediate');
@@ -652,64 +771,18 @@ describe('push command', () => {
 		writeFileSync(file, `${link}\n`);
 
 		try {
-			const result = await parsePush([
+			const run = await parsePush([
 				'https://cache.example.workers.dev/t/acme',
 				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 				'--intermediate-paths-file',
 				file
 			]);
 
-			expect(result).toBeInstanceOf(InvalidStorePathError);
-
-			if (!(result instanceof InvalidStorePathError)) {
-				return;
-			}
-
-			expect(result.storePath).toBe(realpathSync(target));
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
-		}
-	});
-
-	it('rejects a target that is not a store path before authenticating', async () => {
-		const result = await parsePush([
-			'https://cache.example.workers.dev/t/acme',
-			'./result'
-		]);
-
-		expect(result).toBeInstanceOf(InvalidStorePathError);
-
-		if (!(result instanceof InvalidStorePathError)) {
-			return;
-		}
-
-		expect(result.storePath).toBe('./result');
-	});
-
-	it('rejects an intermediate paths file naming a non-store path', async () => {
-		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
-		const file = path.join(directory, 'intermediates.txt');
-		writeFileSync(
-			file,
-			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\nnot-a-path\n'
-		);
-
-		try {
-			const result = await parsePush([
-				'https://cache.example.workers.dev/t/acme',
-				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-				'--closure',
-				'--intermediate-paths-file',
-				file
-			]);
-
-			expect(result).toBeInstanceOf(InvalidStorePathError);
-
-			if (!(result instanceof InvalidStorePathError)) {
-				return;
-			}
-
-			expect(result.storePath).toBe('not-a-path');
+			expect(run).toStrictEqual({
+				result: new InvalidStorePathError(realpathSync(target)),
+				tokenProviderRequests: [defaultCache],
+				openStoreCalls: 0
+			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}

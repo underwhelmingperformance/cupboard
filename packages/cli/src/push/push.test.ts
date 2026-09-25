@@ -1873,6 +1873,43 @@ describe('runPush', () => {
 		});
 	});
 
+	it.each([
+		{
+			name: 'a local entry',
+			paths: [appPath],
+			expected: {
+				opened: 1,
+				nixCalls: [{ method: 'queryValidPathsInfo', paths: [appPath] }]
+			}
+		},
+		{
+			name: 'no local entry',
+			paths: [],
+			expected: { opened: 0, nixCalls: [] }
+		}
+	])(
+		'calls openStore only when the publication has a local entry ($name)',
+		async ({ paths, expected }) => {
+			const nixCalls: NixCall[] = [];
+			let opened = 0;
+
+			await runPush(publication(paths), reporter([]), {
+				client: skipClient([], []),
+				root: rootName('main'),
+				openStore: () => {
+					opened += 1;
+
+					return nixStore(
+						{ [appPath]: pathInfo(appPath, appDigest, []) },
+						nixCalls
+					);
+				}
+			});
+
+			expect({ opened, nixCalls }).toStrictEqual(expected);
+		}
+	);
+
 	it('publishes the complete realised closure with --closure', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
