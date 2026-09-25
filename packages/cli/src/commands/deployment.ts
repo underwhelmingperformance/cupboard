@@ -1,10 +1,17 @@
 import {
+	type LocalStepSweep,
 	localStepWakeBodySchema,
+	type LocalStepWakeOutcomes,
 	type ParsedDeploymentTransitionsResponse
 } from '@cupboard/protocol/deployment';
-import { formatTimestamp, type Reporter } from '@cupboard/reporter';
+import {
+	formatTimestamp,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
 import { type Command, InvalidArgumentError } from 'commander';
 
+import { type Delay } from '../abort.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
@@ -24,7 +31,6 @@ function parseBatchLimit(value: string): number {
 
 interface ResumeOptions {
 	readonly limit: number;
-	readonly maxPasses: number;
 }
 
 export interface DeploymentClient {
@@ -34,13 +40,14 @@ export interface DeploymentClient {
 
 export interface DeploymentResumeOptions {
 	readonly limit: number;
-	readonly maxPasses: number;
 	readonly signal?: AbortSignal;
+	readonly delay?: Delay;
 }
 
 /**
  * Shows each recorded schema transition, the local step they require of every
- * active tenant now, and how many tenants have reached it.
+ * active tenant now, how many tenants have reached it, and how the sweep
+ * chain that advances the rest stands.
  */
 export async function runDeploymentStatus(
 	reporter: Reporter,
@@ -69,14 +76,62 @@ export async function runDeploymentStatus(
 			{
 				label: 'Pending sample',
 				value: status.stragglers.join(', ') || '(none)'
-			}
+			},
+			...sweepRows(status.sweep)
 		]
 	});
 }
 
+function sweepRows(sweep: LocalStepSweep): ResultRow[] {
+	if (sweep.state === 'idle') {
+		return sweep.last === undefined
+			? [{ label: 'Sweep chain', value: 'idle' }]
+			: [
+					{
+						label: 'Sweep chain',
+						value: `idle · last chain ${sweep.last.chain} ended at link ${String(sweep.last.link)} · ${formatTimestamp(sweep.last.updatedAt)}`
+					},
+					{ label: 'Last batch', value: describeBatch(sweep.last.outcomes) }
+				];
+	}
+
+	return [
+		{
+			label: 'Sweep chain',
+			value: `${sweep.state} · chain ${sweep.chain} at link ${String(sweep.link)} · ${formatTimestamp(sweep.updatedAt)} · next batch ${formatTimestamp(sweep.nextAt)}`
+		},
+		{ label: 'Last batch', value: describeBatch(sweep.outcomes) }
+	];
+}
+
+// Counts the batch by outcome and names the tenants that need repair.
+function describeBatch(outcomes: LocalStepWakeOutcomes): string {
+	if (outcomes.length === 0) {
+		return '(none)';
+	}
+
+	const counts = new Map<string, number>();
+	const repairs: string[] = [];
+
+	for (const outcome of outcomes) {
+		counts.set(outcome.kind, (counts.get(outcome.kind) ?? 0) + 1);
+
+		if (outcome.kind === 'unconfigured' || outcome.kind === 'failed') {
+			repairs.push(`${outcome.tenant} ${outcome.kind}`);
+		}
+	}
+
+	const summary = [...counts]
+		.map(([kind, count]) => `${String(count)} ${kind}`)
+		.join(', ');
+
+	return repairs.length === 0 ? summary : `${summary} · ${repairs.join(', ')}`;
+}
+
 /**
- * Advances bounded batches of tenants to the step the recorded transitions
- * require now, then reports whether the deployment can continue.
+ * Brings the tenants to the step the recorded transitions require now by
+ * observing the server's sweep chain, then reports whether the deployment can
+ * continue.
  */
 export async function runDeploymentResume(
 	reporter: Reporter,
@@ -87,8 +142,8 @@ export async function runDeploymentResume(
 	const status = await settleTenants(client.localStep, reporter, {
 		requiredStep: requiredLocalStep,
 		limit: options.limit,
-		maxPasses: options.maxPasses,
-		...(options.signal !== undefined && { signal: options.signal })
+		...(options.signal !== undefined && { signal: options.signal }),
+		...(options.delay !== undefined && { delay: options.delay })
 	});
 	reporter.result({
 		kind: 'deployment-readiness',
@@ -134,18 +189,12 @@ export function registerDeploymentCommands(
 	deployment
 		.command('resume')
 		.description(
-			'Advance bounded tenant batches, then report whether deployment can continue.'
+			'Wake the pending tenants and observe the sweep chain until they have reached the required local step, then report whether deployment can continue.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.option(
 			'--limit <number>',
-			'tenants attempted per batch (1–100)',
-			parseBatchLimit,
-			20
-		)
-		.option(
-			'--max-passes <number>',
-			'maximum batches in this command (1–100)',
+			'tenants attempted in the first batch (1–100)',
 			parseBatchLimit,
 			20
 		)
@@ -155,7 +204,6 @@ export function registerDeploymentCommands(
 				client(url),
 				{
 					limit: request.limit,
-					maxPasses: request.maxPasses,
 					...(options.signal !== undefined && { signal: options.signal })
 				}
 			);

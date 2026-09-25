@@ -1472,7 +1472,6 @@ async function deployFlow(
 				{
 					requiredStep,
 					limit: 20,
-					maxPasses: 100,
 					...(runtimeOptions.signal !== undefined && {
 						signal: runtimeOptions.signal
 					})

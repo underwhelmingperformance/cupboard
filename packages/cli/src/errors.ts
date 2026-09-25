@@ -1,3 +1,4 @@
+import { type LocalStepWakeOutcomes } from '@cupboard/protocol/deployment';
 import {
 	CodedError,
 	genericExitCode,
@@ -117,22 +118,51 @@ export class DeploymentPhaseUnsettledError extends CliError {
  * is thrown; the control Worker's sweep records the step for the tenants that
  * are behind, and running the deploy again then continues.
  */
+/**
+ * Every active tenant has to reach the required local step before the
+ * deployment continues, and the server-side sweep could not bring them there:
+ * its last batch advanced nobody, or its chain died more often than the
+ * settlement restarts it. The last batch's per-tenant outcomes, when the
+ * sweep reported any, say which tenants failed and why.
+ */
 export class LocalStepUnreachedError extends CliError {
 	constructor(
 		public readonly pending: number,
 		public readonly requiredStep: number,
-		public readonly stragglers: readonly string[]
+		public readonly stragglers: readonly string[],
+		public readonly outcomes: LocalStepWakeOutcomes = []
 	) {
 		const unnamed = pending - stragglers.length;
 		const named =
 			unnamed > 0
 				? `${stragglers.join(', ')} and ${String(unnamed)} more`
 				: stragglers.join(', ');
+		const lastBatch =
+			outcomes.length === 0
+				? ''
+				: ` The last batch: ${outcomes.map((outcome) => describeOutcome(outcome)).join(', ')}.`;
 
 		super(
-			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment cannot continue until they have. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
+			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}.${lastBatch} The deployment cannot continue until they have. The sweep keeps retrying them on the server; run cupboard deployment status <url> to inspect its progress. Repair any reported tenant failures, then re-run cupboard deploy or cupboard deployment resume <url>.`
 		);
 		this.name = 'LocalStepUnreachedError';
+	}
+}
+
+function describeOutcome(outcome: LocalStepWakeOutcomes[number]): string {
+	switch (outcome.kind) {
+		case 'recorded': {
+			return `${outcome.tenant} recorded step ${String(outcome.step)}`;
+		}
+
+		case 'advanced': {
+			return `${outcome.tenant} advanced (${String(outcome.projected)} projected)`;
+		}
+
+		case 'unconfigured':
+		case 'failed': {
+			return `${outcome.tenant} ${outcome.kind}`;
+		}
 	}
 }
 

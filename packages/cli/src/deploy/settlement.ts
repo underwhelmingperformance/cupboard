@@ -1,12 +1,14 @@
 import {
 	type LocalStep,
 	type LocalStepStatus,
+	localStepSweepPaceSeconds,
 	type LocalStepWakeBody,
+	type LocalStepWakeOutcomes,
 	type LocalStepWakeResponse
 } from '@cupboard/protocol/deployment';
 import type { Reporter } from '@cupboard/reporter';
 
-import { throwIfAborted } from '../abort.ts';
+import { type Delay, delayMs, throwIfAborted } from '../abort.ts';
 import { LocalStepUnreachedError } from '../errors.ts';
 
 export interface SettlementClient {
@@ -17,43 +19,98 @@ export interface SettlementClient {
 export interface SettlementOptions {
 	readonly requiredStep: LocalStep;
 	readonly limit: number;
-	readonly maxPasses: number;
 	readonly signal?: AbortSignal;
+	readonly delay?: Delay;
 }
 
 /**
-Advances bounded batches, stopping at the requested step or pass limit.
-*/
+ * How many times a chain whose lease expired with tenants still pending is
+ * started again before the settlement gives up.
+ */
+export const maxChainRestarts = 3;
+
+/**
+ * Brings every active tenant to the required step by observing the server's
+ * sweep chain. One wake runs the first batch and starts the chain, which
+ * keeps waking batches on its own; this then polls `localStep.status` at the
+ * chain's pace until nothing is pending. A chain that stalls, because a batch
+ * advanced nobody, fails the settlement naming the stragglers and that
+ * batch's outcomes, while the chain keeps retrying on the server. A chain
+ * that died, because its lease expired, is started again, at most
+ * `maxChainRestarts` times. There is no pass limit and no wall-clock timeout:
+ * the settlement waits while the chain makes progress and stops as soon as it
+ * cannot.
+ */
 export async function settleTenants(
 	client: SettlementClient,
 	reporter: Reporter,
 	options: SettlementOptions
 ): Promise<LocalStepStatus> {
 	const query = { requiredStep: options.requiredStep };
+	const reported = new Set<string>();
+	const report = (outcomes: LocalStepWakeOutcomes): void => {
+		reportOutcomes(outcomes, reporter, reported);
+	};
+	const wake = async (): Promise<void> => {
+		throwIfAborted(options.signal);
+		const woken = await client.wake({ limit: options.limit });
+		report(woken.outcomes);
+	};
+
 	throwIfAborted(options.signal);
 	let status = await client.status(query);
-	const reported = new Set<string>();
-	for (let pass = 0; status.pending > 0 && pass < options.maxPasses; pass++) {
-		throwIfAborted(options.signal);
-		const result = await reporter.phase('Advancing tenant migrations', () =>
-			client.wake({ limit: options.limit })
-		);
-		reportOutcomes(result.outcomes, reporter, reported);
-		status = await client.status(query);
+
+	if (status.pending === 0) {
+		return status;
 	}
-	throwIfAborted(options.signal);
-	if (status.pending > 0) {
-		throw new LocalStepUnreachedError(
-			status.pending,
-			options.requiredStep,
-			status.stragglers
-		);
+
+	return reporter.phase('Advancing tenant migrations', async () => {
+		await wake();
+		let restarts = 0;
+
+		for (;;) {
+			await delayMs(localStepSweepPaceSeconds * 1000, {
+				signal: options.signal,
+				delay: options.delay
+			});
+			throwIfAborted(options.signal);
+			status = await client.status(query);
+			const outcomes = lastOutcomes(status);
+			report(outcomes);
+
+			if (status.pending === 0) {
+				return status;
+			}
+
+			if (status.sweep.state === 'running') {
+				continue;
+			}
+
+			if (restarts === maxChainRestarts || status.sweep.state === 'stalled') {
+				throw new LocalStepUnreachedError(
+					status.pending,
+					options.requiredStep,
+					status.stragglers,
+					outcomes
+				);
+			}
+
+			restarts += 1;
+			await wake();
+		}
+	});
+}
+
+function lastOutcomes(status: LocalStepStatus): LocalStepWakeOutcomes {
+	if (status.sweep.state === 'idle') {
+		return status.sweep.last?.outcomes ?? [];
 	}
-	return status;
+
+	return status.sweep.outcomes;
 }
 
 function reportOutcomes(
-	outcomes: LocalStepWakeResponse['outcomes'],
+	outcomes: LocalStepWakeOutcomes,
 	reporter: Reporter,
 	reported: Set<string>
 ): void {
