@@ -1196,12 +1196,10 @@ jobs:
 
 async function quickstartWorkflow(): Promise<string> {
 	const guide = await readFile(
-		new URL('../../../../../docs/github-actions.md', import.meta.url),
+		new URL('../../../../../docs/ci/quickstart.md', import.meta.url),
 		'utf8'
 	);
-	const section = guide.slice(
-		guide.indexOf('### 4. Call the reusable workflow')
-	);
+	const section = guide.slice(guide.indexOf('## 4. Add the workflow'));
 	const block = /```yaml\n([\s\S]*?)```/u.exec(section)?.[1];
 
 	if (block === undefined) {

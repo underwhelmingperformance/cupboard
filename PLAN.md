@@ -4443,6 +4443,10 @@ workflow.
    where relevant: trust rules and claim matching, runner provenance, reuse-view
    read semantics and intermediate handling, and the release pipeline. The
    examples use one view name and one pull-request-number expression throughout.
+   The documentation is now organised by reader, as `docs/README.md` lists:
+   `docs/github-actions.md` became the pages under `docs/ci/`, runner provenance
+   is a section of `docs/security.md`, and the release pipeline is described in
+   `docs/contributing/releases.md`.
 
 ### The setup command
 

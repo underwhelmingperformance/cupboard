@@ -2,9 +2,8 @@
 
 # CLI reference
 
-This page is the `--help` output of every `cupboard` command. The
-[README](../../README.md) and the guides in [docs/](../) explain when to use
-each one.
+This page is the `--help` output of every `cupboard` command. The guides
+under [docs/](../README.md) explain when to use each one.
 
 - [`cupboard init`](#cupboard-init)
 - [`cupboard deployment`](#cupboard-deployment)

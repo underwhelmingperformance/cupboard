@@ -199,7 +199,7 @@ on:
           job evaluates the flake with the input SSH key and can request an OIDC
           token. If your repository has self-hosted runners, keep this on a
           GitHub-hosted label or restrict the job with runner groups. See
-          docs/runner-provenance.md.
+          docs/security.md#runners.
         required: false
         default: ubuntu-latest
         type: string
