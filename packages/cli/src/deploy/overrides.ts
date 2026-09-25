@@ -1,78 +1,100 @@
 import type { WorkersInvocationAllowance } from '@cupboard/protocol/platform';
 
-import type {
-	DeploymentConfig,
-	EditableResourceKind,
-	WorkerConfig
+import {
+	type DeploymentConfig,
+	type EditableResourceKind,
+	editableResourceKinds,
+	type WorkerConfig
 } from './config.ts';
 import type { OwnerBinding } from './owner.ts';
 
-function renameIn(value: string, from: string, to: string): string {
-	return value === from ? to : value;
-}
+type Rename = (name: string) => string;
 
-function renameBucketIn(
-	worker: WorkerConfig,
-	from: string,
-	to: string
-): WorkerConfig {
+function renameBucketIn(worker: WorkerConfig, rename: Rename): WorkerConfig {
 	return {
 		...worker,
 		r2Buckets: worker.r2Buckets.map((bucket) => ({
 			...bucket,
-			bucketName: renameIn(bucket.bucketName, from, to)
+			bucketName: rename(bucket.bucketName)
 		}))
 	};
 }
 
-function renameDatabaseIn(
-	worker: WorkerConfig,
-	from: string,
-	to: string
-): WorkerConfig {
+function renameDatabaseIn(worker: WorkerConfig, rename: Rename): WorkerConfig {
 	return {
 		...worker,
 		d1Databases: worker.d1Databases.map((database) => ({
 			...database,
-			databaseName: renameIn(database.databaseName, from, to)
+			databaseName: rename(database.databaseName)
 		}))
 	};
 }
 
-function renameQueueIn(
-	worker: WorkerConfig,
-	from: string,
-	to: string
-): WorkerConfig {
+function renameQueueIn(worker: WorkerConfig, rename: Rename): WorkerConfig {
 	return {
 		...worker,
 		queueProducers: worker.queueProducers.map((producer) => ({
 			...producer,
-			queue: renameIn(producer.queue, from, to)
+			queue: rename(producer.queue)
 		})),
 		queueConsumers: worker.queueConsumers.map((consumer) => ({
 			...consumer,
-			queue: renameIn(consumer.queue, from, to),
+			queue: rename(consumer.queue),
 			deadLetterQueue:
 				consumer.deadLetterQueue === undefined
 					? undefined
-					: renameIn(consumer.deadLetterQueue, from, to)
+					: rename(consumer.deadLetterQueue)
 		}))
 	};
 }
 
 const renamers: Record<
 	EditableResourceKind,
-	(worker: WorkerConfig, from: string, to: string) => WorkerConfig
+	(worker: WorkerConfig, rename: Rename) => WorkerConfig
 > = {
 	bucket: renameBucketIn,
 	database: renameDatabaseIn,
 	queue: renameQueueIn
 };
 
+type ResourceRenames = Partial<
+	Record<EditableResourceKind, ReadonlyMap<string, string>>
+>;
+
 /**
- * Renames a resource everywhere both Workers reference it, so bindings,
- * producers, consumers and dead-letter queues stay consistent. Names not
+ * Renames resources in every binding, producer, consumer and dead-letter queue
+ * of both Workers. For each kind,
+ * `renames` maps an old name to its new name. Each reference is looked up once
+ * against the old names, so a new name that equals another old name is not
+ * renamed again. Names without an entry are untouched.
+ */
+export function renameResources(
+	config: DeploymentConfig,
+	renames: ResourceRenames
+): DeploymentConfig {
+	let renamed = config;
+
+	for (const kind of editableResourceKinds) {
+		const names = renames[kind];
+
+		if (names === undefined) {
+			continue;
+		}
+
+		const renameWorker = renamers[kind];
+		const rename = (name: string): string => names.get(name) ?? name;
+
+		renamed = {
+			control: renameWorker(renamed.control, rename),
+			tenant: renameWorker(renamed.tenant, rename)
+		};
+	}
+
+	return renamed;
+}
+
+/**
+ * Renames one resource everywhere both Workers reference it. Names not
  * matching `from` are untouched.
  */
 export function renameResource(
@@ -81,12 +103,7 @@ export function renameResource(
 	from: string,
 	to: string
 ): DeploymentConfig {
-	const rename = renamers[kind];
-
-	return {
-		control: rename(config.control, from, to),
-		tenant: rename(config.tenant, from, to)
-	};
+	return renameResources(config, { [kind]: new Map([[from, to]]) });
 }
 
 export function withCrons(

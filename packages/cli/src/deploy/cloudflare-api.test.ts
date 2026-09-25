@@ -8,6 +8,11 @@ import {
 	maximumCloudflareCollectionPages,
 	QueueConsumerIdMissingError
 } from './cloudflare-api.ts';
+import { parseDeploymentConfig } from './config.ts';
+import {
+	DeadLetterQueueLoopError,
+	readExistingConfig
+} from './existing-deployment.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
@@ -789,6 +794,209 @@ describe('getScriptConfiguration', () => {
 			cacheEnabled: true,
 			crossVersionCache: true
 		});
+	});
+});
+
+describe('findD1DatabaseName', () => {
+	const databasePath = '/accounts/acc-1/d1/database/db-1';
+
+	it('returns the name of the database with the id', async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${databasePath}`]: { uuid: 'db-1', name: 'my-database' }
+		});
+
+		const name = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).findD1DatabaseName(databaseIdSchema.parse('db-1'));
+
+		expect(name).toBe('my-database');
+	});
+
+	it('returns undefined when Cloudflare reports the database as not found', async () => {
+		const { client } = fakeCloudflare({});
+
+		const name = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).findD1DatabaseName(databaseIdSchema.parse('db-1'));
+
+		expect(name).toBeUndefined();
+	});
+});
+
+describe('listSchedules', () => {
+	const schedulesPath = '/accounts/acc-1/workers/scripts/cupboard/schedules';
+
+	it('returns the cron triggers in the order that Cloudflare reports them', async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${schedulesPath}`]: {
+				schedules: [{ cron: '30 2 * * *' }, { cron: '0 * * * *' }]
+			}
+		});
+
+		const crons = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).listSchedules(scriptName('cupboard'));
+
+		expect(crons).toStrictEqual(['30 2 * * *', '0 * * * *']);
+	});
+
+	it('returns an empty list when Cloudflare reports the script as not found', async () => {
+		const { client } = fakeCloudflare({});
+
+		const crons = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).listSchedules(scriptName('cupboard'));
+
+		expect(crons).toStrictEqual([]);
+	});
+});
+
+describe('findConsumerDeadLetterQueue', () => {
+	const queuesPath = '/accounts/acc-1/queues';
+	const maintenanceQueue = {
+		queue_name: 'cupboard-maintenance',
+		queue_id: 'queue-1'
+	};
+
+	it('does not list consumers when no queue has the name', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${queuesPath}`]: [{ queue_name: 'other', queue_id: 'queue-2' }]
+		});
+
+		const deadLetterQueue = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).findConsumerDeadLetterQueue(
+			'cupboard-maintenance',
+			scriptName('cupboard')
+		);
+
+		expect({ deadLetterQueue, requests }).toStrictEqual({
+			deadLetterQueue: undefined,
+			requests: [{ method: 'GET', path: queuesPath }]
+		});
+	});
+
+	it.each<[string, readonly unknown[], string | undefined]>([
+		['returns undefined when the queue has no consumers', [], undefined],
+		[
+			'returns undefined when the only consumer belongs to another script',
+			[{ ...liveWorkerConsumer, script: 'other-worker' }],
+			undefined
+		],
+		[
+			"returns undefined when the script's consumer has no dead-letter queue",
+			[{ ...liveWorkerConsumer, dead_letter_queue: undefined }],
+			undefined
+		],
+		[
+			"returns undefined when the script's consumer reports an empty dead-letter queue",
+			[{ ...liveWorkerConsumer, dead_letter_queue: '' }],
+			undefined
+		],
+		[
+			"returns the dead-letter queue of the script's consumer",
+			[
+				{
+					...liveWorkerConsumer,
+					script: 'other-worker',
+					dead_letter_queue: 'x'
+				},
+				liveWorkerConsumer
+			],
+			'cupboard-maintenance-dlq'
+		]
+	])('%s', async (_name, consumers, expected) => {
+		const { client } = fakeCloudflare({
+			[`GET ${queuesPath}`]: [maintenanceQueue],
+			[`GET ${consumersPath}`]: consumers
+		});
+
+		const deadLetterQueue = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).findConsumerDeadLetterQueue(
+			'cupboard-maintenance',
+			scriptName('cupboard')
+		);
+
+		expect(deadLetterQueue).toBe(expected);
+	});
+});
+
+/**
+ * A fake Cloudflare account whose control Worker produces to `producerQueue`.
+ * The consumer of that queue reports an empty dead-letter queue name, which is
+ * how Cloudflare reports a consumer without a dead-letter queue.
+ */
+function existingDeployment(producerQueue: string): Cloudflare {
+	return fakeCloudflare({
+		'GET /accounts/acc-1/workers/scripts/cupboard/settings': {
+			bindings: [
+				{
+					type: 'queue',
+					name: 'MAINTENANCE_QUEUE',
+					queue_name: producerQueue
+				}
+			]
+		},
+		'GET /accounts/acc-1/queues': [
+			{ queue_name: producerQueue, queue_id: 'queue-1' }
+		],
+		[`GET ${consumersPath}`]: [
+			{ ...liveWorkerConsumer, dead_letter_queue: '' }
+		],
+		'GET /accounts/acc-1/workers/scripts/cupboard/schedules': {
+			schedules: [{ cron: '0 * * * *' }]
+		}
+	}).client;
+}
+
+describe('reading the existing deployment through the API', () => {
+	const defaults = parseDeploymentConfig(
+		`{
+			"name": "cupboard",
+			"compatibility_date": "2026-05-15",
+			"queues": {
+				"producers": [
+					{ "binding": "MAINTENANCE_QUEUE", "queue": "cupboard-maintenance" }
+				],
+				"consumers": [
+					{
+						"queue": "cupboard-maintenance",
+						"dead_letter_queue": "cupboard-maintenance-dlq"
+					}
+				]
+			},
+			"triggers": { "crons": ["0 * * * *"] }
+		}`,
+		`{ "name": "cupboard-tenant", "compatibility_date": "2026-05-15" }`
+	);
+
+	it('keeps the default dead-letter queue when the consumer reports an empty one', async () => {
+		const api = createCloudflareApi(
+			existingDeployment('cupboard-maintenance'),
+			accountId('acc-1')
+		);
+
+		await expect(readExistingConfig(api, defaults)).resolves.toStrictEqual(
+			defaults
+		);
+	});
+
+	it('rejects a plan that would make the maintenance queue its own dead-letter queue', async () => {
+		const api = createCloudflareApi(
+			existingDeployment('cupboard-maintenance-dlq'),
+			accountId('acc-1')
+		);
+
+		await expect(readExistingConfig(api, defaults)).rejects.toStrictEqual(
+			new DeadLetterQueueLoopError('cupboard-maintenance-dlq')
+		);
 	});
 });
 

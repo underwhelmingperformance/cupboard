@@ -356,6 +356,9 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			return Promise.resolve();
 		},
 		findD1Database: () => Promise.resolve(undefined),
+		findD1DatabaseName: () => Promise.resolve(undefined),
+		listSchedules: () => Promise.resolve([]),
+		findConsumerDeadLetterQueue: () => Promise.resolve(undefined),
 		ensureD1Database: () => {
 			recordApiCall(apiCalls, 'ensureD1Database');
 			return Promise.resolve(databaseIdSchema.parse('database-id'));

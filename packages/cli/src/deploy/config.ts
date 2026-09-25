@@ -142,6 +142,12 @@ const queueName = resourceName('queue name', 63);
  */
 export type EditableResourceKind = 'bucket' | 'database' | 'queue';
 
+export const editableResourceKinds: readonly EditableResourceKind[] = [
+	'bucket',
+	'database',
+	'queue'
+];
+
 const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
 	bucket: () => bucketName,
 	database: () => databaseName,

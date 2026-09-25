@@ -329,6 +329,10 @@ that deployed is the identity that administers.
       login presents exactly the triple the owner rule pins. `--headless` uses
       the RFC 8628 device flow (the OAuth client carries the device code grant
       type); a refused device authorization names the grant to enable.
+- [x] Deploys start from the existing deployment. The resource names come from
+      the control Worker's bindings and from its queue consumer's dead-letter
+      queue. The cron triggers come from the control Worker's schedules.
+      Accepting the plan therefore keeps the existing resources.
 - [x] Plans adapt to the account: the Free plan rejects the `limits` field, so
       uploads retry without CPU limits and warn; Cloudflare API errors end the
       deploy with the response's human-readable detail, exit code 1.
