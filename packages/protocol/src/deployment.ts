@@ -54,7 +54,8 @@ export const expansionLocalStep: LocalStep = localStep(4);
  */
 export const transitionIdSchema = z.enum([
 	'cache-identity',
-	'deployment-transitions'
+	'deployment-transitions',
+	'local-step-sweep'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -173,6 +174,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0031_deployment_transitions.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'local-step-sweep',
+		expand: ['0032_local_step_sweep.sql'],
+		contract: [],
+		independent: true
 	}
 ];
 
@@ -237,30 +244,7 @@ export const localStepStatusQuerySchema = z.strictObject({
 	requiredStep: localStepSchema.optional()
 });
 
-export const localStepStatusSchema = z.strictObject({
-	// The final step this build asks of every active tenant.
-	current: localStepSchema,
-	// The step the counts below are measured against: the query's
-	// `requiredStep`, or else the step the recorded transitions require now.
-	required: localStepSchema,
-	// Active tenants that have reported `required` or later.
-	ready: z.number().int().nonnegative(),
-	// Active tenants that have not, whether they reported an earlier step or
-	// have not reported since the column was added.
-	pending: z.number().int().nonnegative(),
-	// Up to `localStepStragglerSampleSize` of the pending tenants, in slug order.
-	stragglers: z.array(tenantIdSchema).max(localStepStragglerSampleSize)
-});
-export type ParsedLocalStepStatus = z.output<typeof localStepStatusSchema>;
-export type LocalStepStatus = z.input<typeof localStepStatusSchema>;
-
 export const localStepWakeMaxTenants = 100;
-
-export const localStepWakeBodySchema = z.strictObject({
-	limit: z.number().int().positive().max(localStepWakeMaxTenants)
-});
-export type ParsedLocalStepWakeBody = z.output<typeof localStepWakeBodySchema>;
-export type LocalStepWakeBody = z.input<typeof localStepWakeBodySchema>;
 
 // Waking a tenant is a request to its object, so a batch can partly fail. A
 // failed tenant stays in the straggler list and the next batch retries it.
@@ -280,11 +264,98 @@ export const localStepWakeOutcomeSchema = z.discriminatedUnion('kind', [
 ]);
 export type LocalStepWakeOutcome = z.infer<typeof localStepWakeOutcomeSchema>;
 
+export const localStepWakeOutcomesSchema = z
+	.array(localStepWakeOutcomeSchema)
+	.max(localStepWakeMaxTenants);
+export type LocalStepWakeOutcomes = z.input<typeof localStepWakeOutcomesSchema>;
+
+/**
+ * The delay between a sweep chain's batches while it makes progress, and the
+ * first delay after a batch that advances no tenant. The deploy polls
+ * `localStep.status` at this pace while it observes a chain.
+ */
+export const localStepSweepPaceSeconds = 10;
+
+export const localStepSweepChainIdSchema = z
+	.uuid()
+	.brand<'LocalStepSweepChainId'>();
+export type LocalStepSweepChainId = z.output<
+	typeof localStepSweepChainIdSchema
+>;
+
+/**
+ * The chain that last held the sweep lease and how far it got: its id, how
+ * many messages it handed on, when its row last changed, and the per-tenant
+ * outcomes of its last batch, so an observer can see which tenants failed
+ * and why without waking them itself.
+ */
+const localStepSweepChainSchema = z.strictObject({
+	chain: localStepSweepChainIdSchema,
+	link: z.number().int().nonnegative(),
+	updatedAt: isoTimestampSchema,
+	outcomes: localStepWakeOutcomesSchema
+});
+
+export const localStepSweepStateSchema = z.enum(['running', 'stalled', 'idle']);
+export type LocalStepSweepState = z.infer<typeof localStepSweepStateSchema>;
+
+/**
+ * How the server-side sweep chain stands. `running` while a chain holds the
+ * lease and its last batch advanced a tenant; `stalled` while it holds the
+ * lease and backs off after a batch that advanced nobody; `idle` when no chain
+ * holds the lease, whether none was started, the last one ended, or its lease
+ * expired because a message was lost. `nextAt` is when the chain's next batch
+ * is due: one pace after the last while running, or the backoff while stalled.
+ */
+export const localStepSweepSchema = z.discriminatedUnion('state', [
+	z.strictObject({
+		state: z.literal('idle'),
+		last: localStepSweepChainSchema.optional()
+	}),
+	z.strictObject({
+		state: z.literal('running'),
+		...localStepSweepChainSchema.shape,
+		nextAt: isoTimestampSchema
+	}),
+	z.strictObject({
+		state: z.literal('stalled'),
+		...localStepSweepChainSchema.shape,
+		nextAt: isoTimestampSchema
+	})
+]);
+export type ParsedLocalStepSweep = z.output<typeof localStepSweepSchema>;
+export type LocalStepSweep = z.input<typeof localStepSweepSchema>;
+
+export const localStepStatusSchema = z.strictObject({
+	// The final step this build asks of every active tenant.
+	current: localStepSchema,
+	// The step the counts below are measured against: the query's
+	// `requiredStep`, or else the step the recorded transitions require now.
+	required: localStepSchema,
+	// Active tenants that have reported `required` or later.
+	ready: z.number().int().nonnegative(),
+	// Active tenants that have not, whether they reported an earlier step or
+	// have not reported since the column was added.
+	pending: z.number().int().nonnegative(),
+	// Up to `localStepStragglerSampleSize` of the pending tenants, in slug order.
+	stragglers: z.array(tenantIdSchema).max(localStepStragglerSampleSize),
+	// The sweep chain that advances the pending tenants server-side.
+	sweep: localStepSweepSchema
+});
+export type ParsedLocalStepStatus = z.output<typeof localStepStatusSchema>;
+export type LocalStepStatus = z.input<typeof localStepStatusSchema>;
+
+export const localStepWakeBodySchema = z.strictObject({
+	limit: z.number().int().positive().max(localStepWakeMaxTenants)
+});
+export type ParsedLocalStepWakeBody = z.output<typeof localStepWakeBodySchema>;
+export type LocalStepWakeBody = z.input<typeof localStepWakeBodySchema>;
+
 export const localStepWakeResponseSchema = z.strictObject({
 	current: localStepSchema,
 	woken: z.number().int().nonnegative(),
 	failed: z.number().int().nonnegative(),
-	outcomes: z.array(localStepWakeOutcomeSchema).max(localStepWakeMaxTenants)
+	outcomes: localStepWakeOutcomesSchema
 });
 export type ParsedLocalStepWakeResponse = z.output<
 	typeof localStepWakeResponseSchema

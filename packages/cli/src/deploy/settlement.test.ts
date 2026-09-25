@@ -17,14 +17,16 @@ const pending: LocalStepStatus = {
 	required: expansionLocalStep,
 	ready: 0,
 	pending: 1,
-	stragglers: [tenant]
+	stragglers: [tenant],
+	sweep: { state: 'idle' }
 };
 const ready: LocalStepStatus = {
 	current: currentLocalStep,
 	required: expansionLocalStep,
 	ready: 1,
 	pending: 0,
-	stragglers: []
+	stragglers: [],
+	sweep: { state: 'idle' }
 };
 
 describe('tenant settlement', () => {

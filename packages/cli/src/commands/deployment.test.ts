@@ -42,7 +42,8 @@ function statusFor(required: number, pending: number): LocalStepStatus {
 		required,
 		ready: 1,
 		pending,
-		stragglers: pending > 0 ? [tenant] : []
+		stragglers: pending > 0 ? [tenant] : [],
+		sweep: { state: 'idle' }
 	};
 }
 

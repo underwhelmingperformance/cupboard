@@ -13,6 +13,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type {
 	LocalStep,
+	LocalStepSweepChainId,
 	TransitionId,
 	TransitionState
 } from '@cupboard/protocol/deployment';
@@ -557,4 +558,24 @@ export const tenantUsage = sqliteTable(
 export const localStepWakeCursor = sqliteTable('local_step_wake_cursor', {
 	id: integer('id').primaryKey(),
 	afterTenant: text('after_tenant').$type<TenantId>().notNull()
+});
+
+// Row 1 records the chain of local-step sweep messages that last held the
+// lease, so at most one chain continues at a time. `link` counts the messages
+// the chain has handed on; only the message carrying the current link may hand
+// on the next. `state` is `running` while the last batch advanced a tenant and
+// `stalled` while the chain backs off after one that advanced nobody. The
+// lease lasts until `expires_at`, which a chain that ends sets to the time it
+// ended; a new chain may claim the row once the lease has expired. `next_at`
+// is when the chain's next message is due, and `last_outcomes` is the last
+// batch's per-tenant outcomes as JSON, in the shape `localStep.wake` returns.
+export const localStepSweep = sqliteTable('local_step_sweep', {
+	id: integer('id').primaryKey(),
+	chain: text('chain').$type<LocalStepSweepChainId>().notNull(),
+	link: integer('link').notNull(),
+	state: text('state').$type<'running' | 'stalled'>().notNull(),
+	expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+	nextAt: text('next_at').$type<IsoTimestamp>(),
+	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+	lastOutcomes: text('last_outcomes').notNull()
 });

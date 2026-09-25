@@ -908,6 +908,22 @@ export class StoredDeploymentTransitionInvalidError extends ServerHttpError {
 	}
 }
 
+/**
+ * The local-step sweep row records its last batch's outcomes in a shape this
+ * server version does not know, which a rollback past a release that added an
+ * outcome kind leaves behind.
+ */
+export class StoredLocalStepSweepOutcomesInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public override readonly cause: unknown) {
+		super(
+			'The local-step sweep records its last outcomes in a shape this server version does not know'
+		);
+		this.name = 'StoredLocalStepSweepOutcomesInvalidError';
+	}
+}
+
 export class StoredReuseViewSelectorInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

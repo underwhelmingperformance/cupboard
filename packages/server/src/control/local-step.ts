@@ -18,6 +18,8 @@ import { readRecordedTransitions } from '../db/deployment-transitions.ts';
 import { belowLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
+import { readLocalStepSweep } from './local-step-sweep.ts';
+
 type Database = DrizzleD1Database<typeof d1Schema>;
 
 // Wake several objects at once without opening enough subrequests to exhaust
@@ -49,8 +51,9 @@ export async function requiredLocalStep(env: Env): Promise<LocalStep> {
 
 /**
  * Reports how many active or suspended tenants have reached the required step,
- * and lists some of those that have not. The step is the caller's, or else the
- * one the recorded transitions require now.
+ * lists some of those that have not, and describes the sweep chain that
+ * advances them. The step is the caller's, or else the one the recorded
+ * transitions require now.
  */
 export async function controlLocalStepStatus(
 	env: Env,
@@ -75,8 +78,20 @@ export async function controlLocalStepStatus(
 		required,
 		ready,
 		pending,
-		stragglers: stragglers.map(({ id }) => id)
+		stragglers: stragglers.map(({ id }) => id),
+		sweep: await readLocalStepSweep(database, new Date())
 	};
+}
+
+/**
+ * Counts the active or suspended tenants that have not reached the required
+ * step, so a sweep can tell whether more remain.
+ */
+export async function controlLocalStepPending(env: Env): Promise<number> {
+	return countTenants(
+		controlDatabase(env),
+		stragglerFilter(await requiredLocalStep(env))
+	);
 }
 
 /**

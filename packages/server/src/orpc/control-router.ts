@@ -26,10 +26,8 @@ import {
 	controlTenantSuspend
 } from '../control/control-plane.ts';
 import { controlDeploymentTransitions } from '../control/deployment-transitions.ts';
-import {
-	controlLocalStepStatus,
-	controlLocalStepWake
-} from '../control/local-step.ts';
+import { controlLocalStepStatus } from '../control/local-step.ts';
+import { wakeLocalStepsAndContinue } from '../routing/local-step-sweep.ts';
 
 import { authoriseRequest, noPendingCache } from './authorise.ts';
 import { bridgedError } from './error-bridge.ts';
@@ -156,7 +154,7 @@ export const controlRouter = os.router({
 			controlLocalStepStatus(context.env, input.requiredStep)
 		),
 		wake: os.localStep.wake.handler(({ input, context }) =>
-			controlLocalStepWake(context.logger, context.env, input.limit)
+			wakeLocalStepsAndContinue(context.logger, context.env, input.limit)
 		)
 	},
 	oidcTrust: {

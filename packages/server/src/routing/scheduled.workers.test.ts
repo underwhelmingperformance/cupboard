@@ -1,13 +1,21 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
-import { currentLocalStep } from '@cupboard/protocol/deployment';
+import {
+	currentLocalStep,
+	localStepSweepChainIdSchema,
+	localStepSweepPaceSeconds
+} from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+	claimLocalStepSweep,
+	readLocalStepSweep
+} from '../control/local-step-sweep.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -137,8 +145,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-reaper' },
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
-				{ kind: 'control-key-retirement' },
-				{ kind: 'local-step-sweep' }
+				{ kind: 'control-key-retirement' }
 			],
 			sent: [
 				[
@@ -149,8 +156,7 @@ describe('scheduled tenant pass failure records', () => {
 					{ kind: 'cas-reaper' },
 					{ kind: 'blob-demote' },
 					{ kind: 'cas-demote' },
-					{ kind: 'control-key-retirement' },
-					{ kind: 'local-step-sweep' }
+					{ kind: 'control-key-retirement' }
 				]
 			],
 			acmeOutcome: undefined,
@@ -305,7 +311,10 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('scheduled entrypoint enqueues bounded maintenance jobs', async () => {
+	// The tick starts a local-step sweep chain when tenants are pending and no
+	// chain holds the lease; a running chain drives itself, so the hourly plan
+	// carries no sweep message.
+	it('scheduled entrypoint enqueues bounded maintenance jobs and starts a sweep chain', async () => {
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('current');
 		await provisionNamedTenant('retiring');
@@ -322,9 +331,29 @@ describe('scheduled tenant pass failure records', () => {
 				MAINTENANCE_QUEUE: queueCollector(sent)
 			})
 		);
+		const sweep = await readLocalStepSweep(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			new Date('2026-01-01T00:00:00.000Z')
+		);
+		// The chain's id is random; the messages and the row are compared with it
+		// projected away.
+		const sweepMessages = sent.flatMap((message) =>
+			message.kind === 'local-step-sweep' ? [message.chain.link] : []
+		);
 
 		expect({
-			sent,
+			sent: sent.filter((message) => message.kind !== 'local-step-sweep'),
+			sweepMessages,
+			sweep:
+				sweep.state === 'running'
+					? {
+							state: sweep.state,
+							link: sweep.link,
+							updatedAt: sweep.updatedAt,
+							nextAt: sweep.nextAt,
+							outcomes: sweep.outcomes
+						}
+					: sweep,
 			acmeOutcome: await tenantMaintenanceFailureRow('acme', 'maintenance'),
 			retiringOutcome: await tenantMaintenanceFailureRow('retiring', 'offboard')
 		}).toStrictEqual({
@@ -335,21 +364,42 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-reaper' },
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
-				{ kind: 'control-key-retirement' },
-				{ kind: 'local-step-sweep' }
+				{ kind: 'control-key-retirement' }
 			],
+			sweepMessages: [0],
+			sweep: {
+				state: 'running',
+				link: 0,
+				updatedAt: '2026-01-01T00:00:00.000Z',
+				nextAt: `2026-01-01T00:00:${String(localStepSweepPaceSeconds)}.000Z`,
+				outcomes: []
+			},
 			acmeOutcome: undefined,
 			retiringOutcome: undefined
 		});
 	});
 
-	it('brings every tenant to the current local step from the queue', async () => {
+	it('brings every tenant to the current local step from a chained message', async () => {
 		await recordTransition('cache-identity', 'complete');
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
+		const chain = localStepSweepChainIdSchema.parse(
+			'00000000-0000-4000-8000-00000000000a'
+		);
+		await claimLocalStepSweep(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			chain,
+			{
+				state: 'running',
+				delaySeconds: localStepSweepPaceSeconds,
+				outcomes: []
+			},
+			new Date()
+		);
 
 		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'local-step-sweep'
+			kind: 'local-step-sweep',
+			chain: { chain, link: 0 }
 		});
 
 		expect({
@@ -662,6 +712,45 @@ describe('scheduled tenant pass failure records', () => {
 						delaySeconds: 60,
 						kind: 'blob-demote',
 						reason: 'Error: kv unavailable'
+					}
+				]
+			]
+		});
+	});
+
+	it('accepts a chained local-step sweep and drops one whose chain has ended', async () => {
+		const actions: QueueMessageAction[] = [];
+		const chain = {
+			chain: '00000000-0000-4000-8000-00000000000a',
+			link: 3
+		};
+		const batch = queueBatch(
+			[queueMessage('chained', { kind: 'local-step-sweep', chain }, actions)],
+			actions
+		);
+		const capture = startCapture();
+
+		try {
+			await worker.queue(batch, env);
+		} finally {
+			capture.stop();
+		}
+		const logged = capture.logs
+			.filter((entry) => entry.level !== 'debug')
+			.map((entry) => [entry.level, entry.message, entry.properties]);
+
+		expect({ actions, logged }).toStrictEqual({
+			actions: [{ target: 'message', id: 'chained', action: 'ack' }],
+			logged: [
+				[
+					'info',
+					'local step sweep superseded',
+					{
+						worker: 'scheduled',
+						queue: 'cupboard-maintenance',
+						messageId: 'chained',
+						attempts: 1,
+						...chain
 					}
 				]
 			]

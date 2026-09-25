@@ -3,6 +3,7 @@ import {
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
+	type ParsedLocalStepStatus,
 	type ParsedLocalStepWakeResponse
 } from '@cupboard/protocol/deployment';
 import { StatusCodes } from 'http-status-codes';
@@ -88,6 +89,20 @@ async function wakeUntilStep(
 	throw new Error(
 		`Tenant migration did not reach local step ${String(requiredStep)}`
 	);
+}
+
+/**
+ * The status without the sweep. These tests drive the wakes themselves, and
+ * each wake starts a server-side sweep chain whose messages the harness's
+ * producer-only queue never delivers, so the sweep's state is an artefact of
+ * the harness rather than something the upgrade asserts.
+ */
+function withoutSweep(
+	status: ParsedLocalStepStatus
+): Omit<ParsedLocalStepStatus, 'sweep'> {
+	const { sweep: _sweep, ...rest } = status;
+
+	return rest;
 }
 
 function phaseApi(server: StagedDeploymentServer): PhaseApi {
@@ -176,7 +191,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			expanded,
 			wake,
 			contractionWake,
-			status: await client.localStepStatus(),
+			status: withoutSweep(await client.localStepStatus()),
 			recorded: await client.transitions(),
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
@@ -274,7 +289,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 
 		// Before the wake, every active or suspended tenant is behind: none has
 		// run since the deploy, so none has recorded a step.
-		const before = await client.localStepStatus();
+		const before = withoutSweep(await client.localStepStatus());
 
 		await wakeUntilStep(server, client, expansionLocalStep);
 		await contractOverPredecessor(server);
@@ -285,7 +300,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 		// the same step as the tenant that was never behind.
 		expect({
 			before,
-			after: await client.localStepStatus()
+			after: withoutSweep(await client.localStepStatus())
 		}).toStrictEqual({
 			before: {
 				current: currentLocalStep,

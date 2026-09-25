@@ -30,7 +30,7 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
-import { loggerMiddleware } from '../observability/logging.ts';
+import { loggerMiddleware, rootLogger } from '../observability/logging.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
@@ -40,6 +40,7 @@ import {
 } from './chunked-availability.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
+import { restartLocalStepSweep } from './local-step-sweep.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
 import { readApp } from './read-app.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
@@ -335,9 +336,19 @@ export default {
 
 	async scheduled(_controller, env) {
 		// Enqueue bounded jobs so execution failures retry per message rather than
-		// repeating the whole cron plan.
+		// repeating the whole cron plan. The local-step sweep is not one of them:
+		// a chain of sweep messages drives itself, and the tick only starts one
+		// when tenants are pending and no chain holds the lease.
 		await withSubrequestSlice(
-			() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+			async () => {
+				const bounded = boundedWorkerEnv(env);
+
+				await enqueueMaintenanceJobs(bounded);
+				await restartLocalStepSweep(
+					rootLogger().with({ worker: 'scheduled' }),
+					bounded
+				);
+			},
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	},

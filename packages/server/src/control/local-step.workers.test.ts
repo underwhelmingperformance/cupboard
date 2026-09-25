@@ -96,7 +96,8 @@ describe('local step', () => {
 			required: expansionLocalStep,
 			ready: 0,
 			pending: 1,
-			stragglers: [tenant('step-unreported')]
+			stragglers: [tenant('step-unreported')],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -123,7 +124,8 @@ describe('local step', () => {
 			required: currentLocalStep,
 			ready: 2,
 			pending: 0,
-			stragglers: []
+			stragglers: [],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -156,7 +158,8 @@ describe('local step', () => {
 				required: expansionLocalStep,
 				ready: 1,
 				pending: 0,
-				stragglers: []
+				stragglers: [],
+				sweep: { state: 'idle' }
 			},
 			second: { current: currentLocalStep, woken: 0, failed: 0, outcomes: [] }
 		});
@@ -173,7 +176,8 @@ describe('local step', () => {
 			required: currentLocalStep,
 			ready: 0,
 			pending: 1,
-			stragglers: [tenant('step-asked')]
+			stragglers: [tenant('step-asked')],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -240,7 +244,8 @@ describe('local step', () => {
 				required: currentLocalStep,
 				ready: 0,
 				pending: 1,
-				stragglers: [tenant('step-suspended')]
+				stragglers: [tenant('step-suspended')],
+				sweep: { state: 'idle' }
 			},
 			result: {
 				current: currentLocalStep,
@@ -259,7 +264,8 @@ describe('local step', () => {
 				required: currentLocalStep,
 				ready: 1,
 				pending: 0,
-				stragglers: []
+				stragglers: [],
+				sweep: { state: 'idle' }
 			}
 		});
 	});
@@ -286,7 +292,8 @@ describe('local step', () => {
 			required: currentLocalStep,
 			ready: 1,
 			pending: 1,
-			stragglers: [tenant('step-batch-b')]
+			stragglers: [tenant('step-batch-b')],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -305,7 +312,8 @@ describe('local step', () => {
 			required: expansionLocalStep,
 			ready: 1,
 			pending: 0,
-			stragglers: []
+			stragglers: [],
+			sweep: { state: 'idle' }
 		});
 	});
 
