@@ -610,7 +610,7 @@ jobs:
     runs-on: ${{ matrix.runsOn }}
     timeout-minutes: 180
     permissions:
-      attestations: write # record build provenance on the repository
+      attestations: write # allow the attest action to upload bundles to the repository's attestation store
       contents: read # check out the flake source
       id-token: write # OIDC token for the partition, roots.ensure and the push
     steps:

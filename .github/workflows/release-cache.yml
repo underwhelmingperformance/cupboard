@@ -36,7 +36,7 @@ jobs:
           - system: aarch64-darwin
             runner: macos-15
     permissions:
-      attestations: write # record the build provenance on the repository
+      attestations: write # allow the attest action to upload bundles to the repository's attestation store
       contents: read # check out the flake source
       id-token: write # OIDC token for the cache push and Sigstore signing
     # The @main reference is load-bearing: the tenant's trust rule pins the

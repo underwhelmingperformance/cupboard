@@ -581,9 +581,13 @@ run built. Those are the subjects of the build-provenance bundles.
 `checksums-file` and `subject-count` describe every accepted receipt subject.
 For a version 3 receipt, those are the subjects of the build-origin bundles.
 
-`id-token: write` lets the action obtain its Sigstore signing certificate, and
-`attestations: write` records the attestations on the repository so
-`gh attestation verify` can find them.
+`id-token: write` lets the action obtain its Sigstore signing certificate.
+`attestations: write` allows the action to upload bundles to the repository's
+attestation store, where `gh attestation verify` can find them. Whether it
+uploads them depends on `upload-to-github`; see [Attesting to a private
+cache][private-attestation] for how the action derives that input's default.
+
+[private-attestation]: #attesting-to-a-private-cache
 
 The signing command can retry transient service failures. A workflow cannot
 retry a `uses:` step. Neither `actions/attest-build-provenance` nor
@@ -595,8 +599,8 @@ when the OIDC token cannot be read or decoded, or when Fulcio refuses to issue
 the certificate. If all attempts fail, the step fails and does not attach a
 bundle. Publication has already completed at this point.
 
-The two bundles make different claims over different subjects. The SLSA
-build-provenance bundle covers paths built by the workflow. It records the
+The two kinds of bundle make different claims over different subjects. SLSA
+build-provenance bundles cover paths built by the workflow. They record the
 repository, commit, workflow file and runner.
 
 Only a version 3 receipt from `build-cohort` produces build-origin bundles. They
@@ -657,11 +661,12 @@ the workflow leaves them unset. A public destination gets `sigstore-default`,
 the private defaults, because publication cannot be undone.
 
 Those defaults prevent automatic publication and keep each bundle to one
-subject; they do not make the bundle non-disclosing. Every subject digest in
-either bundle is the destination's NAR hash for that path. Publishing that
-digest does not bypass cache authorisation, so a reader with only the digest
-cannot fetch the NAR through that cache. The digest still discloses that the
-path exists and identifies its contents to anyone holding a copy from elsewhere.
+subject; they do not make the bundle non-disclosing. Every subject digest in a
+bundle of either kind is the destination's NAR hash for that path. Publishing
+that digest does not bypass cache authorisation, so a reader with only the
+digest cannot fetch the NAR through that cache. The digest still discloses that
+the path exists and identifies its contents to anyone holding a copy from
+elsewhere.
 
 `tsa-only` requires at least one RFC 3161 timestamp and forbids a Rekor entry.
 `rekor-and-tsa` requires at least one of each. The action constructs a Sigstore
