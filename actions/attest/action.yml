@@ -40,7 +40,9 @@ inputs:
     description: Basic-auth password for the destination cache.
     required: false
   github-token:
-    description: GitHub token used to record the attestations on the repository.
+    description:
+      GitHub token that the action uses to upload bundles to the repository's
+      attestation store when upload-to-github is true.
     required: false
   signing-profile:
     description:
