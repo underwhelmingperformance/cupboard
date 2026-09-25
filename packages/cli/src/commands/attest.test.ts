@@ -41,6 +41,10 @@ function thrownBy(run: () => unknown): unknown {
 }
 
 describe('parseVerifierThreshold', () => {
+	it('accepts 0 when the minimum is 0', () => {
+		expect(parseVerifierThreshold('--tlog-threshold', 0)('0')).toBe(0);
+	});
+
 	it.each([
 		{ source: '1', expected: 1 },
 		{

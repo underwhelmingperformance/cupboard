@@ -60,9 +60,12 @@ interface VerifyOptions {
 export class InvalidVerifierThresholdError extends CliUsageError {
 	constructor(
 		public readonly option: string,
-		public readonly value: string
+		public readonly value: string,
+		minimum: number
 	) {
-		super(`Invalid ${option} (expected a positive integer): ${value}`);
+		super(
+			`Invalid ${option} (expected a whole number of at least ${String(minimum)}): ${value}`
+		);
 		this.name = 'InvalidVerifierThresholdError';
 	}
 }
@@ -74,19 +77,16 @@ export class AttestVerifyModeError extends CliUsageError {
 	}
 }
 
-export function parseVerifierThreshold(option: string) {
+export function parseVerifierThreshold(option: string, minimum = 1) {
 	return (value: string): number => {
 		if (!/^\d+$/.test(value)) {
-			throw new InvalidVerifierThresholdError(option, value);
+			throw new InvalidVerifierThresholdError(option, value, minimum);
 		}
 
 		const parsed = Number(value);
 
-		// A threshold of zero would tell the Sigstore verifier to require no
-		// transparency-log, certificate-transparency or timestamp entries, which
-		// silently disables that part of verification.
-		if (!Number.isSafeInteger(parsed) || parsed < 1) {
-			throw new InvalidVerifierThresholdError(option, value);
+		if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+			throw new InvalidVerifierThresholdError(option, value, minimum);
 		}
 
 		return parsed;
@@ -269,7 +269,10 @@ export function registerAttestCommands(
 		.option(
 			'--tlog-threshold <count>',
 			"Require this many Rekor transparency-log entries. Defaults to the Sigstore verifier policy, which requires one; pass 0 for a bundle signed with GitHub's Sigstore instance, which creates no Rekor entry.",
-			parseVerifierThreshold('--tlog-threshold')
+			// Bundles signed without Rekor need a threshold of 0 here. They still
+			// need a signed timestamp, because --timestamp-threshold can't go below
+			// 1, so the signing time stays verified.
+			parseVerifierThreshold('--tlog-threshold', 0)
 		)
 		.option(
 			'--ctlog-threshold <count>',
