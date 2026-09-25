@@ -6233,6 +6233,61 @@ published intermediates and their storage cost.
   retry systems do not mistake a cache failure for a build failure or vice
   versa.
 
+## Schema transitions
+
+The deploy used to apply D1 migrations in two fixed stages, every "preparation"
+migration before the Workers were uploaded and the listed contractions after
+both Workers served the new build, with one global `deployment_phase` row whose
+names belonged to the cache-identity change alone. That left no room for a
+second transition: a deployment on v0.0.33 has the whole cache-identity
+transition pending, and one deploy could not apply a migration numbered after
+that contraction before the upload without breaking journal order.
+
+### The model
+
+- A schema transition is explicit data in `schemaTransitions`
+  (`@cupboard/protocol/deployment`): its expand migrations, its contract
+  migrations, the local step every active tenant must reach before the contract,
+  whether its expand is independent of earlier contracts, and the earliest
+  release that completes it. Every migration belongs to exactly one transition,
+  and the concatenation in list order is the journal.
+- `deployment_transition (id, state, updated_at)` records `expanded` or
+  `complete` per transition. The table is deploy-owned
+  (`CREATE TABLE IF NOT EXISTS` before the walk, and migration `0031` creates it
+  for fresh databases); reading reconciles from the preceding release's
+  `deployment_phase` row, which the deploy keeps writing for `cache-identity`
+  for one release.
+- The deploy walks the transitions in order within one run
+  (`packages/cli/src/deploy/transitions.ts`, pure over the D1 query surface and
+  hooks so the upgrade tests drive the same code): before the upload, expand
+  each transition whose earlier transitions are complete or which is
+  independent; after the upload, once both Workers serve the build, settle the
+  tenants to each pending transition's step, contract, and record complete. A
+  fresh database gets everything before the upload.
+- The Workers gate on a transition being complete (`TransitionGate`,
+  `hasReached('cache-identity', 'complete')`), and the required local step is
+  the settle step of the first incomplete transition that has one, so a
+  settlement to step 4 can finish before the contraction it waits on.
+- `pnpm check:migrations` fails when the files, the journal and the transitions
+  disagree, when a contract sorts before its expand, and when an independent
+  expand does not apply ahead of the earlier contracts.
+
+### Progress
+
+- [x] Transitions as protocol data, the deploy walk, the `TransitionGate`,
+      `requiredLocalStep`, `deployment.transitions`, `required` in
+      `localStep.status`, and the migration checks.
+- [ ] Rebuild the local-step continuation chain (#407) on this: the sweep row
+      with exponential backoff, the `sweep` object in `localStep.status`, the
+      deploy as an observer of the chain, and the cron as the restart of a dead
+      chain. Its lease table becomes migration `0032` in an independent
+      transition.
+- [ ] Put the transition records behind the control plane
+      (`PUT /deployment/transitions/{id}`), so the deploy's direct D1 writes are
+      migrations only.
+- [ ] Drop `deployment_phase` as a later transition's contract, once no
+      supported rollback target reads it.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.
