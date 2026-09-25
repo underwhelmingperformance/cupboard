@@ -205,8 +205,8 @@ type FetchLike = (url: string) => Promise<Response>;
 const maximumPublishedKeyBytes = 64 * 1024;
 
 /**
- * Every key the release cache publishes at `/pubkey`. During a key rotation the
- * endpoint lists several, and a client must trust them all.
+ * Fetches every key the release cache publishes at `/pubkey`. During a key
+ * rotation there are several, and a client must trust all of them.
  */
 export async function fetchCachePublicKeys(
 	baseUrl: URL,
@@ -242,8 +242,8 @@ export function substituterSection(options: {
 		// A substituter is matched by exact string, so the URL is rendered in its
 		// one canonical form.
 		`extra-substituters = ${canonicalHref(cacheUrl(options.baseUrl, { kind: 'named', name: releaseCacheName }))}`,
-		// `trusted-public-keys` is one space-separated line, so every published
-		// key, including both keys of a rotation, belongs on it.
+		// Nix reads `trusted-public-keys` as one space-separated line, so put
+		// every published key on it, including both keys during a rotation.
 		`extra-trusted-public-keys = ${options.publicKeys.join(' ')}`,
 		'```'
 	].join('\n');

@@ -1,101 +1,104 @@
 name: Attest cupboard store paths
 description:
-  Produce Sigstore bundles for the accepted subjects in a current-run build
-  receipt. GitHub's SLSA build-provenance attestations cover paths built by this
-  run. Cupboard build-origin attestations cover every accepted subject and
-  record its origin. Before signing, the action checks each NAR hash and any
-  recorded deriver against the narinfos committed at the destination.
+  Signs Sigstore attestations for the paths in a build receipt. SLSA build
+  provenance covers the paths that the job built. Build origin covers every path
+  in the receipt and records how each one became available. Before signing, the
+  action checks each path's NAR hash, and any deriver in the receipt, against
+  the narinfo in the destination cache.
 inputs:
   receipt-file:
-    description: Current-run receipt produced by a cupboard build action.
+    description:
+      Receipt written earlier in the job by actions/build-paths or by a cohort
+      build in the flake publish workflow.
     required: true
   checksums-file:
     description:
-      Where to write checksums for all accepted receipt subjects. Defaults to a
-      runner-local path under RUNNER_TEMP.
+      Where to write the checksums of every path to attest. Defaults to a file
+      under RUNNER_TEMP.
     required: false
   built-checksums-file:
     description:
-      Where to write checksums for accepted subjects built by this run. The
-      build-provenance attestations cover those subjects. Defaults to a file
-      beside the checksums file.
+      Where to write the checksums of the paths that the job built. The
+      build-provenance attestations cover these paths. Defaults to a file next
+      to the checksums file.
     required: false
   predicate-file:
     description:
-      Where to write the build-origin predicate. Defaults to a file beside the
+      Where to write the build-origin predicate. Defaults to a file next to the
       checksums file.
     required: false
   url:
     description:
-      Destination cupboard tenant URL. The action checks every subject against
-      this tenant's committed narinfos before signing.
+      Tenant URL of the destination. Before signing, the action checks every
+      path against the narinfo in this tenant's cache.
     required: true
   cache:
     description: Named destination cache. Leave empty to use the default cache.
     required: false
   read-user:
-    description: Basic-auth username for the destination cache.
+    description: User name of a read credential for a private destination cache.
     required: false
   read-password:
-    description: Basic-auth password for the destination cache.
+    description: Password of a read credential for a private destination cache.
     required: false
   github-token:
-    description: GitHub token used to record the attestations on the repository.
+    description:
+      GitHub token for uploading the bundles to the repository's attestation
+      store. Defaults to the job's token.
     required: false
   signing-profile:
     description:
-      Select the evidence in each signed bundle. sigstore-default selects the
-      Sigstore instance according to the repository's visibility. tsa-only and
-      rekor-and-tsa use a Sigstore client in the public-good trust domain.
-      tsa-only adds an RFC 3161 timestamp and no Rekor entry; rekor-and-tsa adds
-      both. Defaults to tsa-only when the destination cache requires
-      authentication, and to sigstore-default otherwise.
+      How to sign each bundle. sigstore-default uses the Sigstore instance that
+      GitHub chooses for the repository. tsa-only signs with the public-good
+      Sigstore instance and adds an RFC 3161 timestamp, without a Rekor entry.
+      rekor-and-tsa signs with the public-good instance and adds both a
+      timestamp and a Rekor entry. Defaults to tsa-only for a private
+      destination cache, and to sigstore-default for a public one.
     required: false
   upload-to-github:
     description:
-      When true, record each bundle in the repository's attestation store.
-      Anyone who can read the repository can then read the bundle. Each in-toto
-      subject digest is a NAR hash. Because the attestation store is
-      append-only, publishing a bundle permanently reveals that each subject
-      path exists. A reader with a matching copy can also identify its contents.
-      Defaults to false when the destination cache requires authentication, and
-      to true otherwise.
+      When true, also store each bundle in the repository's attestation store on
+      GitHub, where anyone who can read the repository can read it. A bundle's
+      subjects are NAR hashes, and the attestation store is append-only.
+      Uploading a bundle therefore permanently reveals that each of its paths
+      exists, and anyone with a copy of a path can recognise it. Defaults to
+      false for a private destination cache, and to true for a public one.
     required: false
   subject-grouping:
     description:
-      Select how many subjects each statement covers. run signs one statement
-      for the whole run, so each bundle contains every subject. individual signs
-      a separate statement for each subject, so each bundle contains one
-      subject. Individual statements do not attest to the complete run. Defaults
-      to individual when the destination cache requires authentication, and to
-      run otherwise.
+      How many paths each attestation covers. With run, one attestation covers
+      the job's paths, so each bundle lists all of them. With individual, each
+      path gets its own attestation and bundle, and no attestation covers the
+      whole run. Defaults to individual for a private destination cache, and to
+      run for a public one.
     required: false
 outputs:
   bundle-path:
     description:
-      Paths to the generated SLSA build-provenance bundles, one per line. Empty
-      when this run built no accepted subject.
+      Paths of the build-provenance bundles, one per line. Empty when the job
+      built none of the paths in the receipt.
     value: ${{ steps.attest.outputs.bundle-path }}
   origin-bundle-path:
     description:
-      Paths to the generated build-origin bundles, one per line. Empty for a
-      version 2 receipt or when no accepted subject has a recorded origin.
+      Paths of the build-origin bundles, one per line. Empty for a receipt from
+      actions/build-paths, which does not record origins, or when no path in the
+      receipt has a recorded origin.
     value: ${{ steps.attest.outputs.origin-bundle-path }}
   checksums-file:
     description:
-      Path to the checksums for all accepted receipt subjects. The build-origin
-      attestations cover those subjects.
+      Path to the checksums of every attested path. The build-origin
+      attestations cover these paths.
     value: ${{ steps.subjects.outputs.checksums-file }}
   subject-count:
-    description: Number of accepted attestation subjects.
+    description: Number of attested paths.
     value: ${{ steps.subjects.outputs.subject-count }}
   built-checksums-file:
     description:
-      Path to the checksums for accepted subjects built by this run. The
-      build-provenance attestations cover those subjects.
+      Path to the checksums of the attested paths that the job built. The
+      build-provenance attestations cover these paths.
     value: ${{ steps.subjects.outputs.built-checksums-file }}
   built-subject-count:
-    description: Number of accepted subjects built by this run.
+    description: Number of attested paths that the job built.
     value: ${{ steps.subjects.outputs.built-subject-count }}
 runs:
   using: composite

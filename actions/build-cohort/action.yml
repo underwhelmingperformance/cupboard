@@ -1,153 +1,165 @@
 name: Build a publish cohort
 description:
-  Recheck a publication cohort against the selected store, build missing
-  targets, publish results when enabled, write the build receipt, and update
-  each target root. Local builds stream through `cupboard build-push`; remote
-  ssh-ng builds publish keyed results directly.
+  Builds one cohort for the flake publish workflow. It checks the cohort's
+  targets again against the build store, builds the missing ones, publishes the
+  results if push is true, writes the build receipt, and sets each target's
+  root. On the runner, `cupboard build-push` publishes each output as soon as it
+  is built. With a remote store, the action publishes the outputs from that
+  store after the build.
 inputs:
   cohort-json:
-    description: This job's entry from the plan cohort-matrix.
+    description: This job's entry from the plan's cohort-matrix.
     required: true
   url:
-    description: Cupboard Worker URL.
+    description: Tenant URL or cache URL to publish to.
     required: true
   cupboard-path:
-    description: Path to the cupboard binary installed by actions/setup.
+    description: Path to the cupboard executable that actions/setup installed.
     required: true
   cache:
     description:
-      Named cache to inspect and publish to. Empty selects the default cache.
+      Named cache to check and publish to. Leave empty for the default cache.
     required: false
   reuse-view:
-    description: Named reuse view to probe for substitutable paths.
+    description:
+      Reuse view to check for paths that can be published by reference.
     required: false
   ttl:
-    description: TTL applied when retaining an already cached target.
+    description: TTL for each target's root, such as 14d.
     required: false
   permanent:
-    description: Retain an already cached target permanently.
+    description: Keep each target's root permanently.
     required: false
     default: 'false'
   audience:
-    description: GitHub OIDC audience. Defaults to url.
+    description: Audience of the GitHub OIDC token. Defaults to url.
     required: false
   read-user:
-    description: Username for cache reads.
+    description: User name of a read credential for a private destination cache.
     required: false
   read-password:
-    description: Password for cache reads.
+    description: Password of a read credential for a private destination cache.
     required: false
   fallback-read-user:
-    description: Tenant-fallback username for private reuse-view reads.
+    description:
+      User name of the tenant read credential, for reading a private reuse view.
     required: false
   fallback-read-password:
-    description: Tenant-fallback password for private reuse-view reads.
+    description:
+      Password of the tenant read credential, for reading a private reuse view.
     required: false
   max-jobs:
     description:
-      Maximum build jobs for the selected store. Leave empty to use that store's
-      Nix configuration.
+      Maximum number of build jobs in the build store. Leave empty to use that
+      store's Nix configuration.
     required: false
   store:
-    description: >-
-      URI of the remote ssh-ng store used for planning, building and
-      publication. Every selected output path must be known during planning;
-      floating content-addressed outputs require a local build. Leave empty to
-      use the runner's store.
+    description:
+      ssh-ng:// URI of a remote store to plan, build and publish with. Every
+      output path must be known during planning, so floating content-addressed
+      outputs must be built on the runner instead. Leave empty to use the
+      runner's store.
     required: false
   push:
-    description: >-
-      Publish the cohort. `true` streams a local build or publishes keyed
-      remote-store results, then sets each target root; `false` only builds.
+    description:
+      When true, publish the cohort and set each target's root. On the runner,
+      outputs are published as they are built. With a remote store, they are
+      published from the store after the build. When false, the action only
+      builds.
     required: false
   require-provenance:
-    description: >-
-      Require provenance from this run for every final output. The action skips
-      a target build only when the cache already serves its output path and has
-      an attestation for it. It executes every other selected final derivation,
-      including one whose output is already valid in the build store.
+    description:
+      Require build provenance from this run for every target output. The action
+      only skips a target's build when the cache already serves the target's
+      outputs and has a build-provenance attestation for them. It builds every
+      other target's final derivation, even when the output is already in the
+      build store.
     required: false
     default: 'false'
   best-effort:
-    description: >-
-      Tolerate a target build failure, but only once the action has published
-      every surviving path, updated their retention roots and written the output
-      files. Planning, authentication, copying, publication, retention and
-      receipt failures remain fatal.
+    description:
+      Let the step succeed when a target's build fails. The action first
+      publishes every path that it could build, sets the roots and writes the
+      output files. A failure in planning, authentication, copying, publishing,
+      setting roots or writing the receipt still fails the step.
     required: false
   gc-between-cohorts:
-    description: >-
-      Collect the local Nix store between build-push cohorts. A later cohort
-      then substitutes the shared paths from the cache instead of keeping them
-      on the runner's disk. Disabled by default, and when it is disabled the
-      action deletes no store paths.
+    description:
+      Run garbage collection on the runner's Nix store between the cohorts that
+      one `cupboard build-push` run builds. This frees the disk space that the
+      published paths used, and a later cohort downloads them from the cache if
+      it needs them. Off by default. When it is off, the action deletes no store
+      paths.
     required: false
   run-root:
-    description: Run root that every published path joins as it commits.
+    description: Run root to add every published path to.
     required: false
   run-root-ttl:
-    description: Expire the run root after this duration, such as 2d.
+    description: How long the run root lasts after it was last set, such as 2d.
     required: false
   run-root-permanent:
-    description: Retain the run root permanently.
+    description: Keep the run root permanently.
     required: false
     default: 'false'
   receipt-file:
-    description: >-
-      Where to write the cohort's build receipt. Defaults to a runner-local path
-      under RUNNER_TEMP.
+    description:
+      Where to write the cohort's build receipt. Defaults to a file under
+      RUNNER_TEMP.
     required: false
   target-paths-file:
-    description: Where to write the cohort's target output paths.
+    description: Where to write the output paths of the cohort's targets.
     required: false
   intermediate-paths-file:
-    description: >-
-      Where to write built outputs that are not any target's own output.
+    description:
+      Where to write the built outputs that are not a target's own output.
     required: false
   reference-paths-file:
-    description: >-
-      Where to write paths the destination already serves and can publish by
-      reference.
+    description:
+      Where to write the paths that can be published by reference, without an
+      upload.
     required: false
   left-upstream-file:
-    description: >-
-      Where to record targets excluded from publication because an upstream
-      substituter serves them.
+    description:
+      Where to write the targets that are not published because an upstream
+      cache serves them.
     required: false
   counts-file:
-    description: >-
-      Where to write the partition counts and capacity result for the receipt.
+    description:
+      Where to write the number of targets in each group and the result of the
+      disk-space check, for the receipt.
     required: false
 outputs:
   target-paths-file:
-    description: File containing the cohort's target output paths.
+    description: File that lists the output paths of the cohort's targets.
     value: ${{ steps.build-cohort.outputs.target-paths-file }}
   intermediate-paths-file:
-    description: File containing built outputs that are not target paths.
+    description: File that lists the built outputs that are not target outputs.
     value: ${{ steps.build-cohort.outputs.intermediate-paths-file }}
   reference-paths-file:
-    description: File containing paths publishable by reference.
+    description: File that lists the paths that can be published by reference.
     value: ${{ steps.build-cohort.outputs.reference-paths-file }}
   left-upstream-file:
-    description: >-
-      File containing targets excluded from publication because an upstream
-      substituter serves them.
+    description:
+      File that lists the targets that are not published because an upstream
+      cache serves them.
     value: ${{ steps.build-cohort.outputs.left-upstream-file }}
   counts-file:
-    description: File containing the partition counts and capacity result.
+    description:
+      File that contains the number of targets in each group and the result of
+      the disk-space check.
     value: ${{ steps.build-cohort.outputs.counts-file }}
   receipt-file:
-    description: >-
-      Build receipt for actions/attest. A streamed cohort writes it from its
-      supervised build. A remote-store cohort records the paths published from
-      the selected store, and records provenance only for the outputs Nix
-      reported as results. This output is empty when publication is disabled or
-      the cohort has no result paths to publish.
+    description:
+      Build receipt for actions/attest. On the runner, the action writes it from
+      the build that it ran. With a remote store, the receipt lists the paths
+      published from the store, and records build provenance only for the
+      outputs that Nix reports this build produced. Empty when push is false or
+      the cohort has no paths to publish.
     value: ${{ steps.build-cohort.outputs.receipt-file }}
   out-link-directory:
-    description: >-
-      Directory containing the build's out-links. They keep the cohort's target
-      closures alive until the job finishes reading those paths.
+    description:
+      Directory of the build's out-links. They stop garbage collection from
+      removing the targets' closures until the job has finished with them.
     value: ${{ steps.build-cohort.outputs.out-link-directory }}
 runs:
   using: composite

@@ -1,40 +1,40 @@
 name: Attach cupboard attestation bundles
 description:
-  Attach signed Sigstore bundles to published subjects in a build receipt.
-  actions/attest produces bundles after publication, so this action attaches
-  them only to paths that the destination already serves.
+  Attaches signed Sigstore bundles to the paths in a build receipt.
+  actions/attest signs the bundles after the paths are published, so this action
+  only attaches them to paths that the destination cache already serves.
 inputs:
   url:
-    description: cupboard Worker URL.
+    description: Tenant URL or cache URL of the destination.
     required: true
   cupboard-path:
-    description: Path to the cupboard binary installed by actions/setup.
+    description: Path to the cupboard executable that actions/setup installed.
     required: true
   cache:
     description:
-      Named cache that received the paths. Empty selects the default cache.
+      Named cache that the paths were published to. Leave empty for the default
+      cache.
     required: false
   audience:
-    description: GitHub OIDC audience. Defaults to url.
+    description: Audience of the GitHub OIDC token. Defaults to url.
     required: false
   read-user:
-    description: Basic-auth username for the destination cache.
+    description: User name of a read credential for a private destination cache.
     required: false
   read-password:
-    description: Basic-auth password for the destination cache.
+    description: Password of a read credential for a private destination cache.
     required: false
   receipt-file:
-    description: Current-run receipt produced by the build action.
+    description: Receipt written by the build step earlier in the job.
     required: true
   checksums-file:
     description:
-      Checksums for the signed receipt subjects, produced by actions/attest.
-      Only matching receipt subjects are attached.
+      Checksums file from actions/attest. The action only attaches bundles to
+      the paths in the receipt whose checksums are in this file.
     required: true
   bundle:
     description:
-      Signed Sigstore bundles from the attest action, one path per line. Empty
-      lines are ignored.
+      Bundle files from actions/attest, one per line. Empty lines are ignored.
     required: true
 runs:
   using: composite

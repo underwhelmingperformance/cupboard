@@ -1,33 +1,38 @@
 name: Resolve cupboard
 description:
-  Resolve a reusable workflow revision to an exact release or source commit.
+  Finds the cupboard release that was published from the commit of the calling
+  reusable workflow. If there is no such release, it selects that commit to
+  build cupboard from.
 inputs:
   cupboard-version:
     description:
-      Use latest or an exact published release tag instead of resolving from
-      workflow-sha.
+      latest or an exact release tag. When set, the action selects this release
+      instead of looking up the release for workflow-sha.
     required: false
   workflow-repository:
-    description: Repository for the called reusable workflow.
+    description: Repository that contains the called reusable workflow.
     required: true
   workflow-ref:
-    description: Full job.workflow_ref value for the called workflow.
+    description: The called workflow's full job.workflow_ref value.
     required: true
   workflow-sha:
-    description: Full job.workflow_sha value for the called workflow.
+    description: The called workflow's full job.workflow_sha value.
     required: true
   github-token:
-    description: GitHub token used for release API calls.
+    description: GitHub token for release API requests.
     required: false
   github-api-url:
-    description: GitHub REST API base URL.
+    description: Base URL of the GitHub REST API.
     required: false
   github-graphql-url:
-    description: GitHub GraphQL API URL.
+    description: URL of the GitHub GraphQL API.
     required: false
 outputs:
   cupboard:
-    description: Validated JSON containing the exact release or source commit.
+    description:
+      JSON that identifies the release to install or the commit to build
+      cupboard from. The action checks it against its schema before writing it.
+      Pass it as the cupboard input of actions/setup.
     value: ${{ steps.resolve.outputs.cupboard }}
 runs:
   using: composite

@@ -6,261 +6,274 @@ on:
   workflow_call:
     inputs:
       url:
-        description: Cupboard tenant URL.
+        description: Tenant URL to publish to.
         required: true
         type: string
       targets:
-        description:
-          Flake attribute containing the target manifest and derivation paths.
+        description: Flake attribute that evaluates to the target manifest.
         required: false
         default: '.#cupboardOutputs'
         type: string
       preset:
-        description: >-
-          Derive cache, root-prefix, and ttl from the triggering event.
-          'pull-request-and-branch' gives each pull_request run a
-          gh-<repository-id>-pr-<number> cache with a 14-day TTL. A run on the
-          configured branch uses the default cache. Both roots start with
-          github:<repository>; other refs are rejected before planning. Only
-          branch runs use reuse-view. This input is mutually exclusive with
-          cache, root-prefix, ttl, and permanent; leave it empty to use those
-          explicit inputs.
+        description:
+          Choose the cache, root prefix and TTL from the event that triggered
+          the run. The only preset is pull-request-and-branch. A pull_request
+          run publishes to the cache gh-<repository-id>-pr-<number>, which the
+          workflow creates if needed, with roots under
+          github:<repository>/pr-<number>/ that expire after 14 days. When an
+          unmerged pull request is closed, the run removes that pull request's
+          cache. A run on the branch in the branch input publishes to the
+          default cache, with permanent roots under
+          github:<repository>/<branch>/. The preset fails any other run. Cannot
+          be combined with cache, root-prefix, ttl or permanent. Leave empty to
+          set those inputs yourself.
         required: false
         default: ''
         type: string
       branch:
         description:
-          Branch trusted for non-pull-request runs under the
-          pull-request-and-branch preset. Must match github setup --branch.
+          Branch whose runs publish to the default cache under the
+          pull-request-and-branch preset. Must match the --branch option of
+          cupboard github setup.
         required: false
         default: main
         type: string
       cache:
         description:
-          Named cache to publish to, whether it is public or private. Leave
-          empty to publish to the default cache. When the cache is private,
-          supply the credential it accepts as destination_read_user and
-          destination_read_password. A reuse view is a tenant-level resource and
-          reads with fallback_read_user and fallback_read_password. Supplying
-          the fallback where the cache has its own verifier is rejected by
-          setup's initial cache-info probe, before publication starts.
+          Named cache to publish to. Leave empty to publish to the default
+          cache. If the cache is private, pass a credential that reads it as the
+          destination_read_user and destination_read_password secrets.
         required: false
         default: ''
         type: string
       root-prefix:
         description:
-          Prefix prepended to each target's rootSuffix. Required unless a preset
-          derives it.
+          Start of every target's root name. The target's rootSuffix follows it.
+          Required unless preset is set.
         required: false
         default: ''
         type: string
       ttl:
         description:
-          Retention TTL such as 14d. Leave empty to inherit the selected cache's
-          retention policy unless permanent is true.
+          How long each target's root lasts after it was last set, such as 14d.
+          If ttl is empty and permanent is false, the roots follow the cache's
+          retention settings.
         required: false
         default: ''
         type: string
       permanent:
-        description: Retain every target root permanently.
+        description: Keep every target's root until it is replaced or removed.
         required: false
         default: false
         type: boolean
       run-root-ttl:
         description:
-          TTL for the per-run root that every cohort push attaches, such as 7d
-          or 12h. The root keeps streamed work available, so a later cohort can
-          substitute a shared output instead of rebuilding it.
+          How long the run root lasts, such as 7d or 12h. Every cohort job adds
+          the paths that it publishes to the run root, so a later cohort can
+          download a shared dependency from the cache instead of building it
+          again.
         required: false
         default: '24h'
         type: string
       run-root-permanent:
         description:
-          Retain the per-run root permanently. Set run-root-ttl to an empty
-          string when enabling this input.
+          Keep the run root permanently. Set run-root-ttl to an empty string
+          when you turn this on.
         required: false
         default: false
         type: boolean
       reuse-view:
         description:
-          Named tenant reuse view for shared intermediates missing from the
-          destination. setup rejects a view whose nix-cache-info priority is not
-          numerically greater than the destination's. Leave empty to disable the
-          view.
+          Reuse view to read through, for paths that the destination cache does
+          not have. The workflow refuses a view unless its priority number is
+          greater than the destination's. With the preset, only runs on the
+          branch use a view, and they default to pull-requests-<repository-id>.
+          Leave empty for no view.
         required: false
         default: ''
         type: string
       trusted-public-key:
         description:
-          Nix signing key to trust for reads from the Cupboard tenant. When
-          omitted, setup fetches the tenant's current key from /pubkey.
+          Nix public key to trust for reads from the tenant's caches. If empty,
+          each job downloads the tenant's current key from /pubkey and trusts
+          it.
         required: false
         default: ''
         type: string
       cupboard-version:
-        description: >-
-          Exact published cupboard release tag to install, or 'latest'. When
-          omitted, install a release for the called workflow revision or build
-          its source if no release exists.
+        description:
+          An exact cupboard release tag to install, or latest. If empty, the
+          workflow installs the release that was published from its own commit.
+          If there is no such release, it builds cupboard from that commit.
         required: false
         type: string
       maximise-space:
         description:
-          Reclaim runner disk space before building by deleting preinstalled
-          software such as language toolchains, Android and .NET SDKs, and
-          Docker images. The run does not restore this software. Enable the
-          option only on ephemeral GitHub-hosted runners.
+          Free disk space before building by deleting preinstalled software,
+          such as language toolchains, the Android and .NET SDKs and Docker
+          images on Linux, and Xcode on macOS. The software is not restored, so
+          only use this on ephemeral GitHub-hosted runners.
         required: false
         default: false
         type: boolean
       push:
         description:
-          Publish cohort results. When false, build every cohort directly
-          without cache planning or publication.
+          Publish the cohorts' outputs. When false, the run builds every cohort
+          without checking the cache, and publishes and signs nothing.
         required: false
         default: true
         type: boolean
       gc-between-cohorts:
         description:
-          On a GitHub-hosted runner using its local store, release the build's
-          out-links and collect dead paths once a cohort job has published and
-          attested its work. Requested collection is skipped with a notice on a
-          self-hosted runner or when a direct remote store is selected. Off by
-          default.
+          Run garbage collection on the runner's Nix store after each cohort in
+          a job has been published. This frees the disk space that the published
+          paths used, and a later build downloads them from the cache if it
+          needs them. It only happens on GitHub-hosted runners that use their
+          own store. On a self-hosted runner, or when store is set, the job
+          prints a notice and leaves the store as it is.
         required: false
         default: false
         type: boolean
       nix-config:
         description:
-          Flake installable that evaluates to extra nix.conf text for the plan
-          and cohort jobs. These settings override the workflow's own defaults,
-          such as always-allow-substitutes.
+          Flake attribute that evaluates to extra nix.conf text for the plan and
+          cohort jobs. These settings override the workflow's own, such as
+          always-allow-substitutes.
         required: false
         default: ''
         type: string
       input-known-hosts:
         description:
-          known_hosts lines that pin every SSH host serving a private flake
-          input. Required when input_ssh_key is supplied.
+          known_hosts lines for every SSH host that serves a private flake
+          input. Required when input_ssh_key is set.
         required: false
         default: ''
         type: string
       builders:
         description:
-          One-line nix.conf builders specification for remote target groups.
-          Separate multiple entries with semicolons. This is mutually exclusive
-          with store. Set the machine SSH-key column to '-' and do not set a
-          non-empty ssh-key in a builder store URI. Supply the private key
-          through builder_ssh_key.
+          Nix builders specification on one line, as in nix.conf, for targets
+          with remote set to true. Separate several builders with semicolons.
+          Cannot be combined with store. Put '-' in the SSH key column, and do
+          not set an ssh-key parameter in any builder URI. Supply the private
+          key as the builder_ssh_key secret.
         required: false
         default: ''
         type: string
       builder-known-hosts:
         description:
-          known_hosts lines that pin every enabled remote builder. Required when
-          builders is supplied.
+          known_hosts lines for every remote builder. Required when builders is
+          set.
         required: false
         default: ''
         type: string
       store-known-hosts:
         description:
-          known_hosts lines that pin the direct ssh-ng store. Required unless
-          store uses the default SSH port and supplies
-          base64-ssh-public-host-key. Independent of classic builder delegation.
+          known_hosts lines for the remote store. Required unless the store uses
+          port 22 and its URI includes base64-ssh-public-host-key.
         required: false
         default: ''
         type: string
       store-ambient-identity:
         description:
-          Authenticate the direct store with the runner's SSH agent or default
-          identity files instead of store_ssh_key. Intended only for explicitly
-          provisioned self-hosted runners. When it is false and no store_ssh_key
-          is supplied, the job fails rather than offering an ambient identity.
+          Connect to the remote store with the runner's SSH agent or default key
+          files instead of store_ssh_key. Only use this on a self-hosted runner
+          that is dedicated to this job. When it is false and store_ssh_key is
+          not set, the job fails instead of using the runner's own keys.
         required: false
         default: false
         type: boolean
       store:
-        description: >-
-          Remote ssh-ng store URI for every cohort job. Planning queries this
-          store for path availability, building realises outputs there, and
-          publication reads metadata and NAR bytes from it. The realised closure
-          therefore does not enter the runner's local store. Measured packing
-          also queries this store. When omitted, each runner uses its own store.
-          Do not set a non-empty ssh-key in the URI; supply the private key
-          through store_ssh_key.
+        description:
+          ssh-ng:// URI of a remote store. Every cohort job plans, builds and
+          publishes using that store, so the build outputs never reach the
+          runner's disk. Packing also measures sizes in this store. If empty,
+          each job uses its runner's store. Supply the private key as
+          store_ssh_key, not as an ssh-key parameter in the URI.
         required: false
         default: ''
         type: string
       plan-runner:
-        description: >-
-          Runner label for the configure and plan jobs. The plan job evaluates
-          the flake with the input SSH key and OIDC permission, so repositories
-          with self-hosted runners should leave this input on a GitHub-hosted
-          label, or route the job through runner groups; see
-          docs/ci/runner-provenance.md.
+        description:
+          Runner label for the configure, plan and cache-removal jobs. The plan
+          job evaluates the flake with the input SSH key and can request an OIDC
+          token. If your repository has self-hosted runners, keep this on a
+          GitHub-hosted label or restrict the job with runner groups. See
+          docs/security.md#runners.
         required: false
         default: ubuntu-latest
         type: string
       enable-packing:
-        description: >-
-          Pack cohorts within pack-capacity using measured store sizes, rather
-          than creating one job for each manifest cohort. Off by default; a
-          cohort without a measurement is not repartitioned.
+        description:
+          Pack small single-target cohorts into as few jobs as fit within
+          pack-capacity, using measured closure sizes. Without packing, each
+          cohort gets its own job. Off by default. A cohort without a
+          measurement is not packed.
         required: false
         default: false
         type: boolean
       pack-capacity:
         description:
-          Disk limit in bytes for measured cohort packing. Required when
+          Disk space in bytes that each packed job can use. Required when
           enable-packing is true.
         required: false
         default: ''
         type: string
     secrets:
       builder_ssh_key:
-        description: SSH private key authenticating to the remote builders.
+        description: SSH private key for the remote builders.
         required: false
       builder_ssh_config:
         description:
-          ssh_config Host blocks for remote builder connections. The allowlist
-          accepts endpoint, transport tuning, algorithm, liveness, and SetEnv
-          directives. It rejects commands, proxies, forwarding, identity
-          sources, verbose logging, Include, and Match.
+          ssh_config text for the remote builders. Every setting must be inside
+          a Host block. Only HostName, User, Port, connection tuning, algorithm,
+          keep-alive and SetEnv settings are accepted. Settings that run
+          commands, use proxies, forward connections, load other identities,
+          share connections, change the log level, or use Include or Match are
+          refused.
         required: false
       store_ssh_key:
-        description: SSH private key authenticating to the direct ssh-ng store.
+        description: SSH private key for the remote store.
         required: false
       store_ssh_config:
         description:
-          ssh_config Host blocks for the direct store connection. The allowlist
-          accepts endpoint, transport tuning, algorithm, liveness, and SetEnv
-          directives. It rejects commands, proxies, forwarding, identity
-          sources, verbose logging, Include, and Match. Independent of builder
-          scheduling.
+          ssh_config text for the remote store. Every setting must be inside a
+          Host block. Only HostName, User, Port, connection tuning, algorithm,
+          keep-alive and SetEnv settings are accepted. Settings that run
+          commands, use proxies, forward connections, load other identities,
+          share connections, change the log level, or use Include or Match are
+          refused.
         required: false
       input_ssh_key:
         description:
-          SSH key used while evaluating private flake inputs. Requires
+          SSH private key for fetching private flake inputs. Requires
           input-known-hosts.
         required: false
       destination_read_user:
         description:
-          Basic-auth user accepted by the private destination cache this run
-          publishes to.
+          User name of a read credential for the private cache that the run
+          publishes to. If the run uses a reuse view, the workflow checks this
+          credential before it publishes anything.
         required: false
       destination_read_password:
         description:
-          Basic-auth password accepted by the private destination cache this run
+          Password of a read credential for the private cache that the run
           publishes to.
         required: false
       fallback_read_user:
-        description: Tenant Basic-auth user for private reuse-view reads.
+        description:
+          User name of the tenant read credential, for reading a private reuse
+          view. With the preset, setting it also makes new pull-request caches
+          private.
         required: false
       fallback_read_password:
-        description: Tenant Basic-auth password for private reuse-view reads.
+        description:
+          Password of the tenant read credential, for reading a private reuse
+          view.
         required: false
       private_substituters:
-        description: Authenticated HTTP(S) substituter URLs, one per line.
+        description:
+          URLs of other private caches to read from, one per line, with the
+          credential in each URL.
         required: false
 
 permissions: {}
@@ -732,10 +745,11 @@ jobs:
           read-user: ${{ secrets.destination_read_user }}
           read-password: ${{ secrets.destination_read_password }}
 
-      # Attestation verifies the receipt against committed narinfos, so attach
-      # the bundles only after publication and whenever signing produced
-      # either kind. A cohort that built nothing still signs build-origin
-      # bundles for the paths it published, leaving bundle-path empty.
+      # Attach the signed bundles to the published paths. This runs after the
+      # push, because the attest step checks each path against what the cache
+      # has published. Build provenance only covers paths that this cohort
+      # built, while build origin covers every path that it published. A cohort
+      # that built nothing only has build-origin bundles, so check both outputs.
       - uses: $/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
