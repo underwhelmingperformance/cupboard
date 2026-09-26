@@ -1,4 +1,5 @@
 import { startCapture } from '@cupboard/logger/testing';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type CacheScope,
 	storePathHashSchema
@@ -7,6 +8,7 @@ import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
+import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -17,6 +19,7 @@ import { z } from 'zod';
 
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { NarInfoObjectsService } from '../do/narinfo-objects-service.ts';
 import { withSubrequestSlice } from '../do/subrequest-slice.ts';
 import { SubrequestSliceExceededError } from '../errors.ts';
 import { narInfoCacheTag } from '../http/cache-tags.ts';
@@ -37,6 +40,7 @@ import {
 	readFetch,
 	recordDeploymentPhase,
 	resetTestServer,
+	resolvedCache,
 	testServerFor,
 	uploadMetadata
 } from '../test-support.ts';
@@ -196,48 +200,115 @@ describe('cache availability query', () => {
 		});
 	});
 
-	it('reports another cache as missing after a shared NAR is recovered', async () => {
-		const { token } = await bootstrap({ caches: [{ scope: sharedCache }] });
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(token, metadata, defaultCache());
-		await pushPath(token, metadata, sharedCache);
-		const oldKey = await currentNarObjectKey(metadata.narHash);
-		await env.BLOBS.delete(oldKey);
-		const stagingKey = r2ObjectKeySchema.parse('staging/recover-shared/upload');
-		await env.BLOBS.put(stagingKey, narBytes);
-		await promoteVerifiedBlob(
-			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-			env.BLOBS,
-			stagingKey,
-			{ narHash: metadata.narHash, narSize: metadata.narSize },
-			{ fileHash: metadata.fileHash, fileSize: metadata.fileSize }
-		);
-
-		const response = await handlerFetch(
-			`/t/${fixtureTenant}/cache/${sharedCache.name}/api/v1/missing-paths`,
-			{
-				body: JSON.stringify({ storePathHashes: [metadata.storePathHash] }),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
+	it.each([
+		{
+			repair: 'a later publication',
+			repairPath: async (token: string, metadata: UploadPathMetadata) => {
+				await pushPath(token, metadata, sharedCache);
+				// The negotiation queues reconciliation, which the alarm runs.
+				await runInDurableObject(currentServer(), (instance) =>
+					instance.alarm()
+				);
 			}
-		);
-		const narInfo = await readFetch(
-			`/cache/${sharedCache.name}/${metadata.storePathHash}.narinfo`
-		);
+		},
+		{
+			repair: 'a servability check',
+			repairPath: async (_token: string, metadata: UploadPathMetadata) => {
+				await runInDurableObject(currentServer(), (instance) =>
+					new NarInfoObjectsService(instance.context).servableNarInfoVersions(
+						resolvedCache(instance.context, sharedCache),
+						[metadata.storePathHash]
+					)
+				);
+			}
+		}
+	])(
+		"repairs another cache's narinfo through $repair after a shared NAR is recovered",
+		async ({ repairPath }) => {
+			const { token } = await bootstrap({ caches: [{ scope: sharedCache }] });
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			await pushPath(token, metadata, defaultCache());
+			await pushPath(token, metadata, sharedCache);
+			const oldKey = await currentNarObjectKey(metadata.narHash);
+			await env.BLOBS.delete(oldKey);
+			const stagingKey = r2ObjectKeySchema.parse(
+				'staging/recover-shared/upload'
+			);
+			await env.BLOBS.put(stagingKey, narBytes);
+			await promoteVerifiedBlob(
+				drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+				env.BLOBS,
+				stagingKey,
+				{ narHash: metadata.narHash, narSize: metadata.narSize },
+				{ fileHash: metadata.fileHash, fileSize: metadata.fileSize }
+			);
+			const probe = async () => {
+				const response = await handlerFetch(
+					`/t/${fixtureTenant}/cache/${sharedCache.name}/api/v1/missing-paths`,
+					{
+						body: JSON.stringify({
+							storePathHashes: [metadata.storePathHash]
+						}),
+						headers: { 'content-type': 'application/json' },
+						method: 'POST'
+					}
+				);
 
-		expect({
-			replacedIncarnation:
-				(await currentNarObjectKey(metadata.narHash)) !== oldKey,
-			probeStatus: response.status,
-			probe: cacheAvailabilityResponseSchema.parse(await response.json()),
-			narInfoStatus: narInfo.status
-		}).toStrictEqual({
-			replacedIncarnation: true,
-			probeStatus: StatusCodes.OK,
-			probe: { missingStorePathHashes: [metadata.storePathHash] },
-			narInfoStatus: StatusCodes.OK
-		});
-	});
+				return cacheAvailabilityResponseSchema.parse(await response.json());
+			};
+			const advertisedNar = async () => {
+				const narInfo = await readFetch(
+					`/cache/${sharedCache.name}/${metadata.storePathHash}.narinfo`
+				);
+				const nar = await readFetch(
+					`/cache/${sharedCache.name}/${NarInfo.parse(await narInfo.text()).url}`
+				);
+
+				return {
+					status: nar.status,
+					body: nar.ok ? new Uint8Array(await nar.arrayBuffer()) : undefined
+				};
+			};
+
+			const beforeRepair = { probe: await probe(), nar: await advertisedNar() };
+			const purge = await runInDurableObject(currentServer(), (instance) =>
+				vi.spyOn(instance.context, 'purgeCacheTags').mockResolvedValue()
+			);
+
+			try {
+				await repairPath(token, metadata);
+				await runInDurableObject(currentServer(), (instance) =>
+					instance.alarm()
+				);
+
+				expect({
+					replacedIncarnation:
+						(await currentNarObjectKey(metadata.narHash)) !== oldKey,
+					beforeRepair,
+					afterRepair: { probe: await probe(), nar: await advertisedNar() },
+					// The scheduler can deliver an alarm while this test runs its own,
+					// and each alarm can rewrite the obsolete object and queue its
+					// purge. Compare the distinct purged tags.
+					purgedTags: [...new Set(purge.mock.calls.flatMap(([tags]) => tags))]
+				}).toStrictEqual({
+					replacedIncarnation: true,
+					beforeRepair: {
+						probe: { missingStorePathHashes: [metadata.storePathHash] },
+						nar: { status: StatusCodes.NOT_FOUND, body: undefined }
+					},
+					afterRepair: {
+						probe: { missingStorePathHashes: [] },
+						nar: { status: StatusCodes.OK, body: narBytes }
+					},
+					purgedTags: [
+						narInfoCacheTag(fixtureTenant, sharedCache, metadata.storePathHash)
+					]
+				});
+			} finally {
+				purge.mockRestore();
+			}
+		}
+	);
 
 	it('does not purge a private cache when probing its missing NAR', async () => {
 		await recordDeploymentPhase('contracted');

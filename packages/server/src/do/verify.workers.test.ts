@@ -6,6 +6,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { recordedNarInfoMetadata } from '../blob/narinfo-object-metadata.ts';
 import { narInfos } from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -30,6 +31,7 @@ import {
 } from '../test-support.ts';
 
 import { maxOutgoingConnections } from './bulk.ts';
+import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const buildsCache = namedCache('builds');
 
@@ -85,6 +87,50 @@ describe('background verification', () => {
 			},
 			restored: true
 		});
+	});
+
+	it('rewrites a narinfo object that records no metadata without purging it', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const key = narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+			kind: 'default'
+		});
+
+		await pushPath(token, metadata);
+		const published = await env.BLOBS.get(key);
+
+		if (published === null) {
+			throw new Error('the push did not publish a narinfo object');
+		}
+
+		await env.BLOBS.put(key, await published.arrayBuffer());
+		const purge = vi.spyOn(
+			NarInfoObjectsService.prototype,
+			'purgeReplacedNarUrls'
+		);
+
+		try {
+			const report = await runVerify(token);
+			const rewritten = await env.BLOBS.head(key);
+
+			expect({
+				report,
+				metadata:
+					rewritten === null ? undefined : recordedNarInfoMetadata(rewritten),
+				purges: purge.mock.calls.length
+			}).toStrictEqual({
+				report: {
+					scanned: 1,
+					narInfoObjectsRestored: 1,
+					danglingNarInfosRemoved: 0,
+					wrapped: true
+				},
+				metadata: recordedNarInfoMetadata(published),
+				purges: 0
+			});
+		} finally {
+			purge.mockRestore();
+		}
 	});
 
 	it('skips a narinfo row that cannot render and still advances the pass', async () => {

@@ -1049,6 +1049,21 @@ outputs. It publishes reuse-view paths by reference and sets each target's
 retention root. Upstream paths are not copied into Cupboard. The cohort records
 them in its counts and `left-upstream` files.
 
+The destination serves a path only when it serves the narinfo and the NAR at the
+URL that the narinfo records. When a push uploads a NAR whose object has gone
+missing, Cupboard stores the bytes under a new URL. A push that publishes a path
+by reference has no local copy of the NAR, so it cannot replace a lost one. In
+the cache that receives the push, a narinfo that still records the lost NAR
+first receives a skip decision. Reconciliation then removes that narinfo, and a
+second push uploads the bytes.
+
+Other caches that share the NAR, in any tenant, keep narinfos that record the
+old URL. A Nix client that reads one of those caches receives a narinfo whose
+NAR URL returns 404 until the cache rewrites the narinfo. The cache rewrites it
+when it next checks that the path is servable, for example shortly after the
+next push of the path to that cache, during its periodic verification scan, or
+when a retention root that includes the path is set.
+
 When cohorts share a dependency, each cohort still requests it. Nix substitutes
 the dependency after an earlier cohort publishes it to the destination or
 retains it under the per-run root. Every cohort contributes to this shared root,
