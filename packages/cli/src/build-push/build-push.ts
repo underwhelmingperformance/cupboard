@@ -46,11 +46,11 @@ import {
 	BuildEventHandlingError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
-	classifyPublicationFailures,
 	CliAbortError,
 	PushIncompleteError,
 	type UntrustedDaemonError
 } from '../errors.ts';
+import { classifyPublicationFailures } from '../exit-code.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import {
@@ -889,6 +889,7 @@ async function publishRealised(
 		const shouldRetainTargets = exit.status === 0 && options.root !== undefined;
 
 		published = await runPush(publication, reporter, {
+			command: 'cupboard build-push',
 			client: dependencies.client,
 			nix: dependencies.store,
 			buildStore: autoBuildStore,

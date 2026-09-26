@@ -7,6 +7,7 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { cacheLabel } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { CheckDiscrepanciesError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CheckOptions {
@@ -30,6 +31,10 @@ export function registerCheckCommand(
 		.description('Check every committed path against its stored objects.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
+		.addHelpText(
+			'after',
+			'\nExits 1 if any path has a discrepancy, after printing the report.'
+		)
 		.action(async (url: URL, options: CheckOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
@@ -42,9 +47,11 @@ export function registerCheckCommand(
 }
 
 /**
- * Checks every committed path, one page per request. The server checks a page
- * and names the last row it checked, so the command passes that cursor back
- * until the report returns it empty.
+ * Checks every committed path, one page per request. The server checks one page
+ * and returns a cursor that points after the last row that it checked. The
+ * command sends the cursor back until the server returns an empty one. If the
+ * server reports any discrepancies, the command warns about each one and then
+ * throws {@link CheckDiscrepanciesError}.
  */
 export async function runCheck(
 	isDeep: boolean,
@@ -96,6 +103,8 @@ export async function runCheck(
 	for (const discrepancy of discrepancies) {
 		reporter.warn(discrepancy.kind, describeDiscrepancy(discrepancy));
 	}
+
+	throw new CheckDiscrepanciesError(discrepancies.length);
 }
 
 function describeDiscrepancy(discrepancy: CheckDiscrepancy): string {

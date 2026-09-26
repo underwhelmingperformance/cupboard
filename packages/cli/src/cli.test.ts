@@ -1,24 +1,29 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
+import { ORPCError } from '@orpc/client';
 import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { buildProgram, cliExitCode, reportCliFailure } from './cli.ts';
+import { translateRpcError } from './client/rpc-errors.ts';
 import { GithubRateLimitError } from './commands/oidc-trust/github.ts';
 import {
 	authExitCode,
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
+	CheckDiscrepanciesError,
 	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
 	OwnerLoginRequiredError,
+	PushIncompleteError,
 	RootRetentionOptionError,
 	transientExitCode,
 	UploadWaitTimeoutError
 } from './errors.ts';
+import { RootTargetLimitError } from './push/push.ts';
 
 const abortExitCode = 130;
 
@@ -52,6 +57,11 @@ describe('cliExitCode', () => {
 		{
 			name: 'a 404 response',
 			error: new CupboardHttpError('GET', '/x', 404, ''),
+			expected: 1
+		},
+		{
+			name: 'a 507 response',
+			error: new CupboardHttpError('GET', '/x', 507, ''),
 			expected: 1
 		},
 		{
@@ -98,9 +108,75 @@ describe('cliExitCode', () => {
 			error: new ConfirmationRequiredError('Remove tenant acme?'),
 			expected: usageExitCode
 		},
+		{
+			name: 'a root over its target limit',
+			error: new RootTargetLimitError(150, 149),
+			expected: usageExitCode
+		},
+		{
+			name: 'a timed-out admin request',
+			error: new ORPCError('TIMEOUT', { status: 408 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'a rate-limited admin response',
+			error: new ORPCError('TOO_MANY_REQUESTS', { status: 429 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'a 503 admin response',
+			error: new ORPCError('CACHE_LISTING_PROJECTION_PENDING', {
+				status: 503
+			}),
+			expected: transientExitCode
+		},
+		{
+			name: 'a rejected admin session',
+			error: new ORPCError('UNAUTHORIZED', { status: 401 }),
+			expected: authExitCode
+		},
+		{
+			name: 'an admin quota refusal',
+			error: new ORPCError('INSUFFICIENT_STORAGE', { status: 507 }),
+			expected: 1
+		},
+		{
+			name: 'an admin error with another 5xx status',
+			error: new ORPCError('INTERNAL_SERVER_ERROR', { status: 500 }),
+			expected: 1
+		},
+		{
+			name: 'a missing admin resource',
+			error: new ORPCError('NOT_FOUND', { status: 404 }),
+			expected: 1
+		},
+		{
+			name: 'a push whose failures were transient',
+			error: new PushIncompleteError(
+				[{ path: 'a-app', stage: 'upload' }],
+				transientExitCode,
+				'cupboard push'
+			),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push with an unclassified failure',
+			error: new PushIncompleteError(
+				[{ path: 'a-app', stage: 'upload' }],
+				1,
+				'cupboard push'
+			),
+			expected: 1
+		},
+		{
+			name: 'a check that found discrepancies',
+			error: new CheckDiscrepanciesError(2),
+			expected: 1
+		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }
 	])('maps $name to its exit code', ({ error, expected }) => {
-		expect(cliExitCode(error, abortExitCode)).toBe(expected);
+		// `run.ts` converts oRPC errors before it calls `cliExitCode`.
+		expect(cliExitCode(translateRpcError(error), abortExitCode)).toBe(expected);
 	});
 });
 

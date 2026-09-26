@@ -1,7 +1,11 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import { type AuthzMeta } from '@cupboard/protocol/contract';
-import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { readResponseText } from '@cupboard/shared/response-body';
+import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
+import {
+	BoundedBodyCollector,
+	RemoteBodyTooLargeError,
+	responseWithBufferedBoundedBody
+} from '@cupboard/shared/response-body';
 import { type ReplaySafety, retryingFetcher } from '@cupboard/shared/retry';
 import {
 	createORPCClient,
@@ -19,7 +23,7 @@ import { OpenAPILink } from '@orpc/openapi-client/fetch';
 import { StatusCodes } from 'http-status-codes';
 
 import { throwIfAborted } from '../abort.ts';
-import { CupboardHttpError } from '../errors.ts';
+import { CupboardHttpError, QuotaExceededError } from '../errors.ts';
 
 import {
 	type AccessCredential,
@@ -39,7 +43,8 @@ export interface TenantRpcOptions {
 }
 
 const unauthorizedStatusCode = 401;
-const maximumServerErrorBytes = 64 * 1024;
+const maximumErrorBodyBytes = 64 * 1024;
+const errorBodyPreviewBytes = 4 * 1024;
 
 export type ControlRpc = JsonifiedClient<
 	ContractRouterClient<typeof controlContract>
@@ -119,7 +124,7 @@ function derivedClient<C extends AnyContractRouter>(
 					}
 				}
 
-				return await settleServerError(current, response);
+				return await checkResponse(current, response);
 			}
 		},
 		plugins: [new ResponseValidationPlugin(contract)]
@@ -152,52 +157,210 @@ function replaySafetyFor(
 }
 
 const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const insufficientStorageStatus: number = StatusCodes.INSUFFICIENT_STORAGE;
 
-// Leave 503 and 507 responses for oRPC to decode. Of these statuses,
-// `translateRpcError` converts only 507 to a CLI quota error; 503 remains an
-// ORPCError so callers can inspect its code and data.
+// Leave a 503 or 507 with a decodable body for oRPC to decode, so callers can
+// inspect its oRPC code and data.
 const typedServerErrorStatuses = new Set<number>([
 	StatusCodes.SERVICE_UNAVAILABLE,
 	StatusCodes.INSUFFICIENT_STORAGE
 ]);
 
 /**
- * For an unmapped 5xx response, throws {@link CupboardHttpError} with the
- * decoded oRPC message or raw response body and the `cf-ray` header when
- * present. Contract-declared 503 and 507 responses pass through for oRPC to
- * decode.
+ * Checks an error response before oRPC decodes it, so that the error keeps the
+ * response's HTTP status. `fetch` follows redirects, so every response that is
+ * not a 2xx has an error status. {@link statusError} turns a 507 into a
+ * {@link QuotaExceededError}.
  */
-async function settleServerError(
+async function checkResponse(
 	request: Request,
 	response: Response
 ): Promise<Response> {
-	if (
-		response.status < serverErrorThreshold ||
-		typedServerErrorStatuses.has(response.status)
-	) {
+	if (response.ok) {
 		return response;
 	}
 
-	throw new CupboardHttpError(
+	const buffered = await bufferedErrorResponse(request, response);
+
+	if (
+		buffered.status < serverErrorThreshold ||
+		typedServerErrorStatuses.has(buffered.status)
+	) {
+		return await checkErrorBody(request, buffered);
+	}
+
+	throw statusError(request, buffered, await serverErrorDetail(buffered));
+}
+
+async function bufferedErrorResponse(
+	request: Request,
+	response: Response
+): Promise<Response> {
+	// A clone shares its source stream with the original. Cancelling one of
+	// the two bodies finishes only when the other body is also cancelled or
+	// the source closes. The bounded read waits for its cancellation of the
+	// original when the body is over the limit, so cancel the clone first.
+	const preview = await bodyPreview(response.clone());
+
+	try {
+		return await responseWithBufferedBoundedBody(response, {
+			description: 'Cupboard error response',
+			maximumBytes: maximumErrorBodyBytes,
+			signal: request.signal
+		});
+	} catch (error) {
+		if (!(error instanceof RemoteBodyTooLargeError)) {
+			throw error;
+		}
+
+		const detail = response.status === insufficientStorageStatus ? '' : preview;
+
+		throw statusError(request, response, detail, { cause: error });
+	}
+}
+
+async function bodyPreview(response: Response): Promise<string> {
+	if (response.body === null) {
+		return '';
+	}
+
+	const reader = response.body.getReader();
+	const collector = new BoundedBodyCollector(errorBodyPreviewBytes, 'truncate');
+
+	try {
+		for (;;) {
+			const chunk = await reader.read();
+
+			if (chunk.done || !collector.append(chunk.value)) {
+				return previewText(collector);
+			}
+		}
+	} catch {
+		// The clone fails with the same error as the original, and the bounded
+		// read of the original reports it.
+		return '';
+	} finally {
+		// The cancellation finishes only after the bounded read has read or
+		// cancelled the original, which happens after this function returns.
+		void bestEffort(() => reader.cancel());
+	}
+}
+
+function textPreview(text: string): string {
+	const collector = new BoundedBodyCollector(errorBodyPreviewBytes, 'truncate');
+
+	collector.append(new TextEncoder().encode(text));
+
+	return previewText(collector);
+}
+
+// Decode with `stream: true` so that a multi-byte character cut by the byte
+// limit is left out instead of becoming U+FFFD.
+function previewText(collector: BoundedBodyCollector): string {
+	const text = new TextDecoder().decode(collector.bytes(), { stream: true });
+
+	return (
+		collector.truncated ? `${text}\n[response body truncated]` : text
+	).trim();
+}
+
+// When JSON decoding fails, the error that oRPC throws does not include the
+// HTTP status, so check an error body before passing it to oRPC. The checks
+// below match the JSON branch of `toStandardBody` in
+// `@orpc/standard-server-fetch` and `parseEmptyableJSON` in `@orpc/shared`:
+// oRPC reads a body with a `content-disposition` header as a file, parses a
+// body with a missing, empty or application/json content type, and treats only
+// an empty string as no body. When upgrading oRPC, check that these functions
+// still behave this way.
+//
+// For a 507 that is not an oRPC error envelope, oRPC would keep the body only
+// in the error's data. Such a 507 becomes a `QuotaExceededError` here, so that
+// the server's text is the error's detail.
+async function checkErrorBody(
+	request: Request,
+	response: Response
+): Promise<Response> {
+	const contentType = response.headers.get('content-type');
+
+	const body = await response.clone().text();
+
+	if (
+		response.headers.has('content-disposition') ||
+		(contentType !== null &&
+			contentType !== '' &&
+			!contentType.startsWith('application/json'))
+	) {
+		if (response.status === insufficientStorageStatus) {
+			throw statusError(request, response, textPreview(body));
+		}
+
+		return response;
+	}
+
+	if (body === '') {
+		return response;
+	}
+
+	let json: unknown;
+
+	try {
+		json = JSON.parse(body);
+	} catch {
+		// Report the HTTP status, which oRPC's error would not include.
+		throw statusError(request, response, textPreview(body));
+	}
+
+	if (response.status === insufficientStorageStatus && !isORPCErrorJson(json)) {
+		throw statusError(
+			request,
+			response,
+			jsonErrorMessage(json) ?? textPreview(body)
+		);
+	}
+
+	return response;
+}
+
+function jsonErrorMessage(json: unknown): string | undefined {
+	if (typeof json !== 'object' || json === null) {
+		return undefined;
+	}
+
+	for (const field of ['message', 'error']) {
+		const value: unknown = Reflect.get(json, field);
+
+		if (typeof value === 'string') {
+			return value;
+		}
+	}
+
+	return undefined;
+}
+
+function statusError(
+	request: Request,
+	response: Response,
+	detail: string,
+	options?: ErrorOptions
+): QuotaExceededError | CupboardHttpError {
+	if (response.status === insufficientStorageStatus) {
+		return new QuotaExceededError(detail, options);
+	}
+
+	return new CupboardHttpError(
 		request.method,
 		new URL(request.url).pathname,
 		response.status,
-		await serverErrorDetail(response, request.signal),
-		response.headers.get('cf-ray') ?? undefined
+		detail,
+		response.headers.get('cf-ray') ?? undefined,
+		options
 	);
 }
 
 // Use the decoded message when the body is an oRPC error envelope. Otherwise
-// preserve the trimmed response text without attributing its source.
-async function serverErrorDetail(
-	response: Response,
-	signal: AbortSignal
-): Promise<string> {
-	const body = await readResponseText(response, {
-		description: 'Cupboard server error response',
-		maximumBytes: maximumServerErrorBytes,
-		signal
-	});
+// preserve the start of the response text without attributing its source.
+async function serverErrorDetail(response: Response): Promise<string> {
+	const body = await response.text();
 
 	try {
 		const json: unknown = JSON.parse(body);
@@ -209,5 +372,5 @@ async function serverErrorDetail(
 		// Preserve non-JSON response text below.
 	}
 
-	return body.trim();
+	return textPreview(body);
 }

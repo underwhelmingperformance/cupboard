@@ -17,17 +17,24 @@ import {
 export const authExitCode = 77;
 export const transientExitCode = 75;
 export const unavailableExitCode = 69;
-// A publication failure with no more specific category: a transfer that did
-// not complete. Only build-push returns it. Using this code instead of the
-// generic 1 lets a caller that retries on the exit code tell a lost upload from
-// any other failure.
+// Publication or retention failed without a more specific exit status. Only
+// build-push returns it. A failed build exits with the build command's own
+// status, which can be 1, so a script can tell a publication failure from a
+// failed build only through this separate status.
 export const publicationExitCode = 74;
+
+/**
+ * The exit statuses that `classifyFailures` checks for before its fallback.
+ */
+export type RankedExitStatus =
+	typeof authExitCode | typeof transientExitCode | typeof unavailableExitCode;
 
 const unauthorisedStatusCode: number = StatusCodes.UNAUTHORIZED;
 const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
 const requestTimeoutStatusCode: number = StatusCodes.REQUEST_TIMEOUT;
 const tooManyRequestsStatusCode: number = StatusCodes.TOO_MANY_REQUESTS;
 const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 export abstract class CliError extends CodedError {}
 
@@ -399,10 +406,11 @@ export class OwnerLoginRequiredError extends CliError {
 }
 
 export class SessionRejectedError extends CliError {
-	constructor() {
+	constructor(options?: ErrorOptions) {
 		super(
 			'The server refused your session; it may have expired. ' +
-				'Run `cupboard login <url>` to sign in again.'
+				'Run `cupboard login <url>` to sign in again.',
+			options
 		);
 		this.name = 'SessionRejectedError';
 	}
@@ -413,11 +421,12 @@ export class SessionRejectedError extends CliError {
 }
 
 export class ScopeForbiddenError extends CliError {
-	constructor() {
+	constructor(options?: ErrorOptions) {
 		super(
 			'Your token lacks the scope this command needs. A tenant command ' +
 				"needs that tenant's admin token; a control-plane command (tenant, " +
-				'control-key) needs the operator token.'
+				'control-key) needs the operator token.',
+			options
 		);
 		this.name = 'ScopeForbiddenError';
 	}
@@ -427,16 +436,51 @@ export class ScopeForbiddenError extends CliError {
 	}
 }
 
-export class QuotaExceededError extends CliError {
-	constructor(public readonly detail: string) {
-		const explanation =
-			detail === '' ? 'The cache is over its storage quota.' : detail;
+export type AdminApiTransientStatus = 408 | 429 | 503;
 
+/**
+ * The admin API responded with 408, 429 or 503, so the same request may succeed
+ * later.
+ */
+export class AdminApiTransientError extends CliError {
+	constructor(
+		public readonly status: AdminApiTransientStatus,
+		public readonly code: string,
+		options?: ErrorOptions
+	) {
 		super(
-			`${explanation} Free space by deleting unused paths or raise the quota.`
+			`The admin API responded with ${String(status)} (${code}). Run the command again later.`,
+			options
+		);
+		this.name = 'AdminApiTransientError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
+export class QuotaExceededError extends CliError {
+	constructor(
+		public readonly detail: string,
+		options?: ErrorOptions
+	) {
+		super(
+			`${quotaExplanation(detail)} Free space by deleting unused paths or raise the quota.`,
+			options
 		);
 		this.name = 'QuotaExceededError';
 	}
+}
+
+function quotaExplanation(detail: string): string {
+	const explanation = detail.trim();
+
+	if (explanation === '') {
+		return 'The cache is over its storage quota.';
+	}
+
+	return /[.!?]$/u.test(explanation) ? explanation : `${explanation}.`;
 }
 
 export class CupboardHttpError extends CliError {
@@ -449,11 +493,15 @@ export class CupboardHttpError extends CliError {
 		public readonly body: string,
 		// Cloudflare's per-request ray id from the response, when present. It
 		// identifies the matching server-side log entry.
-		public readonly ray?: string
+		public readonly ray?: string,
+		options?: ErrorOptions
 	) {
 		const rayNote = ray === undefined ? '' : ` (Cloudflare ray ${ray})`;
 
-		super(`${method} ${path} failed with ${String(status)}: ${body}${rayNote}`);
+		super(
+			`${method} ${path} failed with ${String(status)}: ${body}${rayNote}`,
+			options
+		);
 		this.name = 'CupboardHttpError';
 		this.oauthError = parseOAuthErrorBody(body);
 	}
@@ -464,6 +512,12 @@ export class CupboardHttpError extends CliError {
 			this.status === forbiddenStatusCode
 		) {
 			return authExitCode;
+		}
+
+		// The server returns 507 when the cache is over its storage quota, and a
+		// re-run fails in the same way.
+		if (this.status === insufficientStorageStatusCode) {
+			return genericExitCode;
 		}
 
 		if (
@@ -609,13 +663,123 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 	}
 }
 
+/**
+ * The exit statuses that a push with failed paths can return.
+ */
+export type IncompletePushExitStatus =
+	RankedExitStatus | typeof genericExitCode;
+
+/**
+ * The command that the user ran. `PushIncompleteError` includes it in its
+ * advice.
+ */
+export type PushCommand = 'cupboard push' | 'cupboard build-push';
+
+/**
+ * The step of a push at which a path failed. A path that fails at `verify` was
+ * committed, and the server may still publish it.
+ */
+export type PushFailureStage = 'resolve' | 'upload' | 'commit' | 'verify';
+
+export interface FailedPushPath {
+	readonly path: string;
+	readonly stage: PushFailureStage;
+}
+
+/**
+ * What the user should do before running the push again: sign in, run it
+ * again unchanged, or fix the reported failures first.
+ */
+export interface PushRetryAdvice {
+	readonly action: 'sign-in' | 'retry' | 'fix';
+	readonly command: PushCommand;
+}
+
+/**
+ * Some paths of a push failed. The error's exit status comes from
+ * `classifyFailures`, applied to the per-path failures.
+ */
 export class PushIncompleteError extends CliError {
-	constructor(public readonly failedPaths: readonly string[]) {
-		super(
-			`${String(failedPaths.length)} path(s) did not finish. The cache contains ` +
-				`only committed paths. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
-		);
+	readonly failedPaths: readonly string[];
+	readonly advice: PushRetryAdvice;
+
+	constructor(
+		public readonly failures: readonly FailedPushPath[],
+		public readonly exitStatus: IncompletePushExitStatus,
+		command: PushCommand
+	) {
+		const advice = pushRetryAdvice(exitStatus, command);
+
+		super(`${incompletePushOutcome(failures)} ${pushRetryAdviceText(advice)}`);
 		this.name = 'PushIncompleteError';
+		this.failedPaths = failures.map((failure) => failure.path);
+		this.advice = advice;
+	}
+
+	override get exitCode(): number {
+		return this.exitStatus;
+	}
+}
+
+// Retention is recorded after every path has been committed, and before
+// deferred verification finishes. A failure at any earlier stage therefore
+// means that the push did not record retention.
+function incompletePushOutcome(failures: readonly FailedPushPath[]): string {
+	const unpublished = failures
+		.filter((failure) => failure.stage !== 'verify')
+		.map((failure) => failure.path);
+	const unverified = failures
+		.filter((failure) => failure.stage === 'verify')
+		.map((failure) => failure.path);
+	const sentences: string[] = [];
+
+	if (unpublished.length > 0) {
+		sentences.push(
+			`This push did not publish ${String(unpublished.length)} path(s): ${unpublished.join(', ')}. It did not record retention.`
+		);
+	}
+
+	if (unverified.length > 0) {
+		sentences.push(
+			`${String(unverified.length)} committed path(s) were not verified: ${unverified.join(', ')}. The server may still publish them.`
+		);
+	}
+
+	if (unverified.length > 0 && unpublished.length === 0) {
+		sentences.push('The push recorded retention before verification.');
+	}
+
+	return sentences.join(' ');
+}
+
+function pushRetryAdvice(
+	exitStatus: IncompletePushExitStatus,
+	command: PushCommand
+): PushRetryAdvice {
+	if (exitStatus === authExitCode) {
+		return { action: 'sign-in', command };
+	}
+
+	if (exitStatus === transientExitCode) {
+		return { action: 'retry', command };
+	}
+
+	return { action: 'fix', command };
+}
+
+function pushRetryAdviceText(advice: PushRetryAdvice): string {
+	switch (advice.action) {
+		case 'sign-in': {
+			return `Sign in again with cupboard login or use a credential that allows the push, then run ${advice.command} again.`;
+		}
+
+		case 'retry': {
+			return `Run ${advice.command} again to publish the failed paths.`;
+		}
+
+		case 'fix': {
+			return `Fix the failure reported above for each path, then run ${advice.command} again.`;
+		}
 	}
 }
 
@@ -1255,6 +1419,21 @@ export class UnknownCacheCredentialError extends CliUsageError {
 	}
 }
 
+/**
+ * `cupboard check` found committed paths whose stored objects are missing or
+ * wrong. The report lists each path.
+ */
+export class CheckDiscrepanciesError extends CliError {
+	constructor(public readonly count: number) {
+		super(
+			count === 1
+				? 'The check found 1 discrepancy.'
+				: `The check found ${String(count)} discrepancies.`
+		);
+		this.name = 'CheckDiscrepanciesError';
+	}
+}
+
 export class GithubCheckFailedError extends CliError {
 	constructor(public readonly checks: readonly string[]) {
 		super(`Configuration checks failed: ${checks.join(', ')}`);
@@ -1542,7 +1721,7 @@ export class BuildProvenanceIncompleteError extends Error {
 export class BuildPublicationFailedError extends CliError {
 	constructor(
 		public readonly failedPaths: readonly string[],
-		private readonly code: number,
+		private readonly code: RankedExitStatus | typeof publicationExitCode,
 		options: { readonly cause?: unknown } = {}
 	) {
 		super(
@@ -1559,38 +1738,4 @@ export class BuildPublicationFailedError extends CliError {
 	override get exitCode(): number {
 		return this.code;
 	}
-}
-
-/**
- * The error cause and exit code to report when publication fails.
- */
-export interface PublicationFailureClassification {
-	readonly exitCode: number;
-	readonly cause: unknown;
-}
-
-/**
- * Chooses the cause and sysexits category to report. It prefers
- * authentication, then transient, then unavailable failures. If no cause has
- * one of those categories, it reports the first defined cause as a general
- * publication failure.
- */
-export function classifyPublicationFailures(
-	causes: readonly unknown[]
-): PublicationFailureClassification {
-	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
-		const cause = causes.find(
-			(candidate) =>
-				candidate instanceof CliError && candidate.exitCode === code
-		);
-
-		if (cause !== undefined) {
-			return { exitCode: code, cause };
-		}
-	}
-
-	return {
-		exitCode: publicationExitCode,
-		cause: causes.find((cause) => cause !== undefined)
-	};
 }

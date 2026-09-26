@@ -16,6 +16,7 @@ import {
 	observedCopiesSchema
 } from '@cupboard/protocol/build';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
@@ -361,7 +362,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--root <name>',
-			'retain the pushed paths under this named retention root (e.g. github:owner/repo/main)',
+			`retain the pushed paths under this named retention root (e.g. github:owner/repo/main); one push can retain at most ${String(rootSetMaxTargets)} target paths`,
 			parseRootName
 		)
 		.option(
@@ -470,6 +471,21 @@ export function registerPushCommand(
 		.addHelpText(
 			'after',
 			[
+				'',
+				'If some paths fail, the rest are still published. When a path fails',
+				'during resolution, upload or commit, the push does not publish it and',
+				'does not record retention: the command neither updates the retention',
+				'root nor pins any path. When a path fails deferred verification after',
+				'every other path was committed, the push has already recorded retention,',
+				'and the server may still publish the path. In both cases the push fails.',
+				'',
+				'When a path fails, the command exits 77 if any failure was an',
+				'authentication or authorisation failure, otherwise 75 if any was',
+				'transient, otherwise 69 if any was caused by an unavailable dependency,',
+				'and otherwise 1. A failure caused by the storage quota counts as a',
+				'permanent failure (exit status 1), not a transient one, because a re-run',
+				'fails in the same way until space is freed or the quota is raised. For',
+				'exit status 75, run the push again to publish the paths that failed.',
 				'',
 				'Examples:',
 				'  # Push a build result to a tenant, pinning it under a named root',
@@ -587,6 +603,7 @@ export function registerPushCommand(
 
 			const copiedFrom = await observedCopiesFrom(options.copiedFromFile);
 			const receipt = await runPush(publication, reporter, {
+				command: 'cupboard push',
 				client: pushClientFor(resolved.target.tenantUrl, resolved.credential, {
 					cache,
 					signal: programOptions.signal
