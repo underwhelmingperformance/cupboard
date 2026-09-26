@@ -5,6 +5,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
+	oidcAudienceSchema,
 	oidcIssuerSchema,
 	oidcSubjectSchema,
 	type TokenResponse
@@ -308,6 +309,7 @@ describe('CupboardClient.signup', () => {
 	const response: SignupResponse = {
 		issuer: oidcIssuerSchema.parse('https://dash.cloudflare.com'),
 		subject: oidcSubjectSchema.parse('cf-user-1'),
+		audience: oidcAudienceSchema.parse('cupboard-client'),
 		claimed: true
 	};
 
