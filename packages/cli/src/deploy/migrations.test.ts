@@ -10,7 +10,9 @@ import {
 	type D1Migration,
 	D1MigrationDigestError,
 	parseD1Migrations,
-	unclassifiedD1Migrations
+	readAppliedD1Migrations,
+	unclassifiedD1Migrations,
+	verifyD1MigrationDigests
 } from './migrations.ts';
 
 function digestOf(sql: string): string {
@@ -70,7 +72,8 @@ interface RecordedRow {
 /**
  * A database whose tracking table holds the given rows. `columns` states which
  * columns the table already has, so a test can start from a tracking table
- * created before digests were recorded.
+ * created before digests were recorded. With `hasTable` false, `sqlite_master`
+ * lists no tracking table.
  */
 function fakeApi(
 	rows: readonly RecordedRow[],
@@ -80,7 +83,8 @@ function fakeApi(
 		'applied_at',
 		'sha256',
 		'verification_state'
-	]
+	],
+	hasTable = true
 ): { api: D1QueryApi; batches: string[][] } {
 	const batches: string[][] = [];
 
@@ -94,6 +98,14 @@ function fakeApi(
 			queryRows(_databaseId, sql) {
 				if (sql.includes('pragma_table_info')) {
 					return Promise.resolve([...columns]);
+				}
+
+				if (sql.includes('sqlite_master')) {
+					return Promise.resolve(hasTable ? ['d1_migrations'] : []);
+				}
+
+				if (sql === 'SELECT name FROM d1_migrations;') {
+					return Promise.resolve(rows.map((row) => row.name));
 				}
 
 				return Promise.resolve(
@@ -238,6 +250,90 @@ describe('applyD1Migrations', () => {
 			second,
 			`INSERT INTO d1_migrations (name, sha256, verification_state) VALUES ('0001_b.sql', '${digestOf(second)}', 'verified');`
 		]);
+	});
+});
+
+describe('readAppliedD1Migrations', () => {
+	const databaseId = databaseIdSchema.parse('db-1');
+
+	it.each([
+		{
+			name: 'no tracking table',
+			database: fakeApi([], [], false),
+			expected: []
+		},
+		{
+			name: 'a tracking table from before digests were recorded',
+			database: fakeApi([{ name: '0000_a.sql' }], ['id', 'name', 'applied_at']),
+			expected: [['0000_a.sql', {}]]
+		},
+		{
+			name: 'a tracking table with digests',
+			database: fakeApi([
+				{
+					name: '0000_a.sql',
+					sha256: 'a'.repeat(64),
+					verificationState: 'verified'
+				},
+				{ name: '0001_b.sql' }
+			]),
+			expected: [
+				[
+					'0000_a.sql',
+					{ sha256: 'a'.repeat(64), verificationState: 'verified' }
+				],
+				['0001_b.sql', {}]
+			]
+		}
+	])('reads $name without writing', async ({ database, expected }) => {
+		const applied = await readAppliedD1Migrations(database.api, databaseId);
+
+		expect({ applied: [...applied], batches: database.batches }).toStrictEqual({
+			applied: expected,
+			batches: []
+		});
+	});
+});
+
+describe('verifyD1MigrationDigests', () => {
+	const sql = 'CREATE TABLE a (id);';
+	const migration: D1Migration = {
+		name: '0000_a.sql',
+		sha256: digestOf(sql),
+		statements: [sql]
+	};
+
+	it.each([
+		{ name: 'an unapplied migration', applied: new Map() },
+		{
+			name: 'a migration applied before digests were recorded',
+			applied: new Map([['0000_a.sql', {}]])
+		},
+		{
+			name: 'a migration whose digest matches',
+			applied: new Map([['0000_a.sql', { sha256: digestOf(sql) }]])
+		}
+	])('accepts $name', ({ applied }) => {
+		expect(() => {
+			verifyD1MigrationDigests(applied, [migration]);
+		}).not.toThrow();
+	});
+
+	it('refuses a migration whose file changed after it was applied', () => {
+		const changed = digestOf('CREATE TABLE a (other);');
+		let caught: unknown;
+
+		try {
+			verifyD1MigrationDigests(new Map([['0000_a.sql', { sha256: changed }]]), [
+				migration
+			]);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toStrictEqual(
+			new D1MigrationDigestError('0000_a.sql', changed, digestOf(sql))
+		);
 	});
 });
 

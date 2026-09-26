@@ -23,7 +23,11 @@ import type { DeploymentConfig } from './config.ts';
 import type { D1QueryApi } from './d1-query.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
-import { applyD1Migrations } from './migrations.ts';
+import {
+	applyD1Migrations,
+	readAppliedD1Migrations,
+	verifyD1MigrationDigests
+} from './migrations.ts';
 import {
 	readDeploymentPhase,
 	readLocalStepReadiness,
@@ -414,6 +418,12 @@ async function performDeploy(
 		// does not define stops the deploy here, before this build's Workers are
 		// put in front of storage a newer build shaped.
 		await readDeploymentPhase(d1QueryApiOf(api), databaseId);
+		// The contraction migrations run only after the upload, so check their
+		// digests here too, before anything is written.
+		verifyD1MigrationDigests(
+			await readAppliedD1Migrations(d1QueryApiOf(api), databaseId),
+			artifact.d1Migrations
+		);
 
 		const applied = await applyD1Migrations(
 			d1QueryApiOf(api),

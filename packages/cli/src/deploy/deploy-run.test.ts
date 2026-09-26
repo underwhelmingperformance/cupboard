@@ -30,6 +30,7 @@ import {
 	scriptNameSchema,
 	zoneIdSchema
 } from './identifiers.ts';
+import { D1MigrationDigestError } from './migrations.ts';
 import { UnknownDeploymentPhaseError } from './phase.ts';
 import {
 	planDeployment,
@@ -484,6 +485,7 @@ describe('runDeploy', () => {
 			'd1:cupboard',
 			'kv:cupboard-tenant-cache',
 			'd1qr:SELECT tbl_n',
+			'd1qr:SELECT tbl_n',
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
 			'd1q:ALTER TABLE ',
@@ -796,6 +798,7 @@ describe('runDeploy', () => {
 				'd1:cupboard',
 				'kv:cupboard-tenant-cache',
 				'd1qr:SELECT tbl_n',
+				'd1qr:SELECT tbl_n',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
 				'd1q:ALTER TABLE ',
@@ -884,6 +887,7 @@ describe('runDeploy', () => {
 			'd1:cupboard',
 			'kv:cupboard-tenant-cache',
 			'd1qr:SELECT tbl_n',
+			'd1qr:SELECT tbl_n',
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
 			'd1q:ALTER TABLE ',
@@ -971,6 +975,7 @@ describe('runDeploy', () => {
 				'queue:cupboard-maintenance-dlq',
 				'd1:cupboard',
 				'kv:cupboard-tenant-cache',
+				'd1qr:SELECT tbl_n',
 				'd1qr:SELECT tbl_n',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
@@ -1179,6 +1184,9 @@ describe('runDeploy', () => {
 				'kv:cupboard-tenant-cache',
 				'd1qr:SELECT tbl_n',
 				'd1qr:SELECT phase',
+				'd1qr:SELECT tbl_n',
+				'd1qr:SELECT name ',
+				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
 				'd1q:ALTER TABLE ',
@@ -1376,6 +1384,72 @@ describe('refused deployment contractions', () => {
 				(call) => call.startsWith('d1q:') || call.startsWith('upload:')
 			)
 		).toStrictEqual([]);
+	});
+	// A contraction migration runs only after the upload, so the deploy must
+	// check its recorded digest before it writes to D1 or uploads a Worker.
+	it('rejects a changed contraction migration before changing D1 or uploading a Worker', async () => {
+		const { api, calls } = recordingApi();
+		const contraction = {
+			name: contractionMigrations[0] ?? '',
+			sha256: 'a'.repeat(64),
+			statements: ['ALTER TABLE prior DROP COLUMN legacy;']
+		};
+		const observed: CloudflareApi = {
+			...api,
+			d1QueryRows: (id, query) => {
+				if (query.includes("tbl_name = 'd1_migrations'")) {
+					return Promise.resolve(['d1_migrations']);
+				}
+
+				if (query.includes("pragma_table_info('d1_migrations')")) {
+					return Promise.resolve([
+						'id',
+						'name',
+						'applied_at',
+						'sha256',
+						'verification_state'
+					]);
+				}
+
+				if (query.startsWith("SELECT name || ':'")) {
+					return Promise.resolve([
+						`${contraction.name}:${'b'.repeat(64)}:verified`
+					]);
+				}
+
+				return api.d1QueryRows(id, query);
+			}
+		};
+
+		let caught: unknown;
+
+		try {
+			await runDeploy({
+				artifact: {
+					...artifact,
+					d1Migrations: [...artifact.d1Migrations, contraction]
+				},
+				api: observed,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } }
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({
+			caught,
+			writes: calls.filter(
+				(call) => call.startsWith('d1q:') || call.startsWith('upload:')
+			)
+		}).toStrictEqual({
+			caught: new D1MigrationDigestError(
+				contraction.name,
+				'b'.repeat(64),
+				'a'.repeat(64)
+			),
+			writes: []
+		});
 	});
 });
 
