@@ -1,6 +1,7 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
+import { TrustedRootFormatError } from '@cupboard/shared/sigstore';
 import { ORPCError } from '@orpc/client';
 import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
@@ -176,6 +177,11 @@ describe('cliExitCode', () => {
 			name: 'a check that found discrepancies',
 			error: new CheckDiscrepanciesError(2),
 			expected: 1
+		},
+		{
+			name: 'a malformed trusted-root file',
+			error: new TrustedRootFormatError('roots.json', { kind: 'empty' }),
+			expected: usageExitCode
 		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }
 	])('maps $name to its exit code', ({ error, expected }) => {

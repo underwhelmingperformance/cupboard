@@ -265,7 +265,7 @@ export function registerAttestCommands(
 		)
 		.option(
 			'--trusted-root <path>',
-			"Verify against the Sigstore trust roots in this trusted_root.json file. Defaults to the public Sigstore roots; pass the roots that `gh attestation trusted-root` writes to verify a bundle signed with GitHub's Sigstore instance."
+			"Verify against the Sigstore trusted roots in this file: one trusted_root.json document, or JSON Lines with one root per line (the form that `gh attestation trusted-root` prints). Verification succeeds if the bundle verifies against any root in the file. Defaults to the public-good Sigstore root; pass the output of `gh attestation trusted-root` to verify a bundle signed with GitHub's Sigstore instance."
 		)
 		.option(
 			'--tlog-threshold <count>',
