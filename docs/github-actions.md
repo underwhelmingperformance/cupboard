@@ -1223,6 +1223,15 @@ each job that publishes to the tenant. With `--fix`, it also repairs some tenant
 configuration. The quickstart's [verification step](#5-verify-the-setup) shows
 the usual commands.
 
+The command exits 1 if any check of a publishing job failed, and 69 if no check
+failed but at least one could not be verified. With `--fix`, once the repair has
+written a change, the command exits 1 for any later failure. That includes a
+repaired publishing job that still fails or cannot be verified, and a transient
+failure such as an exhausted GitHub API rate limit. The [CLI scripting
+reference][cli-scripting] lists the exit statuses that all commands share.
+
+[cli-scripting]: ./cli-scripting.md
+
 ### Discovery
 
 The check reads the workflow files on the repository's default branch. Use
