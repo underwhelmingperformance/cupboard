@@ -49,7 +49,7 @@ import { registerReuseViewCommands } from './commands/reuse-view.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
-import { CliError } from './errors.ts';
+import { errorExitCode } from './exit-code.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {
@@ -244,8 +244,10 @@ export function failureColour(program: Command): boolean | undefined {
 }
 
 /**
- * The process exit code a thrown value maps to: the abort code for a Ctrl-C, a
- * typed CLI failure's own code, or the catch-all 1 for anything else.
+ * Returns the process exit status for a thrown value: `abortExitCode` for a
+ * cancellation, 0 for `--help` and `--version`, 2 for any other Commander error
+ * or a `ConfirmationRequiredError`, and otherwise the exit status from
+ * {@link errorExitCode}.
  */
 export function cliExitCode(error: unknown, abortExitCode: number): number {
 	if (isAbortError(error)) {
@@ -264,7 +266,7 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
 		return usageExitCode;
 	}
 
-	return error instanceof CliError ? error.exitCode : 1;
+	return errorExitCode(error);
 }
 
 /**
