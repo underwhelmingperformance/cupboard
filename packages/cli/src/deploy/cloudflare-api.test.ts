@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	createCloudflareApi,
+	D1QueryResultsMissingError,
 	maximumCloudflareCollectionPages,
 	QueueConsumerIdMissingError
 } from './cloudflare-api.ts';
@@ -332,6 +333,18 @@ describe('d1QueryRows', () => {
 		);
 
 		expect(rows).toStrictEqual(['0001_first:aaa', '0002_second:bbb']);
+	});
+
+	it('fails when the response has no results, instead of reading no rows', async () => {
+		const path = '/accounts/acc-1/d1/database/db-1/query';
+		const { client } = fakeCloudflare({ [`POST ${path}`]: [{}] });
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).d1QueryRows(
+				databaseIdSchema.parse('db-1'),
+				'SELECT 1;'
+			)
+		).rejects.toBeInstanceOf(D1QueryResultsMissingError);
 	});
 });
 
@@ -1030,6 +1043,33 @@ describe('setWorkersDevRoutes', () => {
 				{ workersDev: false, previewUrls: false }
 			)
 		).rejects.toBeInstanceOf(NotFoundError);
+	});
+});
+
+describe('deleteSecret', () => {
+	const path =
+		'/accounts/acc-1/workers/scripts/cupboard/secrets/CUPBOARD_SIGNUP_SECRET';
+
+	it('deletes the named secret from the script', async () => {
+		const { client, requests } = fakeCloudflare({ [`DELETE ${path}`]: {} });
+
+		await createCloudflareApi(client, accountId('acc-1')).deleteSecret(
+			scriptName('cupboard'),
+			'CUPBOARD_SIGNUP_SECRET'
+		);
+
+		expect(requests).toStrictEqual([{ method: 'DELETE', path }]);
+	});
+
+	it('treats a secret that is already gone as deleted', async () => {
+		const { client, requests } = fakeCloudflare({});
+
+		await createCloudflareApi(client, accountId('acc-1')).deleteSecret(
+			scriptName('cupboard'),
+			'CUPBOARD_SIGNUP_SECRET'
+		);
+
+		expect(requests).toStrictEqual([{ method: 'DELETE', path }]);
 	});
 });
 

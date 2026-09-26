@@ -250,6 +250,10 @@ export interface CloudflareApi {
 		crons: readonly string[]
 	): Promise<void>;
 	putSecret(scriptName: ScriptName, secret: WorkerSecret): Promise<void>;
+	/**
+	Removes a secret; one that is already absent counts as removed.
+	*/
+	deleteSecret(scriptName: ScriptName, name: string): Promise<void>;
 	listScriptSecrets(scriptName: ScriptName): Promise<string[]>;
 
 	findZoneId(name: string): Promise<ZoneId | undefined>;
@@ -464,6 +468,17 @@ function managedLifecycleFields(rule: ManagedLifecycleFields): {
 		deleteObjectsTransition: rule.deleteObjectsTransition,
 		abortMultipartUploadsTransition: rule.abortMultipartUploadsTransition
 	};
+}
+
+/**
+ * A D1 query response has no `results`. The caller cannot tell it from a query
+ * that found no rows, so the read fails.
+ */
+export class D1QueryResultsMissingError extends CliError {
+	constructor() {
+		super('The D1 query response did not include its results.');
+		this.name = 'D1QueryResultsMissingError';
+	}
 }
 
 /**
@@ -741,8 +756,13 @@ export function createCloudflareApi(
 			const rows: string[] = [];
 
 			for (const result of response.result) {
-				const records = result.results ?? [];
-				for (const record of records) {
+				// A query that returns no rows still has an empty `results`, so a
+				// response without it is not an empty answer.
+				if (result.results === undefined) {
+					throw new D1QueryResultsMissingError();
+				}
+
+				for (const record of result.results) {
 					// Read the first column by position, so a caller can pass any
 					// single-column query without aliasing the column.
 					const [value] = Object.values(record as Record<string, unknown>);
@@ -917,6 +937,19 @@ export function createCloudflareApi(
 				text: secret.text,
 				type: 'secret_text'
 			});
+		},
+
+		async deleteSecret(scriptName, name) {
+			try {
+				await client.workers.scripts.secrets.delete(name, {
+					...account,
+					script_name: scriptName
+				});
+			} catch (error) {
+				if (!(error instanceof NotFoundError)) {
+					throw error;
+				}
+			}
 		},
 
 		async listScriptSecrets(scriptName) {

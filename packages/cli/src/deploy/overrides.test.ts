@@ -6,7 +6,6 @@ import {
 	renameResource,
 	renameResources,
 	withCrons,
-	withSignupGate,
 	withWorkersInvocationAllowance
 } from './overrides.ts';
 
@@ -121,37 +120,6 @@ describe('withCrons', () => {
 			control: updated.control.crons,
 			tenant: updated.tenant.crons
 		}).toStrictEqual({ control: ['*/5 * * * *'], tenant: [] });
-	});
-});
-
-describe('withSignupGate', () => {
-	const admin = {
-		issuer: 'https://dash.cloudflare.com',
-		subject: 'cf-user-1',
-		audience: 'client-1'
-	};
-
-	it('sets the gate vars on the control worker, preserving other vars', () => {
-		const updated = withSignupGate(config, admin);
-		const expected = {
-			CUPBOARD_SIGNUP_ISSUER: 'https://dash.cloudflare.com',
-			CUPBOARD_SIGNUP_SUBJECT: 'cf-user-1',
-			CUPBOARD_SIGNUP_AUDIENCE: 'client-1'
-		};
-
-		expect({
-			control: updated.control.vars,
-			tenant: updated.tenant.vars
-		}).toStrictEqual({
-			control: { ...config.control.vars, ...expected },
-			tenant: config.tenant.vars
-		});
-	});
-
-	it('writes empty strings when nobody may claim admin', () => {
-		const updated = withSignupGate(withSignupGate(config, admin));
-
-		expect(updated.control.vars.CUPBOARD_SIGNUP_SUBJECT).toBe('');
 	});
 });
 
