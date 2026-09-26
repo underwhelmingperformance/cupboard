@@ -46,6 +46,7 @@ import { ownDisplayName, principalLabel } from '../principal.ts';
 import { generateReadPassword } from '../read-user.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
+import { deploymentUrl } from './deployment-url.ts';
 import type { CloudflareAccountId, ScriptName } from './identifiers.ts';
 import { showCacheCredential } from './onboard-ready.ts';
 import { deployerOwner, type OwnerBinding, type OwnerChoice } from './owner.ts';
@@ -546,27 +547,6 @@ export async function onboardDeployment(
 			created: { access: first.access, read: first.read }
 		})
 	};
-}
-
-/**
- * The URL the deployment serves on: the custom domain, or the script's
- * workers.dev hostname when the account has a subdomain registered. Purely a
- * lookup; enabling the workers.dev route is the onboarding's job.
- */
-export async function deploymentUrl(
-	api: CloudflareApi,
-	controlScriptName: ScriptName,
-	domain: string | undefined
-): Promise<string | undefined> {
-	if (domain !== undefined) {
-		return `https://${domain}`;
-	}
-
-	const subdomain = await api.getWorkersDevSubdomain();
-
-	return subdomain === undefined
-		? undefined
-		: `https://${controlScriptName}.${subdomain}.workers.dev`;
 }
 
 async function resolveDeploymentUrl(

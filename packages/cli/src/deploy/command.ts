@@ -43,6 +43,7 @@ import {
 	derivedPlanRows,
 	runDeploy
 } from './deploy-run.ts';
+import { deploymentUrl } from './deployment-url.ts';
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import {
@@ -57,7 +58,6 @@ import {
 import type { CloudflareAccountId } from './identifiers.ts';
 import {
 	type ClaimSecret,
-	deploymentUrl,
 	onboardAdminFor,
 	onboardDeployment
 } from './onboard.ts';
