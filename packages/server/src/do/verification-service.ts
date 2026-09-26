@@ -57,6 +57,7 @@ import {
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 
+import { type AttestationsService } from './attestations-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import {
 	type CommitPipelineService,
@@ -595,6 +596,7 @@ export class VerificationService {
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly uploadState: UploadStateService,
 		private readonly retention: RetentionService,
+		private readonly attestations: AttestationsService,
 		// A failed verification must remove the path from every retention root. A
 		// root can include the path while its bytes are still being verified.
 		private readonly pruneRetentionTargets: (
@@ -605,6 +607,19 @@ export class VerificationService {
 
 	private cache(cacheId: CacheId): ResolvedCache {
 		return this.context.cacheRepository.resolvedForId(cacheId);
+	}
+
+	private async inheritAfterCommit(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration
+	): Promise<void> {
+		await this.attestations.queueInheritance(
+			this.cache(pending.cacheId),
+			metadata.storePathHash,
+			generation,
+			metadata.narHash
+		);
 	}
 
 	// Re-read the session after settlement awaits because `attachSession` can
@@ -917,7 +932,7 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<FinaliseCommittedResult> {
-		return this.context.criticalSection(() =>
+		const result = await this.context.criticalSection(() =>
 			this.finaliseIfAlreadyCommittedLocked(
 				pending,
 				metadata,
@@ -926,6 +941,12 @@ export class VerificationService {
 				signal
 			)
 		);
+
+		if (result === 'applied') {
+			await this.inheritAfterCommit(pending, metadata, generation);
+		}
+
+		return result;
 	}
 
 	private async finaliseIfAlreadyCommittedLocked(
@@ -1245,6 +1266,7 @@ export class VerificationService {
 
 			if (reclaim === 'committed-current') {
 				signal?.throwIfAborted();
+				await this.inheritAfterCommit(pending, metadata, generation);
 				const didApply = this.uploadState.clearPendingUpload(pending.id, owner);
 
 				if (didApply) {
@@ -1298,6 +1320,7 @@ export class VerificationService {
 			}
 
 			signal?.throwIfAborted();
+			await this.inheritAfterCommit(pending, metadata, generation);
 			// Once the narinfo is durable, notify waiters and remove the upload row and
 			// private staging bytes.
 			const wasCleared = this.uploadState.clearPendingUpload(pending.id, owner);

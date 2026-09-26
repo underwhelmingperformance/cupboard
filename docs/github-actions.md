@@ -820,6 +820,14 @@ signs it, while its dependencies may still substitute. A rerun after a failed
 signing or attachment step therefore builds the output again and attaches the
 provenance that is missing, instead of finishing with an empty receipt.
 
+When a cache publishes a path that another cache in the tenant serves with the
+same NAR, the destination cache inherits that source cache's existing
+attestations. A destination inherits attestations from public source caches, and
+every cache also inherits them from its own earlier generation of the path.
+Bundles from another private cache remain within their source cache even if the
+destination later becomes public. Inheritance runs shortly after the commit, so
+a newly published path can briefly have no attestation list.
+
 Pin this workflow to an immutable published release tag. With no explicit
 `cupboard-version`, the workflow selects that release and verifies its source
 commit and provenance before installation. A `refs/tags/v*` tenant rule can

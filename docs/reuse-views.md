@@ -104,8 +104,10 @@ Passing `reuse-view` to `cupboard-flake-publish.yml` configures both
 a second Nix substituter, after the destination cache. Each cohort also probes
 the view for the expected output paths. If only the view serves a target, the
 workflow publishes it by reference. The destination then reuses its existing
-bytes and retains the path under the target root. A view hit does not retain the
-path by itself.
+bytes and retains the path under the target root. When the source cache is
+public, the destination inherits the source cache's existing attestations.
+Bundles from a private source remain in that cache. A view hit does not retain
+the path by itself.
 
 ## Adopting pull-request builds into a branch
 

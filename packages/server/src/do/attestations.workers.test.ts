@@ -1,5 +1,9 @@
+import { rootLogger } from '@cupboard/logger';
 import {
+	type CacheAccessMode,
+	type CacheScope,
 	narInfoGenerationSchema,
+	predicateTypeSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema
 } from '@cupboard/nix-store/scalars';
@@ -12,23 +16,24 @@ import {
 	attestationNegotiateResponseSchema,
 	attestationUploadDecisionSchema
 } from '@cupboard/protocol/attestations';
+import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import {
 	subrequestSafetyReserve,
 	workersInvocationAllowances
 } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	uploadActionDecisionSchema,
+	uploadDecisionSchema,
 	uploadIdSchema,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
@@ -41,25 +46,31 @@ import {
 	casObjectKey,
 	type R2ObjectKey
 } from '../http/http.ts';
+import { runReaperDemote } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
 	authorisedWorkerFetch,
+	cacheScopedPath,
 	cacheWriteGrants,
 	casObjectRows,
 	clearBlobStorage,
+	commitSessionFromResponse,
 	commitUploadViaWorker,
 	currentCasObjectKey,
+	currentNarObjectKey,
 	fixtureWorkerServer,
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
 	issueTokenForTenant,
+	namedCache,
 	narDigestHex,
 	pendingAttestationRows,
 	provisionFixtureTenant,
 	provisionNamedTenant,
 	putNarBytes,
+	putWorkerTestCache,
 	readFetch,
 	resetTestServer,
 	resolvedCache,
@@ -74,18 +85,29 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
+import { type MaintenanceProgress } from './alarm.ts';
 import { AttestationCasService } from './attestation-cas-service.ts';
-import { AttestationsService } from './attestations-service.ts';
+import {
+	AttestationsService,
+	inheritanceListSubrequests,
+	inheritanceLookupSubrequests,
+	inheritanceSourceKey,
+	maxInheritanceAttempts
+} from './attestations-service.ts';
 import { chunk, maxBoundParameters } from './bulk.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
+import { type ServerContext } from './context.ts';
+import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
-import { CupboardServer } from './server.ts';
+import { CupboardServer, maintenancePassCursorKey } from './server.ts';
 import {
 	subrequestsAvailable,
+	subrequestSliceReserve,
 	withSubrequestSlice
 } from './subrequest-slice.ts';
 
 const predicateType = 'https://slsa.dev/provenance/v1';
+const defaultCacheScope: CacheScope = { kind: 'default' };
 
 // Orders by UTF-16 code unit, matching the default `<`/`>` comparison.
 function compareById(left: { id: string }, right: { id: string }): number {
@@ -129,6 +151,17 @@ describe('attestation attach and reads', () => {
 		vi.useRealTimers();
 		await resetTestServer();
 		await clearBlobStorage();
+		// The scheduler delivers the alarm that a commit arms. Stop that alarm
+		// from draining the inheritance queue, so that each test drains it with
+		// `drainInheritance`.
+		vi.spyOn(
+			AttestationsService.prototype,
+			'nextInheritanceAt'
+		).mockReturnValue(undefined);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	it('marks an absent attestation list as uncacheable', async () => {
@@ -177,6 +210,833 @@ describe('attestation attach and reads', () => {
 			bundleStatus: StatusCodes.OK,
 			bundleControl: 'no-store',
 			bundleBytes: [...bundle]
+		});
+	});
+
+	it('prefetches attestations for every path when one path has more than the per-path limit', async () => {
+		const first = await committedPathBundle();
+		const secondHash = uniqueStorePathHash();
+		const second = uploadMetadata({
+			storePathHash: secondHash,
+			narHash: first.nar.narHash,
+			narSize: first.nar.narSize,
+			fileHash: first.nar.fileHash,
+			fileSize: first.nar.narBytes.byteLength
+		});
+		await pushPathThroughTenant(fixtureTenant, first.token, second, first.nar);
+		const destination = namedCache('prefetch-destination');
+		await putWorkerTestCache(first.token, destination);
+		const digests = Array.from({ length: 131 }, (_, index) =>
+			sha256HexDigestSchema.parse((index + 1).toString(16).padStart(64, '0'))
+		);
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const lastDigest = digests.at(-1);
+
+		if (lastDigest === undefined) {
+			throw new Error('the test needs a last digest');
+		}
+
+		for (const page of chunk(digests, 25)) {
+			await database.insert(d1Schema.casObject).values(
+				page.map((digest) => ({
+					digest,
+					size: 1,
+					storedAt: isoTimestamp(new Date())
+				}))
+			);
+		}
+
+		const firstPathDigests = digests.slice(0, 130);
+		for (const page of chunk(firstPathDigests, 10)) {
+			await database.insert(d1Schema.attestationReference).values(
+				page.map((digest) => ({
+					tenant: fixtureTenant,
+					cacheKind: 'default' as const,
+					storePathHash: first.metadata.storePathHash,
+					generation: narInfoGenerationSchema.parse(0),
+					predicateType: predicateTypeSchema.parse(predicateType),
+					digest
+				}))
+			);
+		}
+
+		await database.insert(d1Schema.attestationReference).values({
+			tenant: fixtureTenant,
+			cacheKind: 'default',
+			storePathHash: second.storePathHash,
+			generation: narInfoGenerationSchema.parse(0),
+			predicateType: predicateTypeSchema.parse(predicateType),
+			digest: lastDigest
+		});
+
+		const prefetched = await runInDurableObject(
+			fixtureWorkerServer(),
+			(instance) => {
+				const service = new AttestationsService(
+					instance.context,
+					new CacheRegistrationService(instance.context),
+					new AttestationCasService(instance.context),
+					new NarInfoObjectsService(instance.context)
+				);
+
+				return service.prefetchInheritanceSources(
+					resolvedCache(instance.context, destination),
+					[first.metadata, second]
+				);
+			}
+		);
+
+		expect({
+			first: prefetched.sources.get(
+				inheritanceSourceKey(first.metadata.storePathHash, first.nar.narHash)
+			)?.length,
+			second: prefetched.sources
+				.get(inheritanceSourceKey(second.storePathHash, first.nar.narHash))
+				?.map((row) => row.digest)
+		}).toStrictEqual({ first: 65, second: [lastDigest] });
+	});
+
+	it('skips R2 checks for bundles that the destination already references', async () => {
+		const destination = namedCache('already-inherited');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, destination);
+		const nar = await verifiableNar('already-inherited');
+		const metadata = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+		await attachBundle(
+			token,
+			metadata.storePathHash,
+			sigstoreBundleBytes(narDigestHex(nar.narHash))
+		);
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			nar,
+			destination
+		);
+		await drainInheritance();
+		const heads = vi.spyOn(env.BLOBS, 'head');
+
+		try {
+			const result = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance) => {
+					const service = attestationsFor(instance.context);
+					const cache = resolvedCache(instance.context, destination);
+					const prefetch = await service.prefetchInheritanceSources(cache, [
+						metadata
+					]);
+
+					return service.inheritFromTenant(rootLogger(), {
+						cache,
+						storePathHash: metadata.storePathHash,
+						generation: narInfoGenerationSchema.parse(0),
+						narHash: metadata.narHash,
+						prefetch
+					});
+				}
+			);
+
+			expect({ result, heads: heads.mock.calls.length }).toStrictEqual({
+				result: 'complete',
+				heads: 0
+			});
+		} finally {
+			heads.mockRestore();
+		}
+	});
+
+	it('inherits the source cache bundle after the commit when another cache reuses the path', async () => {
+		const destination = namedCache('reused');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, destination);
+		const nar = await verifiableNar('attestation-reused-path');
+		const metadata = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+		const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+		await attachBundle(token, metadata.storePathHash, bundle);
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			nar,
+			destination
+		);
+		const listBeforeDrain = await readFetch(
+			`/cache/reused/attestations/${metadata.storePathHash}`
+		);
+
+		const drain = await drainInheritance();
+		const list = await readFetch(
+			`/cache/reused/attestations/${metadata.storePathHash}`
+		);
+		const bundleRead = await readFetch(
+			`/cache/reused/attestation-bundles/${digest}`
+		);
+
+		expect({
+			listStatusBeforeDrain: listBeforeDrain.status,
+			drain,
+			queued: await queuedInheritances(),
+			listStatus: list.status,
+			list: attestationListSchema.parse(await list.json()),
+			bundleStatus: bundleRead.status
+		}).toStrictEqual({
+			listStatusBeforeDrain: StatusCodes.NOT_FOUND,
+			drain: 'progressed',
+			queued: [],
+			listStatus: StatusCodes.OK,
+			list: {
+				attestations: [{ digest, predicateType, size: bundle.byteLength }]
+			},
+			bundleStatus: StatusCodes.OK
+		});
+	});
+
+	it('inherits for the committed path, not for the identity in a batch entry', async () => {
+		const destination = namedCache('batch-identity');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, destination);
+		const sourceNar = await verifiableNar('batch-identity-source');
+		const targetNar = await verifiableNar('batch-identity-target');
+		const source = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: sourceNar.narHash,
+			narSize: sourceNar.narSize,
+			fileHash: sourceNar.fileHash,
+			fileSize: sourceNar.narBytes.byteLength
+		});
+		const target = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: targetNar.narHash,
+			narSize: targetNar.narSize,
+			fileHash: targetNar.fileHash,
+			fileSize: targetNar.narBytes.byteLength
+		});
+		const targetBundle = sigstoreBundleBytes(narDigestHex(targetNar.narHash));
+		const targetDigest = sha256HexDigestSchema.parse(
+			await sha256HexBytes(targetBundle)
+		);
+		await pushPathThroughTenant(fixtureTenant, token, source, sourceNar);
+		await attachBundle(
+			token,
+			source.storePathHash,
+			sigstoreBundleBytes(narDigestHex(sourceNar.narHash))
+		);
+		await pushPathThroughTenant(fixtureTenant, token, target, targetNar);
+		await attachBundle(token, target.storePathHash, targetBundle);
+		await drainInheritance();
+		const negotiated = await tenantFetch(
+			fixtureTenant,
+			cacheScopedPath(destination, '/uploads'),
+			token,
+			{
+				body: JSON.stringify({
+					pushId: await testPushIdFor(fixtureTenant),
+					paths: [uploadPathNegotiation(target)]
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			}
+		);
+		const [decision] = z
+			.tuple([uploadDecisionSchema])
+			.parse(
+				uploadNegotiateResponseSchema.parse(await negotiated.json()).uploads
+			);
+
+		if (decision.action !== 'commit') {
+			throw new Error(`expected a reuse commit, got ${decision.action}`);
+		}
+
+		const session = commitSessionFromResponse(
+			await tenantFetch(
+				fixtureTenant,
+				cacheScopedPath(destination, '/commit'),
+				token,
+				{ headers: { upgrade: 'websocket' } }
+			)
+		);
+		// A batch entry is client-supplied. This one specifies the source path and
+		// NAR, not those of its pending upload.
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: decision.uploadId,
+					storePathHash: source.storePathHash,
+					narHash: source.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+		const queued = await queuedInheritances();
+		await drainInheritance();
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${target.storePathHash}`
+		);
+
+		expect({
+			frame: frame.ev,
+			queued,
+			listStatus: list.status,
+			listed: list.ok
+				? attestationListSchema
+						.parse(await list.json())
+						.attestations.map((attestation) => attestation.digest)
+				: []
+		}).toStrictEqual({
+			frame: 'settled',
+			queued: [{ storePathHash: target.storePathHash, attempts: 0 }],
+			listStatus: StatusCodes.OK,
+			listed: [targetDigest]
+		});
+	});
+
+	it('retries inheritance after a failed attempt and after running out of subrequests', async () => {
+		const destination = namedCache('reuse-after-attestation-error');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, destination);
+		const nar = await verifiableNar('reuse-attestation-error');
+		const metadata = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+		await attachBundle(
+			token,
+			metadata.storePathHash,
+			sigstoreBundleBytes(narDigestHex(nar.narHash))
+		);
+		// Drain the source cache's own queued path, so that only the destination
+		// remains queued.
+		await drainInheritance();
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			nar,
+			destination
+		);
+		const narInfo = await readFetch(
+			`/cache/${destination.name}/${metadata.storePathHash}.narinfo`
+		);
+		const inheritance = vi
+			.spyOn(AttestationsService.prototype, 'inheritFromTenant')
+			.mockRejectedValueOnce(new Error('attestation lookup failed'));
+		const listStatus = async () => {
+			const response = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+			);
+
+			return response.status;
+		};
+
+		try {
+			const failed = await drainInheritance();
+			const afterFailure = await queuedInheritances();
+			await makeQueuedInheritancesDue();
+			// Leave the drain enough subrequests for the source lookup and the
+			// list write, but not for the bundle.
+			const exhausted = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					withSubrequestSlice(
+						() =>
+							attestationsFor(instance.context).drainInheritanceQueue(
+								rootLogger()
+							),
+						{
+							subrequests:
+								subrequestSliceReserve +
+								inheritanceLookupSubrequests +
+								inheritanceListSubrequests,
+							reserve: subrequestSliceReserve
+						}
+					)
+			);
+			const afterExhaustion = await queuedInheritances();
+			const listAfterExhaustion = await listStatus();
+			const completed = await drainInheritance();
+
+			expect({
+				narInfoStatus: narInfo.status,
+				failed,
+				afterFailure,
+				exhausted,
+				afterExhaustion,
+				listAfterExhaustion,
+				completed,
+				queued: await queuedInheritances(),
+				listStatus: await listStatus()
+			}).toStrictEqual({
+				narInfoStatus: StatusCodes.OK,
+				failed: 'progressed',
+				afterFailure: [{ storePathHash: metadata.storePathHash, attempts: 1 }],
+				exhausted: { progress: 'stalled', dequeued: [] },
+				afterExhaustion: [
+					{ storePathHash: metadata.storePathHash, attempts: 1 }
+				],
+				listAfterExhaustion: StatusCodes.NOT_FOUND,
+				completed: 'progressed',
+				queued: [],
+				listStatus: StatusCodes.OK
+			});
+		} finally {
+			inheritance.mockRestore();
+		}
+	});
+
+	it('writes the list when an interrupted attempt left references without it', async () => {
+		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
+			'interrupted-inheritance'
+		);
+
+		// Reproduce an attempt that the runtime stopped after it referenced the
+		// bundle and before it wrote the list.
+		await runInDurableObject(fixtureWorkerServer(), async (instance) => {
+			await new AttestationCasService(
+				instance.context
+			).reserveReferenceAndCharge(
+				{
+					cache: destination,
+					storePathHash: metadata.storePathHash,
+					generation: narInfoGenerationSchema.parse(0),
+					predicateType: predicateTypeSchema.parse(predicateType),
+					digest
+				},
+				1
+			);
+		});
+		const listBeforeDrain = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+		await drainInheritance();
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+
+		expect({
+			listStatusBeforeDrain: listBeforeDrain.status,
+			queued: await queuedInheritances(),
+			listed: list.ok
+				? attestationListSchema
+						.parse(await list.json())
+						.attestations.map((attestation) => attestation.digest)
+				: []
+		}).toStrictEqual({
+			listStatusBeforeDrain: StatusCodes.NOT_FOUND,
+			queued: [],
+			listed: [digest]
+		});
+	});
+
+	it('keeps the alarm armed for a retry when an earlier alarm runs, and retries through the alarm', async () => {
+		const { destination, metadata } =
+			await reusedPathWithSourceBundle('retry-alarm');
+		vi.spyOn(AttestationsService.prototype, 'nextInheritanceAt').mockRestore();
+		const failing = vi
+			.spyOn(AttestationsService.prototype, 'inheritFromTenant')
+			.mockRejectedValueOnce(new Error('attestation lookup failed'));
+
+		const retry = await runInDurableObject(
+			fixtureWorkerServer(),
+			async (instance, state) => {
+				await attestationsFor(instance.context).drainInheritanceQueue(
+					rootLogger()
+				);
+				failing.mockRestore();
+				const [queued] = instance.context.db
+					.select({ notBefore: schema.attestationInheritances.notBefore })
+					.from(schema.attestationInheritances)
+					.all();
+				// An earlier alarm, such as one that a commit arms, runs first.
+				await state.storage.setAlarm(Date.now());
+				await instance.alarm();
+
+				return {
+					retryAt:
+						queued === undefined ? undefined : Date.parse(queued.notBefore),
+					armedAt: await state.storage.getAlarm()
+				};
+			}
+		);
+		await makeQueuedInheritancesDue();
+		await runInDurableObject(fixtureWorkerServer(), async (instance, state) => {
+			// Start the rotation at the inheritance pass.
+			await state.storage.put(maintenancePassCursorKey, 'garbage-collection');
+			await instance.alarm();
+		});
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+
+		expect({
+			isArmedForRetry:
+				retry.retryAt !== undefined &&
+				retry.armedAt !== null &&
+				retry.armedAt <= retry.retryAt,
+			queued: await queuedInheritances(),
+			listStatus: list.status
+		}).toStrictEqual({
+			isArmedForRetry: true,
+			queued: [],
+			listStatus: StatusCodes.OK
+		});
+	});
+
+	it('abandons a path after the last attempt fails', async () => {
+		const { destination, metadata } = await reusedPathWithSourceBundle(
+			'abandoned-inheritance'
+		);
+		const failing = vi
+			.spyOn(AttestationsService.prototype, 'inheritFromTenant')
+			.mockRejectedValue(new Error('attestation lookup failed'));
+		const attempts: number[][] = [];
+		const calls = await (async () => {
+			try {
+				for (let attempt = 1; attempt <= maxInheritanceAttempts; attempt += 1) {
+					await drainInheritance();
+					const queued = await queuedInheritances();
+					attempts.push(queued.map((row) => row.attempts));
+					await makeQueuedInheritancesDue();
+				}
+
+				return failing.mock.calls.length;
+			} finally {
+				failing.mockRestore();
+			}
+		})();
+
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+
+		expect({
+			calls,
+			attempts,
+			listStatus: list.status
+		}).toStrictEqual({
+			calls: maxInheritanceAttempts,
+			attempts: [[1], [2], [3], [4], []],
+			listStatus: StatusCodes.NOT_FOUND
+		});
+	});
+
+	it('does not reference or list bundles for a generation that the path no longer has', async () => {
+		const { destination, metadata, token } = await reusedPathWithSourceBundle(
+			'superseded-inheritance'
+		);
+		const ownBundle = sigstoreBundleBytes(
+			narDigestHex(metadata.narHash),
+			buildOriginPredicateType
+		);
+		const ownDigest = sha256HexDigestSchema.parse(
+			await sha256HexBytes(ownBundle)
+		);
+		await attachBundle(token, metadata.storePathHash, ownBundle, destination);
+
+		const result = await runInDurableObject(fixtureWorkerServer(), (instance) =>
+			attestationsFor(instance.context).inheritFromTenant(rootLogger(), {
+				cache: resolvedCache(instance.context, destination),
+				storePathHash: metadata.storePathHash,
+				generation: narInfoGenerationSchema.parse(1),
+				narHash: metadata.narHash
+			})
+		);
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+		const references = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.select({ generation: d1Schema.attestationReference.generation })
+			.from(d1Schema.attestationReference)
+			.where(
+				and(
+					eq(d1Schema.attestationReference.cacheName, destination.name),
+					eq(
+						d1Schema.attestationReference.storePathHash,
+						metadata.storePathHash
+					)
+				)
+			);
+
+		expect({
+			result,
+			listed: attestationListSchema
+				.parse(await list.json())
+				.attestations.map((attestation) => attestation.digest),
+			generations: references.map((row) => row.generation)
+		}).toStrictEqual({
+			result: 'superseded',
+			listed: [ownDigest],
+			generations: [narInfoGenerationSchema.parse(0)]
+		});
+	});
+
+	it('lists the bundles that an attempt inherited before it failed', async () => {
+		const destination = namedCache('partial-inheritance');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, destination);
+		const nar = await verifiableNar('partial-inheritance');
+		const metadata = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+		const bundles = [
+			sigstoreBundleBytes(narDigestHex(nar.narHash)),
+			sigstoreBundleBytes(narDigestHex(nar.narHash), buildOriginPredicateType)
+		];
+
+		for (const bundle of bundles) {
+			await attachBundle(token, metadata.storePathHash, bundle);
+		}
+
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			nar,
+			destination
+		);
+		const originalHead = env.BLOBS.head.bind(env.BLOBS);
+		let casHeads = 0;
+		// The first bundle is referenced; the head of the second bundle fails.
+		const failing = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementation((key: string) => {
+				if (key.startsWith('cas/')) {
+					casHeads += 1;
+
+					if (casHeads === 2) {
+						return Promise.reject(new Error('head failed'));
+					}
+				}
+
+				return originalHead(key);
+			});
+
+		try {
+			await drainInheritance();
+		} finally {
+			failing.mockRestore();
+		}
+
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+
+		expect({
+			queued: await queuedInheritances(),
+			listStatus: list.status,
+			listed: list.ok
+				? attestationListSchema.parse(await list.json()).attestations.length
+				: 0
+		}).toStrictEqual({
+			queued: [{ storePathHash: metadata.storePathHash, attempts: 1 }],
+			listStatus: StatusCodes.OK,
+			listed: 1
+		});
+	});
+
+	it.each([
+		{ destinationAccess: 'public' },
+		{ destinationAccess: 'private' }
+	] satisfies {
+		destinationAccess: CacheAccessMode;
+	}[])(
+		'keeps private source bundles private when the destination is $destinationAccess',
+		async ({ destinationAccess }) => {
+			const source = namedCache('private-source');
+			const destination = namedCache(`${destinationAccess}-reused`);
+			const token = await initialiseViaWorker();
+			await putWorkerTestCache(token, source, 'private');
+			await putWorkerTestCache(token, destination, destinationAccess);
+			const nar = await verifiableNar('attestation-private-reused-path');
+			const metadata = uploadMetadata({
+				storePathHash: uniqueStorePathHash(),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			await pushPathThroughTenant(fixtureTenant, token, metadata, nar, source);
+			const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+			const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+			await attachBundle(token, metadata.storePathHash, bundle, source);
+			await pushPathThroughTenant(
+				fixtureTenant,
+				token,
+				metadata,
+				nar,
+				destination
+			);
+			await drainInheritance();
+			await provisionFixtureTenant({
+				read: { user: 'alice', password: 'secret' }
+			});
+			const authorised = {
+				headers: { authorization: `Basic ${btoa('alice:secret')}` }
+			};
+
+			const list = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`,
+				authorised
+			);
+			const bundleRead = await readFetch(
+				`/cache/${destination.name}/attestation-bundles/${digest}`,
+				authorised
+			);
+
+			expect({
+				listStatus: list.status,
+				bundleStatus: bundleRead.status,
+				list: list.ok
+					? attestationListSchema.parse(await list.json())
+					: undefined
+			}).toStrictEqual({
+				listStatus: StatusCodes.NOT_FOUND,
+				bundleStatus: StatusCodes.NOT_FOUND,
+				list: undefined
+			});
+		}
+	);
+
+	it('inherits a private cache attestation from its earlier path generation', async () => {
+		const cache = namedCache('private-recommit');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, cache, 'private');
+		const nar = await verifiableNar('private-recommit-attestation');
+		const metadata = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar, cache);
+		const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+		await attachBundle(token, metadata.storePathHash, bundle, cache);
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
+		await runReaperDemote(rootLogger(), env);
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			nar,
+			cache,
+			async () => {
+				await runInDurableObject(fixtureWorkerServer(), async (instance) => {
+					const resolved = resolvedCache(instance.context, cache);
+					const queued = instance.context.db
+						.select()
+						.from(schema.narInfoDeletions)
+						.where(eq(schema.narInfoDeletions.cacheId, resolved.id))
+						.all();
+					expect(
+						queued.map((row) => ({
+							generation: row.generation,
+							storePathHash: row.storePathHash
+						}))
+					).toStrictEqual([
+						{
+							generation: narInfoGenerationSchema.parse(0),
+							storePathHash: metadata.storePathHash
+						}
+					]);
+					const narInfoObjects = new NarInfoObjectsService(instance.context);
+					const attestationCas = new AttestationCasService(instance.context);
+					const attestations = new AttestationsService(
+						instance.context,
+						new CacheRegistrationService(instance.context),
+						attestationCas,
+						narInfoObjects
+					);
+					const deletionQueue = new DeletionQueueService(
+						instance.context,
+						attestationCas,
+						attestations,
+						narInfoObjects
+					);
+
+					await instance.context.criticalSection(() =>
+						deletionQueue.retireTornDownNarInfos(resolved, queued)
+					);
+				});
+			}
+		);
+		// The commit has cleared its pending upload, and the new generation is
+		// in the inheritance queue. Retirement still defers the queued edge.
+		await runInDurableObject(fixtureWorkerServer(), async (instance) => {
+			const resolved = resolvedCache(instance.context, cache);
+			const queued = instance.context.db
+				.select()
+				.from(schema.narInfoDeletions)
+				.where(eq(schema.narInfoDeletions.cacheId, resolved.id))
+				.all();
+			const narInfoObjects = new NarInfoObjectsService(instance.context);
+			const attestationCas = new AttestationCasService(instance.context);
+			const deletionQueue = new DeletionQueueService(
+				instance.context,
+				attestationCas,
+				attestationsFor(instance.context),
+				narInfoObjects
+			);
+
+			await instance.context.criticalSection(() =>
+				deletionQueue.retireTornDownNarInfos(resolved, queued)
+			);
+		});
+		await drainInheritance();
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const references = await database
+			.select({ generation: d1Schema.attestationReference.generation })
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.digest, digest));
+		const edge = await database
+			.select({ generation: d1Schema.blobReference.generation })
+			.from(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, fixtureTenant),
+					eq(d1Schema.blobReference.cacheName, cache.name),
+					eq(d1Schema.blobReference.storePathHash, metadata.storePathHash)
+				)
+			)
+			.orderBy(desc(d1Schema.blobReference.generation))
+			.get();
+
+		expect({
+			currentGeneration: edge?.generation,
+			generations: references.map((row) => row.generation)
+		}).toStrictEqual({
+			currentGeneration: narInfoGenerationSchema.parse(1),
+			generations: [
+				narInfoGenerationSchema.parse(0),
+				narInfoGenerationSchema.parse(1)
+			]
 		});
 	});
 
@@ -874,6 +1734,77 @@ describe('attestation attach and reads', () => {
 	});
 });
 
+function attestationsFor(context: ServerContext): AttestationsService {
+	return new AttestationsService(
+		context,
+		new CacheRegistrationService(context),
+		new AttestationCasService(context),
+		new NarInfoObjectsService(context)
+	);
+}
+
+// Runs one drain of the inheritance queue, as the maintenance alarm does.
+async function drainInheritance(): Promise<MaintenanceProgress> {
+	const outcome = await runInDurableObject(fixtureWorkerServer(), (instance) =>
+		attestationsFor(instance.context).drainInheritanceQueue(rootLogger())
+	);
+
+	return outcome.progress;
+}
+
+// Publishes a path to the default cache with one bundle, then publishes it to a
+// named destination cache. The destination's inheritance row stays queued.
+async function reusedPathWithSourceBundle(name: string): Promise<{
+	readonly token: string;
+	readonly destination: Extract<CacheScope, { kind: 'named' }>;
+	readonly metadata: ReturnType<typeof uploadMetadata>;
+	readonly digest: Sha256HexDigest;
+}> {
+	const destination = namedCache(name);
+	const token = await initialiseViaWorker();
+	await putWorkerTestCache(token, destination);
+	const nar = await verifiableNar(name);
+	const metadata = uploadMetadata({
+		storePathHash: uniqueStorePathHash(),
+		narHash: nar.narHash,
+		narSize: nar.narSize,
+		fileHash: nar.fileHash,
+		fileSize: nar.narBytes.byteLength
+	});
+	await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+	const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+	await attachBundle(token, metadata.storePathHash, bundle);
+	await drainInheritance();
+	await pushPathThroughTenant(fixtureTenant, token, metadata, nar, destination);
+
+	return { token, destination, metadata, digest };
+}
+
+// Makes a failed path due again without waiting for its retry delay.
+async function makeQueuedInheritancesDue(): Promise<void> {
+	await runInDurableObject(fixtureWorkerServer(), (instance) => {
+		instance.context.db
+			.update(schema.attestationInheritances)
+			.set({ notBefore: isoTimestamp(new Date()) })
+			.run();
+	});
+}
+
+async function queuedInheritances(): Promise<
+	{ readonly storePathHash: string; readonly attempts: number }[]
+> {
+	return runInDurableObject(fixtureWorkerServer(), (instance) =>
+		instance.context.db
+			.select({
+				storePathHash: schema.attestationInheritances.storePathHash,
+				attempts: schema.attestationInheritances.attempts
+			})
+			.from(schema.attestationInheritances)
+			.all()
+	);
+}
+
 async function committedPathBundle(): Promise<{
 	readonly token: string;
 	readonly nar: Awaited<ReturnType<typeof verifiableNar>>;
@@ -913,9 +1844,10 @@ function uniqueStorePathHash(): string {
 async function attachBundle(
 	token: string,
 	pathHash: string,
-	bundle: Uint8Array
+	bundle: Uint8Array,
+	cache: CacheScope = defaultCacheScope
 ): Promise<unknown> {
-	const response = await attachBundleResponse(token, pathHash, bundle);
+	const response = await attachBundleResponse(token, pathHash, bundle, cache);
 	expect(response.status).toBe(StatusCodes.OK);
 
 	return attestationAttachResponseSchema.parse(await response.json());
@@ -924,17 +1856,18 @@ async function attachBundle(
 async function attachBundleResponse(
 	token: string,
 	pathHash: string,
-	bundle: Uint8Array
+	bundle: Uint8Array,
+	cache: CacheScope = defaultCacheScope
 ): Promise<Response> {
 	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
 	const decision = attestationUploadDecisionSchema.parse(
-		await negotiate(token, pathHash, digest)
+		await negotiate(token, pathHash, digest, cache)
 	);
 
 	await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 	return authorisedWorkerFetch(
-		`/attestations/${decision.uploadId}/attach`,
+		cacheScopedPath(cache, `/attestations/${decision.uploadId}/attach`),
 		token,
 		{ method: 'POST' }
 	);
@@ -943,16 +1876,21 @@ async function attachBundleResponse(
 async function negotiate(
 	token: string,
 	pathHash: string,
-	digest: Sha256HexDigest
+	digest: Sha256HexDigest,
+	cache: CacheScope = defaultCacheScope
 ): Promise<AttestationDecision> {
-	const response = await authorisedWorkerFetch('/attestations', token, {
-		body: JSON.stringify({
-			pushId: testPushId,
-			bundles: [{ storePathHash: pathHash, digest }]
-		}),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
+	const response = await authorisedWorkerFetch(
+		cacheScopedPath(cache, '/attestations'),
+		token,
+		{
+			body: JSON.stringify({
+				pushId: testPushId,
+				bundles: [{ storePathHash: pathHash, digest }]
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		}
+	);
 	expect(response.status).toBe(StatusCodes.OK);
 	const body = attestationNegotiateResponseSchema.parse(await response.json());
 	const [bundle] = z.tuple([attestationDecisionSchema]).parse(body.bundles);
@@ -1007,25 +1945,41 @@ async function pushPathThroughTenant(
 	tenant: string,
 	token: string,
 	metadata: ReturnType<typeof uploadMetadata>,
-	nar: Awaited<ReturnType<typeof verifiableNar>>
+	nar: Awaited<ReturnType<typeof verifiableNar>>,
+	cache?: CacheScope,
+	beforeCommit?: () => Promise<void>
 ): Promise<void> {
 	const pushId = await testPushIdFor(tenant);
-	const negotiated = await tenantFetch(tenant, '/uploads', token, {
-		body: JSON.stringify({
-			pushId,
-			paths: [uploadPathNegotiation(metadata)]
-		}),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
+	const negotiated = await tenantFetch(
+		tenant,
+		cacheScopedPath(cache ?? { kind: 'default' }, '/uploads'),
+		token,
+		{
+			body: JSON.stringify({
+				pushId,
+				paths: [uploadPathNegotiation(metadata)]
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		}
+	);
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const body = uploadNegotiateResponseSchema.parse(await negotiated.json());
-	const [decision] = z.tuple([uploadActionDecisionSchema]).parse(body.uploads);
+	const [decision] = z.tuple([uploadDecisionSchema]).parse(body.uploads);
+	expect(decision.action).not.toBe('skip');
+	if (decision.action === 'skip') {
+		throw new Error('Expected an upload or commit decision');
+	}
 
-	await putNarBytes(decision.r2Key, nar);
+	if (decision.action === 'upload') {
+		await putNarBytes(decision.r2Key, nar);
+	}
+
+	await beforeCommit?.();
 
 	const committed = await commitUploadViaWorker(token, decision.uploadId, {
-		tenant
+		tenant,
+		...(cache !== undefined && { cache })
 	});
 	expect(committed.status).toBe('committed');
 }

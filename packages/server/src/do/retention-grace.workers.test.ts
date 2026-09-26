@@ -123,7 +123,13 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 		new SigningKeysService(context, narInfoObjects),
 		new UploadStateService(context),
 		narInfoObjects,
-		new RetentionService(context)
+		new RetentionService(context),
+		new AttestationsService(
+			context,
+			new CacheRegistrationService(context),
+			new AttestationCasService(context),
+			narInfoObjects
+		)
 	);
 }
 
@@ -2104,12 +2110,14 @@ function verificationFor(context: ServerContext): VerificationService {
 			new SigningKeysService(context, narInfoObjects),
 			uploadState,
 			narInfoObjects,
-			retention
+			retention,
+			attestations
 		),
 		deletionQueue,
 		narInfoObjects,
 		uploadState,
 		retention,
+		attestations,
 		() => {
 			// Intentionally empty test callback.
 		}

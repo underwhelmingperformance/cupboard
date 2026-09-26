@@ -147,12 +147,18 @@ import {
 	signingKeys
 } from './db/schema.ts';
 import { maintenanceRetryPrefix } from './do/alarm.ts';
-import { listGenerationMetadataKey } from './do/attestations-service.ts';
+import { AttestationCasService } from './do/attestation-cas-service.ts';
+import {
+	AttestationsService,
+	listGenerationMetadataKey
+} from './do/attestations-service.ts';
 import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { chunk } from './do/bulk.ts';
+import { CacheRegistrationService } from './do/cache-registration-service.ts';
 import type { ServerContext } from './do/context.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations, migrationsThrough } from './do/migrate.ts';
+import { NarInfoObjectsService } from './do/narinfo-objects-service.ts';
 import { withRowBudget } from './do/row-budget.ts';
 import type { CupboardServer } from './do/server.ts';
 import { withSubrequestSlice } from './do/subrequest-slice.ts';
@@ -3310,6 +3316,26 @@ export function runCasReaperToCompletion(
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
 	return runReaperToCompletion(runCasReaper, logger, targetEnv, batchSize);
+}
+
+/**
+ * Drains the attestation inheritance queue once, as the maintenance alarm
+ * does. A test that drives alarms by hand calls this so that each alarm runs
+ * the pass that the test expects.
+ */
+export async function drainAttestationInheritance(
+	server: DurableObjectStub<CupboardServer> = currentServer()
+): Promise<void> {
+	await runInDurableObject(server, async (instance) => {
+		const context = instance.context;
+
+		await new AttestationsService(
+			context,
+			new CacheRegistrationService(context),
+			new AttestationCasService(context),
+			new NarInfoObjectsService(context)
+		).drainInheritanceQueue(rootLogger());
+	});
 }
 
 // Runs the reaper to completion against the current server: a first GC pass arms
