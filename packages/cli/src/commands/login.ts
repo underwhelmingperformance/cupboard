@@ -42,12 +42,6 @@ import {
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { CliError } from '../errors.ts';
 
-interface LoginOptions {
-	readonly oidcIssuer: string;
-	readonly clientId: string;
-	readonly headless?: boolean;
-}
-
 export class DeviceGrantNotEnabledError extends CliError {
 	constructor(options: { readonly cause: unknown }) {
 		super(
@@ -159,6 +153,96 @@ export async function cupboardIdToken(dependencies: {
 	}, dependencies.chain.signal);
 }
 
+/**
+ * Options for the OIDC login that identifies the operator.
+ */
+export interface IdentityLoginOptions {
+	readonly oidcIssuer: string;
+	readonly clientId: string;
+	readonly headless?: boolean;
+}
+
+export interface IdentityLoginDependencies {
+	readonly openBrowser: (url: string) => void;
+	readonly info: (message: string) => void;
+	readonly signal?: AbortSignal;
+}
+
+/**
+ * Obtains an id_token for the operator from the issuer. With the built-in
+ * client, the Cloudflare issuer and no `headless`, it uses the cached
+ * Cloudflare grant that `cupboard init` and `cupboard login` share. It logs in
+ * without a prompt while the cached login can be renewed, and opens the browser
+ * only when it cannot. With any other issuer or client, it logs in through the
+ * browser. With `headless`, it logs in through the device flow.
+ */
+export async function loginIdToken(
+	options: IdentityLoginOptions,
+	dependencies: IdentityLoginDependencies
+): Promise<string> {
+	const { signal } = dependencies;
+	// cupboard's own client has exact-match registered redirect URLs, so the
+	// loopback server must bind one of them; any other client keeps the
+	// ephemeral-port default.
+	const isCupboardClient = options.clientId === cloudflareOauthClientId;
+	const scope = loginScopeForClient(options.clientId);
+	const browserPrompt = (target: string): void => {
+		dependencies.openBrowser(target);
+		dependencies.info('Waiting for you to authorise in your browser…');
+	};
+
+	const isCloudflareBrowserLogin =
+		isCupboardClient &&
+		options.oidcIssuer === cloudflareDashIssuer &&
+		options.headless !== true;
+
+	if (isCloudflareBrowserLogin) {
+		return cupboardIdToken({
+			chain: {
+				readGrant: readCachedGrant,
+				writeGrant: writeCachedGrant,
+				withGrantLock: withCachedGrantLock,
+				refreshGrant: (previous, refreshSignal) =>
+					refreshCloudflareGrant(previous, fetch, Date.now, refreshSignal),
+				signal,
+				now: Date.now
+			},
+			login: (loginSignal) =>
+				cloudflareLogin({
+					openBrowser: browserPrompt,
+					signal: loginSignal
+				})
+		});
+	}
+
+	const endpoints = await discoverOidcLogin(options.oidcIssuer, fetch, signal);
+
+	if (options.headless === true) {
+		try {
+			return await deviceLogin({
+				endpoints,
+				clientId: options.clientId,
+				scope,
+				prompt: (verification) => {
+					dependencies.info(deviceLoginInstruction(verification));
+				},
+				signal
+			});
+		} catch (error) {
+			throw mapDeviceLoginError(error, options.clientId);
+		}
+	}
+
+	return loopbackLogin({
+		endpoints,
+		clientId: options.clientId,
+		scope,
+		openBrowser: browserPrompt,
+		loopback: isCupboardClient ? cloudflareLoopback : undefined,
+		signal
+	});
+}
+
 interface LoginSessionDependencies {
 	readonly writeSession: typeof writeCachedSession;
 	readonly withSessionLock: typeof withCachedSessionLock;
@@ -212,83 +296,25 @@ export function registerLoginCommand(
 			'--headless',
 			'use the device flow instead of opening a browser (for SSH/containers)'
 		)
-		.action(async (url: URL, options: LoginOptions) => {
+		.action(async (url: URL, options: IdentityLoginOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const client = CupboardClient.fromUrl(url, {
 				cache: { kind: 'default' },
 				signal: programOptions.signal
 			});
-			// cupboard's own client has exact-match registered redirect URLs, so
-			// the loopback server must bind one of them; any other client keeps
-			// the ephemeral-port default.
-			const isCupboardClient = options.clientId === cloudflareOauthClientId;
 			const scope = loginScopeForClient(options.clientId);
-
-			const browserPrompt = (target: string): void => {
-				openBrowser(target, reporter);
-				reporter.info('Waiting for you to authorise in your browser…');
-			};
 
 			// Login is interactive, so its prompts are shown the moment they happen,
 			// not held behind a spinner the user is meant to act on.
-			const idToken = await (async (): Promise<string> => {
-				// The built-in client against its own issuer uses the deploy's
-				// cached grant: silent while a cached login can be renewed, the
-				// browser only as a last resort.
-				if (
-					isCupboardClient &&
-					options.oidcIssuer === cloudflareDashIssuer &&
-					options.headless !== true
-				) {
-					return cupboardIdToken({
-						chain: {
-							readGrant: readCachedGrant,
-							writeGrant: writeCachedGrant,
-							withGrantLock: withCachedGrantLock,
-							refreshGrant: (previous, signal) =>
-								refreshCloudflareGrant(previous, fetch, Date.now, signal),
-							signal: programOptions.signal,
-							now: Date.now
-						},
-						login: (signal) =>
-							cloudflareLogin({
-								openBrowser: browserPrompt,
-								signal
-							})
-					});
-				}
-
-				const endpoints = await discoverOidcLogin(
-					options.oidcIssuer,
-					fetch,
-					programOptions.signal
-				);
-
-				if (options.headless === true) {
-					try {
-						return await deviceLogin({
-							endpoints,
-							clientId: options.clientId,
-							scope,
-							prompt: (verification) => {
-								reporter.info(deviceLoginInstruction(verification));
-							},
-							signal: programOptions.signal
-						});
-					} catch (error) {
-						throw mapDeviceLoginError(error, options.clientId);
-					}
-				}
-
-				return loopbackLogin({
-					endpoints,
-					clientId: options.clientId,
-					scope,
-					openBrowser: browserPrompt,
-					loopback: isCupboardClient ? cloudflareLoopback : undefined,
-					signal: programOptions.signal
-				});
-			})();
+			const idToken = await loginIdToken(options, {
+				openBrowser: (target) => {
+					openBrowser(target, reporter);
+				},
+				info: (message) => {
+					reporter.info(message);
+				},
+				signal: programOptions.signal
+			});
 
 			const exchanged = await client.tokenExchange(
 				idToken,
