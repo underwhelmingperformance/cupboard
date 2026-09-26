@@ -455,7 +455,7 @@ suspended tenant must reach now: the contract step of the first incomplete
 transition that has one, else this build's final step. Once `cache-identity` is
 complete, the required local step is never below 5.
 
-This release defines two transitions:
+This release defines three transitions:
 
 - `cache-identity`: migrations `0000` to `0027` are its expand migrations and
   `0028` to `0030` its contract migrations. Its expand migrations include the
@@ -463,13 +463,21 @@ This release defines two transitions:
   contract step is local step 4.
 - `deployment-transitions`: migration `0031` creates the `deployment_transition`
   table. It has no contract migrations and no contract step.
+- `attestation-path-index`: migration `0032` adds an index on `attestation_ref`
+  by tenant, store path and generation, which attestation inheritance searches.
+  It has no expand migrations and no contract step, and `0032` is its contract
+  migration. Migration `0028`, a contract migration of `cache-identity`,
+  rebuilds `attestation_ref` and drops every index that it does not recreate, so
+  the index must be created after it. The deploy applies `0032` after the
+  upload, once both Workers serve this build, and the inheritance lookup scans
+  `attestation_ref` until then.
 
 A transition is _independent_ when its expand migrations do not depend on the
 contract migrations of the transitions before it and do not change existing
 rows. Once every earlier transition has expanded, the deploy may apply an
 independent transition's expand migrations ahead of the earlier transitions'
 contract migrations. A transition that is not independent is _dependent_.
-`deployment-transitions` is independent.
+`deployment-transitions` and `attestation-path-index` are independent.
 
 The `deployment_transition` table has one row for each transition that the
 deploy has started. The state is `expanded` once the transition's expand
@@ -511,15 +519,15 @@ One `cupboard init` run applies the transitions in list order:
    A dependent transition can expand only once every earlier transition is
    complete. Otherwise its expand migrations could run only after the upload,
    and the new Workers would run without them until then. No transition in this
-   release is blocked on any deployment: `deployment-transitions` is
-   independent, so a deployment on v0.0.33 upgrades directly. A later release
-   that adds a dependent transition can be blocked. Its error lists the releases
-   that complete the earlier transition, are not older than the deployed
-   release, and do not include the later transition; for `cache-identity`, that
-   includes this release. If the deployed release is one of these, rerun its
-   `cupboard init` to complete the earlier transition. Then deploy the later
-   release. A fresh deployment is exempt, because every transition completes on
-   it before the upload.
+   release is blocked on any deployment: `deployment-transitions` and
+   `attestation-path-index` are independent, so a deployment on v0.0.33 upgrades
+   directly. A later release that adds a dependent transition can be blocked.
+   Its error lists the releases that complete the earlier transition, are not
+   older than the deployed release, and do not include the later transition; for
+   `cache-identity`, that includes this release. If the deployed release is one
+   of these, rerun its `cupboard init` to complete the earlier transition. Then
+   deploy the later release. A fresh deployment is exempt, because every
+   transition completes on it before the upload.
 
    The deploy command shows the plan first. When the plan shows a blocked
    transition, the review menu offers only changes to the plan, such as another

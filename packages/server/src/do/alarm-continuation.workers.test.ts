@@ -14,6 +14,7 @@ import {
 	bootstrap,
 	countingD1,
 	currentServer,
+	drainAttestationInheritance,
 	flakyR2,
 	type MeasuredInvocation,
 	measureInvocations,
@@ -74,6 +75,7 @@ async function publishCommittedPaths(server: string): Promise<void> {
 			await pushPath(token, indexedMetadata(index), buildsCache);
 		}
 	});
+	await drainAttestationInheritance();
 }
 
 /**

@@ -57,7 +57,8 @@ export const expansionLocalStep: LocalStep = localStep(4);
  */
 export const transitionIdSchema = z.enum([
 	'cache-identity',
-	'deployment-transitions'
+	'deployment-transitions',
+	'attestation-path-index'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -270,6 +271,14 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		id: 'deployment-transitions',
 		expand: ['0031_deployment_transitions.sql'],
 		contract: [],
+		independent: true
+	},
+	{
+		// Migration 0028 rebuilds `attestation_ref` and drops this index if it
+		// runs first, so the index is a contract migration.
+		id: 'attestation-path-index',
+		expand: [],
+		contract: ['0032_attestation_ref_path_index.sql'],
 		independent: true
 	}
 ];

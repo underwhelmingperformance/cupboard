@@ -9,8 +9,21 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponseInput } from '@cupboard/protocol/upload';
-import { and, eq, exists, inArray, isNull, notExists, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	gt,
+	inArray,
+	isNull,
+	lt,
+	notExists,
+	or,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
+import { z } from 'zod';
 
 import {
 	type CacheId,
@@ -31,6 +44,7 @@ import * as schema from '../db/schema.ts';
 import { CacheNotFoundError } from '../errors.ts';
 import { type RequestOrigin } from '../http/http.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import {
 	type AttestationCasService,
 	type AttestationReference
@@ -50,8 +64,41 @@ import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	affordableSubrequestOperations,
+	hasSubrequestsFor,
 	subrequestsAvailable
 } from './subrequest-slice.ts';
+
+// A new generation of a path inherits attestations from an earlier generation
+// with the same NAR after it commits, once the maintenance alarm drains the
+// inheritance queue. A queued narinfo deletion is deferred while an upload of
+// the same path and NAR is pending in the cache, or while the inheritance queue
+// has a newer generation of that path with the same NAR. Retiring the edge
+// earlier would leave inheritance with no source. This predicate is the only
+// definition of a deferred deletion.
+//
+// The unary `+` removes the TEXT affinity of `store_path_hash`. With the
+// affinity, SQLite converts the `json_extract` side and cannot search
+// `pending_upload_gc_path_idx` by the path.
+function deferredDeletionCondition(now: IsoTimestamp): SQL<boolean> {
+	const deletion = schema.narInfoDeletions;
+	const pending = schema.pendingUploads;
+	const inheritance = schema.attestationInheritances;
+
+	return sql`(exists (select 1 from ${pending} where ${pending.cacheId} = ${deletion.cacheId} and ${pending.narHash} = ${deletion.narHash} and ${pending.expiresAt} > ${now} and json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}) or exists (select 1 from ${inheritance} where ${inheritance.cacheId} = ${deletion.cacheId} and ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash} and ${inheritance.generation} > ${deletion.generation}))`.mapWith(
+		Boolean
+	);
+}
+
+// The time at which garbage collection runs again because a pending upload that
+// defers a withdrawn narinfo deletion expires.
+const gcDeferralWakeKey = 'maintenance:gc-deferral-wake';
+
+function deletionKey(entry: {
+	readonly storePathHash: StorePathHash;
+	readonly generation: NarInfoGeneration;
+}): string {
+	return JSON.stringify([entry.storePathHash, entry.generation]);
+}
 
 export interface TornDownNarInfo {
 	readonly storePathHash: StorePathHash;
@@ -67,6 +114,16 @@ export interface RetiredNarInfo {
 	readonly queued: typeof schema.narInfoDeletions.$inferSelect;
 	readonly wasNewerCommitted: boolean;
 }
+
+/**
+ * The result of {@link DeletionQueueService.retireQueuedNarInfoEdge}: the queue
+ * has no such entry, the entry is deferred for inheritance, or its edge was
+ * retired.
+ */
+export type QueuedNarInfoRetirement =
+	| { readonly kind: 'absent' }
+	| { readonly kind: 'deferred'; readonly wasObjectDeleted: boolean }
+	| { readonly kind: 'retired'; readonly retired: RetiredNarInfo };
 
 // The paths one retirement chunk covers. A larger chunk amortises the D1 calls
 // but can make two R2 calls for each path whose list belongs to an older
@@ -275,6 +332,104 @@ export class DeletionQueueService {
 			context
 		)
 	) {}
+
+	// The deferral state of the queued deletions for these entries.
+	private deferralsOf(
+		cache: ResolvedCache,
+		entries: readonly TornDownNarInfo[]
+	): ReadonlyMap<string, { readonly isWithdrawn: boolean }> {
+		const table = schema.narInfoDeletions;
+		const deferred = deferredDeletionCondition(isoTimestamp(new Date()));
+		const rows = jsonRowLists(
+			entries.map((entry) => ({
+				storePathHash: entry.storePathHash,
+				generation: entry.generation
+			}))
+		).flatMap((list) =>
+			this.context.db
+				.select({
+					storePathHash: table.storePathHash,
+					generation: table.generation,
+					isWithdrawn: table.withdrawn
+				})
+				.from(table)
+				.where(
+					and(
+						eq(table.cacheId, cache.id),
+						list.matches({
+							storePathHash: table.storePathHash,
+							generation: table.generation
+						}),
+						deferred
+					)
+				)
+				.all()
+		);
+
+		return new Map(
+			rows.map((row) => [deletionKey(row), { isWithdrawn: row.isWithdrawn }])
+		);
+	}
+
+	// Stops serving the deferred generations while their edges stay for
+	// inheritance, once for each entry. An object whose path has a newer
+	// committed generation belongs to that generation and stays. Only the paths
+	// whose object this deletes are purged.
+	private async withdrawDeferredNarInfos(
+		cache: ResolvedCache,
+		deferred: readonly TornDownNarInfo[]
+	): Promise<void> {
+		if (deferred.length === 0 || !hasSubrequestsFor(1)) {
+			return;
+		}
+
+		const storePathHashes = deferred.map((entry) => entry.storePathHash);
+		const liveGenerations = new Map(
+			this.narInfoObjects
+				.narInfoRowsFor(cache, storePathHashes)
+				.map((row) => [row.storePathHash, row.generation] as const)
+		);
+		const removable = deferred.filter((entry) => {
+			const live = liveGenerations.get(entry.storePathHash);
+
+			return live === undefined || live === entry.generation;
+		});
+		const removed = removable.map((entry) => entry.storePathHash);
+
+		await this.narInfoObjects.deleteNarInfoObjects(cache, removed);
+		await this.cachePurges.enqueueNarInfos(cache, removed);
+		await this.markWithdrawn(cache, deferred);
+	}
+
+	private async markWithdrawn(
+		cache: ResolvedCache,
+		entries: readonly TornDownNarInfo[]
+	): Promise<void> {
+		const table = schema.narInfoDeletions;
+
+		const keys = entries.map((entry) => ({
+			storePathHash: entry.storePathHash,
+			generation: entry.generation
+		}));
+
+		for (const list of jsonRowLists(keys)) {
+			this.context.db
+				.update(table)
+				.set({ withdrawn: true })
+				.where(
+					and(
+						eq(table.cacheId, cache.id),
+						list.matches({
+							storePathHash: table.storePathHash,
+							generation: table.generation
+						})
+					)
+				)
+				.run();
+		}
+
+		await this.armDeferralWake();
+	}
 
 	private async retireBlobRefEdge(
 		cache: ResolvedCache,
@@ -766,7 +921,8 @@ export class DeletionQueueService {
 						rows.column('storePathHash'),
 						rows.column('narHash'),
 						rows.column('generation'),
-						sql`${now}`
+						sql`${now}`,
+						sql`0`
 					])
 				)
 				.onConflictDoUpdate({
@@ -776,8 +932,9 @@ export class DeletionQueueService {
 						schema.narInfoDeletions.generation
 					],
 					// A conflicting row is the same deletion queued again, so it keeps
-					// the time it was first queued.
-					set: { narHash: sql`excluded.nar_hash` }
+					// the time it was first queued. Its narinfo is withdrawn again if
+					// the deletion is deferred.
+					set: { narHash: sql`excluded.nar_hash`, withdrawn: false }
 				})
 				.run();
 		}
@@ -790,16 +947,31 @@ export class DeletionQueueService {
 		origin?: RequestOrigin,
 		limit: number = maxNarInfoDeletionsFlushedPerRun
 	): Promise<number> {
-		const queued = this.context.db
+		// Read the retirable entries first, in key order. Fill the rest of the
+		// flush with deferred entries that have not been withdrawn yet. Each
+		// deferred entry is therefore read for withdrawal once, and deferred
+		// entries never take the place of retirable entries.
+		const table = schema.narInfoDeletions;
+		const deferred = deferredDeletionCondition(isoTimestamp(new Date()));
+		const keyOrder = [table.cacheId, table.storePathHash, table.generation];
+		const retirable = this.context.db
 			.select()
-			.from(schema.narInfoDeletions)
-			.orderBy(
-				schema.narInfoDeletions.cacheId,
-				schema.narInfoDeletions.storePathHash,
-				schema.narInfoDeletions.generation
-			)
+			.from(table)
+			.where(sql`not ${deferred}`)
+			.orderBy(...keyOrder)
 			.limit(limit)
 			.all();
+		const toWithdraw =
+			retirable.length < limit
+				? this.context.db
+						.select()
+						.from(table)
+						.where(and(eq(table.withdrawn, false), deferred))
+						.orderBy(...keyOrder)
+						.limit(limit - retirable.length)
+						.all()
+				: [];
+		const queued = [...retirable, ...toWithdraw];
 
 		const byCache = new Map<CacheId, TornDownNarInfo[]>();
 
@@ -826,6 +998,116 @@ export class DeletionQueueService {
 		}
 
 		return deleted;
+	}
+
+	/**
+	 * Whether the next flush can do work: retire an entry, or withdraw the
+	 * narinfo of a deferred entry that it has not withdrawn yet. A withdrawn
+	 * entry becomes work again when its deferral ends.
+	 */
+	hasNarInfoDeletionWork(now: Date = new Date()): boolean {
+		const table = schema.narInfoDeletions;
+		const deferred = deferredDeletionCondition(isoTimestamp(now));
+		const row = this.context.db
+			.select({ storePathHash: table.storePathHash })
+			.from(table)
+			.where(or(eq(table.withdrawn, false), sql`not ${deferred}`))
+			.limit(1)
+			.get();
+
+		return row !== undefined;
+	}
+
+	/**
+	 * The earliest time at which a pending upload that defers a withdrawn
+	 * deletion expires, or `undefined` when no pending upload defers one. A
+	 * deletion deferred by the inheritance queue becomes work when the drain
+	 * removes its inheritance queue row, and the drain reports that.
+	 */
+	earliestPendingDeferralEnd(now: Date = new Date()): number | undefined {
+		const deletion = schema.narInfoDeletions;
+		const pending = schema.pendingUploads;
+		const unexpired = gt(pending.expiresAt, isoTimestamp(now));
+		const row = this.context.db
+			.select({ expiresAt: sql<string | null>`min(${pending.expiresAt})` })
+			.from(pending)
+			.innerJoin(
+				deletion,
+				and(
+					eq(pending.cacheId, deletion.cacheId),
+					eq(pending.narHash, deletion.narHash),
+					sql`json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}`
+				)
+			)
+			.where(and(unexpired, eq(deletion.withdrawn, true)))
+			.get();
+
+		return row?.expiresAt == undefined ? undefined : Date.parse(row.expiresAt);
+	}
+
+	/**
+	 * Stores the time at which the first pending upload that defers a withdrawn
+	 * deletion expires, and arms the alarm for that time. An earlier stored time
+	 * remains, because garbage collection has not yet retired the deletions whose
+	 * deferral ended then.
+	 */
+	async armDeferralWake(now: Date = new Date()): Promise<void> {
+		const wakeAt = this.earliestPendingDeferralEnd(now);
+
+		if (wakeAt === undefined) {
+			return;
+		}
+
+		const stored = await this.deferralWakeAt();
+		const next = stored === undefined ? wakeAt : Math.min(stored, wakeAt);
+
+		await this.context.ctx.storage.put(gcDeferralWakeKey, next);
+		await armAlarmNoLaterThan(this.context.ctx.storage, next);
+	}
+
+	/**
+	 * The time at which garbage collection runs again for a withdrawn deletion,
+	 * or `undefined` when no time is stored.
+	 */
+	async deferralWakeAt(): Promise<number | undefined> {
+		const stored = z
+			.number()
+			.safeParse(await this.context.ctx.storage.get(gcDeferralWakeKey));
+
+		return stored.success ? stored.data : undefined;
+	}
+
+	async clearDeferralWake(): Promise<void> {
+		await this.context.ctx.storage.delete(gcDeferralWakeKey);
+	}
+
+	/**
+	 * Whether the queue has a deletion for an earlier generation of this path
+	 * with the same NAR. Such a deletion becomes work once the inheritance queue
+	 * no longer has the path.
+	 */
+	hasDeletionForEarlierGeneration(
+		cacheId: CacheId,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		narHash: NixSha256HashString
+	): boolean {
+		const table = schema.narInfoDeletions;
+		const row = this.context.db
+			.select({ storePathHash: table.storePathHash })
+			.from(table)
+			.where(
+				and(
+					eq(table.cacheId, cacheId),
+					eq(table.storePathHash, storePathHash),
+					eq(table.narHash, narHash),
+					lt(table.generation, generation)
+				)
+			)
+			.limit(1)
+			.get();
+
+		return row !== undefined;
 	}
 
 	// Select a real column because this driver returns undefined for a projected
@@ -859,10 +1141,12 @@ export class DeletionQueueService {
 	async retireQueuedNarInfoEdge(
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
-		generation: NarInfoGeneration
-	): Promise<RetiredNarInfo | undefined> {
-		const queued = this.context.db
-			.select()
+		generation: NarInfoGeneration,
+		shouldDeferForInheritance = true
+	): Promise<QueuedNarInfoRetirement> {
+		const deferred = deferredDeletionCondition(isoTimestamp(new Date()));
+		const found = this.context.db
+			.select({ queued: schema.narInfoDeletions, isDeferred: deferred })
 			.from(schema.narInfoDeletions)
 			.where(
 				and(
@@ -873,9 +1157,11 @@ export class DeletionQueueService {
 			)
 			.get();
 
-		if (queued === undefined) {
-			return undefined;
+		if (found === undefined) {
+			return { kind: 'absent' };
 		}
+
+		const { queued } = found;
 
 		const current = this.context.db
 			.select({ generation: schema.narInfos.generation })
@@ -894,6 +1180,18 @@ export class DeletionQueueService {
 			await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
 		}
 
+		// The edge stays for inheritance, but readers stop receiving the queued
+		// generation's narinfo.
+		if (shouldDeferForInheritance && found.isDeferred) {
+			if (!wasNewerCommitted) {
+				await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
+			}
+
+			await this.markWithdrawn(cache, [queued]);
+
+			return { kind: 'deferred', wasObjectDeleted: !wasNewerCommitted };
+		}
+
 		await this.retireBlobRefEdge(
 			cache,
 			storePathHash,
@@ -901,7 +1199,7 @@ export class DeletionQueueService {
 			queued.narHash
 		);
 
-		return { queued, wasNewerCommitted };
+		return { kind: 'retired', retired: { queued, wasNewerCommitted } };
 	}
 
 	// The caller must hold the critical section because the row check, object
@@ -912,21 +1210,28 @@ export class DeletionQueueService {
 		generation: NarInfoGeneration,
 		origin?: RequestOrigin
 	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
-		const retired = await this.retireQueuedNarInfoEdge(
+		const retirement = await this.retireQueuedNarInfoEdge(
 			cache,
 			storePathHash,
 			generation
 		);
 
-		if (retired === undefined) {
+		if (retirement.kind === 'absent') {
 			return { objectDeleted: false, narScheduledForDeletion: false };
+		}
+
+		if (retirement.kind === 'deferred') {
+			return {
+				objectDeleted: retirement.wasObjectDeleted,
+				narScheduledForDeletion: false
+			};
 		}
 
 		return this.cleanUpQueuedNarInfo(
 			cache,
 			storePathHash,
 			generation,
-			retired,
+			retirement.retired,
 			origin
 		);
 	}
@@ -1185,7 +1490,8 @@ export class DeletionQueueService {
 	async retireTornDownNarInfos(
 		cache: ResolvedCache,
 		entries: readonly TornDownNarInfo[],
-		_origin?: RequestOrigin
+		_origin?: RequestOrigin,
+		shouldDeferForInheritance = true
 	): Promise<number> {
 		if (entries.length === 0) {
 			return 0;
@@ -1196,7 +1502,21 @@ export class DeletionQueueService {
 
 		let deletedObjects = 0;
 
-		for (const batch of chunk(entries, maxFencedRetireRows)) {
+		const deferrals = shouldDeferForInheritance
+			? this.deferralsOf(cache, entries)
+			: new Map<string, { readonly isWithdrawn: boolean }>();
+		const retirable = entries.filter(
+			(entry) => !deferrals.has(deletionKey(entry))
+		);
+
+		await this.withdrawDeferredNarInfos(
+			cache,
+			entries.filter(
+				(entry) => deferrals.get(deletionKey(entry))?.isWithdrawn === false
+			)
+		);
+
+		for (const batch of chunk(retirable, maxFencedRetireRows)) {
 			const retired = await this.retireTornDownChunk(cache, tenant, batch, now);
 
 			if (retired === undefined) {
@@ -1278,13 +1598,16 @@ export class DeletionQueueService {
 				);
 			});
 
-			const retired = await this.retireQueuedNarInfoEdge(
+			// An explicit delete retires the edge even while an upload of the same
+			// path and NAR is pending. That upload commits a new generation.
+			const retirement = await this.retireQueuedNarInfoEdge(
 				cache,
 				storePathHash,
-				row.generation
+				row.generation,
+				false
 			);
 
-			if (retired === undefined) {
+			if (retirement.kind !== 'retired') {
 				return {
 					storePathHash,
 					deleted: true,
@@ -1303,7 +1626,7 @@ export class DeletionQueueService {
 						cache,
 						storePathHash,
 						row.generation,
-						retired,
+						retirement.retired,
 						origin
 					));
 			} catch {

@@ -26,14 +26,16 @@ const recorded = isoTimestampSchema.parse('2026-01-01T00:20:30.000Z');
 const expanded: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'expanded', updatedAt: recorded },
-		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
+		{ id: 'attestation-path-index', state: 'expanded', updatedAt: recorded }
 	],
 	unrecognised: []
 };
 const complete: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'complete', updatedAt: recorded },
-		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
+		{ id: 'attestation-path-index', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -194,6 +196,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition deployment-transitions',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition attestation-path-index',
+							value: `expanded ${since}`
+						},
 						{ label: 'Required local step', value: '4' },
 						{ label: 'Ready tenants', value: '1' },
 						{ label: 'Pending tenants', value: '1' },
@@ -229,6 +235,10 @@ describe('runDeploymentStatus', () => {
 					},
 					{
 						label: 'Transition deployment-transitions',
+						value: `complete ${since}`
+					},
+					{
+						label: 'Transition attestation-path-index',
 						value: `complete ${since}`
 					},
 					{ label: `Transition ${row.id}`, value },
@@ -275,7 +285,7 @@ describe('runDeploymentResume', () => {
 			name: 'cache-identity is still expanded',
 			transitions: expanded,
 			step: expansionLocalStep,
-			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity.'
+			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index.'
 		}
 	])(
 		'wakes tenants to the required local step and reports the next action when $name',

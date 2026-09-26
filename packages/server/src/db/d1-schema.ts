@@ -504,6 +504,14 @@ export const attestationReference = sqliteTable(
 				table.digest
 			)
 			.where(sql`${table.cacheKind} = 'named'`),
+		// The identity indexes are partial, so SQLite uses them only for a query
+		// that specifies `cache_kind`. Attestation inheritance searches every
+		// cache in the tenant for a path.
+		index('attestation_ref_tenant_path_idx').on(
+			table.tenant,
+			table.storePathHash,
+			table.generation
+		),
 		index('attestation_ref_digest_idx').on(table.digest)
 	]
 );

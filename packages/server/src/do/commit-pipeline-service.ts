@@ -62,6 +62,7 @@ import {
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
+import { type AttestationsService } from './attestations-service.ts';
 import { batchNonEmpty } from './bulk.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
@@ -251,7 +252,8 @@ export class CommitPipelineService {
 		private readonly signingKeysService: SigningKeysService,
 		private readonly uploadState: UploadStateService,
 		private readonly narInfoObjects: NarInfoObjectsService,
-		private readonly retention: RetentionService
+		private readonly retention: RetentionService,
+		private readonly attestations: AttestationsService
 	) {}
 
 	// Read the session ID at notification time so a reconnect receives the
@@ -387,6 +389,12 @@ export class CommitPipelineService {
 				metadata.narHash,
 				outcome.narInfo
 			);
+			await this.attestations.queueInheritance(
+				cache,
+				metadata.storePathHash,
+				generation,
+				metadata.narHash
+			);
 
 			this.notifyUploadWaiters(uploadId, committingSessionId);
 			this.uploadState.clearPendingUpload(uploadId);
@@ -472,6 +480,12 @@ export class CommitPipelineService {
 		});
 
 		if (confirmed !== undefined) {
+			await this.attestations.queueInheritance(
+				cache,
+				metadata.storePathHash,
+				generation,
+				metadata.narHash
+			);
 			this.notifyUploadWaiters(uploadId, committingSessionId);
 			this.uploadState.clearPendingUpload(uploadId);
 
