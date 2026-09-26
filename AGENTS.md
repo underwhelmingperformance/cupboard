@@ -57,7 +57,8 @@ This is a pnpm workspace.
   middleware; services take parsed values and return typed protocol objects,
   with the route layer doing the parsing and rendering. Only the following
   endpoints handle raw Request/Response: OAuth, the Nix binary-cache protocol,
-  the commit WebSocket, and streamed object serves.
+  the cache's read probes (`missing-paths` and `attested-paths`), the commit
+  WebSocket, and streamed object serves.
 - Hono answers HEAD by re-dispatching the request to the GET handler with the
   body stripped, so register reads with `.get()`; an explicit HEAD registration
   never matches.
@@ -69,4 +70,7 @@ This is a pnpm workspace.
   responses validated at runtime on both sides. A new admin endpoint starts as a
   contract procedure; never add a hand-written route and client pair for JSON.
   Only the raw Request/Response endpoints listed above stay outside the
-  contract, on the slim hand-written `CupboardClient`.
+  contract, on the slim hand-written `CupboardClient`. The read probes are not
+  admin procedures: they accept the cache's read credentials, which the admin
+  contract does not, so they stay outside it. Their request and response schemas
+  are in `@cupboard/protocol`.

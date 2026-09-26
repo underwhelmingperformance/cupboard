@@ -59,6 +59,8 @@ const versionBody = new TextBody(`${buildVersion}\n`);
 const uploadPreviewPathPattern = /^(?:\/cache\/[^/]+)?\/uploads\/preview$/u;
 const cacheAvailabilityPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
+const attestationStatusPathPattern =
+	/^(?:\/cache\/[^/]+)?\/api\/v1\/attested-paths$/u;
 
 function buildApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
@@ -417,18 +419,18 @@ function isTenantWrite(inner: Request): boolean {
 
 	return !(
 		isUploadPreviewRequest(inner.method, innerUrl.pathname) ||
-		isCacheAvailabilityRequest(inner.method, innerUrl.pathname)
+		isReadProbeRequest(inner.method, innerUrl.pathname)
 	);
 }
 
-// A read addresses cache content: the binary-cache protocol plus the two
+// A read addresses cache content: the binary-cache protocol plus three
 // read-only POST endpoints. Admission requires an active tenant for these.
 function isTenantRead(method: string, pathname: string): boolean {
 	return (
 		method === 'GET' ||
 		method === 'HEAD' ||
 		isUploadPreviewRequest(method, pathname) ||
-		isCacheAvailabilityRequest(method, pathname)
+		isReadProbeRequest(method, pathname)
 	);
 }
 
@@ -436,8 +438,12 @@ function isUploadPreviewRequest(method: string, pathname: string): boolean {
 	return method === 'POST' && uploadPreviewPathPattern.test(pathname);
 }
 
-function isCacheAvailabilityRequest(method: string, pathname: string): boolean {
-	return method === 'POST' && cacheAvailabilityPathPattern.test(pathname);
+function isReadProbeRequest(method: string, pathname: string): boolean {
+	return (
+		method === 'POST' &&
+		(cacheAvailabilityPathPattern.test(pathname) ||
+			attestationStatusPathPattern.test(pathname))
+	);
 }
 
 // Read D1 so write suspension does not wait for KV expiry. A missing row is

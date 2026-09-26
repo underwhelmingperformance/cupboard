@@ -345,7 +345,7 @@ export const cacheProbeHeadsPerHash = 2;
  * Retry the D1 query once, as the NAR read does: a persistent failure becomes a
  * retryable refusal instead of a 404 reporting the path as absent.
  */
-async function authorisedNarInfoVersions(
+export async function authorisedNarInfoVersions(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: CacheScope,
