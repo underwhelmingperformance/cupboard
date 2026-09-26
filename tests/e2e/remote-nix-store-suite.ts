@@ -2441,6 +2441,8 @@ async function runPublicationPush(
 			? openedNix
 			: withNarUploadBarrier(openedNix, plan.uploadBarrier);
 	const receipt = await runPush(publication, silentReporter(), {
+		command: 'cupboard push',
+		credential: 'cupboard-login',
 		client: plan.server.pushClient(plan.token),
 		nix,
 		attest: false,

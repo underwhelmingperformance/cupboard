@@ -47,6 +47,7 @@ import {
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
 	CliAbortError,
+	type PushCredential,
 	PushIncompleteError,
 	type UntrustedDaemonError
 } from '../errors.ts';
@@ -153,6 +154,7 @@ export type BuildPushStore = ReconcileOptions['store'] &
 
 export interface BuildPushDependencies {
 	readonly client: PushClient;
+	readonly credential: PushCredential;
 	readonly store: BuildPushStore;
 	readonly batchStore: BatchStore;
 	readonly storeDirectory: StoreDirectory;
@@ -889,6 +891,8 @@ async function publishRealised(
 		const shouldRetainTargets = exit.status === 0 && options.root !== undefined;
 
 		published = await runPush(publication, reporter, {
+			command: 'cupboard build-push',
+			credential: dependencies.credential,
 			client: dependencies.client,
 			nix: dependencies.store,
 			buildStore: autoBuildStore,

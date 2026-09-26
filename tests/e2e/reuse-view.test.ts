@@ -193,6 +193,8 @@ describe('Nix substitution through a reuse view', () => {
 						}),
 						createReporter({ stream: sink, out: sink }),
 						{
+							command: 'cupboard push',
+							credential: 'cupboard-login',
 							client: {
 								...destination,
 								uploadNar: (r2Key, body) => {

@@ -53,7 +53,7 @@ import {
 	type ResultRow
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { UsageError } from '@cupboard/shared/errors';
+import { genericExitCode, UsageError } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
@@ -75,6 +75,10 @@ import {
 	waitTimeoutSecondsSchema
 } from '../duration.ts';
 import {
+	type FailedPushPath,
+	type PushCommand,
+	type PushCredential,
+	type PushFailureStage,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
 	ReferencePathMismatchError,
@@ -84,6 +88,7 @@ import {
 	UploadGraceFactsUnsupportedError,
 	UploadVerificationFailedError
 } from '../errors.ts';
+import { classifyFailures } from '../exit-code.ts';
 import { countingByteStream } from '../io/byte-stream.ts';
 import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
@@ -151,6 +156,11 @@ export interface PushDependencies {
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
+	/**
+	 * The command that `PushIncompleteError` tells the user to run again.
+	 */
+	readonly command: PushCommand;
+	readonly credential: PushCredential;
 	/**
 	 * `alreadyHeld` and `claimable` constrain which published paths can be
 	 * attributed to this build invocation.
@@ -238,8 +248,41 @@ type UploadDecisionOf<A extends UploadDecision['action']> = Extract<
 interface PushFailure {
 	readonly storePathHash: StorePathHash;
 	readonly storePath: string;
-	readonly stage: 'resolve' | 'upload' | 'commit' | 'verify';
+	readonly stage: PushFailureStage;
 	readonly reason: string;
+}
+
+interface PushFailureRecord {
+	readonly storePathHash: StorePathHash;
+	readonly storePath: string;
+	readonly stage: PushFailureStage;
+	readonly cause: unknown;
+}
+
+function failedPushPath(record: PushFailureRecord): FailedPushPath {
+	const path = StorePath.basename(record.storePath);
+
+	if (record.stage !== 'verify') {
+		return { path, stage: record.stage };
+	}
+
+	return {
+		path,
+		stage: 'verify',
+		verdict:
+			record.cause instanceof UploadVerificationFailedError
+				? 'failed'
+				: 'pending'
+	};
+}
+
+function summaryFailure(record: PushFailureRecord): PushFailure {
+	return {
+		storePathHash: record.storePathHash,
+		storePath: record.storePath,
+		stage: record.stage,
+		reason: failureReason(record.cause)
+	};
 }
 
 function failureReason(error: unknown): string {
@@ -376,7 +419,9 @@ export async function runPush(
 		compressNar,
 		wait: dependencies.wait ?? true,
 		waitTimeoutSeconds:
-			dependencies.waitTimeoutSeconds ?? defaultWaitTimeoutSeconds
+			dependencies.waitTimeoutSeconds ?? defaultWaitTimeoutSeconds,
+		command: dependencies.command,
+		credential: dependencies.credential
 	});
 }
 
@@ -392,6 +437,8 @@ interface PushRuntimeDependencies {
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
 	readonly waitTimeoutSeconds: WaitTimeoutSeconds;
+	readonly command: PushCommand;
+	readonly credential: PushCredential;
 	readonly runRoot?: UploadAttachRootInput;
 	readonly attest?: boolean;
 	readonly attestations?: readonly AttestationBundleSource[];
@@ -687,7 +734,7 @@ async function runPushFlow(
 	// of this function) so the incomplete result is never mistaken for a finished
 	// one. A vanished intermediate is not a failure: it is recorded as collected
 	// and the run continues.
-	const failures: PushFailure[] = [];
+	const failures: PushFailureRecord[] = [];
 	const collected: CollectedPath[] = [];
 
 	// Resolve local declarations from the selected store, expanding only those
@@ -730,7 +777,7 @@ async function runPushFlow(
 					storePathHash: StorePath.hash(storePath),
 					storePath,
 					stage: 'resolve',
-					reason: failureReason(vanished)
+					cause: vanished
 				});
 				ctx.warn(
 					'vanished target',
@@ -870,7 +917,7 @@ async function runPushFlow(
 							storePathHash: decision.storePathHash,
 							storePath,
 							stage: 'upload',
-							reason
+							cause: error
 						});
 						bar.warn(
 							'upload failed',
@@ -981,7 +1028,7 @@ async function runPushFlow(
 							storePathHash: decision.storePathHash,
 							storePath,
 							stage: 'commit',
-							reason
+							cause: result.reason
 						});
 						bar.warn(
 							'commit failed',
@@ -1018,7 +1065,9 @@ async function runPushFlow(
 		if (isIncomplete) {
 			reporter.warn(
 				'incomplete',
-				`${formatCount(failures.length)} path(s) failed to publish; retention not recorded, re-run cupboard push to finish`
+				retention.kind === 'none'
+					? `${formatCount(failures.length)} path(s) could not be published.`
+					: `${formatCount(failures.length)} path(s) could not be published, so retention was not recorded.`
 			);
 		}
 
@@ -1065,7 +1114,7 @@ async function runPushFlow(
 							storePathHash: entry.storePathHash,
 							storePath,
 							stage: 'verify',
-							reason
+							cause: result.reason
 						});
 						bar.warn(
 							'verification failed',
@@ -1143,7 +1192,7 @@ async function runPushFlow(
 			reusedBlobs,
 			skipped,
 			uploadedBytes,
-			failures,
+			failures: failures.map((failure) => summaryFailure(failure)),
 			paths: summaryPaths
 		};
 		// Server data can make a locally assembled failure entry invalid, for
@@ -1176,9 +1225,18 @@ async function runPushFlow(
 		// Report every successful path first, then fail the overall command so a
 		// caller cannot treat a partial publication as complete.
 		if (failures.length > 0) {
-			throw new PushIncompleteError(
-				failures.map((failure) => StorePath.basename(failure.storePath))
+			const classification = classifyFailures(
+				failures.map((failure) => failure.cause),
+				genericExitCode
 			);
+
+			throw new PushIncompleteError({
+				failures: failures.map((failure) => failedPushPath(failure)),
+				exitStatus: classification.exitCode,
+				command: dependencies.command,
+				credential: dependencies.credential,
+				recordsRetention: retention.kind !== 'none'
+			});
 		}
 
 		return dependencies.buildStore === undefined

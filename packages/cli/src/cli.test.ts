@@ -18,6 +18,7 @@ import {
 	CupboardHttpError,
 	InvalidCacheNameError,
 	OwnerLoginRequiredError,
+	PushIncompleteError,
 	RootRetentionOptionError,
 	transientExitCode,
 	UploadWaitTimeoutError
@@ -147,6 +148,28 @@ describe('cliExitCode', () => {
 		{
 			name: 'a missing admin resource',
 			error: new ORPCError('NOT_FOUND', { status: 404 }),
+			expected: 1
+		},
+		{
+			name: 'a push whose failures were transient',
+			error: new PushIncompleteError({
+				failures: [{ path: 'a-app', stage: 'upload' }],
+				exitStatus: transientExitCode,
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				recordsRetention: true
+			}),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push with an unclassified failure',
+			error: new PushIncompleteError({
+				failures: [{ path: 'a-app', stage: 'upload' }],
+				exitStatus: 1,
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				recordsRetention: true
+			}),
 			expected: 1
 		},
 		{
