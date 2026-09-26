@@ -1,3 +1,7 @@
+import {
+	NixPublicKey,
+	parsePublishedNixPublicKeys
+} from '@cupboard/nix-store/public-key';
 import { parseBaseUrl } from '@cupboard/nix-store/url';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -7,7 +11,7 @@ import {
 	assetContentType,
 	checksumTargets,
 	createDraftBody,
-	fetchCachePublicKey,
+	fetchCachePublicKeys,
 	MissingInputError,
 	NonCanonicalVersionError,
 	PublicKeyFetchError,
@@ -132,8 +136,16 @@ const slashedBaseUrl = parseBaseUrl(
 	new URL('https://cupboard.example/t/acme/')
 );
 const baseUrls = [baseUrl, slashedBaseUrl];
+const firstKey = 'cupboard-acme-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
+const rotationKeys = [
+	firstKey,
+	'cupboard-acme-2:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8='
+];
+// During a key rotation, `/pubkey` lists more than one key, one on each line.
+const publishRotationKeys = () =>
+	Promise.resolve(new Response(`${rotationKeys.join('\n')}\n`));
 
-describe('fetchCachePublicKey', () => {
+describe('fetchCachePublicKeys', () => {
 	it.each(baseUrls)('requests /pubkey from %s', async (base) => {
 		const requests: string[] = [];
 		const fetchLike = (url: string) => {
@@ -146,39 +158,62 @@ describe('fetchCachePublicKey', () => {
 			);
 		};
 
-		const key = await fetchCachePublicKey(base, fetchLike);
+		const keys = await fetchCachePublicKeys(base, fetchLike);
 
-		expect(key).toBe('cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=');
+		expect(keys).toStrictEqual([
+			new NixPublicKey(
+				'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
+			)
+		]);
 		expect(requests).toStrictEqual(['https://cupboard.example/t/acme/pubkey']);
 	});
 
+	it('returns every key published during a rotation', async () => {
+		const keys = await fetchCachePublicKeys(baseUrl, publishRotationKeys);
+
+		expect(keys).toStrictEqual(
+			rotationKeys.map((key) => new NixPublicKey(key))
+		);
+	});
+
 	it('rejects a response that is not ok', async () => {
-		await expect(fetchCachePublicKey(baseUrl, unavailable)).rejects.toThrow(
+		await expect(fetchCachePublicKeys(baseUrl, unavailable)).rejects.toThrow(
 			PublicKeyFetchError
 		);
 	});
 });
+
+function releaseSection(trustedPublicKeys: string): string {
+	return [
+		'## Substitute from the release cache',
+		'',
+		'Cupboard publishes every versioned release to one Nix binary cache.',
+		'Configure it once in nix.conf to fetch releases instead of building:',
+		'',
+		'```',
+		'extra-substituters = https://cupboard.example/t/acme/cache/releases',
+		`extra-trusted-public-keys = ${trustedPublicKeys}`,
+		'```'
+	].join('\n');
+}
 
 describe('substituterSection', () => {
 	it.each(baseUrls)('renders the cache URL and key for %s', (base) => {
 		expect(
 			substituterSection({
 				baseUrl: base,
-				publicKey: 'cupboard-1:abc123='
+				publicKeys: parsePublishedNixPublicKeys(firstKey)
 			})
-		).toBe(
-			[
-				'## Substitute from the release cache',
-				'',
-				'Cupboard publishes every versioned release to one Nix binary cache.',
-				'Configure it once in nix.conf to fetch releases instead of building:',
-				'',
-				'```',
-				'extra-substituters = https://cupboard.example/t/acme/cache/releases',
-				'extra-trusted-public-keys = cupboard-1:abc123=',
-				'```'
-			].join('\n')
-		);
+		).toBe(releaseSection(firstKey));
+	});
+
+	it('renders every key of a rotation on one trusted-public-keys line', async () => {
+		const section = substituterSection({
+			baseUrl,
+			publicKeys: await fetchCachePublicKeys(baseUrl, publishRotationKeys)
+		});
+
+		expect(section).toBe(releaseSection(rotationKeys.join(' ')));
 	});
 });
 
