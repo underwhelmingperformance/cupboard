@@ -83,6 +83,42 @@ describe('tenant settlement', () => {
 		expect(wakes).toBe(2);
 	});
 
+	// The wake selects tenants below the server's step, so it can select none
+	// while tenants are still below a higher step that the caller counts
+	// against.
+	it('stops when a wake selects no tenant while tenants are pending', async () => {
+		let wakes = 0;
+		const client: SettlementClient = {
+			status: () => Promise.resolve(pending),
+			wake: () => {
+				wakes++;
+				return Promise.resolve({
+					current: expansionLocalStep,
+					woken: 0,
+					failed: 0,
+					outcomes: []
+				});
+			}
+		};
+
+		let caught: unknown;
+
+		try {
+			await settleTenants(client, capturingReporter([]), {
+				requiredStep: expansionLocalStep,
+				limit: 20,
+				maxPasses: 100
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({ caught, wakes }).toStrictEqual({
+			caught: new LocalStepUnreachedError(1, expansionLocalStep, [tenant]),
+			wakes: 1
+		});
+	});
+
 	it('does not send a wake after cancellation', async () => {
 		const controller = new AbortController();
 		let wakes = 0;

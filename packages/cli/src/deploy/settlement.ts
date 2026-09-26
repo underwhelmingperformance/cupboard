@@ -22,8 +22,12 @@ export interface SettlementOptions {
 }
 
 /**
-Advances bounded batches, stopping at the requested step or pass limit.
-*/
+ * Advances bounded batches, stopping at the requested step or pass limit. It
+ * also stops when a wake selects no tenant while tenants are still pending.
+ * The wake selects tenants below the server's step, wrapping round the whole
+ * list, so an empty wake means that no tenant is below that step and further
+ * wakes would select none either.
+ */
 export async function settleTenants(
 	client: SettlementClient,
 	reporter: Reporter,
@@ -40,6 +44,10 @@ export async function settleTenants(
 		);
 		reportOutcomes(result.outcomes, reporter, reported);
 		status = await client.status(query);
+
+		if (result.outcomes.length === 0) {
+			break;
+		}
 	}
 	throwIfAborted(options.signal);
 	if (status.pending > 0) {
