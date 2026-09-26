@@ -27,7 +27,11 @@ release's defaults.
 Earlier versions of `cupboard deploy` started every plan from the release's
 defaults, so accepting the plan could point the Workers at new, empty resources
 with the default names. To use the original resources again, enter their names
-in the menu.
+in the menu. If either the original database or the current one records an
+admin, first bind the control Worker to the original database, as described in
+[Changing the control database][control-database].
+
+[control-database]: #changing-the-control-database
 
 A release that changes a default resource name or cron trigger does not change
 an existing deployment. There is one exception: when the control Worker has no
@@ -52,14 +56,15 @@ the admin; this is the claim. The Cloudflare credential that `cupboard init`
 uses for the account (an OAuth login, a wrangler token or an API token) does not
 make anyone a Cupboard admin. The claim uses the identity in an id_token.
 
-Before it changes anything, the deploy reads the admin from the database
-selected in the plan. The next sections describe what the deploy does for each
-state of the row, and with or without a terminal.
+Before it changes anything, the deploy reads the admin from two databases: the
+database that the deployed Workers are bound to, and the database selected in
+the plan. Usually they are the same database. The next sections describe what
+the deploy does for each state of the row, and with or without a terminal.
 
 ### First deploy
 
-When the database records no admin and the deploy runs in a terminal, it logs
-you in to Cloudflare by default. `--oidc-issuer` and `--client-id` select
+When neither database records an admin and the deploy runs in a terminal, it
+logs you in to Cloudflare by default. `--oidc-issuer` and `--client-id` select
 another issuer and OAuth client, with the same defaults as `cupboard login`.
 With the default issuer and client, and without `--headless`, this login uses
 Cupboard's cached Cloudflare login if there is one; it opens a browser only when
@@ -138,13 +143,13 @@ ends the run with that error instead.
 
 ### First deploy without a terminal
 
-When the database records no admin and the deploy has no terminal, it provisions
-and uploads but skips the claim and the first cache, because the claim needs a
-login. It does not wait for the new build to serve. It exits with an error that
-says the deployment has no admin, because nobody can create a cache until
-someone claims it. A deploy from CI has no terminal and cannot log in, so it
-cannot claim a deployment, and a CI job that deploys a new deployment fails
-until someone runs `cupboard init` from a terminal.
+When neither database records an admin and the deploy has no terminal, it
+provisions and uploads but skips the claim and the first cache, because the
+claim needs a login. It does not wait for the new build to serve. It exits with
+an error that says the deployment has no admin, because nobody can create a
+cache until someone claims it. A deploy from CI has no terminal and cannot log
+in, so it cannot claim a deployment, and a CI job that deploys a new deployment
+fails until someone runs `cupboard init` from a terminal.
 
 ### Update
 
@@ -155,6 +160,22 @@ credentials and migrate the tenants, which brings each tenant's Durable Object
 to the local step that the release requires (see [Local steps][local-steps]).
 
 [local-steps]: #local-steps
+
+### Changing the control database
+
+The deploy refuses a plan that selects a D1 database other than the database of
+the deployed Workers when either database records an admin. Deploying such a
+plan would either run as a first deploy while a database records an admin, or
+leave the admin in a database that the Workers are no longer bound to. The
+refusal happens before any change.
+
+To keep the current database, select it in the plan menu. To move the deployment
+to the other database, first bind the control Worker to it: in the Cloudflare
+dashboard, open the control Worker under Workers & Pages, edit its `CUPBOARD_DB`
+binding under Settings > Bindings, and deploy the new version. Then run
+`cupboard init` again, as the admin that the other database records. When
+neither database records an admin, the deploy runs as a first deploy with the
+database selected in the plan.
 
 ### The first cache
 

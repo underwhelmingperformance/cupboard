@@ -11,7 +11,11 @@ import { CliError } from '../errors.ts';
 import { principalLabel } from '../principal.ts';
 
 import { removeClaimSecret } from './claim-secret.ts';
-import type { CloudflareApi } from './cloudflare-api.ts';
+import {
+	type CloudflareApi,
+	liveD1BindingSchema,
+	type ScriptConfiguration
+} from './cloudflare-api.ts';
 import { jwtExpiryMs } from './cloudflare-oauth.ts';
 import type { DeploymentConfig } from './config.ts';
 import type { DeployOptions } from './deploy-run.ts';
@@ -59,10 +63,63 @@ export type EstablishedAuthority =
 	DeployAuthority | { readonly kind: 'declined' };
 
 /**
- * The facts about the plan and the run that decide who may change the
- * deployment.
+ * Which of the two databases records the admin when the plan selects a
+ * database other than the deployed Workers' database.
+ */
+export type AdminRecordedIn = 'bound' | 'planned' | 'both';
+
+/**
+ * The plan selects a D1 database other than the database of the deployed
+ * Workers, and one of the two databases records an admin. Deploying would
+ * either run as a first deploy while a database records an admin, or leave
+ * the admin in a database that the Workers are no longer bound to.
+ */
+export class AdminDatabaseMismatchError extends CliError {
+	constructor(
+		public readonly boundDatabase: string | undefined,
+		public readonly plannedDatabase: string | undefined,
+		public readonly admin: OwnerBinding,
+		public readonly recordedIn: AdminRecordedIn
+	) {
+		const bound = boundDatabase ?? 'no control database';
+		const planned = plannedDatabase ?? 'no control database';
+		const recorder = {
+			bound: `the D1 database ${bound} records`,
+			planned: `the D1 database ${planned} records`,
+			both: 'both databases record'
+		}[recordedIn];
+
+		super(
+			`The plan selects the D1 database ${planned}, but the deployed ` +
+				`Workers use ${bound}, and ${recorder} the admin ` +
+				`${principalLabel(admin)}. Select ${bound} in the plan, or bind ` +
+				'the control Worker to the selected database first, as described under ' +
+				'"Changing the control database" in the deployment guide ' +
+				'(docs/deploying.md). Nothing was changed.'
+		);
+		this.name = 'AdminDatabaseMismatchError';
+	}
+}
+
+/**
+ * The control database that the deployed Workers are bound to, identified by
+ * the binding's database id.
+ */
+export interface BoundDatabase {
+	readonly id: DatabaseId;
+	readonly name: string | undefined;
+}
+
+/**
+ * The facts about the deployment and the plan that decide who may change it.
  */
 export interface AuthorityDeployment {
+	/**
+	 * The database that the deployed Workers are bound to: the control Worker's
+	 * binding, or the tenant Worker's binding when the control Worker was
+	 * deleted. Undefined when neither Worker has the binding.
+	 */
+	readonly boundDatabase: BoundDatabase | undefined;
 	/**
 	 * The name of the control database selected in the plan.
 	 */
@@ -90,7 +147,11 @@ export interface AuthorityEffects {
  * Decides who may change the deployment. Nothing here changes the account, so
  * a refusal leaves the deployment as it was.
  *
- * The admin is read from the control database selected in the plan.
+ * The admin is read from the database that the deployed Workers are bound to
+ * and from the database selected in the plan. When the two differ and either
+ * records an admin, the deploy refuses: without the refusal, it could run as a
+ * first deploy while a database records an admin, or leave the admin in a
+ * database that the Workers are no longer bound to.
  *
  * Whether the deploy claims or updates the deployment depends on the
  * `global_admin` row, not on whether Workers are deployed. A deployment
@@ -104,18 +165,44 @@ export async function decideAuthority(
 ): Promise<DeployAuthority> {
 	throwIfAborted(effects.signal);
 
+	const bound = deployment.boundDatabase;
 	const plannedName = deployment.plannedDatabaseName;
 	const plannedId =
 		plannedName === undefined
 			? undefined
 			: await effects.api.findD1Database(plannedName);
-	const admin = await adminRecordedIn(effects, plannedId);
+	const isSameDatabase = bound?.id === plannedId;
+	const plannedAdmin = await adminRecordedIn(effects, plannedId);
+	const boundAdmin = isSameDatabase
+		? plannedAdmin
+		: await adminRecordedIn(effects, bound?.id);
+	const admin = boundAdmin ?? plannedAdmin;
 
 	if (admin === undefined) {
 		return firstDeployAuthority(deployment, effects);
 	}
 
+	if (!isSameDatabase) {
+		throw new AdminDatabaseMismatchError(
+			bound?.name,
+			plannedName,
+			admin,
+			recordedIn(boundAdmin, plannedAdmin)
+		);
+	}
+
 	return { kind: 'admin', admin };
+}
+
+function recordedIn(
+	boundAdmin: OwnerBinding | undefined,
+	plannedAdmin: OwnerBinding | undefined
+): AdminRecordedIn {
+	if (boundAdmin !== undefined && plannedAdmin !== undefined) {
+		return 'both';
+	}
+
+	return boundAdmin === undefined ? 'planned' : 'bound';
 }
 
 async function adminRecordedIn(
@@ -342,8 +429,7 @@ export async function removeLeftoverClaimSecret(
 	);
 }
 
-// The control Worker's binding for the control database, which records the
-// admin.
+// The Workers' binding for the control database, which records the admin.
 const controlDatabaseBinding = 'CUPBOARD_DB';
 
 function controlDatabaseName(config: DeploymentConfig): string | undefined {
@@ -352,12 +438,27 @@ function controlDatabaseName(config: DeploymentConfig): string | undefined {
 	)?.databaseName;
 }
 
+function boundDatabaseId(
+	configuration: ScriptConfiguration | undefined
+): DatabaseId | undefined {
+	return configuration?.bindings.flatMap((binding) => {
+		const parsed = liveD1BindingSchema.safeParse(binding);
+
+		return parsed.success && parsed.data.name === controlDatabaseBinding
+			? [parsed.data.database_id]
+			: [];
+	})[0];
+}
+
 /**
  * The Cloudflare reads that determine who may change the deployment.
  */
 export type AuthorityApi = Pick<
 	CloudflareApi,
-	'findD1Database' | 'd1QueryRows'
+	| 'findD1Database'
+	| 'findD1DatabaseName'
+	| 'd1QueryRows'
+	| 'getScriptConfiguration'
 >;
 
 export interface AuthorityWorld {
@@ -386,11 +487,23 @@ export async function establishAuthority(
 	world: AuthorityWorld
 ): Promise<EstablishedAuthority> {
 	const { ui, api } = world;
+	const controlName = plans.agreed.config.control.name;
+	const control = await api.getScriptConfiguration(controlName);
+	// Without the control Worker, the tenant Worker's binding shows which
+	// database the deployment used.
+	const boundId = boundDatabaseId(
+		control ??
+			(await api.getScriptConfiguration(plans.agreed.config.tenant.name))
+	);
 
 	// Not run inside a reporter phase, because a first deploy may open a
 	// browser to log in.
 	const authority = await decideAuthority(
 		{
+			boundDatabase:
+				boundId === undefined
+					? undefined
+					: { id: boundId, name: await api.findD1DatabaseName(boundId) },
 			plannedDatabaseName: controlDatabaseName(plans.agreed.config),
 			interactive: world.interactive
 		},

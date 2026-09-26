@@ -323,8 +323,13 @@ Cloudflare identity, the deployment's admin.
 - [x] Admin binding: the Cloudflare credential for the account does not make
       anyone the admin. The admin comes from the identity in an OIDC id_token,
       which defaults to the Cloudflare login. Before any change, the deploy
-      reads the admin from the `global_admin` row of the D1 database selected in
-      the plan.
+      reads the admin from the `global_admin` row of two D1 databases: the
+      database that the deployed Workers are bound to (the control Worker's
+      binding, or the tenant Worker's when the control Worker was deleted) and
+      the database selected in the plan. When they differ and either records an
+      admin, the deploy refuses, so a run never claims while a database records
+      an admin and never leaves the admin in a database that the Workers are no
+      longer bound to.
 
   First deploy: when the row is absent and a terminal is attached, the deploy
   logs the operator in with `--oidc-issuer` and `--client-id`, which default to

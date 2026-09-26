@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	AdminDatabaseMismatchError,
 	type AuthorityApi,
 	type DeployAuthority,
 	establishAuthority,
@@ -1176,6 +1177,18 @@ async function settled(pending: Promise<unknown>): Promise<unknown> {
 	}
 }
 
+function describeResult(result: unknown): unknown {
+	if (result instanceof AdminDatabaseMismatchError) {
+		return {
+			kind: 'database',
+			boundDatabase: result.boundDatabase,
+			plannedDatabase: result.plannedDatabase
+		};
+	}
+
+	return result;
+}
+
 describe('establishAuthority', () => {
 	const deployedConfig = parseDeploymentConfig(
 		`{
@@ -1197,9 +1210,13 @@ describe('establishAuthority', () => {
 
 	/**
 	 * A Cloudflare account whose `cupboard` database has an admin and whose
-	 * `fresh` database has none. Every read is recorded.
+	 * `fresh` database has none. The Workers are bound to `cupboard`. With
+	 * `isControlDeleted`, only the tenant Worker exists. Every read is recorded.
 	 */
-	function claimedAccount(calls: string[]): AuthorityApi {
+	function claimedAccount(
+		calls: string[],
+		options: { readonly isControlDeleted?: boolean } = {}
+	): AuthorityApi {
 		const claimedId = databaseIdSchema.parse('cupboard-id');
 		const freshId = databaseIdSchema.parse('fresh-id');
 
@@ -1207,6 +1224,10 @@ describe('establishAuthority', () => {
 			findD1Database: (name) => {
 				calls.push(`findD1Database:${name}`);
 				return Promise.resolve(name === 'cupboard' ? claimedId : freshId);
+			},
+			findD1DatabaseName: (id) => {
+				calls.push(`findD1DatabaseName:${id}`);
+				return Promise.resolve(id === claimedId ? 'cupboard' : 'fresh');
 			},
 			d1QueryRows: (id, sql) => {
 				calls.push(`d1QueryRows:${id}`);
@@ -1220,9 +1241,26 @@ describe('establishAuthority', () => {
 						? [JSON.stringify([admin.issuer, admin.subject, admin.audience])]
 						: []
 				);
+			},
+			getScriptConfiguration: (scriptName) => {
+				calls.push(`getScriptConfiguration:${scriptName}`);
+
+				if (scriptName === 'cupboard' && options.isControlDeleted === true) {
+					return Promise.resolve(undefined);
+				}
+
+				return Promise.resolve({
+					bindings: [
+						{ type: 'd1', name: 'CUPBOARD_DB', database_id: claimedId }
+					],
+					cacheEnabled: false,
+					crossVersionCache: false
+				});
 			}
 		};
 	}
+
+	const freshDatabaseName: TextEdit = { kind: 'set', value: 'fresh' };
 
 	it.each([
 		{
@@ -1231,13 +1269,34 @@ describe('establishAuthority', () => {
 			textEdits: [],
 			result: { kind: 'admin', admin },
 			calls: [
+				'getScriptConfiguration:cupboard',
+				'findD1DatabaseName:cupboard-id',
 				'findD1Database:cupboard',
+				'd1QueryRows:cupboard-id',
+				'd1QueryRows:cupboard-id'
+			]
+		},
+		{
+			name: 'another database selected in the plan',
+			menuChoices: ['database:cupboard', 'deploy'],
+			textEdits: [freshDatabaseName],
+			result: {
+				kind: 'database',
+				boundDatabase: 'cupboard',
+				plannedDatabase: 'fresh'
+			},
+			calls: [
+				'getScriptConfiguration:cupboard',
+				'findD1DatabaseName:cupboard-id',
+				'findD1Database:fresh',
+				'd1QueryRows:fresh-id',
+				'd1QueryRows:fresh-id',
 				'd1QueryRows:cupboard-id',
 				'd1QueryRows:cupboard-id'
 			]
 		}
 	])(
-		'reads the admin of a claimed deployment from the database in the plan, with $name',
+		'reads the admin of a claimed deployment from both databases, with $name',
 		async ({
 			menuChoices,
 			textEdits,
@@ -1291,13 +1350,77 @@ describe('establishAuthority', () => {
 
 			expect({
 				agreedDatabase: collectResources(agreed.config).d1Databases,
-				result,
+				result: describeResult(result),
 				// Only reads ran. The run did not log in or create a claim secret.
 				calls
 			}).toStrictEqual({
 				agreedDatabase: [menuChoices.length > 1 ? 'fresh' : 'cupboard'],
 				result: expectedResult,
 				calls: expectedCalls
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'another database in the plan',
+			database: 'fresh',
+			result: {
+				kind: 'database',
+				boundDatabase: 'cupboard',
+				plannedDatabase: 'fresh'
+			}
+		},
+		{
+			name: 'the same database in the plan',
+			database: 'cupboard',
+			result: { kind: 'admin', admin }
+		}
+	])(
+		"reads the admin from the tenant Worker's database when the control Worker was deleted, with $name",
+		async ({ database, result: expectedResult }) => {
+			const config = parseDeploymentConfig(
+				`{
+					"name": "cupboard",
+					"compatibility_date": "2026-05-15",
+					"d1_databases": [{ "binding": "CUPBOARD_DB", "database_name": "${database}" }]
+				}`,
+				`{
+					"name": "cupboard-tenant",
+					"compatibility_date": "2026-05-15",
+					"d1_databases": [{ "binding": "CUPBOARD_DB", "database_name": "${database}" }]
+				}`
+			);
+			const calls: string[] = [];
+
+			const result = await settled(
+				establishAuthority(
+					{ agreed: { config } },
+					{
+						ui: pickerUi(),
+						api: claimedAccount(calls, { isControlDeleted: true }),
+						idToken: () => {
+							calls.push('login');
+							return Promise.resolve('id-token-1');
+						},
+						confirmClaim: () => Promise.resolve(true),
+						interactive: true
+					}
+				)
+			);
+
+			expect({
+				result: describeResult(result),
+				calls: calls.filter(
+					(call) =>
+						call.startsWith('getScriptConfiguration') || call === 'login'
+				)
+			}).toStrictEqual({
+				result: expectedResult,
+				calls: [
+					'getScriptConfiguration:cupboard',
+					'getScriptConfiguration:cupboard-tenant'
+				]
 			});
 		}
 	);
@@ -1556,7 +1679,9 @@ describe('establishAuthority on a first deploy', () => {
 					},
 					api: {
 						findD1Database: () => Promise.resolve(undefined),
-						d1QueryRows: () => Promise.resolve([])
+						findD1DatabaseName: () => Promise.resolve(undefined),
+						d1QueryRows: () => Promise.resolve([]),
+						getScriptConfiguration: () => Promise.resolve(undefined)
 					},
 					idToken: () => Promise.resolve(idToken),
 					confirmClaim: (claimant) => {

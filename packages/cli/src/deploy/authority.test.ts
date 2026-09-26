@@ -9,8 +9,10 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import {
+	AdminDatabaseMismatchError,
 	type AuthorityDeployment,
 	type AuthorityEffects,
+	type BoundDatabase,
 	decideAuthority,
 	type DeployAuthority,
 	GlobalAdminRowInvalidError,
@@ -149,8 +151,15 @@ interface Harness {
 	readonly calls: string[];
 }
 
+const boundCupboard: BoundDatabase = {
+	id: databaseIdSchema.parse('cupboard'),
+	name: 'cupboard'
+};
+
 function harness(options: {
 	readonly database?: ControlDatabase;
+	readonly boundDatabase?: BoundDatabase | undefined;
+	readonly plannedDatabaseName?: string;
 	readonly interactive?: boolean;
 	readonly idToken?: string;
 }): Harness {
@@ -160,7 +169,13 @@ function harness(options: {
 	return {
 		calls,
 		deployment: {
-			plannedDatabaseName: 'cupboard',
+			boundDatabase:
+				'boundDatabase' in options
+					? options.boundDatabase
+					: database.exists
+						? boundCupboard
+						: undefined,
+			plannedDatabaseName: options.plannedDatabaseName ?? 'cupboard',
 			interactive: options.interactive ?? true
 		},
 		effects: {
@@ -407,6 +422,97 @@ function sqliteRows(database: import('node:sqlite').DatabaseSync): {
 
 const seededAdmin =
 	"INSERT INTO global_admin (id, issuer, subject, claimed_at, audience) VALUES ('singleton', 'https://dash.cloudflare.com', 'cf-user-1', '2026-06-01T00:00:00Z', 'cupboard-client')";
+
+// The deployed Workers are bound to `cupboard`, and the plan selects `fresh`.
+async function decideWith(seeded: {
+	readonly bound: boolean;
+	readonly planned: boolean;
+}): Promise<unknown> {
+	const bound = await migratedDatabase('9999');
+	const planned = await migratedDatabase('9999');
+
+	try {
+		if (seeded.bound) {
+			bound.exec(seededAdmin);
+		}
+
+		if (seeded.planned) {
+			planned.exec(seededAdmin);
+		}
+
+		const databases = new Map([
+			['cupboard', sqliteRows(bound)],
+			['fresh', sqliteRows(planned)]
+		]);
+		const { deployment, effects } = harness({
+			boundDatabase: boundCupboard,
+			plannedDatabaseName: 'fresh'
+		});
+
+		try {
+			return describeAuthority(
+				await decideAuthority(deployment, {
+					...effects,
+					api: {
+						findD1Database: (name) =>
+							Promise.resolve(databaseIdSchema.parse(name)),
+						d1QueryRows: async (id, sql) => [
+							...((await databases.get(id)?.queryRows(id, sql)) ?? [])
+						]
+					}
+				})
+			);
+		} catch (error) {
+			return error instanceof AdminDatabaseMismatchError
+				? {
+						boundDatabase: error.boundDatabase,
+						plannedDatabase: error.plannedDatabase,
+						admin: error.admin,
+						recordedIn: error.recordedIn
+					}
+				: error;
+		}
+	} finally {
+		bound.close();
+		planned.close();
+	}
+}
+
+describe('decideAuthority with two control databases', () => {
+	it.each([
+		{
+			name: 'the bound database',
+			bound: true,
+			planned: false,
+			recordedIn: 'bound'
+		},
+		{
+			name: 'the planned database',
+			bound: false,
+			planned: true,
+			recordedIn: 'planned'
+		},
+		{ name: 'both databases', bound: true, planned: true, recordedIn: 'both' }
+	])(
+		'refuses when $name records an admin, before any change',
+		async ({ bound, planned, recordedIn }) => {
+			expect(await decideWith({ bound, planned })).toStrictEqual({
+				boundDatabase: 'cupboard',
+				plannedDatabase: 'fresh',
+				admin,
+				recordedIn
+			});
+		}
+	);
+
+	it('deploys as a first deploy when neither database records an admin', async () => {
+		expect(await decideWith({ bound: false, planned: false })).toStrictEqual({
+			kind: 'bootstrap',
+			claimSecret: 'claim-1',
+			claimant
+		});
+	});
+});
 
 describe('readGlobalAdmin', () => {
 	it('reads the claimed principal', async () => {
