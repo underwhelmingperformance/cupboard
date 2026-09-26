@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { QuotaExceededError } from './errors.ts';
+import {
+	AdminApiTransientError,
+	type AdminApiTransientStatus,
+	QuotaExceededError,
+	transientExitCode
+} from './errors.ts';
 
 describe('QuotaExceededError', () => {
 	it.each([
@@ -29,5 +34,29 @@ describe('QuotaExceededError', () => {
 		].map((detail) => new QuotaExceededError(detail).message);
 
 		expect(new Set(messages).size).toBe(messages.length);
+	});
+});
+
+describe('AdminApiTransientError', () => {
+	it.each<{ status: AdminApiTransientStatus; code: string }>([
+		{ status: 408, code: 'TIMEOUT' },
+		{ status: 503, code: 'CACHE_LISTING_PROJECTION_PENDING' }
+	])('reports status $status and code $code', ({ status, code }) => {
+		const error = new AdminApiTransientError(status, code);
+
+		expect({
+			exitCode: error.exitCode,
+			status: error.status,
+			code: error.code,
+			mentions: {
+				status: error.message.includes(String(status)),
+				code: error.message.includes(code)
+			}
+		}).toStrictEqual({
+			exitCode: transientExitCode,
+			status,
+			code,
+			mentions: { status: true, code: true }
+		});
 	});
 });

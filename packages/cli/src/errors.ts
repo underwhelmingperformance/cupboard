@@ -427,6 +427,30 @@ export class ScopeForbiddenError extends CliError {
 	}
 }
 
+export type AdminApiTransientStatus = 408 | 429 | 503;
+
+/**
+ * The admin API responded with 408, 429 or 503, so the same request may succeed
+ * later.
+ */
+export class AdminApiTransientError extends CliError {
+	constructor(
+		public readonly status: AdminApiTransientStatus,
+		public readonly code: string,
+		options?: ErrorOptions
+	) {
+		super(
+			`The admin API responded with ${String(status)} (${code}). Run the command again later.`,
+			options
+		);
+		this.name = 'AdminApiTransientError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
 export class QuotaExceededError extends CliError {
 	constructor(public readonly detail: string) {
 		super(
