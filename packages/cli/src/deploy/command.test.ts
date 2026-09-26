@@ -1140,7 +1140,8 @@ describe('withClaimSecret', () => {
 		credentialFor: (): TokenProvider => ({
 			get: () => Promise.resolve('admin-jwt'),
 			refresh: () => Promise.resolve('admin-jwt')
-		})
+		}),
+		storedSessionFor: () => Promise.resolve(undefined)
 	};
 
 	it.each<[string, DeployAuthority, typeof options]>([
@@ -1206,6 +1207,10 @@ function recordingSources(): {
 				calls.push(`session:${url.href}`);
 				return labelledProvider(`session:${url.origin}`);
 			},
+			storedSession: (url) => {
+				calls.push(`storedSession:${url.href}`);
+				return Promise.resolve({ accessToken: `stored:${url.origin}` });
+			},
 			githubOidc: (url, audience: Audience) => {
 				calls.push(`githubOidc:${url.href}:${audience}`);
 				return labelledProvider(`github:${url.origin}`);
@@ -1242,12 +1247,17 @@ describe('adminAccessFor', () => {
 			name: 'the cached session',
 			options: {},
 			tokens: ['session:https://cupboard.example.workers.dev'],
-			calls: ['session:https://cupboard.example.workers.dev/']
+			stored: { accessToken: 'stored:https://cupboard.example.workers.dev' },
+			calls: [
+				'session:https://cupboard.example.workers.dev/',
+				'storedSession:https://cupboard.example.workers.dev/'
+			]
 		},
 		{
 			name: 'a CI token for the deployment URL',
 			options: { githubOidc: true },
 			tokens: ['github:https://cupboard.example.workers.dev'],
+			stored: undefined,
 			calls: [
 				'githubOidc:https://cupboard.example.workers.dev/:https://cupboard.example.workers.dev'
 			]
@@ -1259,11 +1269,12 @@ describe('adminAccessFor', () => {
 				audience: audienceSchema.parse('cupboard-ci')
 			},
 			tokens: ['github:https://cupboard.example.workers.dev'],
+			stored: undefined,
 			calls: ['githubOidc:https://cupboard.example.workers.dev/:cupboard-ci']
 		}
 	])(
 		'uses $name, with one provider for each origin',
-		async ({ options, tokens, calls: expectedCalls }) => {
+		async ({ options, tokens, stored, calls: expectedCalls }) => {
 			const { calls, sources } = recordingSources();
 			const access = adminAccessFor(options, sources)(deployment);
 
@@ -1273,8 +1284,14 @@ describe('adminAccessFor', () => {
 			expect({
 				isSameProvider: first === second,
 				tokens: [await first.get()],
+				stored: await access.storedSessionFor?.(deployment),
 				calls
-			}).toStrictEqual({ isSameProvider: true, tokens, calls: expectedCalls });
+			}).toStrictEqual({
+				isSameProvider: true,
+				tokens,
+				stored,
+				calls: expectedCalls
+			});
 		}
 	);
 });
@@ -1493,7 +1510,8 @@ describe('establishAuthority', () => {
 							credentialFor: () => ({
 								get: () => Promise.reject(new OwnerLoginRequiredError()),
 								refresh: () => Promise.reject(new OwnerLoginRequiredError())
-							})
+							}),
+							storedSessionFor: () => Promise.resolve(undefined)
 						}),
 						checkAdmin: () => {
 							calls.push('checkAdmin');
@@ -1531,6 +1549,13 @@ describe('establishAuthority', () => {
 			name: 'the deployment record, not from a domain routed in the dashboard',
 			recordedUrl: 'https://cupboard.example.workers.dev',
 			currentUrl: 'https://cupboard.example.workers.dev/',
+			// The plan's domain already serves the deployment, so the move is
+			// checked there too.
+			checks: [
+				'checkAdmin:https://cupboard.example.workers.dev/',
+				'servesCupboard:https://cache.example.com/',
+				'checkAdmin:https://cache.example.com/'
+			],
 			warnings: 0
 		},
 		{
@@ -1539,11 +1564,17 @@ describe('establishAuthority', () => {
 			name: 'the routed domain when nothing routes the recorded URL',
 			recordedUrl: 'https://new.example.com',
 			currentUrl: 'https://cache.example.com/',
+			checks: ['checkAdmin:https://cache.example.com/'],
 			warnings: 1
 		}
 	])(
 		'takes the current URL from $name',
-		async ({ recordedUrl, currentUrl, warnings: expectedWarnings }) => {
+		async ({
+			recordedUrl,
+			currentUrl,
+			checks: expectedChecks,
+			warnings: expectedWarnings
+		}) => {
 			const calls: string[] = [];
 			const accessBases: string[] = [];
 			const warnings: string[] = [];
@@ -1555,7 +1586,7 @@ describe('establishAuthority', () => {
 
 			const authority = await establishAuthority(
 				{
-					agreed: { config: deployedConfig }
+					agreed: { config: deployedConfig, domain: 'cache.example.com' }
 				},
 				{
 					ui: {
@@ -1575,7 +1606,8 @@ describe('establishAuthority', () => {
 							credentialFor: () => ({
 								get: () => Promise.resolve(wildcardToken),
 								refresh: () => Promise.resolve(wildcardToken)
-							})
+							}),
+							storedSessionFor: () => Promise.resolve(undefined)
 						};
 					},
 					checkAdmin: (url) => {
@@ -1603,7 +1635,7 @@ describe('establishAuthority', () => {
 			}).toStrictEqual({
 				kind: 'admin',
 				accessBases: [currentUrl],
-				checks: [`checkAdmin:${currentUrl}`],
+				checks: expectedChecks,
 				warnings: expectedWarnings
 			});
 		}
@@ -1639,7 +1671,7 @@ describe('establishAuthority', () => {
 
 			const result = await settled(
 				establishAuthority(
-					{ agreed: { config } },
+					{ agreed: { config, domain: undefined } },
 					{
 						ui: pickerUi(),
 						api: claimedAccount(calls, { isControlDeleted: true }),
@@ -1679,7 +1711,8 @@ describe('establishAuthority', () => {
 });
 
 const updateAccess: AdminAccess = {
-	credentialFor: () => labelledProvider('admin-jwt')
+	credentialFor: () => labelledProvider('admin-jwt'),
+	storedSessionFor: () => Promise.resolve(undefined)
 };
 const updateAuthority: DeployAuthority = {
 	kind: 'admin',
@@ -2007,7 +2040,7 @@ describe('establishAuthority on a first deploy', () => {
 
 			const authority = await establishAuthority(
 				{
-					agreed: { config: firstConfig }
+					agreed: { config: firstConfig, domain: undefined }
 				},
 				{
 					ui: {
