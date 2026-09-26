@@ -705,16 +705,34 @@ R2 and the edge.
 
 - [x] When negotiate takes the stale-recovery path (a committed narinfo whose
       NAR blob has vanished from R2), delete the `narinfo/<storePathHash>`
-      object alongside the row and blob row, and best-effort purge the cached
-      narinfo from the current colo. The purge is colo-local; other colos serve
-      the stale narinfo until its TTL, and the subsequent re-upload
-      re-materialises a byte-identical object. Durable cross-colo edge-safe
-      deletion is a V3 concern.
+      object alongside the row and blob row, and queue a purge of the cached
+      narinfo by its path cache tag. The re-upload gives the NAR a new
+      incarnation.
+- [x] Report a path as missing when the NAR at the URL that its narinfo records
+      is gone. After a recovery, another cache that shares the NAR keeps a
+      narinfo with the old URL, so its publisher sees the path as missing and
+      pushes it again instead of retaining a narinfo that readers cannot use.
+- [x] Repair a narinfo object that records an obsolete NAR URL. Reconciliation
+      and servability checks rewrite the object for the NAR's current
+      incarnation and queue a purge of its cached response.
+- [ ] Detect an obsolete NAR URL during negotiation, so that negotiation never
+      returns a skip decision for a narinfo whose NAR URL returns 404.
+      Negotiation reads only D1, so it returns a skip decision and queues
+      reconciliation. Until reconciliation runs, readers receive a NAR URL that
+      returns 404. An exact check needs two things: a persisted NAR URL in each
+      narinfo row, which requires a DO schema migration, and negotiate hints
+      that include each NAR's current incarnation.
+- [x] Inherit existing attestations when a cache commits a store path and NAR
+      that another cache in the tenant already has: from a public cache, or from
+      an earlier generation of the path in the same cache. Each commit records
+      the path in a durable queue, and the Durable Object's alarm drains the
+      queue, so a path whose attempt fails or runs out of subrequests is
+      retried.
 - [x] Update the Routes table so narinfo and NAR show as Worker-served.
 - [x] Tests:
   - [x] Integration: when a committed path's NAR blob is missing, the next
         negotiate clears the narinfo object and returns an upload decision, and
-        a previously cached narinfo is purged from the current colo.
+        a previously cached narinfo is invalidated by its path cache tag.
 
 Deleting committed content through TTL-ordered NAR deletion, a durable
 narinfo-deletion queue, or orphan reconciliation is deferred to V3 (see Garbage

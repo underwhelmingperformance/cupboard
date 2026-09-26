@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	type CacheScope,
 	narInfoGenerationSchema,
@@ -17,22 +18,31 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { narInfoDeletions } from '../db/schema.ts';
+import {
+	attestationInheritances,
+	narInfoDeletions,
+	narInfos
+} from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
 	authorisedFetch,
+	blobReferenceRows,
 	commitPath,
+	commitUpload,
 	currentServer,
 	defaultCache,
 	flakyD1,
 	initialise,
 	namedCache,
 	narInfoDeletionRows,
+	negotiateUploads,
+	putNarBytes,
 	resetTestServer,
 	resolvedCache,
+	singleDecision,
 	syntheticNarHash,
 	syntheticStorePathHash,
 	testBase,
@@ -52,7 +62,9 @@ import {
 	maxFencedRetireRows,
 	type TornDownNarInfo
 } from './deletion-queue-service.ts';
+import { GarbageCollectionService } from './garbage-collection-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { gcContinuationKey, maintenancePassCursorKey } from './server.ts';
 
 const selectDeletions =
 	'SELECT cache_id, store_path_hash FROM narinfo_deletion';
@@ -64,6 +76,19 @@ function syntheticEntries(count: number): TornDownNarInfo[] {
 		generation: narInfoGenerationSchema.parse(1),
 		narHash: syntheticNarHash(index)
 	}));
+}
+
+function objectKey(storePathHash: StorePathHash) {
+	return narInfoObjectKey(fixtureTenant, storePathHash, { kind: 'default' });
+}
+
+function buildAttestations(context: ServerContext): AttestationsService {
+	return new AttestationsService(
+		context,
+		new CacheRegistrationService(context),
+		new AttestationCasService(context),
+		new NarInfoObjectsService(context)
+	);
 }
 
 function buildDeletionQueue(context: ServerContext): DeletionQueueService {
@@ -243,9 +268,301 @@ describe('narinfo deletion queue', () => {
 				storePathHash: entry.storePathHash,
 				narHash: replacement,
 				generation: entry.generation,
-				createdAt: first
+				createdAt: first,
+				withdrawn: false
 			}
 		]);
+	});
+
+	it.each([
+		{ name: 'with a deferred deletion', isDeferred: true },
+		{ name: 'without a deferral', isDeferred: false }
+	])(
+		'runs garbage collection once across repeated alarms $name',
+		async ({ isDeferred }) => {
+			const token = await initialise();
+			const nar = await verifiableNar('alarm-deferred-deletion');
+			const metadata = uploadMetadata({
+				storePathHash: 'd'.repeat(32),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			const first = singleDecision(await negotiateUploads(token, [metadata]));
+
+			if (isDeferred) {
+				// A second upload of the same path and NAR stays pending.
+				await negotiateUploads(token, [metadata]);
+			}
+
+			if (first.action !== 'upload') {
+				throw new Error('the first negotiation must plan an upload');
+			}
+
+			await putNarBytes(first.r2Key, nar);
+			await commitUpload(token, first.uploadId);
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				await buildAttestations(instance.context).drainInheritanceQueue(
+					rootLogger()
+				);
+				const cache = resolvedCache(instance.context);
+
+				instance.context.db
+					.delete(narInfos)
+					.where(
+						and(
+							eq(narInfos.cacheId, cache.id),
+							eq(narInfos.storePathHash, metadata.storePathHash)
+						)
+					)
+					.run();
+				instance.context.db
+					.insert(narInfoDeletions)
+					.values({
+						cacheId: cache.id,
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash,
+						generation: narInfoGenerationSchema.parse(0),
+						createdAt: isoTimestamp(new Date())
+					})
+					.run();
+				await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
+			});
+			const collections = vi.spyOn(
+				GarbageCollectionService.prototype,
+				'collectGarbage'
+			);
+			const objectDeletions = vi.spyOn(
+				NarInfoObjectsService.prototype,
+				'deleteNarInfoObjects'
+			);
+
+			const driven = await (async () => {
+				try {
+					for (let alarm = 0; alarm < 6; alarm += 1) {
+						await runInDurableObject(
+							currentServer(),
+							async (instance, state) => {
+								// Start each rotation at the first pass.
+								await state.storage.delete(maintenancePassCursorKey);
+								await instance.alarm();
+							}
+						);
+					}
+
+					return {
+						collections: collections.mock.calls.length,
+						objectDeletions: objectDeletions.mock.calls.length
+					};
+				} finally {
+					collections.mockRestore();
+					objectDeletions.mockRestore();
+				}
+			})();
+			const continuation = await runInDurableObject(
+				currentServer(),
+				(_instance, state) => state.storage.get(gcContinuationKey)
+			);
+
+			const queued = await narInfoDeletionRows();
+
+			expect({
+				...driven,
+				continuation,
+				queued: queued.length
+			}).toStrictEqual({
+				collections: 1,
+				objectDeletions: 1,
+				continuation: undefined,
+				queued: isDeferred ? 1 : 0
+			});
+		}
+	);
+
+	it('withdraws a deferred narinfo and retires the rest of the queue in a flush', async () => {
+		const token = await initialise();
+		const [deferredNar, retiredNar] = await Promise.all([
+			verifiableNar('flush-deferred'),
+			verifiableNar('flush-retired')
+		]);
+		const deferred = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			narHash: deferredNar.narHash,
+			narSize: deferredNar.narSize,
+			fileHash: deferredNar.fileHash,
+			fileSize: deferredNar.narBytes.byteLength
+		});
+		const retired = uploadMetadata({
+			storePathHash: 'b'.repeat(32),
+			narHash: retiredNar.narHash,
+			narSize: retiredNar.narSize,
+			fileHash: retiredNar.fileHash,
+			fileSize: retiredNar.narBytes.byteLength
+		});
+		// A second upload of the deferred path and NAR stays pending, so its
+		// commit will inherit attestations from generation 0.
+		const first = singleDecision(await negotiateUploads(token, [deferred]));
+		const second = singleDecision(await negotiateUploads(token, [deferred]));
+
+		if (first.action !== 'upload' || second.action !== 'upload') {
+			throw new Error('both negotiations must plan an upload');
+		}
+
+		await putNarBytes(first.r2Key, deferredNar);
+		await commitUpload(token, first.uploadId);
+		await commitPath(token, retired, retiredNar);
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			await buildAttestations(instance.context).drainInheritanceQueue(
+				rootLogger()
+			);
+			await state.storage.deleteAlarm();
+		});
+		const flush = (limit: number) =>
+			runInDurableObject(currentServer(), (instance) =>
+				asOneInvocation(() =>
+					instance.context.criticalSection(() =>
+						buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions(
+							undefined,
+							limit
+						)
+					)
+				)
+			);
+
+		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+			const createdAt = isoTimestamp(new Date());
+
+			for (const metadata of [deferred, retired]) {
+				instance.context.db
+					.delete(narInfos)
+					.where(
+						and(
+							eq(narInfos.cacheId, cache.id),
+							eq(narInfos.storePathHash, metadata.storePathHash)
+						)
+					)
+					.run();
+				instance.context.db
+					.insert(narInfoDeletions)
+					.values({
+						cacheId: cache.id,
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash,
+						generation: narInfoGenerationSchema.parse(0),
+						createdAt
+					})
+					.run();
+			}
+		});
+
+		await flush(1);
+		const afterFirst = {
+			queued: await narInfoDeletionRows(),
+			deferredObject:
+				(await env.BLOBS.head(objectKey(deferred.storePathHash))) !== null,
+			retiredObject:
+				(await env.BLOBS.head(objectKey(retired.storePathHash))) !== null
+		};
+		await flush(2);
+		const afterSecond = {
+			queued: await narInfoDeletionRows(),
+			deferredObject:
+				(await env.BLOBS.head(objectKey(deferred.storePathHash))) !== null
+		};
+		const edges = await blobReferenceRows();
+
+		expect({
+			afterFirst,
+			afterSecond,
+			edges: edges.map((edge) => edge.storePathHash)
+		}).toStrictEqual({
+			afterFirst: {
+				queued: [
+					{
+						cache: defaultCache(),
+						storePathHash: deferred.storePathHash,
+						narHash: deferred.narHash,
+						generation: 0
+					}
+				],
+				deferredObject: true,
+				retiredObject: false
+			},
+			afterSecond: {
+				queued: [
+					{
+						cache: defaultCache(),
+						storePathHash: deferred.storePathHash,
+						narHash: deferred.narHash,
+						generation: 0
+					}
+				],
+				deferredObject: false
+			},
+			edges: [deferred.storePathHash]
+		});
+	});
+
+	it('retires a queued edge whose own generation is in the inheritance queue', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('flush-own-inheritance');
+		const metadata = uploadMetadata({
+			storePathHash: 'c'.repeat(32),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await commitPath(token, metadata, nar);
+
+		// Queue, remove and flush in one call, so that the alarm cannot drain the
+		// commit's inheritance row first.
+		await runInDurableObject(currentServer(), async (instance) => {
+			const cache = resolvedCache(instance.context);
+
+			instance.context.db
+				.insert(attestationInheritances)
+				.values({
+					cacheId: cache.id,
+					storePathHash: metadata.storePathHash,
+					generation: narInfoGenerationSchema.parse(0),
+					narHash: metadata.narHash,
+					notBefore: isoTimestamp(new Date())
+				})
+				.onConflictDoNothing()
+				.run();
+			instance.context.db
+				.delete(narInfos)
+				.where(
+					and(
+						eq(narInfos.cacheId, cache.id),
+						eq(narInfos.storePathHash, metadata.storePathHash)
+					)
+				)
+				.run();
+			instance.context.db
+				.insert(narInfoDeletions)
+				.values({
+					cacheId: cache.id,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					generation: narInfoGenerationSchema.parse(0),
+					createdAt: isoTimestamp(new Date())
+				})
+				.run();
+			await asOneInvocation(() =>
+				instance.context.criticalSection(() =>
+					buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions()
+				)
+			);
+		});
+
+		expect({
+			queued: await narInfoDeletionRows(),
+			edges: await blobReferenceRows()
+		}).toStrictEqual({ queued: [], edges: [] });
 	});
 
 	it('caps a flush at its limit and reports the remaining backlog', async () => {

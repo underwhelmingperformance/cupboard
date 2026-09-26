@@ -7,6 +7,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
+import { attestationStatusRequestSchema } from '@cupboard/protocol/attestations';
 import {
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse,
@@ -266,12 +267,17 @@ function reuseNotFound(): Response {
 // across bounded passes without holding the input gate continuously.
 export const gcContinuationKey = 'maintenance:gc-pending';
 
+// When garbage collection must run again because a pending upload that defers a
+// withdrawn narinfo deletion expires.
+export const gcDeferralWakeKey = 'maintenance:gc-deferral-wake';
+
 // The maintenance pass run by the previous alarm. The next alarm resumes after
 // it, which prevents a permanent backlog from starving other passes. The key
 // sits outside every queue prefix.
 export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 
 type MaintenancePassKey =
+	| 'attestation-inheritance'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
 	| 'managed-retirement'
@@ -284,16 +290,25 @@ type MaintenancePassKey =
 /**
  * One bounded background task an alarm can run.
  *
- * `hasWork` reads durable storage or local SQLite. The alarm therefore leaves
- * the complete subrequest allowance for the selected pass. A pass is due after its retry
- * deadline and while work remains.
+ * `workAt` reads durable storage or local SQLite. The alarm therefore leaves
+ * the complete subrequest allowance for the selected pass. It returns the time
+ * from which the pass has work: now or earlier for work that is ready, a later
+ * time for scheduled work, or `undefined` for none. A pass is due once that
+ * time and its retry deadline have passed.
  *
  * The result from `run` determines the next retry deadline.
  */
 interface MaintenancePass {
 	readonly key: MaintenancePassKey;
-	readonly hasWork: () => Promise<boolean>;
+	readonly workAt: (now: number) => Promise<number | undefined>;
 	readonly run: () => Promise<MaintenanceProgress>;
+}
+
+// Adapts a pass whose work is either ready now or absent.
+function readyWhen(
+	hasWork: () => Promise<boolean>
+): (now: number) => Promise<number | undefined> {
+	return async (now) => ((await hasWork()) ? now : undefined);
 }
 
 const garbageCollectionContinuationSchema = z.discriminatedUnion('scope', [
@@ -560,7 +575,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.signingKeys,
 			this.uploadState,
 			this.narInfoObjects,
-			this.retention
+			this.retention,
+			this.attestations
 		);
 		this.verification = new VerificationService(
 			this.context,
@@ -569,6 +585,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.narInfoObjects,
 			this.uploadState,
 			this.retention,
+			this.attestations,
 			(cache, storePathHash) => {
 				this.roots.pruneRetentionTargets(cache, storePathHash);
 			}
@@ -786,6 +803,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.get('cache'),
 					context.req.param('hash')
 				)
+		);
+		this.app.on(
+			'POST',
+			['/api/v1/attested-paths', '/cache/:cacheName/api/v1/attested-paths'],
+			async (context) => {
+				const request = await parseRequestBody(
+					attestationStatusRequestSchema,
+					context.req.raw
+				);
+
+				return context.json(
+					await this.attestations.attestedPathHashes(
+						context.get('cache'),
+						request.storePathHashes
+					),
+					StatusCodes.OK,
+					{ 'cache-control': 'no-store' }
+				);
+			}
 		);
 		this.app.on(
 			'GET',
@@ -1739,12 +1775,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		outcome: GarbageCollectionOutcome,
 		continuation: GarbageCollectionContinuation
 	): Promise<void> {
+		// A withdrawn deferred deletion is not work until its deferral ends. When a
+		// pending upload defers it, wake collection when that upload expires. The
+		// inheritance drain resumes collection when it releases a deletion.
 		const hasMoreToDrain =
-			outcome.hasMoreWork || this.deletionQueue.hasQueuedNarInfoDeletions();
+			outcome.hasMoreWork || this.deletionQueue.hasNarInfoDeletionWork();
 
-		await (hasMoreToDrain
-			? this.armGarbageContinuation(continuation)
-			: this.clearGarbageContinuation(continuation));
+		if (hasMoreToDrain) {
+			await this.armGarbageContinuation(continuation);
+
+			return;
+		}
+
+		await this.clearGarbageContinuation(continuation);
+		const wakeAt = this.deletionQueue.earliestPendingDeferralEnd();
+
+		if (wakeAt === undefined) {
+			return;
+		}
+
+		await this.ctx.storage.put(gcDeferralWakeKey, wakeAt);
+		await armAlarmNoLaterThan(this.ctx.storage, wakeAt);
 	}
 
 	// Use the same serial chain and durable continuation as cron and alarm-driven
@@ -1870,6 +1921,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Report a stall when every attempted target remains queued. The retry delay
 	// then prevents a persistent probe or repair fault from running alarms back to
 	// back.
+	// A deletion that the inheritance queue deferred becomes work when the drain
+	// removes the queued path. Resume collection for it then.
+	private async drainAttestationInheritance(): Promise<MaintenanceProgress> {
+		const outcome = await this.metered('attestation-inheritance', (logger) =>
+			this.attestations.drainInheritanceQueue(logger)
+		);
+		const hasReleasedDeletion = outcome.dequeued.some((path) =>
+			this.deletionQueue.hasDeletionForEarlierGeneration(
+				path.cacheId,
+				path.storePathHash,
+				path.generation,
+				path.narHash
+			)
+		);
+
+		if (hasReleasedDeletion) {
+			await this.armGarbageContinuation({ scope: 'tenant' });
+		}
+
+		return outcome.progress;
+	}
+
 	private async reconcileNegotiatedOnce(): Promise<MaintenanceProgress> {
 		const queued = await this.reconcileQueue.claimChunk();
 
@@ -2099,15 +2172,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	 * The maintenance passes an alarm chooses between, in the order they take
 	 * turns.
 	 *
-	 * Every `hasWork` callback reads durable storage or the local SQLite database.
+	 * Every `workAt` callback reads durable storage or the local SQLite database.
 	 * The selected pass receives the complete subrequest allowance.
 	 */
 	private maintenancePasses(logger: Logger): readonly MaintenancePass[] {
 		return [
 			{
 				key: 'cache-listing-projection',
-				hasWork: () =>
-					Promise.resolve(this.cacheListingProjection.hasPending()),
+				workAt: readyWhen(() =>
+					Promise.resolve(this.cacheListingProjection.hasPending())
+				),
 				run: () => {
 					this.cacheListingProjection.advance();
 					return Promise.resolve('progressed');
@@ -2115,12 +2189,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'reconcile',
-				hasWork: () => this.reconcileQueue.hasPending(),
+				workAt: readyWhen(() => this.reconcileQueue.hasPending()),
 				run: () => this.reconcileNegotiatedOnce()
 			},
 			{
 				key: 'teardown',
-				hasWork: () => this.cacheAdmin.hasPendingTeardown(),
+				workAt: readyWhen(() => this.cacheAdmin.hasPendingTeardown()),
 				run: async () => {
 					await this.resumeCacheTeardown();
 
@@ -2129,7 +2203,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'managed-retirement',
-				hasWork: () => this.cacheAdmin.hasPendingManagedRetirement(),
+				workAt: readyWhen(() => this.cacheAdmin.hasPendingManagedRetirement()),
 				run: async () => {
 					await this.cacheAdmin.resumeManagedRetirement();
 					return 'progressed';
@@ -2137,12 +2211,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'verdict-drain',
-				hasWork: () => Promise.resolve(this.verification.hasRecordedVerdicts()),
+				workAt: readyWhen(() =>
+					Promise.resolve(this.verification.hasRecordedVerdicts())
+				),
 				run: () => this.drainRecordedVerdicts()
 			},
 			{
 				key: 'verify-backstop',
-				hasWork: () => this.isVerifyBackstopDue(),
+				workAt: readyWhen(() => this.isVerifyBackstopDue()),
 				run: async () => {
 					await this.resumeVerifyBackstop(logger);
 
@@ -2151,7 +2227,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'signing-key-backfill',
-				hasWork: () => Promise.resolve(this.signingKeys.hasBackfillWork()),
+				workAt: readyWhen(() =>
+					Promise.resolve(this.signingKeys.hasBackfillWork())
+				),
 				run: async () => {
 					await this.signingKeys.runBackfillOnce();
 
@@ -2160,12 +2238,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'garbage-collection',
-				hasWork: () => this.hasGarbageCollectionContinuation(),
+				// A deletion deferred for inheritance becomes work again when the
+				// pending upload that defers it expires.
+				workAt: async (now) =>
+					(await this.hasGarbageCollectionContinuation())
+						? now
+						: this.ctx.storage.get<number>(gcDeferralWakeKey),
 				run: async () => {
+					if (!(await this.hasGarbageCollectionContinuation())) {
+						await this.ctx.storage.delete(gcDeferralWakeKey);
+						await this.armGarbageContinuation({ scope: 'tenant' });
+					}
+
 					await this.resumeGarbageCollection();
 
 					return 'progressed';
 				}
+			},
+			{
+				key: 'attestation-inheritance',
+				workAt: () => Promise.resolve(this.attestations.nextInheritanceAt()),
+				run: () => this.drainAttestationInheritance()
 			}
 		];
 	}
@@ -2233,13 +2326,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		pass: MaintenancePass,
 		now: number
 	): Promise<number | undefined> {
-		if (!(await pass.hasWork())) {
+		const workAt = await pass.workAt(now);
+
+		if (workAt === undefined) {
 			return undefined;
 		}
 
 		const notBefore = await this.maintenanceRetry.notBefore(pass.key);
+		const dueAt = Math.max(workAt, notBefore ?? workAt);
 
-		return notBefore === undefined || now >= notBefore ? now : notBefore;
+		return Math.max(dueAt, now);
 	}
 
 	/**
@@ -3166,6 +3262,7 @@ function logRequestFinished(
 }
 
 type MeteredMethod =
+	| 'attestation-inheritance'
 	| 'auth-key-retirement'
 	| 'cache-teardown'
 	| 'claim-verifications'

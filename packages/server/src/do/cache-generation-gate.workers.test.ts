@@ -45,6 +45,7 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	currentServerTenant,
+	drainAttestationInheritance,
 	driveToCompletion,
 	fetchPath,
 	fileAttestationReference,
@@ -378,15 +379,20 @@ async function deletionStatements(
 	await useTestServer(server);
 	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
-	for (let start = 0; start < storePaths; start += pushConcurrency) {
-		await Promise.all(
-			Array.from(
-				{ length: Math.min(pushConcurrency, storePaths - start) },
-				(_, offset) =>
-					pushPath(token, indexedMetadata(start + offset), buildsCache)
-			)
-		);
-	}
+	// Each commit arms an alarm for attestation inheritance. Keep those alarms
+	// from running during the measured teardown, and drain the queue first.
+	await withoutAlarmArming(async () => {
+		for (let start = 0; start < storePaths; start += pushConcurrency) {
+			await Promise.all(
+				Array.from(
+					{ length: Math.min(pushConcurrency, storePaths - start) },
+					(_, offset) =>
+						pushPath(token, indexedMetadata(start + offset), buildsCache)
+				)
+			);
+		}
+	});
+	await drainAttestationInheritance();
 
 	const counting = countingD1(env.CUPBOARD_DB);
 

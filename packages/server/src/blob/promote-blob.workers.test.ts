@@ -16,7 +16,7 @@ import {
 } from '../test-support.ts';
 
 import { reserveObjectIncarnation } from './object-incarnation.ts';
-import { promoteVerifiedBlob } from './promote-blob.ts';
+import { promoteVerifiedBlob, stagePromotedBlob } from './promote-blob.ts';
 
 describe('promoteVerifiedBlob', () => {
 	beforeEach(async () => {
@@ -67,6 +67,68 @@ describe('promoteVerifiedBlob', () => {
 			});
 		} finally {
 			head.mockRestore();
+		}
+	});
+
+	it('does not queue the winner for deletion when ownership expires after a losing put', async () => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const staged = await verifiableNar('promote-lost-ownership');
+		const canonicalKey = narObjectKey(staged.narHash, 2);
+		const stagingKey = r2ObjectKeySchema.parse(
+			'staging/promote-lost-ownership/upload'
+		);
+
+		await env.BLOBS.put(stagingKey, staged.narBytes);
+		await env.BLOBS.put(canonicalKey, staged.narBytes);
+
+		const originalHead = env.BLOBS.head.bind(env.BLOBS);
+		const originalPut = env.BLOBS.put.bind(env.BLOBS);
+		let isBlinded = true;
+		let isOwned = true;
+		const head = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementation((key: string) => {
+				if (key === canonicalKey && isBlinded) {
+					isBlinded = false;
+
+					return originalHead('test/absent');
+				}
+
+				return originalHead(key);
+			});
+		const put = vi
+			.spyOn(env.BLOBS, 'put')
+			.mockImplementation(async (...arguments_) => {
+				const written = await originalPut(...arguments_);
+				if (arguments_[0] === canonicalKey) {
+					isOwned = false;
+				}
+
+				return written;
+			});
+
+		try {
+			const promotion = await stagePromotedBlob(
+				database,
+				env.BLOBS,
+				stagingKey,
+				{ narHash: staged.narHash, narSize: staged.narSize },
+				{ fileHash: staged.fileHash, fileSize: staged.narBytes.byteLength },
+				'promote-lost-ownership',
+				() => isOwned
+			);
+			const markers = await database
+				.select({ incarnation: d1Schema.objectDeletion.incarnation })
+				.from(d1Schema.objectDeletion)
+				.where(eq(d1Schema.objectDeletion.objectId, staged.narHash));
+
+			expect({ promotion, markers }).toStrictEqual({
+				promotion: undefined,
+				markers: [{ incarnation: 1 }]
+			});
+		} finally {
+			head.mockRestore();
+			put.mockRestore();
 		}
 	});
 
@@ -149,6 +211,78 @@ describe('promoteVerifiedBlob', () => {
 
 		expect(markers).toStrictEqual([{ incarnation: 1 }, { incarnation: 2 }]);
 	});
+
+	it.each([
+		{ promoters: 1, name: 'one promoter' },
+		{ promoters: 2, name: 'two concurrent promoters' }
+	])(
+		'replaces a live incarnation whose NAR object has disappeared with $name',
+		async ({ promoters }) => {
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const staged = await verifiableNar('promote-missing-live-nar');
+			const target = { narHash: staged.narHash, narSize: staged.narSize };
+			const blob = {
+				fileHash: staged.fileHash,
+				fileSize: staged.narBytes.byteLength
+			};
+			const stagingKeys = Array.from({ length: promoters + 1 }, (_, index) =>
+				r2ObjectKeySchema.parse(
+					`staging/promote-missing-live-nar/upload-${String(index)}`
+				)
+			);
+
+			for (const stagingKey of stagingKeys) {
+				await env.BLOBS.put(stagingKey, staged.narBytes);
+			}
+
+			const [firstKey, ...recoveryKeys] = stagingKeys;
+
+			if (firstKey === undefined) {
+				throw new Error('the test needs a staging key');
+			}
+
+			await promoteVerifiedBlob(database, env.BLOBS, firstKey, target, blob);
+			await env.BLOBS.delete(narObjectKey(staged.narHash, 2));
+			await Promise.all(
+				recoveryKeys.map((stagingKey) =>
+					promoteVerifiedBlob(database, env.BLOBS, stagingKey, target, blob)
+				)
+			);
+
+			const state = await database
+				.select({ incarnation: d1Schema.blobState.incarnation })
+				.from(d1Schema.blobState)
+				.where(eq(d1Schema.blobState.narHash, staged.narHash))
+				.all();
+			const registry = await database
+				.select({
+					incarnation: d1Schema.objectIncarnation.incarnation,
+					state: d1Schema.objectIncarnation.state
+				})
+				.from(d1Schema.objectIncarnation)
+				.where(eq(d1Schema.objectIncarnation.objectId, staged.narHash))
+				.all();
+			const markers = await database
+				.select({ incarnation: d1Schema.objectDeletion.incarnation })
+				.from(d1Schema.objectDeletion)
+				.where(eq(d1Schema.objectDeletion.objectId, staged.narHash))
+				.orderBy(d1Schema.objectDeletion.incarnation)
+				.all();
+
+			expect({
+				state,
+				registry,
+				markers,
+				isReplacementPresent:
+					(await env.BLOBS.head(narObjectKey(staged.narHash, 3))) !== null
+			}).toStrictEqual({
+				state: [{ incarnation: 3 }],
+				registry: [{ incarnation: 3, state: 'live' }],
+				markers: [{ incarnation: 1 }],
+				isReplacementPresent: true
+			});
+		}
+	);
 
 	it('rejects when the post-conflict head cannot find the canonical object', async () => {
 		const staged = await verifiableNar('promote-vanished');

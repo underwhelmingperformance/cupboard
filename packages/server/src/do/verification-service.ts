@@ -36,6 +36,7 @@ import {
 import { z } from 'zod';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
+import { recordedNarInfoMetadata } from '../blob/narinfo-object-metadata.ts';
 import {
 	type CacheId,
 	cacheScopeFromRow,
@@ -56,6 +57,7 @@ import {
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 
+import { type AttestationsService } from './attestations-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import {
 	type CommitPipelineService,
@@ -240,7 +242,9 @@ function repairSubrequests(observation: RowObservation): number {
 		return subrequestsPerReconcileRemoval;
 	}
 
-	return observation.objectPresent ? 0 : subrequestsPerReconcileRestore;
+	return observation.narInfoObject === 'current'
+		? 0
+		: subrequestsPerReconcileRestore;
 }
 
 function reconcileCandidates(
@@ -250,15 +254,40 @@ function reconcileCandidates(
 		.filter(
 			(observation): observation is RowObservation =>
 				observation !== undefined &&
-				(!observation.isNarPresent || !observation.objectPresent)
+				(!observation.isNarPresent || observation.narInfoObject !== 'current')
 		)
 		.map((observation) => observation.row);
 }
 
+/**
+ * The state of a row's narinfo object. An `obsolete` object records the URL of
+ * an earlier incarnation of the NAR, which recovery has replaced. An
+ * `unrecorded` object was written before narinfo metadata existed, so readers
+ * and the availability probe already refuse it.
+ */
+type NarInfoObjectState = 'current' | 'missing' | 'obsolete' | 'unrecorded';
+
 interface RowObservation {
 	readonly row: NarInfoRow;
 	readonly isNarPresent: boolean;
-	readonly objectPresent: boolean;
+	readonly narInfoObject: NarInfoObjectState;
+}
+
+function narInfoObjectState(
+	object: R2Object | undefined,
+	narKey: R2ObjectKey
+): NarInfoObjectState {
+	if (object === undefined) {
+		return 'missing';
+	}
+
+	const narUrl = recordedNarInfoMetadata(object)?.narUrl;
+
+	if (narUrl === undefined) {
+		return 'unrecorded';
+	}
+
+	return narUrl === narKey ? 'current' : 'obsolete';
 }
 
 /**
@@ -567,6 +596,7 @@ export class VerificationService {
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly uploadState: UploadStateService,
 		private readonly retention: RetentionService,
+		private readonly attestations: AttestationsService,
 		// A failed verification must remove the path from every retention root. A
 		// root can include the path while its bytes are still being verified.
 		private readonly pruneRetentionTargets: (
@@ -577,6 +607,19 @@ export class VerificationService {
 
 	private cache(cacheId: CacheId): ResolvedCache {
 		return this.context.cacheRepository.resolvedForId(cacheId);
+	}
+
+	private async inheritAfterCommit(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration
+	): Promise<void> {
+		await this.attestations.queueInheritance(
+			this.cache(pending.cacheId),
+			metadata.storePathHash,
+			generation,
+			metadata.narHash
+		);
 	}
 
 	// Re-read the session after settlement awaits because `attachSession` can
@@ -755,6 +798,7 @@ export class VerificationService {
 				return { kind: 'requires-decode' };
 			}
 		} else if (!(await this.isCurrentNarPresent(metadata.narHash))) {
+			await this.uploadState.markCanonicalNarMissing(metadata.narHash);
 			throw new UploadedObjectNotFoundError(pending.r2Key);
 		}
 
@@ -888,7 +932,7 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<FinaliseCommittedResult> {
-		return this.context.criticalSection(() =>
+		const result = await this.context.criticalSection(() =>
 			this.finaliseIfAlreadyCommittedLocked(
 				pending,
 				metadata,
@@ -897,6 +941,12 @@ export class VerificationService {
 				signal
 			)
 		);
+
+		if (result === 'applied') {
+			await this.inheritAfterCommit(pending, metadata, generation);
+		}
+
+		return result;
 	}
 
 	private async finaliseIfAlreadyCommittedLocked(
@@ -1015,9 +1065,9 @@ export class VerificationService {
 				return 'ignored';
 			}
 
-			return this.context.criticalSection(async () => {
+			const activation = await this.context.criticalSection(async () => {
 				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
-					return 'ignored';
+					return { result: 'ignored' as const, wasActivated: false };
 				}
 
 				const activation = await this.uploadState.commitStagingBlob(
@@ -1026,13 +1076,22 @@ export class VerificationService {
 				);
 
 				if (activation === 'retired') {
-					return 'ignored';
+					return { result: 'ignored' as const, wasActivated: false };
 				}
 
-				return this.ownsActiveClaim(owner, pending.id, signal)
-					? 'ready'
-					: 'ignored';
+				return {
+					result: this.ownsActiveClaim(owner, pending.id, signal)
+						? ('ready' as const)
+						: ('ignored' as const),
+					wasActivated: true
+				};
 			});
+
+			if (activation.wasActivated) {
+				await this.uploadState.clearCanonicalNarMissing(metadata.narHash);
+			}
+
+			return activation.result;
 		}
 
 		return 'ready';
@@ -1207,6 +1266,7 @@ export class VerificationService {
 
 			if (reclaim === 'committed-current') {
 				signal?.throwIfAborted();
+				await this.inheritAfterCommit(pending, metadata, generation);
 				const didApply = this.uploadState.clearPendingUpload(pending.id, owner);
 
 				if (didApply) {
@@ -1260,6 +1320,7 @@ export class VerificationService {
 			}
 
 			signal?.throwIfAborted();
+			await this.inheritAfterCommit(pending, metadata, generation);
 			// Once the narinfo is durable, notify waiters and remove the upload row and
 			// private staging bytes.
 			const wasCleared = this.uploadState.clearPendingUpload(pending.id, owner);
@@ -1446,15 +1507,19 @@ export class VerificationService {
 	private async probeRow(
 		logger: Logger,
 		row: NarInfoRow,
-		isObjectPresent: (row: NarInfoRow) => Promise<boolean>
+		narInfoObject: (row: NarInfoRow) => Promise<R2Object | undefined>
 	): Promise<RowObservation | undefined> {
 		try {
-			const isNarPresent = await this.isCurrentNarPresent(row.narHash);
+			const narKey = await this.currentNarKey(row.narHash);
+
+			if (narKey === undefined) {
+				return { row, isNarPresent: false, narInfoObject: 'missing' };
+			}
 
 			return {
 				row,
-				isNarPresent: isNarPresent,
-				objectPresent: isNarPresent && (await isObjectPresent(row))
+				isNarPresent: true,
+				narInfoObject: narInfoObjectState(await narInfoObject(row), narKey)
 			};
 		} catch {
 			this.warnSkippedRow(logger);
@@ -1466,30 +1531,40 @@ export class VerificationService {
 	private async isCurrentNarPresent(
 		narHash: NixSha256HashString
 	): Promise<boolean> {
+		return (await this.currentNarKey(narHash)) !== undefined;
+	}
+
+	// The key of the NAR's current incarnation, when that object is present.
+	private async currentNarKey(
+		narHash: NixSha256HashString
+	): Promise<R2ObjectKey | undefined> {
 		const state = await this.context.d1
 			.select({ incarnation: d1Schema.blobState.incarnation })
 			.from(d1Schema.blobState)
 			.where(eq(d1Schema.blobState.narHash, narHash))
 			.get();
 
-		return (
-			state !== undefined &&
-			(await this.context.env.BLOBS.head(
-				narObjectKey(narHash, state.incarnation)
-			)) !== null
-		);
+		if (state === undefined) {
+			return undefined;
+		}
+
+		const key = narObjectKey(narHash, state.incarnation);
+
+		return (await this.context.env.BLOBS.head(key)) === null ? undefined : key;
 	}
 
 	// A targeted reconciliation checks a small set of unrelated paths, so probe
 	// each narinfo object directly instead of listing a prefix.
-	private async headNarInfoObject(row: NarInfoRow): Promise<boolean> {
+	private async headNarInfoObject(
+		row: NarInfoRow
+	): Promise<R2Object | undefined> {
 		const key = this.narInfoKey(
 			this.context.requireTenant(),
 			this.cache(row.cacheId),
 			row.storePathHash
 		);
 
-		return (await this.context.env.BLOBS.head(key)) !== null;
+		return (await this.context.env.BLOBS.head(key)) ?? undefined;
 	}
 
 	// The cache's generation is part of the key, so the objects of a deleted
@@ -1515,9 +1590,9 @@ export class VerificationService {
 		logger: Logger,
 		rows: readonly NarInfoRow[],
 		candidateStartAfter: string | undefined
-	): Promise<ReadonlySet<string> | undefined> {
+	): Promise<ReadonlyMap<string, R2Object> | undefined> {
 		if (rows.length === 0) {
-			return new Set();
+			return new Map();
 		}
 
 		const tenant = this.context.requireTenant();
@@ -1558,7 +1633,7 @@ export class VerificationService {
 
 		const startAfter = candidateStartAfter;
 
-		const present = new Set<string>();
+		const present = new Map<string, R2Object>();
 		let cursor: string | undefined;
 		let isDone = false;
 		let pages = 0;
@@ -1573,16 +1648,20 @@ export class VerificationService {
 					return undefined;
 				}
 
-				const listed = await this.context.env.BLOBS.list(
-					cursor === undefined ? { prefix, startAfter } : { prefix, cursor }
-				);
+				// Include the metadata so the scan can compare each recorded NAR URL
+				// with the URL of the NAR's current incarnation.
+				const listed = await this.context.env.BLOBS.list({
+					prefix,
+					include: ['customMetadata'],
+					...(cursor === undefined ? { startAfter } : { cursor })
+				});
 				pages += 1;
 				const inRange = listed.objects.filter(
 					(object) => object.key <= lastKey
 				);
 
 				for (const object of inRange) {
-					present.add(object.key);
+					present.set(object.key, object);
 				}
 
 				// An object beyond the batch's last key proves that the range is complete.
@@ -1682,11 +1761,7 @@ export class VerificationService {
 		origin: RequestOrigin | undefined,
 		committedEdges: ReadonlySet<string>
 	): Promise<ReconcileOutcome> {
-		const {
-			row,
-			isNarPresent: isNarPresent,
-			objectPresent: isObjectPresent
-		} = observation;
+		const { row, isNarPresent, narInfoObject } = observation;
 		const current = this.narInfoRow(row.cacheId, row.storePathHash);
 
 		if (
@@ -1710,10 +1785,19 @@ export class VerificationService {
 				return 'removed';
 			}
 
-			if (!isObjectPresent) {
-				return (await this.restoreNarInfoObject(current)) === 1
-					? 'restored'
-					: 'unchanged';
+			if (narInfoObject !== 'current') {
+				if ((await this.restoreNarInfoObject(current)) === 0) {
+					return 'unchanged';
+				}
+
+				if (narInfoObject === 'obsolete') {
+					await this.narInfoObjects.purgeReplacedNarUrls(
+						this.cache(current.cacheId),
+						[current.storePathHash]
+					);
+				}
+
+				return 'restored';
 			}
 		} catch {
 			this.warnSkippedRow(logger);
@@ -2372,7 +2456,7 @@ export class VerificationService {
 			rows,
 			startAfter
 		);
-		const resolveObjectPresent =
+		const resolveNarInfoObject =
 			presentObjects === undefined
 				? (target: NarInfoRow) => this.headNarInfoObject(target)
 				: (target: NarInfoRow) => {
@@ -2382,10 +2466,10 @@ export class VerificationService {
 							target.storePathHash
 						);
 
-						return Promise.resolve(presentObjects.has(key));
+						return Promise.resolve(presentObjects.get(key));
 					};
 		const observations = await mapVerificationProbes(rows, (row) =>
-			this.probeRow(logger, row, resolveObjectPresent)
+			this.probeRow(logger, row, resolveNarInfoObject)
 		);
 		const committedEdges = await this.committedEdgeKeys(
 			reconcileCandidates(observations)

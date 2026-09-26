@@ -44,6 +44,7 @@ import {
 	presentNarObjects,
 	recordedNarObjects
 } from './bulk.ts';
+import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
@@ -75,8 +76,11 @@ function referenceKey(
 
 export class NarInfoObjectsService {
 	private readonly publishes = new Map<string, Promise<void>>();
+	private readonly cachePurges: CachePurgeQueueService;
 
-	constructor(private readonly context: ServerContext) {}
+	constructor(private readonly context: ServerContext) {
+		this.cachePurges = new CachePurgeQueueService(context);
+	}
 
 	// A failed publish must not break the per-path sequence. Its caller receives
 	// the failure, but the next publish still waits until the failed attempt has
@@ -764,9 +768,15 @@ export class NarInfoObjectsService {
 	}
 
 	// A version is servable only when its live row, exact D1 edge, canonical NAR,
-	// and generation-matched narinfo object are all present. The R2 probes precede
-	// the row snapshot so a concurrent recommit takes the repair path. Callers that
+	// and generation-matched narinfo object are all present, and the object
+	// records the URL of the NAR's current incarnation. The R2 probes precede the
+	// row snapshot so a concurrent recommit takes the repair path. Callers that
 	// complete work from this result must revalidate the returned generation.
+	//
+	// Recovery gives a NAR a new incarnation without rewriting the narinfo
+	// objects of other caches that share it. Repair such an object before
+	// reporting its path as servable, and purge the cached response that still
+	// contains the old URL.
 	async servableNarInfoVersions(
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
@@ -784,9 +794,21 @@ export class NarInfoObjectsService {
 			committedRows.map((row) => row.narHash)
 		);
 		const backed = await presentNarObjects(this.context.env.BLOBS, objects);
+		const currentNarUrls = new Map(
+			objects.map((object) => [
+				object.narHash,
+				narObjectKey(object.narHash, object.incarnation)
+			])
+		);
 		const servable = new Map<StorePathHash, NarInfoReferenceVersion>();
+		const isCurrentVersion = (
+			row: NarInfoRow,
+			metadata: NarInfoObjectMetadata | undefined
+		): boolean =>
+			isMetadataOfCommit(metadata, row) &&
+			metadata?.narUrl === currentNarUrls.get(row.narHash);
 		const hasCurrentObject = (row: NarInfoRow): boolean =>
-			isMetadataOfCommit(present.get(row.storePathHash), row);
+			isCurrentVersion(row, present.get(row.storePathHash));
 
 		for (const row of committedRows) {
 			if (hasCurrentObject(row) && backed.has(row.narHash)) {
@@ -806,21 +828,43 @@ export class NarInfoObjectsService {
 			cache,
 			recoverable.map((row) => row.storePathHash)
 		);
+		const replacedNarUrls: StorePathHash[] = [];
 
 		for (const row of recoverable) {
-			const metadata = repaired.get(row.storePathHash);
-			if (
-				metadata?.generation === String(row.generation) &&
-				metadata.narHash === row.narHash
-			) {
-				servable.set(row.storePathHash, {
-					generation: row.generation,
-					narHash: row.narHash
-				});
+			if (!isCurrentVersion(row, repaired.get(row.storePathHash))) {
+				continue;
+			}
+
+			servable.set(row.storePathHash, {
+				generation: row.generation,
+				narHash: row.narHash
+			});
+
+			if (isMetadataOfCommit(present.get(row.storePathHash), row)) {
+				replacedNarUrls.push(row.storePathHash);
 			}
 		}
 
+		await this.purgeReplacedNarUrls(cache, replacedNarUrls);
+
 		return servable;
+	}
+
+	/**
+	 * Queues the invalidation of public narinfo responses whose objects this
+	 * service rewrote with a new NAR URL. Workers Cache serves a response until
+	 * it expires, so without the purge a reader would receive the old URL for up
+	 * to an hour after the repair.
+	 */
+	async purgeReplacedNarUrls(
+		cache: ResolvedCache,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<void> {
+		if (cache.access !== 'public') {
+			return;
+		}
+
+		await this.cachePurges.enqueueNarInfos(cache, storePathHashes);
 	}
 
 	async servableStorePathHashes(

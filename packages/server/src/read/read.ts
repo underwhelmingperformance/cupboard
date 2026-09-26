@@ -14,7 +14,8 @@ import { StatusCodes } from 'http-status-codes';
 
 import {
 	isNarInfoObjectOfCommit,
-	type NarInfoReferenceVersion
+	type NarInfoReferenceVersion,
+	recordedNarInfoMetadata
 } from '../blob/narinfo-object-metadata.ts';
 import { type TenantEntry } from '../control/tenant-membership.ts';
 import {
@@ -41,6 +42,7 @@ import {
 	type NarObjectName,
 	notFoundResponse,
 	type R2ObjectKey,
+	r2ObjectKeySchema,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 
@@ -322,8 +324,13 @@ export function narInfoReferenceQuery(
 		);
 }
 
-// One D1 call, however many hashes: the list is bound as one parameter.
-export const cacheProbeD1CallsPerChunk = 1;
+// One D1 read, however many hashes: the list is bound as one parameter. The
+// read is retried once after a transient failure, so it can make two calls.
+export const cacheProbeD1CallsPerChunk = 2;
+
+// Each hash costs a head of its narinfo object and a head of the NAR at the URL
+// that the narinfo records.
+export const cacheProbeHeadsPerHash = 2;
 
 /**
  * Returns the current commit of each requested path in this cache, taken from
@@ -338,7 +345,7 @@ export const cacheProbeD1CallsPerChunk = 1;
  * Retry the D1 query once, as the NAR read does: a persistent failure becomes a
  * retryable refusal instead of a 404 reporting the path as absent.
  */
-async function authorisedNarInfoVersions(
+export async function authorisedNarInfoVersions(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: CacheScope,
@@ -383,6 +390,10 @@ async function authorisedNarInfoVersions(
 // object at this key cannot have outlived its edge. Deleted caches and inactive
 // tenants are refused at admission. A public read therefore
 // serves what R2 holds and spends no D1 statement beyond the admission read.
+//
+// Neither kind of read heads the NAR at the URL that the narinfo records. The
+// availability probe does. It reports the path as missing when that object is
+// gone, so the publisher pushes the path again.
 //
 // An authenticated read keeps the edge lookup. That read answers `no-store`,
 // so it has no staleness allowance to trade for the saved statement, and the
@@ -429,12 +440,26 @@ export async function serveNarInfo(
 	);
 }
 
+async function isPublishedNarAvailable(
+	blobs: R2Bucket,
+	object: R2Object
+): Promise<boolean> {
+	const narUrl = recordedNarInfoMetadata(object)?.narUrl;
+
+	if (narUrl === undefined) {
+		return false;
+	}
+
+	return (await blobs.head(r2ObjectKeySchema.parse(narUrl))) !== null;
+}
+
 /**
  * Which of the requested paths the cache cannot serve. Runs in the tenant
- * Durable Object, one chunk of a page per request: each hash costs one narinfo
- * head, and the Worker sizes a chunk so the heads fit one invocation's
- * subrequest slice (`chunked-availability.ts`). A chunk that does not fit is
- * refused, because the sizing is derived from the same limits.
+ * Durable Object, one chunk of a page per request: each hash costs a narinfo
+ * head and a head of the NAR at the URL that the narinfo records. The Worker
+ * sizes a chunk so the heads fit one invocation's subrequest slice
+ * (`chunked-availability.ts`). A chunk that does not fit is refused, because
+ * the sizing is derived from the same limits.
  */
 export async function missingStorePathHashes(
 	blobs: R2Bucket,
@@ -453,7 +478,10 @@ export async function missingStorePathHashes(
 		cache,
 		unique
 	);
-	requireSubrequestsFor(unique.length, 'cache availability probe');
+	requireSubrequestsFor(
+		unique.length * cacheProbeHeadsPerHash,
+		'cache availability probe'
+	);
 	const missing = await mapWithConcurrency(
 		unique,
 		maxOutgoingConnections,
@@ -467,10 +495,16 @@ export async function missingStorePathHashes(
 			const object = await blobs.head(
 				narInfoObjectKey(tenant, storePathHash, cache, current.cacheGeneration)
 			);
-			const isServable =
-				object !== null && isNarInfoObjectOfCommit(object, current);
 
-			return isServable ? undefined : storePathHash;
+			if (object === null || !isNarInfoObjectOfCommit(object, current)) {
+				return storePathHash;
+			}
+
+			if (!(await isPublishedNarAvailable(blobs, object))) {
+				return storePathHash;
+			}
+
+			return;
 		}
 	);
 

@@ -91,11 +91,11 @@ export const blobReaperBatchSize = 500;
 
 /**
  * How many object deletions one invocation flushes. Each successful R2
- * deletion removes one D1 marker. Reserve one statement to read the due
- * markers before processing them.
+ * deletion removes one D1 marker. Reserve one statement to discard stray
+ * markers and one to read the due markers before processing them.
  */
 export function objectDeletionBatchSize(statementAllowance: number): number {
-	return statementAllowance - 1;
+	return statementAllowance - 2;
 }
 
 /**

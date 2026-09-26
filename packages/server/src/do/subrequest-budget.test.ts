@@ -1,3 +1,4 @@
+import { attestationStatusMaxPaths } from '@cupboard/protocol/attestations';
 import {
 	subrequestSafetyReserve,
 	workersInvocationAllowances
@@ -16,6 +17,12 @@ import {
 	reuseViewAvailabilityChunkSizeFor
 } from '../routing/chunked-availability.ts';
 
+import {
+	inheritanceListSubrequests,
+	inheritanceLookupSubrequests,
+	inheritedBundleSubrequests,
+	maxInheritedBundlesPerPath
+} from './attestations-service.ts';
 import {
 	reuseDistinctNarLimit,
 	reuseViewProbeD1CallsPerChunk
@@ -78,12 +85,27 @@ interface ChunkedRequest {
 
 const chunkedRequests: readonly ChunkedRequest[] = [
 	{
+		chunk: 'attestationStatusMaxPaths',
+		items: attestationStatusMaxPaths,
+		requestsPerItem: 1,
+		d1Calls: 1,
+		fanOut: 'One attestation list head per distinct committed path.'
+	},
+	{
+		chunk: 'maxInheritedBundlesPerPath',
+		items: maxInheritedBundlesPerPath,
+		requestsPerItem: inheritedBundleSubrequests,
+		d1Calls: inheritanceLookupSubrequests + inheritanceListSubrequests,
+		fanOut:
+			'Each inherited bundle heads its CAS object and makes three D1 calls. The source lookup and the list write add three calls for the path.'
+	},
+	{
 		chunk: 'cacheAvailabilityChunkSize',
 		items: cacheAvailabilityChunkSize,
-		requestsPerItem: 1,
+		requestsPerItem: 2,
 		d1Calls: cacheProbeD1CallsPerChunk,
 		fanOut:
-			'One narinfo head for each distinct hash, in `missingStorePathHashes` in `read/read.ts`.'
+			'One narinfo head and one NAR head for each distinct hash, in `missingStorePathHashes` in `read/read.ts`.'
 	},
 	{
 		chunk: 'reuseViewAvailabilityChunkSize',
@@ -139,6 +161,17 @@ describe('the subrequest ceiling', () => {
 		).toStrictEqual([]);
 	});
 
+	it('caps the attestation probe so a retried lookup and one head per path fit a Free invocation', () => {
+		const lookupWithRetry = 2;
+
+		expect({
+			cap: attestationStatusMaxPaths,
+			fits:
+				attestationStatusMaxPaths + lookupWithRetry <=
+				workersInvocationAllowances.free.subrequests - subrequestSliceReserve
+		}).toStrictEqual({ cap: 898, fits: true });
+	});
+
 	it('derives different chunks for Free and Paid invocations', () => {
 		expect({
 			free: {
@@ -158,8 +191,8 @@ describe('the subrequest ceiling', () => {
 				)
 			}
 		}).toStrictEqual({
-			free: { cache: 899, reuse: 56 },
-			paid: { cache: 9899, reuse: 618 }
+			free: { cache: 449, reuse: 56 },
+			paid: { cache: 4949, reuse: 618 }
 		});
 	});
 });

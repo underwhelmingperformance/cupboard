@@ -12,6 +12,10 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
+	attestationStatusMaxPaths,
+	attestationStatusResponseSchema
+} from '@cupboard/protocol/attestations';
+import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
@@ -25,6 +29,8 @@ import { z } from 'zod';
 
 import { fetchWithProbeDeadline } from './cache-probe.ts';
 import {
+	CacheAttestationQueryError,
+	CacheAttestationResponseUnexpectedHashError,
 	CacheAvailabilityQueryError,
 	CacheAvailabilityResponseMalformedError,
 	CacheAvailabilityResponseSchemaError,
@@ -693,6 +699,79 @@ export function availableCachePaths(
 		options,
 		cacheAvailabilityMaxPaths
 	);
+}
+
+/**
+ * Returns the paths for which the destination cache lists at least one
+ * attestation. Any attestation counts, because a reused path cannot have build
+ * provenance from this run.
+ */
+export async function attestedCachePaths(
+	options: ProbeOptions & {
+		readonly baseUrl: URL;
+		readonly cache: CacheScope;
+	}
+): Promise<Set<StorePathString>> {
+	const pathsByHash = Map.groupBy(
+		new Set(options.paths).values().toArray(),
+		(storePath) => StorePath.hash(storePath)
+	);
+	const fetcher = retryingFetcher(options.fetcher ?? fetch, 'replay-safe');
+	const url = `${canonicalHref(cacheUrlFor(options.baseUrl, options.cache))}/api/v1/attested-paths`;
+	const batches = chunk(
+		pathsByHash.keys().toArray(),
+		attestationStatusMaxPaths
+	);
+	const responses = await mapWithConcurrency(
+		batches,
+		maximumConcurrentAvailabilityQueries,
+		async (storePathHashes) =>
+			fetchWithProbeDeadline(
+				fetcher,
+				url,
+				{
+					method: 'POST',
+					headers: {
+						'content-type': 'application/json',
+						...(options.credentials !== undefined &&
+							basicAuthHeader(options.credentials))
+					},
+					body: JSON.stringify({ storePathHashes })
+				},
+				async (response) => {
+					if (!response.ok) {
+						await discardResponseBody(response);
+						throw new CacheAttestationQueryError(url, response.status);
+					}
+
+					const value = await readResponseJson(response, {
+						description: `cache attestation response from ${url}`,
+						maximumBytes: maximumAvailabilityResponseBytes
+					});
+					const result = attestationStatusResponseSchema.parse(value);
+					const requested = new Set(storePathHashes);
+
+					for (const hash of result.attestedStorePathHashes) {
+						if (!requested.has(hash)) {
+							throw new CacheAttestationResponseUnexpectedHashError(hash);
+						}
+					}
+
+					return result.attestedStorePathHashes;
+				}
+			)
+	);
+	const attested = new Set<StorePathString>();
+
+	for (const hash of responses.flat()) {
+		const matchingPaths = pathsByHash.get(hash) ?? [];
+
+		for (const storePath of matchingPaths) {
+			attested.add(storePath);
+		}
+	}
+
+	return attested;
 }
 
 async function availablePathsAt(

@@ -122,6 +122,11 @@ export interface ConstructedBuild {
 	Fail unless the receipt claims every selected final output.
 	*/
 	readonly requireProvenance?: boolean;
+	/**
+	Do not publish a selected output that this run substituted. Outputs that the
+	run built and outputs that were valid before the build are published.
+	*/
+	readonly omitSubstituted?: boolean;
 	readonly keepGoing?: boolean;
 	readonly maxJobs?: number;
 }
@@ -708,12 +713,6 @@ async function runReconciledLocalBuildPush(
 				removeRuntimeDirectory
 			})
 		);
-		const realised = await realisedOutputs(
-			outLinkDirectory,
-			declared,
-			dependencies.store
-		);
-
 		const attemptLogs = attempts.map((attempt) => attempt.log);
 		const delegated = delegatedMachines(
 			attempts.map((attempt) => ({
@@ -722,15 +721,23 @@ async function runReconciledLocalBuildPush(
 				activities: parseBuildActivities(attempt.log)
 			}))
 		);
+		// `--rebuild` executes every selected final derivation even when its
+		// output was valid beforehand. Those paths therefore count as built by
+		// this run, not as already held.
+		const alreadyHeld = build.rebuild === true ? [] : initiallyValid;
+		const realised = await withoutSubstitutedOutputs(
+			invocation,
+			await realisedOutputs(outLinkDirectory, declared, dependencies.store),
+			initiallyValid,
+			delegated,
+			dependencies.store
+		);
 		const terminalFailure = terminalFailureFor(invocation, attempts, exit);
 		const receipt = await publishRealised(
 			{
 				realised,
 				declared,
-				// `--rebuild` executes every selected final derivation even when
-				// its output was valid beforehand. Those paths are therefore
-				// current-run provenance candidates rather than exclusions.
-				alreadyHeld: build.rebuild === true ? [] : initiallyValid,
+				alreadyHeld,
 				delegated,
 				copiedFrom: watchedCopySources(attemptLogs),
 				exit,
@@ -775,6 +782,47 @@ async function runReconciledLocalBuildPush(
 
 		return receipt;
 	}, [() => removeRuntimeDirectory(directory)]);
+}
+
+function shouldOmitSubstituted(invocation: BuildInvocation): boolean {
+	return (
+		invocation.kind === 'constructed' &&
+		invocation.build.omitSubstituted === true
+	);
+}
+
+// Without a build hook, a realised output that was not valid before the build
+// came from this run. The run built it when the store reports it as ultimate or
+// the activity log records the builder of its deriver. Otherwise the run
+// substituted it.
+async function withoutSubstitutedOutputs(
+	invocation: BuildInvocation,
+	realised: readonly string[],
+	initiallyValid: readonly string[],
+	delegated: ReadonlyMap<string, string>,
+	store: BuildPushStore
+): Promise<readonly string[]> {
+	if (!shouldOmitSubstituted(invocation) || realised.length === 0) {
+		return realised;
+	}
+
+	const held = new Set(initiallyValid);
+	const infos = await store.queryValidPathsInfo(
+		realised.map((storePath) => storePathSchema.parse(storePath))
+	);
+	const built = new Set<string>(
+		infos
+			.filter(
+				(info) =>
+					info.deriver !== undefined &&
+					(info.ultimate || delegated.has(info.deriver))
+			)
+			.map((info) => info.storePath)
+	);
+
+	return realised.filter(
+		(storePath) => held.has(storePath) || built.has(storePath)
+	);
 }
 
 // Resolve predictable output paths from derivation installables before the
@@ -1015,11 +1063,21 @@ async function settleRun(
 		});
 
 		const declaredIntermediates = new Set(options.intermediatePaths);
+		const built = new Set(facts.eventPaths);
+		// The build hook reports every output that this run built. A selected
+		// output without an event was either valid before the build or
+		// substituted, and Nix logs a copy activity for each substitution.
 		const targetPaths =
-			facts.selectedTargetPaths ??
-			facts.eventPaths.filter(
-				(eventPath) => !declaredIntermediates.has(eventPath)
-			);
+			facts.selectedTargetPaths === undefined
+				? facts.eventPaths.filter(
+						(eventPath) => !declaredIntermediates.has(eventPath)
+					)
+				: facts.selectedTargetPaths.filter(
+						(storePath) =>
+							!shouldOmitSubstituted(options.invocation) ||
+							built.has(storePath) ||
+							!facts.copiedFrom.has(storePath)
+					);
 		const targetSet = new Set(targetPaths);
 		const intermediates = new Set([
 			...declaredIntermediates,

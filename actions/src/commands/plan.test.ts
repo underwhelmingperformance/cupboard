@@ -944,6 +944,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		packCapacity: 0,
 		store: '',
 		requireProvenance: false,
+		includeCachedTargets: false,
 		...overrides
 	};
 }
@@ -1036,6 +1037,36 @@ function buildRequiredResultLine(unavailable: readonly string[]): string {
 
 const alwaysAvailableFetcher: typeof fetch = () =>
 	Promise.resolve(Response.json({ missingStorePathHashes: [] }));
+
+const originAttestedFetcher: typeof fetch = (input) => {
+	const url =
+		typeof input === 'string'
+			? input
+			: input instanceof URL
+				? input.href
+				: input.url;
+
+	return Promise.resolve(
+		url.includes('/api/v1/attested-paths')
+			? Response.json({ attestedStorePathHashes: ['1'.repeat(32)] })
+			: Response.json({ missingStorePathHashes: [] })
+	);
+};
+
+const attestationProbeMissingFetcher: typeof fetch = (input) => {
+	const url =
+		typeof input === 'string'
+			? input
+			: input instanceof URL
+				? input.href
+				: input.url;
+
+	return Promise.resolve(
+		url.includes('/api/v1/attested-paths')
+			? new Response('Not Found', { status: 404 })
+			: Response.json({ missingStorePathHashes: [] })
+	);
+};
 
 function recordingFetcher(): {
 	readonly requestedUrls: readonly string[];
@@ -1420,7 +1451,16 @@ describe('cohortPreFilter', () => {
 });
 
 describe('cohort-matrix output', () => {
-	it('rebuilds a cached target whose root does not prove completed provenance', async () => {
+	it.each([
+		{
+			reason: 'provenance is required',
+			options: { requireProvenance: 'true' }
+		},
+		{
+			reason: 'a cached target has no attestation',
+			options: { includeCachedTargets: 'true' }
+		}
+	])('keeps a cached target in the plan when $reason', async ({ options }) => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
 		const appNode = {
@@ -1439,9 +1479,7 @@ describe('cohort-matrix output', () => {
 			recordedCalls.push([...arguments_]);
 
 			if (!arguments_.includes('targets')) {
-				throw new Error(
-					'an unattested cached target must not be rooted by planning'
-				);
+				throw new Error('a cached target must remain in the plan');
 			}
 
 			await writeFile(
@@ -1453,7 +1491,7 @@ describe('cohort-matrix output', () => {
 		};
 
 		await planAction(
-			{ ...baseOptions, optimise: 'true', requireProvenance: 'true' },
+			{ ...baseOptions, optimise: 'true', ...options },
 			{
 				GITHUB_RUN_ID: '12345',
 				RUNNER_TEMP: planDirectory,
@@ -1463,7 +1501,22 @@ describe('cohort-matrix output', () => {
 			{
 				evaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
-				fetcher: alwaysAvailableFetcher,
+				fetcher: options.includeCachedTargets
+					? (input) => {
+							const url =
+								typeof input === 'string'
+									? input
+									: input instanceof URL
+										? input.href
+										: input.url;
+
+							return Promise.resolve(
+								url.includes('/api/v1/attested-paths')
+									? Response.json({ attestedStorePathHashes: [] })
+									: Response.json({ missingStorePathHashes: [] })
+							);
+						}
+					: alwaysAvailableFetcher,
 				runner
 			}
 		);
@@ -1480,6 +1533,85 @@ describe('cohort-matrix output', () => {
 			rootCommands: [],
 			targetRetained: false,
 			cohortCount: true
+		});
+	});
+
+	it.each([
+		{
+			reason: 'it already has an attestation',
+			fetcher: originAttestedFetcher,
+			warnings: []
+		},
+		{
+			reason: 'the destination does not report attestations',
+			fetcher: attestationProbeMissingFetcher,
+			warnings: ['Attestation status unavailable']
+		}
+	])('skips a cached target when $reason', async ({ fetcher, warnings }) => {
+		const reported: string[] = [];
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: {
+						[targetRootDrvPath]: {
+							env: { out: appStorePath },
+							inputs: { drvs: {} },
+							outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+						}
+					}
+				})
+			});
+		const calls: string[][] = [];
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			calls.push([...arguments_]);
+
+			if (arguments_.includes('targets')) {
+				await writeFile(
+					resultFileArgument(arguments_),
+					rootTargetsResultLine([storePath(appStorePath)])
+				);
+
+				return { stdout: '', stderr: '' };
+			}
+
+			const root = rootCommandTarget(arguments_);
+			await writeFile(resultFileArgument(arguments_), retainedResultLine(root));
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await planAction(
+			{ ...baseOptions, optimise: 'true', includeCachedTargets: 'true' },
+			{
+				GITHUB_RUN_ID: '12345',
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			},
+			warningReporter(reported),
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher,
+				runner
+			}
+		);
+
+		const outputs = await readFile(path.join(directory, 'output'), 'utf8');
+
+		expect({
+			rootCommands: calls.map((arguments_) =>
+				arguments_.includes('targets') ? 'targets' : 'ensure'
+			),
+			targetRetained: outputs.includes('target-matrix={"include":[]}'),
+			cohortCount: outputs.includes('cohort-count=0\n'),
+			warnings: reported
+		}).toStrictEqual({
+			rootCommands: ['ensure', 'targets', 'ensure'],
+			targetRetained: true,
+			cohortCount: true,
+			warnings
 		});
 	});
 

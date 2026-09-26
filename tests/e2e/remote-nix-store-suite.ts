@@ -1135,6 +1135,7 @@ async function runAlreadyValidPublication(
 							.join(''),
 						outputs:
 							`checksums-file=${initialChecksumsFile}\n` +
+							`receipt-file=${path.join(runDirectory, 'accepted-receipt.json')}\n` +
 							'subject-count=2\n' +
 							`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
 							'built-subject-count=1\n' +
@@ -1603,6 +1604,7 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						.join(''),
 					outputs:
 						`checksums-file=${checksumsFile}\n` +
+						`receipt-file=${path.join(runDirectory, 'accepted-receipt.json')}\n` +
 						`subject-count=${String(closurePaths.length)}\n` +
 						`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
 						`built-subject-count=${String(paths.length)}\n` +

@@ -38,6 +38,9 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
+import { AttestationCasService } from './attestation-cas-service.ts';
+import { AttestationsService } from './attestations-service.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -58,7 +61,13 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 		new SigningKeysService(context, narInfoObjects),
 		new UploadStateService(context),
 		narInfoObjects,
-		new RetentionService(context)
+		new RetentionService(context),
+		new AttestationsService(
+			context,
+			new CacheRegistrationService(context),
+			new AttestationCasService(context),
+			narInfoObjects
+		)
 	);
 }
 

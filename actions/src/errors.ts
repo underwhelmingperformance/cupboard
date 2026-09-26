@@ -219,6 +219,13 @@ export class RetentionChoiceConflictError extends UsageError {
 	}
 }
 
+export class PublicationModeConflictError extends UsageError {
+	constructor(reason: string) {
+		super(reason);
+		this.name = 'PublicationModeConflictError';
+	}
+}
+
 export class GraceWaitConflictError extends UsageError {
 	constructor() {
 		super('require-grace cannot be combined with wait: false');
@@ -1378,6 +1385,25 @@ export class CacheAvailabilityQueryError extends CodedError {
 	constructor(public readonly status: number) {
 		super(`Could not query cache availability: HTTP ${String(status)}`);
 		this.name = 'CacheAvailabilityQueryError';
+	}
+}
+
+export class CacheAttestationQueryError extends CodedError {
+	constructor(
+		public readonly url: string,
+		public readonly status: number
+	) {
+		super(`Could not query attestations at ${url}: HTTP ${String(status)}`);
+		this.name = 'CacheAttestationQueryError';
+	}
+}
+
+export class CacheAttestationResponseUnexpectedHashError extends CodedError {
+	constructor(public readonly storePathHash: string) {
+		super(
+			`the cache attestation query returned an unrequested store-path hash: ${storePathHash}`
+		);
+		this.name = 'CacheAttestationResponseUnexpectedHashError';
 	}
 }
 

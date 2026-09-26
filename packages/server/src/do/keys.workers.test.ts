@@ -38,7 +38,8 @@ import {
 	pushPath,
 	resetTestServer,
 	resolvedCache,
-	uploadMetadata
+	uploadMetadata,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { withDeadlineBudget } from './deadline.ts';
@@ -405,7 +406,9 @@ describe('signing key rotation', () => {
 			storePathHash: 'j'.repeat(32),
 			name: 'expired-purge'
 		});
-		await pushPath(init.token, before);
+		// The commit arms an alarm for attestation inheritance. The test spies on
+		// the alarm, so an alarm handler running beside it would arm its own.
+		await withoutAlarmArming(() => pushPath(init.token, before));
 
 		const result = await runInDurableObject(
 			currentServer(),
@@ -513,7 +516,9 @@ describe('signing key rotation', () => {
 			storePathHash: 'k'.repeat(32),
 			name: 'stalled-publish'
 		});
-		await pushPath(init.token, before);
+		// The commit arms an alarm for attestation inheritance. The test spies on
+		// the alarm, so an alarm handler running beside it would arm its own.
+		await withoutAlarmArming(() => pushPath(init.token, before));
 
 		const result = await runInDurableObject(
 			currentServer(),

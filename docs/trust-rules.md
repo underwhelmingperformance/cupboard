@@ -226,8 +226,9 @@ required reuse period; a later push refreshes the roots it updates.
 
 The flake publish workflow depends on that prefix. Each of its jobs exchanges
 its own OIDC token under the same trust rule: the plan job ensures a retention
-root for each already-cached target, and the cohort jobs push and attest. Every
-root the workflow writes, one per target plus the shared per-run root, is
+root for each cached target (with `attest: all`, only for a target that already
+has an attestation), and the cohort jobs push and attest the remaining targets.
+Every root the workflow writes, one per target plus the shared per-run root, is
 beneath the `root-prefix` the caller passes, so a single prefix grant covers
 them all. Trust the workflow with the branch preset, pinning `job_workflow_ref`
 to cupboard's reusable file:

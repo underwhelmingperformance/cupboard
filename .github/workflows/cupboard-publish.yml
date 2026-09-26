@@ -43,13 +43,31 @@ on:
         required: false
         type: boolean
         default: true
-      attest:
-        description:
-          When true, sign and attach SLSA build provenance for the published
-          paths.
+      push:
+        description: >-
+          Control which outputs this workflow publishes to the destination
+          cache. `none` runs the build without publishing its outputs and
+          requires `attest: none`. This workflow has no reuse view, so
+          `built-and-reused` publishes only outputs built in this run and
+          outputs already present in the selected build store. `all` also
+          publishes substituted outputs. A push replaces the retention root's
+          complete path set, and `built-and-reused` leaves substituted outputs
+          out of that set, so the workflow rejects `built-and-reused` when
+          `root` is set.
         required: false
-        type: boolean
-        default: true
+        type: string
+        default: all
+      attest:
+        description: >-
+          Control which attestations this workflow signs and attaches to
+          published outputs. `none` skips signing in this workflow. `built`
+          signs SLSA build provenance for outputs built in this run. `all` also
+          signs build-origin statements that record how the published outputs
+          were obtained. Signing requires `push` to be `built-and-reused` or
+          `all`.
+        required: false
+        type: string
+        default: all
       runs-on:
         description: Runner label to build on.
         required: false
@@ -88,6 +106,29 @@ jobs:
         run: |
           if [ "${GITHUB_SERVER_URL}" != https://github.com ]; then
             echo '::error::The reusable cupboard workflows require GitHub Cloud because GitHub Enterprise Server does not provide job.workflow_repository, job.workflow_ref or job.workflow_sha'
+            exit 1
+          fi
+
+      - name: Validate publication options
+        env:
+          PUSH: ${{ inputs.push }}
+          ATTEST: ${{ inputs.attest }}
+          ROOT: ${{ inputs.root }}
+        run: |
+          case "${PUSH}" in
+            none|built-and-reused|all) ;;
+            *) echo '::error::push must be none, built-and-reused, or all'; exit 1 ;;
+          esac
+          case "${ATTEST}" in
+            none|built|all) ;;
+            *) echo '::error::attest must be none, built, or all'; exit 1 ;;
+          esac
+          if [ "${PUSH}" = none ] && [ "${ATTEST}" != none ]; then
+            echo '::error::attest must be none when push is none'
+            exit 1
+          fi
+          if [ "${PUSH}" = built-and-reused ] && [ -n "${ROOT}" ]; then
+            echo '::error::push: built-and-reused with root would remove substituted outputs from the retention root; use push: all or omit root'
             exit 1
           fi
 
@@ -151,17 +192,17 @@ jobs:
         id: build
         with:
           installables: ${{ inputs.installable }}
-          # A cached output provides no evidence of a build in this run. Rebuild
-          # cached final derivations when provenance is required so a retry after
+          # A cached output provides no evidence of a build in this run. With
+          # `attest: built`, rebuild cached final derivations so a retry after
           # an attachment failure produces a new receipt.
-          require-provenance: ${{ inputs.attest }}
+          require-provenance: ${{ inputs.attest == 'built' }}
 
       # A retention root holds one set of paths, and each push replaces that
       # set completely, so builds for different systems must retain under
       # sibling roots. Append this builder's system to the caller's prefix.
       - name: Resolve the retention root
         id: root
-        if: ${{ inputs.root != '' }}
+        if: ${{ inputs.push != 'none' && inputs.root != '' }}
         env:
           ROOT: ${{ inputs.root }}
         run:
@@ -170,9 +211,15 @@ jobs:
 
       - uses: $/actions/push
         id: push
+        if:
+          ${{ inputs.push != 'none' && ((inputs.push == 'all' &&
+          steps.build.outputs.paths != '') ||
+          steps.build.outputs.unsubstituted-paths != '') }}
         with:
           url: ${{ inputs.url }}
-          paths: ${{ steps.build.outputs.paths }}
+          paths:
+            ${{ inputs.push == 'all' && steps.build.outputs.paths ||
+            steps.build.outputs.unsubstituted-paths }}
           cache: ${{ inputs.cache }}
           root: ${{ steps.root.outputs.root || '' }}
           ttl: ${{ inputs.ttl }}
@@ -183,19 +230,22 @@ jobs:
       # public-read caches. Use the flake workflow for a private cache.
       - name: Attest committed paths
         id: attest
-        if: ${{ inputs.attest }}
+        if: ${{ inputs.attest != 'none' && steps.push.outcome == 'success' }}
         uses: $/actions/attest
         with:
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
+          mode: ${{ inputs.attest }}
+          receipt-file:
+            ${{ inputs.push == 'all' && steps.build.outputs.receipt-file ||
+            steps.build.outputs.unsubstituted-receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
 
       - uses: $/actions/attest-attach
-        if: ${{ inputs.attest && steps.attest.outputs.bundles != '' }}
+        if: ${{ inputs.attest != 'none' && steps.attest.outputs.bundles != '' }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ inputs.cache }}
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
+          receipt-file: ${{ steps.attest.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundle: ${{ steps.attest.outputs.bundles }}

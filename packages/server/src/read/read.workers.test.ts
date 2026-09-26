@@ -15,7 +15,7 @@ import { env } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { cacheIdentityColumns } from '../db/cache.ts';
@@ -557,6 +557,7 @@ async function seedPrivateNarInfoObject(
 	edgeGeneration?: CacheGeneration
 ): Promise<void> {
 	await seedOwnedNarReference(privateCache, 'private', edgeGeneration);
+	await env.BLOBS.put(narObjectKey(narHash), narBytes);
 	await env.BLOBS.put(
 		narInfoObjectKey(
 			tenant,
@@ -582,6 +583,35 @@ describe('private narinfo reference gate', () => {
 		access: 'private',
 		generation: firstCacheGeneration
 	} as const;
+
+	it('serves a narinfo without reading the NAR at its recorded URL', async () => {
+		await seedPrivateNarInfo();
+		await env.BLOBS.delete(narObjectKey(narHash));
+		const heads = vi.spyOn(env.BLOBS, 'head');
+
+		try {
+			const response = await serveNarInfo(
+				new Request('https://cache.example/probe.narinfo'),
+				env,
+				tenant,
+				privateRead,
+				referencingPath,
+				true
+			);
+
+			expect({
+				status: response.status,
+				body: await response.text(),
+				heads: heads.mock.calls
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				body: 'narinfo-bytes',
+				heads: []
+			});
+		} finally {
+			heads.mockRestore();
+		}
+	});
 
 	it.each([
 		{

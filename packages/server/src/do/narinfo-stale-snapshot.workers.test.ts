@@ -190,7 +190,9 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 					narInfoObjects
 				);
 
-				await deletionQueue.removeStaleNarInfo(captured, internalOrigin);
+				await instance.context.criticalSection(() =>
+					deletionQueue.reconcileMissingNar(captured, internalOrigin)
+				);
 
 				return instance.context.db
 					.select({ generation: schema.narInfos.generation })

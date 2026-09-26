@@ -15,6 +15,7 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	defaultCache,
+	drainAttestationInheritance,
 	driveToCompletion,
 	fetchNarInfo,
 	narBytes,
@@ -59,9 +60,9 @@ async function seedQueuedDeletions(count: number): Promise<void> {
 		}));
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 
-		// Each row binds five parameters, so the insert is chunked under the
+		// Each row binds six parameters, so the insert is chunked under the
 		// driver's bound-parameter limit.
-		for (const batch of chunk(rows, 18)) {
+		for (const batch of chunk(rows, 16)) {
 			database.insert(narInfoDeletions).values(batch).run();
 		}
 	});
@@ -177,6 +178,9 @@ describe('garbage collection critical section', () => {
 
 			await pushPath(token, recommitted, defaultCache(), nar);
 			expect(await narInfoDeletionRows()).toStrictEqual(queuedAfterCollect);
+			// The recommit inherits attestations from generation 0 before the
+			// queued edge of generation 0 can retire.
+			await drainAttestationInheritance();
 			await setRoot(token, {
 				name: 'channel',
 				targets: [rooted.storePath, recommitted.storePath]

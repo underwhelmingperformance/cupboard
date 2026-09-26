@@ -271,6 +271,7 @@ describe('resolveAttestSignInputs', () => {
 				destinationAccess: 'public'
 			})
 		).toStrictEqual({
+			mode: 'all',
 			checksumsFile: '/runner/temp/attestations/subjects.txt',
 			builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
 			predicateFile: '/runner/temp/attestations/build-origin.json',
@@ -498,6 +499,30 @@ describe('attestSignAction', () => {
 				[bundleFile, '{"predicateType":"https://slsa.dev/provenance/v1"}\n'],
 				[originBundleFile, `{"predicateType":"${buildOriginPredicateType}"}\n`]
 			]
+		});
+	});
+
+	it('signs only built subjects in built mode', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+
+		await attestSignAction(
+			options(files, { mode: 'built' }),
+			createGithubReporter(),
+			signing.dependencies
+		);
+
+		expect({
+			predicateTypes: records.map((record) => record.statement.predicateType),
+			outputs: signing.outputs
+		}).toStrictEqual({
+			predicateTypes: ['https://slsa.dev/provenance/v1'],
+			outputs: {
+				'bundle-path': path.join(files.directory, 'provenance.sigstore.json'),
+				'origin-bundle-path': '',
+				bundles: path.join(files.directory, 'provenance.sigstore.json')
+			}
 		});
 	});
 

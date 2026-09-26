@@ -10,6 +10,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { z } from 'zod';
 
 import {
 	commitStagedBlobPromotion,
@@ -20,12 +21,27 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
-import { maxOutgoingConnections } from './bulk.ts';
+import { chunk, maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
 
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
+
+// Negotiation offers a reuse commit from D1 rows, which cannot show that the
+// canonical object is gone. A key under this prefix records a NAR hash whose
+// object a reuse commit found missing, so that negotiation plans an upload for
+// it instead. The value is the time until which the record applies. After an
+// hour, negotiation offers reuse again, and a commit that finds the object
+// still missing records the hash again.
+const missingCanonicalNarPrefix = 'uploads:missing-canonical-nar:';
+const missingCanonicalNarTtlMs = 60 * 60 * 1000;
+// Durable Object storage reads at most this many keys in one call.
+const maxStorageKeysPerGet = 128;
+
+function missingCanonicalNarKey(narHash: NixSha256HashString): string {
+	return `${missingCanonicalNarPrefix}${narHash}`;
+}
 
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
@@ -101,6 +117,74 @@ export class UploadStateService {
 					.set({ deleteAfter: sql`null` })
 					.where(inArray(d1Schema.blobState.narHash, list))
 					.run()
+		);
+	}
+
+	/**
+	 * Records that the canonical object of a live blob is missing, so that
+	 * negotiation plans an upload for the NAR instead of a reuse commit.
+	 */
+	async markCanonicalNarMissing(narHash: NixSha256HashString): Promise<void> {
+		await this.context.ctx.storage.put(
+			missingCanonicalNarKey(narHash),
+			Date.now() + missingCanonicalNarTtlMs
+		);
+	}
+
+	/**
+	 * Removes the record for a NAR hash once an upload has promoted its bytes to
+	 * a live object.
+	 */
+	async clearCanonicalNarMissing(narHash: NixSha256HashString): Promise<void> {
+		await this.context.ctx.storage.delete(missingCanonicalNarKey(narHash));
+	}
+
+	/**
+	 * The reusable blobs, without those whose canonical object a reuse commit
+	 * recently found missing. Expired records are deleted.
+	 */
+	async withoutMissingCanonicalNars<T>(
+		reusable: ReadonlyMap<NixSha256HashString, T>
+	): Promise<ReadonlyMap<NixSha256HashString, T>> {
+		const now = Date.now();
+		const missing = new Set<NixSha256HashString>();
+		const expired: string[] = [];
+
+		for (const narHashes of chunk(
+			reusable.keys().toArray(),
+			maxStorageKeysPerGet
+		)) {
+			const records = await this.context.ctx.storage.get(
+				narHashes.map((narHash) => missingCanonicalNarKey(narHash))
+			);
+
+			for (const narHash of narHashes) {
+				const until = z
+					.number()
+					.safeParse(records.get(missingCanonicalNarKey(narHash)));
+
+				if (!until.success) {
+					continue;
+				}
+
+				if (until.data > now) {
+					missing.add(narHash);
+				} else {
+					expired.push(missingCanonicalNarKey(narHash));
+				}
+			}
+		}
+
+		if (expired.length > 0) {
+			await this.context.ctx.storage.delete(expired);
+		}
+
+		if (missing.size === 0) {
+			return reusable;
+		}
+
+		return new Map(
+			reusable.entries().filter(([narHash]) => !missing.has(narHash))
 		);
 	}
 

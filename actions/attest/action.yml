@@ -6,6 +6,14 @@ description:
   record its origin. Before signing, the action checks each NAR hash and any
   recorded deriver against the narinfos committed at the destination.
 inputs:
+  mode:
+    description:
+      Control which receipt subjects this action accepts and signs. `built`
+      accepts only outputs built in this run and signs SLSA build provenance for
+      them. `all` accepts every subject with a recorded origin and also signs
+      build-origin statements for those subjects.
+    required: false
+    default: all
   receipt-file:
     description: Current-run receipt produced by a cupboard build action.
     required: true
@@ -94,6 +102,11 @@ outputs:
       Path to the checksums for all accepted receipt subjects. The build-origin
       attestations cover those subjects.
     value: ${{ steps.subjects.outputs.checksums-file }}
+  receipt-file:
+    description:
+      Path to the receipt restricted to the accepted subjects. Pass it to
+      actions/attest-attach with the checksums file.
+    value: ${{ steps.subjects.outputs.receipt-file }}
   subject-count:
     description: Number of accepted attestation subjects.
     value: ${{ steps.subjects.outputs.subject-count }}
@@ -155,6 +168,7 @@ runs:
       id: subjects
       shell: bash
       env:
+        MODE: ${{ inputs.mode }}
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         BUILT_CHECKSUMS_FILE: ${{ inputs.built-checksums-file }}
@@ -167,6 +181,7 @@ runs:
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" attest \
+          --mode "$MODE" \
           --receipt-file "$RECEIPT_FILE" \
           --checksums-file "$CHECKSUMS_FILE" \
           --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
@@ -189,6 +204,7 @@ runs:
         SIGNING_PROFILE: ${{ inputs.signing-profile }}
         UPLOAD_TO_GITHUB: ${{ inputs.upload-to-github }}
         SUBJECT_GROUPING: ${{ inputs.subject-grouping }}
+        MODE: ${{ inputs.mode }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
       run: |
         node --experimental-transform-types \
@@ -202,4 +218,5 @@ runs:
           --signing-profile "$SIGNING_PROFILE" \
           --upload-to-github "$UPLOAD_TO_GITHUB" \
           --subject-grouping "$SUBJECT_GROUPING" \
+          --mode "$MODE" \
           --github-token "$GH_TOKEN"

@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfoObjectKey } from '../http/http.ts';
@@ -8,6 +9,7 @@ import {
 	blobStateNarHashes,
 	clearBlobStorage,
 	commitPath,
+	commitUpload,
 	currentNarObjectKey,
 	deleteBlobReferenceEdge,
 	deleteNarInfoRow,
@@ -15,9 +17,13 @@ import {
 	initialise,
 	narInfoDeletionRows,
 	narInfoGeneration,
+	negotiateUploads,
+	putNarBytes,
+	readFetch,
 	reapBlobsPastGrace,
 	resetTestServer,
 	seedNarInfoDeletion,
+	singleDecision,
 	tenantBlobRows,
 	uploadMetadata,
 	verifiableNar
@@ -215,6 +221,51 @@ describe('delete marker replay', () => {
 			generation: 1,
 			objectPresent: true,
 			blobPresent: true
+		});
+	});
+});
+
+describe('explicit deletion', () => {
+	beforeEach(async () => {
+		await resetTestServer();
+		await clearBlobStorage();
+	});
+
+	it('stops serving a path while another upload of the same NAR is pending', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('delete-pending-recommit');
+		const metadata = uploadMetadata({
+			storePathHash: 'b'.repeat(32),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const first = singleDecision(await negotiateUploads(token, [metadata]));
+		const second = singleDecision(await negotiateUploads(token, [metadata]));
+
+		if (first.action !== 'upload' || second.action !== 'upload') {
+			throw new Error('both negotiations must plan an upload');
+		}
+
+		await putNarBytes(first.r2Key, nar);
+		await commitUpload(token, first.uploadId);
+
+		const deletion = await deletePath(token, metadata.storePathHash);
+		const narInfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		expect({
+			deletion,
+			narInfoStatus: narInfo.status,
+			edges: await blobReferenceRows()
+		}).toStrictEqual({
+			deletion: {
+				storePathHash: metadata.storePathHash,
+				deleted: true,
+				narScheduledForDeletion: true
+			},
+			narInfoStatus: StatusCodes.NOT_FOUND,
+			edges: []
 		});
 	});
 });

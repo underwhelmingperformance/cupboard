@@ -60,6 +60,19 @@ inputs:
       Publish the cohort. `true` streams a local build or publishes keyed
       remote-store results, then sets each target root; `false` only builds.
     required: false
+  push-mode:
+    description: >-
+      Set the publication scope when `push` is true. `built-and-reused`
+      publishes outputs built in this run, outputs already present in the build
+      store, and paths found through the reuse view. `all` also publishes
+      substituted outputs, and is the default when `push` is true. Use `none`
+      with `push: false` to build without publication.
+    required: false
+  attest-mode:
+    description: >-
+      Control whether the receipt includes paths published by reference for the
+      later attestation step. `all` includes them; `none` and `built` omit them.
+    required: false
   require-provenance:
     description: >-
       Require provenance from this run for every final output. The action skips
@@ -196,6 +209,8 @@ runs:
         MAX_JOBS: ${{ inputs.max-jobs }}
         STORE: ${{ inputs.store }}
         PUSH: ${{ inputs.push }}
+        PUSH_MODE: ${{ inputs.push-mode }}
+        ATTEST_MODE: ${{ inputs.attest-mode }}
         REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
         BEST_EFFORT: ${{ inputs.best-effort }}
         GC_BETWEEN_COHORTS: ${{ inputs.gc-between-cohorts }}
@@ -225,6 +240,8 @@ runs:
           --max-jobs "$MAX_JOBS"
           --store "$STORE"
           --push "$PUSH"
+          --push-mode "$PUSH_MODE"
+          --attest-mode "$ATTEST_MODE"
           --require-provenance "$REQUIRE_PROVENANCE"
           --best-effort "$BEST_EFFORT"
           --gc-between-cohorts "$GC_BETWEEN_COHORTS"

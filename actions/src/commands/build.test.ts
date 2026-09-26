@@ -120,6 +120,69 @@ afterEach(async () => {
 });
 
 describe('buildAction', () => {
+	it('records a substituted output as copied without claiming a local build', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		let pathQueries = 0;
+
+		await buildAction(
+			{ installables: ['.#app'], attempts: '1' },
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			{
+				nix: {
+					queryPathInfo: () => {
+						pathQueries += 1;
+						return pathQueries === 1
+							? Promise.reject(new Error('not present'))
+							: Promise.resolve(pathInfo(app, `${app}.drv`));
+					}
+				},
+				runNix: async (invocation) => {
+					if (invocation.arguments.includes('--dry-run')) {
+						return {
+							status: 0,
+							stdout: `[ { "outputs": { "out": "${app}" } } ]`
+						};
+					}
+
+					const logFile =
+						invocation.arguments[
+							invocation.arguments.indexOf('json-log-path') + 1
+						];
+					if (logFile === undefined) {
+						throw new Error('missing json-log-path');
+					}
+					await writeFile(logFile, '');
+					return { status: 0, stdout: `${app}\n` };
+				}
+			}
+		);
+
+		const receiptText = await readFile(
+			path.join(directory, 'cupboard-build-receipt.json'),
+			'utf8'
+		);
+		const receiptJson: unknown = JSON.parse(receiptText);
+		expect(buildReceiptSchema.parse(receiptJson)).toStrictEqual({
+			version: 3,
+			paths: [app],
+			subjects: [
+				{
+					origin: 'copied',
+					storePath: app,
+					narHash: 'aa'.repeat(32),
+					derivation: `${app}.drv`,
+					signatures: []
+				}
+			]
+		});
+	});
+
 	it('cancels retry backoff without waiting for its delay', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-build-test-')
@@ -416,15 +479,18 @@ process.stdin.on('end', () => {
 				}
 			],
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [app],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: app,
 						narHash: 'aa'.repeat(32),
 						derivation: appDerivation,
 						attempt: 2,
-						attemptId: 'attempt-2'
+						attemptId: 'attempt-2',
+						buildStore: 'auto',
+						verification: 'local'
 					}
 				]
 			}
@@ -531,21 +597,162 @@ process.stdin.on('end', () => {
 				}
 			],
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [app],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: app,
 						narHash: 'aa'.repeat(32),
 						derivation: appDerivation,
 						attempt: 2,
-						attemptId: 'current-run-rebuild'
+						attemptId: 'current-run-rebuild',
+						buildStore: 'auto',
+						verification: 'local'
 					}
 				]
 			}
 		});
 	});
 });
+
+describe('buildAction on a fully cached rerun', () => {
+	it('writes a built receipt when require-provenance rebuilds a cached output', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const appDerivation = `${app}.drv`;
+		const outputFile = path.join(directory, 'github-output');
+
+		await buildAction(
+			{ installables: ['.#app'], attempts: '1', requireProvenance: 'true' },
+			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+			{
+				nextAttemptId: () => 'cached-rerun',
+				nix: {
+					queryPathInfo: () => Promise.resolve(pathInfo(app, appDerivation))
+				},
+				runNix: async (invocation) => {
+					if (invocation.arguments.includes('--dry-run')) {
+						return { status: 0, stdout: '[]' };
+					}
+
+					if (invocation.arguments.includes('--rebuild')) {
+						return { status: 0, stdout: '' };
+					}
+
+					const logFile =
+						invocation.arguments[
+							invocation.arguments.indexOf('json-log-path') + 1
+						];
+
+					if (logFile === undefined) {
+						throw new Error('missing json-log-path');
+					}
+
+					await writeFile(logFile, '');
+
+					return { status: 0, stdout: `${app}\n` };
+				}
+			}
+		);
+
+		const outputs = await readFile(outputFile, 'utf8');
+		const unsubstitutedReceipt: unknown = JSON.parse(
+			await readFile(
+				path.join(directory, 'cupboard-unsubstituted-receipt.json'),
+				'utf8'
+			)
+		);
+
+		expect({
+			unsubstitutedReceipt: buildReceiptSchema.parse(unsubstitutedReceipt),
+			unsubstitutedPaths: unsubstitutedPathsOutput(outputs)
+		}).toStrictEqual({
+			unsubstitutedReceipt: {
+				version: 3,
+				paths: [app],
+				subjects: [
+					{
+						origin: 'built',
+						storePath: app,
+						narHash: 'aa'.repeat(32),
+						derivation: appDerivation,
+						attempt: 2,
+						attemptId: 'cached-rerun',
+						buildStore: 'auto',
+						verification: 'local'
+					}
+				]
+			},
+			unsubstitutedPaths: app
+		});
+	});
+
+	it.each([
+		{
+			name: 'a cached output already present in the store',
+			ultimate: true,
+			unsubstitutedPaths: app
+		},
+		{
+			name: 'a substituted output',
+			ultimate: false,
+			unsubstitutedPaths: ''
+		}
+	])(
+		'lists only outputs that the run did not substitute, given $name',
+		async ({ ultimate, unsubstitutedPaths }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const outputFile = path.join(directory, 'github-output');
+
+			await buildAction(
+				{ installables: ['.#app'], attempts: '1' },
+				{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+				{
+					nextAttemptId: () => 'cached-rerun',
+					nix: {
+						queryPathInfo: () =>
+							Promise.resolve({
+								...pathInfo(app, `${app}.drv`),
+								ultimate
+							})
+					},
+					runNix: async (invocation) => {
+						if (invocation.arguments.includes('--dry-run')) {
+							return { status: 0, stdout: '[]' };
+						}
+
+						const logFile =
+							invocation.arguments[
+								invocation.arguments.indexOf('json-log-path') + 1
+							];
+
+						if (logFile === undefined) {
+							throw new Error('missing json-log-path');
+						}
+
+						await writeFile(logFile, '');
+
+						return { status: 0, stdout: `${app}\n` };
+					}
+				}
+			);
+
+			expect(
+				unsubstitutedPathsOutput(await readFile(outputFile, 'utf8'))
+			).toStrictEqual(unsubstitutedPaths);
+		}
+	);
+});
+
+function unsubstitutedPathsOutput(outputs: string): string | undefined {
+	return /unsubstituted-paths<<(\S+)\n([^]*?)\n\1\n/u.exec(outputs)?.[2];
+}
 
 function pathInfo(storePath: StorePathString, deriver?: string) {
 	return {

@@ -335,7 +335,9 @@ interface ConstructedFlowConfig {
 	readonly attempts?: number;
 	readonly rebuild?: boolean;
 	readonly requireProvenance?: boolean;
+	readonly omitSubstituted?: boolean;
 	readonly omitActivity?: boolean;
+	readonly copiedPaths?: readonly StorePathString[];
 	readonly suppressEvent?: boolean;
 	readonly outputProtection?: 'failed';
 	readonly machine?: string;
@@ -388,6 +390,18 @@ function activityLine(machine: string): string {
 		text: `building '${drvA}'`,
 		type: 105,
 		fields: [drvA, machine]
+	});
+}
+
+function copyActivityLine(storePath: StorePathString): string {
+	return JSON.stringify({
+		action: 'start',
+		id: 2,
+		level: 4,
+		parent: 0,
+		text: `copying path '${storePath}' from 'https://cache.example.test'`,
+		type: 100,
+		fields: [storePath, 'https://cache.example.test', 'local']
 	});
 }
 
@@ -446,10 +460,14 @@ async function stubNixEnvironment(
 	return {
 		...process.env,
 		PATH: `${stubDirectory}:${process.env.PATH ?? ''}`,
-		STUB_LOG_LINE:
-			constructed.omitActivity === true
-				? ''
-				: activityLine(constructed.machine ?? ''),
+		STUB_LOG_LINE: [
+			...(constructed.omitActivity === true
+				? []
+				: [activityLine(constructed.machine ?? '')]),
+			...(constructed.copiedPaths ?? []).map((storePath) =>
+				copyActivityLine(storePath)
+			)
+		].join('\n'),
 		STUB_COUNT_FILE: stubCountFile(workspace),
 		STUB_SUCCEED_ON: String(constructed.succeedOn),
 		STUB_REQUIRE_REBUILD: String(constructed.rebuild === true),
@@ -735,6 +753,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 						...(config.constructed.rebuild === true && { rebuild: true }),
 						...(config.constructed.requireProvenance === true && {
 							requireProvenance: true
+						}),
+						...(config.constructed.omitSubstituted === true && {
+							omitSubstituted: true
 						})
 					}
 				};
@@ -1281,6 +1302,93 @@ describe('runBuildPush', () => {
 			receiptOver([row.subject])
 		);
 	});
+
+	it.each([
+		{
+			name: 'a streamed output that this run built',
+			config: {
+				constructed: { succeedOn: 1, omitSubstituted: true },
+				valid: [pathA],
+				outPaths: [pathA]
+			},
+			published: [pathA]
+		},
+		{
+			name: 'a streamed output that was valid before the build',
+			config: {
+				constructed: {
+					succeedOn: 1,
+					suppressEvent: true,
+					omitSubstituted: true
+				},
+				valid: [pathA],
+				outPaths: [pathA]
+			},
+			published: [pathA]
+		},
+		{
+			name: 'a streamed output fetched from a substituter',
+			config: {
+				constructed: {
+					succeedOn: 1,
+					suppressEvent: true,
+					omitSubstituted: true,
+					copiedPaths: [pathA]
+				},
+				valid: [pathA],
+				outPaths: [pathA]
+			},
+			published: []
+		},
+		{
+			name: 'a reconciled output that was valid before the build',
+			config: {
+				preflightFailure: new UntrustedDaemonError('not-trusted'),
+				constructed: {
+					succeedOn: 1,
+					installables: [`${drvA}^*`],
+					omitSubstituted: true
+				},
+				declaredOutputs: [pathA],
+				alreadyValid: [pathA],
+				valid: [pathA],
+				ultimatePaths: [pathA]
+			},
+			published: [pathA]
+		},
+		{
+			name: 'a reconciled output fetched from a substituter',
+			config: {
+				preflightFailure: new UntrustedDaemonError('not-trusted'),
+				constructed: {
+					succeedOn: 1,
+					installables: [`${drvA}^*`],
+					omitSubstituted: true
+				},
+				declaredOutputs: [pathA],
+				valid: [pathA]
+			},
+			published: []
+		}
+	])(
+		'omits only substituted outputs when asked, given $name',
+		async ({ config, published }) => {
+			const run = await runFlow(config);
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+
+			expect({
+				error: run.error,
+				paths: receipt.paths,
+				settledTargets: run.settledTargets
+			}).toStrictEqual({
+				error: undefined,
+				paths: published,
+				settledTargets: published
+			});
+		}
+	);
 
 	it('reports the reconciled local run in its summary', async () => {
 		const run = await runFlow({

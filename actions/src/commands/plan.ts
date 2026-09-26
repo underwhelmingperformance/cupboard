@@ -37,6 +37,7 @@ import {
 	waitForAbortableChildProcess
 } from '../child-process.ts';
 import {
+	CacheAttestationQueryError,
 	CommandFailedError,
 	ComponentRootTargetLimitError,
 	MatrixJobLimitError,
@@ -69,6 +70,7 @@ import {
 } from '../options.ts';
 import { packCohorts } from '../packing.ts';
 import {
+	attestedCachePaths,
 	availableCachePaths,
 	cacheProbePaths,
 	type Cohort,
@@ -233,6 +235,7 @@ export interface PlanOptions {
 	readonly packCapacity?: string;
 	readonly store?: string;
 	readonly requireProvenance?: string;
+	readonly includeCachedTargets?: string;
 }
 
 export interface PlanInputs {
@@ -253,6 +256,7 @@ export interface PlanInputs {
 	readonly packCapacity: number;
 	readonly store: string;
 	readonly requireProvenance: boolean;
+	readonly includeCachedTargets: boolean;
 }
 
 /**
@@ -332,6 +336,10 @@ export function registerPlanCommand(
 		.option(
 			'--require-provenance <value>',
 			'build cached targets again to produce provenance for this run: true or false'
+		)
+		.option(
+			'--include-cached-targets <value>',
+			'run the cohort of each cached target that has no attestation: true or false'
 		)
 		.action((options: PlanOptions) =>
 			planAction(options, environment, undefined, {
@@ -421,6 +429,11 @@ export function resolvePlanInputs(
 		requireProvenance: isEnabled(
 			'require-provenance',
 			options.requireProvenance,
+			false
+		),
+		includeCachedTargets: isEnabled(
+			'include-cached-targets',
+			options.includeCachedTargets,
 			false
 		)
 	};
@@ -544,16 +557,34 @@ export async function planAction(
 		: { plan: unoptimisedPlan(inputs.targets), evaluations: [] };
 	// Only an optimised plan has the evaluated graph that the pre-filter needs.
 	// An unoptimised plan must keep every cohort in the matrix.
-	const cohortDecisions =
-		inputs.optimise && !inputs.requireProvenance
-			? await cohortPreFilter(
-					inputs,
-					plan,
-					evaluations,
-					dependencies.runner,
-					dependencies.signal
+	let cohortDecisions: readonly CohortPreFilterDecision[];
+
+	if (inputs.optimise && !inputs.requireProvenance) {
+		const pendingAttributes = new Set(
+			plan.targets.map((target) => target.attr)
+		);
+		const coveredCohorts = inputs.includeCachedTargets
+			? plan.cohorts.filter((cohort) =>
+					cohort.targets.every((target) => !pendingAttributes.has(target.attr))
 				)
-			: plan.cohorts.map((cohort) => ({ key: cohort.key, pruned: false }));
+			: plan.cohorts;
+		const checked = await cohortPreFilter(
+			inputs,
+			{ cohorts: coveredCohorts },
+			evaluations,
+			dependencies.runner,
+			dependencies.signal
+		);
+		const byKey = new Map(checked.map((decision) => [decision.key, decision]));
+		cohortDecisions = plan.cohorts.map(
+			(cohort) => byKey.get(cohort.key) ?? { key: cohort.key, pruned: false }
+		);
+	} else {
+		cohortDecisions = plan.cohorts.map((cohort) => ({
+			key: cohort.key,
+			pruned: false
+		}));
+	}
 
 	await writePlan(
 		environment,
@@ -601,6 +632,7 @@ async function optimisedPlan(
 	const retainedRoots = await retainedRootsFor(
 		inputs,
 		evaluations,
+		reporter,
 		dependencies
 	);
 	const plan = planPublish({
@@ -618,6 +650,7 @@ async function optimisedPlan(
 async function retainedRootsFor(
 	inputs: PlanInputs,
 	evaluations: readonly TargetEvaluation[],
+	reporter: Reporter,
 	dependencies: PlanDependencies
 ): Promise<Set<string>> {
 	if (inputs.requireProvenance) {
@@ -639,14 +672,56 @@ async function retainedRootsFor(
 		...credentials,
 		...fetcher
 	});
+	const attestedPaths = inputs.includeCachedTargets
+		? await attestedPathsIfReported(
+				{
+					baseUrl: inputs.url,
+					cache: inputs.cache,
+					paths: [...availablePaths],
+					...credentials,
+					...fetcher
+				},
+				reporter
+			)
+		: undefined;
 
 	return ensureAvailableTargets(
 		inputs,
 		evaluations,
 		availablePaths,
 		dependencies.runner,
-		dependencies.signal
+		dependencies.signal,
+		attestedPaths
 	);
+}
+
+/**
+ * Returns the cached paths that have an attestation, or `undefined` when the
+ * destination does not provide the `attested-paths` probe. A server returns 404
+ * for the probe until it is updated. The plan then treats every cached target
+ * as attested and leaves it unbuilt.
+ */
+async function attestedPathsIfReported(
+	options: Parameters<typeof attestedCachePaths>[0],
+	reporter: Reporter
+): Promise<ReadonlySet<StorePathString> | undefined> {
+	try {
+		return await attestedCachePaths(options);
+	} catch (error) {
+		if (
+			!(error instanceof CacheAttestationQueryError) ||
+			error.status !== 404
+		) {
+			throw error;
+		}
+
+		reporter.warn(
+			'Attestation status unavailable',
+			`${error.url} returned 404, so cached targets are not checked for a missing attestation`
+		);
+
+		return undefined;
+	}
 }
 
 export function validateRemoteOutputPredictability(
@@ -737,12 +812,17 @@ export async function ensureAvailableTargets(
 	evaluations: readonly TargetEvaluation[],
 	availablePaths: ReadonlySet<StorePathString>,
 	runner: EnsureRunner = defaultEnsureRunner,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	attestedPaths?: ReadonlySet<StorePathString>
 ): Promise<Set<string>> {
 	const cached = evaluations.filter(
 		(evaluation) =>
 			evaluation.targetPaths.length === evaluation.target.outputs.length &&
-			evaluation.targetPaths.every((storePath) => availablePaths.has(storePath))
+			evaluation.targetPaths.every(
+				(storePath) =>
+					availablePaths.has(storePath) &&
+					(attestedPaths === undefined || attestedPaths.has(storePath))
+			)
 	);
 	const results = await mapWithConcurrency(
 		cached,

@@ -277,10 +277,12 @@ export class UploadsService {
 			.filter((path) => !skippable.has(path.storePathHash))
 			.map((path) => path.narHash);
 		const reusableByNarHash: ReadonlyMap<string, ReusableBlob> =
-			facts?.reusableByNarHash ??
-			(await (shouldClaim
-				? this.uploadState.findReusableBlobs(candidateNarHashes)
-				: this.uploadState.peekReusableBlobs(candidateNarHashes)));
+			await this.uploadState.withoutMissingCanonicalNars(
+				facts?.reusableByNarHash ??
+					(await (shouldClaim
+						? this.uploadState.findReusableBlobs(candidateNarHashes)
+						: this.uploadState.peekReusableBlobs(candidateNarHashes)))
+			);
 
 		return {
 			facts,
@@ -360,24 +362,23 @@ export class UploadsService {
 				: { graceSeconds: resolvedGraceSeconds };
 
 		const armedReuseHashes = new Set<NixSha256HashString>();
+		const removedRows: NarInfoRow[] = [];
 
-		for (const metadata of body.paths) {
-			const existing = existingByStorePathHash.get(metadata.storePathHash);
-
-			// A committed row without a present NAR is stale. Remove it before
-			// planning the replacement. Do not remove a replacement row written by a
-			// concurrent publication.
-			if (
-				existing !== undefined &&
-				!skippable.has(metadata.storePathHash) &&
-				committed.has(metadata.storePathHash)
-			) {
-				await this.deletionQueue.removeStaleNarInfo(existing, origin);
-			}
-		}
-
-		const uploads = await this.context.criticalSection(() => {
+		const uploads = await this.context.criticalSection(async () => {
 			this.requireCurrentCache(cache);
+
+			for (const metadata of body.paths) {
+				const existing = existingByStorePathHash.get(metadata.storePathHash);
+
+				if (
+					existing !== undefined &&
+					!skippable.has(metadata.storePathHash) &&
+					committed.has(metadata.storePathHash) &&
+					(await this.deletionQueue.reconcileMissingNar(existing, origin, true))
+				) {
+					removedRows.push(existing);
+				}
+			}
 
 			if (body.attachRoot !== undefined) {
 				this.roots.bindRunRoot(
@@ -458,8 +459,12 @@ export class UploadsService {
 				);
 			}
 
-			return Promise.resolve(decisions);
+			return decisions;
 		});
+
+		// Remove the published objects of the rows removed above, so readers get a
+		// 404 for the narinfo instead of a narinfo whose NAR is missing.
+		await this.deletionQueue.cleanUpRemovedNarInfos(removedRows, origin);
 
 		// Worker hints bypass `findReusableBlobs`, which normally clears armed
 		// timers. Clear the hinted timers before returning the decisions. Otherwise

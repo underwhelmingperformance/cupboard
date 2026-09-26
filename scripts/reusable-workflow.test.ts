@@ -493,7 +493,7 @@ describe('cupboard acquisition', () => {
 		]);
 	});
 
-	it('rebuilds a cached output when the publish workflow attests', async () => {
+	it('rebuilds a cached output when the publish workflow attests only built outputs', async () => {
 		const workflow = await loadWorkflow(publishWorkflow);
 
 		expect(inputsOf(workflow, cupboardAction('build-paths'))).toStrictEqual([
@@ -501,9 +501,22 @@ describe('cupboard acquisition', () => {
 				installables: '${{ inputs.installable }}',
 				// A cached output is no evidence that this run built anything, so a
 				// retry after a failed attachment produces a new receipt.
-				'require-provenance': '${{ inputs.attest }}'
+				'require-provenance': "${{ inputs.attest == 'built' }}"
 			}
 		]);
+	});
+
+	it('rejects built-and-reused with a root in the simple workflow', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		const validation = shellOf(
+			workflow,
+			'publish',
+			'Validate publication options'
+		);
+
+		expect(validation).toContain(
+			'if [ "${PUSH}" = built-and-reused ] && [ -n "${ROOT}" ]; then'
+		);
 	});
 
 	it('reuses one acquisition across setup and push in the publish workflow', async () => {
@@ -689,13 +702,14 @@ describe('cohort planning and publication', () => {
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
-				optimise: '${{ inputs.push }}',
+				optimise: "${{ inputs.push != 'none' }}",
 				'read-user': '${{ secrets.destination_read_user }}',
 				'read-password': '${{ secrets.destination_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
 				store: '${{ inputs.store }}',
-				'require-provenance': '${{ inputs.push }}'
+				'require-provenance': "${{ inputs.attest == 'built' }}",
+				'include-cached-targets': "${{ inputs.attest == 'all' }}"
 			}
 		]);
 	});
@@ -763,8 +777,10 @@ describe('cohort planning and publication', () => {
 				// including one that sets `preferLocalBuild`; a caller that wants that
 				// policy sets `max-jobs` through `nix-config`.
 				store: '${{ inputs.store }}',
-				push: '${{ inputs.push }}',
-				'require-provenance': '${{ inputs.push }}',
+				push: "${{ inputs.push != 'none' }}",
+				'push-mode': '${{ inputs.push }}',
+				'attest-mode': '${{ inputs.attest }}',
+				'require-provenance': "${{ inputs.attest == 'built' }}",
 				'gc-between-cohorts':
 					"${{ inputs.gc-between-cohorts && runner.environment == 'github-hosted' && inputs.store == '' }}",
 				'run-root':
@@ -777,6 +793,24 @@ describe('cohort planning and publication', () => {
 });
 
 describe('attestation', () => {
+	it('publishes every realised output by default in the simple workflow', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		const push = allSteps(workflow).find(
+			({ step }) => step.uses === cupboardAction('push')
+		)?.step;
+
+		expect({
+			default: workflow.on.workflow_call?.inputs.push?.default,
+			paths: push?.with?.paths,
+			if: push?.if
+		}).toStrictEqual({
+			default: 'all',
+			paths:
+				"${{ inputs.push == 'all' && steps.build.outputs.paths || steps.build.outputs.unsubstituted-paths }}",
+			if: "${{ inputs.push != 'none' && ((inputs.push == 'all' && steps.build.outputs.paths != '') || steps.build.outputs.unsubstituted-paths != '') }}"
+		});
+	});
+
 	it('signs the receipt after publication and attaches the bundle after signing', async () => {
 		const workflows = await Promise.all(
 			reusableWorkflows.map(async ({ name, file }) => ({
@@ -833,6 +867,7 @@ describe('attestation', () => {
 		}).toStrictEqual({
 			flake: [
 				{
+					mode: '${{ inputs.attest }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
@@ -842,7 +877,9 @@ describe('attestation', () => {
 			],
 			publish: [
 				{
-					'receipt-file': '${{ steps.build.outputs.receipt-file }}',
+					mode: '${{ inputs.attest }}',
+					'receipt-file':
+						"${{ inputs.push == 'all' && steps.build.outputs.receipt-file || steps.build.outputs.unsubstituted-receipt-file }}",
 					url: '${{ inputs.url }}',
 					cache: '${{ inputs.cache }}'
 				}
@@ -857,11 +894,11 @@ describe('attestation', () => {
 			gated: [
 				{
 					uses: cupboardAction('attest'),
-					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}"
+					if: "${{ inputs.attest != 'none' && steps.build-cohort.outputs.receipt-file != '' }}"
 				},
 				{
 					uses: cupboardAction('attest-attach'),
-					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundles != '' }}"
+					if: "${{ inputs.attest != 'none' && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundles != '' }}"
 				}
 			],
 			attach: [
@@ -871,7 +908,7 @@ describe('attestation', () => {
 					cache: '${{ needs.configure.outputs.cache }}',
 					'read-user': '${{ secrets.destination_read_user }}',
 					'read-password': '${{ secrets.destination_read_password }}',
-					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
+					'receipt-file': '${{ steps.attest.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 					bundle: '${{ steps.attest.outputs.bundles }}'
 				}
@@ -883,11 +920,11 @@ describe('attestation', () => {
 			gated: [
 				{
 					uses: cupboardAction('attest'),
-					if: '${{ inputs.attest }}'
+					if: "${{ inputs.attest != 'none' && steps.push.outcome == 'success' }}"
 				},
 				{
 					uses: cupboardAction('attest-attach'),
-					if: "${{ inputs.attest && steps.attest.outputs.bundles != '' }}"
+					if: "${{ inputs.attest != 'none' && steps.attest.outputs.bundles != '' }}"
 				}
 			],
 			attach: [
@@ -895,7 +932,7 @@ describe('attestation', () => {
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 					cache: '${{ inputs.cache }}',
-					'receipt-file': '${{ steps.build.outputs.receipt-file }}',
+					'receipt-file': '${{ steps.attest.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 					bundle: '${{ steps.attest.outputs.bundles }}'
 				}
@@ -1200,7 +1237,8 @@ async function resolvePublicationEvent(event: {
 					Object.keys(step.env ?? {}).map((key) => [key, ''])
 				),
 				PRESET: 'pull-request-and-branch',
-				PUSH: 'true',
+				PUSH: 'built-and-reused',
+				ATTEST: 'all',
 				PERMANENT: 'false',
 				EVENT_NAME: 'pull_request',
 				EVENT_ACTION: event.action,

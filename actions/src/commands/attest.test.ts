@@ -533,6 +533,7 @@ describe('resolveAttestInputs', () => {
 		);
 
 		expect(inputs).toStrictEqual({
+			mode: 'all',
 			receiptFile,
 			url: new URL('https://cache.example.test/t/acme'),
 			cache: { kind: 'named', name: 'builds' },
@@ -583,6 +584,7 @@ describe('resolveAttestInputs', () => {
 		);
 
 		expect(inputs).toStrictEqual({
+			mode: 'all',
 			receiptFile,
 			url: new URL('https://cache.example.test/t/acme'),
 			cache: { kind: 'default' },

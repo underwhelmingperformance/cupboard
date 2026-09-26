@@ -11,8 +11,6 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import type { RootEnsureResponse } from '@cupboard/protocol/retention';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -75,25 +73,6 @@ async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 	const error: unknown = result.reason;
 
 	return error;
-}
-
-function retained(name: RootName): RootEnsureResponse {
-	return {
-		status: 'retained',
-		root: {
-			name,
-			expired: false,
-			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-			targets: []
-		}
-	};
-}
-
-function buildRequired(
-	unavailable: readonly StorePathString[]
-): RootEnsureResponse {
-	return { status: 'build-required', unavailable: [...unavailable] };
 }
 
 function noProbes(): DestinationProbes {
@@ -222,7 +201,6 @@ function baseOptions(
 		},
 		store: new RecordingStore(),
 		destinationProbes: noProbes(),
-		rootEnsureResults: new Map(),
 		requeryUnknown: neverAsked,
 		confirmUpstreamAvailability: alwaysConfirms,
 		ceiling: defaultCeiling,
@@ -231,29 +209,12 @@ function baseOptions(
 }
 
 describe('partitionAvailability', () => {
-	const appRoot = root('github:owner/repo/main/app');
 	const appPath = path('11111111111111111111111111111111-app');
 	const otherPath = path('22222222222222222222222222222222-other');
-	const retainedResult = retained(appRoot);
-	const buildRequiredMissingSelf = buildRequired([appPath]);
-	const buildRequiredMissingOther = buildRequired([otherPath]);
-
 	it.each([
 		{
-			name: 'does not schedule a target whose root still retains it',
+			name: 'schedules a known target that the destination cannot serve',
 			target: target(),
-			rootEnsureResults: new Map([[appRoot, retainedResult]]),
-			expected: {
-				attachOnly: [appPath],
-				publishByReference: [],
-				leftUpstream: [],
-				buildSet: []
-			}
-		},
-		{
-			name: 'continues checking a target absent from its build-required root',
-			target: target(),
-			rootEnsureResults: new Map([[appRoot, buildRequiredMissingSelf]]),
 			expected: {
 				attachOnly: [],
 				publishByReference: [],
@@ -262,20 +223,8 @@ describe('partitionAvailability', () => {
 			}
 		},
 		{
-			name: 'does not schedule a target still present in a partially missing root',
-			target: target(),
-			rootEnsureResults: new Map([[appRoot, buildRequiredMissingOther]]),
-			expected: {
-				attachOnly: [appPath],
-				publishByReference: [],
-				leftUpstream: [],
-				buildSet: []
-			}
-		},
-		{
 			name: 'schedules a target whose output path is not known yet',
 			target: target({ expectedPath: undefined }),
-			rootEnsureResults: new Map(),
 			expected: {
 				attachOnly: [],
 				publishByReference: [],
@@ -283,9 +232,9 @@ describe('partitionAvailability', () => {
 				buildSet: [appPath]
 			}
 		}
-	])('$name', async ({ target: theTarget, rootEnsureResults, expected }) => {
+	])('$name', async ({ target: theTarget, expected }) => {
 		const partition = await partitionAvailability(
-			baseOptions({ targets: [theTarget], rootEnsureResults })
+			baseOptions({ targets: [theTarget] })
 		);
 
 		expect({
@@ -331,6 +280,22 @@ describe('partitionAvailability', () => {
 		);
 
 		expect(partition.leftUpstream).toStrictEqual([appPath]);
+	});
+
+	it('schedules an externally substitutable path for publication when requested', async () => {
+		const store = new RecordingStore(emptyMissing(), [appPath], [appPath]);
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [target({ expectedPath: appPath })],
+				store,
+				publishUpstream: true
+			})
+		);
+
+		expect({
+			buildSet: partition.buildSet,
+			leftUpstream: partition.leftUpstream
+		}).toStrictEqual({ buildSet: [appPath], leftUpstream: [] });
 	});
 
 	it('confirms only the candidates it would leave upstream, once per path', async () => {
@@ -593,23 +558,29 @@ describe('partitionAvailability', () => {
 		});
 	});
 
-	it('builds an unattested path despite retention by its root', async () => {
+	it('does not query attestations for a path that the destination cannot serve', async () => {
+		const queried: StorePathString[][] = [];
 		const partition = await partitionAvailability(
 			baseOptions({
 				targets: [target({ expectedPath: appPath, installable: appPath })],
-				rootEnsureResults: new Map([[appRoot, retainedResult]]),
-				attestedServed: () => Promise.resolve(new Set())
+				attestedServed: (paths) => {
+					queried.push([...paths]);
+
+					return Promise.resolve(new Set());
+				}
 			})
 		);
 
 		expect({
+			queried: queried.flat(),
 			attachOnly: partition.attachOnly,
 			buildSet: partition.buildSet,
 			unattested: partition.unattested
 		}).toStrictEqual({
+			queried: [],
 			attachOnly: [],
 			buildSet: [appPath],
-			unattested: [appPath]
+			unattested: []
 		});
 	});
 
@@ -2290,8 +2261,7 @@ describe('partitionAvailability', () => {
 		const partition = await partitionAvailability(
 			baseOptions({
 				targets: [target()],
-				store,
-				rootEnsureResults: new Map([[appRoot, retainedResult]])
+				store
 			})
 		);
 

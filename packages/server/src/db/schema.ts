@@ -438,12 +438,42 @@ export const narInfoDeletions = sqliteTable(
 			.$type<NarInfoGeneration>()
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
-		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		// Whether a deletion deferred for attestation inheritance has already
+		// deleted its narinfo object. Garbage collection does not treat such an
+		// entry as work until the deferral ends.
+		withdrawn: integer('withdrawn', { mode: 'boolean' })
+			.notNull()
+			.default(false)
 	},
 	(table) => [
 		primaryKey({
 			columns: [table.cacheId, table.storePathHash, table.generation]
 		})
+	]
+);
+
+/**
+ * Committed paths that have yet to inherit attestations from other caches. The
+ * maintenance alarm drains the rows. A row leaves the queue when inheritance
+ * ends, when its narinfo row no longer has the queued generation, or after a
+ * bounded number of attempts.
+ */
+export const attestationInheritances = sqliteTable(
+	'attestation_inheritance',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		attempts: integer('attempts').notNull().default(0),
+		notBefore: text('not_before').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.storePathHash, table.generation]
+		}),
+		index('attestation_inheritance_not_before_idx').on(table.notBefore)
 	]
 );
 

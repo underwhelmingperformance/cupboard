@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type CacheScope,
@@ -18,9 +19,10 @@ import {
 	type AttestationDescriptorInput,
 	type AttestationListInput,
 	type AttestationNegotiateRequest,
-	type AttestationNegotiateResponseInput
+	type AttestationNegotiateResponseInput,
+	type AttestationStatusResponse
 } from '@cupboard/protocol/attestations';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
@@ -28,10 +30,11 @@ import {
 	DsseDecodeError,
 	inTotoStatementSchema
 } from '@cupboard/shared/in-toto';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, lte, or, type SQL, sql } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 
 import {
+	type CacheId,
 	cacheIdentityCondition,
 	cacheScopeFromRow,
 	type ResolvedCache
@@ -66,7 +69,9 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import { authorisedNarInfoVersions } from '../read/read.ts';
 
+import { armAlarmNoLaterThan, type MaintenanceProgress } from './alarm.ts';
 import {
 	type AttestationCasService,
 	type AttestationReference,
@@ -79,8 +84,13 @@ import {
 } from './bulk.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
 import { type ServerContext } from './context.ts';
-import { jsonValueLists } from './json-list.ts';
+import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import {
+	affordableSubrequestOperations,
+	hasSubrequestsFor,
+	requireSubrequestsFor
+} from './subrequest-slice.ts';
 
 interface AttestationBundle {
 	readonly predicateType: PredicateType;
@@ -90,6 +100,113 @@ interface AttestationBundle {
 interface PendingAttestationUpload {
 	readonly cache: ResolvedCache;
 	readonly row: typeof schema.pendingAttestations.$inferSelect;
+}
+
+// One D1 batch reads the inheritance sources and the destination's references.
+export const inheritanceLookupSubrequests = 1;
+
+// Writing the destination's list reads its descriptors from D1 and puts it in R2.
+export const inheritanceListSubrequests = 2;
+
+// A bundle costs a head of its CAS object and three D1 calls to reference it.
+export const inheritedBundleSubrequests = 4;
+
+// The most bundles that a path inherits for one NAR. A lookup reads one more
+// source so it can report that a path has more sources than the cap.
+export const maxInheritedBundlesPerPath = 64;
+
+// The most queued paths that one maintenance pass reads. The pass looks up the
+// sources of each cache's paths in one D1 batch.
+export const inheritanceDrainPageSize = 100;
+
+// The drain makes at most this many attempts for a queued path. It records each
+// attempt before the work, so an attempt that the runtime interrupts also
+// counts. After the last attempt, the drain removes the row and logs a warning.
+export const maxInheritanceAttempts = 5;
+
+export const inheritanceRetryDelayMs = 60 * 1000;
+
+/**
+ * How an inheritance attempt ended. `source-cap` means the sources exceeded
+ * {@link maxInheritedBundlesPerPath}. `budget-exhausted` means the subrequest
+ * slice ran out before every source was inherited. `superseded` means the
+ * path no longer has the queued generation.
+ */
+type InheritanceResult =
+	'complete' | 'over-quota' | 'budget-exhausted' | 'source-cap' | 'superseded';
+
+/**
+ * A queued path that the drain removed from the queue.
+ */
+export interface DequeuedInheritance {
+	readonly cacheId: CacheId;
+	readonly storePathHash: StorePathHash;
+	readonly generation: NarInfoGeneration;
+	readonly narHash: NixSha256HashString;
+}
+
+/**
+ * The result of one drain pass, and the paths that it removed from the queue.
+ */
+export interface InheritanceDrainOutcome {
+	readonly progress: MaintenanceProgress;
+	readonly dequeued: readonly DequeuedInheritance[];
+}
+
+export interface InheritanceSourceRow {
+	readonly storePathHash: StorePathHash;
+	readonly narHash: NixSha256HashString;
+	readonly predicateType: PredicateType;
+	readonly digest: Sha256HexDigest;
+	readonly size: number;
+	readonly incarnation: number;
+}
+
+export interface ExistingInheritanceRow {
+	readonly storePathHash: StorePathHash;
+	readonly generation: NarInfoGeneration;
+	readonly predicateType: PredicateType;
+	readonly digest: Sha256HexDigest;
+}
+
+/**
+ * The inheritance sources that one drain pass reads once for the queued paths
+ * of one cache, keyed by {@link inheritanceSourceKey}. `candidates` lists every
+ * key that the pass looked up, so an absent key in `sources` means that the
+ * path has no sources.
+ */
+export interface InheritancePrefetch {
+	readonly candidates: ReadonlySet<string>;
+	readonly sources: ReadonlyMap<string, readonly InheritanceSourceRow[]>;
+	readonly existing: ReadonlyMap<
+		StorePathHash,
+		readonly ExistingInheritanceRow[]
+	>;
+}
+
+export const emptyInheritancePrefetch: InheritancePrefetch = {
+	candidates: new Set(),
+	sources: new Map(),
+	existing: new Map()
+};
+
+/**
+ * One committed path that inherits attestations. The path and NAR hash come
+ * from the committed narinfo row.
+ */
+export interface InheritanceRequest {
+	readonly cache: ResolvedCache;
+	readonly storePathHash: StorePathHash;
+	readonly generation: NarInfoGeneration;
+	readonly narHash: NixSha256HashString;
+	readonly prefetch?: InheritancePrefetch;
+}
+
+export function inheritanceSourceKey(
+	storePathHash: StorePathHash,
+	narHash: NixSha256HashString
+): string {
+	return JSON.stringify([storePathHash, narHash]);
 }
 
 export class AttestationsService {
@@ -575,6 +692,310 @@ export class AttestationsService {
 		);
 	}
 
+	private inheritanceSourceQuery(
+		cache: ResolvedCache,
+		candidates: SQL,
+		limit: number,
+		exclude?: SQL
+	) {
+		const sameSourceReference = and(
+			eq(d1Schema.blobReference.tenant, d1Schema.attestationReference.tenant),
+			eq(
+				d1Schema.blobReference.cacheKind,
+				d1Schema.attestationReference.cacheKind
+			),
+			sql`${d1Schema.blobReference.cacheName} is ${d1Schema.attestationReference.cacheName}`,
+			eq(
+				d1Schema.blobReference.storePathHash,
+				d1Schema.attestationReference.storePathHash
+			),
+			eq(
+				d1Schema.blobReference.generation,
+				d1Schema.attestationReference.generation
+			)
+		);
+		const destinationIdentity = cacheIdentityCondition(
+			d1Schema.attestationReference.cacheKind,
+			d1Schema.attestationReference.cacheName,
+			cache.scope
+		);
+		const tenant = this.context.requireTenant();
+		const publicSource = eq(d1Schema.cacheLifecycle.access, 'public');
+		const allowedSource = or(publicSource, destinationIdentity);
+
+		const distinctSources = this.context.d1
+			.selectDistinct({
+				storePathHash: d1Schema.attestationReference.storePathHash,
+				narHash: d1Schema.blobReference.narHash,
+				predicateType: d1Schema.attestationReference.predicateType,
+				digest: d1Schema.attestationReference.digest,
+				size: d1Schema.casObject.size,
+				incarnation: d1Schema.casObject.incarnation
+			})
+			.from(d1Schema.attestationReference)
+			.innerJoin(d1Schema.blobReference, sameSourceReference)
+			.innerJoin(
+				d1Schema.casObject,
+				eq(d1Schema.casObject.digest, d1Schema.attestationReference.digest)
+			)
+			.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+			.where(
+				and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					candidates,
+					authorisedByCacheGeneration(),
+					allowedSource,
+					exclude
+				)
+			)
+			.as('distinct_inheritance_sources');
+		const rankedSources = this.context.d1
+			.select({
+				storePathHash: distinctSources.storePathHash,
+				narHash: distinctSources.narHash,
+				predicateType: distinctSources.predicateType,
+				digest: distinctSources.digest,
+				size: distinctSources.size,
+				incarnation: distinctSources.incarnation,
+				rank: sql<number>`row_number() over (partition by ${distinctSources.storePathHash}, ${distinctSources.narHash} order by ${distinctSources.predicateType}, ${distinctSources.digest})`.as(
+					'source_rank'
+				)
+			})
+			.from(distinctSources)
+			.as('ranked_inheritance_sources');
+
+		return this.context.d1
+			.select({
+				storePathHash: rankedSources.storePathHash,
+				narHash: rankedSources.narHash,
+				predicateType: rankedSources.predicateType,
+				digest: rankedSources.digest,
+				size: rankedSources.size,
+				incarnation: rankedSources.incarnation
+			})
+			.from(rankedSources)
+			.where(lte(rankedSources.rank, limit));
+	}
+
+	private async drainCacheInheritances(
+		logger: Logger,
+		cache: ResolvedCache,
+		rows: readonly (typeof schema.attestationInheritances.$inferSelect)[],
+		dequeued: DequeuedInheritance[]
+	): Promise<{
+		readonly hasProgressed: boolean;
+		readonly isBudgetExhausted: boolean;
+	}> {
+		const stale = rows.filter(
+			(row) => !this.isQueuedGenerationCurrent(cache, row)
+		);
+		const live = rows.filter((row) =>
+			this.isQueuedGenerationCurrent(cache, row)
+		);
+
+		for (const row of stale) {
+			this.dequeueInheritance(row, dequeued);
+		}
+
+		let hasProgressed = stale.length > 0;
+		let prefetch = emptyInheritancePrefetch;
+
+		try {
+			prefetch = await this.prefetchInheritanceSources(cache, live);
+		} catch (error) {
+			// Each path then looks up its own sources.
+			logger.warn('attestation inheritance prefetch failed', {
+				cache: cache.scope,
+				errorMessage: error instanceof Error ? error.message : String(error)
+			});
+		}
+
+		for (const row of live) {
+			const attempt = this.startInheritanceAttempt(
+				logger,
+				cache,
+				row,
+				dequeued
+			);
+
+			if (attempt === undefined) {
+				hasProgressed = true;
+				continue;
+			}
+
+			try {
+				const result = await this.inheritFromTenant(logger, {
+					cache,
+					storePathHash: row.storePathHash,
+					generation: row.generation,
+					narHash: row.narHash,
+					prefetch
+				});
+
+				if (result === 'budget-exhausted') {
+					// Running out of subrequests is not a failed attempt.
+					this.restoreInheritanceRow(row);
+
+					return { hasProgressed, isBudgetExhausted: true };
+				}
+
+				if (result !== 'complete') {
+					logger.warn('attestation inheritance incomplete', {
+						cache: cache.scope,
+						storePathHash: row.storePathHash,
+						reason: result
+					});
+				}
+
+				this.dequeueInheritance(row, dequeued);
+			} catch (error) {
+				await this.recordInheritanceFailure(
+					logger,
+					cache,
+					row,
+					attempt,
+					error,
+					dequeued
+				);
+			}
+
+			hasProgressed = true;
+		}
+
+		return { hasProgressed, isBudgetExhausted: false };
+	}
+
+	private isQueuedGenerationCurrent(
+		cache: ResolvedCache,
+		queued: {
+			readonly storePathHash: StorePathHash;
+			readonly generation: NarInfoGeneration;
+			readonly narHash: NixSha256HashString;
+		}
+	): boolean {
+		const [narInfo] = this.narInfoObjects.narInfoRowsFor(cache, [
+			queued.storePathHash
+		]);
+
+		return (
+			narInfo?.generation === queued.generation &&
+			narInfo.narHash === queued.narHash
+		);
+	}
+
+	// Records the attempt before any work, and schedules the retry at the same
+	// time. Returns the attempt number, or `undefined` when the path has used
+	// every attempt and has left the queue.
+	private startInheritanceAttempt(
+		logger: Logger,
+		cache: ResolvedCache,
+		row: typeof schema.attestationInheritances.$inferSelect,
+		dequeued: DequeuedInheritance[]
+	): number | undefined {
+		if (row.attempts >= maxInheritanceAttempts) {
+			logger.warn('attestation inheritance abandoned', {
+				cache: cache.scope,
+				storePathHash: row.storePathHash,
+				attempts: row.attempts
+			});
+			this.dequeueInheritance(row, dequeued);
+
+			return undefined;
+		}
+
+		const attempt = row.attempts + 1;
+		const retryAt = new Date(Date.now() + inheritanceRetryDelayMs);
+
+		this.updateInheritanceRow(row, {
+			attempts: attempt,
+			notBefore: isoTimestamp(retryAt)
+		});
+
+		return attempt;
+	}
+
+	private restoreInheritanceRow(
+		row: typeof schema.attestationInheritances.$inferSelect
+	): void {
+		this.updateInheritanceRow(row, {
+			attempts: row.attempts,
+			notBefore: row.notBefore
+		});
+	}
+
+	private updateInheritanceRow(
+		row: typeof schema.attestationInheritances.$inferSelect,
+		values: { readonly attempts: number; readonly notBefore: IsoTimestamp }
+	): void {
+		const table = schema.attestationInheritances;
+
+		this.context.db
+			.update(table)
+			.set(values)
+			.where(
+				and(
+					eq(table.cacheId, row.cacheId),
+					eq(table.storePathHash, row.storePathHash),
+					eq(table.generation, row.generation)
+				)
+			)
+			.run();
+	}
+
+	private dequeueInheritance(
+		row: typeof schema.attestationInheritances.$inferSelect,
+		dequeued: DequeuedInheritance[]
+	): void {
+		const table = schema.attestationInheritances;
+
+		this.context.db
+			.delete(table)
+			.where(
+				and(
+					eq(table.cacheId, row.cacheId),
+					eq(table.storePathHash, row.storePathHash),
+					eq(table.generation, row.generation)
+				)
+			)
+			.run();
+		dequeued.push({
+			cacheId: row.cacheId,
+			storePathHash: row.storePathHash,
+			generation: row.generation,
+			narHash: row.narHash
+		});
+	}
+
+	private async recordInheritanceFailure(
+		logger: Logger,
+		cache: ResolvedCache,
+		row: typeof schema.attestationInheritances.$inferSelect,
+		attempt: number,
+		error: unknown,
+		dequeued: DequeuedInheritance[]
+	): Promise<void> {
+		const details = {
+			cache: cache.scope,
+			storePathHash: row.storePathHash,
+			attempts: attempt,
+			errorName: error instanceof Error ? error.name : 'UnknownError',
+			errorMessage: error instanceof Error ? error.message : String(error)
+		};
+
+		if (attempt >= maxInheritanceAttempts) {
+			logger.warn('attestation inheritance abandoned', details);
+			this.dequeueInheritance(row, dequeued);
+
+			return;
+		}
+
+		logger.warn('attestation inheritance failed', details);
+		await armAlarmNoLaterThan(
+			this.context.ctx.storage,
+			Date.now() + inheritanceRetryDelayMs
+		);
+	}
+
 	// The cache's generation is part of the key, so a cache created after a
 	// deletion of the same name never writes over what its predecessor left.
 	listKey(cache: ResolvedCache, storePathHash: StorePathHash): R2ObjectKey {
@@ -584,6 +1005,349 @@ export class AttestationsService {
 			cache.scope,
 			cache.generation
 		);
+	}
+
+	/**
+	 * Queues a committed path for attestation inheritance and arms the alarm
+	 * that drains the queue. The commit does not wait for inheritance.
+	 */
+	async queueInheritance(
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		narHash: NixSha256HashString
+	): Promise<void> {
+		this.context.db
+			.insert(schema.attestationInheritances)
+			.values({
+				cacheId: cache.id,
+				storePathHash,
+				generation,
+				narHash,
+				notBefore: isoTimestamp(new Date())
+			})
+			.onConflictDoNothing()
+			.run();
+		await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+	}
+
+	/**
+	 * When the queue next has a path that the drain may attempt, or `undefined`
+	 * when the queue is empty. The maintenance scheduler arms the alarm for this
+	 * time, so a scheduled retry is not lost when an earlier alarm runs first.
+	 */
+	nextInheritanceAt(): number | undefined {
+		const table = schema.attestationInheritances;
+		const row = this.context.db
+			.select({ notBefore: table.notBefore })
+			.from(table)
+			.orderBy(table.notBefore)
+			.limit(1)
+			.get();
+
+		return row === undefined ? undefined : Date.parse(row.notBefore);
+	}
+
+	/**
+	 * Inherits attestations for one page of queued paths. A path leaves the
+	 * queue when inheritance ends, when its narinfo row no longer has the queued
+	 * generation, or after {@link maxInheritanceAttempts} attempts. A path whose
+	 * inheritance runs out of subrequests stays queued for the next pass.
+	 */
+	async drainInheritanceQueue(
+		logger: Logger
+	): Promise<InheritanceDrainOutcome> {
+		const table = schema.attestationInheritances;
+		const now = isoTimestamp(new Date());
+		const queued = this.context.db
+			.select()
+			.from(table)
+			.where(lte(table.notBefore, now))
+			.orderBy(
+				table.notBefore,
+				table.cacheId,
+				table.storePathHash,
+				table.generation
+			)
+			.limit(inheritanceDrainPageSize)
+			.all();
+		const byCache = Map.groupBy(queued, (row) => row.cacheId);
+		const dequeued: DequeuedInheritance[] = [];
+		let hasProgressed = false;
+
+		for (const [cacheId, rows] of byCache) {
+			const outcome = await this.drainCacheInheritances(
+				logger,
+				this.context.cacheRepository.resolvedForId(cacheId),
+				rows,
+				dequeued
+			);
+
+			hasProgressed ||= outcome.hasProgressed;
+
+			if (outcome.isBudgetExhausted) {
+				break;
+			}
+		}
+
+		return { progress: hasProgressed ? 'progressed' : 'stalled', dequeued };
+	}
+
+	async prefetchInheritanceSources(
+		cache: ResolvedCache,
+		candidates: readonly {
+			readonly storePathHash: StorePathHash;
+			readonly narHash: NixSha256HashString;
+		}[]
+	): Promise<InheritancePrefetch> {
+		const unique = new Map(
+			candidates.map((candidate) => [
+				inheritanceSourceKey(candidate.storePathHash, candidate.narHash),
+				candidate
+			])
+		);
+
+		if (unique.size === 0 || !hasSubrequestsFor(inheritanceLookupSubrequests)) {
+			return emptyInheritancePrefetch;
+		}
+
+		const uniqueCandidates = unique.values().toArray();
+		const pairs =
+			or(
+				...jsonRowLists(uniqueCandidates).map((list) =>
+					list.matches({
+						storePathHash: d1Schema.attestationReference.storePathHash,
+						narHash: d1Schema.blobReference.narHash
+					})
+				)
+			) ?? sql`false`;
+		const pathHashes = [
+			...new Set(uniqueCandidates.map((row) => row.storePathHash))
+		];
+		const destinationVersions = this.narInfoObjects
+			.narInfoRowsFor(cache, pathHashes)
+			.map((row) => ({
+				storePathHash: row.storePathHash,
+				generation: row.generation
+			}));
+		const requestedVersions =
+			or(
+				...jsonRowLists(destinationVersions).map((list) =>
+					list.matches({
+						storePathHash: d1Schema.attestationReference.storePathHash,
+						generation: d1Schema.attestationReference.generation
+					})
+				)
+			) ?? sql`false`;
+		const existingFilter = and(
+			eq(d1Schema.attestationReference.tenant, this.context.requireTenant()),
+			cacheIdentityCondition(
+				d1Schema.attestationReference.cacheKind,
+				d1Schema.attestationReference.cacheName,
+				cache.scope
+			),
+			requestedVersions
+		);
+		const [rows, existingRows] = await this.context.d1.batch([
+			// Exclude the destination's own references for the queued generation, as
+			// the per-path lookup does.
+			this.inheritanceSourceQuery(
+				cache,
+				pairs,
+				maxInheritedBundlesPerPath + 1,
+				sql`not (${existingFilter})`
+			),
+			this.context.d1
+				.select({
+					storePathHash: d1Schema.attestationReference.storePathHash,
+					generation: d1Schema.attestationReference.generation,
+					predicateType: d1Schema.attestationReference.predicateType,
+					digest: d1Schema.attestationReference.digest
+				})
+				.from(d1Schema.attestationReference)
+				.where(existingFilter)
+		]);
+		const sources = Map.groupBy(rows, (row) =>
+			inheritanceSourceKey(row.storePathHash, row.narHash)
+		);
+		const existing = Map.groupBy(existingRows, (row) => row.storePathHash);
+
+		return { candidates: new Set(unique.keys()), sources, existing };
+	}
+
+	async inheritFromTenant(
+		logger: Logger,
+		request: InheritanceRequest
+	): Promise<InheritanceResult> {
+		const { cache, storePathHash, generation, narHash } = request;
+		// Use the prefetched sources only for this path and NAR. For a path that
+		// the pass did not look up, read the sources here.
+		const key = inheritanceSourceKey(storePathHash, narHash);
+		const prefetch =
+			request.prefetch?.candidates.has(key) === true
+				? request.prefetch
+				: undefined;
+		const prefetchedSources =
+			prefetch === undefined ? undefined : (prefetch.sources.get(key) ?? []);
+
+		if (prefetchedSources?.length === 0) {
+			return 'complete';
+		}
+
+		const prefetchedExisting = prefetch?.existing.get(storePathHash);
+
+		const listSubrequests = inheritanceListSubrequests;
+		const lookup =
+			prefetchedSources === undefined ? inheritanceLookupSubrequests : 0;
+
+		if (!hasSubrequestsFor(lookup + listSubrequests)) {
+			return 'budget-exhausted';
+		}
+
+		const tenant = this.context.requireTenant();
+		const maxRows = Math.min(
+			maxInheritedBundlesPerPath,
+			affordableSubrequestOperations(
+				inheritedBundleSubrequests,
+				lookup + listSubrequests
+			)
+		);
+		const destinationIdentity = cacheIdentityCondition(
+			d1Schema.attestationReference.cacheKind,
+			d1Schema.attestationReference.cacheName,
+			cache.scope
+		);
+		const otherSource = sql`not (${destinationIdentity} and ${eq(d1Schema.attestationReference.generation, generation)})`;
+		const existingFilter = and(
+			eq(d1Schema.attestationReference.tenant, tenant),
+			destinationIdentity,
+			eq(d1Schema.attestationReference.storePathHash, storePathHash),
+			eq(d1Schema.attestationReference.generation, generation)
+		);
+		const existingQuery = this.context.d1
+			.select({
+				predicateType: d1Schema.attestationReference.predicateType,
+				digest: d1Schema.attestationReference.digest
+			})
+			.from(d1Schema.attestationReference)
+			.where(existingFilter);
+		let sourceRows: readonly InheritanceSourceRow[];
+		let existingRows: {
+			predicateType: PredicateType;
+			digest: Sha256HexDigest;
+		}[];
+
+		if (prefetchedSources === undefined) {
+			const sourceFilter =
+				and(
+					eq(d1Schema.attestationReference.storePathHash, storePathHash),
+					eq(d1Schema.blobReference.narHash, narHash),
+					otherSource
+				) ?? sql`false`;
+			const result = await this.context.d1.batch([
+				this.inheritanceSourceQuery(
+					cache,
+					sourceFilter,
+					maxInheritedBundlesPerPath + 1
+				),
+				existingQuery
+			]);
+			[sourceRows, existingRows] = result;
+		} else {
+			sourceRows = prefetchedSources;
+			existingRows = (prefetchedExisting ?? [])
+				.filter((row) => row.generation === generation)
+				.map((row) => ({
+					predicateType: row.predicateType,
+					digest: row.digest
+				}));
+		}
+		const existing = new Set(
+			existingRows.map((row) => JSON.stringify([row.predicateType, row.digest]))
+		);
+
+		const isExisting = (row: InheritanceSourceRow): boolean =>
+			existing.has(JSON.stringify([row.predicateType, row.digest]));
+		// An earlier attempt can create references and stop before it writes the
+		// list, for example when the runtime resets the Durable Object. Write the
+		// list whenever the destination already has one of the source bundles.
+		let shouldWriteList = sourceRows.some((row) => isExisting(row));
+		let result: InheritanceResult = 'complete';
+
+		if (sourceRows.length > maxRows) {
+			result =
+				maxRows < maxInheritedBundlesPerPath
+					? 'budget-exhausted'
+					: 'source-cap';
+		}
+
+		// Write the list even when a later bundle throws, so that the list
+		// includes the references created by this attempt.
+		try {
+			for (const row of sourceRows.slice(0, maxRows)) {
+				if (isExisting(row)) {
+					continue;
+				}
+
+				if (!hasSubrequestsFor(inheritedBundleSubrequests + listSubrequests)) {
+					result = 'budget-exhausted';
+					break;
+				}
+
+				if (
+					(await this.context.env.BLOBS.head(
+						casObjectKey(row.digest, row.incarnation)
+					)) === null
+				) {
+					logger.warn('attestation inheritance source missing', {
+						cache: cache.scope,
+						storePathHash,
+						digest: row.digest
+					});
+					continue;
+				}
+
+				// Reserve inside the input gate, and only while the path still has
+				// this generation, so that a concurrent commit or deletion of the path
+				// cannot leave references for a generation that has gone.
+				const outcome = await this.context.criticalSection(() =>
+					Promise.resolve(
+						this.isQueuedGenerationCurrent(cache, request)
+							? this.attestationCas.reserveReferenceAndCharge(
+									{
+										cache: cache.scope,
+										storePathHash,
+										generation,
+										predicateType: row.predicateType,
+										digest: row.digest
+									},
+									row.size
+								)
+							: 'superseded'
+					)
+				);
+
+				if (outcome === 'superseded' || outcome === 'over-quota') {
+					result = outcome;
+					break;
+				}
+
+				// A reference that is already present can come from an earlier attempt
+				// that threw before it wrote the list.
+				shouldWriteList = true;
+			}
+		} finally {
+			if (shouldWriteList) {
+				// A newer generation of the path owns the list once it commits.
+				await this.context.criticalSection(async () => {
+					if (this.isQueuedGenerationCurrent(cache, request)) {
+						await this.materialiseList(cache, storePathHash, generation);
+					}
+				});
+			}
+		}
+
+		return result;
 	}
 
 	async negotiate(
@@ -747,6 +1511,47 @@ export class AttestationsService {
 		}
 
 		throw finalised.error;
+	}
+
+	async attestedPathHashes(
+		cacheScope: CacheScope,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<AttestationStatusResponse> {
+		const cache = this.context.cacheRepository.require(cacheScope);
+		const versions = await authorisedNarInfoVersions(
+			this.context.d1,
+			this.context.requireTenant(),
+			cacheScope,
+			storePathHashes
+		);
+		const candidates = [...new Set(storePathHashes)].flatMap((hash) => {
+			const version = versions.get(hash);
+
+			return version === undefined
+				? []
+				: [{ hash, generation: version.generation }];
+		});
+		requireSubrequestsFor(candidates.length, 'attestation status probe');
+		const checked = await mapWithConcurrency(
+			candidates,
+			maxOutgoingConnections,
+			async ({ hash, generation }) => {
+				const object = await this.context.env.BLOBS.head(
+					this.listKey(cache, hash)
+				);
+
+				return object !== null &&
+					isListOfCommittedGeneration(object, cache, generation)
+					? hash
+					: undefined;
+			}
+		);
+
+		return {
+			attestedStorePathHashes: checked.filter(
+				(hash): hash is StorePathHash => hash !== undefined
+			)
+		};
 	}
 
 	async handleServeList(

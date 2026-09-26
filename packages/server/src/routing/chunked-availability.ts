@@ -16,7 +16,10 @@ import {
 	reuseViewProbeD1CallsPerChunk
 } from '../do/reuse-view-lookup-service.ts';
 import { subrequestSliceReserve } from '../do/subrequest-slice.ts';
-import { cacheProbeD1CallsPerChunk } from '../read/read.ts';
+import {
+	cacheProbeD1CallsPerChunk,
+	cacheProbeHeadsPerHash
+} from '../read/read.ts';
 
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
@@ -37,14 +40,18 @@ function chunkSizeFor(
 }
 
 /**
- * One narinfo head per hash.
+ * One narinfo head and one NAR head per hash.
  */
 export const cacheAvailabilityChunkSize = cacheAvailabilityChunkSizeFor(
 	workersInvocationAllowances.free.subrequests
 );
 
 export function cacheAvailabilityChunkSizeFor(allowance: number): number {
-	return chunkSizeFor(allowance, 1, cacheProbeD1CallsPerChunk);
+	return chunkSizeFor(
+		allowance,
+		cacheProbeHeadsPerHash,
+		cacheProbeD1CallsPerChunk
+	);
 }
 
 /**
