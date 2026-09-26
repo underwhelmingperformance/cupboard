@@ -46,11 +46,11 @@ import {
 	BuildEventHandlingError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
-	classifyPublicationFailures,
 	CliAbortError,
 	PushIncompleteError,
 	type UntrustedDaemonError
 } from '../errors.ts';
+import { classifyPublicationFailures } from '../exit-code.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import {

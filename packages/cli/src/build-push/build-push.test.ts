@@ -28,6 +28,7 @@ import {
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FakeCommitSocket } from '../client/commit-socket.test-support.ts';
@@ -37,10 +38,10 @@ import {
 	runCommitSession
 } from '../client/commit-socket.ts';
 import {
+	AdminApiTransientError,
 	BuildCommandFailedError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
-	classifyPublicationFailures,
 	CliAbortError,
 	CliError,
 	CommitCapacityQueuedError,
@@ -48,9 +49,11 @@ import {
 	CupboardHttpError,
 	PostBuildHookConflictError,
 	QuotaExceededError,
+	SessionRejectedError,
 	unavailableExitCode,
 	UntrustedDaemonError
 } from '../errors.ts';
+import { classifyPublicationFailures } from '../exit-code.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import type { PushClient } from '../push/push.ts';
 
@@ -1067,6 +1070,32 @@ describe('classifyPublicationFailures', () => {
 			exitCode: expectedExitCode,
 			cause: causes[expectedCauseIndex]
 		});
+	});
+
+	const rateLimited = new ORPCError('TOO_MANY_REQUESTS', { status: 429 });
+	const rejectedSession = new ORPCError('UNAUTHORIZED', { status: 401 });
+
+	it.each([
+		{
+			name: 'a rate-limited admin response',
+			causes: [rateLimited],
+			expected: {
+				exitCode: 75,
+				cause: new AdminApiTransientError(429, 'TOO_MANY_REQUESTS', {
+					cause: rateLimited
+				})
+			}
+		},
+		{
+			name: 'a rejected admin session',
+			causes: [rejectedSession],
+			expected: {
+				exitCode: 77,
+				cause: new SessionRejectedError({ cause: rejectedSession })
+			}
+		}
+	])('classifies $name as the converted CLI error', ({ causes, expected }) => {
+		expect(classifyPublicationFailures(causes)).toStrictEqual(expected);
 	});
 });
 

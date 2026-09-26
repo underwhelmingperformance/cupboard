@@ -17,11 +17,17 @@ import {
 export const authExitCode = 77;
 export const transientExitCode = 75;
 export const unavailableExitCode = 69;
-// A publication failure with no more specific category: a transfer that did
-// not complete. Only build-push returns it. Using this code instead of the
-// generic 1 lets a caller that retries on the exit code tell a lost upload from
-// any other failure.
+// Publication or retention failed without a more specific exit status. Only
+// build-push returns it. A failed build exits with the build command's own
+// status, which can be 1, so a script can tell a publication failure from a
+// failed build only through this separate status.
 export const publicationExitCode = 74;
+
+/**
+ * The exit statuses that `classifyFailures` checks for before its fallback.
+ */
+export type RankedExitStatus =
+	typeof authExitCode | typeof transientExitCode | typeof unavailableExitCode;
 
 const unauthorisedStatusCode: number = StatusCodes.UNAUTHORIZED;
 const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
@@ -400,10 +406,11 @@ export class OwnerLoginRequiredError extends CliError {
 }
 
 export class SessionRejectedError extends CliError {
-	constructor() {
+	constructor(options?: ErrorOptions) {
 		super(
 			'The server refused your session; it may have expired. ' +
-				'Run `cupboard login <url>` to sign in again.'
+				'Run `cupboard login <url>` to sign in again.',
+			options
 		);
 		this.name = 'SessionRejectedError';
 	}
@@ -414,11 +421,12 @@ export class SessionRejectedError extends CliError {
 }
 
 export class ScopeForbiddenError extends CliError {
-	constructor() {
+	constructor(options?: ErrorOptions) {
 		super(
 			'Your token lacks the scope this command needs. A tenant command ' +
 				"needs that tenant's admin token; a control-plane command (tenant, " +
-				'control-key) needs the operator token.'
+				'control-key) needs the operator token.',
+			options
 		);
 		this.name = 'ScopeForbiddenError';
 	}
@@ -1603,7 +1611,7 @@ export class BuildProvenanceIncompleteError extends Error {
 export class BuildPublicationFailedError extends CliError {
 	constructor(
 		public readonly failedPaths: readonly string[],
-		private readonly code: number,
+		private readonly code: RankedExitStatus | typeof publicationExitCode,
 		options: { readonly cause?: unknown } = {}
 	) {
 		super(
@@ -1620,38 +1628,4 @@ export class BuildPublicationFailedError extends CliError {
 	override get exitCode(): number {
 		return this.code;
 	}
-}
-
-/**
- * The error cause and exit code to report when publication fails.
- */
-export interface PublicationFailureClassification {
-	readonly exitCode: number;
-	readonly cause: unknown;
-}
-
-/**
- * Chooses the cause and sysexits category to report. It prefers
- * authentication, then transient, then unavailable failures. If no cause has
- * one of those categories, it reports the first defined cause as a general
- * publication failure.
- */
-export function classifyPublicationFailures(
-	causes: readonly unknown[]
-): PublicationFailureClassification {
-	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
-		const cause = causes.find(
-			(candidate) =>
-				candidate instanceof CliError && candidate.exitCode === code
-		);
-
-		if (cause !== undefined) {
-			return { exitCode: code, cause };
-		}
-	}
-
-	return {
-		exitCode: publicationExitCode,
-		cause: causes.find((cause) => cause !== undefined)
-	};
 }
