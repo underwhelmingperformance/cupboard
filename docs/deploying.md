@@ -1,6 +1,6 @@
 # Deploying a release
 
-`cupboard deploy` updates a control Worker, a tenant Worker and their shared D1
+`cupboard init` updates a control Worker, a tenant Worker and their shared D1
 database. Each tenant also has a Durable Object with its own SQLite database; R2
 stores the NAR and attestation bytes. See [releases] for how CLI binaries are
 built and published.
@@ -9,12 +9,12 @@ built and published.
 
 ## Resource names and cron triggers
 
-Before it changes anything, `cupboard deploy` shows the deployment plan and a
-menu for editing it. In that menu you can choose the names of the R2 bucket, the
-D1 database, the maintenance queue and its dead-letter queue that the Workers
-use, and change the control Worker's cron triggers. The list of cron triggers
-cannot be empty, because the control Worker runs maintenance only when a cron
-trigger fires.
+Before it changes anything, `cupboard init` shows the deployment plan and a menu
+for editing it. In that menu you can choose the names of the R2 bucket, the D1
+database, the maintenance queue and its dead-letter queue that the Workers use,
+and change the control Worker's cron triggers. The list of cron triggers cannot
+be empty, because the control Worker runs maintenance only when a cron trigger
+fires.
 
 On an account that already has a control Worker, the deployment plan starts from
 the existing deployment. The deploy reads the bucket, the database and the
@@ -24,7 +24,7 @@ as shown, or deploying with `--yes`, keeps the existing resources and cron
 triggers. On an account without a control Worker, the plan starts from the
 release's defaults.
 
-Earlier versions of `cupboard deploy` started every plan from the release's
+Earlier versions of `cupboard init` started every plan from the release's
 defaults, so accepting the plan could point the Workers at new, empty resources
 with the default names. To use the original resources again, enter their names
 in the menu. If either the original database or the current one records an
@@ -337,7 +337,7 @@ Paid runtime check in which 10,000 D1 calls completed and the 10,001st failed.
 The Free internal-service allowance has not been checked against a hosted
 Worker. Cupboard uses the Workers limits for both plans.
 
-`cupboard deploy` reads the account's subscriptions and writes the selected
+`cupboard init` reads the account's subscriptions and writes the selected
 allowance into both Workers. Plan detection is best effort. If the token cannot
 read subscriptions, the request fails, or the response contains an unrecognised
 Workers plan, deployment reports the reason and uses the Free allowance. An
@@ -351,7 +351,7 @@ does not change that subscription. For example, an operator who has confirmed a
 Paid subscription can deploy with a token that cannot read billing information:
 
 ```sh
-cupboard deploy --workers-plan paid
+cupboard init --workers-plan paid
 ```
 
 The allowance is stored in `CUPBOARD_SUBREQUESTS_PER_INVOCATION`. An unset or
@@ -392,7 +392,7 @@ fails, the D1 contraction and `contracted` phase have already been recorded.
 Each tenant wake stage runs at most 100 batches. Inspect incomplete work with
 `cupboard deployment status <url>` and retry batches with
 `cupboard deployment resume <url>`. Repair any reported tenant configuration or
-migration error, then rerun `cupboard deploy`. Applied migrations are skipped
+migration error, then rerun `cupboard init`. Applied migrations are skipped
 after checking their recorded digests. Repeating a phase preserves its
 timestamp, and a rerun cannot lower `contracted` to `native-reads`.
 
@@ -451,7 +451,7 @@ Before contraction, an object reports at most step 4. After contraction, the
 control plane still finds those tenants below step 5 and wakes them again. A
 successful CLI deploy completes both stages. If a run is interrupted,
 `cupboard deployment resume <url>` continues the pending stage; rerun
-`cupboard deploy` to complete any remaining global transition. The hourly sweep
+`cupboard init` to complete any remaining global transition. The hourly sweep
 also continues tenant work. A persisted cursor rotates through pending tenants,
 so a failed tenant does not prevent later tenants from being attempted.
 
@@ -565,8 +565,8 @@ Migration-history admission checks are separate from schema compatibility. A
 build can admit a longer history when the extra migrations have verified
 digests, yet still be unable to use the schema those migrations produced. An
 older build that does not recognise the recorded phase also refuses
-`cupboard deploy`, and its `deployment.phase` control procedure returns an
-error. Deploy a build that recognises the phase to recover these operations.
+`cupboard init`, and its `deployment.phase` control procedure returns an error.
+Deploy a build that recognises the phase to recover these operations.
 
 The `check` API now uses a numeric cache identity in `cursorCache`. An older CLI
 cannot validate this response or resume an old scan against it. Use the CLI from
