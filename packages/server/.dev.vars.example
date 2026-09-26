@@ -23,12 +23,11 @@ CUPBOARD_AUTH_AUDIENCE=
 CUPBOARD_CONTROL_AUDIENCE=
 CONTROL_KEY_WRAP_SECRET=
 
-# First-signup bootstrap. The signup secret is sensitive and should be set as a
-# Worker secret in production; alternatively pin the subject.
-CUPBOARD_SIGNUP_ISSUER=
-CUPBOARD_SIGNUP_AUDIENCE=
+# The secret that `/signup` requires for the first-admin claim. Set it to claim
+# a local deployment: without it the claim is refused, including when
+# `CUPBOARD_LOCAL_DEV` is set. `CUPBOARD_LOCAL_DEV=1` allows a loopback HTTP
+# OIDC issuer.
 CUPBOARD_SIGNUP_SECRET=
-CUPBOARD_SIGNUP_SUBJECT=
 CUPBOARD_LOCAL_DEV=
 
 # Private-read mode: set both to require HTTP Basic auth on cache reads

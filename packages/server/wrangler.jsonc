@@ -91,14 +91,7 @@
 		// `CONTROL_KEY_WRAP_SECRET` in production with `wrangler secret put`. Tests
 		// supply their own via the pool/Miniflare bindings.
 		"CUPBOARD_CONTROL_AUDIENCE": "cupboard-control",
-		// The OIDC issuer and audience (the control client id) trusted for the first-signup
-		// claim, and the non-secret gates that decide who may claim global admin. The
-		// The signup claim secret is sensitive: set `CUPBOARD_SIGNUP_SECRET` in
-		// production with `wrangler secret put`. With neither gate configured the claim
-		// is refused unless CUPBOARD_LOCAL_DEV relaxes it for local development.
-		"CUPBOARD_SIGNUP_ISSUER": "",
-		"CUPBOARD_SIGNUP_AUDIENCE": "",
-		"CUPBOARD_SIGNUP_SUBJECT": "",
+		// `1` lets local development use a loopback HTTP OIDC issuer.
 		"CUPBOARD_LOCAL_DEV": "",
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},

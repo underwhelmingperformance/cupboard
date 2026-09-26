@@ -633,6 +633,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 const claimedSignup = {
 	issuer: oidcIssuerSchema.parse(owner.issuer),
 	subject: oidcSubjectSchema.parse(owner.subject),
+	audience: oidcAudienceSchema.parse(owner.audience),
 	claimed: true
 };
 

@@ -338,9 +338,6 @@ function currentOptions(
 		...tenantBindings,
 		CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
 		CONTROL_KEY_WRAP_SECRET: controlWrapSecret,
-		CUPBOARD_SIGNUP_ISSUER: '',
-		CUPBOARD_SIGNUP_AUDIENCE: '',
-		CUPBOARD_SIGNUP_SUBJECT: '',
 		CUPBOARD_SIGNUP_SECRET: ''
 	};
 

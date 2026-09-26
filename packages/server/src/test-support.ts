@@ -191,12 +191,7 @@ import worker from './worker.ts';
 // a test drives a bare-host control route.
 export const testControlEnv = {
 	CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
-	CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
-	// The signup issuer points at a host that is never reachable in the workers
-	// pool, so a signup test exercises everything up to the JWKS fetch; the positive
-	// claim is covered end to end against the stub issuer in the e2e suite.
-	CUPBOARD_SIGNUP_ISSUER: 'https://signup.example.test',
-	CUPBOARD_SIGNUP_AUDIENCE: 'cupboard-control-client'
+	CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control'
 } as const;
 
 // A real zstd frame: it decompresses to a 1234-byte payload (the bytes
