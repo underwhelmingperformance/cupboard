@@ -97,6 +97,27 @@ const fixedWidthSites: readonly (BoundListSite & {
 			'One disjunct per bound list, not per selector. A view with more selectors produces longer lists, not more disjuncts.'
 	},
 	{
+		kind: 'or',
+		file: 'src/do/attestations-service.ts',
+		argument: 'or( ...jsonValueLists(pathHashes).map((list) => in',
+		reason:
+			'One disjunct per bound list, not per path. A drain page has at most `inheritanceDrainPageSize` (100) paths.'
+	},
+	{
+		kind: 'or',
+		file: 'src/do/attestations-service.ts',
+		argument: 'or( ...jsonValueLists(narHashes).map((list) => inA',
+		reason:
+			'One disjunct per bound list, not per NAR hash. A drain page has at most `inheritanceDrainPageSize` (100) paths.'
+	},
+	{
+		kind: 'or',
+		file: 'src/do/attestations-service.ts',
+		argument: 'or( ...jsonRowLists(destinationVersions).map((list',
+		reason:
+			'One disjunct per bound list, not per destination version. A drain page has at most `inheritanceDrainPageSize` (100) paths.'
+	},
+	{
 		kind: 'and',
 		file: 'src/migration/cache-retention.ts',
 		argument: "and( eq(schema.legacyRetentionPolicies.kind, 'root",

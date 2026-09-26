@@ -60,6 +60,7 @@ import m0057 from './0057_cache_listing_projection.sql';
 import m0058 from './0058_managed_retirement_blocker_indexes.sql';
 import m0059 from './0059_managed_retirement_wake.sql';
 import m0060 from './0060_managed_retirement_recheck.sql';
+import m0061 from './0061_attestation_inheritance_queue.sql';
 
 export default {
 	journal,
@@ -124,6 +125,7 @@ export default {
 		m0057,
 		m0058,
 		m0059,
-		m0060
+		m0060,
+		m0061
 	}
 };

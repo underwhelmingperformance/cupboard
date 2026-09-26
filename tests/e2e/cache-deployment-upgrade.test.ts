@@ -60,6 +60,11 @@ const completedTransitions = {
 			id: 'deployment-transitions',
 			state: 'complete',
 			updatedAt: deployedAt.toISOString()
+		},
+		{
+			id: 'attestation-path-index',
+			state: 'complete',
+			updatedAt: deployedAt.toISOString()
 		}
 	],
 	unrecognised: []
@@ -188,7 +193,7 @@ it('upgrades a populated predecessor deployment', async () => {
 					'upgrade-suspended'
 				]
 			},
-			// Before the upload the deploy expanded both transitions and completed
+			// Before the upload the deploy expanded every transition and completed
 			// the one with no contract migrations; the tenants then had step 4 to
 			// reach.
 			expanded: {
@@ -201,6 +206,11 @@ it('upgrades a populated predecessor deployment', async () => {
 					{
 						id: 'deployment-transitions',
 						state: 'complete',
+						updatedAt: deployedAt.toISOString()
+					},
+					{
+						id: 'attestation-path-index',
+						state: 'expanded',
 						updatedAt: deployedAt.toISOString()
 					}
 				],
@@ -254,7 +264,8 @@ it('upgrades a populated predecessor deployment', async () => {
 				appliedD1Migrations: server.upgradeMigrationOrder,
 				transitions: {
 					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
+					'deployment-transitions': 'complete',
+					'attestation-path-index': 'complete'
 				},
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
@@ -316,6 +327,11 @@ it('upgrades a deployment that v0.0.35 left at native-reads', async () => {
 						id: 'deployment-transitions',
 						state: 'complete',
 						updatedAt: deployedAt.toISOString()
+					},
+					{
+						id: 'attestation-path-index',
+						state: 'expanded',
+						updatedAt: deployedAt.toISOString()
 					}
 				],
 				unrecognised: []
@@ -325,7 +341,8 @@ it('upgrades a deployment that v0.0.35 left at native-reads', async () => {
 				appliedD1Migrations: server.upgradeMigrationOrder,
 				transitions: {
 					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
+					'deployment-transitions': 'complete',
+					'attestation-path-index': 'complete'
 				},
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
@@ -458,7 +475,8 @@ it('records the same transitions when an interrupted deploy is run again', async
 				appliedD1Migrations: server.upgradeMigrationOrder,
 				transitions: {
 					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
+					'deployment-transitions': 'complete',
+					'attestation-path-index': 'complete'
 				},
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,

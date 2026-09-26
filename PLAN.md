@@ -782,6 +782,12 @@ R2 and the edge.
       returns 404. An exact check needs two things: a persisted NAR URL in each
       narinfo row, which requires a DO schema migration, and negotiate hints
       that include each NAR's current incarnation.
+- [x] Inherit existing attestations when a cache commits a store path and NAR
+      that another cache in the tenant already has: from a public cache, or from
+      an earlier generation of the path in the same cache. Each commit records
+      the path in a durable queue, and the Durable Object's alarm drains the
+      queue, so a path whose attempt fails or runs out of subrequests is
+      retried.
 - [x] Update the Routes table so narinfo and NAR show as Worker-served.
 - [x] Tests:
   - [x] Integration: when a committed path's NAR blob is missing, the next
@@ -6445,6 +6451,8 @@ published intermediates and their storage cost.
       contract migrations run and then stops. If a later release adds another
       transition before that transition completes, the later deploy applies the
       files in an order that the check does not replay yet.
+      `attestation-path-index` landed before this extension with an empty
+      expand, so expanding it early applies no migration.
 
 ## Later features
 

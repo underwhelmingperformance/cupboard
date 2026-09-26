@@ -268,7 +268,14 @@ export class CacheAdminService {
 			.limit(limit)
 			.all();
 
-		await this.deletionQueue.retireTornDownNarInfos(cache, queued, origin);
+		// The cache is going away, so no new generation of its paths needs the
+		// queued edges for inheritance.
+		await this.deletionQueue.retireTornDownNarInfos(
+			cache,
+			queued,
+			origin,
+			false
+		);
 
 		if (this.hasQueuedDeletions(cache)) {
 			return;

@@ -17,6 +17,12 @@ import {
 } from '../routing/chunked-availability.ts';
 
 import {
+	inheritanceListSubrequests,
+	inheritanceLookupSubrequests,
+	inheritedBundleSubrequests,
+	maxInheritedBundlesPerPath
+} from './attestations-service.ts';
+import {
 	reuseDistinctNarLimit,
 	reuseViewProbeD1CallsPerChunk
 } from './reuse-view-lookup-service.ts';
@@ -77,6 +83,14 @@ interface ChunkedRequest {
 }
 
 const chunkedRequests: readonly ChunkedRequest[] = [
+	{
+		chunk: 'maxInheritedBundlesPerPath',
+		items: maxInheritedBundlesPerPath,
+		requestsPerItem: inheritedBundleSubrequests,
+		d1Calls: inheritanceLookupSubrequests + inheritanceListSubrequests,
+		fanOut:
+			'Each inherited bundle heads its CAS object and makes three D1 calls. The source lookup and the list write add three calls for the path.'
+	},
 	{
 		chunk: 'cacheAvailabilityChunkSize',
 		items: cacheAvailabilityChunkSize,
