@@ -80,10 +80,10 @@ const chunkedRequests: readonly ChunkedRequest[] = [
 	{
 		chunk: 'cacheAvailabilityChunkSize',
 		items: cacheAvailabilityChunkSize,
-		requestsPerItem: 1,
+		requestsPerItem: 2,
 		d1Calls: cacheProbeD1CallsPerChunk,
 		fanOut:
-			'One narinfo head for each distinct hash, in `missingStorePathHashes` in `read/read.ts`.'
+			'One narinfo head and one NAR head for each distinct hash, in `missingStorePathHashes` in `read/read.ts`.'
 	},
 	{
 		chunk: 'reuseViewAvailabilityChunkSize',
@@ -158,8 +158,8 @@ describe('the subrequest ceiling', () => {
 				)
 			}
 		}).toStrictEqual({
-			free: { cache: 899, reuse: 56 },
-			paid: { cache: 9899, reuse: 618 }
+			free: { cache: 449, reuse: 56 },
+			paid: { cache: 4949, reuse: 618 }
 		});
 	});
 });

@@ -708,6 +708,10 @@ R2 and the edge.
       object alongside the row and blob row, and queue a purge of the cached
       narinfo by its path cache tag. The re-upload gives the NAR a new
       incarnation.
+- [x] Report a path as missing when the NAR at the URL that its narinfo records
+      is gone. After a recovery, another cache that shares the NAR keeps a
+      narinfo with the old URL, so its publisher sees the path as missing and
+      pushes it again instead of retaining a narinfo that readers cannot use.
 - [x] Update the Routes table so narinfo and NAR show as Worker-served.
 - [x] Tests:
   - [x] Integration: when a committed path's NAR blob is missing, the next

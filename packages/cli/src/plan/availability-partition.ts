@@ -18,7 +18,6 @@ import {
 	type UnknownPathCause,
 	type UnknownPathDetail
 } from '@cupboard/protocol/plan';
-import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import { CliError, CliUsageError, transientExitCode } from '../errors.ts';
@@ -197,7 +196,6 @@ export interface AvailabilityPartitionOptions {
 	readonly attestedServed?: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
-	readonly rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>;
 	/**
 	 * Re-queries paths whose availability remained unknown, bypassing any cache
 	 * used by the first query. Called only when at least one path is unknown.
@@ -352,16 +350,15 @@ function shouldQueryAvailabilityForTarget(
 	target: AvailabilityTarget,
 	destinationServedPaths: ReadonlySet<StorePathString>,
 	viewServedPaths: ReadonlySet<StorePathString>,
-	attestedServedPaths: ReadonlySet<StorePathString> | undefined,
-	rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>
+	attestedServedPaths: ReadonlySet<StorePathString> | undefined
 ): boolean {
 	if (target.expectedPath === undefined) {
 		return true;
 	}
 
-	const isTargetServedByDestination =
-		destinationServedPaths.has(target.expectedPath) ||
-		isServedByRootEnsure(target, rootEnsureResults);
+	const isTargetServedByDestination = destinationServedPaths.has(
+		target.expectedPath
+	);
 
 	if (isTargetServedByDestination) {
 		return (
@@ -419,8 +416,7 @@ export async function partitionAvailability(
 			return [];
 		}
 
-		return destinationServedPaths.has(target.expectedPath) ||
-			isServedByRootEnsure(target, options.rootEnsureResults)
+		return destinationServedPaths.has(target.expectedPath)
 			? [target.expectedPath]
 			: [];
 	});
@@ -433,8 +429,7 @@ export async function partitionAvailability(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
-			attestedServedPaths,
-			options.rootEnsureResults
+			attestedServedPaths
 		)
 	);
 	const queriedMissing =
@@ -511,8 +506,7 @@ export async function partitionAvailability(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
-			substitutableExternal,
-			options.rootEnsureResults
+			substitutableExternal
 		)
 	}));
 	const rejections = await confirmCandidates(classified, options);
@@ -1239,8 +1233,7 @@ export function classify(
 	target: AvailabilityTarget,
 	destinationServedPaths: ReadonlySet<StorePathString>,
 	viewServedPaths: ReadonlySet<StorePathString>,
-	substitutableExternal: ReadonlySet<StorePathString>,
-	rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>
+	substitutableExternal: ReadonlySet<StorePathString>
 ): Classification {
 	const path = target.expectedPath;
 
@@ -1248,10 +1241,7 @@ export function classify(
 		return { bucket: 'buildSet' };
 	}
 
-	if (
-		destinationServedPaths.has(path) ||
-		isServedByRootEnsure(target, rootEnsureResults)
-	) {
+	if (destinationServedPaths.has(path)) {
 		return { bucket: 'attachOnly', path };
 	}
 
@@ -1284,27 +1274,6 @@ function addToBucket(
 	}
 
 	buckets[classification.bucket].push(classification.path);
-}
-
-// `roots.ensure` reports the exact target list from the root's last
-// reconciliation. A `retained` answer means the cache serves all of those
-// targets. Every other answer lists unserved targets in `unavailable`, so any
-// target absent from that list is served.
-function isServedByRootEnsure(
-	target: AvailabilityTarget,
-	rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>
-): boolean {
-	const result = rootEnsureResults.get(target.root);
-
-	if (result === undefined || target.expectedPath === undefined) {
-		return false;
-	}
-
-	if (result.status === 'retained') {
-		return true;
-	}
-
-	return !result.unavailable.includes(target.expectedPath);
 }
 
 // The first query can classify a path as unknown from a cached narinfo miss.
