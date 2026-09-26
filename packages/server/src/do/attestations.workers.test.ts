@@ -14,6 +14,8 @@ import {
 	attestationListSchema,
 	attestationNegotiateMaxBundles,
 	attestationNegotiateResponseSchema,
+	attestationStatusMaxPaths,
+	attestationStatusResponseSchema,
 	attestationUploadDecisionSchema
 } from '@cupboard/protocol/attestations';
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
@@ -39,7 +41,10 @@ import { z } from 'zod';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { AttestationPathNotFoundError } from '../errors.ts';
+import {
+	AttestationPathNotFoundError,
+	SubrequestSliceExceededError
+} from '../errors.ts';
 import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
@@ -211,6 +216,144 @@ describe('attestation attach and reads', () => {
 			bundleControl: 'no-store',
 			bundleBytes: [...bundle]
 		});
+	});
+
+	it('checks several attestation lists in one read request', async () => {
+		const { token, metadata, bundle } = await committedPathBundle();
+		await attachBundle(token, metadata.storePathHash, bundle);
+		const absent = uniqueStorePathHash();
+		const response = await readFetch('/api/v1/attested-paths', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				storePathHashes: [metadata.storePathHash, absent]
+			})
+		});
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			body: attestationStatusResponseSchema.parse(await response.json())
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			cacheControl: 'no-store',
+			body: { attestedStorePathHashes: [metadata.storePathHash] }
+		});
+	});
+
+	it('requires read credentials for the attestation probe of a private named cache', async () => {
+		const cache = namedCache('private-probe');
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, cache, 'private');
+		const nar = await verifiableNar('private-attestation-probe');
+		const metadata = uploadMetadata({
+			storePathHash: uniqueStorePathHash(),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar, cache);
+		await attachBundle(
+			token,
+			metadata.storePathHash,
+			sigstoreBundleBytes(narDigestHex(nar.narHash)),
+			cache
+		);
+		await provisionFixtureTenant({
+			read: { user: 'alice', password: 'secret' }
+		});
+		const probe = (headers: Record<string, string>) =>
+			readFetch(`/cache/${cache.name}/api/v1/attested-paths`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json', ...headers },
+				body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
+			});
+		const unauthorised = await probe({});
+		const authorised = await probe({
+			authorization: `Basic ${btoa('alice:secret')}`
+		});
+
+		expect({
+			unauthorised: unauthorised.status,
+			authorised: authorised.status,
+			body: attestationStatusResponseSchema.parse(await authorised.json())
+		}).toStrictEqual({
+			unauthorised: StatusCodes.UNAUTHORIZED,
+			authorised: StatusCodes.OK,
+			body: { attestedStorePathHashes: [metadata.storePathHash] }
+		});
+	});
+
+	it('reports no attestations for a cache that does not exist', async () => {
+		await initialiseViaWorker();
+		const response = await readFetch('/cache/absent/api/v1/attested-paths', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ storePathHashes: [uniqueStorePathHash()] })
+		});
+
+		expect({
+			status: response.status,
+			body: attestationStatusResponseSchema.parse(await response.json())
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: { attestedStorePathHashes: [] }
+		});
+	});
+
+	it.each([
+		{ cache: 'the default cache', path: '/api/v1/attested-paths' },
+		{
+			cache: 'a cache that does not exist',
+			path: '/cache/absent/api/v1/attested-paths'
+		}
+	])(
+		'refuses an attestation probe for more than the maximum number of paths in $cache',
+		async ({ path }) => {
+			await initialiseViaWorker();
+			const response = await readFetch(path, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					storePathHashes: Array.from(
+						{ length: attestationStatusMaxPaths + 1 },
+						() => uniqueStorePathHash()
+					)
+				})
+			});
+
+			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+		}
+	);
+
+	it('refuses an attestation probe before R2 heads exceed its subrequest slice', async () => {
+		const { metadata } = await committedPathBundle();
+		const heads = vi.spyOn(env.BLOBS, 'head');
+
+		try {
+			await expect(
+				runInDurableObject(fixtureWorkerServer(), (instance) => {
+					const service = new AttestationsService(
+						instance.context,
+						new CacheRegistrationService(instance.context),
+						new AttestationCasService(instance.context),
+						new NarInfoObjectsService(instance.context)
+					);
+
+					return withSubrequestSlice(
+						() =>
+							service.attestedPathHashes(defaultCacheScope, [
+								metadata.storePathHash
+							]),
+						{ subrequests: 1, reserve: 0 }
+					);
+				})
+			).rejects.toBeInstanceOf(SubrequestSliceExceededError);
+			expect(heads.mock.calls).toStrictEqual([]);
+		} finally {
+			heads.mockRestore();
+		}
 	});
 
 	it('prefetches attestations for every path when one path has more than the per-path limit', async () => {

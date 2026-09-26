@@ -1,3 +1,4 @@
+import { attestationStatusMaxPaths } from '@cupboard/protocol/attestations';
 import {
 	subrequestSafetyReserve,
 	workersInvocationAllowances
@@ -84,6 +85,13 @@ interface ChunkedRequest {
 
 const chunkedRequests: readonly ChunkedRequest[] = [
 	{
+		chunk: 'attestationStatusMaxPaths',
+		items: attestationStatusMaxPaths,
+		requestsPerItem: 1,
+		d1Calls: 1,
+		fanOut: 'One attestation list head per distinct committed path.'
+	},
+	{
 		chunk: 'maxInheritedBundlesPerPath',
 		items: maxInheritedBundlesPerPath,
 		requestsPerItem: inheritedBundleSubrequests,
@@ -151,6 +159,17 @@ describe('the subrequest ceiling', () => {
 					`${request.chunk}: ${String(request.items)} hashes at ${String(request.requestsPerItem)} heads`
 			)
 		).toStrictEqual([]);
+	});
+
+	it('caps the attestation probe so a retried lookup and one head per path fit a Free invocation', () => {
+		const lookupWithRetry = 2;
+
+		expect({
+			cap: attestationStatusMaxPaths,
+			fits:
+				attestationStatusMaxPaths + lookupWithRetry <=
+				workersInvocationAllowances.free.subrequests - subrequestSliceReserve
+		}).toStrictEqual({ cap: 898, fits: true });
 	});
 
 	it('derives different chunks for Free and Paid invocations', () => {

@@ -19,7 +19,8 @@ import {
 	type AttestationDescriptorInput,
 	type AttestationListInput,
 	type AttestationNegotiateRequest,
-	type AttestationNegotiateResponseInput
+	type AttestationNegotiateResponseInput,
+	type AttestationStatusResponse
 } from '@cupboard/protocol/attestations';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
@@ -68,6 +69,7 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import { authorisedNarInfoVersions } from '../read/read.ts';
 
 import { armAlarmNoLaterThan, type MaintenanceProgress } from './alarm.ts';
 import {
@@ -86,7 +88,8 @@ import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	affordableSubrequestOperations,
-	hasSubrequestsFor
+	hasSubrequestsFor,
+	requireSubrequestsFor
 } from './subrequest-slice.ts';
 
 interface AttestationBundle {
@@ -1508,6 +1511,47 @@ export class AttestationsService {
 		}
 
 		throw finalised.error;
+	}
+
+	async attestedPathHashes(
+		cacheScope: CacheScope,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<AttestationStatusResponse> {
+		const cache = this.context.cacheRepository.require(cacheScope);
+		const versions = await authorisedNarInfoVersions(
+			this.context.d1,
+			this.context.requireTenant(),
+			cacheScope,
+			storePathHashes
+		);
+		const candidates = [...new Set(storePathHashes)].flatMap((hash) => {
+			const version = versions.get(hash);
+
+			return version === undefined
+				? []
+				: [{ hash, generation: version.generation }];
+		});
+		requireSubrequestsFor(candidates.length, 'attestation status probe');
+		const checked = await mapWithConcurrency(
+			candidates,
+			maxOutgoingConnections,
+			async ({ hash, generation }) => {
+				const object = await this.context.env.BLOBS.head(
+					this.listKey(cache, hash)
+				);
+
+				return object !== null &&
+					isListOfCommittedGeneration(object, cache, generation)
+					? hash
+					: undefined;
+			}
+		);
+
+		return {
+			attestedStorePathHashes: checked.filter(
+				(hash): hash is StorePathHash => hash !== undefined
+			)
+		};
 	}
 
 	async handleServeList(

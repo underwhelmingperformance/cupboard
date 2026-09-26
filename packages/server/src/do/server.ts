@@ -7,6 +7,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
+import { attestationStatusRequestSchema } from '@cupboard/protocol/attestations';
 import {
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse,
@@ -802,6 +803,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.get('cache'),
 					context.req.param('hash')
 				)
+		);
+		this.app.on(
+			'POST',
+			['/api/v1/attested-paths', '/cache/:cacheName/api/v1/attested-paths'],
+			async (context) => {
+				const request = await parseRequestBody(
+					attestationStatusRequestSchema,
+					context.req.raw
+				);
+
+				return context.json(
+					await this.attestations.attestedPathHashes(
+						context.get('cache'),
+						request.storePathHashes
+					),
+					StatusCodes.OK,
+					{ 'cache-control': 'no-store' }
+				);
+			}
 		);
 		this.app.on(
 			'GET',

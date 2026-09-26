@@ -27,6 +27,27 @@ export const attestationListSchema = z.strictObject({
 });
 export type AttestationList = z.output<typeof attestationListSchema>;
 
+// One R2 head per path, after a D1 lookup that is retried once after a
+// transient failure, all within the Free allowance less the safety reserve.
+export const attestationStatusMaxPaths =
+	workersInvocationAllowances.free.subrequests - subrequestSafetyReserve - 2;
+
+export const attestationStatusRequestSchema = z.strictObject({
+	storePathHashes: z.array(storePathHashSchema).max(attestationStatusMaxPaths)
+});
+export type AttestationStatusRequest = z.output<
+	typeof attestationStatusRequestSchema
+>;
+
+export const attestationStatusResponseSchema = z.strictObject({
+	attestedStorePathHashes: z
+		.array(storePathHashSchema)
+		.max(attestationStatusMaxPaths)
+});
+export type AttestationStatusResponse = z.output<
+	typeof attestationStatusResponseSchema
+>;
+
 const attestationBundleRequestSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	digest: sha256HexDigestSchema
