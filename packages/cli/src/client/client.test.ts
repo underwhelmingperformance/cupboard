@@ -25,6 +25,7 @@ import {
 	CupboardHttpError,
 	InvalidCacheNameError,
 	MalformedResponseError,
+	QuotaExceededError,
 	ResponseSchemaMismatchError
 } from '../errors.ts';
 
@@ -470,7 +471,7 @@ describe('CupboardClient.commit', () => {
 
 		await expect(
 			client.commit('write-token', target('upload-app'))
-		).rejects.toBeInstanceOf(CupboardHttpError);
+		).rejects.toStrictEqual(new QuotaExceededError('over quota'));
 		expect(socket?.closed).toBe(true);
 	});
 

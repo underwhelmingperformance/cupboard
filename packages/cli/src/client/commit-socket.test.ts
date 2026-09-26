@@ -16,6 +16,7 @@ import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
+	QuotaExceededError,
 	UploadVerificationFailedError,
 	UploadWaitTimeoutError
 } from '../errors.ts';
@@ -363,33 +364,30 @@ describe('runCommitSession', () => {
 		}
 	);
 
-	it('rejects an error frame with the HTTP error it mirrors', async () => {
-		const socket = new FakeCommitSocket();
-		const session = openSession(socket);
-		const settled = session.commit(target);
-
-		socket.emit('open');
-		socket.emit(
-			'message',
-			frame({ ev: 'error', uploadId, status: 507, message: 'over quota' })
-		);
-
-		const error = await rejectedBy(settled, CupboardHttpError);
-
-		expect({
-			name: error.name,
-			method: error.method,
-			path: error.path,
-			status: error.status,
-			body: error.body
-		}).toStrictEqual({
-			name: 'CupboardHttpError',
-			method: 'GET',
-			path,
+	it.each([
+		{
+			status: 404,
+			message: 'Upload expired',
+			expected: new CupboardHttpError('GET', path, 404, 'Upload expired')
+		},
+		{
 			status: 507,
-			body: 'over quota'
-		});
-	});
+			message: 'over quota',
+			expected: new QuotaExceededError('over quota')
+		}
+	])(
+		'rejects a $status error frame with $expected.name',
+		async ({ status, message, expected }) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket);
+			const settled = session.commit(target);
+
+			socket.emit('open');
+			socket.emit('message', frame({ ev: 'error', uploadId, status, message }));
+
+			expect(await rejectedBy(settled, Error)).toStrictEqual(expected);
+		}
+	);
 
 	it.each([503, 429])(
 		'retries a %i error frame and resolves the entry on a subsequent settled frame',
