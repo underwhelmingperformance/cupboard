@@ -5,7 +5,11 @@ import { env } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
-import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
+import { NixConfig } from '@cupboard/nix-store/nix-config';
+import {
+	type NixPublicKey,
+	parsePublishedNixPublicKeys
+} from '@cupboard/nix-store/public-key';
 import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
@@ -204,10 +208,16 @@ type FetchLike = (url: string) => Promise<Response>;
 
 const maximumPublishedKeyBytes = 64 * 1024;
 
-export async function fetchCachePublicKey(
+/**
+ * Fetches all public keys published by the release cache at `/pubkey`. During a
+ * key rotation the endpoint lists more than one key. A client's
+ * `trusted-public-keys` must list all of them, because a path may be signed
+ * with any of them.
+ */
+export async function fetchCachePublicKeys(
 	baseUrl: URL,
 	fetchLike: FetchLike = fetch
-): Promise<string> {
+): Promise<readonly NixPublicKey[]> {
 	const url = canonicalHref(publicKeyUrl(baseUrl));
 	const response = await fetchLike(url);
 
@@ -221,15 +231,18 @@ export async function fetchCachePublicKey(
 		maximumBytes: maximumPublishedKeyBytes
 	});
 
-	return parsePublishedNixPublicKeys(key)
-		.map((publicKey) => publicKey.value)
-		.join('\n');
+	return parsePublishedNixPublicKeys(key);
 }
 
 export function substituterSection(options: {
 	readonly baseUrl: URL;
-	readonly publicKey: string;
+	readonly publicKeys: readonly NixPublicKey[];
 }): string {
+	const nixConfig = new NixConfig(
+		cacheUrl(options.baseUrl, { kind: 'named', name: releaseCacheName }),
+		options.publicKeys.map((publicKey) => publicKey.value).join(' ')
+	);
+
 	return [
 		'## Substitute from the release cache',
 		'',
@@ -237,10 +250,7 @@ export function substituterSection(options: {
 		'Configure it once in nix.conf to fetch releases instead of building:',
 		'',
 		'```',
-		// A substituter is matched by exact string, so the URL is rendered in its
-		// one canonical form.
-		`extra-substituters = ${canonicalHref(cacheUrl(options.baseUrl, { kind: 'named', name: releaseCacheName }))}`,
-		`extra-trusted-public-keys = ${options.publicKey}`,
+		nixConfig.render().trimEnd(),
 		'```'
 	].join('\n');
 }
@@ -341,7 +351,7 @@ export async function publishAction(
 
 	const body = substituterSection({
 		baseUrl: inputs.baseUrl,
-		publicKey: await fetchCachePublicKey(inputs.baseUrl)
+		publicKeys: await fetchCachePublicKeys(inputs.baseUrl)
 	});
 
 	const release = await upsertDraft(octokit, inputs, body, selection.existing);
