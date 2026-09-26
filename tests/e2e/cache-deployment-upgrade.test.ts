@@ -1,3 +1,4 @@
+import { capturingReporter } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
@@ -22,6 +23,7 @@ import {
 	type TransitionStates
 } from '../../packages/cli/src/deploy/deployment-state.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
+import { settleTenants } from '../../packages/cli/src/deploy/settlement.ts';
 import {
 	completeTransitions,
 	prepareTransitions
@@ -189,6 +191,60 @@ it('defines only independent transitions after the first', () => {
 			.filter((transition) => transition.independent !== true)
 			.map((transition) => transition.id)
 	).toStrictEqual([]);
+});
+
+// The deploy's wait loop against the server's sweep chain. The wake takes one
+// tenant, and the queue then delivers the chain's messages. Each fixture
+// tenant needs two wakes: one runs its migrations and one records its step.
+// The chain's first batch therefore migrates the other tenants and records the
+// first, and its second batch records the rest.
+it('waits while the sweep chain wakes the tenants', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }),
+			false
+		);
+		await server.deployCurrent(true);
+
+		const settled = await settleTenants(
+			server.settlementClient(),
+			capturingReporter([]),
+			{ requiredStep: expansionLocalStep, limit: 1 }
+		);
+
+		expect({
+			pending: settled.pending,
+			ready: settled.ready,
+			sweep:
+				settled.sweep.state === 'idle'
+					? {
+							state: settled.sweep.state,
+							link: settled.sweep.last?.link,
+							outcomes: settled.sweep.last?.outcomes
+						}
+					: settled.sweep.state
+		}).toStrictEqual({
+			pending: 0,
+			ready: resumableFixtureTenants,
+			sweep: {
+				state: 'idle',
+				link: 1,
+				outcomes: [...sleepingFixtureTenants, 'upgrade-suspended'].map(
+					(tenant) => ({
+						tenant,
+						kind: 'recorded',
+						step: expansionLocalStep,
+						progressed: true
+					})
+				)
+			}
+		});
+	} finally {
+		await server.stop();
+	}
 });
 
 it('upgrades a populated predecessor deployment', async () => {

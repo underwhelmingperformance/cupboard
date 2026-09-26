@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	currentLocalStep,
@@ -119,9 +120,10 @@ export interface TransitionHooks<Id extends string = TransitionId> {
 	 */
 	readonly checkServing: () => Promise<void>;
 	/**
-	 * Wakes tenants until every active or suspended tenant has recorded the
-	 * transition's contract step. Without it the walk only checks the tenants,
-	 * and the hourly sweep wakes those below the required local step.
+	 * Waits until every active or suspended tenant has recorded the
+	 * transition's contract step, while a sweep chain wakes the tenants.
+	 * Without it the walk only checks the tenants, and a sweep chain that the
+	 * cron tick starts wakes those below the required local step.
 	 */
 	readonly wakeTenants?: (contractStep: LocalStep) => Promise<void>;
 	readonly report?: (event: TransitionEvent<Id>) => void;
@@ -296,9 +298,14 @@ async function reachContractStep<Id extends string>(
 
 	if (readiness.pending > 0) {
 		throw new LocalStepUnreachedError(
-			readiness.pending,
-			step,
-			readiness.stragglers
+			{ kind: 'below-step' },
+			{
+				pending: readiness.pending,
+				requiredStep: step,
+				stragglers: readiness.stragglers.map((tenant) =>
+					tenantIdSchema.parse(tenant)
+				)
+			}
 		);
 	}
 

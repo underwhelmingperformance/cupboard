@@ -6364,6 +6364,10 @@ published intermediates and their storage cost.
 - The cron tick starts a chain only when tenants are pending and no chain has
   the lease. This restarts the sweep after a chain stops, for example because
   its message was dead-lettered; the tick logs the result.
+- The deploy and `cupboard deployment resume` first call `localStep.wake`, then
+  poll `localStep.status` every ten seconds until no tenant is pending. They
+  fail as soon as the sweep reports `stalled`, and start a new chain when the
+  sweep is `idle` with tenants pending, at most three times.
 
 ### Progress
 
@@ -6372,15 +6376,12 @@ published intermediates and their storage cost.
       `required` in `localStep.status`, and the migration checks.
 - [ ] Set `completedBy` on `deployment-transitions` once the release that first
       includes it has been tagged.
-- [ ] Rebuild the sweep chain from #407 on the schema transitions. The sweep
-      chain is a sequence of maintenance-queue messages that each wake a batch
-      of tenants, so tenant work continues without a deploy. One D1 row, the
-      sweep row, records which chain may run batches and how many batches in a
-      row have stalled; the delay before the next message doubles with each
-      stalled batch. The rebuild adds that row, a `sweep` object in
-      `localStep.status`, the deploy reading the chain's progress, and the cron
-      restarting a chain that has stopped. The sweep row's table becomes
-      migration `0032` in a new independent transition.
+- [x] The local-step sweep chain: the `local_step_sweep` row, stall confirmation
+      over a full pass of the pending tenants with exponential backoff
+      afterwards, the `sweep` object in `localStep.status`, the deploy reading
+      the chain's progress, and the cron starting a new chain after one has
+      stopped. Migration `0032` in the independent `local-step-sweep` transition
+      creates the table.
 - [ ] Write the transition records through a control-plane procedure
       (`PUT /deployment/transitions/{id}`), so the deploy writes to D1 directly
       only to apply migrations.

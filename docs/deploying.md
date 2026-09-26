@@ -208,21 +208,21 @@ One `cupboard deploy` run applies the transitions in list order:
 5. After the upload, check once that each Worker's deployment assigns all
    traffic to one version and that both Workers report this build. This check
    runs on every deploy, including one on which every transition is complete.
-   Then, for each transition that is not complete: wake active or suspended
-   tenants in batches of 20 until every one has recorded the transition's
-   contract step; for `cache-identity` only, write `native-reads` to the
-   `deployment_phase` row; apply the contract migrations and record the
-   transition `complete`.
-6. Wake tenants again until they reach local step 5.
+   Then, for each transition that is not complete: wait until every active or
+   suspended tenant has recorded the transition's contract step, while the
+   server wakes the tenants as described under [Local steps](#local-steps); for
+   `cache-identity` only, write `native-reads` to the `deployment_phase` row;
+   apply the contract migrations and record the transition `complete`.
+6. Wait until every active or suspended tenant has recorded local step 5.
 
 A failed serving check, or tenants that have not recorded the contract step,
 stop the run in step 5. The contract migrations of the incomplete transition
 stay unapplied and the states stay as they were. The error lists the Workers, or
-a sample of the tenants below the contract step. If step 6 fails, the contract
-migrations have already been applied and recorded. Each tenant wake stage runs
-at most 100 batches. Inspect incomplete work with
-`cupboard deployment status <url>`, which lists each recorded transition and the
-required local step, and retry batches with `cupboard deployment resume <url>`.
+a sample of the tenants below the contract step with the last batch's per-tenant
+outcomes. If step 6 fails, the contract migrations have already been applied and
+recorded. Inspect incomplete work with `cupboard deployment status <url>`, which
+lists each recorded transition, the required local step and the state of the
+sweep chain, and poll the sweep again with `cupboard deployment resume <url>`.
 Repair any reported tenant configuration or migration error, then rerun
 `cupboard deploy`. Applied migrations are skipped after checking their recorded
 digests.
@@ -299,11 +299,11 @@ This build defines five steps:
 Once the deploy records `cache-identity` complete, the required local step
 becomes 5. The control plane counts the tenants below it, and the sweep wakes
 them again. A successful CLI deploy applies the contract migrations and then
-wakes tenants until they reach step 5. If a run is interrupted,
-`cupboard deployment resume <url>` wakes tenants until they reach the required
-local step; rerun `cupboard deploy` to complete any remaining transition. A
-persisted cursor rotates through pending tenants, so a failed tenant does not
-prevent later tenants from being attempted.
+waits until every tenant has recorded step 5. If a run is interrupted,
+`cupboard deployment resume <url>` wakes a batch and polls the sweep until the
+tenants reach the required local step; rerun `cupboard deploy` to complete any
+remaining transition. A persisted cursor rotates through pending tenants, so a
+failed tenant does not prevent later tenants from being attempted.
 
 A path whose object has not reached its generation key returns 404. The move or
 a new push makes it available at that key.
@@ -406,6 +406,43 @@ its message was dead-lettered. The new chain keeps the previous chain's last
 outcomes and their batch time until its own first batch runs. The tick logs the
 result, and a failure to enqueue the other maintenance jobs does not prevent the
 restart.
+
+### How the deploy waits for the tenants
+
+`cupboard deploy` and `cupboard deployment resume` first call `localStep.wake`.
+The wake runs a batch and starts a chain, unless a chain that has not confirmed
+a stall has the lease. The command then polls `localStep.status` every ten
+seconds. Each time the number of pending tenants, the state of the sweep or the
+count of tenant wakes without work changes, it prints the number of pending
+tenants, the chain and its link, and each tenant in the last batch that did no
+work, with the step that the tenant had recorded. When a wake reports that it
+could not start or end a chain, the command prints the error as a warning. It
+stops when one of these happens:
+
+- `pending` is zero: every tenant has recorded the step.
+- The sweep is `stalled`. The command fails with the stragglers and the last
+  batch's outcomes. The chain keeps retrying on the server with a growing delay,
+  and a later `cupboard deploy` or `cupboard deployment resume <url>` replaces
+  it with a new chain.
+- The sweep is `idle` with tenants still pending, because the chain stopped or
+  did not start. The command calls `localStep.wake` again to start a new chain,
+  at most three times, and then fails. The command therefore calls
+  `localStep.wake` up to four times. The restart count resets whenever the
+  number of pending tenants falls. The error says that no chain is waking the
+  tenants, and the next cron tick starts one.
+- A wake selects no tenant while tenants are pending. The wake selects tenants
+  below the control Worker's required local step, so none is below that step.
+  The command reads the status again: another wake or a chain may have recorded
+  the last tenants in the meantime. If tenants are still pending, they are below
+  the step that the command counts against but not below the required local
+  step, no chain wakes them, and the command fails.
+
+The command has no timeout. It keeps polling while tenants do work, including a
+large tenant that does work on every wake. A chain that stopped while running
+still reads as `running` until its lease expires, so the command waits for the
+lease to expire before it starts a new chain, and prints nothing while it waits.
+The chain runs on the server, so it continues if the command exits, and the next
+deploy or `cupboard deployment resume <url>` wakes a batch and polls the chain.
 
 ## Stored cache grants
 

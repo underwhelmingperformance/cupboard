@@ -86,9 +86,10 @@ export interface LocalStepReadiness {
  * Counts active and suspended tenants below the required step and returns up
  * to {@link localStepStragglerSampleSize} of their ids in slug order.
  *
- * This function does not write to D1. The hourly sweep wakes tenants below
- * the step, and each woken object records its step. The count therefore falls
- * even when the deploy does nothing.
+ * This function does not write to D1. An object records its step when the
+ * control Worker wakes it: from `localStep.wake`, or from a sweep chain that a
+ * wake or the cron tick starts. The count therefore falls without further
+ * calls from the deploy.
  */
 export async function readLocalStepReadiness(
 	api: D1QueryApi,

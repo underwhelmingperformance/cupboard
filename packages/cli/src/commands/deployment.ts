@@ -1,19 +1,33 @@
 import {
+	hasDoneWork,
 	hasReachedTransitionState,
+	type LocalStepSweep,
+	type LocalStepSweepFailingTenant,
 	localStepWakeBodySchema,
+	type LocalStepWakeOutcome,
+	type LocalStepWakeOutcomes,
 	type ParsedDeploymentTransitionsResponse,
 	schemaTransitions,
 	type UnrecognisedDeploymentTransition
 } from '@cupboard/protocol/deployment';
-import { formatTimestamp, type Reporter } from '@cupboard/reporter';
+import {
+	formatTimestamp,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
 import { type Command, InvalidArgumentError } from 'commander';
 
+import { type Delay } from '../abort.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { readStoredTransition } from '../deploy/deployment-state.ts';
 import { type SettlementClient, settleTenants } from '../deploy/settlement.ts';
+import {
+	describeFailingTenant,
+	describeStuckTenant
+} from '../deploy/wake-outcomes.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 function parseBatchLimit(value: string): number {
@@ -28,7 +42,6 @@ function parseBatchLimit(value: string): number {
 
 interface ResumeOptions {
 	readonly limit: number;
-	readonly maxPasses: number;
 }
 
 export interface DeploymentClient {
@@ -38,8 +51,8 @@ export interface DeploymentClient {
 
 export interface DeploymentResumeOptions {
 	readonly limit: number;
-	readonly maxPasses: number;
 	readonly signal?: AbortSignal;
+	readonly delay?: Delay;
 }
 
 const transitionIds = schemaTransitions.map((transition) => transition.id);
@@ -72,9 +85,9 @@ function unrecognisedRows(
 
 /**
  * Shows each recorded schema transition, any recorded row that this build does
- * not define, the required local step, and how many tenants have reached it.
- * The step comes from the same response as the counts, so the two always
- * agree.
+ * not define, the required local step, how many tenants have reached it, and
+ * the state of the sweep chain that wakes the rest. The step comes from the
+ * same response as the counts, so the two always agree.
  */
 export async function runDeploymentStatus(
 	reporter: Reporter,
@@ -101,17 +114,117 @@ export async function runDeploymentStatus(
 			{
 				label: 'Pending sample',
 				value: status.stragglers.join(', ') || '(none)'
-			}
+			},
+			...sweepRows(status.sweep)
 		]
 	});
 }
 
+function sweepRows(sweep: LocalStepSweep): ResultRow[] {
+	if (sweep.state === 'idle') {
+		return sweep.last === undefined
+			? [{ label: 'Sweep chain', value: 'idle' }]
+			: [
+					{
+						label: 'Sweep chain',
+						value: `idle · last chain ${sweep.last.chain} at link ${String(sweep.last.link)} · updated ${formatTimestamp(sweep.last.updatedAt)}`
+					},
+					lastBatchRow(sweep.last),
+					...failingRows(sweep.last.failing)
+				];
+	}
+
+	const stalled =
+		sweep.state === 'stalled'
+			? ` since ${formatTimestamp(sweep.stalledAt)}`
+			: '';
+	const withoutWork =
+		sweep.wokenWithoutWork === 0
+			? ''
+			: ` · no work done in the last ${sweep.wokenWithoutWork === 1 ? 'tenant wake' : `${String(sweep.wokenWithoutWork)} tenant wakes`}`;
+
+	return [
+		{
+			label: 'Sweep chain',
+			value: `${sweep.state}${stalled} · chain ${sweep.chain} at link ${String(sweep.link)}${withoutWork} · updated ${formatTimestamp(sweep.updatedAt)} · next batch ${formatTimestamp(sweep.nextAt)}`
+		},
+		lastBatchRow(sweep),
+		...failingRows(sweep.failing)
+	];
+}
+
+function failingRows(
+	failing: readonly LocalStepSweepFailingTenant[]
+): ResultRow[] {
+	return failing.length === 0
+		? []
+		: [
+				{
+					label: 'Failing tenants',
+					value: failing
+						.map((tenant) => describeFailingTenant(tenant))
+						.join(', ')
+				}
+			];
+}
+
+function lastBatchRow(chain: {
+	readonly batchAt: string;
+	readonly outcomes: LocalStepWakeOutcomes;
+}): ResultRow {
+	return {
+		label: 'Last batch',
+		value:
+			chain.outcomes.length === 0
+				? '(none)'
+				: `${formatTimestamp(chain.batchAt)} · ${describeBatch(chain.outcomes)}`
+	};
+}
+
+// Counts the batch by outcome and lists the tenants that did no work.
+function describeBatch(outcomes: LocalStepWakeOutcomes): string {
+	const counts = new Map<string, number>();
+
+	for (const outcome of outcomes) {
+		const label = outcomeLabel(outcome);
+		counts.set(label, (counts.get(label) ?? 0) + 1);
+	}
+
+	const stuck = outcomes.flatMap((outcome) => {
+		const description = describeStuckTenant(outcome);
+
+		return description === undefined ? [] : [description];
+	});
+	const summary = [...counts]
+		.map(([kind, count]) => `${String(count)} ${kind}`)
+		.join(', ');
+
+	return stuck.length === 0 ? summary : `${summary} · ${stuck.join(', ')}`;
+}
+
+function outcomeLabel(outcome: LocalStepWakeOutcome): string {
+	switch (outcome.kind) {
+		case 'recorded': {
+			return outcome.progressed ? 'recorded' : 'did no work';
+		}
+
+		case 'advanced': {
+			return hasDoneWork(outcome) ? 'did work' : 'did no work';
+		}
+
+		case 'unconfigured':
+		case 'failed': {
+			return outcome.kind;
+		}
+	}
+}
+
 /**
- * Wakes bounded batches of tenants until each has recorded the required local
- * step, then reports whether a schema transition is still incomplete and needs
- * another `cupboard deploy`. A recorded row that this build does not define is
- * listed with what this build's deploy does with it, and is left out of the
- * transitions to complete.
+ * Wakes a batch of pending tenants, then polls the server's sweep chain until
+ * every tenant has recorded the required local step. It then reports whether a
+ * schema transition is still incomplete and needs another `cupboard deploy`. A
+ * recorded row that this build does not define is listed with what this
+ * build's deploy does with it, and is left out of the transitions to complete.
  */
 export async function runDeploymentResume(
 	reporter: Reporter,
@@ -120,8 +233,8 @@ export async function runDeploymentResume(
 ): Promise<void> {
 	const status = await settleTenants(client.localStep, reporter, {
 		limit: options.limit,
-		maxPasses: options.maxPasses,
-		...(options.signal !== undefined && { signal: options.signal })
+		...(options.signal !== undefined && { signal: options.signal }),
+		...(options.delay !== undefined && { delay: options.delay })
 	});
 	const { transitions, unrecognised } = await client.transitions();
 	reporter.result({
@@ -193,18 +306,12 @@ export function registerDeploymentCommands(
 	deployment
 		.command('resume')
 		.description(
-			'Advance bounded tenant batches, then report whether deployment can continue.'
+			'Wake a batch of pending tenants, then poll the sweep chain until every tenant has reached the required local step, and report whether deployment can continue.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.option(
 			'--limit <number>',
-			'tenants attempted per batch (1–100)',
-			parseBatchLimit,
-			20
-		)
-		.option(
-			'--max-passes <number>',
-			'maximum batches in this command (1–100)',
+			'tenants attempted by each wake that this command makes (1–100)',
 			parseBatchLimit,
 			20
 		)
@@ -214,7 +321,6 @@ export function registerDeploymentCommands(
 				client(url),
 				{
 					limit: request.limit,
-					maxPasses: request.maxPasses,
 					...(options.signal !== undefined && { signal: options.signal })
 				}
 			);
