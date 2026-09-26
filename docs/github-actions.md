@@ -560,12 +560,12 @@ steps:
 `installables` is newline-delimited. Generated lists can instead be written to a
 newline-delimited file and passed as `installables-file`, which avoids runner
 limits on the size of action inputs and environment variables. The build action
-retries three times and outputs the realised `paths`, a `paths-file`, and the
-`receipt-file` consumed by the attest action. A version 2 receipt records only
-the final outputs that the action observed being built during this run. Outputs
-returned by a remote builder are rebuilt and compared with `nix build --rebuild`
-before they qualify. When the run built nothing, no build provenance is signed
-and `bundle-path` is empty.
+attempts the build up to five times and outputs the realised `paths`, a
+`paths-file`, and the `receipt-file` consumed by the attest action. A version 2
+receipt records only the final outputs that the action observed being built
+during this run. Outputs returned by a remote builder are rebuilt and compared
+with `nix build --rebuild` before they qualify. When the run built nothing, no
+build provenance is signed and `bundle-path` is empty.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
