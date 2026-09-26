@@ -718,6 +718,13 @@ cupboard attest verify ./bundle.sigstore.json --nar-hash sha256:... \
   --predicate-type https://slsa.dev/provenance/v1 --tlog-threshold 0
 ```
 
+With the default signing profile, `actions/attest` signs with GitHub's Sigstore
+instance for a public destination cache in a repository that is not public. Such
+a bundle has no Rekor entry and no signed certificate timestamp, and GitHub's
+trusted root lists no certificate-transparency log. To verify it, also pass
+`--trusted-root` with the output of `gh attestation trusted-root` and
+`--ctlog-threshold 0`.
+
 ## Build, publish, and attest
 
 The actions compose into one job: install cupboard and export read

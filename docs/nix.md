@@ -381,7 +381,11 @@ Before signing, the action reports the services it may contact and where it may
 publish signature records or bundles.
 
 Verifying a bundle that carries no transparency-log entry requires
-`--tlog-threshold 0`; `cupboard attest verify --help` prints the complete
-command. [The GitHub Actions guide][github-actions] covers the action's inputs.
+`--tlog-threshold 0`. With the default signing profile, `actions/attest` signs
+with GitHub's Sigstore instance for a public destination when the repository is
+not public. Such a bundle also needs `--trusted-root` with the output of
+`gh attestation trusted-root` and `--ctlog-threshold 0`.
+`cupboard attest verify --help` prints the complete command. [The GitHub Actions
+guide][github-actions] covers the action's inputs.
 
 [github-actions]: ./github-actions.md

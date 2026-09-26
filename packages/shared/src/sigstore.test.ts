@@ -1,3 +1,4 @@
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import {
 	CertificateIdentityModeError,
 	CertificateIssuerModeError,
 	identityPolicy,
+	IneffectiveCtlogThresholdError,
 	TrustedRootFormatError,
 	TrustedRootsRejectedError,
 	verificationPolicy,
@@ -17,6 +19,7 @@ import {
 } from './sigstore.ts';
 import {
 	githubInstanceBundle,
+	publicGoodShapedBundle,
 	signerIdentity,
 	signerIssuer
 } from './sigstore-bundle-fixture.ts';
@@ -25,6 +28,64 @@ function verificationFailure(error: unknown): unknown {
 	return error instanceof VerificationError || error instanceof PolicyError
 		? { name: error.name, code: error.code }
 		: error;
+}
+
+function outcome(result: unknown): unknown {
+	return result instanceof TrustedRootsRejectedError
+		? {
+				name: result.name,
+				failures: result.failures.map((failure) => verificationFailure(failure))
+			}
+		: verificationFailure(result);
+}
+
+const trustedRootLogsSchema = z.looseObject({
+	tlogs: z.array(z.unknown()),
+	ctlogs: z.array(z.unknown())
+});
+
+/**
+ * A transparency-log or certificate-transparency log instance for a trusted
+ * root, with a throwaway P-256 key. No bundle in these tests has a Rekor entry
+ * or a signed certificate timestamp from it.
+ */
+function logInstance(baseUrl: string): unknown {
+	const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+	const rawBytes = publicKey.export({ format: 'der', type: 'spki' });
+
+	return {
+		baseUrl,
+		hashAlgorithm: 'SHA2_256',
+		publicKey: {
+			rawBytes: rawBytes.toString('base64'),
+			keyDetails: 'PKIX_ECDSA_P256_SHA_256',
+			validFor: { start: '2000-01-01T00:00:00Z' }
+		},
+		logId: { keyId: createHash('sha256').update(rawBytes).digest('base64') }
+	};
+}
+
+/**
+ * Adds a transparency log, a certificate-transparency log or both to a trusted
+ * root, after any logs that it already lists.
+ */
+function withLogs(
+	trustedRoot: string,
+	logs: { readonly tlog: boolean; readonly ctlog: boolean }
+): string {
+	const root = trustedRootLogsSchema.parse(JSON.parse(trustedRoot));
+
+	return JSON.stringify({
+		...root,
+		tlogs: [
+			...root.tlogs,
+			...(logs.tlog ? [logInstance('https://rekor.example')] : [])
+		],
+		ctlogs: [
+			...root.ctlogs,
+			...(logs.ctlog ? [logInstance('https://ctfe.example')] : [])
+		]
+	});
 }
 
 function thrownBy(run: () => unknown): unknown {
@@ -270,30 +331,54 @@ describe('verifyBundle with a trusted-root file', () => {
 		predicateType
 	}).trustedRoot;
 	const pretty = JSON.stringify(JSON.parse(fixture.trustedRoot), undefined, 2);
+	const timestamped = publicGoodShapedBundle(
+		{ subjectDigest, predicateType },
+		'listed'
+	);
+	const timestampedByUnlistedLog = publicGoodShapedBundle(
+		{ subjectDigest, predicateType },
+		'unlisted'
+	);
 	const options = { ctlogThreshold: 0, tlogThreshold: 0 };
+	// The verification result for the fixture's signer, without the signer's
+	// key object and certificate OIDs.
 	const verifiedSigner = {
 		predicateType,
 		subjectDigests: [subjectDigest],
+		predicate: {},
+		verifiedTimestampCount: 1,
+		tlogEntries: [],
 		identity: signerIdentity,
 		issuer: signerIssuer
 	};
 
 	async function verifyWith(
 		trustedRoot: string,
-		identityPolicy = policy
+		{
+			bundle = fixture.bundle,
+			identityPolicy = policy,
+			thresholds = options
+		}: {
+			readonly bundle?: Uint8Array;
+			readonly identityPolicy?: typeof policy;
+			readonly thresholds?: {
+				readonly tlogThreshold?: number;
+				readonly ctlogThreshold?: number;
+			};
+		} = {}
 	): Promise<unknown> {
 		return withTrustedRoot(trustedRoot, async (file) => {
 			try {
-				const verified = await verifyBundle(fixture.bundle, identityPolicy, {
-					...options,
-					trustedRoot: file
-				});
+				const { signer, ...verified } = await verifyBundle(
+					bundle,
+					identityPolicy,
+					{ ...thresholds, trustedRoot: file }
+				);
 
 				return {
-					predicateType: verified.predicateType,
-					subjectDigests: verified.subjectDigests,
-					identity: verified.signer.identity?.subjectAlternativeName,
-					issuer: verified.signer.identity?.extensions?.issuer
+					...verified,
+					identity: signer.identity?.subjectAlternativeName,
+					issuer: signer.identity?.extensions?.issuer
 				};
 			} catch (error) {
 				return error;
@@ -367,10 +452,118 @@ describe('verifyBundle with a trusted-root file', () => {
 		});
 	});
 
+	// Unless a case sets its own thresholds, both thresholds are 0. No bundle
+	// here has a Rekor entry. A zero certificate-transparency threshold applies
+	// only to a root that lists no certificate-transparency log. A zero
+	// transparency-log threshold applies to every root.
+	it.each([
+		{
+			name: 'the signing root lists no logs',
+			file: `${withLogs(otherRoot, { tlog: true, ctlog: true })}\n${fixture.trustedRoot}\n`,
+			bundle: fixture.bundle,
+			expected: verifiedSigner
+		},
+		{
+			name: 'the signing root lists a transparency log',
+			file: `${withLogs(fixture.trustedRoot, { tlog: true, ctlog: false })}\n${otherRoot}\n`,
+			bundle: fixture.bundle,
+			expected: verifiedSigner
+		},
+		{
+			name: 'the signing root lists a certificate-transparency log and the certificate has no signed certificate timestamp',
+			file: `${withLogs(fixture.trustedRoot, { tlog: false, ctlog: true })}\n${otherRoot}\n`,
+			bundle: fixture.bundle,
+			expected: {
+				name: 'TrustedRootsRejectedError',
+				failures: [
+					{ name: 'VerificationError', code: 'CERTIFICATE_ERROR' },
+					{ name: 'VerificationError', code: 'TIMESTAMP_ERROR' }
+				]
+			}
+		},
+		{
+			name: 'a tsa-only bundle and a root that lists both kinds of log',
+			file: withLogs(timestamped.trustedRoot, { tlog: true, ctlog: false }),
+			bundle: timestamped.bundle,
+			thresholds: { tlogThreshold: 0 },
+			expected: verifiedSigner
+		},
+		{
+			name: 'the signing root lists a certificate-transparency log and the certificate has a signed certificate timestamp',
+			file: `${withLogs(timestamped.trustedRoot, { tlog: true, ctlog: false })}\n${otherRoot}\n`,
+			bundle: timestamped.bundle,
+			expected: verifiedSigner
+		},
+		{
+			name: 'a signed certificate timestamp from a log that the root does not list',
+			file: timestampedByUnlistedLog.trustedRoot,
+			bundle: timestampedByUnlistedLog.bundle,
+			expected: { name: 'VerificationError', code: 'CERTIFICATE_ERROR' }
+		}
+	])(
+		'applies zero log thresholds per root for $name',
+		async ({ file, bundle, thresholds, expected }) => {
+			expect(
+				outcome(await verifyWith(file, { bundle, thresholds }))
+			).toStrictEqual(expected);
+		}
+	);
+
+	it('rejects a zero certificate-transparency threshold that no root in the file can use', async () => {
+		const { file, refusal } = await withTrustedRoot(
+			withLogs(fixture.trustedRoot, { tlog: false, ctlog: true }),
+			async (trustedRoot) => {
+				try {
+					await verifyBundle(fixture.bundle, policy, {
+						...options,
+						trustedRoot
+					});
+				} catch (error) {
+					return { file: trustedRoot, refusal: error };
+				}
+
+				return { file: trustedRoot, refusal: undefined };
+			}
+		);
+
+		expect(
+			refusal instanceof IneffectiveCtlogThresholdError
+				? { name: refusal.name, trustedRoot: refusal.trustedRoot }
+				: refusal
+		).toStrictEqual({
+			name: 'IneffectiveCtlogThresholdError',
+			trustedRoot: file
+		});
+	});
+
+	it('rejects a zero certificate-transparency threshold for the public-good root before fetching it', async () => {
+		let refusal: unknown;
+
+		try {
+			await verifyBundle(fixture.bundle, policy, options);
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect(
+			refusal instanceof IneffectiveCtlogThresholdError
+				? { name: refusal.name, trustedRoot: refusal.trustedRoot }
+				: refusal
+		).toStrictEqual({
+			name: 'IneffectiveCtlogThresholdError',
+			trustedRoot: undefined
+		});
+	});
+
 	it('rethrows a signer identity failure unwrapped', async () => {
 		const refusal = await verifyWith(
 			`${otherRoot}\n${fixture.trustedRoot}\n${thirdRoot}\n`,
-			{ identity: 'https://other.example/workflow', issuer: signerIssuer }
+			{
+				identityPolicy: {
+					identity: 'https://other.example/workflow',
+					issuer: signerIssuer
+				}
+			}
 		);
 
 		expect(verificationFailure(refusal)).toStrictEqual({

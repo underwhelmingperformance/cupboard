@@ -11,6 +11,7 @@ const commonName = '2.5.4.3';
 const basicConstraints = '2.5.29.19';
 const subjectAlternativeName = '2.5.29.17';
 const fulcioIssuerV2 = '1.3.6.1.4.1.57264.1.8';
+const signedCertificateTimestampList = '1.3.6.1.4.1.11129.2.4.2';
 const signedDataContentType = '1.2.840.113549.1.7.2';
 const tstInfoContentType = '1.2.840.113549.1.9.16.1.4';
 const contentTypeAttribute = '1.2.840.113549.1.9.3';
@@ -220,9 +221,20 @@ interface CertificateFields {
  * authority key identifier.
  */
 function certificate(fields: CertificateFields): Uint8Array {
+	const tbs = toBeSigned(fields);
+
+	return sequence(
+		tbs,
+		algorithmIdentifier(ecdsaWithSha256),
+		bitString(sign('sha256', tbs, fields.issuerKey))
+	);
+}
+
+function toBeSigned(fields: CertificateFields): Uint8Array {
 	const notBefore = new Date(signingTime.getTime() - 3_600_000);
 	const notAfter = new Date(signingTime.getTime() + 3_600_000);
-	const toBeSigned = sequence(
+
+	return sequence(
 		explicit(0, integer(2)),
 		integer(fields.serialNumber),
 		algorithmIdentifier(ecdsaWithSha256),
@@ -232,12 +244,77 @@ function certificate(fields: CertificateFields): Uint8Array {
 		subjectPublicKeyInfo(fields.subjectKey),
 		explicit(3, sequence(...fields.extensions))
 	);
+}
 
-	return sequence(
-		toBeSigned,
-		algorithmIdentifier(ecdsaWithSha256),
-		bitString(sign('sha256', toBeSigned, fields.issuerKey))
+function uint16(value: number): Uint8Array {
+	return Uint8Array.of(Math.floor(value / 0x1_00), value % 0x1_00);
+}
+
+function uint24(value: number): Uint8Array {
+	return Uint8Array.of(
+		Math.floor(value / 0x1_00_00),
+		Math.floor(value / 0x1_00) % 0x1_00,
+		value % 0x1_00
 	);
+}
+
+/**
+ * The certificate extension that lists one RFC 6962 signed certificate
+ * timestamp for a precertificate. `precertificate` is the certificate's
+ * to-be-signed structure without this extension. The verifier rebuilds this
+ * structure and checks the log's signature against it.
+ */
+function signedCertificateTimestampExtension(
+	precertificate: Uint8Array,
+	issuerKey: KeyObject,
+	log: KeyPair
+): Uint8Array {
+	const version = Uint8Array.of(0);
+	const logId = sha256Digest(subjectPublicKeyInfo(log.publicKey));
+	const timestamp = new Uint8Array(8);
+	new DataView(timestamp.buffer).setBigUint64(0, BigInt(signingTime.getTime()));
+	const signedData = concatenate([
+		version,
+		Uint8Array.of(0),
+		timestamp,
+		uint16(1),
+		sha256Digest(subjectPublicKeyInfo(issuerKey)),
+		uint24(precertificate.byteLength),
+		precertificate,
+		uint16(0)
+	]);
+	const signature = new Uint8Array(sign('sha256', signedData, log.privateKey));
+	const timestampEntry = concatenate([
+		version,
+		logId,
+		timestamp,
+		uint16(0),
+		Uint8Array.of(4, 3),
+		uint16(signature.byteLength),
+		signature
+	]);
+	const list = concatenate([
+		uint16(timestampEntry.byteLength + 2),
+		uint16(timestampEntry.byteLength),
+		timestampEntry
+	]);
+
+	return extension(signedCertificateTimestampList, false, octetString(list));
+}
+
+function transparencyLogInstance(baseUrl: string, log: KeyPair): unknown {
+	const spki = subjectPublicKeyInfo(log.publicKey);
+
+	return {
+		baseUrl,
+		hashAlgorithm: 'SHA2_256',
+		publicKey: {
+			rawBytes: base64(spki),
+			keyDetails: 'PKIX_ECDSA_P256_SHA_256',
+			validFor: { start: '2000-01-01T00:00:00Z' }
+		},
+		logId: { keyId: base64(sha256Digest(spki)) }
+	};
 }
 
 function certificateAuthorityExtension(): Uint8Array {
@@ -352,6 +429,13 @@ export interface BundleFixtureOptions {
 	readonly subjectDigest: string;
 	readonly predicateType: string;
 	readonly predicate?: unknown;
+	/**
+	 * Adds a signed certificate timestamp to the signing certificate, as the
+	 * public-good Fulcio does. With `listed`, the trusted root lists the
+	 * certificate-transparency log that signed the timestamp. With `unlisted`,
+	 * it does not.
+	 */
+	readonly signedCertificateTimestamp?: 'listed' | 'unlisted';
 }
 
 /**
@@ -395,7 +479,7 @@ export function githubInstanceBundle(
 	// The signer identity travels as a URI in the subject alternative name,
 	// which is where the verifier reads it from.
 	const generalNames = sequence(tagged(0x86, ascii(signerIdentity)));
-	const signingCertificate = certificate({
+	const signingCertificateFields = {
 		subject: 'cupboard test workload',
 		issuer: fulcioRootName,
 		serialNumber: 0x2a,
@@ -404,6 +488,22 @@ export function githubInstanceBundle(
 		extensions: [
 			extension(subjectAlternativeName, true, generalNames),
 			extension(fulcioIssuerV2, false, utf8String(signerIssuer))
+		]
+	};
+	const certificateTransparencyLog = generateKeyPair();
+	const signingCertificate = certificate({
+		...signingCertificateFields,
+		extensions: [
+			...signingCertificateFields.extensions,
+			...(options.signedCertificateTimestamp === undefined
+				? []
+				: [
+						signedCertificateTimestampExtension(
+							toBeSigned(signingCertificateFields),
+							fulcioRoot.publicKey,
+							certificateTransparencyLog
+						)
+					])
 		]
 	});
 	const timestampLeaf = certificate({
@@ -443,7 +543,15 @@ export function githubInstanceBundle(
 		trustedRoot: JSON.stringify({
 			mediaType: 'application/vnd.dev.sigstore.trustedroot+json;version=0.1',
 			tlogs: [],
-			ctlogs: [],
+			ctlogs:
+				options.signedCertificateTimestamp === 'listed'
+					? [
+							transparencyLogInstance(
+								'https://ctfe.example',
+								certificateTransparencyLog
+							)
+						]
+					: [],
 			certificateAuthorities: [
 				{
 					subject: { organization: 'cupboard', commonName: fulcioRootName },
@@ -475,4 +583,18 @@ export function githubInstanceBundle(
 			]
 		})
 	};
+}
+
+/**
+ * A bundle in the shape of a `tsa-only` bundle from the public-good instance:
+ * like {@link githubInstanceBundle}, but the certificate contains a signed
+ * certificate timestamp, as the public-good Fulcio issues it. With `listed`,
+ * the trusted root lists the certificate-transparency log that signed the
+ * timestamp. With `unlisted`, it does not.
+ */
+export function publicGoodShapedBundle(
+	options: BundleFixtureOptions,
+	log: 'listed' | 'unlisted'
+): BundleFixture {
+	return githubInstanceBundle({ ...options, signedCertificateTimestamp: log });
 }

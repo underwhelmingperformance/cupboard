@@ -194,6 +194,23 @@ function trustedRootFormatProblem(reason: TrustedRootFormatReason): string {
 }
 
 /**
+ * The caller set `--ctlog-threshold 0`, but every trusted root lists a
+ * certificate-transparency log. A zero applies only to a root that lists no
+ * such log, so it would have no effect. `trustedRoot` is the trusted-root file,
+ * or undefined for the public-good Sigstore root.
+ */
+export class IneffectiveCtlogThresholdError extends UsageError {
+	constructor(public readonly trustedRoot: string | undefined) {
+		super(
+			trustedRoot === undefined
+				? '--ctlog-threshold 0 has no effect without --trusted-root: the public-good Sigstore root lists a certificate-transparency log, so it still requires a signed certificate timestamp'
+				: `--ctlog-threshold 0 has no effect: every trusted root in ${trustedRoot} lists a certificate-transparency log, so each one still requires a signed certificate timestamp`
+		);
+		this.name = 'IneffectiveCtlogThresholdError';
+	}
+}
+
+/**
  * The bundle did not verify against any of several trusted roots. `failures`
  * lists the failure for each root in file order, and the first failure is the
  * error's `cause`.
@@ -299,10 +316,25 @@ export async function verifyBundle(
 	policy: VerifiedIdentityPolicy,
 	options: BundleVerifyOptions
 ): Promise<VerifiedBundle> {
+	// The public-good root always lists certificate-transparency logs, so this
+	// combination is rejected before the root is fetched from TUF.
+	if (options.ctlogThreshold === 0 && options.trustedRoot === undefined) {
+		throw new IneffectiveCtlogThresholdError(undefined);
+	}
+
 	const parsed = parseBundle(bytes);
 	const signedEntity = toSignedEntity(parsed.bundle);
+	const roots = await trustedRoots(options);
+
+	if (
+		options.ctlogThreshold === 0 &&
+		roots.every(({ root }) => root.ctlogs.length > 0)
+	) {
+		throw new IneffectiveCtlogThresholdError(options.trustedRoot);
+	}
+
 	const signer = verifyAgainstAnyRoot(
-		await trustedRoots(options),
+		roots,
 		signedEntity,
 		verificationPolicy(policy),
 		verifierOptions(options)
@@ -482,10 +514,10 @@ function verifyAgainstRoot(
 	try {
 		return {
 			ok: true,
-			signer: new Verifier(loaded.material, options).verify(
-				signedEntity,
-				policy
-			)
+			signer: new Verifier(
+				loaded.material,
+				rootVerifierOptions(loaded.root, options)
+			).verify(signedEntity, policy)
 		};
 	} catch (error) {
 		// The verifier checks the policy only after the bundle has verified
@@ -498,6 +530,42 @@ function verifyAgainstRoot(
 
 		return { ok: false, failure: error };
 	}
+}
+
+/**
+ * The Sigstore verifier's own default for each log threshold, which applies
+ * when the caller sets none.
+ */
+const defaultLogThreshold = 1;
+
+/**
+ * A zero certificate-transparency threshold applies only to a root that lists
+ * no certificate-transparency log. For a root that lists one, the threshold is
+ * at least 1, so a bundle that verifies against the public-good root still
+ * needs a signed certificate timestamp. `gh attestation trusted-root` prints
+ * the public-good root next to GitHub's root, which lists no such log, so a
+ * zero that applied to every root would accept a public-good certificate
+ * without a signed certificate timestamp.
+ *
+ * A zero transparency-log threshold applies to every root. A `tsa-only` bundle
+ * has no Rekor entry and verifies against the public-good root, which lists
+ * transparency logs. If this function raised the transparency-log threshold for
+ * such a root, as it does the certificate-transparency threshold, no `tsa-only`
+ * bundle would verify.
+ */
+function rootVerifierOptions(
+	root: TrustedRoot,
+	options: VerifierOptions
+): VerifierOptions & { readonly ctlogThreshold: number } {
+	const ctlogThreshold = options.ctlogThreshold ?? defaultLogThreshold;
+
+	return {
+		...options,
+		ctlogThreshold:
+			root.ctlogs.length === 0
+				? ctlogThreshold
+				: Math.max(defaultLogThreshold, ctlogThreshold)
+	};
 }
 
 type NonEmptyList<T> = readonly [T, ...T[]];

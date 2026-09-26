@@ -12,6 +12,12 @@ import {
 	registerAttestCommands
 } from './attest.ts';
 
+interface VerifyThresholds {
+	readonly tlogThreshold?: number;
+	readonly ctlogThreshold?: number;
+	readonly timestampThreshold?: number;
+}
+
 function silentProgram(): Command {
 	const program = new Command();
 	program.exitOverride();
@@ -40,6 +46,17 @@ function thrownBy(run: () => unknown): unknown {
 	return thrown;
 }
 
+function thresholdFailure(error: unknown): unknown {
+	return error instanceof InvalidVerifierThresholdError
+		? {
+				name: error.name,
+				option: error.option,
+				value: error.value,
+				minimum: error.minimum
+			}
+		: error;
+}
+
 describe('parseVerifierThreshold', () => {
 	it.each([
 		{ source: '1', expected: 1 },
@@ -48,41 +65,26 @@ describe('parseVerifierThreshold', () => {
 			expected: Number.MAX_SAFE_INTEGER
 		}
 	])('accepts $source', ({ source, expected }) => {
-		expect(parseVerifierThreshold('--tlog-threshold')(source)).toBe(expected);
+		expect(parseVerifierThreshold('--timestamp-threshold', 1)(source)).toBe(
+			expected
+		);
 	});
 
-	it.each(['', '0', '-1', '+1', '1.5', '1log', 'Infinity'])(
+	it.each(['', '0', '-1', '+1', '1.5', '1log', 'Infinity', '9007199254740992'])(
 		'rejects %s',
 		(source) => {
 			const error = thrownBy(() =>
-				parseVerifierThreshold('--tlog-threshold')(source)
+				parseVerifierThreshold('--timestamp-threshold', 1)(source)
 			);
 
-			expect(error).toBeInstanceOf(InvalidVerifierThresholdError);
-
-			if (error instanceof InvalidVerifierThresholdError) {
-				expect({ option: error.option, value: error.value }).toStrictEqual({
-					option: '--tlog-threshold',
-					value: source
-				});
-			}
-		}
-	);
-
-	it('rejects unsafe integers', () => {
-		const error = thrownBy(() =>
-			parseVerifierThreshold('--tlog-threshold')('9007199254740992')
-		);
-
-		expect(error).toBeInstanceOf(InvalidVerifierThresholdError);
-
-		if (error instanceof InvalidVerifierThresholdError) {
-			expect({ option: error.option, value: error.value }).toStrictEqual({
-				option: '--tlog-threshold',
-				value: '9007199254740992'
+			expect(thresholdFailure(error)).toStrictEqual({
+				name: 'InvalidVerifierThresholdError',
+				option: '--timestamp-threshold',
+				value: source,
+				minimum: 1
 			});
 		}
-	});
+	);
 });
 
 describe('attest attach command', () => {
@@ -168,4 +170,84 @@ describe('attest verify command', () => {
 			});
 		}
 	});
+});
+
+describe('attest verify thresholds', () => {
+	class StoppedBeforeAction extends Error {}
+
+	async function parseThreshold(
+		option: string,
+		value: string
+	): Promise<unknown> {
+		const program = silentProgram();
+		let thresholds: unknown;
+
+		program.hook('preAction', (_program, action) => {
+			const { tlogThreshold, ctlogThreshold, timestampThreshold } =
+				action.opts<VerifyThresholds>();
+			thresholds = { tlogThreshold, ctlogThreshold, timestampThreshold };
+
+			throw new StoppedBeforeAction();
+		});
+
+		try {
+			await program.parseAsync(
+				[
+					'attest',
+					'verify',
+					'bundle.sigstore.json',
+					'--nar-hash',
+					'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347',
+					'--predicate-type',
+					'https://slsa.dev/provenance/v1',
+					option,
+					value
+				],
+				{ from: 'user' }
+			);
+		} catch (error) {
+			if (error instanceof InvalidVerifierThresholdError) {
+				return thresholdFailure(error);
+			}
+
+			if (!(error instanceof StoppedBeforeAction)) {
+				throw error;
+			}
+		}
+
+		return thresholds;
+	}
+
+	it.each([
+		{
+			option: '--tlog-threshold',
+			expected: {
+				tlogThreshold: 0,
+				ctlogThreshold: undefined,
+				timestampThreshold: undefined
+			}
+		},
+		{
+			option: '--ctlog-threshold',
+			expected: {
+				tlogThreshold: undefined,
+				ctlogThreshold: 0,
+				timestampThreshold: undefined
+			}
+		},
+		{
+			option: '--timestamp-threshold',
+			expected: {
+				name: 'InvalidVerifierThresholdError',
+				option: '--timestamp-threshold',
+				value: '0',
+				minimum: 1
+			}
+		}
+	])(
+		'checks 0 against the minimum for $option',
+		async ({ option, expected }) => {
+			expect(await parseThreshold(option, '0')).toStrictEqual(expected);
+		}
+	);
 });
