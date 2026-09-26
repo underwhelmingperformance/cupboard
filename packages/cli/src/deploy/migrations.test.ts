@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 
-import { contractionMigrations } from '@cupboard/protocol/deployment';
 import { describe, expect, it } from 'vitest';
 
 import type { D1QueryApi } from './d1-query.ts';
@@ -11,7 +10,6 @@ import {
 	D1MigrationDigestError,
 	parseD1Migrations,
 	readAppliedD1Migrations,
-	unclassifiedD1Migrations,
 	verifyD1MigrationDigests
 } from './migrations.ts';
 
@@ -334,40 +332,5 @@ describe('verifyD1MigrationDigests', () => {
 		expect(caught).toStrictEqual(
 			new D1MigrationDigestError('0000_a.sql', changed, digestOf(sql))
 		);
-	});
-});
-
-function migrationsNamed(names: readonly string[]): D1Migration[] {
-	return parseD1Migrations(names.map((name) => ({ name, sql: 'SELECT 1;' })));
-}
-
-describe('unclassifiedD1Migrations', () => {
-	it('reports an unclassified migration after the first contraction', () => {
-		expect(
-			unclassifiedD1Migrations(
-				migrationsNamed([
-					'0027_cache_identity_compatible_contract.sql',
-					'0028_cache_identity_contract.sql',
-					'0029_cache_grant_contract.sql',
-					'0030_cache_credential_lifecycle.sql',
-					'0031_something_new.sql'
-				])
-			)
-		).toStrictEqual(['0031_something_new.sql']);
-	});
-
-	it('accepts the release its own journal ends with', () => {
-		const journal = migrationsNamed(contractionMigrations);
-
-		expect(unclassifiedD1Migrations(journal)).toStrictEqual([]);
-	});
-
-	it('accepts preparation migrations before the contractions', () => {
-		const journal = migrationsNamed([
-			'0001_early.sql',
-			...contractionMigrations
-		]);
-
-		expect(unclassifiedD1Migrations(journal)).toStrictEqual([]);
 	});
 });

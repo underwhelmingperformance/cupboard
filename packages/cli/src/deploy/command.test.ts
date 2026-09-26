@@ -12,6 +12,7 @@ import type { TokenProvider } from '../client/credentials.ts';
 import {
 	CupboardHttpError,
 	OwnerLoginRequiredError,
+	TransitionIncompleteError,
 	UnreachableHostError
 } from '../errors.ts';
 
@@ -75,6 +76,7 @@ import {
 } from './r2-credentials.ts';
 import { TokenManagementNotPermittedError } from './r2-token.ts';
 import { claimSecretSchema } from './secrets.ts';
+import type { DeploymentObservation } from './transition.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
 
 function principal(
@@ -498,6 +500,7 @@ describe('reviewPlan', () => {
 			readonly canReplaceR2Credentials?: boolean;
 			readonly startingPlan?: StartingPlan;
 			readonly requestedDomain?: string;
+			readonly observation?: DeploymentObservation;
 		}
 	): { world: PlanReviewWorld; rendered: PlanState[] } {
 		const rendered: PlanState[] = [];
@@ -508,7 +511,7 @@ describe('reviewPlan', () => {
 				ui,
 				render: (state) => {
 					rendered.push(state);
-					return Promise.resolve();
+					return Promise.resolve(options?.observation ?? { kind: 'offline' });
 				},
 				accounts: () => Promise.resolve(accounts),
 				skipReview: options?.skipReview ?? false,
@@ -532,6 +535,98 @@ describe('reviewPlan', () => {
 			agreed: await reviewPlan(initial, w),
 			rendered
 		}).toStrictEqual({ agreed: initial, rendered: [initial] });
+	});
+
+	// A deployment where `deployment-transitions` could expand only after the
+	// upload, because `cache-identity` is incomplete.
+	const blockedObservation: DeploymentObservation = {
+		kind: 'existing',
+		transitions: new Map([['cache-identity', 'expanded']]),
+		readiness: { pending: 0, stragglers: [] },
+		blocked: {
+			transition: {
+				id: 'deployment-transitions',
+				expand: ['0031_deployment_transitions.sql'],
+				contract: []
+			},
+			waitsFor: {
+				id: 'cache-identity',
+				expand: [],
+				contract: ['0028_contract.sql'],
+				completedBy: 'v0.0.34'
+			}
+		},
+		unrecognised: []
+	};
+	const blockedError = new TransitionIncompleteError(
+		'cache-identity',
+		'deployment-transitions',
+		'v0.0.34'
+	);
+
+	it('throws the blocking error without prompting when the review is skipped', async () => {
+		const menus: string[] = [];
+		const ui = scriptedUi({});
+		const { world: w } = world(
+			{
+				...ui,
+				menu: (message, entries) => {
+					menus.push(message);
+					return ui.menu(message, entries);
+				}
+			},
+			{ skipReview: true, observation: blockedObservation }
+		);
+
+		let caught: unknown;
+
+		try {
+			await reviewPlan(initial, w);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({ caught, menus }).toStrictEqual({
+			caught: blockedError,
+			menus: []
+		});
+	});
+
+	// No R2 key or other resource may be created for a blocked plan, so the
+	// menu leaves out Deploy until an edit unblocks the plan.
+	it('offers only edits and Cancel for a blocked plan, and throws the blocking error on Cancel', async () => {
+		const offered: (readonly string[])[] = [];
+		const ui = scriptedUi({ menuChoices: ['cancel'] });
+		const { world: w } = world(
+			{
+				...ui,
+				menu: (message, entries) => {
+					offered.push([message, ...entries.map((entry) => entry.value)]);
+					return ui.menu(message, entries);
+				}
+			},
+			{ observation: blockedObservation }
+		);
+
+		let caught: unknown;
+
+		try {
+			await reviewPlan(initial, w);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({ caught, offered }).toStrictEqual({
+			caught: blockedError,
+			offered: [
+				[
+					'The plan above is blocked. Change it or cancel.',
+					...planMenuEntries(initial)
+						.map((entry) => entry.value)
+						.filter((value) => value !== 'deploy')
+				]
+			]
+		});
 	});
 
 	it('deploys with the initial state when chosen straight away', async () => {
@@ -1491,7 +1586,7 @@ describe('establishAuthority', () => {
 						},
 						{
 							ui,
-							render: () => Promise.resolve(),
+							render: () => Promise.resolve({ kind: 'offline' }),
 							accounts: () => Promise.resolve(accounts),
 							skipReview: false,
 							startingPlanFor: () =>

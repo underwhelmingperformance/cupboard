@@ -48,7 +48,7 @@ import {
 	provisionFixtureTenant,
 	pushPathToTenant,
 	readFetch,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	sigstoreBundleBytes,
 	testPushId,
@@ -242,7 +242,7 @@ async function attachBundle(
 describe('private cache access', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 	});
 
 	it('requires a credential for every content route and marks every response no-store', async () => {
@@ -742,7 +742,7 @@ describe('cache access during deployment', () => {
 		const token = await initialiseViaWorker();
 		const freshName = cacheNameSchema.parse('deployment-gate');
 		await putNamedCache(token, freshName, 'public');
-		await recordDeploymentPhase('native-reads');
+		await recordTransition('cache-identity', 'expanded');
 		const response = await authorisedWorkerFetch(
 			`/caches/${freshName}`,
 			token,

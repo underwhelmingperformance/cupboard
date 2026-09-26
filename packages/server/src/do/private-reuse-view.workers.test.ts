@@ -33,7 +33,7 @@ import {
 	namedCache,
 	provisionFixtureTenant,
 	readFetch,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -509,7 +509,7 @@ describe('private reuse-view access', () => {
 	});
 
 	it('selects a private default cache through the same scope model', async () => {
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 		const defaultCache: CacheScope = { kind: 'default' };
 		const storePathHash = await commitTo(defaultCache, 'private');
 		await setView([{ kind: 'default' }], privateViewName, 'private');

@@ -13,7 +13,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import {
 	offboardTenant,
 	provisionNamedTenant,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	scheduledController,
 	suspendTenant,
@@ -344,7 +344,7 @@ describe('scheduled tenant pass failure records', () => {
 	});
 
 	it('brings every tenant to the current local step from the queue', async () => {
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
 

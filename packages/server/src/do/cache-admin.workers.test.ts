@@ -56,7 +56,7 @@ import {
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	resolvedCache,
 	testServerFor,
@@ -417,7 +417,7 @@ describe('cache registry admin', () => {
 
 	it('checks the current incarnation after waiting to update cache access', async () => {
 		await useTestServer('cache-admin-access-incarnation');
-		await recordDeploymentPhase('native-reads');
+		await recordTransition('cache-identity', 'expanded');
 		const init = await bootstrap();
 		await putCache(init.token, 'builds', 30);
 
@@ -1402,7 +1402,7 @@ describe('cache registry admin', () => {
 
 	it('bumps the read revision when a cache changes access', async () => {
 		await useTestServer('cache-admin-access-revision');
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 
 		const init = await bootstrap();
 

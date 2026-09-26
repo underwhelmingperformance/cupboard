@@ -3,11 +3,13 @@ import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
 	expansionLocalStep,
+	type LocalStep,
 	type LocalStepStatus,
-	type ParsedDeploymentPhaseResponse
+	type ParsedDeploymentTransitionsResponse,
+	requiredLocalStepFrom
 } from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import type { Reporter, ResultPayload, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import { LocalStepUnreachedError } from '../errors.ts';
@@ -19,23 +21,41 @@ import {
 } from './deployment.ts';
 
 const tenant = tenantIdSchema.parse('acme');
-const updatedAt = isoTimestampSchema.parse('2026-01-01T00:20:30.000Z');
+const recorded = isoTimestampSchema.parse('2026-01-01T00:20:30.000Z');
 
-const unrecorded: ParsedDeploymentPhaseResponse = {};
-const nativeReads: ParsedDeploymentPhaseResponse = {
-	phase: {
-		name: 'native-reads',
-		requiredLocalStep: expansionLocalStep,
-		updatedAt
-	}
+const expanded: ParsedDeploymentTransitionsResponse = {
+	transitions: [
+		{ id: 'cache-identity', state: 'expanded', updatedAt: recorded },
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+	],
+	unrecognised: []
 };
-const contracted: ParsedDeploymentPhaseResponse = {
-	phase: { name: 'contracted', requiredLocalStep: currentLocalStep, updatedAt }
+const complete: ParsedDeploymentTransitionsResponse = {
+	transitions: [
+		{ id: 'cache-identity', state: 'complete', updatedAt: recorded },
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+	],
+	unrecognised: []
 };
 
-function statusFor(pending: number): LocalStepStatus {
+// The required local step that the server derives from the recorded states.
+function requiredStepOf(
+	response: ParsedDeploymentTransitionsResponse
+): LocalStep {
+	return requiredLocalStepFrom(
+		new Map(
+			response.transitions.map((transition) => [
+				transition.id,
+				transition.state
+			])
+		)
+	);
+}
+
+function statusFor(required: number, pending: number): LocalStepStatus {
 	return {
 		current: currentLocalStep,
+		required,
 		ready: 1,
 		pending,
 		stragglers: pending > 0 ? [tenant] : []
@@ -43,28 +63,36 @@ function statusFor(pending: number): LocalStepStatus {
 }
 
 function client(
-	phase: ParsedDeploymentPhaseResponse,
+	transitions: ParsedDeploymentTransitionsResponse,
 	calls: unknown[],
 	pending: { count: number }
 ): DeploymentClient {
 	return {
-		phase: () => {
-			calls.push('phase');
-			return Promise.resolve(phase);
+		transitions: () => {
+			calls.push('transitions');
+			return Promise.resolve(transitions);
 		},
 		localStep: {
 			status: (input) => {
 				calls.push(input);
-				return Promise.resolve(statusFor(pending.count));
+				return Promise.resolve(
+					statusFor(
+						input.requiredStep ?? requiredStepOf(transitions),
+						pending.count
+					)
+				);
 			},
 			wake: (input) => {
 				calls.push(input);
 				pending.count = 0;
 				return Promise.resolve({
 					current: currentLocalStep,
+					required: requiredStepOf(transitions),
 					woken: 1,
 					failed: 0,
-					outcomes: [{ tenant, kind: 'recorded', step: currentLocalStep }]
+					outcomes: [
+						{ tenant, kind: 'recorded', step: requiredStepOf(transitions) }
+					]
 				});
 			}
 		}
@@ -88,55 +116,177 @@ function payloadReporter(
 	};
 }
 
-const phases = [
-	{ name: 'no phase', phase: unrecorded, label: 'not recorded', step: 4 },
-	{ name: 'native-reads', phase: nativeReads, label: 'native-reads', step: 4 },
-	{ name: 'contracted', phase: contracted, label: 'contracted', step: 5 }
-] as const;
+const since = 'since 2026-01-01 00:20 UTC';
+
+// Rows that this build does not define, and what each command prints for them.
+const unrecognisedCases = [
+	{
+		name: 'a later-release row in state expanded',
+		row: { id: 'later-transition', state: 'expanded' },
+		value: `expanded ${since}; this build does not define this transition, and no contract migration of it has started, so cupboard deploy leaves it unchanged`,
+		isRefused: false
+	},
+	{
+		name: 'a later-release row in state complete, with no contract migration started',
+		row: { id: 'later-transition', state: 'complete' },
+		value: `complete ${since}; this build does not define this transition, and no contract migration of it has started, so cupboard deploy leaves it unchanged`,
+		isRefused: false
+	},
+	{
+		name: 'a later-release row in state complete, with its contract migrations started',
+		row: {
+			id: 'later-transition',
+			state: 'complete',
+			contractedAt: recorded
+		},
+		value: `complete ${since}; this build does not define this transition, and cupboard deploy stops because its contract migrations have started and may have removed schema that this build needs`,
+		isRefused: true
+	},
+	{
+		name: 'a later-release row in state expanded, with its contract migrations started',
+		row: {
+			id: 'later-transition',
+			state: 'expanded',
+			contractedAt: recorded
+		},
+		value: `expanded ${since}; this build does not define this transition, and cupboard deploy stops because its contract migrations have started and may have removed schema that this build needs`,
+		isRefused: true
+	},
+	{
+		name: 'an unknown state of cache-identity',
+		row: { id: 'cache-identity', state: 'later-state' },
+		value: `later-state ${since}; this build defines the transition but not state 'later-state', so cupboard deploy stops; deploy a build that defines that state`,
+		isRefused: true
+	},
+	{
+		name: 'a later-release row in an unknown state',
+		row: { id: 'later-transition', state: 'later-state' },
+		value: `later-state ${since}; this build defines neither the transition nor the state, so cupboard deploy stops; deploy a build that defines both`,
+		isRefused: true
+	}
+];
 
 describe('runDeploymentStatus', () => {
-	it.each(phases)(
-		'reports the readiness at the step that $name requires',
-		async ({ phase, label, step }) => {
-			const payloads: ResultPayload[] = [];
-			const calls: unknown[] = [];
+	it('reports each transition and the readiness at the required local step', async () => {
+		const payloads: ResultPayload[] = [];
+		const calls: unknown[] = [];
 
-			await runDeploymentStatus(
-				payloadReporter(payloads),
-				client(phase, calls, { count: 1 })
-			);
+		await runDeploymentStatus(
+			payloadReporter(payloads),
+			client(expanded, calls, { count: 1 })
+		);
 
-			expect({ payloads, calls }).toStrictEqual({
-				payloads: [
+		expect({ payloads, calls }).toStrictEqual({
+			payloads: [
+				{
+					kind: 'deployment-status',
+					data: {
+						transitions: expanded.transitions,
+						unrecognised: [],
+						...statusFor(expansionLocalStep, 1)
+					},
+					rows: [
+						{
+							label: 'Transition cache-identity',
+							value: `expanded ${since}`
+						},
+						{
+							label: 'Transition deployment-transitions',
+							value: `complete ${since}`
+						},
+						{ label: 'Required local step', value: '4' },
+						{ label: 'Ready tenants', value: '1' },
+						{ label: 'Pending tenants', value: '1' },
+						{ label: 'Pending sample', value: 'acme' }
+					]
+				}
+			],
+			calls: ['transitions', {}]
+		});
+	});
+
+	it.each(unrecognisedCases)('lists $name', async ({ row, value }) => {
+		const payloads: ResultPayload[] = [];
+		const unrecognised = [{ ...row, updatedAt: recorded }];
+
+		await runDeploymentStatus(
+			payloadReporter(payloads),
+			client({ ...complete, unrecognised }, [], { count: 0 })
+		);
+
+		expect(payloads).toStrictEqual([
+			{
+				kind: 'deployment-status',
+				data: {
+					transitions: complete.transitions,
+					unrecognised,
+					...statusFor(currentLocalStep, 0)
+				},
+				rows: [
 					{
-						kind: 'deployment-status',
-						data: { ...phase, ...statusFor(1) },
-						rows: [
-							{ label: 'Phase', value: label },
-							{ label: 'Required local step', value: String(step) },
-							{ label: 'Ready tenants', value: '1' },
-							{ label: 'Pending tenants', value: '1' },
-							{ label: 'Pending sample', value: 'acme' }
-						]
-					}
-				],
-				calls: ['phase', { requiredStep: step }]
-			});
-		}
-	);
+						label: 'Transition cache-identity',
+						value: `complete ${since}`
+					},
+					{
+						label: 'Transition deployment-transitions',
+						value: `complete ${since}`
+					},
+					{ label: `Transition ${row.id}`, value },
+					{ label: 'Required local step', value: '5' },
+					{ label: 'Ready tenants', value: '1' },
+					{ label: 'Pending tenants', value: '0' },
+					{ label: 'Pending sample', value: '(none)' }
+				]
+			}
+		]);
+	});
+
+	it("reports 'none recorded' when no transition has been recorded", async () => {
+		const results: ResultRow[][] = [];
+
+		await runDeploymentStatus(
+			reporter(results),
+			client({ transitions: [], unrecognised: [] }, [], {
+				count: 0
+			})
+		);
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Transitions', value: 'none recorded' },
+				{ label: 'Required local step', value: '4' },
+				{ label: 'Ready tenants', value: '1' },
+				{ label: 'Pending tenants', value: '0' },
+				{ label: 'Pending sample', value: '(none)' }
+			]
+		]);
+	});
 });
 
 describe('runDeploymentResume', () => {
-	it.each(phases)(
-		'wakes tenants to the step that $name requires',
-		async ({ phase, step }) => {
+	it.each([
+		{
+			name: 'every transition is complete',
+			transitions: complete,
+			step: currentLocalStep,
+			info: 'Every active or suspended tenant has reached local step 5, and every schema transition is complete.'
+		},
+		{
+			name: 'cache-identity is still expanded',
+			transitions: expanded,
+			step: expansionLocalStep,
+			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity.'
+		}
+	])(
+		'wakes tenants to the required local step and reports the next action when $name',
+		async ({ transitions, step, info }) => {
 			const payloads: ResultPayload[] = [];
 			const infos: string[] = [];
 			const calls: unknown[] = [];
 
 			await runDeploymentResume(
 				payloadReporter(payloads, infos),
-				client(phase, calls, { count: 1 }),
+				client(transitions, calls, { count: 1 }),
 				{ limit: 20, maxPasses: 3 }
 			);
 
@@ -144,34 +294,75 @@ describe('runDeploymentResume', () => {
 				payloads: [
 					{
 						kind: 'deployment-readiness',
-						data: statusFor(0),
+						data: statusFor(step, 0),
 						rows: [
 							{ label: 'Ready tenants', value: '1' },
-							{ label: 'Local step', value: '5' }
+							{ label: 'Required local step', value: String(step) }
+						]
+					}
+				],
+				infos: [info],
+				calls: [{}, { limit: 20 }, {}, 'transitions']
+			});
+		}
+	);
+
+	it.each(unrecognisedCases)(
+		'lists $name and leaves it out of the transitions to complete',
+		async ({ row, value, isRefused }) => {
+			const payloads: ResultPayload[] = [];
+			const infos: string[] = [];
+			const transitions = {
+				transitions: complete.transitions.filter(
+					(transition) => transition.id !== row.id
+				),
+				unrecognised: [{ ...row, updatedAt: recorded }]
+			};
+			const step = requiredStepOf(transitions);
+
+			await runDeploymentResume(
+				payloadReporter(payloads, infos),
+				client(transitions, [], { count: 0 }),
+				{ limit: 20, maxPasses: 3 }
+			);
+
+			expect({ payloads, infos }).toStrictEqual({
+				payloads: [
+					{
+						kind: 'deployment-readiness',
+						data: statusFor(step, 0),
+						rows: [
+							{ label: 'Ready tenants', value: '1' },
+							{ label: 'Required local step', value: String(step) },
+							{ label: `Transition ${row.id}`, value }
 						]
 					}
 				],
 				infos: [
-					'Tenant work is complete for this phase. Re-run cupboard deploy to finish the deployment.'
-				],
-				calls: [
-					'phase',
-					{ requiredStep: step },
-					{ limit: 20 },
-					{ requiredStep: step }
+					isRefused
+						? `Every active or suspended tenant has reached local step ${String(step)}. This build's cupboard deploy stops on ${row.id}, as listed above.`
+						: `Every active or suspended tenant has reached local step ${String(step)}, and every schema transition is complete.`
 				]
 			});
 		}
 	);
 
 	it('fails when tenants remain below the step after the last pass', async () => {
+		const pending = { count: 1 };
 		const failing: DeploymentClient = {
-			...client(unrecorded, [], { count: 1 }),
+			...client(expanded, [], pending),
 			localStep: {
-				status: () => Promise.resolve(statusFor(1)),
+				status: (input) =>
+					Promise.resolve(
+						statusFor(
+							input.requiredStep ?? requiredStepOf(expanded),
+							pending.count
+						)
+					),
 				wake: () =>
 					Promise.resolve({
 						current: currentLocalStep,
+						required: expansionLocalStep,
 						woken: 0,
 						failed: 1,
 						outcomes: [{ tenant, kind: 'failed' }]
