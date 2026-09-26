@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { Nix } from '@cupboard/nix';
+import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import {
 	type CacheScope,
 	type RootName,
@@ -257,8 +258,8 @@ export function parsePathFile(contents: string): string[] {
  * `nix path-info` does. A store path is returned unchanged. Anything else is
  * resolved through the filesystem, so both a `result` symlink and a file inside
  * a store path resolve to the store path that contains them. A location that
- * still does not parse as a store path is returned as resolved, and
- * {@link PublicationCollection} refuses it with a typed error.
+ * still does not parse as a store path is returned as resolved. Each caller
+ * rejects it with its own error.
  */
 export function resolvePushPath(
 	path: string,
@@ -278,8 +279,19 @@ export function resolvePushPath(
 	return containingStorePath(resolved) ?? resolved;
 }
 
-function resolvePushPaths(values: readonly string[]): string[] {
-	return values.map((value) => resolvePushPath(value));
+function resolvePushStorePath(value: string): StorePathString {
+	const resolved = resolvePushPath(value);
+	const parsed = storePathSchema.safeParse(resolved);
+
+	if (!parsed.success) {
+		throw new InvalidStorePathError(resolved);
+	}
+
+	return parsed.data;
+}
+
+function resolvePushStorePaths(values: readonly string[]): StorePathString[] {
+	return values.map((value) => resolvePushStorePath(value));
 }
 
 // A location inside a store path belongs to the shortest prefix that parses as
@@ -509,18 +521,27 @@ export function registerPushCommand(
 
 			// A path argument or a line in a path file may refer to a store path
 			// through a symlink, so each is resolved through the filesystem first.
-			// `PublicationCollection` accepts only store paths, so anything that
-			// does not resolve to one fails here, before any token is requested.
+			// Anything that does not resolve to a store path is rejected before the
+			// command requests a token provider. With `--github-oidc`, requesting a
+			// token provider exchanges an OIDC token with the tenant. If the exchange
+			// fails, the user sees an authentication error instead of an error about
+			// the invalid path. One case is checked later: a first argument that
+			// could be a cache name. Only a cache lookup, which needs a token
+			// provider, determines whether the argument is a cache name or a path.
 			const intermediatePaths =
 				options.intermediatePathsFile === undefined
 					? undefined
-					: parsePathFile(
-							await readFile(options.intermediatePathsFile, 'utf8')
+					: resolvePushStorePaths(
+							parsePathFile(
+								await readFile(options.intermediatePathsFile, 'utf8')
+							)
 						);
 			const referencePaths =
 				options.referencePathsFile === undefined
 					? undefined
-					: parsePathFile(await readFile(options.referencePathsFile, 'utf8'));
+					: resolvePushStorePaths(
+							parsePathFile(await readFile(options.referencePathsFile, 'utf8'))
+						);
 			const canAcceptEmptyPayload =
 				(options.root !== undefined && options.dryRun !== true) ||
 				intermediatePaths !== undefined ||
@@ -528,6 +549,7 @@ export function registerPushCommand(
 			const resolved = await resolveAuthorisedCachePositionals(url, paths, {
 				minimumPayload: canAcceptEmptyPayload ? 0 : 1,
 				payloadDescription: 'a store path',
+				parsePayloadEntry: resolvePushStorePath,
 				authorise: (target) =>
 					authenticate(
 						CupboardClient.fromUrl(target.tenantUrl, {
@@ -547,13 +569,9 @@ export function registerPushCommand(
 				signal: programOptions.signal
 			});
 			const publication = PublicationCollection.of({
-				targets: resolvePushPaths(resolved.payload),
-				...(intermediatePaths !== undefined && {
-					intermediatePaths: resolvePushPaths(intermediatePaths)
-				}),
-				...(referencePaths !== undefined && {
-					referencePaths: resolvePushPaths(referencePaths)
-				})
+				targets: resolved.payload,
+				...(intermediatePaths !== undefined && { intermediatePaths }),
+				...(referencePaths !== undefined && { referencePaths })
 			});
 
 			const isEmptyRootReplacement =

@@ -42,10 +42,22 @@ export interface ConfirmClient {
 	>;
 }
 
+interface ConfirmCommandDependencies {
+	/**
+	 * Returns the token provider for the confirmation. Defaults to
+	 * `authenticateForPush`, which uses GitHub Actions OIDC with `--github-oidc`
+	 * and otherwise the owner session cached by `cupboard login`.
+	 */
+	readonly authenticate?: typeof authenticateForPush;
+}
+
 export function registerConfirmCommand(
 	program: Command,
-	programOptions: ProgramOptions = {}
+	programOptions: ProgramOptions = {},
+	dependencies: ConfirmCommandDependencies = {}
 ): void {
+	const authenticate = dependencies.authenticate ?? authenticateForPush;
+
 	program
 		.command('confirm')
 		.description('Confirm published store paths without uploading their bytes.')
@@ -81,8 +93,9 @@ export function registerConfirmCommand(
 				{
 					minimumPayload: 1,
 					payloadDescription: 'a store path',
+					parsePayloadEntry: (entry) => new StorePath(entry),
 					authorise: (target) =>
-						authenticateForPush(
+						authenticate(
 							CupboardClient.fromUrl(target.tenantUrl, {
 								cache: target.cache,
 								signal: programOptions.signal
@@ -106,7 +119,7 @@ export function registerConfirmCommand(
 
 			await runConfirm(
 				resolved.target.cache,
-				resolved.payload,
+				resolved.payload.map((storePath) => storePath.value),
 				reporter,
 				rpc.uploads
 			);

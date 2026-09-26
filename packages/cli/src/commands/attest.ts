@@ -167,6 +167,7 @@ export function registerAttestCommands(
 			const resolved = await resolveAuthorisedCachePositionals(url, paths, {
 				minimumPayload: 1,
 				payloadDescription: 'a published store path',
+				parsePayloadEntry: (entry) => entry,
 				authorise: (target) =>
 					authenticateForPush(
 						CupboardClient.fromUrl(target.tenantUrl, {

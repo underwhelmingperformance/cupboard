@@ -1,4 +1,5 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
+import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
@@ -8,16 +9,22 @@ import {
 	uploadConfirmResponseSchema
 } from '@cupboard/protocol/upload';
 import type { ResultRow } from '@cupboard/reporter';
+import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import { recordingCacheScopedClient } from '../client/cache-scoped.test-support.ts';
+import type { TokenProvider } from '../client/credentials.ts';
 import {
 	CliAbortError,
 	ConfirmIncompleteError,
 	PathsNotConfirmedError
 } from '../errors.ts';
 
-import { type ConfirmClient, runConfirm } from './confirm.ts';
+import {
+	type ConfirmClient,
+	registerConfirmCommand,
+	runConfirm
+} from './confirm.ts';
 
 function expectConfirmIncomplete(
 	error: unknown
@@ -296,6 +303,57 @@ describe('runConfirm', () => {
 			calls: [uploadConfirmMaxPaths, 2],
 			firstCallLeadsWith: hashes[0],
 			reportedRows: uploadConfirmMaxPaths + 2
+		});
+	});
+});
+
+describe('confirm command', () => {
+	it('rejects a path that is not a store path before authenticating', async () => {
+		const tokenProviderRequests: CacheScope[] = [];
+		const fixedToken: TokenProvider = {
+			get: () => Promise.resolve('test-token'),
+			refresh: () => Promise.resolve('test-token')
+		};
+		const program = new Command();
+		program.exitOverride();
+		program.configureOutput({
+			writeErr() {
+				return;
+			},
+			writeOut() {
+				return;
+			}
+		});
+		registerConfirmCommand(
+			program,
+			{},
+			{
+				authenticate: (client) => {
+					tokenProviderRequests.push(client.cache);
+
+					return Promise.resolve(fixedToken);
+				}
+			}
+		);
+
+		let result: unknown;
+		try {
+			await program.parseAsync(
+				[
+					'confirm',
+					'--github-oidc',
+					'https://cache.example.workers.dev/t/acme',
+					'./result'
+				],
+				{ from: 'user' }
+			);
+		} catch (error: unknown) {
+			result = error;
+		}
+
+		expect({ result, tokenProviderRequests }).toStrictEqual({
+			result: new InvalidStorePathError('./result'),
+			tokenProviderRequests: []
 		});
 	});
 });
