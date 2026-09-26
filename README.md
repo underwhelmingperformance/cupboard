@@ -145,7 +145,7 @@ a terminal, and `json` otherwise. Two environment variables take precedence over
 these checks. A non-empty `FORCE_COLOR` other than `0` selects `terminal`.
 Otherwise, `PRE_COMMIT=1`, which pre-commit sets for its hooks, selects `json`.
 Pass `--output-mode terminal`, `json` or `github` to choose the mode explicitly.
-`cupboard deploy` always reports its progress in `terminal` mode.
+`cupboard init` always reports its progress in `terminal` mode.
 
 Every mode writes progress and status to stderr. A command writes only its
 payload, such as a public key or `nix.conf` lines, to stdout, so the payload can
