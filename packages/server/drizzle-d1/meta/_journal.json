@@ -218,6 +218,13 @@
 			"when": 1788801075143,
 			"tag": "0030_cache_credential_lifecycle",
 			"breakpoints": true
+		},
+		{
+			"idx": 31,
+			"version": "6",
+			"when": 1790420895118,
+			"tag": "0031_deployment_transitions",
+			"breakpoints": true
 		}
 	]
 }
