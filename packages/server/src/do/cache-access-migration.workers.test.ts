@@ -117,20 +117,22 @@ describe('cache access migration', () => {
 				stage: 'assert-cache_identity',
 				cursor: 1000,
 				sourceRows: 1000,
-				declaredSourceWrites: 0
+				declaredSourceWrites: 0,
+				hasCommitted: true
 			},
 			assertionProgress: [{ stage: 28, cursor: 1000 }],
-			assertionResult: { kind: 'complete' },
+			assertionResult: { kind: 'complete', hasCommitted: true },
 			first: {
 				kind: 'pending',
 				migration: '0052_cache_identity_contract',
 				stage: 'copy-cache_identity',
 				cursor: 1000,
 				sourceRows: 1000,
-				declaredSourceWrites: 1000
+				declaredSourceWrites: 1000,
+				hasCommitted: true
 			},
 			progress: [{ stage: 10, cursor: 1000 }],
-			contractResult: { kind: 'complete' },
+			contractResult: { kind: 'complete', hasCommitted: true },
 			cacheCount: 3001,
 			selectorId: 9001
 		});
@@ -399,7 +401,7 @@ describe('cache access migration', () => {
 			})
 		);
 		expect(beforeCompletion).toStrictEqual({
-			outcome: { kind: 'incomplete', projected: 0 },
+			outcome: { kind: 'incomplete', projected: 0, progressed: true },
 			legacyTables: [{ name: 'cache' }]
 		});
 		const pendingTenant = await d1

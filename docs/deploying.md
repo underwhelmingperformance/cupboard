@@ -450,12 +450,14 @@ Use `cupboard deployment status` and `cupboard deployment resume` from the same
 release as the deployed control Worker. This release replaces the
 `deployment.phase` procedure with `deployment.transitions`, which returns the
 recorded transitions, and adds `required` to the `localStep.status` and
-`localStep.wake` responses. The CLI and the server validate these responses
-strictly, so a CLI from another release rejects them or receives 404. The
-`--json` output of both commands changes too: the `deployment-status` result has
-`transitions`, `unrecognised` and `required` in place of `phase`, and the
-`deployment-readiness` result reports `required` as the step that it counted
-against.
+`localStep.wake` responses. The outcomes of `localStep.wake` gain `progressed`
+on `recorded` and `advanced` outcomes, the tenant's recorded step on `advanced`
+outcomes, and `error` on `failed` outcomes. The CLI and the server validate
+these responses strictly, so a CLI from another release rejects them or
+receives 404. The `--json` output of both commands changes too: the
+`deployment-status` result has `transitions`, `unrecognised` and `required` in
+place of `phase`, and the `deployment-readiness` result reports `required` as
+the step that it counted against.
 
 The `check` API now uses a numeric cache identity in `cursorCache`. An older CLI
 cannot validate this response or resume an old scan against it. Use the CLI from

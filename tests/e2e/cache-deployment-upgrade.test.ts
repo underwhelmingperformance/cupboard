@@ -237,7 +237,8 @@ it('upgrades a populated predecessor deployment', async () => {
 					].map((tenant) => ({
 						tenant,
 						kind: 'recorded',
-						step: expansionLocalStep
+						step: expansionLocalStep,
+						progressed: true
 					}))
 				}
 			},
@@ -255,7 +256,8 @@ it('upgrades a populated predecessor deployment', async () => {
 					].map((tenant) => ({
 						tenant,
 						kind: 'recorded',
-						step: currentLocalStep
+						step: currentLocalStep,
+						progressed: true
 					}))
 				}
 			},

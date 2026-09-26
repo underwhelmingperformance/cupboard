@@ -26,6 +26,8 @@ export interface LocalMigrationRecipe {
 	readonly stages: readonly LocalMigrationStage[];
 }
 
+// `hasCommitted` is whether the call committed a migration, or a stage or page
+// of a bounded migration, before it returned.
 export interface LocalMigrationPending {
 	readonly kind: 'pending';
 	readonly migration: string;
@@ -33,10 +35,12 @@ export interface LocalMigrationPending {
 	readonly cursor: number;
 	readonly sourceRows: number;
 	readonly declaredSourceWrites: number;
+	readonly hasCommitted: boolean;
 }
 
 export interface LocalMigrationComplete {
 	readonly kind: 'complete';
+	readonly hasCommitted: boolean;
 }
 
 export type LocalMigrationResult =
@@ -159,12 +163,13 @@ export function runBoundedLocalMigration<
 	let structuralOperations = 0;
 	let sourceRows = 0;
 	let declaredSourceWrites = 0;
+	let hasCommitted = false;
 
 	for (;;) {
 		const stage = recipe.stages[progress.stage];
 
 		if (stage === undefined) {
-			return { kind: 'complete' };
+			return { kind: 'complete', hasCommitted };
 		}
 
 		if (stage.kind === 'batch') {
@@ -190,7 +195,8 @@ export function runBoundedLocalMigration<
 					stage: stage.name,
 					cursor: progress.cursor,
 					sourceRows,
-					declaredSourceWrites
+					declaredSourceWrites,
+					hasCommitted
 				};
 			}
 
@@ -208,6 +214,7 @@ export function runBoundedLocalMigration<
 			progress = { stage: progress.stage + 1, cursor: 0 };
 			structuralOperations += operationCount;
 			budget.structuralOperationsRemaining -= operationCount;
+			hasCommitted = true;
 			continue;
 		}
 
@@ -221,7 +228,8 @@ export function runBoundedLocalMigration<
 				stage: stage.name,
 				cursor: progress.cursor,
 				sourceRows,
-				declaredSourceWrites
+				declaredSourceWrites,
+				hasCommitted
 			};
 		}
 
@@ -237,7 +245,8 @@ export function runBoundedLocalMigration<
 				stage: stage.name,
 				cursor: progress.cursor,
 				sourceRows,
-				declaredSourceWrites
+				declaredSourceWrites,
+				hasCommitted
 			};
 		}
 
@@ -274,6 +283,8 @@ export function runBoundedLocalMigration<
 			throw new Error(`Bounded migration ${recipe.tag} produced no page`);
 		}
 
+		hasCommitted = true;
+
 		if (page.count === 0) {
 			progress = { stage: progress.stage + 1, cursor: 0 };
 			structuralOperations += 2;
@@ -296,7 +307,8 @@ export function runBoundedLocalMigration<
 			stage: stage.name,
 			cursor: page.last,
 			sourceRows,
-			declaredSourceWrites
+			declaredSourceWrites,
+			hasCommitted
 		};
 	}
 }

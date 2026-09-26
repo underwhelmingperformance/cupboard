@@ -455,23 +455,46 @@ export const localStepWakeBodySchema = z.strictObject({
 export type ParsedLocalStepWakeBody = z.output<typeof localStepWakeBodySchema>;
 export type LocalStepWakeBody = z.input<typeof localStepWakeBodySchema>;
 
+/**
+ * The longest error summary that a `failed` outcome contains.
+ */
+export const localStepWakeErrorMaxLength = 500;
+
 // Waking a tenant is a request to its object, so a batch can partly fail. A
 // failed tenant stays in the straggler list and the next batch retries it.
+//
+// `progressed` is whether the wake moved the object's durable state forward.
+// A `recorded` wake progressed when it raised the recorded step or projected
+// or moved any item. Recording the same step again is not progress. An
+// `advanced` wake leaves the object with more work to do; it progressed when
+// it committed a migration or a page of one, saved a cursor, or completed a
+// batch of work. `projected` counts the caches projected, the objects moved,
+// or the rows rewritten in a batch, and is 0 for a schema migration or a
+// catalogue page. `step` is the step that the tenant had recorded before the
+// wake, and is absent if it had recorded none. A `failed` wake is one whose
+// request to the object threw; `error` summarises what it threw.
 export const localStepWakeOutcomeSchema = z.discriminatedUnion('kind', [
 	z.strictObject({
 		tenant: tenantIdSchema,
 		kind: z.literal('recorded'),
-		step: localStepSchema
+		step: localStepSchema,
+		progressed: z.boolean()
 	}),
 	z.strictObject({
 		tenant: tenantIdSchema,
 		kind: z.literal('advanced'),
-		projected: z.number().int().nonnegative()
+		projected: z.number().int().nonnegative(),
+		progressed: z.boolean(),
+		step: localStepSchema.optional()
 	}),
 	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('unconfigured') }),
-	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('failed') })
+	z.strictObject({
+		tenant: tenantIdSchema,
+		kind: z.literal('failed'),
+		error: z.string().max(localStepWakeErrorMaxLength)
+	})
 ]);
-export type LocalStepWakeOutcome = z.infer<typeof localStepWakeOutcomeSchema>;
+export type LocalStepWakeOutcome = z.input<typeof localStepWakeOutcomeSchema>;
 
 export const localStepWakeResponseSchema = z.strictObject({
 	current: localStepSchema,

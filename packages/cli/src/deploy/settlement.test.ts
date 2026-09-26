@@ -44,7 +44,14 @@ describe('tenant settlement', () => {
 					required: expansionLocalStep,
 					woken: 1,
 					failed: 0,
-					outcomes: [{ tenant, kind: 'recorded', step: expansionLocalStep }]
+					outcomes: [
+						{
+							tenant,
+							kind: 'recorded',
+							step: expansionLocalStep,
+							progressed: true
+						}
+					]
 				});
 			}
 		};

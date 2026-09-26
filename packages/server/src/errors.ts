@@ -20,6 +20,7 @@ import { type UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
+import { type LocalMigrationPending } from './do/bounded-migration.ts';
 import { type R2ObjectKey } from './http/http.ts';
 
 export abstract class ServerHttpError extends Error {
@@ -64,15 +65,20 @@ export class CacheCatalogueMigrationPendingError extends ServerHttpError {
 export class LocalSchemaMigrationPendingError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
+	readonly migration: string;
+	readonly stage: string;
 
-	constructor(
-		readonly migration: string,
-		readonly stage: string
-	) {
+	/**
+	 * @param pending The migration that stopped, and whether the initialisation
+	 * committed any migration work before it stopped.
+	 */
+	constructor(readonly pending: LocalMigrationPending) {
 		super(
-			`Durable Object migration ${migration} is still running stage ${stage}; retry shortly`
+			`Durable Object migration ${pending.migration} is still running stage ${pending.stage}; retry shortly`
 		);
 		this.name = 'LocalSchemaMigrationPendingError';
+		this.migration = pending.migration;
+		this.stage = pending.stage;
 	}
 }
 

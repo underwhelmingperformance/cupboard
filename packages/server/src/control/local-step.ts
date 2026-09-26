@@ -5,6 +5,7 @@ import {
 	type LocalStep,
 	type LocalStepStatus,
 	localStepStragglerSampleSize,
+	localStepWakeErrorMaxLength,
 	type LocalStepWakeOutcome,
 	type LocalStepWakeResponse,
 	requiredLocalStepFrom
@@ -78,6 +79,21 @@ export async function controlLocalStepStatus(
 }
 
 /**
+ * Summarises an error for a wake response, within
+ * `localStepWakeErrorMaxLength`.
+ */
+export function summariseWakeError(error: unknown): string {
+	const summary =
+		error instanceof Error
+			? error.message.length > 0
+				? `${error.name}: ${error.message}`
+				: error.name
+			: String(error);
+
+	return summary.slice(0, localStepWakeErrorMaxLength);
+}
+
+/**
  * Wakes up to `limit` tenants that have not reached the required step, so each
  * applies its pending migrations and records how far it has come.
  *
@@ -138,7 +154,7 @@ export async function controlLocalStepWake(
 	const outcomes = await mapWithConcurrency(
 		stragglers,
 		wakeConcurrency,
-		async ({ id }) => wakeTenant(logger, env, id)
+		async ({ id, localStep }) => wakeTenant(logger, env, id, localStep)
 	);
 	const woken = outcomes.filter(
 		(outcome) => outcome.kind === 'recorded' || outcome.kind === 'advanced'
@@ -156,7 +172,8 @@ export async function controlLocalStepWake(
 async function wakeTenant(
 	logger: Logger,
 	env: Env,
-	tenant: TenantId
+	tenant: TenantId,
+	recordedStep: LocalStep | null
 ): Promise<LocalStepWakeOutcome> {
 	try {
 		const outcome = await tenantServer(env, tenant).reportLocalStep();
@@ -170,21 +187,32 @@ async function wakeTenant(
 		}
 
 		if (outcome.kind === 'incomplete') {
-			// The object made progress but has more work than one invocation
-			// allows, so it left its step unrecorded. It stays a straggler and a
-			// later pass wakes it again.
-			logger.info('local step wake made partial progress', {
+			// The object has more work than one invocation allows, so it left its
+			// step unrecorded. It stays a straggler and a later pass wakes it again.
+			logger.info('local step wake left work to do', {
 				tenant,
-				projected: outcome.projected
+				projected: outcome.projected,
+				progressed: outcome.progressed
 			});
-			return { tenant, kind: 'advanced', projected: outcome.projected };
+			return {
+				tenant,
+				kind: 'advanced',
+				projected: outcome.projected,
+				progressed: outcome.progressed,
+				...(recordedStep !== null && { step: recordedStep })
+			};
 		}
 
-		return { tenant, kind: 'recorded', step: outcome.step };
+		return {
+			tenant,
+			kind: 'recorded',
+			step: outcome.step,
+			progressed: outcome.progressed
+		};
 	} catch (error) {
 		logger.warn('local step wake failed', { tenant, error });
 
-		return { tenant, kind: 'failed' };
+		return { tenant, kind: 'failed', error: summariseWakeError(error) };
 	}
 }
 
@@ -205,10 +233,10 @@ function selectStragglers(
 	limit: number,
 	filter: SQL | undefined,
 	position?: SQL
-): Promise<{ id: TenantId }[]> {
+): Promise<{ id: TenantId; localStep: LocalStep | null }[]> {
 	// A stable order lets the persisted cursor resume after the last attempted tenant.
 	return database
-		.select({ id: d1Schema.tenant.id })
+		.select({ id: d1Schema.tenant.id, localStep: d1Schema.tenant.localStep })
 		.from(d1Schema.tenant)
 		.where(and(filter, position))
 		.orderBy(asc(d1Schema.tenant.id))

@@ -532,6 +532,7 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	// The first pass stops before D1 reconciliation. The second must use the
 	// same choice of migration path.
 	budget.freshStore ??= rows.length === 0;
+	let hasCommitted = false;
 
 	// Admission proved the recorded rows are a prefix of the journal, so each
 	// row pairs with the entry at its position and the migrations still to run
@@ -561,7 +562,7 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 
 	for (const entry of entries.slice(rows.length)) {
 		if (entry.idx > throughIndex) {
-			return { kind: 'complete' };
+			return { kind: 'complete', hasCommitted };
 		}
 
 		const statements = statementsOf(bundle, entry);
@@ -571,6 +572,7 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 
 		if (recipe === undefined) {
 			applyMigration(database, entry, statements, digestOf(digests, entry));
+			hasCommitted = true;
 			continue;
 		}
 
@@ -587,7 +589,7 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 		}
 
 		if (result.kind === 'pending') {
-			return result;
+			return { ...result, hasCommitted: hasCommitted || result.hasCommitted };
 		}
 
 		const verificationState = appliedVerificationState(entry.tag);
@@ -598,7 +600,8 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 				sql`INSERT INTO ${sql.identifier(trackingTable)} (hash, created_at, digest, verification_state) VALUES (${entry.tag}, ${entry.when}, ${digest}, ${verificationState})`
 			);
 		});
+		hasCommitted = true;
 	}
 
-	return { kind: 'complete' };
+	return { kind: 'complete', hasCommitted };
 }

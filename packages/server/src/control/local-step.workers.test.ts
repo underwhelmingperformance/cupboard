@@ -125,9 +125,15 @@ describe('local step', () => {
 				{
 					tenant: tenant('step-one'),
 					kind: 'recorded',
-					step: currentLocalStep
+					step: currentLocalStep,
+					progressed: true
 				},
-				{ tenant: tenant('step-two'), kind: 'recorded', step: currentLocalStep }
+				{
+					tenant: tenant('step-two'),
+					kind: 'recorded',
+					step: currentLocalStep,
+					progressed: true
+				}
 			]
 		});
 		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
@@ -161,7 +167,8 @@ describe('local step', () => {
 					{
 						tenant: tenant('step-expanded'),
 						kind: 'recorded',
-						step: expansionLocalStep
+						step: expansionLocalStep,
+						progressed: true
 					}
 				]
 			},
@@ -237,7 +244,8 @@ describe('local step', () => {
 					{
 						tenant: tenant('step-b-ready'),
 						kind: 'recorded',
-						step: currentLocalStep
+						step: currentLocalStep,
+						progressed: true
 					}
 				]
 			},
@@ -274,7 +282,8 @@ describe('local step', () => {
 					{
 						tenant: tenant('step-suspended'),
 						kind: 'recorded',
-						step: currentLocalStep
+						step: currentLocalStep,
+						progressed: true
 					}
 				]
 			},
@@ -302,7 +311,8 @@ describe('local step', () => {
 				{
 					tenant: tenant('step-batch-a'),
 					kind: 'recorded',
-					step: currentLocalStep
+					step: currentLocalStep,
+					progressed: true
 				}
 			]
 		});
@@ -346,7 +356,28 @@ describe('local step', () => {
 
 		await expect(
 			tenantServer(env, id).reportLocalStep()
-		).resolves.toStrictEqual({ kind: 'recorded', step: currentLocalStep });
+		).resolves.toStrictEqual({
+			kind: 'recorded',
+			step: currentLocalStep,
+			progressed: false
+		});
 		await expect(storedStep(id)).resolves.toStrictEqual(laterStep);
+	});
+
+	// A tenant that records the step it already has moves nothing forward, so
+	// that wake reports no progress.
+	it('reports progress only from the wake that raised the recorded step', async () => {
+		const id = tenant('step-again');
+		await provisionNamedTenant(id);
+
+		const outcomes = [
+			await tenantServer(env, id).reportLocalStep(),
+			await tenantServer(env, id).reportLocalStep()
+		];
+
+		expect(outcomes).toStrictEqual([
+			{ kind: 'recorded', step: expansionLocalStep, progressed: true },
+			{ kind: 'recorded', step: expansionLocalStep, progressed: false }
+		]);
 	});
 });

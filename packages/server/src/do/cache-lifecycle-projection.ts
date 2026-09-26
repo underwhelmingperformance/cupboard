@@ -39,6 +39,11 @@ export interface CacheProjectionOutcome {
 	readonly lifecycles: readonly CacheLifecycleRecord[];
 	readonly projected: number;
 	readonly hasMore: boolean;
+	/**
+	 * Whether this call saved the projection's cursor. It is false only when
+	 * an earlier call finished the projection.
+	 */
+	readonly progressed: boolean;
 }
 
 interface LocalCache {
@@ -69,7 +74,7 @@ export async function projectLocalCacheLifecycles(
 		.union([z.number().int().nonnegative(), z.literal('complete')])
 		.parse((await context.ctx.storage.get(projectionProgressKey)) ?? 0);
 	if (saved === 'complete') {
-		return { lifecycles: [], projected: 0, hasMore: false };
+		return { lifecycles: [], projected: 0, hasMore: false, progressed: false };
 	}
 	const afterId = saved;
 	const localRows = context.db
@@ -146,6 +151,7 @@ export async function projectLocalCacheLifecycles(
 			isLive: row.deletedAt === null
 		})),
 		projected: Math.min(missing.length, maxCachesProjectedPerRun),
-		hasMore: localRows.length === maxCachesProjectedPerRun
+		hasMore: localRows.length === maxCachesProjectedPerRun,
+		progressed: true
 	};
 }

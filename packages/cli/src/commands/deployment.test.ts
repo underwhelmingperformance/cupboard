@@ -91,7 +91,12 @@ function client(
 					woken: 1,
 					failed: 0,
 					outcomes: [
-						{ tenant, kind: 'recorded', step: requiredStepOf(transitions) }
+						{
+							tenant,
+							kind: 'recorded',
+							step: requiredStepOf(transitions),
+							progressed: true
+						}
 					]
 				});
 			}
@@ -362,7 +367,13 @@ describe('runDeploymentResume', () => {
 						required: expansionLocalStep,
 						woken: 0,
 						failed: 1,
-						outcomes: [{ tenant, kind: 'failed' }]
+						outcomes: [
+							{
+								tenant,
+								kind: 'failed',
+								error: 'Error: tenant object unavailable'
+							}
+						]
 					})
 			}
 		};

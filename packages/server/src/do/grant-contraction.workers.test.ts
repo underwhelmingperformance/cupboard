@@ -66,10 +66,13 @@ describe('local grant contraction', () => {
 		);
 		expect({ before, after }).toStrictEqual({
 			before: {
-				progress: { kind: 'recorded', step: 4 },
+				progress: { kind: 'recorded', step: 4, progressed: true },
 				grants: selectorGrant
 			},
-			after: { progress: { kind: 'recorded', step: 5 }, grants: scopeGrant }
+			after: {
+				progress: { kind: 'recorded', step: 5, progressed: true },
+				grants: scopeGrant
+			}
 		});
 	});
 });
@@ -166,9 +169,13 @@ describe('writes across local grant contraction', () => {
 			}
 		);
 		expect(result).toStrictEqual({
-			first: { kind: 'incomplete', projected: grantContractionBatchSize },
+			first: {
+				kind: 'incomplete',
+				projected: grantContractionBatchSize,
+				progressed: true
+			},
 			afterFirst: { complete: 0 },
-			second: { kind: 'recorded', step: 5 },
+			second: { kind: 'recorded', step: 5, progressed: true },
 			afterSecond: { complete: 1 }
 		});
 	});
