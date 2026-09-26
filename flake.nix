@@ -133,18 +133,44 @@
               example = "/etc/nix/cupboard-release.conf";
               description = ''
                 Set this to a file containing the `extra-substituters` line
-                printed by `cupboard config --private-cache`. Create the file
-                outside the Nix store with mode 0400 or 0600, and make it
-                readable only by the account that runs Nix.
+                that `cupboard config` prints for a private cache. Create the
+                file outside the Nix store with mode 0400 or 0600. For the
+                NixOS module, make it readable only by the account that runs
+                the Nix daemon. For the Home Manager module, make it readable
+                only by your own account. Restrict only the file: every
+                account that reads `nix.conf` must be able to enter the
+                directories above it. `/etc/nix`, `/run/secrets` and
+                `/run/agenix` meet this requirement.
 
-                The module adds an `include` directive to `nix.conf`. The
+                The module adds an `!include` directive to `nix.conf`. The
                 credential-bearing URL remains in the permission-controlled
                 file. Nix appends settings from the included file, so the
                 private cache joins the substituters from public cache entries
                 in this list.
 
-                A missing or unreadable included file makes the Nix
-                configuration fail.
+                If the file is missing, or the account that must read it
+                cannot read it, Nix leaves the private cache out of its
+                substituters and reports no error. If an account cannot
+                search every directory above the file, Nix then ignores every
+                setting in the including `nix.conf` for that account, again
+                without an error. With the NixOS module, the including file is
+                the system `nix.conf`, and `sudo nix config show` does not
+                show the problem, because root can search every directory.
+
+                To confirm that the private cache is present, run
+                `sudo nix config show substituters` with the NixOS module, or
+                `nix config show substituters` as yourself with the Home
+                Manager module. Both commands print the cache's credential.
+                With the NixOS module, an ordinary user's output does not list
+                the private cache. Builds that the daemon runs for that user
+                still use it, unless the user's Nix client sends its own
+                substituter list. The client sends its own list, which lacks
+                the private cache, when a user-level `nix.conf`, `NIX_CONFIG`
+                or a command-line option such as `--option substituters` or
+                `--extra-substituters` sets `substituters` or
+                `extra-substituters`.
+                With the Home Manager module, the daemon uses the private
+                cache for your builds only if you are a trusted user.
               '';
             };
 
@@ -195,7 +221,7 @@
             };
 
             nix.extraOptions = lib.concatMapStrings (
-              cache: "include ${toString cache.substitutersFile}\n"
+              cache: "!include ${toString cache.substitutersFile}\n"
             ) privateCaches;
           };
         };
