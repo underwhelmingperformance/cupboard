@@ -8,9 +8,9 @@ import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-	DeploymentPhaseUnsettledError,
 	LocalStepUnreachedError,
-	UnclassifiedD1MigrationError
+	UnclassifiedD1MigrationError,
+	WorkersNotServingBuildError
 } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
@@ -1036,9 +1036,9 @@ describe('runDeploy', () => {
 			failure = error;
 		}
 
-		expect(failure).toBeInstanceOf(DeploymentPhaseUnsettledError);
+		expect(failure).toBeInstanceOf(WorkersNotServingBuildError);
 
-		if (!(failure instanceof DeploymentPhaseUnsettledError)) {
+		if (!(failure instanceof WorkersNotServingBuildError)) {
 			return;
 		}
 
@@ -1341,7 +1341,7 @@ describe('refused deployment contractions', () => {
 				})
 			).rejects.toBeInstanceOf(
 				reason === 'versions'
-					? DeploymentPhaseUnsettledError
+					? WorkersNotServingBuildError
 					: LocalStepUnreachedError
 			);
 			expect(
