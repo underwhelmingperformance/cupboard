@@ -6,13 +6,13 @@ import Cloudflare from 'cloudflare';
 import { describe, expect, it } from 'vitest';
 
 import { createCloudflareApi } from './cloudflare-api.ts';
+import type { D1QueryApi } from './d1-query.ts';
 import {
 	cloudflareAccountIdSchema,
 	type DatabaseId,
 	databaseIdSchema
 } from './identifiers.ts';
 import {
-	type PhaseApi,
 	readDeploymentPhase,
 	readLocalStepReadiness,
 	recordDeploymentPhase
@@ -22,10 +22,10 @@ const databaseId = databaseIdSchema.parse('database');
 const requiredStep = localStep(1);
 
 /**
- * A `PhaseApi` whose `queryRows` returns each of `answers` in turn, one per
+ * A `D1QueryApi` whose `queryRows` returns each of `answers` in turn, one per
  * call, and records the SQL so a test can assert which queries ran.
  */
-function stubApi(...answers: readonly (readonly string[])[]): PhaseApi & {
+function stubApi(...answers: readonly (readonly string[])[]): D1QueryApi & {
 	readonly queries: string[];
 } {
 	const queries: string[] = [];
@@ -57,7 +57,7 @@ function sqliteBackedApi(
 		status: string;
 		localStep: number | undefined;
 	}[]
-): PhaseApi {
+): D1QueryApi {
 	const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
 	const database: DatabaseSync = new DatabaseSync(':memory:');
 
@@ -153,7 +153,7 @@ describe('deployment phase records', () => {
 		database.exec(
 			'CREATE TABLE deployment_phase (id TEXT PRIMARY KEY, phase TEXT NOT NULL, required_local_step INTEGER NOT NULL, updated_at TEXT NOT NULL)'
 		);
-		const api: PhaseApi = {
+		const api: D1QueryApi = {
 			queryBatch: (_id, statements) => {
 				for (const statement of statements) {
 					database.exec(statement);

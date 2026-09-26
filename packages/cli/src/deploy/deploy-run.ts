@@ -20,12 +20,12 @@ import {
 	type WorkerSecret
 } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
+import type { D1QueryApi } from './d1-query.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
-import { applyD1Migrations, type D1MigrationApi } from './migrations.ts';
+import { applyD1Migrations } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
 import {
-	type PhaseApi,
 	readDeploymentPhase,
 	readLocalStepReadiness,
 	recordDeploymentPhase,
@@ -626,8 +626,8 @@ async function performDeploy(
 	return rows;
 }
 
-// The D1 query surface the migration and phase readers share.
-function d1QueryApiOf(api: CloudflareApi): PhaseApi & D1MigrationApi {
+// The D1 query calls that the migration and phase readers share.
+function d1QueryApiOf(api: CloudflareApi): D1QueryApi {
 	return {
 		queryBatch: (database, statements) =>
 			api.d1QueryBatch(database, statements),

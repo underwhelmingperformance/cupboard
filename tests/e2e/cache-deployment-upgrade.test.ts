@@ -14,10 +14,10 @@ import { cacheCreateAuthorizationDetails } from '../../packages/cli/src/auth/att
 import { githubPullRequestClaims } from '../../packages/cli/src/commands/github/claims.ts';
 import { pullRequestCacheName } from '../../packages/cli/src/commands/github/convention.ts';
 import { githubPrAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
+import type { D1QueryApi } from '../../packages/cli/src/deploy/d1-query.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
 import {
 	type LocalStepReadiness,
-	type PhaseApi,
 	readLocalStepReadiness,
 	recordDeploymentPhase,
 	recordPhaseWhenTenantsReady
@@ -74,7 +74,7 @@ async function wakeUntilStep(
 	);
 }
 
-function phaseApi(server: StagedDeploymentServer): PhaseApi {
+function phaseApi(server: StagedDeploymentServer): D1QueryApi {
 	return {
 		queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
 		queryRows: (id, sql) => server.api.d1QueryRows(id, sql)

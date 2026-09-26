@@ -3,11 +3,11 @@ import { createHash } from 'node:crypto';
 import { contractionMigrations } from '@cupboard/protocol/deployment';
 import { describe, expect, it } from 'vitest';
 
+import type { D1QueryApi } from './d1-query.ts';
 import { databaseIdSchema } from './identifiers.ts';
 import {
 	applyD1Migrations,
 	type D1Migration,
-	type D1MigrationApi,
 	D1MigrationDigestError,
 	parseD1Migrations,
 	unclassifiedD1Migrations
@@ -81,7 +81,7 @@ function fakeApi(
 		'sha256',
 		'verification_state'
 	]
-): { api: D1MigrationApi; batches: string[][] } {
+): { api: D1QueryApi; batches: string[][] } {
 	const batches: string[][] = [];
 
 	return {
@@ -210,7 +210,7 @@ describe('applyD1Migrations', () => {
 
 		const batches: string[][] = [];
 		let attempt = 0;
-		const api: D1MigrationApi = {
+		const api: D1QueryApi = {
 			queryBatch(_databaseId, statements) {
 				batches.push([...statements]);
 				attempt += 1;

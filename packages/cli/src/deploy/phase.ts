@@ -11,15 +11,8 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 
 import { CliError, LocalStepUnreachedError } from '../errors.ts';
 
+import { type D1QueryApi, sqlString } from './d1-query.ts';
 import type { DatabaseId } from './identifiers.ts';
-
-export interface PhaseApi {
-	queryBatch(
-		databaseId: DatabaseId,
-		statements: readonly string[]
-	): Promise<void>;
-	queryRows(databaseId: DatabaseId, sql: string): Promise<readonly string[]>;
-}
 
 // `queryRows` returns one string per row, so the query concatenates the three
 // fields and the reader splits them. No phase name, step number or ISO
@@ -67,7 +60,7 @@ export interface LocalStepReadiness {
  * count falls without the deploy doing anything.
  */
 export async function readLocalStepReadiness(
-	api: PhaseApi,
+	api: D1QueryApi,
 	databaseId: DatabaseId,
 	requiredStep: LocalStep
 ): Promise<LocalStepReadiness> {
@@ -102,7 +95,7 @@ export async function readLocalStepReadiness(
  * leaves the row unchanged.
  */
 export async function recordPhaseWhenTenantsReady(
-	api: PhaseApi,
+	api: D1QueryApi,
 	databaseId: DatabaseId,
 	phase: DeploymentPhaseName,
 	requiredStep: LocalStep,
@@ -142,7 +135,7 @@ export class UnknownDeploymentPhaseError extends CliError {
  * recorded one or the `deployment_phase` table does not exist yet.
  */
 export async function readDeploymentPhase(
-	api: PhaseApi,
+	api: D1QueryApi,
 	databaseId: DatabaseId
 ): Promise<ParsedDeploymentPhase | undefined> {
 	const tables = await api.queryRows(databaseId, phaseTableQuery);
@@ -179,17 +172,17 @@ export async function readDeploymentPhase(
  * that an earlier run already completed.
  */
 export async function recordDeploymentPhase(
-	api: PhaseApi,
+	api: D1QueryApi,
 	databaseId: DatabaseId,
 	phase: DeploymentPhaseName,
 	requiredLocalStep: LocalStep,
 	now: Date
 ): Promise<void> {
 	const phases = deploymentPhaseNameSchema.options;
-	const storedRank = `CASE deployment_phase.phase ${phases.map((name, index) => `WHEN ${quote(name)} THEN ${String(index)}`).join(' ')} ELSE ${String(phases.length)} END`;
+	const storedRank = `CASE deployment_phase.phase ${phases.map((name, index) => `WHEN ${sqlString(name)} THEN ${String(index)}`).join(' ')} ELSE ${String(phases.length)} END`;
 	await api.queryBatch(databaseId, [
 		`INSERT INTO deployment_phase (id, phase, required_local_step, updated_at) ` +
-			`VALUES (${quote(deploymentPhaseRowId)}, ${quote(phase)}, ${String(requiredLocalStep)}, ${quote(isoTimestamp(now))}) ` +
+			`VALUES (${sqlString(deploymentPhaseRowId)}, ${sqlString(phase)}, ${String(requiredLocalStep)}, ${sqlString(isoTimestamp(now))}) ` +
 			`ON CONFLICT (id) DO UPDATE SET phase = excluded.phase, ` +
 			`required_local_step = excluded.required_local_step, ` +
 			`updated_at = CASE WHEN deployment_phase.phase = excluded.phase ` +
@@ -197,8 +190,4 @@ export async function recordDeploymentPhase(
 			`THEN deployment_phase.updated_at ELSE excluded.updated_at END ` +
 			`WHERE ${storedRank} <= ${String(phases.indexOf(phase))};`
 	]);
-}
-
-function quote(value: string): string {
-	return `'${value.replaceAll("'", "''")}'`;
 }
