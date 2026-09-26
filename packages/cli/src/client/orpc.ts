@@ -159,8 +159,8 @@ function replaySafetyFor(
 const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const insufficientStorageStatus: number = StatusCodes.INSUFFICIENT_STORAGE;
 
-// Leave a 503 or 507 with a decodable body for oRPC to decode, so callers can
-// inspect its oRPC code and data.
+// Leave a 503, or a 507 with an oRPC error envelope, for oRPC to decode, so
+// callers can inspect its oRPC code and data.
 const typedServerErrorStatuses = new Set<number>([
 	StatusCodes.SERVICE_UNAVAILABLE,
 	StatusCodes.INSUFFICIENT_STORAGE
@@ -273,6 +273,10 @@ function previewText(collector: BoundedBodyCollector): string {
 // body with a missing, empty or application/json content type, and treats only
 // an empty string as no body. When upgrading oRPC, check that these functions
 // still behave this way.
+//
+// For a 507 that is not an oRPC error envelope, oRPC would keep the body only
+// in the error's data. Such a 507 becomes a `QuotaExceededError` here, so that
+// the server's text is the error's detail.
 async function checkErrorBody(
 	request: Request,
 	response: Response
@@ -287,6 +291,10 @@ async function checkErrorBody(
 			contentType !== '' &&
 			!contentType.startsWith('application/json'))
 	) {
+		if (response.status === insufficientStorageStatus) {
+			throw statusError(request, response, textPreview(body));
+		}
+
 		return response;
 	}
 
@@ -294,14 +302,40 @@ async function checkErrorBody(
 		return response;
 	}
 
+	let json: unknown;
+
 	try {
-		JSON.parse(body);
-		return response;
+		json = JSON.parse(body);
 	} catch {
 		// Report the HTTP status, which oRPC's error would not include.
+		throw statusError(request, response, textPreview(body));
 	}
 
-	throw statusError(request, response, textPreview(body));
+	if (response.status === insufficientStorageStatus && !isORPCErrorJson(json)) {
+		throw statusError(
+			request,
+			response,
+			textPreview(jsonErrorMessage(json) ?? body)
+		);
+	}
+
+	return response;
+}
+
+function jsonErrorMessage(json: unknown): string | undefined {
+	if (typeof json !== 'object' || json === null) {
+		return undefined;
+	}
+
+	for (const field of ['message', 'error']) {
+		const value: unknown = Reflect.get(json, field);
+
+		if (typeof value === 'string') {
+			return value;
+		}
+	}
+
+	return undefined;
 }
 
 function statusError(

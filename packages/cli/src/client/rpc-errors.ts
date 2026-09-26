@@ -11,6 +11,7 @@ import {
 } from '../errors.ts';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
+const insufficientStorageStatus: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 // oRPC takes an error's status from the error envelope, and the server's
 // envelopes use the response's HTTP status. The admin client throws a
@@ -60,11 +61,11 @@ export function isStaleUploadError(error: unknown): boolean {
 }
 
 /**
- * Converts authentication, scope and `INSUFFICIENT_STORAGE` failures, and any
- * oRPC error with status 408, 429 or 503, into CLI errors. Every other oRPC
- * error and every non-oRPC error passes through unchanged. A caller that needs
- * the oRPC code or data of a 408, 429 or 503 must inspect the error before
- * calling this function.
+ * Converts authentication and scope failures, and any oRPC error with status
+ * 408, 429, 503 or 507, into CLI errors. Every other oRPC error and every
+ * non-oRPC error passes through unchanged. A caller that needs the oRPC code or
+ * data of a 408, 429, 503 or 507 must inspect the error before calling this
+ * function.
  */
 export function translateRpcError(error: unknown): unknown {
 	if (!(error instanceof ORPCError)) {
@@ -85,6 +86,12 @@ export function translateRpcError(error: unknown): unknown {
 		}
 
 		default: {
+			// For a 507 whose body is not an oRPC error envelope, oRPC uses the code
+			// `MALFORMED_ORPC_ERROR_RESPONSE`.
+			if (error.status === insufficientStorageStatus) {
+				return new QuotaExceededError('', { cause: error });
+			}
+
 			const transientStatus = transientRpcStatuses.find(
 				(status) => status === error.status
 			);
