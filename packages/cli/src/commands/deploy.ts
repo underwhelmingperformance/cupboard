@@ -1,3 +1,4 @@
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import {
 	type InstanceName,
 	instanceNameSchema
@@ -33,6 +34,17 @@ function parseInstanceName(value: string): InstanceName {
 	return parsed.data;
 }
 
+function parseCacheSlug(value: string): string {
+	if (!cacheNameSchema.safeParse(value).success) {
+		throw new InvalidArgumentError(
+			'Cache slug must use lowercase letters, digits, ".", "_" or "-", ' +
+				'starting with a letter or digit (63 characters at most).'
+		);
+	}
+
+	return value;
+}
+
 export function registerDeployCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -51,6 +63,12 @@ export function registerDeployCommand(
 			parseInstanceName
 		)
 		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
+		.option(
+			'--cache <slug>',
+			'slug of the first cache on a new deployment (you are asked when it ' +
+				'is omitted; without a terminal, no cache is created)',
+			parseCacheSlug
+		)
 		.option(
 			'--access <mode>',
 			'read access for the first cache: public or private (you are asked ' +

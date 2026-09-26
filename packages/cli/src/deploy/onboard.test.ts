@@ -45,6 +45,7 @@ import {
 	AdminSessionNotCachedError,
 	ClaimantChangedError,
 	DeploymentClaimFailedError,
+	FirstCacheSlugTakenError,
 	type OnboardClient,
 	onboardDeployment,
 	type OnboardOptions,
@@ -1443,6 +1444,29 @@ describe('onboardDeployment', () => {
 		});
 	});
 
+	it('creates the first cache under the requested slug without asking', async () => {
+		const { ui, uiCalls } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			cacheSlug: 'builds',
+			cacheAccess: 'private'
+		});
+
+		expect({
+			slug: outcome.kind === 'ready' ? outcome.slug : outcome.kind,
+			prompts: uiCalls.filter(
+				({ method }) => method === 'prefixedText' || method === 'menu'
+			)
+		}).toStrictEqual({ slug: 'builds', prompts: [] });
+	});
+
 	it('gives up naming the version that kept answering', async () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({ versions: ['v-old', 'v-old'] });
@@ -1684,6 +1708,39 @@ describe('onboardDeployment', () => {
 		});
 	});
 
+	it('refuses a taken --cache slug without a terminal', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			lists: [[]],
+			creates: [StatusCodes.CONFLICT]
+		});
+
+		let refusal: unknown;
+
+		try {
+			await onboardDeployment({
+				...baseOptions({ ...ui, interactive: false }, client),
+				cacheSlug: 'builds'
+			});
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect({
+			refusal:
+				refusal instanceof FirstCacheSlugTakenError
+					? { slug: refusal.slug }
+					: refusal,
+			createdSlugs: client.createdBodies.map(
+				(body) => z.object({ id: z.string() }).parse(body).id
+			)
+		}).toStrictEqual({
+			refusal: { slug: 'builds' },
+			createdSlugs: ['builds']
+		});
+	});
+
 	it('re-prompts when the slug is claimed first, and converges on the next', async () => {
 		const { ui, warnings, menuMessages } = scriptedUi({
 			slugs: ['builds', 'builds-2'],
@@ -1763,6 +1820,26 @@ describe('onboardDeployment', () => {
 			});
 		}
 	);
+
+	it('says that --cache was not applied when the deployment already has a cache', async () => {
+		const { ui, infos } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			lists: [[tenantSummary('laney')]],
+			rebuilds: [{ tenants: 1 }],
+			publicKeys: ['pk-1']
+		});
+
+		await onboardDeployment({
+			...baseOptions(ui, client),
+			cacheSlug: 'builds'
+		});
+
+		expect(infos).toStrictEqual([
+			'--cache builds was not applied, because the deployment already has a cache.',
+			'The cache "laney" already exists; nothing to create.'
+		]);
+	});
 
 	it('fetches an id_token only to inspect an existing cache', async () => {
 		const { ui } = scriptedUi();

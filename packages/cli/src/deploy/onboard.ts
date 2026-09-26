@@ -198,6 +198,11 @@ export interface OnboardOptions {
 	*/
 	readonly authority: DeployAuthority;
 	/**
+	 * The slug of the first cache. When this is absent, the operator is asked,
+	 * or, without a terminal, the first cache is skipped.
+	 */
+	readonly cacheSlug?: string;
+	/**
 	 * Read access for the first cache. Prompt for access when this is absent.
 	 */
 	readonly cacheAccess: CacheAccessMode | undefined;
@@ -416,6 +421,13 @@ export async function onboardDeployment(
 			});
 	}
 
+	if (existing.length > 0 && options.cacheSlug !== undefined) {
+		ui.info(
+			`--cache ${options.cacheSlug} was not applied, because the deployment ` +
+				'already has a cache.'
+		);
+	}
+
 	if (existing.length > 1) {
 		return {
 			kind: 'already-initialised',
@@ -441,10 +453,13 @@ export async function onboardDeployment(
 			url,
 			credential,
 			{ ...owner, audience: ownerAudience },
-			options.cacheAccess,
 			{
-				user: defaultReadUser,
-				password: (options.readPassword ?? generateReadPassword)()
+				slug: options.cacheSlug,
+				access: options.cacheAccess,
+				read: {
+					user: defaultReadUser,
+					password: (options.readPassword ?? generateReadPassword)()
+				}
 			}
 		);
 
@@ -1154,14 +1169,42 @@ export class OwnerAudienceUnknownError extends CliError {
 	}
 }
 
+/**
+ * The slug from `--cache` is taken, and without a terminal nobody can choose
+ * another.
+ */
+export class FirstCacheSlugTakenError extends CliError {
+	constructor(
+		public readonly slug: string,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`The cache slug "${slug}" from --cache is already taken, so the first ` +
+				'cache was not created. Re-run `cupboard init` with another --cache.',
+			options
+		);
+		this.name = 'FirstCacheSlugTakenError';
+	}
+}
+
 interface FirstTenant extends CreatedCache {
 	readonly tenant: TenantSummary;
 }
 
+interface FirstTenantRequest {
+	/**
+	The slug from `--cache`, tried before asking for one.
+	*/
+	readonly slug: string | undefined;
+	readonly access: CacheAccessMode | undefined;
+	readonly read: TenantReadCredential;
+}
+
 /**
- * Ask for a slug and for access if none was supplied. If another caller claims
- * the slug first, ask for another slug and reuse the chosen access and read
- * credential.
+ * Create the first cache under the requested slug, or ask for one, and ask
+ * for access if none was supplied. If another caller takes the slug first,
+ * ask for another slug and reuse the chosen access and read credential.
+ * Without a terminal, the prompts return `undefined`, so no cache is created.
  */
 async function createFirstTenant(
 	ui: DeployUi,
@@ -1169,17 +1212,21 @@ async function createFirstTenant(
 	url: string,
 	credential: AccessCredential,
 	owner: Required<OwnerBinding>,
-	requested: CacheAccessMode | undefined,
-	read: TenantReadCredential
+	request: FirstTenantRequest
 ): Promise<FirstTenant | undefined> {
-	let chosen = requested;
+	const { read } = request;
+	let chosen = request.access;
+	let requestedSlug = request.slug;
 
 	for (;;) {
-		const slug = await ui.prefixedText({
-			message: 'Choose a slug for the first cache',
-			prefix: `${url}/t/`,
-			problem: slugProblemText
-		});
+		const slug =
+			requestedSlug ??
+			(await ui.prefixedText({
+				message: 'Choose a slug for the first cache',
+				prefix: `${url}/t/`,
+				problem: slugProblemText
+			}));
+		requestedSlug = undefined;
 
 		if (slug === undefined) {
 			return undefined;
@@ -1208,6 +1255,10 @@ async function createFirstTenant(
 			return { tenant, access, read };
 		} catch (error) {
 			if (error instanceof ORPCError && error.status === conflictStatusCode) {
+				if (!ui.interactive) {
+					throw new FirstCacheSlugTakenError(slug, { cause: error });
+				}
+
 				ui.warn(`"${slug}" is already taken; choose another.`);
 				continue;
 			}

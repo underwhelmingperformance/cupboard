@@ -181,10 +181,23 @@ export class R2CredentialsRejectedError extends CliError {
 	}
 }
 
+export class FirstCacheAccessRequiredError extends CliUsageError {
+	constructor() {
+		super(
+			'Not running in a terminal: pass --access with --cache to set who may read the first cache.'
+		);
+		this.name = 'FirstCacheAccessRequiredError';
+	}
+}
+
 export interface DeployCliOptions {
 	readonly domain?: string;
 	readonly instanceName?: InstanceName;
 	readonly account?: string;
+	/**
+	The slug of the first cache on a new deployment.
+	*/
+	readonly cache?: string;
 	readonly access?: CacheAccessMode;
 	/**
 	The issuer and client of the admin's login on a first deploy.
@@ -958,6 +971,7 @@ async function deployFlow(
 
 	ui.intro('cupboard deploy');
 
+	requireFirstCacheAccess(cliOptions, isInteractive);
 	requireGithubOidcForAudience(cliOptions);
 
 	const { artifact, notice } = await ui
@@ -1392,6 +1406,12 @@ async function deployFlow(
 		ui.note(note.title, note.rows);
 	}
 
+	const firstCacheNote = unclaimedFirstCacheNote(authority, cliOptions);
+
+	if (firstCacheNote !== undefined) {
+		ui.warn(firstCacheNote);
+	}
+
 	const agreedBucket = bucketNameOf(agreed.config);
 	let wasCreatedNow = false;
 
@@ -1557,6 +1577,9 @@ async function deployFlow(
 					domain: agreed.domain,
 					instanceName: cliOptions.instanceName,
 					authority,
+					...(cliOptions.cache !== undefined && {
+						cacheSlug: cliOptions.cache
+					}),
 					cacheAccess: cliOptions.access,
 					buildVersion: artifact.buildVersion,
 					signal: runtimeOptions.signal,
@@ -1653,8 +1676,11 @@ async function deployFlow(
 
 		case 'cancelled': {
 			ui.info(
-				'No cache was created yet. Re-run `cupboard init` to pick a ' +
-					'name when you are ready.'
+				isInteractive
+					? 'No cache was created yet. Re-run `cupboard init` to pick a ' +
+							'name when you are ready.'
+					: 'No first cache was requested. Re-run `cupboard init` with ' +
+							'--cache and --access to create one.'
 			);
 			ui.outro('Deployed; the admin can create caches.');
 			return;
@@ -1678,6 +1704,23 @@ async function deployFlow(
 			showReadyCache(ui, outcome);
 			return;
 		}
+	}
+}
+
+/**
+ * Refuses `--cache` without `--access` on a run without a terminal, because
+ * nobody can answer the access prompt.
+ */
+export function requireFirstCacheAccess(
+	cliOptions: Pick<DeployCliOptions, 'cache' | 'access'>,
+	isInteractive: boolean
+): void {
+	if (
+		!isInteractive &&
+		cliOptions.cache !== undefined &&
+		cliOptions.access === undefined
+	) {
+		throw new FirstCacheAccessRequiredError();
 	}
 }
 
@@ -1833,4 +1876,28 @@ export function claimServerFault(
 	}
 
 	return { message: error.message, ray: error.ray };
+}
+
+/**
+ * The note for `--cache` and `--access` on a run that leaves the deployment
+ * without an admin. Undefined when the run has an admin or neither option is
+ * passed.
+ */
+export function unclaimedFirstCacheNote(
+	authority: DeployAuthority,
+	cliOptions: Pick<DeployCliOptions, 'cache' | 'access'>
+): string | undefined {
+	if (
+		authority.kind !== 'unclaimed' ||
+		(cliOptions.cache === undefined && cliOptions.access === undefined)
+	) {
+		return undefined;
+	}
+
+	return (
+		'`--cache` and `--access` are not applied, because only an admin can ' +
+		'create a cache. On the run that claims the deployment from a terminal, ' +
+		'they replace the prompts. After the claim, a run without a terminal ' +
+		'uses them to create the first cache if the deployment has none.'
+	);
 }

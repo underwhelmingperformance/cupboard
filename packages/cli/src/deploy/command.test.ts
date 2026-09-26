@@ -36,8 +36,10 @@ import {
 	claimServerFault,
 	deployAndOnboard,
 	DeployCancelledError,
+	type DeployCliOptions,
 	DeploymentUnclaimedError,
 	envR2Credentials,
+	FirstCacheAccessRequiredError,
 	isVersionServed,
 	obtainR2Credentials,
 	outroBeforeReady,
@@ -47,8 +49,10 @@ import {
 	R2CredentialsRejectedError,
 	type R2KeyAction,
 	r2KeyActionFor,
+	requireFirstCacheAccess,
 	requireGithubOidcForAudience,
 	reviewPlan,
+	unclaimedFirstCacheNote,
 	verifyR2Credentials
 } from './command.ts';
 import { parseDeploymentConfig } from './config.ts';
@@ -1684,6 +1688,103 @@ const bootstrapAuthority: DeployAuthority = {
 	claimant: firstClaimant
 };
 const unclaimedAuthority: DeployAuthority = { kind: 'unclaimed' };
+
+type FirstCacheOptions = Pick<DeployCliOptions, 'cache' | 'access'>;
+
+describe('requireFirstCacheAccess', () => {
+	it.each([
+		{
+			name: 'with --cache and --access',
+			options: {
+				cache: 'builds',
+				access: 'public'
+			} satisfies FirstCacheOptions,
+			interactive: false,
+			isRefused: false
+		},
+		{
+			name: 'with --cache alone',
+			options: { cache: 'builds' },
+			interactive: false,
+			isRefused: true
+		},
+		{
+			name: 'with --cache alone at a terminal',
+			options: { cache: 'builds' },
+			interactive: true,
+			isRefused: false
+		},
+		{
+			name: 'without --cache',
+			options: {},
+			interactive: false,
+			isRefused: false
+		}
+	])('checks a run $name', ({ options, interactive, isRefused }) => {
+		let refusal: unknown;
+
+		try {
+			requireFirstCacheAccess(options, interactive);
+		} catch (error) {
+			refusal = error;
+		}
+
+		if (isRefused) {
+			expect(refusal).toBeInstanceOf(FirstCacheAccessRequiredError);
+		} else {
+			expect(refusal).toBeUndefined();
+		}
+	});
+});
+
+describe('unclaimedFirstCacheNote', () => {
+	it.each([
+		{
+			name: 'an unclaimed run with --cache',
+			authority: unclaimedAuthority,
+			options: { cache: 'builds' },
+			hasNote: true
+		},
+		{
+			name: 'an unclaimed run with --access',
+			authority: unclaimedAuthority,
+			options: { access: 'private' } satisfies FirstCacheOptions,
+			hasNote: true
+		},
+		{
+			name: 'an unclaimed run without either',
+			authority: unclaimedAuthority,
+			options: {},
+			hasNote: false
+		},
+		{
+			name: 'a first deploy at a terminal',
+			authority: bootstrapAuthority,
+			options: { cache: 'builds' },
+			hasNote: false
+		},
+		{
+			name: 'an update',
+			authority: updateAuthority,
+			options: { cache: 'builds' },
+			hasNote: false
+		}
+	])(
+		'returns the ignored-options note only for an unclaimed run ($name)',
+		({ authority, options, hasNote }) => {
+			const note = unclaimedFirstCacheNote(authority, options);
+
+			if (hasNote) {
+				expect({
+					mentionsCache: note?.includes('--cache'),
+					mentionsAccess: note?.includes('--access')
+				}).toStrictEqual({ mentionsCache: true, mentionsAccess: true });
+			} else {
+				expect(note).toBeUndefined();
+			}
+		}
+	);
+});
 
 describe('tenantMigratorFor', () => {
 	it.each([

@@ -314,12 +314,12 @@ Cloudflare identity, the deployment's admin.
       keep answering while the new one propagates. Step two: on a first deploy,
       claim the deployment (below); then, with the admin token, initialise the
       instance, prompt for the first cache's slug (typed inline after the
-      `<url>/t/` prefix; no default), create the tenant, and poll its
-      `/t/<slug>/pubkey` (whose first success creates the signing key) before
-      printing the `nix.conf` lines for the cache URL. The create call fails
-      with a conflict when the slug is taken, and the deploy then asks for
-      another slug; re-creating an identical tenant is idempotent, so re-runs
-      converge.
+      `<url>/t/` prefix; no default; `--cache` and `--access` replace the
+      prompts), create the tenant, and poll its `/t/<slug>/pubkey` (whose first
+      success creates the signing key) before printing the `nix.conf` lines for
+      the cache URL. The create call fails with a conflict when the slug is
+      taken, and the deploy then asks for another slug; re-creating an identical
+      tenant is idempotent, so re-runs converge.
 - [x] Admin binding: the Cloudflare credential for the account does not make
       anyone the admin. The admin comes from the identity in an OIDC id_token,
       which defaults to the Cloudflare login. Before any change, the deploy

@@ -300,9 +300,18 @@ the new URL, before the next run.
 ### The first cache
 
 The first cache is created only on a deployment without tenants, and only by an
-admin. At a terminal, the deploy asks for its slug, and for its read access
-unless `--access` is given. A deploy without a terminal does not create the
-first cache.
+admin.
+
+- At a terminal, the deploy asks for the cache's slug and read access. `--cache`
+  and `--access` replace those prompts.
+- Without a terminal, the deploy creates the first cache only from `--cache` and
+  `--access`, which it then requires together, on a deployment that already has
+  an admin. If the slug is taken, the deploy exits with an error.
+- A first deploy without a terminal has no admin, so it does not apply the two
+  options, and it warns about them before it changes anything.
+
+When the deployment already has a cache, the deploy says that it did not apply
+`--cache`.
 
 ### How principals are shown
 
