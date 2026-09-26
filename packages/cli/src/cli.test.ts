@@ -1,7 +1,10 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
-import { TrustedRootFormatError } from '@cupboard/shared/sigstore';
+import {
+	IneffectiveCtlogThresholdError,
+	TrustedRootFormatError
+} from '@cupboard/shared/sigstore';
 import { ORPCError } from '@orpc/client';
 import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
@@ -181,6 +184,11 @@ describe('cliExitCode', () => {
 		{
 			name: 'a malformed trusted-root file',
 			error: new TrustedRootFormatError('roots.json', { kind: 'empty' }),
+			expected: usageExitCode
+		},
+		{
+			name: 'a certificate-transparency threshold of 0 that no root can use',
+			error: new IneffectiveCtlogThresholdError(undefined),
 			expected: usageExitCode
 		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }
