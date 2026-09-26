@@ -47,6 +47,7 @@ import {
 	CommitCapacityTimeoutError,
 	CupboardHttpError,
 	PostBuildHookConflictError,
+	QuotaExceededError,
 	unavailableExitCode,
 	UntrustedDaemonError
 } from '../errors.ts';
@@ -1005,6 +1006,12 @@ describe('classifyPublicationFailures', () => {
 			name: 'a transient failure',
 			causes: [new CupboardHttpError('PUT', '/nar', 503, '')],
 			expectedExitCode: 75,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'a quota refusal',
+			causes: [new QuotaExceededError('over quota')],
+			expectedExitCode: 74,
 			expectedCauseIndex: 0
 		},
 		{

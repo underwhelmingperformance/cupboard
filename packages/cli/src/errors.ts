@@ -28,6 +28,7 @@ const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
 const requestTimeoutStatusCode: number = StatusCodes.REQUEST_TIMEOUT;
 const tooManyRequestsStatusCode: number = StatusCodes.TOO_MANY_REQUESTS;
 const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 export abstract class CliError extends CodedError {}
 
@@ -503,6 +504,12 @@ export class CupboardHttpError extends CliError {
 			this.status === forbiddenStatusCode
 		) {
 			return authExitCode;
+		}
+
+		// The server returns 507 when the cache is over its storage quota, and a
+		// re-run fails in the same way.
+		if (this.status === insufficientStorageStatusCode) {
+			return genericExitCode;
 		}
 
 		if (
