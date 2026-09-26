@@ -112,7 +112,7 @@ export function cachedOwnerProvider(
 				if (
 					session !== undefined &&
 					!isSameSession(session, observed) &&
-					!isExpired(session.accessToken, now())
+					!isAccessTokenExpired(session.accessToken, now())
 				) {
 					return session.accessToken;
 				}
@@ -157,7 +157,10 @@ export function cachedOwnerProvider(
 			const session = await readSession(target);
 			throwIfAborted(dependencies.signal);
 
-			if (session !== undefined && !isExpired(session.accessToken, now())) {
+			if (
+				session !== undefined &&
+				!isAccessTokenExpired(session.accessToken, now())
+			) {
 				return session.accessToken;
 			}
 
@@ -186,7 +189,14 @@ function isSameSession(
 	);
 }
 
-function isExpired(accessToken: string, nowMs: number): boolean {
+/**
+ * Whether a cached access token is expired or expires within 30 seconds, and
+ * so needs renewing before use.
+ */
+export function isAccessTokenExpired(
+	accessToken: string,
+	nowMs: number
+): boolean {
 	const expiry = jwtExpiryMs(accessToken);
 
 	return expiry !== undefined && expiry <= nowMs + accessTokenFreshnessMarginMs;
@@ -291,6 +301,21 @@ export async function authenticateGithubOidc(
 	await provider.get();
 
 	return provider;
+}
+
+/**
+ * A provider that exchanges a GitHub Actions OIDC token for a Cupboard token
+ * on first use and, as the Cupboard token nears expiry, requests a new GitHub
+ * token and exchanges that. Unlike {@link authenticateGithubOidc}, it does not
+ * exchange up front. The first exchange happens at the first `get()`, and
+ * `get()` throws any failure.
+ */
+export function githubOidcTokenProvider(
+	client: CupboardClient,
+	audience: Audience,
+	authorizationDetails: AuthorizationDetails
+): TokenProvider {
+	return new GithubOidcTokenProvider(client, audience, authorizationDetails);
 }
 
 export interface PushAuthOptions {

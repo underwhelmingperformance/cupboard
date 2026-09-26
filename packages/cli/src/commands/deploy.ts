@@ -1,12 +1,16 @@
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import {
 	type InstanceName,
 	instanceNameSchema
 } from '@cupboard/protocol/instance';
 import { type Command, InvalidArgumentError } from 'commander';
 
+import { parseAudience } from '../audience.ts';
 import { parseCacheAccess } from '../cache-access.ts';
 import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
+import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
+import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import type { WorkersPlanOverride } from '../deploy/workers-plan.ts';
 
 function parseWorkersPlan(value: string): WorkersPlanOverride {
@@ -30,6 +34,17 @@ function parseInstanceName(value: string): InstanceName {
 	return parsed.data;
 }
 
+function parseCacheSlug(value: string): string {
+	if (!cacheNameSchema.safeParse(value).success) {
+		throw new InvalidArgumentError(
+			'Cache slug must use lowercase letters, digits, ".", "_" or "-", ' +
+				'starting with a letter or digit (63 characters at most).'
+		);
+	}
+
+	return value;
+}
+
 export function registerDeployCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -49,10 +64,40 @@ export function registerDeployCommand(
 		)
 		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
 		.option(
+			'--cache <slug>',
+			'slug of the first cache on a new deployment (you are asked when it ' +
+				'is omitted; without a terminal, no cache is created)',
+			parseCacheSlug
+		)
+		.option(
 			'--access <mode>',
 			'read access for the first cache: public or private (you are asked ' +
 				'when it is omitted)',
 			parseCacheAccess
+		)
+		.option(
+			'--oidc-issuer <issuer>',
+			'OIDC issuer of the identity that claims a new deployment as its admin',
+			cloudflareDashIssuer
+		)
+		.option(
+			'--client-id <id>',
+			'registered public OAuth client id for the admin login on a first deploy, and for an admin without a recorded audience (PKCE, no client secret)',
+			cloudflareOauthClientId
+		)
+		.option(
+			'--headless',
+			'use the device flow instead of a browser for the admin login, on a first deploy or when an update logs you in as the admin; the Cloudflare login for the account can still open a browser'
+		)
+		.option(
+			'--github-oidc',
+			"authorise an update with the workflow's GitHub Actions OIDC token, " +
+				'through a control trust rule, instead of a `cupboard login` session'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the deployment URL)',
+			parseAudience
 		)
 		.option(
 			'--no-wrangler',

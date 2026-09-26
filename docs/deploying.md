@@ -1,6 +1,6 @@
 # Deploying a release
 
-`cupboard deploy` updates a control Worker, a tenant Worker and their shared D1
+`cupboard init` updates a control Worker, a tenant Worker and their shared D1
 database. Each tenant also has a Durable Object with its own SQLite database; R2
 stores the NAR and attestation bytes. See [releases] for how CLI binaries are
 built and published.
@@ -9,12 +9,12 @@ built and published.
 
 ## Resource names and cron triggers
 
-Before it changes anything, `cupboard deploy` shows the deployment plan and a
-menu for editing it. In that menu you can choose the names of the R2 bucket, the
-D1 database, the maintenance queue and its dead-letter queue that the Workers
-use, and change the control Worker's cron triggers. The list of cron triggers
-cannot be empty, because the control Worker runs maintenance only when a cron
-trigger fires.
+Before it changes anything, `cupboard init` shows the deployment plan and a menu
+for editing it. In that menu you can choose the names of the R2 bucket, the D1
+database, the maintenance queue and its dead-letter queue that the Workers use,
+and change the control Worker's cron triggers. The list of cron triggers cannot
+be empty, because the control Worker runs maintenance only when a cron trigger
+fires.
 
 On an account that already has a control Worker, the deployment plan starts from
 the existing deployment. The deploy reads the bucket, the database and the
@@ -24,10 +24,14 @@ as shown, or deploying with `--yes`, keeps the existing resources and cron
 triggers. On an account without a control Worker, the plan starts from the
 release's defaults.
 
-Earlier versions of `cupboard deploy` started every plan from the release's
+Earlier versions of `cupboard init` started every plan from the release's
 defaults, so accepting the plan could point the Workers at new, empty resources
 with the default names. To use the original resources again, enter their names
-in the menu.
+in the menu. If either the original database or the current one records an
+admin, first bind the control Worker to the original database, as described in
+[Changing the control database][control-database].
+
+[control-database]: #changing-the-control-database
 
 A release that changes a default resource name or cron trigger does not change
 an existing deployment. There is one exception: when the control Worker has no
@@ -40,9 +44,284 @@ defaults.
 
 Choosing a different account in the menu restarts the deployment plan from that
 account's existing deployment. The switch discards the resource, cron trigger
-and domain edits made so far, and any request to replace the R2 credentials. It
-keeps the Admin setting. The plan then shows the domain given with `--domain`,
-or otherwise the custom domain routed to that account's control Worker.
+and domain edits made so far, and any request to replace the R2 credentials. The
+plan then shows the domain given with `--domain`, or otherwise the custom domain
+routed to that account's control Worker.
+
+## Admin
+
+A deployment has one global admin, recorded in the `global_admin` row of its D1
+database. The first principal to present the claim secret at `/signup` becomes
+the admin; this is the claim. The Cloudflare credential that `cupboard init`
+uses for the account (an OAuth login, a wrangler token or an API token) does not
+make anyone a Cupboard admin. The claim uses the identity in an id_token.
+
+Before it changes anything, the deploy reads the admin from two databases: the
+database that the deployed Workers are bound to, and the database selected in
+the plan. Usually they are the same database. The next sections describe what
+the deploy does for each state of the row, and with or without a terminal.
+
+The admin check stops `cupboard init` from updating a deployment when the run
+has no admin token. Anyone with the Cloudflare credentials can still change the
+Workers, their secrets or D1 directly with other tools, so the check does not
+protect a deployment from other holders of the account's credentials.
+
+### First deploy
+
+When neither database records an admin and the deploy runs in a terminal, it
+logs you in to Cloudflare by default. `--oidc-issuer` and `--client-id` select
+another issuer and OAuth client, with the same defaults as `cupboard login`.
+With the default issuer and client, and without `--headless`, this login uses
+Cupboard's cached Cloudflare login if there is one; it opens a browser only when
+there is no cached login or the cached login cannot be renewed. With a different
+issuer or client, the login is always a separate login to that issuer. With
+`--headless`, it uses the device flow instead of a browser; the Cloudflare login
+for the account can still open a browser.
+
+The deploy then prints who the claim will make the admin (the display name,
+issuer, subject and audience from your id_token) and asks you to confirm,
+because the claim cannot be undone. `--yes` confirms without asking.
+
+The id_token's issuer must be an HTTPS URL without a query or fragment, and the
+token must have a `sub` claim. Its `aud` claim must contain exactly one
+audience, because the control trust rule that the claim seeds pins one. The
+deploy checks these before any change and stops if the id_token does not meet
+them, because `/signup` would refuse the token after the upload. An issuer that
+adds further audiences to its id_tokens cannot be used for the claim.
+
+The deploy sets a generated claim secret, as the control Worker's
+`CUPBOARD_SIGNUP_SECRET`, along with the other Worker secrets. Once the new
+build serves, it:
+
+1. presents the secret and your id_token at `/signup`, which records the token's
+   issuer and subject as the admin and seeds a control trust rule that pins the
+   issuer, subject and audience;
+2. deletes the secret, whether or not the claim succeeded;
+3. exchanges the same id_token at `/token` for an admin token and caches it, as
+   `cupboard login` does.
+
+The id_token presented at the claim must belong to the identity that you
+confirmed. The deploy keeps the id_token from the login before the upload and
+logs in again only if that token expires within a minute. If a second login
+returns another identity, the deploy stops before the claim.
+
+If the claim succeeds but the admin token cannot be cached, the deploy stops and
+prints that the claim succeeded. Run the `cupboard login` command that the
+deploy prints to cache the token, then run `cupboard init` again to finish.
+
+The deploy retries `/signup` while it returns 404, 408, 429, 502, 503 or 504,
+for up to 30 attempts four seconds apart (about two minutes), and while it
+returns 403 from a Worker that has not yet received the claim secret. When the
+claim fails, the advice depends on the last response:
+
+- 409: another principal is already the admin. Log in as that admin, with the
+  issuer and client that the admin claimed with, to update the deployment.
+- 400: the deployment rejected your id_token or the request, and the message
+  includes the server's reason.
+- 429: Cloudflare limited the rate of requests. Wait a few minutes and run the
+  deploy again.
+- A 5xx status: the deploy prints the control Worker's log for the request when
+  Cloudflare has it.
+- 403, repeated: the claim secret did not take effect in time, and a re-run
+  claims with a fresh secret.
+- Any other status: check that the URL serves this release's control Worker.
+- No response: the deploy reports that it could not reach the deployment.
+
+`/signup` accepts the claim secret from anyone for as long as it is set. A first
+deploy from a terminal therefore removes the secret after the claim attempt, and
+also when the run stops after setting the secret but before the claim, including
+when you interrupt it. Before its own upload, an update or a deploy without a
+terminal removes any secret that an earlier run left, for example after an
+interrupted run. If a removal fails, the deploy prints a warning, and the secret
+stays set on the Worker until the next `cupboard init` removes it. The deploy
+never prints the value or writes it to disk.
+
+Whether the deploy claims or updates the deployment depends on the row, not on
+whether Workers are already deployed. A deployment uploaded without a claim is
+claimed by the next deploy from a terminal. So is a deployment whose earlier
+deploy stopped before the claim; the next deploy sets a fresh secret. If a first
+deploy from a terminal stops before the claim because the deployment kept
+answering with an older build or an error status, or because the account has no
+workers.dev subdomain, the deploy says that the deployment has no admin yet and
+exits with a non-zero status. A network failure while it waits for the new build
+ends the run with that error instead.
+
+### First deploy without a terminal
+
+When neither database records an admin and the deploy has no terminal, it
+provisions and uploads but skips the claim and the first cache, because the
+claim needs a login. It does not wait for the new build to serve. It exits with
+an error that says the deployment has no admin, because nobody can create a
+cache until someone claims it. A deploy from CI has no terminal and cannot log
+in, so it cannot claim a deployment, and a CI job that deploys a new deployment
+fails until someone runs `cupboard init` from a terminal.
+
+### Update
+
+When the database records an admin, the deploy needs an admin token and checks
+it against the deployment's current URL before any migration or upload. The
+current URL is the URL that the last deploy recorded on the control Worker, the
+URL for which `cupboard init` and `cupboard login` obtain the admin's tokens. A
+deployment from an earlier release has no record; its current URL is the custom
+domain routed to the control Worker, or the workers.dev URL, and the first run
+with this release records it.
+
+The deploy uses the session cached by `cupboard login <deployment URL>`. When no
+session is cached, it first tries the cached Cloudflare login, as
+`cupboard login` does, and exchanges its id_token at the deployment; this
+succeeds only if a control trust rule accepts that identity. When there is still
+no usable session, or the session lacks the wildcard grant, and the run has a
+terminal, the deploy logs you in as the admin and caches the session. The deploy
+always starts a new login through the admin's issuer for this, not the cached
+Cloudflare login, so you can complete it as the admin if your cached login
+belongs to another user. `--headless` makes it use the device flow. If the login
+returns another identity, the deploy stops before any change.
+
+Without a usable token, the deploy stops, prints who the admin is, and prints
+how to log in; nothing has changed by then.
+
+The check sends an `instance.get` request to the deployment. If the deployment
+cannot be reached, returns an error status, does not serve the control Worker at
+its URL, or runs a build without `instance.get`, the deploy stops before any
+change and prints the reason. For an error status, fix the control Worker or
+roll it back, for example with `wrangler rollback`, and deploy again. For a
+build without `instance.get`, first update the deployment with a release that
+has it.
+
+The deploy uses the same token to initialise the instance, rebuild tenant
+membership, check the Worker's R2 credentials and migrate the tenants, which
+brings each tenant's Durable Object to the local step that the release requires
+(see [Local steps][local-steps]). It renews either kind of token when the token
+nears expiry.
+
+[local-steps]: #local-steps
+
+### Updating from CI
+
+In CI, pass `--github-oidc`. The deploy then exchanges the workflow's GitHub
+Actions OIDC token for an admin token through a control trust rule, and the rule
+must give the workflow the wildcard grant. Create the rule once, as the admin.
+`--allow` cannot express the wildcard grant, so give the rule body in a file:
+
+```sh
+cat > ci-admin-rule.json <<'EOF'
+{
+  "issuer": "https://token.actions.githubusercontent.com",
+  "audience": "https://cache.example.com",
+  "claims": { "sub": "repo:acme/infra:ref:refs/heads/main" },
+  "permittedGrants": [{ "type": "cupboard_wildcard" }]
+}
+EOF
+cupboard control-oidc-trust add https://cache.example.com \
+  --issuer https://token.actions.githubusercontent.com \
+  --audience https://cache.example.com \
+  --from-file ci-admin-rule.json
+```
+
+The audience is the deployment's current URL without a trailing slash, which is
+the audience that the deploy requests by default. `--audience` requests another
+audience, and `--audience` without `--github-oidc` is refused. The `sub` claim
+pins the repository and the branch that may deploy. The job needs the
+`id-token: write` permission and runs `cupboard init --github-oidc --yes`.
+
+### Changing the control database
+
+The deploy refuses a plan that selects a D1 database other than the database of
+the deployed Workers when either database records an admin. Deploying such a
+plan would either run as a first deploy while a database records an admin, or
+leave the admin in a database that the Workers are no longer bound to. The
+refusal happens before any change.
+
+To keep the current database, select it in the plan menu. To move the deployment
+to the other database, first bind the control Worker to it: in the Cloudflare
+dashboard, open the control Worker under Workers & Pages, edit its `CUPBOARD_DB`
+binding under Settings > Bindings, and deploy the new version. Then run
+`cupboard init` again, as the admin that the other database records. When
+neither database records an admin, the deploy runs as a first deploy with the
+database selected in the plan.
+
+### If the control Worker was deleted
+
+When the control Worker no longer exists, the deploy reads the database binding
+of the tenant Worker, and it reads the admin from that database and from the
+database selected in the plan. If either records an admin, the deploy stops
+before any change, because no Worker can check an admin token. `cupboard init`
+cannot recreate the control Worker of a claimed deployment. Redeploy it with
+Wrangler from the source of this release:
+
+1. In `packages/server/wrangler.jsonc`, set `name` to the control Worker's
+   script name, set the `CUPBOARD_DB` binding's `database_name` and
+   `database_id` to the database that records the admin, and set the other
+   bindings to the deployment's R2 bucket, KV namespace and queues.
+2. Run `pnpm install`, then `wrangler deploy` in `packages/server`.
+3. Set the original `CONTROL_KEY_WRAP_SECRET` with
+   `wrangler secret put CONTROL_KEY_WRAP_SECRET`. The Worker's secrets were
+   deleted with it, and only the original value can read the control database's
+   signing keys. The first deploy printed the value if it generated it.
+4. If the deployment served on a custom domain, route that domain to the Worker
+   again.
+5. Run `cupboard init` as the admin, with `--domain` set to the custom domain if
+   the deployment served on one. The deploy checks the admin token against the
+   redeployed Worker and replaces the Worker with this release.
+
+### Moving to a new URL
+
+An admin token for one URL is not accepted at another. When the plan moves the
+deployment to a new URL, the deploy migrates the tenants and initialises the
+instance at the new URL. Changing the custom domain is a move, and so is adding
+a first custom domain to a deployment that serves on workers.dev.
+
+If the new URL already serves the deployment, for example because you routed the
+new domain to the control Worker in the Cloudflare dashboard, the deploy checks
+the admin token there as it does at the current URL, and at a terminal it can
+log you in there. Routing a domain in the dashboard does not change the current
+URL, because the deploy takes the current URL from its record. For a deployment
+from an earlier release, which has no record, run `cupboard init` once before
+you route the new domain. Otherwise the deploy would take the routed domain as
+the current URL.
+
+If the new URL does not serve the deployment yet, the deploy cannot obtain or
+check a token there before the upload. It then uses a session for the new URL
+that is cached on this machine. The session's token must be issued by the new
+URL and include the wildcard grant, as for the live check; an expired token
+counts only if the session has a refresh token. Without such a session, the
+deploy stops before any change. To move the deployment, route the new domain to
+the control Worker in the Cloudflare dashboard and deploy again; at a terminal,
+the deploy logs you in at the new URL if needed.
+
+A run with `--github-oidc` can move a deployment only when the new URL already
+serves it, because the run never uses a cached session. The deploy requests a
+GitHub token whose audience is the current URL, or `--audience`, at both URLs,
+because the workflow's control trust rule pins one audience. After the move, the
+recorded URL is the new one, so later runs request the new URL as their
+audience. Pass `--audience` with the old URL, or add a control trust rule for
+the new URL, before the next run.
+
+### The first cache
+
+The first cache is created only on a deployment without tenants, and only by an
+admin.
+
+- At a terminal, the deploy asks for the cache's slug and read access. `--cache`
+  and `--access` replace those prompts.
+- Without a terminal, the deploy creates the first cache only from `--cache` and
+  `--access`, which it then requires together, on a deployment that already has
+  an admin. If the slug is taken, the deploy exits with an error.
+- A first deploy without a terminal has no admin, so it does not apply the two
+  options, and it warns about them before it changes anything.
+
+When the deployment already has a cache, the deploy says that it did not apply
+`--cache`.
+
+### How principals are shown
+
+The CLI shows your own identity as your token's `name`, `email`,
+`preferred_username` or `sub` claim, whichever it finds first in that order. It
+reads your display name from your token each time, and the deployment does not
+record it. Other principals appear as the full issuer URL followed by the
+subject; an update shows the admin in this form. `cupboard oidc-trust list`
+shows each rule's full issuer URL, followed by the subject when the rule is
+pinned to one.
 
 ## Workers plan and subrequest allowance
 
@@ -58,7 +337,7 @@ Paid runtime check in which 10,000 D1 calls completed and the 10,001st failed.
 The Free internal-service allowance has not been checked against a hosted
 Worker. Cupboard uses the Workers limits for both plans.
 
-`cupboard deploy` reads the account's subscriptions and writes the selected
+`cupboard init` reads the account's subscriptions and writes the selected
 allowance into both Workers. Plan detection is best effort. If the token cannot
 read subscriptions, the request fails, or the response contains an unrecognised
 Workers plan, deployment reports the reason and uses the Free allowance. An
@@ -72,7 +351,7 @@ does not change that subscription. For example, an operator who has confirmed a
 Paid subscription can deploy with a token that cannot read billing information:
 
 ```sh
-cupboard deploy --workers-plan paid
+cupboard init --workers-plan paid
 ```
 
 The allowance is stored in `CUPBOARD_SUBREQUESTS_PER_INVOCATION`. An unset or
@@ -102,7 +381,8 @@ This release finishes a deploy in `contracted`. One run performs these steps:
 3. Upload both Workers and configure their triggers and secrets.
 4. Check that each Worker's deployment assigns all traffic to one version and
    that both Workers report this build. Check that every active tenant has
-   reached local step 4, waking pending tenants in batches of 20.
+   reached local step 4, waking pending tenants in batches of 20 with the admin
+   token.
 5. Record `native-reads`, apply the D1 contraction migrations and record
    `contracted`. Wake tenants again until they finish local step 5.
 
@@ -112,7 +392,7 @@ fails, the D1 contraction and `contracted` phase have already been recorded.
 Each tenant wake stage runs at most 100 batches. Inspect incomplete work with
 `cupboard deployment status <url>` and retry batches with
 `cupboard deployment resume <url>`. Repair any reported tenant configuration or
-migration error, then rerun `cupboard deploy`. Applied migrations are skipped
+migration error, then rerun `cupboard init`. Applied migrations are skipped
 after checking their recorded digests. Repeating a phase preserves its
 timestamp, and a rerun cannot lower `contracted` to `native-reads`.
 
@@ -171,7 +451,7 @@ Before contraction, an object reports at most step 4. After contraction, the
 control plane still finds those tenants below step 5 and wakes them again. A
 successful CLI deploy completes both stages. If a run is interrupted,
 `cupboard deployment resume <url>` continues the pending stage; rerun
-`cupboard deploy` to complete any remaining global transition. The hourly sweep
+`cupboard init` to complete any remaining global transition. The hourly sweep
 also continues tenant work. A persisted cursor rotates through pending tenants,
 so a failed tenant does not prevent later tenants from being attempted.
 
@@ -285,8 +565,8 @@ Migration-history admission checks are separate from schema compatibility. A
 build can admit a longer history when the extra migrations have verified
 digests, yet still be unable to use the schema those migrations produced. An
 older build that does not recognise the recorded phase also refuses
-`cupboard deploy`, and its `deployment.phase` control procedure returns an
-error. Deploy a build that recognises the phase to recover these operations.
+`cupboard init`, and its `deployment.phase` control procedure returns an error.
+Deploy a build that recognises the phase to recover these operations.
 
 The `check` API now uses a numeric cache identity in `cursorCache`. An older CLI
 cannot validate this response or resume an old scan against it. Use the CLI from

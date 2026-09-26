@@ -5,20 +5,25 @@ import {
 	oidcIssuerSchema
 } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
-import { type VerifiedOidcClaims } from '@cupboard/protocol/oidc-trust-match';
+import {
+	type OidcClaims,
+	type VerifiedOidcClaims
+} from '@cupboard/protocol/oidc-trust-match';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	signupRequestSchema,
 	type SignupResponseInput
 } from '@cupboard/protocol/signup';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
+import { z } from 'zod';
 
 import { isConstantTimeEqual, sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
-	ControlNotConfiguredError,
 	IssuerUnavailableError,
 	SignupForbiddenError,
+	SubjectTokenAudienceInvalidError,
+	SubjectTokenIssuerInvalidError,
 	SubjectTokenNotJwtError,
 	SubjectTokenSubjectMissingError,
 	SubjectTokenVerificationFailedError
@@ -26,8 +31,7 @@ import {
 import { parseFormBody } from '../http/parse.ts';
 import {
 	canUseLoopbackHttp,
-	isAllowedIssuerTransport,
-	type LocalDevelopmentEnvironment
+	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
 import {
 	decodeInboundClaims,
@@ -40,41 +44,49 @@ import { claimGlobalAdmin } from './global-admin.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
-// Issuer discovery cached across requests in this Worker instance, the same shape
-// the token exchange uses, here against the single deploy-configured signup issuer.
+// Issuer discovery cached across requests in this Worker instance, with the
+// same shape as the store that the token exchange uses. Here it resolves the
+// issuer in the presented token's `iss`.
 const discovery = new OidcDiscoveryStore();
 const localDevelopmentDiscovery = new OidcDiscoveryStore({
 	canUseLoopbackHttp: true
 });
 
-// The gated first-signup claim: a caller presents an external OIDC subject token,
-// it is verified against the deploy-configured signup issuer, the deployment gate
-// is enforced, and only then is the principal claimed as global admin (which also
-// seeds the control trust rule that lets it issue admin tokens). The gate is checked
-// after verification, so only an authenticated principal can probe it.
+// The first-admin claim. The deploy sets a claim secret on the Worker for one
+// claim and presents it with an id_token from any OIDC issuer. The issuer
+// comes from the unverified token's `iss`, so discovery fetches from a URL that
+// the caller chooses. The secret is checked before the token is decoded, so a
+// caller without it cannot make the Worker fetch anything.
+//
+// The token's `iss` and `sub` identify the principal, which becomes the global
+// admin. The seeded control trust rule pins `iss`, `sub` and the single `aud`,
+// and lets the principal obtain admin tokens at `/token`.
 export async function handleSignup(
 	request: Request,
 	env: Env
 ): Promise<Response> {
-	const issuer = signupIssuer(env);
-	const audience = signupAudience(env);
 	const body = await parseFormBody(signupRequestSchema, request);
 
+	await enforceClaimSecret(env, body.claim_secret);
+
+	let claims: OidcClaims;
+
 	try {
-		decodeInboundClaims(body.subject_token);
+		claims = decodeInboundClaims(body.subject_token);
 	} catch {
 		throw new SubjectTokenNotJwtError();
 	}
 
+	const isLoopbackAllowed = canUseLoopbackHttp(env);
+	const issuer = tokenIssuer(claims, isLoopbackAllowed);
+	const audience = tokenAudience(claims);
 	const verified = await verifySignupToken(
 		issuer,
 		audience,
 		body.subject_token,
-		canUseLoopbackHttp(env)
+		isLoopbackAllowed
 	);
 	const subject = verifiedSubject(verified);
-
-	await enforceGate(env, body.claim_secret, subject);
 
 	const now = new Date();
 	const { claimed: isClaimed } = await claimGlobalAdmin(
@@ -84,63 +96,87 @@ export async function handleSignup(
 	);
 
 	return Response.json(
-		{ issuer, subject, claimed: isClaimed } satisfies SignupResponseInput,
+		{
+			issuer,
+			subject,
+			audience,
+			claimed: isClaimed
+		} satisfies SignupResponseInput,
 		{
 			headers: { 'cache-control': 'no-store' }
 		}
 	);
 }
 
-// Bindings can be absent in a hand-written deployment. Read each value as
-// optional so a missing gate fails closed outside local development.
-export interface SignupGate {
+// In a hand-written deployment, the binding can be absent. It then reads as
+// undefined, and every claim is refused.
+export interface ClaimSecretEnvironment {
 	readonly CUPBOARD_SIGNUP_SECRET: string | undefined;
-	readonly CUPBOARD_SIGNUP_SUBJECT: string | undefined;
-	readonly CUPBOARD_LOCAL_DEV: string | undefined;
 }
 
-// A configured single-use claim secret must match. Without a secret, a
-// configured subject must match the verified token. With neither binding, only
-// local development may claim the first administrator.
-export async function enforceGate(
-	env: SignupGate,
-	claimSecret: string | undefined,
-	subject: string
+// The presented claim secret must match the secret on the Worker. Without a
+// secret on the Worker, nobody can claim the first administrator.
+export async function enforceClaimSecret(
+	env: ClaimSecretEnvironment,
+	claimSecret: string | undefined
 ): Promise<void> {
 	const secret = env.CUPBOARD_SIGNUP_SECRET ?? '';
 
-	if (secret !== '') {
-		if (claimSecret === undefined) {
-			throw new SignupForbiddenError();
-		}
+	// Both values are hashed and compared before any refusal, so the response
+	// time does not show whether the Worker has a secret.
+	const [presentedHash, expectedHash] = await Promise.all([
+		sha256Hex(claimSecret ?? ''),
+		sha256Hex(secret)
+	]);
+	const isMatch = await isConstantTimeEqual(presentedHash, expectedHash, 64);
 
-		const [presentedHash, expectedHash] = await Promise.all([
-			sha256Hex(claimSecret),
-			sha256Hex(secret)
-		]);
+	if (secret === '' || claimSecret === undefined || !isMatch) {
+		throw new SignupForbiddenError();
+	}
+}
 
-		if (!(await isConstantTimeEqual(presentedHash, expectedHash, 64))) {
-			throw new SignupForbiddenError();
-		}
+// The issuer comes from the unverified token. Verification then requires the
+// signed `iss` to match it, so a forged `iss` fails verification.
+function tokenIssuer(
+	claims: OidcClaims,
+	isLoopbackAllowed: boolean
+): OidcIssuer {
+	const parsed =
+		typeof claims.iss === 'string' ? IssuerUrl.parse(claims.iss) : undefined;
 
-		return;
+	if (
+		parsed === undefined ||
+		!isAllowedIssuerTransport(parsed.value, isLoopbackAllowed)
+	) {
+		throw new SubjectTokenIssuerInvalidError();
 	}
 
-	const pinnedSubject = env.CUPBOARD_SIGNUP_SUBJECT ?? '';
+	return oidcIssuerSchema.parse(parsed.value);
+}
 
-	if (pinnedSubject !== '') {
-		if (subject !== pinnedSubject) {
-			throw new SignupForbiddenError();
-		}
+// The claims are decoded but not yet verified, so `aud` can have any JSON
+// shape here despite its declared type.
+const inboundAudienceSchema = z.union([
+	oidcAudienceSchema,
+	z.array(oidcAudienceSchema)
+]);
 
-		return;
+// The seeded trust rule pins one audience, so a token must contain exactly one.
+function tokenAudience(claims: OidcClaims): OidcAudience {
+	const parsed = inboundAudienceSchema.safeParse(claims.aud);
+
+	if (!parsed.success) {
+		throw new SubjectTokenAudienceInvalidError();
 	}
 
-	if (canUseLoopbackHttp(env)) {
-		return;
+	const audiences = Array.isArray(parsed.data) ? parsed.data : [parsed.data];
+	const [audience, ...others] = audiences;
+
+	if (audience === undefined || audience === '' || others.length > 0) {
+		throw new SubjectTokenAudienceInvalidError();
 	}
 
-	throw new SignupForbiddenError();
+	return audience;
 }
 
 async function verifySignupToken(
@@ -190,37 +226,4 @@ function verifiedSubject(verified: VerifiedOidcClaims): string {
 
 function controlDatabase(env: Env): Database {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-}
-
-// The verification half of the signup config. A hand-rolled deployment may
-// omit the vars entirely, in which case the env reads as undefined; both refuse.
-interface SignupVerificationConfig extends LocalDevelopmentEnvironment {
-	readonly CUPBOARD_SIGNUP_ISSUER: string | undefined;
-	readonly CUPBOARD_SIGNUP_AUDIENCE: string | undefined;
-}
-
-function signupIssuer(env: SignupVerificationConfig): OidcIssuer {
-	// Parse the configured value at ingress so discovery and token verification
-	// use the same exact issuer identifier. An unusable value is a deployment
-	// fault which the caller cannot clear by retrying.
-	const configured = IssuerUrl.parse(env.CUPBOARD_SIGNUP_ISSUER ?? '');
-
-	if (
-		configured === undefined ||
-		!isAllowedIssuerTransport(configured.value, canUseLoopbackHttp(env))
-	) {
-		throw new ControlNotConfiguredError();
-	}
-
-	return oidcIssuerSchema.parse(configured.value);
-}
-
-function signupAudience(env: SignupVerificationConfig): OidcAudience {
-	const configured = env.CUPBOARD_SIGNUP_AUDIENCE ?? '';
-
-	if (configured === '') {
-		throw new ControlNotConfiguredError();
-	}
-
-	return oidcAudienceSchema.parse(configured);
 }

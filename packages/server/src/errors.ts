@@ -793,6 +793,22 @@ export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
 	}
 }
 
+export class SubjectTokenIssuerInvalidError extends SubjectTokenInvalidError {
+	constructor() {
+		super(
+			'Subject token issuer must be an HTTPS URL, or loopback HTTP in local development, without a query or fragment'
+		);
+		this.name = 'SubjectTokenIssuerInvalidError';
+	}
+}
+
+export class SubjectTokenAudienceInvalidError extends SubjectTokenInvalidError {
+	constructor() {
+		super('Subject token must contain exactly one audience');
+		this.name = 'SubjectTokenAudienceInvalidError';
+	}
+}
+
 export abstract class SubjectTokenUntrustedError extends InvalidRequestError {
 	override readonly problem: SubjectTokenProblem =
 		subjectTokenProblems.untrusted;

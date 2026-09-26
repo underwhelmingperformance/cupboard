@@ -6,7 +6,6 @@ import {
 	editableResourceKinds,
 	type WorkerConfig
 } from './config.ts';
-import type { OwnerBinding } from './owner.ts';
 
 type Rename = (name: string) => string;
 
@@ -113,30 +112,6 @@ export function withCrons(
 	return {
 		...config,
 		control: { ...config.control, crons }
-	};
-}
-
-/**
- * Sets the OIDC identity allowed to claim global admin. Passing no identity
- * writes empty values and closes the signup gate. A configured
- * `CUPBOARD_SIGNUP_SECRET` takes precedence over this identity.
- */
-export function withSignupGate(
-	config: DeploymentConfig,
-	admin?: OwnerBinding
-): DeploymentConfig {
-	const variables = {
-		CUPBOARD_SIGNUP_ISSUER: admin?.issuer ?? '',
-		CUPBOARD_SIGNUP_AUDIENCE: admin?.audience ?? '',
-		CUPBOARD_SIGNUP_SUBJECT: admin?.subject ?? ''
-	};
-
-	return {
-		...config,
-		control: {
-			...config.control,
-			vars: { ...config.control.vars, ...variables }
-		}
 	};
 }
 

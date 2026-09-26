@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	assembleSecrets,
+	generateClaimSecret,
 	generatePushIdSigningKey,
 	generateWrapSecret,
 	settlePushIdSigningKey
@@ -16,7 +17,7 @@ const fullEnv = {
 };
 
 describe('assembleSecrets', () => {
-	it('derives R2 account/bucket and pulls sensitive values from the env', () => {
+	it('derives R2 account/bucket and pulls sensitive values from the env, except the claim secret', () => {
 		expect(
 			assembleSecrets({
 				env: fullEnv,
@@ -28,7 +29,6 @@ describe('assembleSecrets', () => {
 			secrets: {
 				control: [
 					{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'wrap' },
-					{ name: 'CUPBOARD_SIGNUP_SECRET', text: 'signup' },
 					{ name: 'PUSH_ID_SIGNING_KEY', text: 'push' }
 				],
 				tenant: [
@@ -107,5 +107,18 @@ describe.each([
 			secondBytes: 32,
 			distinct: true
 		});
+	});
+});
+
+describe('generateClaimSecret', () => {
+	it('produces a fresh high-entropy base64url secret each call', () => {
+		const first = generateClaimSecret();
+		const second = generateClaimSecret();
+
+		expect({
+			firstBytes: Buffer.from(first, 'base64url').byteLength,
+			urlSafe: /^[\w-]+$/.test(first),
+			distinct: first !== second
+		}).toStrictEqual({ firstBytes: 32, urlSafe: true, distinct: true });
 	});
 });

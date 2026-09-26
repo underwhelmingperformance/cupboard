@@ -313,9 +313,9 @@ export class CupboardClient {
 
 	/**
 	 * Claims (or idempotently re-claims) global admin of the deployment at the
-	 * bootstrap `POST /signup` endpoint. The endpoint is unauthenticated (the
-	 * external OIDC subject token is the credential, which the server evaluates
-	 * against the deployment's signup gate) and takes a urlencoded body.
+	 * bootstrap `POST /signup` endpoint. The endpoint takes no bearer token: it
+	 * requires the claim secret, and the external OIDC subject token identifies
+	 * the principal that claims the deployment. It takes a urlencoded body.
 	 */
 	async signup(request: SignupRequest): Promise<SignupResponse> {
 		throwIfAborted(this.signal);

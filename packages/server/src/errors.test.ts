@@ -13,6 +13,8 @@ import {
 	RefreshTokenRequiredError,
 	RootTargetsUnavailableError,
 	StaleRefreshTokenError,
+	SubjectTokenAudienceInvalidError,
+	SubjectTokenIssuerInvalidError,
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
 	SubjectTokenSubjectMissingError,
@@ -71,6 +73,18 @@ describe('OAuth errors', () => {
 		{
 			error: new SubjectTokenSubjectMissingError(),
 			name: 'SubjectTokenSubjectMissingError',
+			code: 'invalid_request',
+			problem: 'subject-token-invalid'
+		},
+		{
+			error: new SubjectTokenIssuerInvalidError(),
+			name: 'SubjectTokenIssuerInvalidError',
+			code: 'invalid_request',
+			problem: 'subject-token-invalid'
+		},
+		{
+			error: new SubjectTokenAudienceInvalidError(),
+			name: 'SubjectTokenAudienceInvalidError',
 			code: 'invalid_request',
 			problem: 'subject-token-invalid'
 		},

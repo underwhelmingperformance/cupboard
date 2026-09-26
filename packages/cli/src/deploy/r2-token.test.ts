@@ -102,6 +102,10 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'putSecret');
 			return Promise.resolve();
 		},
+		deleteSecret: () => {
+			recordApiCall(apiCalls, 'deleteSecret');
+			return Promise.resolve();
+		},
 		listScriptSecrets: () => {
 			recordApiCall(apiCalls, 'listScriptSecrets');
 			return Promise.resolve([]);

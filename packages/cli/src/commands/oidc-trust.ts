@@ -20,6 +20,7 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { InvalidClaimError } from '../errors.ts';
+import { principalLabel } from '../principal.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import { githubActionsIssuer } from './github/claims.ts';
@@ -739,8 +740,14 @@ function trustRow(rule: OidcTrustSummary): ResultRow {
 		? 'wildcard'
 		: `${String(rule.permittedGrants.length)} grant(s)`;
 
+	const pinnedSubject = rule.claims.sub;
+	const principal =
+		typeof pinnedSubject === 'string'
+			? principalLabel({ issuer: rule.issuer, subject: pinnedSubject })
+			: rule.issuer;
+
 	return {
 		label: rule.id,
-		value: `${grants} ${rule.issuer} aud=${rule.audience}${state}`
+		value: `${grants} ${principal} aud=${rule.audience}${state}`
 	};
 }

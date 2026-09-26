@@ -101,6 +101,7 @@ describe('control plane signup bootstrap', () => {
 				expect(await signup.json()).toStrictEqual({
 					issuer: server.issuer.issuer,
 					subject: 'founder',
+					audience: signupAudience,
 					claimed: true
 				});
 				expect(await create.json()).toMatchObject({
