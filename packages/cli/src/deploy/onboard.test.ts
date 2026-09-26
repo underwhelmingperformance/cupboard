@@ -25,7 +25,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import type { CachedSession } from '../auth/token-store.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import {
+	type AccessCredential,
+	CupboardClient,
+	type TokenProvider
+} from '../client/client.ts';
 import { CupboardHttpError, UnreachableHostError } from '../errors.ts';
 
 import type { DeployAuthority } from './authority.ts';
@@ -482,7 +486,20 @@ const claimIdToken = idTokenWith({
 	aud: owner.audience
 });
 
-const adminAuthority: DeployAuthority = { kind: 'admin', admin: owner };
+// The admin credential for an update, which the deploy checked before it
+// changed anything.
+function adminProvider(token = 'admin-jwt'): TokenProvider {
+	return {
+		get: () => Promise.resolve(token),
+		refresh: () => Promise.resolve(token)
+	};
+}
+
+const adminAuthority: DeployAuthority = {
+	kind: 'admin',
+	admin: owner,
+	access: { credentialFor: () => adminProvider() }
+};
 
 function bootstrapAuthority(
 	idToken: () => Promise<string> = () => Promise.resolve(claimIdToken)
@@ -1381,7 +1398,7 @@ describe('onboardDeployment', () => {
 		}).toStrictEqual({ isRefused: true, signups });
 	});
 
-	it('updates with the cached admin session, without claiming', async () => {
+	it('updates with the checked admin token, without claiming', async () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-old', 'v-old', 'v-new'],
@@ -1408,7 +1425,7 @@ describe('onboardDeployment', () => {
 				created: { access: 'public', read }
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
-			events: ['getInstance:session-jwt'],
+			events: ['getInstance:admin-jwt'],
 			createdBodies: [
 				{
 					id: 'builds',
@@ -1501,7 +1518,7 @@ describe('onboardDeployment', () => {
 					read
 				}
 			],
-			controlCheckTokens: ['session-jwt']
+			controlCheckTokens: ['admin-jwt']
 		});
 	});
 
@@ -1739,7 +1756,7 @@ describe('onboardDeployment', () => {
 					access: cacheAccess
 				} satisfies OnboardOutcome,
 				infos: ['The cache "laney" already exists; nothing to create.'],
-				membershipRebuildTokens: ['session-jwt']
+				membershipRebuildTokens: ['admin-jwt']
 			});
 		}
 	);
@@ -1845,7 +1862,7 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slugs: ['laney', 'builds']
 			} satisfies OnboardOutcome,
-			membershipRebuildTokens: ['session-jwt']
+			membershipRebuildTokens: ['admin-jwt']
 		});
 	});
 

@@ -4,6 +4,7 @@ import {
 } from '@cupboard/protocol/instance';
 import { type Command, InvalidArgumentError } from 'commander';
 
+import { parseAudience } from '../audience.ts';
 import { parseCacheAccess } from '../cache-access.ts';
 import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
 import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
@@ -63,12 +64,22 @@ export function registerDeployCommand(
 		)
 		.option(
 			'--client-id <id>',
-			'registered public OAuth client id for the admin login on a first deploy (PKCE, no client secret)',
+			'registered public OAuth client id for the admin login on a first deploy, and for an admin without a recorded audience (PKCE, no client secret)',
 			cloudflareOauthClientId
 		)
 		.option(
 			'--headless',
-			'use the device flow instead of a browser for the admin login on a first deploy; the Cloudflare login for the account can still open a browser'
+			'use the device flow instead of a browser for the admin login, on a first deploy or when an update logs you in as the admin; the Cloudflare login for the account can still open a browser'
+		)
+		.option(
+			'--github-oidc',
+			"authorise an update with the workflow's GitHub Actions OIDC token, " +
+				'through a control trust rule, instead of a `cupboard login` session'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the deployment URL)',
+			parseAudience
 		)
 		.option(
 			'--no-wrangler',

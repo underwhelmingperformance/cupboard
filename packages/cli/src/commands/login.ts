@@ -161,6 +161,12 @@ export interface IdentityLoginOptions {
 	readonly oidcIssuer: string;
 	readonly clientId: string;
 	readonly headless?: boolean;
+	/**
+	 * Whether the login may return the id_token of the cached Cloudflare grant.
+	 * False forces a new browser login, which the operator can complete as
+	 * another Cloudflare user; the new grant is not cached.
+	 */
+	readonly reuseCachedGrant?: boolean;
 }
 
 export interface IdentityLoginDependencies {
@@ -174,8 +180,9 @@ export interface IdentityLoginDependencies {
  * client, the Cloudflare issuer and no `headless`, it uses the cached
  * Cloudflare grant that `cupboard init` and `cupboard login` share. It logs in
  * without a prompt while the cached login can be renewed, and opens the browser
- * only when it cannot. With any other issuer or client, it logs in through the
- * browser. With `headless`, it logs in through the device flow.
+ * only when it cannot, or when `reuseCachedGrant` is false. With any other
+ * issuer or client, it logs in through the browser. With `headless`, it logs
+ * in through the device flow.
  */
 export async function loginIdToken(
 	options: IdentityLoginOptions,
@@ -196,6 +203,16 @@ export async function loginIdToken(
 		isCupboardClient &&
 		options.oidcIssuer === cloudflareDashIssuer &&
 		options.headless !== true;
+
+	if (isCloudflareBrowserLogin && options.reuseCachedGrant === false) {
+		const grant = await cloudflareLogin({ openBrowser: browserPrompt, signal });
+
+		if (grant.idToken === undefined) {
+			throw new LoginIdTokenMissingError();
+		}
+
+		return grant.idToken;
+	}
 
 	if (isCloudflareBrowserLogin) {
 		return cupboardIdToken({

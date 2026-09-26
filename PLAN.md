@@ -353,9 +353,21 @@ Cloudflare identity, the deployment's admin.
   from a terminal. A first deploy from a terminal whose deployment does not come
   online also exits non-zero.
 
-  Update: when the row contains an admin, the deploy uses the `cupboard login`
-  session to initialise the instance, rebuild membership, run the control check
-  and migrate the tenants to the release's local step.
+  Update: when the row contains an admin, the deploy needs an admin token, from
+  the `cupboard login` session or with `--github-oidc` through a control trust
+  rule with the wildcard grant. At a terminal, when the session is missing, has
+  expired and cannot be renewed, or lacks the wildcard grant, the deploy logs
+  the operator in as the admin with a new login through the admin's issuer, and
+  refuses a login as anyone else. The deploy checks the token against the
+  deployment's current URL, which each deploy records on the control Worker as
+  `CUPBOARD_DEPLOYMENT_URL`, so a domain routed in the dashboard does not change
+  it. Without a usable token, or when the deployment cannot be checked, it fails
+  with instructions before migrating or uploading. When the control Worker no
+  longer exists and a database records an admin, the deploy refuses; the
+  operator redeploys the control Worker with Wrangler first. The deploy uses the
+  token to initialise the instance, rebuild membership, run the control check
+  and migrate the tenants to the release's local step, and renews the token when
+  it nears expiry.
 
   Display names come from the caller's own token claims (`name`, `email`,
   `preferred_username`, `sub`). Other principals show as the full issuer URL and

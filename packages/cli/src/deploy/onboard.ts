@@ -216,9 +216,8 @@ export interface OnboardOptions {
 		target: URL
 	) => Promise<void>;
 	/**
-	 * The admin credential from the cached session: the session that a first
-	 * deploy caches with its claim, or the session that `cupboard login` cached
-	 * before an update. By default the cached session, renewed as it nears
+	 * The admin credential once a first deploy has claimed the deployment and
+	 * cached its session; by default the cached session, renewed as it nears
 	 * expiry.
 	 */
 	readonly sessionCredential?: (target: URL) => AccessCredential;
@@ -286,9 +285,9 @@ export function slugProblemText(value: string): string | undefined {
  * Then it is initialised with an admin credential. A first deploy claims the
  * deployment for the operator with the claim secret and their
  * id_token, caches the admin token for the other commands and deletes the
- * secret. An update uses the session that `cupboard login` cached. A slug is
- * chosen for the first cache (the create call fails with a conflict when the
- * slug is taken, and the deploy then asks for
+ * secret. An update uses the admin token that the deploy checked before it
+ * changed anything. A slug is chosen for the first cache (the create call
+ * fails with a conflict when the slug is taken, and the deploy then asks for
  * another slug), and the new cache's `/pubkey` is polled, since the first
  * successful request creates the signing key.
  */
@@ -375,7 +374,7 @@ export async function onboardDeployment(
 		identityToken = authority.idToken;
 	} else {
 		owner = authority.admin;
-		credential = sessionCredential(target);
+		credential = authority.access.credentialFor(target);
 	}
 
 	const currentInstance = await ui

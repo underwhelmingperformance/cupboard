@@ -2,12 +2,25 @@ import type { LocalStep } from '@cupboard/protocol/deployment';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
-	oidcSubjectSchema
+	oidcSubjectSchema,
+	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
-import { throwIfAborted } from '../abort.ts';
-import { CliError } from '../errors.ts';
+import { isAbortError, throwIfAborted } from '../abort.ts';
+import { type Audience, audienceSchema } from '../audience.ts';
+import { cachedOwnerProvider, githubOidcTokenProvider } from '../auth/auth.ts';
+import { decodeJwtPayload } from '../auth/jwt.ts';
+import { CupboardClient } from '../client/client.ts';
+import type { TokenProvider } from '../client/credentials.ts';
+import {
+	CliError,
+	CupboardHttpError,
+	OwnerLoginRequiredError,
+	UnreachableHostError
+} from '../errors.ts';
 import { principalLabel } from '../principal.ts';
 
 import { removeClaimSecret } from './claim-secret.ts';
@@ -19,12 +32,18 @@ import {
 import { jwtExpiryMs } from './cloudflare-oauth.ts';
 import type { DeploymentConfig } from './config.ts';
 import type { DeployOptions } from './deploy-run.ts';
+import { deploymentUrl, recordedDeploymentUrl } from './deployment-url.ts';
 import type { DatabaseId, ScriptName } from './identifiers.ts';
 import {
+	adminLoginCommand,
 	type Claimant,
 	claimantLabel,
 	claimantOf,
-	type OwnerBinding
+	cloudflareDashIssuer,
+	isSamePrincipal,
+	type OwnerBinding,
+	type Principal,
+	principalOf
 } from './owner.ts';
 import {
 	type ClaimSecret,
@@ -42,8 +61,7 @@ import type { DeployUi } from './ui.ts';
  *   identity in that id_token, which becomes the admin;
  * - `unclaimed`: no admin and no terminal to log in from, so this run
  *   provisions and uploads but leaves the claim to a run with a terminal;
- * - `admin`: an admin exists, and this run updates the deployment with the
- *   session that `cupboard login` cached.
+ * - `admin`: an admin exists, and this run has an admin token for it.
  */
 export type DeployAuthority =
 	| {
@@ -53,7 +71,11 @@ export type DeployAuthority =
 			readonly claimant: Claimant;
 	  }
 	| { readonly kind: 'unclaimed' }
-	| { readonly kind: 'admin'; readonly admin: OwnerBinding };
+	| {
+			readonly kind: 'admin';
+			readonly admin: OwnerBinding;
+			readonly access: AdminAccess;
+	  };
 
 /**
  * The authority for this run, or `declined` when the operator declined the
@@ -61,6 +83,105 @@ export type DeployAuthority =
  */
 export type EstablishedAuthority =
 	DeployAuthority | { readonly kind: 'declined' };
+
+/**
+ * The admin credential for a deployment URL: the session cached by
+ * `cupboard login`, or a CI token exchanged through a control trust rule.
+ * Each provider renews its token as it nears expiry, so the token stays valid
+ * while the deploy migrates tenants.
+ */
+export interface AdminAccess {
+	credentialFor(url: URL): TokenProvider;
+}
+
+/**
+ * Creates the admin access for a deployment whose URL before this run is
+ * `deploymentUrl`. The deploy requests a CI token whose audience is that URL.
+ */
+export type AdminAccessFactory = (deploymentUrl: URL) => AdminAccess;
+
+const unauthorisedStatus: number = StatusCodes.UNAUTHORIZED;
+const forbiddenStatus: number = StatusCodes.FORBIDDEN;
+const badRequestStatus: number = StatusCodes.BAD_REQUEST;
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
+
+function isRefusedStatus(status: number): boolean {
+	return status === unauthorisedStatus || status === forbiddenStatus;
+}
+
+function tokenProblemText(url: URL, cause: unknown): string {
+	if (cause instanceof OwnerLoginRequiredError) {
+		return `no admin session for ${url.origin} is cached on this machine`;
+	}
+
+	if (cause instanceof AdminGrantMissingError) {
+		return 'the token does not include the wildcard grant';
+	}
+
+	if (cause instanceof CupboardHttpError && cause.oauthError !== undefined) {
+		return (
+			'the token exchange was refused: ' +
+			(cause.oauthError.error_description ?? cause.oauthError.error)
+		);
+	}
+
+	if (cause instanceof CupboardHttpError || cause instanceof ORPCError) {
+		return `${url.origin} refused the token (HTTP ${String(cause.status)})`;
+	}
+
+	return 'no usable token was found';
+}
+
+const ciUpdateAdvice =
+	'or in CI pass `--github-oidc` with a control trust rule that gives the ' +
+	'workflow the wildcard grant (see "Updating from CI" in the deployment ' +
+	'guide, docs/deploying.md)';
+
+export class AdminTokenRequiredError extends CliError {
+	/**
+	 * True when the run logged in as the admin at a terminal before this
+	 * refusal.
+	 */
+	readonly isAfterLogin: boolean;
+
+	constructor(
+		public readonly url: URL,
+		public readonly admin: OwnerBinding,
+		options: { readonly cause: unknown; readonly isAfterLogin?: boolean }
+	) {
+		const advice =
+			options.isAfterLogin === true &&
+			options.cause instanceof AdminGrantMissingError
+				? 'The login as the admin succeeded, so the control trust rule for ' +
+					'the admin no longer gives the wildcard grant. Give it back with ' +
+					'`cupboard control-oidc-trust`, then re-run `cupboard init`'
+				: `Log in as the admin with \`${adminLoginCommand(url, admin)}\` ` +
+					`and re-run \`cupboard init\`, ${ciUpdateAdvice}`;
+
+		super(
+			`This deployment is administered by ${principalLabel(admin)}. ` +
+				'Updating it needs an admin token, and ' +
+				`${tokenProblemText(url, options.cause)}. ${advice}. Nothing was ` +
+				'changed.',
+			{ cause: options.cause }
+		);
+		this.name = 'AdminTokenRequiredError';
+		this.isAfterLogin = options.isAfterLogin === true;
+	}
+}
+
+export class AdminDeploymentUrlMissingError extends CliError {
+	constructor(public readonly admin: OwnerBinding) {
+		super(
+			`This deployment is administered by ${principalLabel(admin)}, but it ` +
+				'has no URL to check an admin token against. Register a ' +
+				'workers.dev subdomain in the Cloudflare dashboard (Workers & ' +
+				'Pages) or route a custom domain to the control Worker, then ' +
+				're-run `cupboard init`. Nothing was changed.'
+		);
+		this.name = 'AdminDeploymentUrlMissingError';
+	}
+}
 
 /**
  * Which of the two databases records the admin when the plan selects a
@@ -102,6 +223,250 @@ export class AdminDatabaseMismatchError extends CliError {
 }
 
 /**
+ * The control Worker no longer exists, but a control database records an
+ * admin. No Worker can check an admin token, so the deploy cannot update the
+ * deployment until the control Worker is redeployed.
+ */
+export class AdminControlWorkerMissingError extends CliError {
+	constructor(
+		public readonly admin: OwnerBinding,
+		public readonly controlScriptName: string
+	) {
+		super(
+			`This deployment is administered by ${principalLabel(admin)}, but ` +
+				`its control Worker ${controlScriptName} no longer exists, so no ` +
+				'Worker can check an admin token. Redeploy the control Worker with ' +
+				'Wrangler, as described under "If the control Worker was deleted" ' +
+				'in the deployment guide (docs/deploying.md), then re-run ' +
+				'`cupboard init`. Nothing was changed.'
+		);
+		this.name = 'AdminControlWorkerMissingError';
+	}
+}
+
+/**
+ * Why the deploy could not check an admin token against the deployment: it
+ * could not reach the deployment, the deployment answered with an error
+ * status, the URL does not serve a Cupboard build, or the deployment's build
+ * has no `instance.get` procedure.
+ */
+export type AdminCheckFailure =
+	| { readonly kind: 'unreachable' }
+	| {
+			readonly kind: 'error-status';
+			readonly status: number;
+			readonly ray?: string;
+	  }
+	| { readonly kind: 'not-served' }
+	| { readonly kind: 'unsupported' };
+
+/**
+ * What an error from the admin check means: the token is unusable, the check
+ * could not run against the deployment, or the error has another cause and is
+ * rethrown unchanged.
+ */
+type AdminCheckError =
+	| { readonly kind: 'token' }
+	| { readonly kind: 'check'; readonly failure: AdminCheckFailure }
+	| { readonly kind: 'other' };
+
+// A missing session, a token without the wildcard grant, a 401 or 403, and an
+// OAuth error from the token exchange mean that the token cannot be used. An
+// unreachable host and any other HTTP status mean that the check could not
+// run. A 404 is returned as `unsupported`, which the caller confirms with a
+// `/_version` request.
+function classifyAdminCheckError(error: unknown): AdminCheckError {
+	if (
+		error instanceof OwnerLoginRequiredError ||
+		error instanceof AdminGrantMissingError
+	) {
+		return { kind: 'token' };
+	}
+
+	if (error instanceof UnreachableHostError) {
+		return { kind: 'check', failure: { kind: 'unreachable' } };
+	}
+
+	if (error instanceof CupboardHttpError) {
+		if (
+			isRefusedStatus(error.status) ||
+			(error.status === badRequestStatus && error.oauthError !== undefined)
+		) {
+			return { kind: 'token' };
+		}
+
+		return {
+			kind: 'check',
+			failure:
+				error.status === notFoundStatus
+					? { kind: 'unsupported' }
+					: {
+							kind: 'error-status',
+							status: error.status,
+							...(error.ray !== undefined && { ray: error.ray })
+						}
+		};
+	}
+
+	if (error instanceof ORPCError) {
+		if (isRefusedStatus(error.status)) {
+			return { kind: 'token' };
+		}
+
+		return {
+			kind: 'check',
+			failure:
+				error.status === notFoundStatus
+					? { kind: 'unsupported' }
+					: { kind: 'error-status', status: error.status }
+		};
+	}
+
+	return { kind: 'other' };
+}
+
+function adminCheckFailureText(
+	url: URL,
+	controlScriptName: string,
+	failure: AdminCheckFailure
+): string {
+	switch (failure.kind) {
+		case 'unreachable': {
+			return (
+				`${url.origin} could not be reached. Check that the control Worker ` +
+				'serves at that URL, then re-run `cupboard init`'
+			);
+		}
+		case 'error-status': {
+			const ray =
+				failure.ray === undefined ? '' : ` (Cloudflare ray ${failure.ray})`;
+
+			return (
+				`${url.origin} returned HTTP ${String(failure.status)}${ray}. Run ` +
+				`\`wrangler tail ${controlScriptName}\` and re-run \`cupboard init\` ` +
+				'to see the error, or restore a working version with ' +
+				`\`wrangler rollback --name ${controlScriptName}\` and re-run ` +
+				'`cupboard init`'
+			);
+		}
+		case 'not-served': {
+			return (
+				`${url.origin} does not serve the control Worker. Check the ` +
+				"Worker's workers.dev route or custom domain in the Cloudflare " +
+				'dashboard, then re-run `cupboard init`'
+			);
+		}
+		case 'unsupported': {
+			return (
+				`${url.origin} runs a build without the \`instance.get\` procedure. ` +
+				'First update the deployment with a `cupboard` release that is newer ' +
+				'than the deployed build and has that procedure, then re-run ' +
+				'`cupboard init` with this release'
+			);
+		}
+	}
+}
+
+/**
+ * The deploy could not check the admin token because the deployment was
+ * unreachable, answered with an error status, does not serve at its URL, or
+ * has no `instance.get` procedure.
+ */
+export class AdminCheckFailedError extends CliError {
+	constructor(
+		public readonly url: URL,
+		public readonly admin: OwnerBinding,
+		public readonly failure: AdminCheckFailure,
+		controlScriptName: string,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`This deployment is administered by ${principalLabel(admin)}, and ` +
+				'the deploy could not check the admin token against it: ' +
+				`${adminCheckFailureText(url, controlScriptName, failure)}. Nothing ` +
+				'was changed.',
+			options
+		);
+		this.name = 'AdminCheckFailedError';
+	}
+}
+
+/**
+ * The login as the admin returned an identity other than the admin.
+ */
+export class AdminLoginMismatchError extends CliError {
+	constructor(
+		public readonly admin: OwnerBinding,
+		public readonly presented: Principal | undefined
+	) {
+		const presentedText =
+			presented === undefined
+				? 'an id_token without an issuer and subject'
+				: principalLabel(presented);
+
+		super(
+			`The login returned ${presentedText}, which is not the admin ` +
+				`${principalLabel(admin)} of this deployment. Log in to ` +
+				`${admin.issuer} as the admin, switching to the admin's account in ` +
+				'the browser first if needed, and re-run `cupboard init`. Nothing ' +
+				'was changed.'
+		);
+		this.name = 'AdminLoginMismatchError';
+	}
+}
+
+/**
+ * Returns the login that an update at a terminal uses when no usable admin
+ * session is cached. It always starts a new login through the admin's issuer,
+ * so the operator can complete it as a different identity from the cached
+ * Cloudflare login. It refuses an id_token for any identity other than the
+ * admin, then exchanges the id_token and caches the session, as
+ * `cupboard login` does. The admin's audience is the client id of the login.
+ */
+export function adminLogin(dependencies: {
+	readonly info: (message: string) => void;
+	readonly login: (issuer: string, clientId: string) => Promise<string>;
+	readonly exchange: (url: URL, idToken: string) => Promise<TokenResponse>;
+	readonly cacheSession: (response: TokenResponse, url: URL) => Promise<void>;
+	readonly defaultClientId: string;
+}): (url: URL, admin: OwnerBinding) => Promise<void> {
+	return async (url, admin) => {
+		const separateLogin =
+			admin.issuer === cloudflareDashIssuer
+				? ' This is a new Cloudflare login, separate from the cached one, ' +
+					'so you can log in as a different Cloudflare user.'
+				: '';
+
+		dependencies.info(
+			`No usable admin session for ${url.origin}. Log in through ` +
+				`${admin.issuer} as the admin ${principalLabel(admin)}.${separateLogin}`
+		);
+
+		const idToken = await dependencies.login(
+			admin.issuer,
+			admin.audience ?? dependencies.defaultClientId
+		);
+		const presented = principalOf(idToken);
+
+		if (!isSamePrincipal(presented, admin)) {
+			throw new AdminLoginMismatchError(admin, presented);
+		}
+
+		await dependencies.cacheSession(
+			await dependencies.exchange(url, idToken),
+			url
+		);
+	};
+}
+
+export class AdminGrantMissingError extends CliError {
+	constructor() {
+		super('the token does not include the wildcard grant');
+		this.name = 'AdminGrantMissingError';
+	}
+}
+
+/**
  * The control database that the deployed Workers are bound to, identified by
  * the binding's database id.
  */
@@ -124,6 +489,11 @@ export interface AuthorityDeployment {
 	 * The name of the control database selected in the plan.
 	 */
 	readonly plannedDatabaseName: string | undefined;
+	readonly controlScriptName: string;
+	/**
+	 * Whether the control Worker exists on the account.
+	 */
+	readonly isControlDeployed: boolean;
 	/**
 	 * Whether this run has a terminal, so the operator can log in.
 	 */
@@ -131,10 +501,30 @@ export interface AuthorityDeployment {
 }
 
 /**
- * The reads and the login that deciding the authority performs.
+ * The reads, requests and logins that deciding the authority performs.
  */
 export interface AuthorityEffects {
 	readonly api: Pick<CloudflareApi, 'findD1Database' | 'd1QueryRows'>;
+	/**
+	 * True when a `/_version` request to `url` succeeds, and false when the host
+	 * cannot be reached or does not serve Cupboard. Any other failure throws.
+	 */
+	readonly servesCupboard: (url: URL) => Promise<boolean>;
+	/**
+	 * Logs the operator in as `admin` and caches the session for `url`, as
+	 * `cupboard login` does. Absent when the run cannot log in, for example
+	 * with `--github-oidc`.
+	 */
+	readonly logInAsAdmin?: (url: URL, admin: OwnerBinding) => Promise<void>;
+	/**
+	 * The URL that the deployment serves on before this run changes anything.
+	 */
+	readonly currentUrl: () => Promise<URL | undefined>;
+	readonly adminAccess: AdminAccessFactory;
+	/**
+	 * Checks that the deployment accepts the credential.
+	 */
+	readonly checkAdmin: (url: URL, credential: TokenProvider) => Promise<void>;
 	/**
 	 * An id_token for the operator. The token can be one from an earlier call.
 	 */
@@ -144,8 +534,9 @@ export interface AuthorityEffects {
 }
 
 /**
- * Decides who may change the deployment. Nothing here changes the account, so
- * a refusal leaves the deployment as it was.
+ * Decides who may change the deployment and, for an update, obtains and
+ * checks the admin token. Nothing here changes the account, so a refusal
+ * leaves the deployment as it was.
  *
  * The admin is read from the database that the deployed Workers are bound to
  * and from the database selected in the plan. When the two differ and either
@@ -191,7 +582,23 @@ export async function decideAuthority(
 		);
 	}
 
-	return { kind: 'admin', admin };
+	if (!deployment.isControlDeployed) {
+		throw new AdminControlWorkerMissingError(
+			admin,
+			deployment.controlScriptName
+		);
+	}
+
+	const url = await effects.currentUrl();
+
+	if (url === undefined) {
+		throw new AdminDeploymentUrlMissingError(admin);
+	}
+
+	const access = effects.adminAccess(url);
+	await checkAdminToken(deployment, effects, access, url, admin);
+
+	return { kind: 'admin', admin, access };
 }
 
 function recordedIn(
@@ -240,6 +647,83 @@ async function firstDeployAuthority(
 		idToken: effects.idToken,
 		claimant
 	};
+}
+
+// Checks the admin token against the deployment at `url`. At a terminal, a
+// token that cannot be used leads to one login as the admin, after which the
+// check runs again. This covers a cached Cloudflare login whose exchange
+// returned a session without the wildcard grant.
+async function checkAdminToken(
+	deployment: Pick<AuthorityDeployment, 'interactive' | 'controlScriptName'>,
+	effects: AuthorityEffects,
+	access: AdminAccess,
+	url: URL,
+	admin: OwnerBinding
+): Promise<void> {
+	const credential = access.credentialFor(url);
+	const check = async (): Promise<void> => {
+		requireWildcardGrant(await credential.get());
+		await effects.checkAdmin(url, credential);
+	};
+	let isAfterLogin = false;
+
+	try {
+		try {
+			await check();
+		} catch (error) {
+			const logIn = deployment.interactive ? effects.logInAsAdmin : undefined;
+
+			if (
+				logIn === undefined ||
+				classifyAdminCheckError(error).kind !== 'token'
+			) {
+				throw error;
+			}
+
+			await logIn(url, admin);
+			isAfterLogin = true;
+			await check();
+		}
+	} catch (error) {
+		if (isAbortError(error) || error instanceof AdminLoginMismatchError) {
+			throw error;
+		}
+
+		const classified = classifyAdminCheckError(error);
+
+		if (classified.kind === 'other') {
+			throw error;
+		}
+
+		if (classified.kind === 'token') {
+			throw new AdminTokenRequiredError(url, admin, {
+				cause: error,
+				isAfterLogin
+			});
+		}
+
+		throw new AdminCheckFailedError(
+			url,
+			admin,
+			await confirmedCheckFailure(effects, url, classified.failure),
+			deployment.controlScriptName,
+			{ cause: error }
+		);
+	}
+}
+
+// A 404 comes from a build without `instance.get` only when the URL serves a
+// Cupboard build at all. Otherwise the URL does not serve the control Worker.
+async function confirmedCheckFailure(
+	effects: Pick<AuthorityEffects, 'servesCupboard'>,
+	url: URL,
+	failure: AdminCheckFailure
+): Promise<AdminCheckFailure> {
+	if (failure.kind !== 'unsupported') {
+		return failure;
+	}
+
+	return (await effects.servesCupboard(url)) ? failure : { kind: 'not-served' };
 }
 
 const globalAdminColumnsQuery =
@@ -324,6 +808,28 @@ export async function readGlobalAdmin(
 		: { issuer, subject, audience };
 }
 
+const grantTypeSchema = z.looseObject({ type: z.string() });
+
+const grantedDetailsSchema = z.object({
+	authorization_details: z.array(grantTypeSchema)
+});
+
+// The deploy creates tenants, initialises the instance and migrates every
+// tenant, so it needs the wildcard grant. The server still checks the token;
+// this check stops a narrower token before any change.
+function requireWildcardGrant(token: string): void {
+	const parsed = grantedDetailsSchema.safeParse(decodeJwtPayload(token));
+
+	if (
+		!parsed.success ||
+		parsed.data.authorization_details.every(
+			(grant) => grant.type !== 'cupboard_wildcard'
+		)
+	) {
+		throw new AdminGrantMissingError();
+	}
+}
+
 // The claim's id_token only has to remain valid for the `/signup` and
 // `/token` requests. A short margin keeps the id_token from the login before
 // the upload in use, so the claim normally needs no second login, even with
@@ -384,15 +890,20 @@ export function withClaimSecret(
 }
 
 /**
- * The function that migrates tenants during an update. Only an admin creates
- * tenants, so a deployment without an admin has none, and the result is
- * undefined for a first deploy or an unclaimed deploy.
+ * The function that migrates tenants during an update, with the admin access
+ * that the update checked before any change. Only an admin creates tenants, so
+ * a deployment without an admin has none, and the result is undefined for a
+ * first deploy or an unclaimed deploy.
  */
 export function tenantMigratorFor(
 	authority: DeployAuthority,
-	migrate: (requiredStep: LocalStep) => Promise<void>
+	migrate: (access: AdminAccess, requiredStep: LocalStep) => Promise<void>
 ): ((requiredStep: LocalStep) => Promise<void>) | undefined {
-	return authority.kind === 'admin' ? migrate : undefined;
+	if (authority.kind !== 'admin') {
+		return undefined;
+	}
+
+	return (requiredStep) => migrate(authority.access, requiredStep);
 }
 
 /**
@@ -429,6 +940,67 @@ export async function removeLeftoverClaimSecret(
 	);
 }
 
+/**
+ * Where an update's admin credential comes from: the session that
+ * `cupboard login` cached for a URL, or a CI token exchanged through a control
+ * trust rule.
+ */
+export interface AdminCredentialSources {
+	readonly session: (url: URL) => TokenProvider;
+	readonly githubOidc: (url: URL, audience: Audience) => TokenProvider;
+}
+
+export function adminCredentialSources(
+	signal: AbortSignal | undefined
+): AdminCredentialSources {
+	return {
+		session: (url) => cachedOwnerProvider(url, { signal }),
+		githubOidc: (url, audience) =>
+			githubOidcTokenProvider(
+				CupboardClient.fromUrl(url, { cache: { kind: 'default' }, signal }),
+				audience,
+				[{ type: 'cupboard_wildcard' }]
+			)
+	};
+}
+
+/**
+ * The admin credential for an update: a CI token exchanged through a control
+ * trust rule with `--github-oidc`, otherwise the session cached by
+ * `cupboard login`. Each origin has one provider, so every request to that
+ * origin uses the token that the provider renews. With `--github-oidc`, the
+ * deploy requests a GitHub token whose audience is `--audience`, or otherwise
+ * the deployment URL from before this run.
+ */
+export function adminAccessFor(
+	options: { readonly githubOidc?: boolean; readonly audience?: Audience },
+	sources: AdminCredentialSources
+): AdminAccessFactory {
+	return (currentUrl) => {
+		const providers = new Map<string, TokenProvider>();
+		const audience = options.audience ?? audienceSchema.parse(currentUrl);
+		const create = (url: URL): TokenProvider =>
+			options.githubOidc === true
+				? sources.githubOidc(url, audience)
+				: sources.session(url);
+
+		return {
+			credentialFor: (url) => {
+				const existing = providers.get(url.origin);
+
+				if (existing !== undefined) {
+					return existing;
+				}
+
+				const created = create(url);
+				providers.set(url.origin, created);
+
+				return created;
+			}
+		};
+	};
+}
+
 // The Workers' binding for the control database, which records the admin.
 const controlDatabaseBinding = 'CUPBOARD_DB';
 
@@ -458,12 +1030,18 @@ export type AuthorityApi = Pick<
 	| 'findD1Database'
 	| 'findD1DatabaseName'
 	| 'd1QueryRows'
+	| 'findCustomDomain'
+	| 'getWorkersDevSubdomain'
 	| 'getScriptConfiguration'
 >;
 
 export interface AuthorityWorld {
 	readonly ui: DeployUi;
 	readonly api: AuthorityApi;
+	readonly adminAccess: AdminAccessFactory;
+	readonly checkAdmin: (url: URL, credential: TokenProvider) => Promise<void>;
+	readonly servesCupboard: (url: URL) => Promise<boolean>;
+	readonly logInAsAdmin?: (url: URL, admin: OwnerBinding) => Promise<void>;
 	readonly idToken: () => Promise<string>;
 	/**
 	 * Asks whether the claim may make `claimant` the admin.
@@ -475,7 +1053,11 @@ export interface AuthorityWorld {
 
 /**
  * Determines who may change the deployment before anything changes, with the
- * rules of {@link decideAuthority}, and reports the result. A first deploy logs
+ * rules of {@link decideAuthority}, and reports the result. The deployment's
+ * current URL is the URL that the last deploy recorded on the control Worker.
+ * A deployment from an earlier release has no record, and its current URL is
+ * the custom domain routed to the control Worker, or the workers.dev URL. An
+ * update checks its admin token against the current URL. A first deploy logs
  * the operator in with the issuer and client from `--oidc-issuer` and
  * `--client-id`, prints who the claim will make the admin, and asks for
  * confirmation.
@@ -488,6 +1070,13 @@ export async function establishAuthority(
 ): Promise<EstablishedAuthority> {
 	const { ui, api } = world;
 	const controlName = plans.agreed.config.control.name;
+	const urlFor = async (
+		domain: string | undefined
+	): Promise<URL | undefined> => {
+		const url = await deploymentUrl(api, controlName, domain);
+
+		return url === undefined ? undefined : new URL(url);
+	};
 	const control = await api.getScriptConfiguration(controlName);
 	// Without the control Worker, the tenant Worker's binding shows which
 	// database the deployment used.
@@ -495,6 +1084,8 @@ export async function establishAuthority(
 		control ??
 			(await api.getScriptConfiguration(plans.agreed.config.tenant.name))
 	);
+	const recordedUrl =
+		control === undefined ? undefined : recordedDeploymentUrl(control.bindings);
 
 	// Not run inside a reporter phase, because a first deploy may open a
 	// browser to log in.
@@ -505,10 +1096,20 @@ export async function establishAuthority(
 					? undefined
 					: { id: boundId, name: await api.findD1DatabaseName(boundId) },
 			plannedDatabaseName: controlDatabaseName(plans.agreed.config),
+			controlScriptName: controlName,
+			isControlDeployed: control !== undefined,
 			interactive: world.interactive
 		},
 		{
 			api,
+			servesCupboard: world.servesCupboard,
+			...(world.logInAsAdmin !== undefined && {
+				logInAsAdmin: world.logInAsAdmin
+			}),
+			currentUrl: async () =>
+				recordedUrl ?? urlFor(await api.findCustomDomain(controlName)),
+			adminAccess: world.adminAccess,
+			checkAdmin: world.checkAdmin,
 			idToken: world.idToken,
 			generateClaimSecret,
 			...(world.signal !== undefined && { signal: world.signal })
@@ -517,8 +1118,8 @@ export async function establishAuthority(
 
 	switch (authority.kind) {
 		case 'admin': {
-			ui.info(
-				`Updating the deployment administered by ${principalLabel(authority.admin)}`
+			ui.success(
+				`Authorised to update the deployment administered by ${principalLabel(authority.admin)}`
 			);
 			break;
 		}

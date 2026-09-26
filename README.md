@@ -21,7 +21,8 @@ deployment by its bare host and are marked "operator only" in the help:
 
 - `cupboard init` (alias `cupboard deploy`) provisions the Workers, R2 bucket,
   D1 database, and queues on a Cloudflare account. Its first run from a terminal
-  logs you in and makes you the deployment's admin.
+  logs you in and makes you the deployment's admin; later runs need an admin
+  token.
 - `cupboard tenant` creates, suspends, resumes, and removes tenants, rotates the
   tenant-wide fallback read credential, and manages the read credential of any
   one of a tenant's caches.
@@ -92,11 +93,16 @@ store. Use `cupboard tenant create` only when you want an additional tenant.
 The first `init` from a terminal makes you the deployment's admin. It logs you
 in with Cloudflare, or with the issuer and client given by `--oidc-issuer` and
 `--client-id`. It then claims the deployment with a claim secret, deletes the
-secret and caches your admin token. A first `init` without a terminal leaves the
-deployment without an admin and exits with an error; run `init` from a terminal
-to claim it. See [Deploying a release][deploying-admin] for the details.
+secret and caches your admin token. A later `init` needs an admin token. At a
+terminal it logs you in as the admin if needed. In CI, pass `--github-oidc` with
+a control trust rule that gives the workflow the wildcard grant; [Updating from
+CI][deploying-ci] shows how to create the rule. A first `init` without a
+terminal leaves the deployment without an admin and exits with an error; run
+`init` from a terminal to claim it. See [Deploying a release][deploying-admin]
+for the details.
 
 [deploying-admin]: ./docs/deploying.md#admin
+[deploying-ci]: ./docs/deploying.md#updating-from-ci
 
 Most commands need a session first; `cupboard login <url>` caches an admin token
 for the tenant. Pushing from CI instead uses GitHub Actions OIDC with

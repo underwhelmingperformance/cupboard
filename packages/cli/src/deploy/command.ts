@@ -3,16 +3,23 @@ import { isSea } from 'node:sea';
 
 import type { CacheAccessMode } from '@cupboard/nix-store/scalars';
 import type { InstanceName } from '@cupboard/protocol/instance';
+import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type { ResultRow } from '@cupboard/reporter';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
-import { cachedOwnerProvider } from '../auth/auth.ts';
+import type { Audience } from '../audience.ts';
+import { CupboardClient } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
-import { loginIdToken } from '../commands/login.ts';
-import { CliError } from '../errors.ts';
+import { cacheLoginSession, loginIdToken } from '../commands/login.ts';
+import {
+	CliError,
+	CliUsageError,
+	CupboardHttpError,
+	UnreachableHostError
+} from '../errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
 import {
@@ -22,6 +29,9 @@ import {
 	resolveCloudflare
 } from './auth.ts';
 import {
+	adminAccessFor,
+	adminCredentialSources,
+	adminLogin,
 	type DeployAuthority,
 	establishAuthority,
 	removeLeftoverClaimSecret,
@@ -51,7 +61,7 @@ import {
 	derivedPlanRows,
 	runDeploy
 } from './deploy-run.ts';
-import { deploymentUrl } from './deployment-url.ts';
+import { deploymentUrl, withDeploymentUrl } from './deployment-url.ts';
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import {
@@ -183,9 +193,15 @@ export interface DeployCliOptions {
 	readonly clientId: string;
 	/**
 	 * Log the operator in through the device flow instead of a browser, for the
-	 * admin login on a first deploy.
+	 * admin login on a first deploy or when an update logs in as the admin.
 	 */
 	readonly headless?: boolean;
+	/**
+	 * Authorise an update with the workflow's GitHub Actions OIDC token, through
+	 * a control trust rule, instead of a cached `cupboard login` session.
+	 */
+	readonly githubOidc?: boolean;
+	readonly audience?: Audience;
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
@@ -206,6 +222,7 @@ function bucketNameOf(config: DeploymentConfig): string {
 // `number` so the comparison with a response's numeric status is number to
 // number.
 const serverError: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 /**
  * Surface a server-side fault a deploy probe hit: read the exception the Worker
@@ -941,6 +958,8 @@ async function deployFlow(
 
 	ui.intro('cupboard deploy');
 
+	requireGithubOidcForAudience(cliOptions);
+
 	const { artifact, notice } = await ui
 		.reporter()
 		.phase('Building Workers', () =>
@@ -1246,7 +1265,14 @@ async function deployFlow(
 				const allowance = await allowanceFor(state.accountId);
 				const plannedArtifact = {
 					...artifact,
-					config: withWorkersInvocationAllowance(state.config, allowance)
+					config: withDeploymentUrl(
+						withWorkersInvocationAllowance(state.config, allowance),
+						await deploymentUrl(
+							apiFor(state.accountId),
+							state.config.control.name,
+							state.domain
+						)
+					)
 				};
 				reviewedPlan = planDeployment(
 					plannedArtifact,
@@ -1295,6 +1321,16 @@ async function deployFlow(
 		{
 			ui,
 			api: agreedApi,
+			adminAccess: adminAccessFor(
+				cliOptions,
+				adminCredentialSources(runtimeOptions.signal)
+			),
+			checkAdmin: async (url, credential) => {
+				await controlRpc(url, {
+					credential,
+					signal: runtimeOptions.signal
+				}).instance.get();
+			},
 			idToken: renewingIdToken(() =>
 				loginIdToken(
 					{
@@ -1305,6 +1341,38 @@ async function deployFlow(
 					loginDependencies
 				)
 			),
+			servesCupboard: (url) =>
+				isVersionServed(() =>
+					CupboardClient.fromUrl(url, {
+						cache: { kind: 'default' },
+						signal: runtimeOptions.signal
+					}).version()
+				),
+			...(cliOptions.githubOidc !== true && {
+				logInAsAdmin: adminLogin({
+					info: (message) => {
+						ui.info(message);
+					},
+					login: (issuer, clientId) =>
+						loginIdToken(
+							{
+								oidcIssuer: issuer,
+								clientId,
+								headless: cliOptions.headless,
+								reuseCachedGrant: false
+							},
+							loginDependencies
+						),
+					exchange: (url, idToken) =>
+						CupboardClient.fromUrl(url, {
+							cache: { kind: 'default' },
+							signal: runtimeOptions.signal
+						}).tokenExchange(idToken, subjectTokenTypeIdToken),
+					cacheSession: (response, url) =>
+						cacheLoginSession(response, url, runtimeOptions.signal),
+					defaultClientId: cliOptions.clientId
+				})
+			}),
 			confirmClaim: async (claimant) =>
 				cliOptions.yes === true ||
 				(await ui.confirm({
@@ -1416,34 +1484,35 @@ async function deployFlow(
 					})
 			: undefined;
 
-	const migrateTenants = tenantMigratorFor(authority, async (requiredStep) => {
-		const url = await deploymentUrl(
-			agreedApi,
-			deployedConfig.control.name,
-			agreed.domain
-		);
-		if (url === undefined) {
-			throw new DeploymentSettlementUrlMissingError();
-		}
-		const parsed = new URL(url);
-		await settleTenants(
-			controlRpc(parsed, {
-				credential: cachedOwnerProvider(parsed, {
-					signal: runtimeOptions.signal
-				}),
-				signal: runtimeOptions.signal
-			}).localStep,
-			ui.reporter(),
-			{
-				requiredStep,
-				limit: 20,
-				maxPasses: 100,
-				...(runtimeOptions.signal !== undefined && {
-					signal: runtimeOptions.signal
-				})
+	const migrateTenants = tenantMigratorFor(
+		authority,
+		async (access, requiredStep) => {
+			const url = await deploymentUrl(
+				agreedApi,
+				deployedConfig.control.name,
+				agreed.domain
+			);
+			if (url === undefined) {
+				throw new DeploymentSettlementUrlMissingError();
 			}
-		);
-	});
+			const parsed = new URL(url);
+			await settleTenants(
+				controlRpc(parsed, {
+					credential: access.credentialFor(parsed),
+					signal: runtimeOptions.signal
+				}).localStep,
+				ui.reporter(),
+				{
+					requiredStep,
+					limit: 20,
+					maxPasses: 100,
+					...(runtimeOptions.signal !== undefined && {
+						signal: runtimeOptions.signal
+					})
+				}
+			);
+		}
+	);
 
 	const agreedPlan = reviewedPlan;
 	let outcome: OnboardOutcome;
@@ -1613,6 +1682,31 @@ async function deployFlow(
 }
 
 /**
+ * True when `version` returns a build, and false when the host cannot be
+ * reached or has no `/_version` route. Any other failure, such as a server
+ * error, throws, so a deployment that fails for another reason is not treated
+ * as a URL that does not serve Cupboard.
+ */
+export async function isVersionServed(
+	version: () => Promise<unknown>
+): Promise<boolean> {
+	try {
+		await version();
+
+		return true;
+	} catch (error) {
+		if (
+			error instanceof UnreachableHostError ||
+			(error instanceof CupboardHttpError && error.status === notFoundStatus)
+		) {
+			return false;
+		}
+
+		throw error;
+	}
+}
+
+/**
  * Ends a run whose deployment did not become ready for onboarding, and returns
  * the exit code. A first deploy that stops before the claim leaves the
  * deployment without an admin, and nobody can use it until someone claims it,
@@ -1699,6 +1793,27 @@ export class DeploymentUnclaimedError extends CliError {
 				'`cupboard init` from a terminal to claim the deployment.'
 		);
 		this.name = 'DeploymentUnclaimedError';
+	}
+}
+
+export class AudienceWithoutGithubOidcError extends CliUsageError {
+	constructor() {
+		super(
+			'--audience applies only to the token that --github-oidc requests; pass --github-oidc with it.'
+		);
+		this.name = 'AudienceWithoutGithubOidcError';
+	}
+}
+
+/**
+ * Refuses `--audience` without `--github-oidc`, because only the GitHub
+ * Actions token request uses the audience.
+ */
+export function requireGithubOidcForAudience(
+	cliOptions: Pick<DeployCliOptions, 'audience' | 'githubOidc'>
+): void {
+	if (cliOptions.audience !== undefined && cliOptions.githubOidc !== true) {
+		throw new AudienceWithoutGithubOidcError();
 	}
 }
 

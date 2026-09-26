@@ -293,6 +293,21 @@ export async function authenticateGithubOidc(
 	return provider;
 }
 
+/**
+ * A provider that exchanges a GitHub Actions OIDC token for a Cupboard token
+ * on first use and, as the Cupboard token nears expiry, requests a new GitHub
+ * token and exchanges that. Unlike {@link authenticateGithubOidc}, it does not
+ * exchange up front. The first exchange happens at the first `get()`, and
+ * `get()` throws any failure.
+ */
+export function githubOidcTokenProvider(
+	client: CupboardClient,
+	audience: Audience,
+	authorizationDetails: AuthorizationDetails
+): TokenProvider {
+	return new GithubOidcTokenProvider(client, audience, authorizationDetails);
+}
+
 export interface PushAuthOptions {
 	readonly githubOidc?: boolean;
 	readonly audience: Audience;

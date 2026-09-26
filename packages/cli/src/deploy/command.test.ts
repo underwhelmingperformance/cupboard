@@ -7,8 +7,21 @@ import {
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { type Audience, audienceSchema } from '../audience.ts';
+import type { TokenProvider } from '../client/credentials.ts';
 import {
+	CupboardHttpError,
+	OwnerLoginRequiredError,
+	UnreachableHostError
+} from '../errors.ts';
+
+import {
+	type AdminAccess,
+	adminAccessFor,
+	AdminControlWorkerMissingError,
+	type AdminCredentialSources,
 	AdminDatabaseMismatchError,
+	AdminTokenRequiredError,
 	type AuthorityApi,
 	type DeployAuthority,
 	establishAuthority,
@@ -18,12 +31,14 @@ import {
 } from './authority.ts';
 import {
 	AccountOptionRequiredError,
+	AudienceWithoutGithubOidcError,
 	chooseDeployAccount,
 	claimServerFault,
 	deployAndOnboard,
 	DeployCancelledError,
 	DeploymentUnclaimedError,
 	envR2Credentials,
+	isVersionServed,
 	obtainR2Credentials,
 	outroBeforeReady,
 	planMenuEntries,
@@ -32,6 +47,7 @@ import {
 	R2CredentialsRejectedError,
 	type R2KeyAction,
 	r2KeyActionFor,
+	requireGithubOidcForAudience,
 	reviewPlan,
 	verifyR2Credentials
 } from './command.ts';
@@ -1120,6 +1136,13 @@ describe('withClaimSecret', () => {
 			tenant: [{ name: 'R2_BUCKET_NAME', text: 'cupboard-blobs' }]
 		}
 	};
+	const adminAccess = {
+		credentialFor: (): TokenProvider => ({
+			get: () => Promise.resolve('admin-jwt'),
+			refresh: () => Promise.resolve('admin-jwt')
+		})
+	};
+
 	it.each<[string, DeployAuthority, typeof options]>([
 		[
 			'adds the claim secret to the control Worker on a first deploy',
@@ -1144,7 +1167,8 @@ describe('withClaimSecret', () => {
 			'leaves the options unchanged on an update',
 			{
 				kind: 'admin',
-				admin: principal('https://idp.example', 'a', 'c')
+				admin: principal('https://idp.example', 'a', 'c'),
+				access: adminAccess
 			},
 			options
 		],
@@ -1157,6 +1181,38 @@ describe('withClaimSecret', () => {
 		expect(withClaimSecret(options, authority)).toStrictEqual(expected);
 	});
 });
+
+function labelledProvider(label: string): TokenProvider {
+	return {
+		get: () => Promise.resolve(label),
+		refresh: () => Promise.resolve(label)
+	};
+}
+
+/**
+ * Credential sources that record each call and return a provider whose token
+ * shows which source created it and for which origin.
+ */
+function recordingSources(): {
+	readonly calls: string[];
+	readonly sources: AdminCredentialSources;
+} {
+	const calls: string[] = [];
+
+	return {
+		calls,
+		sources: {
+			session: (url) => {
+				calls.push(`session:${url.href}`);
+				return labelledProvider(`session:${url.origin}`);
+			},
+			githubOidc: (url, audience: Audience) => {
+				calls.push(`githubOidc:${url.href}:${audience}`);
+				return labelledProvider(`github:${url.origin}`);
+			}
+		}
+	};
+}
 
 async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
 	try {
@@ -1177,13 +1233,71 @@ async function settled(pending: Promise<unknown>): Promise<unknown> {
 	}
 }
 
+describe('adminAccessFor', () => {
+	const deployment = new URL('https://cupboard.example.workers.dev');
+	const sameOrigin = new URL('https://cupboard.example.workers.dev/t/builds');
+
+	it.each([
+		{
+			name: 'the cached session',
+			options: {},
+			tokens: ['session:https://cupboard.example.workers.dev'],
+			calls: ['session:https://cupboard.example.workers.dev/']
+		},
+		{
+			name: 'a CI token for the deployment URL',
+			options: { githubOidc: true },
+			tokens: ['github:https://cupboard.example.workers.dev'],
+			calls: [
+				'githubOidc:https://cupboard.example.workers.dev/:https://cupboard.example.workers.dev'
+			]
+		},
+		{
+			name: 'a CI token for --audience',
+			options: {
+				githubOidc: true,
+				audience: audienceSchema.parse('cupboard-ci')
+			},
+			tokens: ['github:https://cupboard.example.workers.dev'],
+			calls: ['githubOidc:https://cupboard.example.workers.dev/:cupboard-ci']
+		}
+	])(
+		'uses $name, with one provider for each origin',
+		async ({ options, tokens, calls: expectedCalls }) => {
+			const { calls, sources } = recordingSources();
+			const access = adminAccessFor(options, sources)(deployment);
+
+			const first = access.credentialFor(deployment);
+			const second = access.credentialFor(sameOrigin);
+
+			expect({
+				isSameProvider: first === second,
+				tokens: [await first.get()],
+				calls
+			}).toStrictEqual({ isSameProvider: true, tokens, calls: expectedCalls });
+		}
+	);
+});
+
 function describeResult(result: unknown): unknown {
+	if (result instanceof AdminTokenRequiredError) {
+		return {
+			kind: 'admin-token',
+			admin: result.admin,
+			url: result.url.href
+		};
+	}
+
 	if (result instanceof AdminDatabaseMismatchError) {
 		return {
 			kind: 'database',
 			boundDatabase: result.boundDatabase,
 			plannedDatabase: result.plannedDatabase
 		};
+	}
+
+	if (result instanceof AdminControlWorkerMissingError) {
+		return { kind: 'control-worker', admin: result.admin };
 	}
 
 	return result;
@@ -1210,12 +1324,18 @@ describe('establishAuthority', () => {
 
 	/**
 	 * A Cloudflare account whose `cupboard` database has an admin and whose
-	 * `fresh` database has none. The Workers are bound to `cupboard`. With
-	 * `isControlDeleted`, only the tenant Worker exists. Every read is recorded.
+	 * `fresh` database has none. The Workers are bound to `cupboard`, and the
+	 * control Worker has `recordedUrl` as its recorded deployment URL when that
+	 * is given. With `isControlDeleted`, only the tenant Worker exists. Every
+	 * read is recorded.
 	 */
 	function claimedAccount(
 		calls: string[],
-		options: { readonly isControlDeleted?: boolean } = {}
+		options: {
+			readonly routedDomain?: string;
+			readonly recordedUrl?: string;
+			readonly isControlDeleted?: boolean;
+		} = {}
 	): AuthorityApi {
 		const claimedId = databaseIdSchema.parse('cupboard-id');
 		const freshId = databaseIdSchema.parse('fresh-id');
@@ -1242,6 +1362,14 @@ describe('establishAuthority', () => {
 						: []
 				);
 			},
+			findCustomDomain: () => {
+				calls.push('findCustomDomain');
+				return Promise.resolve(options.routedDomain);
+			},
+			getWorkersDevSubdomain: () => {
+				calls.push('getWorkersDevSubdomain');
+				return Promise.resolve('example');
+			},
 			getScriptConfiguration: (scriptName) => {
 				calls.push(`getScriptConfiguration:${scriptName}`);
 
@@ -1251,7 +1379,16 @@ describe('establishAuthority', () => {
 
 				return Promise.resolve({
 					bindings: [
-						{ type: 'd1', name: 'CUPBOARD_DB', database_id: claimedId }
+						{ type: 'd1', name: 'CUPBOARD_DB', database_id: claimedId },
+						...(options.recordedUrl === undefined
+							? []
+							: [
+									{
+										type: 'plain_text',
+										name: 'CUPBOARD_DEPLOYMENT_URL',
+										text: options.recordedUrl
+									}
+								])
 					],
 					cacheEnabled: false,
 					crossVersionCache: false
@@ -1264,16 +1401,22 @@ describe('establishAuthority', () => {
 
 	it.each([
 		{
-			name: 'the deployed database',
+			name: 'the deployed database, without an admin token',
 			menuChoices: ['deploy'],
 			textEdits: [],
-			result: { kind: 'admin', admin },
+			result: {
+				kind: 'admin-token',
+				admin,
+				url: 'https://cupboard.example.workers.dev/'
+			},
 			calls: [
 				'getScriptConfiguration:cupboard',
 				'findD1DatabaseName:cupboard-id',
 				'findD1Database:cupboard',
 				'd1QueryRows:cupboard-id',
-				'd1QueryRows:cupboard-id'
+				'd1QueryRows:cupboard-id',
+				'findCustomDomain',
+				'getWorkersDevSubdomain'
 			]
 		},
 		{
@@ -1335,10 +1478,21 @@ describe('establishAuthority', () => {
 					{
 						ui,
 						api: claimedAccount(calls),
+						adminAccess: () => ({
+							credentialFor: () => ({
+								get: () => Promise.reject(new OwnerLoginRequiredError()),
+								refresh: () => Promise.reject(new OwnerLoginRequiredError())
+							})
+						}),
+						checkAdmin: () => {
+							calls.push('checkAdmin');
+							return Promise.resolve();
+						},
 						idToken: () => {
 							calls.push('login');
 							return Promise.resolve('id-token-1');
 						},
+						servesCupboard: () => Promise.resolve(true),
 						confirmClaim: () => {
 							calls.push('confirmClaim');
 							return Promise.resolve(true);
@@ -1361,6 +1515,63 @@ describe('establishAuthority', () => {
 		}
 	);
 
+	it('takes the current URL from the deployment record, not from a domain routed in the dashboard', async () => {
+		const calls: string[] = [];
+		const accessBases: string[] = [];
+		const wildcardToken = `e30.${Buffer.from(
+			JSON.stringify({ authorization_details: [{ type: 'cupboard_wildcard' }] })
+		).toString('base64url')}.signature`;
+
+		const authority = await establishAuthority(
+			{
+				agreed: { config: deployedConfig }
+			},
+			{
+				ui: pickerUi(),
+				api: claimedAccount(calls, {
+					routedDomain: 'cache.example.com',
+					recordedUrl: 'https://cupboard.example.workers.dev'
+				}),
+				adminAccess: (deploymentUrl) => {
+					accessBases.push(deploymentUrl.href);
+
+					return {
+						credentialFor: () => ({
+							get: () => Promise.resolve(wildcardToken),
+							refresh: () => Promise.resolve(wildcardToken)
+						})
+					};
+				},
+				checkAdmin: (url) => {
+					calls.push(`checkAdmin:${url.href}`);
+					return Promise.resolve();
+				},
+				idToken: () => Promise.reject(new Error('no login expected')),
+				servesCupboard: (url) => {
+					calls.push(`servesCupboard:${url.href}`);
+					return Promise.resolve(true);
+				},
+				confirmClaim: () => Promise.resolve(true),
+				interactive: false
+			}
+		);
+
+		expect({
+			kind: authority.kind,
+			accessBases,
+			checks: calls.filter(
+				(call) =>
+					call.startsWith('checkAdmin') ||
+					call.startsWith('servesCupboard') ||
+					call === 'findCustomDomain'
+			)
+		}).toStrictEqual({
+			kind: 'admin',
+			accessBases: ['https://cupboard.example.workers.dev/'],
+			checks: ['checkAdmin:https://cupboard.example.workers.dev/']
+		});
+	});
+
 	it.each([
 		{
 			name: 'another database in the plan',
@@ -1374,7 +1585,7 @@ describe('establishAuthority', () => {
 		{
 			name: 'the same database in the plan',
 			database: 'cupboard',
-			result: { kind: 'admin', admin }
+			result: { kind: 'control-worker', admin }
 		}
 	])(
 		"reads the admin from the tenant Worker's database when the control Worker was deleted, with $name",
@@ -1399,10 +1610,16 @@ describe('establishAuthority', () => {
 					{
 						ui: pickerUi(),
 						api: claimedAccount(calls, { isControlDeleted: true }),
+						adminAccess: () => updateAccess,
+						checkAdmin: () => {
+							calls.push('checkAdmin');
+							return Promise.resolve();
+						},
 						idToken: () => {
 							calls.push('login');
 							return Promise.resolve('id-token-1');
 						},
+						servesCupboard: () => Promise.resolve(true),
 						confirmClaim: () => Promise.resolve(true),
 						interactive: true
 					}
@@ -1413,7 +1630,9 @@ describe('establishAuthority', () => {
 				result: describeResult(result),
 				calls: calls.filter(
 					(call) =>
-						call.startsWith('getScriptConfiguration') || call === 'login'
+						call.startsWith('getScriptConfiguration') ||
+						call === 'login' ||
+						call === 'checkAdmin'
 				)
 			}).toStrictEqual({
 				result: expectedResult,
@@ -1426,9 +1645,13 @@ describe('establishAuthority', () => {
 	);
 });
 
+const updateAccess: AdminAccess = {
+	credentialFor: () => labelledProvider('admin-jwt')
+};
 const updateAuthority: DeployAuthority = {
 	kind: 'admin',
-	admin: principal('https://idp.example.test', 'a', 'c')
+	admin: principal('https://idp.example.test', 'a', 'c'),
+	access: updateAccess
 };
 const bootstrapAuthority: DeployAuthority = {
 	kind: 'bootstrap',
@@ -1448,16 +1671,19 @@ describe('tenantMigratorFor', () => {
 		).toBeUndefined();
 	});
 
-	it('migrates tenants on an update', async () => {
+	it('migrates tenants on an update with its admin access', async () => {
 		const steps: unknown[] = [];
-		const migrate = tenantMigratorFor(updateAuthority, (step) => {
-			steps.push(step);
+		const migrate = tenantMigratorFor(updateAuthority, (access, step) => {
+			steps.push({
+				isUpdateAccess: access === updateAccess,
+				step
+			});
 			return Promise.resolve();
 		});
 
 		await migrate?.(localStep(3));
 
-		expect(steps).toStrictEqual([localStep(3)]);
+		expect(steps).toStrictEqual([{ isUpdateAccess: true, step: localStep(3) }]);
 	});
 });
 
@@ -1552,6 +1778,36 @@ describe('removeLeftoverClaimSecret failures', () => {
 	});
 });
 
+describe('requireGithubOidcForAudience', () => {
+	it.each([
+		{
+			name: '--audience with --github-oidc',
+			options: { audience: audienceSchema.parse('ci'), githubOidc: true },
+			isRefused: false
+		},
+		{
+			name: '--audience alone',
+			options: { audience: audienceSchema.parse('ci') },
+			isRefused: true
+		},
+		{ name: 'neither option', options: {}, isRefused: false }
+	])('checks a run with $name', ({ options, isRefused }) => {
+		let refusal: unknown;
+
+		try {
+			requireGithubOidcForAudience(options);
+		} catch (error) {
+			refusal = error;
+		}
+
+		if (isRefused) {
+			expect(refusal).toBeInstanceOf(AudienceWithoutGithubOidcError);
+		} else {
+			expect(refusal).toBeUndefined();
+		}
+	});
+});
+
 describe('claimantLabel', () => {
 	it.each([
 		{
@@ -1574,6 +1830,38 @@ describe('claimantLabel', () => {
 		}
 	])('shows a claimant with $name', ({ claimant, label }) => {
 		expect(claimantLabel(claimant)).toBe(label);
+	});
+});
+
+describe('isVersionServed', () => {
+	const serverError = new CupboardHttpError('GET', '/_version', 503, '');
+
+	it.each([
+		{ name: 'a build', version: () => Promise.resolve('v-1'), result: true },
+		{
+			name: 'an unreachable host',
+			version: () =>
+				Promise.reject(
+					new UnreachableHostError(
+						'cache.example.com',
+						new TypeError('fetch failed')
+					)
+				),
+			result: false
+		},
+		{
+			name: 'a 404',
+			version: () =>
+				Promise.reject(new CupboardHttpError('GET', '/_version', 404, '')),
+			result: false
+		},
+		{
+			name: 'a server error',
+			version: () => Promise.reject(serverError),
+			result: serverError
+		}
+	])('reports $name', async ({ version, result }) => {
+		expect(await settled(isVersionServed(version))).toBe(result);
 	});
 });
 
@@ -1681,8 +1969,13 @@ describe('establishAuthority on a first deploy', () => {
 						findD1Database: () => Promise.resolve(undefined),
 						findD1DatabaseName: () => Promise.resolve(undefined),
 						d1QueryRows: () => Promise.resolve([]),
+						findCustomDomain: () => Promise.resolve(undefined),
+						getWorkersDevSubdomain: () => Promise.resolve('example'),
 						getScriptConfiguration: () => Promise.resolve(undefined)
 					},
+					adminAccess: () => updateAccess,
+					checkAdmin: () => Promise.resolve(),
+					servesCupboard: () => Promise.resolve(true),
 					idToken: () => Promise.resolve(idToken),
 					confirmClaim: (claimant) => {
 						asked.push(claimant);
