@@ -1,10 +1,14 @@
+import { capturingReporter } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
+	type ParsedLocalStepStatus,
 	type ParsedLocalStepWakeResponse,
-	schemaTransitions
+	type SchemaTransition,
+	schemaTransitions,
+	type TransitionState
 } from '@cupboard/protocol/deployment';
 import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
@@ -19,6 +23,7 @@ import {
 	type TransitionStates
 } from '../../packages/cli/src/deploy/deployment-state.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
+import { settleTenants } from '../../packages/cli/src/deploy/settlement.ts';
 import {
 	completeTransitions,
 	prepareTransitions
@@ -51,19 +56,35 @@ const resumableFixtureTenants = 2 + sleepingFixtureTenants.length;
 // known.
 const deployedAt = new Date('2026-01-01T00:00:00.000Z');
 
+function recordedAs(state: (transition: SchemaTransition) => TransitionState) {
+	return schemaTransitions.map((transition) => ({
+		id: transition.id,
+		state: state(transition),
+		updatedAt: deployedAt.toISOString()
+	}));
+}
+
 const completedTransitions = {
-	transitions: [
-		{
-			id: 'cache-identity',
-			state: 'complete',
-			updatedAt: deployedAt.toISOString()
-		},
-		{
-			id: 'deployment-transitions',
-			state: 'complete',
-			updatedAt: deployedAt.toISOString()
-		}
-	],
+	transitions: recordedAs(() => 'complete'),
+	unrecognised: []
+};
+
+const terminalTransitions = Object.fromEntries(
+	schemaTransitions.map((transition) => [transition.id, 'complete'])
+);
+
+// What the walk records before the upload on the predecessor path. The first
+// transition has contract migrations, so the walk only expands it. The walk
+// expands each later transition before the upload because it is independent,
+// and immediately completes a transition with no contract migrations and no
+// contract step. The expectation reads the transition's lists directly, not
+// the walk's own predicate, so a defect in that predicate fails the test.
+const preUploadTransitions = {
+	transitions: recordedAs((transition) =>
+		transition.contract.length === 0 && transition.contractStep === undefined
+			? 'complete'
+			: 'expanded'
+	),
 	unrecognised: []
 };
 
@@ -93,6 +114,20 @@ async function wakeUntilStep(
 	throw new Error(
 		`Tenant migration did not reach local step ${String(requiredStep)}`
 	);
+}
+
+/**
+ * The status without the sweep. These tests drive the wakes themselves. Each
+ * wake starts a server-side sweep chain, but the harness's queue accepts
+ * messages and never delivers them, so the state of the sweep depends on the
+ * harness and the upgrade tests do not assert it.
+ */
+function withoutSweep(
+	status: ParsedLocalStepStatus
+): Omit<ParsedLocalStepStatus, 'sweep'> {
+	const { sweep: _sweep, ...rest } = status;
+
+	return rest;
 }
 
 function d1QueryApi(server: StagedDeploymentServer): D1QueryApi {
@@ -147,6 +182,71 @@ async function refusedContract(
 	return undefined;
 }
 
+// `preUploadTransitions` relies on every transition after the first being
+// independent.
+it('defines only independent transitions after the first', () => {
+	expect(
+		schemaTransitions
+			.slice(1)
+			.filter((transition) => transition.independent !== true)
+			.map((transition) => transition.id)
+	).toStrictEqual([]);
+});
+
+// The deploy's wait loop against the server's sweep chain. The wake takes one
+// tenant, and the queue then delivers the chain's messages. Each fixture
+// tenant needs two wakes: one runs its migrations and one records its step.
+// The chain's first batch therefore migrates the other tenants and records the
+// first, and its second batch records the rest.
+it('waits while the sweep chain wakes the tenants', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }),
+			false
+		);
+		await server.deployCurrent(true);
+
+		const settled = await settleTenants(
+			server.settlementClient(),
+			capturingReporter([]),
+			{ requiredStep: expansionLocalStep, limit: 1 }
+		);
+
+		expect({
+			pending: settled.pending,
+			ready: settled.ready,
+			sweep:
+				settled.sweep.state === 'idle'
+					? {
+							state: settled.sweep.state,
+							link: settled.sweep.last?.link,
+							outcomes: settled.sweep.last?.outcomes
+						}
+					: settled.sweep.state
+		}).toStrictEqual({
+			pending: 0,
+			ready: resumableFixtureTenants,
+			sweep: {
+				state: 'idle',
+				link: 1,
+				outcomes: [...sleepingFixtureTenants, 'upgrade-suspended'].map(
+					(tenant) => ({
+						tenant,
+						kind: 'recorded',
+						step: expansionLocalStep,
+						progressed: true
+					})
+				)
+			}
+		});
+	} finally {
+		await server.stop();
+	}
+});
+
 it('upgrades a populated predecessor deployment', async () => {
 	const server = await StagedDeploymentServer.start(process.cwd());
 
@@ -178,7 +278,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			expanded,
 			wake,
 			contractWake,
-			status: await client.localStepStatus(),
+			status: withoutSweep(await client.localStepStatus()),
 			recorded: await client.transitions(),
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
@@ -190,24 +290,10 @@ it('upgrades a populated predecessor deployment', async () => {
 					'upgrade-suspended'
 				]
 			},
-			// Before the upload the deploy expanded both transitions and completed
-			// the one with no contract migrations; the tenants then had step 4 to
-			// reach.
-			expanded: {
-				transitions: [
-					{
-						id: 'cache-identity',
-						state: 'expanded',
-						updatedAt: deployedAt.toISOString()
-					},
-					{
-						id: 'deployment-transitions',
-						state: 'complete',
-						updatedAt: deployedAt.toISOString()
-					}
-				],
-				unrecognised: []
-			},
+			// Before the upload the deploy expanded every transition and completed
+			// the transitions with no contract migrations and no contract step.
+			// The tenants then had to record step 4.
+			expanded: preUploadTransitions,
 			wake: {
 				didAdvance: true,
 				final: {
@@ -222,8 +308,10 @@ it('upgrades a populated predecessor deployment', async () => {
 					].map((tenant) => ({
 						tenant,
 						kind: 'recorded',
-						step: expansionLocalStep
-					}))
+						step: expansionLocalStep,
+						progressed: true
+					})),
+					chain: { kind: 'none' }
 				}
 			},
 			contractWake: {
@@ -240,8 +328,10 @@ it('upgrades a populated predecessor deployment', async () => {
 					].map((tenant) => ({
 						tenant,
 						kind: 'recorded',
-						step: currentLocalStep
-					}))
+						step: currentLocalStep,
+						progressed: true
+					})),
+					chain: { kind: 'none' }
 				}
 			},
 			status: {
@@ -254,10 +344,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			recorded: completedTransitions,
 			terminal: {
 				appliedD1Migrations: server.d1MigrationNames,
-				transitions: {
-					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
-				},
+				transitions: terminalTransitions,
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
@@ -306,28 +393,11 @@ it('upgrades a deployment that v0.0.35 left at native-reads', async () => {
 			recorded: await client.transitions(),
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
-			expanded: {
-				transitions: [
-					{
-						id: 'cache-identity',
-						state: 'expanded',
-						updatedAt: deployedAt.toISOString()
-					},
-					{
-						id: 'deployment-transitions',
-						state: 'complete',
-						updatedAt: deployedAt.toISOString()
-					}
-				],
-				unrecognised: []
-			},
+			expanded: preUploadTransitions,
 			recorded: completedTransitions,
 			terminal: {
 				appliedD1Migrations: server.d1MigrationNames,
-				transitions: {
-					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
-				},
+				transitions: terminalTransitions,
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
@@ -349,7 +419,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 
 		// Before the wake, every active or suspended tenant is behind: none has
 		// run since the deploy, so none has recorded a step.
-		const before = await client.localStepStatus();
+		const before = withoutSweep(await client.localStepStatus());
 
 		await wakeUntilStep(server, client, expansionLocalStep);
 		await contractOverPredecessor(server);
@@ -360,7 +430,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 		// the same step as the tenant that was never behind.
 		expect({
 			before,
-			after: await client.localStepStatus()
+			after: withoutSweep(await client.localStepStatus())
 		}).toStrictEqual({
 			before: {
 				current: currentLocalStep,
@@ -457,10 +527,7 @@ it('records the same transitions when an interrupted deploy is run again', async
 			repeated: completedTransitions,
 			terminal: {
 				appliedD1Migrations: server.d1MigrationNames,
-				transitions: {
-					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
-				},
+				transitions: terminalTransitions,
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true

@@ -1,3 +1,8 @@
+import { type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type LocalStep,
+	type LocalStepWakeOutcomes
+} from '@cupboard/protocol/deployment';
 import {
 	CodedError,
 	genericExitCode,
@@ -10,6 +15,7 @@ import {
 	type OAuthErrorResponse,
 	parseOAuthErrorBody
 } from './auth/oauth-error.ts';
+import { describeWakeOutcome } from './deploy/wake-outcomes.ts';
 
 // The CLI's own failure categories, layered on the shared generic (1) and usage
 // (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
@@ -179,27 +185,100 @@ export class WorkersNotServingBuildError extends CliError {
 }
 
 /**
- * Active or suspended tenants have not recorded the required local step, so
- * the deploy stopped. The Workers are already uploaded when this is thrown.
- * The control Worker's hourly sweep wakes the tenants that are behind, and
- * each records its step; running the deploy again then continues.
+ * Why the tenants did not reach the required local step.
+ *
+ * - `stalled`: the server's sweep chain confirmed a stall. Since the last batch
+ *   in which a tenant did work, every pending tenant has completed a wake
+ *   without work or has failed too many wakes in a row. The chain keeps
+ *   retrying with a growing delay.
+ * - `chain-stopped`: the sweep chain stopped with tenants pending, and each
+ *   chain that the settlement started in its place stopped or did not start.
+ *   No chain wakes the tenants until the next cron tick starts one.
+ * - `above-required`: a wake selected no tenant while tenants were still
+ *   pending. The wake selects tenants below the server's required local step,
+ *   so the pending tenants have reached that step but not the step that the
+ *   deploy counts against. No chain wakes them.
+ * - `below-step`: the walk's own count after the settlement found tenants
+ *   below the step, because the walk ran without waking tenants or because a
+ *   tenant was created after the settlement. A sweep chain that a wake or the
+ *   cron tick starts wakes them.
+ *
+ * `outcomes` is the per-tenant outcomes of the sweep's last batch.
+ */
+export type LocalStepUnreachedReason =
+	| { readonly kind: 'stalled'; readonly outcomes: LocalStepWakeOutcomes }
+	| { readonly kind: 'chain-stopped'; readonly outcomes: LocalStepWakeOutcomes }
+	| { readonly kind: 'above-required' }
+	| { readonly kind: 'below-step' };
+
+/**
+ * How many tenants have not reached the required step, and a sample of them.
+ */
+export interface LocalStepShortfall {
+	readonly pending: number;
+	readonly requiredStep: LocalStep;
+	readonly stragglers: readonly TenantId[];
+}
+
+/**
+ * Every active or suspended tenant has to reach the required local step before
+ * the deployment continues, and some tenants have not reached it. The Workers
+ * are already uploaded when this is thrown.
  */
 export class LocalStepUnreachedError extends CliError {
+	public readonly pending: number;
+	public readonly requiredStep: LocalStep;
+	public readonly stragglers: readonly TenantId[];
+
 	constructor(
-		public readonly pending: number,
-		public readonly requiredStep: number,
-		public readonly stragglers: readonly string[]
+		public readonly reason: LocalStepUnreachedReason,
+		shortfall: LocalStepShortfall
 	) {
+		const { pending, requiredStep, stragglers } = shortfall;
 		const unnamed = pending - stragglers.length;
 		const named =
 			unnamed > 0
 				? `${stragglers.join(', ')} and ${String(unnamed)} more`
 				: stragglers.join(', ');
+		const outcomes =
+			reason.kind === 'stalled' || reason.kind === 'chain-stopped'
+				? reason.outcomes
+				: [];
+		const lastBatch =
+			outcomes.length === 0
+				? ''
+				: ` Outcomes of the last batch: ${outcomes.map((outcome) => describeWakeOutcome(outcome)).join(', ')}.`;
 
 		super(
-			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment cannot continue until they have. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
+			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment cannot continue until every tenant has.${lastBatch} ${recoveryFor(reason, requiredStep)}`
 		);
 		this.name = 'LocalStepUnreachedError';
+		this.pending = pending;
+		this.requiredStep = requiredStep;
+		this.stragglers = stragglers;
+	}
+}
+
+function recoveryFor(
+	reason: LocalStepUnreachedReason,
+	requiredStep: LocalStep
+): string {
+	switch (reason.kind) {
+		case 'stalled': {
+			return 'The sweep chain keeps retrying them on the server with a growing delay; run cupboard deployment status <url> to inspect it. Repair any reported tenant failures, then re-run cupboard deploy or cupboard deployment resume <url>. Either command starts a new chain.';
+		}
+
+		case 'chain-stopped': {
+			return "The sweep chain stopped again after each restart, so no chain is waking them now; the next cron tick starts another. Inspect the control Worker's logs for why the chain stopped, then re-run cupboard deploy or cupboard deployment resume <url>.";
+		}
+
+		case 'above-required': {
+			return `These tenants have reached the control Worker's required local step, which is below step ${String(requiredStep)}, so neither the sweep chain nor cupboard deployment resume <url> wakes them. Run cupboard deployment status <url> to see the required local step and the recorded transitions, and check that the control Worker serves this build.`;
+		}
+
+		case 'below-step': {
+			return 'Run cupboard deployment status <url> to see the pending tenants and the sweep chain. cupboard deployment resume <url> wakes a batch of them and waits while the sweep chain wakes the rest. Repair any reported tenant failures, then re-run cupboard deploy.';
+		}
 	}
 }
 

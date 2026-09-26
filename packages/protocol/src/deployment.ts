@@ -57,7 +57,8 @@ export const expansionLocalStep: LocalStep = localStep(4);
  */
 export const transitionIdSchema = z.enum([
 	'cache-identity',
-	'deployment-transitions'
+	'deployment-transitions',
+	'local-step-sweep'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -263,6 +264,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0031_deployment_transitions.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'local-step-sweep',
+		expand: ['0032_local_step_sweep.sql'],
+		contract: [],
+		independent: true
 	}
 ];
 
@@ -429,6 +436,171 @@ export const localStepStatusQuerySchema = z.strictObject({
 	requiredStep: localStepSchema.optional()
 });
 
+export const localStepWakeMaxTenants = 100;
+
+/**
+ * The longest error summary that a `failed` outcome contains.
+ */
+export const localStepWakeErrorMaxLength = 500;
+
+// Waking a tenant is a request to its object, so a batch can partly fail. A
+// failed tenant stays in the straggler list and the next batch retries it.
+//
+// `progressed` is whether the wake moved the object's durable state forward.
+// A `recorded` wake progressed when it raised the recorded step or projected
+// or moved any item. Recording the same step again is not progress. An
+// `advanced` wake leaves the object with more work to do; it progressed when
+// it committed a migration or a page of one, saved a cursor, or completed a
+// batch of work. `projected` counts the caches projected, the objects moved,
+// or the rows rewritten in a batch, and is 0 for a schema migration or a
+// catalogue page. `step` is the step that the tenant had recorded before the
+// wake, and is absent if it had recorded none. A `failed` wake is one whose
+// request to the object threw; `error` summarises what it threw.
+export const localStepWakeOutcomeSchema = z.discriminatedUnion('kind', [
+	z.strictObject({
+		tenant: tenantIdSchema,
+		kind: z.literal('recorded'),
+		step: localStepSchema,
+		progressed: z.boolean()
+	}),
+	z.strictObject({
+		tenant: tenantIdSchema,
+		kind: z.literal('advanced'),
+		projected: z.number().int().nonnegative(),
+		progressed: z.boolean(),
+		step: localStepSchema.optional()
+	}),
+	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('unconfigured') }),
+	z.strictObject({
+		tenant: tenantIdSchema,
+		kind: z.literal('failed'),
+		error: z.string().max(localStepWakeErrorMaxLength)
+	})
+]);
+export type LocalStepWakeOutcome = z.input<typeof localStepWakeOutcomeSchema>;
+
+/**
+ * Whether the tenant did work in the wake: the wake completed and moved the
+ * object's durable state forward.
+ */
+export function hasDoneWork(outcome: LocalStepWakeOutcome): boolean {
+	return (
+		(outcome.kind === 'recorded' || outcome.kind === 'advanced') &&
+		outcome.progressed
+	);
+}
+
+export const localStepWakeOutcomesSchema = z
+	.array(localStepWakeOutcomeSchema)
+	.max(localStepWakeMaxTenants);
+export type LocalStepWakeOutcomes = z.input<typeof localStepWakeOutcomesSchema>;
+
+/**
+ * The delay between a sweep chain's batches until the chain confirms a stall.
+ * The deploy polls `localStep.status` at this interval while it waits for a
+ * chain.
+ */
+export const localStepSweepPaceSeconds = 10;
+
+/**
+ * How many tenants each batch of a sweep chain wakes. Each wake is a
+ * subrequest, so the batch is kept small enough to stay well inside one
+ * invocation's subrequest budget.
+ */
+export const localStepSweepBatchSize = 20;
+
+/**
+ * How many wakes in a row can fail for one tenant before the chain counts the
+ * failures as wakes without work. A failed wake may not have reached the
+ * tenant's object, so the first failures count as neither work nor a
+ * completed wake.
+ */
+export const localStepSweepFailureLimit = 5;
+
+export const localStepSweepChainIdSchema = z
+	.uuid()
+	.brand<'LocalStepSweepChainId'>();
+export type LocalStepSweepChainId = z.output<
+	typeof localStepSweepChainIdSchema
+>;
+
+/**
+ * A tenant whose recent wakes failed: how many wakes in a row have failed for
+ * it, and the error of the last one.
+ */
+export const localStepSweepFailingTenantSchema = z.strictObject({
+	tenant: tenantIdSchema,
+	failures: z.number().int().positive(),
+	error: z.string().max(localStepWakeErrorMaxLength)
+});
+export type LocalStepSweepFailingTenant = z.input<
+	typeof localStepSweepFailingTenantSchema
+>;
+
+/**
+ * The chain that last had the sweep lease and how far it got: its id, the
+ * number of its latest message, when its row last changed, when its last batch
+ * ran, the per-tenant outcomes of that batch, and the tenants whose recent
+ * wakes failed. A caller of `localStep.status` can therefore report which
+ * tenants failed and in which way without waking them. A chain that the cron
+ * tick starts keeps the outcomes of the previous chain's last batch until its
+ * own first batch runs, so `batchAt` can be earlier than the chain's first
+ * `updatedAt`.
+ */
+const localStepSweepChainSchema = z.strictObject({
+	chain: localStepSweepChainIdSchema,
+	link: z.number().int().nonnegative(),
+	updatedAt: isoTimestampSchema,
+	batchAt: isoTimestampSchema,
+	outcomes: localStepWakeOutcomesSchema,
+	failing: z
+		.array(localStepSweepFailingTenantSchema)
+		.max(localStepWakeMaxTenants)
+});
+
+/**
+ * The state of the server-side sweep chain.
+ *
+ * A tenant did work in a wake when the wake completed and moved the tenant's
+ * durable state forward (`hasDoneWork`). `wokenWithoutWork` counts the tenant
+ * wakes since the last batch in which a tenant did work. A failed wake counts
+ * only once the tenant has failed `localStepSweepFailureLimit` wakes in a row.
+ *
+ * - `running`: a chain has the lease and has not confirmed a stall.
+ * - `stalled`: a chain has the lease and has confirmed a stall. Since the last
+ *   batch in which a tenant did work, the chain's batches have followed the
+ *   wake cursor through at least as many tenant wakes as there are pending
+ *   tenants, so every pending tenant has completed a wake without work or has
+ *   failed `localStepSweepFailureLimit` wakes in a row. `stalledAt` is when
+ *   the chain confirmed the stall. The delay before each further batch
+ *   doubles, up to an hour.
+ * - `idle`: no chain has the lease. None was started, the last chain ended
+ *   because no tenant was pending, or the last chain stopped because a message
+ *   was lost and its lease expired.
+ *
+ * `nextAt` is when the chain's next batch is due.
+ */
+export const localStepSweepSchema = z.discriminatedUnion('state', [
+	z.strictObject({
+		state: z.literal('idle'),
+		last: localStepSweepChainSchema.optional()
+	}),
+	z.strictObject({
+		state: z.literal('running'),
+		...localStepSweepChainSchema.shape,
+		nextAt: isoTimestampSchema,
+		wokenWithoutWork: z.number().int().nonnegative()
+	}),
+	z.strictObject({
+		state: z.literal('stalled'),
+		...localStepSweepChainSchema.shape,
+		nextAt: isoTimestampSchema,
+		wokenWithoutWork: z.number().int().positive(),
+		stalledAt: isoTimestampSchema
+	})
+]);
+export type LocalStepSweep = z.input<typeof localStepSweepSchema>;
+
 export const localStepStatusSchema = z.strictObject({
 	// This build's final local step (`currentLocalStep`).
 	current: localStepSchema,
@@ -438,16 +610,15 @@ export const localStepStatusSchema = z.strictObject({
 	// Active or suspended tenants that have reported `required` or later.
 	ready: z.number().int().nonnegative(),
 	// Active or suspended tenants that have not, whether they reported an
-	// earlier step or
-	// have not reported since the column was added.
+	// earlier step or have not reported since the column was added.
 	pending: z.number().int().nonnegative(),
 	// Up to `localStepStragglerSampleSize` of the pending tenants, in slug order.
-	stragglers: z.array(tenantIdSchema).max(localStepStragglerSampleSize)
+	stragglers: z.array(tenantIdSchema).max(localStepStragglerSampleSize),
+	// The server-side sweep chain that wakes the pending tenants.
+	sweep: localStepSweepSchema
 });
 export type ParsedLocalStepStatus = z.output<typeof localStepStatusSchema>;
 export type LocalStepStatus = z.input<typeof localStepStatusSchema>;
-
-export const localStepWakeMaxTenants = 100;
 
 export const localStepWakeBodySchema = z.strictObject({
 	limit: z.number().int().positive().max(localStepWakeMaxTenants)
@@ -455,23 +626,31 @@ export const localStepWakeBodySchema = z.strictObject({
 export type ParsedLocalStepWakeBody = z.output<typeof localStepWakeBodySchema>;
 export type LocalStepWakeBody = z.input<typeof localStepWakeBodySchema>;
 
-// Waking a tenant is a request to its object, so a batch can partly fail. A
-// failed tenant stays in the straggler list and the next batch retries it.
-export const localStepWakeOutcomeSchema = z.discriminatedUnion('kind', [
+/**
+ * What the wake did with the sweep chain after its batch.
+ *
+ * - `started`: a new chain has the lease, with the wake's batch as its first.
+ *   Any chain that had the lease before had confirmed a stall, and the new
+ *   chain replaced it.
+ * - `kept`: a chain that has not confirmed a stall has the lease, and it keeps
+ *   waking the tenants. The wake's batch is not part of that chain.
+ * - `none`: no tenant is pending, and any chain that had the lease has ended.
+ * - `failed`: the wake could not count the pending tenants, or could not start
+ *   or end a chain. `error` summarises the failure. The batch has run.
+ */
+export const localStepWakeChainSchema = z.discriminatedUnion('kind', [
 	z.strictObject({
-		tenant: tenantIdSchema,
-		kind: z.literal('recorded'),
-		step: localStepSchema
+		kind: z.literal('started'),
+		chain: localStepSweepChainIdSchema
 	}),
+	z.strictObject({ kind: z.literal('kept') }),
+	z.strictObject({ kind: z.literal('none') }),
 	z.strictObject({
-		tenant: tenantIdSchema,
-		kind: z.literal('advanced'),
-		projected: z.number().int().nonnegative()
-	}),
-	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('unconfigured') }),
-	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('failed') })
+		kind: z.literal('failed'),
+		error: z.string().max(localStepWakeErrorMaxLength)
+	})
 ]);
-export type LocalStepWakeOutcome = z.infer<typeof localStepWakeOutcomeSchema>;
+export type LocalStepWakeChain = z.input<typeof localStepWakeChainSchema>;
 
 export const localStepWakeResponseSchema = z.strictObject({
 	current: localStepSchema,
@@ -479,9 +658,15 @@ export const localStepWakeResponseSchema = z.strictObject({
 	required: localStepSchema,
 	woken: z.number().int().nonnegative(),
 	failed: z.number().int().nonnegative(),
-	outcomes: z.array(localStepWakeOutcomeSchema).max(localStepWakeMaxTenants)
+	outcomes: localStepWakeOutcomesSchema,
+	chain: localStepWakeChainSchema
 });
 export type ParsedLocalStepWakeResponse = z.output<
 	typeof localStepWakeResponseSchema
 >;
 export type LocalStepWakeResponse = z.input<typeof localStepWakeResponseSchema>;
+
+/**
+ * The part of a wake response that the batch itself produces.
+ */
+export type LocalStepWakeBatch = Omit<LocalStepWakeResponse, 'chain'>;

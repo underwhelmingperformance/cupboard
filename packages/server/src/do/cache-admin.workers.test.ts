@@ -1284,7 +1284,11 @@ describe('cache registry admin', () => {
 		for (let index = 0; index < 4; index++) {
 			await wake();
 		}
-		expect(await wake()).toStrictEqual({ kind: 'incomplete', projected: 0 });
+		expect(await wake()).toStrictEqual({
+			kind: 'incomplete',
+			projected: 0,
+			progressed: true
+		});
 	});
 
 	it('gives each incarnation of a cache name its own identity', async () => {

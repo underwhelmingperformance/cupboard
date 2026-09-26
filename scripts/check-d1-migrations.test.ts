@@ -103,7 +103,7 @@ describe('checkD1Migrations', () => {
 				...transition.expand,
 				...transition.contract
 			]).length,
-			replayed: ['deployment-transitions']
+			replayed: ['deployment-transitions', 'local-step-sweep']
 		});
 	});
 

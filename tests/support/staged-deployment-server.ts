@@ -29,6 +29,7 @@ import { createEsbuildBundler } from '../../packages/cli/src/deploy/bundle.ts';
 import type { CloudflareApi } from '../../packages/cli/src/deploy/cloudflare-api.ts';
 import { databaseIdSchema } from '../../packages/cli/src/deploy/identifiers.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
+import type { SettlementClient } from '../../packages/cli/src/deploy/settlement.ts';
 import {
 	planTransitions,
 	type TransitionHooks,
@@ -237,7 +238,7 @@ export interface DeploymentClient {
 // working tree, keeping D1, R2 and Durable Object storage across the swap.
 type PersistedRuntime =
 	| { readonly kind: 'predecessor'; readonly bundles: FixtureBundles }
-	| { readonly kind: 'release' };
+	| { readonly kind: 'release'; readonly shouldDeliverQueue: boolean };
 
 function d1Api(
 	database: Awaited<ReturnType<Miniflare['getD1Database']>>
@@ -352,7 +353,8 @@ function predecessorOptions(
 
 function currentOptions(
 	paths: StagedDeploymentPaths,
-	artifact: DeploymentArtifact
+	artifact: DeploymentArtifact,
+	shouldDeliverQueue: boolean
 ): MiniflareOptions {
 	const tenantBindings = commonBindings();
 	const controlBindings = {
@@ -400,6 +402,15 @@ function currentOptions(
 				queueProducers: {
 					MAINTENANCE_QUEUE: { queueName: maintenanceQueue }
 				},
+				...(shouldDeliverQueue && {
+					queueConsumers: {
+						[maintenanceQueue]: {
+							maxBatchSize: 1,
+							maxBatchTimeout: 1,
+							maxRetries: 3
+						}
+					}
+				}),
 				bindings: controlBindings
 			},
 			{
@@ -434,7 +445,7 @@ function runtimeOptions(
 ): MiniflareOptions {
 	return runtime.kind === 'predecessor'
 		? predecessorOptions(paths, runtime.bundles)
-		: currentOptions(paths, artifact);
+		: currentOptions(paths, artifact, runtime.shouldDeliverQueue);
 }
 
 async function persistencePaths(): Promise<StagedDeploymentPaths> {
@@ -507,11 +518,15 @@ export class StagedDeploymentServer {
 		return tokenResponseSchema.parse(value).access_token;
 	}
 
-	private async connectDeploymentClient(): Promise<DeploymentClient> {
-		const rpc = controlRpc(new URL('https://cupboard.invalid'), {
+	private async connectControlRpc(): Promise<ReturnType<typeof controlRpc>> {
+		return controlRpc(new URL('https://cupboard.invalid'), {
 			credential: await this.operatorCredential(),
 			fetcher: (input, init) => this.workerFetch(input, init)
 		});
+	}
+
+	private async connectDeploymentClient(): Promise<DeploymentClient> {
+		const rpc = await this.connectControlRpc();
 
 		return {
 			transitions: () => rpc.deployment.transitions(),
@@ -926,11 +941,15 @@ export class StagedDeploymentServer {
 	/**
 	 * Replaces the predecessor Workers with the ones built from the working
 	 * tree, keeping the persisted D1, R2 and Durable Object storage, and returns
-	 * once both scripts serve this build.
+	 * once both scripts serve this build. The control Worker consumes the
+	 * maintenance queue only when `shouldDeliverQueue` is set; otherwise the queue
+	 * accepts messages and never delivers them.
 	 */
-	async deployCurrent(): Promise<void> {
-		await this.miniflare.setOptions(currentOptions(this.paths, this.artifact));
-		this.persistedRuntime = { kind: 'release' };
+	async deployCurrent(shouldDeliverQueue = false): Promise<void> {
+		await this.miniflare.setOptions(
+			currentOptions(this.paths, this.artifact, shouldDeliverQueue)
+		);
+		this.persistedRuntime = { kind: 'release', shouldDeliverQueue };
 		const health = await this.workerFetch('/_health');
 
 		if (!health.ok) {
@@ -981,6 +1000,25 @@ export class StagedDeploymentServer {
 			controlVersionTag: predecessorVersionTag,
 			tenantTrafficPercent: 100,
 			controlTrafficPercent: 100
+		};
+	}
+
+	/**
+	 * The `localStep` procedures in the shape that the deploy's settlement
+	 * uses, with a fresh token for every call.
+	 */
+	settlementClient(): SettlementClient {
+		return {
+			status: async (input) => {
+				const rpc = await this.connectControlRpc();
+
+				return rpc.localStep.status(input);
+			},
+			wake: async (input) => {
+				const rpc = await this.connectControlRpc();
+
+				return rpc.localStep.wake(input);
+			}
 		};
 	}
 

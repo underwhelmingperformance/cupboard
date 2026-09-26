@@ -1567,10 +1567,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		if (expansion.kind === 'pending') {
-			throw new LocalSchemaMigrationPendingError(
-				expansion.migration,
-				expansion.stage
-			);
+			throw new LocalSchemaMigrationPendingError(expansion);
 		}
 		await this.assertZstdAvailable();
 
@@ -1585,7 +1582,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			tenant
 		);
 
-		if (!isCatalogueComplete || !isLocalCacheCatalogueComplete(this.context)) {
+		const isReconciling =
+			!isCatalogueComplete || !isLocalCacheCatalogueComplete(this.context);
+
+		if (isReconciling) {
 			const outcome = await reconcileStoredCacheCatalogue(this.context, tenant);
 
 			if (outcome.status === 'pending') {
@@ -1598,10 +1598,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		if (contraction.kind === 'pending') {
-			throw new LocalSchemaMigrationPendingError(
-				contraction.migration,
-				contraction.stage
-			);
+			throw new LocalSchemaMigrationPendingError({
+				...contraction,
+				hasCommitted:
+					expansion.hasCommitted || isReconciling || contraction.hasCommitted
+			});
 		}
 
 		if (this.cacheListingProjection.hasPending()) {
@@ -2666,11 +2667,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		try {
 			await this.initialise();
 		} catch (error) {
-			if (
-				error instanceof CacheCatalogueMigrationPendingError ||
-				error instanceof LocalSchemaMigrationPendingError
-			) {
-				return { kind: 'incomplete', projected: 0 };
+			if (error instanceof LocalSchemaMigrationPendingError) {
+				return {
+					kind: 'incomplete',
+					projected: 0,
+					progressed: error.pending.hasCommitted
+				};
+			}
+
+			// The reconciliation reports more to do only after it has reconciled a
+			// page and saved its cursor.
+			if (error instanceof CacheCatalogueMigrationPendingError) {
+				return { kind: 'incomplete', projected: 0, progressed: true };
 			}
 
 			if (error instanceof TenantNotConfiguredError) {

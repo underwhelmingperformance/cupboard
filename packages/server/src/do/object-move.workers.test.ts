@@ -20,7 +20,8 @@ import {
 	bootstrap,
 	currentServer,
 	resolvedCache,
-	useTestServer
+	useTestServer,
+	withDeployedSubrequestAllowance
 } from '../test-support.ts';
 
 import { listGenerationMetadataKey } from './attestations-service.ts';
@@ -120,6 +121,14 @@ function wake() {
 	);
 }
 
+function wakeWithAllowance(subrequests: number) {
+	return runInDurableObject(currentServer(), (instance) =>
+		withDeployedSubrequestAllowance(instance.context, subrequests, () =>
+			instance.reportLocalStep()
+		)
+	);
+}
+
 /**
  * The tenant this server was configured with. Object keys are built from that
  * tenant id, which differs from the name the harness addresses the server by.
@@ -176,6 +185,37 @@ async function commitPath(
 }
 
 describe('legacy private object move', () => {
+	// A wake reports progress when an earlier stage in it saved a cursor, and
+	// none when it could not afford any move, so a caller can tell a wake that
+	// changed nothing.
+	it('reports progress only from a wake that saved a cursor', async () => {
+		const tenant = await useServerWithPrivateCache('legacy-unaffordable');
+		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
+		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
+		await clear(source, destination);
+		await seed(source, legacyBody, narInfoMetadata(3));
+		await commitPath(3);
+		const outcomes = [
+			await wakeWithAllowance(10),
+			await wakeWithAllowance(10),
+			await wake()
+		];
+
+		expect({
+			outcomes,
+			source: await objectAt(source),
+			destination: await objectAt(destination)
+		}).toStrictEqual({
+			outcomes: [
+				{ kind: 'incomplete', projected: 0, progressed: true },
+				{ kind: 'incomplete', projected: 0, progressed: false },
+				{ kind: 'recorded', step: 4, progressed: true }
+			],
+			source: undefined,
+			destination: { body: legacyBody, generation: '3' }
+		});
+	});
+
 	it('continues past a full page owned by a public cache named private', async () => {
 		const tenant = await useServerWithPrivateCache('legacy-public-page');
 		const publicKeys = Array.from(

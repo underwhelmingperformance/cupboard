@@ -37,7 +37,8 @@ describe('server initialisation over a migrated store', () => {
 
 		expect(outcome).toStrictEqual({
 			kind: 'recorded',
-			step: currentLocalStep
+			step: currentLocalStep,
+			progressed: true
 		});
 	});
 });

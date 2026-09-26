@@ -1285,6 +1285,11 @@ export interface FlakyD1Plan {
 	*/
 	readonly message?: string;
 	/**
+	 * The error to throw, so a test can assert which fault reached the caller.
+	 * It takes precedence over `message`.
+	 */
+	readonly error?: Error;
+	/**
 	 * Runs when a matching query is prepared, before any fault is applied: a
 	 * deterministic point for a test to interleave a concurrent mutation with
 	 * the code under test.
@@ -1305,7 +1310,7 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 
 				if (plan.failures > 0) {
 					plan.failures -= 1;
-					throw new Error(plan.message ?? 'transient D1 fault');
+					throw plan.error ?? new Error(plan.message ?? 'transient D1 fault');
 				}
 			}
 

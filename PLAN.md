@@ -6334,6 +6334,40 @@ published intermediates and their storage cost.
   are pending. The check fails if an independent transition's expand migrations
   do not apply before the earlier contract migrations, or if the order produces
   a different schema from name order. It compares schemas, not rows.
+- The server wakes the tenants until each has recorded the required local step.
+  `localStep.wake` runs a batch and starts a chain of maintenance-queue
+  messages. Each message wakes the next batch and sends the chain's next message
+  with a ten-second delivery delay, until no tenant is pending.
+- A tenant does work in a wake when the wake moves its durable state forward.
+  The tenant object reports this as `progressed`: a recorded step that rose, an
+  item projected or moved, a committed migration or page of one, a saved cursor,
+  or a rewritten batch. Recording the same step again is not progress. A failed
+  wake counts as neither work nor a completed wake until the same tenant has
+  failed five wakes in a row.
+- The chain counts its tenant wakes since the last batch in which a tenant did
+  work, and confirms a stall once that count reaches the number of pending
+  tenants and no tenant has failed fewer than five wakes in a row. After that
+  the delay doubles with each batch, up to an hour. A batch in which a tenant
+  does work clears the stall. A wake replaces a chain that has confirmed a
+  stall, so the new chain starts its count from the wake's batch, and a wake
+  that leaves no tenant pending ends any chain.
+- The `local_step_sweep` table has a single row, and only the chain that has the
+  row's lease runs batches. Migration `0032` creates the table; it is the only
+  migration of the independent `local-step-sweep` transition, which has no
+  contract migrations. `localStep.status` reports the row as `sweep`: `running`,
+  `stalled` or `idle`. A running or stalled sweep includes the chain, its link,
+  the next batch time, the count of tenant wakes without work, the failing
+  tenants and the last batch's outcomes and time; a stalled sweep also includes
+  when the chain confirmed the stall. A message claims its link's batch with its
+  queue message id and attempt number before it runs the batch, and records the
+  next link as not yet sent before it sends the next message.
+- The cron tick starts a chain only when tenants are pending and no chain has
+  the lease. This restarts the sweep after a chain stops, for example because
+  its message was dead-lettered; the tick logs the result.
+- The deploy and `cupboard deployment resume` first call `localStep.wake`, then
+  poll `localStep.status` every ten seconds until no tenant is pending. They
+  fail as soon as the sweep reports `stalled`, and start a new chain when the
+  sweep is `idle` with tenants pending, at most three times.
 
 ### Progress
 
@@ -6342,15 +6376,12 @@ published intermediates and their storage cost.
       `required` in `localStep.status`, and the migration checks.
 - [ ] Set `completedBy` on `deployment-transitions` once the release that first
       includes it has been tagged.
-- [ ] Rebuild the sweep chain from #407 on the schema transitions. The sweep
-      chain is a sequence of maintenance-queue messages that each wake a batch
-      of tenants, so tenant work continues without a deploy. One D1 row, the
-      sweep row, records which chain may run batches and how many batches in a
-      row have stalled; the delay before the next message doubles with each
-      stalled batch. The rebuild adds that row, a `sweep` object in
-      `localStep.status`, the deploy reading the chain's progress, and the cron
-      restarting a chain that has stopped. The sweep row's table becomes
-      migration `0032` in a new independent transition.
+- [x] The local-step sweep chain: the `local_step_sweep` row, stall confirmation
+      over a full pass of the pending tenants with exponential backoff
+      afterwards, the `sweep` object in `localStep.status`, the deploy reading
+      the chain's progress, and the cron starting a new chain after one has
+      stopped. Migration `0032` in the independent `local-step-sweep` transition
+      creates the table.
 - [ ] Write the transition records through a control-plane procedure
       (`PUT /deployment/transitions/{id}`), so the deploy writes to D1 directly
       only to apply migrations.

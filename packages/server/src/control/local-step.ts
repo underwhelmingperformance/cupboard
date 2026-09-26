@@ -1,22 +1,37 @@
 import { type Logger } from '@cupboard/logger';
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
 	type LocalStep,
 	type LocalStepStatus,
 	localStepStragglerSampleSize,
+	type LocalStepWakeBatch,
+	localStepWakeErrorMaxLength,
 	type LocalStepWakeOutcome,
-	type LocalStepWakeResponse,
 	requiredLocalStepFrom
 } from '@cupboard/protocol/deployment';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, asc, count, eq, gt, gte, lte, or, type SQL } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	count,
+	eq,
+	gt,
+	gte,
+	inArray,
+	lte,
+	or,
+	type SQL
+} from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { readRecordedTransitions } from '../db/deployment-transitions.ts';
+import { jsonValueLists } from '../do/json-list.ts';
 import { belowLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
+
+import { readLocalStepSweep } from './local-step-sweep.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
@@ -47,10 +62,12 @@ export async function requiredLocalStep(env: Env): Promise<LocalStep> {
 
 /**
  * Reports how many active or suspended tenants have reached the required step,
- * and lists some of those that have not. The step is the one in the caller's
- * query, or else the required local step.
+ * lists some of those that have not, and describes the sweep chain that wakes
+ * them. The counts use the step in the caller's query, or else the required
+ * local step.
  */
 export async function controlLocalStepStatus(
+	logger: Logger,
 	env: Env,
 	requiredStep?: LocalStep
 ): Promise<LocalStepStatus> {
@@ -73,8 +90,67 @@ export async function controlLocalStepStatus(
 		required,
 		ready,
 		pending,
-		stragglers: stragglers.map(({ id }) => id)
+		stragglers: stragglers.map(({ id }) => id),
+		sweep: await readLocalStepSweep(logger, database, new Date())
 	};
+}
+
+/**
+ * Counts the active or suspended tenants that have not reached the required
+ * step. The sweep ends its chain when this count is zero.
+ */
+export async function controlLocalStepPending(env: Env): Promise<number> {
+	return countTenants(
+		controlDatabase(env),
+		stragglerFilter(await requiredLocalStep(env))
+	);
+}
+
+/**
+ * Returns those of `tenants` that are active or suspended and have not reached
+ * the required step.
+ */
+export async function controlLocalStepPendingAmong(
+	env: Env,
+	tenants: readonly string[]
+): Promise<ReadonlySet<string>> {
+	if (tenants.length === 0) {
+		return new Set();
+	}
+
+	const ids = tenants.map((tenant) => tenantIdSchema.parse(tenant));
+	const straggler = stragglerFilter(await requiredLocalStep(env));
+	const database = controlDatabase(env);
+	const pending = new Set<string>();
+
+	for (const listed of jsonValueLists(ids)) {
+		const rows = await database
+			.select({ id: d1Schema.tenant.id })
+			.from(d1Schema.tenant)
+			.where(and(straggler, inArray(d1Schema.tenant.id, listed)))
+			.all();
+
+		for (const { id } of rows) {
+			pending.add(id);
+		}
+	}
+
+	return pending;
+}
+
+/**
+ * Summarises an error for a wake response, within
+ * `localStepWakeErrorMaxLength`.
+ */
+export function summariseWakeError(error: unknown): string {
+	const summary =
+		error instanceof Error
+			? error.message.length > 0
+				? `${error.name}: ${error.message}`
+				: error.name
+			: String(error);
+
+	return summary.slice(0, localStepWakeErrorMaxLength);
 }
 
 /**
@@ -88,7 +164,7 @@ export async function controlLocalStepWake(
 	logger: Logger,
 	env: Env,
 	limit: number
-): Promise<LocalStepWakeResponse> {
+): Promise<LocalStepWakeBatch> {
 	const database = controlDatabase(env);
 	const required = await requiredLocalStep(env);
 	const straggler = stragglerFilter(required);
@@ -138,7 +214,7 @@ export async function controlLocalStepWake(
 	const outcomes = await mapWithConcurrency(
 		stragglers,
 		wakeConcurrency,
-		async ({ id }) => wakeTenant(logger, env, id)
+		async ({ id, localStep }) => wakeTenant(logger, env, id, localStep)
 	);
 	const woken = outcomes.filter(
 		(outcome) => outcome.kind === 'recorded' || outcome.kind === 'advanced'
@@ -156,7 +232,8 @@ export async function controlLocalStepWake(
 async function wakeTenant(
 	logger: Logger,
 	env: Env,
-	tenant: TenantId
+	tenant: TenantId,
+	recordedStep: LocalStep | null
 ): Promise<LocalStepWakeOutcome> {
 	try {
 		const outcome = await tenantServer(env, tenant).reportLocalStep();
@@ -170,21 +247,32 @@ async function wakeTenant(
 		}
 
 		if (outcome.kind === 'incomplete') {
-			// The object made progress but has more work than one invocation
-			// allows, so it left its step unrecorded. It stays a straggler and a
-			// later pass wakes it again.
-			logger.info('local step wake made partial progress', {
+			// The object has more work than one invocation allows, so it left its
+			// step unrecorded. It stays a straggler and a later pass wakes it again.
+			logger.info('local step wake left work to do', {
 				tenant,
-				projected: outcome.projected
+				projected: outcome.projected,
+				progressed: outcome.progressed
 			});
-			return { tenant, kind: 'advanced', projected: outcome.projected };
+			return {
+				tenant,
+				kind: 'advanced',
+				projected: outcome.projected,
+				progressed: outcome.progressed,
+				...(recordedStep !== null && { step: recordedStep })
+			};
 		}
 
-		return { tenant, kind: 'recorded', step: outcome.step };
+		return {
+			tenant,
+			kind: 'recorded',
+			step: outcome.step,
+			progressed: outcome.progressed
+		};
 	} catch (error) {
 		logger.warn('local step wake failed', { tenant, error });
 
-		return { tenant, kind: 'failed' };
+		return { tenant, kind: 'failed', error: summariseWakeError(error) };
 	}
 }
 
@@ -205,10 +293,10 @@ function selectStragglers(
 	limit: number,
 	filter: SQL | undefined,
 	position?: SQL
-): Promise<{ id: TenantId }[]> {
+): Promise<{ id: TenantId; localStep: LocalStep | null }[]> {
 	// A stable order lets the persisted cursor resume after the last attempted tenant.
 	return database
-		.select({ id: d1Schema.tenant.id })
+		.select({ id: d1Schema.tenant.id, localStep: d1Schema.tenant.localStep })
 		.from(d1Schema.tenant)
 		.where(and(filter, position))
 		.orderBy(asc(d1Schema.tenant.id))

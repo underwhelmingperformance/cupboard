@@ -8,7 +8,16 @@ import { z } from 'zod';
 
 import { narVerifyBudgetMs, verifyStoredNar } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
-import { controlLocalStepWake } from '../control/local-step.ts';
+import {
+	type LocalStepSweepMessage,
+	restartLocalStepSweep,
+	runLocalStepSweep
+} from '../control/local-step-chain.ts';
+import {
+	type LocalStepSweepDelivery,
+	type LocalStepSweepLink,
+	localStepSweepLinkSchema
+} from '../control/local-step-sweep.ts';
 import {
 	deleteTenantMember,
 	refreshTenantMembership
@@ -45,6 +54,7 @@ import {
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
 } from '../http/http.ts';
+import { maintenanceQueueRetryDelaySeconds } from '../policy/maintenance-queue.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { tenantServer } from './durable-object.ts';
@@ -54,9 +64,6 @@ import { tenantServer } from './durable-object.ts';
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
 const maintenanceEligibilityStaleMs = 6 * 60 * 60 * 1000;
-// Each wake is a subrequest, so keep a sweep well inside one invocation's
-// subrequest budget. The next tick takes the next batch.
-const localStepSweepSize = 20;
 export const verificationConsumerBudgetMs = 14 * 60 * 1000;
 
 // Bound offboarding by tenants, rounds, and objects per round. The object chunk
@@ -109,11 +116,15 @@ interface ExecuteMaintenanceQueueOptions {
 		logger: Logger,
 		env: Env
 	) => Promise<unknown>;
-	readonly runLocalStepSweep?: (logger: Logger, env: Env) => Promise<unknown>;
+	readonly runLocalStepSweep?: (
+		logger: Logger,
+		env: Env,
+		chain: LocalStepSweepLink,
+		delivery: LocalStepSweepDelivery
+	) => Promise<unknown>;
 }
 
 const maxStoredErrorLength = 4096;
-const queueRetryDelaySeconds = 60;
 const queueSendBatchSize = 100;
 const objectReaperPhaseSchema = z.enum([
 	'delete-existing',
@@ -142,10 +153,14 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('blob-demote') }),
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
-	z.object({ kind: z.literal('local-step-sweep') })
+	z.object({
+		kind: z.literal('local-step-sweep'),
+		chain: localStepSweepLinkSchema
+	})
 ]);
 
 export type MaintenanceQueueMessage =
+	| LocalStepSweepMessage
 	| { readonly kind: 'cache-catalogue-migration'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-maintenance'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-verify'; readonly tenant: TenantId }
@@ -154,13 +169,32 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'cas-reaper'; readonly phase?: ObjectReaperPhase }
 	| { readonly kind: 'blob-demote' }
 	| { readonly kind: 'cas-demote' }
-	| { readonly kind: 'control-key-retirement' }
-	| { readonly kind: 'local-step-sweep' };
+	| { readonly kind: 'control-key-retirement' };
+
+/**
+ * The maintenance messages that the cron tick enqueues. A sweep chain sends
+ * its own messages.
+ */
+export type ScheduledMaintenanceQueueMessage = Exclude<
+	MaintenanceQueueMessage,
+	LocalStepSweepMessage
+>;
+
+/**
+ * A maintenance message as the consumer runs it. A sweep message also has the
+ * queue's identity for this delivery, which the sweep records when it claims
+ * the batch for the message's link.
+ */
+export type ReceivedMaintenanceQueueMessage =
+	| ScheduledMaintenanceQueueMessage
+	| (LocalStepSweepMessage & { readonly delivery: LocalStepSweepDelivery });
 
 /**
  * Runs every maintenance pass in sequence and reports their failures together.
  * Reaper passes run after tenant fan-out so tenant work cannot consume the
- * subrequest budget reserved for global cleanup.
+ * subrequest budget reserved for global cleanup. The local-step pass starts a
+ * sweep chain only when tenants are pending and no chain has the lease; a
+ * running chain sends its own messages.
  */
 export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 	const failures: unknown[] = [];
@@ -173,7 +207,7 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 		() => runReaperDemote(logger, env),
 		() => runCasReaperDemote(logger, env),
 		() => runControlKeyRetirement(logger, env),
-		() => runLocalStepSweep(logger, env)
+		() => restartLocalStepSweep(logger, env)
 	]) {
 		try {
 			await pass();
@@ -190,10 +224,42 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 	}
 }
 
+/**
+ * The scheduled handler's work: enqueues the bounded maintenance jobs and
+ * starts a local-step sweep chain when tenants are pending and no chain has
+ * the lease. The cron tick is the only start that needs no operator, so the
+ * start runs even when the enqueue fails, and the failures of both steps are
+ * reported together.
+ */
+export async function runScheduledTick(
+	logger: Logger,
+	env: Env
+): Promise<void> {
+	const failures: unknown[] = [];
+
+	for (const step of [
+		() => enqueueMaintenanceJobs(env),
+		() => restartLocalStepSweep(logger, env)
+	]) {
+		try {
+			await step();
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures,
+			`scheduled tick had ${String(failures.length)} failing step(s)`
+		);
+	}
+}
+
 export async function enqueueMaintenanceJobs(
 	env: Env,
 	queue: MaintenanceQueue = env.MAINTENANCE_QUEUE
-): Promise<MaintenanceQueueMessage[]> {
+): Promise<ScheduledMaintenanceQueueMessage[]> {
 	// Refresh membership before sending queue messages. New tenants and missing
 	// markers must not depend on successful queue delivery.
 	await refreshTenantMembership(env);
@@ -211,16 +277,16 @@ export async function enqueueMaintenanceJobs(
 		database,
 		offboardTenantsPerTick
 	);
-	const messages: MaintenanceQueueMessage[] = [
-		...catalogueTenants.map(({ id }): MaintenanceQueueMessage => ({
+	const messages: ScheduledMaintenanceQueueMessage[] = [
+		...catalogueTenants.map(({ id }): ScheduledMaintenanceQueueMessage => ({
 			kind: 'cache-catalogue-migration',
 			tenant: id
 		})),
-		...maintenanceTenants.map(({ id }): MaintenanceQueueMessage => ({
+		...maintenanceTenants.map(({ id }): ScheduledMaintenanceQueueMessage => ({
 			kind: 'tenant-maintenance',
 			tenant: id
 		})),
-		...offboardTenants.map(({ id }): MaintenanceQueueMessage => ({
+		...offboardTenants.map(({ id }): ScheduledMaintenanceQueueMessage => ({
 			kind: 'offboard',
 			tenant: id
 		})),
@@ -228,8 +294,7 @@ export async function enqueueMaintenanceJobs(
 		{ kind: 'cas-reaper' },
 		{ kind: 'blob-demote' },
 		{ kind: 'cas-demote' },
-		{ kind: 'control-key-retirement' },
-		{ kind: 'local-step-sweep' }
+		{ kind: 'control-key-retirement' }
 	];
 
 	await sendQueueMessages(queue, messages);
@@ -289,7 +354,12 @@ export async function handleMaintenanceQueue(
 		const decision = await executeMaintenanceQueueMessage(
 			messageLogger,
 			env,
-			parsed.data
+			parsed.data.kind === 'local-step-sweep'
+				? {
+						...parsed.data,
+						delivery: { id: message.id, attempts: message.attempts }
+					}
+				: parsed.data
 		);
 
 		if (decision.action === 'ack') {
@@ -305,7 +375,7 @@ export async function handleMaintenanceQueue(
 export async function executeMaintenanceQueueMessage(
 	logger: Logger,
 	env: Env,
-	message: MaintenanceQueueMessage,
+	message: ReceivedMaintenanceQueueMessage,
 	options: ExecuteMaintenanceQueueOptions = {}
 ): Promise<MaintenanceQueueDecision> {
 	try {
@@ -375,14 +445,19 @@ export async function executeMaintenanceQueueMessage(
 				return { action: 'ack' };
 			}
 			case 'local-step-sweep': {
-				await (options.runLocalStepSweep ?? runLocalStepSweep)(logger, env);
+				await (options.runLocalStepSweep ?? runLocalStepSweep)(
+					logger,
+					env,
+					message.chain,
+					message.delivery
+				);
 				return { action: 'ack' };
 			}
 		}
 	} catch (error) {
 		return {
 			action: 'retry',
-			delaySeconds: queueRetryDelaySeconds,
+			delaySeconds: maintenanceQueueRetryDelaySeconds,
 			reason: errorSummary(error)
 		};
 	}
@@ -411,6 +486,8 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
 	readonly kind: string;
 	readonly phase?: ObjectReaperPhase;
 	readonly tenant?: string;
+	readonly chain?: string;
+	readonly link?: number;
 } {
 	if ('tenant' in message) {
 		return { kind: message.kind, tenant: message.tenant };
@@ -420,6 +497,9 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
 			kind: message.kind,
 			phase: message.phase ?? 'delete-existing'
 		};
+	}
+	if (message.kind === 'local-step-sweep') {
+		return { kind: message.kind, ...message.chain };
 	}
 
 	return { kind: message.kind };
@@ -1325,24 +1405,6 @@ async function settleAuthKeyRetirement(
 	} catch (error) {
 		return { status: 'rejected', reason: error };
 	}
-}
-
-/**
- * Wakes a bounded batch of tenants that have not recorded the step this build
- * asks for. Each applies its pending migrations and records its step; nothing
- * else records it. Each tick takes the next batch.
- */
-export async function runLocalStepSweep(
-	logger: Logger,
-	env: Env
-): Promise<void> {
-	const { woken, failed } = await controlLocalStepWake(
-		logger,
-		env,
-		localStepSweepSize
-	);
-
-	logger.info('local step sweep finished', { woken, failed });
 }
 
 function runControlKeyRetirement(logger: Logger, env: Env): Promise<number> {

@@ -44,11 +44,29 @@ export function belowLocalStep(step: LocalStep): SQL | undefined {
  * object again, but they mean different things: `unconfigured` is a tenant
  * whose create failed part way through, and `incomplete` is ordinary progress
  * with work still to do.
+ *
+ * `projected` counts the caches projected, the objects moved, or the rows
+ * rewritten in a full batch of a retention or grant migration. `progressed` is
+ * whether the call moved the object's durable state forward. An `incomplete`
+ * call progressed when it committed a migration, saved a cursor, or completed
+ * a batch, so it can progress with `projected` at zero, for example when it
+ * only moved a cursor past prefixes that contain no objects to move. A
+ * `recorded` call progressed when it raised the recorded step or projected or
+ * moved any item. Recording the same step again is not progress: every stage
+ * starts again after a step is recorded, and projects and moves no item.
  */
 export type LocalStepOutcome =
-	| { readonly kind: 'recorded'; readonly step: LocalStep }
+	| {
+			readonly kind: 'recorded';
+			readonly step: LocalStep;
+			readonly progressed: boolean;
+	  }
 	| { readonly kind: 'unconfigured' }
-	| { readonly kind: 'incomplete'; readonly projected: number };
+	| {
+			readonly kind: 'incomplete';
+			readonly projected: number;
+			readonly progressed: boolean;
+	  };
 
 /**
  * Runs the work this build's steps require of the object and records the step
@@ -81,7 +99,11 @@ export async function recordLocalStep(
 	const projection = await projectLocalCacheLifecycles(context, tenant);
 
 	if (projection.hasMore) {
-		return { kind: 'incomplete', projected: projection.projected };
+		return {
+			kind: 'incomplete',
+			projected: projection.projected,
+			progressed: projection.progressed
+		};
 	}
 
 	for (const lifecycle of projection.lifecycles) {
@@ -99,7 +121,11 @@ export async function recordLocalStep(
 	const legacyMove = await moveLegacyPrivateObjects(context, tenant, families);
 
 	if (legacyMove.hasMore) {
-		return { kind: 'incomplete', projected: legacyMove.moved };
+		return {
+			kind: 'incomplete',
+			projected: legacyMove.moved,
+			progressed: projection.progressed || legacyMove.progressed
+		};
 	}
 
 	const incarnationMove = await moveObjectsToCacheIncarnation(
@@ -109,15 +135,28 @@ export async function recordLocalStep(
 	);
 
 	if (incarnationMove.hasMore) {
-		return { kind: 'incomplete', projected: incarnationMove.moved };
+		return {
+			kind: 'incomplete',
+			projected: incarnationMove.moved,
+			progressed:
+				projection.progressed ||
+				legacyMove.progressed ||
+				incarnationMove.progressed
+		};
 	}
 
 	const retention = await context.criticalSection(() =>
 		advanceCacheRetentionMigration(context.db)
 	);
 
+	// The retention and grant migrations report more to do only after they have
+	// rewritten a full batch.
 	if (retention.status === 'pending') {
-		return { kind: 'incomplete', projected: retentionMigrationBatchSize };
+		return {
+			kind: 'incomplete',
+			projected: retentionMigrationBatchSize,
+			progressed: true
+		};
 	}
 
 	await context.transitions.refresh();
@@ -126,22 +165,34 @@ export async function recordLocalStep(
 		'complete'
 	);
 	if (isContracted && contractCacheGrants(context).status === 'pending') {
-		return { kind: 'incomplete', projected: grantContractionBatchSize };
+		return {
+			kind: 'incomplete',
+			projected: grantContractionBatchSize,
+			progressed: true
+		};
 	}
 	// This mapping covers only `cache-identity`, whose contract step is
 	// `expansionLocalStep`. A later transition that declares a contract step
 	// needs its own branch here, or objects never report that step.
 	const reached = isContracted ? currentLocalStep : expansionLocalStep;
 
-	await context.d1
+	const raised = await context.d1
 		.update(d1Schema.tenant)
 		.set({ localStep: reached })
 		.where(and(eq(d1Schema.tenant.id, tenant), belowLocalStep(reached)))
-		.run();
+		.returning({ id: d1Schema.tenant.id });
 
 	await Promise.all([
 		resetCacheLifecycleProjection(context),
 		resetObjectMoves(context)
 	]);
-	return { kind: 'recorded', step: reached };
+	return {
+		kind: 'recorded',
+		step: reached,
+		progressed:
+			raised.length > 0 ||
+			projection.projected > 0 ||
+			legacyMove.moved > 0 ||
+			incarnationMove.moved > 0
+	};
 }

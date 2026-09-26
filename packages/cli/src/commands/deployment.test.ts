@@ -5,6 +5,8 @@ import {
 	expansionLocalStep,
 	type LocalStep,
 	type LocalStepStatus,
+	type LocalStepSweep,
+	localStepSweepChainIdSchema,
 	type ParsedDeploymentTransitionsResponse,
 	requiredLocalStepFrom
 } from '@cupboard/protocol/deployment';
@@ -22,18 +24,24 @@ import {
 
 const tenant = tenantIdSchema.parse('acme');
 const recorded = isoTimestampSchema.parse('2026-01-01T00:20:30.000Z');
+const chain = localStepSweepChainIdSchema.parse(
+	'00000000-0000-4000-8000-00000000000a'
+);
+const idle: LocalStepSweep = { state: 'idle' };
 
 const expanded: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'expanded', updatedAt: recorded },
-		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
+		{ id: 'local-step-sweep', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
 const complete: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'complete', updatedAt: recorded },
-		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
+		{ id: 'local-step-sweep', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -52,20 +60,28 @@ function requiredStepOf(
 	);
 }
 
-function statusFor(required: number, pending: number): LocalStepStatus {
+function statusFor(
+	required: number,
+	pending: number,
+	sweep: LocalStepSweep = idle
+): LocalStepStatus {
 	return {
 		current: currentLocalStep,
 		required,
 		ready: 1,
 		pending,
-		stragglers: pending > 0 ? [tenant] : []
+		stragglers: pending > 0 ? [tenant] : [],
+		sweep
 	};
 }
 
+// A client with `pending.count` pending tenants, which the first wake
+// advances. The first status after the wake reports no pending tenant.
 function client(
 	transitions: ParsedDeploymentTransitionsResponse,
 	calls: unknown[],
-	pending: { count: number }
+	pending: { count: number },
+	sweep: LocalStepSweep = idle
 ): DeploymentClient {
 	return {
 		transitions: () => {
@@ -78,7 +94,8 @@ function client(
 				return Promise.resolve(
 					statusFor(
 						input.requiredStep ?? requiredStepOf(transitions),
-						pending.count
+						pending.count,
+						sweep
 					)
 				);
 			},
@@ -91,8 +108,14 @@ function client(
 					woken: 1,
 					failed: 0,
 					outcomes: [
-						{ tenant, kind: 'recorded', step: requiredStepOf(transitions) }
-					]
+						{
+							tenant,
+							kind: 'recorded',
+							step: requiredStepOf(transitions),
+							progressed: true
+						}
+					],
+					chain: { kind: 'none' }
 				});
 			}
 		}
@@ -117,6 +140,12 @@ function payloadReporter(
 }
 
 const since = 'since 2026-01-01 00:20 UTC';
+const failedOutcome = {
+	tenant,
+	kind: 'failed' as const,
+	error: 'Error: tenant object unavailable'
+};
+const resumeOptions = { limit: 20, delay: () => Promise.resolve() };
 
 // Rows that this build does not define, and what each command prints for them.
 const unrecognisedCases = [
@@ -161,7 +190,7 @@ const unrecognisedCases = [
 ];
 
 describe('runDeploymentStatus', () => {
-	it('reports each transition and the readiness at the required local step', async () => {
+	it('reports each transition, the readiness at the required local step, and the sweep', async () => {
 		const payloads: ResultPayload[] = [];
 		const calls: unknown[] = [];
 
@@ -188,10 +217,15 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition deployment-transitions',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition local-step-sweep',
+							value: `complete ${since}`
+						},
 						{ label: 'Required local step', value: '4' },
 						{ label: 'Ready tenants', value: '1' },
 						{ label: 'Pending tenants', value: '1' },
-						{ label: 'Pending sample', value: 'acme' }
+						{ label: 'Pending sample', value: 'acme' },
+						{ label: 'Sweep chain', value: 'idle' }
 					]
 				}
 			],
@@ -227,11 +261,16 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition deployment-transitions',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition local-step-sweep',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
 						{ label: 'Required local step', value: '5' },
 						{ label: 'Ready tenants', value: '1' },
 						{ label: 'Pending tenants', value: '0' },
-						{ label: 'Pending sample', value: '(none)' }
+						{ label: 'Pending sample', value: '(none)' },
+						{ label: 'Sweep chain', value: 'idle' }
 					]
 				}
 			]);
@@ -254,7 +293,125 @@ describe('runDeploymentStatus', () => {
 				{ label: 'Required local step', value: '4' },
 				{ label: 'Ready tenants', value: '1' },
 				{ label: 'Pending tenants', value: '0' },
-				{ label: 'Pending sample', value: '(none)' }
+				{ label: 'Pending sample', value: '(none)' },
+				{ label: 'Sweep chain', value: 'idle' }
+			]
+		]);
+	});
+
+	it.each([
+		{
+			name: 'a stalled chain',
+			sweep: {
+				state: 'stalled',
+				chain,
+				link: 3,
+				updatedAt: recorded,
+				batchAt: recorded,
+				nextAt: isoTimestampSchema.parse('2026-01-01T00:21:10.000Z'),
+				wokenWithoutWork: 5,
+				stalledAt: recorded,
+				outcomes: [
+					{ tenant, kind: 'unconfigured' },
+					{
+						tenant: tenantIdSchema.parse('beta'),
+						kind: 'failed',
+						error: 'Error: tenant object unavailable'
+					},
+					{
+						tenant: tenantIdSchema.parse('delta'),
+						kind: 'advanced',
+						projected: 0,
+						progressed: false,
+						step: 3
+					},
+					{
+						tenant: tenantIdSchema.parse('epsilon'),
+						kind: 'advanced',
+						projected: 0,
+						progressed: true
+					},
+					{
+						tenant: tenantIdSchema.parse('gamma'),
+						kind: 'recorded',
+						step: expansionLocalStep,
+						progressed: true
+					}
+				],
+				failing: [
+					{
+						tenant: tenantIdSchema.parse('beta'),
+						failures: 3,
+						error: 'Error: tenant object unavailable'
+					}
+				]
+			} satisfies LocalStepSweep,
+			rows: [
+				{
+					label: 'Sweep chain',
+					value: `stalled ${since} · chain ${chain} at link 3 · no work done in the last 5 tenant wakes · updated 2026-01-01 00:20 UTC · next batch 2026-01-01 00:21 UTC`
+				},
+				{
+					label: 'Last batch',
+					value:
+						'2026-01-01 00:20 UTC · 1 unconfigured, 1 failed, 1 did no work, 1 did work, 1 recorded · acme unconfigured, beta failed (Error: tenant object unavailable), delta did no work (step 3 recorded)'
+				},
+				{
+					label: 'Failing tenants',
+					value:
+						'beta failed 3 wakes in a row (Error: tenant object unavailable)'
+				}
+			]
+		},
+		{
+			name: 'an idle sweep after a chain',
+			sweep: {
+				state: 'idle',
+				last: {
+					chain,
+					link: 2,
+					updatedAt: recorded,
+					batchAt: recorded,
+					outcomes: [
+						{
+							tenant,
+							kind: 'recorded',
+							step: expansionLocalStep,
+							progressed: true
+						}
+					],
+					failing: []
+				}
+			} satisfies LocalStepSweep,
+			rows: [
+				{
+					label: 'Sweep chain',
+					value: `idle · last chain ${chain} at link 2 · updated 2026-01-01 00:20 UTC`
+				},
+				{ label: 'Last batch', value: '2026-01-01 00:20 UTC · 1 recorded' }
+			]
+		}
+	])('describes $name', async ({ sweep, rows }) => {
+		const results: ResultRow[][] = [];
+
+		await runDeploymentStatus(
+			reporter(results),
+			client(expanded, [], { count: 1 }, sweep)
+		);
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Transition cache-identity', value: `expanded ${since}` },
+				{
+					label: 'Transition deployment-transitions',
+					value: `complete ${since}`
+				},
+				{ label: 'Transition local-step-sweep', value: `complete ${since}` },
+				{ label: 'Required local step', value: '4' },
+				{ label: 'Ready tenants', value: '1' },
+				{ label: 'Pending tenants', value: '1' },
+				{ label: 'Pending sample', value: 'acme' },
+				...rows
 			]
 		]);
 	});
@@ -275,7 +432,7 @@ describe('runDeploymentResume', () => {
 			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity.'
 		}
 	])(
-		'wakes tenants to the required local step and reports the next action when $name',
+		'wakes once and polls the sweep until each tenant has reached the required local step, and reports the next action when $name',
 		async ({ transitions, step, info }) => {
 			const payloads: ResultPayload[] = [];
 			const infos: string[] = [];
@@ -284,7 +441,7 @@ describe('runDeploymentResume', () => {
 			await runDeploymentResume(
 				payloadReporter(payloads, infos),
 				client(transitions, calls, { count: 1 }),
-				{ limit: 20, maxPasses: 3 }
+				resumeOptions
 			);
 
 			expect({ payloads, infos, calls }).toStrictEqual({
@@ -320,7 +477,7 @@ describe('runDeploymentResume', () => {
 			await runDeploymentResume(
 				payloadReporter(payloads, infos),
 				client(transitions, [], { count: 0 }),
-				{ limit: 20, maxPasses: 3 }
+				resumeOptions
 			);
 
 			expect({ payloads, infos }).toStrictEqual({
@@ -344,8 +501,20 @@ describe('runDeploymentResume', () => {
 		}
 	);
 
-	it('fails when tenants remain below the step after the last pass', async () => {
+	it('fails when the sweep reports a stall with tenants still below the step', async () => {
 		const pending = { count: 1 };
+		const stalled: LocalStepSweep = {
+			state: 'stalled',
+			chain,
+			link: 2,
+			updatedAt: recorded,
+			batchAt: recorded,
+			nextAt: isoTimestampSchema.parse('2026-01-01T00:20:50.000Z'),
+			wokenWithoutWork: 2,
+			stalledAt: recorded,
+			outcomes: [failedOutcome],
+			failing: [{ tenant, failures: 5, error: failedOutcome.error }]
+		};
 		const failing: DeploymentClient = {
 			...client(expanded, [], pending),
 			localStep: {
@@ -353,7 +522,8 @@ describe('runDeploymentResume', () => {
 					Promise.resolve(
 						statusFor(
 							input.requiredStep ?? requiredStepOf(expanded),
-							pending.count
+							pending.count,
+							stalled
 						)
 					),
 				wake: () =>
@@ -362,7 +532,8 @@ describe('runDeploymentResume', () => {
 						required: expansionLocalStep,
 						woken: 0,
 						failed: 1,
-						outcomes: [{ tenant, kind: 'failed' }]
+						outcomes: [failedOutcome],
+						chain: { kind: 'kept' }
 					})
 			}
 		};
@@ -370,21 +541,20 @@ describe('runDeploymentResume', () => {
 		let caught: unknown;
 
 		try {
-			await runDeploymentResume(reporter([]), failing, {
-				limit: 20,
-				maxPasses: 2
-			});
+			await runDeploymentResume(reporter([]), failing, resumeOptions);
 		} catch (error) {
 			caught = error;
 		}
 
 		expect(caught).toBeInstanceOf(LocalStepUnreachedError);
 		expect({
+			reason: caught instanceof LocalStepUnreachedError && caught.reason,
 			pending: caught instanceof LocalStepUnreachedError && caught.pending,
 			requiredStep:
 				caught instanceof LocalStepUnreachedError && caught.requiredStep,
 			stragglers: caught instanceof LocalStepUnreachedError && caught.stragglers
 		}).toStrictEqual({
+			reason: { kind: 'stalled', outcomes: [failedOutcome] },
 			pending: 1,
 			requiredStep: expansionLocalStep,
 			stragglers: [tenant]
