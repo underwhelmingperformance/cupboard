@@ -143,7 +143,8 @@ describe('runOidcTrustList', () => {
 				summary({
 					id: 'owner',
 					permittedGrants: [{ type: 'cupboard_wildcard' }],
-					issuer: 'https://accounts.google.com'
+					issuer: 'https://idp.example.test/realms/a',
+					claims: { sub: 'owner-1' }
 				}),
 				summary({ id: 'rule-1', disabled: true })
 			]
@@ -158,7 +159,7 @@ describe('runOidcTrustList', () => {
 				{
 					label: 'owner',
 					value:
-						'wildcard https://accounts.google.com aud=https://cache.example.workers.dev'
+						'wildcard https://idp.example.test/realms/a · owner-1 aud=https://cache.example.workers.dev'
 				},
 				{
 					label: 'rule-1',
