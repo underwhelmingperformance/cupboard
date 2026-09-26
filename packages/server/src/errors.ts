@@ -890,23 +890,6 @@ export class StoredOidcTrustInvalidError extends ServerHttpError {
 	}
 }
 
-// This build does not define the stored phase name, which happens after a
-// rollback past a release that added a phase. To repair it, deploy a build that
-// defines the phase, or return the deployment to a phase this build defines.
-export class StoredDeploymentPhaseInvalidError extends ServerHttpError {
-	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
-
-	constructor(
-		public readonly phase: string,
-		public override readonly cause: Error
-	) {
-		super(
-			`The deployment is in phase '${phase}', which this server version does not know`
-		);
-		this.name = 'StoredDeploymentPhaseInvalidError';
-	}
-}
-
 export class StoredReuseViewSelectorInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

@@ -2,6 +2,8 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { TransitionIncompleteError } from '../errors.ts';
+
 import {
 	AccountOptionRequiredError,
 	chooseDeployAccount,
@@ -483,6 +485,39 @@ describe('reviewPlan', () => {
 			agreed: await reviewPlan(initial, w),
 			rendered
 		}).toStrictEqual({ agreed: initial, rendered: [initial] });
+	});
+
+	// The deploy command calls `throwIfPlanBlocked` inside `render`, after
+	// it shows the plan. The error must end the review before the menu, so
+	// no R2 key or other resource is created.
+	it('stops before asking for confirmation when the plan contains a blocked transition', async () => {
+		const ui = scriptedUi({ menuChoices: ['deploy'] });
+		const menus: string[] = [];
+		const { world: w } = world({
+			...ui,
+			menu: (message, entries) => {
+				menus.push(message);
+				return ui.menu(message, entries);
+			}
+		});
+		const blocked = new TransitionIncompleteError(
+			'cache-identity',
+			'deployment-transitions',
+			'v0.0.34'
+		);
+
+		let caught: unknown;
+
+		try {
+			await reviewPlan(initial, {
+				...w,
+				render: () => Promise.reject(blocked)
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({ caught, menus }).toStrictEqual({ caught: blocked, menus: [] });
 	});
 
 	it('deploys with the initial state when chosen straight away', async () => {

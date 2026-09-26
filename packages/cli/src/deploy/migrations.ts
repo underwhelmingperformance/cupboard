@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import { contractionMigrations } from '@cupboard/protocol/deployment';
 
 import { type D1QueryApi, sqlString } from './d1-query.ts';
 import type { DatabaseId } from './identifiers.ts';
@@ -45,30 +44,6 @@ export function parseD1Migrations(
 }
 
 /**
- * Files that follow the first contraction but have no phase classification.
- * Applying these as preparation would violate journal order; applying them
- * after upload could leave the new Workers without schema they require.
- */
-export function unclassifiedD1Migrations(
-	migrations: readonly D1Migration[]
-): readonly string[] {
-	const contractions = [...contractionMigrations].toSorted(byCodeUnit);
-	const [boundary] = contractions;
-
-	if (boundary === undefined) {
-		return [];
-	}
-
-	return migrations
-		.filter(
-			(migration) =>
-				byCodeUnit(migration.name, boundary) >= 0 &&
-				!contractionMigrations.includes(migration.name)
-		)
-		.map((migration) => migration.name);
-}
-
-/**
  * A migration file changed after this tool applied it. The database ran the
  * earlier contents, so applying the file again would not produce the schema
  * the new contents describe.
@@ -95,7 +70,7 @@ export class D1MigrationDigestError extends Error {
  */
 type VerificationState = 'verified' | 'unverified-baseline';
 
-interface RecordedMigration {
+export interface RecordedMigration {
 	readonly sha256?: string;
 	readonly verificationState?: VerificationState;
 }
@@ -105,6 +80,11 @@ const ensureTrackingTable =
 
 const trackingColumnsQuery =
 	"SELECT name FROM pragma_table_info('d1_migrations');";
+
+const appliedNamesQuery = 'SELECT name FROM d1_migrations;';
+
+const trackingTableQuery =
+	"SELECT tbl_name FROM sqlite_master WHERE type = 'table' AND tbl_name = 'd1_migrations';";
 
 // `queryRows` returns one string per row, so the three fields travel in one
 // column. Migration names contain no colon, so the first and last separators
@@ -126,6 +106,73 @@ function parseRecorded(entry: string): [string, RecordedMigration] {
 			...(state !== '' && { verificationState: state as VerificationState })
 		}
 	];
+}
+
+async function readRecorded(
+	api: D1QueryApi,
+	databaseId: DatabaseId
+): Promise<Map<string, RecordedMigration>> {
+	const entries = await api.queryRows(databaseId, recordedMigrationsQuery);
+
+	return new Map(entries.map((entry) => parseRecorded(entry)));
+}
+
+function checkDigest(
+	migration: D1Migration,
+	evidence: RecordedMigration | undefined
+): void {
+	if (evidence?.sha256 === undefined || evidence.sha256 === migration.sha256) {
+		return;
+	}
+
+	throw new D1MigrationDigestError(
+		migration.name,
+		evidence.sha256,
+		migration.sha256
+	);
+}
+
+/**
+ * Reads the migrations that `d1_migrations` records, keyed by name, without
+ * writing anything. The map is empty before the tracking table exists, and a
+ * table from before this tool recorded digests gives names without digests.
+ */
+export async function readAppliedD1Migrations(
+	api: D1QueryApi,
+	databaseId: DatabaseId
+): Promise<ReadonlyMap<string, RecordedMigration>> {
+	const tables = await api.queryRows(databaseId, trackingTableQuery);
+
+	if (tables.length === 0) {
+		return new Map();
+	}
+
+	const columns = new Set(
+		await api.queryRows(databaseId, trackingColumnsQuery)
+	);
+
+	if (columns.has('sha256') && columns.has('verification_state')) {
+		return readRecorded(api, databaseId);
+	}
+
+	const names = await api.queryRows(databaseId, appliedNamesQuery);
+
+	return new Map(names.map((name) => [name, {}]));
+}
+
+/**
+ * Checks the recorded digest of each migration in `migrations`. Throws
+ * `D1MigrationDigestError` when a recorded digest no longer matches the file.
+ * A migration that has not been applied, or that was applied before this tool
+ * recorded digests, passes.
+ */
+export function verifyD1MigrationDigests(
+	applied: ReadonlyMap<string, RecordedMigration>,
+	migrations: readonly D1Migration[]
+): void {
+	for (const migration of migrations) {
+		checkDigest(migration, applied.get(migration.name));
+	}
 }
 
 /**
@@ -173,13 +220,7 @@ export async function applyD1Migrations(
 	await api.queryBatch(databaseId, [ensureTrackingTable]);
 	await ensureDigestColumns(api, databaseId);
 
-	const recordedEntries = await api.queryRows(
-		databaseId,
-		recordedMigrationsQuery
-	);
-	const recorded = new Map(
-		recordedEntries.map((entry) => parseRecorded(entry))
-	);
+	const recorded = await readRecorded(api, databaseId);
 	const baselines: string[] = [];
 	const pending: D1Migration[] = [];
 
@@ -191,15 +232,9 @@ export async function applyD1Migrations(
 			continue;
 		}
 
-		if (evidence.sha256 !== undefined) {
-			if (evidence.sha256 !== migration.sha256) {
-				throw new D1MigrationDigestError(
-					migration.name,
-					evidence.sha256,
-					migration.sha256
-				);
-			}
+		checkDigest(migration, evidence);
 
+		if (evidence.sha256 !== undefined) {
 			continue;
 		}
 
