@@ -769,8 +769,19 @@ R2 and the edge.
       incarnation.
 - [x] Report a path as missing when the NAR at the URL that its narinfo records
       is gone. After a recovery, another cache that shares the NAR keeps a
-      narinfo with the old URL, so its publisher sees the path as missing and
-      pushes it again instead of retaining a narinfo that readers cannot use.
+      narinfo with the old URL. The probe reports the path as missing, but the
+      next push initially skips it and queues reconciliation, which rewrites the
+      narinfo.
+- [x] Repair a narinfo object that records an obsolete NAR URL. Reconciliation
+      and servability checks rewrite the object for the NAR's current
+      incarnation and queue a purge of its cached response.
+- [ ] Detect an obsolete NAR URL during negotiation, so that negotiation never
+      returns a skip decision for a narinfo whose NAR URL returns 404.
+      Negotiation reads only D1, so it returns a skip decision and queues
+      reconciliation. Until reconciliation runs, readers receive a NAR URL that
+      returns 404. An exact check needs two things: a persisted NAR URL in each
+      narinfo row, which requires a DO schema migration, and negotiate hints
+      that include each NAR's current incarnation.
 - [x] Update the Routes table so narinfo and NAR show as Worker-served.
 - [x] Tests:
   - [x] Integration: when a committed path's NAR blob is missing, the next
