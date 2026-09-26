@@ -295,6 +295,7 @@ function pushBatch(concurrency: number): () => Promise<void> {
 		const { reporter, lines } = captureReporter();
 
 		await runPush(PublicationCollection.of({ targets: batch }), reporter, {
+			command: 'cupboard push',
 			nix: harness.nix,
 			client: harness.client,
 			wait: false,

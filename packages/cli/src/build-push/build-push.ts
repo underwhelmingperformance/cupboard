@@ -889,6 +889,7 @@ async function publishRealised(
 		const shouldRetainTargets = exit.status === 0 && options.root !== undefined;
 
 		published = await runPush(publication, reporter, {
+			command: 'cupboard build-push',
 			client: dependencies.client,
 			nix: dependencies.store,
 			buildStore: autoBuildStore,

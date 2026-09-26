@@ -28,6 +28,7 @@ import {
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -48,8 +49,10 @@ import {
 	CommitCapacityTimeoutError,
 	CupboardHttpError,
 	PostBuildHookConflictError,
+	PushIncompleteError,
 	QuotaExceededError,
 	SessionRejectedError,
+	transientExitCode,
 	unavailableExitCode,
 	UntrustedDaemonError
 } from '../errors.ts';
@@ -1009,6 +1012,30 @@ describe('classifyPublicationFailures', () => {
 			name: 'a transient failure',
 			causes: [new CupboardHttpError('PUT', '/nar', 503, '')],
 			expectedExitCode: 75,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'an incomplete push with a transient failure',
+			causes: [
+				new PushIncompleteError(
+					[{ path: 'a-app', stage: 'upload' }],
+					transientExitCode,
+					'cupboard build-push'
+				)
+			],
+			expectedExitCode: 75,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'an incomplete push with an unclassified failure',
+			causes: [
+				new PushIncompleteError(
+					[{ path: 'a-app', stage: 'upload' }],
+					genericExitCode,
+					'cupboard build-push'
+				)
+			],
+			expectedExitCode: 74,
 			expectedCauseIndex: 0
 		},
 		{
@@ -2135,6 +2162,35 @@ describe('runBuildPush', () => {
 		).toStrictEqual({
 			type: BuildPublicationFailedError,
 			cause
+		});
+	});
+
+	it('advises running cupboard build-push again when publication after the build cannot publish a path', async () => {
+		const run = await runFlow({
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			constructed: { succeedOn: 1 },
+			valid: [pathA],
+			action: 'upload',
+			uploadFailure: new CupboardHttpError('PUT', '/nar', 503, '')
+		});
+		const path = StorePath.basename(pathA);
+		const cause: unknown =
+			run.error instanceof BuildPublicationFailedError
+				? run.error.cause
+				: undefined;
+
+		expect({
+			error: run.error,
+			advice: cause instanceof PushIncompleteError ? cause.advice : undefined
+		}).toStrictEqual({
+			error: new BuildPublicationFailedError([path], transientExitCode, {
+				cause: new PushIncompleteError(
+					[{ path, stage: 'upload' }],
+					transientExitCode,
+					'cupboard build-push'
+				)
+			}),
+			advice: { action: 'retry', command: 'cupboard build-push' }
 		});
 	});
 

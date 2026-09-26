@@ -663,13 +663,123 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 	}
 }
 
+/**
+ * The exit statuses that a push with failed paths can return.
+ */
+export type IncompletePushExitStatus =
+	RankedExitStatus | typeof genericExitCode;
+
+/**
+ * The command that the user ran. `PushIncompleteError` includes it in its
+ * advice.
+ */
+export type PushCommand = 'cupboard push' | 'cupboard build-push';
+
+/**
+ * The step of a push at which a path failed. A path that fails at `verify` was
+ * committed, and the server may still publish it.
+ */
+export type PushFailureStage = 'resolve' | 'upload' | 'commit' | 'verify';
+
+export interface FailedPushPath {
+	readonly path: string;
+	readonly stage: PushFailureStage;
+}
+
+/**
+ * What the user should do before running the push again: sign in, run it
+ * again unchanged, or fix the reported failures first.
+ */
+export interface PushRetryAdvice {
+	readonly action: 'sign-in' | 'retry' | 'fix';
+	readonly command: PushCommand;
+}
+
+/**
+ * Some paths of a push failed. The error's exit status comes from
+ * `classifyFailures`, applied to the per-path failures.
+ */
 export class PushIncompleteError extends CliError {
-	constructor(public readonly failedPaths: readonly string[]) {
-		super(
-			`${String(failedPaths.length)} path(s) did not finish. The cache contains ` +
-				`only committed paths. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
-		);
+	readonly failedPaths: readonly string[];
+	readonly advice: PushRetryAdvice;
+
+	constructor(
+		public readonly failures: readonly FailedPushPath[],
+		public readonly exitStatus: IncompletePushExitStatus,
+		command: PushCommand
+	) {
+		const advice = pushRetryAdvice(exitStatus, command);
+
+		super(`${incompletePushOutcome(failures)} ${pushRetryAdviceText(advice)}`);
 		this.name = 'PushIncompleteError';
+		this.failedPaths = failures.map((failure) => failure.path);
+		this.advice = advice;
+	}
+
+	override get exitCode(): number {
+		return this.exitStatus;
+	}
+}
+
+// Retention is recorded after every path has been committed, and before
+// deferred verification finishes. A failure at any earlier stage therefore
+// means that the push did not record retention.
+function incompletePushOutcome(failures: readonly FailedPushPath[]): string {
+	const unpublished = failures
+		.filter((failure) => failure.stage !== 'verify')
+		.map((failure) => failure.path);
+	const unverified = failures
+		.filter((failure) => failure.stage === 'verify')
+		.map((failure) => failure.path);
+	const sentences: string[] = [];
+
+	if (unpublished.length > 0) {
+		sentences.push(
+			`This push did not publish ${String(unpublished.length)} path(s): ${unpublished.join(', ')}. It did not record retention.`
+		);
+	}
+
+	if (unverified.length > 0) {
+		sentences.push(
+			`${String(unverified.length)} committed path(s) were not verified: ${unverified.join(', ')}. The server may still publish them.`
+		);
+	}
+
+	if (unverified.length > 0 && unpublished.length === 0) {
+		sentences.push('The push recorded retention before verification.');
+	}
+
+	return sentences.join(' ');
+}
+
+function pushRetryAdvice(
+	exitStatus: IncompletePushExitStatus,
+	command: PushCommand
+): PushRetryAdvice {
+	if (exitStatus === authExitCode) {
+		return { action: 'sign-in', command };
+	}
+
+	if (exitStatus === transientExitCode) {
+		return { action: 'retry', command };
+	}
+
+	return { action: 'fix', command };
+}
+
+function pushRetryAdviceText(advice: PushRetryAdvice): string {
+	switch (advice.action) {
+		case 'sign-in': {
+			return `Sign in again with cupboard login or use a credential that allows the push, then run ${advice.command} again.`;
+		}
+
+		case 'retry': {
+			return `Run ${advice.command} again to publish the failed paths.`;
+		}
+
+		case 'fix': {
+			return `Fix the failure reported above for each path, then run ${advice.command} again.`;
+		}
 	}
 }
 

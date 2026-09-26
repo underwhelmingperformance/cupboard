@@ -3,8 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
+	authExitCode,
+	type FailedPushPath,
+	type IncompletePushExitStatus,
+	type PushCommand,
+	PushIncompleteError,
+	type PushRetryAdvice,
 	QuotaExceededError,
-	transientExitCode
+	transientExitCode,
+	unavailableExitCode
 } from './errors.ts';
 
 describe('QuotaExceededError', () => {
@@ -59,4 +66,72 @@ describe('AdminApiTransientError', () => {
 			mentions: { status: true, code: true }
 		});
 	});
+});
+
+describe('PushIncompleteError', () => {
+	const failures: readonly FailedPushPath[] = [
+		{ path: 'a-app', stage: 'upload' },
+		{ path: 'b-lib', stage: 'verify' }
+	];
+
+	it.each<{
+		exitStatus: IncompletePushExitStatus;
+		command: PushCommand;
+		advice: PushRetryAdvice;
+	}>([
+		{
+			exitStatus: authExitCode,
+			command: 'cupboard push',
+			advice: { action: 'sign-in', command: 'cupboard push' }
+		},
+		{
+			exitStatus: authExitCode,
+			command: 'cupboard build-push',
+			advice: { action: 'sign-in', command: 'cupboard build-push' }
+		},
+		{
+			exitStatus: transientExitCode,
+			command: 'cupboard push',
+			advice: { action: 'retry', command: 'cupboard push' }
+		},
+		{
+			exitStatus: transientExitCode,
+			command: 'cupboard build-push',
+			advice: { action: 'retry', command: 'cupboard build-push' }
+		},
+		{
+			exitStatus: unavailableExitCode,
+			command: 'cupboard build-push',
+			advice: { action: 'fix', command: 'cupboard build-push' }
+		},
+		{
+			exitStatus: 1,
+			command: 'cupboard push',
+			advice: { action: 'fix', command: 'cupboard push' }
+		}
+	])(
+		'exits $exitStatus and advises $advice.action for $command',
+		({ exitStatus, command, advice }) => {
+			const error = new PushIncompleteError(failures, exitStatus, command);
+
+			expect({
+				exitCode: error.exitCode,
+				failures: error.failures,
+				failedPaths: error.failedPaths,
+				advice: error.advice,
+				mentions: {
+					paths: failures.map((failure) =>
+						error.message.includes(failure.path)
+					),
+					command: error.message.includes(command)
+				}
+			}).toStrictEqual({
+				exitCode: exitStatus,
+				failures,
+				failedPaths: ['a-app', 'b-lib'],
+				advice,
+				mentions: { paths: [true, true], command: true }
+			});
+		}
+	);
 });
