@@ -232,7 +232,11 @@ describe('blob reaper', () => {
 				CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
 					failures: 1,
 					message: 'D1 marker cleanup unavailable',
-					matches: (query) => query.includes('delete from "object_deletion"')
+					// Fail the marker removal after the physical delete, not the
+					// discard of stray markers, which has an `exists` condition.
+					matches: (query) =>
+						query.includes('delete from "object_deletion"') &&
+						!query.includes('exists')
 				})
 			})
 		).rejects.toThrow('D1 marker cleanup unavailable');

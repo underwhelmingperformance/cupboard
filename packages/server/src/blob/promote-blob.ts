@@ -74,7 +74,10 @@ async function ensureCanonicalObject(
 	});
 
 	if (isStillOwned?.() === false) {
-		await queueObjectDeletionAfterWrite?.();
+		if (written !== null) {
+			await queueObjectDeletionAfterWrite?.();
+		}
+
 		return undefined;
 	}
 
