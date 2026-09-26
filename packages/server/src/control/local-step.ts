@@ -1,23 +1,37 @@
 import { type Logger } from '@cupboard/logger';
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
 	type LocalStep,
 	type LocalStepStatus,
 	localStepStragglerSampleSize,
+	type LocalStepWakeBatch,
 	localStepWakeErrorMaxLength,
 	type LocalStepWakeOutcome,
-	type LocalStepWakeResponse,
 	requiredLocalStepFrom
 } from '@cupboard/protocol/deployment';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, asc, count, eq, gt, gte, lte, or, type SQL } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	count,
+	eq,
+	gt,
+	gte,
+	inArray,
+	lte,
+	or,
+	type SQL
+} from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { readRecordedTransitions } from '../db/deployment-transitions.ts';
+import { jsonValueLists } from '../do/json-list.ts';
 import { belowLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
+
+import { readLocalStepSweep } from './local-step-sweep.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
@@ -48,10 +62,12 @@ export async function requiredLocalStep(env: Env): Promise<LocalStep> {
 
 /**
  * Reports how many active or suspended tenants have reached the required step,
- * and lists some of those that have not. The step is the one in the caller's
- * query, or else the required local step.
+ * lists some of those that have not, and describes the sweep chain that wakes
+ * them. The counts use the step in the caller's query, or else the required
+ * local step.
  */
 export async function controlLocalStepStatus(
+	logger: Logger,
 	env: Env,
 	requiredStep?: LocalStep
 ): Promise<LocalStepStatus> {
@@ -74,8 +90,52 @@ export async function controlLocalStepStatus(
 		required,
 		ready,
 		pending,
-		stragglers: stragglers.map(({ id }) => id)
+		stragglers: stragglers.map(({ id }) => id),
+		sweep: await readLocalStepSweep(logger, database, new Date())
 	};
+}
+
+/**
+ * Counts the active or suspended tenants that have not reached the required
+ * step. The sweep ends its chain when this count is zero.
+ */
+export async function controlLocalStepPending(env: Env): Promise<number> {
+	return countTenants(
+		controlDatabase(env),
+		stragglerFilter(await requiredLocalStep(env))
+	);
+}
+
+/**
+ * Returns those of `tenants` that are active or suspended and have not reached
+ * the required step.
+ */
+export async function controlLocalStepPendingAmong(
+	env: Env,
+	tenants: readonly string[]
+): Promise<ReadonlySet<string>> {
+	if (tenants.length === 0) {
+		return new Set();
+	}
+
+	const ids = tenants.map((tenant) => tenantIdSchema.parse(tenant));
+	const straggler = stragglerFilter(await requiredLocalStep(env));
+	const database = controlDatabase(env);
+	const pending = new Set<string>();
+
+	for (const listed of jsonValueLists(ids)) {
+		const rows = await database
+			.select({ id: d1Schema.tenant.id })
+			.from(d1Schema.tenant)
+			.where(and(straggler, inArray(d1Schema.tenant.id, listed)))
+			.all();
+
+		for (const { id } of rows) {
+			pending.add(id);
+		}
+	}
+
+	return pending;
 }
 
 /**
@@ -104,7 +164,7 @@ export async function controlLocalStepWake(
 	logger: Logger,
 	env: Env,
 	limit: number
-): Promise<LocalStepWakeResponse> {
+): Promise<LocalStepWakeBatch> {
 	const database = controlDatabase(env);
 	const required = await requiredLocalStep(env);
 	const straggler = stragglerFilter(required);

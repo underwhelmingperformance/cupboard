@@ -1,16 +1,27 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
-import { currentLocalStep } from '@cupboard/protocol/deployment';
+import {
+	currentLocalStep,
+	localStepSweepChainIdSchema,
+	localStepSweepPaceSeconds
+} from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+	claimLocalStepSweep,
+	localStepSweepRestart,
+	readLocalStepSweep
+} from '../control/local-step-sweep.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { maintenanceQueueRetryDelaySeconds } from '../policy/maintenance-queue.ts';
 import {
+	flakyD1,
 	offboardTenant,
 	provisionNamedTenant,
 	recordTransition,
@@ -29,6 +40,7 @@ import {
 	QueueBatchSendError,
 	runMaintenanceBatch,
 	runOffboardBatch,
+	runScheduledTick,
 	sendQueueMessages
 } from './scheduled.ts';
 
@@ -137,8 +149,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-reaper' },
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
-				{ kind: 'control-key-retirement' },
-				{ kind: 'local-step-sweep' }
+				{ kind: 'control-key-retirement' }
 			],
 			sent: [
 				[
@@ -149,8 +160,7 @@ describe('scheduled tenant pass failure records', () => {
 					{ kind: 'cas-reaper' },
 					{ kind: 'blob-demote' },
 					{ kind: 'cas-demote' },
-					{ kind: 'control-key-retirement' },
-					{ kind: 'local-step-sweep' }
+					{ kind: 'control-key-retirement' }
 				]
 			],
 			acmeOutcome: undefined,
@@ -305,7 +315,10 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('scheduled entrypoint enqueues bounded maintenance jobs', async () => {
+	// The tick starts a local-step sweep chain when tenants are pending and no
+	// chain has the lease. A running chain sends its own messages, so the hourly
+	// plan contains no sweep message.
+	it('scheduled entrypoint enqueues bounded maintenance jobs and starts a sweep chain', async () => {
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('current');
 		await provisionNamedTenant('retiring');
@@ -322,9 +335,21 @@ describe('scheduled tenant pass failure records', () => {
 				MAINTENANCE_QUEUE: queueCollector(sent)
 			})
 		);
+		const sweep = await readLocalStepSweep(
+			rootLogger(),
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			new Date('2026-01-01T00:00:00.000Z')
+		);
+		// The entrypoint creates a random chain id, so the expectation uses the id
+		// that the row records.
+		const started = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.select({ chain: d1Schema.localStepSweep.chain })
+			.from(d1Schema.localStepSweep)
+			.get();
 
 		expect({
 			sent,
+			sweep,
 			acmeOutcome: await tenantMaintenanceFailureRow('acme', 'maintenance'),
 			retiringOutcome: await tenantMaintenanceFailureRow('retiring', 'offboard')
 		}).toStrictEqual({
@@ -336,20 +361,49 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
-				{ kind: 'local-step-sweep' }
+				{
+					kind: 'local-step-sweep',
+					chain: { chain: started?.chain, link: 0 }
+				}
 			],
+			sweep: {
+				state: 'running',
+				chain: started?.chain,
+				link: 0,
+				updatedAt: '2026-01-01T00:00:00.000Z',
+				batchAt: '2026-01-01T00:00:00.000Z',
+				nextAt: `2026-01-01T00:00:${String(localStepSweepPaceSeconds)}.000Z`,
+				wokenWithoutWork: 0,
+				outcomes: [],
+				failing: []
+			},
 			acmeOutcome: undefined,
 			retiringOutcome: undefined
 		});
 	});
 
-	it('brings every tenant to the current local step from the queue', async () => {
+	it('advances every tenant to the current local step from a chained message', async () => {
 		await recordTransition('cache-identity', 'complete');
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
+		const chain = localStepSweepChainIdSchema.parse(
+			'00000000-0000-4000-8000-00000000000a'
+		);
+		const update = localStepSweepRestart({
+			outcomes: [],
+			batchAt: isoTimestamp(new Date())
+		});
+		await claimLocalStepSweep(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			chain,
+			update,
+			new Date()
+		);
 
 		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'local-step-sweep'
+			kind: 'local-step-sweep',
+			chain: { chain, link: 0 },
+			delivery: { id: 'chained', attempts: 1 }
 		});
 
 		expect({
@@ -662,6 +716,163 @@ describe('scheduled tenant pass failure records', () => {
 						delaySeconds: 60,
 						kind: 'blob-demote',
 						reason: 'Error: kv unavailable'
+					}
+				]
+			]
+		});
+	});
+
+	it('restarts the sweep chain in the scheduled tick when enqueueing the maintenance jobs fails', async () => {
+		await provisionNamedTenant('acme');
+		const sweepMessages: MaintenanceQueueMessage[] = [];
+		const collector = queueCollector(sweepMessages);
+		const queue: Queue<MaintenanceQueueMessage> = {
+			...collector,
+			sendBatch: (batch) => {
+				const bodies = Array.from(batch, (entry) => entry.body);
+
+				if (bodies.some((body) => body.kind !== 'local-step-sweep')) {
+					return Promise.reject(new TypeError('maintenance jobs rejected'));
+				}
+
+				return collector.sendBatch(batch);
+			}
+		};
+
+		let caught: unknown;
+
+		try {
+			await runScheduledTick(rootLogger(), {
+				...env,
+				MAINTENANCE_QUEUE: queue
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		const failures = aggregateErrorShape(caught);
+
+		expect({
+			failures: failures.errors.map(
+				(error) => error instanceof QueueBatchSendError
+			),
+			sweepMessages: sweepMessages.map((message) =>
+				message.kind === 'local-step-sweep' ? message.chain.link : undefined
+			)
+		}).toStrictEqual({ failures: [true], sweepMessages: [0] });
+	});
+
+	// The consumer passes each message's queue id and attempt number to the
+	// sweep, which claims the link's batch with them. The first attempt fails
+	// after its claim, a second copy of the message runs no batch, and the
+	// redelivery of the first message takes the claim over.
+	it('claims a sweep batch with the queue message id and attempt number', async () => {
+		await provisionNamedTenant('claim-a', { configure: false });
+		const chain = localStepSweepChainIdSchema.parse(
+			'00000000-0000-4000-8000-00000000000a'
+		);
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const update = localStepSweepRestart({
+			outcomes: [],
+			batchAt: isoTimestamp(new Date())
+		});
+		await claimLocalStepSweep(database, chain, update, new Date());
+		const actions: QueueMessageAction[] = [];
+		const sent: MaintenanceQueueMessage[] = [];
+		const body = { kind: 'local-step-sweep', chain: { chain, link: 0 } };
+		// The claim, with each null column as `undefined`.
+		const claimOf = async () => {
+			const row = await database
+				.select({
+					link: d1Schema.localStepSweep.link,
+					batchMessage: d1Schema.localStepSweep.batchMessage,
+					batchAttempts: d1Schema.localStepSweep.batchAttempts
+				})
+				.from(d1Schema.localStepSweep)
+				.get();
+
+			return {
+				link: row?.link,
+				batchMessage: row?.batchMessage ?? undefined,
+				batchAttempts: row?.batchAttempts ?? undefined
+			};
+		};
+		const consume = (message: Message, sweepEnv: Env = env) =>
+			worker.queue(queueBatch([message], actions), {
+				...sweepEnv,
+				MAINTENANCE_QUEUE: queueCollector(sent)
+			});
+
+		await consume(queueMessage('first', body, actions), {
+			...env,
+			CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+				failures: 1,
+				error: new Error('count unavailable'),
+				matches: (query) => query.startsWith('select count(*)')
+			})
+		});
+		const afterFailure = await claimOf();
+		await consume(queueMessage('copy', body, actions));
+		const afterCopy = await claimOf();
+		await consume(queueMessage('first', body, actions, 2));
+
+		expect({
+			actions,
+			afterFailure,
+			afterCopy,
+			after: await claimOf(),
+			sent
+		}).toStrictEqual({
+			actions: [
+				{
+					target: 'message',
+					id: 'first',
+					action: 'retry',
+					delaySeconds: maintenanceQueueRetryDelaySeconds
+				},
+				{ target: 'message', id: 'copy', action: 'ack' },
+				{ target: 'message', id: 'first', action: 'ack' }
+			],
+			afterFailure: { link: 0, batchMessage: 'first', batchAttempts: 1 },
+			afterCopy: { link: 0, batchMessage: 'first', batchAttempts: 1 },
+			after: { link: 1, batchMessage: undefined, batchAttempts: undefined },
+			sent: [{ kind: 'local-step-sweep', chain: { chain, link: 1 } }]
+		});
+	});
+
+	it('acknowledges a chained local-step sweep message whose chain has no row without running a batch', async () => {
+		const actions: QueueMessageAction[] = [];
+		const chain = {
+			chain: '00000000-0000-4000-8000-00000000000a',
+			link: 3
+		};
+		const batch = queueBatch(
+			[queueMessage('chained', { kind: 'local-step-sweep', chain }, actions)],
+			actions
+		);
+		const capture = startCapture();
+
+		try {
+			await worker.queue(batch, env);
+		} finally {
+			capture.stop();
+		}
+		const logged = capture.logs
+			.filter((entry) => entry.level !== 'debug')
+			.map((entry) => [entry.level, entry.message, entry.properties]);
+
+		expect({ actions, logged }).toStrictEqual({
+			actions: [{ target: 'message', id: 'chained', action: 'ack' }],
+			logged: [
+				[
+					'info',
+					'local step sweep superseded',
+					{
+						worker: 'scheduled',
+						queue: 'cupboard-maintenance',
+						messageId: 'chained',
+						attempts: 1,
+						...chain
 					}
 				]
 			]
@@ -1121,12 +1332,13 @@ function queueBatch(
 function queueMessage(
 	id: string,
 	body: unknown,
-	actions: QueueMessageAction[]
+	actions: QueueMessageAction[],
+	attempts = 1
 ): Message {
 	return {
 		id,
 		timestamp: new Date('2026-01-01T00:00:00.000Z'),
-		attempts: 1,
+		attempts,
 		body,
 		ack: () => {
 			actions.push({ target: 'message', id, action: 'ack' });

@@ -26,14 +26,16 @@ const recorded = isoTimestampSchema.parse('2026-01-01T00:20:30.000Z');
 const expanded: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'expanded', updatedAt: recorded },
-		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
+		{ id: 'local-step-sweep', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
 const complete: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'complete', updatedAt: recorded },
-		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded }
+		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
+		{ id: 'local-step-sweep', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -58,7 +60,8 @@ function statusFor(required: number, pending: number): LocalStepStatus {
 		required,
 		ready: 1,
 		pending,
-		stragglers: pending > 0 ? [tenant] : []
+		stragglers: pending > 0 ? [tenant] : [],
+		sweep: { state: 'idle' }
 	};
 }
 
@@ -97,7 +100,8 @@ function client(
 							step: requiredStepOf(transitions),
 							progressed: true
 						}
-					]
+					],
+					chain: { kind: 'none' }
 				});
 			}
 		}
@@ -193,6 +197,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition deployment-transitions',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition local-step-sweep',
+							value: `complete ${since}`
+						},
 						{ label: 'Required local step', value: '4' },
 						{ label: 'Ready tenants', value: '1' },
 						{ label: 'Pending tenants', value: '1' },
@@ -230,6 +238,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition deployment-transitions',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition local-step-sweep',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },
@@ -373,7 +385,8 @@ describe('runDeploymentResume', () => {
 								kind: 'failed',
 								error: 'Error: tenant object unavailable'
 							}
-						]
+						],
+						chain: { kind: 'kept' }
 					})
 			}
 		};

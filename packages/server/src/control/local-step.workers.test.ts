@@ -102,12 +102,13 @@ describe('local step', () => {
 	it('counts a tenant that has never reported as pending and names it', async () => {
 		await provisionNamedTenant('step-unreported');
 
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
+		await expect(controlLocalStepStatus(logger, env)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			required: expansionLocalStep,
 			ready: 0,
 			pending: 1,
-			stragglers: [tenant('step-unreported')]
+			stragglers: [tenant('step-unreported')],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -136,12 +137,13 @@ describe('local step', () => {
 				}
 			]
 		});
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
+		await expect(controlLocalStepStatus(logger, env)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			required: currentLocalStep,
 			ready: 2,
 			pending: 0,
-			stragglers: []
+			stragglers: [],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -154,7 +156,7 @@ describe('local step', () => {
 		await provisionNamedTenant('step-expanded');
 
 		const first = await wake(10);
-		const status = await controlLocalStepStatus(env);
+		const status = await controlLocalStepStatus(logger, env);
 		const second = await wake(10);
 
 		expect({ first, status, second }).toStrictEqual({
@@ -177,7 +179,8 @@ describe('local step', () => {
 				required: expansionLocalStep,
 				ready: 1,
 				pending: 0,
-				stragglers: []
+				stragglers: [],
+				sweep: { state: 'idle' }
 			},
 			second: {
 				current: currentLocalStep,
@@ -194,13 +197,14 @@ describe('local step', () => {
 		await wake(10);
 
 		await expect(
-			controlLocalStepStatus(env, currentLocalStep)
+			controlLocalStepStatus(logger, env, currentLocalStep)
 		).resolves.toStrictEqual({
 			current: currentLocalStep,
 			required: currentLocalStep,
 			ready: 0,
 			pending: 1,
-			stragglers: [tenant('step-asked')]
+			stragglers: [tenant('step-asked')],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -258,20 +262,21 @@ describe('local step', () => {
 		await provisionNamedTenant('step-suspended');
 		await suspendTenant('step-suspended');
 
-		const before = await controlLocalStepStatus(env);
+		const before = await controlLocalStepStatus(logger, env);
 		const result = await wake(10);
 
 		expect({
 			before,
 			result,
-			after: await controlLocalStepStatus(env)
+			after: await controlLocalStepStatus(logger, env)
 		}).toStrictEqual({
 			before: {
 				current: currentLocalStep,
 				required: currentLocalStep,
 				ready: 0,
 				pending: 1,
-				stragglers: [tenant('step-suspended')]
+				stragglers: [tenant('step-suspended')],
+				sweep: { state: 'idle' }
 			},
 			result: {
 				current: currentLocalStep,
@@ -292,7 +297,8 @@ describe('local step', () => {
 				required: currentLocalStep,
 				ready: 1,
 				pending: 0,
-				stragglers: []
+				stragglers: [],
+				sweep: { state: 'idle' }
 			}
 		});
 	});
@@ -316,12 +322,13 @@ describe('local step', () => {
 				}
 			]
 		});
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
+		await expect(controlLocalStepStatus(logger, env)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			required: currentLocalStep,
 			ready: 1,
 			pending: 1,
-			stragglers: [tenant('step-batch-b')]
+			stragglers: [tenant('step-batch-b')],
+			sweep: { state: 'idle' }
 		});
 	});
 
@@ -336,12 +343,13 @@ describe('local step', () => {
 			failed: 0,
 			outcomes: []
 		});
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
+		await expect(controlLocalStepStatus(logger, env)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			required: expansionLocalStep,
 			ready: 1,
 			pending: 0,
-			stragglers: []
+			stragglers: [],
+			sweep: { state: 'idle' }
 		});
 	});
 

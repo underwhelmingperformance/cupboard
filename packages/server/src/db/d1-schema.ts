@@ -11,7 +11,10 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import type { LocalStep } from '@cupboard/protocol/deployment';
+import type {
+	LocalStep,
+	LocalStepSweepChainId
+} from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
@@ -558,3 +561,54 @@ export const localStepWakeCursor = sqliteTable('local_step_wake_cursor', {
 	id: integer('id').primaryKey(),
 	afterTenant: text('after_tenant').$type<TenantId>().notNull()
 });
+
+// The single row (`id` 1) records the chain of local-step sweep messages that
+// last had the lease. A chain can claim the row only once the lease has
+// expired, so at most one chain runs batches at a time. The lease lasts until
+// `expires_at`, and a chain that ends sets `expires_at` to the current time and
+// `next_at` to null.
+//
+// `link` is the number of the chain's latest message, and only a message with
+// that number runs a batch. `sent` is false from the moment that a chain
+// records a new link until the chain records that the queue accepted the
+// message for that link. While it is false, a redelivery of the previous
+// message sends the message for the new link. Before a message runs its batch,
+// it records its queue message id and attempt number in `batch_message` and
+// `batch_attempts`, which are both null until then. Another copy of the
+// message then runs no batch for the same link.
+//
+// `woken_without_work` counts the tenant wakes since the last batch in which a
+// tenant did work. `stalled_at` is when the chain confirmed a stall. It is null
+// before that and after any batch in which a tenant did work.
+// `failing_tenants` is JSON: the tenants whose recent wakes failed, with the
+// number of failures in a row and the last error. `delay_seconds` is the delay
+// before the next message, and `next_at` is when that message is due.
+// `last_outcomes` is the per-tenant outcomes of the last batch as JSON, in the
+// shape that `localStep.wake` returns, and `batch_at` is when that batch ran.
+export const localStepSweep = sqliteTable(
+	'local_step_sweep',
+	{
+		id: integer('id').primaryKey(),
+		chain: text('chain').$type<LocalStepSweepChainId>().notNull(),
+		link: integer('link').notNull(),
+		sent: integer('sent', { mode: 'boolean' }).notNull(),
+		batchMessage: text('batch_message'),
+		batchAttempts: integer('batch_attempts'),
+		wokenWithoutWork: integer('woken_without_work').notNull(),
+		stalledAt: text('stalled_at').$type<IsoTimestamp>(),
+		failingTenants: text('failing_tenants').notNull(),
+		delaySeconds: integer('delay_seconds').notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		nextAt: text('next_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		batchAt: text('batch_at').$type<IsoTimestamp>().notNull(),
+		lastOutcomes: text('last_outcomes').notNull()
+	},
+	(table) => [
+		check('local_step_sweep_single_row', sql`${table.id} = 1`),
+		check(
+			'local_step_sweep_batch_claim',
+			sql`(${table.batchMessage} IS NULL) = (${table.batchAttempts} IS NULL)`
+		)
+	]
+);

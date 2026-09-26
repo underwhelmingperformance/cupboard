@@ -6334,6 +6334,36 @@ published intermediates and their storage cost.
   are pending. The check fails if an independent transition's expand migrations
   do not apply before the earlier contract migrations, or if the order produces
   a different schema from name order. It compares schemas, not rows.
+- The server wakes the tenants until each has recorded the required local step.
+  `localStep.wake` runs a batch and starts a chain of maintenance-queue
+  messages. Each message wakes the next batch and sends the chain's next message
+  with a ten-second delivery delay, until no tenant is pending.
+- A tenant does work in a wake when the wake moves its durable state forward.
+  The tenant object reports this as `progressed`: a recorded step that rose, an
+  item projected or moved, a committed migration or page of one, a saved cursor,
+  or a rewritten batch. Recording the same step again is not progress. A failed
+  wake counts as neither work nor a completed wake until the same tenant has
+  failed five wakes in a row.
+- The chain counts its tenant wakes since the last batch in which a tenant did
+  work, and confirms a stall once that count reaches the number of pending
+  tenants and no tenant has failed fewer than five wakes in a row. After that
+  the delay doubles with each batch, up to an hour. A batch in which a tenant
+  does work clears the stall. A wake replaces a chain that has confirmed a
+  stall, so the new chain starts its count from the wake's batch, and a wake
+  that leaves no tenant pending ends any chain.
+- The `local_step_sweep` table has a single row, and only the chain that has the
+  row's lease runs batches. Migration `0032` creates the table; it is the only
+  migration of the independent `local-step-sweep` transition, which has no
+  contract migrations. `localStep.status` reports the row as `sweep`: `running`,
+  `stalled` or `idle`. A running or stalled sweep includes the chain, its link,
+  the next batch time, the count of tenant wakes without work, the failing
+  tenants and the last batch's outcomes and time; a stalled sweep also includes
+  when the chain confirmed the stall. A message claims its link's batch with its
+  queue message id and attempt number before it runs the batch, and records the
+  next link as not yet sent before it sends the next message.
+- The cron tick starts a chain only when tenants are pending and no chain has
+  the lease. This restarts the sweep after a chain stops, for example because
+  its message was dead-lettered; the tick logs the result.
 
 ### Progress
 

@@ -3,6 +3,7 @@ import {
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
+	type ParsedLocalStepStatus,
 	type ParsedLocalStepWakeResponse,
 	type SchemaTransition,
 	schemaTransitions,
@@ -113,6 +114,20 @@ async function wakeUntilStep(
 	);
 }
 
+/**
+ * The status without the sweep. These tests drive the wakes themselves. Each
+ * wake starts a server-side sweep chain, but the harness's queue accepts
+ * messages and never delivers them, so the state of the sweep depends on the
+ * harness and the upgrade tests do not assert it.
+ */
+function withoutSweep(
+	status: ParsedLocalStepStatus
+): Omit<ParsedLocalStepStatus, 'sweep'> {
+	const { sweep: _sweep, ...rest } = status;
+
+	return rest;
+}
+
 function d1QueryApi(server: StagedDeploymentServer): D1QueryApi {
 	return {
 		queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
@@ -207,7 +222,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			expanded,
 			wake,
 			contractWake,
-			status: await client.localStepStatus(),
+			status: withoutSweep(await client.localStepStatus()),
 			recorded: await client.transitions(),
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
@@ -239,7 +254,8 @@ it('upgrades a populated predecessor deployment', async () => {
 						kind: 'recorded',
 						step: expansionLocalStep,
 						progressed: true
-					}))
+					})),
+					chain: { kind: 'none' }
 				}
 			},
 			contractWake: {
@@ -258,7 +274,8 @@ it('upgrades a populated predecessor deployment', async () => {
 						kind: 'recorded',
 						step: currentLocalStep,
 						progressed: true
-					}))
+					})),
+					chain: { kind: 'none' }
 				}
 			},
 			status: {
@@ -346,7 +363,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 
 		// Before the wake, every active or suspended tenant is behind: none has
 		// run since the deploy, so none has recorded a step.
-		const before = await client.localStepStatus();
+		const before = withoutSweep(await client.localStepStatus());
 
 		await wakeUntilStep(server, client, expansionLocalStep);
 		await contractOverPredecessor(server);
@@ -357,7 +374,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 		// the same step as the tenant that was never behind.
 		expect({
 			before,
-			after: await client.localStepStatus()
+			after: withoutSweep(await client.localStepStatus())
 		}).toStrictEqual({
 			before: {
 				current: currentLocalStep,

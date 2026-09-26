@@ -112,7 +112,7 @@ suspended tenant must reach now: the contract step of the first incomplete
 transition that has one, else this build's final step. Once `cache-identity` is
 complete, the required local step is never below 5.
 
-This release defines two transitions:
+This release defines three transitions:
 
 - `cache-identity`: migrations `0000` to `0027` are its expand migrations and
   `0028` to `0030` its contract migrations. Its expand migrations include the
@@ -125,6 +125,12 @@ This release defines two transitions:
   earlier transition has expanded, the deploy may therefore apply it ahead of
   their contract migrations. A transition that is not independent is called
   _dependent_.
+- `local-step-sweep`: migration `0032` creates the `local_step_sweep` table
+  described under [The sweep chain](#the-sweep-chain). The transition is
+  independent and has no contract migrations and no contract step. Every earlier
+  transition has expanded before the upload, so the walk applies migration
+  `0032` before the upload on every deploy. The new Worker code can therefore
+  use the table without checking the transition state.
 
 `pnpm check:migrations` replays the migrations in the order that the deploy uses
 for each N, starting from a deployment whose first N transitions are complete
@@ -257,9 +263,11 @@ SQLite schema, complete this deployment to recover.
 
 `tenant.local_step` is a watermark for each object's completed data work. The
 object never lowers it. The `localStep.wake` control procedure wakes a bounded
-batch of active tenants that are behind; the hourly sweep also wakes up to
-twenty per tick. `localStep.status` counts ready and pending tenants and lists
-up to twenty pending tenants. Large tenants can need several wakes.
+batch of active tenants that have not reached the required local step, and
+`localStep.status` counts ready and pending tenants, lists up to twenty pending
+tenants and reports the state of the sweep chain, which
+[The sweep chain](#the-sweep-chain) describes. Large tenants can need several
+wakes.
 
 `localStep.status` reports the step that it counted against as `required` next
 to the build's `current`. That is the required local step unless the query gives
@@ -289,17 +297,115 @@ This build defines five steps:
   old format.
 
 Once the deploy records `cache-identity` complete, the required local step
-becomes 5. The control plane finds the tenants below it and wakes them again. A
-successful CLI deploy applies the contract migrations and then wakes tenants
-until they reach step 5. If a run is interrupted,
+becomes 5. The control plane counts the tenants below it, and the sweep wakes
+them again. A successful CLI deploy applies the contract migrations and then
+wakes tenants until they reach step 5. If a run is interrupted,
 `cupboard deployment resume <url>` wakes tenants until they reach the required
-local step; rerun `cupboard deploy` to complete any remaining transition. The
-hourly sweep also continues tenant work. A persisted cursor rotates through
-pending tenants, so a failed tenant does not prevent later tenants from being
-attempted.
+local step; rerun `cupboard deploy` to complete any remaining transition. A
+persisted cursor rotates through pending tenants, so a failed tenant does not
+prevent later tenants from being attempted.
 
 A path whose object has not reached its generation key returns 404. The move or
 a new push makes it available at that key.
+
+### The sweep chain
+
+The server wakes the tenants until each has recorded the required local step. A
+_sweep chain_ is a chain of messages on the maintenance queue. After its own
+batch, `localStep.wake` starts one when tenants are still pending. Each message
+wakes the next batch of twenty tenants and sends the chain's next message with a
+ten-second delivery delay. The batches follow the persisted cursor through the
+pending tenants. The chain _ends_ when no tenant is pending, and then releases
+its lease.
+
+A tenant _does work_ in a wake when the wake moves the tenant's durable state
+forward, and the tenant reports this as `progressed` in its outcome. A wake that
+records a step progresses when it raises the recorded step, or when it projects
+or moves any item on the way. Recording the same step again is not progress. A
+wake that leaves more work to do progresses when it commits a schema migration
+or a page of one, saves the cursor of a catalogue reconciliation, a cache
+projection or an object move, or rewrites a batch of retention rules or grants.
+A large tenant can need many wakes, and it does work in each of them, even in a
+wake that projects no caches. A _failed_ wake is one whose request to the
+tenant's object threw. It may not have reached the object, so it counts as
+neither work nor a completed wake, and the chain retries the tenant.
+
+The chain counts its tenant wakes since the last batch in which a tenant did
+work. A failed wake counts only once the same tenant has failed five wakes in a
+row; the row records each failing tenant's count and last error. The batches
+follow the cursor, so when the count reaches the number of pending tenants and
+no tenant has failed fewer than five wakes in a row, every pending tenant has
+completed a wake without work or has failed five times, and the chain _confirms
+a stall_. The row records when, and `localStep.status` reports the sweep as
+`stalled`. Until then the delay stays at ten seconds. After the stall is
+confirmed, the delay doubles with each batch, up to one hour. A batch in which a
+tenant does work clears the stall and returns the delay to ten seconds. With
+twenty tenants in each batch, a chain confirms a stall over 200 pending tenants
+after ten batches without work: about 100 seconds after the last batch in which
+a tenant did work, plus the time that each batch takes. These figures assume
+that each message runs when it is due; a backlog on the maintenance queue delays
+every batch.
+
+The `local_step_sweep` table has a single row, and only the chain that has the
+row's lease runs batches. A chain can claim the row only once the lease has
+expired. The row records the chain and the number of its latest message (its
+_link_), the count of tenant wakes without work, the failing tenants, when the
+chain confirmed a stall, the delay before the next message, when the lease
+expires, when the next batch is due, and the last batch's outcomes and time.
+
+A message runs a batch only while the row records its chain and link. Before the
+batch, the message claims it in the row with its queue message id and attempt
+number. A second copy of the message has another message id, so it runs no
+batch. A redelivery of the same message has a higher attempt number and can take
+over the claim, because the queue delivers a message again only after the
+earlier attempt has ended. At most one delivery therefore runs each batch and
+records the chain's next link.
+
+After its batch, a message records the next link as not yet sent, sends the
+chain's next message, and then marks the link as sent. If the send fails, or the
+delivery stops before the send, the queue delivers the message again. The row
+then shows the next link as not sent, so the redelivery sends the message for
+that link without running another batch. If the send succeeds and marking the
+link as sent fails, the redelivery sends the message a second time, and only one
+of the two copies runs the batch for that link.
+
+The lease covers the delivery delay, every delivery of the next message and a
+five-minute margin: it ends about 68 minutes after the chain sent its last
+message, plus the delay. The maintenance consumer runs at most four invocations
+at once, so a message can wait behind other maintenance messages after a busy
+cron tick. Nothing bounds that wait, so the lease does not cover it. If the
+lease expires first and the message then runs before another chain claims the
+row, the chain continues; otherwise the message runs no batch.
+
+A chain _stops_ when its message is lost, for example because the message
+reached the dead-letter queue. `localStep.status` derives the sweep's state from
+the row: `running` or `stalled` while a chain has the lease, and `idle`
+otherwise, with the last chain's link and outcomes still readable. A stopped
+chain therefore reads as `running` or `stalled` until its lease expires. After a
+rollback, the row can record an outcome kind that the running build does not
+define. `localStep.status` then reports no outcomes and logs a warning until the
+next batch writes the row.
+
+`localStep.wake` is an operator's request, and it reports what it did with the
+sweep chain as `chain` in its response. When tenants remain after its batch, it
+starts a chain with that batch as the first, replacing a chain that has
+confirmed a stall. The new chain counts the tenant wakes without work from that
+batch alone, and its delay returns to ten seconds, whether or not a tenant did
+work in the batch. The replacement is one conditional update of the row, and the
+replaced chain's later writes and next message change nothing. A chain that has
+not confirmed a stall keeps the lease (`kept`), including a chain that the cron
+tick started and whose first batch has not run, and the row does not record the
+wake's batch. When no tenant remains, the wake ends any chain that has the lease
+(`none`), so the sweep does not keep reporting an earlier stall. When the wake
+cannot count the pending tenants, or cannot start or end a chain, it reports
+`failed` with the error; the batch has still run.
+
+On each cron tick, the cron starts a chain if tenants are pending and no chain
+has the lease. This restarts the sweep after a chain stops, for example because
+its message was dead-lettered. The new chain keeps the previous chain's last
+outcomes and their batch time until its own first batch runs. The tick logs the
+result, and a failure to enqueue the other maintenance jobs does not prevent the
+restart.
 
 ## Stored cache grants
 
@@ -449,11 +555,12 @@ build writes.
 Use `cupboard deployment status` and `cupboard deployment resume` from the same
 release as the deployed control Worker. This release replaces the
 `deployment.phase` procedure with `deployment.transitions`, which returns the
-recorded transitions, and adds `required` to the `localStep.status` and
-`localStep.wake` responses. The outcomes of `localStep.wake` gain `progressed`
-on `recorded` and `advanced` outcomes, the tenant's recorded step on `advanced`
-outcomes, and `error` on `failed` outcomes. The CLI and the server validate
-these responses strictly, so a CLI from another release rejects them or
+recorded transitions. It adds `required` to the `localStep.status` and
+`localStep.wake` responses, `sweep` to the `localStep.status` response, and
+`chain` to the `localStep.wake` response. The outcomes of `localStep.wake` gain
+`progressed` on `recorded` and `advanced` outcomes, the tenant's recorded step
+on `advanced` outcomes, and `error` on `failed` outcomes. The CLI and the server
+validate these responses strictly, so a CLI from another release rejects them or
 receives 404. The `--json` output of both commands changes too: the
 `deployment-status` result has `transitions`, `unrecognised` and `required` in
 place of `phase`, and the `deployment-readiness` result reports `required` as

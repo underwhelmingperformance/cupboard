@@ -17,14 +17,16 @@ const pending: LocalStepStatus = {
 	required: expansionLocalStep,
 	ready: 0,
 	pending: 1,
-	stragglers: [tenant]
+	stragglers: [tenant],
+	sweep: { state: 'idle' }
 };
 const ready: LocalStepStatus = {
 	current: currentLocalStep,
 	required: expansionLocalStep,
 	ready: 1,
 	pending: 0,
-	stragglers: []
+	stragglers: [],
+	sweep: { state: 'idle' }
 };
 
 describe('tenant settlement', () => {
@@ -51,7 +53,8 @@ describe('tenant settlement', () => {
 							step: expansionLocalStep,
 							progressed: true
 						}
-					]
+					],
+					chain: { kind: 'kept' }
 				});
 			}
 		};
@@ -81,7 +84,8 @@ describe('tenant settlement', () => {
 					required: expansionLocalStep,
 					woken: 0,
 					failed: 1,
-					outcomes: [{ tenant, kind: 'unconfigured' }]
+					outcomes: [{ tenant, kind: 'unconfigured' }],
+					chain: { kind: 'kept' }
 				});
 			}
 		};
@@ -109,7 +113,8 @@ describe('tenant settlement', () => {
 					required: expansionLocalStep,
 					woken: 0,
 					failed: 0,
-					outcomes: []
+					outcomes: [],
+					chain: { kind: 'kept' }
 				});
 			}
 		};
@@ -147,7 +152,8 @@ describe('tenant settlement', () => {
 					required: expansionLocalStep,
 					woken: 0,
 					failed: 0,
-					outcomes: []
+					outcomes: [],
+					chain: { kind: 'kept' }
 				});
 			}
 		};

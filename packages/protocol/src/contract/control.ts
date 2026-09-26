@@ -243,9 +243,11 @@ export const controlContract = {
 	// suspended tenant's Durable Object to report the step it has reached, and
 	// `cupboard deploy` applies a transition's contract migrations only once
 	// every active or suspended tenant has recorded the transition's contract
-	// step. `status` reports how
-	// far the tenants have come and `wake` advances a bounded batch of those
-	// that have not; an object records its step only when woken here.
+	// step. `status` reports how far the tenants have come and the state of the
+	// sweep chain. `wake` wakes a bounded batch of the tenants below the required
+	// step, and starts a sweep chain of queue messages that wakes the rest. An
+	// object records its step only when a wake from `wake` or from the chain
+	// reaches it.
 	localStep: {
 		status: controlProcedure
 			.meta({ requires: 'local-step:read', replaySafety: 'replay-safe' })
