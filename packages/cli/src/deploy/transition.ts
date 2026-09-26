@@ -1,23 +1,31 @@
 import {
-	contractionMigrations,
-	expansionLocalStep,
-	type ParsedDeploymentPhase
+	type DeferredTransition,
+	deferredTransition,
+	hasReachedTransitionState,
+	requiredLocalStepFrom,
+	type SchemaTransition,
+	schemaTransitions,
+	type StoredTransitionRow,
+	type TransitionStates
 } from '@cupboard/protocol/deployment';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import type { ResultRow } from '@cupboard/reporter';
 
-import { UnclassifiedD1MigrationError } from '../errors.ts';
+import { completingReleases, TransitionIncompleteError } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
-import { type D1Migration, unclassifiedD1Migrations } from './migrations.ts';
-import { withWorkersInvocationAllowance } from './overrides.ts';
-import type { LocalStepReadiness } from './phase.ts';
+import type { LocalStepReadiness } from './deployment-state.ts';
 import {
+	isFreshDeployment,
 	parseTenantReadinessCount,
-	readDeploymentPhase,
-	readLocalStepReadiness
-} from './phase.ts';
+	readLocalStepReadiness,
+	readReconciledTransitions,
+	readTenantColumns
+} from './deployment-state.ts';
+import type { D1Migration } from './migrations.ts';
+import { withWorkersInvocationAllowance } from './overrides.ts';
+import { type PlannedTransition, planTransitions } from './transitions.ts';
 import {
 	type WorkersAllowanceSource,
 	workersAllowanceSourceText,
@@ -29,20 +37,26 @@ export type DeploymentObservation =
 	| { readonly kind: 'new' }
 	| {
 			readonly kind: 'existing';
-			readonly phase: ParsedDeploymentPhase | undefined;
+			// The recorded states, reconciled with the preceding release's phase.
+			readonly transitions: TransitionStates;
 			readonly readiness: LocalStepReadiness;
+			// The transition that makes the deploy stop, because it could expand
+			// only after the upload. Undefined when the deploy can proceed.
+			readonly blocked: DeferredTransition | undefined;
+			// The rows of transitions that this build does not define and whose
+			// contract migrations have not started. The deploy leaves them
+			// unchanged.
+			readonly unrecognised: readonly StoredTransitionRow[];
 	  };
 
 /**
-The reviewed artifact and migration stages that one deployment executes.
+The reviewed artifact and the schema transitions that one deployment applies.
 */
 export interface DeploymentPlan {
 	readonly artifact: DeploymentArtifact;
-	readonly transition: 'cache-identity-v1';
 	readonly allowanceSource: WorkersAllowanceSource;
 	readonly observation: DeploymentObservation;
-	readonly preparation: readonly D1Migration[];
-	readonly contraction: readonly D1Migration[];
+	readonly transitions: readonly PlannedTransition[];
 }
 
 export function planDeployment(
@@ -50,48 +64,120 @@ export function planDeployment(
 	observation: DeploymentObservation,
 	allowanceSource?: WorkersAllowanceSource
 ): DeploymentPlan {
-	const unclassified = unclassifiedD1Migrations(artifact.d1Migrations);
-	if (unclassified.length > 0) {
-		throw new UnclassifiedD1MigrationError(unclassified);
-	}
-
 	return {
 		artifact,
-		transition: 'cache-identity-v1',
 		allowanceSource: allowanceSource ?? { kind: 'configuration' },
 		observation,
-		preparation: artifact.d1Migrations.filter(
-			(migration) => !contractionMigrations.includes(migration.name)
-		),
-		contraction: artifact.d1Migrations.filter((migration) =>
-			contractionMigrations.includes(migration.name)
-		)
+		transitions: planTransitions(artifact.d1Migrations, schemaTransitions)
 	};
+}
+
+function migrationNames(migrations: readonly D1Migration[]): string {
+	return migrations.map((migration) => migration.name).join(', ') || '(none)';
+}
+
+/**
+ * What one run does for a transition, from the observed states. On a fresh
+ * database the deploy applies every migration before the upload. Otherwise
+ * the deploy expands a pending transition before the upload and applies its
+ * contract migrations after it; for an expanded one it applies only the
+ * contract migrations, and it leaves a complete one alone. When a transition
+ * could expand only after the upload, the deploy stops with an error, and the
+ * plan row for that transition shows what to deploy first.
+ */
+function transitionStageText(
+	planned: PlannedTransition,
+	observation: DeploymentObservation
+): string {
+	const { transition } = planned;
+	const tenants =
+		transition.contractStep === undefined
+			? ''
+			: ` once every active or suspended tenant has recorded local step ${String(transition.contractStep)}`;
+	const contract =
+		planned.contract.length === 0
+			? 'no contract'
+			: `contract after upload${tenants}: ${migrationNames(planned.contract)}`;
+	const expand = `expand before upload: ${migrationNames(planned.expand)}`;
+
+	if (observation.kind === 'offline') {
+		return `unknown (offline); ${expand}; ${contract}`;
+	}
+
+	if (observation.kind === 'new') {
+		return 'new deployment; expand and contract before upload';
+	}
+
+	const { blocked } = observation;
+
+	if (blocked?.transition.id === transition.id) {
+		const releases = completingReleases(
+			blocked.waitsFor.id,
+			blocked.waitsFor.completedBy,
+			transition.id
+		);
+
+		return `blocked: '${blocked.waitsFor.id}' must be complete before this transition can expand; first run cupboard deploy with ${releases}; if the deployed release is one of these, rerun its cupboard deploy`;
+	}
+
+	const recorded = observation.transitions.get(transition.id);
+
+	if (hasReachedTransitionState(recorded, 'complete')) {
+		return 'complete';
+	}
+
+	if (hasReachedTransitionState(recorded, 'expanded')) {
+		return `expanded; ${contract}`;
+	}
+
+	return `pending; ${expand}; ${contract}`;
+}
+
+/**
+ * Throws the error that the deploy would throw for the observed states. The
+ * deploy command calls this after it shows the plan and before it asks for
+ * confirmation, so a blocked deploy creates no credentials or resources. The
+ * deploy checks again, because the states can change between the plan and the
+ * run.
+ */
+export function throwIfPlanBlocked(plan: DeploymentPlan): void {
+	const { observation } = plan;
+
+	if (observation.kind !== 'existing' || observation.blocked === undefined) {
+		return;
+	}
+
+	const { transition, waitsFor } = observation.blocked;
+
+	throw new TransitionIncompleteError(
+		waitsFor.id,
+		transition.id,
+		waitsFor.completedBy
+	);
 }
 
 export function transitionPlanRows(plan: DeploymentPlan): ResultRow[] {
 	const observed = plan.observation;
+	const requiredStep =
+		observed.kind === 'existing'
+			? requiredLocalStepFrom(observed.transitions)
+			: undefined;
+
 	return [
-		{ label: 'Storage transition', value: plan.transition },
 		{
 			label: 'Subrequest allowance source',
 			value: workersAllowanceSourceText(plan.allowanceSource)
 		},
-		{
-			label: 'Current phase',
-			value:
-				observed.kind === 'offline'
-					? 'unknown (offline)'
-					: observed.kind === 'new'
-						? 'new deployment'
-						: (observed.phase?.name ?? 'not recorded')
-		},
-		{
-			label: 'Before upload',
-			value:
-				plan.preparation.map((migration) => migration.name).join(', ') ||
-				'(none)'
-		},
+		...plan.transitions.map((planned) => ({
+			label: `Transition ${planned.transition.id}`,
+			value: transitionStageText(planned, observed)
+		})),
+		...(observed.kind === 'existing' ? observed.unrecognised : []).map(
+			(row) => ({
+				label: `Transition ${row.id}`,
+				value: `${row.state}; this build does not define this transition, and no contract migration of it has started, so the deploy leaves it unchanged`
+			})
+		),
 		{
 			label: 'Tenant readiness',
 			value:
@@ -99,13 +185,7 @@ export function transitionPlanRows(plan: DeploymentPlan): ResultRow[] {
 					? 'unknown (offline)'
 					: observed.kind === 'new'
 						? 'no existing tenants'
-						: `${String(observed.readiness.pending)} pending at local step ${String(expansionLocalStep)}`
-		},
-		{
-			label: 'After settlement',
-			value:
-				plan.contraction.map((migration) => migration.name).join(', ') ||
-				'(none)'
+						: `${String(observed.readiness.pending)} pending at local step ${String(requiredStep)}`
 		},
 		{
 			label: 'Rollback boundary',
@@ -116,14 +196,30 @@ export function transitionPlanRows(plan: DeploymentPlan): ResultRow[] {
 			label: 'Settlement',
 			value:
 				'Up to 100 batches of 20 tenants; failures remain resumable with cupboard deployment resume.'
-		},
-		{ label: 'Target phase', value: 'contracted' }
+		}
 	];
+}
+
+/**
+Whether either of the artifact's Worker scripts exists in the account.
+*/
+export async function hasWorkerScripts(
+	api: Pick<CloudflareApi, 'getScriptConfiguration'>,
+	artifact: DeploymentArtifact
+): Promise<boolean> {
+	const configurations = await Promise.all(
+		[artifact.config.control.name, artifact.config.tenant.name].map(
+			(scriptName) => api.getScriptConfiguration(scriptName)
+		)
+	);
+
+	return configurations.some((configuration) => configuration !== undefined);
 }
 
 export async function observeDeployment(
 	api: CloudflareApi,
-	artifact: DeploymentArtifact
+	artifact: DeploymentArtifact,
+	transitions: readonly SchemaTransition[] = schemaTransitions
 ): Promise<DeploymentObservation> {
 	const name = artifact.config.tenant.d1Databases[0]?.databaseName;
 	const database =
@@ -131,28 +227,41 @@ export async function observeDeployment(
 	if (database === undefined) {
 		return { kind: 'new' };
 	}
-	const phaseApi = {
+	const d1QueryApi = {
 		queryRows: api.d1QueryRows.bind(api),
 		queryBatch: api.d1QueryBatch.bind(api)
 	};
-	const phase = await readDeploymentPhase(phaseApi, database);
-	const columns = await api.d1QueryRows(
+	// Reading the rows first refuses a row that this build cannot deploy over,
+	// before the plan can report a new deployment.
+	const { states, unrecognised } = await readReconciledTransitions(
+		d1QueryApi,
 		database,
-		"SELECT name FROM pragma_table_info('tenant');"
+		transitions
 	);
+	const columns = await readTenantColumns(d1QueryApi, database);
+	if (
+		await isFreshDeployment(
+			d1QueryApi,
+			database,
+			() => hasWorkerScripts(api, artifact),
+			columns
+		)
+	) {
+		return { kind: 'new' };
+	}
+	const blocked = deferredTransition(transitions, states);
 	if (columns.includes('local_step')) {
 		return {
 			kind: 'existing',
-			phase,
+			transitions: states,
 			readiness: await readLocalStepReadiness(
-				phaseApi,
+				d1QueryApi,
 				database,
-				expansionLocalStep
-			)
+				requiredLocalStepFrom(states)
+			),
+			blocked,
+			unrecognised
 		};
-	}
-	if (columns.length === 0) {
-		return { kind: 'new' };
 	}
 	const [pending] = await api.d1QueryRows(
 		database,
@@ -160,7 +269,9 @@ export async function observeDeployment(
 	);
 	return {
 		kind: 'existing',
-		phase,
+		transitions: states,
+		blocked,
+		unrecognised,
 		readiness: {
 			pending: parseTenantReadinessCount(pending),
 			stragglers: await api.d1QueryRows(

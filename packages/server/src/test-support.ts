@@ -29,9 +29,8 @@ import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import {
-	currentLocalStep,
-	type DeploymentPhaseName,
-	deploymentPhaseRowId
+	type TransitionId,
+	type TransitionState
 } from '@cupboard/protocol/deployment';
 import {
 	type AuthorizationDetails,
@@ -4174,23 +4173,19 @@ export function uploadExpiryFromNow(): IsoTimestamp {
 }
 
 /**
- * Records the deployment phase as `cupboard deploy` does, in the row the
- * tenant objects' phase gate reads.
+ * Records a schema transition's state as `cupboard deploy` does, in the row
+ * that the tenant objects' transition gate reads.
  */
-export async function recordDeploymentPhase(
-	phase: DeploymentPhaseName
+export async function recordTransition(
+	id: TransitionId,
+	state: TransitionState
 ): Promise<void> {
 	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(d1Schema.deploymentPhase)
-		.values({
-			id: deploymentPhaseRowId,
-			phase,
-			requiredLocalStep: currentLocalStep,
-			updatedAt: isoTimestamp(testBase)
-		})
+		.insert(d1Schema.deploymentTransition)
+		.values({ id, state, updatedAt: isoTimestamp(testBase) })
 		.onConflictDoUpdate({
-			target: d1Schema.deploymentPhase.id,
-			set: { phase }
+			target: d1Schema.deploymentTransition.id,
+			set: { state }
 		})
 		.run();
 }

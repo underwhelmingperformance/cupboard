@@ -21,7 +21,7 @@ import {
 	currentOrigin,
 	issueControlAdminToken,
 	issueServerSignedToken,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -159,79 +159,111 @@ describe('control contract round trip', () => {
 		});
 	});
 
-	it.each([
+	const selectorSpelling = [
 		{
-			name: 'the selector spelling until the deployment is contracted',
-			phase: 'native-reads' as const,
-			stored: [
-				{
-					type: 'cupboard_cache',
-					actions: ['upload:commit'],
-					resources: { cache: { exact: '_default', validate: 'cacheName' } }
-				},
-				{
-					type: 'cupboard_cache',
-					actions: ['upload:commit'],
-					resources: { cache: { exact: 'ci', validate: 'cacheName' } }
-				},
-				{
-					type: 'cupboard_cache',
-					actions: ['upload:commit'],
-					resources: { cache: { exact: '_private-ci', validate: 'cacheName' } }
-				},
-				{
-					type: 'cupboard_tenant',
-					actions: ['tenant:create'],
-					resources: { tenant: { exact: 'acme', validate: 'tenant' } }
-				}
-			]
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: '_default', validate: 'cacheName' } }
 		},
 		{
-			name: 'the scope spelling once the deployment is contracted',
-			phase: 'contracted' as const,
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: '_private-ci', validate: 'cacheName' } }
+		},
+		{
+			type: 'cupboard_tenant',
+			actions: ['tenant:create'],
+			resources: { tenant: { exact: 'acme', validate: 'tenant' } }
+		}
+	];
+
+	// The control-trust gate reads the rows as the tenant objects do: it
+	// ignores an unknown transition id and counts an unknown state of
+	// `cache-identity` as complete.
+	it.each([
+		{
+			name: 'the selector spelling until `cache-identity` is complete',
+			rows: [['cache-identity', 'expanded']],
+			isContracted: false,
+			stored: selectorSpelling
+		},
+		{
+			name: 'the selector spelling when only an unknown transition is complete',
+			rows: [
+				['cache-identity', 'expanded'],
+				['later-transition', 'complete']
+			],
+			isContracted: false,
+			stored: selectorSpelling
+		},
+		{
+			name: 'the scope spelling once `cache-identity` is complete',
+			rows: [['cache-identity', 'complete']],
+			isContracted: true,
+			stored: controlRuleGrants
+		},
+		{
+			name: 'the scope spelling when `cache-identity` has an unknown state',
+			rows: [['cache-identity', 'later-state']],
+			isContracted: true,
 			stored: controlRuleGrants
 		}
-	])('stores a control rule in $name', async ({ phase, stored }) => {
-		const { results: triggers } = await env.CUPBOARD_DB.prepare(
-			"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'control_trust_native_grants_%'"
-		).all<{ name: string; sql: string }>();
-		if (phase === 'native-reads') {
-			for (const trigger of triggers) {
-				await env.CUPBOARD_DB.prepare(`DROP TRIGGER ${trigger.name}`).run();
-			}
-		}
-		try {
-			await recordDeploymentPhase(phase);
-			const client = controlClient(await issueControlAdminToken());
-
-			const added = await client.oidcTrust.add({
-				issuer: 'https://token.actions.githubusercontent.com',
-				audience: 'https://cupboard.example/control',
-				claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
-				permittedGrants: controlRuleGrants
-			});
-			const row = await env.CUPBOARD_DB.prepare(
-				'SELECT permitted_grants_json FROM control_trust WHERE id = ?'
-			)
-				.bind(added.id)
-				.first<{ permitted_grants_json: string }>();
-			const storedGrants: unknown = JSON.parse(
-				z.string().parse(row?.permitted_grants_json)
-			);
-			const fetched = await client.oidcTrust.get({ id: added.id });
-
-			expect({
-				stored: storedGrants,
-				read: fetched.permittedGrants
-			}).toStrictEqual({ stored, read: controlRuleGrants });
-		} finally {
-			if (phase === 'native-reads') {
+	])(
+		'stores a control rule in $name',
+		async ({ rows, isContracted, stored }) => {
+			const { results: triggers } = await env.CUPBOARD_DB.prepare(
+				"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'control_trust_native_grants_%'"
+			).all<{ name: string; sql: string }>();
+			if (!isContracted) {
 				for (const trigger of triggers) {
-					await env.CUPBOARD_DB.prepare(trigger.sql).run();
+					await env.CUPBOARD_DB.prepare(`DROP TRIGGER ${trigger.name}`).run();
+				}
+			}
+			try {
+				for (const [id, state] of rows) {
+					await env.CUPBOARD_DB.prepare(
+						'INSERT INTO deployment_transition (id, state, updated_at) VALUES (?, ?, ?)'
+					)
+						.bind(id, state, '2026-01-01T00:00:00.000Z')
+						.run();
+				}
+
+				const client = controlClient(await issueControlAdminToken());
+
+				const added = await client.oidcTrust.add({
+					issuer: 'https://token.actions.githubusercontent.com',
+					audience: 'https://cupboard.example/control',
+					claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
+					permittedGrants: controlRuleGrants
+				});
+				const row = await env.CUPBOARD_DB.prepare(
+					'SELECT permitted_grants_json FROM control_trust WHERE id = ?'
+				)
+					.bind(added.id)
+					.first<{ permitted_grants_json: string }>();
+				const storedGrants: unknown = JSON.parse(
+					z.string().parse(row?.permitted_grants_json)
+				);
+				const fetched = await client.oidcTrust.get({ id: added.id });
+
+				expect({
+					stored: storedGrants,
+					read: fetched.permittedGrants
+				}).toStrictEqual({ stored, read: controlRuleGrants });
+			} finally {
+				if (!isContracted) {
+					for (const trigger of triggers) {
+						await env.CUPBOARD_DB.prepare(trigger.sql).run();
+					}
 				}
 			}
 		}
-	});
+	);
 
 	it('refuses a loopback HTTP control issuer outside local development', async () => {
 		const client = controlClient(await issueControlAdminToken());
@@ -547,6 +579,98 @@ describe('control contract round trip', () => {
 			}
 		});
 	});
+
+	it('reports the recorded transitions in the order that the deploy applies them', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const before = await client.deployment.transitions();
+
+		await recordTransition('deployment-transitions', 'complete');
+		await recordTransition('cache-identity', 'expanded');
+		const expanded = await client.deployment.transitions();
+
+		await recordTransition('cache-identity', 'complete');
+		const complete = await client.deployment.transitions();
+
+		expect({ before, expanded, complete }).toStrictEqual({
+			before: { transitions: [], unrecognised: [] },
+			expanded: {
+				transitions: [
+					{
+						id: 'cache-identity',
+						state: 'expanded',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					},
+					{
+						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				unrecognised: []
+			},
+			complete: {
+				transitions: [
+					{
+						id: 'cache-identity',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					},
+					{
+						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				unrecognised: []
+			}
+		});
+	});
+
+	// A rollback past a release that added a transition leaves its row behind.
+	// The procedure reports that row separately, so the operator can see it.
+	it.each([
+		{
+			name: 'transition id',
+			id: 'later-transition',
+			state: 'complete',
+			contracted: { contractedAt: '2026-01-01T00:00:00.000Z' }
+		},
+		{
+			name: 'state',
+			id: 'cache-identity',
+			state: 'later-state',
+			contracted: {}
+		}
+	])(
+		'reports a $name that this build does not define as unrecognised',
+		async ({ id, state, contracted }) => {
+			await recordTransition('deployment-transitions', 'complete');
+			const updatedAt = '2026-01-01T00:00:00.000Z';
+			const insert =
+				contracted.contractedAt === undefined
+					? env.CUPBOARD_DB.prepare(
+							'INSERT INTO deployment_transition (id, state, updated_at) VALUES (?, ?, ?)'
+						).bind(id, state, updatedAt)
+					: env.CUPBOARD_DB.prepare(
+							'INSERT INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (?, ?, ?, ?)'
+						).bind(id, state, updatedAt, contracted.contractedAt);
+			await insert.run();
+			const client = controlClient(await issueControlAdminToken());
+
+			await expect(client.deployment.transitions()).resolves.toStrictEqual({
+				transitions: [
+					{
+						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				unrecognised: [
+					{ id, state, updatedAt: '2026-01-01T00:00:00.000Z', ...contracted }
+				]
+			});
+		}
+	);
 
 	it('returns UNAUTHORIZED when the control token is missing', async () => {
 		const client = controlClient();

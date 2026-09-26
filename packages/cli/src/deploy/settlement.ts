@@ -10,42 +10,63 @@ import { throwIfAborted } from '../abort.ts';
 import { LocalStepUnreachedError } from '../errors.ts';
 
 export interface SettlementClient {
-	status(input: { requiredStep: LocalStep }): Promise<LocalStepStatus>;
+	status(input: { requiredStep?: LocalStep }): Promise<LocalStepStatus>;
 	wake(input: LocalStepWakeBody): Promise<LocalStepWakeResponse>;
 }
 
 export interface SettlementOptions {
-	readonly requiredStep: LocalStep;
+	/**
+	 * The step for the status counts. Without it, the server counts against the
+	 * required local step and reports that step with the counts. The wake always
+	 * uses the server's required local step.
+	 */
+	readonly requiredStep?: LocalStep;
 	readonly limit: number;
 	readonly maxPasses: number;
 	readonly signal?: AbortSignal;
 }
 
 /**
-Advances bounded batches, stopping at the requested step or pass limit.
-*/
+ * Advances bounded batches, stopping at the requested step or pass limit. It
+ * also stops when a wake selects no tenant while tenants are still pending.
+ * The wake selects tenants below the server's required local step, wrapping
+ * round the whole list, so an empty wake means that no tenant is below that
+ * step and further wakes would select none either.
+ */
 export async function settleTenants(
 	client: SettlementClient,
 	reporter: Reporter,
 	options: SettlementOptions
 ): Promise<LocalStepStatus> {
-	const query = { requiredStep: options.requiredStep };
+	const query =
+		options.requiredStep === undefined
+			? {}
+			: { requiredStep: options.requiredStep };
 	throwIfAborted(options.signal);
 	let status = await client.status(query);
 	const reported = new Set<string>();
 	for (let pass = 0; status.pending > 0 && pass < options.maxPasses; pass++) {
 		throwIfAborted(options.signal);
-		const result = await reporter.phase('Advancing tenant migrations', () =>
-			client.wake({ limit: options.limit })
+		const result = await reporter.phase(
+			'Advancing tenant migrations',
+			async (context) => {
+				const woken = await client.wake({ limit: options.limit });
+				context.fact('local step', woken.required);
+				return woken;
+			}
 		);
 		reportOutcomes(result.outcomes, reporter, reported);
 		status = await client.status(query);
+
+		if (result.outcomes.length === 0) {
+			break;
+		}
 	}
 	throwIfAborted(options.signal);
 	if (status.pending > 0) {
 		throw new LocalStepUnreachedError(
 			status.pending,
-			options.requiredStep,
+			status.required,
 			status.stragglers
 		);
 	}

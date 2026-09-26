@@ -12,7 +12,7 @@ import {
 	pushPathToTenant,
 	putWorkerTestCache,
 	readFetch,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
@@ -48,7 +48,7 @@ function authorised(): RequestInit {
 describe('per-cache private reads', () => {
 	beforeEach(async () => {
 		await resetTestServer();
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 	});
 
 	it('serves reads publicly when no credential is configured', async () => {

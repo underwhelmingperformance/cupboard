@@ -1,16 +1,14 @@
 import { createHash } from 'node:crypto';
 
-import { contractionMigrations } from '@cupboard/protocol/deployment';
 import { describe, expect, it } from 'vitest';
 
+import type { D1QueryApi } from './d1-query.ts';
 import { databaseIdSchema } from './identifiers.ts';
 import {
 	applyD1Migrations,
 	type D1Migration,
-	type D1MigrationApi,
 	D1MigrationDigestError,
-	parseD1Migrations,
-	unclassifiedD1Migrations
+	parseD1Migrations
 } from './migrations.ts';
 
 function digestOf(sql: string): string {
@@ -41,6 +39,24 @@ describe('parseD1Migrations', () => {
 			}
 		]);
 	});
+
+	// `check:migrations` replays the files in this order, so the two must
+	// agree whatever the names contain.
+	it('sorts names by UTF-16 code unit', () => {
+		const names = parseD1Migrations(
+			['0031_b.sql', '0031_B.sql', '0031_x.sql', '0031-x.sql'].map((name) => ({
+				name,
+				sql: 'SELECT 1;'
+			}))
+		).map((migration) => migration.name);
+
+		expect(names).toStrictEqual([
+			'0031-x.sql',
+			'0031_B.sql',
+			'0031_b.sql',
+			'0031_x.sql'
+		]);
+	});
 });
 
 interface RecordedRow {
@@ -63,7 +79,7 @@ function fakeApi(
 		'sha256',
 		'verification_state'
 	]
-): { api: D1MigrationApi; batches: string[][] } {
+): { api: D1QueryApi; batches: string[][] } {
 	const batches: string[][] = [];
 
 	return {
@@ -192,7 +208,7 @@ describe('applyD1Migrations', () => {
 
 		const batches: string[][] = [];
 		let attempt = 0;
-		const api: D1MigrationApi = {
+		const api: D1QueryApi = {
 			queryBatch(_databaseId, statements) {
 				batches.push([...statements]);
 				attempt += 1;
@@ -220,40 +236,5 @@ describe('applyD1Migrations', () => {
 			second,
 			`INSERT INTO d1_migrations (name, sha256, verification_state) VALUES ('0001_b.sql', '${digestOf(second)}', 'verified');`
 		]);
-	});
-});
-
-function migrationsNamed(names: readonly string[]): D1Migration[] {
-	return parseD1Migrations(names.map((name) => ({ name, sql: 'SELECT 1;' })));
-}
-
-describe('unclassifiedD1Migrations', () => {
-	it('reports an unclassified migration after the first contraction', () => {
-		expect(
-			unclassifiedD1Migrations(
-				migrationsNamed([
-					'0027_cache_identity_compatible_contract.sql',
-					'0028_cache_identity_contract.sql',
-					'0029_cache_grant_contract.sql',
-					'0030_cache_credential_lifecycle.sql',
-					'0031_something_new.sql'
-				])
-			)
-		).toStrictEqual(['0031_something_new.sql']);
-	});
-
-	it('accepts the release its own journal ends with', () => {
-		const journal = migrationsNamed(contractionMigrations);
-
-		expect(unclassifiedD1Migrations(journal)).toStrictEqual([]);
-	});
-
-	it('accepts preparation migrations before the contractions', () => {
-		const journal = migrationsNamed([
-			'0001_early.sql',
-			...contractionMigrations
-		]);
-
-		expect(unclassifiedD1Migrations(journal)).toStrictEqual([]);
 	});
 });

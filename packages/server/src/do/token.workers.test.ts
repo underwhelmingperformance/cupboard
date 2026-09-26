@@ -56,7 +56,7 @@ import {
 	provisionNamedTenant,
 	putTestCache,
 	readFetch,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	testPushId,
 	underOneUnitOfWork,
@@ -2116,17 +2116,17 @@ describe('stored spelling of a refresh-token family', () => {
 
 	it.each([
 		{
-			name: 'the selector spelling until the deployment is contracted',
-			phase: 'native-reads' as const,
+			name: 'the selector spelling until `cache-identity` is complete',
+			state: 'expanded' as const,
 			stored: selectorSpelling
 		},
 		{
-			name: 'the scope spelling once the deployment is contracted',
-			phase: 'contracted' as const,
+			name: 'the scope spelling once `cache-identity` is complete',
+			state: 'complete' as const,
 			stored: grants
 		}
-	])("records a family's grants in $name", async ({ phase, stored }) => {
-		await recordDeploymentPhase(phase);
+	])("records a family's grants in $name", async ({ state, stored }) => {
+		await recordTransition('cache-identity', state);
 		const subjectToken = await installTrustedIdp('admin');
 		await registerCaches();
 

@@ -37,7 +37,7 @@ import {
 	namedCache,
 	provisionFixtureTenant,
 	readFetch,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	resolvedCache
 } from '../test-support.ts';
@@ -607,7 +607,7 @@ describe('reuse-view narinfo lookup', () => {
 	});
 
 	it('gates a private view lookup behind the tenant read credential', async () => {
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 		const path = await committedPath('reuse-private', namedCache('pr-1'), {
 			storePathHash: '9'.repeat(32),
 			access: 'private'

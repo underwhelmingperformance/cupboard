@@ -6274,6 +6274,100 @@ published intermediates and their storage cost.
   retry systems do not mistake a cache failure for a build failure or vice
   versa.
 
+## Schema transitions
+
+### The model
+
+- A schema transition is explicit data in `schemaTransitions`
+  (`@cupboard/protocol/deployment`). It has:
+  - its expand migrations and its contract migrations;
+  - its contract step (`contractStep`), the local step that every active or
+    suspended tenant must record before the contract migrations run;
+  - whether it is independent, meaning its expand migrations do not depend on
+    earlier contract migrations and do not change existing rows;
+  - the local step that objects can record once it is complete;
+  - whether v0.0.34 and v0.0.35 read its progress from `deployment_phase`;
+  - the first release that can complete it.
+
+  Every migration belongs to exactly one transition, and concatenating the lists
+  in order gives the migration files in name order. A released transition's
+  fields are fixed apart from `completedBy`. Expand migrations must stay
+  compatible with every build that can still be deployed or rolled back to.
+
+- `deployment_transition (id, state, updated_at, contracted_at)` records
+  `expanded` or `complete` for each transition, and when the deploy started its
+  contract migrations. The deploy sets `contracted_at` before the first contract
+  migration runs. It creates the table with `CREATE TABLE IF NOT EXISTS` once
+  its checks pass, before the first migration, and migration `0031` creates the
+  table for databases that wrangler or the Workers test pool sets up. The deploy
+  reconciles the recorded states with the `deployment_phase` row that v0.0.34
+  and v0.0.35 read, and writes that row for `cache-identity` so that a rollback
+  to one of those releases reads a correct phase. After a rollback past a
+  release that added a transition, the deploy leaves that transition's row
+  unchanged unless `contracted_at` is set. If it is set, the deploy stops with
+  an error.
+- The deploy applies the transitions in order within one run
+  (`packages/cli/src/deploy/transitions.ts`). Before the upload, it expands
+  every transition that is not complete. It stops with an error for a deployment
+  in which a transition that is not independent follows one that is not
+  complete, because the later transition could expand only after the upload. The
+  error message and the plan row give the releases to deploy first: those that
+  complete the earlier transition and do not include the later one. After the
+  upload, the deploy repeats the checks on the applied migrations, checks once
+  that both Workers serve the build, then wakes tenants until they have recorded
+  each incomplete transition's contract step, applies the contract migrations,
+  and records the transition complete. On a fresh deployment (no `tenant` table,
+  or no tenants and no Worker scripts) the deploy applies every migration before
+  the upload. The functions take the D1 query API and a set of hooks as
+  parameters, so the upgrade tests run them against their own database and
+  Workers.
+- The tenant objects check whether a transition is complete through
+  `TransitionGate` (`hasReached('cache-identity', 'complete')`), and the control
+  Worker through `readRecordedTransitions`. The required local step is the
+  contract step of the first incomplete transition that has one, but never below
+  the highest `reportableStepOnComplete` among the complete transitions. Objects
+  cannot record step 5 until the deploy records `cache-identity` complete, so
+  the count of tenants below step 5 would never reach zero before then.
+- `pnpm check:migrations` fails when the files, the journal and the transitions
+  disagree, and when a contract migration sorts before an expand migration of
+  the same transition. For each N, it also takes a deployment whose first N
+  transitions are complete and whose later ones are pending, and replays the
+  migrations in the order that the deploy would apply them. The check fails if
+  an independent transition's expand migrations do not apply before the earlier
+  contract migrations, or if the order produces a different schema from name
+  order. It compares schemas, not rows.
+
+### Progress
+
+- [x] Transitions as protocol data, applying them in order in the deploy, the
+      `TransitionGate`, `requiredLocalStep`, `deployment.transitions`,
+      `required` in `localStep.status`, and the migration checks.
+- [ ] Set `completedBy` on `deployment-transitions` once the release that first
+      includes it has been tagged.
+- [ ] Rebuild the sweep chain from #407 on the schema transitions. The sweep
+      chain is a sequence of maintenance-queue messages that each wake a batch
+      of tenants, so tenant work continues without a deploy. One D1 row, the
+      sweep row, records which chain may run batches and how many batches in a
+      row have stalled; the delay before the next message doubles with each
+      stalled batch. The rebuild adds that row, a `sweep` object in
+      `localStep.status`, the deploy reading the chain's progress, and the cron
+      restarting a chain that has stopped. The sweep row's table becomes
+      migration `0032` in a new independent transition.
+- [ ] Write the transition records through a control-plane procedure
+      (`PUT /deployment/transitions/{id}`), so the deploy writes to D1 directly
+      only to apply migrations.
+- [ ] Drop `deployment_phase` in a later transition's contract migrations, once
+      no supported rollback target reads it.
+- [ ] Before another transition declares a contract step, generalise
+      `recordLocalStep`, which covers only `cache-identity`.
+- [ ] Before a transition after `deployment-transitions` that has contract
+      migrations is added, make `check:migrations` replay every order that a
+      deployment can reach. Suppose an independent transition has contract
+      migrations, and a deploy expands it before an earlier transition's
+      contract migrations run and then stops. If a later release adds another
+      transition before that transition completes, the later deploy applies the
+      files in an order that the check does not replay yet.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.
