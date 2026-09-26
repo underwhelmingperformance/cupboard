@@ -118,6 +118,10 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'findCustomDomain');
 			return Promise.resolve(absentString);
 		},
+		listCustomDomains: () => {
+			recordApiCall(apiCalls, 'listCustomDomains');
+			return Promise.resolve([]);
+		},
 		setCustomDomain: () => {
 			recordApiCall(apiCalls, 'setCustomDomain');
 			return Promise.resolve();

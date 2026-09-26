@@ -258,6 +258,10 @@ export interface CloudflareApi {
 
 	findZoneId(name: string): Promise<ZoneId | undefined>;
 	findCustomDomain(scriptName: ScriptName): Promise<string | undefined>;
+	/**
+	 * The hostnames of every custom domain routed to the script.
+	 */
+	listCustomDomains(scriptName: ScriptName): Promise<string[]>;
 	setCustomDomain(
 		scriptName: ScriptName,
 		domain: CustomDomain | undefined
@@ -993,6 +997,16 @@ export function createCloudflareApi(
 			);
 
 			return existing?.hostname;
+		},
+
+		async listCustomDomains(scriptName) {
+			const domains = await filterCloudflareItems(
+				client.workers.domains.list(account),
+				(domain) => domain.service === scriptName,
+				'Cloudflare Worker domain list'
+			);
+
+			return domains.map((domain) => domain.hostname);
 		},
 
 		async setCustomDomain(scriptName, desired) {

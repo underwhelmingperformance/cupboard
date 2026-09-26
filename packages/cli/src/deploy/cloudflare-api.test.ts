@@ -721,6 +721,25 @@ describe('findCustomDomain', () => {
 	});
 });
 
+describe('listCustomDomains', () => {
+	it('returns every hostname routed to the script', async () => {
+		const { client } = fakeCloudflare({
+			'GET /accounts/acc-1/workers/domains': [
+				{ hostname: 'cache.example.com', service: 'cupboard' },
+				{ hostname: 'other.example.com', service: 'other-worker' },
+				{ hostname: 'new.example.com', service: 'cupboard' }
+			]
+		});
+
+		const hostnames = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).listCustomDomains(scriptName('cupboard'));
+
+		expect(hostnames).toStrictEqual(['cache.example.com', 'new.example.com']);
+	});
+});
+
 describe('setCustomDomain', () => {
 	const domainsPath = '/accounts/acc-1/workers/domains';
 

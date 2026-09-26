@@ -329,6 +329,10 @@ function recordingApi(
 				recordFallbackApiCall(calls, 'findCustomDomain');
 				return Promise.resolve(absentString());
 			},
+			listCustomDomains: () => {
+				recordFallbackApiCall(calls, 'listCustomDomains');
+				return Promise.resolve([]);
+			},
 			setCustomDomain(scriptName, domain) {
 				calls.push(`domain:${domain?.hostname ?? '(none)'}->${scriptName}`);
 				return Promise.resolve();
