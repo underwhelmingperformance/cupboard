@@ -1,4 +1,5 @@
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
 import { isRootOperation } from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
@@ -55,6 +56,13 @@ import {
 	type PublishingJobFinding,
 	type ReuseViewRequirement
 } from './publication.ts';
+import {
+	RepositoryTrustRuleMissingFinding,
+	TrustRuleAudienceMismatchFinding,
+	TrustRuleClaimMismatchFinding,
+	TrustRuleGrantMissingFinding,
+	TrustRuleIssuerMismatchFinding
+} from './trust-selection.ts';
 import { verifyWorkflowReference } from './workflow-reference.ts';
 
 export interface DiscoveredGithubCheckOptions {
@@ -63,6 +71,13 @@ export interface DiscoveredGithubCheckOptions {
 	 * Defaults to the repository's default branch.
 	 */
 	readonly branch?: string;
+	readonly readUser?: string;
+	readonly isFixRequested?: boolean;
+	/**
+	 * Reports the result as `github-check-verified`, without the repair
+	 * suggestion or candidate rules, for the check that follows a repair.
+	 */
+	readonly isVerification?: boolean;
 }
 
 export interface DiscoveredGithubCheckDependencies {
@@ -88,6 +103,12 @@ export interface DiscoveredGithubCheckResult {
 	readonly identity: RepositoryIdentity;
 	readonly branch: string;
 	readonly jobs: readonly PublishingJobResult[];
+	/**
+	 * The discovered jobs in which a repair can fix every failure: a missing
+	 * trust rule, a matching rule without a required grant, or a missing
+	 * preset reuse view.
+	 */
+	readonly repairableJobs: readonly DiscoveredPublishingJob[];
 	readonly verifiedWorkflowReferences: ReadonlySet<string>;
 	readonly scheduleNote?: string;
 	readonly branchNote?: string;
@@ -183,6 +204,45 @@ function publishingJobResult(
 	};
 }
 
+// A repair can add trust rules and create the preset reuse view. Every other
+// failure needs an operator to change the workflow or the tenant.
+function isRepairableFinding(
+	finding: CheckFinding,
+	identity: RepositoryIdentity
+): boolean {
+	if (finding.status !== 'failed') {
+		return finding.status === 'ok';
+	}
+
+	if (finding instanceof ReuseViewMissingFinding) {
+		return finding.view === pullRequestViewName(identity.repositoryId);
+	}
+
+	return (
+		finding instanceof RepositoryTrustRuleMissingFinding ||
+		finding instanceof TrustRuleIssuerMismatchFinding ||
+		finding instanceof TrustRuleAudienceMismatchFinding ||
+		finding instanceof TrustRuleClaimMismatchFinding ||
+		finding instanceof TrustRuleGrantMissingFinding
+	);
+}
+
+function isRepairableJob(
+	job: PublishingJobResult,
+	identity: RepositoryIdentity
+): boolean {
+	return (
+		job.status === 'failed' &&
+		job.findings.every(({ finding }) => isRepairableFinding(finding, identity))
+	);
+}
+
+export function isRepairOffered(
+	result: Pick<DiscoveredGithubCheckResult, 'repairableJobs'>
+): boolean {
+	return result.repairableJobs.length > 0;
+}
+
 function findingDetails(findings: readonly PublishingJobFinding[]): string[] {
 	return findings.flatMap(({ trigger, finding }) => {
 		const detail = finding.detail();
@@ -205,50 +265,65 @@ function isPlaceholder(job: PublishingJobResult): boolean {
 	);
 }
 
-function candidateTrustRules(
+/**
+ * Whether a GitHub trust rule can match a run of this repository whose token
+ * has `workflowReference` as its `job_workflow_ref` claim. When it is
+ * `undefined`, the rule's `job_workflow_ref` claim is not compared.
+ */
+export function canMatchRepositoryRun(
+	rule: Pick<OidcTrustRule, 'issuer' | 'claims'>,
 	identity: RepositoryIdentity,
-	unverified: readonly PublishingJobResult[],
-	rules: readonly OidcTrustSummary[]
-): OidcTrustSummary[] {
+	workflowReference: string | undefined
+): boolean {
 	const knownClaims: Readonly<Record<string, string>> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
 		repository: identity.fullName,
 		repository_owner: identity.fullName.split('/', 1)[0] ?? identity.fullName
 	};
-	const references = unverified.flatMap((job) =>
-		job.workflowRef === undefined ? [] : [job.workflowRef]
-	);
-	const hasUnknownReference = unverified.some(
-		(job) => job.workflowRef === undefined
-	);
-	return rules.filter((rule) => {
-		const hasMatchingClaims = Object.entries(knownClaims).every(
-			([claim, value]) => {
-				const expected = rule.claims[claim];
+	const hasMatchingClaims = Object.entries(knownClaims).every(
+		([claim, value]) => {
+			const expected = rule.claims[claim];
 
-				return expected === undefined || isClaimSatisfied(expected, value);
-			}
-		);
-		const workflow = rule.claims.job_workflow_ref;
-		const subject = rule.claims.sub;
-		const hasMatchingSubject =
-			typeof subject !== 'string' ||
-			subject.startsWith(`repo:${identity.fullName}:`);
+			return expected === undefined || isClaimSatisfied(expected, value);
+		}
+	);
+	const workflow = rule.claims.job_workflow_ref;
+	const subject = rule.claims.sub;
+	const hasMatchingSubject =
+		typeof subject !== 'string' ||
+		subject.startsWith(`repo:${identity.fullName}:`);
 
-		return (
-			!rule.disabled &&
-			rule.issuer === githubActionsIssuer &&
-			hasMatchingClaims &&
-			hasMatchingSubject &&
-			(workflow === undefined ||
-				hasUnknownReference ||
-				references.some((reference) => isClaimSatisfied(workflow, reference)))
-		);
-	});
+	return (
+		rule.issuer === githubActionsIssuer &&
+		hasMatchingClaims &&
+		hasMatchingSubject &&
+		(workflow === undefined ||
+			workflowReference === undefined ||
+			isClaimSatisfied(workflow, workflowReference))
+	);
 }
 
-async function checkView(
+function candidateTrustRules(
+	identity: RepositoryIdentity,
+	unverified: readonly PublishingJobResult[],
+	rules: readonly OidcTrustSummary[]
+): OidcTrustSummary[] {
+	const references = unverified.map((job) => job.workflowRef);
+	const hasUnknownReference = references.includes(undefined);
+
+	return rules.filter(
+		(rule) =>
+			!rule.disabled &&
+			(hasUnknownReference
+				? canMatchRepositoryRun(rule, identity, undefined)
+				: references.some((reference) =>
+						canMatchRepositoryRun(rule, identity, reference)
+					))
+	);
+}
+
+export async function checkView(
 	tenant: URL,
 	view: ReuseViewRequirement,
 	identity: RepositoryIdentity,
@@ -531,18 +606,24 @@ export async function inspectDiscoveredGithubCheck(
 		)
 	);
 
+	const repairableJobs: DiscoveredPublishingJob[] = [];
+
 	for (const job of discovery.jobs) {
-		jobs.push(
-			await inspectJob(
-				job,
-				identity,
-				tenant,
-				branch,
-				rules,
-				inspectionClient,
-				inspectionDependencies
-			)
+		const result = await inspectJob(
+			job,
+			identity,
+			tenant,
+			branch,
+			rules,
+			inspectionClient,
+			inspectionDependencies
 		);
+
+		jobs.push(result);
+
+		if (isRepairableJob(result, identity)) {
+			repairableJobs.push(job);
+		}
 	}
 
 	if (jobs.length === 0) {
@@ -568,6 +649,10 @@ export async function inspectDiscoveredGithubCheck(
 		)
 			? `The check models the preset's push and manual runs on the default branch ${identity.defaultBranch}, using the workflow files from ${branch}. Changes on ${branch} take effect after ${branch} is merged into ${identity.defaultBranch}.`
 			: undefined;
+	const readCredential =
+		options.readUser === undefined
+			? ''
+			: ' --read-user <user> --read-password <password>';
 
 	const rows: ResultRow[] = [
 		{
@@ -590,11 +675,24 @@ export async function inspectDiscoveredGithubCheck(
 			: [{ label: 'Schedule', value: scheduleNote }]),
 		...(branchNote === undefined
 			? []
-			: [{ label: 'Branch', value: branchNote }])
+			: [{ label: 'Branch', value: branchNote }]),
+		...(repairableJobs.length > 0 &&
+		options.isFixRequested !== true &&
+		options.isVerification !== true
+			? [
+					{
+						label: 'Review a repair',
+						value: `cupboard github check ${canonicalHref(tenant)} --repo ${identity.fullName} --branch ${branch}${readCredential} --fix`
+					}
+				]
+			: [])
 	];
 
 	reporter.result({
-		kind: 'github-check-discovered',
+		kind:
+			options.isVerification === true
+				? 'github-check-verified'
+				: 'github-check-discovered',
 		data: {
 			revision: discovery.revision,
 			jobs,
@@ -608,7 +706,7 @@ export async function inspectDiscoveredGithubCheck(
 		(job) => job.status === 'unverified' && !isPlaceholder(job)
 	);
 
-	if (unverified.length > 0) {
+	if (unverified.length > 0 && options.isVerification !== true) {
 		const candidates = candidateTrustRules(identity, unverified, listed.rules);
 
 		reporter.result({
@@ -641,6 +739,7 @@ export async function inspectDiscoveredGithubCheck(
 		identity,
 		branch,
 		jobs,
+		repairableJobs,
 		verifiedWorkflowReferences,
 		...(scheduleNote !== undefined && { scheduleNote }),
 		...(branchNote !== undefined && { branchNote })

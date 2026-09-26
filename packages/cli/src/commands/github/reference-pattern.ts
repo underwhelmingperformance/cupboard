@@ -2,6 +2,7 @@ import {
 	isPatternMatch,
 	quotePatternLiteral
 } from '@cupboard/protocol/capture';
+import { type ClaimMatch } from '@cupboard/protocol/oidc';
 
 // GitHub filter patterns also accept `?`, `+`, character ranges and `!`
 // negation. The check evaluates only literal names with `*` and `**`, and
@@ -40,5 +41,19 @@ export class ReferencePattern {
 	 */
 	example(): string {
 		return this.glob.replaceAll('*', '0');
+	}
+
+	/**
+	 * A claim matcher for every ref that starts with `prefix` and whose
+	 * remainder matches the pattern.
+	 */
+	claim(prefix: string): ClaimMatch {
+		if (!this.glob.includes('*')) {
+			return `${prefix}${this.glob}`;
+		}
+
+		return {
+			pattern: `^${quotePatternLiteral(prefix)}${this.expression()}$`
+		};
 	}
 }

@@ -53,6 +53,8 @@ import {
 	registerGithubCommands,
 	runGithubSetup
 } from './github.ts';
+import { type DiscoveredGithubCheckResult } from './github/discovered-check.ts';
+import { RepositoryTrustRuleMissingFinding } from './github/trust-selection.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
@@ -1716,10 +1718,128 @@ describe('registerGithubCommands', () => {
 			{ flags: '--repo <owner/name>', mandatory: true },
 			{ flags: '--branch <name>', mandatory: false },
 			{ flags: '--workflow-ref <owner/repo/path@ref>', mandatory: false },
+			{ flags: '--fix', mandatory: false },
+			{ flags: '-y, --yes', mandatory: false },
+			{ flags: '--trust-scope <scope>', mandatory: false },
+			{ flags: '--tag-pattern <glob>', mandatory: false },
 			{ flags: '--root-prefix <value>', mandatory: false },
 			{ flags: '--read-user <user>', mandatory: false },
 			{ flags: '--read-password <password>', mandatory: false }
 		]);
+	});
+
+	it('rejects repair options with an explicit workflow reference', async () => {
+		const program = new Command();
+		registerGithubCommands(program);
+
+		await expect(
+			program.parseAsync(
+				[
+					'github',
+					'check',
+					url.href,
+					'--repo',
+					'acme/app',
+					'--workflow-ref',
+					pinnedWorkflowReference,
+					'--fix'
+				],
+				{ from: 'user' }
+			)
+		).rejects.toBeInstanceOf(GithubCheckOptionError);
+	});
+
+	it('validates trust scope before running the check', async () => {
+		const program = new Command();
+		registerGithubCommands(program);
+		const check = program.commands
+			.find((command) => command.name() === 'github')
+			?.commands.find((command) => command.name() === 'check');
+		const stderr: string[] = [];
+		check?.exitOverride();
+		check?.configureOutput({
+			writeErr: (message) => {
+				stderr.push(message);
+			}
+		});
+
+		await expect(
+			program.parseAsync(
+				[
+					'github',
+					'check',
+					url.href,
+					'--repo',
+					'acme/app',
+					'--fix',
+					'--trust-scope',
+					'unknown'
+				],
+				{ from: 'user' }
+			)
+		).rejects.toMatchObject({ code: 'commander.invalidArgument' });
+		expect(stderr).toHaveLength(1);
+	});
+
+	it('passes --fix and the selected trust scope to the discovered repair', async () => {
+		const result: DiscoveredGithubCheckResult = {
+			discovery: { revision: 'a'.repeat(40), jobs: [], unverified: [] },
+			identity,
+			branch: 'main',
+			repairableJobs: [],
+			verifiedWorkflowReferences: new Set(),
+			jobs: [
+				{
+					caller: '.github/workflows/publish.yml',
+					job: 'publish',
+					status: 'failed',
+					findings: [
+						{
+							trigger: 'push',
+							finding: new RepositoryTrustRuleMissingFinding('trust rule')
+						}
+					]
+				}
+			]
+		};
+		const inspected: unknown[] = [];
+		const repaired: unknown[] = [];
+		const program = new Command();
+		registerGithubCommands(
+			program,
+			{},
+			{
+				inspectDiscoveredGithubCheck: (_url, options) => {
+					inspected.push(options);
+
+					return Promise.resolve(result);
+				},
+				runDiscoveredGithubRepair: (_url, options) => {
+					repaired.push(options);
+
+					return Promise.resolve();
+				}
+			}
+		);
+
+		await program.parseAsync(
+			[
+				'github',
+				'check',
+				url.href,
+				'--repo',
+				'acme/app',
+				'--fix',
+				'--trust-scope',
+				'exact'
+			],
+			{ from: 'user' }
+		);
+
+		expect({ inspected, repaired }).toStrictEqual({
+			inspected: [{ repo: 'acme/app', isFixRequested: true }],
+			repaired: [{ repo: 'acme/app', fix: true, trustScope: 'exact' }]
+		});
 	});
 
 	it('rejects --root-prefix in discovery mode with a check usage error', async () => {

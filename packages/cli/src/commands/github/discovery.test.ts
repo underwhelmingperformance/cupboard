@@ -172,6 +172,7 @@ jobs:
 				{
 					caller: '.github/workflows/build.yml',
 					job: 'second',
+					workflow: 'cupboard',
 					workflowRef:
 						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.36',
 					detail:
@@ -209,12 +210,14 @@ jobs:
 				{
 					caller: '.github/workflows/build.yml',
 					job: 'external',
+					workflow: 'external',
 					detail:
 						'another/repo/.github/workflows/publish.yml@v1 is an external reusable workflow; the check cannot inspect its publication steps'
 				},
 				{
 					caller: '.github/workflows/build.yml',
 					job: 'direct',
+					workflow: 'repository',
 					detail:
 						'this job calls a Cupboard action or CLI command directly; inspect its tenant, grant and root inputs'
 				}
@@ -442,6 +445,7 @@ jobs:
 				{
 					caller: '.github/workflows/broken.yml',
 					job: 'workflow',
+					workflow: 'unknown',
 					detail: `Cannot parse .github/workflows/broken.yml: ${parseDocument(broken, { uniqueKeys: true }).errors[0]?.message ?? ''}`
 				}
 			]
@@ -536,6 +540,7 @@ jobs:
 			unverified: ['cache', 'tenant'].map((job) => ({
 				caller: '.github/workflows/build.yml',
 				job,
+				workflow: 'external',
 				detail:
 					'another/repo/.github/workflows/publish.yml@v1 is an external reusable workflow; the check cannot inspect its publication steps'
 			}))
@@ -573,6 +578,7 @@ jobs:
 			unverified: ['dynamic-url', 'dynamic-secret'].map((job) => ({
 				caller: '.github/workflows/build.yml',
 				job,
+				workflow: 'external',
 				detail:
 					'another/repo/.github/workflows/publish.yml@v1 is an external reusable workflow; the check cannot inspect its publication steps'
 			}))
@@ -612,6 +618,7 @@ jobs:
 				{
 					caller: '.github/workflows/build.yml',
 					job: 'build',
+					workflow: 'repository',
 					detail:
 						'this job calls a Cupboard action or CLI command directly; inspect its tenant, grant and root inputs'
 				}
@@ -751,6 +758,7 @@ jobs:
 				{
 					caller: '.github/workflows/first.yml',
 					job: 'publish (second.yml: publish)',
+					workflow: 'unknown',
 					detail: `reusable workflow calls form a cycle at .github/workflows/first.yml@${'a'.repeat(40)}`
 				}
 			]
@@ -1291,6 +1299,7 @@ jobs:
 				{
 					caller: '.github/workflows/ci.yml',
 					job: 'missing',
+					workflow: 'unknown',
 					detail: 'Cannot read .github/workflows/missing.yml from GitHub'
 				}
 			]
@@ -1327,6 +1336,7 @@ jobs:
 				{
 					caller: '.github/workflows/publish.yml',
 					job: 'publish',
+					workflow: 'cupboard',
 					workflowRef:
 						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
 					detail:
@@ -1387,6 +1397,7 @@ runs:
 				{
 					caller: '.github/workflows/build.yml',
 					job: 'publish',
+					workflow: 'repository',
 					detail:
 						'this job calls a Cupboard action or CLI command through the local action ./.github/actions/publish; inspect its tenant, grant and root inputs'
 				}
@@ -1420,6 +1431,7 @@ jobs:
 				{
 					caller: '.github/workflows/cleanup.yml',
 					job: 'cleanup',
+					workflow: 'repository',
 					detail:
 						'this job calls a Cupboard action or CLI command directly; inspect its tenant, grant and root inputs'
 				}

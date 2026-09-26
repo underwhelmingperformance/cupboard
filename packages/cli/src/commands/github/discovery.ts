@@ -71,9 +71,19 @@ export interface DiscoveredPublishingJob {
 	readonly triggers: readonly WorkflowTrigger[];
 }
 
+/**
+ * The workflow that the `job_workflow_ref` claim of an unverified job's OIDC
+ * token refers to: a Cupboard publishing workflow, a workflow file in the
+ * checked repository, a reusable workflow in another repository, or a workflow
+ * that the check could not read.
+ */
+export type UnverifiedJobWorkflow =
+	'cupboard' | 'repository' | 'external' | 'unknown';
+
 export interface UnverifiedPublishingJob {
 	readonly caller: string;
 	readonly job: string;
+	readonly workflow: UnverifiedJobWorkflow;
 	readonly workflowRef?: string;
 	readonly detail: string;
 }
@@ -309,8 +319,8 @@ function calledWorkflow(
 	};
 }
 
-const cupboardWorkflowPrefix =
-	'underwhelmingperformance/cupboard/.github/workflows/';
+export const cupboardRepository = 'underwhelmingperformance/cupboard';
+const cupboardWorkflowPrefix = `${cupboardRepository}/.github/workflows/`;
 const publishingActions = new Set([
 	'push',
 	'attest',
@@ -630,6 +640,7 @@ export async function discoverPublishingJobs(
 			unverified.push({
 				caller,
 				job: callerLabel ?? 'workflow',
+				workflow: 'unknown',
 				detail: `reusable workflow calls form a cycle at ${location}`
 			});
 			return;
@@ -647,6 +658,7 @@ export async function discoverPublishingJobs(
 			unverified.push({
 				caller,
 				job: callerLabel ?? 'workflow',
+				workflow: 'unknown',
 				detail: error.message
 			});
 			return;
@@ -679,7 +691,12 @@ export async function discoverPublishingJobs(
 			const direct = await directPublication(job.steps ?? [], reference, []);
 
 			if (direct !== undefined) {
-				unverified.push({ caller, job: label, detail: direct });
+				unverified.push({
+					caller,
+					job: label,
+					workflow: 'repository',
+					detail: direct
+				});
 			}
 
 			const uses = job.uses;
@@ -717,6 +734,7 @@ export async function discoverPublishingJobs(
 					unverified.push({
 						caller,
 						job: label,
+						workflow: 'external',
 						detail: `${uses} is an external reusable workflow; the check cannot inspect its publication steps`
 					});
 				}
@@ -738,6 +756,7 @@ export async function discoverPublishingJobs(
 				unverified.push({
 					caller,
 					job: label,
+					workflow: 'cupboard',
 					...(workflowReference !== undefined && {
 						workflowRef: workflowReference
 					}),
@@ -757,6 +776,7 @@ export async function discoverPublishingJobs(
 				unverified.push({
 					caller,
 					job: label,
+					workflow: 'cupboard',
 					...(workflowReference !== undefined && {
 						workflowRef: workflowReference
 					}),
@@ -770,6 +790,7 @@ export async function discoverPublishingJobs(
 				unverified.push({
 					caller,
 					job: label,
+					workflow: 'cupboard',
 					detail: `${uses} does not use an exact release tag or full commit ID`
 				});
 				continue;
@@ -804,7 +825,12 @@ export async function discoverPublishingJobs(
 				throw error;
 			}
 
-			unverified.push({ caller: path, job: 'workflow', detail: error.message });
+			unverified.push({
+				caller: path,
+				job: 'workflow',
+				workflow: 'unknown',
+				detail: error.message
+			});
 			continue;
 		}
 
