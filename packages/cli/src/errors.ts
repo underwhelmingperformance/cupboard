@@ -452,9 +452,13 @@ export class AdminApiTransientError extends CliError {
 }
 
 export class QuotaExceededError extends CliError {
-	constructor(public readonly detail: string) {
+	constructor(
+		public readonly detail: string,
+		options?: ErrorOptions
+	) {
 		super(
-			`${quotaExplanation(detail)} Free space by deleting unused paths or raise the quota.`
+			`${quotaExplanation(detail)} Free space by deleting unused paths or raise the quota.`,
+			options
 		);
 		this.name = 'QuotaExceededError';
 	}
@@ -480,11 +484,15 @@ export class CupboardHttpError extends CliError {
 		public readonly body: string,
 		// Cloudflare's per-request ray id from the response, when present. It
 		// identifies the matching server-side log entry.
-		public readonly ray?: string
+		public readonly ray?: string,
+		options?: ErrorOptions
 	) {
 		const rayNote = ray === undefined ? '' : ` (Cloudflare ray ${ray})`;
 
-		super(`${method} ${path} failed with ${String(status)}: ${body}${rayNote}`);
+		super(
+			`${method} ${path} failed with ${String(status)}: ${body}${rayNote}`,
+			options
+		);
 		this.name = 'CupboardHttpError';
 		this.oauthError = parseOAuthErrorBody(body);
 	}
