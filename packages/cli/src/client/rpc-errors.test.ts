@@ -6,7 +6,8 @@ import {
 	type AdminApiTransientStatus,
 	QuotaExceededError,
 	ScopeForbiddenError,
-	SessionRejectedError
+	SessionRejectedError,
+	TenantOffboardingError
 } from '../errors.ts';
 
 import { isRpcNotFoundError, translateRpcError } from './rpc-errors.ts';
@@ -125,6 +126,22 @@ describe('translateRpcError', () => {
 		expect(translateRpcError(error)).toStrictEqual(
 			new QuotaExceededError('', { cause: error })
 		);
+	});
+
+	it('translates TENANT_OFFBOARDING into TenantOffboardingError with the tenant ID', () => {
+		const translated = translateRpcError(
+			new ORPCError('TENANT_OFFBOARDING', {
+				status: 409,
+				message: 'raw',
+				data: { id: 'beta' }
+			})
+		);
+
+		expect(
+			translated instanceof TenantOffboardingError
+				? { name: translated.name, tenant: translated.tenant }
+				: translated
+		).toStrictEqual({ name: 'TenantOffboardingError', tenant: 'beta' });
 	});
 
 	it('returns an unrecognised oRPC code unchanged', () => {

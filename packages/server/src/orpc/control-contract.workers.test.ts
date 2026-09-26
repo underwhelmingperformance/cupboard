@@ -312,6 +312,49 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('returns TENANT_OFFBOARDING when suspending or resuming an offboarding tenant', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		await client.tenants.remove({ id: 'acme' });
+		const [suspendError] = await safe(client.tenants.suspend({ id: 'acme' }));
+		const [resumeError] = await safe(client.tenants.resume({ id: 'acme' }));
+		const listed = await client.tenants.list();
+		const contractError = z.object({
+			code: z.string(),
+			status: z.number(),
+			data: z.unknown()
+		});
+		const acmeSummary = listed.tenants.find((entry) => entry.id === 'acme');
+
+		expect({
+			suspend: contractError.parse(suspendError),
+			resume: contractError.parse(resumeError),
+			listed:
+				acmeSummary === undefined
+					? undefined
+					: { id: acmeSummary.id, status: acmeSummary.status }
+		}).toStrictEqual({
+			suspend: {
+				code: 'TENANT_OFFBOARDING',
+				status: StatusCodes.CONFLICT,
+				data: { id: 'acme' }
+			},
+			resume: {
+				code: 'TENANT_OFFBOARDING',
+				status: StatusCodes.CONFLICT,
+				data: { id: 'acme' }
+			},
+			listed: { id: 'acme', status: 'offboarding' }
+		});
+	});
+
 	it.each([
 		'https://idp.test?',
 		'https://idp.test#',

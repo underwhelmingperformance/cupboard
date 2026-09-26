@@ -89,6 +89,11 @@ export type TenantMutateResponseInput = z.input<
 	typeof tenantMutateResponseSchema
 >;
 
+// The data of the `TENANT_OFFBOARDING` contract error.
+export const tenantOffboardingErrorDataSchema = z.strictObject({
+	id: tenantIdSchema
+});
+
 // A membership rebuild reasserts every live tenant's marker and reconstructs
 // the admission filter from the registry. The response reports how many tenants
 // the gate now admits. No tenant data changes.

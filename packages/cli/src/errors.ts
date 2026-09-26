@@ -1,3 +1,4 @@
+import type { TenantId } from '@cupboard/nix-store/scalars';
 import {
 	CodedError,
 	genericExitCode,
@@ -481,6 +482,23 @@ function quotaExplanation(detail: string): string {
 	}
 
 	return /[.!?]$/u.test(explanation) ? explanation : `${explanation}.`;
+}
+
+/**
+ * The operator tried to suspend or resume a tenant whose removal has begun.
+ * Removal runs to completion, so the tenant's next status can only be
+ * `offboarded`.
+ */
+export class TenantOffboardingError extends CliError {
+	constructor(public readonly tenant: TenantId) {
+		super(
+			`Tenant ${tenant} is being removed, so it cannot be suspended or ` +
+				'resumed. Removal cannot be undone. `cupboard tenant list` shows ' +
+				'the tenant as `offboarding` until removal finishes, then ' +
+				'`offboarded`.'
+		);
+		this.name = 'TenantOffboardingError';
+	}
 }
 
 export class CupboardHttpError extends CliError {
