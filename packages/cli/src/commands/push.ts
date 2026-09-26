@@ -16,6 +16,7 @@ import {
 	observedCopiesSchema
 } from '@cupboard/protocol/build';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
@@ -361,7 +362,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--root <name>',
-			'retain the pushed paths under this named retention root (e.g. github:owner/repo/main)',
+			`retain the pushed paths under this named retention root (e.g. github:owner/repo/main); one push can retain at most ${String(rootSetMaxTargets)} target paths`,
 			parseRootName
 		)
 		.option(
