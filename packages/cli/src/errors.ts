@@ -429,14 +429,21 @@ export class ScopeForbiddenError extends CliError {
 
 export class QuotaExceededError extends CliError {
 	constructor(public readonly detail: string) {
-		const explanation =
-			detail === '' ? 'The cache is over its storage quota.' : detail;
-
 		super(
-			`${explanation} Free space by deleting unused paths or raise the quota.`
+			`${quotaExplanation(detail)} Free space by deleting unused paths or raise the quota.`
 		);
 		this.name = 'QuotaExceededError';
 	}
+}
+
+function quotaExplanation(detail: string): string {
+	const explanation = detail.trim();
+
+	if (explanation === '') {
+		return 'The cache is over its storage quota.';
+	}
+
+	return /[.!?]$/u.test(explanation) ? explanation : `${explanation}.`;
 }
 
 export class CupboardHttpError extends CliError {
