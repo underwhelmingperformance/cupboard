@@ -2,12 +2,14 @@ import { rootLogger } from '@cupboard/logger';
 import { type Capture, startCapture } from '@cupboard/logger/testing';
 import {
 	cacheNameSchema,
-	signingKeyIdSchema
+	signingKeyIdSchema,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	CacheAlreadyExistsError,
@@ -17,6 +19,7 @@ import {
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
+	TenantOffboardingError,
 	UploadNotFoundError
 } from '../errors.ts';
 
@@ -52,6 +55,25 @@ describe('bridgedError', () => {
 			message:
 				'The cache contains store paths. Set force to true to delete it.',
 			data: { cache: { kind: 'named', name: 'builds' } }
+		});
+		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it('returns TENANT_OFFBOARDING with the tenant being removed', () => {
+		const bridged = bridgedError(
+			rootLogger(),
+			new TenantOffboardingError(tenantIdSchema.parse('beta'))
+		);
+
+		expect(bridged).toBeInstanceOf(ORPCError);
+		expect(
+			z
+				.object({ code: z.string(), status: z.number(), data: z.unknown() })
+				.parse(bridged)
+		).toStrictEqual({
+			code: 'TENANT_OFFBOARDING',
+			status: StatusCodes.CONFLICT,
+			data: { id: 'beta' }
 		});
 		expect(capture.logs).toStrictEqual([]);
 	});

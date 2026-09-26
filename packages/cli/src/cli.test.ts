@@ -1,6 +1,7 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
+import { TrustedRootFormatError } from '@cupboard/shared/sigstore';
 import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -19,6 +20,7 @@ import {
 	transientExitCode,
 	UploadWaitTimeoutError
 } from './errors.ts';
+import { RootTargetLimitError } from './push/push.ts';
 
 const abortExitCode = 130;
 
@@ -96,6 +98,16 @@ describe('cliExitCode', () => {
 		{
 			name: 'a refused confirmation',
 			error: new ConfirmationRequiredError('Remove tenant acme?'),
+			expected: usageExitCode
+		},
+		{
+			name: 'a root over its target limit',
+			error: new RootTargetLimitError(150, 149),
+			expected: usageExitCode
+		},
+		{
+			name: 'a malformed trusted-root file',
+			error: new TrustedRootFormatError('roots.json', { kind: 'empty' }),
 			expected: usageExitCode
 		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }

@@ -85,9 +85,28 @@ cache to their own configuration.
 
 ### As a NixOS or Home Manager module
 
-Both modules expose `nix.cupboard.caches`, a list of caches, and fold each entry
-into `nix.settings.substituters` and `nix.settings.trusted-public-keys`. The
-default cache and its key are kept; the caches you list are added.
+Both modules expose `nix.cupboard.caches`, a list of caches.
+
+After `nix.settings` and your own `extraOptions`, each module writes an
+`extra-substituters` line for the public caches, an `extra-trusted-public-keys`
+line for every cache's keys, and an `!include` line for each private cache. Each
+`extra-` line adds to the list that Nix has already read, so the default cache
+and its key are kept. Caches and keys that you set in
+`nix.settings.substituters`, `nix.settings.trusted-public-keys` or
+`extraOptions` are kept too. Home Manager writes a user-level `nix.conf`, and
+Nix reads it after the system file, so the Home Manager module's lines add to
+the system's caches and keys.
+
+Nix asks substituters in order of the `Priority` that each one reports in its
+`nix-cache-info`, lowest first, and keeps the configured order when priorities
+are equal. A cupboard cache reports 40 unless you change it, the same as
+cache.nixos.org. The module's caches come after the system's substituters, so
+Nix asks cache.nixos.org first. To have Nix ask a cupboard cache first, give it
+a lower priority with `cupboard cache set-priority`.
+
+The modules do not add cupboard's caches or keys to the
+`nix.settings.substituters` and `nix.settings.trusted-public-keys` options, so
+other configuration that reads those options does not see them.
 
 A public cache sets `url`. A private cache sets `substitutersFile` instead: its
 substituter URL carries a read credential, and `nix.conf` is world-readable, so
@@ -205,17 +224,49 @@ the credentials. Give the snippet to the modules through `substitutersFile`:
 
 Set `substitutersFile` to a file that contains the `extra-substituters` line
 printed by `cupboard config`. Create the file outside the Nix store with mode
-0400 or 0600, and make it readable only by the account that runs Nix. The option
-has type `lib.types.externalPath`, so module evaluation rejects a path in the
-Nix store.
+0400 or 0600. For the NixOS module, make it readable only by the account that
+runs the Nix daemon. For the Home Manager module, make it readable only by your
+own account. Restrict only the file itself: every account that reads `nix.conf`
+must be able to enter the directories above it, which needs search (execute)
+permission on each of them. `/etc/nix` meets this requirement, and so do
+`/run/secrets` and `/run/agenix`, which sops-nix and agenix create with
+mode 0751. The option has type `lib.types.externalPath`, so module evaluation
+rejects a path in the Nix store.
 
-The module writes a required `include` directive to `nix.conf`. Nix reads the
-protected file at runtime, so the credential-bearing URL does not appear in the
+The module writes an `!include` directive to `nix.conf`. Nix reads the protected
+file at runtime, so the credential-bearing URL does not appear in the
 world-readable `nix.conf`. Settings in the included file extend the settings
 that Nix has already read, which adds the private cache to the other
-substituters. If the file is missing or unreadable, Nix rejects the
-configuration. The private cache therefore cannot disappear from the substituter
-list without an error.
+substituters.
+
+If the file is missing, or the account that must read it cannot read it, Nix
+leaves the private cache out of its substituters and reports no error. If an
+account cannot search every directory above the file, Nix then ignores every
+setting in the including `nix.conf` for that account, again without an error.
+With the NixOS module, the including file is the system `nix.conf`: an ordinary
+user's Nix then runs without the system's substituters, trusted keys and
+experimental features. `sudo nix config show` does not show this, because root
+can search every directory. As an ordinary user, run
+`nix --extra-experimental-features nix-command config show trusted-public-keys`
+and check that it lists the cupboard key. The module writes that key into the
+same `nix.conf` as the `!include` line, so the key is missing exactly when Nix
+ignored the file.
+
+With the NixOS module, run `sudo nix config show substituters` to confirm that
+the private cache is present. An ordinary user's output does not list the
+private cache. Builds that the daemon runs for that user still use it, unless
+the user's Nix client sends its own substituter list. The client sends its own
+list when a user-level `nix.conf`, `NIX_CONFIG` or a command-line option such as
+`--option substituters` or `--extra-substituters` sets `substituters` or
+`extra-substituters`. That list lacks the private cache, because the client
+cannot read the file.
+
+With the Home Manager module, run `nix config show substituters` as yourself to
+confirm that the private cache is present. The daemon uses the private cache for
+your builds only if you are a trusted user, as for any user-level substituter
+(see above). Both commands print the cache's credential. Neither Nix nor
+cupboard reports a missing or unreadable file, so run the check after you create
+or move the file.
 
 ### Cache access
 
@@ -330,7 +381,11 @@ Before signing, the action reports the services it may contact and where it may
 publish signature records or bundles.
 
 Verifying a bundle that carries no transparency-log entry requires
-`--tlog-threshold 0`; `cupboard attest verify --help` prints the complete
-command. [The GitHub Actions guide][github-actions] covers the action's inputs.
+`--tlog-threshold 0`. With the default signing profile, `actions/attest` signs
+with GitHub's Sigstore instance for a public destination when the repository is
+not public. Such a bundle also needs `--trusted-root` with the output of
+`gh attestation trusted-root` and `--ctlog-threshold 0`.
+`cupboard attest verify --help` prints the complete command. [The GitHub Actions
+guide][github-actions] covers the action's inputs.
 
 [github-actions]: ./github-actions.md

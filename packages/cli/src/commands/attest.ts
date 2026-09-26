@@ -3,7 +3,11 @@ import { env } from 'node:process';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { formatCount, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
-import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
+import {
+	defaultVerifierThreshold,
+	type VerifyResult,
+	type VerifyTrust
+} from '@cupboard/shared/sigstore';
 import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
 import type { Command } from 'commander';
 
@@ -60,9 +64,12 @@ interface VerifyOptions {
 export class InvalidVerifierThresholdError extends CliUsageError {
 	constructor(
 		public readonly option: string,
-		public readonly value: string
+		public readonly value: string,
+		public readonly minimum: number
 	) {
-		super(`Invalid ${option} (expected a positive integer): ${value}`);
+		super(
+			`Invalid ${option} (expected an integer of at least ${String(minimum)}): ${value}`
+		);
 		this.name = 'InvalidVerifierThresholdError';
 	}
 }
@@ -74,19 +81,16 @@ export class AttestVerifyModeError extends CliUsageError {
 	}
 }
 
-export function parseVerifierThreshold(option: string) {
+export function parseVerifierThreshold(option: string, minimum: number) {
 	return (value: string): number => {
 		if (!/^\d+$/.test(value)) {
-			throw new InvalidVerifierThresholdError(option, value);
+			throw new InvalidVerifierThresholdError(option, value, minimum);
 		}
 
 		const parsed = Number(value);
 
-		// A threshold of zero would tell the Sigstore verifier to require no
-		// transparency-log, certificate-transparency or timestamp entries, which
-		// silently disables that part of verification.
-		if (!Number.isSafeInteger(parsed) || parsed < 1) {
-			throw new InvalidVerifierThresholdError(option, value);
+		if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+			throw new InvalidVerifierThresholdError(option, value, minimum);
 		}
 
 		return parsed;
@@ -265,22 +269,26 @@ export function registerAttestCommands(
 		)
 		.option(
 			'--trusted-root <path>',
-			"Verify against the Sigstore trust roots in this trusted_root.json file. Defaults to the public Sigstore roots; pass the roots that `gh attestation trusted-root` writes to verify a bundle signed with GitHub's Sigstore instance."
+			"Verify against the Sigstore trusted roots in this file: one trusted_root.json document, or JSON Lines with one root per line (the form that `gh attestation trusted-root` prints). Verification succeeds if the bundle verifies against any root in the file. Defaults to the public-good Sigstore root; pass the output of `gh attestation trusted-root` to verify a bundle signed with GitHub's Sigstore instance."
 		)
 		.option(
 			'--tlog-threshold <count>',
-			"Require this many Rekor transparency-log entries. Defaults to the Sigstore verifier policy, which requires one; pass 0 for a bundle signed with GitHub's Sigstore instance, which creates no Rekor entry.",
-			parseVerifierThreshold('--tlog-threshold')
+			"Require this many Rekor transparency-log entries. Defaults to the Sigstore verifier policy, which requires one. A value of 0 requires no Rekor entry for any trusted root, but the verifier still checks every Rekor entry that the bundle contains. Pass 0 for a bundle without a Rekor entry, such as a bundle that `actions/attest` signed with the `tsa-only` profile, or a bundle from GitHub's Sigstore instance. A bundle from GitHub's instance also needs `--ctlog-threshold 0`. A verified signed timestamp is still required.",
+			parseVerifierThreshold('--tlog-threshold', 0)
 		)
 		.option(
 			'--ctlog-threshold <count>',
-			'Require this many certificate-transparency log entries. Defaults to the Sigstore verifier policy.',
-			parseVerifierThreshold('--ctlog-threshold')
+			"Require this many signed certificate timestamps from certificate-transparency logs. Defaults to the Sigstore verifier policy, which requires one. A value of 0 requires no signed certificate timestamp, but only for a trusted root that lists no certificate-transparency log, such as the root for GitHub's Sigstore instance. A root that lists a certificate-transparency log still requires a signed certificate timestamp, so 0 is rejected when every root lists such a log. The verifier still checks every signed certificate timestamp that the signing certificate contains. A bundle from GitHub's instance also needs `--tlog-threshold 0`.",
+			parseVerifierThreshold('--ctlog-threshold', 0)
 		)
 		.option(
 			'--timestamp-threshold <count>',
 			'Require this many verified signed timestamps. Defaults to the Sigstore verifier policy.',
-			parseVerifierThreshold('--timestamp-threshold')
+			// The verifier checks the certificate chain and the signing key's
+			// validity period at each verified timestamp. With no verified
+			// timestamp it would not check the chain or the key's validity
+			// period, so the minimum is 1.
+			parseVerifierThreshold('--timestamp-threshold', 1)
 		)
 		.option(
 			'--certificate-identity <identity>',
@@ -312,13 +320,15 @@ export function registerAttestCommands(
 				'    --store-path-hash <hash> --trust-cache-pubkey \\',
 				'    --predicate-type https://slsa.dev/provenance/v1',
 				'',
-				"  # A bundle signed with GitHub's Sigstore instance carries RFC 3161",
-				'  # timestamps and no Rekor entry, so verify it against GitHub trust',
-				'  # roots and require no transparency-log entry.',
-				'  gh attestation trusted-root > github-trusted-root.json',
+				"  # GitHub's Sigstore instance creates no Rekor entry, and its trusted",
+				'  # root lists no certificate-transparency log. Verify a bundle from that',
+				'  # instance against the roots that `gh` prints, with both log thresholds',
+				'  # set to 0.',
+				'  gh attestation trusted-root > github-trusted-roots.jsonl',
 				'  cupboard attest verify ./app.sigstore.json --nar-hash sha256:... \\',
 				'    --predicate-type https://slsa.dev/provenance/v1 \\',
-				'    --trusted-root github-trusted-root.json --tlog-threshold 0'
+				'    --trusted-root github-trusted-roots.jsonl \\',
+				'    --tlog-threshold 0 --ctlog-threshold 0'
 			].join('\n')
 		)
 		.action(async (bundles: string[], options: VerifyOptions) => {
@@ -459,31 +469,58 @@ function provenanceRows(
 	];
 }
 
-function trustRows(trust: VerifyTrust, options: VerifyOptions): ResultRow[] {
+export function trustRows(
+	trust: VerifyTrust,
+	options: Pick<
+		VerifyOptions,
+		'trustedRoot' | 'tlogThreshold' | 'timestampThreshold'
+	>
+): ResultRow[] {
 	const indexes = trust.tlogEntries.map((entry) => entry.logIndex).join(', ');
+	const { acceptingRoot, certificateTransparency } = trust;
 
 	return [
+		{
+			label: 'Trusted root',
+			value:
+				acceptingRoot.kind === 'public-good'
+					? 'the public-good Sigstore root'
+					: `root ${formatCount(acceptingRoot.position)} of ${formatCount(acceptingRoot.count)} in ${options.trustedRoot ?? 'the trusted-root file'}`
+		},
 		...optionalRow('Rekor integration', trust.integratedAt),
 		...optionalRow(
 			'Rekor log',
 			indexes === '' ? undefined : `index ${indexes}`
 		),
 		{
-			label: 'Transparency',
+			label: 'Transparency log',
 			value: describeCount(
 				trust.tlogEntries.length,
 				'log entry',
 				'log entries',
-				options.tlogThreshold
+				options.tlogThreshold ?? defaultVerifierThreshold
 			)
 		},
+		...(certificateTransparency === undefined
+			? []
+			: [
+					{
+						label: 'Certificate transparency',
+						value: describeCount(
+							certificateTransparency.signedCertificateTimestamps,
+							'signed certificate timestamp',
+							'signed certificate timestamps',
+							certificateTransparency.threshold
+						)
+					}
+				]),
 		{
 			label: 'Timestamps',
 			value: describeCount(
 				trust.timestampCount,
 				'verified timestamp',
 				'verified timestamps',
-				options.timestampThreshold
+				options.timestampThreshold ?? defaultVerifierThreshold
 			)
 		}
 	];
@@ -493,11 +530,7 @@ function describeCount(
 	count: number,
 	singular: string,
 	plural: string,
-	threshold: number | undefined
+	threshold: number
 ): string {
-	const base = `${formatCount(count)} ${count === 1 ? singular : plural}`;
-
-	return threshold === undefined
-		? base
-		: `${base} (threshold ${formatCount(threshold)})`;
+	return `${formatCount(count)} ${count === 1 ? singular : plural} (threshold ${formatCount(threshold)})`;
 }
