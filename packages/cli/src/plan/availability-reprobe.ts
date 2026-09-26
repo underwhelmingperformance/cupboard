@@ -1,6 +1,5 @@
 import type { NixDerivedPathString } from '@cupboard/nix';
-import type { RootName, StorePathString } from '@cupboard/nix-store/scalars';
-import type { RootEnsureResponse } from '@cupboard/protocol/retention';
+import type { StorePathString } from '@cupboard/nix-store/scalars';
 
 import {
 	type AvailabilityTarget,
@@ -25,11 +24,6 @@ export interface AvailabilityReprobe {
 	readonly buildSet: readonly NixDerivedPathString[];
 	readonly withdrawn: readonly WithdrawnTarget[];
 }
-
-// The initial partition removes any target whose retained root still serves
-// its output. No such target can reach this second probe.
-const noRootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse> =
-	new Map();
 
 // Only the initial partition may leave a target with an upstream substituter.
 // That decision compares the offered NAR with the local path and applies the
@@ -70,8 +64,7 @@ export async function reprobeAvailability(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
-			noSubstitutableExternal,
-			noRootEnsureResults
+			noSubstitutableExternal
 		);
 
 		if (

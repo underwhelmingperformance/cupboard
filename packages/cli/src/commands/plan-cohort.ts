@@ -546,15 +546,13 @@ export async function runPlanCohort(
 	reporter: Reporter,
 	dependencies: PlanCohortDependencies
 ): Promise<void> {
-	const rootEnsureResults = await reporter.phase(
-		'Checking retention roots',
-		() =>
-			ensureCohortRoots(
-				options.targets,
-				options.cache,
-				options.retention,
-				dependencies.rootClient
-			)
+	await reporter.phase('Checking retention roots', () =>
+		ensureCohortRoots(
+			options.targets,
+			options.cache,
+			options.retention,
+			dependencies.rootClient
+		)
 	);
 	const availabilityTargets: AvailabilityTarget[] = options.targets.map(
 		(target) => ({
@@ -608,7 +606,6 @@ export async function runPlanCohort(
 					...(options.requireAttested === true && {
 						attestedServed: dependencies.attestedServed
 					}),
-					rootEnsureResults,
 					storeIdentity: options.storeIdentity,
 					requeryUnknown: dependencies.requeryUnknown,
 					confirmUpstreamAvailability: dependencies.confirmUpstreamAvailability,
