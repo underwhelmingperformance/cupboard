@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	type InstanceName,
@@ -23,8 +25,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import type { CachedSession } from '../auth/token-store.ts';
-import { CupboardHttpError } from '../errors.ts';
+import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { CupboardHttpError, UnreachableHostError } from '../errors.ts';
 
+import type { DeployAuthority } from './authority.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import {
 	cloudflareAccountIdSchema,
@@ -34,14 +38,17 @@ import {
 	scriptNameSchema
 } from './identifiers.ts';
 import {
-	onboardAdminFor,
+	AdminSessionNotCachedError,
+	ClaimantChangedError,
+	DeploymentClaimFailedError,
 	type OnboardClient,
 	onboardDeployment,
 	type OnboardOptions,
 	type OnboardOutcome,
 	slugProblem
 } from './onboard.ts';
-import { deployerOwner, type OwnerBinding } from './owner.ts';
+import type { OwnerBinding } from './owner.ts';
+import { claimSecretSchema } from './secrets.ts';
 import {
 	type DeployUi,
 	type MenuEntry,
@@ -315,7 +322,7 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 type ApiCall =
 	| { readonly method: keyof CloudflareApi }
 	| {
-			readonly method: 'putSecret';
+			readonly method: 'putSecret' | 'deleteSecret';
 			readonly scriptName: string;
 			readonly name: string;
 	  }
@@ -404,6 +411,11 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 
 			return Promise.resolve();
 		},
+		deleteSecret: (scriptName, name) => {
+			apiCalls.push({ method: 'deleteSecret', scriptName, name });
+
+			return Promise.resolve();
+		},
 		listScriptSecrets: () => {
 			recordApiCall(apiCalls, 'listScriptSecrets');
 			return Promise.resolve([]);
@@ -451,30 +463,62 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 const subdomainOf = (value?: string) => (): Promise<string | undefined> =>
 	Promise.resolve(value);
 
-const owner: OwnerBinding = deployerOwner('cf-user-1');
+const owner = {
+	issuer: oidcIssuerSchema.parse('https://dash.cloudflare.com'),
+	subject: oidcSubjectSchema.parse('cf-user-1'),
+	audience: oidcAudienceSchema.parse('cupboard-client')
+} satisfies OwnerBinding;
 
-const claimable = {
-	kind: 'claimable',
-	owner,
-	idToken: 'id-token-1'
-} as const;
+function idTokenWith(claims: Record<string, unknown>): string {
+	const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+
+	return `e30.${payload}.signature`;
+}
+
+// The operator's id_token for the claimant that `bootstrapAuthority` confirms.
+const claimIdToken = idTokenWith({
+	iss: owner.issuer,
+	sub: owner.subject,
+	aud: owner.audience
+});
+
+const adminAuthority: DeployAuthority = { kind: 'admin', admin: owner };
+
+function bootstrapAuthority(
+	idToken: () => Promise<string> = () => Promise.resolve(claimIdToken)
+): DeployAuthority {
+	return {
+		kind: 'bootstrap',
+		claimSecret: claimSecretSchema.parse('claim-1'),
+		idToken,
+		claimant: { ...owner, displayName: undefined }
+	};
+}
+
+function tokenOf(credential: AccessCredential): Promise<string> {
+	return typeof credential === 'string'
+		? Promise.resolve(credential)
+		: credential.get();
+}
 
 function tenantSummary(id: string): TenantSummary {
 	return {
 		id: tenantIdSchema.parse(id),
 		status: 'active',
-		ownerIssuer: oidcIssuerSchema.parse(owner.issuer),
-		ownerSubject: oidcSubjectSchema.parse(owner.subject),
-		ownerAudience: oidcAudienceSchema.parse(owner.audience),
+		ownerIssuer: owner.issuer,
+		ownerSubject: owner.subject,
+		ownerAudience: owner.audience,
 		configVersion: 1,
 		createdAt: isoTimestampSchema.parse('2026-06-12T00:00:00Z')
 	};
 }
 
 /**
-One scripted answer: a value, an HTTP status to fail with, or no route.
-*/
-type Scripted<T> = T | number | 'offline';
+ * One scripted answer: a value, an HTTP status to fail with, a `fetch` that
+ * fails before any response, or a network failure as `CupboardClient`
+ * reports it.
+ */
+type Scripted<T> = T | number | 'offline' | 'unreachable';
 
 function answer<T>(
 	remaining: Scripted<T>[],
@@ -490,6 +534,15 @@ function answer<T>(
 		return Promise.reject(new TypeError('fetch failed'));
 	}
 
+	if (scripted === 'unreachable') {
+		return Promise.reject(
+			new UnreachableHostError(
+				'cache.example.com',
+				new TypeError('fetch failed')
+			)
+		);
+	}
+
 	if (typeof scripted === 'number') {
 		return Promise.reject(rejection(scripted, member));
 	}
@@ -501,6 +554,10 @@ function answer<T>(
 // through the derived client, whose failures are ORPCErrors.
 function httpRejection(status: number, member: string): Error {
 	return new CupboardHttpError('GET', member, status, 'computer says no\n');
+}
+
+function signupRejection(status: number, member: string): Error {
+	return new CupboardHttpError('POST', member, status, 'computer says no\n');
 }
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
@@ -539,6 +596,10 @@ interface ScriptedClient {
 	readonly initialisedInstanceNames: InstanceName[];
 	readonly cachedSessions: { session: CachedSession; target: URL }[];
 	readonly cacheSession: (session: CachedSession, target: URL) => Promise<void>;
+	/**
+	The claim-relevant calls, in order.
+	*/
+	readonly events: string[];
 }
 
 function scriptedClient(script: ClientScript): ScriptedClient {
@@ -557,6 +618,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const cacheAccessTokens: string[] = [];
 	const cachedSessions: { session: CachedSession; target: URL }[] = [];
 	const initialisedInstanceNames: InstanceName[] = [];
+	const events: string[] = [];
 	const currentInstanceName =
 		script.instanceName ?? instanceNameSchema.parse('cupboard');
 
@@ -569,7 +631,9 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 		cacheAccessTokens,
 		initialisedInstanceNames,
 		cachedSessions,
+		events,
 		cacheSession: (session, target) => {
+			events.push('cacheSession');
 			cachedSessions.push({ session, target });
 			return Promise.resolve();
 		},
@@ -582,42 +646,47 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					return Promise.resolve(script.cacheAccess ?? 'public');
 				},
 				version: () => answer(versions, '/_version'),
-				getInstance: () =>
-					Promise.resolve(
-						script.instanceConfigured === false
-							? { state: 'unconfigured' }
-							: { state: 'configured', name: currentInstanceName }
-					),
+				getInstance: async (credential) => {
+					events.push(`getInstance:${await tokenOf(credential)}`);
+
+					return script.instanceConfigured === false
+						? { state: 'unconfigured' }
+						: { state: 'configured', name: currentInstanceName };
+				},
 				initialiseInstance: (_token, name) => {
 					initialisedInstanceNames.push(name);
 					return Promise.resolve({ state: 'configured', name });
 				},
 				signup: (request) => {
+					events.push('signup');
 					signupBodies.push(request);
-					return answer(signups, '/signup');
+					return answer(signups, '/signup', signupRejection);
 				},
 				listTenants: async () => ({
 					tenants: await answer(lists, '/control/tenants', orpcRejection)
 				}),
-				tokenExchange: () =>
-					Promise.resolve({
+				tokenExchange: () => {
+					events.push('tokenExchange');
+
+					return Promise.resolve({
 						access_token: 'admin-jwt',
 						token_type: 'Bearer',
 						expires_in: 900,
 						scope: 'admin',
 						issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
 						refresh_token: 'refresh-1'
-					}),
+					});
+				},
 				createTenant: (_token, body) => {
 					createdBodies.push(body);
 					return answer(creates, '/control/tenants', orpcRejection);
 				},
-				rebuildMembership: (token) => {
-					membershipRebuildTokens.push(token);
+				rebuildMembership: async (credential) => {
+					membershipRebuildTokens.push(await tokenOf(credential));
 					return answer(rebuilds, '/control/membership/rebuild', orpcRejection);
 				},
-				controlCheck: async (token) => {
-					controlCheckTokens.push(token);
+				controlCheck: async (credential) => {
+					controlCheckTokens.push(await tokenOf(credential));
 
 					return {
 						db: { result: 'ok' },
@@ -630,12 +699,12 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	};
 }
 
-const claimedSignup = {
-	issuer: oidcIssuerSchema.parse(owner.issuer),
-	subject: oidcSubjectSchema.parse(owner.subject),
-	audience: oidcAudienceSchema.parse(owner.audience),
-	claimed: true
-};
+const unreachableTwice: Scripted<SignupResponse>[] = [
+	'unreachable',
+	'unreachable'
+];
+
+const claimedSignup = { ...owner, claimed: true };
 
 /**
 The options every test starts from; spread and override per case.
@@ -648,38 +717,15 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 		tenantScriptName: scriptNameSchema.parse('cupboard-tenant'),
 		domain: 'cache.example.com',
 		instanceName: instanceNameSchema.parse('cupboard'),
-		admin: claimable,
+		authority: adminAuthority,
 		buildVersion: 'v-new',
-		claimSecret: { kind: 'none' },
 		cacheAccess: 'public',
 		r2: { kind: 'fresh' },
 		readPassword: () => readPassword,
 		clientFactory: client.factory,
 		cacheSession: client.cacheSession,
+		sessionCredential: () => 'session-jwt',
 		sleep: () => Promise.resolve()
-	};
-}
-
-function claimRefusedShape(outcome: OnboardOutcome): {
-	readonly kind: string;
-	readonly url: string | undefined;
-	readonly status: number | undefined;
-	readonly detail: string;
-} {
-	const refused = z
-		.object({
-			kind: z.literal('claim-refused'),
-			url: z.string(),
-			status: z.number(),
-			detail: z.string()
-		})
-		.parse(outcome);
-
-	return {
-		kind: refused.kind,
-		url: refused.url,
-		status: refused.status,
-		detail: refused.detail
 	};
 }
 
@@ -703,6 +749,35 @@ function unreachableShape(outcome: OnboardOutcome): {
 	};
 }
 
+/**
+ * A loopback port with nothing listening on it, so a connection is refused.
+ */
+async function closedLoopbackPort(): Promise<number> {
+	const server = createServer();
+
+	await new Promise<void>((resolve) => {
+		server.listen(0, '127.0.0.1', resolve);
+	});
+
+	const address = server.address();
+
+	await new Promise<void>((resolve, reject) => {
+		server.close((error) => {
+			if (error === undefined) {
+				resolve();
+			} else {
+				reject(error);
+			}
+		});
+	});
+
+	if (address === null || typeof address === 'string') {
+		throw new Error('the server has no TCP address');
+	}
+
+	return address.port;
+}
+
 const readPassword = 'A'.repeat(43);
 const read = { user: defaultReadUser, password: readPassword };
 
@@ -711,45 +786,6 @@ const keptR2 = {
 	accountId: cloudflareAccountIdSchema.parse('acc-1'),
 	bucketName: 'cupboard-blobs'
 } as const;
-
-describe('onboardAdminFor', () => {
-	const deployer = { subject: 'cf-user-1', idToken: 'id-token-1' };
-
-	it('is claimable when the gate is the deployer themselves', () => {
-		expect(
-			onboardAdminFor({ kind: 'owner', owner, origin: 'deployer' }, deployer)
-		).toStrictEqual({ kind: 'claimable', owner, idToken: 'id-token-1' });
-	});
-
-	it('is claimable when a re-read config gate matches the deployer', () => {
-		expect(
-			onboardAdminFor({ kind: 'owner', owner, origin: 'config' }, deployer)
-		).toStrictEqual({ kind: 'claimable', owner, idToken: 'id-token-1' });
-	});
-
-	it('belongs to someone else when the subject differs', () => {
-		const other: OwnerBinding = { ...owner, subject: 'cf-user-2' };
-
-		expect(
-			onboardAdminFor(
-				{ kind: 'owner', owner: other, origin: 'manual' },
-				deployer
-			)
-		).toStrictEqual({ kind: 'other', owner: other });
-	});
-
-	it('is unproven when the session credential has no identity', () => {
-		expect(
-			onboardAdminFor({ kind: 'owner', owner, origin: 'config' })
-		).toStrictEqual({ kind: 'unproven', owner });
-	});
-
-	it('is closed when no admin is bound', () => {
-		expect(onboardAdminFor({ kind: 'none' }, deployer)).toStrictEqual({
-			kind: 'none'
-		});
-	});
-});
 
 describe('slugProblem', () => {
 	it.each([['builds'], ['team-1'], ['a.b_c-d']])('accepts %s', (value) => {
@@ -767,7 +803,7 @@ describe('slugProblem', () => {
 });
 
 describe('onboardDeployment', () => {
-	it('claims, creates the chosen tenant and initialises its cache', async () => {
+	it('claims the deployment, then deletes the secret and creates the first cache', async () => {
 		const { ui, successes } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['offline', StatusCodes.NOT_FOUND, 'v-new'],
@@ -776,15 +812,29 @@ describe('onboardDeployment', () => {
 			creates: [tenantSummary('builds')],
 			publicKeys: [StatusCodes.SERVICE_UNAVAILABLE, 'pk-1']
 		});
+		const apiCalls: ApiCall[] = [];
+		const api: CloudflareApi = {
+			...baseApi(apiCalls),
+			deleteSecret: (scriptName, name) => {
+				client.events.push(`deleteSecret:${scriptName}:${name}`);
+				apiCalls.push({ method: 'deleteSecret', scriptName, name });
+				return Promise.resolve();
+			}
+		};
 
-		const outcome = await onboardDeployment(baseOptions(ui, client));
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			api,
+			authority: bootstrapAuthority()
+		});
 
 		expect({
 			outcome,
-			urls: client.urls,
+			events: client.events,
 			signupBodies: client.signupBodies,
-			createdBodies: client.createdBodies,
 			cachedSessions: client.cachedSessions,
+			createdBodies: client.createdBodies,
+			apiCalls,
 			successes
 		}).toStrictEqual({
 			outcome: {
@@ -795,8 +845,22 @@ describe('onboardDeployment', () => {
 				publicKey: 'pk-1',
 				created: { access: 'public', read }
 			} satisfies OnboardOutcome,
-			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
-			signupBodies: [{ subject_token: 'id-token-1' }],
+			// The secret is gone as soon as `/signup` has answered.
+			events: [
+				'signup',
+				'deleteSecret:cupboard:CUPBOARD_SIGNUP_SECRET',
+				'tokenExchange',
+				'cacheSession',
+				'getInstance:session-jwt'
+			],
+			signupBodies: [{ subject_token: claimIdToken, claim_secret: 'claim-1' }],
+			cachedSessions: [
+				{
+					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
+					target: new URL('https://cache.example.com')
+				}
+			],
+			// The first cache belongs to the principal that the claim seeded.
 			createdBodies: [
 				{
 					id: 'builds',
@@ -807,15 +871,14 @@ describe('onboardDeployment', () => {
 					read
 				}
 			],
-			cachedSessions: [
+			apiCalls: [
 				{
-					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
-					target: new URL('https://cache.example.com')
+					method: 'deleteSecret',
+					scriptName: 'cupboard',
+					name: 'CUPBOARD_SIGNUP_SECRET'
 				}
 			],
-			successes: [
-				'You are now the admin of this deployment (https://dash.cloudflare.com · cf-user-1).'
-			]
+			successes: ['You are now the admin of this deployment (cf-user-1).']
 		});
 	});
 
@@ -826,13 +889,16 @@ describe('onboardDeployment', () => {
 			signup: [claimedSignup],
 			lists: [[]]
 		});
-		const claims = Buffer.from(
-			JSON.stringify({ sub: 'cf-user-1', email: 'ada@example.com' })
-		).toString('base64url');
+		const idToken = idTokenWith({
+			iss: owner.issuer,
+			sub: owner.subject,
+			email: 'ada@example.com'
+		});
 
 		await onboardDeployment({
 			...baseOptions(ui, client),
-			admin: { ...claimable, idToken: `e30.${claims}.signature` }
+			api: baseApi(),
+			authority: bootstrapAuthority(() => Promise.resolve(idToken))
 		});
 
 		expect(successes).toStrictEqual([
@@ -840,11 +906,485 @@ describe('onboardDeployment', () => {
 		]);
 	});
 
-	it('waits out an older version that is still serving', async () => {
+	it.each<{
+		readonly name: string;
+		readonly exchangeFailure?: Error;
+		readonly writeFailure?: Error;
+		readonly cause: abstract new (...parameters: never[]) => Error;
+	}>([
+		{
+			name: 'the token exchange fails',
+			exchangeFailure: new CupboardHttpError('POST', '/token', 500, 'boom'),
+			cause: CupboardHttpError
+		},
+		{
+			name: 'the session cannot be written',
+			writeFailure: new Error('disk full'),
+			cause: Error
+		}
+	])(
+		'reports a successful claim whose session is not cached when $name',
+		async ({ exchangeFailure, writeFailure, cause }) => {
+			const { ui } = scriptedUi();
+			const client = scriptedClient({
+				versions: ['v-new'],
+				signup: [claimedSignup]
+			});
+			const apiCalls: ApiCall[] = [];
+
+			let refusal: unknown;
+
+			try {
+				await onboardDeployment({
+					...baseOptions(ui, client),
+					api: baseApi(apiCalls),
+					authority: bootstrapAuthority(),
+					clientFactory: (url) => ({
+						...client.factory(url),
+						...(exchangeFailure !== undefined && {
+							tokenExchange: () => Promise.reject(exchangeFailure)
+						})
+					}),
+					cacheSession: (session, target) =>
+						writeFailure === undefined
+							? client.cacheSession(session, target)
+							: Promise.reject(writeFailure)
+				});
+			} catch (error) {
+				refusal = error;
+			}
+
+			expect({
+				refusal:
+					refusal instanceof AdminSessionNotCachedError
+						? {
+								url: refusal.url.href,
+								admin: refusal.admin,
+								isExpectedCause: refusal.cause instanceof cause
+							}
+						: refusal,
+				apiCalls
+			}).toStrictEqual({
+				refusal: {
+					url: 'https://cache.example.com/',
+					admin: owner,
+					isExpectedCause: true
+				},
+				apiCalls: [
+					{
+						method: 'deleteSecret',
+						scriptName: 'cupboard',
+						name: 'CUPBOARD_SIGNUP_SECRET'
+					}
+				]
+			});
+		}
+	);
+
+	it('refuses to claim with an id_token for a different identity from the confirmed one', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({ versions: ['v-new'] });
+		const apiCalls: ApiCall[] = [];
+		const confirmed = {
+			issuer: oidcIssuerSchema.parse('https://idp.example.test'),
+			subject: oidcSubjectSchema.parse('founder'),
+			audience: oidcAudienceSchema.parse('cupboard-cli'),
+			displayName: undefined
+		};
+		const idToken = idTokenWith({
+			iss: 'https://idp.example.test',
+			sub: 'intruder'
+		});
+
+		let refusal: unknown;
+
+		try {
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				api: baseApi(apiCalls),
+				authority: {
+					kind: 'bootstrap',
+					claimSecret: claimSecretSchema.parse('claim-1'),
+					idToken: () => Promise.resolve(idToken),
+					claimant: confirmed
+				}
+			});
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect({
+			refusal:
+				refusal instanceof ClaimantChangedError
+					? { confirmed: refusal.confirmed, presented: refusal.presented }
+					: refusal,
+			events: client.events,
+			apiCalls
+		}).toStrictEqual({
+			refusal: {
+				confirmed,
+				presented: {
+					issuer: 'https://idp.example.test',
+					subject: 'intruder'
+				}
+			},
+			events: [],
+			apiCalls: [
+				{
+					method: 'deleteSecret',
+					scriptName: 'cupboard',
+					name: 'CUPBOARD_SIGNUP_SECRET'
+				}
+			]
+		});
+	});
+
+	it('retries the claim when the version read after a 403 fails', async () => {
+		const { ui } = scriptedUi({ slugs: [undefined] });
+		const client = scriptedClient({
+			versions: ['v-new', 'offline'],
+			signup: [StatusCodes.FORBIDDEN, claimedSignup],
+			lists: [[]]
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			api: baseApi(),
+			authority: bootstrapAuthority()
+		});
+
+		expect({ outcome, signups: client.signupBodies.length }).toStrictEqual({
+			outcome: { kind: 'cancelled', url: 'https://cache.example.com' },
+			signups: 2
+		});
+	});
+
+	it('retries the claim while the claim secret takes effect', async () => {
+		const { ui } = scriptedUi({ slugs: [undefined] });
+		const client = scriptedClient({
+			versions: ['v-new', 'v-new'],
+			signup: [StatusCodes.FORBIDDEN, claimedSignup],
+			lists: [[]]
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			api: baseApi(),
+			authority: bootstrapAuthority()
+		});
+
+		expect({ outcome, events: client.events }).toStrictEqual({
+			outcome: { kind: 'cancelled', url: 'https://cache.example.com' },
+			events: [
+				'signup',
+				'signup',
+				'tokenExchange',
+				'cacheSession',
+				'getInstance:session-jwt'
+			]
+		});
+	});
+
+	it.each([
+		{
+			name: 'a second principal',
+			signup: [StatusCodes.CONFLICT],
+			isDeleteFailing: false,
+			detail: 'POST /signup returned HTTP 409: computer says no',
+			status: StatusCodes.CONFLICT,
+			advice: 'already-claimed',
+			warningCount: 0
+		},
+		{
+			name: 'a secret that never takes effect',
+			signup: [StatusCodes.FORBIDDEN, StatusCodes.FORBIDDEN],
+			isDeleteFailing: false,
+			detail: 'HTTP 403: computer says no',
+			status: StatusCodes.FORBIDDEN,
+			advice: 'fresh-secret',
+			warningCount: 0
+		},
+		{
+			name: 'a server fault',
+			signup: [StatusCodes.INTERNAL_SERVER_ERROR],
+			isDeleteFailing: false,
+			detail: 'HTTP 500: computer says no',
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			advice: 'server-fault',
+			warningCount: 0
+		},
+		{
+			name: 'a rejected id_token',
+			signup: [StatusCodes.BAD_REQUEST],
+			isDeleteFailing: false,
+			detail: 'POST /signup returned HTTP 400: computer says no',
+			status: StatusCodes.BAD_REQUEST,
+			advice: 'rejected-token',
+			warningCount: 0
+		},
+		{
+			name: 'a route that is not found',
+			signup: [StatusCodes.NOT_FOUND, StatusCodes.NOT_FOUND],
+			isDeleteFailing: false,
+			detail: 'HTTP 404: computer says no',
+			status: StatusCodes.NOT_FOUND,
+			advice: 'unexpected-status',
+			warningCount: 0
+		},
+		{
+			name: 'rate limiting',
+			signup: [StatusCodes.TOO_MANY_REQUESTS, StatusCodes.TOO_MANY_REQUESTS],
+			isDeleteFailing: false,
+			detail: 'HTTP 429: computer says no',
+			status: StatusCodes.TOO_MANY_REQUESTS,
+			advice: 'rate-limited',
+			warningCount: 0
+		},
+		{
+			name: 'a deployment that cannot be reached',
+			signup: unreachableTwice,
+			isDeleteFailing: false,
+			detail: 'unreachable',
+			status: undefined,
+			advice: 'unreachable',
+			warningCount: 0
+		},
+		{
+			name: 'a second principal, when the secret cannot be removed',
+			signup: [StatusCodes.CONFLICT],
+			isDeleteFailing: true,
+			detail: 'POST /signup returned HTTP 409: computer says no',
+			status: StatusCodes.CONFLICT,
+			advice: 'already-claimed',
+			warningCount: 1
+		}
+	])(
+		'reports a failed claim for $name and still deletes the secret',
+		async ({
+			signup,
+			isDeleteFailing,
+			detail,
+			status,
+			advice,
+			warningCount
+		}) => {
+			const { ui, warnings: shown } = scriptedUi();
+			const client = scriptedClient({
+				versions: ['v-new', 'v-new', 'v-new'],
+				signup
+			});
+			const apiCalls: ApiCall[] = [];
+			const api: CloudflareApi = {
+				...baseApi(apiCalls),
+				deleteSecret: (scriptName, name) => {
+					apiCalls.push({ method: 'deleteSecret', scriptName, name });
+
+					return isDeleteFailing
+						? Promise.reject(new Error('Cloudflare is unavailable'))
+						: Promise.resolve();
+				}
+			};
+
+			let refusal: unknown;
+
+			try {
+				await onboardDeployment({
+					...baseOptions(ui, client),
+					api,
+					authority: bootstrapAuthority(),
+					attempts: 2
+				});
+			} catch (error) {
+				refusal = error;
+			}
+
+			expect({
+				refusal:
+					refusal instanceof DeploymentClaimFailedError
+						? {
+								detail: refusal.detail,
+								status: refusal.status,
+								advice: refusal.advice
+							}
+						: refusal,
+				cachedSessions: client.cachedSessions,
+				apiCalls,
+				warningCount: shown.length
+			}).toStrictEqual({
+				refusal: { detail, status, advice },
+				cachedSessions: [],
+				apiCalls: [
+					{
+						method: 'deleteSecret',
+						scriptName: 'cupboard',
+						name: 'CUPBOARD_SIGNUP_SECRET'
+					}
+				],
+				warningCount
+			});
+		}
+	);
+
+	it('reports an unreachable deployment when the client cannot connect to /signup', async () => {
+		const port = await closedLoopbackPort();
+		const unreachable = CupboardClient.fromUrl(
+			new URL(`http://127.0.0.1:${String(port)}`),
+			{ cache: { kind: 'default' } }
+		);
+		const { ui } = scriptedUi();
+		const client = scriptedClient({ versions: ['v-new'] });
+
+		let refusal: unknown;
+
+		try {
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				api: baseApi(),
+				authority: bootstrapAuthority(),
+				attempts: 2,
+				clientFactory: (url) => ({
+					...client.factory(url),
+					signup: (request) => unreachable.signup(request)
+				})
+			});
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect(
+			refusal instanceof DeploymentClaimFailedError
+				? {
+						detail: refusal.detail,
+						status: refusal.status,
+						advice: refusal.advice
+					}
+				: refusal
+		).toStrictEqual({
+			detail: 'unreachable',
+			status: undefined,
+			advice: 'unreachable'
+		});
+	});
+
+	it("reports the server's full reason when it rejects the id_token", async () => {
+		const reason =
+			'Subject token issuer must be an HTTPS URL, or loopback HTTP in local ' +
+			'development, without a query or fragment';
+		const { ui } = scriptedUi();
+		const client = scriptedClient({ versions: ['v-new'] });
+
+		let refusal: unknown;
+
+		try {
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				api: baseApi(),
+				authority: bootstrapAuthority(),
+				clientFactory: (url) => ({
+					...client.factory(url),
+					signup: () =>
+						Promise.reject(
+							new CupboardHttpError(
+								'POST',
+								'/signup',
+								StatusCodes.BAD_REQUEST,
+								JSON.stringify({
+									error: 'invalid_request',
+									error_description: reason,
+									problem: 'subject-token-invalid'
+								})
+							)
+						)
+				})
+			});
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect(
+			refusal instanceof DeploymentClaimFailedError
+				? { detail: refusal.detail, advice: refusal.advice }
+				: refusal
+		).toStrictEqual({
+			detail: `POST /signup returned HTTP 400: ${reason}`,
+			advice: 'rejected-token'
+		});
+	});
+
+	it('keeps a successful claim when the secret cannot be removed', async () => {
+		const { ui, warnings } = scriptedUi({ slugs: [undefined] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]]
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			api: {
+				...baseApi(),
+				deleteSecret: () =>
+					Promise.reject(new Error('Cloudflare is unavailable'))
+			},
+			authority: bootstrapAuthority()
+		});
+
+		expect({
+			outcome,
+			events: client.events,
+			warningCount: warnings.length
+		}).toStrictEqual({
+			outcome: { kind: 'cancelled', url: 'https://cache.example.com' },
+			events: [
+				'signup',
+				'tokenExchange',
+				'cacheSession',
+				'getInstance:session-jwt'
+			],
+			warningCount: 1
+		});
+	});
+
+	it.each([
+		{
+			name: 'stops after eight refusals from the new build',
+			versions: Array.from({ length: 8 }, () => 'v-new'),
+			signups: 8
+		},
+		{
+			name: 'does not count a refusal from an older build',
+			versions: ['v-old', ...Array.from({ length: 8 }, () => 'v-new')],
+			signups: 9
+		}
+	])('$name', async ({ versions, signups }) => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new', ...versions],
+			signup: Array.from({ length: signups }, () => StatusCodes.FORBIDDEN)
+		});
+
+		let refusal: unknown;
+
+		try {
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				api: baseApi(),
+				authority: bootstrapAuthority()
+			});
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect({
+			isRefused: refusal instanceof DeploymentClaimFailedError,
+			signups: client.events.filter((event) => event === 'signup').length
+		}).toStrictEqual({ isRefused: true, signups });
+	});
+
+	it('updates with the cached admin session, without claiming', async () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-old', 'v-old', 'v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: ['pk-1']
@@ -855,7 +1395,7 @@ describe('onboardDeployment', () => {
 		expect({
 			outcome,
 			urls: client.urls,
-			signupBodies: client.signupBodies,
+			events: client.events,
 			createdBodies: client.createdBodies,
 			cachedSessions: client.cachedSessions
 		}).toStrictEqual({
@@ -868,7 +1408,7 @@ describe('onboardDeployment', () => {
 				created: { access: 'public', read }
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
-			signupBodies: [{ subject_token: 'id-token-1' }],
+			events: ['getInstance:session-jwt'],
 			createdBodies: [
 				{
 					id: 'builds',
@@ -879,12 +1419,7 @@ describe('onboardDeployment', () => {
 					read
 				}
 			],
-			cachedSessions: [
-				{
-					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
-					target: new URL('https://cache.example.com')
-				}
-			]
+			cachedSessions: []
 		});
 	});
 
@@ -912,7 +1447,6 @@ describe('onboardDeployment', () => {
 		// once on a terminal error.
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: [StatusCodes.INTERNAL_SERVER_ERROR]
@@ -927,105 +1461,10 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('sends the claim secret this deploy supplied', async () => {
-		const { ui } = scriptedUi({ slugs: ['builds'] });
-		const client = scriptedClient({
-			versions: ['v-new'],
-			signup: [claimedSignup],
-			lists: [[]],
-			creates: [tenantSummary('builds')],
-			publicKeys: ['pk-1']
-		});
-
-		await onboardDeployment({
-			...baseOptions(ui, client),
-			claimSecret: { kind: 'known', value: 'hunter2' }
-		});
-
-		expect(client.signupBodies).toStrictEqual([
-			{ subject_token: 'id-token-1', claim_secret: 'hunter2' }
-		]);
-	});
-
-	it('prompts for the configured claim secret, then claims', async () => {
-		const { ui, infos } = scriptedUi({
-			slugs: ['builds'],
-			secrets: ['hunter2']
-		});
-		const client = scriptedClient({
-			versions: ['v-new'],
-			signup: [claimedSignup],
-			lists: [[]],
-			creates: [tenantSummary('builds')],
-			publicKeys: ['pk-1']
-		});
-
-		const outcome = await onboardDeployment({
-			...baseOptions(ui, client),
-			claimSecret: { kind: 'configured' }
-		});
-
-		expect({
-			outcome,
-			signupBodies: client.signupBodies,
-			infos
-		}).toStrictEqual({
-			outcome: {
-				kind: 'ready',
-				url: 'https://cache.example.com',
-				slug: 'builds',
-				cacheUrl: new URL('https://cache.example.com/t/builds'),
-				publicKey: 'pk-1',
-				created: { access: 'public', read }
-			} satisfies OnboardOutcome,
-			signupBodies: [{ subject_token: 'id-token-1', claim_secret: 'hunter2' }],
-			infos: [
-				'This deployment is protected by a claim secret (the CUPBOARD_SIGNUP_SECRET Worker secret), which must be presented to become the admin.',
-				'Save this credential now, even if a later onboarding step fails. `cupboard tenant rotate-credential` replaces it.'
-			]
-		});
-	});
-
-	it('withholds the claim when the secret prompt is dismissed', async () => {
-		const { ui } = scriptedUi({ secrets: [undefined] });
-		const client = scriptedClient({ versions: ['v-new'] });
-
-		expect(
-			await onboardDeployment({
-				...baseOptions(ui, client),
-				claimSecret: { kind: 'configured' }
-			})
-		).toStrictEqual({
-			kind: 'claim-cancelled',
-			url: 'https://cache.example.com'
-		});
-	});
-
-	it('presents a freshly fetched id_token to the claim', async () => {
-		const { ui } = scriptedUi({ slugs: ['builds'] });
-		const client = scriptedClient({
-			versions: ['v-new'],
-			signup: [claimedSignup],
-			lists: [[]],
-			creates: [tenantSummary('builds')],
-			publicKeys: ['pk-1']
-		});
-
-		await onboardDeployment({
-			...baseOptions(ui, client),
-			freshIdToken: () => Promise.resolve('id-token-fresh')
-		});
-
-		expect(client.signupBodies).toStrictEqual([
-			{ subject_token: 'id-token-fresh' }
-		]);
-	});
-
 	it('proves a kept R2 pair through the new cache', async () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			controlChecks: [{ result: 'ok' }],
@@ -1062,7 +1501,7 @@ describe('onboardDeployment', () => {
 					read
 				}
 			],
-			controlCheckTokens: ['admin-jwt']
+			controlCheckTokens: ['session-jwt']
 		});
 	});
 
@@ -1070,7 +1509,6 @@ describe('onboardDeployment', () => {
 		const { ui, warnings } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			controlChecks: [StatusCodes.NOT_FOUND],
@@ -1088,7 +1526,6 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			controlChecks: [StatusCodes.SERVICE_UNAVAILABLE],
@@ -1124,7 +1561,6 @@ describe('onboardDeployment', () => {
 		});
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			// After the replacement is stored, the existing Durable Object can
@@ -1193,7 +1629,6 @@ describe('onboardDeployment', () => {
 		});
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			controlChecks: [{ result: 'rejected', status: StatusCodes.FORBIDDEN }],
@@ -1236,7 +1671,6 @@ describe('onboardDeployment', () => {
 		});
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [{ ...claimedSignup, claimed: false }],
 			lists: [[]],
 			creates: [StatusCodes.CONFLICT, tenantSummary('builds-2')],
 			publicKeys: ['pk-2']
@@ -1280,14 +1714,16 @@ describe('onboardDeployment', () => {
 			const { ui, infos } = scriptedUi();
 			const client = scriptedClient({
 				versions: ['v-new'],
-				signup: [{ ...claimedSignup, claimed: false }],
 				lists: [[tenantSummary('laney')]],
 				cacheAccess,
 				rebuilds: [{ tenants: 1 }],
 				publicKeys: ['pk-1']
 			});
 
-			const outcome = await onboardDeployment(baseOptions(ui, client));
+			const outcome = await onboardDeployment({
+				...baseOptions(ui, client),
+				freshIdToken: () => Promise.resolve('id-token-1')
+			});
 
 			expect({
 				outcome,
@@ -1303,16 +1739,15 @@ describe('onboardDeployment', () => {
 					access: cacheAccess
 				} satisfies OnboardOutcome,
 				infos: ['The cache "laney" already exists; nothing to create.'],
-				membershipRebuildTokens: ['admin-jwt']
+				membershipRebuildTokens: ['session-jwt']
 			});
 		}
 	);
 
-	it('refreshes the ID token before inspecting an existing cache', async () => {
+	it('fetches an id_token only to inspect an existing cache', async () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [{ ...claimedSignup, claimed: false }],
 			lists: [[tenantSummary('laney')]],
 			rebuilds: [{ tenants: 1 }],
 			publicKeys: ['pk-1']
@@ -1326,8 +1761,34 @@ describe('onboardDeployment', () => {
 			signupBodies: client.signupBodies,
 			cacheAccessTokens: client.cacheAccessTokens
 		}).toStrictEqual({
-			signupBodies: [{ subject_token: 'id-token-1' }],
-			cacheAccessTokens: ['id-token-2']
+			signupBodies: [],
+			cacheAccessTokens: ['id-token-1']
+		});
+	});
+
+	it('leaves the access of an existing cache unread without an id_token', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			lists: [[tenantSummary('laney')]],
+			rebuilds: [{ tenants: 1 }],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment(baseOptions(ui, client));
+
+		expect({
+			outcome,
+			cacheAccessTokens: client.cacheAccessTokens
+		}).toStrictEqual({
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'laney',
+				cacheUrl: new URL('https://cache.example.com/t/laney'),
+				publicKey: 'pk-1'
+			} satisfies OnboardOutcome,
+			cacheAccessTokens: []
 		});
 	});
 	it('keeps a custom instance name when a redeploy omits the option', async () => {
@@ -1336,7 +1797,6 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			instanceName: forge,
 			versions: ['v-new'],
-			signup: [{ ...claimedSignup, claimed: false }],
 			lists: [[tenantSummary('laney')]],
 			rebuilds: [{ tenants: 1 }],
 			publicKeys: ['pk-1']
@@ -1353,7 +1813,6 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			instanceConfigured: false,
 			versions: ['v-new'],
-			signup: [{ ...claimedSignup, claimed: false }],
 			lists: [[tenantSummary('laney')]],
 			rebuilds: [{ tenants: 1 }],
 			publicKeys: ['pk-1']
@@ -1371,7 +1830,6 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [{ ...claimedSignup, claimed: false }],
 			lists: [[tenantSummary('laney'), tenantSummary('builds')]],
 			rebuilds: [{ tenants: 2 }]
 		});
@@ -1387,7 +1845,7 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slugs: ['laney', 'builds']
 			} satisfies OnboardOutcome,
-			membershipRebuildTokens: ['admin-jwt']
+			membershipRebuildTokens: ['session-jwt']
 		});
 	});
 
@@ -1398,7 +1856,6 @@ describe('onboardDeployment', () => {
 		});
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: ['pk-1']
@@ -1450,7 +1907,6 @@ describe('onboardDeployment', () => {
 		const { ui, menuMessages } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: ['pk-1']
@@ -1483,7 +1939,6 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi({ slugs: ['builds'], menuChoices: [undefined] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]]
 		});
 
@@ -1502,79 +1957,12 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]]
 		});
 
 		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
 			kind: 'cancelled',
 			url: 'https://cache.example.com'
-		});
-	});
-
-	it('reports a refused claim with the server response, not as a failure', async () => {
-		const { ui } = scriptedUi();
-		const client = scriptedClient({
-			versions: ['v-new'],
-			signup: [StatusCodes.FORBIDDEN]
-		});
-
-		const options = baseOptions(ui, client);
-		const outcome = await onboardDeployment(options);
-
-		expect(claimRefusedShape(outcome)).toStrictEqual({
-			kind: 'claim-refused',
-			url: 'https://cache.example.com',
-			status: StatusCodes.FORBIDDEN,
-			detail: 'GET /signup answered HTTP 403: computer says no'
-		});
-	});
-
-	it('stops after the version wait when no admin is bound', async () => {
-		const { ui } = scriptedUi();
-		const client = scriptedClient({ versions: ['v-new'] });
-
-		expect(
-			await onboardDeployment({
-				...baseOptions(ui, client),
-				admin: { kind: 'none' }
-			})
-		).toStrictEqual({
-			kind: 'no-admin',
-			url: 'https://cache.example.com'
-		});
-	});
-
-	it('leaves the setup to an admin who is someone else', async () => {
-		const { ui } = scriptedUi();
-		const other: OwnerBinding = { ...owner, subject: 'cf-user-2' };
-		const client = scriptedClient({ versions: ['v-new'] });
-
-		expect(
-			await onboardDeployment({
-				...baseOptions(ui, client),
-				admin: { kind: 'other', owner: other }
-			})
-		).toStrictEqual({
-			kind: 'admin-elsewhere',
-			url: 'https://cache.example.com',
-			owner: other
-		});
-	});
-
-	it('stops short when the session cannot prove the admin is the deployer', async () => {
-		const { ui } = scriptedUi();
-		const client = scriptedClient({ versions: ['v-new'] });
-
-		expect(
-			await onboardDeployment({
-				...baseOptions(ui, client),
-				admin: { kind: 'unproven', owner }
-			})
-		).toStrictEqual({
-			kind: 'identity-unproven',
-			url: 'https://cache.example.com',
-			owner
 		});
 	});
 
@@ -1598,12 +1986,12 @@ describe('onboardDeployment', () => {
 			...baseOptions(ui, client),
 			api,
 			domain: undefined,
-			admin: { kind: 'none' }
+			authority: { kind: 'unclaimed' }
 		});
 
 		expect({ outcome, apiCalls, urls: client.urls }).toStrictEqual({
 			outcome: {
-				kind: 'no-admin',
+				kind: 'unclaimed',
 				url: 'https://cupboard.laney.workers.dev'
 			} satisfies OnboardOutcome,
 			apiCalls: [
@@ -1615,7 +2003,8 @@ describe('onboardDeployment', () => {
 					previewUrls: true
 				}
 			],
-			urls: ['https://cupboard.laney.workers.dev']
+			// A deployment without an admin gets no requests.
+			urls: []
 		});
 	});
 
@@ -1634,8 +2023,7 @@ describe('onboardDeployment', () => {
 		const outcome = await onboardDeployment({
 			...baseOptions(ui, client),
 			api,
-			domain: undefined,
-			admin: { kind: 'none' }
+			domain: undefined
 		});
 
 		expect({ outcome, apiCalls }).toStrictEqual({
@@ -1643,6 +2031,38 @@ describe('onboardDeployment', () => {
 			apiCalls: [{ method: 'getWorkersDevSubdomain' }]
 		});
 	});
+
+	it.each([
+		{
+			name: 'the account has no workers.dev subdomain',
+			domain: undefined,
+			outcome: { kind: 'unclaimed', url: undefined }
+		},
+		{
+			name: 'the deployment has a URL',
+			domain: 'cache.example.com',
+			outcome: { kind: 'unclaimed', url: 'https://cache.example.com' }
+		}
+	])(
+		'reports an unclaimed deployment without waiting for the build when $name',
+		async ({ domain, outcome }) => {
+			const { ui } = scriptedUi();
+			const client = scriptedClient({
+				versions: [StatusCodes.NOT_FOUND, StatusCodes.NOT_FOUND]
+			});
+
+			expect({
+				outcome: await onboardDeployment({
+					...baseOptions(ui, client),
+					api: { ...baseApi(), getWorkersDevSubdomain: subdomainOf() },
+					domain,
+					authority: { kind: 'unclaimed' },
+					attempts: 2
+				}),
+				urls: client.urls
+			}).toStrictEqual({ outcome, urls: [] });
+		}
+	);
 
 	it('gives up when the Worker never comes up', async () => {
 		const { ui } = scriptedUi();
@@ -1666,7 +2086,6 @@ describe('onboardDeployment', () => {
 		const { ui, notes } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: ['offline']
 		});
@@ -1688,7 +2107,6 @@ describe('onboardDeployment', () => {
 		const { ui, notes } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: [

@@ -23,7 +23,6 @@ import type { DeploymentConfig } from './config.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
 import { applyD1Migrations, type D1MigrationApi } from './migrations.ts';
-import { type OwnerChoice, ownerHint } from './owner.ts';
 import {
 	type PhaseApi,
 	readDeploymentPhase,
@@ -183,12 +182,11 @@ export function derivedPlanRows(
 
 /**
  * The plan facts the user may change while reviewing: resource names, cron
- * triggers, the custom domain, and the admin identity.
+ * triggers and the custom domain.
  */
 export function choicePlanRows(
 	config: DeploymentConfig,
-	domain: string | undefined,
-	owner: OwnerChoice
+	domain: string | undefined
 ): ResultRow[] {
 	const resources = collectResources(config);
 
@@ -200,8 +198,7 @@ export function choicePlanRows(
 			label: 'Cron triggers',
 			value: config.control.crons.join(', ') || '(none)'
 		},
-		{ label: 'Custom domain', value: domain ?? '(none)' },
-		{ label: 'Admin', value: ownerHint(owner) }
+		{ label: 'Custom domain', value: domain ?? '(none)' }
 	];
 }
 

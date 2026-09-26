@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
+import { z } from 'zod';
+
 import type { WorkerSecret } from './cloudflare-api.ts';
 
 /**
@@ -18,6 +20,28 @@ export function generateWrapSecret(): string {
  */
 export function generatePushIdSigningKey(): string {
 	return randomBytes(32).toString('base64');
+}
+
+/**
+ * The control Worker secret that `/signup` requires for the first-admin claim.
+ */
+export const claimSecretName = 'CUPBOARD_SIGNUP_SECRET';
+
+/**
+ * A generated claim secret, which `/signup` requires for the first-admin
+ * claim.
+ */
+export const claimSecretSchema = z.string().min(1).brand('ClaimSecret');
+export type ClaimSecret = z.infer<typeof claimSecretSchema>;
+
+/**
+ * Generate a claim secret for one first deploy. The deploy sets it on the
+ * control Worker, presents it with the operator's id_token, and deletes it
+ * after the claim attempt or when the run stops before the claim. The CLI never
+ * prints the value or writes it to disk.
+ */
+export function generateClaimSecret(): ClaimSecret {
+	return claimSecretSchema.parse(randomBytes(32).toString('base64url'));
 }
 
 /**
@@ -45,7 +69,6 @@ export interface AssembledSecrets {
 }
 
 const requiredControl = ['CONTROL_KEY_WRAP_SECRET'];
-const optionalControl = ['CUPBOARD_SIGNUP_SECRET'];
 const requiredTenantR2 = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
 const requiredShared = ['PUSH_ID_SIGNING_KEY'];
 
@@ -96,14 +119,6 @@ export function assembleSecrets(inputs: SecretInputs): AssembledSecrets {
 		if (text === undefined) {
 			missing.push(name);
 		} else {
-			control.push({ name, text });
-		}
-	}
-
-	for (const name of optionalControl) {
-		const text = fromEnv(name);
-
-		if (text !== undefined) {
 			control.push({ name, text });
 		}
 	}

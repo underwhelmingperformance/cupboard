@@ -313,6 +313,10 @@ function recordingApi(
 				calls.push(`secret:${scriptName}:${secret.name}`);
 				return Promise.resolve();
 			},
+			deleteSecret(scriptName, name) {
+				calls.push(`delete-secret:${scriptName}:${name}`);
+				return Promise.resolve();
+			},
 			listScriptSecrets(scriptName) {
 				calls.push(`secrets:${scriptName}`);
 				return Promise.resolve([]);

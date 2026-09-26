@@ -46,8 +46,9 @@ export interface CloudflareCredential {
 	*/
 	readonly subject: string | undefined;
 	/**
-	The grant's raw ID token, which Cupboard can use for signup.
-	*/
+	 * The grant's raw ID token; `undefined` when the credential has no id_token,
+	 * such as an API token or a wrangler token.
+	 */
 	readonly idToken: string | undefined;
 }
 
@@ -416,6 +417,11 @@ export function freshIdTokenFromGrant(
 
 export interface ResolvedAccount {
 	readonly client: Cloudflare;
+	/**
+	 * Creates a client with the same credential and its own signal, for work
+	 * that must finish after the run's signal aborts.
+	 */
+	readonly clientWithSignal: (signal: AbortSignal) => Cloudflare;
 	readonly api: CloudflareApi;
 	readonly accountId: CloudflareAccountId;
 	readonly credentialSource: CredentialSource;
@@ -424,8 +430,9 @@ export interface ResolvedAccount {
 	*/
 	readonly subject: string | undefined;
 	/**
-	The grant's raw ID token, which Cupboard can use for signup.
-	*/
+	 * The grant's raw ID token; `undefined` when the credential has no id_token,
+	 * such as an API token or a wrangler token.
+	 */
 	readonly idToken: string | undefined;
 }
 
@@ -442,6 +449,13 @@ export async function resolveCloudflare(
 	chain: CredentialChain
 ): Promise<ResolvedAccount> {
 	const credential = await resolveCredential(chain);
+	const clientWithSignal = (signal: AbortSignal): Cloudflare =>
+		createCloudflareClient(
+			credential.token,
+			fetch,
+			cloudflareResponseLimits,
+			signal
+		);
 	const client = createCloudflareClient(
 		credential.token,
 		fetch,
@@ -456,6 +470,7 @@ export async function resolveCloudflare(
 
 		return {
 			client,
+			clientWithSignal,
 			api: createCloudflareApi(client, accountId),
 			accountId,
 			credentialSource: credential.source,
@@ -481,6 +496,7 @@ export async function resolveCloudflare(
 
 	return {
 		client,
+		clientWithSignal,
 		api: createCloudflareApi(client, accountId),
 		accountId,
 		credentialSource: credential.source,

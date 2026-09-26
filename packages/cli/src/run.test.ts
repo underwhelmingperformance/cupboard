@@ -1,6 +1,29 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { runCli } from './run.ts';
+
+// `cupboard init` runs a first deploy whose deployment never serves the new
+// build, so the deploy stops before the claim.
+vi.mock('./deploy/command.ts', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('./deploy/command.ts')>();
+
+	return {
+		...actual,
+		executeDeploy: () => {
+			actual.endBeforeReady(
+				{
+					outro: () => {
+						// The outro is not part of the exit status.
+					}
+				},
+				{ kind: 'bootstrap' },
+				'https://cache.example.com'
+			);
+
+			return Promise.resolve();
+		}
+	};
+});
 
 describe('runCli', () => {
 	it.each([
@@ -15,5 +38,13 @@ describe('runCli', () => {
 		expect(
 			await runCli(['node', 'cupboard', 'no-such-command'])
 		).toBeGreaterThan(0);
+	});
+
+	// The released binary sets `process.exitCode` to the value that `runCli`
+	// returns, so the failure has to be in that value.
+	it('returns a non-zero code for a first deploy that stops before the claim', async () => {
+		expect(
+			await runCli(['node', 'cupboard', 'init', '--output-mode', 'json'])
+		).toBe(1);
 	});
 });
