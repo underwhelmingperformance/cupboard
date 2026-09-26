@@ -2,6 +2,8 @@ import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
 import {
+	AdminApiTransientError,
+	type AdminApiTransientStatus,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError
@@ -52,6 +54,21 @@ describe('translateRpcError', () => {
 			});
 		}
 	});
+
+	it.each<{ code: string; status: AdminApiTransientStatus }>([
+		{ code: 'TIMEOUT', status: 408 },
+		{ code: 'TOO_MANY_REQUESTS', status: 429 },
+		{ code: 'CACHE_LISTING_PROJECTION_PENDING', status: 503 }
+	])(
+		'converts a $status oRPC error into a transient admin-API error',
+		({ code, status }) => {
+			const error = new ORPCError(code, { status });
+
+			expect(translateRpcError(error)).toStrictEqual(
+				new AdminApiTransientError(status, code, { cause: error })
+			);
+		}
+	);
 
 	it('returns an unrecognised oRPC code unchanged', () => {
 		const error = new ORPCError('NOT_FOUND', {

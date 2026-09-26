@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { QuotaExceededError } from './errors.ts';
+import {
+	AdminApiTransientError,
+	type AdminApiTransientStatus,
+	QuotaExceededError
+} from './errors.ts';
 
 describe('QuotaExceededError', () => {
 	it.each([
@@ -30,5 +34,35 @@ describe('QuotaExceededError', () => {
 		).toBe(
 			"This upload would exceed the tenant's storage quota. Free space by deleting unused paths or raise the quota."
 		);
+	});
+});
+
+describe('AdminApiTransientError', () => {
+	it.each<{
+		status: AdminApiTransientStatus;
+		code: string;
+		message: string;
+	}>([
+		{
+			status: 408,
+			code: 'TIMEOUT',
+			message:
+				'The admin API responded with 408 (TIMEOUT). Run the command again later.'
+		},
+		{
+			status: 503,
+			code: 'CACHE_LISTING_PROJECTION_PENDING',
+			message:
+				'The admin API responded with 503 (CACHE_LISTING_PROJECTION_PENDING). Run the command again later.'
+		}
+	])('reports status $status and code $code', ({ status, code, message }) => {
+		const error = new AdminApiTransientError(status, code);
+
+		expect({
+			exitCode: error.exitCode,
+			status: error.status,
+			code: error.code,
+			message: error.message
+		}).toStrictEqual({ exitCode: 75, status, code, message });
 	});
 });
