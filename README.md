@@ -155,7 +155,7 @@ an error.
 Colour is a separate choice: `--colour` and `--no-colour` force ANSI on or off,
 and `NO_COLOR` is honoured otherwise.
 
-## Exit codes for `cupboard build-push`
+## `cupboard build-push`
 
 `cupboard build-push` streams publication while the build runs, then reconciles
 the final build and publication results. Its numeric exit status lets retry
@@ -169,18 +169,10 @@ The build command must use the inherited Nix store configuration. Do not pass
 `--store` to a nested Nix command or change `NIX_REMOTE`. Cupboard cannot
 protect or publish outputs from another store.
 
-| Code | Meaning                                                              |
-| ---- | -------------------------------------------------------------------- |
-| 0    | The build succeeded and every selected path is published.            |
-| 1-n  | The build command itself failed; its own exit status passes through. |
-| 69   | A dependency the run needs is unavailable (`EX_UNAVAILABLE`).        |
-| 74   | A publication failure not otherwise classified (`EX_IOERR`).         |
-| 75   | A transient failure; retrying the run may succeed (`EX_TEMPFAIL`).   |
-| 77   | An authentication or authorisation failure (`EX_NOPERM`).            |
-| 130  | The run was interrupted; reserved for abort.                         |
+The exit statuses of `build-push`, and those shared by all commands, are listed
+in [docs/cli-scripting.md][cli-scripting].
 
-Other commands share the 69, 75 and 77 categories; 74 is specific to
-`build-push`, whose publication phase never exits with a bare 1.
+[cli-scripting]: ./docs/cli-scripting.md
 
 ## More
 
@@ -190,6 +182,8 @@ Other commands share the 69, 75 and 77 categories; 74 is specific to
   substituter.
 - [docs/measuring-realisation.md](./docs/measuring-realisation.md) measures what
   publishing a flake's targets costs a cold runner, and gates that cost.
+- [docs/cli-scripting.md][cli-scripting] lists the CLI's exit statuses and says
+  when a script should retry.
 - [SECURITY.md](./SECURITY.md) explains how to report a vulnerability.
 - [docs/security.md](./docs/security.md) lists the other security documentation.
 - [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
