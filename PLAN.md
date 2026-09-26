@@ -380,7 +380,7 @@ Cloudflare identity, the deployment's admin.
 
   Display names come from the caller's own token claims (`name`, `email`,
   `preferred_username`, `sub`). Other principals show as the full issuer URL and
-  `sub`.
+  `sub`, and so do the rows of `oidc-trust list`.
 
 - [x] `cupboard login` defaults to the same issuer and client, so a flagless
       login presents exactly the triple the owner rule pins. `--headless` uses

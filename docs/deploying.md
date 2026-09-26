@@ -319,7 +319,9 @@ The CLI shows your own identity as your token's `name`, `email`,
 `preferred_username` or `sub` claim, whichever it finds first in that order. It
 reads your display name from your token each time, and the deployment does not
 record it. Other principals appear as the full issuer URL followed by the
-subject; an update shows the admin in this form.
+subject; an update shows the admin in this form. `cupboard oidc-trust list`
+shows each rule's full issuer URL, followed by the subject when the rule is
+pinned to one.
 
 ## Workers plan and subrequest allowance
 
