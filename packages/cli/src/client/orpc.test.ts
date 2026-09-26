@@ -15,7 +15,11 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { CliAbortError, CupboardHttpError } from '../errors.ts';
+import {
+	CliAbortError,
+	CupboardHttpError,
+	QuotaExceededError
+} from '../errors.ts';
 
 import type { TokenProvider } from './credentials.ts';
 import { controlRpc, tenantRpc } from './orpc.ts';
@@ -60,6 +64,16 @@ async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 	}
 
 	return rejected;
+}
+
+function rotateHttpError(status: number, body: string): CupboardHttpError {
+	return new CupboardHttpError('POST', '/t/acme/keys/rotate', status, body);
+}
+
+function expectORPCError(
+	value: unknown
+): asserts value is ORPCError<string, unknown> {
+	expect(value).toBeInstanceOf(ORPCError);
 }
 
 const internalError = (): Response =>
@@ -778,6 +792,221 @@ describe('tenantRpc', () => {
 				status: StatusCodes.INSUFFICIENT_STORAGE
 			});
 		}
+	});
+
+	// `keys.signing.rotate` is replay-unsafe, so the client sends it once and each
+	// case below needs only one response.
+	it.each([
+		{
+			status: StatusCodes.REQUEST_TIMEOUT,
+			body: '{"oops"',
+			contentType: 'application/json',
+			expected: rotateHttpError(StatusCodes.REQUEST_TIMEOUT, '{"oops"')
+		},
+		{
+			status: StatusCodes.TOO_MANY_REQUESTS,
+			body: '{"oops"',
+			contentType: 'application/json',
+			expected: rotateHttpError(StatusCodes.TOO_MANY_REQUESTS, '{"oops"')
+		},
+		{
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			body: '{"oops"',
+			contentType: 'application/json',
+			expected: rotateHttpError(StatusCodes.SERVICE_UNAVAILABLE, '{"oops"')
+		},
+		{
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			body: ' ',
+			contentType: 'application/json',
+			expected: rotateHttpError(StatusCodes.SERVICE_UNAVAILABLE, '')
+		},
+		{
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			body: '{',
+			contentType: undefined,
+			expected: rotateHttpError(StatusCodes.SERVICE_UNAVAILABLE, '{')
+		},
+		{
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			body: '{',
+			contentType: '',
+			expected: rotateHttpError(StatusCodes.SERVICE_UNAVAILABLE, '{')
+		},
+		{
+			status: StatusCodes.NOT_FOUND,
+			body: '{"oops"',
+			contentType: 'application/json',
+			expected: rotateHttpError(StatusCodes.NOT_FOUND, '{"oops"')
+		},
+		{
+			status: StatusCodes.INSUFFICIENT_STORAGE,
+			body: '{"oops"',
+			contentType: 'application/json',
+			expected: new QuotaExceededError('{"oops"')
+		}
+	])(
+		'throws the error for HTTP status $status when oRPC cannot decode body $body (content type $contentType)',
+		async ({ status, body, contentType, expected }) => {
+			const { fetcher } = capturingFetcher([
+				// A byte body leaves the content type unset unless one is given.
+				() =>
+					new Response(new TextEncoder().encode(body), {
+						status,
+						headers:
+							contentType === undefined ? {} : { 'content-type': contentType }
+					})
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			const rejected = await rejectedBy(() => rpc.keys.signing.rotate());
+
+			expect(rejected).toStrictEqual(expected);
+		}
+	);
+
+	it.each([
+		{
+			name: 'an undecodable 429 body',
+			status: StatusCodes.TOO_MANY_REQUESTS,
+			contentType: 'application/json'
+		},
+		{
+			name: 'a plain-text 500 body',
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			contentType: 'text/plain'
+		}
+	])(
+		'keeps the first 4 KiB of $name as the error detail',
+		async ({ status, contentType }) => {
+			// A two-byte character straddles the 4 KiB limit, so the preview ends
+			// before it.
+			const body = `${'a'.repeat(4 * 1024 - 1)}é${'b'.repeat(100)}`;
+			const { fetcher } = capturingFetcher([
+				() =>
+					new Response(body, {
+						status,
+						headers: { 'content-type': contentType }
+					})
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			const rejected = await rejectedBy(() => rpc.keys.signing.rotate());
+
+			expect(rejected).toStrictEqual(
+				new CupboardHttpError(
+					'POST',
+					'/t/acme/keys/rotate',
+					status,
+					`${'a'.repeat(4 * 1024 - 1)}\n[response body truncated]`
+				)
+			);
+		}
+	);
+
+	const anyFile: unknown = expect.any(File);
+	const slowDown = {
+		defined: false,
+		code: 'TOO_MANY_REQUESTS',
+		status: StatusCodes.TOO_MANY_REQUESTS,
+		message: 'Slow down',
+		data: { retryAfterSeconds: 5 }
+	};
+
+	it.each([
+		{
+			name: 'a well-formed oRPC error',
+			response: () =>
+				Response.json(slowDown, { status: StatusCodes.TOO_MANY_REQUESTS }),
+			message: 'Slow down',
+			data: { retryAfterSeconds: 5 }
+		},
+		{
+			name: 'a well-formed oRPC error with no content type',
+			response: () =>
+				new Response(new TextEncoder().encode(JSON.stringify(slowDown)), {
+					status: StatusCodes.TOO_MANY_REQUESTS
+				}),
+			message: 'Slow down',
+			data: { retryAfterSeconds: 5 }
+		},
+		{
+			name: 'a plain-text body',
+			response: () =>
+				new Response('Slow down', {
+					status: StatusCodes.TOO_MANY_REQUESTS,
+					headers: { 'content-type': 'text/plain' }
+				}),
+			message: 'Too Many Requests',
+			data: {
+				status: StatusCodes.TOO_MANY_REQUESTS,
+				headers: { 'content-type': 'text/plain' },
+				body: 'Slow down'
+			}
+		},
+		{
+			name: 'an empty JSON body',
+			response: () =>
+				new Response('', {
+					status: StatusCodes.TOO_MANY_REQUESTS,
+					headers: { 'content-type': 'application/json' }
+				}),
+			message: 'Too Many Requests',
+			data: {
+				status: StatusCodes.TOO_MANY_REQUESTS,
+				headers: { 'content-type': 'application/json' },
+				body: undefined
+			}
+		},
+		{
+			name: 'an attachment with a malformed JSON body',
+			response: () =>
+				new Response(new TextEncoder().encode('{'), {
+					status: StatusCodes.TOO_MANY_REQUESTS,
+					headers: {
+						'content-type': 'application/json',
+						'content-disposition': 'attachment; filename="error.json"'
+					}
+				}),
+			message: 'Too Many Requests',
+			data: {
+				status: StatusCodes.TOO_MANY_REQUESTS,
+				headers: {
+					'content-disposition': 'attachment; filename="error.json"',
+					'content-type': 'application/json'
+				},
+				body: anyFile
+			}
+		}
+	])('leaves $name for oRPC to decode', async ({ response, message, data }) => {
+		const { fetcher } = capturingFetcher([response]);
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+			credential: 'admin-token',
+			fetcher
+		});
+
+		const rejected = await rejectedBy(() => rpc.keys.signing.rotate());
+
+		expectORPCError(rejected);
+		expect({
+			code: rejected.code,
+			status: rejected.status,
+			defined: rejected.defined,
+			message: rejected.message,
+			data: rejected.data
+		}).toStrictEqual({
+			code: 'TOO_MANY_REQUESTS',
+			status: StatusCodes.TOO_MANY_REQUESTS,
+			defined: false,
+			message,
+			data
+		});
 	});
 
 	it('rejects a response that does not satisfy the contract', async () => {
