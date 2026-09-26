@@ -2,13 +2,16 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { VerificationError } from '@sigstore/verify';
+import { PolicyError, VerificationError } from '@sigstore/verify';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	CertificateIdentityModeError,
 	CertificateIssuerModeError,
 	identityPolicy,
+	TrustedRootFormatError,
+	TrustedRootsRejectedError,
 	verificationPolicy,
 	verifyBundle
 } from './sigstore.ts';
@@ -17,6 +20,12 @@ import {
 	signerIdentity,
 	signerIssuer
 } from './sigstore-bundle-fixture.ts';
+
+function verificationFailure(error: unknown): unknown {
+	return error instanceof VerificationError || error instanceof PolicyError
+		? { name: error.name, code: error.code }
+		: error;
+}
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;
@@ -218,5 +227,206 @@ describe('verifyBundle against a GitHub-instance bundle', () => {
 		expect(
 			refusal instanceof VerificationError ? refusal.code : undefined
 		).toBe('TLOG_ERROR');
+	});
+});
+
+// `gh attestation trusted-root` prints JSON Lines, one root per line, while a
+// hand-written root is usually one (possibly pretty-printed) JSON document.
+const trustedRootDocumentSchema = z.looseObject({
+	mediaType: z.string(),
+	certificateAuthorities: z.array(z.looseObject({}))
+});
+
+/**
+ * Replaces the first certificate authority of a trusted root with one whose
+ * certificate is not DER.
+ */
+function withUnloadableCertificate(trustedRoot: string): string {
+	const root = trustedRootDocumentSchema.parse(JSON.parse(trustedRoot));
+
+	return JSON.stringify({
+		...root,
+		certificateAuthorities: [
+			{
+				subject: { organization: 'cupboard', commonName: 'broken' },
+				certChain: { certificates: [{ rawBytes: 'AAAA' }] }
+			},
+			...root.certificateAuthorities
+		]
+	});
+}
+
+describe('verifyBundle with a trusted-root file', () => {
+	const subjectDigest = 'aa'.repeat(32);
+	const predicateType = 'https://slsa.dev/provenance/v1';
+	const policy = { identity: signerIdentity, issuer: signerIssuer };
+	const fixture = githubInstanceBundle({ subjectDigest, predicateType });
+	const otherRoot = githubInstanceBundle({
+		subjectDigest,
+		predicateType
+	}).trustedRoot;
+	const thirdRoot = githubInstanceBundle({
+		subjectDigest,
+		predicateType
+	}).trustedRoot;
+	const pretty = JSON.stringify(JSON.parse(fixture.trustedRoot), undefined, 2);
+	const options = { ctlogThreshold: 0, tlogThreshold: 0 };
+	const verifiedSigner = {
+		predicateType,
+		subjectDigests: [subjectDigest],
+		identity: signerIdentity,
+		issuer: signerIssuer
+	};
+
+	async function verifyWith(
+		trustedRoot: string,
+		identityPolicy = policy
+	): Promise<unknown> {
+		return withTrustedRoot(trustedRoot, async (file) => {
+			try {
+				const verified = await verifyBundle(fixture.bundle, identityPolicy, {
+					...options,
+					trustedRoot: file
+				});
+
+				return {
+					predicateType: verified.predicateType,
+					subjectDigests: verified.subjectDigests,
+					identity: verified.signer.identity?.subjectAlternativeName,
+					issuer: verified.signer.identity?.extensions?.issuer
+				};
+			} catch (error) {
+				return error;
+			}
+		});
+	}
+
+	it.each([
+		{ name: 'one compact JSON document', file: fixture.trustedRoot },
+		{ name: 'one pretty-printed JSON document', file: pretty },
+		{
+			name: 'JSON Lines with the signing root first',
+			file: `${fixture.trustedRoot}\n${otherRoot}\n`
+		},
+		{
+			name: 'JSON Lines with the signing root last',
+			file: `${otherRoot}\n${thirdRoot}\n${fixture.trustedRoot}\n`
+		},
+		{
+			name: 'JSON Lines with blank lines and CRLF endings',
+			file: `\r\n${otherRoot}\r\n\r\n${fixture.trustedRoot}\r\n`
+		}
+	])('verifies against $name', async ({ file }) => {
+		expect(await verifyWith(file)).toStrictEqual(verifiedSigner);
+	});
+
+	// `TrustedRoot.mediaType` in `@sigstore/protobuf-specs` documents these
+	// forms. `gh attestation trusted-root` prints the old form.
+	it.each([
+		'application/vnd.dev.sigstore.trustedroot.v0.2+json',
+		'application/vnd.dev.sigstore.trustedroot.v0.1+json',
+		'application/vnd.dev.sigstore.trustedroot+json;version=0.1'
+	])('accepts a root with the media type %s', async (mediaType) => {
+		const relabelled = JSON.stringify({
+			...trustedRootDocumentSchema.parse(JSON.parse(fixture.trustedRoot)),
+			mediaType
+		});
+
+		expect(await verifyWith(relabelled)).toStrictEqual(verifiedSigner);
+	});
+
+	it('rethrows the failure of a single root unchanged', async () => {
+		const refusal = await verifyWith(otherRoot);
+
+		expect(verificationFailure(refusal)).toStrictEqual({
+			name: 'VerificationError',
+			code: 'TIMESTAMP_ERROR'
+		});
+	});
+
+	it('reports every root failure when none verifies', async () => {
+		const refusal = await verifyWith(`${otherRoot}\n${thirdRoot}\n`);
+
+		expect(
+			refusal instanceof TrustedRootsRejectedError
+				? {
+						name: refusal.name,
+						failures: refusal.failures.map((failure) =>
+							verificationFailure(failure)
+						),
+						causeIsFirstFailure: refusal.cause === refusal.failures[0]
+					}
+				: refusal
+		).toStrictEqual({
+			name: 'TrustedRootsRejectedError',
+			failures: [
+				{ name: 'VerificationError', code: 'TIMESTAMP_ERROR' },
+				{ name: 'VerificationError', code: 'TIMESTAMP_ERROR' }
+			],
+			causeIsFirstFailure: true
+		});
+	});
+
+	it('rethrows a signer identity failure unwrapped', async () => {
+		const refusal = await verifyWith(
+			`${otherRoot}\n${fixture.trustedRoot}\n${thirdRoot}\n`,
+			{ identity: 'https://other.example/workflow', issuer: signerIssuer }
+		);
+
+		expect(verificationFailure(refusal)).toStrictEqual({
+			name: 'PolicyError',
+			code: 'UNTRUSTED_SIGNER_ERROR'
+		});
+	});
+
+	it.each([
+		{
+			name: 'a malformed line',
+			file: `${fixture.trustedRoot}\n{not json\n`,
+			reason: { kind: 'malformed-line', line: 2 }
+		},
+		{
+			name: 'a line that is not a JSON object',
+			file: `${fixture.trustedRoot}\nnull\n`,
+			reason: { kind: 'malformed-line', line: 2 }
+		},
+		{
+			name: 'a pretty-printed document with a syntax error',
+			file: pretty.slice(0, pretty.lastIndexOf('}')),
+			reason: { kind: 'malformed-document' }
+		},
+		{
+			name: 'a document that is not a JSON object',
+			file: '42\n',
+			reason: { kind: 'malformed-document' }
+		},
+		{
+			name: 'an empty file',
+			file: '\n \n',
+			reason: { kind: 'empty' }
+		},
+		{
+			name: 'a JSON object that is not a trusted root',
+			file: JSON.stringify({ mediaType: 'application/json' }),
+			reason: { kind: 'not-a-trusted-root' }
+		},
+		{
+			name: 'a line that is not a trusted root',
+			file: `${fixture.trustedRoot}\n{}\n`,
+			reason: { kind: 'not-a-trusted-root-line', line: 2 }
+		},
+		{
+			name: 'a root with a certificate that cannot be loaded, after a root that verifies',
+			file: `${fixture.trustedRoot}\n${withUnloadableCertificate(otherRoot)}\n`,
+			reason: { kind: 'unusable-root-line', line: 2 }
+		}
+	])('rejects $name', async ({ file, reason }) => {
+		const refusal = await verifyWith(file);
+
+		expect(
+			refusal instanceof TrustedRootFormatError
+				? { name: refusal.name, reason: refusal.reason }
+				: refusal
+		).toStrictEqual({ name: 'TrustedRootFormatError', reason });
 	});
 });
