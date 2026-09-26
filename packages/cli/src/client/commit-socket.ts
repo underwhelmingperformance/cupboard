@@ -22,6 +22,7 @@ import {
 import { chunk } from '@cupboard/shared/collections';
 import { BoundedBodyCollector } from '@cupboard/shared/response-body';
 import { retryAfterDelayMs } from '@cupboard/shared/retry';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import { abortReason } from '../abort.ts';
@@ -30,6 +31,7 @@ import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
+	QuotaExceededError,
 	TokenProviderError,
 	UploadVerificationFailedError,
 	UploadWaitTimeoutError
@@ -223,6 +225,7 @@ const maxTimerDelayMs = 2 ** 31 - 1;
 // frame is written by the tenant's own object, which reports every transient
 // condition of its own as one of these two.
 const retryableErrorStatuses = new Set([429, 503]);
+const insufficientStorageStatus: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 // Cap `Retry-After` above the reconnect back-off ceiling so valid server delays
 // still take effect, but an unbounded value cannot consume the whole capacity
@@ -1169,12 +1172,10 @@ export function runCommitSession(
 				noteCapacityProgress();
 
 				finishEntry(errorUploadId, (finishing) => {
-					const error = new CupboardHttpError(
-						'GET',
-						options.path,
-						status,
-						message
-					);
+					const error =
+						status === insufficientStorageStatus
+							? new QuotaExceededError(message)
+							: new CupboardHttpError('GET', options.path, status, message);
 
 					if (finishing.acked) {
 						finishing.settleFailed(error);

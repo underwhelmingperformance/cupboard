@@ -59,6 +59,11 @@ describe('cliExitCode', () => {
 			expected: 1
 		},
 		{
+			name: 'a 507 response',
+			error: new CupboardHttpError('GET', '/x', 507, ''),
+			expected: 1
+		},
+		{
 			name: 'a wait timeout',
 			error: new UploadWaitTimeoutError(1, 600),
 			expected: transientExitCode
