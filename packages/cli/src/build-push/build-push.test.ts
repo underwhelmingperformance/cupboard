@@ -28,6 +28,7 @@ import {
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -48,8 +49,10 @@ import {
 	CommitCapacityTimeoutError,
 	CupboardHttpError,
 	PostBuildHookConflictError,
+	PushIncompleteError,
 	QuotaExceededError,
 	SessionRejectedError,
+	transientExitCode,
 	unavailableExitCode,
 	UntrustedDaemonError
 } from '../errors.ts';
@@ -652,6 +655,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 	const dependencies: BuildPushDependencies = {
 		client,
+		credential: 'cupboard-login',
 		store,
 		batchStore: {
 			withProtectedPaths: (use) => {
@@ -1009,6 +1013,34 @@ describe('classifyPublicationFailures', () => {
 			name: 'a transient failure',
 			causes: [new CupboardHttpError('PUT', '/nar', 503, '')],
 			expectedExitCode: 75,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'an incomplete push with a transient failure',
+			causes: [
+				new PushIncompleteError({
+					failures: [{ path: 'a-app', stage: 'upload' }],
+					exitStatus: transientExitCode,
+					command: 'cupboard build-push',
+					credential: 'cupboard-login',
+					recordsRetention: false
+				})
+			],
+			expectedExitCode: 75,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'an incomplete push with an unclassified failure',
+			causes: [
+				new PushIncompleteError({
+					failures: [{ path: 'a-app', stage: 'upload' }],
+					exitStatus: genericExitCode,
+					command: 'cupboard build-push',
+					credential: 'cupboard-login',
+					recordsRetention: false
+				})
+			],
+			expectedExitCode: 74,
 			expectedCauseIndex: 0
 		},
 		{
@@ -2136,6 +2168,29 @@ describe('runBuildPush', () => {
 			type: BuildPublicationFailedError,
 			cause
 		});
+	});
+
+	it('passes cupboard build-push as the command to run again when publication after the build cannot publish a path', async () => {
+		const run = await runFlow({
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			constructed: { succeedOn: 1 },
+			valid: [pathA],
+			action: 'upload',
+			uploadFailure: new CupboardHttpError('PUT', '/nar', 503, '')
+		});
+		const path = StorePath.basename(pathA);
+
+		expect(run.error).toStrictEqual(
+			new BuildPublicationFailedError([path], transientExitCode, {
+				cause: new PushIncompleteError({
+					failures: [{ path, stage: 'upload' }],
+					exitStatus: transientExitCode,
+					command: 'cupboard build-push',
+					credential: 'cupboard-login',
+					recordsRetention: false
+				})
+			})
+		);
 	});
 
 	it('returns the child status when build and publication both fail and records both failures in the receipt', async () => {

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { Writable } from 'node:stream';
 
 import {
 	Nix,
@@ -35,11 +36,13 @@ import {
 	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
 import {
+	createReporter,
 	formatBytes,
 	type Reporter,
 	type ResultPayload,
 	type ResultRow
 } from '@cupboard/reporter';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -49,10 +52,16 @@ import { waitTimeoutSecondsSchema } from '../duration.ts';
 import {
 	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
+	authExitCode,
 	CupboardHttpError,
+	type FailedPushPath,
+	type IncompletePushExitStatus,
+	type PushFailureStage,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
+	QuotaExceededError,
 	ReferenceUploadRequiredError,
+	transientExitCode,
 	UploadGraceFactsUnsupportedError,
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
@@ -216,6 +225,8 @@ describe('runPush', () => {
 
 			await expect(
 				runPush(publication(targets), reporter([]), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					retain: false,
 					nix: nixStore(infos),
 					client: {
@@ -243,6 +254,8 @@ describe('runPush', () => {
 
 		await expect(
 			runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				dryRun: true,
 				retain: false,
 				nix: nixStore({ [appPath]: info }),
@@ -269,6 +282,8 @@ describe('runPush', () => {
 
 		await expect(
 			runPush(publication(paths), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				root: rootName('main'),
 				nix: nixStore({}),
 				client: {
@@ -294,6 +309,8 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			closure: true,
 			client: {
 				preview: unexpectedPreviewCall,
@@ -391,6 +408,8 @@ describe('runPush', () => {
 		const negotiations: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			runRoot: {
 				name: rootName('ci/run-1'),
 				retention: {
@@ -467,6 +486,8 @@ describe('runPush', () => {
 		const uploadedKeys: string[] = [];
 
 		await runPush(publication(paths), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			uploadConcurrency: limit,
 			client: {
 				preview: unexpectedPreviewCall,
@@ -522,6 +543,8 @@ describe('runPush', () => {
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
 		await runPush(publication([appPath]), reporter([], [], payloads), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -600,6 +623,8 @@ describe('runPush', () => {
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -683,6 +708,8 @@ describe('runPush', () => {
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
 		await runPush(publication([appPath]), reporter([], [], payloads), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -789,6 +816,8 @@ describe('runPush', () => {
 		);
 
 		await runPush(publication([appPath]), reporter([], [], payloads), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -881,6 +910,8 @@ describe('runPush', () => {
 		const previews: UploadPreviewRequestInput[] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			closure: true,
 			dryRun: true,
 			client: {
@@ -971,6 +1002,8 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 
 		await runPush(publication([appPath]), reporter(results, warnings), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			wait: false,
 			client: {
 				preview: unexpectedPreviewCall,
@@ -1046,6 +1079,8 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate(body) {
@@ -1142,6 +1177,8 @@ describe('runPush', () => {
 		const bundleDigest = sha256Hex(bundle);
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				...skipClient(roots, clientCalls),
 				negotiateAttestations(body) {
@@ -1255,6 +1292,8 @@ describe('runPush', () => {
 		const bundleDigest = sha256Hex(bundle);
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				...deferredUpload([]),
@@ -1323,6 +1362,8 @@ describe('runPush', () => {
 		const bundleDigest = sha256Hex(bundle);
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			closure: true,
 			client: {
 				...skipClient(roots, clientCalls),
@@ -1421,6 +1462,8 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
@@ -1464,6 +1507,8 @@ describe('runPush', () => {
 		const outcome = await (async () => {
 			try {
 				await runPush(publication([appPath]), reporter([]), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					client: skipClient([], clientCalls),
 					attestations: [{ path: 'other.sigstore.json' }],
 					readAttestationBundle(path) {
@@ -1521,6 +1566,8 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 
 		await runPush(publication([appPath]), reporter(results, warnings), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: divergentSkipClient(
 				cacheDigest.narHash.toString(),
 				[],
@@ -1564,6 +1611,8 @@ describe('runPush', () => {
 		const outcome = await (async () => {
 			try {
 				await runPush(publication([appPath]), reporter([]), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					client: {
 						...divergentSkipClient(
 							cacheDigest.narHash.toString(),
@@ -1614,6 +1663,8 @@ describe('runPush', () => {
 		const archives: FakeNarArchive[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: () =>
@@ -1672,6 +1723,8 @@ describe('runPush', () => {
 		);
 
 		const options = {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate(body) {
@@ -1755,10 +1808,208 @@ describe('runPush', () => {
 				{
 					label: 'incomplete',
 					value:
-						'1 path(s) failed to publish; retention not recorded, re-run cupboard push to finish'
+						'1 path(s) could not be published, so retention was not recorded.'
 				}
 			]
 		});
+	});
+
+	it.each([
+		{
+			name: 'a 503 upload response',
+			failures: { app: { stage: 'upload', error: http(503) } },
+			failed: [failedPath('app', 'upload')],
+			expected: transientExitCode
+		},
+		{
+			name: 'a rate-limited admin response',
+			failures: {
+				app: {
+					stage: 'upload',
+					error: new ORPCError('TOO_MANY_REQUESTS', { status: 429 })
+				}
+			},
+			failed: [failedPath('app', 'upload')],
+			expected: transientExitCode
+		},
+		{
+			name: 'a quota refusal from the admin API',
+			failures: {
+				app: {
+					stage: 'upload',
+					error: new ORPCError('INSUFFICIENT_STORAGE', { status: 507 })
+				}
+			},
+			failed: [failedPath('app', 'upload')],
+			expected: genericExitCode
+		},
+		{
+			name: 'a rejected session',
+			failures: { app: { stage: 'upload', error: http(401) } },
+			failed: [failedPath('app', 'upload')],
+			expected: authExitCode
+		},
+		{
+			name: 'an unclassified upload failure',
+			failures: { app: { stage: 'upload', error: new Error('lost') } },
+			failed: [failedPath('app', 'upload')],
+			expected: genericExitCode
+		},
+		{
+			name: 'a target missing from the local store',
+			failures: { runtime: { stage: 'resolve' } },
+			failed: [failedPath('runtime', 'resolve')],
+			expected: genericExitCode
+		},
+		{
+			name: 'a 503 commit',
+			failures: { app: { stage: 'commit', error: http(503) } },
+			failed: [failedPath('app', 'commit')],
+			expected: transientExitCode
+		},
+		{
+			name: 'a 507 commit',
+			failures: {
+				app: { stage: 'commit', error: new QuotaExceededError('over quota') }
+			},
+			failed: [failedPath('app', 'commit')],
+			expected: genericExitCode
+		},
+		{
+			name: 'a 503 deferred verification',
+			failures: { app: { stage: 'verify', error: http(503) } },
+			failed: [unverifiedPath('app', 'pending')],
+			expected: transientExitCode
+		},
+		{
+			name: 'an upload that the server rejected during verification',
+			failures: {
+				app: {
+					stage: 'verify',
+					error: new UploadVerificationFailedError('upload-app', 'mismatch')
+				}
+			},
+			failed: [unverifiedPath('app', 'failed')],
+			expected: genericExitCode
+		},
+		{
+			name: 'a transient upload failure and a rejected commit',
+			failures: {
+				app: { stage: 'upload', error: http(503) },
+				runtime: { stage: 'commit', error: http(401) }
+			},
+			failed: [failedPath('app', 'upload'), failedPath('runtime', 'commit')],
+			expected: authExitCode
+		},
+		{
+			name: 'a transient upload failure and a quota refusal',
+			failures: {
+				runtime: { stage: 'upload', error: http(503) },
+				app: { stage: 'commit', error: new QuotaExceededError('over quota') }
+			},
+			failed: [failedPath('runtime', 'upload'), failedPath('app', 'commit')],
+			expected: transientExitCode
+		}
+	] satisfies readonly {
+		name: string;
+		failures: PathFailures;
+		failed: readonly FailedPushPath[];
+		expected: IncompletePushExitStatus;
+	}[])(
+		'gives PushIncompleteError exit status $expected when $name leaves a push incomplete',
+		async ({ failures, failed, expected }) => {
+			expect(await incompletePush(failures)).toStrictEqual(
+				new PushIncompleteError({
+					failures: failed,
+					exitStatus: expected,
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					recordsRetention: true
+				})
+			);
+		}
+	);
+
+	it('omits retry advice from the incomplete warning', async () => {
+		const warnings: { label: string; value?: string }[] = [];
+
+		const outcome = await incompletePush(
+			{
+				app: { stage: 'upload', error: http(503) },
+				runtime: { stage: 'verify', error: http(401) }
+			},
+			warnings
+		);
+
+		expect({
+			incomplete: warnings.filter((warning) => warning.label === 'incomplete'),
+			outcome
+		}).toStrictEqual({
+			incomplete: [
+				{
+					label: 'incomplete',
+					value:
+						'1 path(s) could not be published, so retention was not recorded.'
+				}
+			],
+			outcome: new PushIncompleteError({
+				failures: [
+					failedPath('app', 'upload'),
+					unverifiedPath('runtime', 'pending')
+				],
+				exitStatus: authExitCode,
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				recordsRetention: true
+			})
+		});
+	});
+
+	it('leaves retention out of the warning and the error when the push has none to record', async () => {
+		const warnings: { label: string; value?: string }[] = [];
+
+		const outcome = await incompletePush(
+			{ app: { stage: 'upload', error: http(503) } },
+			warnings,
+			false
+		);
+
+		expect({
+			incomplete: warnings.filter((warning) => warning.label === 'incomplete'),
+			outcome
+		}).toStrictEqual({
+			incomplete: [
+				{ label: 'incomplete', value: '1 path(s) could not be published.' }
+			],
+			outcome: new PushIncompleteError({
+				failures: [failedPath('app', 'upload')],
+				exitStatus: transientExitCode,
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				recordsRetention: false
+			})
+		});
+	});
+
+	it('does not report the per-path failure as the cause of an incomplete push', async () => {
+		const events: string[] = [];
+		const stream = new Writable({
+			write(chunk: Buffer, _encoding, callback) {
+				events.push(chunk.toString());
+				callback();
+			}
+		});
+		const failure = await incompletePush({
+			app: { stage: 'upload', error: http(503) }
+		});
+
+		const anyMessage: unknown = expect.any(String);
+
+		createReporter({ stream, out: stream }).error(failure);
+
+		expect(events.map((event): unknown => JSON.parse(event))).toStrictEqual([
+			{ event: 'error', name: 'PushIncompleteError', message: anyMessage }
+		]);
 	});
 
 	it('sets a named retention root to the pushed paths with --root', async () => {
@@ -1767,6 +2018,8 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -1811,6 +2064,8 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 
 		await runPush(publication([]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			root: rootName('main')
 		});
@@ -1837,6 +2092,8 @@ describe('runPush', () => {
 		const nixCalls: NixCall[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
 			nix: nixStore(
@@ -1894,6 +2151,8 @@ describe('runPush', () => {
 			let opened = 0;
 
 			await runPush(publication(paths), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				client: skipClient([], []),
 				root: rootName('main'),
 				openStore: () => {
@@ -1916,6 +2175,8 @@ describe('runPush', () => {
 		const nixCalls: NixCall[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			closure: true,
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
@@ -1959,6 +2220,8 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		await runPush(publication([appPath], [runtimePath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
 			nix: nixStore({
@@ -2006,6 +2269,8 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 
 		await runPush(publication([appPath], [runtimePath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
@@ -2049,6 +2314,8 @@ describe('runPush', () => {
 			PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
 			reporter([]),
 			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				referenceSource: {
 					url: new URL('https://cache.example.workers.dev/t/acme')
 				},
@@ -2146,6 +2413,8 @@ describe('runPush', () => {
 				PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
 				reporter([], [], payloads),
 				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					referenceSource: {
 						url: new URL('https://cache.example.workers.dev/t/acme')
 					},
@@ -2286,6 +2555,8 @@ describe('runPush', () => {
 				PublicationCollection.of(input),
 				reporter([], [], payloads),
 				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					client: skipClient([], clientCalls),
 					root: rootName('main'),
 					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -2386,6 +2657,8 @@ describe('runPush', () => {
 				PublicationCollection.of(input),
 				reporter([], [], payloads),
 				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					client: {
 						preview: unexpectedPreviewCall,
 						negotiate: (body) =>
@@ -2459,6 +2732,8 @@ describe('runPush', () => {
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: (body) =>
@@ -2525,6 +2800,8 @@ describe('runPush', () => {
 			const commits: string[] = [];
 
 			await runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				client: {
 					preview: unexpectedPreviewCall,
 					negotiate: (body) =>
@@ -2587,6 +2864,8 @@ describe('runPush', () => {
 		let error: unknown;
 		try {
 			await runPush(publication([appPath]), reporter([], [], payloads), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				client: {
 					preview: unexpectedPreviewCall,
 					negotiate: (body) =>
@@ -2648,6 +2927,8 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
 			retention: {
@@ -2700,6 +2981,8 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		await runPush(publication([appPath, runtimePath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
@@ -2762,6 +3045,8 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			retention: {
 				kind: 'duration',
@@ -2811,6 +3096,8 @@ describe('runPush', () => {
 		const warns: { label: string; value?: string }[] = [];
 
 		await runPush(publication([appPath]), reporter(results, warns), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			retain: false,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -2861,6 +3148,8 @@ describe('runPush', () => {
 		);
 
 		await runPush(publication(storePaths), reporter(results, []), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient([], []),
 			retain: false,
 			nix: store
@@ -2898,6 +3187,8 @@ describe('runPush', () => {
 			const bodies: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
 
 			await runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				...options,
 				client: {
 					...skipClient([], []),
@@ -2931,6 +3222,8 @@ describe('runPush', () => {
 		const previews: UploadPreviewRequestInput[] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			dryRun: true,
 			retain: false,
 			client: {
@@ -2999,6 +3292,8 @@ describe('runPush', () => {
 			const results: ResultRow[][] = [];
 
 			await runPush(publication([appPath]), reporter(results), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				...(wait !== undefined && { wait }),
 				retain: false,
 				client: {
@@ -3035,7 +3330,9 @@ describe('runPush', () => {
 	it('derives a stable pin name when the same path is pushed again', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
-		const dependencies = {
+		const dependencies: PushDependencies = {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: skipClient(roots, clientCalls),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		};
@@ -3087,6 +3384,8 @@ describe('runPush', () => {
 		const events: string[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -3184,6 +3483,8 @@ describe('runPush', () => {
 		};
 
 		await runPush(publication([appPath, runtimePath]), reporter(results), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client,
 			retention: {
 				kind: 'duration',
@@ -3236,6 +3537,8 @@ describe('runPush', () => {
 		const commitOptions: CommitOptions[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			wait: true,
 			waitTimeoutSeconds: waitTimeoutSecondsSchema.parse(30),
 			client: {
@@ -3278,6 +3581,8 @@ describe('runPush', () => {
 		const events: string[] = [];
 
 		const options = {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				...deferredUpload(events),
@@ -3334,7 +3639,7 @@ describe('runPush', () => {
 			{
 				label: 'incomplete',
 				value:
-					'1 path(s) failed to publish; retention not recorded, re-run cupboard push to finish'
+					'1 path(s) could not be published, so retention was not recorded.'
 			}
 		]);
 	});
@@ -3354,6 +3659,8 @@ describe('runPush', () => {
 		);
 
 		const options = {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				...deferredUpload(events),
@@ -3420,6 +3727,8 @@ describe('runPush', () => {
 		const roots: RootSetBodyInput[] = [];
 
 		const options = {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: () =>
@@ -3523,6 +3832,8 @@ describe('runPush', () => {
 			publication([appPath, runtimePath]),
 			reporter(results, [], payloads),
 			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				client: {
 					preview: unexpectedPreviewCall,
 					negotiate: (body) =>
@@ -3613,6 +3924,8 @@ describe('runPush', () => {
 		const payloads: ResultPayload[] = [];
 
 		await runPush(publication([appPath]), reporter(results, [], payloads), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			wait: false,
 			client: {
 				preview: unexpectedPreviewCall,
@@ -3687,6 +4000,8 @@ describe('runPush', () => {
 		const commitTargets: CommitTarget[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			client: {
 				...skipClient([], []),
 				probeUploadGraceFacts(kind) {
@@ -3742,6 +4057,8 @@ describe('runPush', () => {
 		const probes: string[] = [];
 
 		const pushed = runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			retain: false,
 			client: {
 				...skipClient([], []),
@@ -3766,6 +4083,8 @@ describe('runPush', () => {
 		const probes: string[] = [];
 
 		const previewed = runPush(publication([appPath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			dryRun: true,
 			retain: false,
 			client: {
@@ -3793,6 +4112,8 @@ describe('runPush', () => {
 		const outcome = await (async () => {
 			try {
 				await runPush(publication([appPath]), reporter([]), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -3823,6 +4144,8 @@ describe('runPush', () => {
 		const outcome = await (async () => {
 			try {
 				await runPush(publication([appPath]), reporter([]), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -3873,6 +4196,8 @@ describe('runPush', () => {
 		const outcome = await (async () => {
 			try {
 				await runPush(publication([appPath]), reporter([]), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -3921,6 +4246,8 @@ describe('runPush', () => {
 			const outcome = await (async () => {
 				try {
 					await runPush(publication([appPath]), reporter([]), {
+						command: 'cupboard push',
+						credential: 'cupboard-login',
 						dryRun: true,
 						client: {
 							negotiate: unexpectedNegotiateCall,
@@ -3950,6 +4277,8 @@ describe('runPush', () => {
 		const outcome = await (async () => {
 			try {
 				await runPush(publication([appPath]), reporter([]), {
+					command: 'cupboard push',
+					credential: 'cupboard-login',
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -3978,6 +4307,8 @@ describe('runPush', () => {
 		const warns: { label: string; value?: string }[] = [];
 
 		await runPush(publication([appPath]), reporter(results, warns), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			dryRun: true,
 			retain: false,
 			client: {
@@ -4018,6 +4349,8 @@ describe('runPush', () => {
 		const warns: { label: string; value?: string }[] = [];
 
 		await runPush(publication([appPath]), reporter(results, warns), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			dryRun: true,
 			retain: false,
 			client: {
@@ -4064,6 +4397,8 @@ describe('runPush', () => {
 		const warns: { label: string; value?: string }[] = [];
 
 		await runPush(publication([appPath]), reporter([], warns), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
 			dryRun: true,
 			client: {
 				negotiate: unexpectedNegotiateCall,
@@ -4106,6 +4441,8 @@ function receiptPush(
 	>
 ): Promise<BuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
+		command: 'cupboard push',
+		credential: 'cupboard-login',
 		retain: false,
 		client: {
 			preview: unexpectedPreviewCall,
@@ -4310,6 +4647,8 @@ describe('the build receipt a push writes', () => {
 			PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
 			reporter([]),
 			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
 				retain: false,
 				buildStore,
 				claimable: [],
@@ -4477,6 +4816,145 @@ async function collectReadableStream(
 	}
 
 	return Buffer.concat(chunks);
+}
+
+type PushedPath = 'app' | 'runtime';
+
+type PathFailure =
+	| { readonly stage: 'resolve' }
+	| {
+			readonly stage: 'upload' | 'commit' | 'verify';
+			readonly error: Error;
+	  };
+
+type PathFailures = Partial<Record<PushedPath, PathFailure>>;
+
+const pushedPaths = { app: appPath, runtime: runtimePath };
+const pushedDigests = { app: appDigest, runtime: runtimeDigest };
+
+function failedPath(
+	key: PushedPath,
+	stage: Exclude<PushFailureStage, 'verify'>
+): FailedPushPath {
+	return { path: StorePath.basename(pushedPaths[key]), stage };
+}
+
+function unverifiedPath(
+	key: PushedPath,
+	verdict: 'failed' | 'pending'
+): FailedPushPath {
+	return {
+		path: StorePath.basename(pushedPaths[key]),
+		stage: 'verify',
+		verdict
+	};
+}
+
+function pathKey(value: string): PushedPath {
+	return value.includes('runtime') ? 'runtime' : 'app';
+}
+
+/**
+ * Pushes `appPath` and `runtimePath`, failing each path at the stage given in
+ * `failures`, and returns the value that the push throws. A path that fails at
+ * `resolve` is missing from the local store. The push's warnings are appended
+ * to `warnings`.
+ */
+async function incompletePush(
+	failures: PathFailures,
+	warnings: { label: string; value?: string }[] = [],
+	shouldRetain = true
+): Promise<unknown> {
+	const localPaths: Record<string, NixValidPathInfo> = {};
+
+	for (const key of ['app', 'runtime'] as const) {
+		if (failures[key]?.stage === 'resolve') {
+			continue;
+		}
+
+		localPaths[pushedPaths[key]] = pathInfo(
+			pushedPaths[key],
+			pushedDigests[key],
+			[]
+		);
+	}
+
+	try {
+		await runPush(publication([appPath, runtimePath]), reporter([], warnings), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
+			retain: shouldRetain,
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate: (body) =>
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: body.paths.map((path) => {
+								const key = pathKey(path.storePath);
+
+								return {
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: `upload-${key}`,
+									r2Key: `nar/${key}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								};
+							})
+						})
+					),
+				async uploadNar(r2Key, body) {
+					await collectReadableStream(body);
+					const failure = failures[pathKey(r2Key)];
+
+					if (failure?.stage === 'upload') {
+						throw failure.error;
+					}
+				},
+				commit(target) {
+					const key = pathKey(target.uploadId);
+					const failure = failures[key];
+
+					if (failure?.stage === 'commit') {
+						return Promise.reject(failure.error);
+					}
+
+					const isDeferred = failure?.stage === 'verify';
+
+					return Promise.resolve({
+						storePathHash: StorePath.hash(pushedPaths[key]),
+						narHash: pushedDigests[key].narHash.value,
+						status: isDeferred ? ('pending' as const) : ('committed' as const),
+						settled: isDeferred
+							? handledRejection(failure.error)
+							: Promise.resolve()
+					});
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore(localPaths),
+			createNarArchive: (storePath) =>
+				new FakeNarArchive(pushedDigests[pathKey(storePath)]),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+	} catch (error) {
+		return error;
+	}
+
+	throw new Error('expected the push to fail');
+}
+
+// The push awaits a deferred verdict only after committing every path, so mark
+// the rejection handled now to keep it from being reported as unhandled.
+function handledRejection(error: Error): Promise<void> {
+	const verdict = Promise.reject(error);
+	void Promise.allSettled([verdict]);
+
+	return verdict;
+}
+
+function http(status: number): CupboardHttpError {
+	return new CupboardHttpError('PUT', '/nar', status, '');
 }
 
 function digestForNar(nar: PushNarArchive): NarDigest {

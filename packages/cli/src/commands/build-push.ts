@@ -678,6 +678,8 @@ export function registerBuildPushCommand(
 						reporter,
 						{
 							client: pushClient,
+							credential:
+								options.githubOidc === true ? 'github-oidc' : 'cupboard-login',
 							store: nix,
 							batchStore: {
 								withProtectedPaths: (use) =>

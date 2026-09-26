@@ -330,6 +330,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 					recordingReporter(record),
 					{
 						client: runClient,
+						credential: 'cupboard-login',
 						store: nix,
 						batchStore: {
 							withProtectedPaths: (use) =>

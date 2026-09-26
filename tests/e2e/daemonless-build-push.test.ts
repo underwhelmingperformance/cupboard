@@ -368,6 +368,7 @@ function daemonlessDependencies(options: {
 
 	return {
 		client: options.client,
+		credential: 'cupboard-login',
 		store: options.nix,
 		batchStore: {
 			withProtectedPaths: () =>

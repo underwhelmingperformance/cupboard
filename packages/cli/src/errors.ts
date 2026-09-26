@@ -663,14 +663,146 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 	}
 }
 
+/**
+ * The exit statuses that a push with failed paths can return.
+ */
+export type IncompletePushExitStatus =
+	RankedExitStatus | typeof genericExitCode;
+
+/**
+ * The command that the user ran. `PushIncompleteError` includes it in its
+ * advice.
+ */
+export type PushCommand = 'cupboard push' | 'cupboard build-push';
+
+/**
+ * The credential that a push uses: the owner session cached by
+ * `cupboard login`, or a token exchanged for the GitHub Actions OIDC token
+ * with `--github-oidc`. `PushIncompleteError` gives advice for it when a push
+ * is not authorised.
+ */
+export type PushCredential = 'cupboard-login' | 'github-oidc';
+
+/**
+ * The step of a push at which a path failed. A path that fails at `verify` was
+ * committed, and then either the server reported that its verification failed
+ * or the server had not verified it when the push stopped waiting.
+ */
+export type PushFailureStage = 'resolve' | 'upload' | 'commit' | 'verify';
+
+/**
+ * A path that a push did not publish. For a path that failed deferred
+ * verification, `verdict` is `failed` when the server reported that
+ * verification failed, for example because the upload did not match its hash
+ * or the server lost the path. It is `pending` when the server had not
+ * verified the path when the push stopped waiting, so the server may still
+ * publish it.
+ */
+export type FailedPushPath =
+	| {
+			readonly path: string;
+			readonly stage: Exclude<PushFailureStage, 'verify'>;
+	  }
+	| {
+			readonly path: string;
+			readonly stage: 'verify';
+			readonly verdict: 'failed' | 'pending';
+	  };
+
+export interface IncompletePush {
+	readonly failures: readonly FailedPushPath[];
+	readonly exitStatus: IncompletePushExitStatus;
+	readonly command: PushCommand;
+	readonly credential: PushCredential;
+	/**
+	 * Whether the push has retention to record. It has none with `--no-retain`,
+	 * or for a build-push run without `--root`.
+	 */
+	readonly recordsRetention: boolean;
+}
+
+/**
+ * Some paths of a push failed. The error's exit status comes from
+ * `classifyFailures`, applied to the per-path failures.
+ */
 export class PushIncompleteError extends CliError {
-	constructor(public readonly failedPaths: readonly string[]) {
-		super(
-			`${String(failedPaths.length)} path(s) did not finish. The cache contains ` +
-				`only committed paths. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
-		);
+	readonly failedPaths: readonly string[];
+
+	constructor(public readonly push: IncompletePush) {
+		super(`${incompletePushOutcome(push)} ${pushRetryAdvice(push)}`);
 		this.name = 'PushIncompleteError';
+		this.failedPaths = push.failures.map((failure) => failure.path);
 	}
+
+	override get exitCode(): number {
+		return this.push.exitStatus;
+	}
+}
+
+// The push records retention after every path has been committed, and before
+// deferred verification finishes. A failure at any earlier stage therefore
+// means that the push did not record retention.
+function incompletePushOutcome(push: IncompletePush): string {
+	const unpublished: string[] = [];
+	const failed: string[] = [];
+	const pending: string[] = [];
+
+	for (const failure of push.failures) {
+		if (failure.stage !== 'verify') {
+			unpublished.push(failure.path);
+			continue;
+		}
+
+		(failure.verdict === 'failed' ? failed : pending).push(failure.path);
+	}
+
+	const sentences: string[] = [];
+
+	if (unpublished.length > 0) {
+		sentences.push(
+			`This push did not publish ${String(unpublished.length)} path(s): ${unpublished.join(', ')}.`
+		);
+	}
+
+	if (failed.length > 0) {
+		sentences.push(
+			`Verification failed for ${String(failed.length)} committed path(s): ${failed.join(', ')}.`
+		);
+	}
+
+	if (pending.length > 0) {
+		sentences.push(
+			`The server had not verified ${String(pending.length)} committed path(s) when the push stopped waiting: ${pending.join(', ')}. It may still publish them.`
+		);
+	}
+
+	if (push.recordsRetention) {
+		sentences.push(
+			unpublished.length > 0
+				? 'The push did not record retention.'
+				: 'The push recorded retention before verification.'
+		);
+	}
+
+	return sentences.join(' ');
+}
+
+function pushRetryAdvice({
+	exitStatus,
+	command,
+	credential
+}: IncompletePush): string {
+	if (exitStatus === authExitCode) {
+		return credential === 'github-oidc'
+			? `Check that a trust rule of the tenant grants this GitHub workflow the push, then run ${command} again.`
+			: `Sign in again with cupboard login or use a credential that allows the push, then run ${command} again.`;
+	}
+
+	if (exitStatus === transientExitCode) {
+		return `Run ${command} again to publish the failed paths.`;
+	}
+
+	return `Fix the failure reported above for each path, then run ${command} again.`;
 }
 
 export class PathsNotConfirmedError extends CliError {
