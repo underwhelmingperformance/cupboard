@@ -2,7 +2,7 @@ import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	type PushSummary,
 	type PushSummaryInput,
@@ -11,6 +11,9 @@ import {
 import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
+import { buildProgram } from '../../../packages/cli/src/cli.ts';
+import { modelPublishingJob } from '../../../packages/cli/src/commands/github/publication.ts';
+import { pushCommandAuthorizationDetails } from '../../../packages/cli/src/commands/push.ts';
 import {
 	BooleanInputInvalidError,
 	CupboardReleaseSelectionConflictError,
@@ -1145,5 +1148,81 @@ describe('runPushCupboard', () => {
 				]
 			]
 		});
+	});
+});
+
+describe('the push authority modelled by github check', () => {
+	it("matches the push command's authority for an installable push without signing", async () => {
+		const cache: CacheScope = {
+			kind: 'named',
+			name: cacheNameSchema.parse('packages')
+		};
+		const tenant = new URL('https://cache.example.test/t/acme');
+		const program = buildProgram();
+		const push = program.commands.find((command) => command.name() === 'push');
+		let parsed:
+			Parameters<typeof pushCommandAuthorizationDetails>[0] | undefined;
+
+		program.exitOverride();
+		push?.action(
+			(
+				_url: URL,
+				_paths: string[],
+				options: Parameters<typeof pushCommandAuthorizationDetails>[0]
+			) => {
+				parsed = options;
+			}
+		);
+		await program.parseAsync([
+			'node',
+			'cupboard',
+			...buildPushArguments({
+				...noExtras,
+				url: tenant,
+				paths: ['/nix/store/a'],
+				audience: '',
+				root: 'github:acme/app/main/x86_64-linux',
+				cache,
+				cacheSyntax: 'url',
+				ttl: '',
+				retain: true,
+				wait: true,
+				waitTimeout: '',
+				attestations: []
+			})
+		]);
+
+		if (parsed === undefined) {
+			throw new Error('Expected the real CLI to parse the push arguments');
+		}
+
+		const modelled = modelPublishingJob(
+			{
+				caller: '.github/workflows/publish.yml',
+				job: 'publish',
+				kind: 'installable',
+				workflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
+				inputs: {
+					url: tenant.href,
+					cache: 'packages',
+					root: 'github:acme/app/main',
+					attest: false
+				},
+				triggers: [{ event: 'push', filters: {}, hasPathFilter: false }]
+			},
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: 'acme/app',
+				defaultBranch: 'main'
+			},
+			tenant,
+			'main'
+		);
+
+		expect(
+			modelled.cases.map((publication) => publication.requests)
+		).toStrictEqual([[pushCommandAuthorizationDetails(parsed, cache)]]);
 	});
 });

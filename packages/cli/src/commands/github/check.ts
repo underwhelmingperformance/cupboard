@@ -22,14 +22,6 @@ import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { type ReadUser } from '@cupboard/shared/http';
 
 import { isAbortError } from '../../abort.ts';
-import {
-	cacheCreateAuthorizationDetails,
-	cacheRemoveAuthorizationDetails,
-	confirmAuthorizationDetails,
-	pushAuthorizationDetails,
-	rootEnsureAuthorizationDetails,
-	rootListAuthorizationDetails
-} from '../../auth/attenuate.ts';
 import { cacheLabel } from '../../client/client.ts';
 import {
 	GithubCheckFailedError,
@@ -62,6 +54,7 @@ import {
 	RootPrefixOutsideGrantFinding,
 	RootPrefixUnspecifiedFinding
 } from './finding.ts';
+import { flakeRequests } from './publication.ts';
 import {
 	RepositoryTrustRuleMissingFinding,
 	TrustRuleAudienceMismatchFinding,
@@ -95,14 +88,18 @@ export interface GithubCheckDependencies {
 	readonly signal?: AbortSignal;
 }
 
-function toMatcherRule(summary: OidcTrustSummary): OidcTrustRule {
-	return {
-		id: summary.id,
-		issuer: summary.issuer,
-		audience: summary.audience,
-		claims: summary.claims,
-		permittedGrants: summary.permittedGrants
-	};
+export function activeMatcherRules(
+	rules: readonly OidcTrustSummary[]
+): OidcTrustRule[] {
+	return rules
+		.filter((rule) => !rule.disabled)
+		.map((rule) => ({
+			id: rule.id,
+			issuer: rule.issuer,
+			audience: rule.audience,
+			claims: rule.claims,
+			permittedGrants: rule.permittedGrants
+		}));
 }
 
 // Prefer a rule for the modelled trigger over a sibling rule for another
@@ -169,10 +166,9 @@ function unmatchedFinding(
 	return new TrustRuleAudienceMismatchFinding(check, candidate, claims.aud);
 }
 
-// Matching claims do not grant authority by themselves. Model the quickstart's
-// requests with the same authorization helpers as the commands, then check each
-// request against the stored grants. This does not inspect a caller's flags.
-function checkTrustRule(
+// Matching claims do not grant authority by themselves, so check each modelled
+// request against the grants of the rule that the server would select.
+export function checkTrustRule(
 	check: string,
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims,
@@ -206,11 +202,12 @@ function hasPullRequestViewSelectors(
 	);
 }
 
-async function checkReuseView(
+export async function checkReuseView(
 	url: URL,
 	identity: RepositoryIdentity,
 	client: GithubCheckClient,
-	fetchCacheInfo: (url: URL) => Promise<CacheInfo>
+	fetchCacheInfo: (url: URL) => Promise<CacheInfo>,
+	destinationUrl: URL = url
 ): Promise<CheckFinding> {
 	const check = 'reuse view';
 	const viewName = pullRequestViewName(identity.repositoryId);
@@ -226,11 +223,22 @@ async function checkReuseView(
 		return new ReuseViewSelectorsMismatchFinding(check, prefix);
 	}
 
-	const destination = await fetchCacheInfo(url);
+	return checkReuseViewCacheInfo(url, destinationUrl, viewName, fetchCacheInfo);
+}
+
+export async function checkReuseViewCacheInfo(
+	tenant: URL,
+	destinationUrl: URL,
+	viewName: string,
+	fetchCacheInfo: (url: URL) => Promise<CacheInfo>
+): Promise<CheckFinding> {
+	const check = 'reuse view';
+
+	const destination = await fetchCacheInfo(destinationUrl);
 	let view: CacheInfo;
 
 	try {
-		view = await fetchCacheInfo(reuseViewUrl(url, viewName));
+		view = await fetchCacheInfo(reuseViewUrl(tenant, viewName));
 	} catch (error) {
 		if (isAbortError(error)) {
 			throw error;
@@ -260,7 +268,7 @@ async function checkReuseView(
 	return new PassedCheckFinding(check);
 }
 
-async function checkPullRequestCacheAccess(
+export async function checkPullRequestCacheAccess(
 	identity: RepositoryIdentity,
 	client: GithubCheckClient
 ): Promise<CheckFinding> {
@@ -349,9 +357,7 @@ export async function runGithubCheck(
 	const rules = await reporter.phase('Reading trust rules', async () => {
 		const listed = await client.oidcTrust.list();
 
-		return listed.rules
-			.filter((rule) => !rule.disabled)
-			.map((rule) => toMatcherRule(rule));
+		return activeMatcherRules(listed.rules);
 	});
 
 	// These requests model the quickstart's PR and branch publications. They
@@ -373,44 +379,18 @@ export async function runGithubCheck(
 		name: pullRequestCache
 	};
 	const branchCacheScope: CacheScope = { kind: 'default' };
-	const pullRequestRequests = [
-		// The default cache outlives runs, so only the pull-request rule needs
-		// lifecycle permissions.
-		cacheCreateAuthorizationDetails({ cache: pullRequestCacheScope }),
-		cacheRemoveAuthorizationDetails({ cache: pullRequestCacheScope }),
-		pushAuthorizationDetails({
-			cache: pullRequestCacheScope,
-			attest: true,
-			root: pullRequestRoot,
-			runRoot: pullRequestRunRoot
-		}),
-		rootListAuthorizationDetails({
-			cache: pullRequestCacheScope,
-			root: pullRequestRoot
-		}),
-		rootEnsureAuthorizationDetails({
-			cache: pullRequestCacheScope,
-			root: pullRequestRoot
-		}),
-		confirmAuthorizationDetails({ cache: pullRequestCacheScope })
-	];
-	const branchRequests = [
-		pushAuthorizationDetails({
-			cache: branchCacheScope,
-			attest: true,
-			root: branchRoot,
-			runRoot: branchRunRoot
-		}),
-		rootListAuthorizationDetails({
-			cache: branchCacheScope,
-			root: branchRoot
-		}),
-		rootEnsureAuthorizationDetails({
-			cache: branchCacheScope,
-			root: branchRoot
-		}),
-		confirmAuthorizationDetails({ cache: branchCacheScope })
-	];
+	// The default cache outlives runs, so only the pull-request rule needs
+	// lifecycle permissions.
+	const pullRequestRequests = flakeRequests(
+		pullRequestCacheScope,
+		{ target: pullRequestRoot, run: pullRequestRunRoot },
+		true
+	);
+	const branchRequests = flakeRequests(
+		branchCacheScope,
+		{ target: branchRoot, run: branchRunRoot },
+		false
+	);
 
 	const findings = await reporter.phase(
 		'Checking tenant configuration',

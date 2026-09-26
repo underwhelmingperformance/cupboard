@@ -34,7 +34,8 @@ import { type RepositoryIdentity } from './oidc-trust/github.ts';
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
 	repositoryOwnerId: 5678,
-	fullName: 'acme/infra'
+	fullName: 'acme/infra',
+	defaultBranch: 'main'
 };
 const tenantUrl = 'https://cache.example.workers.dev/t/acme';
 const tenantBase = parseWorkerUrl(tenantUrl);
@@ -100,8 +101,17 @@ const ciGrant: OidcTrustSummary['permittedGrants'][number] = {
 		cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' }
 	}
 };
-const ciGrantRow =
-	'cache owner-ci: upload:negotiate, upload:status, upload:commit';
+const ciRuleRows: ResultRow[] = [
+	{ label: 'Rule', value: 'rule-1' },
+	{ label: 'Issuer', value: 'https://token.actions.githubusercontent.com' },
+	{ label: 'Audience', value: 'https://cache.example.workers.dev' },
+	{ label: 'Claims', value: 'repository_owner_id=5678' },
+	{ label: '', value: 'repository_id=1234' },
+	{
+		label: 'Grants',
+		value: 'cache owner-ci: upload:negotiate, upload:status, upload:commit'
+	}
+];
 
 function summary(overrides: Partial<OidcTrustSummaryInput>) {
 	return oidcTrustSummarySchema.parse({
@@ -194,19 +204,7 @@ describe('runOidcTrustAdd', () => {
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [body],
-			results: [
-				[
-					{ label: 'Rule', value: 'rule-1' },
-					{
-						label: 'Issuer',
-						value: 'https://token.actions.githubusercontent.com'
-					},
-					{ label: 'Audience', value: 'https://cache.example.workers.dev' },
-					{ label: 'Claims', value: 'repository_owner_id=5678' },
-					{ label: '', value: 'repository_id=1234' },
-					{ label: 'Grants', value: ciGrantRow }
-				]
-			]
+			results: [ciRuleRows]
 		});
 	});
 });
@@ -234,19 +232,7 @@ describe('runOidcTrustShow', () => {
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ id: 'rule-1' }],
-			results: [
-				[
-					{ label: 'Rule', value: 'rule-1' },
-					{
-						label: 'Issuer',
-						value: 'https://token.actions.githubusercontent.com'
-					},
-					{ label: 'Audience', value: 'https://cache.example.workers.dev' },
-					{ label: 'Claims', value: 'repository_owner_id=5678' },
-					{ label: '', value: 'repository_id=1234' },
-					{ label: 'Grants', value: ciGrantRow }
-				]
-			]
+			results: [ciRuleRows]
 		});
 	});
 });
@@ -516,7 +502,7 @@ describe('githubBranchAddBody', () => {
 });
 
 describe('claim rendering', () => {
-	it('renders an exact claim with = and a pattern claim with =~', async () => {
+	it('renders exact and pattern claims in the rule summary', async () => {
 		const results: ResultRow[][] = [];
 
 		await runOidcTrustShow(
@@ -535,14 +521,23 @@ describe('claim rendering', () => {
 			}
 		);
 
-		expect(results[0]).toContainEqual({
-			label: 'Claims',
-			value: 'repository_id=1234'
-		});
-		expect(results[0]).toContainEqual({
-			label: '',
-			value: 'job_workflow_ref=~^acme/infra/.+@.+$'
-		});
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Rule', value: 'rule-1' },
+				{
+					label: 'Issuer',
+					value: 'https://token.actions.githubusercontent.com'
+				},
+				{ label: 'Audience', value: 'https://cache.example.workers.dev' },
+				{ label: 'Claims', value: 'repository_id=1234' },
+				{ label: '', value: 'job_workflow_ref=~^acme/infra/.+@.+$' },
+				{
+					label: 'Grants',
+					value:
+						'cache owner-ci: upload:negotiate, upload:status, upload:commit'
+				}
+			]
+		]);
 	});
 });
 
@@ -576,12 +571,14 @@ describe('pull-request cache naming across repositories', () => {
 	const first: RepositoryIdentity = {
 		repositoryId: 1234,
 		repositoryOwnerId: 5678,
-		fullName: 'acme/infra'
+		fullName: 'acme/infra',
+		defaultBranch: 'main'
 	};
 	const second: RepositoryIdentity = {
 		repositoryId: 4321,
 		repositoryOwnerId: 5678,
-		fullName: 'acme/tools'
+		fullName: 'acme/tools',
+		defaultBranch: 'main'
 	};
 	const candidates = ['pr-1', 'gh-1234-pr-1', 'gh-4321-pr-1'];
 

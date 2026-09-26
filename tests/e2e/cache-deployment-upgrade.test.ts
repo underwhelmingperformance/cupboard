@@ -40,7 +40,8 @@ const wakePassLimit = 100;
 const repository = {
 	repositoryId: 4321,
 	repositoryOwnerId: 8765,
-	fullName: 'owner/repo'
+	fullName: 'owner/repo',
+	defaultBranch: 'main'
 };
 
 const resumableFixtureTenants = 2 + sleepingFixtureTenants.length;

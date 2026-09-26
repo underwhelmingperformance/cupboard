@@ -28,16 +28,14 @@ import { abortReason } from '../abort.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
-import { resilientFetcher } from '../client/transport.ts';
-
-const maximumCacheInfoBytes = 1024 * 1024;
-import { parseWorkerUrl } from '../client/transport.ts';
+import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
 import {
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
 	CacheInfoTimeoutError,
 	CacheInfoUnavailableError,
 	CacheInfoUnparsableError,
+	GithubCheckOptionError,
 	GithubSetupDriftError,
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
@@ -58,6 +56,10 @@ import {
 	pullRequestViewName,
 	workflowReferenceClaimsOverlap
 } from './github/convention.ts';
+import {
+	finishDiscoveredGithubCheck,
+	inspectDiscoveredGithubCheck
+} from './github/discovered-check.ts';
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import {
@@ -66,8 +68,17 @@ import {
 } from './oidc-trust/github.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
 
+const maximumCacheInfoBytes = 1024 * 1024;
 const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
+
+interface GithubCheckCommandOptions extends Omit<
+	GithubCheckOptions,
+	'workflowRef' | 'branch'
+> {
+	readonly branch?: string;
+	readonly workflowRef?: string;
+}
 
 export interface GithubSetupOptions {
 	readonly repo: string;
@@ -1059,17 +1070,20 @@ export function registerGithubCommands(
 	github
 		.command('check')
 		.description(
-			"Check tenant state against the quickstart's modelled pull-request and branch publications: trust rules and grants, reuse-view configuration and root-prefix nesting."
+			'Check the publishing workflows in a GitHub repository against the tenant configuration.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
 			'--repo <owner/name>',
 			'GitHub repository whose tenant configuration to check.'
 		)
-		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
-		.requiredOption(
+		.option(
+			'--branch <name>',
+			"Branch to read workflows from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main)."
+		)
+		.option(
 			'--workflow-ref <owner/repo/path@ref>',
-			"Exact full commit id or tag ref for a release GitHub reports as immutable, as used by the caller's workflow."
+			'Check one workflow reference without discovery. The reference must pin a full commit ID or the tag of a release that GitHub reports as immutable.'
 		)
 		.option(
 			'--root-prefix <value>',
@@ -1084,31 +1098,65 @@ export function registerGithubCommands(
 			'--read-password <password>',
 			'Basic read credential for tenants whose reads are private.'
 		)
-		.action(async (url: URL, options: GithubCheckOptions) => {
+		.action(async (url: URL, options: GithubCheckCommandOptions) => {
+			if (
+				options.workflowRef === undefined &&
+				options.rootPrefix !== undefined
+			) {
+				throw new GithubCheckOptionError(
+					"--root-prefix requires --workflow-ref. Discovery reads each job's root prefix from its workflow inputs."
+				);
+			}
+
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				credential: cachedOwnerProvider(url, {
+					signal: programOptions.signal
+				}),
 				signal: programOptions.signal
 			});
 
-			await runGithubCheck(
-				url,
-				options,
-				reporter,
-				{
-					caches: rpc.caches,
-					reuseViews: rpc.reuseViews,
-					oidcTrust: rpc.oidcTrust
-				},
-				{
-					...(programOptions.signal !== undefined && {
-						signal: programOptions.signal
-					}),
-					fetchCacheInfo: cacheInfoFetcher({
+			const client = {
+				caches: rpc.caches,
+				reuseViews: rpc.reuseViews,
+				oidcTrust: rpc.oidcTrust
+			};
+			const dependencies = {
+				...(programOptions.signal !== undefined && {
+					signal: programOptions.signal
+				}),
+				fetchCacheInfo: cacheInfoFetcher({
+					...options,
+					signal: programOptions.signal
+				})
+			};
+
+			if (options.workflowRef !== undefined) {
+				await runGithubCheck(
+					url,
+					{
 						...options,
-						signal: programOptions.signal
-					})
-				}
+						branch: options.branch ?? 'main',
+						workflowRef: options.workflowRef
+					},
+					reporter,
+					client,
+					dependencies
+				);
+				return;
+			}
+
+			const result = await inspectDiscoveredGithubCheck(
+				url,
+				{
+					repo: options.repo,
+					...(options.branch !== undefined && { branch: options.branch })
+				},
+				reporter,
+				client,
+				dependencies
 			);
+
+			finishDiscoveredGithubCheck(result);
 		});
 }

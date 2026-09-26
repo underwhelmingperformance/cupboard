@@ -125,7 +125,7 @@ export class TrustRuleGrantMissingFinding extends FailedCheckFinding {
 		const grant = describeAuthorizationDetail(this.refused);
 
 		if (rest.length === 0) {
-			return `rule ${rule.id} matches the modelled claims but does not permit ${grant}; remove it and re-run setup`;
+			return `rule ${rule.id} matches the modelled claims but does not permit ${grant}; add a rule with the required grant, or add a corrected rule and remove this one`;
 		}
 
 		const ids = this.rules.map(({ id }) => id).join(', ');

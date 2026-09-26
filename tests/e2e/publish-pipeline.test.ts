@@ -63,7 +63,8 @@ const releaseArchive =
 const consumerRepository = {
 	repositoryId: 4241,
 	repositoryOwnerId: 4242,
-	fullName: 'cupboard-test/consumer'
+	fullName: 'cupboard-test/consumer',
+	defaultBranch: 'main'
 };
 const consumerBranch = 'main';
 const consumerClaims = {

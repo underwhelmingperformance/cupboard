@@ -27,6 +27,7 @@ import {
 	pullRequestCacheTemplate,
 	pullRequestRootTemplate
 } from './github/convention.ts';
+import { trustRuleSummaryRows } from './oidc-trust/format.ts';
 import {
 	lookupRepository,
 	type RepositoryIdentity
@@ -155,78 +156,6 @@ export interface OidcTrustClient {
 
 function collect(value: string, previous: readonly string[]): string[] {
 	return [...previous, value];
-}
-
-function claimRows(claims: Record<string, ClaimMatch>): ResultRow[] {
-	const entries = Object.entries(claims);
-
-	if (entries.length === 0) {
-		return [{ label: 'Claims', value: '(none)' }];
-	}
-
-	return entries.map(([key, match], index) => ({
-		label: index === 0 ? 'Claims' : '',
-		value:
-			typeof match === 'string' ? `${key}=${match}` : `${key}=~${match.pattern}`
-	}));
-}
-
-function grantRows(grants: OidcTrustSummary['permittedGrants']): ResultRow[] {
-	if (grants.length === 0) {
-		return [{ label: 'Grants', value: '(none)' }];
-	}
-
-	return grants.map((grant, index) => ({
-		label: index === 0 ? 'Grants' : '',
-		value: describeGrant(grant)
-	}));
-}
-
-function describeCacheBinding(
-	binding: Extract<
-		OidcTrustSummary['permittedGrants'][number],
-		{ type: 'cupboard_cache' }
-	>['resources']['cache']
-): string {
-	if (binding.kind === 'default') {
-		return '(default)';
-	}
-
-	return binding.exact ?? binding.equalsTemplate ?? '?';
-}
-
-function describeGrant(
-	grant: OidcTrustSummary['permittedGrants'][number]
-): string {
-	if (grant.type === 'cupboard_wildcard') {
-		return 'wildcard (every operation)';
-	}
-
-	if (grant.type === 'cupboard_cache') {
-		return `cache ${describeCacheBinding(grant.resources.cache)}: ${grant.actions.join(', ')}`;
-	}
-
-	if (grant.type === 'cupboard_tenant') {
-		const tenant =
-			grant.resources.tenant.exact ?? grant.resources.tenant.equalsTemplate;
-
-		return `tenant ${tenant ?? '?'}: ${grant.actions.join(', ')}`;
-	}
-
-	return `${grant.type}: ${grant.actions.join(', ')}`;
-}
-
-function summaryRows(summary: OidcTrustSummary): ResultRow[] {
-	return [
-		{ label: 'Rule', value: summary.id },
-		{ label: 'Issuer', value: summary.issuer },
-		{ label: 'Audience', value: summary.audience },
-		...claimRows(summary.claims),
-		...grantRows(summary.permittedGrants),
-		...(summary.display?.repository === undefined
-			? []
-			: [{ label: 'Repository', value: summary.display.repository }])
-	];
 }
 
 // Reject duplicate sources for `job_workflow_ref` instead of making command-line
@@ -752,7 +681,7 @@ export async function runOidcTrustAdd(
 	reporter.result({
 		kind: 'oidc-trust-rule',
 		data: summary,
-		rows: summaryRows(summary)
+		rows: trustRuleSummaryRows(summary)
 	});
 }
 
@@ -768,7 +697,7 @@ export async function runOidcTrustShow(
 	reporter.result({
 		kind: 'oidc-trust-rule',
 		data: summary,
-		rows: summaryRows(summary)
+		rows: trustRuleSummaryRows(summary)
 	});
 }
 

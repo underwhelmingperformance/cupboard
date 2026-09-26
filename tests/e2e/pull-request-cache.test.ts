@@ -22,7 +22,8 @@ import { pushStorePaths } from '../support/push.ts';
 const repository = {
 	repositoryId: 4321,
 	repositoryOwnerId: 8765,
-	fullName: 'owner/repo'
+	fullName: 'owner/repo',
+	defaultBranch: 'main'
 };
 const contentAddressedFixture = path.join(
 	path.resolve(import.meta.dirname, '../..'),

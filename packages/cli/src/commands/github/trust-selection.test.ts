@@ -124,7 +124,7 @@ describe('trustSelectionFinding', () => {
 			),
 			rendered:
 				'failed: rule branch matches the modelled claims but does not permit ' +
-				'upload:commit on cache private; remove it and re-run setup'
+				'upload:commit on cache private; add a rule with the required grant, or add a corrected rule and remove this one'
 		},
 		{
 			name: 'grant no tied rule permits',
