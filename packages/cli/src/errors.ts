@@ -1186,6 +1186,13 @@ export class WorkflowReferenceNotFoundError extends CliUsageError {
 	}
 }
 
+export class GithubCheckOptionError extends CliUsageError {
+	constructor(reason: string) {
+		super(reason);
+		this.name = 'GithubCheckOptionError';
+	}
+}
+
 /**
  * Optional trust-rule removals failed after the new configuration was already
  * applied. The result report names each rule that stayed behind; the non-zero

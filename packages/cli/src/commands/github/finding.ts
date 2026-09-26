@@ -146,3 +146,18 @@ export class RootPrefixOutsideGrantFinding extends FailedCheckFinding {
 		return `${this.rootPrefix} does not nest under the granted ${this.grantedPrefix}`;
 	}
 }
+
+export class RootGrantPrefixUnverifiedFinding extends CheckFinding {
+	readonly status = 'unverified' as const;
+
+	constructor(
+		check: string,
+		public readonly root: string
+	) {
+		super(check);
+	}
+
+	detail(): string {
+		return `the selected rule permits only ${this.root}; the job also creates roots below its root prefix, and no grant covers them`;
+	}
+}

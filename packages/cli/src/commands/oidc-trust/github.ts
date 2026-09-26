@@ -18,6 +18,7 @@ export interface RepositoryIdentity {
 	readonly repositoryId: number;
 	readonly repositoryOwnerId: number;
 	readonly fullName: string;
+	readonly defaultBranch: string;
 }
 
 export class InvalidRepositoryError extends Error {
@@ -192,14 +193,15 @@ export async function lookupRepository(
 		return {
 			repositoryId: data.id,
 			repositoryOwnerId: data.owner.id,
-			fullName: data.full_name
+			fullName: data.full_name,
+			defaultBranch: data.default_branch
 		};
 	} catch (error) {
 		if (options.signal?.aborted === true) {
 			throw abortReason(options.signal);
 		}
 
-		if (isStatus(error, StatusCodes.NOT_FOUND)) {
+		if (isGithubResponseStatus(error, StatusCodes.NOT_FOUND)) {
 			throw new RepositoryNotFoundError(repository);
 		}
 
@@ -208,8 +210,8 @@ export async function lookupRepository(
 		}
 
 		if (
-			isStatus(error, StatusCodes.UNAUTHORIZED) ||
-			isStatus(error, StatusCodes.FORBIDDEN)
+			isGithubResponseStatus(error, StatusCodes.UNAUTHORIZED) ||
+			isGithubResponseStatus(error, StatusCodes.FORBIDDEN)
 		) {
 			throw new GithubPermissionError(`repository '${repository}'`);
 		}
@@ -219,11 +221,11 @@ export async function lookupRepository(
 }
 
 export function isGithubRateLimitResponse(error: unknown): boolean {
-	if (isStatus(error, StatusCodes.TOO_MANY_REQUESTS)) {
+	if (isGithubResponseStatus(error, StatusCodes.TOO_MANY_REQUESTS)) {
 		return true;
 	}
 
-	if (!isStatus(error, forbiddenStatus)) {
+	if (!isGithubResponseStatus(error, forbiddenStatus)) {
 		return false;
 	}
 
@@ -289,7 +291,12 @@ function githubRequestSignal(
 	return controller.signal;
 }
 
-function isStatus(
+/**
+ * Tests the HTTP status of a GitHub request failure by reading its `status`
+ * field. More than one installed copy of `@octokit/request-error` can define
+ * `RequestError`, so an `instanceof` check can miss an error from another copy.
+ */
+export function isGithubResponseStatus(
 	error: unknown,
 	status: number
 ): error is { readonly status: number } {

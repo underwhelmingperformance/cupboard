@@ -18,8 +18,13 @@ interface PullRequestClaimsOptions {
 
 interface BranchClaimsOptions {
 	readonly branch: string;
-	readonly eventName?: 'push';
+	readonly eventName?: 'push' | 'workflow_dispatch' | 'schedule';
 	readonly workflowReference?: string;
+}
+
+interface TagPushClaimsOptions {
+	readonly tag: string;
+	readonly workflowReference: string;
 }
 
 function repositoryClaims(
@@ -76,5 +81,22 @@ export function githubBranchClaims(
 		...(options.workflowReference !== undefined && {
 			job_workflow_ref: options.workflowReference
 		})
+	};
+}
+
+export function githubTagPushClaims(
+	audience: string | URL,
+	identity: GithubRepositoryClaimsIdentity,
+	options: TagPushClaimsOptions
+): GithubActionsClaims {
+	const reference = `refs/tags/${options.tag}`;
+
+	return {
+		...repositoryClaims(audience, identity),
+		sub: `repo:${identity.fullName}:ref:${reference}`,
+		event_name: 'push',
+		ref: reference,
+		ref_type: 'tag',
+		job_workflow_ref: options.workflowReference
 	};
 }

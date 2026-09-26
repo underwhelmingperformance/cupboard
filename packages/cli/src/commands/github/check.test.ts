@@ -51,7 +51,8 @@ const previousWorkflowReference =
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
 	repositoryOwnerId: 5678,
-	fullName: 'acme/app'
+	fullName: 'acme/app',
+	defaultBranch: 'main'
 };
 
 const options: GithubCheckOptions = {
@@ -796,8 +797,8 @@ describe('runGithubCheck', () => {
 					'failed: rule branch matches the modelled claims but does not permit ' +
 					'upload:negotiate, upload:status, upload:commit, ' +
 					'attestation:negotiate, attestation:attach, root:set on cache ' +
-					'(default) with root github:acme/app/main/target; remove it and ' +
-					're-run setup'
+					'(default) with root github:acme/app/main/target; add a rule ' +
+					'with the required grant, or add a corrected rule and remove this one'
 			}
 		});
 	});
@@ -887,8 +888,8 @@ describe('runGithubCheck', () => {
 					label: check,
 					value:
 						`failed: rule ${check.startsWith('pull-request') ? 'pr' : 'branch'} ` +
-						`matches the modelled claims but does not permit ${detail}; remove it and ` +
-						're-run setup'
+						`matches the modelled claims but does not permit ${detail}; ` +
+						'add a rule with the required grant, or add a corrected rule and remove this one'
 				}
 			});
 		}

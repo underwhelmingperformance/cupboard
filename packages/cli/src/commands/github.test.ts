@@ -38,6 +38,7 @@ import {
 	CacheInfoTimeoutError,
 	CacheInfoUnavailableError,
 	CliAbortError,
+	GithubCheckOptionError,
 	GithubSetupDriftError,
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
@@ -60,7 +61,8 @@ const alice = readUserInputSchema.parse('alice');
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
 	repositoryOwnerId: 5678,
-	fullName: 'acme/app'
+	fullName: 'acme/app',
+	defaultBranch: 'main'
 };
 
 const pinnedWorkflowReference =
@@ -1674,32 +1676,71 @@ describe('registerGithubCommands', () => {
 		]);
 	});
 
-	it.each([['setup'], ['check']])(
-		'refuses %s without --workflow-ref',
-		async (subcommand) => {
-			const stderr: string[] = [];
-			const program = new Command();
-			program.exitOverride();
-			program.configureOutput({
-				writeErr: (message) => {
-					stderr.push(message);
-				}
-			});
-			registerGithubCommands(program);
+	it('refuses setup without --workflow-ref', async () => {
+		const stderr: string[] = [];
+		const program = new Command();
+		program.exitOverride();
+		program.configureOutput({
+			writeErr: (message) => {
+				stderr.push(message);
+			}
+		});
+		registerGithubCommands(program);
 
-			await expect(
-				program.parseAsync(
-					['github', subcommand, url.href, '--repo', 'acme/app'],
-					{
-						from: 'user'
-					}
-				)
-			).rejects.toMatchObject({
-				code: 'commander.missingMandatoryOptionValue'
-			});
-			expect(stderr).toHaveLength(1);
-		}
-	);
+		await expect(
+			program.parseAsync(['github', 'setup', url.href, '--repo', 'acme/app'], {
+				from: 'user'
+			})
+		).rejects.toMatchObject({
+			code: 'commander.missingMandatoryOptionValue'
+		});
+		expect(stderr).toHaveLength(1);
+	});
+
+	it('uses workflow discovery when --workflow-ref is absent', () => {
+		const program = new Command();
+		registerGithubCommands(program);
+		const github = program.commands.find(
+			(command) => command.name() === 'github'
+		);
+		const check = github?.commands.find(
+			(command) => command.name() === 'check'
+		);
+
+		expect(
+			check?.options.map((option) => ({
+				flags: option.flags,
+				mandatory: option.mandatory
+			}))
+		).toStrictEqual([
+			{ flags: '--repo <owner/name>', mandatory: true },
+			{ flags: '--branch <name>', mandatory: false },
+			{ flags: '--workflow-ref <owner/repo/path@ref>', mandatory: false },
+			{ flags: '--root-prefix <value>', mandatory: false },
+			{ flags: '--read-user <user>', mandatory: false },
+			{ flags: '--read-password <password>', mandatory: false }
+		]);
+	});
+
+	it('rejects --root-prefix in discovery mode with a check usage error', async () => {
+		const program = new Command();
+		registerGithubCommands(program);
+
+		await expect(
+			program.parseAsync(
+				[
+					'github',
+					'check',
+					url.href,
+					'--repo',
+					'acme/app',
+					'--root-prefix',
+					'github:acme/app/main'
+				],
+				{ from: 'user' }
+			)
+		).rejects.toBeInstanceOf(GithubCheckOptionError);
+	});
 });
 
 describe('cacheInfoFetcher', () => {

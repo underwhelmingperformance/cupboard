@@ -45,7 +45,8 @@ describe('lookupRepository', () => {
 			Response.json({
 				id: 123,
 				owner: { id: 456 },
-				full_name: 'iainlane/cupboard'
+				full_name: 'iainlane/cupboard',
+				default_branch: 'main'
 			})
 		);
 
@@ -54,7 +55,8 @@ describe('lookupRepository', () => {
 		).toStrictEqual({
 			repositoryId: 123,
 			repositoryOwnerId: 456,
-			fullName: 'iainlane/cupboard'
+			fullName: 'iainlane/cupboard',
+			defaultBranch: 'main'
 		});
 	});
 
