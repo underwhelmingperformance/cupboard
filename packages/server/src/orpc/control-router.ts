@@ -25,7 +25,7 @@ import {
 	controlTenantRotateReadCredential,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
-import { controlDeploymentPhase } from '../control/deployment-phase.ts';
+import { controlDeploymentTransitions } from '../control/deployment-transitions.ts';
 import {
 	controlLocalStepStatus,
 	controlLocalStepWake
@@ -147,8 +147,8 @@ export const controlRouter = os.router({
 		)
 	},
 	deployment: {
-		phase: os.deployment.phase.handler(({ context }) =>
-			controlDeploymentPhase(context.env)
+		transitions: os.deployment.transitions.handler(({ context }) =>
+			controlDeploymentTransitions(context.env)
 		)
 	},
 	localStep: {

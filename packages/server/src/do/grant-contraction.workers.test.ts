@@ -10,7 +10,7 @@ import { grantContractionBatchSize } from '../migration/cache-grants.ts';
 import {
 	bootstrap,
 	currentServer,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -34,7 +34,7 @@ const scopeGrant = JSON.stringify([
 describe('local grant contraction', () => {
 	beforeEach(resetTestServer);
 	it('keeps selector grants through expansion and rewrites them once contracted', async () => {
-		await recordDeploymentPhase('native-reads');
+		await recordTransition('cache-identity', 'expanded');
 		await bootstrap();
 		const before = await runInDurableObject(
 			currentServer(),
@@ -51,7 +51,7 @@ describe('local grant contraction', () => {
 				};
 			}
 		);
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 		const after = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
@@ -77,7 +77,7 @@ describe('local grant contraction', () => {
 describe('writes across local grant contraction', () => {
 	beforeEach(resetTestServer);
 	it('canonicalises a prepared rule and refresh family at the write after contraction', async () => {
-		await recordDeploymentPhase('native-reads');
+		await recordTransition('cache-identity', 'expanded');
 		await bootstrap();
 		const result = await runInDurableObject(
 			currentServer(),
@@ -94,7 +94,7 @@ describe('writes across local grant contraction', () => {
 					}
 				]);
 				const family = await spelling.authorizationDetailsJson(grants);
-				await recordDeploymentPhase('contracted');
+				await recordTransition('cache-identity', 'complete');
 				await instance.reportLocalStep();
 				const writtenRule: unknown = JSON.parse(
 					spelling.permittedGrantsForWrite(rule)
@@ -119,7 +119,7 @@ describe('writes across local grant contraction', () => {
 	it.each(['insert', 'update'] as const)(
 		'rejects a selector-shaped %s after contraction',
 		async (operation) => {
-			await recordDeploymentPhase('contracted');
+			await recordTransition('cache-identity', 'complete');
 			await bootstrap();
 			await runInDurableObject(currentServer(), async (instance, state) => {
 				await instance.reportLocalStep();
@@ -139,7 +139,7 @@ describe('writes across local grant contraction', () => {
 		}
 	);
 	it('continues the rewrite over bounded batches before recording completion', async () => {
-		await recordDeploymentPhase('native-reads');
+		await recordTransition('cache-identity', 'expanded');
 		await bootstrap();
 		const result = await runInDurableObject(
 			currentServer(),
@@ -153,7 +153,7 @@ describe('writes across local grant contraction', () => {
 						selectorGrant
 					);
 				}
-				await recordDeploymentPhase('contracted');
+				await recordTransition('cache-identity', 'complete');
 				const first = await instance.reportLocalStep();
 				const afterFirst = state.storage.sql
 					.exec('SELECT complete FROM grant_contraction')

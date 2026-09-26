@@ -721,11 +721,14 @@ export class CacheAdminService {
 		}
 
 		return this.context.criticalSection(async () => {
-			await this.context.phases.refresh();
+			await this.context.transitions.refresh();
 			const existing = this.context.cacheRepository.require(scope);
 			if (
 				existing.access !== update.access &&
-				!(await this.context.phases.hasReached('contracted'))
+				!(await this.context.transitions.hasReached(
+					'cache-identity',
+					'complete'
+				))
 			) {
 				throw new CacheAccessMigrationPendingError();
 			}

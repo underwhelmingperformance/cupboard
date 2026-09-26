@@ -16,7 +16,7 @@ import {
 	pushPathToTenant,
 	putWorkerTestCache,
 	readFetch,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
@@ -159,7 +159,7 @@ describe('named cache reads', () => {
 	});
 
 	it('gates named-cache reads in private mode', async () => {
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 		const token = await initialiseViaWorker();
 		await putWorkerTestCache(token, namedCache('builds'), 'private');
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

@@ -1,17 +1,18 @@
 import {
-	currentLocalStep,
-	expansionLocalStep,
-	type LocalStep,
+	hasReachedTransitionState,
 	localStepWakeBodySchema,
-	type ParsedDeploymentPhaseResponse
+	type ParsedDeploymentTransitionsResponse,
+	type StoredTransitionRow,
+	transitionIds
 } from '@cupboard/protocol/deployment';
-import type { Reporter } from '@cupboard/reporter';
+import { formatTimestamp, type Reporter } from '@cupboard/reporter';
 import { type Command, InvalidArgumentError } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { readStoredTransition } from '../deploy/deployment-state.ts';
 import { type SettlementClient, settleTenants } from '../deploy/settlement.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
@@ -31,7 +32,7 @@ interface ResumeOptions {
 }
 
 export interface DeploymentClient {
-	phase(): Promise<ParsedDeploymentPhaseResponse>;
+	transitions(): Promise<ParsedDeploymentTransitionsResponse>;
 	readonly localStep: SettlementClient;
 }
 
@@ -41,29 +42,62 @@ export interface DeploymentResumeOptions {
 	readonly signal?: AbortSignal;
 }
 
-function requiredStepFor(response: ParsedDeploymentPhaseResponse): LocalStep {
-	return response.phase?.name === 'contracted'
-		? currentLocalStep
-		: expansionLocalStep;
+// What this build's `cupboard deploy` does with a row that the server lists
+// under `unrecognised`.
+function unrecognisedRowText(row: StoredTransitionRow): string {
+	const since = `${row.state} since ${formatTimestamp(row.updatedAt)}`;
+	const reading = readStoredTransition(transitionIds, row);
+
+	if (reading.kind === 'unrecognised') {
+		return `${since}; this build does not define this transition, and no contract migration of it has started, so cupboard deploy leaves it unchanged`;
+	}
+
+	if (reading.kind === 'refused' && reading.reason === 'contracted') {
+		return `${since}; this build does not define this transition, and cupboard deploy stops because its contract migrations have started and may have removed schema that this build needs`;
+	}
+
+	if (reading.kind === 'refused' && reading.reason === 'unknown-state') {
+		return `${since}; this build defines the transition but not state '${row.state}', so cupboard deploy stops; deploy a build that defines that state`;
+	}
+
+	return `${since}; this build defines neither the transition nor the state, so cupboard deploy stops; deploy a build that defines both`;
+}
+
+function unrecognisedRows(
+	unrecognised: readonly StoredTransitionRow[]
+): { label: string; value: string }[] {
+	return unrecognised.map((row) => ({
+		label: `Transition ${row.id}`,
+		value: unrecognisedRowText(row)
+	}));
 }
 
 /**
- * Shows the recorded deployment phase, the local step that the phase
- * requires, and how many tenants have reached that step.
+ * Shows each recorded schema transition, any recorded row that this build does
+ * not define, the required local step, and how many tenants have reached it.
+ * The step comes from the same response as the counts, so the two always
+ * agree.
  */
 export async function runDeploymentStatus(
 	reporter: Reporter,
 	client: DeploymentClient
 ): Promise<void> {
-	const phase = await client.phase();
-	const requiredStep = requiredStepFor(phase);
-	const status = await client.localStep.status({ requiredStep });
+	const { transitions, unrecognised } = await client.transitions();
+	const status = await client.localStep.status({});
+	const transitionRows =
+		transitions.length === 0 && unrecognised.length === 0
+			? [{ label: 'Transitions', value: 'none recorded' }]
+			: transitions.map((transition) => ({
+					label: `Transition ${transition.id}`,
+					value: `${transition.state} since ${formatTimestamp(transition.updatedAt)}`
+				}));
 	reporter.result({
 		kind: 'deployment-status',
-		data: { ...phase, ...status },
+		data: { transitions, unrecognised, ...status },
 		rows: [
-			{ label: 'Phase', value: phase.phase?.name ?? 'not recorded' },
-			{ label: 'Required local step', value: String(requiredStep) },
+			...transitionRows,
+			...unrecognisedRows(unrecognised),
+			{ label: 'Required local step', value: String(status.required) },
 			{ label: 'Ready tenants', value: String(status.ready) },
 			{ label: 'Pending tenants', value: String(status.pending) },
 			{
@@ -75,31 +109,57 @@ export async function runDeploymentStatus(
 }
 
 /**
- * Wakes bounded batches of tenants until each has recorded the local step
- * that the recorded phase requires.
+ * Wakes bounded batches of tenants until each has recorded the required local
+ * step, then reports whether a schema transition is still incomplete and needs
+ * another `cupboard deploy`. A recorded row that this build does not define is
+ * listed with what this build's deploy does with it, and is left out of the
+ * transitions to complete.
  */
 export async function runDeploymentResume(
 	reporter: Reporter,
 	client: DeploymentClient,
 	options: DeploymentResumeOptions
 ): Promise<void> {
-	const phase = await client.phase();
 	const status = await settleTenants(client.localStep, reporter, {
-		requiredStep: requiredStepFor(phase),
 		limit: options.limit,
 		maxPasses: options.maxPasses,
 		...(options.signal !== undefined && { signal: options.signal })
 	});
+	const { transitions, unrecognised } = await client.transitions();
 	reporter.result({
 		kind: 'deployment-readiness',
 		data: status,
 		rows: [
 			{ label: 'Ready tenants', value: String(status.ready) },
-			{ label: 'Local step', value: String(status.current) }
+			{ label: 'Required local step', value: String(status.required) },
+			...unrecognisedRows(unrecognised)
 		]
 	});
+	const refused = unrecognised
+		.filter(
+			(row) => readStoredTransition(transitionIds, row).kind === 'refused'
+		)
+		.map((row) => row.id);
+	const reached = `Every active or suspended tenant has reached local step ${String(status.required)}.`;
+
+	if (refused.length > 0) {
+		reporter.info(
+			`${reached} This build's cupboard deploy stops on ${refused.join(', ')}, as listed above.`
+		);
+		return;
+	}
+
+	const recorded = new Map(
+		transitions.map((transition) => [transition.id, transition.state])
+	);
+	const incomplete = transitionIds.filter(
+		(id) => !hasReachedTransitionState(recorded.get(id), 'complete')
+	);
+
 	reporter.info(
-		'Tenant work is complete for this phase. Re-run cupboard deploy to finish the deployment.'
+		incomplete.length === 0
+			? `Every active or suspended tenant has reached local step ${String(status.required)}, and every schema transition is complete.`
+			: `${reached} Re-run cupboard deploy to complete ${incomplete.join(', ')}.`
 	);
 }
 
@@ -117,13 +177,13 @@ export function registerDeploymentCommands(
 		});
 
 		return {
-			phase: () => rpc.deployment.phase(),
+			transitions: () => rpc.deployment.transitions(),
 			localStep: rpc.localStep
 		};
 	};
 	deployment
 		.command('status')
-		.description('Show the deployment phase and pending tenant work.')
+		.description('Show the schema transitions and pending tenant work.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			await runDeploymentStatus(

@@ -106,8 +106,10 @@ import {
 import { settleTenants } from './settlement.ts';
 import { planWorkerSource } from './source.ts';
 import {
+	type DeploymentObservation,
 	type DeploymentPlan,
 	observeDeployment,
+	planBlockedError,
 	planDeployment,
 	planOfflineDeployment,
 	transitionPlanRows
@@ -439,7 +441,11 @@ function cronsListProblem(value: string): string | undefined {
 
 export interface PlanReviewWorld {
 	readonly ui: DeployUi;
-	readonly render: (state: PlanState) => Promise<void>;
+	/**
+	 * Shows the plan for the state and returns the observation of the
+	 * deployment that the plan was built from.
+	 */
+	readonly render: (state: PlanState) => Promise<DeploymentObservation>;
 	readonly accounts: () => Promise<readonly AccountSummary[]>;
 	readonly skipReview: boolean;
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
@@ -564,6 +570,8 @@ async function applyPlanEdit(
 /**
  * Show the plan and let the user adjust the deploy-time choices until they
  * deploy or cancel. Returns the agreed state, or undefined when cancelled.
+ * While the plan is blocked, the menu offers only edits and Cancel, and
+ * skipping the review or cancelling throws the blocking error.
  */
 export async function reviewPlan(
 	initial: PlanState,
@@ -572,22 +580,37 @@ export async function reviewPlan(
 	let state = initial;
 
 	for (;;) {
-		await world.render(state);
+		const blocked = planBlockedError(await world.render(state));
 
 		if (world.skipReview) {
+			if (blocked !== undefined) {
+				throw blocked;
+			}
+
 			return state;
 		}
 
 		const canReplaceR2Credentials =
 			world.canReplaceR2Credentials !== undefined &&
 			(await world.canReplaceR2Credentials(state));
+		const entries = planMenuEntries(state, canReplaceR2Credentials);
 
-		const choice = await world.ui.menu(
-			'Deploy to Cloudflare with the plan above?',
-			planMenuEntries(state, canReplaceR2Credentials)
-		);
+		const choice =
+			blocked === undefined
+				? await world.ui.menu(
+						'Deploy to Cloudflare with the plan above?',
+						entries
+					)
+				: await world.ui.menu(
+						'The plan above is blocked. Change it or cancel.',
+						entries.filter((entry) => entry.value !== 'deploy')
+					);
 
 		if (choice === undefined || choice === 'cancel') {
+			if (blocked !== undefined) {
+				throw blocked;
+			}
+
 			return undefined;
 		}
 
@@ -1311,6 +1334,8 @@ async function deployFlow(
 					...choicePlanRows(state.config, state.domain)
 				]);
 				warnMissing(missing);
+
+				return reviewedPlan.observation;
 			},
 			accounts: () => apiFor(accountId).listAccounts(),
 			skipReview: cliOptions.yes === true,

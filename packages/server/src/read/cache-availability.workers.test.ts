@@ -26,7 +26,7 @@ import {
 	provisionFixtureTenant,
 	pushPath,
 	putTestCache,
-	recordDeploymentPhase,
+	recordTransition,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
@@ -112,7 +112,7 @@ describe('cache availability query', () => {
 	);
 
 	it("requires the tenant's Basic credentials when reads are private", async () => {
-		await recordDeploymentPhase('contracted');
+		await recordTransition('cache-identity', 'complete');
 		const { token } = await bootstrap();
 		await provisionFixtureTenant({
 			read: { user: 'alice', password: 'secret' }
