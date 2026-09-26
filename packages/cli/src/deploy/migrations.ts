@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { contractionMigrations } from '@cupboard/protocol/deployment';
 
+import { type D1QueryApi, sqlString } from './d1-query.ts';
 import type { DatabaseId } from './identifiers.ts';
 
 /**
@@ -67,14 +68,6 @@ export function unclassifiedD1Migrations(
 		.map((migration) => migration.name);
 }
 
-export interface D1MigrationApi {
-	queryBatch(
-		databaseId: DatabaseId,
-		statements: readonly string[]
-	): Promise<void>;
-	queryRows(databaseId: DatabaseId, sql: string): Promise<readonly string[]>;
-}
-
 /**
  * A migration file changed after this tool applied it. The database ran the
  * earlier contents, so applying the file again would not produce the schema
@@ -119,10 +112,6 @@ const trackingColumnsQuery =
 const recordedMigrationsQuery =
 	"SELECT name || ':' || COALESCE(sha256, '') || ':' || COALESCE(verification_state, '') FROM d1_migrations;";
 
-function quote(value: string): string {
-	return `'${value.replaceAll("'", "''")}'`;
-}
-
 function parseRecorded(entry: string): [string, RecordedMigration] {
 	const firstSeparator = entry.indexOf(':');
 	const lastSeparator = entry.lastIndexOf(':');
@@ -145,7 +134,7 @@ function parseRecorded(entry: string): [string, RecordedMigration] {
  * so the current columns decide what to add.
  */
 async function ensureDigestColumns(
-	api: D1MigrationApi,
+	api: D1QueryApi,
 	databaseId: DatabaseId
 ): Promise<void> {
 	const columns = new Set(
@@ -177,7 +166,7 @@ async function ensureDigestColumns(
  * Returns the names applied this run.
  */
 export async function applyD1Migrations(
-	api: D1MigrationApi,
+	api: D1QueryApi,
 	databaseId: DatabaseId,
 	migrations: readonly D1Migration[]
 ): Promise<string[]> {
@@ -215,7 +204,7 @@ export async function applyD1Migrations(
 		}
 
 		baselines.push(
-			`UPDATE d1_migrations SET sha256 = ${quote(migration.sha256)}, verification_state = 'unverified-baseline' WHERE name = ${quote(migration.name)};`
+			`UPDATE d1_migrations SET sha256 = ${sqlString(migration.sha256)}, verification_state = 'unverified-baseline' WHERE name = ${sqlString(migration.name)};`
 		);
 	}
 
@@ -228,7 +217,7 @@ export async function applyD1Migrations(
 	for (const migration of pending) {
 		await api.queryBatch(databaseId, [
 			...migration.statements,
-			`INSERT INTO d1_migrations (name, sha256, verification_state) VALUES (${quote(migration.name)}, ${quote(migration.sha256)}, 'verified');`
+			`INSERT INTO d1_migrations (name, sha256, verification_state) VALUES (${sqlString(migration.name)}, ${sqlString(migration.sha256)}, 'verified');`
 		]);
 
 		newlyApplied.push(migration.name);
