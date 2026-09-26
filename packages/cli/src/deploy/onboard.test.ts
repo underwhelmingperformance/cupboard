@@ -813,8 +813,31 @@ describe('onboardDeployment', () => {
 					target: new URL('https://cache.example.com')
 				}
 			],
-			successes: ['You are now the admin of this deployment (cf-user-1).']
+			successes: [
+				'You are now the admin of this deployment (https://dash.cloudflare.com · cf-user-1).'
+			]
 		});
+	});
+
+	it('shows the new admin by the display name in their id_token', async () => {
+		const { ui, successes } = scriptedUi({ slugs: [undefined] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]]
+		});
+		const claims = Buffer.from(
+			JSON.stringify({ sub: 'cf-user-1', email: 'ada@example.com' })
+		).toString('base64url');
+
+		await onboardDeployment({
+			...baseOptions(ui, client),
+			admin: { ...claimable, idToken: `e30.${claims}.signature` }
+		});
+
+		expect(successes).toStrictEqual([
+			'You are now the admin of this deployment (ada@example.com).'
+		]);
 	});
 
 	it('waits out an older version that is still serving', async () => {

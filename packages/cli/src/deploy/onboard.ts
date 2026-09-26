@@ -42,6 +42,7 @@ import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { CupboardHttpError } from '../errors.ts';
+import { ownDisplayName, principalLabel } from '../principal.ts';
 import { generateReadPassword } from '../read-user.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
@@ -874,6 +875,7 @@ async function claimAdmin(
 		| undefined
 		| {
 				readonly claimed: boolean;
+				readonly issuer: string;
 				readonly subject: string;
 				readonly token: string;
 		  };
@@ -898,6 +900,7 @@ async function claimAdmin(
 
 			return {
 				claimed: signup.claimed,
+				issuer: signup.issuer,
 				subject: signup.subject,
 				token: exchanged.access_token
 			};
@@ -915,10 +918,11 @@ async function claimAdmin(
 		throw error;
 	}
 
+	const name = ownDisplayName(proof.idToken) ?? principalLabel(claim);
 	ui.success(
 		claim.claimed
-			? `You are now the admin of this deployment (${claim.subject}).`
-			: `You are already the admin of this deployment (${claim.subject}).`
+			? `You are now the admin of this deployment (${name}).`
+			: `You are already the admin of this deployment (${name}).`
 	);
 
 	return { kind: 'claimed', token: claim.token };
