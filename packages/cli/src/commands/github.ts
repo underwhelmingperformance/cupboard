@@ -21,7 +21,7 @@ import {
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
-import type { Command } from 'commander';
+import { type Command, Option } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 
 import { abortReason } from '../abort.ts';
@@ -56,10 +56,14 @@ import {
 	pullRequestViewName,
 	workflowReferenceClaimsOverlap
 } from './github/convention.ts';
+import { isDeepEqual } from './github/deep-equal.ts';
+import { inspectDiscoveredGithubCheck } from './github/discovered-check.ts';
 import {
-	finishDiscoveredGithubCheck,
-	inspectDiscoveredGithubCheck
-} from './github/discovered-check.ts';
+	type GithubTrustScope,
+	githubTrustScopes,
+	offerDiscoveredGithubRepair,
+	runDiscoveredGithubRepair
+} from './github/repair.ts';
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import {
@@ -78,6 +82,10 @@ interface GithubCheckCommandOptions extends Omit<
 > {
 	readonly branch?: string;
 	readonly workflowRef?: string;
+	readonly fix?: boolean;
+	readonly yes?: boolean;
+	readonly trustScope?: GithubTrustScope;
+	readonly tagPattern?: string;
 }
 
 export interface GithubSetupOptions {
@@ -205,41 +213,6 @@ export function cacheInfoFetcher(
 			throw new CacheInfoUnparsableError(target, { cause: error });
 		}
 	};
-}
-
-function isDeepEqual(left: unknown, right: unknown): boolean {
-	if (Object.is(left, right)) {
-		return true;
-	}
-
-	if (Array.isArray(left) || Array.isArray(right)) {
-		return (
-			Array.isArray(left) &&
-			Array.isArray(right) &&
-			left.length === right.length &&
-			left.every((value, index) => isDeepEqual(value, right[index]))
-		);
-	}
-
-	if (
-		typeof left !== 'object' ||
-		typeof right !== 'object' ||
-		left === null ||
-		right === null
-	) {
-		return false;
-	}
-
-	const leftEntries = Object.entries(left);
-	const rightEntries = new Map<string, unknown>(Object.entries(right));
-
-	return (
-		leftEntries.length === rightEntries.size &&
-		leftEntries.every(
-			([key, value]) =>
-				rightEntries.has(key) && isDeepEqual(value, rightEntries.get(key))
-		)
-	);
 }
 
 // Rule ids and disabled state do not form part of a rule body. Compare every
@@ -1002,9 +975,20 @@ export async function runGithubSetup(
 	});
 }
 
+interface GithubCheckCommandDependencies {
+	readonly inspectDiscoveredGithubCheck: typeof inspectDiscoveredGithubCheck;
+	readonly runDiscoveredGithubRepair: typeof runDiscoveredGithubRepair;
+}
+
+const defaultCheckDependencies: GithubCheckCommandDependencies = {
+	inspectDiscoveredGithubCheck,
+	runDiscoveredGithubRepair
+};
+
 export function registerGithubCommands(
 	program: Command,
-	programOptions: ProgramOptions = {}
+	programOptions: ProgramOptions = {},
+	checkDependencies = defaultCheckDependencies
 ): void {
 	const github = program
 		.command('github')
@@ -1085,13 +1069,25 @@ export function registerGithubCommands(
 			'--workflow-ref <owner/repo/path@ref>',
 			'Check one workflow reference without discovery. The reference must pin a full commit ID or the tag of a release that GitHub reports as immutable.'
 		)
+		.option('--fix', 'Review and apply repairs for discovered publishing jobs.')
+		.option('-y, --yes', 'Apply the repair without a confirmation prompt.')
+		.addOption(
+			new Option(
+				'--trust-scope <scope>',
+				'Cupboard workflow references that new trust rules accept: exact (the current pins) or tag-pattern (release tags matching --tag-pattern).'
+			).choices(githubTrustScopes)
+		)
+		.option(
+			'--tag-pattern <glob>',
+			'Cupboard workflow release tag pattern for new trust rules, for example v*.'
+		)
 		.option(
 			'--root-prefix <value>',
 			"root-prefix value passed by the caller's workflow."
 		)
 		.option(
 			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.',
+			'Basic read credential for tenants whose reads are private. When set, a repair creates the pull-request reuse view as a private view.',
 			parseReadUser
 		)
 		.option(
@@ -1099,6 +1095,23 @@ export function registerGithubCommands(
 			'Basic read credential for tenants whose reads are private.'
 		)
 		.action(async (url: URL, options: GithubCheckCommandOptions) => {
+			if (
+				options.fix !== true &&
+				(options.yes === true ||
+					options.trustScope !== undefined ||
+					options.tagPattern !== undefined)
+			) {
+				throw new GithubCheckOptionError(
+					'--yes, --trust-scope and --tag-pattern require --fix.'
+				);
+			}
+
+			if (options.workflowRef !== undefined && options.fix === true) {
+				throw new GithubCheckOptionError(
+					'--fix requires workflow discovery. Omit --workflow-ref.'
+				);
+			}
+
 			if (
 				options.workflowRef === undefined &&
 				options.rootPrefix !== undefined
@@ -1108,7 +1121,10 @@ export function registerGithubCommands(
 				);
 			}
 
-			const reporter = commandUi(program, programOptions).reporter();
+			const ui = commandUi(program, programOptions, {
+				assumeYes: options.yes
+			});
+			const reporter = ui.reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, {
 					signal: programOptions.signal
@@ -1146,17 +1162,30 @@ export function registerGithubCommands(
 				return;
 			}
 
-			const result = await inspectDiscoveredGithubCheck(
+			const result = await checkDependencies.inspectDiscoveredGithubCheck(
 				url,
 				{
 					repo: options.repo,
-					...(options.branch !== undefined && { branch: options.branch })
+					...(options.branch !== undefined && { branch: options.branch }),
+					...(options.readUser !== undefined && {
+						readUser: options.readUser
+					}),
+					isFixRequested: options.fix === true
 				},
 				reporter,
 				client,
 				dependencies
 			);
 
-			finishDiscoveredGithubCheck(result);
+			await offerDiscoveredGithubRepair(result, ui, options.fix === true, () =>
+				checkDependencies.runDiscoveredGithubRepair(
+					url,
+					options,
+					ui,
+					client,
+					dependencies,
+					result
+				)
+			);
 		});
 }

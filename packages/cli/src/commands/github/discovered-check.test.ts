@@ -35,6 +35,7 @@ import {
 	type DiscoveredGithubCheckDependencies,
 	DiscoveryUnverifiedFinding,
 	inspectDiscoveredGithubCheck,
+	isRepairOffered,
 	SharedPullRequestCacheFinding,
 	WorkflowPinFailedFinding
 } from './discovered-check.ts';
@@ -49,6 +50,7 @@ import {
 	CustomReuseViewFinding,
 	ForkPullRequestFinding,
 	PublicationUnmodelledFinding,
+	PushCoverageFinding,
 	ReferenceFilterExcludesFinding
 } from './publication.ts';
 import {
@@ -202,6 +204,10 @@ it('reports every matching publishing job', async () => {
 				{
 					label: `${path}, systems`,
 					value: 'failed: push: no rule pins this repository'
+				},
+				{
+					label: 'Review a repair',
+					value: `cupboard github check ${tenant.href.replace(/\/$/u, '')} --repo ${repository} --branch main --fix`
 				}
 			]
 		]
@@ -487,7 +493,7 @@ jobs:
 	]);
 });
 
-it('reports a missing custom reuse view', async () => {
+it('does not offer to create a custom reuse view', async () => {
 	const content = `
 on:
   push:
@@ -510,26 +516,32 @@ jobs:
 		})
 	);
 
-	expect(result.jobs).toStrictEqual([
-		{
-			caller: path,
-			job: 'publish',
-			workflowRef:
-				'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
-			status: 'failed',
-			findings: [
-				{ finding: new CustomReuseViewFinding('shared') },
-				{
-					trigger: 'push',
-					finding: new RepositoryTrustRuleMissingFinding('trust rule')
-				},
-				{
-					trigger: 'push',
-					finding: new ReuseViewMissingFinding('reuse view', 'shared')
-				}
-			]
-		}
-	]);
+	expect({
+		jobs: result.jobs,
+		isRepairOffered: isRepairOffered(result)
+	}).toStrictEqual({
+		jobs: [
+			{
+				caller: path,
+				job: 'publish',
+				workflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+				status: 'failed',
+				findings: [
+					{ finding: new CustomReuseViewFinding('shared') },
+					{
+						trigger: 'push',
+						finding: new RepositoryTrustRuleMissingFinding('trust rule')
+					},
+					{
+						trigger: 'push',
+						finding: new ReuseViewMissingFinding('reuse view', 'shared')
+					}
+				]
+			}
+		],
+		isRepairOffered: false
+	});
 });
 
 it("compares a reuse view with the job's named destination cache", async () => {
@@ -837,26 +849,32 @@ jobs:
 		})
 	);
 
-	expect(result.jobs).toStrictEqual([
-		{
-			caller: path,
-			job: 'publish',
-			workflowRef:
-				'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
-			status: 'unverified',
-			findings: [
-				{
-					trigger: 'push',
-					finding: new ReferenceFilterExcludesFinding(
-						'branches',
-						['release'],
-						'main',
-						'select-branch'
-					)
-				}
-			]
-		}
-	]);
+	expect({
+		jobs: result.jobs,
+		isRepairOffered: isRepairOffered(result)
+	}).toStrictEqual({
+		jobs: [
+			{
+				caller: path,
+				job: 'publish',
+				workflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
+				status: 'unverified',
+				findings: [
+					{
+						trigger: 'push',
+						finding: new ReferenceFilterExcludesFinding(
+							'branches',
+							['release'],
+							'main',
+							'select-branch'
+						)
+					}
+				]
+			}
+		],
+		isRepairOffered: false
+	});
 });
 
 it('omits candidate rules when the repository has no publishing job', async () => {
@@ -994,6 +1012,56 @@ it('reads the repository before its workflows and defaults to its default branch
 	});
 });
 
+it('does not offer a repair for a job whose pull-request runs share the branch cache', async () => {
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main' },
+		capturingReporter([]),
+		fixture().client,
+		defaultDependencies({
+			source: {
+				...source,
+				read: () =>
+					Promise.resolve(`
+on: [push, pull_request]
+jobs:
+  packages:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+`)
+			}
+		})
+	);
+
+	expect({
+		jobs: result.jobs,
+		repairableJobs: result.repairableJobs
+	}).toStrictEqual({
+		jobs: [
+			{
+				caller: path,
+				job: 'packages',
+				workflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
+				status: 'failed',
+				findings: [
+					{ trigger: 'push', finding: new PushCoverageFinding('main') },
+					{
+						trigger: 'push',
+						finding: new RepositoryTrustRuleMissingFinding('trust rule')
+					},
+					{
+						trigger: 'pull_request',
+						finding: new SharedPullRequestCacheFinding()
+					}
+				]
+			}
+		],
+		repairableJobs: []
+	});
+});
+
 it.each([
 	{
 		pin: 'refs/heads/main',
@@ -1049,6 +1117,38 @@ jobs:
 		});
 	}
 );
+
+it.each([
+	{
+		name: 'includes the read credential options in the repair command',
+		options: { readUser: 'reader' },
+		rows: [
+			{
+				label: 'Review a repair',
+				value: `cupboard github check ${tenant.href.replace(/\/$/u, '')} --repo ${repository} --branch main --read-user <user> --read-password <password> --fix`
+			}
+		]
+	},
+	{
+		name: 'omits the repair command from the output under --fix',
+		options: { isFixRequested: true },
+		rows: []
+	}
+])('$name', async ({ options, rows }) => {
+	const results: ResultRow[][] = [];
+
+	await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main', ...options },
+		capturingReporter(results),
+		fixture().client,
+		defaultDependencies()
+	);
+
+	expect(
+		results[0]?.filter((row) => row.label === 'Review a repair')
+	).toStrictEqual(rows);
+});
 
 it('checks each guarded job only for the events that its condition allows', async () => {
 	const result = await inspectDiscoveredGithubCheck(
@@ -1260,3 +1360,43 @@ jobs:
 		]);
 	}
 );
+
+it('offers a repair for the quickstart workflow on an empty tenant', async () => {
+	const workflow = await quickstartWorkflow();
+	const result = await inspectDiscoveredGithubCheck(
+		new URL('https://cupboard.example.workers.dev/t/acme'),
+		{ repo: 'acme/app' },
+		capturingReporter([]),
+		fixture().client,
+		defaultDependencies({
+			lookupRepository: () =>
+				Promise.resolve({
+					repositoryId: 1234,
+					repositoryOwnerId: 5678,
+					fullName: 'acme/app',
+					defaultBranch: 'main'
+				}),
+			source: {
+				resolveBranch: () => Promise.resolve('a'.repeat(40)),
+				list: () => Promise.resolve(['.github/workflows/cupboard.yml']),
+				read: () => Promise.resolve(workflow)
+			},
+			fetchCacheInfo: () =>
+				Promise.resolve(
+					new CacheInfo(
+						servedStoreDirectory,
+						true,
+						cachePrioritySchema.parse(40)
+					)
+				)
+		})
+	);
+
+	expect({
+		statuses: result.jobs.map((job) => [job.job, job.status]),
+		repairable: result.repairableJobs.map((job) => job.job)
+	}).toStrictEqual({
+		statuses: [['publish', 'failed']],
+		repairable: ['publish']
+	});
+});

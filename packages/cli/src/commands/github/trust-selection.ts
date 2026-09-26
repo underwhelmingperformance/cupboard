@@ -13,7 +13,9 @@ import { cacheLabel } from '../../client/client.ts';
 
 import { type CheckFinding, FailedCheckFinding } from './finding.ts';
 
-function describeAuthorizationDetail(detail: AuthorizationDetail): string {
+export function describeAuthorizationDetail(
+	detail: AuthorizationDetail
+): string {
 	if (detail.type !== 'cupboard_cache') {
 		return detail.type;
 	}
