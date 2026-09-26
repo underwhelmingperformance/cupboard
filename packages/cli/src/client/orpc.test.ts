@@ -8,6 +8,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { pushIdSchema } from '@cupboard/protocol/upload';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
 import { ValidationError } from '@orpc/contract';
@@ -16,10 +17,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+	authExitCode,
 	CliAbortError,
 	CupboardHttpError,
-	QuotaExceededError
+	QuotaExceededError,
+	transientExitCode
 } from '../errors.ts';
+import { errorExitCode } from '../exit-code.ts';
+import { byteStream } from '../io/byte-stream.ts';
 
 import type { TokenProvider } from './credentials.ts';
 import { controlRpc, tenantRpc } from './orpc.ts';
@@ -238,23 +243,6 @@ const nonIdempotentNegotiations = [
 ] as const;
 
 describe('tenantRpc', () => {
-	it('rejects an oversized raw server error before decoding it', async () => {
-		const { fetcher } = capturingFetcher([
-			() =>
-				new Response('failure', {
-					status: StatusCodes.NOT_IMPLEMENTED,
-					headers: { 'content-length': String(64 * 1024 + 1) }
-				})
-		]);
-		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
-			fetcher
-		});
-
-		await expect(rpc.caches.list()).rejects.toBeInstanceOf(
-			RemoteBodyTooLargeError
-		);
-	});
-
 	it('requests a tenant procedure under the existing path prefix with the configured credential', async () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ caches: [] })
@@ -910,6 +898,109 @@ describe('tenantRpc', () => {
 		}
 	);
 
+	it.each(
+		[
+			{ status: StatusCodes.UNAUTHORIZED, expected: authExitCode },
+			{ status: StatusCodes.NOT_FOUND, expected: genericExitCode },
+			{ status: StatusCodes.TOO_MANY_REQUESTS, expected: transientExitCode },
+			{
+				status: StatusCodes.TOO_MANY_REQUESTS,
+				contentType: 'text/html',
+				expected: transientExitCode
+			},
+			{ status: StatusCodes.SERVICE_UNAVAILABLE, expected: transientExitCode },
+			{ status: StatusCodes.INSUFFICIENT_STORAGE, expected: genericExitCode },
+			{
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				expected: transientExitCode
+			},
+			{ status: StatusCodes.BAD_GATEWAY, expected: transientExitCode }
+		].flatMap((row) =>
+			(['declared', 'received'] as const).map((source) => ({
+				contentType: 'application/json',
+				...row,
+				source
+			}))
+		)
+	)(
+		'maps a $status error body over the limit ($source size, content type $contentType) to exit status $expected',
+		async ({ status, source, expected, contentType }) => {
+			const maximumBytes = 64 * 1024;
+			const oversized = maximumBytes + 1;
+			const letterA = 0x61;
+			const { fetcher } = capturingFetcher([
+				() =>
+					source === 'declared'
+						? new Response('{}', {
+								status,
+								headers: {
+									'content-type': contentType,
+									'content-length': String(oversized)
+								}
+							})
+						: new Response(
+								byteStream([new Uint8Array(oversized).fill(letterA)]),
+								{ status, headers: { 'content-type': contentType } }
+							)
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+			const cause = new RemoteBodyTooLargeError(
+				'Cupboard error response',
+				maximumBytes,
+				oversized,
+				source
+			);
+
+			const rejected = await rejectedBy(() => rpc.keys.signing.rotate());
+
+			expect({ rejected, exitCode: errorExitCode(rejected) }).toStrictEqual({
+				rejected:
+					status === StatusCodes.INSUFFICIENT_STORAGE
+						? new QuotaExceededError('', { cause })
+						: new CupboardHttpError(
+								'POST',
+								'/t/acme/keys/rotate',
+								status,
+								source === 'declared'
+									? '{}'
+									: `${'a'.repeat(4 * 1024)}\n[response body truncated]`,
+								undefined,
+								{ cause }
+							),
+				exitCode: expected
+			});
+		}
+	);
+
+	it('rethrows the error from a failed error-body read', async () => {
+		const aborted = new CliAbortError();
+		const { fetcher } = capturingFetcher([
+			() =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						pull(controller) {
+							controller.error(aborted);
+						}
+					}),
+					{
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						headers: { 'content-type': 'application/json' }
+					}
+				)
+		]);
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+			credential: 'admin-token',
+			fetcher
+		});
+
+		const rejected = await rejectedBy(() => rpc.keys.signing.rotate());
+
+		expect(rejected).toBe(aborted);
+	});
+
 	const anyFile: unknown = expect.any(File);
 	const slowDown = {
 		defined: false,
@@ -919,6 +1010,8 @@ describe('tenantRpc', () => {
 		data: { retryAfterSeconds: 5 }
 	};
 
+	// The client passes oRPC a buffered copy of the response, which has a
+	// `content-length` header that the server did not send.
 	it.each([
 		{
 			name: 'a well-formed oRPC error',
@@ -946,7 +1039,7 @@ describe('tenantRpc', () => {
 			message: 'Too Many Requests',
 			data: {
 				status: StatusCodes.TOO_MANY_REQUESTS,
-				headers: { 'content-type': 'text/plain' },
+				headers: { 'content-length': '9', 'content-type': 'text/plain' },
 				body: 'Slow down'
 			}
 		},
@@ -960,7 +1053,7 @@ describe('tenantRpc', () => {
 			message: 'Too Many Requests',
 			data: {
 				status: StatusCodes.TOO_MANY_REQUESTS,
-				headers: { 'content-type': 'application/json' },
+				headers: { 'content-length': '0', 'content-type': 'application/json' },
 				body: undefined
 			}
 		},
@@ -979,6 +1072,7 @@ describe('tenantRpc', () => {
 				status: StatusCodes.TOO_MANY_REQUESTS,
 				headers: {
 					'content-disposition': 'attachment; filename="error.json"',
+					'content-length': '1',
 					'content-type': 'application/json'
 				},
 				body: anyFile

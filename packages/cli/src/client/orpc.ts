@@ -1,9 +1,10 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import { type AuthzMeta } from '@cupboard/protocol/contract';
-import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import {
 	BoundedBodyCollector,
-	readResponseText
+	RemoteBodyTooLargeError,
+	responseWithBufferedBoundedBody
 } from '@cupboard/shared/response-body';
 import { type ReplaySafety, retryingFetcher } from '@cupboard/shared/retry';
 import {
@@ -42,7 +43,7 @@ export interface TenantRpcOptions {
 }
 
 const unauthorizedStatusCode = 401;
-const maximumServerErrorBytes = 64 * 1024;
+const maximumErrorBodyBytes = 64 * 1024;
 const errorBodyPreviewBytes = 4 * 1024;
 
 export type ControlRpc = JsonifiedClient<
@@ -179,18 +180,70 @@ async function checkResponse(
 		return response;
 	}
 
+	const buffered = await bufferedErrorResponse(request, response);
+
 	if (
-		response.status < serverErrorThreshold ||
-		typedServerErrorStatuses.has(response.status)
+		buffered.status < serverErrorThreshold ||
+		typedServerErrorStatuses.has(buffered.status)
 	) {
-		return await checkErrorBody(request, response);
+		return await checkErrorBody(request, buffered);
 	}
 
-	throw statusError(
-		request,
-		response,
-		await serverErrorDetail(response, request.signal)
-	);
+	throw statusError(request, buffered, await serverErrorDetail(buffered));
+}
+
+async function bufferedErrorResponse(
+	request: Request,
+	response: Response
+): Promise<Response> {
+	// A clone shares its source stream with the original. Cancelling one of
+	// the two bodies finishes only when the other body is also cancelled or
+	// the source closes. The bounded read waits for its cancellation of the
+	// original when the body is over the limit, so cancel the clone first.
+	const preview = await bodyPreview(response.clone());
+
+	try {
+		return await responseWithBufferedBoundedBody(response, {
+			description: 'Cupboard error response',
+			maximumBytes: maximumErrorBodyBytes,
+			signal: request.signal
+		});
+	} catch (error) {
+		if (!(error instanceof RemoteBodyTooLargeError)) {
+			throw error;
+		}
+
+		const detail = response.status === insufficientStorageStatus ? '' : preview;
+
+		throw statusError(request, response, detail, { cause: error });
+	}
+}
+
+async function bodyPreview(response: Response): Promise<string> {
+	if (response.body === null) {
+		return '';
+	}
+
+	const reader = response.body.getReader();
+	const collector = new BoundedBodyCollector(errorBodyPreviewBytes, 'truncate');
+
+	try {
+		for (;;) {
+			const chunk = await reader.read();
+
+			if (chunk.done || !collector.append(chunk.value)) {
+				return previewText(collector);
+			}
+		}
+	} catch {
+		// The clone fails with the same error as the original, and the bounded
+		// read of the original reports it.
+		return '';
+	} finally {
+		// The cancellation finishes only after the bounded read has read or
+		// cancelled the original, which happens after this function returns.
+		void bestEffort(() => reader.cancel());
+	}
 }
 
 function textPreview(text: string): string {
@@ -253,10 +306,11 @@ async function checkErrorBody(
 function statusError(
 	request: Request,
 	response: Response,
-	detail: string
+	detail: string,
+	options?: ErrorOptions
 ): QuotaExceededError | CupboardHttpError {
 	if (response.status === insufficientStorageStatus) {
-		return new QuotaExceededError(detail);
+		return new QuotaExceededError(detail, options);
 	}
 
 	return new CupboardHttpError(
@@ -264,21 +318,15 @@ function statusError(
 		new URL(request.url).pathname,
 		response.status,
 		detail,
-		response.headers.get('cf-ray') ?? undefined
+		response.headers.get('cf-ray') ?? undefined,
+		options
 	);
 }
 
 // Use the decoded message when the body is an oRPC error envelope. Otherwise
 // preserve the start of the response text without attributing its source.
-async function serverErrorDetail(
-	response: Response,
-	signal: AbortSignal
-): Promise<string> {
-	const body = await readResponseText(response, {
-		description: 'Cupboard server error response',
-		maximumBytes: maximumServerErrorBytes,
-		signal
-	});
+async function serverErrorDetail(response: Response): Promise<string> {
+	const body = await response.text();
 
 	try {
 		const json: unknown = JSON.parse(body);
