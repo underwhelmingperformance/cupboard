@@ -41,6 +41,24 @@ describe('parseD1Migrations', () => {
 			}
 		]);
 	});
+
+	// `check:migrations` replays the files in this order, so the two must
+	// agree whatever the names contain.
+	it('sorts names by UTF-16 code unit', () => {
+		const names = parseD1Migrations(
+			['0031_b.sql', '0031_B.sql', '0031_x.sql', '0031-x.sql'].map((name) => ({
+				name,
+				sql: 'SELECT 1;'
+			}))
+		).map((migration) => migration.name);
+
+		expect(names).toStrictEqual([
+			'0031-x.sql',
+			'0031_B.sql',
+			'0031_b.sql',
+			'0031_x.sql'
+		]);
+	});
 });
 
 interface RecordedRow {
