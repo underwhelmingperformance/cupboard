@@ -164,6 +164,8 @@ describe('splitDelimitedCachePositionals', () => {
 	});
 });
 
+const keepEntry = (entry: string): string => entry;
+
 describe('resolveCachePositionals', () => {
 	it('requires the configured minimum payload for an explicit cache URL', async () => {
 		await expect(
@@ -173,6 +175,7 @@ describe('resolveCachePositionals', () => {
 				{
 					minimumPayload: 1,
 					payloadDescription: 'a path',
+					parsePayloadEntry: keepEntry,
 					cacheExists: () => Promise.resolve(true)
 				}
 			)
@@ -185,6 +188,7 @@ describe('resolveCachePositionals', () => {
 				minimumPayload: 1,
 				maximumPayload: 1,
 				payloadDescription: 'a path',
+				parsePayloadEntry: keepEntry,
 				cacheExists: () => Promise.resolve(false)
 			})
 		).rejects.toBeInstanceOf(CacheTargetPayloadCountError);
@@ -197,7 +201,12 @@ describe('resolveCachePositionals', () => {
 			resolveCachePositionals(
 				new URL('https://cupboard.test/t/acme/cache/builds'),
 				['result'],
-				{ minimumPayload: 1, payloadDescription: 'a path', cacheExists }
+				{
+					minimumPayload: 1,
+					payloadDescription: 'a path',
+					cacheExists,
+					parsePayloadEntry: keepEntry
+				}
 			)
 		).resolves.toStrictEqual({
 			target: {
@@ -216,6 +225,7 @@ describe('resolveCachePositionals', () => {
 			resolveCachePositionals(tenantUrl, ['builds', 'result'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
+				parsePayloadEntry: keepEntry,
 				cacheExists,
 				existsLocally: () => false
 			})
@@ -237,6 +247,7 @@ describe('resolveCachePositionals', () => {
 			resolveCachePositionals(tenantUrl, ['result'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
+				parsePayloadEntry: keepEntry,
 				cacheExists: () => Promise.resolve(false)
 			})
 		).resolves.toStrictEqual({
@@ -254,6 +265,7 @@ describe('resolveCachePositionals', () => {
 			resolveCachePositionals(tenantUrl, ['builds', 'result'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
+				parsePayloadEntry: keepEntry,
 				cacheExists,
 				existsLocally: (candidate) => candidate === 'builds'
 			})
@@ -271,6 +283,7 @@ describe('resolveCachePositionals', () => {
 			resolveCachePositionals(tenantUrl, ['./result'], {
 				minimumPayload: 1,
 				payloadDescription: 'a path',
+				parsePayloadEntry: keepEntry,
 				cacheExists
 			})
 		).resolves.toStrictEqual({
@@ -280,10 +293,85 @@ describe('resolveCachePositionals', () => {
 		expect(cacheExists).not.toHaveBeenCalled();
 	});
 
+	it('parses the entries that follow a possible cache name before looking up the cache', async () => {
+		const cacheExists = vi.fn<() => Promise<boolean>>();
+		const invalid = new Error('invalid payload entry');
+
+		await expect(
+			resolveCachePositionals(tenantUrl, ['builds', 'bad'], {
+				minimumPayload: 1,
+				payloadDescription: 'a path',
+				cacheExists,
+				existsLocally: () => false,
+				parsePayloadEntry: (entry) => {
+					if (entry === 'bad') {
+						throw invalid;
+					}
+
+					return entry;
+				}
+			})
+		).rejects.toBe(invalid);
+		expect(cacheExists).not.toHaveBeenCalled();
+	});
+
+	it('parses the entries that follow an existing cache name once, before the lookup', async () => {
+		const events: string[] = [];
+
+		await expect(
+			resolveCachePositionals(tenantUrl, ['builds', 'result'], {
+				minimumPayload: 1,
+				payloadDescription: 'a path',
+				cacheExists: () => {
+					events.push('lookup');
+
+					return Promise.resolve(true);
+				},
+				existsLocally: () => false,
+				parsePayloadEntry: (entry) => {
+					events.push(`parse ${entry}`);
+
+					return entry.length;
+				}
+			})
+		).resolves.toStrictEqual({
+			target: { tenantUrl, cache: { kind: 'named', name: builds } },
+			payload: [6]
+		});
+		expect(events).toStrictEqual(['parse result', 'lookup']);
+	});
+
+	it('parses a possible cache name only after looking up the cache', async () => {
+		const events: string[] = [];
+
+		await expect(
+			resolveCachePositionals(tenantUrl, ['result', 'other'], {
+				minimumPayload: 1,
+				payloadDescription: 'a path',
+				cacheExists: () => {
+					events.push('lookup');
+
+					return Promise.resolve(false);
+				},
+				existsLocally: () => false,
+				parsePayloadEntry: (entry) => {
+					events.push(`parse ${entry}`);
+
+					return entry;
+				}
+			})
+		).resolves.toStrictEqual({
+			target: { tenantUrl, cache: { kind: 'default' } },
+			payload: ['result', 'other']
+		});
+		expect(events).toStrictEqual(['parse other', 'lookup', 'parse result']);
+	});
+
 	it('explains when consuming a cache leaves required payload missing', async () => {
 		const result = resolveCachePositionals(tenantUrl, ['builds'], {
 			minimumPayload: 1,
 			payloadDescription: 'a path',
+			parsePayloadEntry: keepEntry,
 			cacheExists: () => Promise.resolve(true)
 		});
 

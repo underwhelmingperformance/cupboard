@@ -47,6 +47,7 @@ export function registerDeleteCommand(
 					minimumPayload: 1,
 					maximumPayload: 1,
 					payloadDescription: 'a store path',
+					parsePayloadEntry: (entry) => entry,
 					authorise: (target) =>
 						cachedOwnerProvider(target.tenantUrl, {
 							signal: programOptions.signal

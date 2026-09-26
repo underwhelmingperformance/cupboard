@@ -26,12 +26,14 @@ export type NamedCacheTarget = TenantCacheUrl & {
 	readonly cache: Extract<CacheScope, { readonly kind: 'named' }>;
 };
 
-export interface ResolvedCachePositionals {
+export interface ResolvedCachePositionals<T> {
 	readonly target: CacheTarget;
-	readonly payload: readonly string[];
+	readonly payload: readonly T[];
 }
 
-export interface AuthorisedCachePositionals extends ResolvedCachePositionals {
+export interface AuthorisedCachePositionals<
+	T
+> extends ResolvedCachePositionals<T> {
 	readonly credential: AccessCredential;
 }
 
@@ -44,7 +46,7 @@ export interface DelimitedCacheOptions {
 	readonly withoutSeparator: 'command-payload' | 'cache-only';
 }
 
-export interface CachePositionalResolution {
+export interface CachePositionalResolution<T> {
 	readonly minimumPayload: number;
 	readonly maximumPayload?: number;
 	readonly payloadDescription: string;
@@ -52,36 +54,54 @@ export interface CachePositionalResolution {
 	// Whether a positional matches a file or directory in the working directory.
 	// Tests supply one; commands take the filesystem.
 	readonly existsLocally?: (candidate: string) => boolean;
+	// Parses a payload entry, or throws for an invalid one. When the first
+	// positional could be a cache name, `resolveCachePositionals` parses the
+	// positionals that follow it before calling `cacheExists`. A caller whose
+	// `cacheExists` requests credentials can therefore reject invalid entries
+	// before requesting them. `resolveCachePositionals` parses each positional
+	// once.
+	readonly parsePayloadEntry: (entry: string) => T;
 }
 
-function validatePayload(
-	resolved: ResolvedCachePositionals,
-	resolution: CachePositionalResolution
-): ResolvedCachePositionals {
-	if (resolved.payload.length < resolution.minimumPayload) {
+function checkPayloadCount<T>(
+	count: number,
+	resolution: CachePositionalResolution<T>
+): void {
+	if (count < resolution.minimumPayload) {
 		throw new CommandPayloadRequiredError(resolution.payloadDescription);
 	}
 
 	if (
 		resolution.maximumPayload !== undefined &&
-		resolved.payload.length > resolution.maximumPayload
+		count > resolution.maximumPayload
 	) {
 		throw new CacheTargetPayloadCountError(
-			resolved.payload.length,
+			count,
 			resolution.maximumPayload,
 			resolution.payloadDescription
 		);
 	}
+}
 
-	return resolved;
+function parsedPayload<T>(
+	target: CacheTarget,
+	positionals: readonly string[],
+	resolution: CachePositionalResolution<T>
+): ResolvedCachePositionals<T> {
+	checkPayloadCount(positionals.length, resolution);
+
+	return {
+		target,
+		payload: positionals.map((entry) => resolution.parsePayloadEntry(entry))
+	};
 }
 
 export interface CacheLookupClient {
 	readonly get: CacheScopedClient<object, unknown>;
 }
 
-export interface CacheTargetAuthorisation extends Omit<
-	CachePositionalResolution,
+export interface CacheTargetAuthorisation<T> extends Omit<
+	CachePositionalResolution<T>,
 	'cacheExists'
 > {
 	readonly authorise: (
@@ -174,41 +194,38 @@ export function cacheTargetWithName(
  * selects a named cache when that cache exists, and stays payload when none
  * does.
  */
-export async function resolveCachePositionals(
+export async function resolveCachePositionals<T>(
 	url: URL,
 	positionals: readonly string[],
-	resolution: CachePositionalResolution
-): Promise<ResolvedCachePositionals> {
+	resolution: CachePositionalResolution<T>
+): Promise<ResolvedCachePositionals<T>> {
 	const urlTarget = cacheTargetFromUrl(url);
 
 	if (urlTarget.cache.kind === 'named' || positionals.length === 0) {
-		return validatePayload(
-			{ target: urlTarget, payload: positionals },
-			resolution
-		);
+		return parsedPayload(urlTarget, positionals, resolution);
 	}
 
-	const [candidate, ...payload] = positionals;
+	const [candidate, ...rest] = positionals;
 	const existsLocally = resolution.existsLocally ?? existsSync;
 	const name = cacheNameSchema.safeParse(candidate);
 
 	if (!name.success || existsLocally(name.data)) {
-		return validatePayload(
-			{ target: urlTarget, payload: positionals },
-			resolution
-		);
+		return parsedPayload(urlTarget, positionals, resolution);
 	}
 
+	const parsedRest = rest.map((entry) => resolution.parsePayloadEntry(entry));
 	const candidateTarget = cacheTargetWithName(urlTarget, name.data);
 
 	if (!(await resolution.cacheExists(candidateTarget))) {
-		return validatePayload(
-			{ target: urlTarget, payload: positionals },
-			resolution
-		);
+		checkPayloadCount(positionals.length, resolution);
+
+		return {
+			target: urlTarget,
+			payload: [resolution.parsePayloadEntry(name.data), ...parsedRest]
+		};
 	}
 
-	if (payload.length < resolution.minimumPayload) {
+	if (rest.length < resolution.minimumPayload) {
 		throw new CacheTargetPayloadRequiredError(
 			candidateTarget,
 			resolution.payloadDescription,
@@ -216,7 +233,9 @@ export async function resolveCachePositionals(
 		);
 	}
 
-	return validatePayload({ target: candidateTarget, payload }, resolution);
+	checkPayloadCount(rest.length, resolution);
+
+	return { target: candidateTarget, payload: parsedRest };
 }
 
 /**
@@ -244,11 +263,11 @@ export function cacheExistsWith(
  * The same credential is reused when the resolved target is the candidate
  * that the exact-cache lookup probed.
  */
-export async function resolveAuthorisedCachePositionals(
+export async function resolveAuthorisedCachePositionals<T>(
 	url: URL,
 	positionals: readonly string[],
-	authorisation: CacheTargetAuthorisation
-): Promise<AuthorisedCachePositionals> {
+	authorisation: CacheTargetAuthorisation<T>
+): Promise<AuthorisedCachePositionals<T>> {
 	const credentials = new Map<string, Promise<AccessCredential>>();
 	const credentialFor = (target: CacheTarget): Promise<AccessCredential> => {
 		const key =
@@ -271,6 +290,7 @@ export async function resolveAuthorisedCachePositionals(
 			maximumPayload: authorisation.maximumPayload
 		}),
 		payloadDescription: authorisation.payloadDescription,
+		parsePayloadEntry: authorisation.parsePayloadEntry,
 		cacheExists: async (target) =>
 			cacheExistsWith(
 				tenantRpc(target.tenantUrl, {

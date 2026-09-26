@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
 	mkdtempSync,
 	realpathSync,
@@ -685,6 +686,16 @@ describe('push command', () => {
 			]
 		},
 		{
+			name: 'a non-store path that follows a possible cache name',
+			// A random name cannot match an entry in the working directory, so the
+			// command treats it as a possible cache name.
+			pushArguments: (_directory: string, missing: string) => [
+				'https://cache.example.workers.dev/t/acme',
+				`cache-${randomUUID()}`,
+				missing
+			]
+		},
+		{
 			name: 'a reference paths file listing a non-store path',
 			pushArguments: (directory: string, missing: string) => {
 				const file = path.join(directory, 'references.txt');
@@ -721,7 +732,7 @@ describe('push command', () => {
 				];
 			}
 		}
-	])('rejects $name', async ({ pushArguments }) => {
+	])('rejects $name before authenticating', async ({ pushArguments }) => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
 		const missing = path.join(directory, 'missing');
 
@@ -730,7 +741,7 @@ describe('push command', () => {
 
 			expect(run).toStrictEqual({
 				result: new InvalidStorePathError(missing),
-				tokenProviderRequests: [defaultCache],
+				tokenProviderRequests: [],
 				openStoreCalls: 0
 			});
 		} finally {
@@ -738,7 +749,7 @@ describe('push command', () => {
 		}
 	});
 
-	it('rejects a symlink argument that resolves outside the store', async () => {
+	it('rejects a symlink argument that resolves outside the store before authenticating', async () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
 		const target = path.join(directory, 'out');
 		const link = path.join(directory, 'result');
@@ -753,7 +764,7 @@ describe('push command', () => {
 
 			expect(run).toStrictEqual({
 				result: new InvalidStorePathError(realpathSync(target)),
-				tokenProviderRequests: [defaultCache],
+				tokenProviderRequests: [],
 				openStoreCalls: 0
 			});
 		} finally {
@@ -761,7 +772,7 @@ describe('push command', () => {
 		}
 	});
 
-	it('rejects an intermediate paths file listing a symlink outside the store', async () => {
+	it('rejects an intermediate paths file listing a symlink outside the store before authenticating', async () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
 		const target = path.join(directory, 'out');
 		const link = path.join(directory, 'intermediate');
@@ -780,7 +791,7 @@ describe('push command', () => {
 
 			expect(run).toStrictEqual({
 				result: new InvalidStorePathError(realpathSync(target)),
-				tokenProviderRequests: [defaultCache],
+				tokenProviderRequests: [],
 				openStoreCalls: 0
 			});
 		} finally {
