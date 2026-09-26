@@ -70,6 +70,16 @@ describe('translateRpcError', () => {
 		}
 	);
 
+	it('converts a 507 without an oRPC error envelope into a quota error', () => {
+		const error = new ORPCError('MALFORMED_ORPC_ERROR_RESPONSE', {
+			status: 507
+		});
+
+		expect(translateRpcError(error)).toStrictEqual(
+			new QuotaExceededError('', { cause: error })
+		);
+	});
+
 	it('returns an unrecognised oRPC code unchanged', () => {
 		const error = new ORPCError('NOT_FOUND', {
 			status: 404,

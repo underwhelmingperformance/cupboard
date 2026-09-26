@@ -858,6 +858,52 @@ describe('tenantRpc', () => {
 
 	it.each([
 		{
+			name: 'a plain-text body',
+			body: 'Over quota',
+			contentType: 'text/plain',
+			detail: 'Over quota'
+		},
+		{
+			name: 'a JSON body with an error field',
+			body: '{"error":"Over quota"}',
+			contentType: 'application/json',
+			detail: 'Over quota'
+		},
+		{
+			name: 'a JSON body with a message field',
+			body: '{"message":"Over quota"}',
+			contentType: 'application/json',
+			detail: 'Over quota'
+		},
+		{
+			name: 'a JSON body with neither field',
+			body: '{"quota":"10 GB"}',
+			contentType: 'application/json',
+			detail: '{"quota":"10 GB"}'
+		}
+	])(
+		'throws a quota error with the server text for a 507 with $name',
+		async ({ body, contentType, detail }) => {
+			const { fetcher } = capturingFetcher([
+				() =>
+					new Response(body, {
+						status: StatusCodes.INSUFFICIENT_STORAGE,
+						headers: { 'content-type': contentType }
+					})
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			const rejected = await rejectedBy(() => rpc.keys.signing.rotate());
+
+			expect(rejected).toStrictEqual(new QuotaExceededError(detail));
+		}
+	);
+
+	it.each([
+		{
 			name: 'an undecodable 429 body',
 			status: StatusCodes.TOO_MANY_REQUESTS,
 			contentType: 'application/json'
