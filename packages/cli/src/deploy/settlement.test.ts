@@ -1,6 +1,7 @@
 import { capturingReporter } from '@cupboard/cli-ui/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	currentLocalStep,
 	expansionLocalStep,
 	type LocalStepStatus
 } from '@cupboard/protocol/deployment';
@@ -12,13 +13,15 @@ import { type SettlementClient, settleTenants } from './settlement.ts';
 
 const tenant = tenantIdSchema.parse('pending');
 const pending: LocalStepStatus = {
-	current: expansionLocalStep,
+	current: currentLocalStep,
+	required: expansionLocalStep,
 	ready: 0,
 	pending: 1,
 	stragglers: [tenant]
 };
 const ready: LocalStepStatus = {
-	current: expansionLocalStep,
+	current: currentLocalStep,
+	required: expansionLocalStep,
 	ready: 1,
 	pending: 0,
 	stragglers: []
@@ -38,6 +41,7 @@ describe('tenant settlement', () => {
 				status = ready;
 				return Promise.resolve({
 					current: expansionLocalStep,
+					required: expansionLocalStep,
 					woken: 1,
 					failed: 0,
 					outcomes: [{ tenant, kind: 'recorded', step: expansionLocalStep }]
@@ -67,6 +71,7 @@ describe('tenant settlement', () => {
 				wakes++;
 				return Promise.resolve({
 					current: expansionLocalStep,
+					required: expansionLocalStep,
 					woken: 0,
 					failed: 1,
 					outcomes: [{ tenant, kind: 'unconfigured' }]
@@ -83,17 +88,18 @@ describe('tenant settlement', () => {
 		expect(wakes).toBe(2);
 	});
 
-	// The wake selects tenants below the server's step, so it can select none
-	// while tenants are still below a higher step that the caller counts
-	// against.
+	// The wake selects tenants below the server's required local step, so it
+	// can select none while tenants are still below a higher step that the
+	// caller counts against.
 	it('stops when a wake selects no tenant while tenants are pending', async () => {
 		let wakes = 0;
 		const client: SettlementClient = {
-			status: () => Promise.resolve(pending),
+			status: () => Promise.resolve({ ...pending, required: currentLocalStep }),
 			wake: () => {
 				wakes++;
 				return Promise.resolve({
-					current: expansionLocalStep,
+					current: currentLocalStep,
+					required: expansionLocalStep,
 					woken: 0,
 					failed: 0,
 					outcomes: []
@@ -105,7 +111,7 @@ describe('tenant settlement', () => {
 
 		try {
 			await settleTenants(client, capturingReporter([]), {
-				requiredStep: expansionLocalStep,
+				requiredStep: currentLocalStep,
 				limit: 20,
 				maxPasses: 100
 			});
@@ -114,7 +120,7 @@ describe('tenant settlement', () => {
 		}
 
 		expect({ caught, wakes }).toStrictEqual({
-			caught: new LocalStepUnreachedError(1, expansionLocalStep, [tenant]),
+			caught: new LocalStepUnreachedError(1, currentLocalStep, [tenant]),
 			wakes: 1
 		});
 	});
@@ -131,6 +137,7 @@ describe('tenant settlement', () => {
 				wakes++;
 				return Promise.resolve({
 					current: expansionLocalStep,
+					required: expansionLocalStep,
 					woken: 0,
 					failed: 0,
 					outcomes: []

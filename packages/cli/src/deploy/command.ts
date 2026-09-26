@@ -102,6 +102,7 @@ import {
 	observeDeployment,
 	planDeployment,
 	planOfflineDeployment,
+	throwIfPlanBlocked,
 	transitionPlanRows
 } from './transition.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
@@ -1407,6 +1408,7 @@ async function deployFlow(
 					...choicePlanRows(state.config, state.domain, state.owner)
 				]);
 				warnMissing(missing);
+				throwIfPlanBlocked(reviewedPlan);
 			},
 			accounts: () => apiFor(accountId).listAccounts(),
 			deployer,

@@ -54,12 +54,103 @@ export class SigningKeyNotFoundError extends CliError {
 	}
 }
 
-export class UnclassifiedD1MigrationError extends CliError {
-	constructor(public readonly migrations: readonly string[]) {
+/**
+ * The artifact's D1 migrations, in name order, differ from the migrations that
+ * the schema transitions list. A migration added without a transition, or
+ * listed under the wrong one, is detected here before the deploy changes
+ * anything.
+ */
+export class MisclassifiedD1MigrationsError extends CliError {
+	constructor(
+		public readonly expected: readonly string[],
+		public readonly found: readonly string[]
+	) {
+		const position = expected.findIndex((name, index) => name !== found[index]);
+		const first = position === -1 ? expected.length : position;
+		const listed = new Set(expected);
+		const contained = new Set(found);
+		const missing = expected.filter((name) => !contained.has(name));
+		const unlisted = found.filter((name) => !listed.has(name));
+
 		super(
-			`D1 migrations are not classified: ${migrations.join(', ')}. Each sorts after the first contraction. Add it to contractionMigrations if it must run after the Workers settle, or move it before the contractions if the new Workers need it when they start.`
+			`The D1 migrations do not match the schema transitions. They first differ at position ${String(first + 1)}, where the transitions list ${expected[first] ?? '(nothing)'} and the artifact contains ${found[first] ?? '(nothing)'}. Missing from the artifact: ${missing.join(', ') || '(none)'}. Listed by no transition: ${unlisted.join(', ') || '(none)'}. Add each new migration to a new transition at the end of \`schemaTransitions\` (@cupboard/protocol/deployment), in name order; a released transition's migrations must not change.`
 		);
-		this.name = 'UnclassifiedD1MigrationError';
+		this.name = 'MisclassifiedD1MigrationsError';
+	}
+}
+
+/**
+ * The releases that can complete `transition` without including `dependent`,
+ * as text for the error and the plan row.
+ */
+export function completingReleases(
+	transition: string,
+	completedBy: string | undefined,
+	dependent: string
+): string {
+	return completedBy === undefined
+		? `a release that completes '${transition}' and does not include '${dependent}'`
+		: `a release of ${completedBy} or later that does not include '${dependent}'`;
+}
+
+/**
+ * A transition that is not independent (`dependent` below) could expand only
+ * after the upload, because an earlier transition is not complete. The new
+ * Workers would then run without its expand migrations, so the deploy stops
+ * with this error before it changes anything. Once a deploy of a release that
+ * does not include the dependent transition has completed the earlier
+ * transition, the deploy can apply the dependent transition's expand
+ * migrations before the upload.
+ *
+ * The message gives a range of releases, not `completedBy` alone, because
+ * `completedBy` can be older than the deployed release, and deploying it would
+ * then be a downgrade.
+ */
+export class TransitionIncompleteError extends CliError {
+	constructor(
+		public readonly transition: string,
+		public readonly dependent: string,
+		public readonly completedBy: string | undefined
+	) {
+		super(
+			`The '${dependent}' schema transition can expand only after '${transition}' is complete, and D1 does not record '${transition}' as complete. First complete '${transition}' by running cupboard deploy with ${completingReleases(transition, completedBy, dependent)}. The deployed release qualifies only if it is one of those releases and its own deploy stopped before completing '${transition}'. When that deploy has finished, deploy this build.`
+		);
+		this.name = 'TransitionIncompleteError';
+	}
+}
+
+/**
+ * The deployment records a transition as complete, or its `deployment_phase`
+ * row implies that it is complete, but `d1_migrations` does not record every
+ * migration that the transition lists. The deploy never applies the migrations
+ * of a complete transition, so it stops with this error before it changes
+ * anything. Either a migration was added to a released transition, or the
+ * records disagree with the migrations that ran.
+ */
+export class TransitionMigrationsMissingError extends CliError {
+	constructor(
+		public readonly transition: string,
+		public readonly migrations: readonly string[]
+	) {
+		super(
+			`The deployment records the '${transition}' schema transition as complete, in deployment_transition or through the deployment_phase row, but these D1 migrations of the transition have not been applied: ${migrations.join(', ')}. If this build added them to a released transition, move each to a new transition in @cupboard/protocol/deployment. Otherwise the records disagree with d1_migrations; check which migrations ran before you change either.`
+		);
+		this.name = 'TransitionMigrationsMissingError';
+	}
+}
+
+/**
+ * `completeTransitions` found a transition that has not expanded.
+ * `prepareTransitions` expands every incomplete transition or stops with an
+ * error, so this happens only when `prepareTransitions` did not run. Running
+ * the whole deploy again applies the expand migrations before the upload.
+ */
+export class TransitionNotExpandedError extends CliError {
+	constructor(public readonly transition: string) {
+		super(
+			`The '${transition}' schema transition has not expanded, so the deploy cannot apply its contract migrations. Re-run cupboard deploy, which applies expand migrations before it uploads the Workers.`
+		);
+		this.name = 'TransitionNotExpandedError';
 	}
 }
 
@@ -88,10 +179,10 @@ export class WorkersNotServingBuildError extends CliError {
 }
 
 /**
- * Active tenants have not recorded the local step this build requires, so the
- * deploy did not record its phase. The Workers are already uploaded when this
- * is thrown; the control Worker's sweep records the step for the tenants that
- * are behind, and running the deploy again then records the phase.
+ * Active or suspended tenants have not recorded the required local step, so
+ * the deploy stopped. The Workers are already uploaded when this is thrown.
+ * The control Worker's hourly sweep wakes the tenants that are behind, and
+ * each records its step; running the deploy again then continues.
  */
 export class LocalStepUnreachedError extends CliError {
 	constructor(
@@ -106,7 +197,7 @@ export class LocalStepUnreachedError extends CliError {
 				: stragglers.join(', ');
 
 		super(
-			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment phase was not recorded. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
+			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment cannot continue until they have. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
 		);
 		this.name = 'LocalStepUnreachedError';
 	}
