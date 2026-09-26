@@ -369,6 +369,15 @@ Cloudflare identity, the deployment's admin.
   and migrate the tenants to the release's local step, and renews the token when
   it nears expiry.
 
+  URL move: when the plan moves the deployment to another URL, including by
+  adding a first custom domain, the deploy also needs an admin token for that
+  URL. If the new URL already serves the deployment, the deploy checks the token
+  there. Otherwise the deploy cannot obtain or check a token there before it
+  changes anything, so it requires a session for that URL that is cached on this
+  machine. The session's token must be issued by that URL and include the
+  wildcard grant, as for the live check. With `--github-oidc`, the deploy
+  requests a GitHub token whose audience is the current URL at both URLs.
+
   Display names come from the caller's own token claims (`name`, `email`,
   `preferred_username`, `sub`). Other principals show as the full issuer URL and
   `sub`.

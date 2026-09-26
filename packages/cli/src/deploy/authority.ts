@@ -11,8 +11,13 @@ import { z } from 'zod';
 
 import { isAbortError, throwIfAborted } from '../abort.ts';
 import { type Audience, audienceSchema } from '../audience.ts';
-import { cachedOwnerProvider, githubOidcTokenProvider } from '../auth/auth.ts';
+import {
+	cachedOwnerProvider,
+	githubOidcTokenProvider,
+	isAccessTokenExpired
+} from '../auth/auth.ts';
 import { decodeJwtPayload } from '../auth/jwt.ts';
+import { type CachedSession, readCachedSession } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
@@ -92,11 +97,18 @@ export type EstablishedAuthority =
  */
 export interface AdminAccess {
 	credentialFor(url: URL): TokenProvider;
+	/**
+	 * The admin session that this machine has stored for `url`, read without
+	 * contacting `url`. Undefined when there is none.
+	 */
+	storedSessionFor(url: URL): Promise<CachedSession | undefined>;
 }
 
 /**
  * Creates the admin access for a deployment whose URL before this run is
- * `deploymentUrl`. The deploy requests a CI token whose audience is that URL.
+ * `deploymentUrl`. The deploy requests a CI token whose audience is that URL
+ * at every URL that the deploy contacts, because the workflow's control trust
+ * rule pins one audience.
  */
 export type AdminAccessFactory = (deploymentUrl: URL) => AdminAccess;
 
@@ -167,6 +179,34 @@ export class AdminTokenRequiredError extends CliError {
 		);
 		this.name = 'AdminTokenRequiredError';
 		this.isAfterLogin = options.isAfterLogin === true;
+	}
+}
+
+/**
+ * The plan leaves the deployment without a URL, for example by removing its
+ * custom domain on an account without a workers.dev subdomain.
+ */
+export class AdminNewUrlMissingError extends CliError {
+	constructor(public readonly admin: OwnerBinding) {
+		super(
+			`This deployment is administered by ${principalLabel(admin)}, and the ` +
+				'plan leaves it without a URL, so the deploy would not be able to ' +
+				'migrate tenants or initialise the instance after the upload. Keep a ' +
+				'custom domain in the plan, or register a workers.dev subdomain in ' +
+				'the Cloudflare dashboard (Workers & Pages), then re-run ' +
+				'`cupboard init`. Nothing was changed.'
+		);
+		this.name = 'AdminNewUrlMissingError';
+	}
+}
+
+/**
+ * A session stored for a URL was issued by a different deployment.
+ */
+export class StoredSessionMismatchError extends CliError {
+	constructor() {
+		super('the stored session was issued by a different deployment');
+		this.name = 'StoredSessionMismatchError';
 	}
 }
 
@@ -241,6 +281,35 @@ export class AdminControlWorkerMissingError extends CliError {
 				'`cupboard init`. Nothing was changed.'
 		);
 		this.name = 'AdminControlWorkerMissingError';
+	}
+}
+
+/**
+ * The plan moves the deployment to another URL, and this machine has no
+ * usable admin token for that URL. The new URL does not serve the deployment
+ * until this run moves the deployment there, so the deploy cannot obtain a
+ * token from the new URL beforehand.
+ */
+export class AdminTokenForNewUrlRequiredError extends CliError {
+	constructor(
+		public readonly url: URL,
+		public readonly newUrl: URL,
+		public readonly admin: OwnerBinding,
+		options?: { readonly cause?: unknown }
+	) {
+		super(
+			`The plan moves the deployment from ${url.origin} to ${newUrl.origin}, ` +
+				`and an admin token for ${url.origin} is not accepted at ` +
+				`${newUrl.origin}. This machine has no usable admin session for ` +
+				`${newUrl.origin}, so migrating tenants and initialising the ` +
+				'instance there after the upload would fail. ' +
+				`Route ${newUrl.host} to the control Worker in the Cloudflare ` +
+				`dashboard, log in as ${principalLabel(admin)} with ` +
+				`\`${adminLoginCommand(newUrl, admin)}\`, and re-run ` +
+				'`cupboard init`. Nothing was changed.',
+			options
+		);
+		this.name = 'AdminTokenForNewUrlRequiredError';
 	}
 }
 
@@ -520,6 +589,11 @@ export interface AuthorityEffects {
 	 * The URL that the deployment serves on before this run changes anything.
 	 */
 	readonly currentUrl: () => Promise<URL | undefined>;
+	/**
+	 * The URL that the deploy uses after the upload to migrate tenants and to
+	 * initialise the instance.
+	 */
+	readonly newUrl: () => Promise<URL | undefined>;
 	readonly adminAccess: AdminAccessFactory;
 	/**
 	 * Checks that the deployment accepts the credential.
@@ -530,6 +604,7 @@ export interface AuthorityEffects {
 	 */
 	readonly idToken: () => Promise<string>;
 	readonly generateClaimSecret: () => ClaimSecret;
+	readonly now?: () => number;
 	readonly signal?: AbortSignal;
 }
 
@@ -597,6 +672,29 @@ export async function decideAuthority(
 
 	const access = effects.adminAccess(url);
 	await checkAdminToken(deployment, effects, access, url, admin);
+
+	const newUrl = await effects.newUrl();
+
+	if (newUrl === undefined) {
+		throw new AdminNewUrlMissingError(admin);
+	}
+
+	if (newUrl.origin === url.origin) {
+		return { kind: 'admin', admin, access };
+	}
+
+	// A new URL that already serves Cupboard is checked live, as the current URL
+	// is. A domain routed to the control Worker in the dashboard serves before
+	// the deploy records it as the deployment's URL.
+	if (await effects.servesCupboard(newUrl)) {
+		await checkAdminToken(deployment, effects, access, newUrl, admin);
+	} else {
+		await requireStoredAdminToken(effects, access, newUrl, (cause) => {
+			return new AdminTokenForNewUrlRequiredError(url, newUrl, admin, {
+				cause
+			});
+		});
+	}
 
 	return { kind: 'admin', admin, access };
 }
@@ -724,6 +822,49 @@ async function confirmedCheckFailure(
 	}
 
 	return (await effects.servesCupboard(url)) ? failure : { kind: 'not-served' };
+}
+
+// A session read from this machine and checked without contacting `url`,
+// because nothing serves the deployment at `url` yet. The same rule applies as
+// for the live check: the access token must come from the control issuer at
+// `url` (its origin) and include the wildcard grant. An expired access token
+// is accepted only with a refresh token, which the token provider uses to
+// renew the access token once `url` serves. The deploy has already checked a
+// token live at the current URL, so this check only makes sure that the steps
+// after the upload can obtain a token for `url`.
+async function requireStoredAdminToken(
+	effects: Pick<AuthorityEffects, 'now'>,
+	access: AdminAccess,
+	url: URL,
+	refuse: (cause: unknown) => Error
+): Promise<void> {
+	const session = await access.storedSessionFor(url);
+	const now = effects.now ?? Date.now;
+
+	if (
+		session === undefined ||
+		(session.refreshToken === undefined &&
+			isAccessTokenExpired(session.accessToken, now()))
+	) {
+		throw refuse(undefined);
+	}
+
+	try {
+		requireIssuer(session.accessToken, url);
+		requireWildcardGrant(session.accessToken);
+	} catch (error) {
+		throw refuse(error);
+	}
+}
+
+const issuerClaimSchema = z.looseObject({ iss: z.string() });
+
+function requireIssuer(token: string, url: URL): void {
+	const parsed = issuerClaimSchema.safeParse(decodeJwtPayload(token));
+
+	if (!parsed.success || parsed.data.iss !== url.origin) {
+		throw new StoredSessionMismatchError();
+	}
 }
 
 const globalAdminColumnsQuery =
@@ -947,6 +1088,7 @@ export async function removeLeftoverClaimSecret(
  */
 export interface AdminCredentialSources {
 	readonly session: (url: URL) => TokenProvider;
+	readonly storedSession: (url: URL) => Promise<CachedSession | undefined>;
 	readonly githubOidc: (url: URL, audience: Audience) => TokenProvider;
 }
 
@@ -955,6 +1097,7 @@ export function adminCredentialSources(
 ): AdminCredentialSources {
 	return {
 		session: (url) => cachedOwnerProvider(url, { signal }),
+		storedSession: readCachedSession,
 		githubOidc: (url, audience) =>
 			githubOidcTokenProvider(
 				CupboardClient.fromUrl(url, { cache: { kind: 'default' }, signal }),
@@ -970,7 +1113,8 @@ export function adminCredentialSources(
  * `cupboard login`. Each origin has one provider, so every request to that
  * origin uses the token that the provider renews. With `--github-oidc`, the
  * deploy requests a GitHub token whose audience is `--audience`, or otherwise
- * the deployment URL from before this run.
+ * the deployment URL from before this run, and `storedSessionFor` does not
+ * read stored sessions.
  */
 export function adminAccessFor(
 	options: { readonly githubOidc?: boolean; readonly audience?: Audience },
@@ -996,6 +1140,13 @@ export function adminAccessFor(
 				providers.set(url.origin, created);
 
 				return created;
+			},
+			storedSessionFor: async (url) => {
+				if (options.githubOidc === true) {
+					return;
+				}
+
+				return sources.storedSession(url);
 			}
 		};
 	};
@@ -1057,14 +1208,20 @@ export interface AuthorityWorld {
  * current URL is the URL that the last deploy recorded on the control Worker.
  * A deployment from an earlier release has no record, and its current URL is
  * the custom domain routed to the control Worker, or the workers.dev URL. An
- * update checks its admin token against the current URL. A first deploy logs
- * the operator in with the issuer and client from `--oidc-issuer` and
+ * update checks its admin token against the current URL. When the plan moves
+ * the deployment, the update also needs a token for the new URL: the deploy
+ * checks it live if the new URL already serves the deployment, and otherwise
+ * reads it from a session stored on this machine. A first deploy logs the
+ * operator in with the issuer and client from `--oidc-issuer` and
  * `--client-id`, prints who the claim will make the admin, and asks for
  * confirmation.
  */
 export async function establishAuthority(
 	plans: {
-		readonly agreed: { readonly config: DeploymentConfig };
+		readonly agreed: {
+			readonly config: DeploymentConfig;
+			readonly domain: string | undefined;
+		};
 	},
 	world: AuthorityWorld
 ): Promise<EstablishedAuthority> {
@@ -1108,6 +1265,7 @@ export async function establishAuthority(
 			}),
 			currentUrl: async () =>
 				recordedUrl ?? urlFor(await api.findCustomDomain(controlName)),
+			newUrl: () => urlFor(plans.agreed.domain),
 			adminAccess: world.adminAccess,
 			checkAdmin: world.checkAdmin,
 			idToken: world.idToken,

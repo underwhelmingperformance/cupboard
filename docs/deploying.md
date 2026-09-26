@@ -264,6 +264,39 @@ Wrangler from the source of this release:
    the deployment served on one. The deploy checks the admin token against the
    redeployed Worker and replaces the Worker with this release.
 
+### Moving to a new URL
+
+An admin token for one URL is not accepted at another. When the plan moves the
+deployment to a new URL, the deploy migrates the tenants and initialises the
+instance at the new URL. Changing the custom domain is a move, and so is adding
+a first custom domain to a deployment that serves on workers.dev.
+
+If the new URL already serves the deployment, for example because you routed the
+new domain to the control Worker in the Cloudflare dashboard, the deploy checks
+the admin token there as it does at the current URL, and at a terminal it can
+log you in there. Routing a domain in the dashboard does not change the current
+URL, because the deploy takes the current URL from its record. For a deployment
+from an earlier release, which has no record, run `cupboard init` once before
+you route the new domain. Otherwise the deploy would take the routed domain as
+the current URL.
+
+If the new URL does not serve the deployment yet, the deploy cannot obtain or
+check a token there before the upload. It then uses a session for the new URL
+that is cached on this machine. The session's token must be issued by the new
+URL and include the wildcard grant, as for the live check; an expired token
+counts only if the session has a refresh token. Without such a session, the
+deploy stops before any change. To move the deployment, route the new domain to
+the control Worker in the Cloudflare dashboard and deploy again; at a terminal,
+the deploy logs you in at the new URL if needed.
+
+A run with `--github-oidc` can move a deployment only when the new URL already
+serves it, because the run never uses a cached session. The deploy requests a
+GitHub token whose audience is the current URL, or `--audience`, at both URLs,
+because the workflow's control trust rule pins one audience. After the move, the
+recorded URL is the new one, so later runs request the new URL as their
+audience. Pass `--audience` with the old URL, or add a control trust rule for
+the new URL, before the next run.
+
 ### The first cache
 
 The first cache is created only on a deployment without tenants, and only by an

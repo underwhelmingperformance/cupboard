@@ -9,6 +9,7 @@ import {
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
+import type { CachedSession } from '../auth/token-store.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
 	CupboardHttpError,
@@ -17,6 +18,7 @@ import {
 } from '../errors.ts';
 
 import {
+	adminAccessFor,
 	AdminCheckFailedError,
 	AdminControlWorkerMissingError,
 	AdminDatabaseMismatchError,
@@ -24,6 +26,8 @@ import {
 	AdminGrantMissingError,
 	adminLogin,
 	AdminLoginMismatchError,
+	AdminNewUrlMissingError,
+	AdminTokenForNewUrlRequiredError,
 	AdminTokenRequiredError,
 	type AuthorityDeployment,
 	type AuthorityEffects,
@@ -32,7 +36,8 @@ import {
 	type DeployAuthority,
 	GlobalAdminRowInvalidError,
 	readGlobalAdmin,
-	renewingIdToken
+	renewingIdToken,
+	StoredSessionMismatchError
 } from './authority.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import { type DatabaseId, databaseIdSchema } from './identifiers.ts';
@@ -64,6 +69,7 @@ const admin = owner(
 	'cupboard-client'
 );
 const deploymentUrl = new URL('https://cupboard.example.workers.dev');
+const newDomainUrl = new URL('https://cache.example.com');
 
 function segment(value: unknown): string {
 	return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -103,6 +109,18 @@ const claimToken = jwt({
 	aud: 'cupboard-client'
 });
 const nowMs = Date.parse('2026-09-25T12:00:00Z');
+const newUrlAdminToken = jwt({
+	iss: 'https://cache.example.com',
+	sub: 'cf-user-1',
+	authorization_details: [{ type: 'cupboard_wildcard' }]
+});
+const expiredAdminToken = jwt({
+	iss: 'https://cache.example.com',
+	sub: 'cf-user-1',
+	exp: Math.floor(nowMs / 1000) - 60,
+	authorization_details: [{ type: 'cupboard_wildcard' }]
+});
+
 /**
  * A control database as the deploy reads it before any change: whether the
  * database exists, whether it has the `global_admin` table yet, and its row.
@@ -183,9 +201,12 @@ function harness(options: {
 	readonly interactive?: boolean;
 	readonly credential?: TokenProvider;
 	readonly url?: URL | undefined;
+	readonly newUrl?: URL | undefined;
+	readonly storedSessions?: ReadonlyMap<string, CachedSession>;
 	readonly checkAdmin?: () => Promise<void>;
 	readonly controlWorkerExists?: boolean;
 	readonly servesCupboard?: boolean;
+	readonly newUrlServes?: boolean;
 	readonly idToken?: string;
 	readonly logInAsAdmin?: () => Promise<void>;
 }): Harness {
@@ -215,7 +236,11 @@ function harness(options: {
 			api: controlDatabaseApi({ cupboard: database }, calls),
 			servesCupboard: (url) => {
 				calls.push(`servesCupboard:${url.href}`);
-				return Promise.resolve(options.servesCupboard ?? true);
+				return Promise.resolve(
+					url.origin === currentUrl?.origin
+						? (options.servesCupboard ?? true)
+						: (options.newUrlServes ?? false)
+				);
 			},
 			...(options.logInAsAdmin !== undefined && {
 				logInAsAdmin: (url, principal) => {
@@ -227,10 +252,20 @@ function harness(options: {
 				calls.push('currentUrl');
 				return Promise.resolve(currentUrl);
 			},
+			newUrl: () => {
+				calls.push('newUrl');
+				return Promise.resolve(
+					'newUrl' in options ? options.newUrl : currentUrl
+				);
+			},
 			adminAccess: () => ({
 				credentialFor: (url) => {
 					calls.push(`credentialFor:${url.href}`);
 					return credential;
+				},
+				storedSessionFor: (url) => {
+					calls.push(`storedSessionFor:${url.href}`);
+					return Promise.resolve(options.storedSessions?.get(url.origin));
 				}
 			}),
 			checkAdmin: (url) => {
@@ -244,7 +279,8 @@ function harness(options: {
 			generateClaimSecret: () => {
 				calls.push('generateClaimSecret');
 				return claimSecretSchema.parse('claim-1');
-			}
+			},
+			now: () => nowMs
 		}
 	};
 }
@@ -402,7 +438,8 @@ describe('decideAuthority', () => {
 				...claimedReads,
 				'currentUrl',
 				`credentialFor:${deploymentUrl.href}`,
-				`checkAdmin:${deploymentUrl.href}`
+				`checkAdmin:${deploymentUrl.href}`,
+				'newUrl'
 			]
 		});
 	});
@@ -710,25 +747,202 @@ describe('decideAuthority', () => {
 		});
 	});
 
-	it('refuses an update when the deployment has no URL', async () => {
+	it.each([
+		{ name: 'an unexpired token', session: { accessToken: newUrlAdminToken } },
+		{
+			name: 'an expired token with a refresh token',
+			session: { accessToken: expiredAdminToken, refreshToken: 'refresh-1' }
+		},
+		{
+			// The live check accepts any principal with the wildcard grant, and so
+			// does the stored-session check.
+			name: 'a wildcard token for another principal',
+			session: {
+				accessToken: jwt({
+					iss: 'https://cache.example.com',
+					sub: 'ci-workflow',
+					authorization_details: [{ type: 'cupboard_wildcard' }]
+				})
+			}
+		}
+	])(
+		'moves to a new URL with a stored session that has $name',
+		async ({ session }) => {
+			const { deployment, effects, calls } = harness({
+				database: claimedDatabase,
+				newUrl: newDomainUrl,
+				storedSessions: new Map([[newDomainUrl.origin, session]])
+			});
+
+			const authority = await decideAuthority(deployment, effects);
+
+			expect({ authority: describeAuthority(authority), calls }).toStrictEqual({
+				authority: { kind: 'admin', admin },
+				calls: [
+					...claimedReads,
+					'currentUrl',
+					`credentialFor:${deploymentUrl.href}`,
+					`checkAdmin:${deploymentUrl.href}`,
+					'newUrl',
+					`servesCupboard:${newDomainUrl.href}`,
+					`storedSessionFor:${newDomainUrl.href}`
+				]
+			});
+		}
+	);
+
+	it('checks the admin token live at a new URL that already serves Cupboard', async () => {
 		const { deployment, effects, calls } = harness({
 			database: claimedDatabase,
-			url: undefined
+			newUrl: newDomainUrl,
+			newUrlServes: true
 		});
 
-		const refusal = await rejectionOf(decideAuthority(deployment, effects));
+		const authority = await decideAuthority(deployment, effects);
 
 		expect({
-			refusal:
-				refusal instanceof AdminDeploymentUrlMissingError
-					? { admin: refusal.admin }
-					: refusal,
-			calls
+			authority: describeAuthority(authority),
+			newUrlCalls: calls.filter((call) => call.includes(newDomainUrl.host))
 		}).toStrictEqual({
-			refusal: { admin },
-			calls: [...claimedReads, 'currentUrl']
+			authority: { kind: 'admin', admin },
+			newUrlCalls: [
+				`servesCupboard:${newDomainUrl.href}`,
+				`credentialFor:${newDomainUrl.href}`,
+				`checkAdmin:${newDomainUrl.href}`
+			]
 		});
 	});
+
+	it.each([
+		{
+			// The deploy never logs in to obtain a token for the new URL, so a
+			// session for the current URL, from any issuer, does not count.
+			name: 'only a session for the current URL',
+			storedSessions: new Map([
+				[deploymentUrl.origin, { accessToken: adminToken }]
+			]),
+			cause: undefined
+		},
+		{
+			name: 'an expired stored token without a refresh token',
+			storedSessions: new Map([
+				[newDomainUrl.origin, { accessToken: expiredAdminToken }]
+			]),
+			cause: undefined
+		},
+		{
+			name: 'a stored token without the wildcard grant',
+			storedSessions: new Map([
+				[
+					newDomainUrl.origin,
+					{
+						accessToken: jwt({
+							iss: 'https://cache.example.com',
+							sub: 'cf-user-1'
+						})
+					}
+				]
+			]),
+			cause: AdminGrantMissingError
+		},
+		{
+			name: 'a stored token from a different deployment',
+			storedSessions: new Map([
+				[
+					newDomainUrl.origin,
+					{
+						accessToken: jwt({
+							iss: 'https://elsewhere.example.com',
+							sub: 'cf-user-1',
+							authorization_details: [{ type: 'cupboard_wildcard' }]
+						})
+					}
+				]
+			]),
+			cause: StoredSessionMismatchError
+		}
+	])(
+		'refuses to move to a new URL with $name, before any change',
+		async ({ storedSessions, cause }) => {
+			const { deployment, effects, calls } = harness({
+				database: claimedDatabase,
+				newUrl: newDomainUrl,
+				storedSessions
+			});
+
+			const refusal = await rejectionOf(decideAuthority(deployment, effects));
+
+			expect({
+				refusal:
+					refusal instanceof AdminTokenForNewUrlRequiredError
+						? {
+								url: refusal.url.href,
+								newUrl: refusal.newUrl.href,
+								admin: refusal.admin,
+								isExpectedCause:
+									cause === undefined
+										? refusal.cause === undefined
+										: refusal.cause instanceof cause
+							}
+						: refusal,
+				// The new URL does not serve Cupboard, so it is never sent a
+				// credential or checked.
+				newUrlCalls: calls.filter(
+					(call) =>
+						call.includes(newDomainUrl.host) &&
+						!call.startsWith('storedSessionFor') &&
+						!call.startsWith('servesCupboard')
+				)
+			}).toStrictEqual({
+				refusal: {
+					url: deploymentUrl.href,
+					newUrl: newDomainUrl.href,
+					admin,
+					isExpectedCause: true
+				},
+				newUrlCalls: []
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'no URL now',
+			url: undefined,
+			newUrl: deploymentUrl,
+			error: AdminDeploymentUrlMissingError,
+			calls: [...claimedReads, 'currentUrl']
+		},
+		{
+			name: 'no URL after this run',
+			url: deploymentUrl,
+			newUrl: undefined,
+			error: AdminNewUrlMissingError,
+			calls: [
+				...claimedReads,
+				'currentUrl',
+				`credentialFor:${deploymentUrl.href}`,
+				`checkAdmin:${deploymentUrl.href}`,
+				'newUrl'
+			]
+		}
+	])(
+		'refuses an update when the deployment has $name',
+		async ({ url, newUrl, error, calls: expectedCalls }) => {
+			const { deployment, effects, calls } = harness({
+				database: claimedDatabase,
+				url,
+				newUrl
+			});
+
+			const refusal = await rejectionOf(decideAuthority(deployment, effects));
+
+			expect({
+				refusal: refusal instanceof error ? { admin: refusal.admin } : refusal,
+				calls
+			}).toStrictEqual({ refusal: { admin }, calls: expectedCalls });
+		}
+	);
 
 	it('refuses an update when the control Worker was deleted, before any request to the deployment', async () => {
 		const { deployment, effects, calls } = harness({
@@ -1161,5 +1375,35 @@ describe('adminLogin', () => {
 			cacheCalls: cached,
 			logins: [`login:${admin.issuer}:cupboard-client`]
 		});
+	});
+});
+
+describe('adminAccessFor', () => {
+	it('requests the current URL as the CI audience at every URL', () => {
+		const requested: string[] = [];
+		const access = adminAccessFor(
+			{ githubOidc: true },
+			{
+				session: () => {
+					throw new Error('no session expected');
+				},
+				storedSession: () => Promise.resolve(undefined),
+				githubOidc: (url, audience) => {
+					requested.push(`${url.origin}:${audience}`);
+					return {
+						get: () => Promise.resolve(''),
+						refresh: () => Promise.resolve('')
+					};
+				}
+			}
+		)(deploymentUrl);
+
+		access.credentialFor(deploymentUrl);
+		access.credentialFor(newDomainUrl);
+
+		expect(requested).toStrictEqual([
+			'https://cupboard.example.workers.dev:https://cupboard.example.workers.dev',
+			'https://cache.example.com:https://cupboard.example.workers.dev'
+		]);
 	});
 });
