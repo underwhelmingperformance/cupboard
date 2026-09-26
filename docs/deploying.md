@@ -225,6 +225,16 @@ an error when the artifact's files do not match the transitions, and
 in a different order. Once a release has shipped a transition, its migration
 lists do not change; a new migration goes in a new transition.
 
+For each N, `pnpm check:migrations` takes a deployment whose first N transitions
+are complete and whose later ones are pending, and replays the migrations in the
+order that the deploy would apply them. It fails if any of those orders fails to
+apply, or if one produces a different schema from name order. It compares
+schemas, not rows. It does not cover one case. Suppose an independent transition
+has contract migrations, and a deploy expands it before an earlier transition's
+contract migrations run and then stops. If a later release adds another
+transition before that transition completes, the later deploy applies the files
+in an order that the check does not replay.
+
 There is no elapsed-time delay and no second deploy required solely to apply
 contract migrations. The [Workers deployments API] reports the configured
 traffic allocation, not whether every old invocation has finished. A [Durable
