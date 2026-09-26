@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { contractionMigrations } from '@cupboard/protocol/deployment';
 
 import type { DatabaseId } from './identifiers.ts';
@@ -31,7 +32,7 @@ export function parseD1Migrations(
 	files: readonly RawMigrationFile[]
 ): D1Migration[] {
 	return files
-		.toSorted((left, right) => left.name.localeCompare(right.name))
+		.toSorted((left, right) => byCodeUnit(left.name, right.name))
 		.map((file) => ({
 			name: file.name,
 			sha256: createHash('sha256').update(file.sql).digest('hex'),
@@ -50,9 +51,7 @@ export function parseD1Migrations(
 export function unclassifiedD1Migrations(
 	migrations: readonly D1Migration[]
 ): readonly string[] {
-	const contractions = [...contractionMigrations].toSorted((left, right) =>
-		left.localeCompare(right)
-	);
+	const contractions = [...contractionMigrations].toSorted(byCodeUnit);
 	const [boundary] = contractions;
 
 	if (boundary === undefined) {
@@ -62,7 +61,7 @@ export function unclassifiedD1Migrations(
 	return migrations
 		.filter(
 			(migration) =>
-				migration.name.localeCompare(boundary) >= 0 &&
+				byCodeUnit(migration.name, boundary) >= 0 &&
 				!contractionMigrations.includes(migration.name)
 		)
 		.map((migration) => migration.name);
