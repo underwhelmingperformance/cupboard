@@ -5,7 +5,12 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
-import type { BuildReceiptV2Input } from '@cupboard/protocol/build';
+import {
+	autoBuildStore,
+	type BuildReceiptV2Input,
+	buildReceiptV3Schema,
+	type BuildSubjectV3Input
+} from '@cupboard/protocol/build';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -279,6 +284,45 @@ export function receiptSubjects(
 			];
 		})
 		.toSorted((left, right) => left.storePath.localeCompare(right.storePath));
+}
+
+function originSubjects(
+	built: BuildReceiptV2Input['subjects'],
+	finalInfos: readonly NixValidPathInfo[]
+): BuildSubjectV3Input[] {
+	const builtByPath = new Map(
+		built.map((subject) => [subject.storePath, subject])
+	);
+
+	return finalInfos.map((info): BuildSubjectV3Input => {
+		const subject = builtByPath.get(info.storePath);
+
+		if (subject !== undefined) {
+			return {
+				...subject,
+				origin: 'built',
+				buildStore: autoBuildStore,
+				verification: 'local'
+			};
+		}
+
+		const identity = {
+			storePath: info.storePath,
+			narHash: info.narHash.digestHex(),
+			...(info.deriver !== undefined && { derivation: info.deriver })
+		};
+
+		if (info.ultimate) {
+			return { ...identity, origin: 'store-held', buildStore: autoBuildStore };
+		}
+
+		return {
+			...identity,
+			origin: 'copied',
+			signatures: [...info.signatures],
+			...(info.ca !== undefined && { ca: info.ca })
+		};
+	});
 }
 
 export function plannedOutputPaths(value: string): string[] {
@@ -612,22 +656,51 @@ export async function buildAction(
 			);
 		}
 	}
-	const receipt: BuildReceiptV2Input = {
-		version: 2,
+	const receipt = buildReceiptV3Schema.parse({
+		version: 3,
 		paths: finalPaths,
-		subjects
-	};
+		subjects: originSubjects(subjects, finalInfos)
+	});
+	const unsubstitutedSubjects = receipt.subjects.filter(
+		(subject) => subject.origin !== 'copied'
+	);
+	const unsubstitutedPaths = unsubstitutedSubjects.map(
+		(subject) => subject.storePath
+	);
+	const unsubstitutedReceipt = buildReceiptV3Schema.parse({
+		version: 3,
+		paths: unsubstitutedPaths,
+		subjects: unsubstitutedSubjects
+	});
+	const unsubstitutedReceiptFile = path.join(
+		path.dirname(receiptFile),
+		'cupboard-unsubstituted-receipt.json'
+	);
 	await mkdir(path.dirname(pathsFile), { recursive: true });
 	await writeFile(
 		pathsFile,
 		finalPaths.join('\n').concat(finalPaths.length === 0 ? '' : '\n')
 	);
 	await writeFile(receiptFile, `${JSON.stringify(receipt)}\n`);
+	await writeFile(
+		unsubstitutedReceiptFile,
+		`${JSON.stringify(unsubstitutedReceipt)}\n`
+	);
 	await setOutput(environment, 'paths-file', pathsFile);
 	await setOutput(environment, 'receipt-file', receiptFile);
+	await setOutput(
+		environment,
+		'unsubstituted-receipt-file',
+		unsubstitutedReceiptFile
+	);
 	const delimiter = `CUPBOARD_PATHS_${randomUUID().replaceAll('-', '_')}`;
 	await appendEnvironmentFile(
 		environment.GITHUB_OUTPUT,
 		`paths<<${delimiter}\n${finalPaths.join('\n')}\n${delimiter}\n`
+	);
+	const unsubstitutedDelimiter = `CUPBOARD_UNSUBSTITUTED_PATHS_${randomUUID().replaceAll('-', '_')}`;
+	await appendEnvironmentFile(
+		environment.GITHUB_OUTPUT,
+		`unsubstituted-paths<<${unsubstitutedDelimiter}\n${unsubstitutedPaths.join('\n')}\n${unsubstitutedDelimiter}\n`
 	);
 }

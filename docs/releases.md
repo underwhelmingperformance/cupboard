@@ -5,6 +5,43 @@ binaries installed by the GitHub actions. Nothing here is needed to use the
 actions; see [docs/github-actions.md](./github-actions.md) for that. For how a
 release reaches a running deployment, see [docs/deploying.md](./deploying.md).
 
+## Upgrade notes
+
+### Publication and attestation modes
+
+The `push` and `attest` inputs of both reusable publish workflows take named
+values instead of booleans. A caller that passes a boolean must change it when
+it updates the workflow pin.
+
+In the flake workflow, `push: true` becomes `push: built-and-reused`, which is
+the default, and `push: false` becomes `push: none` with `attest: none`. The
+simple workflow gains a `push` input. Its default, `all`, publishes every build
+output, as the workflow did with the boolean inputs. In the simple workflow,
+`attest: false` becomes `attest: none`.
+
+With the boolean inputs, both workflows signed SLSA build provenance for every
+published final output, and rebuilt cached final outputs to do so.
+`attest: built` keeps that behaviour, so `attest: true` in the simple workflow
+becomes `attest: built`. A flake caller that needs the same guarantee sets
+`attest: built`. The default, `attest: all`, does not rebuild cached outputs.
+For an output that the run did not build, it signs a build-origin statement,
+which records how the run obtained the output, and no SLSA build provenance.
+
+A workflow that calls `actions/attest` and `actions/attest-attach` directly must
+pass the `receipt-file` output of `actions/attest` to `actions/attest-attach`,
+not the build receipt. `actions/attest` can accept fewer subjects than the build
+receipt lists, for example with `mode: built`, and `actions/attest-attach`
+rejects a receipt whose subjects differ from the checksums.
+
+### Attestation status for cached targets
+
+With `attest: all`, the flake workflow's plan asks the destination which cached
+targets have an attestation, through the cache's `attested-paths` read probe. A
+server without that probe returns 404. The plan then warns and treats every
+cached target as attested, so the run does not republish or attest cached
+targets. Deploy the server before updating the workflow pin so that runs attest
+cached targets that have no attestation.
+
 ## Release ordering
 
 The upload protocol negotiates optional response fields explicitly. A new CLI

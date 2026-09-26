@@ -303,6 +303,7 @@ describe('attestation outputs', () => {
 			'origin-bundle-path': '${{ steps.attest.outputs.origin-bundle-path }}',
 			bundles: '${{ steps.attest.outputs.bundles }}',
 			'checksums-file': '${{ steps.subjects.outputs.checksums-file }}',
+			'receipt-file': '${{ steps.subjects.outputs.receipt-file }}',
 			'subject-count': '${{ steps.subjects.outputs.subject-count }}',
 			'built-checksums-file':
 				'${{ steps.subjects.outputs.built-checksums-file }}',

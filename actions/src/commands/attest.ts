@@ -52,6 +52,7 @@ import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
 	provided,
 	providedCacheSelection,
+	providedChoice,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -63,6 +64,7 @@ interface StorePathDigest {
 }
 
 export interface AttestOptions {
+	readonly mode?: string;
 	readonly receiptFile?: string;
 	readonly checksumsFile?: string;
 	readonly builtChecksumsFile?: string;
@@ -74,6 +76,7 @@ export interface AttestOptions {
 }
 
 export interface AttestInputs {
+	readonly mode: 'built' | 'all';
 	readonly receiptFile: string;
 	readonly checksumsFile: string;
 	readonly builtChecksumsFile: string;
@@ -273,6 +276,27 @@ export function buildOriginPredicateFor(
 	return buildOriginPredicateSchema.parse({ subjects: origins });
 }
 
+/**
+ * The receipt restricted to the accepted subjects. The attach step checks its
+ * subjects against the checksums file, so both must describe the same paths.
+ */
+export function acceptedReceipt<
+	Receipt extends {
+		readonly subjects: readonly { readonly storePath: string }[];
+	}
+>(receipt: Receipt, subjects: readonly StorePathDigest[]): Receipt {
+	const accepted = new Set<string>(
+		subjects.map((subject) => subject.storePath)
+	);
+
+	return {
+		...receipt,
+		subjects: receipt.subjects.filter((subject) =>
+			accepted.has(subject.storePath)
+		)
+	};
+}
+
 export function renderChecksums(digests: readonly StorePathDigest[]): string {
 	return digests
 		.map((digest) => `${digest.sha256}  ${path.basename(digest.storePath)}`)
@@ -288,6 +312,10 @@ export function registerAttestCommand(
 		.command('attest')
 		.description(
 			'Resolve attestation subjects from a current-run build receipt and identify the paths built by this run.'
+		)
+		.option(
+			'--mode <mode>',
+			'Accept only the subjects built by this run (built), or every subject with a recorded origin (all).'
 		)
 		.requiredOption(
 			'--receipt-file <path>',
@@ -358,6 +386,12 @@ export function resolveAttestInputs(
 		);
 
 	return {
+		mode: providedChoice(
+			'mode',
+			options.mode,
+			['built', 'all'] as const,
+			'all'
+		),
 		receiptFile,
 		url,
 		cache: providedCacheSelection(options.cache),
@@ -488,11 +522,14 @@ export async function attestAction(
 		retryingFetcher(fetcher, 'replay-safe'),
 		cacheUrlFor(inputs.url, inputs.cache)
 	);
-	const { subjects, built, skipped } = await resolveAttestation(
-		receipt,
-		inputs,
-		{ ...dependencies, fetch: fetcher }
-	);
+	const resolved = await resolveAttestation(receipt, inputs, {
+		...dependencies,
+		fetch: fetcher
+	});
+	const { built, skipped } = resolved;
+	// In `built` mode the action signs no origin statement, so it accepts only
+	// the subjects covered by the build-provenance statement.
+	const subjects = inputs.mode === 'built' ? built : resolved.subjects;
 
 	for (const storePath of skipped) {
 		reporter.warn(
@@ -502,13 +539,24 @@ export async function attestAction(
 
 	const checksumsFile = path.resolve(inputs.checksumsFile);
 	const builtChecksumsFile = path.resolve(inputs.builtChecksumsFile);
+	const acceptedReceiptFile = path.join(
+		path.dirname(checksumsFile),
+		'accepted-receipt.json'
+	);
 
 	await mkdir(path.dirname(checksumsFile), { recursive: true });
 	await writeFile(checksumsFile, renderChecksums(subjects));
+	await writeFile(
+		acceptedReceiptFile,
+		`${JSON.stringify(acceptedReceipt(receipt, subjects))}\n`
+	);
 	await mkdir(path.dirname(builtChecksumsFile), { recursive: true });
 	await writeFile(builtChecksumsFile, renderChecksums(built));
 
-	const predicate = buildOriginPredicateFor(receipt, subjects);
+	const predicate =
+		inputs.mode === 'built'
+			? undefined
+			: buildOriginPredicateFor(receipt, subjects);
 	const predicateFile =
 		predicate === undefined ? '' : path.resolve(inputs.predicateFile);
 
@@ -521,6 +569,7 @@ export async function attestAction(
 	}
 
 	await setOutput(environment, 'checksums-file', checksumsFile);
+	await setOutput(environment, 'receipt-file', acceptedReceiptFile);
 	await setOutput(environment, 'subject-count', String(subjects.length));
 	await setOutput(environment, 'built-checksums-file', builtChecksumsFile);
 	await setOutput(environment, 'built-subject-count', String(built.length));

@@ -68,6 +68,13 @@ inputs:
       and can attest every published target.
     required: false
     default: 'false'
+  include-cached-targets:
+    description: >-
+      Run a cohort for each cached target that has no attestation. The cohort
+      republishes the target by reference, so the run can sign an attestation
+      for it without rebuilding it.
+    required: false
+    default: 'false'
 outputs:
   plan-file:
     description: Path to the plan consumed by the cohort jobs.
@@ -156,6 +163,7 @@ runs:
         PACK_CAPACITY: ${{ inputs.pack-capacity }}
         STORE: ${{ inputs.store }}
         REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
+        INCLUDE_CACHED_TARGETS: ${{ inputs.include-cached-targets }}
       run: |
         args=(plan
           --targets "$TARGETS"
@@ -173,6 +181,7 @@ runs:
           --enable-packing "$ENABLE_PACKING"
           --store "$STORE")
         args+=(--require-provenance "$REQUIRE_PROVENANCE")
+        args+=(--include-cached-targets "$INCLUDE_CACHED_TARGETS")
         if [ -n "$PACK_CAPACITY" ]; then
           args+=(--pack-capacity "$PACK_CAPACITY")
         fi

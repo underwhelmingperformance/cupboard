@@ -181,6 +181,7 @@ export interface PlanCohortOptions {
 	readonly store?: string;
 	readonly storePath?: string;
 	readonly requireAttested?: boolean;
+	readonly publishUpstream?: boolean;
 	readonly unknownCeiling?: number;
 	readonly unknownCeilingUntrustedFallback?: number;
 	readonly headroomAbsoluteMinimum?: number;
@@ -267,6 +268,7 @@ export interface PlanCohortRunOptions {
 	 * output path before the plan leaves that target unbuilt.
 	 */
 	readonly requireAttested?: boolean;
+	readonly publishUpstream?: boolean;
 	readonly ceiling: AvailabilityCeilingConfig;
 	readonly detected: DetectedCapacityOptions;
 	readonly headroom?: Partial<HeadroomConfig>;
@@ -352,6 +354,10 @@ export function registerPlanCommands(
 		.option(
 			'--require-attested',
 			'rebuild a cached target unless the cache also holds its build provenance'
+		)
+		.option(
+			'--publish-upstream',
+			'publish target outputs even when another substituter serves them'
 		)
 		.option(
 			'--unknown-ceiling <count>',
@@ -454,55 +460,11 @@ export function registerPlanCommands(
 				});
 
 				await runPlanCohort(
-					{
-						targets,
+					planCohortRunOptions(options, input, {
 						cache,
 						plannedSubstitutionPolicy,
-						retention: rootRetentionChoice(options.ttl, options.permanent),
-						storeIdentity: {
-							kind: nix.storeKind,
-							...(options.store !== undefined && { uri: options.store })
-						},
-						storePath: options.storePath ?? defaultStorePath,
-						planFile: options.planFile ?? defaultPlanFile(),
-						...(input.plannedLocalClosure !== undefined && {
-							plannedLocalClosure: input.plannedLocalClosure
-						}),
-						...(input.plannedSubstitutableDerivations !== undefined && {
-							plannedSubstitutableDerivations:
-								input.plannedSubstitutableDerivations
-						}),
-						...(input.plannedFloatingOutputs !== undefined && {
-							plannedFloatingOutputs: input.plannedFloatingOutputs
-						}),
-						...(input.plannedLocalOutputs !== undefined && {
-							plannedLocalOutputs: input.plannedLocalOutputs
-						}),
-						...(options.requireAttested === true && { requireAttested: true }),
-						ceiling: {
-							value: options.unknownCeiling ?? defaultUnknownCeiling,
-							untrustedFallback:
-								options.unknownCeilingUntrustedFallback ??
-								defaultUnknownCeilingUntrustedFallback
-						},
-						detected: {
-							cohortSplitPossible: options.cohortSplitPossible === true,
-							remoteStoreConfigured: options.remoteStoreConfigured === true,
-							componentPublicationApplicable:
-								options.componentPublicationApplicable === true
-						},
-						...((options.headroomAbsoluteMinimum !== undefined ||
-							options.headroomFraction !== undefined) && {
-							headroom: {
-								...(options.headroomAbsoluteMinimum !== undefined && {
-									absoluteMinimum: options.headroomAbsoluteMinimum
-								}),
-								...(options.headroomFraction !== undefined && {
-									fraction: options.headroomFraction
-								})
-							}
-						})
-					},
+						storeKind: nix.storeKind
+					}),
 					reporter,
 					{
 						rootClient: rpc.roots,
@@ -539,6 +501,70 @@ export function registerPlanCommands(
 
 	registerPlanMeasureCommand(plan, program, programOptions);
 	registerPlanReprobeCommand(plan, program, programOptions);
+}
+
+/**
+ * The run options for one `plan cohort` invocation, from its parsed command
+ * options, its targets file and the store facts that the command resolved.
+ */
+export function planCohortRunOptions(
+	options: PlanCohortOptions,
+	input: CohortPlanInput,
+	resolved: {
+		readonly cache: CacheScope;
+		readonly plannedSubstitutionPolicy: PlannedSubstitutionPolicy;
+		readonly storeKind: PlanStore['kind'];
+	}
+): PlanCohortRunOptions {
+	return {
+		targets: input.targets,
+		cache: resolved.cache,
+		plannedSubstitutionPolicy: resolved.plannedSubstitutionPolicy,
+		retention: rootRetentionChoice(options.ttl, options.permanent),
+		storeIdentity: {
+			kind: resolved.storeKind,
+			...(options.store !== undefined && { uri: options.store })
+		},
+		storePath: options.storePath ?? defaultStorePath,
+		planFile: options.planFile ?? defaultPlanFile(),
+		...(input.plannedLocalClosure !== undefined && {
+			plannedLocalClosure: input.plannedLocalClosure
+		}),
+		...(input.plannedSubstitutableDerivations !== undefined && {
+			plannedSubstitutableDerivations: input.plannedSubstitutableDerivations
+		}),
+		...(input.plannedFloatingOutputs !== undefined && {
+			plannedFloatingOutputs: input.plannedFloatingOutputs
+		}),
+		...(input.plannedLocalOutputs !== undefined && {
+			plannedLocalOutputs: input.plannedLocalOutputs
+		}),
+		...(options.requireAttested === true && { requireAttested: true }),
+		...(options.publishUpstream === true && { publishUpstream: true }),
+		ceiling: {
+			value: options.unknownCeiling ?? defaultUnknownCeiling,
+			untrustedFallback:
+				options.unknownCeilingUntrustedFallback ??
+				defaultUnknownCeilingUntrustedFallback
+		},
+		detected: {
+			cohortSplitPossible: options.cohortSplitPossible === true,
+			remoteStoreConfigured: options.remoteStoreConfigured === true,
+			componentPublicationApplicable:
+				options.componentPublicationApplicable === true
+		},
+		...((options.headroomAbsoluteMinimum !== undefined ||
+			options.headroomFraction !== undefined) && {
+			headroom: {
+				...(options.headroomAbsoluteMinimum !== undefined && {
+					absoluteMinimum: options.headroomAbsoluteMinimum
+				}),
+				...(options.headroomFraction !== undefined && {
+					fraction: options.headroomFraction
+				})
+			}
+		})
+	};
 }
 
 export async function runPlanCohort(
@@ -606,6 +632,7 @@ export async function runPlanCohort(
 					...(options.requireAttested === true && {
 						attestedServed: dependencies.attestedServed
 					}),
+					publishUpstream: options.publishUpstream === true,
 					storeIdentity: options.storeIdentity,
 					requeryUnknown: dependencies.requeryUnknown,
 					confirmUpstreamAvailability: dependencies.confirmUpstreamAvailability,

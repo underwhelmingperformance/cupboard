@@ -168,6 +168,7 @@ export type PlannedSubstitutionPolicy =
 
 export interface AvailabilityPartitionOptions {
 	readonly targets: readonly AvailabilityTarget[];
+	readonly publishUpstream?: boolean;
 	readonly plannedLocalClosure?: ReadonlySet<StorePathString>;
 	readonly plannedSubstitutableDerivations?: ReadonlySet<StorePathString>;
 	readonly plannedFloatingOutputs?: ReadonlySet<NixDerivedPathString>;
@@ -506,7 +507,7 @@ export async function partitionAvailability(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
-			substitutableExternal
+			options.publishUpstream ? new Set() : substitutableExternal
 		)
 	}));
 	const rejections = await confirmCandidates(classified, options);

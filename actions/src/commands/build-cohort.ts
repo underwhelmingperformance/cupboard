@@ -45,6 +45,7 @@ import {
 	type ReporterResultEvent
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -81,6 +82,7 @@ import {
 	MissingInputError,
 	PlannedTargetNotDerivationError,
 	PlannedTargetSourceMissingError,
+	PublicationModeConflictError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	RemoteBuildOutputPathUnknownError,
@@ -100,9 +102,11 @@ import {
 	isEnabled,
 	provided,
 	providedCacheSelection,
+	providedChoice,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import { attestedCachePaths } from '../publish-plan.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
 function isNixDerivedPathString(value: unknown): value is NixDerivedPathString {
@@ -373,6 +377,8 @@ export interface BuildCohortOptions {
 	readonly maxJobs?: string;
 	readonly store?: string;
 	readonly push?: string;
+	readonly pushMode?: string;
+	readonly attestMode?: string;
 	readonly requireProvenance?: string;
 	readonly bestEffort?: string;
 	readonly gcBetweenCohorts?: string;
@@ -403,6 +409,8 @@ export interface BuildCohortInputs {
 	readonly maxJobs: string;
 	readonly store: string;
 	readonly push: boolean;
+	readonly pushMode: 'none' | 'built-and-reused' | 'all';
+	readonly attestMode: 'none' | 'built' | 'all';
 	readonly requireProvenance: boolean;
 	readonly allBestEffort: boolean;
 	readonly gcBetweenCohorts: boolean;
@@ -529,6 +537,34 @@ export function resolveBuildCohortInputs(
 				path.join(runnerTemporary, `cupboard-cohort-${name}`)
 		);
 
+	const isPushEnabled = isEnabled('push', options.push, false);
+	const pushMode = providedChoice(
+		'push-mode',
+		options.pushMode,
+		['none', 'built-and-reused', 'all'],
+		isPushEnabled ? 'all' : 'none'
+	);
+	if (isPushEnabled === (pushMode === 'none')) {
+		throw new PublicationModeConflictError(
+			isPushEnabled
+				? 'push-mode must be built-and-reused or all when push is true'
+				: 'push-mode must be none when push is false'
+		);
+	}
+
+	const attestMode = providedChoice(
+		'attest-mode',
+		options.attestMode,
+		['none', 'built', 'all'],
+		'none'
+	);
+
+	if (!isPushEnabled && attestMode !== 'none') {
+		throw new PublicationModeConflictError(
+			'attest-mode must be none when push is false'
+		);
+	}
+
 	return {
 		cohort: cohort.data,
 		url,
@@ -544,7 +580,9 @@ export function resolveBuildCohortInputs(
 		readPassword,
 		maxJobs,
 		store: provided(options.store) ?? '',
-		push: isEnabled('push', options.push, false),
+		push: isPushEnabled,
+		pushMode,
+		attestMode,
 		requireProvenance: isEnabled(
 			'require-provenance',
 			options.requireProvenance,
@@ -636,6 +674,14 @@ export function registerBuildCohortCommand(
 			'false'
 		)
 		.option(
+			'--push-mode <mode>',
+			'publication scope: none, built-and-reused (paths built in this run, paths already in the build store, and reuse-view hits), or all (also substituted outputs)'
+		)
+		.option(
+			'--attest-mode <mode>',
+			'attestation scope: with all, add paths published by reference to the receipt (none, built, or all)'
+		)
+		.option(
 			'--require-provenance <boolean>',
 			'require provenance from this run for every final output (true or false)',
 			'false'
@@ -692,6 +738,7 @@ export function registerBuildCohortCommand(
 }
 
 export interface BuildCohortDependencies {
+	readonly fetcher?: typeof fetch;
 	readonly runCupboard?: typeof defaultRunCupboard;
 	readonly runNixBuild?: typeof runNixBuild;
 	readonly runNixBuildWithResults?: typeof runNixBuildWithResults;
@@ -878,7 +925,9 @@ export async function buildCohortAction(
 			isStreamed,
 			environment,
 			runCupboard,
-			cupboardRunDependencies
+			cupboardRunDependencies,
+			fetcher: dependencies.fetcher,
+			reporter
 		};
 
 		if (execution.kind === 'remote') {
@@ -1332,6 +1381,8 @@ async function writeRemoteFailureReceipt(
 }
 
 interface SettleCohortBuildContext {
+	readonly fetcher: typeof fetch | undefined;
+	readonly reporter: Reporter;
 	readonly inputs: BuildCohortInputs;
 	readonly members: readonly CohortMember[];
 	readonly partition: PartitionData | undefined;
@@ -1342,6 +1393,85 @@ interface SettleCohortBuildContext {
 	readonly environment: Environment;
 	readonly runCupboard: typeof defaultRunCupboard;
 	readonly cupboardRunDependencies: CupboardRunDependencies | undefined;
+}
+
+/**
+ * The reference paths that already have an attestation at the destination.
+ * This function runs after publication. When the query fails, it returns no
+ * paths, so every reference path receives an origin statement. A redundant
+ * statement is harmless, and failing the job would leave the published paths
+ * without an attestation.
+ */
+async function attestedReferencePaths(
+	inputs: BuildCohortInputs,
+	referencePaths: readonly string[],
+	fetcher: typeof fetch | undefined,
+	reporter: Reporter
+): Promise<ReadonlySet<StorePathString>> {
+	try {
+		return await attestedCachePaths({
+			baseUrl: inputs.url,
+			cache: inputs.cache,
+			paths: referencePaths.map((storePath) =>
+				storePathSchema.parse(storePath)
+			),
+			...(inputs.readUser !== '' && {
+				credentials: {
+					user: readUserInputSchema.parse(inputs.readUser),
+					password: inputs.readPassword
+				}
+			}),
+			...(fetcher !== undefined && { fetcher })
+		});
+	} catch (error) {
+		reporter.warn(
+			'attestation status unavailable',
+			`signing an origin statement for every reference path: ${error instanceof Error ? error.message : String(error)}`
+		);
+
+		return new Set();
+	}
+}
+
+/**
+ * The realised outputs that `built-and-reused` publication leaves unpublished:
+ * those that this run substituted. Keyed remote results report which outputs
+ * the store substituted. `cupboard build-push` leaves substituted targets out
+ * of its receipt. An output that was valid in the build store before the run is
+ * published, because the destination may not serve it.
+ */
+async function substitutedOutputs(
+	inputs: BuildCohortInputs,
+	isStreamed: boolean,
+	built: readonly string[],
+	publicationBuilds: readonly NixBuildResult[],
+	provenanceRebuilds: ReadonlySet<string>
+): Promise<ReadonlySet<string>> {
+	if (inputs.pushMode !== 'built-and-reused') {
+		return new Set();
+	}
+
+	if (inputs.store !== '') {
+		return new Set(
+			publicationBuilds.flatMap((result) =>
+				result.outcome.kind === 'substituted' &&
+				!provenanceRebuilds.has(result.target)
+					? Object.values(result.outcome.outputs)
+					: []
+			)
+		);
+	}
+
+	if (!isStreamed) {
+		return new Set();
+	}
+
+	const receipt = buildReceiptV3Schema.parse(
+		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
+	);
+	const published = new Set<string>(receipt.paths);
+
+	return new Set(built.filter((storePath) => !published.has(storePath)));
 }
 
 // Complete every operation that reads realised paths before returning. Remote
@@ -1373,7 +1503,9 @@ async function settleCohortBuild(
 		isStreamed,
 		environment,
 		runCupboard,
-		cupboardRunDependencies
+		cupboardRunDependencies,
+		fetcher,
+		reporter
 	} = context;
 	const {
 		built,
@@ -1396,15 +1528,30 @@ async function settleCohortBuild(
 		partition?.alreadyValid ?? [],
 		claimable
 	);
+	const substituted = await substitutedOutputs(
+		inputs,
+		isStreamed,
+		built,
+		publicationBuilds,
+		provenanceRebuilds
+	);
+	const isPublishable = (storePath: string): boolean =>
+		!substituted.has(storePath);
 
 	// A plain `nix build` prints only results for the requested installables, so
 	// every output is a target path. The intermediate-paths file remains empty.
-	const targetPaths = [...(partition?.attachOnly ?? []), ...built].toSorted(
-		(left, right) => left.localeCompare(right)
-	);
+	const targetPaths = [
+		...(partition?.attachOnly ?? []),
+		...built.filter((storePath) => isPublishable(storePath))
+	].toSorted((left, right) => left.localeCompare(right));
 	const intermediatePaths: readonly string[] = [];
 	const referencePaths = partition?.publishByReference ?? [];
-	const leftUpstream = partition?.leftUpstream ?? [];
+	// A substituted output is not published. Readers fetch it from the
+	// substituter that supplied it.
+	const leftUpstream = [
+		...(partition?.leftUpstream ?? []),
+		...built.filter((storePath) => !isPublishable(storePath))
+	];
 
 	await mkdir(path.dirname(inputs.targetPathsFile), { recursive: true });
 	await mkdir(path.dirname(copiedFromFile), { recursive: true });
@@ -1439,15 +1586,18 @@ async function settleCohortBuild(
 	// keyed daemon results once to read back NAR hashes and derivers for the
 	// receipt. Claim only outputs that the keyed results report as built; exclude
 	// substituted and already-valid paths. Per-root pushes then reuse these paths.
+	const publishedPaths = publicationPaths.filter((storePath) =>
+		isPublishable(storePath)
+	);
 	const isReconciled =
-		inputs.push && inputs.store !== '' && publicationPaths.length > 0;
+		inputs.push && inputs.store !== '' && publishedPaths.length > 0;
 
 	if (isReconciled) {
 		await runCupboard(
 			inputs.cupboardPath,
 			cohortReceiptPushArguments(
 				inputs,
-				publicationPaths,
+				publishedPaths,
 				alreadyHeld,
 				claimable,
 				copiedFromFile
@@ -1489,24 +1639,51 @@ async function settleCohortBuild(
 		);
 	}
 
-	if (inputs.push) {
-		await publishCohort({
+	const referenceReceiptFiles = inputs.push
+		? await publishCohort({
+				inputs,
+				members,
+				paths: { targetPaths, intermediatePaths, referencePaths },
+				attachOnlyPaths: partition?.attachOnly ?? [],
+				leftUpstreamPaths: leftUpstream,
+				environment,
+				runCupboard,
+				cupboardRunDependencies,
+				resultBuilds,
+				localBuilds,
+				incompleteRoots
+			})
+		: [];
+
+	let addedReferenceSubjects = 0;
+
+	if (referenceReceiptFiles.length > 0) {
+		const referenceCandidates = [
+			...referencePaths,
+			...(partition?.attachOnly ?? [])
+		];
+		const attested = await attestedReferencePaths(
 			inputs,
-			members,
-			paths: { targetPaths, intermediatePaths, referencePaths },
-			attachOnlyPaths: partition?.attachOnly ?? [],
-			leftUpstreamPaths: leftUpstream,
-			environment,
-			runCupboard,
-			cupboardRunDependencies,
-			resultBuilds,
-			localBuilds,
-			incompleteRoots
-		});
+			referenceCandidates,
+			fetcher,
+			reporter
+		);
+		const unattested = referenceCandidates.filter(
+			(storePath) => !attested.has(storePathSchema.parse(storePath))
+		);
+		addedReferenceSubjects = await mergeReferenceReceipts(
+			inputs.receiptFile,
+			isStreamed || isReconciled || terminalFailure !== undefined,
+			referenceReceiptFiles,
+			unattested
+		);
 	}
 
 	const receiptFile =
-		isStreamed || isReconciled || terminalFailure !== undefined
+		isStreamed ||
+		isReconciled ||
+		terminalFailure !== undefined ||
+		addedReferenceSubjects > 0
 			? inputs.receiptFile
 			: '';
 
@@ -1543,7 +1720,8 @@ export function buildPushCohortsFile(
 	maxJobs: string,
 	shouldSeparateTargets = false,
 	rebuildInstallables: ReadonlySet<string> = new Set(),
-	requiresProvenance = false
+	requiresProvenance = false,
+	shouldOmitSubstituted = false
 ): { readonly cohorts: readonly Record<string, unknown>[] } {
 	const unique = [...new Set(installables)];
 	const groups = shouldSeparateTargets
@@ -1562,6 +1740,7 @@ export function buildPushCohortsFile(
 				rebuild: true
 			}),
 			...(requiresProvenance && { requireProvenance: true }),
+			...(shouldOmitSubstituted && { omitSubstituted: true }),
 			keepGoing: !shouldSeparateTargets,
 			...(maxJobs !== '' && { maxJobs: Number(maxJobs) })
 		}))
@@ -1631,7 +1810,8 @@ async function runBuildPushCohort(
 				inputs.maxJobs,
 				inputs.allBestEffort,
 				provenanceRebuilds,
-				inputs.requireProvenance
+				inputs.requireProvenance,
+				inputs.pushMode === 'built-and-reused'
 			),
 			undefined,
 			2
@@ -1834,6 +2014,7 @@ interface CohortPushExtras {
 	readonly intermediatePathsFile: string;
 	readonly referencePathsFile: string;
 	readonly referenceSource: string;
+	readonly receiptFile?: string;
 }
 
 /**
@@ -1900,6 +2081,9 @@ export function cohortPushArguments(
 		...(readUser !== '' && extras.referencePathsFile !== ''
 			? ['--read-user', readUser, '--read-password', readPassword]
 			: []),
+		...(extras.receiptFile === undefined
+			? []
+			: ['--receipt-file', extras.receiptFile]),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
 		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
@@ -1927,7 +2111,25 @@ interface PublishCohortOptions {
 // One push per exact root group. A reference path is published only under the
 // root that owns it, so a group made up entirely of reference paths can still
 // be published without adding paths to any other root's retained set.
-async function publishCohort(options: PublishCohortOptions): Promise<void> {
+async function publishCohort(options: PublishCohortOptions): Promise<string[]> {
+	const temporaryReceipts: string[] = [];
+
+	try {
+		return await publishCohortGroups(options, temporaryReceipts);
+	} catch (error) {
+		await Promise.all(
+			temporaryReceipts.map((file) => rm(file, { force: true }))
+		);
+		throw error;
+	}
+}
+
+// Records each temporary receipt path in `temporaryReceipts` before the push
+// that writes it, so the caller can remove it when a push fails.
+async function publishCohortGroups(
+	options: PublishCohortOptions,
+	temporaryReceipts: string[]
+): Promise<string[]> {
 	const {
 		inputs,
 		members,
@@ -1957,11 +2159,31 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 	);
 	const attachOnly = new Set(options.attachOnlyPaths);
 	const hasIntermediates = paths.intermediatePaths.length > 0;
+	const referenceReceiptFiles: string[] = [];
 
 	for (const [index, group] of groups.entries()) {
+		const referenceReceiptFile =
+			inputs.attestMode === 'all' && group.referencePaths.length > 0
+				? `${inputs.receiptFile}.reference.${String(index)}`
+				: undefined;
+
+		if (referenceReceiptFile !== undefined) {
+			await rm(referenceReceiptFile, { force: true });
+			temporaryReceipts.push(referenceReceiptFile);
+		}
+
 		const attachOnlyPaths = group.paths.filter((targetPath) =>
 			attachOnly.has(targetPath)
 		);
+		const destinationReceiptFile =
+			inputs.attestMode === 'all' && attachOnlyPaths.length > 0
+				? `${inputs.receiptFile}.destination.${String(index)}`
+				: undefined;
+
+		if (destinationReceiptFile !== undefined) {
+			await rm(destinationReceiptFile, { force: true });
+			temporaryReceipts.push(destinationReceiptFile);
+		}
 
 		if (attachOnlyPaths.length === 0) {
 			const referencePathsFile =
@@ -1983,11 +2205,17 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 					intermediatePathsFile:
 						index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '',
 					referencePathsFile,
-					referenceSource: referencePathsFile === '' ? '' : referenceSource
+					referenceSource: referencePathsFile === '' ? '' : referenceSource,
+					...(referenceReceiptFile !== undefined && {
+						receiptFile: referenceReceiptFile
+					})
 				}),
 				environment,
 				cupboardRunDependencies
 			);
+			if (referenceReceiptFile !== undefined) {
+				referenceReceiptFiles.push(referenceReceiptFile);
+			}
 			continue;
 		}
 
@@ -2006,12 +2234,18 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 					{
 						intermediatePathsFile: '',
 						referencePathsFile: reusePathsFile,
-						referenceSource
+						referenceSource,
+						...(referenceReceiptFile !== undefined && {
+							receiptFile: referenceReceiptFile
+						})
 					}
 				),
 				environment,
 				cupboardRunDependencies
 			);
+			if (referenceReceiptFile !== undefined) {
+				referenceReceiptFiles.push(referenceReceiptFile);
+			}
 		}
 
 		const destinationPaths = group.paths.filter(
@@ -2041,11 +2275,84 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 					intermediatePathsFile:
 						index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '',
 					referencePathsFile: destinationPathsFile,
-					referenceSource: destinationPathsFile === '' ? '' : destinationSource
+					referenceSource: destinationPathsFile === '' ? '' : destinationSource,
+					...(destinationReceiptFile !== undefined && {
+						receiptFile: destinationReceiptFile
+					})
 				}
 			),
 			environment,
 			cupboardRunDependencies
+		);
+		if (destinationReceiptFile !== undefined) {
+			referenceReceiptFiles.push(destinationReceiptFile);
+		}
+	}
+
+	return referenceReceiptFiles;
+}
+
+export async function mergeReferenceReceipts(
+	receiptFile: string,
+	hasExistingReceipt: boolean,
+	referenceReceiptFiles: readonly string[],
+	referencePaths: readonly string[]
+): Promise<number> {
+	try {
+		const existing = hasExistingReceipt
+			? buildReceiptV3Schema.parse(
+					JSON.parse(await readFile(receiptFile, 'utf8'))
+				)
+			: buildReceiptV3Schema.parse({ version: 3, paths: [], subjects: [] });
+		const references = new Set(referencePaths);
+		const subjects = new Map(
+			existing.subjects.map((subject) => [subject.storePath, subject])
+		);
+		const existingSubjectCount = subjects.size;
+		const paths = new Set(existing.paths);
+
+		for (const file of referenceReceiptFiles) {
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(file, 'utf8'))
+			);
+			const servable = new Set(receipt.paths);
+
+			for (const subject of receipt.subjects) {
+				if (
+					subject.origin !== 'republished' ||
+					!references.has(subject.storePath) ||
+					!servable.has(subject.storePath)
+				) {
+					continue;
+				}
+
+				paths.add(subject.storePath);
+				if (!subjects.has(subject.storePath)) {
+					subjects.set(subject.storePath, subject);
+				}
+			}
+		}
+
+		const addedSubjects = subjects.size - existingSubjectCount;
+
+		if (!hasExistingReceipt && addedSubjects === 0) {
+			return 0;
+		}
+
+		const merged = buildReceiptV3Schema.parse({
+			...existing,
+			paths: [...paths].toSorted(byCodeUnit),
+			subjects: subjects
+				.values()
+				.toArray()
+				.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath))
+		});
+		await writeFile(receiptFile, `${JSON.stringify(merged, undefined, 2)}\n`);
+
+		return addedSubjects;
+	} finally {
+		await Promise.all(
+			referenceReceiptFiles.map((file) => rm(file, { force: true }))
 		);
 	}
 }
@@ -2382,6 +2689,7 @@ async function planCohort(
 		// a build-provenance statement for it, so a provenance run asks the plan to
 		// build every served path without one.
 		...(inputs.requireProvenance ? ['--require-attested'] : []),
+		...(inputs.pushMode === 'all' ? ['--publish-upstream'] : []),
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.reuseView === '' ? [] : ['--reuse-view', inputs.reuseView]),
 		...(inputs.reuseView !== '' && inputs.fallbackReadUser !== ''

@@ -282,6 +282,22 @@ describe('partitionAvailability', () => {
 		expect(partition.leftUpstream).toStrictEqual([appPath]);
 	});
 
+	it('schedules an externally substitutable path for publication when requested', async () => {
+		const store = new RecordingStore(emptyMissing(), [appPath], [appPath]);
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [target({ expectedPath: appPath })],
+				store,
+				publishUpstream: true
+			})
+		);
+
+		expect({
+			buildSet: partition.buildSet,
+			leftUpstream: partition.leftUpstream
+		}).toStrictEqual({ buildSet: [appPath], leftUpstream: [] });
+	});
+
 	it('confirms only the candidates it would leave upstream, once per path', async () => {
 		const store = new RecordingStore(
 			emptyMissing(),

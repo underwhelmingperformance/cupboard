@@ -32,6 +32,11 @@ outputs:
   paths:
     description: Newline-delimited realised output paths.
     value: ${{ steps.build.outputs.paths }}
+  unsubstituted-paths:
+    description:
+      Newline-delimited output paths that this run built or found already
+      present in the store. Substituted outputs are omitted.
+    value: ${{ steps.build.outputs.unsubstituted-paths }}
   paths-file:
     description: File containing the realised output paths.
     value: ${{ steps.build.outputs.paths-file }}
@@ -39,6 +44,9 @@ outputs:
     description:
       Path to the current-run build receipt that actions/attest reads.
     value: ${{ steps.build.outputs.receipt-file }}
+  unsubstituted-receipt-file:
+    description: Receipt restricted to the paths in unsubstituted-paths.
+    value: ${{ steps.build.outputs.unsubstituted-receipt-file }}
 runs:
   using: composite
   steps:

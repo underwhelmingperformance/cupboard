@@ -1,7 +1,8 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { Reporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -14,12 +15,14 @@ import {
 	ReadUserRequiredError
 } from '../errors.ts';
 
+import { attestAction } from './attest.ts';
 import {
 	attestAttachAction,
 	attestAttachArguments,
 	type AttestAttachOptions,
 	resolveAttestAttachInputs
 } from './attest-attach.ts';
+import { attestSignAction } from './attest-sign.ts';
 
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
@@ -609,5 +612,165 @@ describe('attestAttachAction', () => {
 		).rejects.toThrow(
 			'The installed cupboard emitted no attestation attachment result'
 		);
+	});
+});
+
+function committedNarInfo(storePath: string, digestByte: number): string {
+	const hash = NixSha256Hash.fromDigest(
+		Buffer.alloc(32, digestByte)
+	).toString();
+
+	return [
+		`StorePath: ${storePath}`,
+		`URL: nar/${path.basename(storePath)}.nar.zst`,
+		'Compression: zstd',
+		`FileHash: ${hash}`,
+		'FileSize: 1',
+		`NarHash: ${hash}`,
+		'NarSize: 1',
+		'References: ',
+		`Deriver: ${path.basename(storePath)}.drv`,
+		''
+	].join('\n');
+}
+
+function githubOutputs(contents: string): Record<string, string> {
+	return Object.fromEntries(
+		contents
+			.split('\n')
+			.filter((line) => line.includes('='))
+			.map((line) => [
+				line.slice(0, line.indexOf('=')),
+				line.slice(line.indexOf('=') + 1)
+			])
+	);
+}
+
+function signedBundle() {
+	return Promise.resolve({
+		bundle: '{}\n',
+		evidence: { tlogEntryCount: 1, timestampCount: 0 },
+		attestationId: '1'
+	});
+}
+
+describe('attestation of built subjects from a receipt that also has copied subjects', () => {
+	const url = 'https://cache.example.workers.dev/t/acme';
+
+	it('selects, signs and attaches only the subject that this run built', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attach-'));
+		const receiptFile = path.join(directory, 'receipt.json');
+		const outputFile = path.join(directory, 'output');
+		const narInfos = [
+			[StorePath.hash(appPath), committedNarInfo(appPath, 0x11)],
+			[StorePath.hash(runtimePath), committedNarInfo(runtimePath, 0x22)]
+		] as const;
+		await writeFile(
+			receiptFile,
+			JSON.stringify({
+				version: 3,
+				paths: [appPath, runtimePath],
+				subjects: [
+					{
+						origin: 'built',
+						storePath: appPath,
+						narHash: '11'.repeat(32),
+						derivation: `${appPath}.drv`,
+						buildStore: 'auto',
+						verification: 'local'
+					},
+					{
+						origin: 'copied',
+						storePath: runtimePath,
+						narHash: '22'.repeat(32),
+						derivation: `${runtimePath}.drv`,
+						signatures: []
+					}
+				]
+			})
+		);
+
+		await attestAction(
+			{
+				mode: 'built',
+				receiptFile,
+				checksumsFile: path.join(directory, 'subjects.txt'),
+				url
+			},
+			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+			recordingReporter([]),
+			{
+				fetch: (input) => {
+					const requested = new Request(input).url;
+					const narInfo = requested.endsWith('/nix-cache-info')
+						? undefined
+						: narInfos.find(([hash]) => requested.includes(hash))?.[1];
+
+					return Promise.resolve(new Response(narInfo));
+				}
+			}
+		);
+		const accepted = githubOutputs(await readFile(outputFile, 'utf8'));
+		const signed: Record<string, string> = {};
+
+		await attestSignAction(
+			{
+				mode: 'built',
+				checksumsFile: accepted['checksums-file'],
+				builtChecksumsFile: accepted['built-checksums-file'],
+				predicateFile: accepted['predicate-file'],
+				predicateType: accepted['predicate-type'],
+				destinationAccess: accepted['destination-access'],
+				githubToken: 'token'
+			},
+			recordingReporter([]),
+			{
+				delay: () => Promise.resolve(),
+				provenanceStatement: () =>
+					Promise.resolve({
+						predicateType: 'https://slsa.dev/provenance/v1',
+						predicate: { buildDefinition: { buildType: 'workflow' } }
+					}),
+				signerFor: () => signedBundle,
+				setOutput(name, value) {
+					signed[name] = value;
+				}
+			}
+		);
+		const attachments: (readonly string[])[] = [];
+
+		await attestAttachAction(
+			{
+				url,
+				cupboardPath: '/opt/cupboard/cupboard',
+				receiptFile: accepted['receipt-file'],
+				checksumsFile: accepted['checksums-file'],
+				bundle: [
+					signed['bundle-path'] ?? '',
+					signed['origin-bundle-path'] ?? ''
+				]
+			},
+			{},
+			recordingReporter([]),
+			{
+				runCupboard: (_binaryPath, arguments_) => {
+					attachments.push(
+						arguments_.filter((argument) => argument.startsWith('/nix/store/'))
+					);
+
+					return Promise.resolve(attachedResults([appPath]));
+				}
+			}
+		);
+
+		expect({
+			checksums: await readFile(accepted['checksums-file'] ?? '', 'utf8'),
+			originBundle: signed['origin-bundle-path'],
+			attachments
+		}).toStrictEqual({
+			checksums: `${'11'.repeat(32)}  ${path.basename(appPath)}\n`,
+			originBundle: '',
+			attachments: [[appPath]]
+		});
 	});
 });

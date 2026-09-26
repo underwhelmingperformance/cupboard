@@ -114,12 +114,29 @@ on:
         default: false
         type: boolean
       push:
-        description:
-          Publish cohort results. When false, build every cohort directly
-          without cache planning or publication.
+        description: >-
+          Control which outputs this workflow publishes to the destination
+          cache. `none` builds the targets without publishing them and requires
+          `attest: none`. `built-and-reused` publishes outputs built in this
+          run, outputs already present in the selected build store, and paths
+          found through the reuse view. `all` also publishes substituted
+          outputs. With `attest: all`, a run republishes by reference each
+          cached target that has no attestation, and signs a build-origin
+          statement for it.
         required: false
-        default: true
-        type: boolean
+        default: built-and-reused
+        type: string
+      attest:
+        description: >-
+          Control which attestations this workflow signs and attaches to
+          published outputs. `none` skips signing in this workflow. `built`
+          signs SLSA build provenance for outputs built in this run. `all` also
+          signs build-origin statements that record how the published outputs
+          were obtained. Signing requires `push` to be `built-and-reused` or
+          `all`.
+        required: false
+        default: all
+        type: string
       gc-between-cohorts:
         description:
           On a GitHub-hosted runner using its local store, release the build's
@@ -311,6 +328,7 @@ jobs:
         env:
           PRESET: ${{ inputs.preset }}
           PUSH: ${{ inputs.push }}
+          ATTEST: ${{ inputs.attest }}
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
@@ -332,6 +350,18 @@ jobs:
           STORE_KNOWN_HOSTS: ${{ inputs.store-known-hosts }}
         run: |
           set -euo pipefail
+          case "${PUSH}" in
+            none|built-and-reused|all) ;;
+            *) echo '::error::push must be none, built-and-reused, or all'; exit 1 ;;
+          esac
+          case "${ATTEST}" in
+            none|built|all) ;;
+            *) echo '::error::attest must be none, built, or all'; exit 1 ;;
+          esac
+          if [ "${PUSH}" = none ] && [ "${ATTEST}" != none ]; then
+            echo '::error::attest must be none when push is none'
+            exit 1
+          fi
           for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do
             if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
               echo "::error::${name} must not contain line breaks"
@@ -426,7 +456,7 @@ jobs:
                 fi
                 TTL=14d
                 PERMANENT=false
-                if [ "${PUSH}" = true ]; then
+                if [ "${PUSH}" != none ]; then
                   PROVISION_CACHE="${CACHE}"
                 fi
                 if [ -n "${REUSE_VIEW}" ]; then
@@ -558,7 +588,7 @@ jobs:
           PUSH: ${{ inputs.push }}
         run: |
           set -euo pipefail
-          if [[ "${PUSH}" == true ]]; then
+          if [[ "${PUSH}" != none ]]; then
             manifest=$(nix eval --json "${TARGETS}")
           else
             manifest=$(
@@ -578,15 +608,14 @@ jobs:
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
-          optimise: ${{ inputs.push }}
+          optimise: ${{ inputs.push != 'none' }}
           read-user: ${{ secrets.destination_read_user }}
           read-password: ${{ secrets.destination_read_password }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
-          # A retention root does not prove that provenance was attached.
-          # Re-run cached targets so a previous attachment failure is retried.
-          require-provenance: ${{ inputs.push }}
+          require-provenance: ${{ inputs.attest == 'built' }}
+          include-cached-targets: ${{ inputs.attest == 'all' }}
 
       - name: Summarise plan
         env:
@@ -703,8 +732,10 @@ jobs:
           fallback-read-user: ${{ secrets.fallback_read_user }}
           fallback-read-password: ${{ secrets.fallback_read_password }}
           store: ${{ inputs.store }}
-          push: ${{ inputs.push }}
-          require-provenance: ${{ inputs.push }}
+          push: ${{ inputs.push != 'none' }}
+          push-mode: ${{ inputs.push }}
+          attest-mode: ${{ inputs.attest }}
+          require-provenance: ${{ inputs.attest == 'built' }}
           gc-between-cohorts:
             ${{ inputs.gc-between-cohorts && runner.environment ==
             'github-hosted' && inputs.store == '' }}
@@ -724,8 +755,11 @@ jobs:
       # receipt.
       - uses: $/actions/attest
         id: attest
-        if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
+        if:
+          ${{ inputs.attest != 'none' && steps.build-cohort.outputs.receipt-file
+          != '' }}
         with:
+          mode: ${{ inputs.attest }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
@@ -733,20 +767,20 @@ jobs:
           read-password: ${{ secrets.destination_read_password }}
 
       # `actions/attest` checks the receipt against committed narinfos, so attach
-      # only after this run has published. When the run builds none of the
-      # cohort's paths, `actions/attest` signs only build-origin bundles.
-      # `bundles` lists them and `bundle-path` does not.
+      # only after this run has published. `bundles` lists both kinds of
+      # bundle. When the run builds none of the cohort's paths, `all` mode signs
+      # only build-origin bundles and `built` mode signs nothing.
       - uses: $/actions/attest-attach
         if:
-          ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
-          steps.attest.outputs.bundles != '' }}
+          ${{ inputs.attest != 'none' && steps.build-cohort.outputs.receipt-file
+          != '' && steps.attest.outputs.bundles != '' }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
           read-user: ${{ secrets.destination_read_user }}
           read-password: ${{ secrets.destination_read_password }}
-          receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
+          receipt-file: ${{ steps.attest.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundle: ${{ steps.attest.outputs.bundles }}
 

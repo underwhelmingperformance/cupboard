@@ -112,6 +112,7 @@ const constructedCohortSchema = z.strictObject({
 	attempts: z.number().int().positive().optional(),
 	rebuild: z.boolean().optional(),
 	requireProvenance: z.boolean().optional(),
+	omitSubstituted: z.boolean().optional(),
 	keepGoing: z.boolean().optional(),
 	// Zero is Nix's remote-builders-only setting: no local build slots.
 	maxJobs: z.number().int().nonnegative().optional()
@@ -218,6 +219,9 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 				...(cohort.rebuild !== undefined && { rebuild: cohort.rebuild }),
 				...(cohort.requireProvenance !== undefined && {
 					requireProvenance: cohort.requireProvenance
+				}),
+				...(cohort.omitSubstituted !== undefined && {
+					omitSubstituted: cohort.omitSubstituted
 				}),
 				...(cohort.keepGoing !== undefined && { keepGoing: cohort.keepGoing }),
 				...(cohort.maxJobs !== undefined && { maxJobs: cohort.maxJobs })

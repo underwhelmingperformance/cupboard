@@ -514,11 +514,13 @@ during the push.
 bundle to a store path only when the bundle's in-toto subject digest equals the
 path's NAR hash. An attestation over a file's own digest, which is what
 `actions/attest-build-provenance` records by default, therefore does not match.
-`actions/build-paths` builds the requested installables and writes a version 2
-receipt for the final outputs that Nix built during the run. After publication,
+`actions/build-paths` builds the requested installables and writes a version 3
+receipt for the final outputs. For each path, the receipt records whether this
+run built it, copied it, or found it already in the store. After publication,
 `actions/attest` verifies those paths and NAR hashes against the destination's
-committed narinfos, then signs a SLSA build-provenance attestation over the
-accepted subjects.
+committed narinfos. It then signs SLSA build provenance for the paths that the
+run built and, in its default `all` mode, a build-origin statement for every
+accepted path.
 
 ```yaml
 permissions:
@@ -552,7 +554,7 @@ steps:
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
       cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
-      receipt-file: ${{ steps.build.outputs.receipt-file }}
+      receipt-file: ${{ steps.attest.outputs.receipt-file }}
       checksums-file: ${{ steps.attest.outputs.checksums-file }}
       bundle: ${{ steps.attest.outputs.bundles }}
 ```
@@ -561,18 +563,27 @@ steps:
 newline-delimited file and passed as `installables-file`, which avoids runner
 limits on the size of action inputs and environment variables. The build action
 attempts the build up to five times and outputs the realised `paths`, a
-`paths-file`, and the `receipt-file` consumed by the attest action. A version 2
-receipt records only the final outputs that the action observed being built
-during this run. Outputs returned by a remote builder are rebuilt and compared
-with `nix build --rebuild` before they qualify. When the run built nothing, no
-build provenance is signed and `bundle-path` is empty.
+`paths-file`, and the `receipt-file` consumed by the attest action. Its version
+3 receipt records each final output and whether the run built it, copied it, or
+found it already in the store. The separate `unsubstituted-paths` and
+`unsubstituted-receipt-file` outputs leave out the outputs that the run copied
+from a substituter. Outputs returned by a remote builder are rebuilt and
+compared with `nix build --rebuild` before they qualify as built. When the run
+built nothing, no SLSA build provenance is signed and `bundle-path` is empty. In
+`all` mode, `origin-bundle-path` can still list a build-origin bundle for the
+accepted paths.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
 present, the action rebuilds that final derivation on the selected build store
-before adding it to the receipt; its dependencies may still be substituted. This
-is useful when a failed signing or attachment step will be retried after the
-path was pushed.
+before adding it to the receipt; its dependencies may still be substituted. With
+`require-provenance`, every statement describes a build from this run.
+
+`actions/attest` writes a copy of the receipt that contains only the subjects
+that it accepted, and returns its path as `receipt-file`. Pass that file, not
+the build receipt, to `actions/attest-attach`: the attach step requires the
+receipt subjects and the checksums to describe the same paths. With
+`mode: built`, the action accepts only the paths that the run built.
 
 `actions/attest` has three bundle outputs. Each lists one bundle path per line,
 because a run can produce several bundles of each kind. With `individual`
@@ -611,14 +622,15 @@ The two kinds of bundle make different claims over different subjects. SLSA
 build-provenance bundles cover paths built by the workflow. They record the
 repository, commit, workflow file and runner.
 
-Only a version 3 receipt from `build-cohort` produces build-origin bundles. They
-cover every accepted receipt subject. With `run` grouping, one statement covers
-up to 1024 accepted subjects. With `individual` grouping, each statement covers
-one subject. The predicate records origin information from events observed
-during the run. For a path the run built, it records the store path, the NAR
-hash, the derivation that produced it, the store where the build ran, whether
-the coordinating machine watched the build or the build store reported it, and
-the builder from the activity log when one was reported. For a path already
+Only a version 3 receipt produces build-origin bundles, and both `build-paths`
+and `build-cohort` write version 3 receipts. Build-origin bundles cover every
+accepted receipt subject. With `run` grouping, one statement covers up to 1024
+accepted subjects. With `individual` grouping, each statement covers one
+subject. The predicate records origin information from events observed during
+the run. For a path the run built, it records the store path, the NAR hash, the
+derivation that produced it, the store where the build ran, whether the
+coordinating machine watched the build or the build store reported it, and the
+builder from the activity log when one was reported. For a path already
 registered in the build store, it records the store and that the run did not
 observe the build. For a copied path, it records the signatures reported by the
 store, the content address when present, and sources from the copy activities
@@ -756,16 +768,16 @@ steps:
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
       cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
-      receipt-file: ${{ steps.build.outputs.receipt-file }}
+      receipt-file: ${{ steps.attest.outputs.receipt-file }}
       checksums-file: ${{ steps.attest.outputs.checksums-file }}
       bundle: ${{ steps.attest.outputs.bundles }}
 ```
 
 `setup` adds the cache as a substituter, `build-paths` records the final outputs
-that the run built, `push` commits the paths, `attest` verifies and signs those
-paths' NAR hashes, and `attest-attach` attaches the bundles to them. Pushing
-needs a trust rule on the tenant that accepts this repository's GitHub Actions
-token, added with `cupboard oidc-trust`; see
+and how the run obtained them, `push` commits the selected paths, `attest`
+verifies and signs those paths' NAR hashes, and `attest-attach` attaches the
+bundles to them. Pushing needs a trust rule on the tenant that accepts this
+repository's GitHub Actions token, added with `cupboard oidc-trust`; see
 [docs/trust-rules.md](./trust-rules.md).
 
 ## The reusable workflow
@@ -808,17 +820,66 @@ one platform from replacing retained paths for another. A Linux build and a
 macOS build of the same pull request therefore remain under separate roots.
 
 The other inputs configure the build and publication. `installable` selects the
-build target (the default is `.`, the flake at the repository root), `attest`
-turns provenance signing off for tenants that do not accept it, `runs-on`
+build target (the default is `.`, the flake at the repository root), `runs-on`
 selects the runner, and `trusted-public-key` configures the substituter.
 `cupboard-version` is an optional explicit release override; normally the
-workflow derives Cupboard from its own pin. When `attest` is enabled, the
-workflow requires provenance for every final output. A target the cache already
-serves is left unbuilt only when the cache also holds an attestation for its
-output path. Every other final derivation is rebuilt locally before the workflow
-signs it, while its dependencies may still substitute. A rerun after a failed
-signing or attachment step therefore builds the output again and attaches the
-provenance that is missing, instead of finishing with an empty receipt.
+workflow derives Cupboard from its own pin.
+
+Both reusable workflows accept `push` and `attest` with three values each:
+
+| Input    | Values                            | Simple workflow | Flake workflow     |
+| -------- | --------------------------------- | --------------- | ------------------ |
+| `push`   | `none`, `built-and-reused`, `all` | `all`           | `built-and-reused` |
+| `attest` | `none`, `built`, `all`            | `all`           | `all`              |
+
+`push: none` builds without publication and requires `attest: none`.
+
+`push: all` publishes every output that the build realised, including outputs
+that it substituted from another cache.
+
+`push: built-and-reused` publishes outputs built in this run and outputs already
+present in the selected build store. It does not publish substituted outputs:
+readers fetch them from the substituter that supplied them, and the target's
+retention root does not retain them. The flake workflow also publishes the paths
+found through its reuse view. The simple workflow has no reuse view.
+
+The simple workflow defaults to `push: all`, so a repeat run renews its complete
+retention root, including paths that the destination already serves. A push
+replaces the root's complete path set, and `built-and-reused` leaves substituted
+outputs out of that set. The simple workflow therefore rejects
+`push: built-and-reused` when `root` is set.
+
+`attest: built` signs SLSA build provenance for outputs built in this run. So
+that a later run can attach provenance that is missing, the simple workflow
+rebuilds every cached final output, and the flake workflow rebuilds each cached
+target that has no attestation. `attest: all` also signs build-origin statements
+for every published path, including paths that the run did not build. A
+build-origin statement records how the run obtained each path; it does not claim
+that the run built a substituted path. Any `push` value other than `none` may be
+combined with any value for `attest`.
+
+With `attest: all`, the flake workflow checks which cached targets have an
+attestation. It runs a cohort for each target that has none, and the cohort
+republishes that target by reference, even with `push: built-and-reused`. The
+run then signs a build-origin statement for the target without rebuilding it, so
+a run after a failed attestation or attachment attaches the missing statement.
+Any attestation counts, including a bundle that the destination inherited from
+another cache, so a target with an inherited bundle receives no new statement. A
+target that already has an attestation is left out of the new statement, even
+when another target causes its cohort to run. If the destination server does not
+provide the attestation query, the plan warns and treats every cached target as
+attested.
+
+`actions/build-cohort` exposes the same choices through its `push-mode` and
+`attest-mode` inputs. Set `push: true` with `push-mode: built-and-reused` or
+`push-mode: all`; `push-mode` defaults to `all` when `push` is true. Use
+`push: false` with `push-mode: none` and `attest-mode: none` for a build without
+publication. `attest-mode: all` adds paths published by reference to the receipt
+for `actions/attest`. `attest-mode: built` and `attest-mode: none` leave those
+paths out. Set `actions/plan`'s `include-cached-targets: true` when a cohort
+must republish each cached target that has no attestation. The flake workflow
+sets this input for `attest: all` and sets `require-provenance` for
+`attest: built`.
 
 When a cache publishes a path that another cache in the tenant serves with the
 same NAR, the destination cache inherits that source cache's existing
@@ -826,7 +887,9 @@ attestations. A destination inherits attestations from public source caches, and
 every cache also inherits them from its own earlier generation of the path.
 Bundles from another private cache remain within their source cache even if the
 destination later becomes public. Inheritance runs shortly after the commit, so
-a newly published path can briefly have no attestation list.
+a newly published path can briefly have no attestation list. Inheritance also
+occurs with `attest: none`; `attest` controls the new statements that the
+workflow signs.
 
 Pin this workflow to an immutable published release tag. With no explicit
 `cupboard-version`, the workflow selects that release and verifies its source
@@ -891,7 +954,7 @@ Strict targets must provide a derivation path in `rootDrvPath`. The helper
 evaluates those paths directly, so evaluation failures retain Nix's diagnostic.
 For a best-effort target, it catches an evaluation failure and omits the field;
 the planner then schedules a direct build and the target job reports the error.
-When `push` is false, the workflow removes every `rootDrvPath` without
+When `push` is `none`, the workflow removes every `rootDrvPath` without
 evaluating it. Build-only mode therefore does not inspect derivations.
 
 `outputs` defaults to `["out"]`, and `remote` and `bestEffort` to `false`. A
@@ -1078,9 +1141,11 @@ retains it under the per-run root. Every cohort contributes to this shared root,
 whose TTL is set by `run-root-ttl` and defaults to `24h`. This keeps shared
 outputs available throughout the run, even before their target roots are set.
 Cohort jobs write a build receipt, verify its subjects against the committed
-destination, sign those accepted subjects, and attach the resulting provenance
-bundle after publication. A substituted or already-valid path may be published
-and retained, but the receipt does not record it as built by this run.
+destination, sign the accepted subjects selected by `attest`, and attach the
+resulting bundles after publication. A path that the run did not build may be
+published and retained: with `push: all`, a substituted or already-valid path,
+and with `push: built-and-reused`, an already-valid path. The cohort's receipt
+records the path's origin without claiming that this run built it.
 
 `reuse-view` opts the run into reading shared intermediates through a named
 tenant reuse view when the destination is missing them; see
@@ -1097,9 +1162,9 @@ deleting preinstalled software from the runner image; opt in only on ephemeral
 GitHub-hosted runners, since the reclamation is destructive and permanent on a
 self-hosted machine.
 
-The workflow accepts `push: false` for a build-only validation run. In that mode
-it does not inspect the cache or derivation graph, and every cohort builds its
-targets directly without publishing them.
+The workflow accepts `push: none` with `attest: none` for a build-only
+validation run. In that mode it does not inspect the cache or derivation graph,
+and every cohort builds its targets directly without publishing them.
 
 ### Building against a remote store
 

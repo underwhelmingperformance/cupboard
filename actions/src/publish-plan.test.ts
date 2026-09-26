@@ -32,6 +32,7 @@ const namedCache = (name: string): CacheScope => ({
 });
 import {
 	assertDistinctGroupKeys,
+	attestedCachePaths,
 	availableCachePaths,
 	cacheProbePaths,
 	type Cohort,
@@ -1202,6 +1203,38 @@ describe('joinRoot', () => {
 		{ prefix: 'github:owner/repo/main/', suffix: 'app' }
 	])('joins $prefix and $suffix to one root', ({ prefix, suffix }) => {
 		expect(joinRoot(prefix, suffix)).toBe('github:owner/repo/main/app');
+	});
+});
+
+it('checks cached attestations in one request for a page of paths', async () => {
+	const requests: { url: string; body: unknown }[] = [];
+	const result = await attestedCachePaths({
+		baseUrl: new URL('https://cache.example.test/t/acme'),
+		cache: { kind: 'default' },
+		paths: [sharedPath, firstPath],
+		fetcher: async (input, init) => {
+			const request = new Request(input, init);
+			requests.push({ url: request.url, body: await request.json() });
+
+			return Response.json({
+				attestedStorePathHashes: [StorePath.hash(sharedPath)]
+			});
+		}
+	});
+
+	expect({ requests, result: [...result] }).toStrictEqual({
+		requests: [
+			{
+				url: 'https://cache.example.test/t/acme/api/v1/attested-paths',
+				body: {
+					storePathHashes: [
+						StorePath.hash(sharedPath),
+						StorePath.hash(firstPath)
+					]
+				}
+			}
+		],
+		result: [sharedPath]
 	});
 });
 

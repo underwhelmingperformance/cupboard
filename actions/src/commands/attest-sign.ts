@@ -48,6 +48,7 @@ import {
 } from '../sigstore-signing.ts';
 
 export interface AttestSignOptions {
+	readonly mode?: string;
 	readonly checksumsFile?: string;
 	readonly builtChecksumsFile?: string;
 	readonly predicateFile?: string;
@@ -62,6 +63,7 @@ export interface AttestSignOptions {
 }
 
 export interface AttestSignInputs {
+	readonly mode: 'built' | 'all';
 	readonly checksumsFile: string;
 	readonly builtChecksumsFile: string;
 	readonly predicateFile: string;
@@ -114,6 +116,10 @@ export function registerAttestSignCommand(
 		.command('attest-sign')
 		.description(
 			'Sign build provenance and build-origin statements for the resolved subjects.'
+		)
+		.option(
+			'--mode <mode>',
+			'Sign build provenance only (built), or build provenance and build-origin statements (all).'
 		)
 		.requiredOption(
 			'--checksums-file <path>',
@@ -195,6 +201,12 @@ export function resolveAttestSignInputs(
 	const bundleDirectory = path.dirname(path.resolve(checksumsFile));
 
 	return {
+		mode: providedChoice(
+			'mode',
+			options.mode,
+			['built', 'all'] as const,
+			'all'
+		),
 		checksumsFile,
 		builtChecksumsFile,
 		predicateFile,
@@ -311,7 +323,7 @@ export async function attestSignAction(
 	// later, an unreadable file could fail the run after the action had already
 	// recorded a provenance attestation in the repository.
 	const originPredicate =
-		inputs.predicateFile === ''
+		inputs.mode === 'built' || inputs.predicateFile === ''
 			? undefined
 			: await readPredicate(inputs.predicateFile, io);
 

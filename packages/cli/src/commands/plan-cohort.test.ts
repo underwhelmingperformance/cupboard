@@ -51,7 +51,9 @@ import {
 } from './plan-cohort.ts';
 import {
 	type PlanCohortDependencies,
+	type PlanCohortOptions,
 	type PlanCohortRunOptions,
+	planCohortRunOptions,
 	registerPlanCommands,
 	runPlanCohort
 } from './plan-cohort.ts';
@@ -954,6 +956,73 @@ describe('plan cohort command', () => {
 			} finally {
 				rmSync(directory, { recursive: true, force: true });
 			}
+		}
+	);
+
+	it.each([
+		{ flags: [], publication: {} },
+		{
+			flags: ['--require-attested', '--publish-upstream'],
+			publication: { requireAttested: true, publishUpstream: true }
+		}
+	])(
+		'forwards the planning flags $flags to the run',
+		async ({ flags, publication }) => {
+			const program = silentProgram();
+			const cohort = program.commands
+				.find((command) => command.name() === 'plan')
+				?.commands.find((command) => command.name() === 'cohort');
+			let parsed: PlanCohortOptions | undefined;
+
+			cohort?.action(
+				(_url: URL, _cache: string | undefined, options: PlanCohortOptions) => {
+					parsed = options;
+				}
+			);
+			await program.parseAsync(
+				[
+					'plan',
+					'cohort',
+					'https://cache.example.workers.dev/t/acme',
+					'--targets-file',
+					'targets.json',
+					'--plan-file',
+					'plan.json',
+					...flags
+				],
+				{ from: 'user' }
+			);
+
+			if (parsed === undefined) {
+				throw new Error('the cohort command did not run');
+			}
+
+			expect(
+				planCohortRunOptions(
+					parsed,
+					{ targets: [] },
+					{
+						cache: { kind: 'default' },
+						plannedSubstitutionPolicy: { kind: 'unknown' },
+						storeKind: 'daemon'
+					}
+				)
+			).toStrictEqual({
+				targets: [],
+				cache: { kind: 'default' },
+				plannedSubstitutionPolicy: { kind: 'unknown' },
+				retention: { kind: 'inherit' },
+				storeIdentity: { kind: 'daemon' },
+				storePath: '/nix/store',
+				planFile: 'plan.json',
+				...publication,
+				ceiling: { value: 0, untrustedFallback: 5 },
+				detected: {
+					cohortSplitPossible: false,
+					remoteStoreConfigured: false,
+					componentPublicationApplicable: false
+				}
+			});
 		}
 	);
 
