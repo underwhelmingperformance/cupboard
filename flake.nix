@@ -185,15 +185,17 @@
           };
         };
 
-      # Both modules expose `nix.cupboard.caches`. Nix merges these list settings
-      # by concatenation, so the configured caches are added to existing
-      # substituters and trusted keys.
       cupboardModule =
         { config, lib, ... }:
         let
           cfg = config.nix.cupboard;
           publicCaches = builtins.filter (cache: cache.url != null) cfg.caches;
           privateCaches = builtins.filter (cache: cache.substitutersFile != null) cfg.caches;
+          publicKeys = lib.concatMap (cache: cache.publicKeys) cfg.caches;
+          substitutersLine = "extra-substituters = ${
+            lib.concatMapStringsSep " " (cache: cache.url) publicCaches
+          }\n";
+          publicKeysLine = "extra-trusted-public-keys = ${lib.concatStringsSep " " publicKeys}\n";
         in
         {
           options.nix.cupboard.caches = lib.mkOption {
@@ -215,14 +217,20 @@
               '';
             }) cfg.caches;
 
-            nix.settings = {
-              substituters = map (cache: cache.url) publicCaches;
-              trusted-public-keys = lib.concatMap (cache: cache.publicKeys) cfg.caches;
-            };
-
-            nix.extraOptions = lib.concatMapStrings (
-              cache: "!include ${toString cache.substitutersFile}\n"
-            ) privateCaches;
+            # Nix reads `nix.conf` from top to bottom, and a bare `substituters`
+            # or `trusted-public-keys` line replaces everything that an earlier
+            # `extra-` line appended. Home Manager writes `nix.settings` in
+            # alphabetical order, so `extra-substituters` there would come
+            # before a user's `substituters`. NixOS and Home Manager both write
+            # `nix.extraOptions` after `nix.settings`, and `mkAfter` places these
+            # lines after the user's own `extraOptions`.
+            nix.extraOptions = lib.mkAfter (
+              lib.concatStrings (
+                lib.optional (publicCaches != [ ]) substitutersLine
+                ++ lib.optional (publicKeys != [ ]) publicKeysLine
+                ++ map (cache: "!include ${toString cache.substitutersFile}\n") privateCaches
+              )
+            );
           };
         };
     in

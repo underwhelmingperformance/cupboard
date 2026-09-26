@@ -85,9 +85,28 @@ cache to their own configuration.
 
 ### As a NixOS or Home Manager module
 
-Both modules expose `nix.cupboard.caches`, a list of caches, and fold each entry
-into `nix.settings.substituters` and `nix.settings.trusted-public-keys`. The
-default cache and its key are kept; the caches you list are added.
+Both modules expose `nix.cupboard.caches`, a list of caches.
+
+After `nix.settings` and your own `extraOptions`, each module writes an
+`extra-substituters` line for the public caches, an `extra-trusted-public-keys`
+line for every cache's keys, and an `!include` line for each private cache. Each
+`extra-` line adds to the list that Nix has already read, so the default cache
+and its key are kept. Caches and keys that you set in
+`nix.settings.substituters`, `nix.settings.trusted-public-keys` or
+`extraOptions` are kept too. Home Manager writes a user-level `nix.conf`, and
+Nix reads it after the system file, so the Home Manager module's lines add to
+the system's caches and keys.
+
+Nix asks substituters in order of the `Priority` that each one reports in its
+`nix-cache-info`, lowest first, and keeps the configured order when priorities
+are equal. A cupboard cache reports 40 unless you change it, the same as
+cache.nixos.org. The module's caches come after the system's substituters, so
+Nix asks cache.nixos.org first. To have Nix ask a cupboard cache first, give it
+a lower priority with `cupboard cache set-priority`.
+
+The modules do not add cupboard's caches or keys to the
+`nix.settings.substituters` and `nix.settings.trusted-public-keys` options, so
+other configuration that reads those options does not see them.
 
 A public cache sets `url`. A private cache sets `substitutersFile` instead: its
 substituter URL carries a read credential, and `nix.conf` is world-readable, so
