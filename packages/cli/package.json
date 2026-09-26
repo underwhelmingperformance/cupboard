@@ -7,8 +7,8 @@
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1075.0",
 		"@aws-sdk/lib-storage": "^3.1075.0",
-		"@cloudflare/workers-auth": "^0.7.0",
-		"@cloudflare/workers-utils": "^0.40.0",
+		"@cloudflare/workers-auth": "^0.9.0",
+		"@cloudflare/workers-utils": "^0.41.0",
 		"@cupboard/cli-ui": "workspace:*",
 		"@cupboard/logger": "workspace:*",
 		"@cupboard/nix": "workspace:*",
