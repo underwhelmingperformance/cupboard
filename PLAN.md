@@ -4391,6 +4391,43 @@ values. Where jobs run is operator configuration, so the check verifies
 tenant-side state only; a check that is missing an input (`--root-prefix`)
 degrades by naming what it could not verify.
 
+Without `--workflow-ref`, the check discovers publishing jobs in the caller
+repository. It reads the default branch or the selected branch, follows local
+reusable workflows at the caller's ref, and checks each job whose Cupboard
+publishing workflow targets the tenant. It reports these jobs for manual review:
+jobs that call Cupboard actions or OIDC-authenticated CLI commands directly or
+through local composite actions, jobs that pass the tenant URL to external
+workflows, and the pull-request runs of jobs without the flake preset. With
+`--workflow-ref`, the check verifies one pinned workflow without discovery.
+
+The check models each event's branch and tag filters and each job's `if`
+condition on `github.event_name`. It models a pull request from the repository
+itself, so the quickstart's fork guard is true, and it notes that pull requests
+from forks are not modelled. For a tag filter, it models a tag push. When the
+check cannot evaluate a filter or condition, it reports the job as unverified.
+For a schedule on another branch, the check models the default branch ref and
+notes that the schedule takes effect after the branch is merged into the default
+branch.
+
+The repair fixes a missing trust rule, a matching rule without a required grant,
+and a missing preset reuse view. When every failure of a job is one of these,
+the command offers a repair, and the preview lists trust claims, grants and
+reuse-view changes before confirmation. The repair never adds a pull-request
+rule for a job without the flake preset, and it writes rules from an unmerged
+branch only after an operator confirms them at an interactive prompt.
+
+The server selects the matching rule with the most claims, so the repair checks
+its planned rules against every discovered job outside the repair. It stops
+without writing when a planned rule would be selected for the runs of an exactly
+modelled job without granting what that job requests. For a job that the check
+cannot model exactly, it stops when a planned rule could match the job's runs
+with at least as many claims as an existing rule that could also match them.
+When a planned rule is for the default branch, the repair also checks the
+default branch's jobs. It does not read workflow files at tags or on other
+branches. It also stops when a matching rule without a required grant has at
+least as many claims as the planned rule, because the server would not prefer
+the planned rule.
+
 ### Implementation sequence
 
 1. Documentation: split `docs/github-actions.md` into the user-facing guide and
