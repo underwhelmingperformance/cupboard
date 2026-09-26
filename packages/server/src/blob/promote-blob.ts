@@ -179,7 +179,7 @@ export async function stagePromotedBlob(
 	reservationOwner?: string,
 	isStillOwned?: () => boolean
 ): Promise<StagedBlobPromotion | undefined> {
-	const [claimed] = await d1
+	let [claimed] = await d1
 		.select({ incarnation: d1Schema.blobState.incarnation })
 		.from(d1Schema.blobState)
 		.where(
@@ -194,7 +194,7 @@ export async function stagePromotedBlob(
 			)
 		)
 		.limit(1);
-	const reserved =
+	let reserved =
 		claimed ??
 		(await reserveObjectIncarnation(
 			d1,
@@ -207,17 +207,55 @@ export async function stagePromotedBlob(
 		return undefined;
 	}
 
-	const canonical = await ensureCanonicalObject(
-		blobs,
-		stagingKey,
-		target.narHash,
-		target.narSize,
-		reserved.incarnation,
-		claimed === undefined,
-		blob,
-		isStillOwned,
-		() => queueObjectDeletion(d1, 'nar', target.narHash, reserved.incarnation)
-	);
+	const promote = () =>
+		ensureCanonicalObject(
+			blobs,
+			stagingKey,
+			target.narHash,
+			target.narSize,
+			reserved.incarnation,
+			claimed === undefined,
+			blob,
+			isStillOwned,
+			() => queueObjectDeletion(d1, 'nar', target.narHash, reserved.incarnation)
+		);
+	let canonical: CanonicalBlob | undefined;
+
+	try {
+		canonical = await promote();
+	} catch (error) {
+		if (
+			claimed === undefined ||
+			blob === undefined ||
+			!(error instanceof UploadedObjectNotFoundError)
+		) {
+			throw error;
+		}
+
+		await d1
+			.update(d1Schema.objectIncarnation)
+			.set({
+				state: 'absent',
+				reservationOwner: sql`null`,
+				updatedAt: isoTimestamp(new Date())
+			})
+			.where(
+				and(
+					eq(d1Schema.objectIncarnation.kind, 'nar'),
+					eq(d1Schema.objectIncarnation.objectId, target.narHash),
+					eq(d1Schema.objectIncarnation.incarnation, claimed.incarnation),
+					eq(d1Schema.objectIncarnation.state, 'live')
+				)
+			);
+		claimed = undefined;
+		reserved = await reserveObjectIncarnation(
+			d1,
+			'nar',
+			target.narHash,
+			reservationOwner
+		);
+		canonical = await promote();
+	}
 
 	if (canonical === undefined) {
 		return undefined;
