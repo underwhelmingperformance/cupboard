@@ -9,7 +9,8 @@ import {
 	type TenantCreateBody,
 	tenantCreateBodySchema,
 	type TenantReadCredential,
-	tenantReadCredentialSchema
+	tenantReadCredentialSchema,
+	type TenantStatus
 } from '@cupboard/protocol/tenants';
 import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
 import { env } from 'cloudflare:workers';
@@ -25,6 +26,7 @@ import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
+	TenantOffboardingError,
 	TenantRetiredError
 } from '../errors.ts';
 import {
@@ -128,6 +130,25 @@ function quotaBody(id: string, quotaBytes: number): TenantCreateBody {
 
 async function provision(body: TenantCreateBody): Promise<void> {
 	await ensureTenant(database(), body, now);
+}
+
+async function tenantWithStatus(status: TenantStatus): Promise<void> {
+	await provision(createBody(acme));
+
+	if (status === 'active') {
+		return;
+	}
+
+	if (status === 'suspended') {
+		await setTenantStatus(database(), acme, 'suspended');
+		return;
+	}
+
+	await setTenantStatus(database(), acme, 'offboarding');
+
+	if (status === 'offboarded') {
+		await finaliseOffboardedTenant(database(), acme);
+	}
 }
 
 async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
@@ -651,6 +672,95 @@ describe('tenant registry', () => {
 		});
 	});
 
+	it.each<{
+		readonly from: TenantStatus;
+		readonly to: 'suspended' | 'offboarding';
+		readonly outcome: unknown;
+		readonly stored: TenantStatus;
+	}>([
+		{
+			from: 'active',
+			to: 'suspended',
+			outcome: 'suspended',
+			stored: 'suspended'
+		},
+		{
+			from: 'suspended',
+			to: 'suspended',
+			outcome: 'suspended',
+			stored: 'suspended'
+		},
+		{
+			from: 'offboarding',
+			to: 'suspended',
+			outcome: {
+				name: 'TenantOffboardingError',
+				status: StatusCodes.CONFLICT,
+				tenant: acme
+			},
+			stored: 'offboarding'
+		},
+		{
+			from: 'offboarded',
+			to: 'suspended',
+			outcome: {
+				name: 'TenantRetiredError',
+				status: StatusCodes.GONE,
+				tenant: acme
+			},
+			stored: 'offboarded'
+		},
+		{
+			from: 'active',
+			to: 'offboarding',
+			outcome: 'offboarding',
+			stored: 'offboarding'
+		},
+		{
+			from: 'suspended',
+			to: 'offboarding',
+			outcome: 'offboarding',
+			stored: 'offboarding'
+		},
+		{
+			from: 'offboarding',
+			to: 'offboarding',
+			outcome: 'offboarding',
+			stored: 'offboarding'
+		},
+		{
+			from: 'offboarded',
+			to: 'offboarding',
+			outcome: 'offboarded',
+			stored: 'offboarded'
+		}
+	])(
+		'changes the tenant from $from to $to or throws the expected error',
+		async ({ from, to, outcome, stored }) => {
+			await tenantWithStatus(from);
+
+			let result: unknown;
+
+			try {
+				const summary = await setTenantStatus(database(), acme, to);
+				result = summary.status;
+			} catch (error) {
+				result = errorFields(error);
+			}
+
+			const row = await database()
+				.select({ status: d1Schema.tenant.status })
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, acme))
+				.get();
+
+			expect({ outcome: result, stored: row?.status }).toStrictEqual({
+				outcome,
+				stored
+			});
+		}
+	);
+
 	it('refuses to re-provision a slug that has begun offboarding', async () => {
 		await provision(createBody(acme, 'private'));
 		await setTenantStatus(database(), acme, 'offboarding');
@@ -787,6 +897,20 @@ describe('tenant lifecycle operations', () => {
 			setup: async () => {
 				await ensureTenant(database(), createBody(acme), now);
 				await setTenantStatus(database(), acme, 'offboarding');
+			},
+			error: TenantOffboardingError,
+			fields: {
+				name: 'TenantOffboardingError',
+				status: StatusCodes.CONFLICT,
+				tenant: acme
+			}
+		},
+		{
+			name: 'offboarded',
+			setup: async () => {
+				await ensureTenant(database(), createBody(acme), now);
+				await setTenantStatus(database(), acme, 'offboarding');
+				await finaliseOffboardedTenant(database(), acme);
 			},
 			error: TenantRetiredError,
 			fields: {

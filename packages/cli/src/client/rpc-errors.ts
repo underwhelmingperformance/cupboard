@@ -1,3 +1,4 @@
+import { tenantOffboardingErrorDataSchema } from '@cupboard/protocol/tenants';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
@@ -5,7 +6,8 @@ import {
 	CupboardHttpError,
 	QuotaExceededError,
 	ScopeForbiddenError,
-	SessionRejectedError
+	SessionRejectedError,
+	TenantOffboardingError
 } from '../errors.ts';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
@@ -47,9 +49,10 @@ export function isStaleUploadError(error: unknown): boolean {
 }
 
 /**
- * Converts authentication, scope and `INSUFFICIENT_STORAGE` failures into CLI
- * errors. `SERVICE_UNAVAILABLE` and every other oRPC code remain unchanged so
- * their callers can inspect them. Non-oRPC errors also pass through unchanged.
+ * Converts authentication, scope, `INSUFFICIENT_STORAGE` and
+ * `TENANT_OFFBOARDING` failures into CLI errors. `SERVICE_UNAVAILABLE` and
+ * every other oRPC code remain unchanged so their callers can inspect them.
+ * Non-oRPC errors also pass through unchanged.
  */
 export function translateRpcError(error: unknown): unknown {
 	if (!(error instanceof ORPCError)) {
@@ -67,6 +70,12 @@ export function translateRpcError(error: unknown): unknown {
 
 		case 'INSUFFICIENT_STORAGE': {
 			return new QuotaExceededError(error.message);
+		}
+
+		case 'TENANT_OFFBOARDING': {
+			const data = tenantOffboardingErrorDataSchema.safeParse(error.data);
+
+			return data.success ? new TenantOffboardingError(data.data.id) : error;
 		}
 
 		default: {
