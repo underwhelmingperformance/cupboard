@@ -18,12 +18,15 @@ import {
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { buildVersion } from '../build-info.generated.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	legacyNarCacheTag,
@@ -3169,6 +3172,26 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
+	});
+
+	it('removes the published narinfo when negotiation finds its blob row gone', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, metadata);
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.delete(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, metadata.narHash));
+
+		const decision = singleDecision(await negotiateUploads(token, [metadata]));
+		const narInfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		expect({
+			action: decision.action,
+			narInfoStatus: narInfo.status
+		}).toStrictEqual({
+			action: 'upload',
+			narInfoStatus: StatusCodes.NOT_FOUND
+		});
 	});
 
 	it('recovers a lost NAR that another cache references through the next push', async () => {

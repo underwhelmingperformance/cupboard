@@ -705,16 +705,14 @@ R2 and the edge.
 
 - [x] When negotiate takes the stale-recovery path (a committed narinfo whose
       NAR blob has vanished from R2), delete the `narinfo/<storePathHash>`
-      object alongside the row and blob row, and best-effort purge the cached
-      narinfo from the current colo. The purge is colo-local; other colos serve
-      the stale narinfo until its TTL, and the subsequent re-upload
-      re-materialises a byte-identical object. Durable cross-colo edge-safe
-      deletion is a V3 concern.
+      object alongside the row and blob row, and queue a purge of the cached
+      narinfo by its path cache tag. The re-upload gives the NAR a new
+      incarnation.
 - [x] Update the Routes table so narinfo and NAR show as Worker-served.
 - [x] Tests:
   - [x] Integration: when a committed path's NAR blob is missing, the next
         negotiate clears the narinfo object and returns an upload decision, and
-        a previously cached narinfo is purged from the current colo.
+        a previously cached narinfo is invalidated by its path cache tag.
 
 Deleting committed content through TTL-ordered NAR deletion, a durable
 narinfo-deletion queue, or orphan reconciliation is deferred to V3 (see Garbage

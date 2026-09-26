@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	type CacheScope,
 	isSameCacheScope,
@@ -1317,22 +1318,14 @@ export class DeletionQueueService {
 		});
 	}
 
-	async removeStaleNarInfo(
-		row: typeof schema.narInfos.$inferSelect,
-		origin: RequestOrigin
-	): Promise<void> {
-		await this.context.criticalSection(() =>
-			this.reconcileMissingNar(row, origin)
-		);
-	}
-
 	// The caller must hold the critical section. Remove the stale row and enqueue
 	// cleanup atomically so an interrupted reconciliation cannot recreate the
 	// path. Garbage collection retries any object cleanup left in the queue.
 	async reconcileMissingNar(
 		row: typeof schema.narInfos.$inferSelect,
-		origin?: RequestOrigin
-	): Promise<void> {
+		origin?: RequestOrigin,
+		shouldDeferCleanup = false
+	): Promise<boolean> {
 		const now = isoTimestamp(new Date());
 		const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
 		const wasRemoved = this.context.db.transaction((tx) => {
@@ -1373,8 +1366,8 @@ export class DeletionQueueService {
 			return true;
 		});
 
-		if (!wasRemoved) {
-			return;
+		if (!wasRemoved || shouldDeferCleanup) {
+			return wasRemoved;
 		}
 
 		try {
@@ -1386,6 +1379,43 @@ export class DeletionQueueService {
 			);
 		} catch {
 			// The durable queue remains for garbage collection to retry.
+		}
+
+		return true;
+	}
+
+	/**
+	 * Runs the queued cleanup of rows that {@link reconcileMissingNar} removed
+	 * with deferred cleanup. Each row has its own critical section, so the input
+	 * gate does not stay closed across every R2 delete. A failed row stays
+	 * queued for garbage collection.
+	 *
+	 * Opens critical sections; do not call this from inside one.
+	 */
+	async cleanUpRemovedNarInfos(
+		rows: readonly (typeof schema.narInfos.$inferSelect)[],
+		origin?: RequestOrigin
+	): Promise<void> {
+		for (const row of rows) {
+			const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
+
+			try {
+				await this.context.criticalSection(() =>
+					this.deleteQueuedNarInfo(
+						cache,
+						row.storePathHash,
+						row.generation,
+						origin
+					)
+				);
+			} catch (error) {
+				// The durable queue remains for garbage collection to retry.
+				rootLogger().warn('removed narinfo cleanup failed', {
+					cache: cache.scope,
+					storePathHash: row.storePathHash,
+					errorMessage: error instanceof Error ? error.message : String(error)
+				});
+			}
 		}
 	}
 }
