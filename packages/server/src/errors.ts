@@ -489,9 +489,21 @@ export class TenantRetiredError extends ServerHttpError {
 	}
 }
 
-// Resume changes only a suspended tenant to active. An active tenant returns a
-// conflict. An offboarding or offboarded tenant returns
-// `TenantRetiredError`.
+// The tenant is `offboarding`, so it cannot be suspended or resumed.
+export class TenantOffboardingError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly tenant: TenantId) {
+		super(
+			`Tenant '${tenant}' is being removed; it can no longer be suspended or resumed`
+		);
+		this.name = 'TenantOffboardingError';
+	}
+}
+
+// Resume changes only a suspended tenant to active. Resume throws this error for
+// an active tenant, `TenantOffboardingError` for an `offboarding` tenant and
+// `TenantRetiredError` for an `offboarded` one.
 export class TenantNotSuspendedError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
