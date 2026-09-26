@@ -11,6 +11,7 @@ import {
 	and,
 	asc,
 	eq,
+	exists,
 	gte,
 	inArray,
 	lte,
@@ -60,6 +61,33 @@ export async function drainObjectDeletions(
 	limit: number
 ): Promise<{ readonly deleted: number; readonly hasMoreWork: boolean }> {
 	const now = isoTimestamp(new Date());
+	const currentIncarnation = database
+		.select({ one: sql`1` })
+		.from(d1Schema.objectIncarnation)
+		.where(
+			and(
+				eq(d1Schema.objectIncarnation.kind, d1Schema.objectDeletion.kind),
+				eq(
+					d1Schema.objectIncarnation.objectId,
+					d1Schema.objectDeletion.objectId
+				),
+				eq(
+					d1Schema.objectIncarnation.incarnation,
+					d1Schema.objectDeletion.incarnation
+				),
+				inArray(d1Schema.objectIncarnation.state, ['pending', 'live'])
+			)
+		);
+	const due = and(
+		eq(d1Schema.objectDeletion.kind, kind),
+		lte(d1Schema.objectDeletion.removeAfter, now)
+	);
+	// A due marker for a pending or live incarnation is stray: the object is in
+	// use. Discard it before selecting the markers to drain.
+	await database
+		.delete(d1Schema.objectDeletion)
+		.where(and(due, exists(currentIncarnation)))
+		.run();
 	const rows = await database
 		.select({
 			kind: d1Schema.objectDeletion.kind,
@@ -68,12 +96,7 @@ export async function drainObjectDeletions(
 			removeAfter: d1Schema.objectDeletion.removeAfter
 		})
 		.from(d1Schema.objectDeletion)
-		.where(
-			and(
-				eq(d1Schema.objectDeletion.kind, kind),
-				lte(d1Schema.objectDeletion.removeAfter, now)
-			)
-		)
+		.where(and(due, notExists(currentIncarnation)))
 		.orderBy(
 			asc(d1Schema.objectDeletion.removeAfter),
 			asc(d1Schema.objectDeletion.objectId),

@@ -16,7 +16,7 @@ import {
 } from '../test-support.ts';
 
 import { reserveObjectIncarnation } from './object-incarnation.ts';
-import { promoteVerifiedBlob } from './promote-blob.ts';
+import { promoteVerifiedBlob, stagePromotedBlob } from './promote-blob.ts';
 
 describe('promoteVerifiedBlob', () => {
 	beforeEach(async () => {
@@ -67,6 +67,68 @@ describe('promoteVerifiedBlob', () => {
 			});
 		} finally {
 			head.mockRestore();
+		}
+	});
+
+	it('does not queue the winner for deletion when ownership expires after a losing put', async () => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const staged = await verifiableNar('promote-lost-ownership');
+		const canonicalKey = narObjectKey(staged.narHash, 2);
+		const stagingKey = r2ObjectKeySchema.parse(
+			'staging/promote-lost-ownership/upload'
+		);
+
+		await env.BLOBS.put(stagingKey, staged.narBytes);
+		await env.BLOBS.put(canonicalKey, staged.narBytes);
+
+		const originalHead = env.BLOBS.head.bind(env.BLOBS);
+		const originalPut = env.BLOBS.put.bind(env.BLOBS);
+		let isBlinded = true;
+		let isOwned = true;
+		const head = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementation((key: string) => {
+				if (key === canonicalKey && isBlinded) {
+					isBlinded = false;
+
+					return originalHead('test/absent');
+				}
+
+				return originalHead(key);
+			});
+		const put = vi
+			.spyOn(env.BLOBS, 'put')
+			.mockImplementation(async (...arguments_) => {
+				const written = await originalPut(...arguments_);
+				if (arguments_[0] === canonicalKey) {
+					isOwned = false;
+				}
+
+				return written;
+			});
+
+		try {
+			const promotion = await stagePromotedBlob(
+				database,
+				env.BLOBS,
+				stagingKey,
+				{ narHash: staged.narHash, narSize: staged.narSize },
+				{ fileHash: staged.fileHash, fileSize: staged.narBytes.byteLength },
+				'promote-lost-ownership',
+				() => isOwned
+			);
+			const markers = await database
+				.select({ incarnation: d1Schema.objectDeletion.incarnation })
+				.from(d1Schema.objectDeletion)
+				.where(eq(d1Schema.objectDeletion.objectId, staged.narHash));
+
+			expect({ promotion, markers }).toStrictEqual({
+				promotion: undefined,
+				markers: [{ incarnation: 1 }]
+			});
+		} finally {
+			head.mockRestore();
+			put.mockRestore();
 		}
 	});
 

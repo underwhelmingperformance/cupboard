@@ -106,6 +106,42 @@ describe('abandoned object version recovery', () => {
 		await clearBlobStorage();
 	});
 
+	it('does not delete a live object with a stray deletion marker', async () => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const nar = await verifiableNar('live-object-stray-marker');
+		const reserved = await reserveObjectIncarnation(
+			database,
+			'nar',
+			nar.narHash
+		);
+		const key = narObjectKey(nar.narHash, reserved.incarnation);
+		await env.BLOBS.put(key, nar.narBytes);
+		await activateObjectIncarnation(
+			database,
+			'nar',
+			nar.narHash,
+			reserved.incarnation
+		);
+		await queueObjectDeletion(
+			database,
+			'nar',
+			nar.narHash,
+			reserved.incarnation
+		);
+
+		const drained = await drainObjectDeletions(database, env.BLOBS, 'nar', 2);
+
+		expect({
+			drained,
+			present: (await env.BLOBS.head(key)) !== null,
+			markers: await deletionMarkers('nar', nar.narHash)
+		}).toStrictEqual({
+			drained: { deleted: 0, hasMoreWork: false },
+			present: true,
+			markers: [1]
+		});
+	});
+
 	it('uses maintenance indexes for recovery and deletion scans', async () => {
 		const recovery = await env.CUPBOARD_DB.prepare(
 			`EXPLAIN QUERY PLAN
@@ -369,12 +405,13 @@ describe('abandoned object version recovery', () => {
 	});
 
 	it.each(['nar', 'cas'] as const)(
-		'keeps an extended %s marker after an earlier drain resumes',
+		'queues a late-write %s marker when another owner supersedes a pending reservation after a drain',
 		async (kind) => {
 			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-			const nar = await verifiableNar(`extended-drain-${kind}`);
-			const bundle = await casFixture(`extended-drain-${kind}`);
+			const nar = await verifiableNar(`superseded-after-drain-${kind}`);
+			const bundle = await casFixture(`superseded-after-drain-${kind}`);
 			const objectId = kind === 'nar' ? nar.narHash : bundle.digest;
+			const legacyIncarnation = firstVersionedObjectIncarnation - 1;
 			const first = await reserveObjectIncarnation(
 				database,
 				kind,
@@ -385,8 +422,76 @@ describe('abandoned object version recovery', () => {
 				kind === 'nar'
 					? narObjectKey(nar.narHash, first.incarnation)
 					: casObjectKey(bundle.digest, first.incarnation);
-			await env.BLOBS.put(firstKey, 'first');
 			await queueObjectDeletion(database, kind, objectId, first.incarnation);
+
+			const discarded = await drainObjectDeletions(
+				database,
+				env.BLOBS,
+				kind,
+				500
+			);
+			const markersAfterDrain = await deletionMarkers(kind, objectId);
+			const replacement = await reserveObjectIncarnation(
+				database,
+				kind,
+				objectId,
+				'owner-b'
+			);
+			await env.BLOBS.put(firstKey, 'late first');
+			const marker = await database
+				.select({
+					incarnation: d1Schema.objectDeletion.incarnation,
+					removeAfter: d1Schema.objectDeletion.removeAfter
+				})
+				.from(d1Schema.objectDeletion)
+				.where(
+					and(
+						eq(d1Schema.objectDeletion.kind, kind),
+						eq(d1Schema.objectDeletion.objectId, objectId)
+					)
+				)
+				.all();
+			const lateWriteDeadline = new Date(
+				testBase.getTime() + lateWriteTombstoneHorizonMs
+			);
+
+			vi.setSystemTime(lateWriteDeadline);
+			await drainObjectDeletions(database, env.BLOBS, kind, 500);
+
+			expect({
+				discarded,
+				markersAfterDrain,
+				replacement,
+				marker,
+				firstPresentAfterDeadline: (await env.BLOBS.head(firstKey)) !== null
+			}).toStrictEqual({
+				discarded: { deleted: 0, hasMoreWork: false },
+				// The first reservation also queues the unversioned legacy object.
+				markersAfterDrain: [legacyIncarnation],
+				replacement: { incarnation: first.incarnation + 1, state: 'pending' },
+				marker: [legacyIncarnation, first.incarnation].map((incarnation) => ({
+					incarnation,
+					removeAfter: lateWriteDeadline.toISOString()
+				})),
+				firstPresentAfterDeadline: false
+			});
+		}
+	);
+
+	it.each(['nar', 'cas'] as const)(
+		'keeps an extended %s marker after an earlier drain resumes',
+		async (kind) => {
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const nar = await verifiableNar(`extended-drain-${kind}`);
+			const bundle = await casFixture(`extended-drain-${kind}`);
+			const objectId = kind === 'nar' ? nar.narHash : bundle.digest;
+			const legacyIncarnation = firstVersionedObjectIncarnation - 1;
+			const legacyKey =
+				kind === 'nar'
+					? narObjectKey(nar.narHash, legacyIncarnation)
+					: casObjectKey(bundle.digest, legacyIncarnation);
+			await env.BLOBS.put(legacyKey, 'legacy');
+			await queueObjectDeletion(database, kind, objectId, legacyIncarnation);
 
 			const originalDelete = env.BLOBS.delete.bind(env.BLOBS);
 			const { promise: held, resolve: release } =
@@ -398,7 +503,7 @@ describe('abandoned object version recovery', () => {
 				get: env.BLOBS.get.bind(env.BLOBS),
 				put: env.BLOBS.put.bind(env.BLOBS),
 				async delete(keys) {
-					if ((Array.isArray(keys) ? keys : [keys]).includes(firstKey)) {
+					if ((Array.isArray(keys) ? keys : [keys]).includes(legacyKey)) {
 						didReach(undefined);
 						await held;
 					}
@@ -412,27 +517,12 @@ describe('abandoned object version recovery', () => {
 			const earlyDrain = drainObjectDeletions(database, bucket, kind, 500);
 
 			await reached;
-			const replacement = await reserveObjectIncarnation(
-				database,
-				kind,
-				objectId,
-				'owner-b'
-			);
-			const replacementKey =
-				kind === 'nar'
-					? narObjectKey(nar.narHash, replacement.incarnation)
-					: casObjectKey(bundle.digest, replacement.incarnation);
-			await env.BLOBS.put(replacementKey, 'replacement');
-			await activateObjectIncarnation(
-				database,
-				kind,
-				objectId,
-				replacement.incarnation,
-				'owner-b'
-			);
+			// The first versioned reservation extends the legacy object's marker,
+			// because a writer that predates the registry can still write it.
+			await reserveObjectIncarnation(database, kind, objectId, 'owner-a');
 			release(undefined);
 			await earlyDrain;
-			await env.BLOBS.put(firstKey, 'late first');
+			await env.BLOBS.put(legacyKey, 'late legacy');
 
 			const extendedDeadline = new Date(
 				testBase.getTime() + lateWriteTombstoneHorizonMs
@@ -444,32 +534,26 @@ describe('abandoned object version recovery', () => {
 					and(
 						eq(d1Schema.objectDeletion.kind, kind),
 						eq(d1Schema.objectDeletion.objectId, objectId),
-						eq(d1Schema.objectDeletion.incarnation, first.incarnation)
+						eq(d1Schema.objectDeletion.incarnation, legacyIncarnation)
 					)
 				)
 				.get();
-
-			expect({
-				marker,
-				firstPresent: (await env.BLOBS.head(firstKey)) !== null,
-				replacementPresent: (await env.BLOBS.head(replacementKey)) !== null
-			}).toStrictEqual({
-				marker: { removeAfter: extendedDeadline },
-				firstPresent: true,
-				replacementPresent: true
-			});
+			const isLegacyPresentBeforeDeadline =
+				(await env.BLOBS.head(legacyKey)) !== null;
 
 			vi.setSystemTime(new Date(extendedDeadline));
 			await drainObjectDeletions(database, env.BLOBS, kind, 500);
 
 			expect({
-				markers: await deletionMarkers(kind, objectId),
-				firstPresent: (await env.BLOBS.head(firstKey)) !== null,
-				replacementPresent: (await env.BLOBS.head(replacementKey)) !== null
+				marker,
+				isLegacyPresentBeforeDeadline,
+				markersAfterDeadline: await deletionMarkers(kind, objectId),
+				isLegacyPresentAfterDeadline: (await env.BLOBS.head(legacyKey)) !== null
 			}).toStrictEqual({
-				markers: [],
-				firstPresent: false,
-				replacementPresent: true
+				marker: { removeAfter: extendedDeadline },
+				isLegacyPresentBeforeDeadline: true,
+				markersAfterDeadline: [],
+				isLegacyPresentAfterDeadline: false
 			});
 		}
 	);
@@ -955,7 +1039,7 @@ describe('abandoned object version recovery', () => {
 				continuations
 			}).toStrictEqual({
 				statementLimit: allowance,
-				pageSize: allowance - 1,
+				pageSize: allowance - 2,
 				afterFirst: 1,
 				afterSecond: 0,
 				continuations: ['delete-existing', 'recover']
