@@ -502,7 +502,10 @@ function adminProvider(token = 'admin-jwt'): TokenProvider {
 const adminAuthority: DeployAuthority = {
 	kind: 'admin',
 	admin: owner,
-	access: { credentialFor: () => adminProvider() }
+	access: {
+		credentialFor: () => adminProvider(),
+		storedSessionFor: () => Promise.resolve(undefined)
+	}
 };
 
 function bootstrapAuthority(
