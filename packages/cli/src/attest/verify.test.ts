@@ -182,9 +182,16 @@ function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 const integratedTime = '2024-06-30T14:22:07.000Z';
 const tlogEntries = [{ logIndex: '148905233', integratedTime }];
 const verifiedTimestampCount = 1;
+const acceptingRoot: VerifyTrust['acceptingRoot'] = { kind: 'public-good' };
+const certificateTransparency = {
+	signedCertificateTimestamps: 1,
+	threshold: 1
+};
 const trust: VerifyTrust = {
 	tlogEntries,
 	timestampCount: verifiedTimestampCount,
+	acceptingRoot,
+	certificateTransparency,
 	integratedAt: integratedTime
 };
 
@@ -202,7 +209,9 @@ function verifiedBundle(
 		signer: verifiedSigner(policy),
 		...(fields.predicate !== undefined && { predicate: fields.predicate }),
 		verifiedTimestampCount,
-		tlogEntries
+		tlogEntries,
+		acceptingRoot,
+		certificateTransparency
 	};
 }
 

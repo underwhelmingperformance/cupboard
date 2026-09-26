@@ -9,7 +9,8 @@ import {
 import {
 	InvalidVerifierThresholdError,
 	parseVerifierThreshold,
-	registerAttestCommands
+	registerAttestCommands,
+	trustRows
 } from './attest.ts';
 
 interface VerifyThresholds {
@@ -250,4 +251,62 @@ describe('attest verify thresholds', () => {
 			expect(await parseThreshold(option, '0')).toStrictEqual(expected);
 		}
 	);
+});
+
+describe('trustRows', () => {
+	it.each([
+		{
+			name: 'the public-good root and no thresholds',
+			options: {},
+			trust: {
+				tlogEntries: [],
+				timestampCount: 1,
+				acceptingRoot: { kind: 'public-good' },
+				certificateTransparency: {
+					signedCertificateTimestamps: 1,
+					threshold: 1
+				}
+			},
+			expected: [
+				{ label: 'Trusted root', value: 'the public-good Sigstore root' },
+				{ label: 'Transparency log', value: '0 log entries (threshold 1)' },
+				{
+					label: 'Certificate transparency',
+					value: '1 signed certificate timestamp (threshold 1)'
+				},
+				{ label: 'Timestamps', value: '1 verified timestamp (threshold 1)' }
+			]
+		},
+		{
+			name: 'a trusted-root file and a bundle signed with a public key',
+			options: {
+				trustedRoot: 'github-trusted-roots.jsonl',
+				tlogThreshold: 0,
+				timestampThreshold: 2
+			},
+			trust: {
+				tlogEntries: [],
+				timestampCount: 2,
+				acceptingRoot: { kind: 'file', position: 2, count: 2 }
+			},
+			expected: [
+				{
+					label: 'Trusted root',
+					value: 'root 2 of 2 in github-trusted-roots.jsonl'
+				},
+				{ label: 'Transparency log', value: '0 log entries (threshold 0)' },
+				{
+					label: 'Timestamps',
+					value: '2 verified timestamps (threshold 2)'
+				}
+			]
+		}
+	] satisfies readonly {
+		readonly name: string;
+		readonly options: Parameters<typeof trustRows>[1];
+		readonly trust: Parameters<typeof trustRows>[0];
+		readonly expected: unknown;
+	}[])('reports the evidence for $name', ({ options, trust, expected }) => {
+		expect(trustRows(trust, options)).toStrictEqual(expected);
+	});
 });

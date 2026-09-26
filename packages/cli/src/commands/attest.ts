@@ -3,7 +3,11 @@ import { env } from 'node:process';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { formatCount, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
-import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
+import {
+	defaultVerifierThreshold,
+	type VerifyResult,
+	type VerifyTrust
+} from '@cupboard/shared/sigstore';
 import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
 import type { Command } from 'commander';
 
@@ -465,31 +469,58 @@ function provenanceRows(
 	];
 }
 
-function trustRows(trust: VerifyTrust, options: VerifyOptions): ResultRow[] {
+export function trustRows(
+	trust: VerifyTrust,
+	options: Pick<
+		VerifyOptions,
+		'trustedRoot' | 'tlogThreshold' | 'timestampThreshold'
+	>
+): ResultRow[] {
 	const indexes = trust.tlogEntries.map((entry) => entry.logIndex).join(', ');
+	const { acceptingRoot, certificateTransparency } = trust;
 
 	return [
+		{
+			label: 'Trusted root',
+			value:
+				acceptingRoot.kind === 'public-good'
+					? 'the public-good Sigstore root'
+					: `root ${formatCount(acceptingRoot.position)} of ${formatCount(acceptingRoot.count)} in ${options.trustedRoot ?? 'the trusted-root file'}`
+		},
 		...optionalRow('Rekor integration', trust.integratedAt),
 		...optionalRow(
 			'Rekor log',
 			indexes === '' ? undefined : `index ${indexes}`
 		),
 		{
-			label: 'Transparency',
+			label: 'Transparency log',
 			value: describeCount(
 				trust.tlogEntries.length,
 				'log entry',
 				'log entries',
-				options.tlogThreshold
+				options.tlogThreshold ?? defaultVerifierThreshold
 			)
 		},
+		...(certificateTransparency === undefined
+			? []
+			: [
+					{
+						label: 'Certificate transparency',
+						value: describeCount(
+							certificateTransparency.signedCertificateTimestamps,
+							'signed certificate timestamp',
+							'signed certificate timestamps',
+							certificateTransparency.threshold
+						)
+					}
+				]),
 		{
 			label: 'Timestamps',
 			value: describeCount(
 				trust.timestampCount,
 				'verified timestamp',
 				'verified timestamps',
-				options.timestampThreshold
+				options.timestampThreshold ?? defaultVerifierThreshold
 			)
 		}
 	];
@@ -499,11 +530,7 @@ function describeCount(
 	count: number,
 	singular: string,
 	plural: string,
-	threshold: number | undefined
+	threshold: number
 ): string {
-	const base = `${formatCount(count)} ${count === 1 ? singular : plural}`;
-
-	return threshold === undefined
-		? base
-		: `${base} (threshold ${formatCount(threshold)})`;
+	return `${formatCount(count)} ${count === 1 ? singular : plural} (threshold ${formatCount(threshold)})`;
 }

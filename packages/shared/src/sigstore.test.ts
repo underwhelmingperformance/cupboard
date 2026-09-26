@@ -340,17 +340,34 @@ describe('verifyBundle with a trusted-root file', () => {
 		'unlisted'
 	);
 	const options = { ctlogThreshold: 0, tlogThreshold: 0 };
-	// The verification result for the fixture's signer, without the signer's
-	// key object and certificate OIDs.
-	const verifiedSigner = {
-		predicateType,
-		subjectDigests: [subjectDigest],
-		predicate: {},
-		verifiedTimestampCount: 1,
-		tlogEntries: [],
-		identity: signerIdentity,
-		issuer: signerIssuer
-	};
+	/**
+	 * The verification result for the fixture's signer, without the signer's
+	 * key object and certificate OIDs. The certificate has no signed
+	 * certificate timestamp unless the case gives one.
+	 */
+	function verifiedAgainst(
+		position: number,
+		count: number,
+		certificateTransparency?: {
+			readonly signedCertificateTimestamps: number;
+			readonly threshold: number;
+		}
+	): unknown {
+		return {
+			predicateType,
+			subjectDigests: [subjectDigest],
+			predicate: {},
+			verifiedTimestampCount: 1,
+			tlogEntries: [],
+			acceptingRoot: { kind: 'file', position, count },
+			certificateTransparency: certificateTransparency ?? {
+				signedCertificateTimestamps: 0,
+				threshold: 0
+			},
+			identity: signerIdentity,
+			issuer: signerIssuer
+		};
+	}
 
 	async function verifyWith(
 		trustedRoot: string,
@@ -387,22 +404,33 @@ describe('verifyBundle with a trusted-root file', () => {
 	}
 
 	it.each([
-		{ name: 'one compact JSON document', file: fixture.trustedRoot },
-		{ name: 'one pretty-printed JSON document', file: pretty },
+		{
+			name: 'one compact JSON document',
+			file: fixture.trustedRoot,
+			expected: verifiedAgainst(1, 1)
+		},
+		{
+			name: 'one pretty-printed JSON document',
+			file: pretty,
+			expected: verifiedAgainst(1, 1)
+		},
 		{
 			name: 'JSON Lines with the signing root first',
-			file: `${fixture.trustedRoot}\n${otherRoot}\n`
+			file: `${fixture.trustedRoot}\n${otherRoot}\n`,
+			expected: verifiedAgainst(1, 2)
 		},
 		{
 			name: 'JSON Lines with the signing root last',
-			file: `${otherRoot}\n${thirdRoot}\n${fixture.trustedRoot}\n`
+			file: `${otherRoot}\n${thirdRoot}\n${fixture.trustedRoot}\n`,
+			expected: verifiedAgainst(3, 3)
 		},
 		{
 			name: 'JSON Lines with blank lines and CRLF endings',
-			file: `\r\n${otherRoot}\r\n\r\n${fixture.trustedRoot}\r\n`
+			file: `\r\n${otherRoot}\r\n\r\n${fixture.trustedRoot}\r\n`,
+			expected: verifiedAgainst(2, 2)
 		}
-	])('verifies against $name', async ({ file }) => {
-		expect(await verifyWith(file)).toStrictEqual(verifiedSigner);
+	])('verifies against $name', async ({ file, expected }) => {
+		expect(await verifyWith(file)).toStrictEqual(expected);
 	});
 
 	// `TrustedRoot.mediaType` in `@sigstore/protobuf-specs` documents these
@@ -417,7 +445,7 @@ describe('verifyBundle with a trusted-root file', () => {
 			mediaType
 		});
 
-		expect(await verifyWith(relabelled)).toStrictEqual(verifiedSigner);
+		expect(await verifyWith(relabelled)).toStrictEqual(verifiedAgainst(1, 1));
 	});
 
 	it('rethrows the failure of a single root unchanged', async () => {
@@ -461,13 +489,13 @@ describe('verifyBundle with a trusted-root file', () => {
 			name: 'the signing root lists no logs',
 			file: `${withLogs(otherRoot, { tlog: true, ctlog: true })}\n${fixture.trustedRoot}\n`,
 			bundle: fixture.bundle,
-			expected: verifiedSigner
+			expected: verifiedAgainst(2, 2)
 		},
 		{
 			name: 'the signing root lists a transparency log',
 			file: `${withLogs(fixture.trustedRoot, { tlog: true, ctlog: false })}\n${otherRoot}\n`,
 			bundle: fixture.bundle,
-			expected: verifiedSigner
+			expected: verifiedAgainst(1, 2)
 		},
 		{
 			name: 'the signing root lists a certificate-transparency log and the certificate has no signed certificate timestamp',
@@ -486,13 +514,19 @@ describe('verifyBundle with a trusted-root file', () => {
 			file: withLogs(timestamped.trustedRoot, { tlog: true, ctlog: false }),
 			bundle: timestamped.bundle,
 			thresholds: { tlogThreshold: 0 },
-			expected: verifiedSigner
+			expected: verifiedAgainst(1, 1, {
+				signedCertificateTimestamps: 1,
+				threshold: 1
+			})
 		},
 		{
 			name: 'the signing root lists a certificate-transparency log and the certificate has a signed certificate timestamp',
 			file: `${withLogs(timestamped.trustedRoot, { tlog: true, ctlog: false })}\n${otherRoot}\n`,
 			bundle: timestamped.bundle,
-			expected: verifiedSigner
+			expected: verifiedAgainst(1, 2, {
+				signedCertificateTimestamps: 1,
+				threshold: 1
+			})
 		},
 		{
 			name: 'a signed certificate timestamp from a log that the root does not list',

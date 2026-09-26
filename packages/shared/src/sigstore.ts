@@ -54,6 +54,31 @@ export interface VerifyTlogEntry {
 }
 
 /**
+ * The trusted root against which the bundle verified: the public-good Sigstore
+ * root, or a root from a trusted-root file, as its 1-based position among the
+ * `count` trusted roots in that file.
+ */
+export type AcceptingRoot =
+	| { readonly kind: 'public-good' }
+	| {
+			readonly kind: 'file';
+			readonly position: number;
+			readonly count: number;
+	  };
+
+/**
+ * The certificate-transparency evidence for a bundle signed with a
+ * certificate: the number of signed certificate timestamps that the verifier
+ * checked, and the minimum that applied to the accepting root. A bundle signed
+ * with a public key has no certificate, and the verifier checks no signed
+ * certificate timestamp.
+ */
+export interface CertificateTransparency {
+	readonly signedCertificateTimestamps: number;
+	readonly threshold: number;
+}
+
+/**
  * Evidence extracted after Sigstore verifies a bundle. `integratedAt` is the
  * earliest Rekor integration time, not the time when the signature was
  * created. `timestampCount` counts verified signed timestamps.
@@ -62,6 +87,8 @@ export interface VerifyTrust {
 	readonly integratedAt?: string;
 	readonly tlogEntries: readonly VerifyTlogEntry[];
 	readonly timestampCount: number;
+	readonly acceptingRoot: AcceptingRoot;
+	readonly certificateTransparency?: CertificateTransparency;
 }
 
 export interface VerifyResult {
@@ -95,6 +122,8 @@ export interface VerifiedBundle {
 	readonly predicate?: unknown;
 	readonly verifiedTimestampCount: number;
 	readonly tlogEntries: readonly VerifyTlogEntry[];
+	readonly acceptingRoot: AcceptingRoot;
+	readonly certificateTransparency?: CertificateTransparency;
 }
 
 export interface BundleVerifyOptions extends VerifierOptions {
@@ -333,12 +362,13 @@ export async function verifyBundle(
 		throw new IneffectiveCtlogThresholdError(options.trustedRoot);
 	}
 
-	const signer = verifyAgainstAnyRoot(
+	const accepted = verifyAgainstAnyRoot(
 		roots,
 		signedEntity,
 		verificationPolicy(policy),
 		verifierOptions(options)
 	);
+	const { signer } = accepted;
 
 	// The verifier matches certificate extensions by exact value, so a regex
 	// issuer cannot be expressed as a policy and is enforced here.
@@ -358,6 +388,20 @@ export async function verifyBundle(
 		subjectDigests: parsed.subjectDigests,
 		predicate: parsed.predicate,
 		verifiedTimestampCount: verifiedTimestampCount(signedEntity.timestamps),
+		acceptingRoot:
+			options.trustedRoot === undefined
+				? { kind: 'public-good' }
+				: { kind: 'file', position: accepted.position, count: roots.length },
+		...(signedEntity.key.$case === 'certificate' && {
+			certificateTransparency: {
+				// The verifier checks every signed certificate timestamp in the
+				// certificate, so each one counted here has been verified.
+				signedCertificateTimestamps:
+					signedEntity.key.certificate.extSCT?.signedCertificateTimestamps
+						.length ?? 0,
+				threshold: accepted.ctlogThreshold
+			}
+		}),
 		tlogEntries: signedEntity.tlogEntries.map((entry) => {
 			const integratedTime = isoFromUnixSeconds(entry.integratedTime);
 
@@ -425,6 +469,10 @@ function trustFor(verified: VerifiedBundle): VerifyTrust {
 	return {
 		tlogEntries: verified.tlogEntries,
 		timestampCount: verified.verifiedTimestampCount,
+		acceptingRoot: verified.acceptingRoot,
+		...(verified.certificateTransparency !== undefined && {
+			certificateTransparency: verified.certificateTransparency
+		}),
 		...(integratedAt !== undefined && { integratedAt })
 	};
 }
@@ -474,21 +522,21 @@ function verifyAgainstAnyRoot(
 	signedEntity: SignedEntity,
 	policy: VerificationPolicy,
 	options: VerifierOptions
-): Signer {
+): AcceptedVerification {
 	const [firstRoot, ...otherRoots] = roots;
 	const first = verifyAgainstRoot(firstRoot, signedEntity, policy, options);
 
 	if (first.ok) {
-		return first.signer;
+		return { ...first.accepted, position: 1 };
 	}
 
 	const failures: [unknown, ...unknown[]] = [first.failure];
 
-	for (const loaded of otherRoots) {
+	for (const [index, loaded] of otherRoots.entries()) {
 		const attempt = verifyAgainstRoot(loaded, signedEntity, policy, options);
 
 		if (attempt.ok) {
-			return attempt.signer;
+			return { ...attempt.accepted, position: index + 2 };
 		}
 
 		failures.push(attempt.failure);
@@ -501,8 +549,22 @@ function verifyAgainstAnyRoot(
 	throw new TrustedRootsRejectedError(failures);
 }
 
+/**
+ * The signer from the root against which the bundle verified, the root's
+ * 1-based position in the list, and the certificate-transparency threshold
+ * that applied to that root.
+ */
+interface AcceptedVerification {
+	readonly signer: Signer;
+	readonly position: number;
+	readonly ctlogThreshold: number;
+}
+
 type RootAttempt =
-	| { readonly ok: true; readonly signer: Signer }
+	| {
+			readonly ok: true;
+			readonly accepted: Omit<AcceptedVerification, 'position'>;
+	  }
 	| { readonly ok: false; readonly failure: unknown };
 
 function verifyAgainstRoot(
@@ -511,13 +573,18 @@ function verifyAgainstRoot(
 	policy: VerificationPolicy,
 	options: VerifierOptions
 ): RootAttempt {
+	const rootOptions = rootVerifierOptions(loaded.root, options);
+
 	try {
 		return {
 			ok: true,
-			signer: new Verifier(
-				loaded.material,
-				rootVerifierOptions(loaded.root, options)
-			).verify(signedEntity, policy)
+			accepted: {
+				signer: new Verifier(loaded.material, rootOptions).verify(
+					signedEntity,
+					policy
+				),
+				ctlogThreshold: rootOptions.ctlogThreshold
+			}
 		};
 	} catch (error) {
 		// The verifier checks the policy only after the bundle has verified
@@ -533,10 +600,10 @@ function verifyAgainstRoot(
 }
 
 /**
- * The Sigstore verifier's own default for each log threshold, which applies
- * when the caller sets none.
+ * The Sigstore verifier's own default for each threshold, which applies when
+ * the caller sets none.
  */
-const defaultLogThreshold = 1;
+export const defaultVerifierThreshold = 1;
 
 /**
  * A zero certificate-transparency threshold applies only to a root that lists
@@ -557,14 +624,14 @@ function rootVerifierOptions(
 	root: TrustedRoot,
 	options: VerifierOptions
 ): VerifierOptions & { readonly ctlogThreshold: number } {
-	const ctlogThreshold = options.ctlogThreshold ?? defaultLogThreshold;
+	const ctlogThreshold = options.ctlogThreshold ?? defaultVerifierThreshold;
 
 	return {
 		...options,
 		ctlogThreshold:
 			root.ctlogs.length === 0
 				? ctlogThreshold
-				: Math.max(defaultLogThreshold, ctlogThreshold)
+				: Math.max(defaultVerifierThreshold, ctlogThreshold)
 	};
 }
 
