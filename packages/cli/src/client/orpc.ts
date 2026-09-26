@@ -153,9 +153,8 @@ function replaySafetyFor(
 
 const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
-// Leave 503 and 507 responses for oRPC to decode. Of these statuses,
-// `translateRpcError` converts only 507 to a CLI quota error; 503 remains an
-// ORPCError so callers can inspect its code and data.
+// Leave 503 and 507 responses for oRPC to decode, so callers can inspect the
+// oRPC code and data before `translateRpcError` converts them to CLI errors.
 const typedServerErrorStatuses = new Set<number>([
 	StatusCodes.SERVICE_UNAVAILABLE,
 	StatusCodes.INSUFFICIENT_STORAGE
