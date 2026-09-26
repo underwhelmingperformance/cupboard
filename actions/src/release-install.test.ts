@@ -2582,7 +2582,9 @@ function verifiedAs(digest: string, commit: string): VerifiedBundle {
 			}
 		},
 		verifiedTimestampCount: 0,
-		tlogEntries: []
+		tlogEntries: [],
+		acceptingRoot: { kind: 'public-good' },
+		certificateTransparency: { signedCertificateTimestamps: 1, threshold: 1 }
 	};
 }
 
