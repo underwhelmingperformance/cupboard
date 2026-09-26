@@ -53,6 +53,10 @@ const cupboard = {
 	privateKey: 'cupboard-acme-2:QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8='
 };
 const privateUrl = 'https://cupboard.example/t/acme/cache/release';
+const user = {
+	url: 'https://user-cache.example',
+	key: 'user-cache-1:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8='
+};
 
 const listSettingSchema = z.object({ value: z.array(z.string()) });
 const configShowSchema = z.object({
@@ -67,9 +71,15 @@ interface NixSettings {
 
 type PrivateFile = 'present' | 'absent' | 'unreachable';
 
-interface ModuleCase {
+interface Scenario {
+	readonly module: 'nixos' | 'home-manager';
 	readonly file: PrivateFile;
-	readonly substituters: readonly string[];
+	readonly user: 'none' | 'settings' | 'extraOptions';
+}
+
+interface ModuleCase extends Scenario {
+	readonly name: string;
+	readonly expected: NixSettings;
 }
 
 /**
@@ -94,11 +104,11 @@ async function privateFile(root: string, file: PrivateFile): Promise<string> {
 }
 
 /**
- * Reads the settings that Nix derives from a system `nix.conf`.
+ * Reads the settings that Nix derives from the system `nix.conf` in
+ * `NIX_CONF_DIR` and the user-level files in `NIX_USER_CONF_FILES`.
  */
 async function shownSettings(
-	environment: NodeJS.ProcessEnv,
-	configDirectory: string
+	environment: NodeJS.ProcessEnv
 ): Promise<NixSettings> {
 	const shown = await runCommand(
 		'nix',
@@ -109,7 +119,7 @@ async function shownSettings(
 			'show',
 			'--json'
 		],
-		{ env: { ...environment, NIX_CONF_DIR: configDirectory } }
+		{ env: environment }
 	);
 	const settings = configShowSchema.parse(JSON.parse(shown.stdout));
 
@@ -120,12 +130,14 @@ async function shownSettings(
 }
 
 /**
- * Renders the NixOS module's `nix.conf` for the case's private file and returns
- * the settings that Nix reads from it, together with the settings of an empty
- * configuration for comparison.
+ * Renders the module's `nix.conf` for the scenario and returns the settings
+ * that Nix reads, together with the settings of an empty configuration for
+ * comparison. The NixOS module's file is the system `nix.conf`. The Home
+ * Manager module's file is a user-level `nix.conf`, which Nix reads after a
+ * system file that lists the system cache.
  */
 async function renderedSettings(
-	file: PrivateFile
+	scenario: Scenario
 ): Promise<{ readonly rendered: NixSettings; readonly empty: NixSettings }> {
 	return withTemporaryDirectory(
 		'cupboard-nix-module-',
@@ -136,7 +148,7 @@ async function renderedSettings(
 			await mkdir(systemDirectory);
 			await mkdir(emptyDirectory);
 
-			const substitutersFile = await privateFile(root, file);
+			const substitutersFile = await privateFile(root, scenario.file);
 			const rendered = await runCommand(
 				'nix',
 				['eval', '--impure', '--raw', '--file', renderExpression],
@@ -148,54 +160,126 @@ async function renderedSettings(
 						}),
 						CUPBOARD_NIX_MODULE_INPUT: JSON.stringify({
 							root: repositoryRoot,
+							module: scenario.module,
 							substitutersFile,
 							system,
-							cupboard
+							cupboard,
+							user: { ...user, configuration: scenario.user }
 						})
 					}
 				}
 			);
-			await writeFile(path.join(systemDirectory, 'nix.conf'), rendered.stdout);
+			const userFile = path.join(root, 'user-nix.conf');
+			const systemFile = path.join(systemDirectory, 'nix.conf');
+
+			if (scenario.module === 'nixos') {
+				await writeFile(systemFile, rendered.stdout);
+			} else {
+				await writeFile(
+					systemFile,
+					`substituters = ${system.url}\ntrusted-public-keys = ${system.key}\n`
+				);
+				await writeFile(userFile, rendered.stdout);
+			}
 
 			return {
-				rendered: await shownSettings(environment, systemDirectory),
-				empty: await shownSettings(environment, emptyDirectory)
+				rendered: await shownSettings({
+					...environment,
+					NIX_CONF_DIR: systemDirectory,
+					...(scenario.module === 'home-manager' && {
+						NIX_USER_CONF_FILES: userFile
+					})
+				}),
+				empty: await shownSettings({
+					...environment,
+					NIX_CONF_DIR: emptyDirectory
+				})
 			};
 		},
 		{ makeWritableBeforeCleanup: true }
 	);
 }
 
-describe.skipIf(!isNixPresent)('the NixOS module', () => {
+describe.skipIf(!isNixPresent)('the cupboard Nix module', () => {
 	it.each<ModuleCase>([
 		{
+			name: 'NixOS, private file present',
+			module: 'nixos',
 			file: 'present',
-			substituters: [cupboard.url, system.url, privateUrl]
+			user: 'none',
+			expected: {
+				substituters: [system.url, cupboard.url, privateUrl],
+				trustedPublicKeys: [system.key, cupboard.key, cupboard.privateKey]
+			}
 		},
 		{
+			name: 'NixOS, private file absent',
+			module: 'nixos',
 			file: 'absent',
-			substituters: [cupboard.url, system.url]
-		}
-	])(
-		'adds its caches and keys when the private file is $file',
-		async ({ file, substituters }) => {
-			const { rendered } = await renderedSettings(file);
-
-			expect(rendered).toStrictEqual({
-				substituters,
+			user: 'none',
+			expected: {
+				substituters: [system.url, cupboard.url],
 				trustedPublicKeys: [system.key, cupboard.key, cupboard.privateKey]
-			});
+			}
+		},
+		{
+			name: 'Home Manager, system cache in the system nix.conf',
+			module: 'home-manager',
+			file: 'present',
+			user: 'none',
+			expected: {
+				substituters: [system.url, cupboard.url, privateUrl],
+				trustedPublicKeys: [system.key, cupboard.key, cupboard.privateKey]
+			}
+		},
+		{
+			name: 'Home Manager, private file absent',
+			module: 'home-manager',
+			file: 'absent',
+			user: 'none',
+			expected: {
+				substituters: [system.url, cupboard.url],
+				trustedPublicKeys: [system.key, cupboard.key, cupboard.privateKey]
+			}
+		},
+		{
+			name: "Home Manager, user's own bare substituters and keys",
+			module: 'home-manager',
+			file: 'present',
+			user: 'settings',
+			expected: {
+				substituters: [user.url, cupboard.url, privateUrl],
+				trustedPublicKeys: [user.key, cupboard.key, cupboard.privateKey]
+			}
+		},
+		{
+			name: "Home Manager, bare substituters and keys in the user's extraOptions",
+			module: 'home-manager',
+			file: 'present',
+			user: 'extraOptions',
+			expected: {
+				substituters: [user.url, cupboard.url, privateUrl],
+				trustedPublicKeys: [user.key, cupboard.key, cupboard.privateKey]
+			}
 		}
-	);
+	])('adds its caches and keys: $name', async ({ expected, ...scenario }) => {
+		const { rendered } = await renderedSettings(scenario);
+
+		expect(rendered).toStrictEqual(expected);
+	});
 
 	// Nix checks whether the included file exists, and that check fails when
-	// the directory cannot be entered. Nix then ignores the whole system
-	// `nix.conf` for that account without an error. Root can enter every
+	// the account cannot search the directory. Nix then ignores the whole system
+	// `nix.conf` for that account without an error. Root can search every
 	// directory, so the case runs only as another account.
 	it.skipIf(isRoot)(
 		"makes Nix ignore the system nix.conf when the private file's directory is not searchable",
 		async () => {
-			const { rendered, empty } = await renderedSettings('unreachable');
+			const { rendered, empty } = await renderedSettings({
+				module: 'nixos',
+				file: 'unreachable',
+				user: 'none'
+			});
 
 			expect(rendered).toStrictEqual(empty);
 		}
