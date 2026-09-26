@@ -10,7 +10,7 @@ import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
-import { DeploymentPhaseUnsettledError } from '../errors.ts';
+import { WorkersNotServingBuildError } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
@@ -678,7 +678,7 @@ async function servingBuildVersion(
  * The deployments API reports the configured allocation, not whether old
  * requests have finished. Contracted schemas must reject incompatible writes. If a script is still split across
  * versions, or still serves an earlier build, this throws
- * {@link DeploymentPhaseUnsettledError} and leaves the row unchanged.
+ * {@link WorkersNotServingBuildError} and leaves the row unchanged.
  */
 async function settlePhase(
 	dependencies: DeployDependencies,
@@ -710,7 +710,7 @@ async function settlePhase(
 		}
 
 		if (unsettled.length > 0) {
-			throw new DeploymentPhaseUnsettledError(unsettled, artifact.buildVersion);
+			throw new WorkersNotServingBuildError(unsettled, artifact.buildVersion);
 		}
 
 		if (dependencies.settleTenants !== undefined) {

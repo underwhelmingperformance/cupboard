@@ -64,15 +64,16 @@ export class UnclassifiedD1MigrationError extends CliError {
 }
 
 /**
- * The recorded phase describes the code that is running, so a deploy records it
- * only when every script serves the build it just uploaded. A script fails this
- * check when it still serves an earlier build, or when a gradual deployment
- * splits its traffic across two versions.
+ * After the upload, every deploy checks that each script serves the build that
+ * it has just uploaded. Contract migrations remove what the earlier build
+ * reads, so the deploy applies none until the check passes. A script fails
+ * this check when it still serves an earlier build, or when a gradual
+ * deployment splits its traffic across two versions.
  *
  * The deploy has already uploaded the Workers when it throws this. Running the
- * deploy again once the rollout has finished records the phase.
+ * deploy again once the rollout has finished applies the contract migrations.
  */
-export class DeploymentPhaseUnsettledError extends CliError {
+export class WorkersNotServingBuildError extends CliError {
 	constructor(
 		public readonly scripts: readonly string[],
 		public readonly buildVersion: string
@@ -80,9 +81,9 @@ export class DeploymentPhaseUnsettledError extends CliError {
 		const verb = scripts.length === 1 ? 'is' : 'are';
 
 		super(
-			`${scripts.join(' and ')} ${verb} not serving ${buildVersion} from a single version, so the deployment phase was not recorded. Re-run the deploy once the rollout has settled.`
+			`${scripts.join(' and ')} ${verb} not serving ${buildVersion} from a single version, so the deploy stopped before applying any contract migrations. Re-run the deploy once the rollout has finished.`
 		);
-		this.name = 'DeploymentPhaseUnsettledError';
+		this.name = 'WorkersNotServingBuildError';
 	}
 }
 
