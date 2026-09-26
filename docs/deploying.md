@@ -126,6 +126,14 @@ This release defines two transitions:
   their contract migrations. A transition that is not independent is called
   _dependent_.
 
+`pnpm check:migrations` replays the migrations in the order that the deploy uses
+for each N, starting from a deployment whose first N transitions are complete
+and whose later ones are pending. It fails if any of those orders fails to
+apply, or if one produces a different schema from name order. It compares
+schemas, not rows. It does not replay one history: an independent transition
+with contract migrations that expanded ahead of an earlier transition's contract
+migrations and is still expanded when a later release adds another transition.
+
 The `deployment_transition` table has one row for each transition that the
 deploy has started. The state is `expanded` once the transition's expand
 migrations are applied, and `complete` once its contract migrations are applied
