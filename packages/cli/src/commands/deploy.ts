@@ -6,7 +6,9 @@ import { type Command, InvalidArgumentError } from 'commander';
 
 import { parseCacheAccess } from '../cache-access.ts';
 import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
+import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
+import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import type { WorkersPlanOverride } from '../deploy/workers-plan.ts';
 
 function parseWorkersPlan(value: string): WorkersPlanOverride {
@@ -53,6 +55,20 @@ export function registerDeployCommand(
 			'read access for the first cache: public or private (you are asked ' +
 				'when it is omitted)',
 			parseCacheAccess
+		)
+		.option(
+			'--oidc-issuer <issuer>',
+			'OIDC issuer of the identity that claims a new deployment as its admin',
+			cloudflareDashIssuer
+		)
+		.option(
+			'--client-id <id>',
+			'registered public OAuth client id for the admin login on a first deploy (PKCE, no client secret)',
+			cloudflareOauthClientId
+		)
+		.option(
+			'--headless',
+			'use the device flow instead of a browser for the admin login on a first deploy; the Cloudflare login for the account can still open a browser'
 		)
 		.option(
 			'--no-wrangler',

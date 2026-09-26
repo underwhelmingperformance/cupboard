@@ -40,9 +40,136 @@ defaults.
 
 Choosing a different account in the menu restarts the deployment plan from that
 account's existing deployment. The switch discards the resource, cron trigger
-and domain edits made so far, and any request to replace the R2 credentials. It
-keeps the Admin setting. The plan then shows the domain given with `--domain`,
-or otherwise the custom domain routed to that account's control Worker.
+and domain edits made so far, and any request to replace the R2 credentials. The
+plan then shows the domain given with `--domain`, or otherwise the custom domain
+routed to that account's control Worker.
+
+## Admin
+
+A deployment has one global admin, recorded in the `global_admin` row of its D1
+database. The first principal to present the claim secret at `/signup` becomes
+the admin; this is the claim. The Cloudflare credential that `cupboard init`
+uses for the account (an OAuth login, a wrangler token or an API token) does not
+make anyone a Cupboard admin. The claim uses the identity in an id_token.
+
+Before it changes anything, the deploy reads the admin from the database
+selected in the plan. The next sections describe what the deploy does for each
+state of the row, and with or without a terminal.
+
+### First deploy
+
+When the database records no admin and the deploy runs in a terminal, it logs
+you in to Cloudflare by default. `--oidc-issuer` and `--client-id` select
+another issuer and OAuth client, with the same defaults as `cupboard login`.
+With the default issuer and client, and without `--headless`, this login uses
+Cupboard's cached Cloudflare login if there is one; it opens a browser only when
+there is no cached login or the cached login cannot be renewed. With a different
+issuer or client, the login is always a separate login to that issuer. With
+`--headless`, it uses the device flow instead of a browser; the Cloudflare login
+for the account can still open a browser.
+
+The deploy then prints who the claim will make the admin (the display name,
+issuer, subject and audience from your id_token) and asks you to confirm,
+because the claim cannot be undone. `--yes` confirms without asking.
+
+The id_token's issuer must be an HTTPS URL without a query or fragment, and the
+token must have a `sub` claim. Its `aud` claim must contain exactly one
+audience, because the control trust rule that the claim seeds pins one. The
+deploy checks these before any change and stops if the id_token does not meet
+them, because `/signup` would refuse the token after the upload. An issuer that
+adds further audiences to its id_tokens cannot be used for the claim.
+
+The deploy sets a generated claim secret, as the control Worker's
+`CUPBOARD_SIGNUP_SECRET`, along with the other Worker secrets. Once the new
+build serves, it:
+
+1. presents the secret and your id_token at `/signup`, which records the token's
+   issuer and subject as the admin and seeds a control trust rule that pins the
+   issuer, subject and audience;
+2. deletes the secret, whether or not the claim succeeded;
+3. exchanges the same id_token at `/token` for an admin token and caches it, as
+   `cupboard login` does.
+
+The id_token presented at the claim must belong to the identity that you
+confirmed. The deploy keeps the id_token from the login before the upload and
+logs in again only if that token expires within a minute. If a second login
+returns another identity, the deploy stops before the claim.
+
+If the claim succeeds but the admin token cannot be cached, the deploy stops and
+prints that the claim succeeded. Run the `cupboard login` command that the
+deploy prints to cache the token, then run `cupboard init` again to finish.
+
+The deploy retries `/signup` while it returns 404, 408, 429, 502, 503 or 504,
+for up to 30 attempts four seconds apart (about two minutes), and while it
+returns 403 from a Worker that has not yet received the claim secret. When the
+claim fails, the advice depends on the last response:
+
+- 409: another principal is already the admin. Log in as that admin, with the
+  issuer and client that the admin claimed with, to update the deployment.
+- 400: the deployment rejected your id_token or the request, and the message
+  includes the server's reason.
+- 429: Cloudflare limited the rate of requests. Wait a few minutes and run the
+  deploy again.
+- A 5xx status: the deploy prints the control Worker's log for the request when
+  Cloudflare has it.
+- 403, repeated: the claim secret did not take effect in time, and a re-run
+  claims with a fresh secret.
+- Any other status: check that the URL serves this release's control Worker.
+- No response: the deploy reports that it could not reach the deployment.
+
+`/signup` accepts the claim secret from anyone for as long as it is set. A first
+deploy from a terminal therefore removes the secret after the claim attempt, and
+also when the run stops after setting the secret but before the claim, including
+when you interrupt it. Before its own upload, an update or a deploy without a
+terminal removes any secret that an earlier run left, for example after an
+interrupted run. If a removal fails, the deploy prints a warning, and the secret
+stays set on the Worker until the next `cupboard init` removes it. The deploy
+never prints the value or writes it to disk.
+
+Whether the deploy claims or updates the deployment depends on the row, not on
+whether Workers are already deployed. A deployment uploaded without a claim is
+claimed by the next deploy from a terminal. So is a deployment whose earlier
+deploy stopped before the claim; the next deploy sets a fresh secret. If a first
+deploy from a terminal stops before the claim because the deployment kept
+answering with an older build or an error status, or because the account has no
+workers.dev subdomain, the deploy says that the deployment has no admin yet and
+exits with a non-zero status. A network failure while it waits for the new build
+ends the run with that error instead.
+
+### First deploy without a terminal
+
+When the database records no admin and the deploy has no terminal, it provisions
+and uploads but skips the claim and the first cache, because the claim needs a
+login. It does not wait for the new build to serve. It exits with an error that
+says the deployment has no admin, because nobody can create a cache until
+someone claims it. A deploy from CI has no terminal and cannot log in, so it
+cannot claim a deployment, and a CI job that deploys a new deployment fails
+until someone runs `cupboard init` from a terminal.
+
+### Update
+
+When the database records an admin, the deploy updates the deployment with the
+session cached by `cupboard login <deployment URL>`. It uses the session to
+initialise the instance, rebuild tenant membership, check the Worker's R2
+credentials and migrate the tenants, which brings each tenant's Durable Object
+to the local step that the release requires (see [Local steps][local-steps]).
+
+[local-steps]: #local-steps
+
+### The first cache
+
+The first cache is created only on a deployment without tenants, and only by an
+admin. At a terminal, the deploy asks for its slug, and for its read access
+unless `--access` is given. A deploy without a terminal does not create the
+first cache.
+
+### How principals are shown
+
+The CLI shows your own identity as your token's `name`, `email`,
+`preferred_username` or `sub` claim, whichever it finds first in that order. It
+reads your display name from your token each time, and the deployment does not
+record it. Other principals appear as the full issuer URL followed by the
+subject; an update shows the admin in this form.
 
 ## Workers plan and subrequest allowance
 
@@ -102,7 +229,8 @@ This release finishes a deploy in `contracted`. One run performs these steps:
 3. Upload both Workers and configure their triggers and secrets.
 4. Check that each Worker's deployment assigns all traffic to one version and
    that both Workers report this build. Check that every active tenant has
-   reached local step 4, waking pending tenants in batches of 20.
+   reached local step 4, waking pending tenants in batches of 20 with the admin
+   token.
 5. Record `native-reads`, apply the D1 contraction migrations and record
    `contracted`. Wake tenants again until they finish local step 5.
 

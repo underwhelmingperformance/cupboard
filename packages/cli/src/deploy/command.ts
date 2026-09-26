@@ -3,6 +3,7 @@ import { isSea } from 'node:sea';
 
 import type { CacheAccessMode } from '@cupboard/nix-store/scalars';
 import type { InstanceName } from '@cupboard/protocol/instance';
+import type { ResultRow } from '@cupboard/reporter';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
@@ -10,6 +11,7 @@ import { StatusCodes } from 'http-status-codes';
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { controlRpc } from '../client/orpc.ts';
+import { loginIdToken } from '../commands/login.ts';
 import { CliError } from '../errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
@@ -19,17 +21,23 @@ import {
 	freshIdToken,
 	resolveCloudflare
 } from './auth.ts';
+import {
+	type DeployAuthority,
+	establishAuthority,
+	removeLeftoverClaimSecret,
+	renewingIdToken,
+	tenantMigratorFor,
+	withClaimSecret
+} from './authority.ts';
 import { createEsbuildBundler } from './bundle.ts';
 import { fetchClaimFailureLogs } from './claim-logs.ts';
+import { claimSecretCleanupApi, removeClaimSecret } from './claim-secret.ts';
 import {
 	type AccountSummary,
 	type CloudflareApi,
 	createCloudflareApi
 } from './cloudflare-api.ts';
-import {
-	cloudflareOauthClientId,
-	refreshCloudflareGrant
-} from './cloudflare-oauth.ts';
+import { refreshCloudflareGrant } from './cloudflare-oauth.ts';
 import {
 	cronProblem,
 	type DeploymentConfig,
@@ -57,27 +65,17 @@ import {
 } from './grant-store.ts';
 import type { CloudflareAccountId } from './identifiers.ts';
 import {
-	type ClaimSecret,
-	onboardAdminFor,
-	onboardDeployment
+	DeploymentClaimFailedError,
+	onboardDeployment,
+	type OnboardOutcome
 } from './onboard.ts';
 import { showReadyCache } from './onboard-ready.ts';
 import {
 	renameResource,
 	withCrons,
-	withSignupGate,
 	withWorkersInvocationAllowance
 } from './overrides.ts';
-import {
-	cloudflareDashIssuer,
-	defaultOwnerChoice,
-	deployerOwner,
-	type OwnerBinding,
-	type OwnerChoice,
-	ownerFieldProblemText,
-	ownerHint,
-	ownerIssuerProblemText
-} from './owner.ts';
+import { claimantLabel } from './owner.ts';
 import {
 	checkR2Credentials,
 	promptR2CredentialPair,
@@ -178,6 +176,16 @@ export interface DeployCliOptions {
 	readonly instanceName?: InstanceName;
 	readonly account?: string;
 	readonly access?: CacheAccessMode;
+	/**
+	The issuer and client of the admin's login on a first deploy.
+	*/
+	readonly oidcIssuer: string;
+	readonly clientId: string;
+	/**
+	 * Log the operator in through the device flow instead of a browser, for the
+	 * admin login on a first deploy.
+	 */
+	readonly headless?: boolean;
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
@@ -194,53 +202,10 @@ function bucketNameOf(config: DeploymentConfig): string {
 	return config.tenant.r2Buckets[0]?.bucketName ?? 'cupboard-blobs';
 }
 
-/**
- * Why the server refused the admin claim, by status class: an ownership or
- * claim-secret mismatch, a server-side fault to read in the logs, or a
- * likely-stale login, which is the only case where re-running `cupboard init`
- * signs in again.
- */
-export type ClaimRefusalReason =
-	'ownership-or-secret' | 'server-error' | 'stale-login';
-
-// http-status-codes exposes its codes as an enum; widen the two compared
-// against a response's numeric status so the comparisons stay number to number.
-const forbidden: number = StatusCodes.FORBIDDEN;
+// http-status-codes exposes its codes as an enum. `serverError` is widened to
+// `number` so the comparison with a response's numeric status is number to
+// number.
 const serverError: number = StatusCodes.INTERNAL_SERVER_ERROR;
-
-export function claimRefusalReason(status: number): ClaimRefusalReason {
-	if (status === forbidden) {
-		return 'ownership-or-secret';
-	}
-
-	if (status >= serverError) {
-		return 'server-error';
-	}
-
-	return 'stale-login';
-}
-
-// The operator-facing advice for a refusal that is not a server error; a server
-// error is surfaced through `showServerFault` instead, which reads the log.
-function claimRefusalAdvice(
-	reason: Exclude<ClaimRefusalReason, 'server-error'>
-): string {
-	switch (reason) {
-		case 'ownership-or-secret': {
-			return (
-				'The deployment may already belong to a different identity, or its ' +
-				'claim secret did not match.'
-			);
-		}
-
-		case 'stale-login': {
-			return (
-				'Your Cloudflare login may have gone stale; re-running ' +
-				'`cupboard init` signs in again.'
-			);
-		}
-	}
-}
 
 /**
  * Surface a server-side fault a deploy probe hit: read the exception the Worker
@@ -338,7 +303,6 @@ export interface PlanState {
 	readonly accountId: CloudflareAccountId;
 	readonly domain: string | undefined;
 	readonly config: DeploymentConfig;
-	readonly owner: OwnerChoice;
 	/**
 	Replace the R2 credentials the Worker already holds with a new pair.
 	*/
@@ -351,7 +315,6 @@ type PlanChoice =
 	| 'account'
 	| 'domain'
 	| 'crons'
-	| 'owner'
 	| 'r2-credentials'
 	| 'cancel'
 	| ResourceChoice;
@@ -413,7 +376,6 @@ export function planMenuEntries(
 			label: 'Cron triggers',
 			hint: state.config.control.crons.join(', ') || '(none)'
 		},
-		{ value: 'owner', label: 'Admin', hint: ownerHint(state.owner) },
 		{ value: 'cancel', label: 'Cancel' }
 	];
 }
@@ -440,7 +402,6 @@ export interface PlanReviewWorld {
 	readonly ui: DeployUi;
 	readonly render: (state: PlanState) => Promise<void>;
 	readonly accounts: () => Promise<readonly AccountSummary[]>;
-	readonly deployer: OwnerBinding | undefined;
 	readonly skipReview: boolean;
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
 	/**
@@ -456,98 +417,6 @@ export interface PlanReviewWorld {
 	 * custom domain on every account.
 	 */
 	readonly requestedDomain: string | undefined;
-}
-
-async function editOwner(
-	state: PlanState,
-	world: PlanReviewWorld
-): Promise<PlanState> {
-	const { ui } = world;
-
-	const choice = await ui.menu('Who should administer this deployment?', [
-		...(world.deployer === undefined
-			? []
-			: [
-					{
-						value: 'deployer',
-						label: 'You, the deployer',
-						hint: world.deployer.subject
-					} as const
-				]),
-		{
-			value: 'manual',
-			label: 'Another OIDC identity',
-			hint: 'issuer, subject and audience'
-		},
-		{
-			value: 'none',
-			label: 'Nobody',
-			hint: 'the signup gate stays closed; no admin, no tenants'
-		},
-		{ value: 'keep', label: 'Keep the current admin' }
-	]);
-
-	if (choice === undefined || choice === 'keep') {
-		return state;
-	}
-
-	if (choice === 'deployer' && world.deployer !== undefined) {
-		return {
-			...state,
-			owner: { kind: 'owner', owner: world.deployer, origin: 'deployer' }
-		};
-	}
-
-	if (choice === 'none') {
-		return { ...state, owner: { kind: 'none' } };
-	}
-
-	const current = state.owner.kind === 'owner' ? state.owner.owner : undefined;
-
-	const issuer = await ui.editText({
-		message: 'OIDC issuer URL',
-		initial: current?.issuer ?? cloudflareDashIssuer,
-		problem: ownerIssuerProblemText
-	});
-
-	if (issuer.kind !== 'set') {
-		return state;
-	}
-
-	const subject = await ui.editText({
-		message: 'Subject (the sub claim of your id_token)',
-		initial: current?.subject,
-		problem: ownerFieldProblemText
-	});
-
-	if (subject.kind !== 'set') {
-		return state;
-	}
-
-	const audience = await ui.editText({
-		message: 'Audience (the OAuth client id the id_token is issued for)',
-		initial:
-			current?.audience ??
-			(issuer.value === cloudflareDashIssuer ? cloudflareOauthClientId : ''),
-		problem: ownerFieldProblemText
-	});
-
-	if (audience.kind !== 'set') {
-		return state;
-	}
-
-	return {
-		...state,
-		owner: {
-			kind: 'owner',
-			owner: {
-				issuer: issuer.value,
-				subject: subject.value,
-				audience: audience.value
-			},
-			origin: 'manual'
-		}
-	};
 }
 
 async function applyPlanEdit(
@@ -589,10 +458,6 @@ async function applyPlanEdit(
 		}
 
 		return edit.kind === 'clear' ? { ...state, domain: undefined } : state;
-	}
-
-	if (choice === 'owner') {
-		return editOwner(state, world);
 	}
 
 	if (choice === 'r2-credentials') {
@@ -1115,12 +980,7 @@ async function deployFlow(
 			),
 			...transitionPlanRows(offlinePlan),
 			{ label: '', value: '' },
-			...choicePlanRows(
-				offlineArtifact.config,
-				initialDomain,
-				// Dry runs do not authenticate, so derive the plan without a deployer identity.
-				defaultOwnerChoice(artifact.config)
-			)
+			...choicePlanRows(offlineArtifact.config, initialDomain)
 		]);
 		warnMissing(assembled.missing.filter((name) => !r2Names.has(name)));
 		ui.outro('Dry run: nothing was changed.');
@@ -1132,14 +992,13 @@ async function deployFlow(
 	}
 
 	let client: Cloudflare;
+	let clientWithSignal: (signal: AbortSignal) => Cloudflare;
 	let api: CloudflareApi;
 	let accountId: CloudflareAccountId;
 	let credentialSource: CredentialSource;
-	let subject: string | undefined;
-	let idToken: string | undefined;
 
 	try {
-		({ client, api, accountId, credentialSource, subject, idToken } =
+		({ client, clientWithSignal, api, accountId, credentialSource } =
 			await resolveCloudflare(
 				cliOptions.account,
 				(accounts) => chooseDeployAccount(ui, accounts, isInteractive),
@@ -1189,6 +1048,13 @@ async function deployFlow(
 	>();
 	let generatedWrapSecret: string | undefined;
 	let generatedPushIdSigningKey: string | undefined;
+	// The notes for generated secrets wait until the run is allowed to change
+	// the deployment, so a run that stops before any change does not ask the
+	// operator to save a value that it never uploads.
+	const generatedSecretNotes: {
+		readonly title: string;
+		readonly rows: readonly ResultRow[];
+	}[] = [];
 
 	const existingSecretsFor = (
 		accountId: CloudflareAccountId
@@ -1265,17 +1131,21 @@ async function deployFlow(
 				});
 
 				if (isNewlyGenerated) {
-					ui.note('Generated CONTROL_KEY_WRAP_SECRET: save this value now', [
-						{
-							label: 'What',
-							value: 'the key that encrypts control-plane signing keys at rest'
-						},
-						{
-							label: 'Why',
-							value: 'a different wrapping secret cannot unwrap existing data'
-						},
-						{ label: 'Value', value: generatedWrapSecret }
-					]);
+					generatedSecretNotes.push({
+						title: 'Generated CONTROL_KEY_WRAP_SECRET: save this value now',
+						rows: [
+							{
+								label: 'What',
+								value:
+									'the key that encrypts control-plane signing keys at rest'
+							},
+							{
+								label: 'Why',
+								value: 'a different wrapping secret cannot unwrap existing data'
+							},
+							{ label: 'Value', value: generatedWrapSecret }
+						]
+					});
 				}
 			}
 		}
@@ -1299,11 +1169,12 @@ async function deployFlow(
 				tenantSecrets.push(secret);
 
 				if (isNewlyGenerated) {
-					ui.note(
-						settlement === 'rotate'
-							? 'Rotated PUSH_ID_SIGNING_KEY: save this value now'
-							: 'Generated PUSH_ID_SIGNING_KEY: save this value now',
-						[
+					generatedSecretNotes.push({
+						title:
+							settlement === 'rotate'
+								? 'Rotated PUSH_ID_SIGNING_KEY: save this value now'
+								: 'Generated PUSH_ID_SIGNING_KEY: save this value now',
+						rows: [
 							{
 								label: 'What',
 								value: 'the key that signs per-push upload-credential ids'
@@ -1317,7 +1188,7 @@ async function deployFlow(
 							},
 							{ label: 'Value', value: generatedPushIdSigningKey }
 						]
-					);
+					});
 				}
 			}
 		}
@@ -1332,21 +1203,12 @@ async function deployFlow(
 		};
 	};
 
-	const deployer = subject === undefined ? undefined : deployerOwner(subject);
 	const startingPlanFor = startingPlanLookup({
 		apiFor,
 		defaults: artifact.config,
 		phase: (label, read) => ui.reporter().phase(label, read)
 	});
 	const startingPlan = await startingPlanFor(accountId);
-	const initialOwner = defaultOwnerChoice(artifact.config, subject);
-
-	if (cliOptions.yes === true && initialOwner.kind === 'none') {
-		ui.warn(
-			'No admin is bound: the signup gate stays closed, so nobody can ' +
-				'claim this deployment or create tenants until an admin is configured.'
-		);
-	}
 
 	let reviewedPlan: DeploymentPlan | undefined;
 	const accountAllowances = new Map<CloudflareAccountId, WorkersAllowance>();
@@ -1375,8 +1237,7 @@ async function deployFlow(
 		{
 			accountId,
 			config: startingPlan.config,
-			domain: initialDomain ?? startingPlan.routedDomain,
-			owner: initialOwner
+			domain: initialDomain ?? startingPlan.routedDomain
 		},
 		{
 			ui,
@@ -1385,13 +1246,7 @@ async function deployFlow(
 				const allowance = await allowanceFor(state.accountId);
 				const plannedArtifact = {
 					...artifact,
-					config: withWorkersInvocationAllowance(
-						withSignupGate(
-							state.config,
-							state.owner.kind === 'owner' ? state.owner.owner : undefined
-						),
-						allowance
-					)
+					config: withWorkersInvocationAllowance(state.config, allowance)
 				};
 				reviewedPlan = planDeployment(
 					plannedArtifact,
@@ -1404,12 +1259,11 @@ async function deployFlow(
 					{ label: '', value: '' },
 					...transitionPlanRows(reviewedPlan),
 					{ label: 'Account', value: state.accountId },
-					...choicePlanRows(state.config, state.domain, state.owner)
+					...choicePlanRows(state.config, state.domain)
 				]);
 				warnMissing(missing);
 			},
 			accounts: () => apiFor(accountId).listAccounts(),
-			deployer,
 			skipReview: cliOptions.yes === true,
 			canReplaceR2Credentials: async (state) =>
 				r2Credentials === undefined && (await isR2AlreadySetFor(state)),
@@ -1424,6 +1278,52 @@ async function deployFlow(
 	}
 
 	const agreedStartingPlan = await startingPlanFor(agreed.accountId);
+	const agreedApi = apiFor(agreed.accountId);
+	const controlName = agreed.config.control.name;
+	const loginDependencies = {
+		openBrowser: (url: string) => {
+			ui.openBrowser(url);
+		},
+		info: (message: string) => {
+			ui.info(message);
+		},
+		signal: runtimeOptions.signal
+	};
+
+	const authority = await establishAuthority(
+		{ agreed },
+		{
+			ui,
+			api: agreedApi,
+			idToken: renewingIdToken(() =>
+				loginIdToken(
+					{
+						oidcIssuer: cliOptions.oidcIssuer,
+						clientId: cliOptions.clientId,
+						headless: cliOptions.headless
+					},
+					loginDependencies
+				)
+			),
+			confirmClaim: async (claimant) =>
+				cliOptions.yes === true ||
+				(await ui.confirm({
+					message: `Claim this deployment as ${claimantLabel(claimant)}?`
+				})) === 'yes',
+			interactive: isInteractive,
+			signal: runtimeOptions.signal
+		}
+	);
+
+	if (authority.kind === 'declined') {
+		ui.cancelled('Deploy aborted.');
+		return;
+	}
+
+	for (const note of generatedSecretNotes) {
+		ui.note(note.title, note.rows);
+	}
+
 	const agreedBucket = bucketNameOf(agreed.config);
 	let wasCreatedNow = false;
 
@@ -1492,7 +1392,8 @@ async function deployFlow(
 		r2Credentials = verified;
 	}
 
-	const { options } = await planFor(agreed);
+	const planned = await planFor(agreed);
+	const options = withClaimSecret(planned.options, authority);
 
 	const deployedConfig = reviewedPlan.artifact.config;
 
@@ -1515,96 +1416,136 @@ async function deployFlow(
 					})
 			: undefined;
 
-	await runDeploy({
-		plan: reviewedPlan,
-		settleTenants: async (requiredStep) => {
-			const url = await deploymentUrl(
-				apiFor(agreed.accountId),
-				deployedConfig.control.name,
-				agreed.domain
-			);
-			if (url === undefined) {
-				throw new DeploymentSettlementUrlMissingError();
-			}
-			const parsed = new URL(url);
-			const credential = cachedOwnerProvider(parsed, {
+	const migrateTenants = tenantMigratorFor(authority, async (requiredStep) => {
+		const url = await deploymentUrl(
+			agreedApi,
+			deployedConfig.control.name,
+			agreed.domain
+		);
+		if (url === undefined) {
+			throw new DeploymentSettlementUrlMissingError();
+		}
+		const parsed = new URL(url);
+		await settleTenants(
+			controlRpc(parsed, {
+				credential: cachedOwnerProvider(parsed, {
+					signal: runtimeOptions.signal
+				}),
 				signal: runtimeOptions.signal
-			});
-			await settleTenants(
-				controlRpc(parsed, { credential, signal: runtimeOptions.signal })
-					.localStep,
-				ui.reporter(),
-				{
-					requiredStep,
-					limit: 20,
-					maxPasses: 100,
-					...(runtimeOptions.signal !== undefined && {
-						signal: runtimeOptions.signal
-					})
-				}
-			);
-		},
-		api: apiFor(agreed.accountId),
-		reporter: ui.reporter(),
-		options,
-		signal: runtimeOptions.signal
+			}).localStep,
+			ui.reporter(),
+			{
+				requiredStep,
+				limit: 20,
+				maxPasses: 100,
+				...(runtimeOptions.signal !== undefined && {
+					signal: runtimeOptions.signal
+				})
+			}
+		);
 	});
 
-	// A newly supplied signup secret is available for the claim. An existing
-	// secret is unreadable, so onboarding can only ask the operator for it.
-	const suppliedSignupSecret = options.secrets.control.find(
-		(secret) => secret.name === 'CUPBOARD_SIGNUP_SECRET'
-	)?.text;
-	const { control: controlSecrets } = await existingSecretsFor(
-		agreed.accountId
-	);
-	const claimSecret: ClaimSecret =
-		suppliedSignupSecret === undefined
-			? {
-					kind: controlSecrets.includes('CUPBOARD_SIGNUP_SECRET')
-						? 'configured'
-						: 'none'
-				}
-			: { kind: 'known', value: suppliedSignupSecret };
+	const agreedPlan = reviewedPlan;
+	let outcome: OnboardOutcome;
 
-	const outcome = await onboardDeployment({
-		api: apiFor(agreed.accountId),
-		ui,
-		controlScriptName: agreed.config.control.name,
-		tenantScriptName: agreed.config.tenant.name,
-		domain: agreed.domain,
-		instanceName: cliOptions.instanceName,
-		cacheAccess: cliOptions.access,
-		admin: onboardAdminFor(
-			agreed.owner,
-			subject !== undefined && idToken !== undefined
-				? { subject, idToken }
-				: undefined
-		),
-		buildVersion: artifact.buildVersion,
-		claimSecret,
-		signal: runtimeOptions.signal,
-		// A pair settled this run was probed client-side before it was set; a
-		// kept pair is only on the Worker, so the onboarding proves it there.
-		r2:
-			r2Credentials === undefined
-				? {
-						kind: 'kept',
-						accountId: agreed.accountId,
-						bucketName: agreedBucket
+	try {
+		outcome = await deployAndOnboard(authority, {
+			removeLeftoverClaimSecret: () =>
+				removeLeftoverClaimSecret(authority, {
+					ui,
+					api: agreedApi,
+					controlScriptName: controlName,
+					controlSecrets: async () => {
+						const secrets = await existingSecretsFor(agreed.accountId);
+
+						return secrets.control;
 					}
-				: { kind: 'fresh' },
-		...(refreshIdToken !== undefined && { freshIdToken: refreshIdToken })
-	});
+				}),
+			deploy: async () => {
+				await runDeploy({
+					plan: agreedPlan,
+					...(migrateTenants !== undefined && {
+						settleTenants: migrateTenants
+					}),
+					api: agreedApi,
+					reporter: ui.reporter(),
+					options,
+					signal: runtimeOptions.signal
+				});
+			},
+			removeClaimSecret: () =>
+				removeClaimSecret(
+					ui,
+					claimSecretCleanupApi(clientWithSignal, agreed.accountId),
+					controlName
+				),
+			onboard: (removeClaimSecretOnce) =>
+				onboardDeployment({
+					api: agreedApi,
+					ui,
+					controlScriptName: controlName,
+					tenantScriptName: agreed.config.tenant.name,
+					domain: agreed.domain,
+					instanceName: cliOptions.instanceName,
+					authority,
+					cacheAccess: cliOptions.access,
+					buildVersion: artifact.buildVersion,
+					signal: runtimeOptions.signal,
+					// A pair settled this run was probed client-side before it was set; a
+					// kept pair is only on the Worker, so the onboarding proves it there.
+					r2:
+						r2Credentials === undefined
+							? {
+									kind: 'kept',
+									accountId: agreed.accountId,
+									bucketName: agreedBucket
+								}
+							: { kind: 'fresh' },
+					...(refreshIdToken !== undefined && { freshIdToken: refreshIdToken }),
+					removeClaimSecret: removeClaimSecretOnce
+				})
+		});
+	} catch (error) {
+		const fault = claimServerFault(error);
+
+		if (fault === undefined) {
+			throw error;
+		}
+
+		await showServerFault({
+			ui,
+			api: agreedApi,
+			ray: fault.ray,
+			worker: controlName,
+			signal: runtimeOptions.signal,
+			lead: fault.message
+		});
+		ui.outro('Deployed; the admin claim failed.');
+		process.exitCode = 1;
+		return;
+	}
+
+	const unclaimedNote =
+		authority.kind === 'bootstrap'
+			? ' The deployment has no admin yet; the next `cupboard init` from a ' +
+				'terminal claims it.'
+			: '';
+	const endBeforeReady = (): void => {
+		const exitCode = outroBeforeReady(ui, authority);
+
+		if (exitCode !== 0) {
+			process.exitCode = exitCode;
+		}
+	};
 
 	switch (outcome.kind) {
 		case 'no-subdomain': {
 			ui.warn(
 				'The account has no workers.dev subdomain, so the deployment has ' +
 					'no URL yet. Register one in the Cloudflare dashboard ' +
-					'(Workers & Pages), then re-run `cupboard init`.'
+					`(Workers & Pages), then re-run \`cupboard init\`.${unclaimedNote}`
 			);
-			ui.outro('Deployed.');
+			endBeforeReady();
 			return;
 		}
 
@@ -1615,13 +1556,13 @@ async function deployFlow(
 			) {
 				await showServerFault({
 					ui,
-					api: apiFor(agreed.accountId),
+					api: agreedApi,
 					ray: outcome.lastRay,
 					worker: outcome.worker,
 					signal: runtimeOptions.signal,
-					lead: `Deployed, but ${outcome.url} is returning a server error (HTTP ${String(outcome.lastStatus)}).`
+					lead: `Deployed, but ${outcome.url} is returning a server error (HTTP ${String(outcome.lastStatus)}).${unclaimedNote}`
 				});
-				ui.outro('Deployed.');
+				endBeforeReady();
 				return;
 			}
 
@@ -1635,69 +1576,9 @@ async function deployFlow(
 			ui.warn(
 				`Deployed, but ${outcome.url} did not come online in time ` +
 					`(last probe: ${outcome.lastProbe}).${dnsNote} Once it responds, ` +
-					're-run `cupboard init` to finish setting up.'
+					`re-run \`cupboard init\` to finish setting up.${unclaimedNote}`
 			);
-			ui.outro('Deployed.');
-			return;
-		}
-
-		case 'no-admin': {
-			ui.warn(
-				'Nobody was made admin, so no caches can be created in this ' +
-					'deployment yet. Re-run `cupboard init` and pick an admin to ' +
-					'finish setting up.'
-			);
-			ui.outro('Deployed.');
-			return;
-		}
-
-		case 'admin-elsewhere': {
-			ui.info(
-				`${outcome.owner.subject} is the admin of this deployment, so ` +
-					'only they can create its first cache.'
-			);
-			ui.outro('Deployed.');
-			return;
-		}
-
-		case 'identity-unproven': {
-			ui.warn(
-				`The plan assigns ${outcome.owner.subject} as the admin, but a ` +
-					'raw API token has no user identity. This session cannot prove ' +
-					'that you match the configured admin. Re-run `cupboard init` and ' +
-					'log in through the browser to finish setting up.'
-			);
-			ui.outro('Deployed.');
-			return;
-		}
-
-		case 'claim-refused': {
-			const base = `The server did not accept you as the admin: ${outcome.detail}.`;
-			const reason = claimRefusalReason(outcome.status);
-
-			if (reason === 'server-error') {
-				await showServerFault({
-					ui,
-					api: apiFor(agreed.accountId),
-					ray: outcome.ray,
-					worker: agreed.config.control.name,
-					signal: runtimeOptions.signal,
-					lead: `${base} This is a server-side error.`
-				});
-			} else {
-				ui.warn(`${base} ${claimRefusalAdvice(reason)}`);
-			}
-
-			ui.outro('Deployed.');
-			return;
-		}
-
-		case 'claim-cancelled': {
-			ui.info(
-				'The deployment was not claimed because no claim secret was supplied. Re-run ' +
-					'`cupboard init` to finish setting up when you have it.'
-			);
-			ui.outro('Deployed.');
+			endBeforeReady();
 			return;
 		}
 
@@ -1706,7 +1587,7 @@ async function deployFlow(
 				'No cache was created yet. Re-run `cupboard init` to pick a ' +
 					'name when you are ready.'
 			);
-			ui.outro('Deployed; you are the admin.');
+			ui.outro('Deployed; the admin can create caches.');
 			return;
 		}
 
@@ -1729,4 +1610,112 @@ async function deployFlow(
 			return;
 		}
 	}
+}
+
+/**
+ * Ends a run whose deployment did not become ready for onboarding, and returns
+ * the exit code. A first deploy that stops before the claim leaves the
+ * deployment without an admin, and nobody can use it until someone claims it,
+ * so the run fails, as a run without a terminal does.
+ */
+export function outroBeforeReady(
+	ui: Pick<DeployUi, 'outro'>,
+	authority: DeployAuthority
+): number {
+	if (authority.kind === 'bootstrap') {
+		ui.outro('Deployed; the deployment has no admin yet.');
+
+		return 1;
+	}
+
+	ui.outro('Deployed.');
+
+	return 0;
+}
+
+type ClaimedOnboardOutcome = Exclude<
+	OnboardOutcome,
+	{ readonly kind: 'unclaimed' }
+>;
+
+/**
+ * Deploys and onboards in the order that keeps the claim secret short-lived.
+ * A leftover claim secret is removed before the upload. For a first deploy,
+ * `onboard` receives a removal that deletes the claim secret at most once, and
+ * the `finally` calls it too, so the secret is removed on every exit once the
+ * deploy starts, including a failed upload or a run that stops before the
+ * claim. A run that leaves the deployment without an admin throws
+ * `DeploymentUnclaimedError` after the upload.
+ */
+export async function deployAndOnboard(
+	authority: DeployAuthority,
+	steps: {
+		readonly removeLeftoverClaimSecret: () => Promise<void>;
+		readonly deploy: () => Promise<void>;
+		readonly removeClaimSecret: () => Promise<void>;
+		readonly onboard: (
+			removeClaimSecretOnce: () => Promise<void>
+		) => Promise<OnboardOutcome>;
+	}
+): Promise<ClaimedOnboardOutcome> {
+	let removal: Promise<void> | undefined;
+	const removeClaimSecretOnce = (): Promise<void> => {
+		removal ??= steps.removeClaimSecret();
+
+		return removal;
+	};
+
+	try {
+		await steps.removeLeftoverClaimSecret();
+		await steps.deploy();
+
+		const outcome = await steps.onboard(removeClaimSecretOnce);
+
+		if (outcome.kind === 'unclaimed') {
+			throw new DeploymentUnclaimedError(outcome.url);
+		}
+
+		return outcome;
+	} finally {
+		if (authority.kind === 'bootstrap') {
+			await removeClaimSecretOnce();
+		}
+	}
+}
+
+/**
+ * A deploy without a terminal left a new deployment without an admin. Nobody
+ * can create a cache until a run from a terminal claims the deployment, so the
+ * run fails although the Workers were deployed.
+ */
+export class DeploymentUnclaimedError extends CliError {
+	constructor(public readonly url: string | undefined) {
+		const deployment =
+			url === undefined ? 'the deployment' : `the deployment at ${url}`;
+
+		super(
+			`Deployed, but ${deployment} has no admin: this run had no terminal ` +
+				'to log in from, and only an admin can create a cache. Run ' +
+				'`cupboard init` from a terminal to claim the deployment.'
+		);
+		this.name = 'DeploymentUnclaimedError';
+	}
+}
+
+/**
+ * The 5xx response from a failed claim, used to look up the Worker's log.
+ * Undefined unless `/signup` returned a 5xx status.
+ */
+export function claimServerFault(
+	error: unknown
+): { readonly message: string; readonly ray: string | undefined } | undefined {
+	if (
+		!(error instanceof DeploymentClaimFailedError) ||
+		error.status === undefined ||
+		error.status < serverError
+	) {
+		return undefined;
+	}
+
+	return { message: error.message, ray: error.ray };
 }

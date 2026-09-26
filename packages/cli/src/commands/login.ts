@@ -154,7 +154,8 @@ export async function cupboardIdToken(dependencies: {
 }
 
 /**
- * Options for the OIDC login that identifies the operator.
+ * Options for the OIDC login that identifies the operator. `cupboard login`
+ * and `cupboard init` both use it.
  */
 export interface IdentityLoginOptions {
 	readonly oidcIssuer: string;

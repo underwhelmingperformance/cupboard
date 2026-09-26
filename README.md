@@ -20,7 +20,8 @@ tenants, and manage the control-plane signing keys. These commands address the
 deployment by its bare host and are marked "operator only" in the help:
 
 - `cupboard init` (alias `cupboard deploy`) provisions the Workers, R2 bucket,
-  D1 database, and queues on a Cloudflare account.
+  D1 database, and queues on a Cloudflare account. Its first run from a terminal
+  logs you in and makes you the deployment's admin.
 - `cupboard tenant` creates, suspends, resumes, and removes tenants, rotates the
   tenant-wide fallback read credential, and manages the read credential of any
   one of a tenant's caches.
@@ -87,6 +88,15 @@ cupboard push https://cupboard.example.workers.dev/t/acme ./result
 Add the configuration printed by `init` to your `nix.conf`. For a private cache,
 also save the printed credential in the indicated netrc file outside the Nix
 store. Use `cupboard tenant create` only when you want an additional tenant.
+
+The first `init` from a terminal makes you the deployment's admin. It logs you
+in with Cloudflare, or with the issuer and client given by `--oidc-issuer` and
+`--client-id`. It then claims the deployment with a claim secret, deletes the
+secret and caches your admin token. A first `init` without a terminal leaves the
+deployment without an admin and exits with an error; run `init` from a terminal
+to claim it. See [Deploying a release][deploying-admin] for the details.
+
+[deploying-admin]: ./docs/deploying.md#admin
 
 Most commands need a session first; `cupboard login <url>` caches an admin token
 for the tenant. Pushing from CI instead uses GitHub Actions OIDC with

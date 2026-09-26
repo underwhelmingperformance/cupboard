@@ -292,39 +292,70 @@ successfully substitute that path from the Worker.
 
 ### Onboarding
 
-One command takes an operator from nothing to a usable cache, and the identity
-that deployed is the identity that administers.
+One command takes an operator from a Cloudflare account to a usable cache. The
+Cloudflare credential gives the deploy access to the account's infrastructure.
+The claim makes the identity in an OIDC id_token, by default the operator's
+Cloudflare identity, the deployment's admin.
 
 - [x] `cupboard init` (alias `deploy`): build, authenticate via cupboard's
       public Cloudflare OAuth client (PKCE loopback on registered ports; grant
       cached with owner-only permissions and renewed from its refresh token),
       review an editable plan (account, custom domain, resource names, cron
-      triggers, admin), settle R2 credentials (created as a bucket-scoped
-      account-owned API token where the deploy credential may manage tokens,
-      rolled on re-deploys; entered manually otherwise; probed with a signed
-      HEAD before anything deploys), then provision.
+      triggers), determine who may change the deployment (below), set up R2
+      credentials (created as a bucket-scoped account-owned API token where the
+      deploy credential may manage tokens, rolled on re-deploys; entered
+      manually otherwise; probed with a signed HEAD before anything deploys),
+      then provision.
 - [x] Two-step initialisation after the deploy. Step one: resolve the deployment
       URL (custom domain, read back from the routing on re-runs, or the
       workers.dev subdomain with the script route enabled) and poll the
       unauthenticated `/_version` route until it answers with the build just
       uploaded, since an older Worker version (with the old configuration) can
-      keep answering while the new one propagates. Step two: claim global admin
-      at `POST /signup` with the deployer's id_token (idempotent for the same
-      principal; a `CUPBOARD_SIGNUP_SECRET` on the Worker is presented too,
-      prompted for when only the Worker knows it), exchange it for an admin
-      token and cache that token, prompt for the first cache's slug (typed
-      inline after the `<url>/t/` prefix; no default), create the tenant, and
-      poll its `/t/<slug>/pubkey` (whose first success creates the signing key)
-      before printing the `nix.conf` lines for the cache URL. The create call is
-      the arbiter of slug ownership: a conflict re-prompts, and re-creating an
-      identical tenant is idempotent, so re-runs converge.
-- [x] Admin binding: the deploy seeds the control Worker's signup gate
-      (`CUPBOARD_SIGNUP_*`) from the plan's Admin choice. The default is the
-      configured vars, then the deployer's Cloudflare identity
-      (`https://dash.cloudflare.com` is a compliant OIDC issuer; the id_token's
-      `sub` arrives with the `openid` scope; the audience is cupboard's client
-      id), then nobody, with a warning that the gate stays closed. A gate naming
-      someone else leaves the claim to them.
+      keep answering while the new one propagates. Step two: on a first deploy,
+      claim the deployment (below); then, with the admin token, initialise the
+      instance, prompt for the first cache's slug (typed inline after the
+      `<url>/t/` prefix; no default), create the tenant, and poll its
+      `/t/<slug>/pubkey` (whose first success creates the signing key) before
+      printing the `nix.conf` lines for the cache URL. The create call fails
+      with a conflict when the slug is taken, and the deploy then asks for
+      another slug; re-creating an identical tenant is idempotent, so re-runs
+      converge.
+- [x] Admin binding: the Cloudflare credential for the account does not make
+      anyone the admin. The admin comes from the identity in an OIDC id_token,
+      which defaults to the Cloudflare login. Before any change, the deploy
+      reads the admin from the `global_admin` row of the D1 database selected in
+      the plan.
+
+  First deploy: when the row is absent and a terminal is attached, the deploy
+  logs the operator in with `--oidc-issuer` and `--client-id`, which default to
+  Cloudflare and Cupboard's client, as for `cupboard login`. It refuses an
+  id_token that `/signup` on a deployed Worker would refuse (an issuer that is
+  not an HTTPS URL, no subject, or not exactly one audience). It prints who the
+  claim will make the admin (the display name, issuer, subject and audience from
+  the id_token) and asks for confirmation unless `--yes` is given. It sets a
+  generated `CUPBOARD_SIGNUP_SECRET` along with the other secrets and presents
+  it with the id_token at `POST /signup` once the new build serves; the id_token
+  must belong to the confirmed identity. It deletes the secret right after
+  `/signup` responds, whether or not the claim succeeded, and also when the run
+  stops before the claim, with a request that does not use the run's aborted
+  signal. It then exchanges the id_token for an admin token and caches the
+  token. Before its own upload, an update or a deploy without a terminal deletes
+  a secret that an interrupted run left. `/signup` checks the secret before it
+  decodes the token. It seeds the admin and the control trust rule from the
+  token's `iss`, `sub` and single `aud`; the token may come from any issuer.
+  Without a terminal, the deploy leaves the deployment without an admin and,
+  without waiting for the new build, exits with an error that says to run `init`
+  from a terminal. A first deploy from a terminal whose deployment does not come
+  online also exits non-zero.
+
+  Update: when the row contains an admin, the deploy uses the `cupboard login`
+  session to initialise the instance, rebuild membership, run the control check
+  and migrate the tenants to the release's local step.
+
+  Display names come from the caller's own token claims (`name`, `email`,
+  `preferred_username`, `sub`). Other principals show as the full issuer URL and
+  `sub`.
+
 - [x] `cupboard login` defaults to the same issuer and client, so a flagless
       login presents exactly the triple the owner rule pins. `--headless` uses
       the RFC 8628 device flow (the OAuth client carries the device code grant
@@ -1223,8 +1254,8 @@ Settled decisions:
 - No privileged "primary" tenant. Every cache lives under `/t/<tenant>/`; the
   bare host is the control surface.
 - Bootstrap is by first signup, but through a gated claim. The first
-  authenticated principal is promoted to global admin only when they satisfy the
-  configured claim gate.
+  authenticated principal is promoted to global admin only when they present the
+  claim secret that the deploy set on the Worker.
 - The Worker is a first-class Hono coordinator. There is no singleton
   control-plane Durable Object; global state lives in D1 with a KV read-cache
   for admission.
@@ -1373,26 +1404,31 @@ offboarding. Tenant tokens authorise tenant operations.
 
 ### Bootstrap
 
-A fresh deployment has no global admin and no control trust policy. The
-deployment is configured with the OIDC provider to trust for control-plane
-login: issuer and public client id. The first principal to authenticate and call
-the claim endpoint is promoted to global admin by a first-writer-wins insert
-into D1 (`global_admin` singleton, unique constraint). The claim also seeds the
-control trust policy, pinning that principal's `iss`, `sub`, and `aud`, after
-which `/token` works as above. The Worker first verifies the deploy-configured
-gate, which is either a reusable claim secret or a pinned `(issuer, subject)`.
-One atomic D1 batch then inserts the `global_admin` singleton and seeds
+A fresh deployment has no global admin and no control trust policy. The claim
+accepts an id_token from any OIDC issuer. The first deploy sets a claim secret
+on the Worker; the principal that presents it with a verified id_token is
+promoted to global admin by a first-writer-wins insert into D1 (`global_admin`
+singleton, unique constraint). The issuer comes from the unverified token, so
+discovery would fetch from a URL that the caller chooses. The Worker therefore
+checks the secret before it decodes the token, and a caller without the secret
+cannot make the Worker fetch anything. The issuer from the token's `iss` must
+follow the same rule as trust-rule issuers: an HTTPS URL, or loopback HTTP under
+`CUPBOARD_LOCAL_DEV`. The Worker requires exactly one `aud`, because the seeded
+rule pins one audience. It verifies the token against that issuer and seeds the
+control trust policy pinning `iss`, `sub` and `aud`, after which `/token` works
+as above. One atomic D1 batch inserts the `global_admin` singleton and seeds
 `control_trust`. A second claim by a different principal is refused because the
 singleton already exists. A claim by the same principal is idempotent and
 returns the existing state. The writes must remain atomic: if `global_admin`
-existed without a matching `control_trust` rule, `/token` could not mint an
+existed without a matching `control_trust` rule, `/token` could not issue an
 admin token and the deployment would have no way to recover through the admin
 API. This is the only irreversible bootstrap transition.
 
-The claim gate is required in hosted mode. The claimant must satisfy either the
-configured claim secret or a pinned `(issuer, subject)`. With neither
-configured, claims are refused. An explicit local-dev flag relaxes this only for
-local development.
+The Worker refuses every claim when the secret is not set, including under
+`CUPBOARD_LOCAL_DEV`. The server accepts the secret for as long as it is set. A
+first deploy therefore removes it after its claim attempt, or when it stops
+before the claim. An update or a deploy without a terminal removes any secret
+that an interrupted run left, before its own upload.
 
 ### Shared CAS
 
