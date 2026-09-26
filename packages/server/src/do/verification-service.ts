@@ -755,6 +755,7 @@ export class VerificationService {
 				return { kind: 'requires-decode' };
 			}
 		} else if (!(await this.isCurrentNarPresent(metadata.narHash))) {
+			await this.uploadState.markCanonicalNarMissing(metadata.narHash);
 			throw new UploadedObjectNotFoundError(pending.r2Key);
 		}
 
@@ -1015,9 +1016,9 @@ export class VerificationService {
 				return 'ignored';
 			}
 
-			return this.context.criticalSection(async () => {
+			const activation = await this.context.criticalSection(async () => {
 				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
-					return 'ignored';
+					return { result: 'ignored' as const, wasActivated: false };
 				}
 
 				const activation = await this.uploadState.commitStagingBlob(
@@ -1026,13 +1027,22 @@ export class VerificationService {
 				);
 
 				if (activation === 'retired') {
-					return 'ignored';
+					return { result: 'ignored' as const, wasActivated: false };
 				}
 
-				return this.ownsActiveClaim(owner, pending.id, signal)
-					? 'ready'
-					: 'ignored';
+				return {
+					result: this.ownsActiveClaim(owner, pending.id, signal)
+						? ('ready' as const)
+						: ('ignored' as const),
+					wasActivated: true
+				};
 			});
+
+			if (activation.wasActivated) {
+				await this.uploadState.clearCanonicalNarMissing(metadata.narHash);
+			}
+
+			return activation.result;
 		}
 
 		return 'ready';
