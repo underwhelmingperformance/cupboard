@@ -19,6 +19,7 @@ import {
 	transientExitCode,
 	UploadWaitTimeoutError
 } from './errors.ts';
+import { RootTargetLimitError } from './push/push.ts';
 
 const abortExitCode = 130;
 
@@ -96,6 +97,11 @@ describe('cliExitCode', () => {
 		{
 			name: 'a refused confirmation',
 			error: new ConfirmationRequiredError('Remove tenant acme?'),
+			expected: usageExitCode
+		},
+		{
+			name: 'a root over its target limit',
+			error: new RootTargetLimitError(150, 149),
 			expected: usageExitCode
 		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }
