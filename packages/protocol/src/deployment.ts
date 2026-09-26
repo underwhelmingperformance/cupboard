@@ -213,7 +213,7 @@ export interface SchemaTransition<Id extends string = TransitionId> {
  * Every D1 migration belongs to exactly one transition, and the transitions
  * are listed in the order that the deploy applies them. Concatenating each
  * transition's expand then contract, in this order, must give the migration
- * files sorted by name; the deploy verifies that.
+ * files sorted by name; `check:migrations` and the deploy both verify that.
  *
  * Once a release has shipped a transition, its migration lists must not
  * change: a deployment that recorded the transition complete never applies a
@@ -357,8 +357,8 @@ export interface DeferredTransition<Id extends string = TransitionId> {
  *
  * The deploy stops with an error for such a deployment, because the new
  * Workers would otherwise run without that transition's expand migrations.
- * The plan and the deploy both use this function, so they agree on which
- * transition is blocked.
+ * The plan, the deploy and `check:migrations` all use this function, so they
+ * agree on which transition is blocked.
  */
 export function deferredTransition<Id extends string>(
 	transitions: readonly SchemaTransition<Id>[],
