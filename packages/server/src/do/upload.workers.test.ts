@@ -53,6 +53,7 @@ import {
 	commitSharedPath,
 	CommitSocketError,
 	commitUpload,
+	commitUploadRejection,
 	commitUploadViaWorker,
 	CommitVerdictError,
 	commitVerifiablePath,
@@ -107,6 +108,8 @@ import {
 	runGcResult,
 	seedReservedNarInfo,
 	setRoot,
+	singleDecision,
+	syntheticNarHash,
 	testBase,
 	testPushId,
 	uploadMetadata,
@@ -119,6 +122,8 @@ import {
 } from '../test-support.ts';
 
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { UploadStateService } from './upload-state-service.ts';
+import { type VerificationService } from './verification-service.ts';
 
 function byUploadId(
 	left: { readonly uploadId: string },
@@ -3166,6 +3171,105 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
+	});
+
+	it('recovers a lost NAR that another cache references through the next push', async () => {
+		const sharedCache = namedCache('other');
+		const { token } = await bootstrap({ caches: [{ scope: sharedCache }] });
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPath(token, metadata, defaultCache());
+		await pushPath(token, metadata, sharedCache);
+		const lostKey = await currentNarObjectKey(metadata.narHash);
+		await env.BLOBS.delete(lostKey);
+
+		// Negotiation reads only D1, so the first push after the loss receives a
+		// skip decision. Reconciliation then removes the path from the default
+		// cache.
+		const skip = singleDecision(await negotiateUploads(token, [metadata]));
+		await fireReconcile();
+		const reuse = singleDecision(await negotiateUploads(token, [metadata]));
+
+		if (reuse.action !== 'commit') {
+			throw new Error(`expected a reuse commit, got ${reuse.action}`);
+		}
+
+		const refusal = await commitUploadRejection(token, reuse.uploadId);
+		const retry = singleDecision(await negotiateUploads(token, [metadata]));
+
+		if (retry.action !== 'upload') {
+			throw new Error(`expected an upload, got ${retry.action}`);
+		}
+
+		await putNarBytes(retry.r2Key);
+		await commitUpload(token, retry.uploadId);
+
+		const narInfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
+		const nar = await readFetch(`/${NarInfo.parse(await narInfo.text()).url}`);
+
+		expect({
+			decisions: [skip.action, reuse.action, retry.action],
+			refusal: refusal instanceof CommitSocketError ? refusal.status : refusal,
+			replacedIncarnation:
+				(await currentNarObjectKey(metadata.narHash)) !== lostKey,
+			narStatus: nar.status
+		}).toStrictEqual({
+			decisions: ['skip', 'commit', 'upload'],
+			refusal: StatusCodes.NOT_FOUND,
+			replacedIncarnation: true,
+			narStatus: StatusCodes.OK
+		});
+	});
+
+	it('deletes expired missing-NAR records when it records another', async () => {
+		await initialise();
+		const expired = syntheticNarHash(1);
+		const recorded = syntheticNarHash(2);
+		const prefix = 'uploads:missing-canonical-nar:';
+
+		const keys = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await state.storage.put(`${prefix}${expired}`, Date.now() - 1);
+				await new UploadStateService(instance.context).markCanonicalNarMissing(
+					recorded
+				);
+				const records = await state.storage.list({ prefix });
+
+				return records.keys().toArray();
+			}
+		);
+
+		expect(keys).toStrictEqual([`${prefix}${recorded}`]);
+	});
+
+	it("plans an upload after the verification pass finds a reuse commit's NAR missing", async () => {
+		const sharedCache = namedCache('other');
+		const { token } = await bootstrap({ caches: [{ scope: sharedCache }] });
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPath(token, metadata, defaultCache());
+		await pushPath(token, metadata, sharedCache);
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
+		await negotiateUploads(token, [metadata]);
+		await fireReconcile();
+		const reuse = singleDecision(await negotiateUploads(token, [metadata]));
+
+		if (reuse.action !== 'commit') {
+			throw new Error(`expected a reuse commit, got ${reuse.action}`);
+		}
+
+		// The commit is deferred to the verification pass, which settles reuse
+		// commits without decoding the NAR.
+		await markUploadCommitting(reuse.uploadId);
+		await runInDurableObject(currentServer(), async (instance) => {
+			const verification = (
+				instance as unknown as { verification: VerificationService }
+			).verification;
+
+			await verification.processPendingWithoutDecode(rootLogger(), 10);
+		});
+		const retry = singleDecision(await negotiateUploads(token, [metadata]));
+
+		expect(retry.action).toBe('upload');
 	});
 
 	it('keeps committed blobs when expired pending uploads reuse them', async () => {

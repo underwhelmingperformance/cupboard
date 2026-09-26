@@ -277,10 +277,12 @@ export class UploadsService {
 			.filter((path) => !skippable.has(path.storePathHash))
 			.map((path) => path.narHash);
 		const reusableByNarHash: ReadonlyMap<string, ReusableBlob> =
-			facts?.reusableByNarHash ??
-			(await (shouldClaim
-				? this.uploadState.findReusableBlobs(candidateNarHashes)
-				: this.uploadState.peekReusableBlobs(candidateNarHashes)));
+			await this.uploadState.withoutMissingCanonicalNars(
+				facts?.reusableByNarHash ??
+					(await (shouldClaim
+						? this.uploadState.findReusableBlobs(candidateNarHashes)
+						: this.uploadState.peekReusableBlobs(candidateNarHashes)))
+			);
 
 		return {
 			facts,

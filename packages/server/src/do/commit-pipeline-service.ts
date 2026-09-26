@@ -1588,6 +1588,10 @@ export class CommitPipelineService {
 				: (stagedObject?.size ?? undefined);
 
 		if (stagedSize === undefined) {
+			if (pending.r2Key === canonicalKey && probe.blob !== undefined) {
+				await this.uploadState.markCanonicalNarMissing(metadata.narHash);
+			}
+
 			throw new UploadedObjectNotFoundError(pending.r2Key);
 		}
 
