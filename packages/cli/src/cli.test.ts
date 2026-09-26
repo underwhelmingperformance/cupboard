@@ -11,6 +11,7 @@ import {
 	authExitCode,
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
+	CheckDiscrepanciesError,
 	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
@@ -97,6 +98,11 @@ describe('cliExitCode', () => {
 			name: 'a refused confirmation',
 			error: new ConfirmationRequiredError('Remove tenant acme?'),
 			expected: usageExitCode
+		},
+		{
+			name: 'a check that found discrepancies',
+			error: new CheckDiscrepanciesError(2),
+			expected: 1
 		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }
 	])('maps $name to its exit code', ({ error, expected }) => {

@@ -1255,6 +1255,21 @@ export class UnknownCacheCredentialError extends CliUsageError {
 	}
 }
 
+/**
+ * `cupboard check` found committed paths whose stored objects are missing or
+ * wrong. The report lists each path.
+ */
+export class CheckDiscrepanciesError extends CliError {
+	constructor(public readonly count: number) {
+		super(
+			count === 1
+				? 'The check found 1 discrepancy.'
+				: `The check found ${String(count)} discrepancies.`
+		);
+		this.name = 'CheckDiscrepanciesError';
+	}
+}
+
 export class GithubCheckFailedError extends CliError {
 	constructor(public readonly checks: readonly string[]) {
 		super(`Configuration checks failed: ${checks.join(', ')}`);
