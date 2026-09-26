@@ -4,7 +4,9 @@ import {
 	expansionLocalStep,
 	type LocalStep,
 	type ParsedLocalStepWakeResponse,
-	schemaTransitions
+	type SchemaTransition,
+	schemaTransitions,
+	type TransitionState
 } from '@cupboard/protocol/deployment';
 import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
@@ -51,19 +53,35 @@ const resumableFixtureTenants = 2 + sleepingFixtureTenants.length;
 // known.
 const deployedAt = new Date('2026-01-01T00:00:00.000Z');
 
+function recordedAs(state: (transition: SchemaTransition) => TransitionState) {
+	return schemaTransitions.map((transition) => ({
+		id: transition.id,
+		state: state(transition),
+		updatedAt: deployedAt.toISOString()
+	}));
+}
+
 const completedTransitions = {
-	transitions: [
-		{
-			id: 'cache-identity',
-			state: 'complete',
-			updatedAt: deployedAt.toISOString()
-		},
-		{
-			id: 'deployment-transitions',
-			state: 'complete',
-			updatedAt: deployedAt.toISOString()
-		}
-	],
+	transitions: recordedAs(() => 'complete'),
+	unrecognised: []
+};
+
+const terminalTransitions = Object.fromEntries(
+	schemaTransitions.map((transition) => [transition.id, 'complete'])
+);
+
+// What the walk records before the upload on the predecessor path. The first
+// transition has contract migrations, so the walk only expands it. The walk
+// expands each later transition before the upload because it is independent,
+// and immediately completes a transition with no contract migrations and no
+// contract step. The expectation reads the transition's lists directly, not
+// the walk's own predicate, so a defect in that predicate fails the test.
+const preUploadTransitions = {
+	transitions: recordedAs((transition) =>
+		transition.contract.length === 0 && transition.contractStep === undefined
+			? 'complete'
+			: 'expanded'
+	),
 	unrecognised: []
 };
 
@@ -147,6 +165,17 @@ async function refusedContract(
 	return undefined;
 }
 
+// `preUploadTransitions` relies on every transition after the first being
+// independent.
+it('defines only independent transitions after the first', () => {
+	expect(
+		schemaTransitions
+			.slice(1)
+			.filter((transition) => transition.independent !== true)
+			.map((transition) => transition.id)
+	).toStrictEqual([]);
+});
+
 it('upgrades a populated predecessor deployment', async () => {
 	const server = await StagedDeploymentServer.start(process.cwd());
 
@@ -190,24 +219,10 @@ it('upgrades a populated predecessor deployment', async () => {
 					'upgrade-suspended'
 				]
 			},
-			// Before the upload the deploy expanded both transitions and completed
-			// the one with no contract migrations; the tenants then had step 4 to
-			// reach.
-			expanded: {
-				transitions: [
-					{
-						id: 'cache-identity',
-						state: 'expanded',
-						updatedAt: deployedAt.toISOString()
-					},
-					{
-						id: 'deployment-transitions',
-						state: 'complete',
-						updatedAt: deployedAt.toISOString()
-					}
-				],
-				unrecognised: []
-			},
+			// Before the upload the deploy expanded every transition and completed
+			// the transitions with no contract migrations and no contract step.
+			// The tenants then had to record step 4.
+			expanded: preUploadTransitions,
 			wake: {
 				didAdvance: true,
 				final: {
@@ -254,10 +269,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			recorded: completedTransitions,
 			terminal: {
 				appliedD1Migrations: server.d1MigrationNames,
-				transitions: {
-					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
-				},
+				transitions: terminalTransitions,
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
@@ -306,28 +318,11 @@ it('upgrades a deployment that v0.0.35 left at native-reads', async () => {
 			recorded: await client.transitions(),
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
-			expanded: {
-				transitions: [
-					{
-						id: 'cache-identity',
-						state: 'expanded',
-						updatedAt: deployedAt.toISOString()
-					},
-					{
-						id: 'deployment-transitions',
-						state: 'complete',
-						updatedAt: deployedAt.toISOString()
-					}
-				],
-				unrecognised: []
-			},
+			expanded: preUploadTransitions,
 			recorded: completedTransitions,
 			terminal: {
 				appliedD1Migrations: server.d1MigrationNames,
-				transitions: {
-					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
-				},
+				transitions: terminalTransitions,
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
@@ -457,10 +452,7 @@ it('records the same transitions when an interrupted deploy is run again', async
 			repeated: completedTransitions,
 			terminal: {
 				appliedD1Migrations: server.d1MigrationNames,
-				transitions: {
-					'cache-identity': 'complete',
-					'deployment-transitions': 'complete'
-				},
+				transitions: terminalTransitions,
 				phase: 'contracted',
 				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
