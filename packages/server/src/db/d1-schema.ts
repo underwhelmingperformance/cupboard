@@ -392,6 +392,21 @@ export const tenantMaintenanceEligibility = sqliteTable(
 	]
 );
 
+// One row for each schema transition, keyed by the transition id, with the
+// state that the transition has reached. `expanded` means that the
+// transition's expand migrations are applied, and `complete` means that its
+// contract migrations are applied too. `contracted_at` is set before the first
+// contract migration runs, so a build that does not define the transition can
+// tell whether those migrations may have removed anything. Other releases
+// write ids and states that this build does not define, so the columns are
+// plain text and readers parse them.
+export const deploymentTransition = sqliteTable('deployment_transition', {
+	id: text('id').primaryKey(),
+	state: text('state').notNull(),
+	updatedAt: text('updated_at').notNull(),
+	contractedAt: text('contracted_at')
+});
+
 // This table has one row, under the `id` `current`. It records which phase the
 // deployed build runs in, and the local step every tenant must reach before the
 // release advances past that phase. `cupboard deploy` writes the row and reads
