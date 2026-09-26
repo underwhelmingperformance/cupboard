@@ -1094,6 +1094,17 @@ export function registerGithubCommands(
 			'--read-password <password>',
 			'Basic read credential for tenants whose reads are private.'
 		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Exits 1 if any check failed, and 69 if no check failed but at least one',
+				'could not be verified. With --fix, once the repair has written a change,',
+				'it exits 1 if a later step of the repair fails, even for a transient',
+				'failure, or if a repaired job still fails or cannot be verified. Jobs',
+				'that the repair did not change still give 1 or 69 as above.'
+			].join('\n')
+		)
 		.action(async (url: URL, options: GithubCheckCommandOptions) => {
 			if (
 				options.fix !== true &&
