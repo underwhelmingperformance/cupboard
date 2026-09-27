@@ -21,20 +21,28 @@ The control Worker has a cron trigger that runs every hour. Each run:
 - refreshes the list of tenants that the Workers use to decide which requests to
   accept.
 
-A tenant is due for maintenance when one of its retention roots expires or a
-grace period ends, and in any case at least every six hours. Suspended tenants
-are skipped.
+An active tenant becomes due for maintenance when it has work to do, such as an
+expired retention root or grace period, or six hours have passed since its
+maintenance eligibility was last reconciled. Each hourly run queues at most 100
+due tenants. Queue delivery, other due tenants and maintenance failures can
+delay completion. Suspended tenants are skipped.
 
 ## Maintenance and the queues
 
 The hourly job doesn't do tenant maintenance itself. It sends the work as
 messages to the `cupboard-maintenance` queue.
 
-If a message fails, it's retried a minute later, up to three times. After that,
-it's moved to the dead-letter queue, `cupboard-maintenance-dlq`. cupboard
-doesn't read from the dead-letter queue. The next hourly run queues all the
-regular work again anyway, so you can inspect the messages in the dead-letter
-queue and then purge them without losing anything.
+If the queue consumer cannot process a message, it retries after one minute, up
+to three times. After that, the message goes to `cupboard-maintenance-dlq`,
+which cupboard does not consume. A failed tenant maintenance or removal pass
+follows a different path: the consumer records the failure in D1 and
+acknowledges the message. The hourly job can queue the tenant again while its
+work is due.
+
+Inspect each dead-letter message and the Worker logs before purging it. The
+hourly job selects only bounded batches of due tenants and does not recreate
+every kind of message. Check that the work completed or arrange another attempt
+before you purge the message.
 
 ## What to watch
 
