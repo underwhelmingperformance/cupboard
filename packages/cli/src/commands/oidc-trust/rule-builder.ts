@@ -273,8 +273,28 @@ export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 	});
 }
 
+export function buildCacheContentReadGrant(
+	options: Pick<CacheGrantOptions, 'cache' | 'cacheTemplate' | 'substitutions'>
+): PermittedGrant {
+	return permittedGrantSchema.parse({
+		type: 'cupboard_cache',
+		actions: ['cache:content-read'],
+		resources: {
+			cache: cacheBinding(options, options.substitutions ?? {})
+		}
+	});
+}
+
+export function buildViewContentReadGrant(view: string): PermittedGrant {
+	return permittedGrantSchema.parse({
+		type: 'cupboard_view',
+		actions: ['view:content-read'],
+		resources: { view: { exact: view, validate: 'reuseViewName' } }
+	});
+}
+
 function cacheBinding(
-	options: CacheGrantOptions,
+	options: Pick<CacheGrantOptions, 'cache' | 'cacheTemplate'>,
 	substitutions: Record<string, Substitution>
 ): Record<string, unknown> {
 	if (options.cacheTemplate !== undefined) {

@@ -151,7 +151,7 @@ exit 75
 
 | Variable                                                                                     | Used for                                                                                                                                                              |
 | -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CUPBOARD_READ_USER`, `CUPBOARD_READ_PASSWORD`                                               | The tenant read credential, for `config`, `attest verify` and `attest attach`.                                                                                        |
+| `CUPBOARD_READ_USER`, `CUPBOARD_READ_PASSWORD`                                               | A static read credential for `config`, `attest verify` and `attest attach`. The addressed cache determines which credential it accepts.                               |
 | `CUPBOARD_CACHE_CREDENTIALS`                                                                 | Cache read credentials for `config`, as a JSON array.                                                                                                                 |
 | `GH_TOKEN`, `GITHUB_TOKEN`                                                                   | Access to the GitHub API, for `github setup`, `github check` and the `oidc-trust add-github-*` commands.                                                              |
 | `ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`                             | Requesting a GitHub Actions OIDC token for `--github-oidc`. GitHub sets these.                                                                                        |
@@ -162,3 +162,12 @@ exit 75
 | `XDG_RUNTIME_DIR`, `RUNNER_TEMP`                                                             | Where `build-push` creates its socket.                                                                                                                                |
 | `NO_COLOR`, `FORCE_COLOR`, `PRE_COMMIT`, `GITHUB_ACTIONS`, `CI`                              | Colour, the output mode and prompts, as described above.                                                                                                              |
 | `NIX_REMOTE`, `NIX_CONFIG` and Nix's other variables                                         | Finding and configuring the Nix store, in the same way as Nix.                                                                                                        |
+
+`cupboard run` sets `netrc-file` in its child's `NIX_CONFIG` when the command
+needs temporary OIDC read access. The child inherits the other Nix settings. The
+netrc exists only while the wrapper runs. Do not copy its path into persistent
+Nix configuration.
+
+With a local multi-user Nix daemon, the invoking user must be trusted by Nix for
+the daemon to accept this `netrc-file` setting. A remote daemon uses its own
+credentials and configuration.

@@ -17,6 +17,12 @@ inputs:
       Path to a cupboard executable that an earlier actions/setup step
       installed. When it is set, the action does not install a release.
     required: false
+  read-session-target:
+    description: Internal setup output for private OIDC reads.
+    required: false
+  read-session-view:
+    description: Internal setup output for an additional private reuse view.
+    required: false
   cupboard-version:
     description:
       cupboard release to install, either latest or an exact release tag.
@@ -217,6 +223,8 @@ runs:
         URL: ${{ inputs.url }}
         PATHS: ${{ inputs.paths }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
         INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
@@ -275,6 +283,9 @@ runs:
           --run-root-ttl "$RUN_ROOT_TTL"
           --run-root-permanent "$RUN_ROOT_PERMANENT"
           --root-groups "$ROOT_GROUPS")
-        node --experimental-transform-types \
-          --disable-warning=ExperimentalWarning \
-          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"
+        source "$GITHUB_ACTION_PATH/../read-session.sh"
+        run_with_read_session \
+          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
+          node --experimental-transform-types \
+            --disable-warning=ExperimentalWarning \
+            "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

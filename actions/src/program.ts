@@ -104,6 +104,7 @@ export async function runAction(
 	const githubActions = workflowCommands();
 	const isSignalAwareCommand = [
 		'setup',
+		'setup-configure',
 		'attest-attach',
 		'build',
 		'build-cohort',

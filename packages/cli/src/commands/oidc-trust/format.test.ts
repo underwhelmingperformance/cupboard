@@ -39,6 +39,31 @@ it('keeps a long claim pattern on one line', () => {
 	]);
 });
 
+it('shows the exact view selector in a read grant', () => {
+	const rule = oidcTrustSummarySchema.parse({
+		id: 'view-reader',
+		issuer: 'https://token.actions.githubusercontent.com',
+		audience: 'https://cupboard.example.test/t/acme',
+		claims: { repository_id: '1234' },
+		permittedGrants: [
+			{
+				type: 'cupboard_view',
+				actions: ['view:content-read'],
+				resources: { view: { exact: 'reuse', validate: 'reuseViewName' } }
+			}
+		],
+		disabled: false
+	});
+
+	expect(trustRuleSummaryRows(rule)).toStrictEqual([
+		{ label: 'Rule', value: 'view-reader' },
+		{ label: 'Issuer', value: 'https://token.actions.githubusercontent.com' },
+		{ label: 'Audience', value: 'https://cupboard.example.test/t/acme' },
+		{ label: 'Claims', value: 'repository_id=1234' },
+		{ label: 'Grants', value: 'view reuse: view:content-read' }
+	]);
+});
+
 it('shows a claim-bound cache grant as structured fields', () => {
 	const capture = {
 		pattern: '^refs/pull/(?<pr>[0-9]+)/merge$',

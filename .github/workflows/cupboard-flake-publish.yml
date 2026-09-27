@@ -21,12 +21,23 @@ on:
           run publishes to the cache gh-<repository-id>-pr-<number>, with roots
           under github:<repository>/pr-<number>/ that expire after 14 days. When
           push is true, the workflow creates that cache if it does not exist.
-          The preset refuses a pull request from a fork. When an unmerged pull
-          request is closed, the run removes that pull request's cache. A run on
-          the branch in the branch input publishes to the default cache, with
+          When push is false, the run reads from the tenant's default cache and
+          does not create or remove a pull-request cache. The preset refuses a
+          pull request from a fork. When an unmerged pull request is closed and
+          push is true, the run removes that pull request's cache. A run on the
+          branch in the branch input publishes to the default cache, with
           permanent roots under github:<repository>/<branch>/. The preset fails
           any other run. Cannot be combined with cache, root-prefix, ttl or
           permanent. Leave empty to set those inputs yourself.
+        required: false
+        default: ''
+        type: string
+      cache-access-mode:
+        description:
+          Access for a pull-request cache that the preset creates, public or
+          private. When omitted, a new cache inherits the tenant's default cache
+          access. An existing cache keeps its access. Set an explicit mode when
+          the new cache must differ from the default cache.
         required: false
         default: ''
         type: string
@@ -41,8 +52,9 @@ on:
       cache:
         description:
           Named cache to publish to. Leave empty to publish to the default
-          cache. If the cache is private, pass a credential that reads it as the
-          destination_read_user and destination_read_password secrets.
+          cache. If this cache needs a different static read credential from
+          read_user and read_password, supply destination_read_user and
+          destination_read_password.
         required: false
         default: ''
         type: string
@@ -251,25 +263,28 @@ on:
         required: false
       destination_read_user:
         description:
-          User name of a read credential for the private cache that the run
-          publishes to. If the run uses a reuse view, the workflow checks this
-          credential before it publishes anything.
+          User name of a credential to read the destination cache when its
+          credential differs from read_user and read_password.
         required: false
       destination_read_password:
         description:
-          Password of a read credential for the private cache that the run
-          publishes to.
+          Password of the destination cache's distinct read credential.
+        required: false
+      read_user:
+        description:
+          User name of the default static read credential for the selected cache
+          and reuse view.
+        required: false
+      read_password:
+        description: Password of the default static read credential.
         required: false
       fallback_read_user:
         description:
-          User name of the tenant read credential, for reading a private reuse
-          view. With the preset, setting it also makes new pull-request caches
-          private.
+          Deprecated alias of read_user. Supply both aliases or neither.
         required: false
       fallback_read_password:
         description:
-          Password of the tenant read credential, for reading a private reuse
-          view.
+          Deprecated alias of read_password. Supply both aliases or neither.
         required: false
       private_substituters:
         description:
@@ -324,6 +339,7 @@ jobs:
         id: resolve
         env:
           PRESET: ${{ inputs.preset }}
+          CACHE_ACCESS_MODE: ${{ inputs.cache-access-mode }}
           PUSH: ${{ inputs.push }}
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
@@ -344,9 +360,33 @@ jobs:
           BUILDERS: ${{ inputs.builders }}
           BUILDER_KNOWN_HOSTS: ${{ inputs.builder-known-hosts }}
           STORE_KNOWN_HOSTS: ${{ inputs.store-known-hosts }}
+          READ_USER: ${{ secrets.read_user }}
+          READ_PASSWORD: ${{ secrets.read_password }}
+          FALLBACK_READ_USER: ${{ secrets.fallback_read_user }}
+          FALLBACK_READ_PASSWORD: ${{ secrets.fallback_read_password }}
+          DESTINATION_READ_USER: ${{ secrets.destination_read_user }}
+          DESTINATION_READ_PASSWORD: ${{ secrets.destination_read_password }}
         run: |
           set -euo pipefail
-          for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do
+          for pair in READ FALLBACK_READ DESTINATION_READ; do
+            user="${pair}_USER"
+            password="${pair}_PASSWORD"
+            if [ -n "${!user}" ] && [ -n "${!password}" ]; then
+              continue
+            fi
+            if [ -n "${!user}${!password}" ]; then
+              label="$(printf '%s' "${pair}" | tr '[:upper:]' '[:lower:]')"
+              echo "::error::${label}_user and ${label}_password must be supplied together"
+              exit 1
+            fi
+          done
+          if [ -n "${READ_USER}" ] && [ -n "${FALLBACK_READ_USER}" ] &&
+             { [ "${READ_USER}" != "${FALLBACK_READ_USER}" ] ||
+               [ "${READ_PASSWORD}" != "${FALLBACK_READ_PASSWORD}" ]; }; then
+            echo '::error::read_user/read_password and fallback_read_user/fallback_read_password must match when both are supplied'
+            exit 1
+          fi
+          for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do
             if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
               echo "::error::${name} must not contain line breaks"
               exit 1
@@ -360,6 +400,13 @@ jobs:
             echo '::error::store and builders select different build modes and are mutually exclusive'
             exit 1
           fi
+          case "${CACHE_ACCESS_MODE}" in
+            ''|public|private) ;;
+            *)
+              echo '::error::cache-access-mode must be public or private'
+              exit 1
+              ;;
+          esac
           if [ "${STORE_AMBIENT_IDENTITY}" = true ] && [ -z "${STORE}" ]; then
             echo '::error::store-ambient-identity requires the store input'
             exit 1
@@ -434,14 +481,15 @@ jobs:
                 fi
                 # Match pullRequestCacheTemplate and the prefix used by
                 # cupboard github setup's repository view.
-                CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
-                if [ "${EVENT_ACTION}" = closed ] && [ "${MERGED}" != true ]; then
-                  REMOVE_CACHE="${CACHE}"
-                fi
+                pr_cache="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
                 TTL=14d
                 PERMANENT=false
                 if [ "${PUSH}" = true ]; then
+                  CACHE="${pr_cache}"
                   PROVISION_CACHE="${CACHE}"
+                  if [ "${EVENT_ACTION}" = closed ] && [ "${MERGED}" != true ]; then
+                    REMOVE_CACHE="${CACHE}"
+                  fi
                 fi
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
@@ -552,15 +600,17 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           provision-cache: ${{ needs.configure.outputs.provision-cache }}
-          provision-cache-access:
-            ${{ secrets.fallback_read_user != '' && 'private' || 'public' }}
+          cache-access-mode:
+            ${{ github.event_name == 'pull_request' && inputs.push &&
+            inputs.cache-access-mode || '' }}
           provision-cache-ttl:
             ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           destination-read-user: ${{ secrets.destination_read_user }}
           destination-read-password: ${{ secrets.destination_read_password }}
-          read-user: ${{ secrets.fallback_read_user }}
-          read-password: ${{ secrets.fallback_read_password }}
+          read-user: ${{ secrets.read_user || secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.read_password || secrets.fallback_read_password }}
           private-substituters: ${{ secrets.private_substituters }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
@@ -570,15 +620,23 @@ jobs:
         env:
           TARGETS: ${{ inputs.targets }}
           PUSH: ${{ inputs.push }}
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          READ_SESSION_TARGET: ${{ steps.setup.outputs.read-session-target }}
+          READ_SESSION_VIEW: ${{ steps.setup.outputs.read-session-view }}
         run: |
           set -euo pipefail
-          if [[ "${PUSH}" == true ]]; then
-            manifest=$(nix eval --json "${TARGETS}")
+          evaluation=(nix eval --json "${TARGETS}")
+          if [[ "${PUSH}" != true ]]; then
+            evaluation+=(--apply 'targets: map (target: builtins.removeAttrs target ["rootDrvPath"]) targets')
+          fi
+          if [[ -n "${READ_SESSION_TARGET}" ]]; then
+            wrapper=("${CUPBOARD_PATH}" run "${READ_SESSION_TARGET}" --github-oidc)
+            if [[ -n "${READ_SESSION_VIEW}" ]]; then
+              wrapper+=(--reuse-view "${READ_SESSION_VIEW}")
+            fi
+            manifest=$("${wrapper[@]}" -- "${evaluation[@]}")
           else
-            manifest=$(
-              nix eval --json "${TARGETS}" \
-                --apply 'targets: map (target: builtins.removeAttrs target ["rootDrvPath"]) targets'
-            )
+            manifest=$("${evaluation[@]}")
           fi
           echo "manifest=${manifest}" >> "${GITHUB_OUTPUT}"
 
@@ -588,13 +646,19 @@ jobs:
           targets: ${{ steps.targets.outputs.manifest }}
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
           cache: ${{ needs.configure.outputs.cache }}
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
           optimise: ${{ inputs.push }}
-          read-user: ${{ secrets.destination_read_user }}
-          read-password: ${{ secrets.destination_read_password }}
+          read-user:
+            ${{ secrets.destination_read_user || secrets.read_user ||
+            secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.destination_read_password || secrets.read_password ||
+            secrets.fallback_read_password }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
@@ -688,11 +752,15 @@ jobs:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
+          cache-access-mode:
+            ${{ github.event_name == 'pull_request' && inputs.push &&
+            inputs.cache-access-mode || '' }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           destination-read-user: ${{ secrets.destination_read_user }}
           destination-read-password: ${{ secrets.destination_read_password }}
-          read-user: ${{ secrets.fallback_read_user }}
-          read-password: ${{ secrets.fallback_read_password }}
+          read-user: ${{ secrets.read_user || secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.read_password || secrets.fallback_read_password }}
           private-substituters: ${{ secrets.private_substituters }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
@@ -708,14 +776,22 @@ jobs:
           best-effort: ${{ matrix.bestEffort }}
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
           cache: ${{ needs.configure.outputs.cache }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
-          read-user: ${{ secrets.destination_read_user }}
-          read-password: ${{ secrets.destination_read_password }}
-          fallback-read-user: ${{ secrets.fallback_read_user }}
-          fallback-read-password: ${{ secrets.fallback_read_password }}
+          read-user:
+            ${{ secrets.destination_read_user || secrets.read_user ||
+            secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.destination_read_password || secrets.read_password ||
+            secrets.fallback_read_password }}
+          fallback-read-user:
+            ${{ secrets.read_user || secrets.fallback_read_user }}
+          fallback-read-password:
+            ${{ secrets.read_password || secrets.fallback_read_password }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           require-provenance: ${{ inputs.push }}
@@ -743,8 +819,15 @@ jobs:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.destination_read_user }}
-          read-password: ${{ secrets.destination_read_password }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-user:
+            ${{ secrets.destination_read_user || secrets.read_user ||
+            secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.destination_read_password || secrets.read_password ||
+            secrets.fallback_read_password }}
 
       # `actions/attest` checks the receipt against committed narinfos, so attach
       # only after this run has published. When the run builds none of the
@@ -757,9 +840,15 @@ jobs:
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.destination_read_user }}
-          read-password: ${{ secrets.destination_read_password }}
+          read-user:
+            ${{ secrets.destination_read_user || secrets.read_user ||
+            secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.destination_read_password || secrets.read_password ||
+            secrets.fallback_read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundle: ${{ steps.attest.outputs.bundles }}

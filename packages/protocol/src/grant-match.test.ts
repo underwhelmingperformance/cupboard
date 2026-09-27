@@ -400,3 +400,63 @@ describe('root selectors at issuance', () => {
 		).toBe(expected);
 	});
 });
+
+describe('view content-read issuance', () => {
+	it('matches an exact view binding and rejects another view', () => {
+		const permitted = grant({
+			type: 'cupboard_view',
+			actions: ['view:content-read'],
+			resources: {
+				view: { exact: 'sources', validate: 'reuseViewName' }
+			}
+		});
+
+		expect({
+			selected: isGrantPermittedByRule(
+				[permitted],
+				request({
+					type: 'cupboard_view',
+					actions: ['view:content-read'],
+					view: 'sources'
+				}),
+				{}
+			),
+			other: isGrantPermittedByRule(
+				[permitted],
+				request({
+					type: 'cupboard_view',
+					actions: ['view:content-read'],
+					view: 'other'
+				}),
+				{}
+			)
+		}).toStrictEqual({ selected: true, other: false });
+	});
+
+	it('resolves a view binding from verified claims', () => {
+		const permitted = grant({
+			type: 'cupboard_view',
+			actions: ['view:content-read'],
+			resources: {
+				view: {
+					equalsTemplate: 'source-{ref}',
+					substitutions: { ref: { claim: 'ref' } },
+					validate: 'reuseViewName'
+				}
+			}
+		});
+		const requested = request({
+			type: 'cupboard_view',
+			actions: ['view:content-read'],
+			view: 'source-main'
+		});
+
+		expect({
+			match: isGrantPermittedByRule([permitted], requested, { ref: 'main' }),
+			missing: isGrantPermittedByRule([permitted], requested, {}),
+			invalid: isGrantPermittedByRule([permitted], requested, {
+				ref: 'Bad Name'
+			})
+		}).toStrictEqual({ match: true, missing: false, invalid: false });
+	});
+});

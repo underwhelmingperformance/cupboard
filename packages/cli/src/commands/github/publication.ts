@@ -394,8 +394,8 @@ function flakeRoots(rootPrefix: string): FlakeRoots | undefined {
 }
 
 /**
- * The requests of one flake workflow run. The workflow creates and removes the
- * cache only for a pull request under the preset.
+ * The publication requests of one flake workflow run. The workflow creates
+ * and removes the cache only for a pull request under the preset.
  */
 export function flakeRequests(
 	cache: CacheScope,
@@ -692,6 +692,16 @@ export function modelPublishingJob(
 	}
 
 	const isPreset = isPresetJob(job);
+	const cacheAccessMode = scalar(job, 'cache-access-mode');
+
+	if (
+		isPreset &&
+		job.inputs.push !== false &&
+		(cacheAccessMode === undefined ||
+			!['', 'public', 'private'].includes(cacheAccessMode))
+	) {
+		return unmodelled('cache-access-mode must be public, private or omitted');
+	}
 	// The flake workflow reads `branch` only with the preset, and only the flake
 	// workflow has a `reuse-view` input.
 	const configuredBranch = isPreset ? scalar(job, 'branch', 'main') : branch;
@@ -794,8 +804,9 @@ export function modelPublishingJob(
 				continue;
 			}
 
+			const isReadOnly = job.inputs.push === false;
 			const publicationCache: CacheScope =
-				isPreset && isPullRequest
+				isPreset && isPullRequest && !isReadOnly
 					? {
 							kind: 'named',
 							name: cacheNameSchema.parse(
@@ -812,11 +823,9 @@ export function modelPublishingJob(
 				return unmodelled(`root-prefix '${selectedRoot}' is invalid`);
 			}
 
-			const requests = flakeRequests(
-				publicationCache,
-				roots,
-				isPreset && isPullRequest
-			);
+			const requests = isReadOnly
+				? []
+				: flakeRequests(publicationCache, roots, isPreset && isPullRequest);
 
 			const hasReuseView = isPreset ? !isPullRequest : reuseView !== '';
 

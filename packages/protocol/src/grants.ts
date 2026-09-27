@@ -12,6 +12,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { type ReuseViewName, reuseViewNameSchema } from './reuse-views.ts';
+
 // Tokens encode grants in the RFC 9396 `authorization_details` claim.
 // `isCoveredByToken` checks the route's required operation against the concrete
 // request resource. Stored trust rules use templates and captures that resolve
@@ -33,6 +35,7 @@ export const cacheOperationSchema = z.enum([
 	'root:list',
 	'root:remove',
 	'cache:read',
+	'cache:content-read',
 	'cache:create',
 	'cache:update',
 	'cache:retire',
@@ -44,6 +47,9 @@ export const cacheOperationSchema = z.enum([
 export type CacheOperation = z.infer<typeof cacheOperationSchema>;
 export const cacheOperations: readonly CacheOperation[] =
 	cacheOperationSchema.options;
+
+const viewOperationSchema = z.enum(['view:content-read']);
+export type ViewOperation = z.infer<typeof viewOperationSchema>;
 
 // Tenant-domain operations use authority over the tenant established by the
 // issuer. They have no separate resource selector.
@@ -121,6 +127,8 @@ export const operationSchema = z.enum([
 	'root:list',
 	'root:remove',
 	'cache:read',
+	'cache:content-read',
+	'view:content-read',
 	'cache:create',
 	'cache:update',
 	'cache:retire',
@@ -183,6 +191,7 @@ export function isRootOperation(operation: Operation): boolean {
 
 export interface ResourceRequest {
 	readonly cache?: CacheScope;
+	readonly view?: ReuseViewName;
 	readonly root?: RootName;
 	readonly tenant?: TenantId;
 }
@@ -197,6 +206,7 @@ export interface ResourceRequest {
 
 const grantTypeSchema = z.enum([
 	'cupboard_cache',
+	'cupboard_view',
 	'cupboard_domain',
 	'cupboard_tenant',
 	'cupboard_control',
@@ -205,16 +215,32 @@ const grantTypeSchema = z.enum([
 export const grantTypes = grantTypeSchema.options;
 
 const cacheActionsSchema = z.array(cacheOperationSchema).min(1);
+const viewActionsSchema = z.array(viewOperationSchema).min(1);
 const domainActionsSchema = z.array(domainOperationSchema).min(1);
 const tenantActionsSchema = z.array(tenantOperationSchema).min(1);
 const controlActionsSchema = z.array(controlOperationSchema).min(1);
 
-export const authorizationDetailSchema = z.discriminatedUnion('type', [
-	z.strictObject({
+const cacheAuthorizationDetailSchema = z
+	.strictObject({
 		type: z.literal('cupboard_cache'),
 		actions: cacheActionsSchema,
 		cache: cacheScopeSchema,
 		root: rootNameSchema.optional()
+	})
+	.refine(
+		(value) =>
+			value.root === undefined || !value.actions.includes('cache:content-read'),
+		{
+			message: 'Content-read grants cannot select a root'
+		}
+	);
+
+export const authorizationDetailSchema = z.discriminatedUnion('type', [
+	cacheAuthorizationDetailSchema,
+	z.strictObject({
+		type: z.literal('cupboard_view'),
+		actions: viewActionsSchema,
+		view: reuseViewNameSchema
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_domain'),
@@ -254,7 +280,9 @@ const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
 const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
-const cacheOperationSet: ReadonlySet<Operation> = new Set(cacheOperations);
+const metadataImplyingCacheOperations: ReadonlySet<Operation> = new Set(
+	cacheOperations.filter((operation) => operation !== 'cache:content-read')
+);
 
 function isOperationImplied(
 	actions: readonly Operation[],
@@ -264,7 +292,7 @@ function isOperationImplied(
 	if (
 		actions.includes(operation) ||
 		(operation === 'cache:read' &&
-			actions.some((action) => cacheOperationSet.has(action)))
+			actions.some((action) => metadataImplyingCacheOperations.has(action)))
 	) {
 		return true;
 	}
@@ -317,6 +345,7 @@ function isCoveredByGrant(
 		case 'cupboard_cache': {
 			if (
 				resource.cache === undefined ||
+				resource.view !== undefined ||
 				!isSameCacheScope(resource.cache, grant.cache)
 			) {
 				return false;
@@ -334,14 +363,31 @@ function isCoveredByGrant(
 				grant.root !== undefined && isRootWithin(resource.root, grant.root)
 			);
 		}
+		case 'cupboard_view': {
+			return (
+				resource.view !== undefined &&
+				resource.view === grant.view &&
+				resource.cache === undefined &&
+				resource.root === undefined &&
+				resource.tenant === undefined
+			);
+		}
 		case 'cupboard_tenant': {
-			return resource.tenant !== undefined && resource.tenant === grant.tenant;
+			return (
+				resource.tenant !== undefined &&
+				resource.tenant === grant.tenant &&
+				resource.view === undefined
+			);
 		}
 		case 'cupboard_domain':
 		case 'cupboard_control': {
 			// Resource-free: covers only the deployment-wide invocation, never a
 			// cache- or tenant-scoped one.
-			return resource.cache === undefined && resource.tenant === undefined;
+			return (
+				resource.cache === undefined &&
+				resource.view === undefined &&
+				resource.tenant === undefined
+			);
 		}
 	}
 }
@@ -363,6 +409,9 @@ function detailResource(detail: AuthorizationDetail): ResourceRequest {
 	switch (detail.type) {
 		case 'cupboard_cache': {
 			return { cache: detail.cache, root: detail.root };
+		}
+		case 'cupboard_view': {
+			return { view: detail.view };
 		}
 		case 'cupboard_tenant': {
 			return { tenant: detail.tenant };
@@ -509,6 +558,11 @@ export const tenantBindingSchema = z
 	.superRefine((value, ctx) => {
 		refineBinding(value, ctx);
 	});
+export const viewBindingSchema = z
+	.strictObject({ ...bindingShape, validate: z.literal('reuseViewName') })
+	.superRefine((value, ctx) => {
+		refineBinding(value, ctx);
+	});
 
 export const oidcTrustDisplaySchema = z.strictObject({
 	provider: z.string().max(displayFieldMaxLength).optional(),
@@ -521,13 +575,30 @@ const cacheResourcesSchema = z.strictObject({
 	cache: cacheBindingSchema,
 	root: rootBindingSchema.optional()
 });
+const viewResourcesSchema = z.strictObject({ view: viewBindingSchema });
 const tenantResourcesSchema = z.strictObject({ tenant: tenantBindingSchema });
 
-export const permittedGrantSchema = z.discriminatedUnion('type', [
-	z.strictObject({
+const cachePermittedGrantSchema = z
+	.strictObject({
 		type: z.literal('cupboard_cache'),
 		actions: cacheActionsSchema,
 		resources: cacheResourcesSchema
+	})
+	.refine(
+		(value) =>
+			value.resources.root === undefined ||
+			!value.actions.includes('cache:content-read'),
+		{
+			message: 'Content-read rules cannot select a root'
+		}
+	);
+
+export const permittedGrantSchema = z.discriminatedUnion('type', [
+	cachePermittedGrantSchema,
+	z.strictObject({
+		type: z.literal('cupboard_view'),
+		actions: viewActionsSchema,
+		resources: viewResourcesSchema
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_domain'),

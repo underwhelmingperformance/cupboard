@@ -83,16 +83,19 @@ inputs:
   provision-cache:
     description:
       Named cache to create with the job's OIDC token before Nix is configured.
-      provision-cache-access and provision-cache-ttl set its access and default
-      root TTL. If the cache already exists, setup keeps its settings, but fails
-      if its access differs from provision-cache-access.
+      cache-access-mode and provision-cache-ttl set its access and default root
+      TTL. If the cache already exists, setup keeps its settings. An explicit
+      public or private access requirement must match that cache.
+    required: false
+  cache-access-mode:
+    description:
+      Access for the created cache, public or private. If omitted, new caches
+      inherit the tenant's default cache access. An existing cache keeps its
+      access, and an explicit mode must match it. A configured reuse view must
+      have the same access as the cache.
     required: false
   provision-cache-access:
-    description:
-      Access for the created cache, public or private. Required with
-      provision-cache. A reuse view only includes caches with the same access as
-      the view, so this must match the access of any view that should include
-      the cache.
+    description: Deprecated alias for cache-access-mode.
     required: false
   provision-cache-ttl:
     description:
@@ -150,6 +153,16 @@ outputs:
     description:
       Path to the Nix configuration file that setup wrote under RUNNER_TEMP.
     value: ${{ steps.setup.outputs.nix-config-file }}
+  read-session-target:
+    description:
+      Cache or reuse-view URL that later steps must read through cupboard run.
+      Empty when public or static credentials cover the selected resources.
+    value: ${{ steps.setup.outputs.read-session-target }}
+  read-session-view:
+    description:
+      Reuse view to add to cupboard run when both the destination and view need
+      GitHub OIDC read access. Empty otherwise.
+    value: ${{ steps.setup.outputs.read-session-view }}
 runs:
   using: composite
   steps:
@@ -216,6 +229,7 @@ runs:
         DESTINATION_READ_USER: ${{ inputs.destination-read-user }}
         DESTINATION_READ_PASSWORD: ${{ inputs.destination-read-password }}
         PROVISION_CACHE: ${{ inputs.provision-cache }}
+        CACHE_ACCESS_MODE: ${{ inputs.cache-access-mode }}
         PROVISION_CACHE_ACCESS: ${{ inputs.provision-cache-access }}
         PROVISION_CACHE_TTL: ${{ inputs.provision-cache-ttl }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
@@ -239,6 +253,7 @@ runs:
           --cache "$CACHE"
           --include-default-cache "$INCLUDE_DEFAULT_CACHE"
           --provision-cache "$PROVISION_CACHE"
+          --cache-access-mode "$CACHE_ACCESS_MODE"
           --provision-cache-access "$PROVISION_CACHE_ACCESS"
           --provision-cache-ttl "$PROVISION_CACHE_TTL"
           --reuse-view "$REUSE_VIEW"

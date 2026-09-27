@@ -16,6 +16,12 @@ inputs:
   cupboard-path:
     description: Path to the cupboard executable that actions/setup installed.
     required: true
+  read-session-target:
+    description: Internal setup output for private OIDC reads.
+    required: false
+  read-session-view:
+    description: Internal setup output for an additional private reuse view.
+    required: false
   cache:
     description:
       Named cache to check and publish to. Leave empty for the default cache.
@@ -198,6 +204,8 @@ runs:
         COHORT_JSON: ${{ inputs.cohort-json }}
         URL: ${{ inputs.url }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         CACHE: ${{ inputs.cache }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TTL: ${{ inputs.ttl }}
@@ -251,6 +259,9 @@ runs:
           --reference-paths-file "$REFERENCE_PATHS_FILE"
           --left-upstream-file "$LEFT_UPSTREAM_FILE"
           --counts-file "$COUNTS_FILE")
-        node --experimental-transform-types \
-          --disable-warning=ExperimentalWarning \
-          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"
+        source "$GITHUB_ACTION_PATH/../read-session.sh"
+        run_with_read_session \
+          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
+          node --experimental-transform-types \
+            --disable-warning=ExperimentalWarning \
+            "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

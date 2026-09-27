@@ -1,7 +1,11 @@
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
+import { type CacheAccessMode } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
-import { isRootOperation } from '@cupboard/protocol/grants';
+import {
+	type AuthorizationDetails,
+	isRootOperation
+} from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { selectModelledOidcTrust } from '@cupboard/protocol/oidc-trust-diagnostics';
 import {
@@ -39,6 +43,7 @@ import {
 	type DiscoveredPublishingJob,
 	discoverPublishingJobs,
 	githubWorkflowSource,
+	type ReadCredentialWiring,
 	type WorkflowDiscovery,
 	type WorkflowSource
 } from './discovery.ts';
@@ -46,6 +51,10 @@ import {
 	CheckFinding,
 	FailedCheckFinding,
 	PassedCheckFinding,
+	ReadAuthenticationConfiguredFinding,
+	ReadAuthenticationIncompleteFinding,
+	ReadAuthenticationUnverifiedFinding,
+	ReuseViewAccessModeMismatchFinding,
 	ReuseViewMissingFinding,
 	RootGrantPrefixUnverifiedFinding
 } from './finding.ts';
@@ -56,6 +65,7 @@ import {
 	type PublishingJobFinding,
 	type ReuseViewRequirement
 } from './publication.ts';
+import { publicationReadAuthority } from './read-authority.ts';
 import {
 	RepositoryTrustRuleMissingFinding,
 	TrustRuleAudienceMismatchFinding,
@@ -85,6 +95,7 @@ export interface DiscoveredGithubCheckDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
 	readonly verifyWorkflowReference?: typeof verifyWorkflowReference;
 	readonly fetchCacheInfo: (url: URL) => Promise<CacheInfo>;
+	readonly fetchCacheAccess: (url: URL) => Promise<CacheAccessMode>;
 	readonly signal?: AbortSignal;
 }
 
@@ -211,7 +222,10 @@ function isRepairableFinding(
 	identity: RepositoryIdentity
 ): boolean {
 	if (finding.status !== 'failed') {
-		return finding.status === 'ok';
+		return (
+			finding.status === 'ok' ||
+			finding instanceof ReadAuthenticationUnverifiedFinding
+		);
 	}
 
 	if (finding instanceof ReuseViewMissingFinding) {
@@ -411,8 +425,13 @@ function checkRootGrantPrefixes(
 function trustFindings(
 	isPreset: boolean,
 	publication: PublicationCase,
-	rules: readonly OidcTrustRule[]
+	rules: readonly OidcTrustRule[],
+	requests: readonly AuthorizationDetails[]
 ): CheckFinding[] {
+	if (requests.length === 0) {
+		return [];
+	}
+
 	if (!isPreset && publication.trigger === 'pull_request') {
 		return [new SharedPullRequestCacheFinding()];
 	}
@@ -421,12 +440,36 @@ function trustFindings(
 		'trust rule',
 		rules,
 		publication.claims,
-		publication.requests
+		requests
 	);
+
+	if (publication.requests.length === 0) {
+		return [trust];
+	}
 
 	return trust.status === 'ok'
 		? [trust, checkRootGrantPrefixes(rules, publication)]
 		: [trust];
+}
+
+function readAuthenticationFinding(
+	resource: 'cache' | 'view',
+	wiring: ReadCredentialWiring
+): CheckFinding | undefined {
+	switch (wiring) {
+		case 'configured': {
+			return new ReadAuthenticationConfiguredFinding(resource);
+		}
+		case 'incomplete': {
+			return new ReadAuthenticationIncompleteFinding(resource);
+		}
+		case 'unknown': {
+			return new ReadAuthenticationUnverifiedFinding(resource);
+		}
+		case 'none': {
+			return;
+		}
+	}
 }
 
 async function inspectPublication(
@@ -439,7 +482,47 @@ async function inspectPublication(
 	dependencies: DiscoveredGithubCheckDependencies
 ): Promise<CheckFinding[]> {
 	const isPreset = isPresetJob(job);
-	const findings = trustFindings(isPreset, publication, rules);
+	const read = await publicationReadAuthority(
+		job,
+		publication,
+		tenant,
+		identity.repositoryId,
+		client,
+		dependencies.fetchCacheAccess
+	);
+	const findings = trustFindings(isPreset, publication, rules, [
+		...publication.requests,
+		...read.requests
+	]);
+	for (const [resource, access, wiring] of [
+		['cache', read.cacheAccess, read.cacheWiring],
+		['view', read.viewAccess, read.viewWiring]
+	] as const) {
+		if (access !== 'private' && wiring !== 'incomplete') {
+			continue;
+		}
+
+		const finding = readAuthenticationFinding(resource, wiring);
+
+		if (finding !== undefined) {
+			findings.push(finding);
+		}
+	}
+	if (
+		publication.reuseView !== undefined &&
+		read.selectedViewAccess !== undefined &&
+		read.viewAccess !== undefined &&
+		read.selectedViewAccess !== read.viewAccess
+	) {
+		findings.push(
+			new ReuseViewAccessModeMismatchFinding(
+				'reuse view access',
+				publication.reuseView.name,
+				read.viewAccess,
+				read.selectedViewAccess
+			)
+		);
+	}
 
 	if (publication.reuseView !== undefined) {
 		findings.push(
@@ -453,7 +536,11 @@ async function inspectPublication(
 		);
 	}
 
-	if (isPreset && publication.trigger === 'pull_request') {
+	if (
+		isPreset &&
+		publication.trigger === 'pull_request' &&
+		publication.requests.length > 0
+	) {
 		findings.push(await checkPullRequestCacheAccess(identity, client));
 	}
 
@@ -535,6 +622,7 @@ export async function inspectDiscoveredGithubCheck(
 	const verified = new Map<string, Promise<void>>();
 	const verifiedWorkflowReferences = new Set<string>();
 	const cacheInfo = new Map<string, Promise<CacheInfo>>();
+	const cacheAccess = new Map<string, Promise<CacheAccessMode>>();
 	let listedViews: ReturnType<typeof client.reuseViews.list> | undefined;
 	const inspectionDependencies: DiscoveredGithubCheckDependencies = {
 		...dependencies,
@@ -568,6 +656,18 @@ export async function inspectDiscoveredGithubCheck(
 			cacheInfo.set(url.href, info);
 
 			return info;
+		},
+		fetchCacheAccess: (url) => {
+			const cached = cacheAccess.get(url.href);
+
+			if (cached !== undefined) {
+				return cached;
+			}
+
+			const access = dependencies.fetchCacheAccess(url);
+			cacheAccess.set(url.href, access);
+
+			return access;
 		}
 	};
 	const inspectionClient: GithubCheckClient = {

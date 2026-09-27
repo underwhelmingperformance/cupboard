@@ -400,7 +400,7 @@ describe('cupboard acquisition', () => {
 
 	const provisionInputNames = new Set([
 		'provision-cache',
-		'provision-cache-access',
+		'cache-access-mode',
 		'provision-cache-ttl'
 	]);
 
@@ -453,8 +453,9 @@ describe('cupboard acquisition', () => {
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
 				'destination-read-user': '${{ secrets.destination_read_user }}',
 				'destination-read-password': '${{ secrets.destination_read_password }}',
-				'read-user': '${{ secrets.fallback_read_user }}',
-				'read-password': '${{ secrets.fallback_read_password }}',
+				'read-user': '${{ secrets.read_user || secrets.fallback_read_user }}',
+				'read-password':
+					'${{ secrets.read_password || secrets.fallback_read_password }}',
 				'private-substituters': '${{ secrets.private_substituters }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				'checkout-dir': sourceCheckoutDirectory
@@ -508,17 +509,42 @@ describe('cupboard acquisition', () => {
 			.map((inputs) =>
 				selectInputs(inputs, (name) => provisionInputNames.has(name))
 			)
-			.filter((inputs) => Object.keys(inputs).length > 0);
+			.filter((inputs) => inputs['provision-cache'] !== undefined);
+		const accessModes = inputsOf(workflow, cupboardAction('setup'))
+			.map((inputs) => inputs?.['cache-access-mode'])
+			.filter((mode) => mode !== undefined);
+		const policy = workflow.on.workflow_call?.inputs['cache-access-mode'];
 
-		expect(provisioning).toStrictEqual([
-			{
-				'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
-				'provision-cache-access':
-					"${{ secrets.fallback_read_user != '' && 'private' || 'public' }}",
-				'provision-cache-ttl':
-					'${{ needs.configure.outputs.provision-cache-ttl }}'
-			}
-		]);
+		expect({
+			policy: {
+				required: policy?.required,
+				default: policy?.default,
+				type: policy?.type,
+				description: typeof policy?.description
+			},
+			provisioning,
+			accessModes
+		}).toStrictEqual({
+			policy: {
+				required: false,
+				default: '',
+				type: 'string',
+				description: 'string'
+			},
+			provisioning: [
+				{
+					'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
+					'cache-access-mode':
+						"${{ github.event_name == 'pull_request' && inputs.push && inputs.cache-access-mode || '' }}",
+					'provision-cache-ttl':
+						'${{ needs.configure.outputs.provision-cache-ttl }}'
+				}
+			],
+			accessModes: [
+				"${{ github.event_name == 'pull_request' && inputs.push && inputs.cache-access-mode || '' }}",
+				"${{ github.event_name == 'pull_request' && inputs.push && inputs.cache-access-mode || '' }}"
+			]
+		});
 	});
 
 	it('rebuilds a cached output when the publish workflow attests', async () => {
@@ -527,6 +553,9 @@ describe('cupboard acquisition', () => {
 		expect(inputsOf(workflow, cupboardAction('build-paths'))).toStrictEqual([
 			{
 				installables: '${{ inputs.installable }}',
+				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
+				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 				// A cached output is no evidence that this run built anything, so a
 				// retry after a failed attachment produces a new receipt.
 				'require-provenance': '${{ inputs.attest }}'
@@ -659,6 +688,8 @@ describe('SSH credential isolation', () => {
 				'input_ssh_key',
 				'destination_read_user',
 				'destination_read_password',
+				'read_user',
+				'read_password',
 				'fallback_read_user',
 				'fallback_read_password',
 				'private_substituters'
@@ -713,13 +744,17 @@ describe('cohort planning and publication', () => {
 				targets: '${{ steps.targets.outputs.manifest }}',
 				url: '${{ inputs.url }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
+				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
 				optimise: '${{ inputs.push }}',
-				'read-user': '${{ secrets.destination_read_user }}',
-				'read-password': '${{ secrets.destination_read_password }}',
+				'read-user':
+					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
+				'read-password':
+					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
 				store: '${{ inputs.store }}',
@@ -779,14 +814,20 @@ describe('cohort planning and publication', () => {
 				'best-effort': '${{ matrix.bestEffort }}',
 				url: '${{ inputs.url }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
+				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
-				'read-user': '${{ secrets.destination_read_user }}',
-				'read-password': '${{ secrets.destination_read_password }}',
-				'fallback-read-user': '${{ secrets.fallback_read_user }}',
-				'fallback-read-password': '${{ secrets.fallback_read_password }}',
+				'read-user':
+					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
+				'read-password':
+					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
+				'fallback-read-user':
+					'${{ secrets.read_user || secrets.fallback_read_user }}',
+				'fallback-read-password':
+					'${{ secrets.read_password || secrets.fallback_read_password }}',
 				// No `max-jobs`. Passing 0 would send every derivation to the builders,
 				// including one that sets `preferLocalBuild`; a caller that wants that
 				// policy sets `max-jobs` through `nix-config`.
@@ -864,15 +905,25 @@ describe('attestation', () => {
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.destination_read_user }}',
-					'read-password': '${{ secrets.destination_read_password }}'
+					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+					'read-session-target':
+						'${{ steps.setup.outputs.read-session-target }}',
+					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+					'read-user':
+						'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
+					'read-password':
+						'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}'
 				}
 			],
 			publish: [
 				{
 					'receipt-file': '${{ steps.build.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
-					cache: '${{ inputs.cache }}'
+					cache: '${{ inputs.cache }}',
+					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+					'read-session-target':
+						'${{ steps.setup.outputs.read-session-target }}',
+					'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
 				}
 			]
 		});
@@ -896,9 +947,14 @@ describe('attestation', () => {
 				{
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+					'read-session-target':
+						'${{ steps.setup.outputs.read-session-target }}',
+					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.destination_read_user }}',
-					'read-password': '${{ secrets.destination_read_password }}',
+					'read-user':
+						'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
+					'read-password':
+						'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 					bundle: '${{ steps.attest.outputs.bundles }}'
@@ -922,6 +978,9 @@ describe('attestation', () => {
 				{
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+					'read-session-target':
+						'${{ steps.setup.outputs.read-session-target }}',
+					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 					cache: '${{ inputs.cache }}',
 					'receipt-file': '${{ steps.build.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
@@ -1000,7 +1059,7 @@ describe('resolved publication inputs', () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
 		const validation =
-			'for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do';
+			'for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do';
 
 		expect({
 			validation: resolve.includes(validation),
@@ -1048,7 +1107,7 @@ describe('resolved publication inputs', () => {
 			refuses: resolve.includes(refusal),
 			beforeTheCacheName:
 				resolve.indexOf(refusal) <
-				resolve.indexOf('CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"')
+				resolve.indexOf('pr_cache="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"')
 		}).toStrictEqual({
 			headRepositoryId: '${{ github.event.pull_request.head.repo.id }}',
 			refuses: true,
@@ -1225,6 +1284,8 @@ const execFileAsync = promisify(execFile);
 async function resolvePublicationEvent(event: {
 	readonly action: string;
 	readonly merged: boolean;
+	readonly push?: boolean;
+	readonly credentials?: Readonly<Record<string, string | undefined>>;
 }): Promise<Record<string, string>> {
 	const workflow = await loadWorkflow(flakeWorkflow);
 	const step = workflow.jobs.configure?.steps.find(
@@ -1246,7 +1307,7 @@ async function resolvePublicationEvent(event: {
 					Object.keys(step.env ?? {}).map((key) => [key, ''])
 				),
 				PRESET: 'pull-request-and-branch',
-				PUSH: 'true',
+				PUSH: String(event.push ?? true),
 				PERMANENT: 'false',
 				EVENT_NAME: 'pull_request',
 				EVENT_ACTION: event.action,
@@ -1257,6 +1318,7 @@ async function resolvePublicationEvent(event: {
 				HEAD_REPOSITORY_ID: '1234',
 				REF: event.merged ? 'refs/heads/main' : 'refs/pull/7/merge',
 				BRANCH: 'main',
+				...event.credentials,
 				GITHUB_OUTPUT: output
 			}
 		});
@@ -1278,6 +1340,64 @@ async function resolvePublicationEvent(event: {
 }
 
 describe('pull-request cache lifecycle', () => {
+	it.each([
+		{
+			credentials: { READ_USER: 'reader' },
+			message: '::error::read_user and read_password must be supplied together'
+		},
+		{
+			credentials: {
+				READ_USER: 'reader',
+				READ_PASSWORD: 'one',
+				FALLBACK_READ_USER: 'other',
+				FALLBACK_READ_PASSWORD: 'two'
+			},
+			message:
+				'::error::read_user/read_password and fallback_read_user/fallback_read_password must match when both are supplied'
+		}
+	])(
+		'rejects incomplete or conflicting static read pairs',
+		async ({ credentials, message }) => {
+			try {
+				await resolvePublicationEvent({
+					action: 'opened',
+					merged: false,
+					credentials
+				});
+			} catch (error) {
+				if (
+					!(error instanceof Error) ||
+					!('stdout' in error) ||
+					typeof error.stdout !== 'string'
+				) {
+					throw error;
+				}
+				expect(error.stdout.trim()).toBe(message);
+				return;
+			}
+			throw new Error('Expected the workflow to reject the static read pair');
+		}
+	);
+
+	it('uses the default cache without provisioning or removal for a read-only pull request', async () => {
+		expect(
+			await resolvePublicationEvent({
+				action: 'closed',
+				merged: false,
+				push: false
+			})
+		).toStrictEqual({
+			cache: '',
+			'root-prefix': 'github:acme/infra/pr-7',
+			ttl: '14d',
+			permanent: 'false',
+			'reuse-view': '',
+			'provision-cache': '',
+			'provision-cache-ttl': '14d',
+			'remove-cache': ''
+		});
+	});
+
 	it.each([
 		{ action: 'opened', merged: false, removed: '' },
 		{ action: 'closed', merged: false, removed: 'gh-1234-pr-7' },

@@ -1,5 +1,13 @@
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
-import { parseBasicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import {
+	readTokenBasicUser,
+	readTokenPasswordPrefix
+} from '@cupboard/protocol/read-access';
+import {
+	parseAuthenticationHeader,
+	parseBasicAuthHeader,
+	type ReadUser
+} from '@cupboard/shared/http';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -97,6 +105,29 @@ export async function isReadAuthorised(
 	);
 
 	return isUserMatching && isPasswordMatching;
+}
+
+export function readAccessToken(request: Request): string | undefined {
+	const authorization = request.headers.get('authorization') ?? undefined;
+	const bearer = parseAuthenticationHeader(authorization, 'Bearer');
+
+	if (bearer !== undefined) {
+		return bearer;
+	}
+
+	const parsed = parseBasicAuthHeader(authorization);
+
+	if (!parsed.ok || parsed.credential.user !== readTokenBasicUser) {
+		return undefined;
+	}
+
+	const { password } = parsed.credential;
+
+	if (!password.startsWith(readTokenPasswordPrefix)) {
+		return undefined;
+	}
+
+	return password.slice(readTokenPasswordPrefix.length);
 }
 
 export function unauthorisedResponse(): Response {

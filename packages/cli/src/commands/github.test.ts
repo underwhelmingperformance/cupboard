@@ -10,7 +10,9 @@ import {
 } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
-	cachePrioritySchema
+	cacheNameSchema,
+	cachePrioritySchema,
+	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import {
 	type OidcTrustAddBodyInput,
@@ -37,6 +39,7 @@ import {
 	CacheInfoServerError,
 	CacheInfoTimeoutError,
 	CacheInfoUnavailableError,
+	CacheInfoUnparsableError,
 	CliAbortError,
 	GithubCheckOptionError,
 	GithubSetupDriftError,
@@ -47,6 +50,7 @@ import {
 } from '../errors.ts';
 
 import {
+	cacheAccessFetcher,
 	cacheInfoFetcher,
 	type GithubSetupClient,
 	type GithubSetupOptions,
@@ -115,6 +119,11 @@ interface Recorded {
 }
 
 interface Stored {
+	readonly defaultCacheAccess?: CacheAccessMode;
+	readonly caches?: readonly {
+		readonly scope: CacheScope;
+		readonly access: CacheAccessMode;
+	}[];
 	readonly gracePolicies?: { cachePrefix: string; graceSeconds: number }[];
 	readonly views?: {
 		readonly access?: CacheAccessMode;
@@ -136,6 +145,20 @@ function setupClient(stored: Stored): {
 		ruleRemoves: []
 	};
 	const client: GithubSetupClient = {
+		caches: {
+			get: {
+				inDefaultCache: () =>
+					Promise.resolve({ access: stored.defaultCacheAccess ?? 'public' })
+			},
+			list: (input) =>
+				Promise.resolve({
+					caches: (stored.caches ?? []).filter(
+						(cache) =>
+							cache.scope.kind === 'named' &&
+							cache.scope.name.startsWith(input?.namePrefix ?? '')
+					)
+				})
+		},
 		reuseViews: {
 			list: () =>
 				Promise.resolve(
@@ -222,22 +245,17 @@ describe('runGithubSetup', () => {
 		it.each([
 			{
 				access: 'public' as const,
-				credential: {
-					readUser: readUserInputSchema.parse('reader'),
-					readPassword: 'secret'
-				},
-				detail:
-					'stored view is public; setup was given a read credential, so it would write a private view'
+				requested: { cacheAccessMode: 'private' as const },
+				detail: 'stored view is public; setup selected private access'
 			},
 			{
 				access: 'private' as const,
-				credential: {},
-				detail:
-					'stored view is private; setup was given no read credential, so it would write a public view'
+				requested: {},
+				detail: 'stored view is private; setup selected public access'
 			}
 		])(
 			'reports incompatible $access access without writes',
-			async ({ access, credential, detail }) => {
+			async ({ access, requested, detail }) => {
 				const results: ResultRow[][] = [];
 				const { client, recorded } = setupClient({
 					views: [
@@ -255,7 +273,7 @@ describe('runGithubSetup', () => {
 				try {
 					await runGithubSetup(
 						url,
-						{ ...options, ...credential },
+						{ ...options, ...requested },
 						reporter(results),
 						client,
 						dependencies
@@ -358,7 +376,7 @@ describe('runGithubSetup', () => {
 		});
 	});
 
-	it('creates a private view when setup receives read credentials', async () => {
+	it('does not infer cache visibility from read credentials', async () => {
 		const { client, recorded } = setupClient({});
 
 		await runGithubSetup(
@@ -375,12 +393,101 @@ describe('runGithubSetup', () => {
 
 		expect(recorded.viewSets).toStrictEqual([
 			{
-				access: 'private',
+				access: 'public',
 				name: 'pull-requests-1234',
 				selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
 				priority: 50
 			}
 		]);
+	});
+
+	it('inherits private default-cache access without a static credential', async () => {
+		const { client, recorded } = setupClient({ defaultCacheAccess: 'private' });
+
+		await runGithubSetup(url, options, reporter([]), client, dependencies);
+
+		expect({
+			views: recorded.viewSets,
+			grants: recorded.ruleAdds.map((rule) => rule.permittedGrants)
+		}).toStrictEqual({
+			views: [
+				{
+					access: 'private',
+					name: 'pull-requests-1234',
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+					priority: 50
+				}
+			],
+			grants: [
+				githubPrAddBody(url, identity, {
+					repo: options.repo,
+					jobWorkflowRef: options.workflowRef,
+					readCache: true
+				}).permittedGrants,
+				githubBranchAddBody(url, identity, {
+					repo: options.repo,
+					branch: options.branch,
+					jobWorkflowRef: options.workflowRef,
+					readCache: true,
+					readView: 'pull-requests-1234'
+				}).permittedGrants
+			]
+		});
+	});
+
+	it('refuses an explicit mode that differs from an existing PR cache', async () => {
+		const results: ResultRow[][] = [];
+		const { client, recorded } = setupClient({
+			caches: [
+				{
+					scope: {
+						kind: 'named',
+						name: cacheNameSchema.parse('gh-1234-pr-7')
+					},
+					access: 'private'
+				}
+			]
+		});
+		let failure: unknown;
+
+		try {
+			await runGithubSetup(
+				url,
+				{ ...options, cacheAccessMode: 'public' },
+				reporter(results),
+				client,
+				dependencies
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectDriftError(failure);
+		expect({ recorded, steps: failure.steps, outcomes: results }).toStrictEqual(
+			{
+				recorded: {
+					graceAdds: [],
+					viewSets: [],
+					ruleAdds: [],
+					ruleRemoves: []
+				},
+				steps: ['pull-request cache access'],
+				outcomes: [
+					[
+						{
+							label: 'pull-request cache access',
+							value:
+								'drift: gh-1234-pr-7 already has access that differs from the selected public mode'
+						},
+						{
+							label: 'reuse view',
+							value:
+								'missing: setup would create it after the drift is resolved'
+						}
+					]
+				]
+			}
+		);
 	});
 
 	it('derives the audience from the tenant URL without its trailing slash', async () => {
@@ -1674,7 +1781,8 @@ describe('registerGithubCommands', () => {
 			'--workflow-ref <owner/repo/path@ref>',
 			'-y, --yes',
 			'--read-user <user>',
-			'--read-password <password>'
+			'--read-password <password>',
+			'--cache-access-mode <mode>'
 		]);
 	});
 
@@ -1863,6 +1971,63 @@ describe('registerGithubCommands', () => {
 	});
 });
 
+it.each([
+	{ status: 200, access: 'public' },
+	{ status: 401, access: 'private' }
+] as const)(
+	'probes $access cache access without credentials',
+	async ({ status, access }) => {
+		const requests: { url: string; authorization: string | undefined }[] = [];
+		const probe = cacheAccessFetcher({
+			fetch: (input, init) => {
+				const url =
+					input instanceof URL
+						? input.href
+						: typeof input === 'string'
+							? input
+							: input.url;
+				requests.push({
+					url,
+					authorization:
+						new Headers(init?.headers).get('authorization') ?? undefined
+				});
+
+				const body =
+					status === 200
+						? new CacheInfo(
+								servedStoreDirectory,
+								true,
+								cachePrioritySchema.parse(40)
+							).render()
+						: undefined;
+
+				return Promise.resolve(new Response(body, { status }));
+			}
+		});
+
+		expect({
+			access: await probe(new URL('https://cupboard.example/t/acme')),
+			requests
+		}).toStrictEqual({
+			access,
+			requests: [
+				{
+					url: 'https://cupboard.example/t/acme/nix-cache-info',
+					authorization: undefined
+				}
+			]
+		});
+	}
+);
+
+it('does not classify an HTML login response as a public cache', async () => {
+	const probe = cacheAccessFetcher({
+		fetch: () => Promise.resolve(new Response('<html>Sign in</html>'))
+	});
+
+	await expect(probe(url)).rejects.toBeInstanceOf(CacheInfoUnparsableError);
+});
+
 describe('cacheInfoFetcher', () => {
 	const info = new CacheInfo(
 		servedStoreDirectory,
@@ -1902,6 +2067,37 @@ describe('cacheInfoFetcher', () => {
 					authorization: `Basic ${Buffer.from('alice:s3cret').toString('base64')}`
 				}
 			]
+		});
+	});
+
+	it('refreshes an owner token once when a private cache refuses it', async () => {
+		const authorizations: (string | undefined)[] = [];
+		const fetch = cacheInfoFetcher(
+			{},
+			{
+				ownerCredential: {
+					get: () => Promise.resolve('old'),
+					refresh: () => Promise.resolve('new')
+				},
+				fetch: (_input, init) => {
+					const authorization =
+						new Headers(init?.headers).get('authorization') ?? undefined;
+					authorizations.push(authorization);
+
+					return Promise.resolve(
+						authorization === 'Bearer new'
+							? new Response(info)
+							: new Response(undefined, { status: 401 })
+					);
+				}
+			}
+		);
+
+		const result = await fetch(new URL('https://cupboard.example/t/acme'));
+
+		expect({ priority: result.priority, authorizations }).toStrictEqual({
+			priority: 40,
+			authorizations: ['Bearer old', 'Bearer new']
 		});
 	});
 

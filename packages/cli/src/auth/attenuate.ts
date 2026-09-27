@@ -3,6 +3,7 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import type { ReuseViewName } from '@cupboard/protocol/reuse-views';
 
 // A CI exchange must request explicit `authorization_details`. Build the grant
 // from the operations this push will perform so its token is confined to one
@@ -55,6 +56,40 @@ export interface CacheCreateGrantIntent {
 
 export interface CacheRemoveGrantIntent {
 	readonly cache: CacheScope;
+}
+
+export interface ContentReadGrantIntent {
+	readonly cache?: CacheScope;
+	readonly view?: ReuseViewName;
+}
+
+/**
+ * Requests only binary-cache read authority for the resources used by a CI
+ * operation. An empty request needs no token exchange.
+ */
+export function contentReadAuthorizationDetails(
+	intent: ContentReadGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		...(intent.cache === undefined
+			? []
+			: [
+					{
+						type: 'cupboard_cache',
+						actions: ['cache:content-read'],
+						cache: intent.cache
+					}
+				]),
+		...(intent.view === undefined
+			? []
+			: [
+					{
+						type: 'cupboard_view',
+						actions: ['view:content-read'],
+						view: intent.view
+					}
+				])
+	]);
 }
 
 const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];

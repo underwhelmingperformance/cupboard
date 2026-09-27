@@ -6,7 +6,10 @@ import {
 	CacheInfo,
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	cachePrioritySchema
+} from '@cupboard/nix-store/scalars';
 import { cacheListResponseSchema } from '@cupboard/protocol/caches';
 import {
 	type OidcTrustAddBodyInput,
@@ -34,6 +37,7 @@ import {
 } from '../oidc-trust.ts';
 import {
 	buildAddBody,
+	buildCacheContentReadGrant,
 	buildCacheGrant,
 	jobWorkflowReferenceClaim
 } from '../oidc-trust/rule-builder.ts';
@@ -115,6 +119,7 @@ async function fixture(
 		defaultBranch?: string;
 		rules?: readonly OidcTrustSummary[];
 		views?: readonly ReuseViewSummary[];
+		cacheAccess?: CacheAccessMode;
 	} = {}
 ) {
 	const { ui, captured } = fakeCliUi(
@@ -180,7 +185,8 @@ async function fixture(
 			return Promise.resolve(
 				new CacheInfo(servedStoreDirectory, true, priority)
 			);
-		}
+		},
+		fetchCacheAccess: () => Promise.resolve(options.cacheAccess ?? 'public')
 	};
 	const check = await inspectDiscoveredGithubCheck(
 		url,
@@ -247,6 +253,86 @@ it('plans one rule for both publishing jobs and applies it after review', async 
 		confirms: ['Apply this tenant configuration?'],
 		notes: ['Planned GitHub repair']
 	});
+});
+
+it('repairs a private read-only pull request with a content-read grant only', async () => {
+	const readOnlyWorkflow = `
+on: pull_request
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+      push: false
+`;
+	const { ui, added, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		readOnlyWorkflow,
+		{ cacheAccess: 'private' }
+	);
+
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+
+	expect(
+		added.map((body) => ({
+			claims: body.claims,
+			permittedGrants: body.permittedGrants
+		}))
+	).toStrictEqual([
+		{
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				event_name: 'pull_request',
+				job_workflow_ref:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+			},
+			permittedGrants: [buildCacheContentReadGrant({})]
+		}
+	]);
+});
+
+it('repairs publication grants without adding read authority for a declared static pair', async () => {
+	const staticWorkflow = `
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: packages
+    secrets:
+      destination_read_user: \${{ secrets.CACHE_USER }}
+      destination_read_password: \${{ secrets.CACHE_PASSWORD }}
+`;
+	const { ui, added, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		staticWorkflow,
+		{ cacheAccess: 'private' }
+	);
+
+	expect(check.repairableJobs.map(({ job }) => job)).toStrictEqual(['publish']);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+	expect(added.map(({ permittedGrants }) => permittedGrants)).toStrictEqual([
+		[buildCacheGrant({ cache: 'packages', allow: ['push', 'attest'] })]
+	]);
 });
 
 it('shows that a repair retains a matching rule with insufficient grants', async () => {
@@ -832,7 +918,8 @@ jobs:
 					cachePrioritySchema.parse(priority)
 				)
 			);
-		}
+		},
+		fetchCacheAccess: () => Promise.resolve('public' as const)
 	};
 	const check = await inspectDiscoveredGithubCheck(
 		url,

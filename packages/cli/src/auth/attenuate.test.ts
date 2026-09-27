@@ -3,11 +3,13 @@ import {
 	type CacheScope,
 	rootNameSchema
 } from '@cupboard/nix-store/scalars';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { describe, expect, it } from 'vitest';
 
 import {
 	attestAttachAuthorizationDetails,
 	confirmAuthorizationDetails,
+	contentReadAuthorizationDetails,
 	previewAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
@@ -20,6 +22,28 @@ const namedCache = (value: string): CacheScope => ({
 	name: cacheNameSchema.parse(value)
 });
 const defaultCache: CacheScope = { kind: 'default' };
+
+describe('contentReadAuthorizationDetails', () => {
+	it('requests only cache and view content reads for selected private resources', () => {
+		expect(
+			contentReadAuthorizationDetails({
+				cache: namedCache('builds'),
+				view: reuseViewNameSchema.parse('release')
+			})
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				cache: { kind: 'named', name: 'builds' }
+			},
+			{
+				type: 'cupboard_view',
+				actions: ['view:content-read'],
+				view: 'release'
+			}
+		]);
+	});
+});
 
 describe('pushAuthorizationDetails', () => {
 	it('requests only upload operations for a plain push', () => {

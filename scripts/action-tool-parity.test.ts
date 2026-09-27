@@ -253,7 +253,9 @@ describe('canonical acquisition composition', () => {
 			'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 			cupboard: '${{ steps.setup.outputs.cupboard }}',
 			'cupboard-version': '${{ steps.setup.outputs.cupboard-version }}',
-			'nix-config-file': '${{ steps.setup.outputs.nix-config-file }}'
+			'nix-config-file': '${{ steps.setup.outputs.nix-config-file }}',
+			'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
+			'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
 		});
 	});
 

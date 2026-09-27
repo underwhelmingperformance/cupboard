@@ -26,6 +26,7 @@ import {
 import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
 import {
 	buildAddBody,
+	buildCacheContentReadGrant,
 	buildCacheGrant,
 	jobWorkflowReferenceClaim
 } from '../oidc-trust/rule-builder.ts';
@@ -42,6 +43,9 @@ import {
 import { type WorkflowSource } from './discovery.ts';
 import {
 	PassedCheckFinding,
+	ReadAuthenticationConfiguredFinding,
+	ReadAuthenticationIncompleteFinding,
+	ReadAuthenticationUnverifiedFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
 	RootGrantPrefixUnverifiedFinding
@@ -132,6 +136,7 @@ function defaultDependencies(
 		verifyWorkflowReference: () => Promise.resolve(),
 		fetchCacheInfo: () =>
 			Promise.reject(new Error('unexpected cache-info read')),
+		fetchCacheAccess: () => Promise.resolve('public'),
 		...overrides
 	};
 }
@@ -214,6 +219,101 @@ it('reports every matching publishing job', async () => {
 	});
 });
 
+it.each([
+	{
+		access: 'public' as const,
+		rules: [] as readonly unknown[],
+		secrets: '',
+		status: 'ready',
+		findings: []
+	},
+	{
+		access: 'private' as const,
+		rules: [
+			oidcTrustSummarySchema.parse({
+				id: 'read-only',
+				issuer: 'https://token.actions.githubusercontent.com',
+				audience: tenant.href,
+				claims: { repository_id: '1234', event_name: 'pull_request' },
+				permittedGrants: [buildCacheContentReadGrant({})],
+				disabled: false
+			})
+		],
+		secrets: '',
+		status: 'ready',
+		findings: [new PassedCheckFinding('trust rule')]
+	},
+	{
+		access: 'private' as const,
+		rules: [] as readonly unknown[],
+		secrets: `
+    secrets:
+      destination_read_user: \${{ secrets.CACHE_USER }}
+      destination_read_password: \${{ secrets.CACHE_PASSWORD }}`,
+		status: 'ready',
+		findings: [new ReadAuthenticationConfiguredFinding('cache')]
+	},
+	{
+		access: 'private' as const,
+		rules: [] as readonly unknown[],
+		secrets: '\n    secrets: inherit',
+		status: 'unverified',
+		findings: [new ReadAuthenticationUnverifiedFinding('cache')]
+	},
+	{
+		access: 'private' as const,
+		rules: [] as readonly unknown[],
+		secrets:
+			'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
+		status: 'failed',
+		findings: [new ReadAuthenticationIncompleteFinding('cache')]
+	},
+	{
+		access: 'public' as const,
+		rules: [] as readonly unknown[],
+		secrets:
+			'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
+		status: 'failed',
+		findings: [new ReadAuthenticationIncompleteFinding('cache')]
+	}
+])(
+	'checks $access read-only pull requests with declared secrets $secrets',
+	async (scenario) => {
+		const readOnlyWorkflow = `
+on: pull_request
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+      push: false${scenario.secrets}
+`;
+		const { client, dependencies } = fixture({
+			rules: scenario.rules,
+			dependencies: {
+				source: { ...source, read: () => Promise.resolve(readOnlyWorkflow) },
+				fetchCacheAccess: () => Promise.resolve(scenario.access)
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+
+		expect(
+			result.jobs.map((job) => ({
+				status: job.status,
+				findings: job.findings.map(({ finding }) => finding)
+			}))
+		).toStrictEqual([{ status: scenario.status, findings: scenario.findings }]);
+		expect(result.repairableJobs).toStrictEqual([]);
+	}
+);
+
 it('checks a proposed schedule and notes when it will start running', async () => {
 	const results: ResultRow[][] = [];
 	const rule = oidcTrustSummarySchema.parse({
@@ -287,6 +387,64 @@ jobs:
 			]
 		]
 	});
+});
+
+it('checks a private cache read separately from publication authority', async () => {
+	const rule = oidcTrustSummarySchema.parse({
+		id: 'publication-only',
+		issuer: 'https://token.actions.githubusercontent.com',
+		audience: tenant.href,
+		claims: { repository_id: '1234', ref: 'refs/heads/main' },
+		permittedGrants: [buildCacheGrant({ allow: ['push', 'attest'] })],
+		disabled: false
+	});
+	const { client, dependencies } = fixture({
+		rules: [rule],
+		dependencies: {
+			fetchCacheAccess: () => Promise.resolve('private'),
+			source: {
+				resolveBranch: () => Promise.resolve('a'.repeat(40)),
+				list: () => Promise.resolve([path]),
+				read: () =>
+					Promise.resolve(`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+`)
+			}
+		}
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main' },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+
+	expect(
+		result.jobs.map((job) => ({
+			status: job.status,
+			findings: job.findings.map(({ finding }) => finding.toJSON())
+		}))
+	).toStrictEqual([
+		{
+			status: 'failed',
+			findings: [
+				{
+					check: 'trust rule',
+					status: 'failed',
+					detail:
+						'rule publication-only matches the modelled claims but does not permit cache:content-read on cache (default); add a rule with the required grant, or add a corrected rule and remove this one'
+				}
+			]
+		}
+	]);
 });
 
 it('notes when a preset push is checked for the default branch', async () => {
@@ -419,7 +577,7 @@ jobs:
 				findings: [
 					{
 						finding: new DiscoveryUnverifiedFinding(
-							'the push input is dynamic, so the check cannot determine whether this job publishes'
+							'the push input is dynamic, so the check cannot determine whether this job publishes or only reads'
 						)
 					}
 				]

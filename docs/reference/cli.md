@@ -17,6 +17,7 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard attest verify`](#cupboard-attest-verify)
 - [`cupboard push`](#cupboard-push)
 - [`cupboard build-push`](#cupboard-build-push)
+- [`cupboard run`](#cupboard-run)
 - [`cupboard config`](#cupboard-config)
 - [`cupboard pubkey`](#cupboard-pubkey)
 - [`cupboard stats`](#cupboard-stats)
@@ -107,42 +108,43 @@ Deploy and manage cupboard, a multi-tenant Nix binary cache on Cloudflare
 Workers. Push store paths, manage tenants and keys, and configure Nix clients.
 
 Options:
-  -V, --version                                output the version number
-  --output-mode <mode>                         choose the output format: terminal (interactive, with progress), json (one JSON object per line) or github (GitHub Actions workflow commands)
-  --colour                                     force ANSI colour output
-  --no-colour                                  disable ANSI colour output
-  --result-file <path>                         append the command's results to this file, one JSON object per line
-  -h, --help                                   display help for command
+  -V, --version                                   output the version number
+  --output-mode <mode>                            choose the output format: terminal (interactive, with progress), json (one JSON object per line) or github (GitHub Actions workflow commands)
+  --colour                                        force ANSI colour output
+  --no-colour                                     disable ANSI colour output
+  --result-file <path>                            append the command's results to this file, one JSON object per line
+  -h, --help                                      display help for command
 
 Commands:
-  init|deploy [options]                        Deploy cupboard to a Cloudflare account, or upgrade an existing deployment.
-  deployment                                   Inspect and resume tenant migration work.
-  login [options] <url>                        Sign in to a tenant or the deployment, and save the session on this machine.
-  logout [options] [url]                       Delete the cached session for a tenant or the deployment from this machine.
-  whoami [options] [url]                       Show who the cached sessions sign in as or, with --provider, the identity a trust rule must match to admit you.
-  attest                                       Attach Sigstore attestations to published store paths, and verify them.
-  push [options] <url> [paths...]              Publish store paths to a cache.
-  build-push [options] <url> [arguments...]    Run a build command and publish each output as soon as Nix builds it.
-  config [options] <url> <pubkey> [caches...]  Print the nix.conf lines that add a tenant's caches as Nix substituters.
-  pubkey <url>                                 Print the tenant's public signing keys, one per line (more than one during a key rotation).
-  stats <url> [cache]                          Show how many store paths a cache has and how much storage they use.
-  usage <url>                                  Show how much storage the tenant is charged for, across all its caches.
-  delete [options] <url> <arguments...>        Delete one store path from a cache immediately, even if a root keeps it.
-  root                                         Manage retention roots, which keep named sets of store paths in a cache.
-  confirm [options] <url> <arguments...>       Check that store paths are already in a cache and refresh their grace period, without uploading anything.
-  key                                          Manage and rotate the keys that sign the tenant's narinfos.
-  auth-key                                     Manage and rotate the keys that sign the tenant's access tokens.
-  control-key                                  Manage and rotate the keys that sign operator tokens (operator only).
-  control-oidc-trust                           Manage the rules that admit OIDC tokens to the control plane, for CI jobs and for other operators (operator only).
-  tenant                                       Create, suspend and remove tenants, and manage their quotas and read credentials (operator only).
-  cache                                        Create, inspect, configure and remove a tenant's caches.
-  policy                                       List and remove old retention policies that an upgrade hasn't imported yet.
-  reuse-view                                   Manage reuse views, which let Nix read from several of a tenant's caches through one URL.
-  oidc-trust                                   Manage the trust rules that let administrators and CI jobs sign in to the tenant with OIDC identity tokens.
-  github                                       Set up and check a tenant for cupboard's GitHub flake publish workflow.
-  check [options] <url>                        Check that every store path in the tenant still has all of its stored files.
-  plan                                         Internal steps of cupboard's flake publish workflow, not for direct use.
-  help [command]                               display help for command
+  init|deploy [options]                           Deploy cupboard to a Cloudflare account, or upgrade an existing deployment.
+  deployment                                      Inspect and resume tenant migration work.
+  login [options] <url>                           Sign in to a tenant or the deployment, and save the session on this machine.
+  logout [options] [url]                          Delete the cached session for a tenant or the deployment from this machine.
+  whoami [options] [url]                          Show who the cached sessions sign in as or, with --provider, the identity a trust rule must match to admit you.
+  attest                                          Attach Sigstore attestations to published store paths, and verify them.
+  push [options] <url> [paths...]                 Publish store paths to a cache.
+  build-push [options] <url> [arguments...]       Run a build command and publish each output as soon as Nix builds it.
+  run [options] <cache-or-view-url> <command...>  Run a command with renewable private-cache read access in CI.
+  config [options] <url> <pubkey> [caches...]     Print the nix.conf lines that add a tenant's caches as Nix substituters.
+  pubkey <url>                                    Print the tenant's public signing keys, one per line (more than one during a key rotation).
+  stats <url> [cache]                             Show how many store paths a cache has and how much storage they use.
+  usage <url>                                     Show how much storage the tenant is charged for, across all its caches.
+  delete [options] <url> <arguments...>           Delete one store path from a cache immediately, even if a root keeps it.
+  root                                            Manage retention roots, which keep named sets of store paths in a cache.
+  confirm [options] <url> <arguments...>          Check that store paths are already in a cache and refresh their grace period, without uploading anything.
+  key                                             Manage and rotate the keys that sign the tenant's narinfos.
+  auth-key                                        Manage and rotate the keys that sign the tenant's access tokens.
+  control-key                                     Manage and rotate the keys that sign operator tokens (operator only).
+  control-oidc-trust                              Manage the rules that admit OIDC tokens to the control plane, for CI jobs and for other operators (operator only).
+  tenant                                          Create, suspend and remove tenants, and manage their quotas and read credentials (operator only).
+  cache                                           Create, inspect, configure and remove a tenant's caches.
+  policy                                          List and remove old retention policies that an upgrade hasn't imported yet.
+  reuse-view                                      Manage reuse views, which let Nix read from several of a tenant's caches through one URL.
+  oidc-trust                                      Manage the trust rules that let administrators and CI jobs sign in to the tenant with OIDC identity tokens.
+  github                                          Set up and check a tenant for cupboard's GitHub flake publish workflow.
+  check [options] <url>                           Check that every store path in the tenant still has all of its stored files.
+  plan                                            Internal steps of cupboard's flake publish workflow, not for direct use.
+  help [command]                                  display help for command
 
 Most commands need you to sign in first with `cupboard login <url>`.
 ```
@@ -674,6 +676,26 @@ Examples:
   cupboard build-push --github-oidc --root github:acme/app/main \
     --run-root github:acme/app/run-123 --run-root-ttl 2d \
     https://cupboard.example.workers.dev/t/acme -- nix build --no-link .#app
+```
+
+### cupboard run
+
+```text
+Usage: cupboard run <cache-or-view-url> [options] -- <command...>
+
+Run a command with renewable private-cache read access in CI.
+
+Arguments:
+  cache-or-view-url      cache or reuse view URL
+  command                command to run after --
+
+Options:
+  --github-oidc          request private-cache read access through GitHub
+                         Actions OIDC when needed
+  --audience <audience>  OIDC audience (default: the tenant URL)
+  --reuse-view <name>    reuse view whose private cache content the command will
+                         read
+  -h, --help             display help for command
 ```
 
 ### cupboard config
@@ -2142,10 +2164,12 @@ Options:
                                         asking. Rules that only might conflict,
                                         and rules for a different workflow
                                         reference, are kept.
-  --read-user <user>                    user name of the tenant read credential.
-                                        With a credential, the reuse view is
-                                        private.
-  --read-password <password>            password of the tenant read credential
+  --read-user <user>                    user name of a read credential for
+                                        checking private cache information
+  --read-password <password>            password of the read credential
+  --cache-access-mode <mode>            public or private for new pull-request
+                                        caches (default: the tenant default
+                                        cache access)
   -h, --help                            display help for command
 ```
 
@@ -2187,12 +2211,11 @@ Options:
                                         accept, such as v*
   --root-prefix <value>                 the root-prefix value that the
                                         repository's workflow passes
-  --read-user <user>                    user name of the tenant read credential,
-                                        for a tenant whose caches are private.
-                                        With a credential, a repair creates the
-                                        pull-request reuse view as a private
-                                        view.
-  --read-password <password>            password of the tenant read credential
+  --read-user <user>                    user name of a read credential for
+                                        checking private cache and view
+                                        metadata; it does not select access mode
+                                        or workflow grants
+  --read-password <password>            password of the read credential
   -h, --help                            display help for command
 
 Exits 1 if any check failed, and 69 if no check failed but at least one

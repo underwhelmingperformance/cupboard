@@ -137,6 +137,7 @@ export class NixStore {
 export interface DivertedNixDaemonOptions {
 	readonly root: string;
 	readonly home: string;
+	readonly nixConfig?: string;
 	/**
 	Where the daemon listens; must be short enough for `sun_path`.
 	*/
@@ -156,7 +157,8 @@ export class DivertedNixDaemon {
 	): Promise<DivertedNixDaemon> {
 		const environment = {
 			...(await isolatedEnvironment(options.home)),
-			NIX_DAEMON_SOCKET_PATH: options.socketPath
+			NIX_DAEMON_SOCKET_PATH: options.socketPath,
+			...(options.nixConfig !== undefined && { NIX_CONFIG: options.nixConfig })
 		};
 		const child = spawn(
 			'nix-daemon',

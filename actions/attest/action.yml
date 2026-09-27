@@ -35,6 +35,16 @@ inputs:
   cache:
     description: Named destination cache. Leave empty to use the default cache.
     required: false
+  cupboard-path:
+    description:
+      Path to the cupboard executable when private OIDC reads are used.
+    required: false
+  read-session-target:
+    description: Internal setup output for private OIDC reads.
+    required: false
+  read-session-view:
+    description: Internal setup output for an additional private reuse view.
+    required: false
   read-user:
     description: User name of a read credential for a private destination cache.
     required: false
@@ -163,20 +173,26 @@ runs:
         PREDICATE_FILE: ${{ inputs.predicate-file }}
         URL: ${{ inputs.url }}
         CACHE: ${{ inputs.cache }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
       run: |
-        node --experimental-transform-types \
-          --disable-warning=ExperimentalWarning \
-          "$GITHUB_ACTION_PATH/../src/main.ts" attest \
-          --receipt-file "$RECEIPT_FILE" \
-          --checksums-file "$CHECKSUMS_FILE" \
-          --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
-          --predicate-file "$PREDICATE_FILE" \
-          --url "$URL" \
-          --cache "$CACHE" \
-          --read-user "$READ_USER" \
-          --read-password "$READ_PASSWORD"
+        source "$GITHUB_ACTION_PATH/../read-session.sh"
+        run_with_read_session \
+          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
+          node --experimental-transform-types \
+            --disable-warning=ExperimentalWarning \
+            "$GITHUB_ACTION_PATH/../src/main.ts" attest \
+            --receipt-file "$RECEIPT_FILE" \
+            --checksums-file "$CHECKSUMS_FILE" \
+            --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
+            --predicate-file "$PREDICATE_FILE" \
+            --url "$URL" \
+            --cache "$CACHE" \
+            --read-user "$READ_USER" \
+            --read-password "$READ_PASSWORD"
 
     - name: Sign the attestation statements
       id: attest

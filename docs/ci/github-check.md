@@ -4,10 +4,11 @@ This page is for tenant administrators who want to know, before a run fails,
 whether their trust rules and reuse view accept a repository's publishing jobs.
 
 `cupboard github check` reads a repository's workflows from GitHub and checks
-each job that publishes to the tenant. With `--fix`, it also repairs some tenant
-configuration. [Step 5 of the quickstart](./quickstart.md#5-check-the-setup)
-shows the usual commands, and [Trust rules](./trust-rules.md) explains the rules
-that the check tests.
+each job that publishes to or reads from the tenant. With `--fix`, it also
+repairs some tenant configuration.
+[Step 5 of the quickstart](./quickstart.md#5-check-the-setup) shows the usual
+commands, and [Trust rules](./trust-rules.md) explains the rules that the check
+tests.
 
 ## Exit status
 
@@ -81,9 +82,20 @@ The check reports these jobs as unverified, for manual review:
   request's outputs to a separate cache, or publish pull requests to a separate
   cache.
 
-The check skips a job that passes `push: false` to the flake workflow. With the
-flake preset, such a job still removes a pull request's cache when the pull
-request closes without merging, and the check does not cover that removal.
+For `push: false`, the check models the selected cache read without publication
+or cache-removal grants. A pull-request run with the flake preset reads from the
+tenant's default cache. A public read needs no trust grant. A private read needs
+the exact cache content-read grant unless the workflow supplies a static read
+pair.
+
+The check can see that a workflow declares an explicit static username and
+password pair, but GitHub does not reveal the secret values. It reports the pair
+as configured, without claiming that the values authenticate at runtime. An
+incomplete pair fails. Inherited or dynamic secret wiring remains unverified and
+can make the check exit 69. `--fix` can still repair independent publication
+grants, but it cannot inspect or repair the hidden secret values. The
+`--read-user` and `--read-password` options authenticate the administrator's
+metadata queries; they do not choose a view's access or verify workflow secrets.
 
 The check ignores `actions/setup` when it only installs cupboard or configures
 Nix substituters. If the step sets `provision-cache`, setup can create a cache

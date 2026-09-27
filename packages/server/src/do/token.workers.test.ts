@@ -659,11 +659,25 @@ const trustClassGrants = {
 				cache: { kind: 'named', exact: 'release', validate: 'cacheName' }
 			}
 		}
+	],
+	read: [
+		{
+			type: 'cupboard_cache',
+			actions: ['cache:content-read'],
+			resources: { cache: { kind: 'default' } }
+		},
+		{
+			type: 'cupboard_view',
+			actions: ['view:content-read'],
+			resources: {
+				view: { exact: 'sources', validate: 'reuseViewName' }
+			}
+		}
 	]
 } as const;
 
 async function installTrustedIdp(
-	scope: 'admin' | 'write' | 'release-write',
+	scope: 'admin' | 'write' | 'release-write' | 'read',
 	options: {
 		failFirstFetches?: number;
 		protectedType?: string;
@@ -2865,6 +2879,79 @@ async function exchangeWith(
 describe('requested grants', () => {
 	beforeEach(resetTestServer);
 
+	it('issues exact cache and view read grants without write authority', async () => {
+		const subjectToken = await installTrustedIdp('read');
+		const requested = [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				cache: { kind: 'default' }
+			},
+			{
+				type: 'cupboard_view',
+				actions: ['view:content-read'],
+				view: 'sources'
+			}
+		];
+		const issued = await exchange(subjectToken, requested);
+		const claims = decodeJwt(issued.access_token);
+		const refused = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken,
+			authorization_details: JSON.stringify([
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					cache: { kind: 'default' }
+				}
+			])
+		});
+
+		expect({
+			status: issued.status,
+			grants: issued.authorization_details,
+			claims: claims.authorization_details,
+			expiresIn: issued.expires_in,
+			refreshToken: issued.refresh_token,
+			writeStatus: refused.status,
+			writeError: oauthErrorShape(await refused.json()).error
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			grants: requested,
+			claims: requested,
+			expiresIn: 900,
+			refreshToken: undefined,
+			writeStatus: StatusCodes.BAD_REQUEST,
+			writeError: 'invalid_authorization_details'
+		});
+	});
+
+	it('issues a stateless read-only token under a wildcard trust rule', async () => {
+		const requested = [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				cache: { kind: 'default' }
+			}
+		];
+		const issued = await exchange(await installTrustedIdp('admin'), requested);
+
+		expect({
+			status: issued.status,
+			grants: issued.authorization_details,
+			expiresIn: issued.expires_in,
+			refreshToken: issued.refresh_token,
+			refreshFamilies: await refreshTokenRows()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			grants: requested,
+			expiresIn: 900,
+			refreshToken: undefined,
+			refreshFamilies: []
+		});
+	});
+
 	it('issues a token confined to the requested grant', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const exchanged = await exchange(subjectToken, ciRequest);
@@ -3545,6 +3632,7 @@ describe('auth discovery endpoints', () => {
 				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				authorization_details_types_supported: [
 					'cupboard_cache',
+					'cupboard_view',
 					'cupboard_domain',
 					'cupboard_wildcard'
 				],

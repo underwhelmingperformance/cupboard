@@ -217,7 +217,14 @@ function guardRead(
 		context.req.raw,
 		context.get('tenantEntry'),
 		context.get('readScope'),
-		context.get('cacheVerifier')
+		{
+			cacheVerifier: context.get('cacheVerifier'),
+			isTokenAuthorised: (token, cache) =>
+				tenantServer(
+					context.env,
+					context.get('tenant')
+				).authoriseCacheContentRead(token, cache)
+		}
 	);
 }
 

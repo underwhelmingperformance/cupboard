@@ -48,6 +48,7 @@ import {
 
 import {
 	isReadAuthorised,
+	readAccessToken,
 	type ReadVerifier,
 	unauthorisedResponse
 } from './read-auth.ts';
@@ -73,50 +74,79 @@ export interface ReadScope {
 	readonly generation: CacheGeneration;
 }
 
+export interface CacheReadAuthentication {
+	readonly cacheVerifier?: ReadVerifier;
+	readonly isTokenAuthorised: (
+		token: string,
+		cache: CacheScope
+	) => Promise<boolean>;
+}
+
+export interface ViewReadAuthentication {
+	readonly verifier: ReadVerifier | undefined;
+	readonly isTokenAuthorised: (token: string) => Promise<boolean>;
+}
+
 /**
  * Authenticates a read, or returns the refusal to send instead.
  *
  * Admission reads every verifier from the authoritative D1 rows on each
  * request, so a rotated or deleted verifier takes effect immediately.
  *
- * A private cache must authenticate. `cacheVerifier` is the cache-specific
- * verifier, when present. Otherwise the guard uses the tenant verifier. If
- * neither verifier exists, the guard refuses the request. Authenticated reads
- * stay on the control Worker and never enter the cache-owning tenant Worker.
+ * A private cache must authenticate. A content-read token can authorise the
+ * cache directly. For a static credential, the cache-specific verifier takes
+ * precedence over the tenant verifier. The control Worker streams private
+ * content; token verification calls the tenant Worker once per request.
  */
 export async function guardScopedRead(
 	request: Request,
 	entry: TenantEntry,
 	scope: ReadScope,
-	cacheVerifier?: ReadVerifier
+	authentication: CacheReadAuthentication
 ): Promise<Response | undefined> {
 	if (scope.access === 'public') {
 		return undefined;
 	}
 
-	return authenticateRead(request, cacheVerifier ?? entry.readVerifier);
+	return authenticateRead(
+		request,
+		authentication.cacheVerifier ?? entry.readVerifier,
+		(token) => authentication.isTokenAuthorised(token, scope.scope)
+	);
 }
 
 /**
  * Authenticates a read of a private reuse view, or returns the refusal to send
  * instead.
  *
- * A view can select several caches, so only the tenant verifier authorises the
- * read. A cache-specific verifier grants access only to that cache, not to a
- * view over it. A tenant without a verifier therefore has no readable private
- * view.
+ * A view can select several caches. An exact view content-read token or the
+ * tenant's static credential can authorise it; a cache-specific credential
+ * grants access only to that cache.
  */
 export function guardPrivateViewRead(
 	request: Request,
-	verifier: ReadVerifier | undefined
+	authentication: ViewReadAuthentication
 ): Promise<Response | undefined> {
-	return authenticateRead(request, verifier);
+	return authenticateRead(
+		request,
+		authentication.verifier,
+		authentication.isTokenAuthorised
+	);
 }
 
 async function authenticateRead(
 	request: Request,
-	verifier: ReadVerifier | undefined
+	verifier: ReadVerifier | undefined,
+	isTokenAuthorised: (token: string) => Promise<boolean>
 ): Promise<Response | undefined> {
+	const token = readAccessToken(request);
+
+	if (token !== undefined) {
+		return (await isTokenAuthorised(token))
+			? undefined
+			: unauthorisedResponse();
+	}
+
 	if (verifier !== undefined && (await isReadAuthorised(request, verifier))) {
 		return undefined;
 	}

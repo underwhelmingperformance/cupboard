@@ -32,7 +32,7 @@ import {
 	type VerifyResult
 } from '@cupboard/shared/sigstore';
 
-import { resilientFetcher } from '../client/transport.ts';
+import { cacheReadFetcher, resilientFetcher } from '../client/transport.ts';
 
 export interface LocalAttestationVerifyOptions extends AttestationPolicyOptions {
 	readonly bundles: readonly string[];
@@ -128,10 +128,11 @@ export async function verifyRemoteAttestations(
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
 	const fetcher = dependencies.fetch ?? resilientFetcher('replay-safe');
+	const readFetcher = cacheReadFetcher(options.url, dependencies.fetch);
 	const base = canonicalHref(cacheUrl(options.url, options.cache));
 	const readHeaders = readAuthHeaders(options);
 	const narInfo = await fetchNarInfo(
-		fetcher,
+		readFetcher,
 		`${base}/${options.storePathHash}.narinfo`,
 		readHeaders,
 		options.signal
@@ -154,7 +155,7 @@ export async function verifyRemoteAttestations(
 
 	const expectedSubject = narInfo.narHash.digestHex();
 	const descriptors = await fetchAttestationList(
-		fetcher,
+		readFetcher,
 		`${base}/attestations/${options.storePathHash}`,
 		readHeaders,
 		options.signal
@@ -190,7 +191,7 @@ export async function verifyRemoteAttestations(
 			}
 
 			const bundleUrl = `${base}/attestation-bundles/${descriptor.digest}`;
-			const response = await fetcher(bundleUrl, {
+			const response = await readFetcher(bundleUrl, {
 				headers: readHeaders,
 				signal: options.signal
 			});

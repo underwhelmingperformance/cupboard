@@ -26,7 +26,7 @@ const publicWorkflows: readonly PublicWorkflow[] = [
 	{
 		file: 'cupboard-publish',
 		summary:
-			'Builds one flake installable on one runner, then publishes it and signs its build provenance. The workflow reads the cache without credentials, so the destination cache must be public.'
+			'Builds one flake installable on one runner, then publishes it and signs its build provenance. For a private destination, the workflow exchanges its GitHub OIDC identity token for a short-lived Cupboard read token.'
 	}
 ];
 const publicActions = [

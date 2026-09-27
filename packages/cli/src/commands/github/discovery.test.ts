@@ -225,7 +225,7 @@ jobs:
 		});
 	});
 
-	it('matches a named cache URL and skips a flake workflow with publication disabled', async () => {
+	it('discovers a flake workflow that reads without publishing', async () => {
 		const result = await discoverPublishingJobs(
 			repository,
 			'main',
@@ -258,10 +258,64 @@ jobs:
 						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
 					inputs: { url: 'https://cupboard.supply/t/laney/cache/packages' },
 					triggers: triggers('push')
+				},
+				{
+					caller: '.github/workflows/build.yml',
+					job: 'no-push',
+					kind: 'flake',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					inputs: {
+						url: 'https://cupboard.supply/t/laney',
+						push: false
+					},
+					triggers: triggers('push')
 				}
 			],
 			unverified: []
 		});
+	});
+
+	it('records declared read-secret wiring without reading secret values', async () => {
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source({
+				'.github/workflows/build.yml': `
+on: push
+jobs:
+  static-cache:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+    secrets:
+      destination_read_user: \${{ secrets.CACHE_USER }}
+      destination_read_password: \${{ secrets.CACHE_PASSWORD }}
+  inherited:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+    secrets: inherit
+`
+			})
+		);
+
+		expect(
+			result.jobs.map(({ job, readCredentialWiring }) => ({
+				job,
+				readCredentialWiring
+			}))
+		).toStrictEqual([
+			{
+				job: 'static-cache',
+				readCredentialWiring: { cache: 'configured', view: 'none' }
+			},
+			{
+				job: 'inherited',
+				readCredentialWiring: { cache: 'unknown', view: 'unknown' }
+			}
+		]);
 	});
 
 	it('ignores direct Cupboard calls for another tenant', async () => {

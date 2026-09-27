@@ -1,3 +1,4 @@
+import { withReadAuthentication } from '@cupboard/nix';
 import { InvalidCacheUrlBaseError } from '@cupboard/nix-store/errors';
 import { parseBaseUrl } from '@cupboard/nix-store/url';
 import {
@@ -23,6 +24,17 @@ export function resilientFetcher(
 	fetcher: typeof fetch = fetch
 ): typeof fetch {
 	return reachableFetcher(retryingFetcher(fetcher, replaySafety));
+}
+
+export function cacheReadFetcher(
+	tenantUrl: URL,
+	fetcher?: typeof fetch
+): typeof fetch {
+	const authenticated = withReadAuthentication(fetcher ?? fetch, { tenantUrl });
+
+	return fetcher === undefined
+		? resilientFetcher('replay-safe', authenticated)
+		: authenticated;
 }
 
 /**

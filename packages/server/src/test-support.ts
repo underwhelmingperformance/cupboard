@@ -1090,10 +1090,24 @@ export function issueServerSignedToken(
 	return issueServerSignedTokenFor(harness.server, grants, subject);
 }
 
+export function issueWorkerSignedToken(
+	grants: AuthorizationDetails,
+	subject = 'grant-test',
+	issuedAt = new Date()
+): Promise<string> {
+	return issueServerSignedTokenFor(
+		fixtureWorkerServer(),
+		grants,
+		subject,
+		issuedAt
+	);
+}
+
 async function issueServerSignedTokenFor(
 	stub: DurableObjectStub<CupboardServer>,
 	grants: AuthorizationDetails,
-	subject = 'grant-test'
+	subject = 'grant-test',
+	issuedAt = new Date()
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
 
@@ -1107,7 +1121,7 @@ async function issueServerSignedTokenFor(
 			kid: key.kid,
 			ttlSeconds: ttlSecondsSchema.parse(600)
 		},
-		new Date()
+		issuedAt
 	);
 }
 

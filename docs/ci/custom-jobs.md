@@ -38,7 +38,10 @@ jobs:
 
 Things to know before you use it:
 
-- The cache must be public. The workflow doesn't accept read credentials.
+- The workflow requests a Cupboard read token through GitHub OIDC when the
+  selected cache is private. Its trust rule must grant that cache's
+  `cache:content-read` action as well as publication. The workflow has no static
+  read-secret input.
 - The workflow adds the runner's Nix system to the end of the root name. In this
   example, the root is `github:acme/app/main/x86_64-linux`. A macOS run of the
   same workflow sets a different root, so it doesn't replace the Linux one. The

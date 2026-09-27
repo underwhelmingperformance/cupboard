@@ -25,6 +25,7 @@ import {
 	storedAuthorizationDetailsSchema,
 	storedPermittedGrantsSchema
 } from './grants.ts';
+import { reuseViewNameSchema } from './reuse-views.ts';
 
 interface ResourceFields {
 	cache?: CacheScope;
@@ -1169,6 +1170,71 @@ describe('cache scopes in issued grants', () => {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
 				cache: 'builds'
+			}).success
+		).toBe(false);
+	});
+});
+
+describe('content-read grants', () => {
+	it('authorises one cache without implying metadata or write access', () => {
+		const grant = authorizationDetailSchema.parse({
+			type: 'cupboard_cache',
+			actions: ['cache:content-read'],
+			cache: { kind: 'named', name: 'builds' }
+		});
+		const scope = { cache: namedCacheScope('builds') };
+
+		expect({
+			content: isCoveredByToken([grant], 'cache:content-read', scope),
+			metadata: isCoveredByToken([grant], 'cache:read', scope),
+			write: isCoveredByToken([grant], 'upload:commit', scope),
+			otherCache: isCoveredByToken([grant], 'cache:content-read', {
+				cache: namedCacheScope('other')
+			}),
+			writeGrantReads: isCoveredByToken([cacheGrant], 'cache:content-read', {
+				cache: namedCacheScope('pr-123')
+			})
+		}).toStrictEqual({
+			content: true,
+			metadata: false,
+			write: false,
+			otherCache: false,
+			writeGrantReads: false
+		});
+	});
+
+	it('authorises only the selected reuse view', () => {
+		const grant = authorizationDetailSchema.parse({
+			type: 'cupboard_view',
+			actions: ['view:content-read'],
+			view: 'sources'
+		});
+		const view = reuseViewNameSchema.parse('sources');
+
+		expect({
+			view: isCoveredByToken([grant], 'view:content-read', { view }),
+			otherView: isCoveredByToken([grant], 'view:content-read', {
+				view: reuseViewNameSchema.parse('other')
+			}),
+			cache: isCoveredByToken([grant], 'cache:content-read', {
+				cache: namedCacheScope('builds')
+			}),
+			attenuation: isAuthorizationDetailCovered([grant], grant)
+		}).toStrictEqual({
+			view: true,
+			otherView: false,
+			cache: false,
+			attenuation: true
+		});
+	});
+
+	it('rejects a root selector on cache content-read grants', () => {
+		expect(
+			authorizationDetailSchema.safeParse({
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				cache: { kind: 'default' },
+				root: 'main'
 			}).success
 		).toBe(false);
 	});

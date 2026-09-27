@@ -1,6 +1,6 @@
 # Managing tenants
 
-As the operator, you create tenants, issue the read credentials that Nix uses
+As the operator, you create tenants, issue static read credentials that Nix uses
 for private caches, set storage quotas, and suspend or remove tenants. This page
 covers each of these.
 
@@ -54,8 +54,8 @@ tenant's private caches. The user name is `cupboard`, and the command prints the
 generated password. The password isn't shown again. These options change that:
 
 - `--read-user` sets a different user name.
-- `--no-read-password` doesn't create a credential at all. Nobody can read a
-  private cache until it has a credential.
+- `--no-read-password` doesn't create a static credential. Private reads then
+  need a cache read credential or an access token with a content-read grant.
 
 You can also limit how much storage the tenant can use with `--quota-bytes`. By
 default there's no limit. See [Changing a quota](#changing-a-quota).
@@ -75,10 +75,15 @@ cupboard tenant list https://cupboard.example.workers.dev
 
 ## Read credentials
 
-Only operators can issue read credentials. Tenant administrators can't.
+Only operators can issue static read credentials. Tenant administrators can
+authorise CI jobs to exchange OIDC tokens for short-lived content-read access.
+See [Private caches in CI].
+
 [Read credentials](../use/private-caches.md#read-credentials) explains the two
 kinds, the tenant read credential and cache read credentials, and which one a
 cache accepts.
+
+[Private caches in CI]: ../ci/private-caches.md
 
 | Command                                                 | What it does                                                          |
 | ------------------------------------------------------- | --------------------------------------------------------------------- |
@@ -107,8 +112,8 @@ doesn't remember a custom user name, so pass `--read-user` again every time you
 rotate one.
 
 Each password is printed only once, because the deployment only keeps a salted
-SHA-256 hash of it. After you rotate a credential, everyone who reads the cache
-has to update their Nix configuration with the new password.
+SHA-256 hash of it. After you rotate a credential, readers that use that
+credential have to update their Nix configuration with the new password.
 
 Rotating a cache's own credential replaces the old one in a single write. The
 cache never accepts the tenant read credential in between, so a rotation doesn't
@@ -118,8 +123,10 @@ moment that it's created. Removing a cache also removes its own credential.
 
 Clearing a cache's own credential doesn't lock the cache. The cache goes back to
 accepting the tenant read credential, so anyone who has the tenant read
-credential can read the cache. A private cache with neither kind of credential
-refuses every read.
+credential can read the cache. Clearing static credentials does not remove
+access granted by content-read tokens. A private cache with neither kind of
+static credential still accepts an access token with the required content-read
+grant.
 
 ## Changing a quota
 

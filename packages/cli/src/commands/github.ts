@@ -2,7 +2,8 @@ import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
-	type CachePriority
+	type CachePriority,
+	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import {
 	type OidcTrustAddBodyInput,
@@ -19,6 +20,7 @@ import {
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { type Command, Option } from 'commander';
@@ -26,7 +28,10 @@ import { StatusCodes } from 'http-status-codes';
 
 import { abortReason } from '../abort.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
+import { parseCacheAccess } from '../cache-access.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { type TokenProvider } from '../client/client.ts';
+import { bearerAttempt } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
 import {
@@ -75,6 +80,65 @@ import { type ReuseViewClient } from './reuse-view.ts';
 const maximumCacheInfoBytes = 1024 * 1024;
 const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const okStatus: number = StatusCodes.OK;
+const unauthorisedStatus: number = StatusCodes.UNAUTHORIZED;
+
+export function cacheAccessFetcher(
+	dependencies: CacheInfoFetcherDependencies = {}
+): (url: URL) => Promise<CacheAccessMode> {
+	const fetcher = resilientFetcher('replay-safe', dependencies.fetch);
+	const timeoutMs = dependencies.timeoutMs ?? cacheInfoTimeoutMs;
+
+	return async (url) => {
+		const target = new URL(url);
+		target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;
+		const timeoutSignal = AbortSignal.timeout(timeoutMs);
+		const signal =
+			dependencies.signal === undefined
+				? timeoutSignal
+				: AbortSignal.any([dependencies.signal, timeoutSignal]);
+		let response: Response;
+
+		try {
+			response = await fetcher(target, { signal });
+		} catch (error) {
+			if (dependencies.signal?.aborted === true) {
+				throw abortReason(dependencies.signal);
+			}
+
+			if (timeoutSignal.aborted) {
+				throw new CacheInfoTimeoutError(target, timeoutMs, { cause: error });
+			}
+
+			throw error;
+		}
+
+		try {
+			if (response.status === okStatus) {
+				try {
+					const body = await readResponseText(response, {
+						description: `Cache information from ${target.href}`,
+						maximumBytes: maximumCacheInfoBytes,
+						signal
+					});
+					CacheInfo.parse(body);
+				} catch (error) {
+					throw new CacheInfoUnparsableError(target, { cause: error });
+				}
+
+				return 'public';
+			}
+
+			if (response.status === unauthorisedStatus) {
+				return 'private';
+			}
+
+			throw new CacheInfoUnavailableError(target, response.status);
+		} finally {
+			await discardResponseBody(response);
+		}
+	};
+}
 
 interface GithubCheckCommandOptions extends Omit<
 	GithubCheckOptions,
@@ -95,9 +159,27 @@ export interface GithubSetupOptions {
 	readonly yes?: boolean;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
+	readonly cacheAccessMode?: CacheAccessMode;
 }
 
 export interface GithubSetupClient {
+	readonly caches: {
+		readonly get: {
+			inDefaultCache(
+				input: object
+			): Promise<{ readonly access: CacheAccessMode }>;
+		};
+		list(input?: {
+			readonly namePrefix?: string;
+			readonly cursor?: string;
+		}): Promise<{
+			readonly caches: readonly {
+				readonly scope: CacheScope;
+				readonly access: CacheAccessMode;
+			}[];
+			readonly cursor?: string;
+		}>;
+	};
 	readonly reuseViews: Pick<ReuseViewClient, 'list' | 'set'>;
 	readonly oidcTrust: {
 		list(): Promise<OidcTrustListResponse>;
@@ -132,6 +214,8 @@ export interface ReadCredentialOptions {
 interface CacheInfoFetcherDependencies {
 	readonly fetch?: typeof fetch;
 	readonly timeoutMs?: number;
+	readonly ownerCredential?: TokenProvider;
+	readonly signal?: AbortSignal;
 }
 
 const cacheInfoTimeoutMs = 30_000;
@@ -174,10 +258,27 @@ export function cacheInfoFetcher(
 		let body: string;
 
 		try {
+			const ownerAttempt =
+				headers === undefined && dependencies.ownerCredential !== undefined
+					? await bearerAttempt(dependencies.ownerCredential)
+					: undefined;
 			response = await fetcher(target, {
 				...(headers !== undefined && { headers }),
+				...(ownerAttempt !== undefined && { headers: ownerAttempt.headers }),
 				signal
 			});
+			if (ownerAttempt && response.status === unauthorisedStatus) {
+				await discardResponseBody(response);
+				const refreshed =
+					await ownerAttempt.refreshAfterAuthenticationFailure();
+				if (refreshed === undefined) {
+					throw new CacheInfoUnavailableError(target, response.status);
+				}
+				response = await fetcher(target, {
+					headers: refreshed.headers,
+					signal
+				});
+			}
 			body = await readResponseText(response, {
 				description: `Cache information from ${target.href}`,
 				maximumBytes: maximumCacheInfoBytes,
@@ -598,6 +699,43 @@ async function planReuseView(
 	};
 }
 
+async function planPullRequestCacheAccess(
+	client: GithubSetupClient,
+	identity: RepositoryIdentity,
+	access: CacheAccessMode
+): Promise<PlannedSetupStep | undefined> {
+	const prefix = pullRequestCachePrefix(identity.repositoryId);
+	const mismatched: string[] = [];
+	let cursor: string | undefined;
+
+	do {
+		const page = await client.caches.list({ namePrefix: prefix, cursor });
+
+		for (const cache of page.caches) {
+			if (
+				cache.scope.kind === 'named' &&
+				cache.scope.name.startsWith(prefix) &&
+				cache.access !== access
+			) {
+				mismatched.push(cache.scope.name);
+			}
+		}
+		cursor = page.cursor;
+	} while (cursor !== undefined);
+
+	if (mismatched.length === 0) {
+		return undefined;
+	}
+
+	return {
+		step: {
+			step: 'pull-request cache access',
+			outcome: 'drift',
+			detail: `${mismatched.join(', ')} already has access that differs from the selected ${access} mode`
+		}
+	};
+}
+
 function reuseViewDrift(state: {
 	readonly existing: {
 		readonly access: CacheAccessMode;
@@ -608,7 +746,7 @@ function reuseViewDrift(state: {
 	readonly destinationPriority: CachePriority;
 }): string {
 	if (state.existing.access !== state.access) {
-		return `stored view is ${state.existing.access}; setup was ${state.access === 'private' ? 'given a read credential' : 'given no read credential'}, so it would write a ${state.access} view`;
+		return `stored view is ${state.existing.access}; setup selected ${state.access} access`;
 	}
 
 	if (
@@ -692,14 +830,28 @@ export async function runGithubSetup(
 		'Reading repository identity from GitHub',
 		() => resolveRepository(options.repo, lookupOptions)
 	);
+	const defaultCache = await reporter.phase(
+		'Reading default cache access',
+		() => client.caches.get.inDefaultCache({})
+	);
+	const access = options.cacheAccessMode ?? defaultCache.access;
+	const prCacheAccess = await reporter.phase(
+		'Reading pull-request cache access',
+		() => planPullRequestCacheAccess(client, identity, access)
+	);
 	const prBody = githubPrAddBody(url, identity, {
 		repo: options.repo,
-		jobWorkflowRef: options.workflowRef
+		jobWorkflowRef: options.workflowRef,
+		readCache: access === 'private'
 	});
 	const branchBody = githubBranchAddBody(url, identity, {
 		repo: options.repo,
 		branch: options.branch,
-		jobWorkflowRef: options.workflowRef
+		jobWorkflowRef: options.workflowRef,
+		readCache: defaultCache.access === 'private',
+		...(access === 'private' && {
+			readView: pullRequestViewName(identity.repositoryId)
+		})
 	});
 	// These are the default claims that setup can determine without seeing a
 	// token. GitHub environments and custom subject templates can change `sub`,
@@ -772,12 +924,8 @@ export async function runGithubSetup(
 	const configurationPlans = await reporter.phase(
 		'Reading tenant configuration',
 		async () => [
-			await planReuseView(
-				client,
-				identity,
-				destination.priority,
-				options.readUser === undefined ? 'public' : 'private'
-			)
+			...(prCacheAccess === undefined ? [] : [prCacheAccess]),
+			await planReuseView(client, identity, destination.priority, access)
 		]
 	);
 	const drifted = configurationPlans.filter(
@@ -1021,17 +1169,22 @@ export function registerGithubCommands(
 		)
 		.option(
 			'--read-user <user>',
-			'user name of the tenant read credential. With a credential, the reuse view is private.',
+			'user name of a read credential for checking private cache information',
 			parseReadUser
 		)
+		.option('--read-password <password>', 'password of the read credential')
 		.option(
-			'--read-password <password>',
-			'password of the tenant read credential'
+			'--cache-access-mode <mode>',
+			'public or private for new pull-request caches (default: the tenant default cache access)',
+			parseCacheAccess
 		)
 		.action(async (url: URL, options: GithubSetupOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
+			const ownerCredential = cachedOwnerProvider(url, {
+				signal: programOptions.signal
+			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				credential: ownerCredential,
 				signal: programOptions.signal
 			});
 
@@ -1040,6 +1193,7 @@ export function registerGithubCommands(
 				options,
 				ui,
 				{
+					caches: rpc.caches,
 					reuseViews: rpc.reuseViews,
 					oidcTrust: rpc.oidcTrust
 				},
@@ -1047,10 +1201,13 @@ export function registerGithubCommands(
 					...(programOptions.signal !== undefined && {
 						signal: programOptions.signal
 					}),
-					fetchCacheInfo: cacheInfoFetcher({
-						...options,
-						signal: programOptions.signal
-					})
+					fetchCacheInfo: cacheInfoFetcher(
+						{
+							...options,
+							signal: programOptions.signal
+						},
+						{ ownerCredential }
+					)
 				}
 			);
 		});
@@ -1091,13 +1248,10 @@ export function registerGithubCommands(
 		)
 		.option(
 			'--read-user <user>',
-			'user name of the tenant read credential, for a tenant whose caches are private. With a credential, a repair creates the pull-request reuse view as a private view.',
+			'user name of a read credential for checking private cache and view metadata; it does not select access mode or workflow grants',
 			parseReadUser
 		)
-		.option(
-			'--read-password <password>',
-			'password of the tenant read credential'
-		)
+		.option('--read-password <password>', 'password of the read credential')
 		.addHelpText(
 			'after',
 			[
@@ -1140,10 +1294,11 @@ export function registerGithubCommands(
 				assumeYes: options.yes
 			});
 			const reporter = ui.reporter();
+			const ownerCredential = cachedOwnerProvider(url, {
+				signal: programOptions.signal
+			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, {
-					signal: programOptions.signal
-				}),
+				credential: ownerCredential,
 				signal: programOptions.signal
 			});
 
@@ -1156,10 +1311,16 @@ export function registerGithubCommands(
 				...(programOptions.signal !== undefined && {
 					signal: programOptions.signal
 				}),
-				fetchCacheInfo: cacheInfoFetcher({
-					...options,
+				fetchCacheAccess: cacheAccessFetcher({
 					signal: programOptions.signal
-				})
+				}),
+				fetchCacheInfo: cacheInfoFetcher(
+					{
+						...options,
+						signal: programOptions.signal
+					},
+					{ ownerCredential }
+				)
 			};
 
 			if (options.workflowRef !== undefined) {
