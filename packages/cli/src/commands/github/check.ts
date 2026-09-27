@@ -1,6 +1,7 @@
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import {
+	type CacheAccessMode,
 	type CacheName,
 	cacheNameSchema,
 	type CacheScope
@@ -45,6 +46,7 @@ import {
 import {
 	CheckFinding,
 	PassedCheckFinding,
+	ReuseViewAccessModeMismatchFinding,
 	ReuseViewCacheAccessMismatchFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
@@ -270,7 +272,8 @@ export async function checkReuseViewCacheInfo(
 
 export async function checkPullRequestCacheAccess(
 	identity: RepositoryIdentity,
-	client: GithubCheckClient
+	client: GithubCheckClient,
+	expectedAccess?: CacheAccessMode
 ): Promise<CheckFinding> {
 	const check = 'pull-request cache access';
 	const viewName = pullRequestViewName(identity.repositoryId);
@@ -280,6 +283,15 @@ export async function checkPullRequestCacheAccess(
 
 	if (definition === undefined) {
 		return new ReuseViewMissingFinding(check, viewName);
+	}
+
+	if (expectedAccess !== undefined && definition.access !== expectedAccess) {
+		return new ReuseViewAccessModeMismatchFinding(
+			check,
+			viewName,
+			definition.access,
+			expectedAccess
+		);
 	}
 
 	const caches: CacheListEntry[] = [];
