@@ -113,9 +113,9 @@ A named cache can also be set up to remove itself once it's empty. See
 
 ### How storage is counted
 
-Storage is counted once per tenant. If the same file is used by several store
-paths, or appears in several caches, you're only charged for it once. Sizes are
-the compressed sizes.
+Storage is counted once per tenant. If the same NAR or attestation bundle is
+used by several store paths or caches, you're charged for it once. NARs use
+their compressed file size; attestation bundles use their stored byte length.
 
 If your tenant has a quota, an upload that would take it over the quota fails.
 The command exits with status 1, or 74 for `build-push`, because running it

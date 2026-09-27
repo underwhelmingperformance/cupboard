@@ -100,10 +100,13 @@ Second, the same destination secrets are used by pull-request runs and by `main`
 runs, so they have to work for both caches. Pull-request caches don't have
 credentials of their own, so the tenant read credential works for them. If your
 default cache has its own cache read credential, the tenant read credential
-won't work for it. In that case, choose the secret based on the event. For
-example:
+won't work for it. In that case, choose both the user name and password based on
+the event. For example:
 
 ```yaml
+destination_read_user:
+  ${{ github.event_name == 'pull_request' && secrets.TENANT_READ_USER ||
+  secrets.MAIN_READ_USER }}
 destination_read_password:
   ${{ github.event_name == 'pull_request' && secrets.TENANT_READ_PASSWORD ||
   secrets.MAIN_READ_PASSWORD }}

@@ -123,9 +123,10 @@ refuses every read.
 
 ## Changing a quota
 
-A quota limits how much storage a tenant can use. Each file that the tenant
-stores is counted once, at its compressed size, however many store paths or
-caches use it. This covers both NARs and attestations.
+A quota limits how much storage a tenant can use. Each distinct NAR and
+attestation bundle is counted once per tenant, however many store paths or
+caches refer to it. NARs are charged by compressed file size. Attestation
+bundles are charged by their stored byte length.
 
 To set a quota of 50 GB on the `acme` tenant:
 
