@@ -128,6 +128,19 @@ describe('NixLocalStoreClient', () => {
 		);
 	});
 
+	it('reports a missing path when closing the database also fails', async () => {
+		const failingClose = new NixLocalStoreClient(() => ({
+			...fakeDatabase(),
+			close: () => {
+				throw new Error('the database could not be closed');
+			}
+		}));
+
+		await expect(failingClose.queryPathInfo(missingPath)).rejects.toThrow(
+			NixStorePathNotFoundError
+		);
+	});
+
 	it('queries registered paths without loading their metadata', async () => {
 		await expect(
 			client.queryValidPaths([missingPath, pathB, pathB, pathA])

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
+import { bestEffort, withCleanup } from '@cupboard/shared/cleanup';
 import {
 	GenericContainer,
 	type StartedTestContainer,
@@ -63,6 +64,29 @@ class FixtureEvent {
 	}
 }
 
+interface StoppableContainer {
+	stop(options: {
+		readonly remove: boolean;
+		readonly removeVolumes: boolean;
+	}): Promise<unknown>;
+}
+
+/**
+ * Stops the fixture's container, when one was started, and removes the
+ * fixture's workspace.
+ */
+export async function stopNixSshStore(
+	container: StoppableContainer | undefined,
+	workspace: string
+): Promise<void> {
+	await withCleanup(
+		async () => {
+			await container?.stop({ remove: true, removeVolumes: true });
+		},
+		() => rm(workspace, { force: true, recursive: true })
+	);
+}
+
 /**
  * Starts an isolated Nix store whose daemon is reachable only through a real
  * OpenSSH server. Testcontainers owns the image and container lifecycle; the
@@ -96,14 +120,7 @@ export async function startNixSshStore(): Promise<NixSshStoreFixture> {
 		}
 	};
 
-	const closeOnce = async (): Promise<void> => {
-		try {
-			await container?.stop({ remove: true, removeVolumes: true });
-		} finally {
-			await rm(workspace, { force: true, recursive: true });
-		}
-	};
-	const close = onceAsync(closeOnce);
+	const close = onceAsync(() => stopNixSshStore(container, workspace));
 
 	try {
 		await runCommand('ssh-keygen', [
@@ -227,7 +244,7 @@ export async function startNixSshStore(): Promise<NixSshStoreFixture> {
 			waitForBlockingDaemonEvent: (event) => blockingEvents[event].wait()
 		};
 	} catch (error) {
-		await close();
+		await bestEffort(close);
 		throw error;
 	}
 }

@@ -32,6 +32,31 @@ export async function withCleanup<T>(
 }
 
 /**
+ * Runs a synchronous operation and its synchronous cleanup. As with
+ * {@link withCleanup}, a cleanup failure is reported after a successful
+ * operation, but cannot replace the operation's own failure.
+ */
+export function withCleanupSync<T>(operation: () => T, cleanup: () => void): T {
+	let result: T;
+
+	try {
+		result = operation();
+	} catch (error) {
+		try {
+			cleanup();
+		} catch {
+			// The caller receives the operation's failure.
+		}
+
+		throw error;
+	}
+
+	cleanup();
+
+	return result;
+}
+
+/**
  * Runs an operation and every cleanup in order. The first failure is reported,
  * while later cleanup failures cannot replace it or prevent remaining cleanup.
  */

@@ -3,6 +3,8 @@ import { chmod, lstat, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { withCleanup } from '@cupboard/shared/cleanup';
+
 export const temporaryRoot =
 	process.platform === 'darwin' ? '/private/tmp' : tmpdir();
 
@@ -20,15 +22,16 @@ export async function withTemporaryDirectory<T>(
 		path.join(options.root ?? temporaryRoot, prefix)
 	);
 
-	try {
-		return await body(directory);
-	} finally {
-		if (options.makeWritableBeforeCleanup === true) {
-			await makeWritable(directory);
-		}
+	return withCleanup(
+		() => body(directory),
+		async () => {
+			if (options.makeWritableBeforeCleanup === true) {
+				await makeWritable(directory);
+			}
 
-		await rm(directory, { force: true, recursive: true });
-	}
+			await rm(directory, { force: true, recursive: true });
+		}
+	);
 }
 
 export async function makeWritable(target: string): Promise<void> {
