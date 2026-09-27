@@ -69,8 +69,9 @@ the public key at `/pubkey`. You can rotate a tenant's signing key. See
 ### How storage is shared
 
 cupboard stores each NAR only once, however many caches or tenants publish it.
-Each tenant is charged once for each distinct NAR and attestation that it refers
-to, at its compressed size.
+Each tenant is charged once for each distinct NAR and attestation bundle that it
+refers to. NARs use their compressed file size; attestation bundles use their
+stored byte length.
 
 ## Read credentials
 
