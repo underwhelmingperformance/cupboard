@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
 	backoffDelay,
+	fullJitterDelayMs,
 	isTransientResponse,
 	reachableFetcher,
 	retryingFetcher as makeRetryingFetcher
@@ -83,6 +84,24 @@ describe('isTransientResponse', () => {
 			transient
 		);
 	});
+});
+
+describe('fullJitterDelayMs', () => {
+	it.each([
+		{ attempt: 1, random: 0, expected: 0 },
+		{ attempt: 1, random: 0.5, expected: 125 },
+		{ attempt: 3, random: 0.5, expected: 500 },
+		{ attempt: 3, random: 0.999, expected: 999 },
+		{ attempt: 6, random: 0.5, expected: 2500 },
+		{ attempt: 40, random: 0.5, expected: 2500 }
+	])(
+		'scales attempt $attempt with random $random to $expected',
+		({ attempt, random, expected }) => {
+			vi.spyOn(Math, 'random').mockReturnValue(random);
+
+			expect(fullJitterDelayMs(attempt, 250, 5000)).toBe(expected);
+		}
+	);
 });
 
 describe('backoffDelay', () => {

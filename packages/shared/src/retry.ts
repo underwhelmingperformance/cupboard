@@ -123,12 +123,25 @@ export async function backoffDelay(
 	attempt: number,
 	signal?: AbortSignal
 ): Promise<void> {
-	const ceiling = Math.min(
-		baseRetryDelayMs * 2 ** (attempt - 1),
-		maxRetryDelayMs
+	await abortableSleep(
+		fullJitterDelayMs(attempt, baseRetryDelayMs, maxRetryDelayMs),
+		signal
 	);
+}
 
-	await abortableSleep(Math.random() * ceiling, signal);
+/**
+ * Returns a delay with full jitter for the given attempt, counted from 1: a
+ * random value from zero to a ceiling. The ceiling starts at `baseMs` and
+ * doubles with each attempt, up to `maximumMs`.
+ */
+export function fullJitterDelayMs(
+	attempt: number,
+	baseMs: number,
+	maximumMs: number
+): number {
+	const ceiling = Math.min(baseMs * 2 ** (attempt - 1), maximumMs);
+
+	return Math.random() * ceiling;
 }
 
 /**
