@@ -21,6 +21,7 @@ import {
 	type BasicCredential,
 	readUserSchema
 } from '@cupboard/shared/http';
+import { parseHttpDate } from '@cupboard/shared/http-fields';
 import {
 	readResponseText,
 	RemoteBodyTooLargeError
@@ -798,8 +799,9 @@ function retryDelayMs(
 }
 
 /**
- * Parses `Retry-After` as either seconds or an HTTP date. Returns `undefined`
- * when the header is absent or malformed, allowing the normal backoff to apply.
+ * Parses `Retry-After` as either seconds or an RFC 9110 HTTP date. Returns
+ * `undefined` when the header is absent or malformed, and the normal backoff
+ * then applies.
  */
 function retryAfterMilliseconds(response: Response): number | undefined {
 	const header = response.headers.get('retry-after');
@@ -815,9 +817,9 @@ function retryAfterMilliseconds(response: Response): number | undefined {
 		return seconds * 1000;
 	}
 
-	const moment = Date.parse(asked);
+	const moment = parseHttpDate(asked);
 
-	return Number.isNaN(moment) ? undefined : Math.max(0, moment - Date.now());
+	return moment === undefined ? undefined : Math.max(0, moment - Date.now());
 }
 
 /**
