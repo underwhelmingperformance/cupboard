@@ -90,6 +90,7 @@ import {
 	type UploadStatusResponseInput,
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
+import { withCleanup } from '@cupboard/shared/cleanup';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { withDeadline } from '@cupboard/shared/timeout';
 import {
@@ -107,6 +108,7 @@ import { z } from 'zod';
 
 import migrations from '../drizzle/migrations.js';
 
+import { closeAlarmFence, openAlarmFence } from './alarm-fence.test-support.ts';
 import { issueAccessJwt } from './auth/auth.ts';
 import { type NarVerification } from './blob/nar-verify.ts';
 import {
@@ -808,22 +810,6 @@ export async function finishTestServerLifecycle(): Promise<
 	return stalled;
 }
 
-interface SuspendedAlarmArming {
-	/**
-	 * The original `setAlarm` method, restored after the last fence ends.
-	 */
-	readonly armAlarm: DurableObjectStorage['setAlarm'];
-	/**
-	 * The number of active fences.
-	 */
-	depth: number;
-}
-
-const suspendedAlarmArming = new WeakMap<
-	DurableObjectStorage,
-	SuspendedAlarmArming
->();
-
 /**
  * Prevents a Durable Object, by default the harness's current server, from
  * arming an alarm while `body` runs. The function restores `setAlarm` before
@@ -835,54 +821,24 @@ const suspendedAlarmArming = new WeakMap<
  * does not cancel delivery. This function disables `setAlarm`, and the test
  * calls `alarm()` explicitly at the required point.
  *
- * Overlapping fences share a reference count. The first fence saves and
- * disables `setAlarm`; the last fence restores the saved method. This remains
- * correct when overlapping bodies finish out of order.
+ * The fence also applies to an instance that replaces the object while `body`
+ * runs (see `alarm-fence.test-support.ts`). Overlapping fences share a
+ * reference count, and the last fence to close restores `setAlarm`. If `body`
+ * fails, its error is reported even when restoring `setAlarm` also fails.
  */
 export async function withoutAlarmArming<T>(
 	body: () => Promise<T>,
 	stub: DurableObjectStub<CupboardServer> = currentServer()
 ): Promise<T> {
 	await runInDurableObject(stub, (_instance, state) => {
-		const { storage } = state;
-		const fence = suspendedAlarmArming.get(storage);
-
-		if (fence !== undefined) {
-			fence.depth += 1;
-
-			return;
-		}
-
-		suspendedAlarmArming.set(storage, {
-			armAlarm: storage.setAlarm.bind(storage),
-			depth: 1
-		});
-		storage.setAlarm = () => Promise.resolve();
+		openAlarmFence(state);
 	});
 
-	try {
-		return await body();
-	} finally {
-		await runInDurableObject(stub, (_instance, state) => {
-			const { storage } = state;
-			const fence = suspendedAlarmArming.get(storage);
-
-			if (fence === undefined) {
-				throw new Error(
-					'Alarm arming was already restored while a fence still held it.'
-				);
-			}
-
-			fence.depth -= 1;
-
-			if (fence.depth > 0) {
-				return;
-			}
-
-			storage.setAlarm = fence.armAlarm;
-			suspendedAlarmArming.delete(storage);
-		});
-	}
+	return withCleanup(body, () =>
+		runInDurableObject(stub, (_instance, state) => {
+			closeAlarmFence(state);
+		})
+	);
 }
 
 /**
