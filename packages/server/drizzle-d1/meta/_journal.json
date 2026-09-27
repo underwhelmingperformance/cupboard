@@ -232,6 +232,13 @@
 			"when": 1790469902807,
 			"tag": "0032_attestation_ref_path_index",
 			"breakpoints": true
+		},
+		{
+			"idx": 33,
+			"version": "6",
+			"when": 1790475405819,
+			"tag": "0033_tenant_local_step_attempts",
+			"breakpoints": true
 		}
 	]
 }

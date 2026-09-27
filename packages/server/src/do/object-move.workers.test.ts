@@ -6,6 +6,7 @@ import {
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import { expansionLocalStep } from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -15,14 +16,17 @@ import { describe, expect, it } from 'vitest';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { StoredObjectKeyInvalidError } from '../errors.ts';
 import {
 	bootstrap,
 	currentServer,
 	resolvedCache,
-	useTestServer
+	takeStalledMaintenancePasses,
+	useTestServer,
+	withDeployedSubrequestAllowance,
+	withoutAlarmArming
 } from '../test-support.ts';
 
+import { noProgressRetryMs } from './alarm.ts';
 import { listGenerationMetadataKey } from './attestations-service.ts';
 
 // One narinfo body per seeded object, so a moved object can be told from a
@@ -114,9 +118,23 @@ async function listAt(
 	};
 }
 
+// The wake's continuation on the alarm is not armed, so each call runs
+// exactly one page.
 function wake() {
-	return runInDurableObject(currentServer(), (instance) =>
-		instance.reportLocalStep()
+	return withoutAlarmArming(() =>
+		runInDurableObject(currentServer(), (instance) =>
+			instance.reportLocalStep(expansionLocalStep)
+		)
+	);
+}
+
+function wakeWithAllowance(subrequests: number) {
+	return withoutAlarmArming(() =>
+		runInDurableObject(currentServer(), (instance) =>
+			withDeployedSubrequestAllowance(instance.context, subrequests, () =>
+				instance.reportLocalStep(expansionLocalStep)
+			)
+		)
 	);
 }
 
@@ -176,6 +194,37 @@ async function commitPath(
 }
 
 describe('legacy private object move', () => {
+	// A wake reports progress when an earlier stage in it saved a cursor, and
+	// none when it could not afford any move, so a caller can tell a wake that
+	// changed nothing.
+	it('reports progress only from a wake that saved a cursor', async () => {
+		const tenant = await useServerWithPrivateCache('legacy-unaffordable');
+		const source = `t/${tenant}/narinfo/private/${cacheName}/${storePathHash}`;
+		const destination = `t/${tenant}/narinfo/${cacheName}/${storePathHash}`;
+		await clear(source, destination);
+		await seed(source, legacyBody, narInfoMetadata(3));
+		await commitPath(3);
+		const outcomes = [
+			await wakeWithAllowance(10),
+			await wakeWithAllowance(10),
+			await wake()
+		];
+
+		expect({
+			outcomes,
+			source: await objectAt(source),
+			destination: await objectAt(destination)
+		}).toStrictEqual({
+			outcomes: [
+				{ kind: 'incomplete', projected: 0, progressed: true },
+				{ kind: 'incomplete', projected: 0, progressed: false },
+				{ kind: 'recorded', step: 4, progressed: true }
+			],
+			source: undefined,
+			destination: { body: legacyBody, generation: '3' }
+		});
+	});
+
 	it('continues past a full page owned by a public cache named private', async () => {
 		const tenant = await useServerWithPrivateCache('legacy-public-page');
 		const publicKeys = Array.from(
@@ -385,9 +434,20 @@ describe('legacy private object move', () => {
 		await clear(key);
 		await seed(key, legacyBody, narInfoMetadata(3));
 
-		await expect(wake()).rejects.toThrow(StoredObjectKeyInvalidError);
+		const outcome = await wake();
 
 		await clear(key);
+		// The error summary starts with the error's name.
+		expect({
+			kind: outcome.kind,
+			errorName:
+				outcome.kind === 'failed' ? outcome.error.split(':', 1)[0] : undefined,
+			stalled: await takeStalledMaintenancePasses()
+		}).toStrictEqual({
+			kind: 'failed',
+			errorName: 'StoredObjectKeyInvalidError',
+			stalled: [{ pass: 'local-step', waitMs: noProgressRetryMs }]
+		});
 	});
 });
 

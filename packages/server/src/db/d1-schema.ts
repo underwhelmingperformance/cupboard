@@ -307,7 +307,19 @@ export const tenant = sqliteTable(
 		lastMaintainedAt: text('last_maintained_at').$type<IsoTimestamp>(),
 		// The highest local step this tenant's Durable Object has reported. Null
 		// means the control Worker has not woken it since the column was added.
-		localStep: integer('local_step').$type<LocalStep>()
+		localStep: integer('local_step').$type<LocalStep>(),
+		// When a page of this tenant's local-step work last ran, or when a wake
+		// last failed to reach its object. Each write replaces the last one. A
+		// page that records the step clears it.
+		localStepAttemptedAt: text('local_step_attempted_at').$type<IsoTimestamp>(),
+		// When a page last made progress: it recorded a higher step, or it
+		// projected, moved or rewrote an item, or committed migration work.
+		localStepProgressedAt: text(
+			'local_step_progressed_at'
+		).$type<IsoTimestamp>(),
+		// A summary of the error from the last attempt, or null when the last
+		// attempt did not fail.
+		localStepError: text('local_step_error')
 	},
 	(table) => [
 		index('tenant_maintenance_idx').on(table.status, table.lastMaintainedAt)

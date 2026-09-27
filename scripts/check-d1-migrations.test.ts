@@ -103,7 +103,11 @@ describe('checkD1Migrations', () => {
 				...transition.expand,
 				...transition.contract
 			]).length,
-			replayed: ['deployment-transitions', 'attestation-path-index']
+			replayed: [
+				'deployment-transitions',
+				'attestation-path-index',
+				'local-step-attempts'
+			]
 		});
 	});
 

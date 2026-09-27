@@ -825,8 +825,9 @@ const suspendedAlarmArming = new WeakMap<
 >();
 
 /**
- * Prevents the harness's Durable Object from arming an alarm while `body` runs.
- * The function restores `setAlarm` before it returns.
+ * Prevents a Durable Object, by default the harness's current server, from
+ * arming an alarm while `body` runs. The function restores `setAlarm` before
+ * it returns.
  *
  * Workerd schedules alarms with the real clock even when the test pool isolates
  * storage. An immediate alarm can therefore run before a test inspects the state
@@ -839,10 +840,9 @@ const suspendedAlarmArming = new WeakMap<
  * correct when overlapping bodies finish out of order.
  */
 export async function withoutAlarmArming<T>(
-	body: () => Promise<T>
+	body: () => Promise<T>,
+	stub: DurableObjectStub<CupboardServer> = currentServer()
 ): Promise<T> {
-	const stub = currentServer();
-
 	await runInDurableObject(stub, (_instance, state) => {
 		const { storage } = state;
 		const fence = suspendedAlarmArming.get(storage);

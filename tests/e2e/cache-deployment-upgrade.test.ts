@@ -3,7 +3,6 @@ import {
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
-	type ParsedLocalStepWakeResponse,
 	type SchemaTransition,
 	schemaTransitions,
 	type TransitionState,
@@ -83,18 +82,15 @@ const preUploadTransitions = {
 	unrecognised: []
 };
 
+// Each tenant object continues its own work on its alarm after a wake, so
+// the outcome of the last wake depends on timing and is not returned.
 async function wakeUntilStep(
 	server: StagedDeploymentServer,
 	client: DeploymentClient,
 	requiredStep: LocalStep
-): Promise<{
-	readonly didAdvance: boolean;
-	readonly final: ParsedLocalStepWakeResponse;
-}> {
-	let didAdvance = false;
+): Promise<void> {
 	for (let pass = 0; pass < wakePassLimit; pass++) {
-		const wake = await client.wakeLocalStep(wakeLimit);
-		didAdvance ||= wake.outcomes.some((outcome) => outcome.kind === 'advanced');
+		await client.wakeLocalStep(wakeLimit);
 		const readiness = await readLocalStepReadiness(
 			d1QueryApi(server),
 			stagedDeploymentDatabaseId,
@@ -102,7 +98,7 @@ async function wakeUntilStep(
 		);
 
 		if (readiness.pending === 0) {
-			return { didAdvance, final: wake };
+			return;
 		}
 	}
 
@@ -195,16 +191,16 @@ it('upgrades a populated predecessor deployment', async () => {
 
 		const client = await server.deploymentClient();
 		const expanded = await client.transitions();
-		const wake = await wakeUntilStep(server, client, expansionLocalStep);
+		await wakeUntilStep(server, client, expansionLocalStep);
+		const expandedStatus = await client.localStepStatus();
 
 		await contractOverPredecessor(server);
-		const contractWake = await wakeUntilStep(server, client, currentLocalStep);
+		await wakeUntilStep(server, client, currentLocalStep);
 
 		expect({
 			refused,
 			expanded,
-			wake,
-			contractWake,
+			expandedStatus,
 			status: await client.localStepStatus(),
 			recorded: await client.transitions(),
 			terminal: await server.terminalSnapshot()
@@ -221,41 +217,12 @@ it('upgrades a populated predecessor deployment', async () => {
 			// the transitions with no contract migrations and no contract step.
 			// The tenants then had to record step 4.
 			expanded: preUploadTransitions,
-			wake: {
-				didAdvance: true,
-				final: {
-					current: currentLocalStep,
-					required: expansionLocalStep,
-					woken: resumableFixtureTenants,
-					failed: 0,
-					outcomes: [
-						'upgrade-active',
-						...sleepingFixtureTenants,
-						'upgrade-suspended'
-					].map((tenant) => ({
-						tenant,
-						kind: 'recorded',
-						step: expansionLocalStep
-					}))
-				}
-			},
-			contractWake: {
-				didAdvance: false,
-				final: {
-					current: currentLocalStep,
-					required: currentLocalStep,
-					woken: resumableFixtureTenants,
-					failed: 0,
-					outcomes: [
-						'upgrade-active',
-						...sleepingFixtureTenants,
-						'upgrade-suspended'
-					].map((tenant) => ({
-						tenant,
-						kind: 'recorded',
-						step: currentLocalStep
-					}))
-				}
+			expandedStatus: {
+				current: currentLocalStep,
+				required: expansionLocalStep,
+				ready: resumableFixtureTenants,
+				pending: 0,
+				stragglers: []
 			},
 			status: {
 				current: currentLocalStep,

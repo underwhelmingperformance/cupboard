@@ -5,14 +5,18 @@ import {
 	expansionLocalStep,
 	localStep
 } from '@cupboard/protocol/deployment';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { recordLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 import {
+	asOneInvocation,
 	provisionNamedTenant,
 	recordTransition,
 	suspendTenant
@@ -344,9 +348,25 @@ describe('local step', () => {
 		await provisionNamedTenant(id);
 		await setStoredStep(id, laterStep);
 
-		await expect(
-			tenantServer(env, id).reportLocalStep()
-		).resolves.toStrictEqual({ kind: 'recorded', step: currentLocalStep });
-		await expect(storedStep(id)).resolves.toStrictEqual(laterStep);
+		// A wake finds the step recorded and runs no page. A page that runs anyway,
+		// as a pass does for a request made before the newer build recorded its
+		// step, leaves the stored step where it is.
+		const wake = await tenantServer(env, id).reportLocalStep(currentLocalStep);
+		const page = await runInDurableObject(tenantServer(env, id), (instance) =>
+			asOneInvocation(() =>
+				recordLocalStep(
+					instance.context,
+					[],
+					isoTimestamp(new Date()),
+					currentLocalStep
+				)
+			)
+		);
+
+		expect({ wake, page, stored: await storedStep(id) }).toStrictEqual({
+			wake: { kind: 'recorded', step: laterStep, progressed: false },
+			page: { kind: 'recorded', step: currentLocalStep, progressed: false },
+			stored: laterStep
+		});
 	});
 });

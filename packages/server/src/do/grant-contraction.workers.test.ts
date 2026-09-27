@@ -1,4 +1,8 @@
 import {
+	currentLocalStep,
+	expansionLocalStep
+} from '@cupboard/protocol/deployment';
+import {
 	authorizationDetailsSchema,
 	storedPermittedGrantsSchema
 } from '@cupboard/protocol/grants';
@@ -11,7 +15,8 @@ import {
 	bootstrap,
 	currentServer,
 	recordTransition,
-	resetTestServer
+	resetTestServer,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { StoredGrantSpelling } from './stored-grant-spelling.ts';
@@ -42,7 +47,7 @@ describe('local grant contraction', () => {
 				instance.context.db.run(
 					sql`INSERT INTO oidc_trust (id, issuer, audience, permitted_grants_json, created_at) VALUES ('legacy', 'https://issuer.example', 'https://cache.example', ${selectorGrant}, '2026-01-01T00:00:00.000Z')`
 				);
-				const progress = await instance.reportLocalStep();
+				const progress = await instance.reportLocalStep(expansionLocalStep);
 				return {
 					progress,
 					grants: instance.context.db.get<{ grants: string }>(
@@ -55,7 +60,7 @@ describe('local grant contraction', () => {
 		const after = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const progress = await instance.reportLocalStep();
+				const progress = await instance.reportLocalStep(currentLocalStep);
 				return {
 					progress,
 					grants: instance.context.db.get<{ grants: string }>(
@@ -66,10 +71,13 @@ describe('local grant contraction', () => {
 		);
 		expect({ before, after }).toStrictEqual({
 			before: {
-				progress: { kind: 'recorded', step: 4 },
+				progress: { kind: 'recorded', step: 4, progressed: true },
 				grants: selectorGrant
 			},
-			after: { progress: { kind: 'recorded', step: 5 }, grants: scopeGrant }
+			after: {
+				progress: { kind: 'recorded', step: 5, progressed: true },
+				grants: scopeGrant
+			}
 		});
 	});
 });
@@ -95,7 +103,7 @@ describe('writes across local grant contraction', () => {
 				]);
 				const family = await spelling.authorizationDetailsJson(grants);
 				await recordTransition('cache-identity', 'complete');
-				await instance.reportLocalStep();
+				await instance.reportLocalStep(currentLocalStep);
 				const writtenRule: unknown = JSON.parse(
 					spelling.permittedGrantsForWrite(rule)
 				);
@@ -122,7 +130,7 @@ describe('writes across local grant contraction', () => {
 			await recordTransition('cache-identity', 'complete');
 			await bootstrap();
 			await runInDurableObject(currentServer(), async (instance, state) => {
-				await instance.reportLocalStep();
+				await instance.reportLocalStep(currentLocalStep);
 				const insert =
 					"INSERT INTO oidc_trust (id, issuer, audience, permitted_grants_json, created_at) VALUES ('late', 'https://issuer.example', 'https://cache.example', ?, '2026-01-01T00:00:00.000Z')";
 				if (operation === 'update') {
@@ -141,9 +149,10 @@ describe('writes across local grant contraction', () => {
 	it('continues the rewrite over bounded batches before recording completion', async () => {
 		await recordTransition('cache-identity', 'expanded');
 		await bootstrap();
-		const result = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
+		// The first page leaves work to do, and the second page must run from
+		// this call, not from the alarm.
+		const result = await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
 				const insert =
 					"INSERT INTO oidc_trust (id, issuer, audience, permitted_grants_json, created_at) VALUES (?, 'https://issuer.example', 'https://cache.example', ?, '2026-01-01T00:00:00.000Z')";
 				for (let index = 0; index <= grantContractionBatchSize; index += 1) {
@@ -154,21 +163,25 @@ describe('writes across local grant contraction', () => {
 					);
 				}
 				await recordTransition('cache-identity', 'complete');
-				const first = await instance.reportLocalStep();
+				const first = await instance.reportLocalStep(currentLocalStep);
 				const afterFirst = state.storage.sql
 					.exec('SELECT complete FROM grant_contraction')
 					.one();
-				const second = await instance.reportLocalStep();
+				const second = await instance.reportLocalStep(currentLocalStep);
 				const afterSecond = state.storage.sql
 					.exec('SELECT complete FROM grant_contraction')
 					.one();
 				return { first, afterFirst, second, afterSecond };
-			}
+			})
 		);
 		expect(result).toStrictEqual({
-			first: { kind: 'incomplete', projected: grantContractionBatchSize },
+			first: {
+				kind: 'incomplete',
+				projected: grantContractionBatchSize,
+				progressed: true
+			},
 			afterFirst: { complete: 0 },
-			second: { kind: 'recorded', step: 5 },
+			second: { kind: 'recorded', step: 5, progressed: true },
 			afterSecond: { complete: 1 }
 		});
 	});

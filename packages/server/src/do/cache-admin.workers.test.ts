@@ -19,7 +19,12 @@ import {
 	cacheRemoveResponseSchema,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import {
+	currentLocalStep,
+	expansionLocalStep,
+	type LocalStep
+} from '@cupboard/protocol/deployment';
+import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { tenantReadCredentialSchema } from '@cupboard/protocol/tenants';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -37,6 +42,7 @@ import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
 import { canonicalCacheRequest } from '../routing/cache-request.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	asOneInvocation,
 	authorisedFetch,
 	bootstrap,
 	cacheWriteGrants,
@@ -61,12 +67,13 @@ import {
 	resolvedCache,
 	testServerFor,
 	uploadMetadata,
-	useTestServer
+	useTestServer,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 import { maxCachesProjectedPerRun } from './cache-lifecycle-projection.ts';
-import { type LocalStepOutcome } from './local-step.ts';
+import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 
@@ -159,9 +166,13 @@ async function policyIdentityRows(): Promise<
 	}));
 }
 
+// The wake's continuation on the alarm is not armed, so each call runs
+// exactly one page.
 function wake(): Promise<LocalStepOutcome> {
-	return runInDurableObject(currentServer(), (instance) =>
-		instance.reportLocalStep()
+	return withoutAlarmArming(() =>
+		runInDurableObject(currentServer(), (instance) =>
+			instance.reportLocalStep(expansionLocalStep)
+		)
 	);
 }
 
@@ -329,6 +340,42 @@ function cacheListRequest(token: string): Request {
 	return new Request('https://cupboard.test/caches', {
 		headers: { authorization: `Bearer ${token}` }
 	});
+}
+
+// With no object families to move, one cycle is a projection page that leaves
+// work to do and a page that records the step.
+function recordingCycle(isProgressing: boolean, isRaising: boolean) {
+	return [
+		['incomplete', isProgressing],
+		['recorded', isRaising]
+	];
+}
+
+// Runs pages towards `requested`, with no object families to move, until one
+// records a step, and returns each page's kind and whether it progressed.
+function recordingPages(requested: LocalStep): Promise<unknown[]> {
+	return runInDurableObject(currentServer(), (instance) =>
+		asOneInvocation(async () => {
+			const outcomes: unknown[] = [];
+
+			for (;;) {
+				const outcome = await recordLocalStep(
+					instance.context,
+					[],
+					isoTimestamp(new Date()),
+					requested
+				);
+				outcomes.push([
+					outcome.kind,
+					'progressed' in outcome ? outcome.progressed : undefined
+				]);
+
+				if (outcome.kind !== 'incomplete') {
+					return outcomes;
+				}
+			}
+		})
+	);
 }
 
 describe('cache registry admin', () => {
@@ -1281,10 +1328,39 @@ describe('cache registry admin', () => {
 		for (let index = 0; index < maxCachesProjectedPerRun + 5; index++) {
 			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
 		}
-		for (let index = 0; index < 4; index++) {
-			await wake();
+		expect(await wake()).toStrictEqual({
+			kind: 'incomplete',
+			projected: 0,
+			progressed: true
+		});
+	});
+
+	// Every stage starts again after a step is recorded. Once a page records the
+	// step that the tenant already had, the restarted stages save their cursors
+	// without projecting or moving anything, and those pages are not progress
+	// while the requested step is not higher. A wake does not run such pages,
+	// because it finds the step recorded, so the test runs the pages directly.
+	it('reports no progress from the stages that restart after a repeated recording', async () => {
+		await useTestServer('cache-admin-repeated-recording');
+		const init = await bootstrap();
+		for (let index = 0; index < maxCachesProjectedPerRun + 5; index++) {
+			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
 		}
-		expect(await wake()).toStrictEqual({ kind: 'incomplete', projected: 0 });
+
+		// The first recording raises the step, so the cycle after it still
+		// counts its cursors. The second recording repeats step 4, so a third
+		// cycle towards step 4 is not progress, and a cycle towards step 5 is.
+		expect([
+			await recordingPages(expansionLocalStep),
+			await recordingPages(expansionLocalStep),
+			await recordingPages(expansionLocalStep),
+			await recordingPages(currentLocalStep)
+		]).toStrictEqual([
+			recordingCycle(true, true),
+			recordingCycle(true, false),
+			recordingCycle(false, false),
+			recordingCycle(true, false)
+		]);
 	});
 
 	it('gives each incarnation of a cache name its own identity', async () => {

@@ -38,6 +38,11 @@ export const maxObjectsMovedPerRun = 100;
 export interface ObjectMoveOutcome {
 	readonly moved: number;
 	readonly hasMore: boolean;
+	/**
+	 * Whether this call saved the move's cursor. A call that moves no objects
+	 * can still advance the cursor past prefixes with nothing to move.
+	 */
+	readonly progressed: boolean;
 }
 
 /**
@@ -303,12 +308,19 @@ export async function moveLegacyPrivateObjects(
 			: legacyProgressSchema.parse(saved);
 	let moved = 0;
 	let inspected = 0;
+	let isSaved = false;
+	const save = async (
+		value: z.infer<typeof legacyProgressSchema>
+	): Promise<void> => {
+		await context.ctx.storage.put(legacyProgressKey, value);
+		isSaved = true;
+	};
 	for (const [familyIndex, family] of families.entries()) {
 		if (familyIndex < progress.family) {
 			continue;
 		}
 		if (!hasSubrequestsFor(2 + 5 * (maxObjectsMovedPerRun - moved))) {
-			return { moved, hasMore: true };
+			return { moved, hasMore: true, progressed: isSaved };
 		}
 		const prefix = legacyPrefix(tenant, family);
 		const directories = await context.env.BLOBS.list({
@@ -325,7 +337,7 @@ export async function moveLegacyPrivateObjects(
 				moved >= maxObjectsMovedPerRun ||
 				!hasSubrequestsFor(1 + 5 * (maxObjectsMovedPerRun - moved))
 			) {
-				return { moved, hasMore: true };
+				return { moved, hasMore: true, progressed: isSaved };
 			}
 			const listed = await context.env.BLOBS.list({
 				prefix: directory,
@@ -349,33 +361,33 @@ export async function moveLegacyPrivateObjects(
 			moved += listed.objects.length;
 			inspected += 1;
 			if (listed.truncated) {
-				await context.ctx.storage.put(legacyProgressKey, {
+				await save({
 					...progress,
 					family: familyIndex,
 					activeDirectory: directory,
 					listingCursor: listed.cursor
 				});
-				return { moved, hasMore: true };
+				return { moved, hasMore: true, progressed: isSaved };
 			}
 			progress = {
 				family: familyIndex,
 				outerCursor: progress.outerCursor,
 				afterDirectory: directory
 			};
-			await context.ctx.storage.put(legacyProgressKey, progress);
+			await save(progress);
 		}
 		if (directories.truncated) {
-			await context.ctx.storage.put(legacyProgressKey, {
+			await save({
 				family: familyIndex,
 				outerCursor: directories.cursor,
 				afterDirectory: ''
 			});
-			return { moved, hasMore: true };
+			return { moved, hasMore: true, progressed: isSaved };
 		}
 		progress = { family: familyIndex + 1, afterDirectory: '' };
-		await context.ctx.storage.put(legacyProgressKey, progress);
+		await save(progress);
 	}
-	return { moved, hasMore: false };
+	return { moved, hasMore: false, progressed: isSaved };
 }
 
 export const maxPrefixesInspectedPerRun = 36;
@@ -406,6 +418,13 @@ export async function moveObjectsToCacheIncarnation(
 			: incarnationProgressSchema.parse(saved);
 	let moved = 0;
 	let inspected = 0;
+	let isSaved = false;
+	const save = async (
+		value: z.infer<typeof incarnationProgressSchema>
+	): Promise<void> => {
+		await context.ctx.storage.put(incarnationProgressKey, value);
+		isSaved = true;
+	};
 
 	for (const [familyIndex, family] of families.entries()) {
 		if (familyIndex < progress.family) {
@@ -431,7 +450,7 @@ export async function moveObjectsToCacheIncarnation(
 				moved >= maxObjectsMovedPerRun ||
 				!hasSubrequestsFor(1 + 5 * (maxObjectsMovedPerRun - moved))
 			) {
-				return { moved, hasMore: true };
+				return { moved, hasMore: true, progressed: isSaved };
 			}
 			const scope = cacheScopeFromRow({
 				kind: row.cacheKind,
@@ -467,12 +486,12 @@ export async function moveObjectsToCacheIncarnation(
 				);
 				moved += listed.objects.length;
 				if (listed.truncated) {
-					await context.ctx.storage.put(incarnationProgressKey, {
+					await save({
 						...progress,
 						family: familyIndex,
 						listingCursor: listed.cursor
 					});
-					return { moved, hasMore: true };
+					return { moved, hasMore: true, progressed: isSaved };
 				}
 			}
 			inspected += 1;
@@ -480,15 +499,15 @@ export async function moveObjectsToCacheIncarnation(
 				family: familyIndex,
 				afterKey: scope.kind === 'default' ? 'default' : `named:${scope.name}`
 			};
-			await context.ctx.storage.put(incarnationProgressKey, progress);
+			await save(progress);
 		}
 		if (inspected >= maxPrefixesInspectedPerRun) {
-			return { moved, hasMore: true };
+			return { moved, hasMore: true, progressed: isSaved };
 		}
 		progress = { family: familyIndex + 1, afterKey: '' };
-		await context.ctx.storage.put(incarnationProgressKey, progress);
+		await save(progress);
 	}
-	return { moved, hasMore: false };
+	return { moved, hasMore: false, progressed: isSaved };
 }
 
 export async function resetObjectMoves(context: ServerContext): Promise<void> {
