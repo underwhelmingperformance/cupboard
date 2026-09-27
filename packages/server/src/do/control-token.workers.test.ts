@@ -548,6 +548,30 @@ describe('control plane POST /token', () => {
 		});
 	});
 
+	it('retries one issuer fetch failure and completes the exchange', async () => {
+		const { token: subjectToken } = await trustedControlIdentity('JWT');
+		const served = fetch;
+		let remainingFailures = 1;
+		vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+			if (remainingFailures > 0) {
+				remainingFailures -= 1;
+
+				return Promise.reject(new Error('issuer fetch blip'));
+			}
+
+			return served(input, init);
+		});
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		await response.text();
+
+		expect(response.status).toBe(StatusCodes.OK);
+	});
+
 	it('reports 503, not invalid_grant, when the matched issuer is unavailable', async () => {
 		const issuer = currentOrigin();
 

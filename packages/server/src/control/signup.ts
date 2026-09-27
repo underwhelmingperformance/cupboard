@@ -20,37 +20,30 @@ import { z } from 'zod';
 import { isConstantTimeEqual, sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
-	IssuerUnavailableError,
 	SignupForbiddenError,
 	SubjectTokenAudienceInvalidError,
 	SubjectTokenIssuerInvalidError,
 	SubjectTokenNotJwtError,
-	SubjectTokenSubjectMissingError,
-	SubjectTokenVerificationFailedError
+	SubjectTokenSubjectMissingError
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
+import { InboundTokenVerifier } from '../oidc/inbound-verifier.ts';
 import {
 	canUseLoopbackHttp,
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
-import {
-	decodeInboundClaims,
-	OidcDiscoveryStore,
-	OidcKeysUnreachableError,
-	verifyInboundOidcToken
-} from '../oidc/oidc.ts';
+import { decodeInboundClaims, OidcDiscoveryStore } from '../oidc/oidc.ts';
 
 import { claimGlobalAdmin } from './global-admin.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
-// Issuer discovery cached across requests in this Worker instance, with the
-// same shape as the store that the token exchange uses. Here it resolves the
-// issuer in the presented token's `iss`.
-const discovery = new OidcDiscoveryStore();
-const localDevelopmentDiscovery = new OidcDiscoveryStore({
-	canUseLoopbackHttp: true
-});
+// Issuer discovery cached across requests in this Worker instance. Here the
+// verifier resolves the issuer in the presented token's `iss`.
+const verifier = new InboundTokenVerifier(new OidcDiscoveryStore());
+const localDevelopmentVerifier = new InboundTokenVerifier(
+	new OidcDiscoveryStore({ canUseLoopbackHttp: true })
+);
 
 // The first-admin claim. The deploy sets a claim secret on the Worker for one
 // claim and presents it with an id_token from any OIDC issuer. The issuer
@@ -185,35 +178,11 @@ async function verifySignupToken(
 	token: string,
 	canUseHttpLoopback: boolean
 ): Promise<VerifiedOidcClaims> {
-	let resolved;
-	try {
-		resolved = await (
-			canUseHttpLoopback ? localDevelopmentDiscovery : discovery
-		).resolve(issuer);
-	} catch (error: unknown) {
-		throw new IssuerUnavailableError(issuer, { cause: error });
-	}
-
-	try {
-		return await verifyInboundOidcToken(
-			resolved.resolver,
-			token,
-			{
-				issuer,
-				audience,
-				trustedAudiences: new Set(),
-				algorithms: resolved.algorithms,
-				requireIdTokenClaims: true
-			},
-			new Date()
-		);
-	} catch (error) {
-		if (error instanceof OidcKeysUnreachableError) {
-			throw new IssuerUnavailableError(issuer, { cause: error });
-		}
-
-		throw new SubjectTokenVerificationFailedError();
-	}
+	return (canUseHttpLoopback ? localDevelopmentVerifier : verifier).verify(
+		{ issuer, audience },
+		token,
+		new Set()
+	);
 }
 
 function verifiedSubject(verified: VerifiedOidcClaims): string {

@@ -30,9 +30,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	hasMatchingOidcTrustIdentity,
-	type OidcTrustVerificationTarget,
-	oidcTrustVerificationTarget,
-	type VerifiedOidcClaims
+	oidcTrustVerificationTarget
 } from '@cupboard/protocol/oidc-trust-match';
 import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
@@ -70,7 +68,6 @@ import {
 	ControlSubjectTokenUntrustedError,
 	InvalidAccessTokenError,
 	InvalidAuthorizationDetailsError,
-	IssuerUnavailableError,
 	OidcIssuerTransportRequiredError,
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
@@ -81,16 +78,12 @@ import {
 } from '../errors.ts';
 import { oauthJsonResponse } from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
+import { InboundTokenVerifier } from '../oidc/inbound-verifier.ts';
 import {
 	canUseLoopbackHttp,
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
-import {
-	decodeInboundClaims,
-	OidcDiscoveryStore,
-	OidcKeysUnreachableError,
-	verifyInboundOidcToken
-} from '../oidc/oidc.ts';
+import { decodeInboundClaims, OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 import {
@@ -136,10 +129,10 @@ import {
 // Issuer discovery cached across requests in this Worker instance, distinct from
 // the per-tenant Durable Object's own store: the control plane verifies inbound
 // tokens against its own trust policy.
-const discovery = new OidcDiscoveryStore();
-const localDevelopmentDiscovery = new OidcDiscoveryStore({
-	canUseLoopbackHttp: true
-});
+const verifier = new InboundTokenVerifier(new OidcDiscoveryStore());
+const localDevelopmentVerifier = new InboundTokenVerifier(
+	new OidcDiscoveryStore({ canUseLoopbackHttp: true })
+);
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
@@ -255,11 +248,12 @@ export async function controlTokenExchange(
 
 	// Every configured audience identifies this deployment, so any of them may
 	// appear alongside the verified audience in a token's `aud` array.
-	const verified = await verifyControlInbound(
+	const verified = await (
+		canUseHttpLoopback ? localDevelopmentVerifier : verifier
+	).verify(
 		target,
 		exchange.subject_token,
-		new Set(rules.map((rule) => rule.audience)),
-		canUseHttpLoopback
+		new Set(rules.map((rule) => rule.audience))
 	);
 	const requested = parseRequestedGrants(exchange.authorization_details);
 	const selection = selectOidcTrust(rules, verified, requested);
@@ -343,45 +337,6 @@ async function verifyControlSelfIssued(
 		);
 	} catch {
 		return undefined;
-	}
-}
-
-async function verifyControlInbound(
-	target: OidcTrustVerificationTarget,
-	token: string,
-	trustedAudiences: ReadonlySet<string>,
-	canUseHttpLoopback: boolean
-): Promise<VerifiedOidcClaims> {
-	// Reaching the issuer is an upstream condition, not a bad token, so a discovery
-	// or JWKS-fetch failure is a retryable 503.
-	let issuer;
-	try {
-		issuer = await (
-			canUseHttpLoopback ? localDevelopmentDiscovery : discovery
-		).resolve(target.issuer);
-	} catch (error: unknown) {
-		throw new IssuerUnavailableError(target.issuer, { cause: error });
-	}
-
-	try {
-		return await verifyInboundOidcToken(
-			issuer.resolver,
-			token,
-			{
-				issuer: target.issuer,
-				audience: target.audience,
-				trustedAudiences,
-				algorithms: issuer.algorithms,
-				requireIdTokenClaims: true
-			},
-			new Date()
-		);
-	} catch (error) {
-		if (error instanceof OidcKeysUnreachableError) {
-			throw new IssuerUnavailableError(target.issuer, { cause: error });
-		}
-
-		throw new SubjectTokenVerificationFailedError();
 	}
 }
 
