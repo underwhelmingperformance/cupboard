@@ -27,14 +27,14 @@ A tenant slug can't be used again, even after the tenant has been removed.
 
 See [Retention](../admin/retention.md).
 
-| Limit                              | Value                                                                      |
-| ---------------------------------- | -------------------------------------------------------------------------- |
-| Targets in one root                | 149. Run roots have no limit.                                              |
-| Root TTL                           | 1 second to 3,650 days                                                     |
-| Grace period                       | 0 seconds to 3,650 days                                                    |
-| Root prefix overrides in one cache | 4,096                                                                      |
-| How often garbage collection runs  | At least every 6 hours for each active tenant. The job itself runs hourly. |
-| When stored NAR files are deleted  | At least 70 minutes after the last store path that uses them is removed    |
+| Limit                               | Value                                                                                                    |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Targets in one root                 | 149. Run roots have no limit.                                                                            |
+| Root TTL                            | 1 second to 3,650 days                                                                                   |
+| Grace period                        | 0 seconds to 3,650 days                                                                                  |
+| Root prefix overrides in one cache  | 4,096                                                                                                    |
+| When tenant maintenance becomes due | After six hours, or sooner when tenant work is due. The hourly job queues up to 100 due tenants per run. |
+| When stored NAR files are deleted   | At least 70 minutes after the last store path that uses them is removed                                  |
 
 ## Reuse views
 
