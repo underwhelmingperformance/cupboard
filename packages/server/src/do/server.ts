@@ -1634,6 +1634,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			if (outcome.status === 'pending') {
 				throw new CacheCatalogueMigrationPendingError();
 			}
+
+			if (!isCatalogueComplete) {
+				await markCacheCatalogueComplete(this.context, tenant);
+			}
 		}
 
 		const contraction = await applyMigrations(this.context.db, migrations, {
@@ -1657,10 +1661,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.select({ complete: schema.grantContraction.complete })
 				.from(schema.grantContraction)
 				.get()?.complete ?? false;
-
-		if (!isCatalogueComplete) {
-			await markCacheCatalogueComplete(this.context, tenant);
-		}
 
 		this.oidcTrust.seedOwnerRule();
 
