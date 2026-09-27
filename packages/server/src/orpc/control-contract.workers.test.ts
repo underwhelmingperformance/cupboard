@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { controlContract } from '@cupboard/protocol/contract';
 import {
@@ -26,8 +27,11 @@ import {
 	issueControlAdminToken,
 	issueServerSignedToken,
 	recordTransition,
-	resetTestServer
+	resetTestServer,
+	testControlEnv
 } from '../test-support.ts';
+
+import { controlOrpcHandler } from './handler.ts';
 
 type ControlClient = JsonifiedClient<
 	ContractRouterClient<typeof controlContract>
@@ -196,6 +200,26 @@ describe('control contract round trip', () => {
 			removed: { id, removed: true },
 			disabledInListing: true
 		});
+	});
+
+	it('marks a control procedure response as not storable in the contract handler', async () => {
+		const request = new Request(`${currentOrigin()}/control/oidc-trust`, {
+			headers: { authorization: `Bearer ${await issueControlAdminToken()}` }
+		});
+
+		const { response } = await controlOrpcHandler.handle(request, {
+			prefix: '/control',
+			context: {
+				request,
+				env: Object.assign({}, env, testControlEnv),
+				logger: rootLogger()
+			}
+		});
+
+		expect({
+			status: response?.status,
+			cacheControl: response?.headers.get('cache-control')
+		}).toStrictEqual({ status: StatusCodes.OK, cacheControl: 'no-store' });
 	});
 
 	it('lists the readable control trust rules and reports each rule with a subject pattern', async () => {

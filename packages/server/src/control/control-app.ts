@@ -31,8 +31,6 @@ function buildControlApp() {
 	// the handlers or the error handler is logged with the request's fields.
 	app.use(loggerMiddleware);
 
-	// Admin procedure responses contain mutable control-plane state, so never
-	// cache them.
 	app.use('/control/*', async (context, next) => {
 		const { matched: isMatched, response } = await controlOrpcHandler.handle(
 			context.req.raw,
@@ -47,7 +45,6 @@ function buildControlApp() {
 		);
 
 		if (isMatched) {
-			response.headers.set('cache-control', 'no-store');
 			return response;
 		}
 
