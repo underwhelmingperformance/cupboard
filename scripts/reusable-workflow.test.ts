@@ -9,6 +9,7 @@ import { parse } from 'yaml';
 import { z } from 'zod';
 
 import {
+	type NixSystem,
 	nixSystemRunners,
 	nixSystemRunnerSchema
 } from '../packages/nix/src/nix-systems.ts';
@@ -23,6 +24,10 @@ const publishWorkflow = new URL(
 );
 const releaseCacheWorkflow = new URL(
 	'../.github/workflows/release-cache.yml',
+	import.meta.url
+);
+const releaseWorkflow = new URL(
+	'../.github/workflows/release.yml',
 	import.meta.url
 );
 const cachePublishWorkflow = new URL(
@@ -121,6 +126,29 @@ type Step = z.output<typeof stepSchema>;
 const releaseCacheMatrixSchema = z.strictObject({
 	include: z.array(nixSystemRunnerSchema)
 });
+
+const releaseAssetSchema = z.strictObject({
+	'asset-platform': z.enum(['linux', 'macos']),
+	'asset-arch': z.enum(['x64', 'arm64'])
+});
+
+const releaseBinaryBuildSchema = releaseAssetSchema.extend({
+	runner: z.string()
+});
+
+const releaseBinaryMatrixSchema = z.strictObject({
+	include: z.array(releaseBinaryBuildSchema)
+});
+
+const releaseAssetBySystem: Record<
+	NixSystem,
+	z.infer<typeof releaseAssetSchema>
+> = {
+	'x86_64-linux': { 'asset-platform': 'linux', 'asset-arch': 'x64' },
+	'aarch64-linux': { 'asset-platform': 'linux', 'asset-arch': 'arm64' },
+	'x86_64-darwin': { 'asset-platform': 'macos', 'asset-arch': 'x64' },
+	'aarch64-darwin': { 'asset-platform': 'macos', 'asset-arch': 'arm64' }
+};
 
 async function loadWorkflow(file: URL): Promise<Workflow> {
 	const document: unknown = parse(await readFile(file, 'utf8'));
@@ -1146,6 +1174,24 @@ describe('release cache publication', () => {
 			failFast: false,
 			tolerance: undefined,
 			flakehubNeedsPublish: ['publish']
+		});
+	});
+});
+
+describe('binary release', () => {
+	it('builds a release binary on the runner for every supported Nix system', async () => {
+		const workflow = await loadWorkflow(releaseWorkflow);
+		const build = workflow.jobs.build;
+
+		expect({
+			matrix: releaseBinaryMatrixSchema.parse(build?.strategy?.matrix).include,
+			failFast: build?.strategy?.['fail-fast']
+		}).toStrictEqual({
+			matrix: nixSystemRunners.map(({ system, runner }) => ({
+				runner,
+				...releaseAssetBySystem[system]
+			})),
+			failFast: false
 		});
 	});
 });
