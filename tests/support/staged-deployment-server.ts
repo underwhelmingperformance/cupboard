@@ -735,13 +735,16 @@ export class StagedDeploymentServer {
 				? new URL(input, 'https://cupboard.invalid')
 				: input;
 		const request = new Request(source, init);
-		const target = new URL(request.url);
-		const ready = await this.miniflare.ready;
+		const response = await this.miniflare.dispatchFetch(request.url, request);
 
-		target.protocol = ready.protocol;
-		target.host = ready.host;
-
-		return fetch(new Request(target, request));
+		return new Response(
+			response.body === null ? undefined : await response.arrayBuffer(),
+			{
+				headers: [...response.headers],
+				status: response.status,
+				statusText: response.statusText
+			}
+		);
 	}
 
 	get buildVersion(): string {
