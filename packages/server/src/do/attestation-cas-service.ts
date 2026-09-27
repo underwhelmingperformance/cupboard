@@ -437,9 +437,10 @@ export class AttestationCasService {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
 
-		// The reaper observed a particular object generation before it found the
-		// object missing. If another request promotes the object again, every delete
-		// and quota credit below must fail its storedAt fence so the new generation
+		// The reaper observed a particular object incarnation before it found the
+		// object missing. If another request promotes the object again, the
+		// `cas_object` row has a different incarnation. Every delete and quota
+		// credit below then fails its incarnation fence, so the new incarnation
 		// keeps its reference and charge. Direct removal does not use this fence.
 		const repromotedFilter =
 			fenceIncarnation === undefined
