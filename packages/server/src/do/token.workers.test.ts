@@ -870,6 +870,42 @@ function refreshTokenMemberRows(): Promise<
 	);
 }
 
+/**
+ * Presents a refresh token to a token service in the tenant object. `fault`
+ * runs first and can make the rotation fail. Returns the response, or the
+ * error that the refresh throws.
+ */
+function refreshWithFault(
+	refreshToken: string,
+	fault: (authKeys: AuthKeysService, state: DurableObjectState) => void
+): Promise<unknown> {
+	return runInDurableObject(currentServer(), async (instance, state) => {
+		const tenantIdentity = new TenantIdentityService(instance.context);
+		const authKeys = new AuthKeysService(instance.context, tenantIdentity);
+		const service = new TokenExchangeService(
+			instance.context,
+			authKeys,
+			new OidcTrustService(instance.context, tenantIdentity)
+		);
+		const request = new Request(new URL('/token', currentOrigin()), {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: refreshTokenGrantType,
+				refresh_token: refreshToken
+			}).toString()
+		});
+
+		fault(authKeys, state);
+
+		try {
+			return await service.handleToken(rootLogger(), request);
+		} catch (error: unknown) {
+			return error;
+		}
+	});
+}
+
 function refresh(refreshToken: string): Promise<Response> {
 	return postToken({
 		grant_type: refreshTokenGrantType,
@@ -1647,6 +1683,101 @@ describe('refresh grant', () => {
 			result: { kind: 'refused' },
 			families: [],
 			members: []
+		});
+	});
+
+	it('keeps the presented refresh token usable when loading the signing key fails during rotation', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const refreshToken = exchanged.refresh_token ?? '';
+		const before = {
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		};
+		const signingFailure = new Error('the signing key is unavailable');
+
+		const failure = await refreshWithFault(refreshToken, (authKeys) => {
+			vi.spyOn(authKeys, 'activeAuthKey').mockRejectedValueOnce(signingFailure);
+		});
+		const afterFailure = {
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		};
+		const retried = await refresh(refreshToken);
+		await retried.text();
+		const membersAfterRetry = await refreshTokenMemberRows();
+
+		expect({
+			isSigningFailure: failure === signingFailure,
+			afterFailure,
+			retried: retried.status,
+			generations: membersAfterRetry.map((member) => member.generation)
+		}).toStrictEqual({
+			isSigningFailure: true,
+			afterFailure: before,
+			retried: StatusCodes.OK,
+			generations: [0, 1]
+		});
+	});
+
+	it('keeps the presented refresh token usable when the successor member cannot be inserted', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const refreshToken = exchanged.refresh_token ?? '';
+		const before = {
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		};
+		const [family] = before.families;
+
+		if (family === undefined) {
+			throw new Error('the exchange created no refresh token family');
+		}
+
+		// A member at the successor's generation makes the successor's insert
+		// violate the unique family and generation constraint.
+		const blocking = {
+			id: 'blocking-member',
+			familyId: family.id,
+			generation: family.generation + 1
+		};
+		const failure = await refreshWithFault(refreshToken, (_authKeys, state) => {
+			drizzle(state.storage, { schema: { refreshTokenMembers } })
+				.insert(refreshTokenMembers)
+				.values({
+					...blocking,
+					secretHash: '0'.repeat(64),
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+				})
+				.run();
+		});
+		const afterFailure = {
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		};
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { refreshTokenMembers } })
+				.delete(refreshTokenMembers)
+				.where(eq(refreshTokenMembers.id, blocking.id))
+				.run();
+		});
+		const retried = await refresh(refreshToken);
+		await retried.text();
+		const membersAfterRetry = await refreshTokenMemberRows();
+
+		expect({
+			isRefused: failure instanceof Error,
+			isRevocation: failure instanceof StaleRefreshTokenError,
+			afterFailure,
+			retried: retried.status,
+			generations: membersAfterRetry.map((member) => member.generation)
+		}).toStrictEqual({
+			isRefused: true,
+			isRevocation: false,
+			afterFailure: {
+				families: before.families,
+				members: [...before.members, blocking]
+			},
+			retried: StatusCodes.OK,
+			generations: [0, 1]
 		});
 	});
 
