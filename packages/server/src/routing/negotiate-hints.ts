@@ -7,7 +7,6 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { pushIdSchema } from '@cupboard/protocol/upload';
-import { parseAuthenticationHeader } from '@cupboard/shared/http';
 import { and, eq, inArray } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -20,9 +19,9 @@ import { batchNonEmpty } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { type NegotiateHints } from '../do/negotiate-hints.ts';
 
-// Hint reads happen before the Durable Object authenticates the request. Bound
-// their size here; larger negotiations proceed without hints and read the facts
-// after authentication.
+import { tenantServer } from './durable-object.ts';
+
+// Larger negotiations proceed without hints and read the facts in the object.
 const hintPathCap = 10_000;
 
 // Parse only the fields needed for the optional hint. The Durable Object still
@@ -38,9 +37,8 @@ const lenientNegotiateBodySchema = z.object({
 
 /**
  * Prefetches shared blob and reference facts before dispatching a negotiation.
- * The Durable Object holds the access-token keys, so this Worker authorises the
- * prefetch with the HMAC-signed push ID instead. Missing credentials, invalid
- * input, an invalid push ID, or an oversized request disables the optimisation.
+ * The Durable Object checks the access token and its cache grant before any
+ * shared D1 fact read. Invalid input or credentials disable the optimisation.
  */
 export async function computeNegotiateHints(
 	request: Request,
@@ -48,12 +46,9 @@ export async function computeNegotiateHints(
 	tenant: TenantId,
 	cache: CacheScope
 ): Promise<NegotiateHints | undefined> {
-	if (
-		parseAuthenticationHeader(
-			request.headers.get('authorization') ?? undefined,
-			'Bearer'
-		) === undefined
-	) {
+	const authorization = request.headers.get('authorization');
+
+	if (authorization === null) {
 		return undefined;
 	}
 
@@ -88,6 +83,19 @@ export async function computeNegotiateHints(
 		return undefined;
 	}
 
+	try {
+		if (
+			!(await tenantServer(env, tenant).authoriseNegotiateHints(
+				authorization,
+				cache
+			))
+		) {
+			return undefined;
+		}
+	} catch {
+		return undefined;
+	}
+
 	const narHashes = [...new Set(parsed.data.paths.map((path) => path.narHash))];
 	const storePathHashes = [
 		...new Set(parsed.data.paths.map((path) => path.storePathHash))
@@ -98,8 +106,7 @@ export async function computeNegotiateHints(
 		return await readHints(database, tenant, cache, narHashes, storePathHashes);
 	} catch {
 		// The hints are an optimisation: a shared-fact read fault dispatches
-		// plainly and the Durable Object reads its own facts after
-		// authenticating.
+		// plainly and the Durable Object reads its own facts.
 		return undefined;
 	}
 }
