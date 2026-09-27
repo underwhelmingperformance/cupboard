@@ -56,7 +56,6 @@ import {
 	commitSharedPath,
 	CommitSocketError,
 	commitUpload,
-	commitUploadRejection,
 	commitUploadViaWorker,
 	CommitVerdictError,
 	commitVerifiablePath,
@@ -2352,18 +2351,32 @@ describe('upload flow', () => {
 
 			return verdicts.filter((verdict) => verdict === undefined).length;
 		};
+		const continuationMessages = (): unknown[] =>
+			sent.filter(
+				(message) =>
+					typeof message === 'object' &&
+					message !== null &&
+					'kind' in message &&
+					message.kind === 'tenant-verify'
+			);
 
 		await verifyTenant(rootLogger(), env, tenant, 2);
 		expect({
-			sent: sent.length,
+			sent: continuationMessages(),
 			servable: await servableCount()
-		}).toStrictEqual({ sent: 1, servable: 2 });
+		}).toStrictEqual({
+			sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }],
+			servable: 2
+		});
 
 		await verifyTenant(rootLogger(), env, tenant, 2);
 		expect({
-			sent: sent.length,
+			sent: continuationMessages(),
 			servable: await servableCount()
-		}).toStrictEqual({ sent: 1, servable: 3 });
+		}).toStrictEqual({
+			sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }],
+			servable: 3
+		});
 	});
 
 	it('marks a deferred upload servable on commit, and a later delete is not undone', async () => {
@@ -2817,17 +2830,9 @@ describe('upload flow', () => {
 
 		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
-		// Leave `blob_state` present so negotiation queues reconciliation. The
-		// missing canonical object then makes reconciliation retire the narinfo.
-		const skip = await negotiateUploads(token, [metadata]);
+		const first = await negotiateUploads(token, [metadata]);
 
-		expect(skip.uploads).toStrictEqual([
-			{
-				action: 'skip',
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash
-			}
-		]);
+		expectSingleUploadDecision(first, metadata);
 
 		await fireReconcile();
 
@@ -2921,16 +2926,18 @@ describe('upload flow', () => {
 		// Remove the physical object shared by two committed paths.
 		await env.BLOBS.delete(await currentNarObjectKey(first.narHash));
 
-		// Reconciliation retires both reference edges but credits the shared blob
-		// only once.
-		await negotiateUploads(token, [first, second]);
+		const decisions = await negotiateUploads(token, [first, second]);
+		expect(decisions.uploads.map((decision) => decision.action)).toStrictEqual([
+			'upload',
+			'upload'
+		]);
 		await fireReconcile();
 
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 0,
-			pendingUploads: 0,
-			totalFileSize: 0
+			narBlobs: 1,
+			pendingUploads: 2,
+			totalFileSize: narBytes.byteLength
 		});
 
 		expectSingleUploadDecision(await negotiateUploads(token, [third]), third);
@@ -3156,18 +3163,17 @@ describe('upload flow', () => {
 		await commitPath(token, metadata);
 		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
-		// Leave `blob_state` present so negotiation queues reconciliation before the
-		// missing canonical object retires the narinfo.
-		await negotiateUploads(token, [metadata]);
+		expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
 		await fireReconcile();
 
-		// Tenant usage is credited when its edge is retired, before the global
-		// `blob_state` row is reaped.
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 0,
-			pendingUploads: 0,
-			totalFileSize: 0
+			narBlobs: 1,
+			pendingUploads: 1,
+			totalFileSize: narBytes.byteLength
 		});
 
 		expectSingleUploadDecision(
@@ -3205,41 +3211,39 @@ describe('upload flow', () => {
 		const lostKey = await currentNarObjectKey(metadata.narHash);
 		await env.BLOBS.delete(lostKey);
 
-		// Negotiation reads only D1, so the first push after the loss receives a
-		// skip decision. Reconciliation then removes the path from the default
-		// cache.
-		const skip = singleDecision(await negotiateUploads(token, [metadata]));
+		const decision = singleDecision(await negotiateUploads(token, [metadata]));
+
+		if (decision.action !== 'upload') {
+			throw new Error(`expected an upload, got ${decision.action}`);
+		}
+
+		await putNarBytes(decision.r2Key);
+		await commitUpload(token, decision.uploadId);
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.enqueueNarInfoReconciliation(metadata.narHash)
+		);
 		await fireReconcile();
-		const reuse = singleDecision(await negotiateUploads(token, [metadata]));
-
-		if (reuse.action !== 'commit') {
-			throw new Error(`expected a reuse commit, got ${reuse.action}`);
-		}
-
-		const refusal = await commitUploadRejection(token, reuse.uploadId);
-		const retry = singleDecision(await negotiateUploads(token, [metadata]));
-
-		if (retry.action !== 'upload') {
-			throw new Error(`expected an upload, got ${retry.action}`);
-		}
-
-		await putNarBytes(retry.r2Key);
-		await commitUpload(token, retry.uploadId);
 
 		const narInfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
 		const nar = await readFetch(`/${NarInfo.parse(await narInfo.text()).url}`);
+		const otherNarInfo = await readFetch(
+			`/cache/other/${metadata.storePathHash}.narinfo`
+		);
+		const otherNar = await readFetch(
+			`/${NarInfo.parse(await otherNarInfo.text()).url}`
+		);
 
 		expect({
-			decisions: [skip.action, reuse.action, retry.action],
-			refusal: refusal instanceof CommitSocketError ? refusal.status : refusal,
+			decision: decision.action,
 			replacedIncarnation:
 				(await currentNarObjectKey(metadata.narHash)) !== lostKey,
-			narStatus: nar.status
+			narStatus: nar.status,
+			otherNarStatus: otherNar.status
 		}).toStrictEqual({
-			decisions: ['skip', 'commit', 'upload'],
-			refusal: StatusCodes.NOT_FOUND,
+			decision: 'upload',
 			replacedIncarnation: true,
-			narStatus: StatusCodes.OK
+			narStatus: StatusCodes.OK,
+			otherNarStatus: StatusCodes.OK
 		});
 	});
 
@@ -3272,9 +3276,12 @@ describe('upload flow', () => {
 		await pushPath(token, metadata, defaultCache());
 		await pushPath(token, metadata, sharedCache);
 		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
-		await negotiateUploads(token, [metadata]);
-		await fireReconcile();
-		const reuse = singleDecision(await negotiateUploads(token, [metadata]));
+		const another = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'another',
+			storePathHash: '33333333333333333333333333333333'
+		});
+		const reuse = singleDecision(await negotiateUploads(token, [another]));
 
 		if (reuse.action !== 'commit') {
 			throw new Error(`expected a reuse commit, got ${reuse.action}`);
@@ -3290,7 +3297,7 @@ describe('upload flow', () => {
 
 			await verification.processPendingWithoutDecode(rootLogger(), 10);
 		});
-		const retry = singleDecision(await negotiateUploads(token, [metadata]));
+		const retry = singleDecision(await negotiateUploads(token, [another]));
 
 		expect(retry.action).toBe('upload');
 	});

@@ -72,6 +72,7 @@ interface ClosureClassification {
 	readonly facts: NegotiateFacts | undefined;
 	readonly existingByStorePathHash: ReadonlyMap<StorePathHash, NarInfoRow>;
 	readonly committed: ReadonlySet<StorePathHash>;
+	readonly missingCanonicalNars: ReadonlySet<NixSha256HashString>;
 	readonly skippableRows: readonly NarInfoRow[];
 	readonly skippable: ReadonlySet<StorePathHash>;
 	readonly reusableByNarHash: ReadonlyMap<string, ReusableBlob>;
@@ -239,9 +240,9 @@ export class UploadsService {
 		return new Set([...facts.backedNarHashes, ...present]);
 	}
 
-	// Per-path R2 heads exceed the Worker's subrequest limit for large closures, so
-	// availability comes from the D1 reference and blob indexes. Preview must use
-	// the non-claiming lookup because classification must not clear reaper timers.
+	// Preview must use the non-claiming lookup because classification must not
+	// clear reaper timers. The canonical NAR probe checks would-be skips; clients
+	// split large requests so those R2 heads fit the invocation's allowance.
 	private async classifyClosure(
 		cache: ResolvedCache,
 		body: ClosureRequest,
@@ -267,9 +268,20 @@ export class UploadsService {
 			this.backedNarHashes(facts, body, existingRows)
 		]);
 
-		const skippableRows = existingRows.filter(
+		const backedRows = existingRows.filter(
 			(row) =>
 				committed.has(row.storePathHash) && backedNarHashes.has(row.narHash)
+		);
+		const canonicalNars = await this.uploadState.presentCanonicalNars(
+			backedRows.map((row) => row.narHash)
+		);
+		const missingCanonicalNars = new Set(
+			backedRows
+				.map((row) => row.narHash)
+				.filter((narHash) => !canonicalNars.has(narHash))
+		);
+		const skippableRows = backedRows.filter((row) =>
+			canonicalNars.has(row.narHash)
 		);
 		const skippable = new Set(skippableRows.map((row) => row.storePathHash));
 
@@ -283,14 +295,21 @@ export class UploadsService {
 						? this.uploadState.findReusableBlobs(candidateNarHashes)
 						: this.uploadState.peekReusableBlobs(candidateNarHashes)))
 			);
+		const missingCanonicalNarStrings = new Set<string>(missingCanonicalNars);
+		const presentReusable = new Map(
+			reusableByNarHash
+				.entries()
+				.filter(([narHash]) => !missingCanonicalNarStrings.has(narHash))
+		);
 
 		return {
 			facts,
 			existingByStorePathHash,
 			committed,
+			missingCanonicalNars,
 			skippableRows,
 			skippable,
-			reusableByNarHash
+			reusableByNarHash: presentReusable
 		};
 	}
 
@@ -340,10 +359,15 @@ export class UploadsService {
 			facts,
 			existingByStorePathHash,
 			committed,
+			missingCanonicalNars,
 			skippableRows,
 			skippable,
 			reusableByNarHash
 		} = await this.classifyClosure(cache, body, hints, true);
+
+		for (const narHash of missingCanonicalNars) {
+			await this.uploadState.markCanonicalNarMissing(narHash);
+		}
 
 		// Capture grace once and store it with every pending upload. A later cache
 		// change cannot alter the decision before commit finishes. Attach grace facts

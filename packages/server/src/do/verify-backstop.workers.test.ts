@@ -223,7 +223,13 @@ describe('verify alarm backstop', () => {
 		await fireAlarm();
 
 		expect({
-			sent: sent.length,
+			sent: sent.filter(
+				(message) =>
+					typeof message === 'object' &&
+					message !== null &&
+					'kind' in message &&
+					message.kind === 'tenant-verify'
+			),
 			verdict: await pendingUploadVerdict(reuse.uploadId),
 			servable:
 				(await env.BLOBS.head(
@@ -232,7 +238,7 @@ describe('verify alarm backstop', () => {
 					})
 				)) !== null
 		}).toStrictEqual({
-			sent: 2,
+			sent: [request, request],
 			verdict: undefined,
 			servable: true
 		});

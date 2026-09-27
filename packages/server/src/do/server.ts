@@ -4,6 +4,8 @@ import {
 	type CacheScope,
 	cacheScopeSchema,
 	isSameCacheScope,
+	type NixSha256HashString,
+	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
@@ -39,7 +41,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
-import { and, eq, isNull, or } from 'drizzle-orm';
+import { and, asc, eq, gt, isNull, or } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -48,7 +50,7 @@ import { z } from 'zod';
 import migrations from '../../drizzle/migrations.js';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
-import { type ResolvedCache } from '../db/cache.ts';
+import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
 import * as schema from '../db/schema.ts';
 import { isD1Overload } from '../db/transient.ts';
@@ -3043,6 +3045,48 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	async enqueueNarInfoReconciliation(
+		narHash: NixSha256HashString,
+		after?: { readonly cacheId: CacheId; readonly storePathHash: StorePathHash }
+	): Promise<
+		| { readonly cacheId: CacheId; readonly storePathHash: StorePathHash }
+		| undefined
+	> {
+		await this.initialise();
+
+		return this.metered('enqueue-narinfo-reconciliation', async () => {
+			const withinCache =
+				after === undefined
+					? undefined
+					: and(
+							eq(schema.narInfos.cacheId, after.cacheId),
+							gt(schema.narInfos.storePathHash, after.storePathHash)
+						);
+			const afterCursor =
+				after === undefined
+					? undefined
+					: or(gt(schema.narInfos.cacheId, after.cacheId), withinCache);
+			const page = this.context.db
+				.select({
+					cacheId: schema.narInfos.cacheId,
+					storePathHash: schema.narInfos.storePathHash
+				})
+				.from(schema.narInfos)
+				.where(and(eq(schema.narInfos.narHash, narHash), afterCursor))
+				.orderBy(
+					asc(schema.narInfos.cacheId),
+					asc(schema.narInfos.storePathHash)
+				)
+				.limit(101)
+				.all();
+			const targets = page.slice(0, 100);
+
+			await this.reconcileQueue.enqueue(undefined, targets);
+
+			return page.length > 100 ? targets.at(-1) : undefined;
+		});
+	}
+
 	async measureAttestationBundle(
 		stagingKey: R2ObjectKey
 	): Promise<MeasuredAttestationBundle> {
@@ -3501,6 +3545,7 @@ type MeteredMethod =
 	| 'configure'
 	| 'demote-attestation-references'
 	| 'demote-narinfo-objects'
+	| 'enqueue-narinfo-reconciliation'
 	| 'garbage-collection'
 	| 'initialise'
 	| 'local-step'

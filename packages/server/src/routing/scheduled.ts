@@ -1,8 +1,25 @@
 import { type Logger, rootLogger } from '@cupboard/logger';
-import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	nixSha256HashSchema,
+	type NixSha256HashString,
+	storePathHashSchema,
+	type TenantId,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, asc, eq, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	eq,
+	gt,
+	inArray,
+	isNull,
+	lte,
+	ne,
+	or,
+	sql
+} from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
@@ -21,6 +38,7 @@ import {
 	refreshTenantMembership
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
+import { cacheIdSchema } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	BlobReaperService,
@@ -123,6 +141,7 @@ interface ExecuteMaintenanceQueueOptions {
 
 const maxStoredErrorLength = 4096;
 const queueRetryDelaySeconds = 60;
+const narInfoRefreshTenantsPerPage = 50;
 const objectReaperPhaseSchema = z.enum([
 	'delete-existing',
 	'recover',
@@ -148,6 +167,19 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 		phase: objectReaperPhaseSchema.optional()
 	}),
 	z.object({ kind: z.literal('blob-demote') }),
+	z.object({
+		kind: z.literal('narinfo-refresh'),
+		narHash: nixSha256HashSchema,
+		afterTenant: tenantIdSchema.optional()
+	}),
+	z.object({
+		kind: z.literal('narinfo-refresh-tenant'),
+		tenant: tenantIdSchema,
+		narHash: nixSha256HashSchema,
+		after: z
+			.object({ cacheId: cacheIdSchema, storePathHash: storePathHashSchema })
+			.optional()
+	}),
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
 	z.object({
@@ -169,6 +201,20 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'blob-reaper'; readonly phase?: ObjectReaperPhase }
 	| { readonly kind: 'cas-reaper'; readonly phase?: ObjectReaperPhase }
 	| { readonly kind: 'blob-demote' }
+	| {
+			readonly kind: 'narinfo-refresh';
+			readonly narHash: NixSha256HashString;
+			readonly afterTenant?: TenantId;
+	  }
+	| {
+			readonly kind: 'narinfo-refresh-tenant';
+			readonly tenant: TenantId;
+			readonly narHash: NixSha256HashString;
+			readonly after?: {
+				readonly cacheId: ReturnType<typeof cacheIdSchema.parse>;
+				readonly storePathHash: ReturnType<typeof storePathHashSchema.parse>;
+			};
+	  }
 	| { readonly kind: 'cas-demote' }
 	| { readonly kind: 'control-key-retirement' }
 	| { readonly kind: 'local-step-sweep' };
@@ -416,6 +462,28 @@ export async function executeMaintenanceQueueMessage(
 				await (options.runReaperDemote ?? runReaperDemote)(logger, env);
 				return { action: 'ack' };
 			}
+			case 'narinfo-refresh': {
+				await enqueueNarInfoRefreshTenants(
+					env,
+					message.narHash,
+					message.afterTenant
+				);
+				return { action: 'ack' };
+			}
+			case 'narinfo-refresh-tenant': {
+				const after = await tenantServer(
+					env,
+					message.tenant
+				).enqueueNarInfoReconciliation(message.narHash, message.after);
+
+				if (after !== undefined) {
+					await sendQueueMessages(env.MAINTENANCE_QUEUE, [
+						{ ...message, after }
+					]);
+				}
+
+				return { action: 'ack' };
+			}
 			case 'cas-demote': {
 				await (options.runCasReaperDemote ?? runCasReaperDemote)(logger, env);
 				return { action: 'ack' };
@@ -446,6 +514,48 @@ export async function executeMaintenanceQueueMessage(
 			reason: errorSummary(error)
 		};
 	}
+}
+
+export async function enqueueNarInfoRefreshTenants(
+	env: Env,
+	narHash: NixSha256HashString,
+	afterTenant: TenantId | undefined,
+	queue: MaintenanceQueue = env.MAINTENANCE_QUEUE
+): Promise<void> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const tenants = await database
+		.selectDistinct({ tenant: d1Schema.blobReference.tenant })
+		.from(d1Schema.blobReference)
+		.where(
+			and(
+				eq(d1Schema.blobReference.narHash, narHash),
+				afterTenant === undefined
+					? undefined
+					: gt(d1Schema.blobReference.tenant, afterTenant)
+			)
+		)
+		.orderBy(asc(d1Schema.blobReference.tenant))
+		.limit(narInfoRefreshTenantsPerPage + 1);
+	const page = tenants.slice(0, narInfoRefreshTenantsPerPage);
+	const messages: MaintenanceQueueMessage[] = page.map(({ tenant }) => ({
+		kind: 'narinfo-refresh-tenant',
+		tenant,
+		narHash
+	}));
+
+	if (tenants.length > narInfoRefreshTenantsPerPage) {
+		const last = page.at(-1);
+
+		if (last !== undefined) {
+			messages.push({
+				kind: 'narinfo-refresh',
+				narHash,
+				afterTenant: last.tenant
+			});
+		}
+	}
+
+	await sendQueueMessages(queue, messages);
 }
 
 function logInvalidMaintenanceQueueMessage(

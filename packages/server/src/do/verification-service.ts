@@ -1326,6 +1326,13 @@ export class VerificationService {
 				return false;
 			}
 
+			if (outcome.narInfo.url !== narObjectKey(metadata.narHash)) {
+				await this.context.env.MAINTENANCE_QUEUE.send({
+					kind: 'narinfo-refresh',
+					narHash: metadata.narHash
+				});
+			}
+
 			signal?.throwIfAborted();
 			await this.inheritAfterCommit(pending, metadata, generation);
 			// Once the narinfo is durable, notify waiters and remove the upload row and
