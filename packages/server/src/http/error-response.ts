@@ -11,7 +11,9 @@ import {
 	OAuthError,
 	ServerHttpError,
 	TenantDispatchInterruptedError,
-	UnauthenticatedError
+	UnauthenticatedError,
+	uploadPageSplitHeader,
+	UploadPageSplitRequiredError
 } from '../errors.ts';
 import { rootLogger } from '../observability/logging.ts';
 
@@ -57,6 +59,10 @@ HTTP metadata shared by ordinary and oRPC error renderers.
 */
 export function serverHttpErrorHeaders(error: ServerHttpError): Headers {
 	const headers = new Headers();
+
+	if (error instanceof UploadPageSplitRequiredError) {
+		headers.set(uploadPageSplitHeader, '1');
+	}
 
 	if (error.retryAfterSeconds !== undefined) {
 		headers.set('retry-after', String(error.retryAfterSeconds));

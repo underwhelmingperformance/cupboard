@@ -17,7 +17,10 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
-import { withSubrequestSlice } from '../do/subrequest-slice.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from '../do/subrequest-slice.ts';
 import {
 	TenantAdmissionUnavailableError,
 	TenantWritesStoppedError
@@ -38,6 +41,7 @@ import {
 	answerAvailabilityInChunks,
 	reuseViewAvailabilityChunkSizeFor
 } from './chunked-availability.ts';
+import { answerUploadsInChunks } from './chunked-uploads.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
@@ -284,6 +288,33 @@ function buildApp(): Hono<WorkerHonoEnv> {
 					writeStatus
 				);
 			}
+			const confirmedStatus =
+				writeStatus ?? (await tenantStatus(context.env, tenant));
+
+			if (confirmedStatus !== 'active') {
+				throw new TenantWritesStoppedError(tenant, confirmedStatus);
+			}
+
+			let pageTemplate: Request | undefined;
+			const chunked = await answerUploadsInChunks(
+				context.req.raw,
+				'negotiate',
+				(body) => {
+					pageTemplate ??= innerRequest(context);
+
+					return dispatchTenant(
+						uploadPageRequest(pageTemplate, body),
+						context.env,
+						tenant,
+						confirmedStatus
+					);
+				},
+				subrequestsAvailable()
+			);
+
+			if (chunked !== undefined) {
+				return chunked;
+			}
 
 			// Compute hints before constructing the forwarded request because reading
 			// them clones the original body.
@@ -307,7 +338,37 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				}
 			}
 
-			return dispatchTenant(inner, context.env, tenant, writeStatus);
+			return dispatchTenant(inner, context.env, tenant, confirmedStatus);
+		}
+	);
+
+	app.on(
+		'POST',
+		[
+			'/t/:tenant/uploads/preview',
+			'/t/:tenant/cache/:cacheName/uploads/preview'
+		],
+		async (context) => {
+			let pageTemplate: Request | undefined;
+			const chunked = await answerUploadsInChunks(
+				context.req.raw,
+				'preview',
+				(body) => {
+					pageTemplate ??= innerRequest(context);
+
+					return tenantServer(context.env, context.get('tenant')).fetch(
+						uploadPageRequest(pageTemplate, body)
+					);
+				},
+				subrequestsAvailable()
+			);
+
+			return (
+				chunked ??
+				(await tenantServer(context.env, context.get('tenant')).fetch(
+					innerRequest(context)
+				))
+			);
 		}
 	);
 
@@ -328,6 +389,18 @@ function buildApp(): Hono<WorkerHonoEnv> {
 }
 
 const app = buildApp();
+
+function uploadPageRequest(inner: Request, body: unknown): Request {
+	const headers = new Headers(inner.headers);
+	headers.delete('content-length');
+	headers.set('content-type', 'application/json');
+
+	return new Request(inner.url, {
+		method: 'POST',
+		headers,
+		body: JSON.stringify(body)
+	});
+}
 
 export default {
 	fetch: (request: Request, env: Env, ctx: ExecutionContext) =>

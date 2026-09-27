@@ -35,6 +35,31 @@ export abstract class InvalidRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 }
 
+export const uploadPageSplitHeader = 'x-cupboard-upload-page-split';
+
+export class UploadPageSplitRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor() {
+		super(
+			'The upload page needs to be split before its missing NARs can be repaired'
+		);
+		this.name = 'UploadPageSplitRequiredError';
+	}
+}
+
+export class UploadRequestBudgetExceededError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super(
+			"The upload request exceeds this Worker invocation's subrequest budget. Retry with fewer paths per request."
+		);
+		this.name = 'UploadRequestBudgetExceededError';
+	}
+}
+
 export class MalformedRequestBodyError extends InvalidRequestBodyError {
 	constructor(public override readonly cause: SyntaxError) {
 		super('Malformed JSON request body');

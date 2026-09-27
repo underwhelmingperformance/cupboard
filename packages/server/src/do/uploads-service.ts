@@ -28,7 +28,11 @@ import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
 import { type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { CacheNotFoundError, InvalidPushIdError } from '../errors.ts';
+import {
+	CacheNotFoundError,
+	InvalidPushIdError,
+	UploadPageSplitRequiredError
+} from '../errors.ts';
 import {
 	narObjectKey,
 	type RequestOrigin,
@@ -52,9 +56,13 @@ import {
 	type NegotiateFacts,
 	type NegotiateHints
 } from './negotiate-hints.ts';
-import { type ReconcileQueueService } from './reconcile-queue-service.ts';
+import {
+	type ReconcileQueueService,
+	subrequestsPerReconcileRemoval
+} from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { type RootsService } from './roots-service.ts';
+import { hasSubrequestsFor } from './subrequest-slice.ts';
 import { commitMetadataFromPathAndBlob } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
@@ -364,6 +372,25 @@ export class UploadsService {
 			skippable,
 			reusableByNarHash
 		} = await this.classifyClosure(cache, body, hints, true);
+
+		const missingRows = body.paths.filter((metadata) => {
+			const existing = existingByStorePathHash.get(metadata.storePathHash);
+
+			return (
+				existing !== undefined &&
+				committed.has(metadata.storePathHash) &&
+				missingCanonicalNars.has(existing.narHash)
+			);
+		});
+
+		if (
+			!hasSubrequestsFor(
+				missingRows.length * subrequestsPerReconcileRemoval +
+					jsonValueLists(body.paths.map((path) => path.narHash)).length
+			)
+		) {
+			throw new UploadPageSplitRequiredError();
+		}
 
 		for (const narHash of missingCanonicalNars) {
 			await this.uploadState.markCanonicalNarMissing(narHash);

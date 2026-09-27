@@ -3,7 +3,8 @@ import {
 	acceptCapabilitiesHeader,
 	uploadGraceFactsCapability,
 	uploadNegotiateResponseSchema,
-	type UploadPathMetadata
+	type UploadPathMetadata,
+	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -17,6 +18,7 @@ import {
 	commitPath,
 	CommitSocketError,
 	commitUploadRejection,
+	currentNarObjectKey,
 	currentServer,
 	defaultCache,
 	deleteBlobReferenceEdge,
@@ -141,6 +143,79 @@ describe('computing negotiate hints', () => {
 			blobStates: [],
 			ownedNarHashes: [],
 			committedEdges: []
+		});
+	});
+
+	it('answers a large direct preview through more than one object request', async () => {
+		const token = await issueServerSignedToken(
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:preview'],
+					cache: defaultCache()
+				}
+			])
+		);
+		const paths = Array.from({ length: 401 }, () => path);
+		const response = await handlerFetch(`/t/${fixtureTenant}/uploads/preview`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ paths })
+		});
+
+		expect({
+			status: response.status,
+			body: uploadPreviewResponseSchema.parse(await response.json())
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: {
+				uploads: paths.map(() => ({
+					action: 'upload',
+					storePathHash: path.storePathHash,
+					narHash: path.narHash
+				}))
+			}
+		});
+	});
+
+	it('splits a direct negotiation before repairing a missing canonical NAR', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('chunked-missing-nar');
+		const metadata = uploadMetadata({
+			name: 'chunked-missing',
+			storePathHash: '8'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		await commitPath(token, metadata, nar);
+		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
+
+		const input = Array.from({ length: 200 }, () => metadata);
+		const answer = await negotiateViaWorker(token, input);
+
+		expect({
+			decisions: answer.uploads.map(({ action, storePathHash, narHash }) => ({
+				action,
+				storePathHash,
+				narHash
+			})),
+			uniqueUploadIds: new Set(
+				answer.uploads
+					.filter((decision) => decision.action === 'upload')
+					.map((decision) => decision.uploadId)
+			).size
+		}).toStrictEqual({
+			decisions: input.map(() => ({
+				action: 'upload',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash
+			})),
+			uniqueUploadIds: 200
 		});
 	});
 
@@ -376,11 +451,14 @@ describe('negotiate hints', () => {
 			narSize: rebuiltNar.narSize
 		});
 		const hinted = await negotiateViaWorker(token, [rebuilt]);
+		const queued = await narInfoDeletionRows();
 
 		expect({
 			decisions: actionsByPath(hinted),
 			generation: await narInfoGeneration(committed.storePathHash),
-			queued: await narInfoDeletionRows()
+			queued: queued.filter(
+				(row) => row.storePathHash === committed.storePathHash
+			)
 		}).toStrictEqual({
 			decisions: { [committed.storePathHash]: 'skip' },
 			generation,
