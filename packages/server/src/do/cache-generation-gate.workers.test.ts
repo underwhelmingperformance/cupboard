@@ -18,7 +18,7 @@ import {
 import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq, sql } from 'drizzle-orm';
+import { count, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
@@ -28,7 +28,7 @@ import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { cacheIdentityColumns, cacheScopeFromRow } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { narInfoDeletions } from '../db/schema.ts';
+import { narInfoDeletions, narInfos } from '../db/schema.ts';
 import {
 	attestationListObjectKey,
 	narInfoObjectKey,
@@ -379,20 +379,75 @@ async function deletionStatements(
 	await useTestServer(server);
 	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
-	// Each commit arms an alarm for attestation inheritance. Keep those alarms
-	// from running during the measured teardown, and drain the queue first.
-	await withoutAlarmArming(async () => {
-		for (let start = 0; start < storePaths; start += pushConcurrency) {
-			await Promise.all(
-				Array.from(
-					{ length: Math.min(pushConcurrency, storePaths - start) },
-					(_, offset) =>
-						pushPath(token, indexedMetadata(start + offset), buildsCache)
-				)
-			);
-		}
-	});
+	const paths = Array.from({ length: storePaths }, (_, index) =>
+		indexedMetadata(index)
+	);
+	const first = paths[0];
+	if (first === undefined) {
+		throw new Error('A deletion statement fixture needs at least one path.');
+	}
+	await withoutAlarmArming(() => pushPath(token, first, buildsCache));
 	await drainAttestationInheritance();
+
+	const seeded = await runInDurableObject(currentServer(), async (instance) => {
+		const sourceNarInfo = instance.context.db
+			.select()
+			.from(narInfos)
+			.where(eq(narInfos.storePathHash, first.storePathHash))
+			.get();
+		const sourceReference = await instance.context.d1
+			.select()
+			.from(d1Schema.blobReference)
+			.where(eq(d1Schema.blobReference.storePathHash, first.storePathHash))
+			.get();
+		if (sourceNarInfo === undefined || sourceReference === undefined) {
+			throw new Error('The deletion statement fixture was not committed.');
+		}
+
+		for (let start = 1; start < paths.length; start += 6) {
+			const batch = paths.slice(start, start + 6);
+			instance.context.db
+				.insert(narInfos)
+				.values(
+					batch.map((path) => ({
+						...sourceNarInfo,
+						storePathHash: path.storePathHash,
+						storePath: path.storePath
+					}))
+				)
+				.run();
+			await instance.context.d1
+				.insert(d1Schema.blobReference)
+				.values(
+					batch.map((path) => ({
+						...sourceReference,
+						storePathHash: path.storePathHash
+					}))
+				)
+				.run();
+		}
+
+		await instance.context.d1
+			.update(d1Schema.tenantUsage)
+			.set({ narinfos: storePaths, updatedAt: isoTimestamp(new Date()) })
+			.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+			.run();
+
+		return {
+			narinfos: instance.context.db
+				.select({ total: count() })
+				.from(narInfos)
+				.get()?.total,
+			references: await instance.context.d1
+				.select({ total: count() })
+				.from(d1Schema.blobReference)
+				.get()
+		};
+	});
+	expect(seeded).toStrictEqual({
+		narinfos: storePaths,
+		references: { total: storePaths }
+	});
 
 	const counting = countingD1(env.CUPBOARD_DB);
 
