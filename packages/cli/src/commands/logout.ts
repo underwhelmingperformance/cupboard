@@ -80,11 +80,7 @@ export interface LogoutDependencies {
 	readonly signal?: AbortSignal;
 }
 
-/**
- * What became of the cached Cloudflare sign-in: deleted, never cached, or left
- * in place because `--cloudflare` was not given.
- */
-type CloudflareSignInOutcome = Removal | 'kept';
+type CloudflareSignInOutcome = Removal | 'kept' | 'unreadable';
 
 export interface LogoutResult {
 	/**
@@ -129,9 +125,13 @@ async function resolveCloudflareSignIn(
 		return dependencies.removeGrant(dependencies.signal);
 	}
 
-	const grant = await dependencies.readGrant();
+	try {
+		const grant = await dependencies.readGrant();
 
-	return grant === undefined ? 'absent' : 'kept';
+		return grant === undefined ? 'absent' : 'kept';
+	} catch {
+		return 'unreadable';
+	}
 }
 
 function sessionsRow(
@@ -159,7 +159,8 @@ const cloudflareSignInLabels: Readonly<
 > = {
 	removed: 'removed',
 	absent: 'none was cached',
-	kept: 'still cached'
+	kept: 'still cached',
+	unreadable: 'could not be checked'
 };
 
 /**
@@ -191,7 +192,11 @@ export async function runLogout(
 	const sessions = sessionsRow(input.sessions, sessionsRemoved);
 	const rows: ResultRow[] = sessions === undefined ? [] : [sessions];
 
-	if (cloudflareSignIn === 'kept' || input.cloudflareSignIn === 'remove') {
+	if (
+		cloudflareSignIn === 'kept' ||
+		cloudflareSignIn === 'unreadable' ||
+		input.cloudflareSignIn === 'remove'
+	) {
 		rows.push({
 			label: 'Cloudflare sign-in',
 			value: cloudflareSignInLabels[cloudflareSignIn]
@@ -206,6 +211,11 @@ export async function runLogout(
 				'to start a new session without a browser. Run `cupboard logout ' +
 				'--cloudflare` to remove it. `cupboard login` and `cupboard init` will ' +
 				'then ask you to sign in to Cloudflare again.'
+		);
+	} else if (cloudflareSignIn === 'unreadable') {
+		reporter.warn(
+			'Could not check the cached Cloudflare sign-in. Run `cupboard logout ' +
+				'--cloudflare` to remove the sign-in.'
 		);
 	}
 

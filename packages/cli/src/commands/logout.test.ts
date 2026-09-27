@@ -173,6 +173,49 @@ describe('runLogout', () => {
 		});
 	});
 
+	it('removes a session when the cached Cloudflare grant cannot be read', async () => {
+		const state = { sessions: new Set([tenant, other]), grant: true };
+		const { ui, captured } = fakeCliUi();
+		const result = await runLogout(
+			logoutInput(new URL(tenant), {}),
+			ui.reporter(),
+			{
+				...fakeDependencies(state),
+				readGrant: () => Promise.reject(new Error('EACCES'))
+			}
+		);
+
+		expect({
+			result,
+			remaining: [...state.sessions],
+			grant: state.grant,
+			results: captured.results,
+			warnings: captured.warnings
+		}).toStrictEqual({
+			result: {
+				url: tenant,
+				sessionsRemoved: 1,
+				cloudflareSignIn: 'unreadable',
+				revoked: false
+			},
+			remaining: [other],
+			grant: true,
+			results: [
+				{
+					kind: 'logout',
+					data: result,
+					rows: [
+						{ label: tenant, value: 'session removed' },
+						{ label: 'Cloudflare sign-in', value: 'could not be checked' }
+					]
+				}
+			],
+			warnings: [
+				'Could not check the cached Cloudflare sign-in. Run `cupboard logout --cloudflare` to remove the sign-in.'
+			]
+		});
+	});
+
 	it('removes every session and the Cloudflare sign-in', async () => {
 		const state = { sessions: new Set([tenant, other]), grant: true };
 		const { ui, captured } = fakeCliUi();
