@@ -10,7 +10,6 @@ import {
 	InvalidHashesFileError,
 	LockfileDriftError,
 	parseDependenciesHashes,
-	PendingStoreHashRecordedError,
 	serialiseDependenciesHashes,
 	sriSha256,
 	type StoreFetcher,
@@ -128,6 +127,11 @@ describe('parseDependenciesHashes', () => {
 				{ code: 'invalid_format', path: ['lockfile'] },
 				{ code: 'invalid_format', path: ['store'] }
 			]
+		},
+		{
+			name: 'a field that the tool does not write',
+			text: `{ "lockfile": "${lockfileDigest}", "store": "${oldStoreHash}", "confirmation": "pending" }`,
+			issues: [{ code: 'unrecognized_keys', path: [] }]
 		}
 	])('rejects $name', async ({ text, issues }) => {
 		const error = await captureError(InvalidHashesFileError, () =>
@@ -179,20 +183,6 @@ describe('checkFlakeDependencies', () => {
 		});
 
 		expect(error).toBeInstanceOf(FakeHashRecordedError);
-	});
-
-	it('rejects a resolved store hash whose confirmation did not finish', async () => {
-		const workspace = fakeWorkspace({
-			lockfile: lockfileDigest,
-			store: newStoreHash,
-			confirmation: 'pending'
-		});
-
-		const error = await captureError(PendingStoreHashRecordedError, () => {
-			checkFlakeDependencies(workspace);
-		});
-
-		expect(error).toBeInstanceOf(PendingStoreHashRecordedError);
 	});
 });
 

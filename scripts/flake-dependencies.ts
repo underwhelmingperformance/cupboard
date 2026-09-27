@@ -17,10 +17,9 @@ export const hashesFileName = 'pnpm-deps-hash.json';
 
 const sriSha256Hash = z.string().regex(/^sha256-[\d+/A-Za-z]{43}=$/);
 
-const dependenciesHashesSchema = z.object({
+const dependenciesHashesSchema = z.strictObject({
 	lockfile: sriSha256Hash,
-	store: sriSha256Hash,
-	confirmation: z.literal('pending').optional()
+	store: sriSha256Hash
 });
 
 export type DependenciesHashes = z.infer<typeof dependenciesHashesSchema>;
@@ -79,16 +78,6 @@ export class FakeHashRecordedError extends CodedError {
 				'interrupted update. Run `pnpm update:flake-deps` to refresh it.'
 		);
 		this.name = 'FakeHashRecordedError';
-	}
-}
-
-export class PendingStoreHashRecordedError extends CodedError {
-	constructor() {
-		super(
-			`${hashesFileName} records a store hash whose confirmation did not ` +
-				'finish. Run `pnpm update:flake-deps` to confirm it.'
-		);
-		this.name = 'PendingStoreHashRecordedError';
 	}
 }
 
@@ -153,10 +142,6 @@ export function checkFlakeDependencies(workspace: Workspace): void {
 	const digest = sriSha256(workspace.readLockfile());
 	const hashes = parseDependenciesHashes(workspace.readHashesFile());
 
-	if (hashes.confirmation === 'pending') {
-		throw new PendingStoreHashRecordedError();
-	}
-
 	if (hashes.store === fakeStoreHash) {
 		throw new FakeHashRecordedError();
 	}
@@ -186,11 +171,7 @@ export async function updateFlakeDependencies(
 	const originalText = workspace.readHashesFile();
 	const current = parseDependenciesHashes(originalText);
 
-	if (
-		current.lockfile === digest &&
-		current.store !== fakeStoreHash &&
-		current.confirmation !== 'pending'
-	) {
+	if (current.lockfile === digest && current.store !== fakeStoreHash) {
 		return { kind: 'already-current', store: current.store };
 	}
 
