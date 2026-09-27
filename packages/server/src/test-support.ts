@@ -2916,8 +2916,61 @@ function waitForCommitFixturePhase<T>(
 	);
 }
 
+const verificationRetryDelayMs = 100;
+const maxVerificationPasses = 100;
+
+/**
+ * Runs verification passes until `frame` arrives, at most
+ * `maxVerificationPasses` times, then returns `frame`.
+ *
+ * A pass can leave a deferred upload pending without a verdict, for example
+ * when a concurrent promotion of the same NAR defers it again. Production then
+ * runs another pass from the queue or the verification backstop alarm. The test
+ * pool delivers neither, and an alarm fence also disables the backstop, so the
+ * fixture runs the next pass itself. `scheduler.wait` keeps the pause real
+ * while a test fakes timers.
+ */
+async function verifyUntilFrame(
+	frame: Promise<CommitSessionFrame>,
+	runVerification: () => Promise<void>
+): Promise<CommitSessionFrame> {
+	const arrival = frameArrival(frame);
+
+	for (let pass = 0; pass < maxVerificationPasses; pass += 1) {
+		await runVerification();
+
+		if ((await Promise.race([arrival, verificationRetryPause()])) === 'frame') {
+			break;
+		}
+	}
+
+	return frame;
+}
+
+/**
+ * Resolves once `frame` settles. The caller of {@link verifyUntilFrame}
+ * receives a rejected frame, so this promise does not reject.
+ */
+async function frameArrival(
+	frame: Promise<CommitSessionFrame>
+): Promise<'frame'> {
+	try {
+		await frame;
+	} catch {
+		// The caller awaits `frame` and receives the rejection.
+	}
+
+	return 'frame';
+}
+
+async function verificationRetryPause(): Promise<'pause'> {
+	await scheduler.wait(verificationRetryDelayMs);
+
+	return 'pause';
+}
+
 // Sends a commit operation and waits for its response. For a deferred upload,
-// the helper runs the verification pass that the queue runs in production and
+// the helper runs the verification passes that the queue runs in production and
 // waits for the verdict. With `wait: false`, it returns `pending` immediately.
 // The helper closes the session after every result or error.
 export async function completeCommitSession(
@@ -2959,12 +3012,11 @@ export async function completeCommitSession(
 			};
 		}
 
-		await runVerification();
 		const verdict = await waitForCommitFixturePhase(
 			conversation,
 			uploadId,
 			'verdict',
-			nextFrame
+			() => verifyUntilFrame(nextFrame(), runVerification)
 		);
 
 		if (verdict.ev !== 'verdict') {
