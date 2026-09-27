@@ -21,7 +21,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
 import { BoundedBodyCollector } from '@cupboard/shared/response-body';
-import { retryAfterDelayMs } from '@cupboard/shared/retry';
+import { fullJitterDelayMs, retryAfterDelayMs } from '@cupboard/shared/retry';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -1298,7 +1298,10 @@ export function runCommitSession(
 				reconnectTimer = undefined;
 				authoriseAndOpenConnection();
 			},
-			Math.max(reconnectDelay(reconnectAttempt, backoffBase), minimumDelayMs)
+			Math.max(
+				fullJitterDelayMs(reconnectAttempt, backoffBase, maxReconnectBackoffMs),
+				minimumDelayMs
+			)
 		);
 	};
 
@@ -1820,13 +1823,6 @@ export function runCommitSession(
 
 function asError(value: unknown): Error {
 	return value instanceof Error ? value : new TokenProviderError(value);
-}
-
-// Exponential back-off with full jitter, capped.
-function reconnectDelay(attempt: number, base: number): number {
-	const ceiling = Math.min(base * 2 ** (attempt - 1), maxReconnectBackoffMs);
-
-	return Math.random() * ceiling;
 }
 
 /**
