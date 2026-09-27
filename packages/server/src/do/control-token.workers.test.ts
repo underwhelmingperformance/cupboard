@@ -427,6 +427,43 @@ describe('control plane POST /token', () => {
 		});
 	});
 
+	it.each([
+		{
+			name: 'an ID token exchange',
+			respond: async () => {
+				const { token } = await trustedControlIdentity('JWT');
+
+				return postToken({
+					grant_type: tokenExchangeGrantType,
+					subject_token: token,
+					subject_token_type: subjectTokenTypeIdToken
+				});
+			}
+		},
+		{
+			name: 'an exchange of an issued token',
+			respond: async () =>
+				postToken({
+					grant_type: tokenExchangeGrantType,
+					subject_token: await issueControlAdminToken('global-admin'),
+					subject_token_type: issuedAccessTokenType
+				})
+		}
+	])('renders $name with the OAuth cache directives', async ({ respond }) => {
+		const response = await respond();
+		await response.text();
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			pragma: response.headers.get('pragma')
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			cacheControl: 'no-store',
+			pragma: 'no-cache'
+		});
+	});
+
 	it('narrows a self-issued control token to a requested subset', async () => {
 		const presented = await issueControlAdminToken('global-admin');
 		const subset = [

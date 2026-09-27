@@ -186,6 +186,50 @@ describe('POST /token', () => {
 		});
 	});
 
+	it.each([
+		{
+			name: 'an ID token exchange',
+			respond: async () =>
+				postToken({
+					grant_type: tokenExchangeGrantType,
+					subject_token: await installTrustedIdp('admin'),
+					subject_token_type: subjectTokenTypeIdToken
+				})
+		},
+		{
+			name: 'a refresh',
+			respond: async () => {
+				const exchanged = await exchange(await installTrustedIdp('admin'));
+
+				return refresh(exchanged.refresh_token ?? '');
+			}
+		},
+		{
+			name: 'an exchange of an issued token',
+			respond: async () =>
+				attenuate(await ownerToken(), [
+					{
+						type: 'cupboard_cache',
+						actions: ['upload:commit'],
+						cache: namedCache('pr-1')
+					}
+				])
+		}
+	])('renders $name with the OAuth cache directives', async ({ respond }) => {
+		const response = await respond();
+		await response.text();
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			pragma: response.headers.get('pragma')
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			cacheControl: 'no-store',
+			pragma: 'no-cache'
+		});
+	});
+
 	it('rejects a token exchange with no subject token', async () => {
 		const error = await tokenExchangeError({
 			grant_type: tokenExchangeGrantType,
