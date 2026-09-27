@@ -21,9 +21,10 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
-import { chunk, maxOutgoingConnections } from './bulk.ts';
+import { chunk, maxOutgoingConnections, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
+import { requireSubrequestsFor } from './subrequest-slice.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
 
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
@@ -219,10 +220,8 @@ export class UploadStateService {
 	// deletes `blob_state` before the object, so a row means the object was
 	// created and has not yet been deliberately removed. It does not mean the
 	// object is present: the reaper's `demoteMissingBlobs` pass finds rows whose
-	// object has gone. A caller that answers `skip` from this set must repair a
-	// wrong answer some other way; the upload negotiate enqueues every skipped
-	// path for reconciliation, which heads the NAR and removes the path when the
-	// object is gone.
+	// object has gone. A caller that answers `skip` from this set must also check
+	// the canonical object in R2.
 	async presentNarHashes(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Set<NixSha256HashString>> {
@@ -235,6 +234,24 @@ export class UploadStateService {
 		const states = await this.blobStatesByNarHash(unique);
 
 		return new Set(states.keys());
+	}
+
+	async presentCanonicalNars(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<ReadonlySet<NixSha256HashString>> {
+		const unique = [...new Set(narHashes)];
+
+		if (unique.length === 0) {
+			return new Set();
+		}
+
+		requireSubrequestsFor(
+			unique.length + jsonValueLists(unique).length,
+			'upload negotiation'
+		);
+		const states = await this.blobStatesByNarHash(unique);
+
+		return presentNarObjects(this.context.env.BLOBS, states.values().toArray());
 	}
 
 	clearPendingUpload(uploadId: UploadId, owner?: string): boolean {

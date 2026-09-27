@@ -1,10 +1,17 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import {
+	subrequestSafetyReserve,
+	workersInvocationAllowances
+} from '@cupboard/protocol/platform';
+import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
-	uploadGraceFactsCapability
+	uploadGraceFactsCapability,
+	type UploadNegotiateResponse,
+	type UploadPreviewResponse
 } from '@cupboard/protocol/upload';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { chunk } from '@cupboard/shared/collections';
 import { StatusCodes } from 'http-status-codes';
 
 import { callInCache } from '../client/cache-scoped.ts';
@@ -17,6 +24,13 @@ import { type PushClient } from './push.ts';
 import { type BlobUploader, r2BlobUploader } from './r2-upload.ts';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
+// A missing canonical NAR also retires its old narinfo and reference. Leave
+// nine D1/R2 calls per path for that cleanup and the R2 presence probe.
+const negotiationSubrequestsPerPath = 9;
+const negotiationPageSize = Math.floor(
+	(workersInvocationAllowances.free.subrequests - subrequestSafetyReserve) /
+		negotiationSubrequestsPerPath
+);
 
 export interface PushClientOptions {
 	readonly cache: CacheScope;
@@ -89,18 +103,48 @@ export function pushClientFor(
 	return {
 		negotiate: async (body) => {
 			hasUploadGraceFacts = false;
+			const pushId = await session.pushId();
+			const pages = chunk(body.paths, negotiationPageSize);
+			const requestPages = pages.length === 0 ? [[]] : pages;
+			const uploads: UploadNegotiateResponse['uploads'] = [];
+			let hasGraceFactsForEveryPage = true;
 
-			return callInCache(uploadRpc.uploads.negotiate, cache, {
-				pushId: await session.pushId(),
-				...body
-			});
+			for (const paths of requestPages) {
+				const response = await callInCache(uploadRpc.uploads.negotiate, cache, {
+					pushId,
+					paths,
+					...(body.attachRoot !== undefined && {
+						attachRoot: body.attachRoot
+					})
+				});
+				uploads.push(...response.uploads);
+				hasGraceFactsForEveryPage &&= hasUploadGraceFacts;
+			}
+
+			hasUploadGraceFacts = hasGraceFactsForEveryPage;
+
+			return { uploads };
 		},
 		// Never touches the credential session: a dry run requests no upload
 		// credential, so preview must not negotiate a pushId to get one.
 		preview: async (body) => {
 			hasUploadGraceFacts = false;
+			const pages = chunk(body.paths, negotiationPageSize);
+			const requestPages = pages.length === 0 ? [[]] : pages;
+			const uploads: UploadPreviewResponse['uploads'] = [];
+			let hasGraceFactsForEveryPage = true;
 
-			return callInCache(uploadRpc.uploads.preview, cache, body);
+			for (const paths of requestPages) {
+				const response = await callInCache(uploadRpc.uploads.preview, cache, {
+					paths
+				});
+				uploads.push(...response.uploads);
+				hasGraceFactsForEveryPage &&= hasUploadGraceFacts;
+			}
+
+			hasUploadGraceFacts = hasGraceFactsForEveryPage;
+
+			return { uploads };
 		},
 		probeUploadGraceFacts: async (kind) => {
 			hasUploadGraceFacts = false;

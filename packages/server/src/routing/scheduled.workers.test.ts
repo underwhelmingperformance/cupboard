@@ -740,6 +740,8 @@ describe('scheduled tenant pass failure records', () => {
 									'blob-reaper',
 									'cas-reaper',
 									'blob-demote',
+									'narinfo-refresh',
+									'narinfo-refresh-tenant',
 									'cas-demote',
 									'control-key-retirement',
 									'local-step',

@@ -73,7 +73,7 @@ export class ReconcileQueueService {
 	}
 
 	async enqueue(
-		origin: RequestOrigin,
+		origin: RequestOrigin | undefined,
 		targets: readonly ReconcileTarget[]
 	): Promise<void> {
 		if (targets.length === 0) {
@@ -88,7 +88,9 @@ export class ReconcileQueueService {
 			);
 		}
 
-		await this.context.ctx.storage.put(reconcileOriginKey, origin);
+		if (origin !== undefined) {
+			await this.context.ctx.storage.put(reconcileOriginKey, origin);
+		}
 		await this.context.ctx.storage.setAlarm(Date.now());
 	}
 

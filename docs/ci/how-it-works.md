@@ -121,18 +121,17 @@ sign.
 
 A cache serves a path only when it serves both the narinfo and the NAR at the
 URL that the narinfo records. If the stored NAR has gone missing, a push that
-uploads the path again stores the bytes under a new URL. In the cache that
-receives the push, the first push skips a path whose narinfo still records the
-lost NAR. The cache then removes that narinfo in the background, and a second
-push uploads the bytes. Publishing by reference can't replace a lost NAR,
-because the run has no copy of the bytes.
+uploads the path again stores the bytes under a new URL. Upload negotiation
+checks the NAR in object storage, so the first push requests an upload even if
+the cache still has a narinfo for the path. Publishing by reference cannot
+replace a lost NAR because the run sends no NAR bytes.
 
-Other caches that share the same NAR, in any tenant, keep narinfos that record
-the old URL. A Nix client that reads one of those caches gets a 404 for the NAR
-until the cache rewrites the narinfo. Each cache rewrites it the next time it
-checks that the path is servable: for example, shortly after the path is pushed
-to that cache again, during the cache's periodic verification scan, or when a
-retention root that includes the path is set.
+Other caches that share the same NAR, in any tenant, may still have narinfos
+that record the old URL. A Nix client that reads one of those caches gets a 404
+for the NAR until the cache rewrites its narinfo. After the replacement upload,
+the maintenance queue finds those caches and schedules the rewrite. The queue
+retries failed work. A cache's periodic verification scan can also repair its
+narinfo.
 
 ## Sharing work between cohorts: the run root
 

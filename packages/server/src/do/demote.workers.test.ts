@@ -1,15 +1,22 @@
 import { rootLogger } from '@cupboard/logger';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
 	type StorePathHash,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfoObjectKey } from '../http/http.ts';
-import { runReaperDemote } from '../routing/scheduled.ts';
+import {
+	enqueueNarInfoRefreshTenants,
+	executeMaintenanceQueueMessage,
+	type MaintenanceQueueMessage,
+	runReaperDemote
+} from '../routing/scheduled.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
@@ -97,6 +104,107 @@ describe('missing blob demotion', () => {
 		await resetTestServer();
 
 		await clearBlobStorage();
+	});
+
+	it('refreshes a second tenant after another tenant replaces a missing NAR', async () => {
+		const first = await committedTenantPath('shared-cross-tenant');
+		const secondTenant = tenantIdSchema.parse(
+			`demote-test-${String(tenantNumbers.next().value)}`
+		);
+		const issuer = await provisionNamedTenant(secondTenant);
+		const secondToken = await issueTokenForTenant(
+			testServerFor(secondTenant),
+			issuer,
+			cacheWriteGrants()
+		);
+		await pushPathToTenant(
+			secondTenant,
+			secondToken,
+			first.metadata,
+			first.nar
+		);
+		const emitted: unknown[] = [];
+		await runInDurableObject(testServerFor(first.tenant), (instance) => {
+			const queue = instance.context.env.MAINTENANCE_QUEUE;
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: async (message: unknown) => {
+						emitted.push(message);
+
+						return queue.send(message);
+					},
+					sendBatch: queue.sendBatch.bind(queue),
+					metrics: queue.metrics.bind(queue)
+				}
+			};
+
+			return Promise.resolve();
+		});
+		const lostKey = await currentNarObjectKey(first.narHash);
+		await env.BLOBS.delete(lostKey);
+		await pushPathToTenant(
+			first.tenant,
+			first.token,
+			first.metadata,
+			first.nar
+		);
+		const refreshes = emitted.filter(
+			(message) =>
+				message !== null &&
+				typeof message === 'object' &&
+				'kind' in message &&
+				message.kind === 'narinfo-refresh'
+		);
+		expect(refreshes).toStrictEqual([
+			{ kind: 'narinfo-refresh', narHash: first.narHash }
+		]);
+
+		const messages: MaintenanceQueueMessage[] = [];
+		await enqueueNarInfoRefreshTenants(env, first.narHash, undefined, {
+			sendBatch: (batch) => {
+				messages.push(...Array.from(batch, (entry) => entry.body));
+
+				return Promise.resolve({
+					metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } }
+				});
+			}
+		});
+		const secondMessage = messages.find(
+			(message) =>
+				message.kind === 'narinfo-refresh-tenant' &&
+				message.tenant === secondTenant
+		);
+
+		if (secondMessage === undefined) {
+			throw new Error('The second tenant received no narinfo refresh');
+		}
+
+		const key = narInfoObjectKey(secondTenant, first.metadata.storePathHash, {
+			kind: 'default'
+		});
+		const before = await env.BLOBS.get(key);
+		const oldUrl =
+			before === null ? undefined : NarInfo.parse(await before.text()).url;
+		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			secondMessage
+		);
+		await runInDurableObject(testServerFor(secondTenant), (instance) =>
+			instance.alarm()
+		);
+		const after = await env.BLOBS.get(key);
+		const newUrl =
+			after === null ? undefined : NarInfo.parse(await after.text()).url;
+		const current = await currentNarObjectKey(first.narHash);
+
+		expect({ decision, oldUrl, newUrl, current }).toStrictEqual({
+			decision: { action: 'ack' },
+			oldUrl: lostKey,
+			newUrl: current,
+			current
+		});
 	});
 
 	it('removes narinfo objects and the `blob_state` row for a missing NAR', async () => {
