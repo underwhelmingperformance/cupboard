@@ -475,8 +475,8 @@ async function performDeploy(
 		}
 	);
 
-	const uploadTenant = async (): Promise<void> => {
-		if (unchanged.tenant) {
+	const uploadTenant = async (isForced = false): Promise<void> => {
+		if (!isForced && unchanged.tenant) {
 			reporter.step(
 				`${artifact.config.tenant.name} already runs this build and configuration; upload skipped.`
 			);
@@ -494,8 +494,8 @@ async function performDeploy(
 			)
 		);
 	};
-	const uploadControl = async (): Promise<void> => {
-		if (unchanged.control) {
+	const uploadControl = async (isForced = false): Promise<void> => {
+		if (!isForced && unchanged.control) {
 			reporter.step(
 				`${artifact.config.control.name} already runs this build and configuration; upload skipped.`
 			);
@@ -537,12 +537,21 @@ async function performDeploy(
 			service.binding === 'CUPBOARD_TENANT' && service.entrypoint !== undefined
 	);
 
-	if (hasNamedTenantEntrypoint) {
-		await uploadTenant();
-		await uploadControl();
-	} else {
-		await uploadControl();
-		await uploadTenant();
+	const orderedUploads: readonly {
+		secrets: readonly WorkerSecret[];
+		upload: (isForced?: boolean) => Promise<void>;
+	}[] = hasNamedTenantEntrypoint
+		? [
+				{ secrets: options.secrets.tenant, upload: uploadTenant },
+				{ secrets: options.secrets.control, upload: uploadControl }
+			]
+		: [
+				{ secrets: options.secrets.control, upload: uploadControl },
+				{ secrets: options.secrets.tenant, upload: uploadTenant }
+			];
+
+	for (const { upload } of orderedUploads) {
+		await upload();
 	}
 
 	await api.setWorkersDevRoutes(artifact.config.tenant.name, tenantRoutes);
@@ -568,6 +577,12 @@ async function performDeploy(
 		});
 	} else {
 		reporter.step('Setting secrets · no secrets to set');
+	}
+
+	for (const { secrets, upload } of orderedUploads) {
+		if (secrets.length > 0) {
+			await upload(true);
+		}
 	}
 
 	await configureTriggers(dependencies);

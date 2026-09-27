@@ -256,16 +256,23 @@ interface RecordingApiOptions {
 function recordingApi(
 	alreadyDeployed: Readonly<Record<string, DeployedBuild>> = {},
 	options: RecordingApiOptions = {}
-): { api: CloudflareApi; calls: string[]; database: DatabaseSync } {
+): {
+	api: CloudflareApi;
+	calls: string[];
+	database: DatabaseSync;
+	secretBindings: Map<string, Set<string>>;
+} {
 	const calls: string[] = [];
 	const database = new DatabaseSync(':memory:');
 	const deployedBuilds = new Map<string, DeployedBuild>(
 		Object.entries(alreadyDeployed)
 	);
+	const secretBindings = new Map<string, Set<string>>();
 
 	return {
 		calls,
 		database,
+		secretBindings,
 		api: {
 			listAccounts: () =>
 				Promise.resolve([
@@ -363,6 +370,9 @@ function recordingApi(
 			},
 			uploadScript(scriptName, metadata) {
 				calls.push(`upload:${scriptName}`);
+				if (!metadata.keep_bindings?.includes('secret_text')) {
+					secretBindings.delete(scriptName);
+				}
 				deployedBuilds.set(
 					scriptName,
 					metadata.annotations?.['workers/tag'] ?? ''
@@ -383,6 +393,10 @@ function recordingApi(
 			},
 			putSecret(scriptName, secret) {
 				calls.push(`secret:${scriptName}:${secret.name}`);
+				const bindings = secretBindings.get(scriptName) ?? new Set<string>();
+				bindings.add(secret.name);
+				secretBindings.set(scriptName, bindings);
+				deployedBuilds.set(scriptName, noBuildVersion);
 				return Promise.resolve();
 			},
 			deleteSecret(scriptName, name) {
@@ -665,7 +679,7 @@ describe('runDeploy', () => {
 				domain: 'cupboard.store',
 				secrets: {
 					control: [{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'k' }],
-					tenant: []
+					tenant: [{ name: 'PUSH_ID_SIGNING_KEY', text: 'tenant-key' }]
 				}
 			}
 		});
@@ -685,6 +699,9 @@ describe('runDeploy', () => {
 			'upload:cupboard',
 			'workers-dev:cupboard-tenant:false:false',
 			'secret:cupboard:CONTROL_KEY_WRAP_SECRET',
+			'secret:cupboard-tenant:PUSH_ID_SIGNING_KEY',
+			'upload:cupboard-tenant',
+			'upload:cupboard',
 			'queue:cupboard-maintenance',
 			'consumer:qid-cupboard-maintenance->cupboard',
 			'cron:cupboard:0 * * * *',
@@ -692,6 +709,124 @@ describe('runDeploy', () => {
 			'domain:cupboard.store->cupboard',
 			...completedTransitions
 		]);
+	});
+
+	it.each([
+		{
+			script: 'cupboard',
+			secret: { name: 'CONTROL_KEY_WRAP_SECRET', text: 'control-key' },
+			secrets: {
+				control: [{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'control-key' }],
+				tenant: []
+			}
+		},
+		{
+			script: 'cupboard-tenant',
+			secret: { name: 'PUSH_ID_SIGNING_KEY', text: 'tenant-key' },
+			secrets: {
+				control: [],
+				tenant: [{ name: 'PUSH_ID_SIGNING_KEY', text: 'tenant-key' }]
+			}
+		}
+	])(
+		'restores $script build metadata after setting its secret',
+		async ({ script, secret, secrets }) => {
+			const { api, calls, secretBindings } = recordingApi({
+				cupboard: artifact.buildVersion,
+				'cupboard-tenant': artifact.buildVersion
+			});
+
+			await runDeploy({
+				artifact,
+				api,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets }
+			});
+
+			expect({
+				changes: calls.filter(
+					(call) => call.startsWith('secret:') || call.startsWith('upload:')
+				),
+				secretBindings: [...secretBindings].map(([name, bindings]) => ({
+					name,
+					bindings: [...bindings]
+				}))
+			}).toStrictEqual({
+				changes: [`secret:${script}:${secret.name}`, `upload:${script}`],
+				secretBindings: [{ name: script, bindings: [secret.name] }]
+			});
+		}
+	);
+
+	it('retries a build restoration upload that failed after a secret update', async () => {
+		const { api, calls, secretBindings } = recordingApi({
+			cupboard: artifact.buildVersion,
+			'cupboard-tenant': artifact.buildVersion
+		});
+		const secret = { name: 'CONTROL_KEY_WRAP_SECRET', text: 'control-key' };
+		const secrets = { control: [secret], tenant: [] };
+		const failedUpload = new Error('Worker upload failed');
+		let shouldFail = true;
+		const failingApi: CloudflareApi = {
+			...api,
+			uploadScript: (scriptName, metadata, bundle) => {
+				if (shouldFail) {
+					shouldFail = false;
+					calls.push(`upload-failed:${scriptName}`);
+					return Promise.reject(failedUpload);
+				}
+
+				return api.uploadScript(scriptName, metadata, bundle);
+			}
+		};
+
+		await expect(
+			runDeploy({
+				artifact,
+				api: failingApi,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets }
+			})
+		).rejects.toBe(failedUpload);
+
+		const retryFrom = calls.length;
+
+		await runDeploy({
+			artifact,
+			api: failingApi,
+			reporter: silentReporter,
+			options: { domain: undefined, secrets }
+		});
+
+		expect({
+			firstAttempt: calls
+				.slice(0, retryFrom)
+				.filter(
+					(call) => call.startsWith('secret:') || call.startsWith('upload-')
+				),
+			retry: calls
+				.slice(retryFrom)
+				.filter(
+					(call) => call.startsWith('secret:') || call.startsWith('upload:')
+				),
+			secretBindings: [...secretBindings].map(([name, bindings]) => ({
+				name,
+				bindings: [...bindings]
+			}))
+		}).toStrictEqual({
+			firstAttempt: [
+				'secret:cupboard:CONTROL_KEY_WRAP_SECRET',
+				'upload-failed:cupboard'
+			],
+			retry: [
+				'upload:cupboard',
+				'secret:cupboard:CONTROL_KEY_WRAP_SECRET',
+				'upload:cupboard'
+			],
+			secretBindings: [
+				{ name: 'cupboard', bindings: ['CONTROL_KEY_WRAP_SECRET'] }
+			]
+		});
 	});
 
 	it('removes schedules and custom domains that are no longer configured', async () => {
@@ -750,11 +885,22 @@ describe('runDeploy', () => {
 			reporter: silentReporter,
 			options: {
 				domain: undefined,
-				secrets: { control: [], tenant: [] }
+				secrets: {
+					control: [{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'control-key' }],
+					tenant: [{ name: 'PUSH_ID_SIGNING_KEY', text: 'tenant-key' }]
+				}
 			}
 		});
 
-		expect(calls.filter((call) => call.startsWith('upload:'))).toStrictEqual([
+		expect(
+			calls.filter(
+				(call) => call.startsWith('upload:') || call.startsWith('secret:')
+			)
+		).toStrictEqual([
+			'upload:cupboard',
+			'upload:cupboard-tenant',
+			'secret:cupboard:CONTROL_KEY_WRAP_SECRET',
+			'secret:cupboard-tenant:PUSH_ID_SIGNING_KEY',
 			'upload:cupboard',
 			'upload:cupboard-tenant'
 		]);
