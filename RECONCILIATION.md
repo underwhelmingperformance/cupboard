@@ -1,24 +1,24 @@
 # Background reconciliation: design
 
-This document designs work that the control Worker's hourly tick currently
-selects: the offboarding drain, tenant maintenance, the missing-object demote
-scans, the cache catalogue migration, the shared-object reapers, membership
-refresh and control-key retirement. Some tenant work already continues on its
-own alarm, and some inner loops are unbounded. The aim is that each kind
-finishes as soon as the platform allows, that its progress and its stuck items
-are visible to the operator, and that it keeps the correctness properties of the
-local-step work: harmless under duplicate and concurrent delivery, facts that
-are overwritten in place of counters, and no lease rows or self-continuing
-message chains on the control plane.
+The control Worker starts background jobs on an hourly cron schedule. Those jobs
+drain offboarding tenants, maintain tenant state, check for missing shared
+objects, migrate cache catalogues, reap shared objects, refresh membership and
+retire control keys. Some tenant work already continues on Durable Object
+alarms. Several current loops can process an unbounded amount of work.
 
-It covers merged `main` at `bf9eb7380`, including the deployment and migration
-progress repairs in PRs #412 and #413. This document is ready for implementation
-review; it does not change the running system. Each phase below has its own
-activation and rollback criteria.
+Each kind should finish as soon as platform capacity permits. Give each job
+bounded work units, durable progress and a recovery path. Operators can see
+unfinished and failed work. Duplicate or concurrent delivery must be harmless.
+The control plane records facts instead of counters and uses neither leases nor
+queue messages that send their own successors.
+
+The current baseline is merged `main` at `bf9eb7380`, including the deployment
+and migration progress repairs in PRs #412 and #413. Each implementation phase
+below has activation and rollback criteria.
 
 ## Background
 
-### What the investigation found
+### Current scheduling
 
 The control Worker (`cupboard`) has one cron trigger, `0 * * * *`. Its
 `scheduled()` handler runs `enqueueMaintenanceJobs`
@@ -26,10 +26,9 @@ The control Worker (`cupboard`) has one cron trigger, `0 * * * *`. Its
 in KV inline and sends selected jobs to `cupboard-maintenance`. The queue
 consumer processes one message per invocation, with up to four concurrent
 invocations. It retries a rejected message after 60 seconds and eventually moves
-it to the dead-letter queue. Some tenant operations also continue on their own
-alarm. Consequently, an hourly selection is not an hourly execution limit:
-retries and alarm continuation can do more work between ticks, while delayed or
-failed delivery can do less.
+the message to the dead-letter queue. Tenant alarms can also continue work
+between ticks. The hourly tick controls when the Worker selects jobs; retries,
+queue delays and alarms determine when they run.
 
 | Kind                      | Current trigger and work boundary                                                                                                          | Consequence                                                                                                                                                         |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -40,15 +39,15 @@ failed delivery can do less.
 | Shared-object reapers     | Two hourly messages start five phases that continue through new queue messages without a cap.                                              | Work from separate ticks can overlap, and an endlessly reporting phase can keep sending messages.                                                                   |
 | Membership refresh        | The tick writes one KV marker per live tenant plus the filter before sending other work.                                                   | The hourly baseline exceeds Free's 1,000 KV writes a day at about 40 live tenants; a KV failure blocks that tick's other jobs.                                      |
 | Control-key retirement    | The tick sends a job that selects every due key.                                                                                           | The selection and per-key loop have no structural page bound; failures leave due keys for later ticks.                                                              |
-| Local-step wake           | The tick groups pending tenants into messages of twenty; the object continues on its alarm.                                                | This is the accepted pattern for tenant-local continuation.                                                                                                         |
+| Local-step wake           | The tick groups pending tenants into messages of twenty; the object continues on its alarm.                                                | The object's alarm continues tenant-local work.                                                                                                                     |
 
 The numerical page counts describe selection under ordinary delivery, not
 completion-time or platform-capacity guarantees.
 
-### The accepted pattern
+### Existing local-step recovery
 
-Commits `0328288a4` and `81437a069` moved the local-step work onto the tenant
-object's alarm. The properties that this document extends are:
+The local-step implementation in commits `0328288a4` and `81437a069` already
+uses tenant alarms and durable progress facts:
 
 - The control plane records overwritable facts per tenant in D1
   (`tenant.local_step_attempted_at`, `local_step_progressed_at`,
@@ -68,17 +67,15 @@ object's alarm. The properties that this document extends are:
 - Every cron tick sends the same selection as the deploy's wake, so a lost
   message or an object that stopped is woken again.
 
-The pieces that pattern uses already exist in
-`packages/server/src/do/server.ts`: `maintenancePasses()` and
-`runOneMaintenancePass`, `MaintenanceRetrySchedule`, `armAlarmNoLaterThan`,
-`runExclusiveMaintenance`, and `LocalStepRun`
+The implementation uses `packages/server/src/do/server.ts`:
+`maintenancePasses()` and `runOneMaintenancePass`, `MaintenanceRetrySchedule`,
+`armAlarmNoLaterThan`, `runExclusiveMaintenance`, and `LocalStepRun`
 (`packages/server/src/do/local-step-run.ts`).
 
 ## Constraints
 
-The maintainer has ruled out a coordinator and a control-plane Durable Object.
-The design uses the existing pieces: the control Worker, D1, the maintenance
-queue, cron triggers, and the tenant objects.
+Use the existing control Worker, D1, maintenance queue, cron triggers and tenant
+objects. Do not add a coordinator or a control-plane Durable Object.
 
 - Cloudflare Queues deliver at least once and concurrently. Every consumer in
   this document tolerates a duplicate and a concurrent delivery.
@@ -115,13 +112,10 @@ queue, cron triggers, and the tenant objects.
 - The Free plan's Queues allowance is 10,000 operations per day, and a delivered
   message costs about three (write, read, delete). The Paid plan includes one
   million operations a month. See [Queues pricing].
-- Two project rules apply. Platform limits are enforced by a refusing wrapper at
-  the binding, never by predictive arithmetic at call sites; the agreed
-  follow-up derives the D1 per-invocation statement budget from a plan enum in a
-  Wrangler variable. And the design uses plain names for repeated work:
-  rotation, run, page, pass and refresh; the earlier term for a bounded pass
-  over a table is not used, except where an existing message-kind identifier
-  contains it.
+- Enforce platform limits with a refusing wrapper at the binding. Do not rely on
+  predictive arithmetic at call sites. Derive the D1 per-invocation statement
+  budget from a plan enum in a Wrangler variable. Use rotation, run, page, pass
+  and refresh for repeated work. Preserve existing message-kind identifiers.
 
 [Workers limits]: https://developers.cloudflare.com/workers/platform/limits/
 [Durable Object alarms]:
@@ -140,12 +134,12 @@ queue, cron triggers, and the tenant objects.
 
 ## Summary of the design
 
-Tenant-local work uses each tenant object's alarm: offboarding drains its own
-rows and R2 prefix, deadline maintenance runs on the alarm, and pending
-catalogue migrations continue after any relevant entry point arms the alarm.
-Paid periodic maintenance also uses the alarm; Free selects bounded groups on
-the tick and each selected object runs its own periodic page. The control plane
-finalises offboarding because it writes the registry tombstone and KV marker.
+Each tenant object drains its offboarding rows and R2 prefix and runs deadline
+maintenance on its alarm. Pending catalogue migrations continue after an entry
+point arms the alarm. Paid objects also schedule periodic maintenance on their
+alarms. On Free, the tick selects bounded groups, and each selected object runs
+its periodic page. The control plane writes the registry tombstone and KV marker
+when it finalises offboarding.
 
 Shared work remains on the control plane. The tick sends independent bounded
 messages for demote scans, each reaper phase, membership refresh and control-key
@@ -200,62 +194,58 @@ Migration tooling can use its separate explicit executor. Preserve the current
 binding's deadline and subrequest accounting. Page loops reserve statements for
 their outcome writes. A refusal leaves the next page for a later invocation.
 
-Use the existing `WorkersPlanTier` and deploy's account-plan decision to write
-one `free` or `paid` variable to both Worker scripts in the reviewed deployment
-plan, alongside `CUPBOARD_SUBREQUESTS_PER_INVOCATION`. An older deployment with
-no plan variable uses the Free statement limit. An invalid value also uses the
-Free limit and records a configuration error; deploy validation rejects an
-invalid generated value before upload. This is a plan-derived safety policy, not
-an operator page-size control. Free permits 50 D1 queries per invocation; Paid
-permits 1,000. Test direct Wrangler deployment with a missing or invalid
-variable, a plan change, both script configurations, a mixed-version deploy and
-rollback. The wrapper does not enforce the shared daily rows allowance.
+Use `WorkersPlanTier` and the account-plan decision during deployment to write a
+`free` or `paid` variable to both Worker scripts. Include the variable in the
+reviewed deployment plan alongside `CUPBOARD_SUBREQUESTS_PER_INVOCATION`. If the
+variable is missing, the runtime uses the Free statement limit. An invalid value
+also uses the Free limit and records a configuration error. Deployment
+validation rejects an invalid generated value before upload. The plan determines
+this safety limit; operators do not set page sizes. Free permits 50 D1 queries
+per invocation and Paid permits 1,000. Test a direct Wrangler deployment with a
+missing or invalid variable, a plan change, both script configurations, a
+mixed-version deployment and rollback. The wrapper does not enforce the shared
+daily rows allowance.
 
-On Free, elective work therefore uses a fixed, deployment-wide admission
-schedule. A `reconciliation_run` fact `last_admitted_slot` records the UTC slot
-most recently admitted for each kind, including the one shared `offboard-rows`
-kind. A single conditional D1 upsert advances the slot only when the stored slot
-precedes the requested one. Duplicate messages and concurrent objects for the
-same slot can therefore perform at most one unit. A slot is consumed **before**
-any page can write rows. An interruption or partial failure wastes the slot and
-leaves the remaining rows for the next one; it cannot start another deletion
-page after 30 seconds. This is an admission fact, not ownership of a tenant or
-an expiring lease. The tick's interval remains advisory; the conditional update
-is the hard limit. Use a bounded, fixed number of UTC slots per kind, not a
-sliding comparison with a recent attempt. The Free offboard candidate is the
-incomplete row part with the oldest recorded row attempt, with tenant id as a
-tie-breaker. The object checks that selection before attempting the atomic slot
-admission, then records its row attempt before deleting. A failed tenant returns
-behind other attempted tenants on later slots; a duplicate or concurrent
-candidate can spend only one slot. If an invocation stops after admission but
-before its attempt fact, the same candidate may be retried in the next slot.
-That rare interruption can delay others, and status exposes the admitted slot
-without a matching attempt. Object deletion and finalisation do not depend on
-this selection.
+On Free, a fixed deployment-wide schedule admits elective work. Each kind has a
+`reconciliation_run.last_admitted_slot` fact; all offboarding tenants share the
+`offboard-rows` kind. A conditional D1 upsert advances the UTC slot only when
+the stored slot is older. This permits at most one unit for the kind and slot,
+even if messages or tenant objects run concurrently. Consume the slot **before**
+the page writes rows. An interrupted or partly failed page uses its slot and
+leaves remaining rows for a later slot. It cannot start a second deletion page
+after 30 seconds. The slot records admission; it grants neither tenant ownership
+nor an expiring lease. The tick can run at another cadence, but the fixed number
+of UTC slots limits work.
 
-Each admitted unit also has a maximum statement count, selected row count, R2
-call count and elapsed-time budget. All SQL operations that can change an
-unbounded number of rows must first select a bounded key page and mutate only
-those keys. For the exact migration schema, derive a conservative per-unit
-ceiling from the bounded SQL and indexes, then check D1 `meta` for full pages,
-empty pages, indexed deletes, facts, retry paths and each reaper phase. A
-measured maximum alone is not a mathematical bound on future populations. If a
-query can scan or mutate beyond its declared ceiling, change the query or keep
-that Free unit disabled. Set page sizes and slot frequencies only after this
-check. Keep the Free row drain and new higher-frequency control work disabled
-until the admission test passes.
+For a Free offboard row page, select the incomplete tenant whose row part has
+the oldest recorded attempt. Use tenant id to break ties. The object confirms
+that selection, admits the current slot, records its attempt and then deletes
+rows. Later slots prefer other tenants after a failure. If the invocation stops
+between admission and the attempt write, the same tenant can be selected in the
+next slot. Status shows the admission without an attempt, and other tenants may
+wait longer. Object deletion and finalisation use separate scheduling.
 
-The Free release policy reserves at least half of each D1 daily row allowance
-for foreground and deadline work: planned elective background work may use at
-most 2.5 million rows read and 50,000 rows written per UTC day. This is a
-conservative internal release gate, not a promise that foreground traffic cannot
-exhaust its remaining half. Start with one admitted row page across all
-offboarding tenants per UTC hour, one unit per reaper phase and demote kind per
-hour, and the hourly membership and control-key units described below. The
-initial release targets at most 500 total row keys across the four offboarding
-tables in one unit, 500 shared objects in one demote page, 25 keys in one reaper
-page and 100 tenants in one periodic selection. Those are caps on selected keys,
-not assertions about D1 rows scanned or billed. Use one deterministic
+Limit each admitted unit by statement count, selected rows, R2 calls and elapsed
+time. Before an SQL operation that could change an unbounded number of rows,
+select a bounded page of keys and change only those keys. Derive a conservative
+per-unit ceiling from the SQL and indexes in the migration schema. Check D1
+`meta` for full and empty pages, indexed deletes, fact writes, retries and each
+reaper phase. A measured maximum does not bound future table populations. If a
+query can scan or change more rows than its declared ceiling, change the query
+or disable that Free unit. Choose page sizes and slot frequencies after these
+checks. Keep the Free row drain and new higher-frequency control work disabled
+until admission tests pass.
+
+The Free release policy allocates at most half of each D1 daily row allowance to
+planned elective background work: 2.5 million rows read and 50,000 rows written
+per UTC day. This leaves at least half of each allowance for foreground and
+deadline work, although that work can still exhaust it. Start with one admitted
+row page across all offboarding tenants per UTC hour, one unit per reaper phase
+and demote kind per hour, and the hourly membership and control-key units
+described below. The initial release targets at most 500 total row keys across
+the four offboarding tables in one unit, 500 shared objects in one demote page,
+25 keys in one reaper page and 100 tenants in one periodic selection. These caps
+limit selected keys; D1 can read or bill more rows. Use one deterministic
 release-sizing rule: test the target vector `(500, 500, 25, 100)` in that order,
 then halve all four caps together and round down to at least one key until the
 complete daily worksheet passes. Choose the first passing vector. Do not change
@@ -264,53 +254,53 @@ predecessor path must also be bounded. These are release constants derived from
 repeatable tests, not operator settings. Increase a released cap only with new
 fixture and hosted evidence. At 500 offboard rows per hour, a million rows need
 at least 2,000 admitted hours on Free; at 250 rows, at least 4,000 hours. If the
-measured cap is smaller, publish its resulting minimum page count. This excludes
-retries and R2 work, so large drains need Paid capacity for shorter completion
-times.
+measured cap is smaller, publish the corresponding minimum page count. These
+calculations exclude retries and R2 work. Large drains need Paid capacity for
+shorter completion times.
 
-The admission test uses an explicit daily worksheet. For reads and writes
-separately, add the maximum number of UTC slots per kind multiplied by the
-validated ceiling for one unit. Include tick selections, membership repair,
-finalisation, retries, outcome and index writes, and one maximum partial unit
-per kind at a UTC boundary. Free periodic integrity has one deployment-wide
-selection of at most `P` tenants per hour, where `P` is the selected fourth
-release cap, at most 100. Its worksheet term includes at most `24 × P` selected
-tenant pages in the current UTC day and one prior-hour group of `P` pages that
-can finish after midnight, plus the selection, dispatch, heartbeat, projection
-and error costs of those pages. This is a planned issue-time bound: an abandoned
-external D1 call can finish later, so hosted billing within one UTC day has no
-proven absolute bound. A late queue delivery cannot execute a previous hour's
-group. Include empty selections even when no tenant is due. Use the indexed
-query and mutation bounds proved at 5, 200 and 5,000 tenants; do not extrapolate
-an unbounded scan from these fixtures. Publish the measured fleet envelope and
-minimum full-rotation time for the selected caps, without imposing a
-tenant-creation restriction based on this elective schedule. If even the one-key
-vector fails the complete worksheet, the new Free elective profile cannot
-activate; keep the bounded compatibility schedule, report the unavailable
-profile in status, and require a revised profile or Paid capacity. Recheck the
-worksheet after a schema or page-size change. No finite background schedule
-guarantees that the total deployment stays below Free's daily allowance if
-foreground requests or deadline work are unbounded. When daily usage is near the
-allowance, D1 can reject both background and foreground queries; status must
-report that platform error.
+Use a daily worksheet with separate read and write totals. For each kind,
+multiply the maximum number of UTC slots by the validated ceiling for one unit.
+Include tick selections, membership repair, finalisation, retries, outcome and
+index writes, and one maximum partial unit per kind that crosses a UTC-day
+boundary.
 
-D1 analytics are useful for diagnosis, but the documented API gives no freshness
-bound suitable for page admission. A sample that is missing, stale, or from a
-previous UTC day never authorises extra work. The fixed slot and unit limits
-remain in force even if the tick stores observed usage. Do not replace them with
-a threshold check until an independently proved maximum expenditure between
-observations, including concurrent work, exists.
+On Free, one deployment-wide periodic selection includes at most `P` tenants per
+hour. `P` is the fourth release cap and cannot exceed 100. Budget for at most
+`24 × P` selected tenant pages in the current UTC day and a group of `P` pages
+from the previous hour that can finish after midnight. Include selection,
+dispatch, heartbeat, projection and error costs, even when no tenant is due.
+This calculation bounds planned calls when they are issued. An abandoned D1 call
+can finish later, so it does not establish an absolute bound on rows billed in
+one hosted UTC day. Queue messages from a previous hour cannot start another
+periodic page.
+
+Use indexed query and mutation bounds verified at 5, 200 and 5,000 tenants. Do
+not extrapolate a query with an unbounded scan from these fixtures. Publish the
+measured fleet envelope and minimum full-rotation time for the selected caps. Do
+not restrict tenant creation because of this elective schedule. If the complete
+worksheet fails even with every cap at one, keep the bounded compatibility
+schedule and report that the new Free elective profile is unavailable.
+Activation then needs a revised profile or Paid capacity. Recheck the worksheet
+after a schema or page-size change. No finite background schedule guarantees
+that the deployment stays within Free's daily D1 allowance under unbounded
+foreground or deadline traffic. Report any D1 quota error in status.
+
+D1 analytics help diagnose usage, but the API specifies no freshness bound for
+page admission. A missing or stale sample, including a sample from the previous
+UTC day, cannot authorise extra work. Keep the fixed slot and unit limits even
+if the tick records observed usage. A threshold check may replace those limits
+only after a separate proof bounds expenditure between observations, including
+concurrent work.
 
 [D1 analytics]:
   https://developers.cloudflare.com/d1/observability/metrics-analytics/
 
 ### The `reconciliation_run` table
 
-One D1 row per control-plane kind records overwritable observations. The Free
-admission fact above is also stored here. Each write uses a conditional
-comparison so an older consumer cannot replace a newer timestamp. An error and
-its timestamp change together. Success in one run does not erase an unrelated or
-later failure.
+Store one D1 row per control-plane kind, including the Free admission fact.
+Condition each write so an older consumer cannot replace a newer timestamp.
+Update an error and its timestamp together. Success in one run does not erase an
+unrelated or later failure.
 
 | Column                                                                 | Meaning                                                                                                                                                                         |
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -324,107 +314,104 @@ later failure.
 | `selection_id`                                                         | Random identity for a Free periodic tenant selection. A losing concurrent producer cannot assign another group for that slot.                                                   |
 | `rotation`, `position`, `rotation_started_at`, `rotation_exhausted_at` | Demote page progress. `rotation_exhausted_at` is set only after the last page has been checked and its missing-object or failed-probe facts are durable.                        |
 
-An attempt write must preserve a newer error and vice versa. The status API
-compares timestamps and states which facts were observed; it does not infer that
-a queue message was lost from an old `attempted_at`. Rotation advancement and
-Free slot admission use conditional writes; neither grants exclusive ownership
-of a tenant. A typed helper receives structured outcomes from the reaper and
-demote services so caught partial failures reach these rows.
+An attempt write must preserve a newer error, and an error write must preserve a
+newer attempt. The status API compares timestamps and reports observed facts. An
+old `attempted_at` does not prove that a queue message was lost. Conditional
+writes advance rotations and admit Free slots; neither operation grants
+exclusive ownership of a tenant. Reaper and demote services return structured
+outcomes to a typed helper, which records partial failures in these rows.
 
 ### The tick as a decision over facts
 
-`enqueueMaintenanceJobs` reads the run facts, makes bounded tenant selections,
-and sends messages. A kind is due when its last observed attempt is absent or
-older than its interval. On Free, the consumer's atomic UTC slot admission also
-caps actual work when duplicate or overlapping ticks send more messages. The
-schedule only sets how soon the tick can notice work; it does not guarantee an
-hourly execution count.
+`enqueueMaintenanceJobs` reads run facts, selects bounded groups of tenants and
+sends messages. Work is due if no attempt has been recorded or the last attempt
+is older than the kind's interval. On Free, consumers also admit work through an
+atomic UTC slot, so duplicate or overlapping ticks cannot exceed the slot limit.
+The schedule determines when the tick can notice work, not how often work will
+finish.
 
-The release defaults are hourly selection on Free and five-minute selection on
-Paid after the phase consumers are active. Free admits one bounded unit per kind
-and UTC hour. Paid sends one message per reaper phase and up to twelve demote
-page messages per kind at each tick, while each invocation still has statement,
-subrequest and time limits. Control-key retirement is checked on every tick,
-with a Free admission slot. The deploy plan already reviews cron triggers; the
-new cadence is a deliberate change to both configuration and deployed trigger,
-not an assumption that a code upload rewrites an existing trigger. These
-defaults are not completion-time guarantees. The Paid cadence is limited by
-observed D1 latency and queue health during rollout, not by the included Queues
-billing allowance.
+After consumers are active, select work hourly on Free and every five minutes on
+Paid. Free admits one bounded unit per kind and UTC hour. At each Paid tick,
+send one message per reaper phase and up to twelve demote page messages per
+kind. Each invocation still has statement, subrequest and time limits. Check
+control-key retirement on every tick, subject to a Free admission slot. Update
+both the configured cron trigger and the deployed trigger; uploading code alone
+does not rewrite an existing trigger. These defaults do not guarantee completion
+times. During rollout, use D1 latency and queue health to decide whether the
+Paid cadence remains suitable. The included Queues billing allowance is not a
+hard limit.
 
-The tenant selections include pending local-step or catalogue work, offboarding
-starts and finalisation, Free periodic work, and maintenance recovery. Each
-selection has a result cap. The local-step upgrade can still read a large
-pending set and send one message per twenty tenants, so the tick's cost is not
-constant. At 5,000 selected tenants that fan-out is 250 messages. Bounded
-results do not imply bounded D1 rows read; measure the query plans and `meta`
-for empty and full selections before narrowing the old backstop.
+The tick also selects pending local-step and catalogue work, offboarding starts
+and finalisation, Free periodic work, and maintenance recovery. Each selection
+limits its result count. The local-step upgrade can still read many pending
+tenants and sends one message per twenty. Selecting 5,000 tenants produces 250
+messages. A result limit does not bound D1 rows read, so measure query plans and
+`meta` on empty and full selections before narrowing the old backstop.
 
 ### Attempt facts on the tenant row
 
-Keep the existing `LocalStepRun` behaviour. Offboarding has two distinct parts
-and terminal finalisation, so its outcome writer is specific to those facts
-rather than a generalised `PagedRun` class. Both use the shared scheduler's
-`deferred` outcome for an intentional future deadline. A no-progress retry or
-error has a separate stall deadline. Successful progress in one offboard part
+Keep the existing `LocalStepRun` behaviour. Offboarding records row drainage,
+object deletion and finalisation separately. Use a direct outcome writer for
+those facts, without a generalised `PagedRun` class. Both paths use the shared
+scheduler's `deferred` outcome for an intentional future deadline. A no-progress
+retry or error has a separate stall deadline. Progress in one offboard part
 cannot clear an error in the other.
 
 ### The scheduler's outcome contract
 
-A maintenance pass returns `MaintenanceProgress`, today `'progressed'` or
-`'stalled'`, and `recordMaintenanceProgress` writes a retry deadline of 30
-seconds for a stall. A pass cannot set a longer deadline itself, because the
-scheduler overwrites it. The contract gains a third outcome,
-`{ kind: 'deferred', until: number }`: the pass has work but must not run before
-`until`. `MaintenanceRetrySchedule.record` stores that time as the pass's retry
-deadline, and `maintenancePassDueAt` and `armForMaintenancePasses` already
-honour retry deadlines, so a deferred pass arms the alarm for `until` and
-nothing earlier. A pass that has given up returns `deferred` with `until` one
-hour ahead.
+Currently a maintenance pass returns `'progressed'` or `'stalled'` as
+`MaintenanceProgress`. For a stall, `recordMaintenanceProgress` sets a retry
+deadline 30 seconds later. The scheduler overwrites any longer deadline that the
+pass sets itself. Add `{ kind: 'deferred', until: number }` for work that must
+wait until `until`. `MaintenanceRetrySchedule.record` stores that deadline.
+Because `maintenancePassDueAt` and `armForMaintenancePasses` already use retry
+deadlines, they arm the alarm no earlier than `until`. A pass that has given up
+returns `deferred` with `until` one hour ahead.
 
 ### `maintenance.status` and `cupboard maintenance status`
 
-A contract-first, replay-safe `maintenance.status` procedure uses
-`GET /control/maintenance` and a new deployment-wide `maintenance:read` grant.
-Add that operation to the bootstrap operator grant and test that a token without
-it is refused. The CLI command `cupboard maintenance status <url>` presents the
-same typed response in the style of `cupboard deployment status`, with the
-ordinary reporter's JSON and terminal modes. The default response includes one
-section per kind, durable run facts and at most twenty affected tenant or object
-samples per section. Samples use stable keyset order. An optional `kind` and
-validated keyset cursor request the next twenty entries of that kind, as the
-existing cache and root listings do. Bind the cursor to its kind and filters,
-and use it only as a SQL parameter. Each page has a bounded statement count;
-each returned error summary is at most 500 characters. Exact pending counts are
-included only for indexed queries whose measured cost fits the status budget;
-otherwise the response reports `count unavailable` and whether another page
-exists. The status procedure never enumerates the full backlog in one
-invocation. Test sparse, full and empty pages at 5, 200 and 5,000 tenants,
-including D1 `rows_read` and the Free statement limit.
+Define a contract-first, replay-safe `maintenance.status` procedure at
+`GET /control/maintenance`. Require a new deployment-wide `maintenance:read`
+grant. Add the operation to the bootstrap operator grant, and test that a token
+without it is refused. `cupboard maintenance status <url>` renders the typed
+response through the existing reporter in terminal or JSON mode, following
+`cupboard deployment status`.
 
-Each section identifies which flags can overlap and which state is exclusive. A
-recent success does not erase a later error from another pass. `deferred` means
-an intentional future retry time, while `stalled` means repeated failure or no
-progress. A missing attempt shows that none was recorded; it does not establish
-that the tick, queue or alarm failed. Store and return bounded error summaries
-with a stable category, observation time and request identifier. Return the
-known D1 quota and overload codes, but do not expose arbitrary exception text,
-SQL, credentials, URLs or token material. Detailed causes remain in protected
-logs. The operator guide can use this procedure instead of a manual query of
-`tenant_maintenance_failure`.
+By default, return one section per kind with durable run facts and no more than
+twenty affected tenant or object samples. Order samples by a stable keyset. An
+optional `kind` and validated keyset cursor request the next twenty entries for
+that kind, following the existing cache and root listings. Bind the cursor to
+its kind and filters, and pass it to SQL only as a parameter. Bound each page's
+statement count. Limit each returned error summary to 500 characters. Return an
+exact pending count only when an indexed query fits the measured status budget.
+Otherwise report `count unavailable` and whether another page exists. Never
+enumerate the full backlog in one invocation. Test sparse, full and empty pages
+at 5, 200 and 5,000 tenants, including D1 `rows_read` and the Free statement
+limit.
+
+For each kind, specify which status flags can overlap and which states are
+exclusive. A recent success in one pass does not erase a later error in another.
+`deferred` reports an intentional future retry time; `stalled` reports repeated
+failure or no progress. A missing attempt means that none was recorded. It does
+not prove a failure in the tick, queue or alarm. Store and return bounded error
+summaries with a stable category, observation time and request identifier.
+Return known D1 quota and overload codes, but exclude arbitrary exception text,
+SQL, credentials, URLs and token material. Protected logs retain detailed
+causes. The operator guide can direct operators to this procedure instead of a
+manual `tenant_maintenance_failure` query.
 
 ## 1. The offboarding drain
 
 ### Current behaviour and placement
 
 `controlTenantOffboard` changes the registry status and calls `beginOffboard()`.
-The object currently sets only an in-memory fence. The hourly consumer calls
-`runOffboard()`, deletes rows from four D1 tables, deletes R2 keys under
-`t/<tenant>/`, purges the object, writes the tombstone, and deletes its KV
-marker. An interruption between these steps is recoverable only through another
-tick. The object is the single writer of its references and presence rows, so it
-should drain them on its alarm. The control plane writes the tombstone and KV
-marker.
+The object currently sets only an in-memory fence. On the next hourly selection,
+`runOffboard()` deletes rows from four D1 tables and R2 keys under
+`t/<tenant>/`, purges the object, writes the tombstone and deletes the KV
+marker. If execution stops between these steps, another tick must resume it. The
+tenant object is the single writer of its references and presence rows, so it
+should drain them on its alarm. The control plane remains responsible for the
+tombstone and KV marker.
 
 The `t/<tenant>/` prefix contains tenant-local narinfo and attestation objects.
 NAR and CAS bytes use shared `nar/` and `cas/` keys. Removing a tenant's prefix
@@ -433,15 +420,15 @@ only when its reference and incarnation rules permit it.
 
 ### Durable facts and invariants
 
-The tenant row gains conditional, monotonic attempt and progress timestamps for
-each of the row and object parts, a completion timestamp for each part, and a
-separate error and error time for each part and finalisation. It also records
-`offboard_drained_at` after both parts have been checked empty,
-`offboard_marker_deleted_at` after the KV delete succeeds, and a due time and
-last result for terminal residue checks. The tombstone keeps these facts,
-including a finalisation error that occurs after tombstoning. Success in one
-part does not clear another part's error. Status compares each error time with
-that part's later progress or completion.
+Add conditional, monotonic attempt and progress times to the tenant row for the
+row and object parts, plus a completion time for each part. Record separate
+errors and error times for both parts and finalisation. Write
+`offboard_drained_at` after both parts have been checked empty and
+`offboard_marker_deleted_at` after KV deletion succeeds. Also record when the
+next terminal residue check is due and its last result. Keep these facts on the
+tombstone, including a finalisation error after tombstoning. Success in one part
+does not clear an error in another. Status compares each error time with later
+progress or completion in the same part.
 
 Object storage gains `offboard:begun`, `offboard:pending`, `offboard:rows-done`,
 `offboard:objects-done`, and separate retry deadlines for the two parts. The
@@ -451,13 +438,13 @@ interrupted page has used that slot. No `row-page-at` write after deletion is
 needed. The pending marker remains until both parts are finished; an empty
 object part cannot stop a deliberately deferred row part.
 
-The required lifecycle invariant is stronger than filtering
-`maintenancePasses()`: once `offboard:begun` is durable, no entry point may
-admit a new ordinary mutation. Guarded D1 statements prevent a late reference or
-presence insert after the registry changes status. An R2 put issued before the
-fence may still finish later; terminal residue repair removes its tenant-prefix
-bytes. The object restores the fence before dispatching work after eviction, and
-checks the authoritative D1 registry status when local identity has been purged.
+Once `offboard:begun` is durable, no entry point may admit a new ordinary
+mutation. Filtering `maintenancePasses()` alone cannot enforce this. Guarded D1
+statements prevent a late reference or presence insert after the registry
+changes status. An R2 put that started before the fence may still finish later;
+terminal residue repair removes its tenant-prefix bytes. After eviction, the
+object restores the fence before dispatching work. If local identity has been
+purged, the object checks the authoritative D1 registry status.
 `beginOffboard()` closes commit sockets and makes their later callbacks observe
 the fence. A shared object-local lifecycle gate admits the whole mutation,
 including asynchronous D1 and R2 calls and trailing bookkeeping, before it
@@ -468,18 +455,18 @@ rather than waiting on themselves. The existing per-kind maintenance locks do
 not provide this gate. Read-only requests continue according to registry
 admission policy.
 
-Admission does not add a persisted row per foreground mutation. The durable
-fence is the recovery fact; the gate counts active operations only in the live
-object. A bounded D1 or R2 call that times out may still complete, as
-`ObjectWriteOrder` already recognises for path-keyed R2 writes. The lifecycle
-gate therefore keeps that operation active until its underlying settlement
-signal completes, even if the client has already received a timeout. In
-particular, a late `t/<tenant>/` put cannot pass a terminal residue check merely
-because the wrapper returned. Shared content-addressed `nar/` and `cas/` writes
-may finish after the fence, but they cannot create a tenant reference; the
-global reapers collect unreferenced bytes. The implementation audit must
-enumerate all D1 reference and presence writes and all tenant-prefix R2 puts,
-deletes and moves, including migration paths and callbacks.
+Admission does not write a row for every foreground mutation. The durable fence
+records the lifecycle state, while the live object tracks active operations. A
+bounded D1 or R2 call that times out may still complete, as `ObjectWriteOrder`
+already recognises for path-keyed R2 writes. The lifecycle gate therefore keeps
+that operation active until its underlying settlement signal completes, even if
+the client has already received a timeout. In particular, a late `t/<tenant>/`
+put cannot pass a terminal residue check merely because the wrapper returned.
+Shared content-addressed `nar/` and `cas/` writes may finish after the fence,
+but they cannot create a tenant reference; the global reapers collect
+unreferenced bytes. The implementation audit must enumerate all D1 reference and
+presence writes and all tenant-prefix R2 puts, deletes and moves, including
+migration paths and callbacks.
 
 The four D1 reference and presence inserts need a second fence at the database
 statement itself. The current NAR charge batch and attestation reference batch
@@ -496,75 +483,78 @@ in the Free worksheet.
 
 ### Drain and terminal protocol
 
-The control operation changes the tenant to `offboarding`, calls an updated
-`beginOffboard()` that closes gate admission, persists the fence, closes commit
-sockets, and sends one start message. The fence is written only after the
-object's identity or migration journal is established; an unconfigured object
-must not acquire a lone key that makes it appear configured. A failed start
-remains visible and the tick retries it. A pending local or catalogue migration
-makes `startOffboard()` arm the migration alarm and return incomplete. The
-offboard passes become eligible when initialisation finishes.
+The control operation changes the tenant status to `offboarding`, calls the
+updated `beginOffboard()` and sends one start message. `beginOffboard()` closes
+gate admission, persists the fence and closes commit sockets. Write the fence
+only after establishing the object's identity or migration journal. A lone fence
+key must not make an unconfigured object appear configured. Record a failed
+start so the tick can retry it. If a local or catalogue migration is pending,
+`startOffboard()` arms the migration alarm and returns incomplete. Offboard
+passes become eligible after initialisation finishes.
 
-Each alarm runs at most one bounded part page, then records that part's attempt
-and outcome before scheduling the next alarm. The object part lists and deletes
-at most one bounded page under `t/<tenant>/`, restarting the listing at the
+Each alarm runs at most one bounded page for one part. It records that part's
+attempt and outcome before scheduling the next alarm. The object part lists and
+deletes at most one bounded page under `t/<tenant>/`; each listing starts at the
 prefix. The row part selects and deletes bounded pages from `blob_ref`,
 `attestation_ref`, `tenant_blob` and `tenant_cas_blob` through the existing
 single writer. On Free it first checks that this is the oldest-attempt
 offboarding tenant whose row part remains and conditionally admits the current
 UTC row slot. The shared slot comparison serialises competing alarms. Paid uses
 the per-invocation statement and time budgets without daily slot pacing. The
-selected row page size is a fixed implementation constant. The proposed 500-key
-cap requires D1 metadata, index and 25-second critical-section tests before Free
-activation; it is not a promised safe size.
+selected row page size is a fixed implementation constant. Before activating the
+proposed 500-key cap on Free, test D1 metadata, indexes and the 25-second
+critical-section limit. The tests may require a smaller cap.
 
-When a part finds no residue, it records that part as done and stops scheduling
-that pass. The other pass continues independently. A no-progress object page
-retries after 30 seconds. On Free, a failed row page records its error and waits
-for the next UTC slot because the current slot was spent before deletion; on
-Paid it may retry after 30 seconds. A persistent fault defers only the failing
-part for an hour. A planned Free slot wait is `deferred`, never a stall. When
-both parts are done, the object checks all four D1 tables with bounded `LIMIT 1`
-queries and lists one key under the tenant prefix. Only the empty result writes
-`offboard_drained_at` and sends a finalisation message. The tick also selects
-drained tenants, so a failed send does not strand finalisation.
+When a part finds no residue, record it as done and stop scheduling that pass.
+The other pass continues. An object page that makes no progress retries after 30
+seconds. On Free, a failed row page records its error and waits for the next UTC
+slot because admission already consumed the current slot. On Paid, it may retry
+after 30 seconds. A persistent fault defers only the failing part for an hour.
+Report a planned Free slot wait as `deferred`, not as a stall.
 
-`finishOffboard()` closes gate admission and waits outside
-`blockConcurrencyWhile` for active writers and underlying timed-out calls. The
-wait has a short invocation deadline; expiry returns `waiting-for-writers` and
-schedules a retry without purging storage. A client conversation or a stuck R2
-call never occupies the object's 25-second critical section. Once the gate is
-quiet, the object rechecks the four tables and R2 prefix. Residue returns
-`not-drained`; the control consumer conditionally clears the drained fact and
-reopens the incomplete part. The control consumer then conditionally writes the
-D1 tombstone before the short local-storage purge. Tombstoning first keeps the
-registry refusal in force if the object resets during purge. A retryable purge
-deletes the alarm and local storage under the short critical section; the fenced
-in-memory object rejects later entries. The KV marker delete and its completion
-fact follow, with independent retry. A tombstoned object whose purge failed
-remains fenced and is retried. None of these steps waits under the critical
+After both parts finish, check all four D1 tables with bounded `LIMIT 1` queries
+and list one key under the tenant prefix. Only an empty result permits
+`offboard_drained_at` and a finalisation message. The tick also selects drained
+tenants, so a failed send does not prevent finalisation.
+
+`finishOffboard()` closes gate admission. Outside `blockConcurrencyWhile`, it
+waits for active writers and for timed-out calls whose underlying operations
+have not finished. The wait has a short invocation deadline. If it expires,
+return `waiting-for-writers` and schedule a retry without purging storage. A
+client conversation or a stuck R2 call must not occupy the object's 25-second
+critical section.
+
+When the gate becomes quiet, recheck the four tables and R2 prefix. If any
+residue remains, return `not-drained`. The control consumer then conditionally
+clears the drained fact and reopens the incomplete part. Otherwise the control
+consumer conditionally writes the D1 tombstone before the short local-storage
+purge. The tombstone keeps registry refusal in force if the object resets during
+purge. The retryable purge deletes the alarm and local storage inside the short
+critical section; the in-memory fence rejects later entries. Delete the KV
+marker and record completion afterwards, with an independent retry. If purging a
+tombstoned object fails, keep it fenced and retry. No step waits in the critical
 section for an external D1, R2 or client operation.
 
-Forced reset can discard the in-memory operation set while an already-issued
-external call is still in flight. Cloudflare keeps a normal object active for
-pending I/O, but it does not offer a durable settlement receipt for an R2 or D1
-call after a forced reset [DO lifecycle]. An empty prefix at one instant is
-therefore not proof that a late put cannot finish. The tombstone makes logical
-retirement final: entry points reject writes, and an old request cannot make the
-tenant readable again. Keep a bounded, recurring terminal-residue selection over
-tombstoned tenants. It checks the four D1 tables and `t/<tenant>/`, removes
-residue through exact bounded keys while the tombstone excludes active writers,
-and records the check, any repair and errors. A failed or nonempty check becomes
-due sooner; otherwise the tenant returns to a slower periodic rotation. The
-selection uses due time and tenant id so older tombstones do not starve. On
-Free, a separate atomic `offboard-terminal` UTC slot admits at most ten
-tombstones per hour, and each tenant gets one bounded 25-key residue page. Paid
-selects at most ten due tombstones per five-minute tick. A nonempty page becomes
-due again at the next eligible slot; an empty page becomes due again after 24
-hours on Paid or seven days on Free. Thus every tombstone is revisited under
-sustained service, though a large backlog has no fixed completion time. A
-physical-cleanup status reports the last clean observation, not a permanent
-proof that R2 is empty. The Free admission worksheet includes this rotation.
+Forced reset can discard the in-memory operation set while an external call is
+still in flight. Cloudflare keeps an object active for ordinary pending I/O, but
+after a forced reset it provides no durable receipt that proves an R2 or D1 call
+has finished [DO lifecycle]. A put may therefore finish after a check finds an
+empty tenant prefix. The tombstone makes logical retirement final: entry points
+reject writes, and an old request cannot make the tenant readable again.
+
+Check tombstoned tenants repeatedly for physical residue. Each bounded check
+inspects the four D1 tables and `t/<tenant>/`, removes exact keys while the
+tombstone excludes active writers, and records the result and any error. Retry a
+failed or nonempty check sooner. After an empty check, return the tenant to a
+slower periodic rotation. Select by due time and tenant id so older tombstones
+continue to receive checks. On Free, an atomic `offboard-terminal` UTC slot
+admits at most ten tombstones per hour. Check one bounded 25-key page for each
+tenant. Paid selects at most ten due tombstones per five-minute tick. A nonempty
+page becomes due again at the next eligible slot. An empty page becomes due
+again after 24 hours on Paid or seven days on Free. Under sustained service,
+every tombstone is revisited, but a large backlog has no fixed completion time.
+Physical-cleanup status reports the last clean observation; it cannot prove that
+R2 will remain empty. Include this rotation in the Free admission worksheet.
 
 An `offboarding` row with an unconfigured object may be an interrupted legacy
 purge. The consumer checks the four tables and R2 prefix. If both are empty, it
@@ -578,22 +568,21 @@ remaining marker is selected by membership cleanup.
 
 ### Free admission and capacity
 
-Only one Free row page is admitted in each configured UTC slot across the whole
-deployment. The candidate check and atomic slot update avoid the race in a
-read-then-start gate; a second tenant cannot use the same slot. After an early
-delete commits and a later table fails, the slot stays consumed. The aggregate
-worksheet in the shared budget section includes full and partial pages, index
-writes, four-table residue reads, attempt facts, terminal facts and retries. It
-also includes the independent reaper and maintenance work. Until those costs are
-measured and the restricted schedule is set, Free automatic row draining is not
-enabled by this design. A fixed schedule can cap elective background cost but
-cannot reserve unused D1 allowance against arbitrary foreground traffic.
+Across the deployment, admit only one Free row page per configured UTC slot.
+Check the selected tenant before attempting the atomic slot update. The
+conditional update prevents a second tenant from using the same slot. The slot
+remains consumed if one table's delete commits and a later table fails. Include
+full and partial pages, index writes, four-table residue reads, attempt and
+terminal facts, and retries in the aggregate worksheet. Include reaper and
+maintenance work as well. Do not activate automatic Free row draining until
+these costs have been measured and the restricted schedule has been set. The
+schedule limits elective background work, but arbitrary foreground traffic can
+still consume the D1 allowance.
 
-Paid tenants have independent objects, but all row pages share one D1 database.
-Cloudflare states that one D1 database processes queries serially and can return
-overload errors. The time to drain a million rows or objects therefore needs a
-representative measurement under concurrent drains; the page count alone is not
-a completion bound.
+Paid tenants use independent objects, but their row pages share one D1 database.
+D1 processes queries for one database serially and can return overload errors.
+Measure concurrent drains to estimate the time needed for a million rows or
+objects; a page count alone cannot provide that estimate.
 
 ### Status and recovery tests
 
@@ -617,38 +606,40 @@ and `cas/` bytes remaining for the global reaper.
 
 ### Current behaviour and placement
 
-The tick selects at most 100 active tenants whose eligibility projection is
-missing, old or due. The consumer calls garbage collection, verification and
-auth-key retirement as separate RPCs. The object already continues some work on
-its alarm, but no alarm is armed for the projected deadline. The projection uses
-the Unix epoch for immediate work and deliberately leaves `reconciled_at`
-unchanged when its deadline has not changed. Neither value is a heartbeat.
-Deadline work runs on the tenant object's alarm. A Paid object also schedules
-its own six-hour periodic check. On Free, the tick selects objects for a bounded
-periodic check that becomes due after 24 hours; the check still runs in the
-object. The tick remains a recovery backstop. The existing PLAN.md preference
-for cron garbage collection must change with this release.
+The tick selects at most 100 active tenants with a missing, old or due
+eligibility projection. The consumer calls garbage collection, verification and
+auth-key retirement through separate RPCs. The object already continues some
+work on its alarm, but the projected deadline does not arm the alarm. The
+projection uses the Unix epoch for work that is due immediately. It leaves
+`reconciled_at` unchanged if the deadline is unchanged. Neither value records
+whether the object has recently run. Deadline work runs on the tenant object's
+alarm. A Paid object also schedules its own six-hour periodic check. On Free,
+the tick selects objects for a bounded periodic check that becomes due after 24
+hours; the check still runs in the object. The tick remains a recovery backstop.
+The existing PLAN.md preference for cron garbage collection must change with
+this release.
 
 ### Facts and alarm work
 
 Keep `tenant_maintenance_eligibility.next_wake_at` as the deadline projection,
-including the epoch sentinel. Add `tenant.maintenance_heartbeat_at` for the last
-completed object pass or periodic check. Add
-`tenant.maintenance_projection_missing_at`, set before or atomically with
-removal of a failed projection and cleared after a successful reconciliation. A
-null projection with no marker in upgraded persisted state is marked by a
-bounded backfill before the old selection is narrowed. An unbounded data
-migration would consume Free D1 writes. These are distinct facts: a deadline is
-not evidence that a handler ran, and a recent heartbeat does not make a missing
-projection healthy.
+including the epoch sentinel. Record the last completed object pass or periodic
+check in `tenant.maintenance_heartbeat_at`. Set
+`tenant.maintenance_projection_missing_at` before or atomically with removal of
+a failed projection, then clear it after successful reconciliation. Before
+narrowing the old selection, use a bounded backfill to mark upgraded tenants
+whose projection is null and whose missing marker is absent. An unbounded data
+migration would consume Free D1 writes. These fields record separate facts: a
+deadline does not prove that a handler ran, and a recent heartbeat does not
+repair a missing projection.
 
-For Free periodic selection, add `tenant.periodic_next_due_at` with an epoch
-default for existing tenants, `periodic_selected_slot`, `periodic_selection_id`
-and `periodic_checked_at`. These are due, admission and outcome facts, not a
-count of work performed. Index active tenants by due time and id. A selection
-that gets no queue delivery remains due after the next hour and eventually
-returns to the front of the fair due order. A completed page sets the next due
-time 24 hours ahead; a failed or interrupted page keeps an earlier due time.
+For Free periodic selection, add `tenant.periodic_next_due_at`,
+`periodic_selected_slot`, `periodic_selection_id` and `periodic_checked_at`.
+Default the due time to the epoch for existing tenants. These fields record when
+work is due, admitted and completed; they do not count runs. Index active
+tenants by due time and id. If a selected tenant gets no queue delivery, it
+becomes due again after the next hour and eventually returns to the front of the
+due order. A completed page sets the next due time 24 hours ahead. A failed or
+interrupted page keeps an earlier due time.
 
 The object records one `tenant_maintenance_failure` row per pass:
 `garbage-collection`, `verification`, `auth-key-retirement`,
@@ -657,77 +648,79 @@ conditional and monotonic; a successful pass does not clear another pass's
 failure. Stop incrementing `consecutive_failures` only after predecessor
 compatibility has been tested, and retain the column for the rollback window.
 
-The alarm rotation gives garbage collection, verification, auth-key retirement
-and managed retirement separate turns, subrequest slices, retry deadlines and
-failure rows. Paid also includes the periodic check in that rotation. Each pass
-reads its own effective deadline. Garbage collection keeps its continuation.
-Verification processes a bounded pending page and requests `tenant-verify` when
-uploads remain. The periodic check runs one integrity page and reconciles the
-projection. It becomes due after 24 hours on Free or six hours on Paid. The Free
-object's alarm never admits that elective page: only the selected periodic RPC
-may do so, after it validates the durable assignment and current UTC hour.
-Deadline work remains eligible immediately on both plans. On Paid, derive a
-stable phase offset from the tenant id when first arming an upgraded idle
-object, so 5,000 existing objects do not all start their periodic check in one
-interval. An error or page with no progress records a failure, retries after the
-pass's backoff, then defers for an hour after its stall window. The scheduler's
-outcome type gains `{ kind: 'deferred', until }`, so it cannot replace the
-pass's longer deadline with the generic 30-second retry.
+Give garbage collection, verification, auth-key retirement and managed
+retirement separate alarm turns, subrequest slices, retry deadlines and failure
+rows. On Paid, include the periodic check in that rotation. Each pass reads its
+effective deadline. Garbage collection continues across pages. Verification
+processes a bounded pending page and requests `tenant-verify` if uploads remain.
+A periodic check runs one integrity page and reconciles the projection. It
+becomes due after 24 hours on Free or six hours on Paid.
 
-`reconcileMaintenanceEligibility()` arms the earliest **effective** alarm pass
-deadline, after applying retry deadlines. On Paid, creation, first
-initialisation and each backstop wake also arm the periodic pass when its local
-key is absent. On Free, the periodic selector wakes idle objects while the alarm
-continues to schedule deadline work. The old broad backstop remains until every
-active tenant has been observed with a new-build heartbeat; it may stay longer
-if its measured query cost fits. Merely waiting one interval does not cover a
-fleet larger than one tick's selection.
+The Free alarm cannot start the elective periodic page. The selected periodic
+RPC first validates the durable assignment and current UTC hour. Deadline work
+remains immediately eligible on both plans. On Paid, use a stable offset from
+the tenant id when first arming an upgraded idle object; this spreads the first
+checks across intervals for a fleet of 5,000 objects. An error or page without
+progress records a failure and retries after the pass's backoff. After the stall
+window, defer that pass for an hour. The scheduler needs the
+`{ kind: 'deferred', until }` outcome so its generic 30-second retry does not
+replace the longer deadline.
+
+`reconcileMaintenanceEligibility()` applies retry deadlines and arms the
+earliest **effective** alarm pass deadline. On Paid, creation, first
+initialisation and each backstop wake arm the periodic pass if its local key is
+absent. On Free, the periodic selector wakes idle objects; the alarm continues
+to schedule deadline work. Keep the old broad backstop until a new-build
+heartbeat has been observed for every active tenant. It may remain afterwards if
+its measured query cost fits. Waiting one interval cannot establish coverage
+when a fleet exceeds one tick's selection limit.
 
 ### Free periodic admission
 
-The Free tick admits one deployment-wide `tenant-periodic` selection per UTC
-hour. It first reads at most `P` active tenants, using the selected release cap,
-ordered by `periodic_next_due_at, id`, where the due time is no later than the
-current hour. A transactional D1 batch conditionally advances
-`reconciliation_run.last_admitted_slot` and writes a fresh `selection_id`, then
-assigns that slot and identity to the selected tenants. Bind the selected ids as
-one JSON array through the repository's `json_each` list pattern, then test the
-full target 100-tenant batch against D1's parameter limit and row metadata. The
-assignment statement is conditional on the batch's stored `selection_id`; if a
-competing tick won admission, this batch assigns no tenant. It also sets each
-assigned tenant's next due time to the next UTC hour. The winner reads back only
-its assigned ids and sends them in existing groups of twenty. The queue's
-one-message-per-invocation configuration, these groups and the binding-level
-budgets keep dispatches bounded. A send failure leaves the assignment visible;
-the tenant becomes due again after the hour and fair due ordering eventually
-reselects it. A duplicate tick cannot assign a second group for the same hour.
+On Free, admit one deployment-wide `tenant-periodic` selection per UTC hour.
+Read at most `P` active tenants with a due time no later than that hour, ordered
+by `periodic_next_due_at, id`. `P` is the selected release cap. In a D1
+transaction, conditionally advance `reconciliation_run.last_admitted_slot`,
+write a fresh `selection_id`, and assign the slot and identity to those tenants.
+Bind the selected ids as one JSON array using the repository's `json_each`
+pattern. Test the full target batch of 100 tenants against D1's parameter limit
+and row metadata.
 
-The consumer and object reject a periodic message outside its assigned UTC hour.
-The object reads its tenant's D1 assignment and active status, compares both the
-hour and `selection_id` with the message, validates the current hour again
-immediately before its local claim, and conditionally records
-`periodic:last_executed_slot` in one atomic local SQLite critical section before
-the page starts. A duplicate message, alarm or direct RPC cannot start another
-page for that assignment. Free alarms never schedule the periodic pass without
-an assigned message. A forced reset restores the executed-slot fact from local
-storage. A failure before that fact is written can retry within the hour; a
-failure afterward waits for another admitted selection. An object that starts
-near the hour's end may finish after midnight. The periodic RPC has a fixed
-cooperative deadline of at most 25 seconds, so only the previous hour's group
-can cross a UTC-day boundary; the worksheet includes that group. A delayed
-message from an older hour is rejected and does not consume a new page.
+The assignment statement checks the `selection_id` that the batch stored. If
+another tick won admission, the losing batch assigns no tenants. For assigned
+tenants, set the next due time to the following UTC hour. Read back only the
+assigned ids and send them in groups of twenty. The queue processes one message
+per invocation, and the binding-level budgets limit each group. If sending a
+message fails, the assignment remains visible. Its tenants become due again
+after the hour and eventually return to the front of the due order. A duplicate
+tick cannot assign another group for that hour.
 
-On success, the object conditionally records `periodic_checked_at`, a heartbeat
-and `periodic_next_due_at` 24 hours ahead, using its still-current assignment
-slot and identity as the update predicate. A stale completion cannot overwrite a
-later assignment. A failed page records its pass-specific error but leaves the
-next due time no later than the following hour. Deadline GC, verification and
-key retirement do not use this elective slot and remain eligible on their
-alarms. The Free periodic schedule is fair best-effort: with 5,000 due tenants
-and `P` assignments per hour, one visit needs at least `ceil(5,000 / P)` hourly
-selections, before queue delay, failure or retries. Status reports the oldest
-due time and last completed page; it does not promise a 24-hour full-fleet
-rotation.
+Both the queue consumer and the tenant object reject a periodic message unless
+its assigned UTC hour is current. The object reads its D1 assignment and active
+status and checks the hour and `selection_id` against the message. Immediately
+before starting a page, it checks the current hour again and conditionally
+writes `periodic:last_executed_slot` in one atomic local SQLite critical
+section. This permits one page per assignment despite duplicate messages, alarms
+or direct RPCs. A Free alarm never schedules an unassigned periodic page. After
+a forced reset, the object reads the executed-slot fact from local storage.
+Failure before that fact is written can retry within the hour; later failure
+requires another admitted selection.
+
+A page started near the end of an hour may finish after midnight. The periodic
+RPC has a fixed cooperative deadline of at most 25 seconds, so only the previous
+hour's group can cross a UTC-day boundary. Include that group in the worksheet.
+Reject a delayed message from an older hour without starting a page.
+
+After a successful page, conditionally record `periodic_checked_at`, a heartbeat
+and `periodic_next_due_at` 24 hours ahead. The update requires the same slot and
+identity still to be assigned, so a stale completion cannot overwrite a later
+assignment. After failure, record the pass-specific error and leave the next due
+time no later than the following hour. Deadline GC, verification and key
+retirement remain eligible on their alarms without an elective slot. With 5,000
+due tenants and `P` assignments per hour, visiting each tenant requires at least
+`ceil(5,000 / P)` hourly selections before queue delay, failure or retries.
+Status reports the oldest due time and the last completed page. The 24-hour due
+time is not a full-fleet completion guarantee.
 
 ### Backstop selection and cost
 
@@ -739,16 +732,16 @@ on Paid for active tenants:
    minutes;
 3. on Paid, no heartbeat in seven hours, including a null heartbeat.
 
-The epoch sentinel is therefore not selected while an object has reacted within
-ten minutes. A heartbeat that is six hours old does not suppress an epoch wake:
-predicate 2 selects it. The missing-projection predicate remains independently
-sufficient even after a recent successful pass.
+The epoch sentinel does not trigger a backstop wake if the object has reacted
+within ten minutes. An epoch deadline still triggers a wake after ten minutes
+when the last heartbeat was six hours ago. A missing projection triggers a wake
+even after a recent successful pass.
 
-Use these bounded SQL selections. Run the third only on Paid, deduplicate the
-selected tenant ids, then apply `backstopTenantsPerTick` to the result. The
-consumer must stamp `last_maintained_at` after each attempted wake, including a
-rejected RPC, as it does today; otherwise a persistently failing first page
-could starve later tenants:
+Use these bounded SQL selections, with the third query on Paid only. Deduplicate
+tenant ids and apply `backstopTenantsPerTick`. After every wake attempt,
+including a rejected RPC, the consumer updates `last_maintained_at`. Without
+that update, tenants that fail on the first page could prevent later tenants
+from being selected:
 
 ```sql
 SELECT id FROM tenant
@@ -771,19 +764,18 @@ WHERE status = 'active'
 ORDER BY last_maintained_at, id LIMIT :cap;
 ```
 
-The due branch can begin at
-`tenant_maintenance_eligibility(next_wake_at, tenant)` and join the tenant row;
-the stale and missing branches can use partial active-tenant indexes on
-`maintenance_heartbeat_at` and `maintenance_projection_missing_at`. Ordering by
-`last_maintained_at` may still require a temporary sort or a wider scan. The
-Free periodic selection needs its own indexed due-time path. Do not claim that
-`(pass, last_success_at)` covers tenant identity or that the queries examine
-only their returned rows. Before narrowing the backstop, run
-`EXPLAIN QUERY PLAN` on each branch and D1 `meta.rows_read` on empty, sparse and
-fleet-wide due fixtures at 5, 200 and 5,000 tenants. If an empty selection scans
-the fleet each tick, retain the old cadence or change the projection/index
-before activation. Selection and queue costs enter the Free read and write
-worksheet.
+The due query can use `tenant_maintenance_eligibility(next_wake_at, tenant)`
+before joining the tenant row. The stale and missing queries can use partial
+indexes for active tenants on `maintenance_heartbeat_at` and
+`maintenance_projection_missing_at`. Ordering by `last_maintained_at` may still
+require a temporary sort or a wider scan. Free periodic selection needs its own
+indexed due-time path. The index `(pass, last_success_at)` does not include
+tenant identity, and a result limit does not prove that a query reads only the
+returned rows. Before narrowing the backstop, run `EXPLAIN QUERY PLAN` on each
+branch and D1 `meta.rows_read` on empty, sparse and fleet-wide due fixtures at
+5, 200 and 5,000 tenants. If an empty selection scans the fleet each tick,
+retain the old cadence or change the projection/index before activation.
+Selection and queue costs enter the Free read and write worksheet.
 
 ### Status and failure cases
 
@@ -819,36 +811,35 @@ unbounded fan-out can repeat its first targets indefinitely. CAS demotion calls
 tenant and digest. A batch of digests does not bound that inner operation. Both
 paths need bounded target work, not merely bounded scan pages.
 
-The rotation is an audit of a changing table, not a snapshot transaction. Its
-cursor advances only after every object in a bounded page has either a
-successful HEAD result with any missing-object work recorded, or a durable retry
-fact for a failed HEAD. A crash before that update repeats the page, so a
-transient failure cannot permanently skip it. A persistent failure remains
-visible without blocking later pages. A new or changed row behind the cursor can
-still wait for the next rotation. Repair of recorded work continues
-independently of later rotations.
+The rotation audits a table that can change during the scan. Its cursor advances
+only after every object in a bounded page has either a successful HEAD result
+with any missing-object work recorded, or a durable retry fact for a failed
+HEAD. A crash before that update repeats the page, so a transient failure cannot
+permanently skip it. A persistent failure remains visible without blocking later
+pages. A new or changed row behind the cursor can still wait for the next
+rotation. Repair of recorded work continues independently of later rotations.
 
 ### Rotation and pending work facts
 
 `reconciliation_run` stores a random rotation id, its keyset position,
 `rotation_started_at` and `rotation_exhausted_at`. A consumer reads one bounded
-page at that position, checks its objects and durably inserts each
-missing-object observation or failed-probe retry, then conditionally advances
-the cursor on the rotation id and old position. A losing concurrent consumer may
-repeat those checks, but its cursor write changes nothing. A failed D1 recording
-leaves the cursor unchanged for retry. A failed R2 HEAD creates an
-`object_demotion` row in `probe-pending` phase, without treating the object as
-missing. Its retry uses a bounded backoff and the same incarnation fence; a
-later successful HEAD removes the probe fact or changes it to `discovering` if
-the object is absent. A permanently failing probe stays due at its next retry
-time while the rotation continues. The final short or empty page records
-`rotation_exhausted_at` after this work; `completed_at` means that every page
-produced either an observation or a durable retry fact. Status separately
-reports pending probes and never calls that rotation clean while they remain.
-Later messages acknowledge while exhausted. A new rotation starts only after the
-interval from exhaustion, with a new id and empty position. An empty first page
-completes once, without repeated wraparound. Status distinguishes completion of
-this best-effort rotation from proof of a consistent snapshot.
+page at that position and checks its objects. It records each missing-object
+observation or failed-probe retry before conditionally advancing the cursor with
+the rotation id and old position. A concurrent consumer may repeat the checks,
+but only one cursor update succeeds. If D1 cannot record the results, the cursor
+stays in place for a retry. A failed R2 HEAD creates an `object_demotion` row in
+`probe-pending` phase, without treating the object as missing. Its retry uses a
+bounded backoff and the same incarnation fence; a later successful HEAD removes
+the probe fact or changes it to `discovering` if the object is absent. A
+permanently failing probe stays due at its next retry time while the rotation
+continues. The final short or empty page records `rotation_exhausted_at` after
+this work. `completed_at` means that every page produced either an observation
+or a durable retry fact. Status reports pending probes separately and does not
+report the rotation as clean while probes remain. Later messages acknowledge
+while the rotation is exhausted. A new rotation starts only after the interval
+from exhaustion, with a new id and empty position. An empty first page completes
+once, without repeated wraparound. Completion of this best-effort rotation does
+not prove that the changing table was observed as a consistent snapshot.
 
 `object_demotion` has one row per missing object or failed probe and
 incarnation. It records its kind, first observation, phase (`probe-pending`,
@@ -866,16 +857,16 @@ generation and predicate where applicable. No target row is removed merely
 because a message failed. A later promotion uses a different incarnation and is
 independent of this work.
 
-A bounded reference query after the object's durable cursor inserts a bounded
-set of target rows before moving the cursor. Discovery pages use keyset ordering
-over the reference table's full identity and an index beginning with the object
-id. Route pages select `done_at IS NULL` targets in primary-key order, up to the
-invocation's remaining statement, subrequest and time budget. Each successful
-tenant RPC marks only its exact targets done. A failed RPC updates the object
-row's error and `next_attempt_at`; other pending objects remain eligible.
-Selection orders due objects by `next_attempt_at`, then `first_seen_at` and
-object id, with a bounded number per message. A persistent failure gets a later
-attempt time so it cannot monopolise every message.
+Read a bounded page of references after the object's durable cursor. Insert
+target rows for that page before moving the cursor. Discovery pages use keyset
+ordering over the reference table's full identity and an index beginning with
+the object id. Route pages select `done_at IS NULL` targets in primary-key
+order, up to the invocation's remaining statement, subrequest and time budget.
+Each successful tenant RPC marks only its exact targets done. A failed RPC
+updates the object row's error and `next_attempt_at`; other pending objects
+remain eligible. Selection orders due objects by `next_attempt_at`, then
+`first_seen_at` and object id, with a bounded number per message. A persistent
+failure gets a later attempt time so it cannot monopolise every message.
 
 NAR target RPCs are small because `demoteUnbackedLocked()` can read D1 once per
 target. CAS receives a new bounded per-reference RPC; it rechecks the fenced R2
@@ -944,7 +935,7 @@ proves catalogue conversion, not that `initialise()` has completed. Request
 admission still enters object initialisation and returns a retryable response
 while contraction remains pending.
 
-The object's initialisation and alarm are the continuing worker. A shared
+The object continues migration through initialisation and its alarm. A shared
 `initialiseOrArm()` path arms the alarm on both local-schema and catalogue
 pending errors for `reportLocalStep`, offboard start, and maintenance RPC entry
 points. The alarm's migration branch continues in bounded pages. A direct RPC
@@ -952,26 +943,27 @@ that reports pending work never treats the current D1 marker alone as ready. The
 old `cache-catalogue-migration` message remains decodable through the rollback
 window and acknowledges after making or scheduling a bounded attempt.
 
-The local-step wake is the control-plane recovery path for active and suspended
-tenants. Its producer selection includes tenants below the required local step
+The control plane uses the local-step wake to recover active and suspended
+tenants. Producer selection includes tenants below the required local step
 **or** with a null or mismatched catalogue version. The consumer's
-`wakeLocalStepTenants()` revalidation uses that same disjunction; its present
-`belowLocalStep(required)` filter alone would discard the exceptional tenant.
-`recordWakeFailure()` uses the same condition, so a rejected RPC remains visible
-even when the local step is already sufficient. `reportLocalStep()` already
-initialises before returning `recorded` for a sufficient step; retain that
-ordering and arm pending migration work. An offboarding tenant uses the offboard
-start and its tick backstop instead of the local-step selection.
+`wakeLocalStepTenants()` revalidation uses that same disjunction. Its current
+`belowLocalStep(required)` filter alone would discard a tenant whose step is
+current but whose catalogue version is not. `recordWakeFailure()` uses the same
+condition, so a rejected RPC remains visible even when the local step is already
+sufficient. `reportLocalStep()` already initialises before returning `recorded`
+for a sufficient step; retain that ordering and arm pending migration work. An
+offboarding tenant uses the offboard start and its tick backstop instead of the
+local-step selection.
 
-Ordinary predecessor state may make the extra predicate empty, because the
-marker is written before a sufficiently high step is recorded. The repair path
-still needs a seeded test with an already-sufficient step and a missing or
-mismatched version, both before and after object initialisation. A second test
-pauses contraction after the marker becomes current and checks the retryable
-HTTP response, alarm continuation and eventual ready step. Tests also cover a
-pending catalogue migration on offboard start, an old queue message, duplicate
-wakes and rollback to a predecessor build while the alarm key and queue message
-remain persisted.
+In ordinary predecessor state, the marker is written before a sufficiently high
+step is recorded, so the extra predicate may select no tenants. Test the
+recovery path with an already-sufficient step and a missing or mismatched
+version, both before and after object initialisation. A second test pauses
+contraction after the marker becomes current and checks the retryable HTTP
+response, alarm continuation and eventual ready step. Tests also cover a pending
+catalogue migration on offboard start, an old queue message, duplicate wakes and
+rollback to a predecessor build while the alarm key and queue message remain
+persisted.
 
 Status reports the count and a bounded sample of non-tombstoned tenants whose
 catalogue version differs from the current version, alongside local-step
@@ -988,16 +980,16 @@ can write far more rows than its page limit suggests. The incarnation and
 reference fences already make repeated and overlapping phase calls safe; the
 control plane remains the correct place for shared object work.
 
-The simpler replacement schedules one bounded message **per phase and object
-kind** at each due tick. The tick sends ten independent messages. No phase sends
-another message. Each phase has its own `reconciliation_run` row and Free UTC
-admission slot, so a failed early phase neither spends another phase's statement
-allowance nor prevents its invocation. The phases may run in a different order
-or overlap; correctness depends on the existing atomic fences and durable
-deletion markers, not on one invocation's phase order. Tests must prove this for
-both NAR and CAS before the chain is removed. If a specific phase dependency
-fails that test, schedule that pair in one message with a reserved budget for
-each, rather than restoring a continuation chain.
+At each due tick, schedule one bounded message **per phase and object kind**.
+The tick sends ten independent messages. No phase sends another message. Each
+phase has its own `reconciliation_run` row and Free UTC admission slot, so a
+failed early phase neither spends another phase's statement allowance nor
+prevents its invocation. The phases may run in a different order or overlap;
+correctness depends on the existing atomic fences and durable deletion markers,
+not on one invocation's phase order. Tests must prove this for both NAR and CAS
+before the chain is removed. If a specific phase dependency fails that test,
+schedule that pair in one message with a reserved budget for each, rather than
+restoring a continuation chain.
 
 Each invocation has one cooperative wall-clock deadline shorter than the
 platform limit, a binding-level statement allowance and a reserved statement and
@@ -1016,25 +1008,24 @@ opportunity. A completed pass can reset the position for the next interval.
 Validate those queries' rows-read cost and the exact D1 statement count on
 representative backlogs.
 
-A phase's `completed_at` means that invocation observed no eligible work for
-that phase at its final query. It does not mean the five-phase pipeline was
-globally empty or that no new reference or deadline appeared afterwards.
-`left_work_at` means a page or budget left eligible work. A thrown phase records
-its own error; other phase messages still run. A successful phase does not clear
-another phase's error. Status groups the five phase facts per object kind and
-shows which phases last observed work, exhausted a budget or failed. An old
-start timestamp is an observation only; it cannot prove why a message did not
-start.
+A phase's `completed_at` means that its final query found no eligible work for
+that phase. It does not establish that every phase was empty or that no new
+reference or deadline appeared afterwards. `left_work_at` means a page or budget
+left eligible work. A thrown phase records its own error; other phase messages
+still run. A successful phase does not clear another phase's error. Status
+groups the five phase facts per object kind and shows which phases last observed
+work, exhausted a budget or failed. An old start timestamp is an observation
+only; it cannot prove why a message did not start.
 
-The cost of a run cannot be derived from a count of binding calls. D1 batches
-contain multiple statements, and rows read and written depend on indexes and
-population. Measure phase pages on sparse and full NAR and CAS fixtures,
-including a page with many referenced candidates and stray markers. Use those
-figures in the Free aggregate worksheet before activating the new cadence. At
-five-minute Paid cadence, ten ordinary phase messages per tick contribute 2,880
-messages and about 8,640 Queues operations a day before retries. Include this
-traffic with demote and other messages in the rollout's queue latency and
-monthly cost observations.
+Binding-call counts alone do not establish the cost of a run. D1 batches contain
+multiple statements, and rows read and written depend on indexes and population.
+Measure phase pages on sparse and full NAR and CAS fixtures, including a page
+with many referenced candidates and stray markers. Use those figures in the Free
+aggregate worksheet before activating the new cadence. At five-minute Paid
+cadence, ten ordinary phase messages per tick contribute 2,880 messages and
+about 8,640 Queues operations a day before retries. Include this traffic with
+demote and other messages in the rollout's queue latency and monthly cost
+observations.
 
 ## 6. The membership refresh
 
@@ -1045,8 +1036,8 @@ KV failure prevents the tick from sending unrelated work. A valid but stale
 filter can reject a newly created tenant. If the filter is missing or cannot be
 read, `admitTenant()` falls through to the marker and then D1; a missing filter
 alone does not reject admission. The filter construction itself is deterministic
-for a given set because its initial seeds are fixed. Those facts matter to the
-recovery contract.
+for a given set because its initial seeds are fixed. The recovery path must
+account for these behaviours.
 
 The tick sends an independent `membership-refresh` message. On Free, one UTC
 slot per hour admits the refresh before any KV write; duplicate deliveries
@@ -1065,28 +1056,27 @@ and index maintenance. A construction or D1 failure leaves the previous filter
 in place and records an error; valid-filter misses still check the marker, so a
 newly created tenant remains reachable when its marker is visible.
 
-Marker repair is a separate bounded page, not a second full D1 snapshot. List at
-most 100 KV marker keys from a persisted list cursor. For listed keys, read the
-corresponding D1 statuses in bounded JSON batches. Delete a marker only when its
-slug has an `offboarded` tombstone; a missing row is not evidence for deletion
-because creation may be concurrent. To find missing live markers, advance a
-separate keyset cursor through at most 100 live D1 slugs and check their KV
-keys. The Free release caps repairs at 20 marker puts and 20 tombstone deletes
-per admitted hour. The two cursors advance after their page's outcomes are
-recorded and restart when exhausted; failures repeat the page. These limits
-cover normal and duplicate delivery without an unbounded list or a write for
-every tenant. The consumer records partial repair and errors separately from
-filter publication. A failed KV operation does not stop the other kinds that the
-tick scheduled.
+Repair markers in separate bounded pages. List at most 100 KV marker keys from a
+persisted list cursor. For listed keys, read the corresponding D1 statuses in
+bounded JSON batches. Delete a marker only when its slug has an `offboarded`
+tombstone; a missing row is not evidence for deletion because creation may be
+concurrent. To find missing live markers, advance a separate keyset cursor
+through at most 100 live D1 slugs and check their KV keys. The Free release caps
+repairs at 20 marker puts and 20 tombstone deletes per admitted hour. The two
+cursors advance after their page's outcomes are recorded and restart when
+exhausted; failures repeat the page. These limits cover normal and duplicate
+delivery without an unbounded list or a write for every tenant. The consumer
+records partial repair and errors separately from filter publication. A failed
+KV operation does not stop the other kinds that the tick scheduled.
 
-The existing creation path still writes the marker and publishes a filter.
-Overlapping creation and refresh publishers can put an older filter last. KV
-provides no compare-and-set and propagation can take sixty seconds or more.
-Under successful subsequent delivery, the next refresh is expected to repair
-that filter. Queue delay, repeated failures and a late old publisher mean there
-is no fixed one-hour recovery guarantee. Status reports publication attempt,
-success, unfinished marker count where measured, and the latest KV error. It
-does not claim that a recent write is globally visible.
+The existing creation path still writes the marker and publishes a filter. When
+creation and refresh overlap, an older filter can be published last. KV provides
+no compare-and-set and propagation can take sixty seconds or more. Under
+successful subsequent delivery, the next refresh is expected to repair that
+filter. Queue delay, repeated failures and a late old publisher mean there is no
+fixed one-hour recovery guarantee. Status reports publication attempt, success,
+unfinished marker count where measured, and the latest KV error. It does not
+claim that a recent write is globally visible.
 
 Admission checks the per-tenant marker when a valid filter misses. A present
 marker permits the authoritative D1 read; a missing marker rejects that slug. If
@@ -1097,9 +1087,9 @@ KV error. This improves recovery from a stale filter without reading D1 for
 every unknown slug. A newly written marker can itself remain invisible in
 another location, so creation still has an eventual consistency window.
 Unknown-slug traffic now consumes KV reads; Free's 100,000-read daily allowance
-can be exhausted by sufficiently high traffic. That tradeoff is part of this
-admission contract and must be visible in observability and the operator guide,
-not exposed as a correctness-policy switch.
+can be exhausted by sufficiently high traffic. Show these additional KV reads in
+observability and the operator guide. Do not expose the admission rule as a
+correctness-policy switch.
 
 On Free, hourly admission permits at most 24 filter writes, 480 marker puts and
 480 marker deletes a day from this job. Puts and deletes have separate KV
