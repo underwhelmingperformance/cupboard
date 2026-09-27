@@ -110,8 +110,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 4,
-			largeBacklogCost: 4
+			smallBacklogCost: 3,
+			largeBacklogCost: 3
 		});
 	});
 
@@ -125,8 +125,40 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 4,
+			smallBacklogCost: 3,
 			largeBacklogCost: 3
+		});
+	});
+
+	it('finds no due retry and one due retry at bounded cost', async () => {
+		await initialise();
+		await seedPendingUploads(3, 'deferred-small', 'pending');
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				"UPDATE pending_upload SET settle_retry_after = '2099-01-01T00:00:00.000Z' WHERE id LIKE 'deferred-%'"
+			);
+		});
+		const smallDeferred = await reconcileCost();
+
+		await seedPendingUploads(197, 'deferred-large', 'committing');
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				"UPDATE pending_upload SET settle_retry_after = '2099-01-01T00:00:00.000Z' WHERE id LIKE 'deferred-%'"
+			);
+		});
+		const largeDeferred = await reconcileCost();
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				"UPDATE pending_upload SET settle_retry_after = '1970-01-01T00:00:00.000Z' WHERE id = 'deferred-large-196'"
+			);
+		});
+		const sparseDue = await reconcileCost();
+
+		expect({ smallDeferred, largeDeferred, sparseDue }).toStrictEqual({
+			smallDeferred: 10,
+			largeDeferred: 10,
+			sparseDue: 2
 		});
 	});
 });
@@ -217,8 +249,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 182,
-			largeBacklogCost: 182
+			smallBacklogCost: 183,
+			largeBacklogCost: 183
 		});
 	});
 
@@ -270,8 +302,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 174,
-			largeBacklogCost: 174
+			smallBacklogCost: 175,
+			largeBacklogCost: 175
 		});
 	});
 
@@ -302,8 +334,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 806, rowsWritten: 131 },
-			largeBacklog: { rowsRead: 806, rowsWritten: 131 }
+			smallBacklog: { rowsRead: 807, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 807, rowsWritten: 131 }
 		});
 	});
 
@@ -326,8 +358,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 190,
-			largeBacklogCost: 190
+			smallBacklogCost: 191,
+			largeBacklogCost: 191
 		});
 	});
 });

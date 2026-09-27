@@ -286,7 +286,7 @@ describe('consumer verify pass', () => {
 		});
 	});
 
-	it('releases a reuse claim after a transient promotion fault', async () => {
+	it('retries a reuse claim after a transient promotion fault and backoff', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('reuse-transient');
 		const first = uploadMetadata({
@@ -315,9 +315,6 @@ describe('consumer verify pass', () => {
 
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// The promote's canonical head fails transiently; the pass abandons the
-		// claim, and abandoning must free the lease so the next pass retries at
-		// at once.
 		const canonicalKey = await currentNarObjectKey(nar.narHash);
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		let shouldFail = true;
@@ -337,6 +334,10 @@ describe('consumer verify pass', () => {
 
 			expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
 
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
+
+			vi.setSystemTime(new Date(Date.now() + 30_000));
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			head.mockRestore();

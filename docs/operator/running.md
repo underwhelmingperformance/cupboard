@@ -75,6 +75,15 @@ wrangler d1 execute cupboard --remote \
 If a tenant keeps failing, the last error and the Worker logs from around that
 time are the place to start.
 
+The tenant Worker records exceptional failures to settle an upload in
+`pending_upload.settle_failures` and `last_settle_error`. It delays each retry
+by 30 seconds initially, doubling the delay up to ten minutes. The
+`pending upload verification failed` log includes the upload ID, failure count,
+phase and last error. The row remains eligible for recovery after the retry
+deadline, including when a commit has already changed shared storage. Check the
+last error and the storage service if a client repeatedly times out while
+waiting for verification. A normal deferral does not increase the count.
+
 ### Upgrade progress
 
 `cupboard deployment status https://cupboard.example.workers.dev` shows the

@@ -1153,7 +1153,7 @@ export class UploadWaitTimeoutError extends CliError {
 		public readonly timeoutSeconds: number
 	) {
 		super(
-			`Timed out after ${String(timeoutSeconds)}s waiting for ${String(pending)} upload(s) to become servable`
+			`Timed out after ${String(timeoutSeconds)}s waiting for ${String(pending)} upload(s) to become servable. Verification may still finish; retry the push later, and contact the cache operator if the delay persists.`
 		);
 		this.name = 'UploadWaitTimeoutError';
 	}
