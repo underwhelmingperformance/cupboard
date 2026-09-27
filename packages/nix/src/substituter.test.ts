@@ -29,6 +29,32 @@ import {
 	SubstituterUnreachableError
 } from './substituter.ts';
 
+// When a test sets `failure`, every file handle closes its file and then
+// rejects with that error.
+const fileHandleClose = vi.hoisted((): { failure?: Error } => ({}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('node:fs/promises')>();
+
+	return {
+		...actual,
+		open: async (...arguments_: Parameters<typeof actual.open>) => {
+			const handle = await actual.open(...arguments_);
+			const close = handle.close.bind(handle);
+
+			handle.close = async () => {
+				await close();
+
+				if (fileHandleClose.failure !== undefined) {
+					throw fileHandleClose.failure;
+				}
+			};
+
+			return handle;
+		}
+	};
+});
+
 type OpenStore = (stateDirectory: string) => NixStoreDatabase;
 
 const unopenableStore: OpenStore = () => {
@@ -248,6 +274,27 @@ describe('a directory-backed substituter', () => {
 		}
 
 		directories.length = 0;
+		delete fileHandleClose.failure;
+	});
+
+	it('excludes a directory with oversized cache info when closing the file also fails', async () => {
+		const directory = cacheDirectory({
+			'nix-cache-info': 'x'.repeat(maxSubstituterDocumentByteLength + 1)
+		});
+		// A failure with this code would make the document read as absent.
+		fileHandleClose.failure = Object.assign(
+			new Error('the file could not be closed'),
+			{ code: 'ENOENT' }
+		);
+
+		const opened = await openSubstituters([fileUri(directory)], {
+			fetch: never
+		});
+
+		expect(opened).toStrictEqual({
+			substituters: [],
+			unreachable: [{ uri: fileUri(directory), reason: 'no-cache-info' }]
+		});
 	});
 
 	function cacheDirectory(
@@ -696,6 +743,68 @@ describe('a local-store substituter', () => {
 		expect(await client.querySubstitutablePathInfos([appPath])).toStrictEqual(
 			[]
 		);
+	});
+
+	it.each([
+		{
+			name: 'the read failure when closing the database also fails',
+			readFailure: new Error('the database could not be read'),
+			closeFailure: new Error('the database could not be closed'),
+			expectedCause: 'read'
+		},
+		{
+			name: 'a close failure after a successful read',
+			readFailure: undefined,
+			closeFailure: new Error('the database could not be closed'),
+			expectedCause: 'close'
+		}
+	])('reports $name', async ({ readFailure, closeFailure, expectedCause }) => {
+		const open: OpenStore = () => ({
+			pathRow: () => {
+				if (readFailure !== undefined) {
+					throw readFailure;
+				}
+
+				return appRow;
+			},
+			references: () => [],
+			validPaths: () => [],
+			derivationOutputs: () => [],
+			close: () => {
+				throw closeFailure;
+			}
+		});
+		const client = new SubstituterClient(
+			() =>
+				openSubstituters(['local:///rooted'], {
+					storeDirectory,
+					openStore: open
+				}),
+			{
+				storeDirectory,
+				substitute: true,
+				fallback: false,
+				fetch: never,
+				openStore: open
+			}
+		);
+		let error: unknown;
+
+		try {
+			await client.querySubstitutablePathInfos([appPath]);
+		} catch (error_) {
+			error = error_;
+		}
+
+		expect({
+			isUnreadable: error instanceof SubstituterAnswerUnreadableError,
+			cause:
+				error instanceof Error && error.cause === readFailure
+					? 'read'
+					: error instanceof Error && error.cause === closeFailure
+						? 'close'
+						: 'other'
+		}).toStrictEqual({ isUnreadable: true, cause: expectedCause });
 	});
 
 	it.each([

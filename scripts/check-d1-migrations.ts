@@ -11,6 +11,7 @@ import {
 	schemaTransitions,
 	type TransitionState
 } from '@cupboard/protocol/deployment';
+import { withCleanupSync } from '@cupboard/shared/cleanup';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
@@ -275,21 +276,24 @@ function replay(
 ): string[] {
 	const database = new DatabaseSync(':memory:');
 
-	try {
-		for (const file of files) {
-			for (const statement of statementsOf(set, file)) {
-				try {
-					database.prepare(statement).run();
-				} catch (error) {
-					throw new MigrationApplyError(file, statement, error, context);
+	return withCleanupSync(
+		() => {
+			for (const file of files) {
+				for (const statement of statementsOf(set, file)) {
+					try {
+						database.prepare(statement).run();
+					} catch (error) {
+						throw new MigrationApplyError(file, statement, error, context);
+					}
 				}
 			}
-		}
 
-		return schemaOf(database);
-	} finally {
-		database.close();
-	}
+			return schemaOf(database);
+		},
+		() => {
+			database.close();
+		}
+	);
 }
 
 function isSameSequence(

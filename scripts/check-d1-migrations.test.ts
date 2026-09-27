@@ -1,11 +1,12 @@
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type SchemaTransition,
 	schemaTransitions
 } from '@cupboard/protocol/deployment';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	checkD1Migrations,
@@ -194,6 +195,31 @@ describe('checkD1Migrations', () => {
 				'0001_expand.sql'
 			)
 		);
+	});
+
+	it('reports the migration that does not apply when closing the database also fails', () => {
+		const set = migrationSet({
+			'0001_expand.sql': 'ALTER TABLE tenant ADD COLUMN legacy TEXT;'
+		});
+		const close = vi
+			.spyOn(DatabaseSync.prototype, 'close')
+			.mockImplementation(() => {
+				throw new Error('the database could not be closed');
+			});
+		let caught: unknown;
+
+		try {
+			checkD1Migrations(set, [cacheIdentity, independent]);
+		} catch (error) {
+			caught = error;
+		} finally {
+			close.mockRestore();
+		}
+
+		expect({
+			isApplyError: caught instanceof MigrationApplyError,
+			file: caught instanceof MigrationApplyError && caught.file
+		}).toStrictEqual({ isApplyError: true, file: '0001_expand.sql' });
 	});
 
 	it('fails when a migration does not apply in name order', () => {

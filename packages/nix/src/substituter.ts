@@ -14,7 +14,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import { discardResponseBody } from '@cupboard/shared/cleanup';
+import {
+	discardResponseBody,
+	withCleanup,
+	withCleanupSync
+} from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	basicAuthHeader,
@@ -479,26 +483,15 @@ export class SubstituterClient {
 			};
 		}
 
+		let held: ReturnType<typeof pathInfoIn>;
+
 		try {
-			const held = pathInfoIn(database, storePath);
-
-			if (held === undefined) {
-				return { kind: 'absent' };
-			}
-
-			return {
-				kind: 'held',
-				offer: {
-					source: 'substituter',
-					narHash: held.narHash,
-					narSize: held.narSize,
-					downloadSize: 0,
-					references: held.references,
-					signatures: held.signatures,
-					fromTrustedSubstituter: substituter.isTrusted,
-					...(held.deriver !== undefined && { deriver: held.deriver })
+			held = withCleanupSync(
+				() => pathInfoIn(database, storePath),
+				() => {
+					database.close();
 				}
-			};
+			);
 		} catch (error) {
 			this.raiseIfAbandoned();
 
@@ -508,9 +501,25 @@ export class SubstituterClient {
 					cause: error
 				})
 			};
-		} finally {
-			database.close();
 		}
+
+		if (held === undefined) {
+			return { kind: 'absent' };
+		}
+
+		return {
+			kind: 'held',
+			offer: {
+				source: 'substituter',
+				narHash: held.narHash,
+				narSize: held.narSize,
+				downloadSize: 0,
+				references: held.references,
+				signatures: held.signatures,
+				fromTrustedSubstituter: substituter.isTrusted,
+				...(held.deriver !== undefined && { deriver: held.deriver })
+			}
+		};
 	}
 
 	// Preserve the caller's abort reason instead of replacing it with a
@@ -926,17 +935,18 @@ async function boundedFileText(
 ): Promise<string> {
 	const handle = await open(filePath);
 
-	try {
-		const { size } = await handle.stat();
+	return withCleanup(
+		async () => {
+			const { size } = await handle.stat();
 
-		if (size > maxByteLength) {
-			throw new OversizedSubstituterDocumentError(maxByteLength);
-		}
+			if (size > maxByteLength) {
+				throw new OversizedSubstituterDocumentError(maxByteLength);
+			}
 
-		return await handle.readFile('utf8');
-	} finally {
-		await handle.close();
-	}
+			return handle.readFile('utf8');
+		},
+		() => handle.close()
+	);
 }
 
 async function boundedText(

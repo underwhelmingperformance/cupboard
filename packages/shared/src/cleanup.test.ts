@@ -4,7 +4,8 @@ import {
 	bestEffort,
 	discardResponseBody,
 	withCleanup,
-	withCleanups
+	withCleanups,
+	withCleanupSync
 } from './cleanup.ts';
 
 describe('withCleanup', () => {
@@ -27,6 +28,51 @@ describe('withCleanup', () => {
 				() => Promise.reject(cleanupFailure)
 			)
 		).rejects.toBe(cleanupFailure);
+	});
+});
+
+describe('withCleanupSync', () => {
+	it.each<{
+		readonly name: string;
+		readonly operationFails: boolean;
+		readonly expected: 'operation' | 'cleanup';
+	}>([
+		{
+			name: 'preserves an operation failure when cleanup also fails',
+			operationFails: true,
+			expected: 'operation'
+		},
+		{
+			name: 'surfaces a cleanup failure after a successful operation',
+			operationFails: false,
+			expected: 'cleanup'
+		}
+	])('$name', ({ operationFails, expected }) => {
+		const failures = {
+			operation: new Error('operation failed'),
+			cleanup: new Error('cleanup failed')
+		};
+		const cleanup = vi.fn(() => {
+			throw failures.cleanup;
+		});
+		let caught: unknown;
+
+		try {
+			withCleanupSync(() => {
+				if (operationFails) {
+					throw failures.operation;
+				}
+
+				return 'complete';
+			}, cleanup);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({
+			caught: caught === failures[expected] ? expected : 'other',
+			cleanups: cleanup.mock.calls.length
+		}).toStrictEqual({ caught: expected, cleanups: 1 });
 	});
 });
 

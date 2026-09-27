@@ -159,11 +159,14 @@ export class NixLocalStoreClient implements NixStoreClient {
 	): Promise<Awaited<T>> {
 		const database = this.open();
 
-		try {
-			return await use(database);
-		} finally {
-			database.close();
-		}
+		return withCleanup(
+			() => Promise.resolve(use(database)),
+			() => {
+				database.close();
+
+				return Promise.resolve();
+			}
+		);
 	}
 
 	resolveClosure(
