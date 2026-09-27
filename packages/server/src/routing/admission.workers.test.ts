@@ -102,6 +102,25 @@ async function admit(slug: string): Promise<TenantEntry | undefined> {
 	return entry?.entry;
 }
 
+async function refusal(path: string): Promise<{
+	readonly status: number;
+	readonly cacheControl: string | null;
+}> {
+	const ctx = createExecutionContext();
+	const response = await worker.fetch(
+		new Request(`https://cache.example${path}`),
+		env,
+		ctx
+	);
+	await waitOnExecutionContext(ctx);
+	await response.text();
+
+	return {
+		status: response.status,
+		cacheControl: response.headers.get('cache-control')
+	};
+}
+
 async function primeRowCache(slug: string): Promise<void> {
 	const ctx = createExecutionContext();
 	await worker.fetch(
@@ -461,6 +480,30 @@ describe('layered admission gate', () => {
 			expect(response.status).toBe(StatusCodes.NOT_FOUND);
 		}
 	);
+
+	it('marks the 404 for an unknown or suspended tenant as not storable', async () => {
+		const slug = 'refused-no-store';
+
+		await provisionNamedTenant(slug);
+		await setTenantStatus(database(), tenantIdSchema.parse(slug), 'suspended');
+
+		const notStorable = {
+			status: StatusCodes.NOT_FOUND,
+			cacheControl: 'no-store'
+		};
+
+		expect({
+			unknown: await refusal('/t/never-provisioned/oidc-trust'),
+			suspended: await refusal(`/t/${slug}/oidc-trust`),
+			suspendedMetadata: await refusal(
+				`/.well-known/oauth-authorization-server/t/${slug}`
+			)
+		}).toStrictEqual({
+			unknown: notStorable,
+			suspended: notStorable,
+			suspendedMetadata: notStorable
+		});
+	});
 
 	it('returns the admission refusal as a 503 with Retry-After', async () => {
 		const app = new Hono();

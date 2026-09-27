@@ -111,7 +111,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			);
 
 			if (admission?.entry.status !== 'active') {
-				return notFoundResponse();
+				return uncachedNotFoundResponse();
 			}
 
 			const inner = new URL(context.req.url);
@@ -157,7 +157,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		);
 
 		if (admission === undefined) {
-			return notFoundResponse();
+			return uncachedNotFoundResponse();
 		}
 
 		const { entry, fresh, cache, cacheVerifier, cacheVersion } = admission;
@@ -166,7 +166,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			isTenantRead(context.req.method, route.rest) &&
 			entry.status !== 'active'
 		) {
-			return notFoundResponse();
+			return uncachedNotFoundResponse();
 		}
 
 		context.set('tenant', route.tenant);
