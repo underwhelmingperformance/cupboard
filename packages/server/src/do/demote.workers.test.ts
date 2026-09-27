@@ -106,6 +106,68 @@ describe('missing blob demotion', () => {
 		await clearBlobStorage();
 	});
 
+	it('does not queue another global refresh when a later tenant uploads the same NAR', async () => {
+		const first = await committedTenantPath('replacement-later-upload');
+		await env.BLOBS.delete(await currentNarObjectKey(first.narHash));
+		await pushPathToTenant(
+			first.tenant,
+			first.token,
+			first.metadata,
+			first.nar
+		);
+
+		const laterTenant = tenantIdSchema.parse(
+			`demote-test-${String(tenantNumbers.next().value)}`
+		);
+		const issuer = await provisionNamedTenant(laterTenant);
+		const token = await issueTokenForTenant(
+			testServerFor(laterTenant),
+			issuer,
+			cacheWriteGrants()
+		);
+		const emitted: unknown[] = [];
+		await runInDurableObject(testServerFor(laterTenant), (instance) => {
+			const queue = instance.context.env.MAINTENANCE_QUEUE;
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: async (message: unknown) => {
+						emitted.push(message);
+
+						return queue.send(message);
+					},
+					sendBatch: queue.sendBatch.bind(queue),
+					metrics: queue.metrics.bind(queue)
+				}
+			};
+
+			return Promise.resolve();
+		});
+		await pushPathToTenant(laterTenant, token, first.metadata, first.nar);
+
+		const object = await env.BLOBS.get(
+			narInfoObjectKey(laterTenant, first.metadata.storePathHash, {
+				kind: 'default'
+			})
+		);
+		const refreshes = emitted.filter(
+			(message) =>
+				message !== null &&
+				typeof message === 'object' &&
+				'kind' in message &&
+				message.kind === 'narinfo-refresh'
+		);
+
+		expect({
+			refreshes,
+			narUrl:
+				object === null ? undefined : NarInfo.parse(await object.text()).url
+		}).toStrictEqual({
+			refreshes: [],
+			narUrl: await currentNarObjectKey(first.narHash)
+		});
+	});
+
 	it('refreshes a second tenant after another tenant replaces a missing NAR', async () => {
 		const first = await committedTenantPath('shared-cross-tenant');
 		const secondTenant = tenantIdSchema.parse(

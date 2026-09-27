@@ -36,12 +36,17 @@ type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 // hour, negotiation offers reuse again, and a commit that finds the object
 // still missing records the hash again.
 const missingCanonicalNarPrefix = 'uploads:missing-canonical-nar:';
+const pendingNarRefreshPrefix = 'uploads:pending-nar-refresh:';
 const missingCanonicalNarTtlMs = 60 * 60 * 1000;
 // Durable Object storage reads at most this many keys in one call.
 const maxStorageKeysPerGet = 128;
 
 function missingCanonicalNarKey(narHash: NixSha256HashString): string {
 	return `${missingCanonicalNarPrefix}${narHash}`;
+}
+
+function pendingNarRefreshKey(uploadId: UploadId): string {
+	return `${pendingNarRefreshPrefix}${uploadId}`;
 }
 
 export class UploadStateService {
@@ -165,6 +170,22 @@ export class UploadStateService {
 	 */
 	async clearCanonicalNarMissing(narHash: NixSha256HashString): Promise<void> {
 		await this.context.ctx.storage.delete(missingCanonicalNarKey(narHash));
+	}
+
+	async markPendingNarRefresh(uploadId: UploadId): Promise<void> {
+		await this.context.ctx.storage.put(pendingNarRefreshKey(uploadId), true);
+	}
+
+	async hasPendingNarRefresh(uploadId: UploadId): Promise<boolean> {
+		return (
+			(await this.context.ctx.storage.get<boolean>(
+				pendingNarRefreshKey(uploadId)
+			)) === true
+		);
+	}
+
+	async clearPendingNarRefresh(uploadId: UploadId): Promise<void> {
+		await this.context.ctx.storage.delete(pendingNarRefreshKey(uploadId));
 	}
 
 	/**

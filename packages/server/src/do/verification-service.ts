@@ -1072,6 +1072,10 @@ export class VerificationService {
 				return 'ignored';
 			}
 
+			if (staged.requiresActivation && staged.incarnation > 1) {
+				await this.uploadState.markPendingNarRefresh(pending.id);
+			}
+
 			const activation = await this.context.criticalSection(async () => {
 				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
 					return { result: 'ignored' as const, wasActivated: false };
@@ -1096,6 +1100,14 @@ export class VerificationService {
 
 			if (activation.wasActivated) {
 				await this.uploadState.clearCanonicalNarMissing(metadata.narHash);
+
+				if (await this.uploadState.hasPendingNarRefresh(pending.id)) {
+					await this.context.env.MAINTENANCE_QUEUE.send({
+						kind: 'narinfo-refresh',
+						narHash: metadata.narHash
+					});
+					await this.uploadState.clearPendingNarRefresh(pending.id);
+				}
 			}
 
 			return activation.result;
@@ -1324,13 +1336,6 @@ export class VerificationService {
 
 			if (!wasPublished) {
 				return false;
-			}
-
-			if (outcome.narInfo.url !== narObjectKey(metadata.narHash)) {
-				await this.context.env.MAINTENANCE_QUEUE.send({
-					kind: 'narinfo-refresh',
-					narHash: metadata.narHash
-				});
 			}
 
 			signal?.throwIfAborted();
