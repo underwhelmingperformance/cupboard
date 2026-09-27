@@ -1,3 +1,6 @@
+import { setTimeout as sleep } from 'node:timers/promises';
+
+import { capturingReporter } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
@@ -18,6 +21,7 @@ import { githubPrAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
 import type { D1QueryApi } from '../../packages/cli/src/deploy/d1-query.ts';
 import { readLocalStepReadiness } from '../../packages/cli/src/deploy/deployment-state.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
+import { settleTenants } from '../../packages/cli/src/deploy/settlement.ts';
 import {
 	completeTransitions,
 	prepareTransitions
@@ -33,9 +37,12 @@ import {
 	StagedDeploymentServer
 } from '../support/staged-deployment-server.ts';
 
-// Enough for every seeded tenant in one pass.
-const wakeLimit = 20;
-const wakePassLimit = 100;
+// The settlement reads the tenants every five seconds; the tests read them
+// more often so that they finish sooner.
+const pollDelayMs = 200;
+// The most reads of an offboarding tenant's cache that a test makes while the
+// tenant's object continues its migrations.
+const pendingReadLimit = 100;
 
 const repository = {
 	repositoryId: 4321,
@@ -45,6 +52,16 @@ const repository = {
 };
 
 const resumableFixtureTenants = 2 + sleepingFixtureTenants.length;
+
+// The counts in `localStep.status` once every tenant has recorded the step.
+const noTenantPending = {
+	pending: 0,
+	working: 0,
+	stalled: 0,
+	unwoken: 0,
+	stalledSample: [],
+	unwokenSample: []
+};
 
 // The clock that every walk uses for timestamps, so the recorded timestamps are
 // known.
@@ -82,24 +99,33 @@ const preUploadTransitions = {
 	unrecognised: []
 };
 
-// Each tenant object continues its own work on its alarm after a wake, so
-// the outcome of the last wake depends on timing and is not returned.
+/**
+ * Wakes the tenants and waits for them as the deploy does, then checks that
+ * every active or suspended tenant has recorded `requiredStep`. The wake goes
+ * through the maintenance queue, and each woken tenant object continues its
+ * own work on its alarm.
+ */
 async function wakeUntilStep(
 	server: StagedDeploymentServer,
 	client: DeploymentClient,
 	requiredStep: LocalStep
 ): Promise<void> {
-	for (let pass = 0; pass < wakePassLimit; pass++) {
-		await client.wakeLocalStep(wakeLimit);
-		const readiness = await readLocalStepReadiness(
-			d1QueryApi(server),
-			stagedDeploymentDatabaseId,
-			requiredStep
-		);
+	await settleTenants(
+		{
+			status: () => client.localStepStatus(),
+			wake: () => client.wakeLocalStep()
+		},
+		capturingReporter([]),
+		{ delay: () => sleep(pollDelayMs) }
+	);
+	const readiness = await readLocalStepReadiness(
+		d1QueryApi(server),
+		stagedDeploymentDatabaseId,
+		requiredStep
+	);
 
-		if (readiness.pending === 0) {
-			return;
-		}
+	if (readiness.pending === 0) {
+		return;
 	}
 
 	throw new Error(
@@ -221,15 +247,13 @@ it('upgrades a populated predecessor deployment', async () => {
 				current: currentLocalStep,
 				required: expansionLocalStep,
 				ready: resumableFixtureTenants,
-				pending: 0,
-				stragglers: []
+				...noTenantPending
 			},
 			status: {
 				current: currentLocalStep,
 				required: currentLocalStep,
 				ready: resumableFixtureTenants,
-				pending: 0,
-				stragglers: []
+				...noTenantPending
 			},
 			recorded: completedTransitions,
 			terminal: {
@@ -326,8 +350,9 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 		await wakeUntilStep(server, client, currentLocalStep);
 
 		// Each sleeping tenant stopped at a different migration under the
-		// predecessor. Repeated wakes advance its persisted pages until it reaches
-		// the same step as the tenant that was never behind.
+		// predecessor. After one wake, its object runs its persisted pages on its
+		// alarm until it reaches the same step as the tenant that was never
+		// behind.
 		expect({
 			before,
 			after: await client.localStepStatus()
@@ -337,18 +362,21 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 				required: expansionLocalStep,
 				ready: 0,
 				pending: resumableFixtureTenants,
-				stragglers: [
+				working: 0,
+				stalled: 0,
+				unwoken: resumableFixtureTenants,
+				stalledSample: [],
+				unwokenSample: [
 					'upgrade-active',
 					...sleepingFixtureTenants,
 					'upgrade-suspended'
-				]
+				].map((tenant) => ({ tenant }))
 			},
 			after: {
 				current: currentLocalStep,
 				required: currentLocalStep,
 				ready: resumableFixtureTenants,
-				pending: 0,
-				stragglers: []
+				...noTenantPending
 			}
 		});
 	} finally {
@@ -376,7 +404,7 @@ it('serves a suspended predecessor private cache immediately after resume', asyn
 		);
 		await immediate.arrayBuffer();
 
-		await client.wakeLocalStep(wakeLimit);
+		await client.wakeLocalStep();
 		const afterWake = await server.tenantNarInfo(
 			'upgrade-suspended',
 			'secrets'
@@ -552,7 +580,7 @@ it('starts an offboarding tenant that never converted its catalogue', async () =
 		// advance its persisted migration pages even though it no longer serves reads.
 		let response: Response | undefined;
 		let didReturnPending = false;
-		for (let attempt = 0; attempt < wakePassLimit; attempt++) {
+		for (let attempt = 0; attempt < pendingReadLimit; attempt++) {
 			response = await server.dispatch('/t/upgrade-offboarding/nix-cache-info');
 			if (response.status !== 503) {
 				break;

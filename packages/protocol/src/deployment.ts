@@ -172,8 +172,8 @@ export interface SchemaTransition<Id extends string = TransitionId> {
 	/**
 	 * The transition's contract step: the local step that every active or
 	 * suspended tenant must record before the deploy applies the contract
-	 * migrations. The deploy wakes tenants in batches until each has recorded
-	 * it. An object can record only the steps that its `recordLocalStep`
+	 * migrations. The deploy wakes the tenants and waits until each has
+	 * recorded it. An object can record only the steps that its `recordLocalStep`
 	 * reports, so a transition may declare only such a step; a protocol test
 	 * enforces this.
 	 */
@@ -451,8 +451,6 @@ export type DeploymentTransitionsResponse = z.input<
 	typeof deploymentTransitionsResponseSchema
 >;
 
-export const localStepStragglerSampleSize = 20;
-
 /**
  * How long a tenant's local-step work may go without progress before it
  * counts as stalled. Each page of the work is bounded, and a page that saves a
@@ -467,60 +465,79 @@ export const localStepStallWindowMs = 10 * 60 * 1000;
  */
 export const localStepErrorMaxLength = 500;
 
-export const localStepStatusQuerySchema = z.strictObject({
-	requiredStep: localStepSchema.optional()
-});
+/**
+ * The most tenants that `localStep.status` lists in each sample.
+ */
+export const localStepSampleSize = 20;
 
+const tenantCountSchema = z.number().int().nonnegative();
+
+// A stalled pending tenant. `progressedAt` is absent when the object has never
+// made progress. `error` is the error of the last attempt, or the reason that
+// the object gave up, and is absent when the last attempt made no progress
+// without failing.
+export const localStepStalledTenantSchema = z.strictObject({
+	tenant: tenantIdSchema,
+	attemptedAt: isoTimestampSchema.optional(),
+	progressedAt: isoTimestampSchema.optional(),
+	error: z.string().max(localStepErrorMaxLength).optional()
+});
+export type ParsedLocalStepStalledTenant = z.output<
+	typeof localStepStalledTenantSchema
+>;
+
+// An unwoken pending tenant. `attemptedAt` is the last attempt at the
+// outstanding work, and is absent when no attempt has been made since the
+// tenant last recorded a step, or ever.
+export const localStepUnwokenTenantSchema = z.strictObject({
+	tenant: tenantIdSchema,
+	attemptedAt: isoTimestampSchema.optional()
+});
+export type ParsedLocalStepUnwokenTenant = z.output<
+	typeof localStepUnwokenTenantSchema
+>;
+
+/**
+ * How far the active and suspended tenants have come towards the required
+ * local step. Every pending tenant is in exactly one class, measured against
+ * the `localStepStallWindowMs` before the request. A tenant is unwoken when
+ * no attempt at the outstanding work has been made within the window and the
+ * last attempt did not fail. Otherwise the object has attempted the work, and
+ * the tenant is:
+ *
+ * - `working` when its last progress is inside the window, even if its last
+ *   attempt failed, or when it has never made progress and has not failed;
+ * - `stalled` when its last progress is outside the window, or when it has
+ *   never made progress and its last attempt failed.
+ */
 export const localStepStatusSchema = z.strictObject({
 	// This build's final local step (`currentLocalStep`).
 	current: localStepSchema,
-	// The step that `ready` and `pending` are counted against: the query's
-	// `requiredStep`, or else the required local step.
+	// The required local step, which `ready` and `pending` are counted against.
 	required: localStepSchema,
-	// Active or suspended tenants that have reported `required` or later.
-	ready: z.number().int().nonnegative(),
-	// Active or suspended tenants that have not, whether they reported an
-	// earlier step or have not reported since the column was added.
-	pending: z.number().int().nonnegative(),
-	// Up to `localStepStragglerSampleSize` of the pending tenants, in slug order.
-	stragglers: z.array(tenantIdSchema).max(localStepStragglerSampleSize)
+	// Active or suspended tenants that have recorded `required` or later.
+	ready: tenantCountSchema,
+	// Active or suspended tenants that have not, whether they recorded an
+	// earlier step or have not recorded one since the column was added.
+	pending: tenantCountSchema,
+	working: tenantCountSchema,
+	stalled: tenantCountSchema,
+	unwoken: tenantCountSchema,
+	// Up to `localStepSampleSize` of the stalled and of the unwoken tenants, in
+	// slug order.
+	stalledSample: z.array(localStepStalledTenantSchema).max(localStepSampleSize),
+	unwokenSample: z.array(localStepUnwokenTenantSchema).max(localStepSampleSize)
 });
 export type ParsedLocalStepStatus = z.output<typeof localStepStatusSchema>;
 export type LocalStepStatus = z.input<typeof localStepStatusSchema>;
 
-export const localStepWakeMaxTenants = 100;
-
-export const localStepWakeBodySchema = z.strictObject({
-	limit: z.number().int().positive().max(localStepWakeMaxTenants)
-});
-export type ParsedLocalStepWakeBody = z.output<typeof localStepWakeBodySchema>;
-export type LocalStepWakeBody = z.input<typeof localStepWakeBodySchema>;
-
-// Waking a tenant is a request to its object, so a batch can partly fail. A
-// failed tenant stays in the straggler list and the next batch retries it.
-export const localStepWakeOutcomeSchema = z.discriminatedUnion('kind', [
-	z.strictObject({
-		tenant: tenantIdSchema,
-		kind: z.literal('recorded'),
-		step: localStepSchema
-	}),
-	z.strictObject({
-		tenant: tenantIdSchema,
-		kind: z.literal('advanced'),
-		projected: z.number().int().nonnegative()
-	}),
-	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('unconfigured') }),
-	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('failed') })
-]);
-export type LocalStepWakeOutcome = z.infer<typeof localStepWakeOutcomeSchema>;
-
+// `localStep.wake` enqueues a wake for every pending tenant that is stalled or
+// unwoken. `enqueued` counts those tenants, and `pending` counts every pending
+// tenant.
 export const localStepWakeResponseSchema = z.strictObject({
-	current: localStepSchema,
-	// This batch selected the tenants below this step.
 	required: localStepSchema,
-	woken: z.number().int().nonnegative(),
-	failed: z.number().int().nonnegative(),
-	outcomes: z.array(localStepWakeOutcomeSchema).max(localStepWakeMaxTenants)
+	enqueued: tenantCountSchema,
+	pending: tenantCountSchema
 });
 export type ParsedLocalStepWakeResponse = z.output<
 	typeof localStepWakeResponseSchema

@@ -1239,10 +1239,12 @@ describe('runDeploy', () => {
 			transitions: recordedTransitions(recording.database),
 			phase: recordedPhase(recording.database)
 		}).toStrictEqual({
-			failure: new LocalStepUnreachedError(2, expansionLocalStep, [
-				'alpha',
-				'beta'
-			]),
+			failure: new LocalStepUnreachedError({
+				kind: 'below-step',
+				pending: 2,
+				requiredStep: expansionLocalStep,
+				stragglers: ['alpha', 'beta']
+			}),
 			applied: ['0000_a.sql', '0002_independent.sql'],
 			transitions: {
 				'cache-identity': 'expanded@2026-01-01T00:00:00.000Z',

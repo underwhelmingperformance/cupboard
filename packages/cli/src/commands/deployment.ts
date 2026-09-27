@@ -1,46 +1,40 @@
 import {
 	hasReachedTransitionState,
-	localStepWakeBodySchema,
+	type LocalStepStatus,
 	type ParsedDeploymentTransitionsResponse,
 	type StoredTransitionRow,
 	transitionIds
 } from '@cupboard/protocol/deployment';
-import { formatTimestamp, type Reporter } from '@cupboard/reporter';
-import { type Command, InvalidArgumentError } from 'commander';
+import {
+	formatTimestamp,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
+import { type Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { readStoredTransition } from '../deploy/deployment-state.ts';
-import { type SettlementClient, settleTenants } from '../deploy/settlement.ts';
+import {
+	pendingText,
+	stalledTenantText,
+	unwokenTenantText
+} from '../deploy/local-step-samples.ts';
+import {
+	type SettlementClient,
+	type SettlementOptions,
+	settleTenants
+} from '../deploy/settlement.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
-
-function parseBatchLimit(value: string): number {
-	const parsed = localStepWakeBodySchema.safeParse({ limit: Number(value) });
-	if (!parsed.success) {
-		throw new InvalidArgumentError(
-			'Batch size must be an integer from 1 to 100.'
-		);
-	}
-	return parsed.data.limit;
-}
-
-interface ResumeOptions {
-	readonly limit: number;
-	readonly maxPasses: number;
-}
 
 export interface DeploymentClient {
 	transitions(): Promise<ParsedDeploymentTransitionsResponse>;
 	readonly localStep: SettlementClient;
 }
 
-export interface DeploymentResumeOptions {
-	readonly limit: number;
-	readonly maxPasses: number;
-	readonly signal?: AbortSignal;
-}
+export type DeploymentResumeOptions = SettlementOptions;
 
 // What this build's `cupboard deploy` does with a row that the server lists
 // under `unrecognised`.
@@ -72,9 +66,35 @@ function unrecognisedRows(
 	}));
 }
 
+// A row for each tenant in the stalled and unwoken samples, and a row for the
+// pending tenants that the samples leave out.
+function sampleRows(status: LocalStepStatus): ResultRow[] {
+	const sampled = status.stalledSample.length + status.unwokenSample.length;
+
+	return [
+		...status.stalledSample.map((tenant) => ({
+			label: 'Stalled',
+			value: stalledTenantText(tenant)
+		})),
+		...status.unwokenSample.map((tenant) => ({
+			label: 'Not yet woken',
+			value: unwokenTenantText(tenant)
+		})),
+		...(status.stalled + status.unwoken > sampled
+			? [
+					{
+						label: 'Not listed',
+						value: `${String(status.stalled + status.unwoken - sampled)} more stalled or unwoken tenants`
+					}
+				]
+			: [])
+	];
+}
+
 /**
  * Shows each recorded schema transition, any recorded row that this build does
- * not define, the required local step, and how many tenants have reached it.
+ * not define, the required local step, how many tenants have reached it, and
+ * the pending tenants by class with a sample of the stalled and unwoken ones.
  * The step comes from the same response as the counts, so the two always
  * agree.
  */
@@ -83,7 +103,7 @@ export async function runDeploymentStatus(
 	client: DeploymentClient
 ): Promise<void> {
 	const { transitions, unrecognised } = await client.transitions();
-	const status = await client.localStep.status({});
+	const status = await client.localStep.status();
 	const transitionRows =
 		transitions.length === 0 && unrecognised.length === 0
 			? [{ label: 'Transitions', value: 'none recorded' }]
@@ -99,32 +119,25 @@ export async function runDeploymentStatus(
 			...unrecognisedRows(unrecognised),
 			{ label: 'Required local step', value: String(status.required) },
 			{ label: 'Ready tenants', value: String(status.ready) },
-			{ label: 'Pending tenants', value: String(status.pending) },
-			{
-				label: 'Pending sample',
-				value: status.stragglers.join(', ') || '(none)'
-			}
+			{ label: 'Pending tenants', value: pendingText(status) },
+			...sampleRows(status)
 		]
 	});
 }
 
 /**
- * Wakes bounded batches of tenants until each has recorded the required local
- * step, then reports whether a schema transition is still incomplete and needs
- * another `cupboard deploy`. A recorded row that this build does not define is
- * listed with what this build's deploy does with it, and is left out of the
- * transitions to complete.
+ * Wakes the pending tenants and waits until each has recorded the required
+ * local step, as the deploy does, then reports whether a schema transition is
+ * still incomplete and needs another `cupboard init`. A recorded row that this
+ * build does not define is listed with what this build's deploy does with it,
+ * and is left out of the transitions to complete.
  */
 export async function runDeploymentResume(
 	reporter: Reporter,
 	client: DeploymentClient,
 	options: DeploymentResumeOptions
 ): Promise<void> {
-	const status = await settleTenants(client.localStep, reporter, {
-		limit: options.limit,
-		maxPasses: options.maxPasses,
-		...(options.signal !== undefined && { signal: options.signal })
-	});
+	const status = await settleTenants(client.localStep, reporter, options);
 	const { transitions, unrecognised } = await client.transitions();
 	reporter.result({
 		kind: 'deployment-readiness',
@@ -194,28 +207,14 @@ export function registerDeploymentCommands(
 	deployment
 		.command('resume')
 		.description(
-			'Advance bounded tenant batches, then report whether deployment can continue.'
+			'Wake the pending tenants and wait for them, then report whether deployment can continue.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.option(
-			'--limit <number>',
-			'tenants attempted per batch (1–100)',
-			parseBatchLimit,
-			20
-		)
-		.option(
-			'--max-passes <number>',
-			'maximum batches in this command (1–100)',
-			parseBatchLimit,
-			20
-		)
-		.action(async (url: URL, request: ResumeOptions) => {
+		.action(async (url: URL) => {
 			await runDeploymentResume(
 				commandUi(program, options).reporter(),
 				client(url),
 				{
-					limit: request.limit,
-					maxPasses: request.maxPasses,
 					...(options.signal !== undefined && { signal: options.signal })
 				}
 			);

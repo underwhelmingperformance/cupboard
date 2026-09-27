@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	flakyD1,
 	offboardTenant,
 	provisionNamedTenant,
 	recordTransition,
@@ -31,6 +32,7 @@ import {
 	runOffboardBatch,
 	sendQueueMessages
 } from './scheduled.ts';
+import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 function aggregateErrorShape(error: unknown): {
 	readonly name: string;
@@ -138,7 +140,10 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
-				{ kind: 'local-step-sweep' }
+				{
+					kind: 'local-step',
+					tenants: ['acme', 'beta', 'current', fixtureTenant]
+				}
 			],
 			sent: [
 				[
@@ -150,7 +155,10 @@ describe('scheduled tenant pass failure records', () => {
 					{ kind: 'blob-demote' },
 					{ kind: 'cas-demote' },
 					{ kind: 'control-key-retirement' },
-					{ kind: 'local-step-sweep' }
+					{
+						kind: 'local-step',
+						tenants: ['acme', 'beta', 'current', fixtureTenant]
+					}
 				]
 			],
 			acmeOutcome: undefined,
@@ -336,7 +344,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
-				{ kind: 'local-step-sweep' }
+				{ kind: 'local-step', tenants: ['acme', 'current', fixtureTenant] }
 			],
 			acmeOutcome: undefined,
 			retiringOutcome: undefined
@@ -349,7 +357,8 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('beta');
 
 		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'local-step-sweep'
+			kind: 'local-step',
+			tenants: [tenantIdSchema.parse('acme'), tenantIdSchema.parse('beta')]
 		});
 
 		expect({
@@ -361,6 +370,96 @@ describe('scheduled tenant pass failure records', () => {
 			acme: currentLocalStep,
 			beta: currentLocalStep
 		});
+	});
+
+	// Earlier builds enqueued this kind every hour, and such a message can
+	// still be in the queue when this build deploys.
+	it("acknowledges an earlier build's wake message without waking a tenant", async () => {
+		await recordTransition('cache-identity', 'complete');
+		await provisionNamedTenant('acme');
+
+		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
+			kind: 'local-step-sweep'
+		});
+
+		expect({
+			decision,
+			acme: await localStepOf('acme')
+		}).toStrictEqual({ decision: { action: 'ack' }, acme: undefined });
+	});
+
+	it('enqueues the other jobs when the local-step selection fails', async () => {
+		const fault = new Error('selection fault');
+		const sent: MaintenanceQueueMessage[] = [];
+
+		let caught: unknown;
+
+		try {
+			await enqueueMaintenanceJobs(
+				{
+					...env,
+					CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+						failures: 1,
+						matches: (query) => query.includes('local_step_progressed_at'),
+						error: fault
+					})
+				},
+				queueCollector(sent)
+			);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({ isFault: caught === fault, sent }).toStrictEqual({
+			isFault: true,
+			sent: [
+				{ kind: 'blob-reaper' },
+				{ kind: 'cas-reaper' },
+				{ kind: 'blob-demote' },
+				{ kind: 'cas-demote' },
+				{ kind: 'control-key-retirement' }
+			]
+		});
+	});
+
+	// The fixture tenant has not recorded a step either, so every tick wakes it
+	// too.
+	it('enqueues a wake on every tick for each pending tenant that is not working', async () => {
+		await provisionNamedTenant('stalled', { configure: false });
+		await provisionNamedTenant('unwoken', { configure: false });
+		await provisionNamedTenant('working', { configure: false });
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.update(d1Schema.tenant)
+			.set({
+				localStepAttemptedAt: isoTimestamp(new Date()),
+				localStepProgressedAt: isoTimestamp(new Date())
+			})
+			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('working')))
+			.run();
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.update(d1Schema.tenant)
+			.set({
+				localStepAttemptedAt: isoTimestamp(new Date()),
+				localStepError: 'InjectedPageFault'
+			})
+			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('stalled')))
+			.run();
+
+		const sent: MaintenanceQueueMessage[] = [];
+		await enqueueMaintenanceJobs(env, queueCollector(sent));
+
+		expect(
+			sent.filter((message) => message.kind === 'local-step')
+		).toStrictEqual([
+			{
+				kind: 'local-step',
+				tenants: [
+					tenantIdSchema.parse('stalled'),
+					tenantIdSchema.parse('unwoken'),
+					fixtureTenant
+				]
+			}
+		]);
 	});
 
 	it('executes stale tenant maintenance messages as no-ops', async () => {
@@ -643,6 +742,7 @@ describe('scheduled tenant pass failure records', () => {
 									'blob-demote',
 									'cas-demote',
 									'control-key-retirement',
+									'local-step',
 									'local-step-sweep'
 								],
 								path: ['kind']
@@ -1015,14 +1115,16 @@ describe('scheduled tenant pass failure records', () => {
 	});
 });
 
-async function localStepOf(tenant: string): Promise<number | null | undefined> {
+// The tenant's recorded local step. A step that has not been recorded reads as
+// undefined.
+async function localStepOf(tenant: string): Promise<number | undefined> {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({ localStep: d1Schema.tenant.localStep })
 		.from(d1Schema.tenant)
 		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(tenant)))
 		.get();
 
-	return row?.localStep;
+	return row?.localStep ?? undefined;
 }
 
 async function writeEligibility(

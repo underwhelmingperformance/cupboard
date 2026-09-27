@@ -552,23 +552,27 @@ One `cupboard init` run applies the transitions in list order:
    migrations, then check once that each Worker's deployment assigns all traffic
    to one version and that both Workers report this build. This check runs on
    every deploy, including one on which every transition is complete. Then, for
-   each transition that is not complete: wake active or suspended tenants in
-   batches of 20 until every one has recorded the transition's contract step;
-   for `cache-identity` only, write `native-reads` to the `deployment_phase`
-   row; apply the contract migrations and record the transition `complete`.
-6. Wake tenants again until they reach local step 5.
+   each transition that is not complete: wake the active or suspended tenants
+   and wait until every one has recorded the transition's contract step (see
+   [Local steps][local-steps]); for `cache-identity` only, write `native-reads`
+   to the `deployment_phase` row; apply the contract migrations and record the
+   transition `complete`.
+6. Wake the tenants again and wait until they reach local step 5.
+
+[local-steps]: #local-steps
 
 A failed serving check, or tenants that have not recorded the contract step,
 stop the run in step 5. The contract migrations of the incomplete transition
 stay unapplied and that transition stays `expanded`. The error lists the
 Workers, or a sample of the tenants below the contract step. If step 6 fails,
-the contract migrations have already been applied and recorded. Each tenant wake
-stage runs at most 100 batches. Inspect incomplete work with
-`cupboard deployment status <url>`, which lists each recorded transition and the
-required local step, and retry batches with `cupboard deployment resume <url>`.
-Repair any reported tenant configuration or migration error, then rerun
-`cupboard init`. Applied migrations are skipped after checking their recorded
-digests.
+the contract migrations have already been applied and recorded. A wait stops
+with an error once ten minutes have passed since its wake and no pending tenant
+is classified as working; objects that are making progress continue. Inspect
+incomplete work with `cupboard deployment status <url>`, which lists each
+recorded transition, the required local step and the pending tenants, and wake
+the tenants and wait again with `cupboard deployment resume <url>`. Repair any
+reported tenant configuration or migration error, then rerun `cupboard init`.
+Applied migrations are skipped after checking their recorded digests.
 
 Releases v0.0.34 and v0.0.35 read the `deployment_phase` row, so the deploy
 writes it for `cache-identity`: `native-reads` once every active or suspended
@@ -625,47 +629,115 @@ SQLite schema, complete this deployment to recover.
 ## Local steps
 
 `tenant.local_step` is a watermark for each object's completed data work. The
-object never lowers it. The `localStep.wake` control procedure wakes a bounded
-batch of active tenants that are behind; the hourly sweep also wakes up to
-twenty per tick. `localStep.status` counts ready and pending tenants and lists
-up to twenty pending tenants. Large tenants can need several wakes.
+object never lowers it. Three more columns describe the last attempt at that
+work: `local_step_attempted_at`, `local_step_progressed_at` and
+`local_step_error`. Migration `0033`, the only migration of the independent
+`local-step-attempts` transition, adds them. The `local_step_wake_cursor` table
+is no longer read, and stays until a later transition's contract migrations drop
+it.
 
-`localStep.status` reports the step that it counted against as `required` next
-to the build's `current`. That is the required local step unless the query gives
-a step. `localStep.wake` reports the required local step as `required` for each
-batch. The wake and the control Worker's cron trigger select tenants below it.
-Until the deploy records `cache-identity` complete, an object can report at most
-step 4, so the count of tenants below step 5 would never reach zero. The
-required local step is therefore 4 until then. Once `cache-identity` is
-complete, the required local step does not fall below 5, even while a later
-transition with a lower contract step is incomplete.
+A wake starts a tenant object's work, and the object then continues by itself.
+`localStep.wake` enqueues a wake for every pending tenant that is stalled or
+unwoken (the classes are described below), with up to twenty tenants in each
+maintenance-queue message. Every cron tick enqueues the same wakes, which covers
+a lost message and an object that has stopped. The queue consumer calls each
+listed tenant object that is still pending, four at a time. The object stores
+the requested step as pending, arms its alarm, and runs one page of the work. It
+runs further pages on its alarm: the next page runs at once after a page that
+made progress, and thirty seconds later after a page that made none or failed.
+It stops once it has recorded the requested step, or once no page has made
+progress for ten minutes. The next wake starts it again. When the object finds
+that its tenant row already records the requested step, it runs no page.
+
+An object that has stopped after ten minutes without progress waits for the next
+wake: the next cron tick, or `cupboard deployment resume`. With the default
+hourly trigger, such an object retries for ten minutes each hour.
+
+A page is one bounded interval of the object's schema migrations, or one bounded
+call of its data work. A page made progress when it recorded a higher step,
+projected, moved or rewrote an item, saved a cursor, or committed migration
+work. Recording a step that the tenant already had is not progress. After such a
+recording, the cursor saves of the restarted projection and object moves are not
+progress either, until a wake asks for a higher step.
+
+The object writes its attempts to its tenant row: when the page ran, a summary
+of its error or none, and the time of the page when it made progress. It always
+writes a failed page, a page without progress and a page that records a step.
+After it writes a page that made progress and left work to do, it skips the
+writes of further such pages for thirty seconds, so the recorded progress can be
+up to thirty seconds old. The object keeps that interval in memory, so after a
+failed page, a page without progress, a recorded step or a restart, the next
+page that made progress is written at once. A page that records the requested
+step clears the attempt time, because the object has no work left, so a tenant
+that a later required step leaves pending reads as unwoken until a wake reaches
+it. When the object stops after ten minutes of pages that made no progress and
+did not fail, it records "gave up after 10 minutes without progress" as the
+error. When a wake rejects, or finds that the control plane never configured the
+object, the queue consumer writes the error, unless the row's attempt time has
+changed since the consumer read it before the wake.
+
+`localStep.status` counts the active or suspended tenants that have reached the
+required local step, and puts each pending tenant in one class, measured over
+the ten minutes before the request. A tenant is unwoken when no attempt at the
+outstanding work has been made within the ten minutes and the last attempt did
+not fail. Otherwise its object has attempted the work, and the tenant is:
+
+- working, when its last progress is within the ten minutes, even if its last
+  attempt failed, or when it has not made progress yet and has not failed;
+- stalled, when its last progress is older than ten minutes, or when it has not
+  made progress and its last attempt failed.
+
+It lists up to twenty stalled tenants, each with the time of its last attempt,
+its last progress and its error, and up to twenty unwoken tenants with the time
+of their last attempt. A stalled tenant with an error has a fault that the error
+describes; an unconfigured tenant shows `TenantNotConfiguredError`, and
+repeating its creation repairs it. A stalled tenant without an error has made no
+progress for ten minutes but has not failed or given up yet. An unwoken tenant
+has had no attempt at its outstanding work recently: its wake may still be
+waiting in the queue, or the object stopped without recording why. If a tenant
+stays unwoken after a wake and a cron tick, inspect the maintenance queue's
+delivery, its dead-letter queue and the queue consumer's errors in the control
+Worker's logs.
+
+`localStep.status` and `localStep.wake` both report the required local step as
+`required`, next to the build's `current` in the status. The wake and the
+control Worker's cron trigger select tenants below it. Until the deploy records
+`cache-identity` complete, an object can report at most step 4, so the count of
+tenants below step 5 would never reach zero. The required local step is
+therefore 4 until then. Once `cache-identity` is complete, the required local
+step does not fall below 5, even while a later transition with a lower contract
+step is incomplete.
 
 This build defines five steps:
 
-- Step 1 projects missing lifecycle rows into D1, at most 36 caches per wake.
+- Step 1 projects missing lifecycle rows into D1, at most 36 caches per page.
   The local schema migrations now reconcile registrations and fill identity
   columns before the local contraction.
 - Step 2 moves private-cache objects off their old `private/` keys.
 - Step 3 moves objects from later cache generations onto keys that include the
-  generation. Steps 2 and 3 each move at most 100 objects per wake.
+  generation. Steps 2 and 3 each move at most 100 objects per page.
 - Step 4 imports legacy retention and grace policies in bounded batches. Cache
   retention edits are refused while that import is pending. The policy list and
   removal procedures remain available to recover from an import that exceeds its
   supported rule bound.
 - Step 5 rewrites stored trust rules and refresh-token grants once D1 records
-  the `cache-identity` transition complete. A wake rewrites at most 100 rules
+  the `cache-identity` transition complete. A page rewrites at most 100 rules
   and 100 families. Completion enables local database triggers that reject the
   old format.
 
-Once the deploy records `cache-identity` complete, the required local step
-becomes 5. The control plane finds the tenants below it and wakes them again. A
-successful CLI deploy applies the contract migrations and then wakes tenants
-until they reach step 5. If a run is interrupted,
-`cupboard deployment resume <url>` wakes tenants until they reach the required
-local step; rerun `cupboard init` to complete any remaining transition. The
-hourly sweep also continues tenant work. A persisted cursor rotates through
-pending tenants, so a failed tenant does not prevent later tenants from being
-attempted.
+The deploy, and `cupboard deployment resume <url>`, call `localStep.wake` once
+and then read `localStep.status` every five seconds until no tenant is pending,
+with no limit on the number of reads. They stop with an error once no pending
+tenant is classified as working and ten minutes have passed since the wake. The
+error lists the stalled tenants with their errors and the unwoken tenants. The
+tenant objects do not depend on the deploy: an object that is making progress
+continues after the deploy stops or is interrupted, an object that has stopped
+waits for the next wake, and `cupboard deployment status <url>` shows how far
+they have come. Once the deploy records `cache-identity` complete, the required
+local step becomes 5, and the deploy wakes the tenants again and waits until
+they reach step 5. After a repair, `cupboard deployment resume <url>` wakes the
+tenants and waits again; rerun `cupboard init` to complete any remaining
+transition.
 
 A path whose object has not reached its generation key returns 404. The move or
 a new push makes it available at that key.
@@ -829,13 +901,16 @@ build writes.
 Use `cupboard deployment status` and `cupboard deployment resume` from the same
 release as the deployed control Worker. This release replaces the
 `deployment.phase` procedure with `deployment.transitions`, which returns the
-recorded transitions, and adds `required` to the `localStep.status` and
-`localStep.wake` responses. The CLI and the server validate these responses
-strictly, so a CLI from another release rejects them or receives 404. The
-`--json` output of both commands changes too: the `deployment-status` result has
-`transitions`, `unrecognised` and `required` in place of `phase`, and the
-`deployment-readiness` result reports `required` as the step that it counted
-against.
+recorded transitions. `localStep.status` takes no query, and reports the pending
+tenants as `working`, `stalled` and `unwoken` with `stalledSample` and
+`unwokenSample` in place of `stragglers`. `localStep.wake` takes no body, and
+reports `required`, `enqueued` and `pending` in place of the outcome of each
+tenant. `cupboard deployment resume` no longer has `--limit` and `--max-passes`.
+The CLI and the server validate these responses strictly, so a CLI from another
+release rejects them or receives 404. The `--json` output of both commands
+changes too: the `deployment-status` result has `transitions`, `unrecognised`
+and `required` in place of `phase`, and both results contain the new status
+fields.
 
 The `check` API now uses a numeric cache identity in `cursorCache`. An older CLI
 cannot validate this response or resume an old scan against it. Use the CLI from

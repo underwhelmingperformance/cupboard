@@ -2,6 +2,7 @@ import {
 	type DeferredTransition,
 	deferredTransition,
 	hasReachedTransitionState,
+	localStepStallWindowMs,
 	requiredLocalStepFrom,
 	type SchemaTransition,
 	schemaTransitions,
@@ -25,6 +26,7 @@ import {
 } from './deployment-state.ts';
 import type { D1Migration } from './migrations.ts';
 import { withWorkersInvocationAllowance } from './overrides.ts';
+import { localStepPollIntervalMs } from './settlement.ts';
 import { type PlannedTransition, planTransitions } from './transitions.ts';
 import {
 	type WorkersAllowanceSource,
@@ -195,8 +197,7 @@ export function transitionPlanRows(plan: DeploymentPlan): ResultRow[] {
 		},
 		{
 			label: 'Settlement',
-			value:
-				'Up to 100 batches of 20 tenants; failures remain resumable with cupboard deployment resume.'
+			value: `Enqueues a wake for each pending tenant once, then reads the tenants every ${String(localStepPollIntervalMs / 1000)} seconds while their objects work. Fails once ${String(localStepStallWindowMs / 60_000)} minutes have passed since the wake and no pending tenant is classified as working; objects that are making progress continue, and cupboard deployment resume wakes the tenants and waits again.`
 		}
 	];
 }

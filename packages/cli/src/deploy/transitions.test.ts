@@ -768,10 +768,12 @@ describe('transition walk', () => {
 			recorded: recorded(world.database),
 			phase: phase(world.database)
 		}).toStrictEqual({
-			caught: new LocalStepUnreachedError(2, expansionLocalStep, [
-				'tenant-0',
-				'tenant-2'
-			]),
+			caught: new LocalStepUnreachedError({
+				kind: 'below-step',
+				pending: 2,
+				requiredStep: expansionLocalStep,
+				stragglers: ['tenant-0', 'tenant-2']
+			}),
 			applied: [
 				'0000_base.sql',
 				'0001_phase.sql',

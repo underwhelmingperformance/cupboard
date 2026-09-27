@@ -1,97 +1,126 @@
 import {
-	type LocalStep,
+	localStepStallWindowMs,
 	type LocalStepStatus,
-	type LocalStepWakeBody,
 	type LocalStepWakeResponse
 } from '@cupboard/protocol/deployment';
-import type { Reporter } from '@cupboard/reporter';
+import type { Reporter, StepLog } from '@cupboard/reporter';
 
-import { throwIfAborted } from '../abort.ts';
+import { type Delay, delayMs, throwIfAborted } from '../abort.ts';
 import { LocalStepUnreachedError } from '../errors.ts';
 
+import { pendingText, stalledTenantText } from './local-step-samples.ts';
+
 export interface SettlementClient {
-	status(input: { requiredStep?: LocalStep }): Promise<LocalStepStatus>;
-	wake(input: LocalStepWakeBody): Promise<LocalStepWakeResponse>;
+	status(): Promise<LocalStepStatus>;
+	wake(): Promise<LocalStepWakeResponse>;
 }
 
 export interface SettlementOptions {
-	/**
-	 * The step for the status counts. Without it, the server counts against the
-	 * required local step and reports that step with the counts. The wake always
-	 * uses the server's required local step.
-	 */
-	readonly requiredStep?: LocalStep;
-	readonly limit: number;
-	readonly maxPasses: number;
 	readonly signal?: AbortSignal;
+	readonly delay?: Delay;
+	readonly now?: () => number;
 }
 
 /**
- * Advances bounded batches, stopping at the requested step or pass limit. It
- * also stops when a wake selects no tenant while tenants are still pending.
- * The wake selects tenants below the server's required local step, wrapping
- * round the whole list, so an empty wake means that no tenant is below that
- * step and further wakes would select none either.
+ * How long the settlement waits between two reads of `localStep.status`.
+ */
+export const localStepPollIntervalMs = 5000;
+
+/**
+ * Waits until every active or suspended tenant has recorded the server's
+ * required local step. When tenants are pending, the settlement calls
+ * `localStep.wake` once, which enqueues a wake for every pending tenant that
+ * is not working. Each woken tenant object then continues its own work on its
+ * alarm. The settlement reads `localStep.status` every
+ * `localStepPollIntervalMs` until no tenant is pending. It writes the counts to
+ * the step log whenever they change, and a warning the first time that a
+ * tenant appears in the stalled sample.
+ *
+ * It fails with `LocalStepUnreachedError` when tenants are pending, none of
+ * them is currently classified as working, and the wake is at least
+ * `localStepStallWindowMs` old. The tenant objects do not depend on the
+ * settlement: an object that is working continues when the settlement fails
+ * or is interrupted, and one that has stopped waits for the next wake.
  */
 export async function settleTenants(
 	client: SettlementClient,
 	reporter: Reporter,
-	options: SettlementOptions
+	options: SettlementOptions = {}
 ): Promise<LocalStepStatus> {
-	const query =
-		options.requiredStep === undefined
-			? {}
-			: { requiredStep: options.requiredStep };
 	throwIfAborted(options.signal);
-	let status = await client.status(query);
-	const reported = new Set<string>();
-	for (let pass = 0; status.pending > 0 && pass < options.maxPasses; pass++) {
-		throwIfAborted(options.signal);
-		const result = await reporter.phase(
-			'Advancing tenant migrations',
-			async (context) => {
-				const woken = await client.wake({ limit: options.limit });
-				context.fact('local step', woken.required);
-				return woken;
-			}
-		);
-		reportOutcomes(result.outcomes, reporter, reported);
-		status = await client.status(query);
+	const initial = await client.status();
 
-		if (result.outcomes.length === 0) {
-			break;
-		}
+	if (initial.pending === 0) {
+		return initial;
 	}
-	throwIfAborted(options.signal);
-	if (status.pending > 0) {
-		throw new LocalStepUnreachedError(
-			status.pending,
-			status.required,
-			status.stragglers
-		);
-	}
-	return status;
+
+	return reporter.steps('Advancing tenant migrations', (log) =>
+		waitForTenants(client, log, options)
+	);
 }
 
-function reportOutcomes(
-	outcomes: LocalStepWakeResponse['outcomes'],
-	reporter: Reporter,
-	reported: Set<string>
-): void {
-	for (const outcome of outcomes) {
-		if (
-			outcome.kind === 'recorded' ||
-			outcome.kind === 'advanced' ||
-			reported.has(outcome.tenant)
-		) {
-			continue;
+async function waitForTenants(
+	client: SettlementClient,
+	log: StepLog,
+	options: SettlementOptions
+): Promise<LocalStepStatus> {
+	const now = options.now ?? Date.now;
+
+	throwIfAborted(options.signal);
+	const woken = await client.wake();
+	const wokenAt = now();
+	const warned = new Set<string>();
+	let previous: LocalStepStatus | undefined;
+
+	log.message(
+		`Enqueued wakes for ${String(woken.enqueued)} of ${String(woken.pending)} pending tenants`
+	);
+
+	for (;;) {
+		throwIfAborted(options.signal);
+		const status = await client.status();
+
+		if (previous === undefined || haveCountsChanged(previous, status)) {
+			log.message(
+				`Local step ${String(status.required)}: ${String(status.ready)} ready, ${pendingText(status)} pending`
+			);
 		}
-		reported.add(outcome.tenant);
-		reporter.warn(
-			outcome.tenant,
-			outcome.kind === 'unconfigured'
-				? 'Tenant creation is incomplete. Repeat its creation with the original configuration.'
-				: 'Tenant migration failed. Inspect the tenant Worker logs before retrying.'
-		);
+
+		for (const tenant of status.stalledSample) {
+			if (warned.has(tenant.tenant)) {
+				continue;
+			}
+
+			warned.add(tenant.tenant);
+			log.warn('Stalled', stalledTenantText(tenant));
+		}
+
+		previous = status;
+
+		if (status.pending === 0) {
+			return status;
+		}
+
+		if (status.working === 0 && now() - wokenAt >= localStepStallWindowMs) {
+			throw new LocalStepUnreachedError({ kind: 'stalled', status });
+		}
+
+		await delayMs(localStepPollIntervalMs, {
+			signal: options.signal,
+			delay: options.delay
+		});
 	}
+}
+
+function haveCountsChanged(
+	previous: LocalStepStatus,
+	status: LocalStepStatus
+): boolean {
+	return (
+		previous.required !== status.required ||
+		previous.ready !== status.ready ||
+		previous.working !== status.working ||
+		previous.stalled !== status.stalled ||
+		previous.unwoken !== status.unwoken
+	);
 }

@@ -1538,35 +1538,32 @@ async function deployFlow(
 					})
 			: undefined;
 
-	const migrateTenants = tenantMigratorFor(
-		authority,
-		async (access, requiredStep) => {
-			const url = await deploymentUrl(
-				agreedApi,
-				deployedConfig.control.name,
-				agreed.domain
-			);
-			if (url === undefined) {
-				throw new DeploymentSettlementUrlMissingError();
-			}
-			const parsed = new URL(url);
-			await settleTenants(
-				controlRpc(parsed, {
-					credential: access.credentialFor(parsed),
-					signal: runtimeOptions.signal
-				}).localStep,
-				ui.reporter(),
-				{
-					requiredStep,
-					limit: 20,
-					maxPasses: 100,
-					...(runtimeOptions.signal !== undefined && {
-						signal: runtimeOptions.signal
-					})
-				}
-			);
+	// The settlement waits for the server's required local step, which is the
+	// step that the walk asks for while its transition is incomplete. The walk
+	// checks the tenants against its own step afterwards.
+	const migrateTenants = tenantMigratorFor(authority, async (access) => {
+		const url = await deploymentUrl(
+			agreedApi,
+			deployedConfig.control.name,
+			agreed.domain
+		);
+		if (url === undefined) {
+			throw new DeploymentSettlementUrlMissingError();
 		}
-	);
+		const parsed = new URL(url);
+		await settleTenants(
+			controlRpc(parsed, {
+				credential: access.credentialFor(parsed),
+				signal: runtimeOptions.signal
+			}).localStep,
+			ui.reporter(),
+			{
+				...(runtimeOptions.signal !== undefined && {
+					signal: runtimeOptions.signal
+				})
+			}
+		);
+	});
 
 	const agreedPlan = reviewedPlan;
 	let outcome: OnboardOutcome;

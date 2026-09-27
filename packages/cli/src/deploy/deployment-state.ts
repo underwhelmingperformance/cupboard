@@ -1,7 +1,7 @@
 import {
 	hasReachedTransitionState,
 	type LocalStep,
-	localStepStragglerSampleSize,
+	localStepSampleSize,
 	readTransitionRow,
 	type SchemaTransition,
 	type StoredTransitionRow,
@@ -138,11 +138,11 @@ export interface LocalStepReadiness {
 
 /**
  * Counts active and suspended tenants below the required step and returns up
- * to {@link localStepStragglerSampleSize} of their ids in slug order.
+ * to {@link localStepSampleSize} of their ids in slug order.
  *
  * This function does not write to D1. The control Worker's cron trigger wakes
- * tenants below the step, and each woken object records its step. The count
- * therefore falls even when the deploy does nothing.
+ * tenants below the required local step, and each woken object records its
+ * step. The count therefore falls even when the deploy does nothing.
  */
 export async function readLocalStepReadiness(
 	api: D1QueryApi,
@@ -166,7 +166,7 @@ export async function readLocalStepReadiness(
 		pending,
 		stragglers: await api.queryRows(
 			databaseId,
-			`SELECT id FROM tenant WHERE ${behind} ORDER BY id LIMIT ${String(localStepStragglerSampleSize)};`
+			`SELECT id FROM tenant WHERE ${behind} ORDER BY id LIMIT ${String(localStepSampleSize)};`
 		)
 	};
 }

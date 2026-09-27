@@ -8,7 +8,14 @@ import { z } from 'zod';
 
 import { narVerifyBudgetMs, verifyStoredNar } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
-import { controlLocalStepWake } from '../control/local-step.ts';
+import {
+	enqueueLocalStepWakes,
+	localStepWakeBatchSize,
+	type LocalStepWakeMessage,
+	localStepWakeMessages,
+	selectLocalStepWakes,
+	wakeLocalStepTenants
+} from '../control/local-step.ts';
 import {
 	deleteTenantMember,
 	refreshTenantMembership
@@ -45,6 +52,7 @@ import {
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
 } from '../http/http.ts';
+import { queueSendBatchSize } from '../policy/queues.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { tenantServer } from './durable-object.ts';
@@ -54,9 +62,6 @@ import { tenantServer } from './durable-object.ts';
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
 const maintenanceEligibilityStaleMs = 6 * 60 * 60 * 1000;
-// Each wake is a subrequest, so keep a sweep well inside one invocation's
-// subrequest budget. The next tick takes the next batch.
-const localStepSweepSize = 20;
 export const verificationConsumerBudgetMs = 14 * 60 * 1000;
 
 // Bound offboarding by tenants, rounds, and objects per round. The object chunk
@@ -109,12 +114,15 @@ interface ExecuteMaintenanceQueueOptions {
 		logger: Logger,
 		env: Env
 	) => Promise<unknown>;
-	readonly runLocalStepSweep?: (logger: Logger, env: Env) => Promise<unknown>;
+	readonly wakeLocalStepTenants?: (
+		logger: Logger,
+		env: Env,
+		tenants: readonly TenantId[]
+	) => Promise<void>;
 }
 
 const maxStoredErrorLength = 4096;
 const queueRetryDelaySeconds = 60;
-const queueSendBatchSize = 100;
 const objectReaperPhaseSchema = z.enum([
 	'delete-existing',
 	'recover',
@@ -142,10 +150,18 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('blob-demote') }),
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
+	z.object({
+		kind: z.literal('local-step'),
+		tenants: z.array(tenantIdSchema).min(1).max(localStepWakeBatchSize)
+	}),
+	// The hourly wake that earlier builds enqueued. Messages of this kind can be
+	// in the queue when this build deploys. They are acknowledged without work,
+	// because each tick now enqueues `local-step` messages.
 	z.object({ kind: z.literal('local-step-sweep') })
 ]);
 
 export type MaintenanceQueueMessage =
+	| LocalStepWakeMessage
 	| { readonly kind: 'cache-catalogue-migration'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-maintenance'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-verify'; readonly tenant: TenantId }
@@ -173,7 +189,7 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 		() => runReaperDemote(logger, env),
 		() => runCasReaperDemote(logger, env),
 		() => runControlKeyRetirement(logger, env),
-		() => runLocalStepSweep(logger, env)
+		() => enqueueLocalStepWakes(env)
 	]) {
 		try {
 			await pass();
@@ -211,6 +227,7 @@ export async function enqueueMaintenanceJobs(
 		database,
 		offboardTenantsPerTick
 	);
+	const localStepWakes = await selectLocalStepWakeMessages(env);
 	const messages: MaintenanceQueueMessage[] = [
 		...catalogueTenants.map(({ id }): MaintenanceQueueMessage => ({
 			kind: 'cache-catalogue-migration',
@@ -229,12 +246,48 @@ export async function enqueueMaintenanceJobs(
 		{ kind: 'blob-demote' },
 		{ kind: 'cas-demote' },
 		{ kind: 'control-key-retirement' },
-		{ kind: 'local-step-sweep' }
+		...(localStepWakes.kind === 'selected' ? localStepWakes.messages : [])
 	];
 
-	await sendQueueMessages(queue, messages);
+	try {
+		await sendQueueMessages(queue, messages);
+	} catch (error) {
+		if (localStepWakes.kind === 'failed') {
+			throw new AggregateError(
+				[localStepWakes.error, error],
+				'the local-step selection and the enqueue failed',
+				{ cause: error }
+			);
+		}
+
+		throw error;
+	}
+
+	if (localStepWakes.kind === 'failed') {
+		throw localStepWakes.error;
+	}
 
 	return messages;
+}
+
+// A failed selection of the local-step wakes is returned, not thrown, so that
+// it does not stop the other jobs of the tick.
+async function selectLocalStepWakeMessages(
+	env: Env
+): Promise<
+	| { readonly kind: 'selected'; readonly messages: LocalStepWakeMessage[] }
+	| { readonly kind: 'failed'; readonly error: unknown }
+> {
+	try {
+		const selection = await selectLocalStepWakes(env);
+
+		return {
+			kind: 'selected',
+			messages: localStepWakeMessages(selection.tenants)
+		};
+	} catch (error) {
+		return { kind: 'failed', error };
+	}
 }
 
 export class QueueBatchSendError extends AggregateError {
@@ -374,8 +427,15 @@ export async function executeMaintenanceQueueMessage(
 				);
 				return { action: 'ack' };
 			}
+			case 'local-step': {
+				await (options.wakeLocalStepTenants ?? wakeLocalStepTenants)(
+					logger,
+					env,
+					message.tenants
+				);
+				return { action: 'ack' };
+			}
 			case 'local-step-sweep': {
-				await (options.runLocalStepSweep ?? runLocalStepSweep)(logger, env);
 				return { action: 'ack' };
 			}
 		}
@@ -411,9 +471,13 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
 	readonly kind: string;
 	readonly phase?: ObjectReaperPhase;
 	readonly tenant?: string;
+	readonly tenants?: readonly string[];
 } {
 	if ('tenant' in message) {
 		return { kind: message.kind, tenant: message.tenant };
+	}
+	if (message.kind === 'local-step') {
+		return { kind: message.kind, tenants: message.tenants };
 	}
 	if (message.kind === 'blob-reaper' || message.kind === 'cas-reaper') {
 		return {
@@ -1325,24 +1389,6 @@ async function settleAuthKeyRetirement(
 	} catch (error) {
 		return { status: 'rejected', reason: error };
 	}
-}
-
-/**
- * Wakes a bounded batch of tenants that have not recorded the step this build
- * asks for. Each applies its pending migrations and records its step; nothing
- * else records it. Each tick takes the next batch.
- */
-export async function runLocalStepSweep(
-	logger: Logger,
-	env: Env
-): Promise<void> {
-	const { woken, failed } = await controlLocalStepWake(
-		logger,
-		env,
-		localStepSweepSize
-	);
-
-	logger.info('local step sweep finished', { woken, failed });
 }
 
 function runControlKeyRetirement(logger: Logger, env: Env): Promise<number> {
