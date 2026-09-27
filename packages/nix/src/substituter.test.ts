@@ -1774,6 +1774,18 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 			expected: [5000, 10_000, 20_000, 40_000]
 		},
 		{
+			name: 'an ISO 8601 date, which is not an HTTP date',
+			status: 503,
+			retryAfter: '2999-01-01T00:00:00Z',
+			expected: [5000, 10_000, 20_000, 40_000]
+		},
+		{
+			name: 'an HTTP date past the maximum wait',
+			status: 503,
+			retryAfter: 'Tue, 01 Jan 2999 00:00:00 GMT',
+			expected: []
+		},
+		{
 			name: 'a configured starting delay',
 			status: 500,
 			transfer: { retryDelayMs: 300 },
