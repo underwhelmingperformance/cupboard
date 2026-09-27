@@ -298,6 +298,72 @@ jobs:
 		});
 	});
 
+	it('ignores read-only Cupboard setup for this tenant', async () => {
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source({
+				'.github/workflows/build.yml': `
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: underwhelmingperformance/cupboard/actions/setup@v0.0.35
+        with:
+          cache-url: https://cupboard.supply/t/laney/cache/default
+      - uses: underwhelmingperformance/cupboard/actions/setup@v0.0.35
+        with:
+          cache-url: https://cupboard.supply/t/laney
+          provision-cache: '  '
+`
+			})
+		);
+
+		expect(result).toStrictEqual({
+			revision: 'a'.repeat(40),
+			jobs: [],
+			unverified: []
+		});
+	});
+
+	it('reports Cupboard setup that can provision a cache', async () => {
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source({
+				'.github/workflows/build.yml': `
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: underwhelmingperformance/cupboard/actions/setup@v0.0.35
+        with:
+          cache-url: https://cupboard.supply/t/laney
+          provision-cache: packages
+          provision-cache-access: public
+`
+			})
+		);
+
+		expect(result).toStrictEqual({
+			revision: 'a'.repeat(40),
+			jobs: [],
+			unverified: [
+				{
+					caller: '.github/workflows/build.yml',
+					job: 'build',
+					workflow: 'repository',
+					detail:
+						'this job calls a Cupboard action or CLI command directly; inspect its tenant, grant and root inputs'
+				}
+			]
+		});
+	});
+
 	it('ignores Cupboard actions that do not publish', async () => {
 		const result = await discoverPublishingJobs(
 			repository,

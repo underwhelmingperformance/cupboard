@@ -17,6 +17,7 @@ import {
 	type WorkflowTrigger
 } from './discovery.ts';
 import {
+	BranchFilterCoverageFinding,
 	CustomReuseViewFinding,
 	JobConditionUndecidedFinding,
 	ManualRunBranchFinding,
@@ -28,6 +29,7 @@ import {
 	PushCoverageFinding,
 	ReferenceFilterExcludesFinding,
 	ReferenceFilterUnsupportedFinding,
+	TagPatternCoverageFinding,
 	TagsIgnoreUnmodelledFinding
 } from './publication.ts';
 import { ReferencePattern } from './reference-pattern.ts';
@@ -584,15 +586,15 @@ describe('modelPublishingJob inputs', () => {
 describe('modelPublishingJob event filters', () => {
 	const tagClaims = {
 		...repositoryClaims,
-		sub: 'repo:iainlane/dotfiles:ref:refs/tags/v0',
+		sub: 'repo:iainlane/dotfiles:ref:refs/tags/v1.2.3',
 		event_name: 'push',
-		ref: 'refs/tags/v0',
+		ref: 'refs/tags/v1.2.3',
 		ref_type: 'tag',
 		job_workflow_ref: installableWorkflowReference
 	};
 	const tagCase = {
 		trigger: 'push',
-		ref: { kind: 'tag', pattern: ReferencePattern.parse('v*') },
+		ref: { kind: 'tag', pattern: ReferencePattern.parse('v1.2.3') },
 		claims: tagClaims,
 		requests: installableRequests
 	};
@@ -605,19 +607,80 @@ describe('modelPublishingJob event filters', () => {
 
 	it.each([
 		{
-			name: 'a tag-only push as a tag ref',
-			job: filtered('push', { tags: ['v*'] }),
+			name: 'an exact tag-only push as a tag ref',
+			job: filtered('push', { tags: ['v1.2.3'] }),
 			expected: { cases: [tagCase], findings: [] }
+		},
+		{
+			name: 'a wildcard tag-only push as unverified',
+			job: filtered('push', { tags: ['v*'] }),
+			expected: {
+				cases: [],
+				findings: [
+					{ trigger: 'push', finding: new TagPatternCoverageFinding('v*') }
+				]
+			}
 		},
 		{
 			name: 'branch and tag filters as both refs',
 			job: filtered('push', { branches: ['main'], tags: ['v*'] }),
-			expected: { cases: [branchCase, tagCase], findings: [] }
+			expected: {
+				cases: [branchCase],
+				findings: [
+					{ trigger: 'push', finding: new TagPatternCoverageFinding('v*') }
+				]
+			}
 		},
 		{
 			name: 'a branch filter that includes the selected branch',
 			job: filtered('push', { branches: ['ma*', 'release/**'] }),
-			expected: { cases: [branchCase], findings: [] }
+			expected: {
+				cases: [branchCase],
+				findings: [
+					{
+						trigger: 'push',
+						finding: new BranchFilterCoverageFinding(
+							'branches',
+							['ma*', 'release/**'],
+							'main'
+						)
+					}
+				]
+			}
+		},
+		{
+			name: 'a branch filter with another exact branch',
+			job: filtered('push', { branches: ['main', 'develop'] }),
+			expected: {
+				cases: [branchCase],
+				findings: [
+					{
+						trigger: 'push',
+						finding: new BranchFilterCoverageFinding(
+							'branches',
+							['main', 'develop'],
+							'main'
+						)
+					}
+				]
+			}
+		},
+		{
+			name: 'an ignore filter that allows other branches',
+			job: filtered('push', { 'branches-ignore': ['develop'] }),
+			expected: {
+				cases: [branchCase],
+				findings: [
+					{
+						trigger: 'push',
+						finding: new BranchFilterCoverageFinding(
+							'branches-ignore',
+							['develop'],
+							'main'
+						)
+					}
+				]
+			}
 		},
 		{
 			name: 'a branch filter that excludes the selected branch',

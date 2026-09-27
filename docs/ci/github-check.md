@@ -55,13 +55,13 @@ fresh response.
 
 The check reports these jobs as unverified, for manual review:
 
-- A job with a step that calls a cupboard action, with a `run:` step that calls
-  `cupboard push`, `build-push`, `attest attach`, `plan cohort`, `cache create`,
-  `cache remove`, `root ensure` or `confirm`, or with a `run:` step that passes
-  `--github-oidc` to any command. The check reports the step when its tenant URL
-  is this tenant's URL, uses an expression, or is missing. The check also reads
-  the steps of each local composite action that the job uses, such as
-  `uses: ./.github/actions/publish`.
+- A job with a step that calls a cupboard action that can change the tenant,
+  with a `run:` step that calls `cupboard push`, `build-push`, `attest attach`,
+  `plan cohort`, `cache create`, `cache remove`, `root ensure` or `confirm`, or
+  with a `run:` step that passes `--github-oidc` to any command. The check
+  reports the step when its tenant URL is this tenant's URL, uses an expression,
+  or is missing. The check also reads the steps of each local composite action
+  that the job uses, such as `uses: ./.github/actions/publish`.
 - A job that calls an external reusable workflow when one of its `with:` values
   contains the tenant URL, when a URL input uses an expression, or when an
   expression reads `secrets` or `vars`. The check does not report a job as
@@ -85,7 +85,10 @@ The check skips a job that passes `push: false` to the flake workflow. With the
 flake preset, such a job still removes a pull request's cache when the pull
 request closes without merging, and the check does not cover that removal.
 
-The check ignores a `run:` step that calls `cupboard github setup`. That command
+The check ignores `actions/setup` when it only installs cupboard or configures
+Nix substituters. If the step sets `provision-cache`, setup can create a cache
+with an OIDC token, so the check reports the job for manual review. The check
+also ignores a `run:` step that calls `cupboard github setup`. That command
 changes tenant settings with the owner's credential and does not publish with an
 OIDC token.
 
@@ -139,14 +142,16 @@ the change takes effect only after the merge.
 
 Without the preset, the check simulates a `workflow_dispatch` run on the branch
 that it checks. GitHub can start a manual run on any branch, so the check notes
-that manual runs on other branches are not covered. The note does not change the
-job's status.
+that manual runs on other branches can have different OIDC claims. It reports
+the job as unverified; review the trust rules for those branches.
 
 A `push` event without branch or tag filters starts runs for pushes to every
-branch and tag, but the check simulates only the checked branch. It notes that
-other pushes are not covered. For a flake preset job, the note suggests adding
-the preset's `branch` input as a `branches` filter, because a preset run fails
-on a push to any other branch.
+branch and tag, but the check simulates only the checked branch. It reports the
+job as unverified because other pushes can use different trust-rule claims. Add
+branch or tag filters for the refs that should publish. A flake preset run fails
+on a push to any branch other than its `branch` input, so the check reports an
+unfiltered preset job as unverified and suggests adding that branch as a
+`branches` filter.
 
 The installable workflow appends the builder's Nix system to its `root` input.
 The check works out the root for the workflow's default `x86_64-linux` runner,
@@ -154,10 +159,12 @@ and it requires a grant for the whole root prefix so that builds on other
 runners are covered too.
 
 The check reads each event's `branches`, `branches-ignore`, `tags` and
-`tags-ignore` filters. A `push` event with a `tags` filter starts runs for tag
-pushes, so the check simulates one tag push for each pattern, using a tag name
-that the pattern matches. The workflow also runs for branch pushes when the
-event has a branch filter.
+`tags-ignore` filters. For a `push` event with an exact `tags` filter, the check
+simulates a push of that tag. A wildcard pattern such as `v*` admits several
+tags whose OIDC claims can differ, so the check reports the job as unverified
+without testing a fabricated tag. Use an exact tag filter when the check must
+verify a tag push. The workflow also runs for branch pushes when the event has a
+branch filter.
 
 A branch filter can exclude the branch that the check simulates. For `push`,
 that is the checked branch, or the default branch for a flake preset job whose
@@ -165,6 +172,13 @@ that is the checked branch, or the default branch for a flake preset job whose
 branch, which pull requests normally target. If the filter excludes that branch,
 the check reports the job as unverified. For `push`, use `--branch` to check a
 branch that the filter includes, or change the preset's `branch` input.
+
+For `push`, a `branches` filter can select several branches, and a
+`branches-ignore` filter can allow branches beyond the one that the check
+simulates. The check reports the job as unverified unless `branches` lists only
+the exact branch that it simulates. To verify a workflow with several eligible
+branches, review the trust rules for each branch or give each branch its own
+workflow with an exact filter.
 
 The check evaluates literal names with `*` and `**` wildcards. It reports other
 patterns and `tags-ignore` filters for manual review. It also reports a flake
@@ -197,6 +211,11 @@ After writing, the repair runs the check again and reports it under a separate
 `github-check-verified` result kind. If a repaired job is still failed or
 unverified, the command exits with an error that lists the changes already
 applied.
+
+The repair does not create a trust rule from one modelled ref when the workflow
+can publish on other refs that the check cannot verify. An unfiltered push or a
+wildcard tag filter needs narrower workflow filters or a manual review of the
+trust rules before the check can report readiness.
 
 The repair prompts you to choose whether planned trust rules accept only the
 current cupboard workflow pins or future cupboard workflow release tags that
