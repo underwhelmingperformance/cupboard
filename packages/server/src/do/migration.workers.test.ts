@@ -281,6 +281,14 @@ describe('migrations', () => {
 						})
 						.run();
 				});
+				const members = database
+					.select()
+					.from(refreshTokenMembers)
+					.all()
+					.map((member) => ({
+						...member,
+						successorEnvelope: member.successorEnvelope ?? undefined
+					}));
 
 				return {
 					clearedLegacyRows,
@@ -288,7 +296,7 @@ describe('migrations', () => {
 					legacySchema,
 					precedingWorkerLookup,
 					families: database.select().from(refreshTokenFamilies).all(),
-					members: database.select().from(refreshTokenMembers).all(),
+					members,
 					legacyRows: {
 						live: state.storage.sql
 							.exec('SELECT id, secret_hash FROM refresh_token ORDER BY id')
@@ -401,6 +409,7 @@ describe('migrations', () => {
 					familyId: 'new-family',
 					generation: 0,
 					secretHash: 'new-hash',
+					successorEnvelope: undefined,
 					createdAt: '2026-01-01T00:00:00.000Z'
 				}
 			],

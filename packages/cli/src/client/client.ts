@@ -393,9 +393,9 @@ export class CupboardClient {
 
 	/**
 	 * Renews a session at the OAuth `POST /token` endpoint with the RFC 6749
-	 * refresh_token grant. The refresh token is the credential and the server
-	 * rotates it on every use: the response returns its successor, and the
-	 * presented token is spent whether or not the caller stores the replacement.
+	 * refresh_token grant. The server rotates the credential on first use. For
+	 * one minute, a retry of the consumed token can return the same successor.
+	 * Callers must persist each successful response.
 	 */
 	async tokenRefresh(refreshToken: string): Promise<TokenResponse> {
 		const response = await this.postTokenForm({

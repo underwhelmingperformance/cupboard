@@ -530,8 +530,8 @@ export const legacyRefreshTokens = sqliteTable(
 );
 
 // A refresh-token family has one active member and an absolute expiry. Rotation
-// advances the active member. Spent members remain so replay can revoke the
-// family. The stored grants start with the authority granted by the external
+// advances the active member. Spent members remain so later replay can revoke
+// the family. The stored grants start with the authority granted by the external
 // exchange and narrow when a refresh requests less authority. Every later
 // rotation is bounded by the stored grants.
 export const refreshTokenFamilies = sqliteTable(
@@ -555,9 +555,8 @@ export const refreshTokenFamilies = sqliteTable(
 	]
 );
 
-// Every member remains until its family expires or is revoked. Only the hash of
-// the bearer secret is stored. A spent member can therefore identify its family
-// and prove possession without recovering any successor token.
+// Every member remains until its family expires or is revoked. A spent member
+// may also store an encrypted successor secret for retry recovery.
 export const refreshTokenMembers = sqliteTable(
 	'refresh_token_member',
 	{
@@ -565,6 +564,7 @@ export const refreshTokenMembers = sqliteTable(
 		familyId: text('family_id').notNull(),
 		generation: integer('generation').notNull(),
 		secretHash: text('secret_hash').notNull(),
+		successorEnvelope: text('successor_envelope'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [

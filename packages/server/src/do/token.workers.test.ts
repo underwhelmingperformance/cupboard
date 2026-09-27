@@ -16,7 +16,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
@@ -986,7 +986,7 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('revokes the family when a consumed refresh token is replayed', async () => {
+	it('returns the issued successor when a consumed token is retried', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
@@ -996,11 +996,13 @@ describe('refresh grant', () => {
 
 		const capture = startCapture();
 		let replay;
-		let successorAfterReplay;
 
 		try {
-			replay = await staleRefreshOutcome(refreshToken);
-			successorAfterReplay = await staleRefreshOutcome(successor);
+			const response = await refresh(refreshToken);
+			replay = {
+				status: response.status,
+				body: tokenResponseSchema.parse(await response.json())
+			};
 		} finally {
 			capture.stop();
 		}
@@ -1011,32 +1013,463 @@ describe('refresh grant', () => {
 				level: entry.level,
 				properties: entry.properties
 			}));
+		const rows = await refreshTokenRows();
 
 		expect({
 			firstStatus: first.status,
-			replay,
-			successorAfterReplay,
+			replay: {
+				status: replay.status,
+				refreshToken: replay.body.refresh_token,
+				grants: replay.body.authorization_details
+			},
 			revocations,
-			rows: await refreshTokenRows()
+			rows: rows.map((row) => ({
+				activeMemberId: row.activeMemberId,
+				generation: row.generation
+			}))
 		}).toStrictEqual({
 			firstStatus: StatusCodes.OK,
+			replay: {
+				status: StatusCodes.OK,
+				refreshToken: successor,
+				grants: [{ type: 'cupboard_wildcard' }]
+			},
+			revocations: [],
+			rows: [{ activeMemberId: successor.split('.', 2)[0], generation: 1 }]
+		});
+	});
+
+	it('accepts a retry at the grace deadline and revokes one millisecond later', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const startedAt = new Date('2026-01-01T00:00:00.000Z');
+			vi.setSystemTime(startedAt);
+			const exchanged = await exchange(await installTrustedIdp('admin'));
+			const original = exchanged.refresh_token ?? '';
+			const firstResponse = await refresh(original);
+			const first = tokenResponseSchema.parse(await firstResponse.json());
+
+			vi.setSystemTime(new Date(startedAt.getTime() + 60_000));
+			const deadlineResponse = await refresh(original);
+			const atDeadline = tokenResponseSchema.parse(
+				await deadlineResponse.json()
+			);
+
+			vi.setSystemTime(new Date(startedAt.getTime() + 60_001));
+			const late = await staleRefreshOutcome(original);
+			const successor = await staleRefreshOutcome(first.refresh_token ?? '');
+
+			expect({
+				atDeadline: atDeadline.refresh_token,
+				late,
+				successor,
+				families: await refreshTokenRows()
+			}).toStrictEqual({
+				atDeadline: first.refresh_token,
+				late: {
+					status: StatusCodes.BAD_REQUEST,
+					error: 'invalid_grant',
+					problem: 'stale-refresh-token'
+				},
+				successor: {
+					status: StatusCodes.BAD_REQUEST,
+					error: 'invalid_grant',
+					problem: 'stale-refresh-token'
+				},
+				families: []
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('refuses a retry that finishes after the grace deadline', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const startedAt = new Date('2026-01-01T00:00:00.000Z');
+			vi.setSystemTime(startedAt);
+			const exchanged = await exchange(await installTrustedIdp('admin'));
+			const original = exchanged.refresh_token ?? '';
+			await refresh(original);
+
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const identity = new TenantIdentityService(instance.context);
+					const authKeys = new AuthKeysService(instance.context, identity);
+					const service = new TokenExchangeService(
+						instance.context,
+						authKeys,
+						new OidcTrustService(instance.context, identity)
+					);
+					const activeAuthKey = authKeys.activeAuthKey.bind(authKeys);
+					const spy = vi
+						.spyOn(authKeys, 'activeAuthKey')
+						.mockImplementation(() => {
+							vi.setSystemTime(new Date(startedAt.getTime() + 60_001));
+
+							return activeAuthKey();
+						});
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: refreshTokenGrantType,
+							refresh_token: original
+						}).toString()
+					});
+
+					try {
+						return await service.handleToken(rootLogger(), request);
+					} catch (error) {
+						return error;
+					} finally {
+						spy.mockRestore();
+					}
+				}
+			);
+
+			expect({
+				stale: result instanceof StaleRefreshTokenError,
+				families: await refreshTokenRows()
+			}).toStrictEqual({
+				stale: true,
+				families: []
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not recover a random successor issued before the grace policy', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const [originalId] = z
+			.tuple([z.uuid(), z.string()])
+			.parse(original.split('.'));
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { refreshTokenMembers } })
+				.update(refreshTokenMembers)
+				.set({ successorEnvelope: sql`NULL` })
+				.where(eq(refreshTokenMembers.id, originalId))
+				.run();
+		});
+
+		const replay = await staleRefreshOutcome(original);
+		const successorResponse = await refresh(first.refresh_token ?? '');
+		const successor = tokenResponseSchema.parse(await successorResponse.json());
+		const families = await refreshTokenRows();
+
+		expect({
+			replay,
+			successorStatus: successorResponse.status,
+			successorRotated: successor.refresh_token !== first.refresh_token,
+			generations: families.map((row) => row.generation)
+		}).toStrictEqual({
 			replay: {
 				status: StatusCodes.BAD_REQUEST,
 				error: 'invalid_grant',
 				problem: 'stale-refresh-token'
 			},
-			successorAfterReplay: {
+			successorStatus: StatusCodes.OK,
+			successorRotated: true,
+			generations: [2]
+		});
+	});
+
+	it('keeps the successor usable when its recovery envelope is corrupted', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const [originalId] = z
+			.tuple([z.uuid(), z.string()])
+			.parse(original.split('.'));
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { refreshTokenMembers } })
+				.update(refreshTokenMembers)
+				.set({ successorEnvelope: `${'0'.repeat(24)}.${'0'.repeat(160)}` })
+				.where(eq(refreshTokenMembers.id, originalId))
+				.run();
+		});
+
+		const replay = await staleRefreshOutcome(original);
+		const successorResponse = await refresh(first.refresh_token ?? '');
+		const successor = tokenResponseSchema.parse(await successorResponse.json());
+		const families = await refreshTokenRows();
+
+		expect({
+			replay,
+			successorStatus: successorResponse.status,
+			successorRotated: successor.refresh_token !== first.refresh_token,
+			generations: families.map((row) => row.generation)
+		}).toStrictEqual({
+			replay: {
 				status: StatusCodes.BAD_REQUEST,
 				error: 'invalid_grant',
 				problem: 'stale-refresh-token'
 			},
-			revocations: [
-				{
-					level: 'warning',
-					properties: { method: 'POST', path: '/token', reason: 'replay' }
+			successorStatus: StatusCodes.OK,
+			successorRotated: true,
+			generations: [2]
+		});
+	});
+
+	it('keeps the family when successor decryption fails internally', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const failure = new TypeError('Web Crypto is unavailable');
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const identity = new TenantIdentityService(instance.context);
+				const service = new TokenExchangeService(
+					instance.context,
+					new AuthKeysService(instance.context, identity),
+					new OidcTrustService(instance.context, identity)
+				);
+				const request = new Request(new URL('/token', currentOrigin()), {
+					method: 'POST',
+					headers: { 'content-type': 'application/x-www-form-urlencoded' },
+					body: new URLSearchParams({
+						grant_type: refreshTokenGrantType,
+						refresh_token: original
+					}).toString()
+				});
+				const spy = vi
+					.spyOn(crypto.subtle, 'decrypt')
+					.mockRejectedValueOnce(failure);
+
+				try {
+					return await service.handleToken(rootLogger(), request);
+				} catch (error) {
+					return error;
+				} finally {
+					spy.mockRestore();
 				}
-			],
-			rows: []
+			}
+		);
+		const successorResponse = await refresh(first.refresh_token ?? '');
+		const successor = tokenResponseSchema.parse(await successorResponse.json());
+		const families = await refreshTokenRows();
+
+		expect({
+			internalFailure: result instanceof TypeError,
+			successorStatus: successorResponse.status,
+			successorRotated: successor.refresh_token !== first.refresh_token,
+			familyGenerations: families.map((family) => family.generation)
+		}).toStrictEqual({
+			internalFailure: true,
+			successorStatus: StatusCodes.OK,
+			successorRotated: true,
+			familyGenerations: [2]
+		});
+	});
+
+	it('keeps the current successor usable after the deployment key changes', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const identity = new TenantIdentityService(instance.context);
+				const service = new TokenExchangeService(
+					instance.context,
+					new AuthKeysService(instance.context, identity),
+					new OidcTrustService(instance.context, identity)
+				);
+				const originalEnv = instance.context.env;
+				instance.context.env = {
+					...originalEnv,
+					PUSH_ID_SIGNING_KEY: 'replacement-deployment-key'
+				};
+				const refreshWithChangedKey = (token: string) => {
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: refreshTokenGrantType,
+							refresh_token: token
+						}).toString()
+					});
+
+					return service.handleToken(rootLogger(), request);
+				};
+
+				try {
+					let recoveryError: unknown;
+
+					try {
+						await refreshWithChangedKey(original);
+					} catch (error) {
+						recoveryError = error;
+					}
+
+					const successorResponse = await refreshWithChangedKey(
+						first.refresh_token ?? ''
+					);
+					const rotated = tokenResponseSchema.parse(
+						await successorResponse.json()
+					);
+
+					return {
+						recoveryRejected: recoveryError instanceof StaleRefreshTokenError,
+						successorStatus: successorResponse.status,
+						successorRotated: rotated.refresh_token !== first.refresh_token
+					};
+				} finally {
+					instance.context.env = originalEnv;
+				}
+			}
+		);
+
+		const families = await refreshTokenRows();
+
+		expect({
+			...outcome,
+			generations: families.map((row) => row.generation)
+		}).toStrictEqual({
+			recoveryRejected: true,
+			successorStatus: StatusCodes.OK,
+			successorRotated: true,
+			generations: [2]
+		});
+	});
+
+	it('refuses grace recovery after the trust rule loses interactive authority', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { oidcTrust } })
+				.update(oidcTrust)
+				.set({ permittedGrantsJson: JSON.stringify(trustClassGrants.write) })
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('admin-rule')))
+				.run();
+		});
+
+		expect({
+			replay: await staleRefreshOutcome(original),
+			successor: await staleRefreshOutcome(first.refresh_token ?? ''),
+			families: await refreshTokenRows()
+		}).toStrictEqual({
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			successor: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			families: []
+		});
+	});
+
+	it('does not return a successor for a different grant request', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const narrowed = [
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-1')
+			}
+		];
+		const firstResponse = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: original,
+			authorization_details: JSON.stringify(narrowed)
+		});
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const mismatched = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: original,
+			authorization_details: JSON.stringify(adminGrants())
+		});
+		const matchedResponse = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: original,
+			authorization_details: JSON.stringify(narrowed)
+		});
+		const matched = tokenResponseSchema.parse(await matchedResponse.json());
+		const families = await refreshTokenRows();
+
+		expect({
+			mismatched: {
+				status: mismatched.status,
+				problem: oauthErrorShape(await mismatched.json()).problem
+			},
+			matched: {
+				refreshToken: matched.refresh_token,
+				grants: matched.authorization_details
+			},
+			families: families.map((family) => ({
+				generation: family.generation
+			}))
+		}).toStrictEqual({
+			mismatched: {
+				status: StatusCodes.BAD_REQUEST,
+				problem: 'stale-refresh-token'
+			},
+			matched: {
+				refreshToken: first.refresh_token,
+				grants: narrowed
+			},
+			families: [{ generation: 1 }]
+		});
+	});
+
+	it('accepts a retry with equivalent grant ordering', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const firstGrants = [
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate', 'upload:commit'],
+				cache: namedCache('pr-1')
+			}
+		];
+		const reorderedGrants = [
+			{
+				...firstGrants[0],
+				actions: ['upload:commit', 'upload:negotiate']
+			}
+		];
+		const firstResponse = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: original,
+			authorization_details: JSON.stringify(firstGrants)
+		});
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const replayResponse = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: original,
+			authorization_details: JSON.stringify(reorderedGrants)
+		});
+		const replay = tokenResponseSchema.parse(await replayResponse.json());
+
+		expect({
+			status: replayResponse.status,
+			refreshToken: replay.refresh_token,
+			grants: replay.authorization_details
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			refreshToken: first.refresh_token,
+			grants: first.authorization_details
 		});
 	});
 
@@ -1095,6 +1528,36 @@ describe('refresh grant', () => {
 		});
 	});
 
+	it('removes the previous recovery envelope on the next rotation', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const firstSuccessor = first.refresh_token ?? '';
+		await refresh(firstSuccessor);
+
+		const envelopes = await runInDurableObject(
+			currentServer(),
+			(_instance, state) =>
+				state.storage.sql
+					.exec(
+						'SELECT generation, successor_envelope FROM refresh_token_member ORDER BY generation'
+					)
+					.toArray()
+		);
+
+		expect(
+			envelopes.map((row) => ({
+				generation: row.generation,
+				envelopePresent: typeof row.successor_envelope === 'string'
+			}))
+		).toStrictEqual([
+			{ generation: 0, envelopePresent: false },
+			{ generation: 1, envelopePresent: true },
+			{ generation: 2, envelopePresent: false }
+		]);
+	});
+
 	it('ends a refresh family at its original deadline', async () => {
 		vi.useFakeTimers();
 
@@ -1147,7 +1610,7 @@ describe('refresh grant', () => {
 		}
 	});
 
-	it('stores only member ids and SHA-256 secret hashes', async () => {
+	it('stores a successor envelope without either bearer secret', async () => {
 		vi.useFakeTimers();
 
 		try {
@@ -1200,13 +1663,22 @@ describe('refresh grant', () => {
 				})
 			);
 			const serialised = JSON.stringify(persisted);
+			const envelope = persisted.members[0]?.successor_envelope;
+			const persistedView = {
+				...persisted,
+				members: persisted.members.map((member) => ({
+					...member,
+					successor_envelope: typeof member.successor_envelope
+				}))
+			};
 
 			expect({
-				persisted,
+				persisted: persistedView,
 				containsOriginalSecret: serialised.includes(originalSecret),
 				containsSuccessorSecret: serialised.includes(successorSecret),
-				containsCiphertext: serialised.includes('ciphertext'),
-				containsIv: serialised.includes('"iv"')
+				envelopeFormat:
+					typeof envelope === 'string' &&
+					/^[\da-f]{24}\.[\da-f]{160}$/u.test(envelope)
 			}).toStrictEqual({
 				persisted: {
 					families: [
@@ -1226,6 +1698,7 @@ describe('refresh grant', () => {
 							family_id: persisted.families[0]?.id,
 							generation: 0,
 							secret_hash: originalHash,
+							successor_envelope: 'string',
 							created_at: '2026-01-01T00:00:00.000Z'
 						},
 						{
@@ -1233,6 +1706,7 @@ describe('refresh grant', () => {
 							family_id: persisted.families[0]?.id,
 							generation: 1,
 							secret_hash: successorHash,
+							successor_envelope: 'object',
 							created_at: '2026-01-01T00:00:00.000Z'
 						}
 					],
@@ -1240,8 +1714,7 @@ describe('refresh grant', () => {
 				},
 				containsOriginalSecret: false,
 				containsSuccessorSecret: false,
-				containsCiphertext: false,
-				containsIv: false
+				envelopeFormat: true
 			});
 		} finally {
 			vi.useRealTimers();
@@ -1401,7 +1874,7 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('revokes the family when the same refresh token is presented concurrently', async () => {
+	it('returns one successor to concurrent presentations of a refresh token', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
@@ -1422,7 +1895,6 @@ describe('refresh grant', () => {
 		const outcomes = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const okStatusCode: number = StatusCodes.OK;
 				const responses = await Promise.all([
 					instance.fetch(present()),
 					instance.fetch(present())
@@ -1430,68 +1902,122 @@ describe('refresh grant', () => {
 
 				return Promise.all(
 					responses.map(async (response) => {
-						if (response.status === okStatusCode) {
-							const body = tokenResponseSchema.parse(await response.json());
-
-							return {
-								status: response.status,
-								refreshToken: body.refresh_token ?? ''
-							};
-						}
-
-						const body = oauthErrorShape(await response.json());
+						const body = tokenResponseSchema.parse(await response.json());
 
 						return {
 							status: response.status,
-							error: body.error,
-							problem: body.problem
+							refreshToken: body.refresh_token ?? ''
 						};
 					})
 				);
 			}
 		);
-		const granted = outcomes.find(
-			(outcome): outcome is { status: number; refreshToken: string } =>
-				'refreshToken' in outcome
-		);
-		const refused = outcomes.find(
-			(
-				outcome
-			): outcome is {
-				status: number;
-				error: string;
-				problem: string | undefined;
-			} => 'error' in outcome
-		);
-		const grantedToken = z.string().min(1).parse(granted?.refreshToken);
-		const successorAfterReplay = await staleRefreshOutcome(grantedToken);
+		const [first, second] = z
+			.tuple([
+				z.object({ status: z.number(), refreshToken: z.string() }),
+				z.object({ status: z.number(), refreshToken: z.string() })
+			])
+			.parse(outcomes);
+		const [firstId] = z
+			.tuple([z.uuid(), z.string()])
+			.parse(first.refreshToken.split('.'));
+		const families = await refreshTokenRows();
+		const members = await refreshTokenMemberRows();
 
 		expect({
 			exchangeStatus: exchanged.status,
-			statuses: outcomes
-				.map((outcome) => outcome.status)
-				.toSorted((left, right) => left - right),
-			refused,
-			successorAfterReplay,
-			families: await refreshTokenRows(),
-			members: await refreshTokenMemberRows()
+			statuses: [first.status, second.status],
+			sameSuccessor: first.refreshToken === second.refreshToken,
+			families: families.map((family) => ({
+				activeMemberId: family.activeMemberId,
+				generation: family.generation
+			})),
+			memberGenerations: members.map((member) => member.generation)
 		}).toStrictEqual({
 			exchangeStatus: StatusCodes.OK,
-			statuses: [StatusCodes.OK, StatusCodes.BAD_REQUEST].toSorted(
-				(left, right) => left - right
-			),
-			refused: {
-				status: StatusCodes.BAD_REQUEST,
-				error: 'invalid_grant',
-				problem: 'stale-refresh-token'
-			},
-			successorAfterReplay: {
-				status: StatusCodes.BAD_REQUEST,
-				error: 'invalid_grant',
-				problem: 'stale-refresh-token'
-			},
-			families: [],
-			members: []
+			statuses: [StatusCodes.OK, StatusCodes.OK],
+			sameSuccessor: true,
+			families: [{ activeMemberId: firstId, generation: 1 }],
+			memberGenerations: [0, 1]
+		});
+	});
+
+	it('recovers after another refresh wins the rotation comparison', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const present = (): Request =>
+			new Request(new URL('/token', currentOrigin()), {
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({
+					grant_type: refreshTokenGrantType,
+					refresh_token: original
+				}).toString()
+			});
+		const outcomes = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const identity = new TenantIdentityService(instance.context);
+				const firstKeys = new AuthKeysService(instance.context, identity);
+				const firstService = new TokenExchangeService(
+					instance.context,
+					firstKeys,
+					new OidcTrustService(instance.context, identity)
+				);
+				const secondService = new TokenExchangeService(
+					instance.context,
+					new AuthKeysService(instance.context, identity),
+					new OidcTrustService(instance.context, identity)
+				);
+				const entered = Promise.withResolvers<undefined>();
+				const release = Promise.withResolvers<undefined>();
+				const activeAuthKey = firstKeys.activeAuthKey.bind(firstKeys);
+				const spy = vi
+					.spyOn(firstKeys, 'activeAuthKey')
+					.mockImplementation(async () => {
+						entered.resolve(undefined);
+						await release.promise;
+
+						return activeAuthKey();
+					});
+
+				try {
+					const firstPending = firstService.handleToken(
+						rootLogger(),
+						present()
+					);
+					await entered.promise;
+					const second = await secondService.handleToken(
+						rootLogger(),
+						present()
+					);
+					release.resolve(undefined);
+					const first = await firstPending;
+
+					return {
+						first: tokenResponseSchema.parse(await first.json()),
+						second: tokenResponseSchema.parse(await second.json())
+					};
+				} finally {
+					release.resolve(undefined);
+					spy.mockRestore();
+				}
+			}
+		);
+		const families = await refreshTokenRows();
+		const members = await refreshTokenMemberRows();
+
+		expect({
+			sameSuccessor:
+				outcomes.first.refresh_token === outcomes.second.refresh_token,
+			families: families.map((family) => ({
+				generation: family.generation
+			})),
+			memberGenerations: members.map((member) => member.generation)
+		}).toStrictEqual({
+			sameSuccessor: true,
+			families: [{ generation: 1 }],
+			memberGenerations: [0, 1]
 		});
 	});
 

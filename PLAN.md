@@ -3336,7 +3336,18 @@ session can refresh; claim-bound CI exchanges omit it. A refresh-token grant
 consumes the presented refresh token, re-reads the current trust rule, and
 issues a new access token only for grants the rule still permits. If the refresh
 request also carries narrower `authorization_details`, the same subset test used
-for attenuation applies before the new token is issued.
+for attenuation applies before the new token is issued. For one minute after a
+rotation, retrying the immediately consumed token returns the same successor
+refresh token and a newly issued access token, provided the trust rule still
+permits an interactive session. A retry that requests different grants is
+refused. A later replay, or a replay of an older generation, revokes the family.
+The successor remains an independent random secret. The spent member stores an
+AES-GCM envelope for the successor. Its key depends on the presented secret,
+`PUSH_ID_SIGNING_KEY`, the tenant, and both member IDs. An unreadable envelope
+rejects recovery without revoking the current successor. The previous envelope
+is cleared when its successor rotates. For an idle family, the ciphertext may
+remain until expiry cleanup; the server enforces the one-minute recovery window
+on every retry.
 
 ### Migration
 

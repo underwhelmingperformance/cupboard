@@ -119,6 +119,14 @@ A tenant session has two parts:
 The CLI renews the access token for you whenever it needs to, for up to 30 days
 after you signed in.
 
+If a refresh response is lost, retry the command within one minute. The CLI
+keeps the consumed refresh token until it receives a response. The server then
+returns the same successor refresh token and issues a new access token after
+checking the current trust rule. The CLI does not automatically retry a failed
+refresh request. A later retry revokes that refresh-token family. The CLI can
+establish a new session from a saved Cloudflare sign-in when it is still valid;
+otherwise, sign in again.
+
 A deployment session has only an access token, which is also valid for ten
 minutes. It has no refresh token.
 

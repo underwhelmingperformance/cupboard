@@ -7,7 +7,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
-import { asc } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -89,17 +89,30 @@ async function seedRefreshFamily(): Promise<RefreshFixture> {
 		createdAt
 	} as const satisfies typeof schema.refreshTokenMembers.$inferInsert;
 
-	await runInDurableObject(testServerFor(fixtureTenant), (instance) => {
-		instance.context.db.transaction((transaction) => {
-			transaction.insert(schema.refreshTokenFamilies).values(family).run();
-			transaction.insert(schema.refreshTokenMembers).values(member).run();
-		});
-	});
+	const persistedMember = await runInDurableObject(
+		testServerFor(fixtureTenant),
+		(instance) => {
+			instance.context.db.transaction((transaction) => {
+				transaction.insert(schema.refreshTokenFamilies).values(family).run();
+				transaction.insert(schema.refreshTokenMembers).values(member).run();
+			});
+
+			return instance.context.db
+				.select()
+				.from(schema.refreshTokenMembers)
+				.where(eq(schema.refreshTokenMembers.id, memberId))
+				.get();
+		}
+	);
+
+	if (persistedMember === undefined) {
+		throw new Error('The refresh member was not persisted');
+	}
 
 	return {
 		token: `${memberId}.${secret}`,
 		family: { ...family },
-		member: { ...member }
+		member: persistedMember
 	};
 }
 
