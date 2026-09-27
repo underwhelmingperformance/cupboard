@@ -44,16 +44,16 @@ import {
 	type Reporter,
 	type ReporterResultEvent
 } from '@cupboard/reporter';
-import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import type { Command } from 'commander';
-import { z } from 'zod';
-
 import {
 	type AbortableChildProcessLifecycle,
 	type ChildProcessEscalationScheduler,
 	observeChildProcess,
 	waitForAbortableChildProcess
-} from '../child-process.ts';
+} from '@cupboard/shared/child-process';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import type { Command } from 'commander';
+import { z } from 'zod';
+
 import {
 	type CupboardRunDependencies,
 	runCupboard as defaultRunCupboard

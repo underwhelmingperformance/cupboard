@@ -28,15 +28,15 @@ import {
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
 import type { Reporter, ReporterResultEvent } from '@cupboard/reporter';
+import {
+	type ChildProcessEscalationScheduler,
+	terminationGracePeriodMs
+} from '@cupboard/shared/child-process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildProgram } from '../../../packages/cli/src/cli.ts';
 import { FakeDaemonChild } from '../../../tests/support/fake-daemon-child.ts';
 import { FakeDaemonTransport } from '../../../tests/support/fake-daemon-transport.ts';
-import {
-	type ChildProcessEscalationScheduler,
-	terminationGracePeriodMs
-} from '../child-process.ts';
 import { runCupboard } from '../cupboard-run.ts';
 import {
 	CohortJsonInvalidError,
