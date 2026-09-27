@@ -17,7 +17,9 @@ function reportableError(error: unknown): Error {
 
 /**
  * Records an error object's identity globally so another reporter can suppress
- * a duplicate diagnostic. Primitive thrown values cannot be tracked.
+ * a duplicate diagnostic. A primitive value is not recorded. The GitHub
+ * reporter's phases wrap a thrown primitive in an `Error` before they record
+ * and rethrow it, so the Actions handler receives the recorded object.
  */
 export function markErrorReported(error: unknown): void {
 	if (typeof error === 'object' && error !== null) {
