@@ -25,18 +25,20 @@ export function isTransientResponse(response: Response): boolean {
 	return retryableStatuses.has(response.status);
 }
 
+export type ReplaySafety = 'replay-safe' | 'replay-unsafe';
+
 /**
- * Retries every rejected fetch and each {@link isTransientResponse} status,
- * with at most {@link maxTransientRetries} additional attempts. Other responses
- * return immediately. A positive numeric `Retry-After` value supplies the delay
- * up to the configured maximum; HTTP-date values use the normal backoff. An
- * abort signal ends the wait immediately.
+ * For a `replay-safe` request, retries a fetch that rejects with a network
+ * error ({@link isFetchNetworkError}) and each {@link isTransientResponse}
+ * status, with at most {@link maxTransientRetries} additional attempts. Other
+ * rejections and other responses return immediately. A `Retry-After` value in
+ * seconds or as an HTTP date supplies the delay, up to the maximum backoff. A
+ * missing or invalid value uses the normal backoff. An abort signal ends the
+ * wait immediately. A `replay-unsafe` request makes a single attempt.
  *
  * The function clones a `Request` before each attempt. Callers that send a body
  * must therefore supply reusable bytes rather than a one-shot stream.
  */
-export type ReplaySafety = 'replay-safe' | 'replay-unsafe';
-
 export function retryingFetcher(
 	fetcher: typeof fetch,
 	replaySafety: ReplaySafety
@@ -91,8 +93,9 @@ export function retryingFetcher(
 
 /**
  * Discards a transient response body, then waits for the next attempt. A
- * positive numeric `Retry-After` value supplies the delay, limited to the
- * maximum backoff. HTTP-date and invalid values use {@link backoffDelay}.
+ * `Retry-After` value in seconds or as an HTTP date supplies the delay,
+ * limited to the maximum backoff. A missing or invalid value uses
+ * {@link backoffDelay}.
  */
 export async function transientResponseDelay(
 	response: Response,
