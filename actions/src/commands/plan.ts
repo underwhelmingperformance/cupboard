@@ -26,16 +26,16 @@ import {
 	type Reporter,
 	type ReporterResultEvent
 } from '@cupboard/reporter';
+import {
+	type ClosedChildProcess,
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from '@cupboard/shared/child-process';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { type ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
-import {
-	type ClosedChildProcess,
-	observeChildProcess,
-	waitForAbortableChildProcess
-} from '../child-process.ts';
 import {
 	CommandFailedError,
 	ComponentRootTargetLimitError,

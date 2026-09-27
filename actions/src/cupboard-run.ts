@@ -10,15 +10,15 @@ import {
 	reporterResultEventSchema
 } from '@cupboard/reporter';
 import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from '@cupboard/shared/child-process';
+import {
 	type WorkflowCommands,
 	workflowCommands
 } from '@cupboard/shared/github-actions';
 import { z } from 'zod';
 
-import {
-	observeChildProcess,
-	waitForAbortableChildProcess
-} from './child-process.ts';
 import { CommandFailedError, CupboardReportedError } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 

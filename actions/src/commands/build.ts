@@ -6,13 +6,13 @@ import { env } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import type { BuildReceiptV2Input } from '@cupboard/protocol/build';
-import type { Command } from 'commander';
-import { z } from 'zod';
-
 import {
 	observeChildProcess,
 	waitForAbortableChildProcess
-} from '../child-process.ts';
+} from '@cupboard/shared/child-process';
+import type { Command } from 'commander';
+import { z } from 'zod';
+
 import {
 	BuildAttemptsInvalidError,
 	BuildInstallableInvalidError,

@@ -26,6 +26,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import type { Reporter } from '@cupboard/reporter';
 import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from '@cupboard/shared/child-process';
+import {
 	bestEffort,
 	discardResponseBody,
 	withCleanup,
@@ -54,10 +58,6 @@ import semverValid from 'semver/functions/valid.js';
 import { uncompress as uncompressSnappy } from 'snappyjs';
 import { z } from 'zod';
 
-import {
-	observeChildProcess,
-	waitForAbortableChildProcess
-} from './child-process.ts';
 import {
 	ArchiveSha256InvalidError,
 	AttestationNotFoundError,

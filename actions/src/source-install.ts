@@ -2,13 +2,13 @@ import { spawn } from 'node:child_process';
 import { access, constants, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { bestEffort } from '@cupboard/shared/cleanup';
-import { CodedError } from '@cupboard/shared/errors';
-
 import {
 	observeChildProcess,
 	waitForAbortableChildProcess
-} from './child-process.ts';
+} from '@cupboard/shared/child-process';
+import { bestEffort } from '@cupboard/shared/cleanup';
+import { CodedError } from '@cupboard/shared/errors';
+
 import type { ResolvedCupboard } from './cupboard-resolution.ts';
 import { CommandFailedError } from './errors.ts';
 import { parseLines } from './inputs.ts';

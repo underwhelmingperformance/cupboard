@@ -16,13 +16,13 @@ import {
 	type Reporter,
 	type ReporterResultEvent
 } from '@cupboard/reporter';
-import type { Command } from 'commander';
-import { z } from 'zod';
-
 import {
 	observeChildProcess,
 	waitForAbortableChildProcess
-} from '../child-process.ts';
+} from '@cupboard/shared/child-process';
+import type { Command } from 'commander';
+import { z } from 'zod';
+
 import {
 	type CacheSelectionSyntax,
 	cacheSelectionSyntax,
