@@ -16,10 +16,14 @@ import { describe, expect, it } from 'vitest';
 import migrations from '../../drizzle/migrations.js';
 import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { LocalSchemaMigrationPendingError } from '../errors.ts';
+import {
+	CacheCatalogueMigrationPendingError,
+	LocalSchemaMigrationPendingError
+} from '../errors.ts';
 import { reconcileCacheCatalogue } from '../migration/cache-access.ts';
 import {
 	beforeCacheIdentityContract,
+	flakyD1,
 	latestMigrationIndex,
 	migrateThrough,
 	testServerFor,
@@ -371,7 +375,7 @@ describe('cache access migration', () => {
 				"INSERT INTO tenant_identity (id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version) VALUES ('singleton', ?, 'https://idp.test', 'cupboard', 'https://idp.test', 'owner', 'cupboard', 1)",
 				tenant
 			);
-			for (let index = 0; index < 80; index++) {
+			for (let index = 0; index < 2001; index++) {
 				state.storage.sql.exec(
 					'INSERT INTO cache (name, priority, created_at) VALUES (?, 40, ?)',
 					`cache-${String(index).padStart(3, '0')}`,
@@ -418,19 +422,47 @@ describe('cache access migration', () => {
 		const outcomes = await runInDurableObject(
 			server,
 			async (instance, state) => {
-				const results: string[] = [];
-				for (let index = 0; index < 3; index++) {
+				let pendingCataloguePages = 0;
+				let hasStartedContraction = false;
+				for (let index = 0; index < 250; index++) {
 					const restarted = new CupboardServer(state, instance.context.env);
 					try {
 						await restarted.migrateCacheCatalogue(tenant);
-						results.push('complete');
+						break;
 					} catch (error) {
-						if (!(error instanceof Error)) {
-							throw error;
+						if (error instanceof LocalSchemaMigrationPendingError) {
+							if (pendingCataloguePages > 0) {
+								hasStartedContraction = true;
+								break;
+							}
+							continue;
 						}
-						results.push(error.name);
+						if (error instanceof CacheCatalogueMigrationPendingError) {
+							pendingCataloguePages += 1;
+							continue;
+						}
+						throw error;
 					}
 				}
+				const tenantAfterCatalogue = await d1
+					.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+					.from(d1Schema.tenant)
+					.where(eq(d1Schema.tenant.id, tenant))
+					.get();
+				let catalogueReadsAfterCompletion = 0;
+				const afterCatalogue = new CupboardServer(state, {
+					...instance.context.env,
+					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
+						failures: 0,
+						matches: (query) => query.includes('cache_lifecycle'),
+						onMatch: () => {
+							catalogueReadsAfterCompletion += 1;
+						}
+					})
+				});
+				const response = await afterCatalogue.fetch(
+					new Request('https://cache.test/nix-cache-info')
+				);
 				let hasCompleted = false;
 				for (let attempt = 0; attempt < 100; attempt++) {
 					const restarted = new CupboardServer(state, instance.context.env);
@@ -440,18 +472,23 @@ describe('cache access migration', () => {
 						break;
 					} catch (error) {
 						if (
-							!(error instanceof Error) ||
-							![
-								'LocalSchemaMigrationPendingError',
-								'CacheCatalogueMigrationPendingError'
-							].includes(error.name)
+							!(error instanceof LocalSchemaMigrationPendingError) &&
+							!(error instanceof CacheCatalogueMigrationPendingError)
 						) {
 							throw error;
 						}
 					}
 				}
 				return {
-					results,
+					hasMultipleCataloguePages: pendingCataloguePages > 1,
+					hasStartedContraction,
+					versionAfterCatalogue: tenantAfterCatalogue?.version ?? undefined,
+					catalogueReadsAfterCompletion,
+					afterCatalogueResponse: {
+						status: response.status,
+						retryAfter: response.headers.get('retry-after'),
+						cacheControl: response.headers.get('cache-control')
+					},
 					hasCompleted,
 					legacyTables: state.storage.sql
 						.exec(
@@ -462,11 +499,15 @@ describe('cache access migration', () => {
 			}
 		);
 		expect(outcomes).toStrictEqual({
-			results: [
-				'CacheCatalogueMigrationPendingError',
-				'CacheCatalogueMigrationPendingError',
-				'LocalSchemaMigrationPendingError'
-			],
+			hasMultipleCataloguePages: true,
+			hasStartedContraction: true,
+			versionAfterCatalogue: 2,
+			catalogueReadsAfterCompletion: 0,
+			afterCatalogueResponse: {
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				retryAfter: '1',
+				cacheControl: 'no-store'
+			},
 			hasCompleted: true,
 			legacyTables: []
 		});
@@ -477,6 +518,119 @@ describe('cache access migration', () => {
 				.where(eq(d1Schema.tenant.id, tenant))
 				.get()
 		).toStrictEqual({ version: 2 });
+	});
+
+	it('retries the catalogue marker write before contracting', async () => {
+		const tenant = tenantIdSchema.parse('catalogue-marker-write-failure');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await d1.insert(d1Schema.tenant).values({
+			id: tenant,
+			status: 'active',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'cupboard',
+			configVersion: 1,
+			createdAt: now
+		});
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			cacheName: sql`null`,
+			access: 'public',
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt: now
+		});
+		const server = testServerFor(tenant);
+		const markerFault = new Error('catalogue marker write failed');
+		const outcome = await runInDurableObject(
+			server,
+			async (instance, state) => {
+				await migrateThrough(state, 41);
+				state.storage.sql.exec(
+					"INSERT INTO tenant_identity (id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version) VALUES ('singleton', ?, 'https://idp.test', 'cupboard', 'https://idp.test', 'owner', 'cupboard', 1)",
+					tenant
+				);
+				state.storage.sql.exec(
+					'INSERT INTO cache (name, priority, created_at) VALUES (?, 40, ?)',
+					'builds',
+					now
+				);
+				const plan = {
+					failures: 1,
+					matches: (query: string) =>
+						query.startsWith('update "tenant"') &&
+						query.includes('"cache_catalogue_version"'),
+					error: markerFault
+				};
+				let hasSeenMarkerFault = false;
+				for (let attempt = 0; attempt < 20; attempt++) {
+					const restarted = new CupboardServer(state, {
+						...instance.context.env,
+						CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, plan)
+					});
+					try {
+						await restarted.migrateCacheCatalogue(tenant);
+					} catch (error) {
+						if (error === markerFault) {
+							hasSeenMarkerFault = true;
+							break;
+						}
+						if (
+							!(error instanceof LocalSchemaMigrationPendingError) &&
+							!(error instanceof CacheCatalogueMigrationPendingError)
+						) {
+							throw error;
+						}
+					}
+				}
+				const versionOnFault = await d1
+					.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+					.from(d1Schema.tenant)
+					.where(eq(d1Schema.tenant.id, tenant))
+					.get();
+				const legacyTablesOnFault = state.storage.sql
+					.exec(
+						"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cache'"
+					)
+					.toArray();
+				let hasCompleted = false;
+				for (let attempt = 0; attempt < 100; attempt++) {
+					const restarted = new CupboardServer(state, instance.context.env);
+					try {
+						await restarted.migrateCacheCatalogue(tenant);
+						hasCompleted = true;
+						break;
+					} catch (error) {
+						if (
+							!(error instanceof LocalSchemaMigrationPendingError) &&
+							!(error instanceof CacheCatalogueMigrationPendingError)
+						) {
+							throw error;
+						}
+					}
+				}
+				return {
+					hasSeenMarkerFault,
+					versionOnFault: versionOnFault?.version ?? undefined,
+					legacyTablesOnFault,
+					hasCompleted
+				};
+			}
+		);
+		const finalVersion = await d1
+			.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, tenant))
+			.get();
+
+		expect({ ...outcome, finalVersion }).toStrictEqual({
+			hasSeenMarkerFault: true,
+			versionOnFault: undefined,
+			legacyTablesOnFault: [{ name: 'cache' }],
+			hasCompleted: true,
+			finalVersion: { version: 2 }
+		});
 	});
 
 	it('removes legacy backfill markers and indexes at contraction', async () => {
