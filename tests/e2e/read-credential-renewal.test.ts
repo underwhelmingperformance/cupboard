@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
 import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -22,10 +22,9 @@ const narFile = fileURLToPath(
 );
 
 function storePath(label: string): string {
-	const bytes = randomBytes(32);
-	const hash = [...bytes]
-		.map((byte) => alphabet[byte % alphabet.length])
-		.join('');
+	const hash = Array.from({ length: 32 }, () =>
+		alphabet.charAt(randomInt(alphabet.length))
+	).join('');
 	return `/nix/store/${hash}-${label}`;
 }
 

@@ -22,6 +22,10 @@ import {
 
 const execute = promisify(execFile);
 const main = fileURLToPath(new URL('../main.ts', import.meta.url));
+const mockFetchImport = `--import=data:text/javascript,${encodeURIComponent(
+	"globalThis.fetch = () => Promise.resolve(new Response(process.env.CUPBOARD_TEST_CACHE_STATUS === '200' ? process.env.CUPBOARD_TEST_CACHE_INFO : undefined, { status: Number(process.env.CUPBOARD_TEST_CACHE_STATUS) }));"
+)}`;
+const childScript = String.raw`process.stdout.write('{"ok":true}\n'); process.exitCode = Number(process.env.CUPBOARD_TEST_CHILD_STATUS);`;
 
 describe('cupboard run', () => {
 	it('requests only view read access for a reuse view target', async () => {
@@ -394,7 +398,7 @@ describe('cupboard run', () => {
 		async (fixture) => {
 			const url = `https://cupboard.example.workers.dev${fixture.urlPath}`;
 			const arguments_ = [
-				`--import=data:text/javascript,${encodeURIComponent(`globalThis.fetch = () => Promise.resolve(new Response(${fixture.cacheStatus === 200 ? JSON.stringify(CacheInfo.default.render()) : 'undefined'}, { status: ${String(fixture.cacheStatus)} }));`)}`,
+				mockFetchImport,
 				'--experimental-transform-types',
 				'--disable-warning=ExperimentalWarning',
 				main,
@@ -403,7 +407,7 @@ describe('cupboard run', () => {
 				'--',
 				process.execPath,
 				'-e',
-				String.raw`process.stdout.write('{"ok":true}\n');process.exitCode=${String(fixture.childStatus)}`
+				childScript
 			];
 			let actual: {
 				readonly status: number;
@@ -419,7 +423,10 @@ describe('cupboard run', () => {
 						FORCE_COLOR: '0',
 						PRE_COMMIT: '0',
 						NIX_USER_CONF_FILES: '',
-						NIX_CONFIG: 'netrc-file = /nonexistent/cupboard-run-test-netrc'
+						NIX_CONFIG: 'netrc-file = /nonexistent/cupboard-run-test-netrc',
+						CUPBOARD_TEST_CACHE_STATUS: String(fixture.cacheStatus),
+						CUPBOARD_TEST_CACHE_INFO: CacheInfo.default.render(),
+						CUPBOARD_TEST_CHILD_STATUS: String(fixture.childStatus)
 					}
 				});
 				actual = { status: 0, ...output };
