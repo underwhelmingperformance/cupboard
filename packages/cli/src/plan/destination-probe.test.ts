@@ -98,7 +98,12 @@ describe('attestedServedPaths', () => {
 			fetcher: recordingFetcher(new Set([appHash]), requests)
 		});
 
-		expect({ attested: [...attested], requests }).toStrictEqual({
+		expect({
+			attested: [...attested],
+			requests: requests.toSorted((left, right) =>
+				left.url.localeCompare(right.url)
+			)
+		}).toStrictEqual({
 			attested: [appPath],
 			requests: [
 				{
