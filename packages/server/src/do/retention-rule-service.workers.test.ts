@@ -47,6 +47,38 @@ describe('retention rule sets', () => {
 		).rejects.toThrow('at most 4096 root retention overrides');
 	});
 
+	it('replaces the rule for a prefix that is set again', async () => {
+		await bootstrap();
+		const rules = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const service = new RetentionRuleService(instance.context);
+				const cache = instance.context.cacheRepository.require({
+					kind: 'default'
+				});
+				const prefix = rootNameSchema.parse('ci/');
+
+				await service.setRule(cache, prefix, {
+					kind: 'duration',
+					seconds: ttlSecondsSchema.parse(3600)
+				});
+				await service.setRule(cache, prefix, {
+					kind: 'duration',
+					seconds: ttlSecondsSchema.parse(7200)
+				});
+
+				return service.listForCache(cache);
+			}
+		);
+
+		expect(rules).toStrictEqual([
+			{
+				rootPrefix: 'ci/',
+				retention: { kind: 'duration', seconds: 7200 }
+			}
+		]);
+	});
+
 	it('compares canonical rules before reusing a matching content hash', async () => {
 		await bootstrap();
 		const result = await runInDurableObject(
