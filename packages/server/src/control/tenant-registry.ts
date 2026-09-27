@@ -8,7 +8,6 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
-import { legacyNormalisedIssuer } from '@cupboard/protocol/oidc-issuer';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type {
 	TenantCreateBody,
@@ -97,7 +96,7 @@ function toSummary(row: TenantRow): TenantSummary {
 	};
 }
 
-async function hasSameConfigExceptIssuer(
+async function hasSameConfig(
 	database: Database,
 	row: TenantRow,
 	body: TenantCreateBody
@@ -130,43 +129,11 @@ async function hasSameConfigExceptIssuer(
 
 	return (
 		isAccessMatching &&
+		row.ownerIssuer === body.ownerIssuer &&
 		row.ownerSubject === body.ownerSubject &&
 		row.ownerAudience === body.ownerAudience &&
 		isReadMatching
 	);
-}
-
-async function repairLegacyOwnerIssuer(
-	database: Database,
-	row: TenantRow,
-	body: TenantCreateBody
-): Promise<TenantRow | undefined> {
-	const legacyIssuer = legacyNormalisedIssuer(body.ownerIssuer);
-
-	if (
-		legacyIssuer === undefined ||
-		row.ownerIssuer !== legacyIssuer ||
-		!(await hasSameConfigExceptIssuer(database, row, body))
-	) {
-		return undefined;
-	}
-
-	const repaired = await database
-		.update(d1Schema.tenant)
-		.set({
-			ownerIssuer: body.ownerIssuer,
-			configVersion: sql`${d1Schema.tenant.configVersion} + 1`
-		})
-		.where(
-			and(
-				eq(d1Schema.tenant.id, row.id),
-				eq(d1Schema.tenant.ownerIssuer, legacyIssuer),
-				eq(d1Schema.tenant.configVersion, row.configVersion)
-			)
-		)
-		.returning();
-
-	return repaired[0];
 }
 
 async function hasSameReadVerifier(
@@ -240,16 +207,7 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	if (!(await hasSameConfigExceptIssuer(database, existing, body))) {
-		throw new TenantAlreadyExistsError(body.id);
-	}
-
-	const requiresIssuerRepair = existing.ownerIssuer !== body.ownerIssuer;
-
-	if (
-		requiresIssuerRepair &&
-		existing.ownerIssuer !== legacyNormalisedIssuer(body.ownerIssuer)
-	) {
+	if (!(await hasSameConfig(database, existing, body))) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
@@ -270,28 +228,7 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	if (!requiresIssuerRepair) {
-		return toSummary(existing);
-	}
-
-	const repaired = await repairLegacyOwnerIssuer(database, existing, body);
-
-	if (repaired !== undefined) {
-		return toSummary(repaired);
-	}
-
-	// A concurrent retry may have completed the compare-and-set first. Treat its
-	// exact result as the same successful repair.
-	const concurrent = await loadTenant(database, body.id);
-
-	if (
-		concurrent?.ownerIssuer !== body.ownerIssuer ||
-		!(await hasSameConfigExceptIssuer(database, concurrent, body))
-	) {
-		throw new TenantAlreadyExistsError(body.id);
-	}
-
-	return toSummary(concurrent);
+	return toSummary(existing);
 }
 
 /**

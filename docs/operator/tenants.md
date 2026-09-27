@@ -46,6 +46,9 @@ is removed.
 `--access` sets whether the tenant's default cache is public or private. It is
 required, as are the three `--owner-` options.
 
+The owner's issuer URL must match exactly on later attempts to create the same
+tenant, including any trailing slash. A different spelling returns a conflict.
+
 The command also creates a tenant read credential, which Nix uses to read the
 tenant's private caches. The user name is `cupboard`, and the command prints the
 generated password. The password isn't shown again. These options change that:

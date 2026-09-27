@@ -322,47 +322,64 @@ describe('tenant registry', () => {
 		expect(again.id).toBe(acme);
 	});
 
-	it('repairs a legacy-normalised owner issuer and makes the repair idempotent', async () => {
-		await ensureTenant(database(), createBody(acme), now);
-		const exactBody = tenantCreateBodySchema.parse({
-			...createBody(acme),
-			ownerIssuer: 'https://idp.test/'
-		});
-
-		const repaired = await ensureTenant(database(), exactBody, now);
-		const repeated = await ensureTenant(database(), exactBody, now);
-		const oldIdentity = await rejectedBy(() =>
-			ensureTenant(database(), createBody(acme), now)
-		);
-
-		expect({ repaired, repeated }).toStrictEqual({
-			repaired: {
+	it.each([
+		['https://idp.test', 'https://idp.test/'],
+		['https://idp.test/', 'https://idp.test'],
+		['https://idp.test/realm', 'https://idp.test/realm/'],
+		['https://idp.test/realm/', 'https://idp.test/realm']
+	])(
+		'refuses to re-create issuer %s as %s',
+		async (storedIssuer, requestedIssuer) => {
+			const storedBody = tenantCreateBodySchema.parse({
+				...createBody(acme),
+				ownerIssuer: storedIssuer
+			});
+			const requestedBody = tenantCreateBodySchema.parse({
+				...createBody(acme),
+				ownerIssuer: requestedIssuer
+			});
+			const created = await ensureTenant(database(), storedBody, now);
+			const repeated = await ensureTenant(database(), storedBody, now);
+			const rejected = await rejectedBy(() =>
+				ensureTenant(database(), requestedBody, now)
+			);
+			const stored = await database()
+				.select({
+					ownerIssuer: d1Schema.tenant.ownerIssuer,
+					configVersion: d1Schema.tenant.configVersion
+				})
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, acme))
+				.get();
+			const summary = {
 				id: acme,
 				status: 'active',
-				ownerIssuer: 'https://idp.test/',
+				ownerIssuer: storedIssuer,
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
-				configVersion: 2,
+				configVersion: 1,
 				createdAt: now
-			},
-			repeated: {
-				id: acme,
-				status: 'active',
-				ownerIssuer: 'https://idp.test/',
-				ownerSubject: 'owner',
-				ownerAudience: 'aud',
-				configVersion: 2,
-				createdAt: now
-			}
-		});
-		expect(errorFields(oldIdentity)).toStrictEqual({
-			name: 'TenantAlreadyExistsError',
-			status: StatusCodes.CONFLICT,
-			id: acme
-		});
-	});
+			};
 
-	it('does not repair the owner issuer when another setting conflicts', async () => {
+			expect({
+				created,
+				repeated,
+				rejected: errorFields(rejected),
+				stored
+			}).toStrictEqual({
+				created: summary,
+				repeated: summary,
+				rejected: {
+					name: 'TenantAlreadyExistsError',
+					status: StatusCodes.CONFLICT,
+					id: acme
+				},
+				stored: { ownerIssuer: storedIssuer, configVersion: 1 }
+			});
+		}
+	);
+
+	it('preserves the owner issuer when a conflicting retry also changes the quota', async () => {
 		await ensureTenant(database(), quotaBody(acme, 1000), now);
 		const conflicting = tenantCreateBodySchema.parse({
 			...quotaBody(acme, 2000),
