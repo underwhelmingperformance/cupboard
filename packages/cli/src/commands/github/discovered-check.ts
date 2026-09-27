@@ -541,7 +541,13 @@ async function inspectPublication(
 		publication.trigger === 'pull_request' &&
 		publication.requests.length > 0
 	) {
-		findings.push(await checkPullRequestCacheAccess(identity, client));
+		findings.push(
+			await checkPullRequestCacheAccess(
+				identity,
+				client,
+				read.selectedViewAccess
+			)
+		);
 	}
 
 	return findings;

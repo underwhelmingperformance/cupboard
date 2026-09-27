@@ -6,7 +6,10 @@ import {
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
-import { cacheListResponseSchema } from '@cupboard/protocol/caches';
+import {
+	cacheListResponseSchema,
+	type CacheSummaryInput
+} from '@cupboard/protocol/caches';
 import {
 	oidcTrustListResponseSchema,
 	oidcTrustSummarySchema
@@ -46,6 +49,7 @@ import {
 	ReadAuthenticationConfiguredFinding,
 	ReadAuthenticationIncompleteFinding,
 	ReadAuthenticationUnverifiedFinding,
+	ReuseViewAccessModeMismatchFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
 	RootGrantPrefixUnverifiedFinding
@@ -92,6 +96,7 @@ function fixture(
 	options: {
 		readonly rules?: readonly unknown[];
 		readonly views?: readonly ReuseViewSummary[];
+		readonly caches?: readonly CacheSummaryInput[];
 		readonly dependencies?: Partial<DiscoveredGithubCheckDependencies>;
 	} = {}
 ): {
@@ -102,7 +107,9 @@ function fixture(
 		client: {
 			caches: {
 				list: () =>
-					Promise.resolve(cacheListResponseSchema.parse({ caches: [] }))
+					Promise.resolve(
+						cacheListResponseSchema.parse({ caches: options.caches ?? [] })
+					)
 			},
 			reuseViews: {
 				list: () =>
@@ -216,6 +223,107 @@ it('reports every matching publishing job', async () => {
 				}
 			]
 		]
+	});
+});
+
+it.each([
+	{
+		selected: 'public' as const,
+		input: '',
+		status: 'failed',
+		mismatches: [
+			new ReuseViewAccessModeMismatchFinding(
+				'pull-request cache access',
+				'pull-requests-1234',
+				'private',
+				'public'
+			)
+		]
+	},
+	{
+		selected: 'private' as const,
+		input: '      cache-access-mode: private\n',
+		status: 'ready',
+		mismatches: []
+	}
+])('compares the PR view with the $selected cache policy', async (scenario) => {
+	const view = reuseViewSummarySchema.parse({
+		name: 'pull-requests-1234',
+		access: 'private',
+		selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+		priority: 50,
+		revision: 1,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z'
+	});
+	const cache: CacheSummaryInput = {
+		scope: { kind: 'named', name: 'gh-1234-pr-42' },
+		access: 'private',
+		priority: 30,
+		storePaths: 0,
+		defaultRootRetention: { kind: 'permanent' },
+		grace: { kind: 'none' },
+		rootRetentionOverrides: []
+	};
+	const rule = oidcTrustSummarySchema.parse({
+		...githubPrAddBody(
+			tenant,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{
+				repo: repository,
+				jobWorkflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+				readCache: true
+			}
+		),
+		id: 'pr',
+		disabled: false
+	});
+	const content = `
+on: pull_request
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+${scenario.input}`;
+	const { client, dependencies } = fixture({
+		rules: [rule],
+		views: [view],
+		caches: [cache],
+		dependencies: {
+			source: { ...source, read: () => Promise.resolve(content) },
+			fetchCacheAccess: () => Promise.resolve('public')
+		}
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main' },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+
+	expect({
+		status: result.jobs.map((job) => job.status),
+		mismatches: result.jobs.flatMap((job) =>
+			job.findings
+				.map(({ finding }) => finding)
+				.filter(
+					(finding) => finding instanceof ReuseViewAccessModeMismatchFinding
+				)
+		),
+		repairOffered: isRepairOffered(result)
+	}).toStrictEqual({
+		status: [scenario.status],
+		mismatches: scenario.mismatches,
+		repairOffered: false
 	});
 });
 
