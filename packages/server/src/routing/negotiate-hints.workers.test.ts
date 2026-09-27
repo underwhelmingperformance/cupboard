@@ -1,3 +1,4 @@
+import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import {
 	acceptCapabilitiesHeader,
 	uploadGraceFactsCapability,
@@ -6,7 +7,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
 import {
@@ -24,6 +25,8 @@ import {
 	flakyD1,
 	handlerFetch,
 	initialise,
+	issueServerSignedToken,
+	namedCache,
 	narInfoDeletionRows,
 	narInfoGeneration,
 	resetTestServer,
@@ -76,24 +79,29 @@ function actionsByPath(response: {
 	);
 }
 
-function probeRequest(
-	body: unknown,
-	headers?: Record<string, string>
-): Request {
-	return new Request(`https://cache.example/t/${fixtureTenant}/uploads`, {
-		method: 'POST',
-		headers: {
-			'content-type': 'application/json',
-			...(headers ?? { authorization: 'Bearer junk' })
-		},
-		body: typeof body === 'string' ? body : JSON.stringify(body)
-	});
-}
-
-// Hint computation runs before the Durable Object authenticates the request.
-// The signed push ID and path cap bound the D1 reads available at this stage.
 describe('computing negotiate hints', () => {
 	const path = uploadPathNegotiation(uploadMetadata({ fileSize: 1 }));
+	let hintToken: string;
+
+	function probeRequest(
+		body: unknown,
+		headers?: Record<string, string>
+	): Request {
+		return new Request(`https://cache.example/t/${fixtureTenant}/uploads`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				...(headers ?? { authorization: `Bearer ${hintToken}` })
+			},
+			body: typeof body === 'string' ? body : JSON.stringify(body)
+		});
+	}
+
+	beforeEach(async () => {
+		await resetTestServer();
+		await useTestServer(fixtureTenant);
+		hintToken = await initialise();
+	});
 
 	it('computes hints only for a signed push id', async () => {
 		const signed = await computeNegotiateHints(
@@ -120,7 +128,7 @@ describe('computing negotiate hints', () => {
 			probeRequest(
 				{ pushId: testPushId, paths: [path] },
 				{
-					authorization: 'Bearer junk',
+					authorization: `Bearer ${hintToken}`,
 					[acceptCapabilitiesHeader]: uploadGraceFactsCapability
 				}
 			),
@@ -146,6 +154,63 @@ describe('computing negotiate hints', () => {
 
 		expect(hints).toBeUndefined();
 	});
+
+	it('does not read shared D1 for a valid push ID with junk credentials', async () => {
+		const prepare = vi.spyOn(env.CUPBOARD_DB, 'prepare');
+
+		try {
+			const hints = await computeNegotiateHints(
+				probeRequest(
+					{ pushId: testPushId, paths: [path] },
+					{ authorization: 'Bearer junk' }
+				),
+				env,
+				fixtureTenant,
+				defaultCache()
+			);
+
+			expect({ hints, reads: prepare.mock.calls }).toStrictEqual({
+				hints: undefined,
+				reads: []
+			});
+		} finally {
+			prepare.mockRestore();
+		}
+	});
+
+	it.each([
+		{ actions: ['upload:preview'], cache: defaultCache() },
+		{ actions: ['upload:negotiate'], cache: namedCache('other') }
+	])(
+		'does not read shared D1 for a token with $actions on $cache.kind cache',
+		async ({ actions, cache }) => {
+			const token = await issueServerSignedToken(
+				authorizationDetailsSchema.parse([
+					{ type: 'cupboard_cache', actions, cache }
+				])
+			);
+			const prepare = vi.spyOn(env.CUPBOARD_DB, 'prepare');
+
+			try {
+				const hints = await computeNegotiateHints(
+					probeRequest(
+						{ pushId: testPushId, paths: [path] },
+						{ authorization: `Bearer ${token}` }
+					),
+					env,
+					fixtureTenant,
+					defaultCache()
+				);
+
+				expect({ hints, reads: prepare.mock.calls }).toStrictEqual({
+					hints: undefined,
+					reads: []
+				});
+			} finally {
+				prepare.mockRestore();
+			}
+		}
+	);
 
 	it('returns no hints for an unparseable body', async () => {
 		const hints = await computeNegotiateHints(
@@ -192,6 +257,34 @@ describe('negotiate hints', () => {
 	beforeEach(async () => {
 		await resetTestServer();
 		await useTestServer(fixtureTenant);
+	});
+
+	it('returns the ordinary authentication refusal without hint reads', async () => {
+		const path = uploadPathNegotiation(uploadMetadata({ fileSize: 1 }));
+		const prepare = vi.spyOn(env.CUPBOARD_DB, 'prepare');
+
+		try {
+			const response = await handlerFetch(`/t/${fixtureTenant}/uploads`, {
+				method: 'POST',
+				headers: {
+					authorization: 'Bearer junk',
+					'content-type': 'application/json'
+				},
+				body: JSON.stringify({ pushId: testPushId, paths: [path] })
+			});
+
+			expect({
+				status: response.status,
+				hintReads: prepare.mock.calls.filter(
+					([query]) =>
+						query.includes('"blob_state"') ||
+						query.includes('"tenant_blob"') ||
+						query.includes('"blob_ref"')
+				)
+			}).toStrictEqual({ status: StatusCodes.UNAUTHORIZED, hintReads: [] });
+		} finally {
+			prepare.mockRestore();
+		}
 	});
 
 	it('decides a mixed closure identically with and without hints', async () => {

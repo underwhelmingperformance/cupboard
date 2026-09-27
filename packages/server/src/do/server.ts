@@ -13,6 +13,7 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
+import { tenantContract } from '@cupboard/protocol/contract';
 import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	R2CredentialCheck,
@@ -2840,6 +2841,34 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		await this.initialise();
 		return this.verification.renewClaimLeases(owner, uploadIds);
+	}
+
+	/**
+	 * Checks the token and cache grant before the Worker reads shared hints.
+	 */
+	async authoriseNegotiateHints(
+		authorization: string,
+		cache: CacheScope
+	): Promise<boolean> {
+		const request = new Request('https://cupboard.invalid/uploads', {
+			headers: { authorization }
+		});
+
+		try {
+			const claims = await this.authKeys.authenticate(request);
+
+			await authoriseRequest(
+				claims,
+				tenantContract.uploads.negotiate.inDefaultCache['~orpc'].meta,
+				{},
+				cache,
+				noPendingCache
+			);
+
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	// Only RPC callers can stage negotiate hints. The Worker puts the returned
