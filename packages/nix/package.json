@@ -5,13 +5,13 @@
 		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/shared": "workspace:*",
 		"undici": "^8.0.0",
-		"zod": "^4.4.3"
+		"zod": "catalog:"
 	},
 	"devDependencies": {
-		"@types/node": "^25.9.1",
-		"http-status-codes": "^2.3.0",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"@types/node": "catalog:",
+		"http-status-codes": "catalog:",
+		"typescript": "catalog:",
+		"vitest": "catalog:"
 	},
 	"exports": {
 		".": "./src/index.ts"

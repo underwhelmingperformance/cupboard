@@ -2,13 +2,13 @@
 	"name": "@cupboard/nix-store",
 	"version": "0.0.0",
 	"dependencies": {
-		"zod": "^4.4.3"
+		"zod": "catalog:"
 	},
 	"devDependencies": {
-		"@types/node": "^25.9.1",
+		"@types/node": "catalog:",
 		"fast-check": "^4.8.0",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"typescript": "catalog:",
+		"vitest": "catalog:"
 	},
 	"exports": {
 		"./cache-info": "./src/cache-info.ts",

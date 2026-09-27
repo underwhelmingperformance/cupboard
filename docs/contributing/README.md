@@ -64,6 +64,10 @@ dependency. Scope it to the package that needs it with
 pnpm add -D --filter @cupboard/cli some-package
 ```
 
+For a dependency in the default catalogue, use its `catalog:` reference, such as
+`pnpm add --filter @cupboard/cli zod@catalog:`. Use `--save-catalog` only when
+intentionally adding or updating a catalogue entry.
+
 ## Finding your way around
 
 The repository is a pnpm workspace. Most of the code is in `packages/`:

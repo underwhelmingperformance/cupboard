@@ -21,3 +21,32 @@ minimumReleaseAgeExclude:
   - undici@7.29.0
   # Renovate security update: vitest@4.1.11
   - vitest@4.1.11
+
+catalog:
+  '@aws-sdk/client-s3': ^3.1075.0
+  '@aws-sdk/lib-storage': ^3.1075.0
+  '@cloudflare/workers-types': ^5.20260705.1
+  '@octokit/request-error': ^7.1.1
+  '@orpc/client': ^1.15.2
+  '@orpc/contract': ^1.15.2
+  '@orpc/json-schema': ^1.15.0
+  '@orpc/openapi': ^1.15.0
+  '@orpc/openapi-client': ^1.15.2
+  '@orpc/server': ^1.15.0
+  '@orpc/zod': ^1.15.0
+  '@sigstore/bundle': ^5.0.0
+  '@sigstore/verify': ^4.0.0
+  '@types/node': ^25.9.1
+  '@types/ws': ^8.18.1
+  aws4fetch: ^1.0.20
+  cloudflare: ^7.0.0
+  commander: ^15.0.0
+  esbuild: ^0.28.1
+  http-status-codes: ^2.3.0
+  miniflare: ^4.20260730.0
+  picocolors: ^1.1.1
+  typescript: ^6.0.3
+  vitest: ^4.1.8
+  ws: ^8.21.3
+  yaml: ^2.9.0
+  zod: ^4.4.3

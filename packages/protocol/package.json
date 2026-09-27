@@ -4,15 +4,15 @@
 	"dependencies": {
 		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/shared": "workspace:*",
-		"@orpc/contract": "^1.15.2",
-		"http-status-codes": "^2.3.0",
+		"@orpc/contract": "catalog:",
+		"http-status-codes": "catalog:",
 		"re2js": "^2.8.3",
-		"zod": "^4.4.3"
+		"zod": "catalog:"
 	},
 	"devDependencies": {
-		"@types/node": "^25.9.1",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"@types/node": "catalog:",
+		"typescript": "catalog:",
+		"vitest": "catalog:"
 	},
 	"exports": {
 		"./attestations": "./src/attestations.ts",

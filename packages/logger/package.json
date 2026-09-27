@@ -6,9 +6,9 @@
 		"@logtape/logtape": "^2.2.3"
 	},
 	"devDependencies": {
-		"@types/node": "^25.9.1",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"@types/node": "catalog:",
+		"typescript": "catalog:",
+		"vitest": "catalog:"
 	},
 	"exports": {
 		".": "./src/config.ts",

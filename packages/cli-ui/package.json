@@ -7,13 +7,13 @@
 		"@cupboard/logger": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
-		"picocolors": "^1.1.1"
+		"picocolors": "catalog:"
 	},
 	"devDependencies": {
-		"@types/node": "^25.9.1",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8",
-		"zod": "^4.4.3"
+		"@types/node": "catalog:",
+		"typescript": "catalog:",
+		"vitest": "catalog:",
+		"zod": "catalog:"
 	},
 	"exports": {
 		".": "./src/cli-ui.ts",

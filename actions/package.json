@@ -13,14 +13,14 @@
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
-		"@octokit/request-error": "^7.1.1",
-		"@sigstore/bundle": "^5.0.0",
+		"@octokit/request-error": "catalog:",
+		"@sigstore/bundle": "catalog:",
 		"@sigstore/sign": "^5.0.0",
-		"commander": "^15.0.0",
-		"http-status-codes": "^2.3.0",
+		"commander": "catalog:",
+		"http-status-codes": "catalog:",
 		"semver": "^7.8.5",
 		"snappyjs": "^0.7.0",
-		"zod": "^4.4.3"
+		"zod": "catalog:"
 	},
 	"devDependencies": {
 		"@types/semver": "^7.8.0",
