@@ -661,6 +661,40 @@ describe('control plane POST /signup', () => {
 		});
 	});
 
+	it('retries one issuer fetch failure and claims the admin', async () => {
+		const idp = await stubIssuer();
+		const subjectToken = await idp.sign({
+			subject: 'founder',
+			audience: 'cupboard-client'
+		});
+		const served = fetch;
+		let remainingFailures = 1;
+		vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+			if (remainingFailures > 0) {
+				remainingFailures -= 1;
+
+				return Promise.reject(new Error('issuer fetch blip'));
+			}
+
+			return served(input, init);
+		});
+
+		const response = await postSignup({
+			subject_token: subjectToken,
+			claim_secret: claimSecret
+		});
+		const { admin } = await seededAdmin();
+
+		expect({ status: response.status, admin }).toStrictEqual({
+			status: StatusCodes.OK,
+			admin: {
+				issuer: idp.issuer,
+				subject: 'founder',
+				audience: 'cupboard-client'
+			}
+		});
+	});
+
 	it('reports 503 when the token issuer is unavailable', async () => {
 		const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
 		const { privateKey } = await generateKeyPair('RS256');

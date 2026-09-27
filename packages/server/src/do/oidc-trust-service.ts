@@ -23,23 +23,18 @@ import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import {
-	IssuerUnavailableError,
 	OidcIssuerTransportRequiredError,
 	OidcTrustRuleNotFoundError,
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
-	SubjectTokenNotJwtError,
-	SubjectTokenVerificationFailedError
+	SubjectTokenNotJwtError
 } from '../errors.ts';
+import { InboundTokenVerifier } from '../oidc/inbound-verifier.ts';
 import {
 	canUseLoopbackHttp,
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
-import {
-	decodeInboundClaims,
-	OidcKeysUnreachableError,
-	verifyInboundOidcToken
-} from '../oidc/oidc.ts';
+import { decodeInboundClaims } from '../oidc/oidc.ts';
 
 import {
 	oidcTrustRuleFromRow,
@@ -52,8 +47,6 @@ import {
 import { StoredGrantSpelling } from './stored-grant-spelling.ts';
 import { type TenantIdentityService } from './tenant-identity-service.ts';
 
-const issuerRetryDelayMs = 100;
-
 export interface OidcTrustRuleSnapshot {
 	readonly rule: OidcTrustRule;
 	readonly row: typeof schema.oidcTrust.$inferSelect;
@@ -61,12 +54,14 @@ export interface OidcTrustRuleSnapshot {
 
 export class OidcTrustService {
 	private readonly grantSpelling: StoredGrantSpelling;
+	private readonly verifier: InboundTokenVerifier;
 
 	constructor(
 		private readonly context: ServerContext,
 		private readonly tenantIdentity: TenantIdentityService
 	) {
 		this.grantSpelling = new StoredGrantSpelling(context);
+		this.verifier = new InboundTokenVerifier(context.discovery);
 	}
 
 	private ownerConfig(
@@ -117,44 +112,6 @@ export class OidcTrustService {
 			subject,
 			audience
 		};
-	}
-
-	private async verifyInboundOnce(
-		target: OidcTrustVerificationTarget,
-		token: string,
-		trustedAudiences: ReadonlySet<string>
-	): Promise<VerifiedOidcClaims> {
-		// Discovery and JWKS fetch failures are retryable issuer outages.
-		// Signature and claim failures remain non-retryable token errors.
-		let issuer;
-		try {
-			issuer = await this.context.discovery.resolve(target.issuer);
-		} catch (error: unknown) {
-			throw new IssuerUnavailableError(target.issuer, { cause: error });
-		}
-
-		try {
-			// The signature is checked against the discovered keys, with issuer and
-			// audience pinned.
-			return await verifyInboundOidcToken(
-				issuer.resolver,
-				token,
-				{
-					issuer: target.issuer,
-					audience: target.audience,
-					trustedAudiences,
-					algorithms: issuer.algorithms,
-					requireIdTokenClaims: true
-				},
-				new Date()
-			);
-		} catch (error) {
-			if (error instanceof OidcKeysUnreachableError) {
-				throw new IssuerUnavailableError(target.issuer, { cause: error });
-			}
-
-			throw new SubjectTokenVerificationFailedError();
-		}
 	}
 
 	listRules(): OidcTrustListResponse {
@@ -260,25 +217,12 @@ export class OidcTrustService {
 		}
 	}
 
-	async verifyInbound(
+	verifyInbound(
 		target: OidcTrustVerificationTarget,
 		token: string,
 		trustedAudiences: ReadonlySet<string>
 	): Promise<VerifiedOidcClaims> {
-		try {
-			return await this.verifyInboundOnce(target, token, trustedAudiences);
-		} catch (error) {
-			// Only the transient upstream refusal is retried; a token that failed
-			// verification is refused at once. One short in-place retry absorbs an
-			// issuer fetch blip before it costs the client a full round trip.
-			if (!(error instanceof IssuerUnavailableError)) {
-				throw error;
-			}
-
-			await new Promise((resolve) => setTimeout(resolve, issuerRetryDelayMs));
-
-			return this.verifyInboundOnce(target, token, trustedAudiences);
-		}
+		return this.verifier.verify(target, token, trustedAudiences);
 	}
 
 	enabledOidcTrustRules(logger: Logger): OidcTrustRule[] {
