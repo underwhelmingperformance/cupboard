@@ -135,14 +135,8 @@ export interface InboundVerifyOptions {
 	readonly requireIdTokenClaims?: boolean;
 }
 
-/**
- * Verifies the signature, issuer, audience, expiry and algorithm with the
- * supplied key resolver. A remote resolver can fetch the issuer's JWKS while
- * this function runs.
- */
-// Keep token-shape, claim, signature, algorithm and key-selection failures
-// separate from failures to load the JWKS. Callers reject the former and return
-// a retryable issuer response for the latter.
+// The jose errors that describe the token: its shape, claims, signature,
+// algorithm or key selection.
 const tokenVerificationErrors = [
 	joseErrors.JWSSignatureVerificationFailed,
 	joseErrors.JWTExpired,
@@ -161,6 +155,13 @@ function isTokenVerificationFailure(error: unknown): boolean {
 	);
 }
 
+/**
+ * Verifies the signature, issuer, audience, expiry and algorithm with the
+ * supplied key resolver. A token that fails verification throws
+ * `OidcTokenVerificationError`. The resolver that `OidcDiscoveryStore` returns
+ * fetches the issuer's JWKS and reports a failed fetch as
+ * `OidcKeysUnreachableError`. Every other error propagates unchanged.
+ */
 export async function verifyInboundOidcToken(
 	resolveKey: JWTVerifyGetKey,
 	token: string,
@@ -242,15 +243,11 @@ export async function verifyInboundOidcToken(
 		// `jwtVerify` established the invariant represented by the opaque brand.
 		return verified.payload as VerifiedOidcClaims;
 	} catch (error) {
-		if (error instanceof OidcTokenVerificationError) {
-			throw error;
-		}
-
 		if (isTokenVerificationFailure(error)) {
 			throw new OidcTokenVerificationError({ cause: error });
 		}
 
-		throw new OidcKeysUnreachableError({ cause: error });
+		throw error;
 	}
 }
 
@@ -475,19 +472,54 @@ export class OidcDiscoveryStore {
 			this.fetcher,
 			this.canUseLoopbackHttp
 		);
-		const jwksFetcher: FetchImplementation = (url, options) =>
-			fetchBoundedResponse(this.fetcher, url, options, {
-				description: 'OIDC JWKS response',
-				maximumBytes: jwksMaximumBytes
-			});
+		// jose reports a status other than 200 and a body that is not JSON with
+		// its generic error class. Check both here so that every failed retrieval
+		// of the key set is an `OidcKeysUnreachableError`.
+		const jwksFetcher: FetchImplementation = async (url, options) => {
+			try {
+				const response = await fetchBoundedResponse(
+					this.fetcher,
+					url,
+					options,
+					{ description: 'OIDC JWKS response', maximumBytes: jwksMaximumBytes }
+				);
+
+				if (response.status !== 200) {
+					throw new Error(
+						`the JWKS endpoint responded with HTTP ${String(response.status)}`
+					);
+				}
+
+				await response.clone().json();
+
+				return response;
+			} catch (error) {
+				throw new OidcKeysUnreachableError({ cause: error });
+			}
+		};
+		const remoteKeys = createRemoteJWKSet(new URL(discovery.jwksUri), {
+			cacheMaxAge: jwksCacheMaxAgeMs,
+			cooldownDuration: jwksCooldownMs,
+			[customFetchKey]: jwksFetcher,
+			timeoutDuration: jwksTimeoutMs
+		});
+		const resolver: JWTVerifyGetKey = async (protectedHeader, token) => {
+			try {
+				return await remoteKeys(protectedHeader, token);
+			} catch (error) {
+				if (
+					error instanceof joseErrors.JWKSInvalid ||
+					error instanceof joseErrors.JWKSTimeout
+				) {
+					throw new OidcKeysUnreachableError({ cause: error });
+				}
+
+				throw error;
+			}
+		};
 
 		return {
-			resolver: createRemoteJWKSet(new URL(discovery.jwksUri), {
-				cacheMaxAge: jwksCacheMaxAgeMs,
-				cooldownDuration: jwksCooldownMs,
-				[customFetchKey]: jwksFetcher,
-				timeoutDuration: jwksTimeoutMs
-			}),
+			resolver,
 			algorithms: intersectAlgorithms(
 				discovery.signingAlgValues,
 				inboundAlgorithmAllowlist
