@@ -228,7 +228,7 @@ interface FixtureBundles {
 export interface DeploymentClient {
 	transitions(): Promise<ParsedDeploymentTransitionsResponse>;
 	localStepStatus(): Promise<ParsedLocalStepStatus>;
-	wakeLocalStep(limit: number): Promise<ParsedLocalStepWakeResponse>;
+	wakeLocalStep(): Promise<ParsedLocalStepWakeResponse>;
 }
 
 // Which Workers the persisted storage is currently served by. The harness swaps
@@ -396,6 +396,15 @@ function currentOptions(
 				queueProducers: {
 					MAINTENANCE_QUEUE: { queueName: maintenanceQueue }
 				},
+				// The control Worker consumes the maintenance queue, so a wake
+				// reaches the tenant objects as it does in production.
+				queueConsumers: {
+					[maintenanceQueue]: {
+						maxBatchSize: 1,
+						maxBatchTimeout: 1,
+						maxRetries: 3
+					}
+				},
 				bindings: controlBindings
 			},
 			{
@@ -511,8 +520,8 @@ export class StagedDeploymentServer {
 
 		return {
 			transitions: () => rpc.deployment.transitions(),
-			localStepStatus: () => rpc.localStep.status({}),
-			wakeLocalStep: (limit) => rpc.localStep.wake({ limit })
+			localStepStatus: () => rpc.localStep.status(),
+			wakeLocalStep: () => rpc.localStep.wake()
 		};
 	}
 
@@ -1002,10 +1011,10 @@ export class StagedDeploymentServer {
 
 				return client.localStepStatus();
 			},
-			wakeLocalStep: async (limit) => {
+			wakeLocalStep: async () => {
 				const client = await this.connectDeploymentClient();
 
-				return client.wakeLocalStep(limit);
+				return client.wakeLocalStep();
 			}
 		};
 	}

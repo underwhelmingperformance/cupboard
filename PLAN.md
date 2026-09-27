@@ -6427,16 +6427,22 @@ published intermediates and their storage cost.
       `required` in `localStep.status`, and the migration checks.
 - [ ] Set `completedBy` on `deployment-transitions` once the release that first
       includes it has been tagged.
-- [ ] Rebuild the wake chain from #407 on the schema transitions. The wake chain
-      is a chain of maintenance-queue messages that wakes tenants until none is
-      pending, so tenant work continues without a deploy. Each message wakes one
-      batch. One row in the `local_step_wake_chain` table records which chain
-      may run batches and how many batches in a row have stalled; the delay
-      before the next message doubles with each stalled batch. The rebuild adds
-      that table as migration `0032` in a new independent transition,
-      `local-step-wake-chain`. It also reports the chain's progress in
-      `localStep.status`, makes the deploy read that progress, and makes the
-      cron restart a chain that has stopped.
+- [x] Tenant work continues without a deploy. A wake makes a tenant object store
+      the requested step and run one page; the object runs further pages on its
+      alarm as the `local-step` maintenance pass, with the thirty-second retry
+      after a page without progress, and stops after ten minutes without
+      progress. The object writes the attempts of failed pages, pages without
+      progress and pages that record a step to `tenant.local_step_attempted_at`,
+      `local_step_progressed_at` and `local_step_error` (migration `0033`, in
+      the independent `local-step-attempts` transition); a throttle can skip the
+      writes of pages that made progress. `localStep.status` classifies the
+      pending tenants as working, stalled or unwoken over a ten-minute window,
+      with samples. `localStep.wake` and every cron tick enqueue a wake for each
+      stalled or unwoken tenant, twenty to a message. The deploy and
+      `cupboard deployment resume` wake once and poll the status every five
+      seconds.
+- [ ] Drop `local_step_wake_cursor` in a later transition's contract migrations.
+      Nothing reads it since the wake stopped using a cursor.
 - [ ] Write the transition records through a control-plane procedure
       (`PUT /deployment/transitions/{id}`), so the deploy writes to D1 directly
       only to apply migrations.

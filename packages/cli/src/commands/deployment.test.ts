@@ -56,13 +56,18 @@ function requiredStepOf(
 	);
 }
 
+// A status in which every pending tenant is unwoken.
 function statusFor(required: number, pending: number): LocalStepStatus {
 	return {
 		current: currentLocalStep,
 		required,
 		ready: 1,
 		pending,
-		stragglers: pending > 0 ? [tenant] : []
+		working: 0,
+		stalled: 0,
+		unwoken: pending,
+		stalledSample: [],
+		unwokenSample: pending > 0 ? [{ tenant }] : []
 	};
 }
 
@@ -77,26 +82,20 @@ function client(
 			return Promise.resolve(transitions);
 		},
 		localStep: {
-			status: (input) => {
-				calls.push(input);
+			status: () => {
+				calls.push('status');
 				return Promise.resolve(
-					statusFor(
-						input.requiredStep ?? requiredStepOf(transitions),
-						pending.count
-					)
+					statusFor(requiredStepOf(transitions), pending.count)
 				);
 			},
-			wake: (input) => {
-				calls.push(input);
+			wake: () => {
+				calls.push('wake');
+				const woken = pending.count;
 				pending.count = 0;
 				return Promise.resolve({
-					current: currentLocalStep,
 					required: requiredStepOf(transitions),
-					woken: 1,
-					failed: 0,
-					outcomes: [
-						{ tenant, kind: 'recorded', step: requiredStepOf(transitions) }
-					]
+					enqueued: woken,
+					pending: woken
 				});
 			}
 		}
@@ -208,12 +207,18 @@ describe('runDeploymentStatus', () => {
 						},
 						{ label: 'Required local step', value: '4' },
 						{ label: 'Ready tenants', value: '1' },
-						{ label: 'Pending tenants', value: '1' },
-						{ label: 'Pending sample', value: 'acme' }
+						{
+							label: 'Pending tenants',
+							value: '1 (working 0, stalled 0, unwoken 1)'
+						},
+						{
+							label: 'Not yet woken',
+							value: 'acme: no attempt at the outstanding work'
+						}
 					]
 				}
 			],
-			calls: ['transitions', {}]
+			calls: ['transitions', 'status']
 		});
 	});
 
@@ -254,8 +259,10 @@ describe('runDeploymentStatus', () => {
 					{ label: `Transition ${row.id}`, value },
 					{ label: 'Required local step', value: '5' },
 					{ label: 'Ready tenants', value: '1' },
-					{ label: 'Pending tenants', value: '0' },
-					{ label: 'Pending sample', value: '(none)' }
+					{
+						label: 'Pending tenants',
+						value: '0 (working 0, stalled 0, unwoken 0)'
+					}
 				]
 			}
 		]);
@@ -276,8 +283,71 @@ describe('runDeploymentStatus', () => {
 				{ label: 'Transitions', value: 'none recorded' },
 				{ label: 'Required local step', value: '4' },
 				{ label: 'Ready tenants', value: '1' },
-				{ label: 'Pending tenants', value: '0' },
-				{ label: 'Pending sample', value: '(none)' }
+				{
+					label: 'Pending tenants',
+					value: '0 (working 0, stalled 0, unwoken 0)'
+				}
+			]
+		]);
+	});
+
+	it('lists the sampled stalled and unwoken tenants and counts the others', async () => {
+		const results: ResultRow[][] = [];
+		const status: LocalStepStatus = {
+			current: currentLocalStep,
+			required: expansionLocalStep,
+			ready: 4,
+			pending: 4,
+			working: 1,
+			stalled: 2,
+			unwoken: 1,
+			stalledSample: [
+				{
+					tenant: 'acme',
+					attemptedAt: '2026-01-01T00:31:04.000Z',
+					progressedAt: '2026-01-01T00:02:11.000Z',
+					error: 'InjectedPageFault'
+				}
+			],
+			unwokenSample: [{ tenant: 'gamma' }]
+		};
+
+		await runDeploymentStatus(reporter(results), {
+			...client(expanded, [], { count: 0 }),
+			localStep: {
+				status: () => Promise.resolve(status),
+				wake: () => Promise.reject(new Error('status does not wake'))
+			}
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Transition cache-identity', value: `expanded ${since}` },
+				{
+					label: 'Transition deployment-transitions',
+					value: `complete ${since}`
+				},
+				{
+					label: 'Transition attestation-path-index',
+					value: `expanded ${since}`
+				},
+				{ label: 'Transition local-step-attempts', value: `complete ${since}` },
+				{ label: 'Required local step', value: '4' },
+				{ label: 'Ready tenants', value: '4' },
+				{
+					label: 'Pending tenants',
+					value: '4 (working 1, stalled 2, unwoken 1)'
+				},
+				{
+					label: 'Stalled',
+					value:
+						'acme: attempted 2026-01-01 00:31 UTC, last progress 2026-01-01 00:02 UTC, InjectedPageFault'
+				},
+				{
+					label: 'Not yet woken',
+					value: 'gamma: no attempt at the outstanding work'
+				},
+				{ label: 'Not listed', value: '1 more stalled or unwoken tenants' }
 			]
 		]);
 	});
@@ -307,7 +377,7 @@ describe('runDeploymentResume', () => {
 			await runDeploymentResume(
 				payloadReporter(payloads, infos),
 				client(transitions, calls, { count: 1 }),
-				{ limit: 20, maxPasses: 3 }
+				{}
 			);
 
 			expect({ payloads, infos, calls }).toStrictEqual({
@@ -322,7 +392,7 @@ describe('runDeploymentResume', () => {
 					}
 				],
 				infos: [info],
-				calls: [{}, { limit: 20 }, {}, 'transitions']
+				calls: ['status', 'wake', 'status', 'transitions']
 			});
 		}
 	);
@@ -343,7 +413,7 @@ describe('runDeploymentResume', () => {
 			await runDeploymentResume(
 				payloadReporter(payloads, infos),
 				client(transitions, [], { count: 0 }),
-				{ limit: 20, maxPasses: 3 }
+				{}
 			);
 
 			expect({ payloads, infos }).toStrictEqual({
@@ -367,25 +437,18 @@ describe('runDeploymentResume', () => {
 		}
 	);
 
-	it('fails when tenants remain below the step after the last pass', async () => {
-		const pending = { count: 1 };
+	it('fails when no tenant has worked for the stall window after the wake', async () => {
+		let now = 0;
+		const stalled = statusFor(expansionLocalStep, 1);
 		const failing: DeploymentClient = {
-			...client(expanded, [], pending),
+			...client(expanded, [], { count: 1 }),
 			localStep: {
-				status: (input) =>
-					Promise.resolve(
-						statusFor(
-							input.requiredStep ?? requiredStepOf(expanded),
-							pending.count
-						)
-					),
+				status: () => Promise.resolve(stalled),
 				wake: () =>
 					Promise.resolve({
-						current: currentLocalStep,
 						required: expansionLocalStep,
-						woken: 0,
-						failed: 1,
-						outcomes: [{ tenant, kind: 'failed' }]
+						enqueued: 1,
+						pending: 1
 					})
 			}
 		};
@@ -394,15 +457,19 @@ describe('runDeploymentResume', () => {
 
 		try {
 			await runDeploymentResume(reporter([]), failing, {
-				limit: 20,
-				maxPasses: 2
+				now: () => now,
+				delay: (ms) => {
+					now += ms;
+
+					return Promise.resolve();
+				}
 			});
 		} catch (error) {
 			caught = error;
 		}
 
 		expect(caught).toStrictEqual(
-			new LocalStepUnreachedError(1, expansionLocalStep, [tenant])
+			new LocalStepUnreachedError({ kind: 'stalled', status: stalled })
 		);
 	});
 });

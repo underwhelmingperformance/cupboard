@@ -120,9 +120,9 @@ export interface TransitionHooks<Id extends string = TransitionId> {
 	readonly checkServing: () => Promise<void>;
 	/**
 	 * Wakes tenants until every active or suspended tenant has recorded the
-	 * transition's contract step. Without it the walk only checks the tenants,
-	 * and the control Worker's cron trigger wakes those below the required
-	 * local step.
+	 * transition's contract step. The walk checks the tenants again afterwards.
+	 * Without it the walk only checks the tenants, and the control Worker's cron
+	 * trigger wakes those below the required local step.
 	 */
 	readonly wakeTenants?: (contractStep: LocalStep) => Promise<void>;
 	readonly report?: (event: TransitionEvent<Id>) => void;
@@ -321,11 +321,12 @@ async function reachContractStep<Id extends string>(
 	}
 
 	if (readiness.pending > 0) {
-		throw new LocalStepUnreachedError(
-			readiness.pending,
-			step,
-			readiness.stragglers
-		);
+		throw new LocalStepUnreachedError({
+			kind: 'below-step',
+			pending: readiness.pending,
+			requiredStep: step,
+			stragglers: readiness.stragglers
+		});
 	}
 
 	hooks.report?.({ kind: 'tenants-ready', transition: id, step });

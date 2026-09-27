@@ -14,9 +14,7 @@ import {
 } from '../control-keys.ts';
 import {
 	deploymentTransitionsResponseSchema,
-	localStepStatusQuerySchema,
 	localStepStatusSchema,
-	localStepWakeBodySchema,
 	localStepWakeResponseSchema
 } from '../deployment.ts';
 import {
@@ -254,20 +252,18 @@ export const controlContract = {
 	// suspended tenant's Durable Object to report the step it has reached, and
 	// `cupboard deploy` applies a transition's contract migrations only once
 	// every active or suspended tenant has recorded the transition's contract
-	// step. `status` reports how far the tenants have come and `wake` advances a
-	// bounded batch of those that have not; an object records its step only when
-	// woken here.
+	// step. `status` reports how far the tenants have come. `wake` sends a wake
+	// to each tenant that is not working towards the step, and each woken object
+	// continues until it records the step.
 	localStep: {
 		status: controlProcedure
 			.meta({ requires: 'local-step:read', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/local-step' })
-			.input(localStepStatusQuerySchema)
 			.output(localStepStatusSchema),
 
 		wake: controlProcedure
 			.meta({ requires: 'local-step:wake' })
 			.route({ method: 'POST', path: '/local-step/wake' })
-			.input(localStepWakeBodySchema)
 			.output(localStepWakeResponseSchema)
 	},
 

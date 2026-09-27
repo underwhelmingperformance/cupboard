@@ -1,5 +1,9 @@
 import type { TenantId } from '@cupboard/nix-store/scalars';
 import {
+	localStepStallWindowMs,
+	type LocalStepStatus
+} from '@cupboard/protocol/deployment';
+import {
 	CodedError,
 	genericExitCode,
 	usageExitCode
@@ -11,6 +15,10 @@ import {
 	type OAuthErrorResponse,
 	parseOAuthErrorBody
 } from './auth/oauth-error.ts';
+import {
+	stalledTenantText,
+	unwokenTenantText
+} from './deploy/local-step-samples.ts';
 
 // The CLI's own failure categories, layered on the shared generic (1) and usage
 // (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
@@ -188,30 +196,114 @@ export class WorkersNotServingBuildError extends CliError {
 }
 
 /**
+ * Why tenants below a local step stopped the deploy or
+ * `cupboard deployment resume`.
+ *
+ * - `below-step`: the deploy's own readiness check found tenants below a
+ *   transition's contract step. `stragglers` is a sample of them in slug
+ *   order.
+ * - `stalled`: tenants were still pending a whole stall window after the
+ *   settlement's wake, and none was working. `status` is the last status that
+ *   the settlement read.
+ */
+export type LocalStepShortfall =
+	| {
+			readonly kind: 'below-step';
+			readonly pending: number;
+			readonly requiredStep: number;
+			readonly stragglers: readonly string[];
+	  }
+	| { readonly kind: 'stalled'; readonly status: LocalStepStatus };
+
+/**
  * Active or suspended tenants have not recorded a local step, so the deploy or
  * `cupboard deployment resume` stopped. The Workers are already uploaded when
  * the deploy throws this. When the step is a transition's contract step, that
  * transition's contract migrations stay unapplied. After every transition is
- * complete, only tenant work remains. The control Worker's cron trigger wakes
- * the tenants that are behind, and each records its step.
+ * complete, only tenant work remains. A woken tenant object continues while
+ * it makes progress and stops after `localStepStallWindowMs` without it, and
+ * the control Worker's cron trigger enqueues another wake for the stalled and
+ * unwoken tenants on every tick.
  */
 export class LocalStepUnreachedError extends CliError {
-	constructor(
-		public readonly pending: number,
-		public readonly requiredStep: number,
-		public readonly stragglers: readonly string[]
-	) {
-		const unnamed = pending - stragglers.length;
-		const named =
-			unnamed > 0
-				? `${stragglers.join(', ')} and ${String(unnamed)} more`
-				: stragglers.join(', ');
+	readonly pending: number;
+	readonly requiredStep: number;
+	/**
+	 * The pending tenants that the error lists.
+	 */
+	readonly stragglers: readonly string[];
 
-		super(
-			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. A schema transition that waits for this step stays incomplete until they have; once every transition is complete, only this tenant work remains. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy if a schema transition is still incomplete.`
-		);
+	constructor(readonly shortfall: LocalStepShortfall) {
+		const reading = readShortfall(shortfall);
+
+		super(reading.message);
 		this.name = 'LocalStepUnreachedError';
+		this.pending = reading.pending;
+		this.requiredStep = reading.requiredStep;
+		this.stragglers = reading.stragglers;
 	}
+}
+
+function readShortfall(shortfall: LocalStepShortfall): {
+	readonly pending: number;
+	readonly requiredStep: number;
+	readonly stragglers: readonly string[];
+	readonly message: string;
+} {
+	if (shortfall.kind === 'below-step') {
+		const { pending, requiredStep, stragglers } = shortfall;
+
+		return {
+			pending,
+			requiredStep,
+			stragglers,
+			message: `${tenantsHaveNotReached(pending, requiredStep)}: ${namedTenants(stragglers, pending)}. A schema transition that waits for this step stays incomplete until they have; once every transition is complete, only this tenant work remains. Run cupboard deployment status <url> to inspect the tenants and cupboard deployment resume <url> to wake them and wait. Repair any reported tenant failures, then re-run cupboard init if a schema transition is still incomplete.`
+		};
+	}
+
+	const { status } = shortfall;
+	const minutes = String(localStepStallWindowMs / 60_000);
+	const stragglers = [
+		...status.stalledSample.map(({ tenant }) => tenant),
+		...status.unwokenSample.map(({ tenant }) => tenant)
+	];
+	const samples = [
+		...(status.stalledSample.length === 0
+			? []
+			: [
+					`Stalled: ${status.stalledSample.map((tenant) => stalledTenantText(tenant)).join('; ')}.`
+				]),
+		...(status.unwokenSample.length === 0
+			? []
+			: [
+					`Not yet woken: ${status.unwokenSample.map((tenant) => unwokenTenantText(tenant)).join('; ')}.`
+				]),
+		...(status.pending > stragglers.length
+			? [`${String(status.pending - stragglers.length)} more are pending.`]
+			: [])
+	];
+
+	return {
+		pending: status.pending,
+		requiredStep: status.required,
+		stragglers,
+		message: `${tenantsHaveNotReached(status.pending, status.required)}, and ${minutes} minutes after the wake none of them is classified as working. ${samples.join(' ')} A tenant object that makes progress continues without the deploy; one that makes no progress for ${minutes} minutes stops, and the control Worker's cron trigger enqueues another wake for the stalled and unwoken tenants on every tick. Run cupboard deployment status <url> to follow them. Repair the reported failures, then run cupboard deployment resume <url> to wake them and wait, and re-run cupboard init if a schema transition is still incomplete.`
+	};
+}
+
+function tenantsHaveNotReached(pending: number, step: number): string {
+	const tenants =
+		pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`;
+
+	return `${tenants} not reached local step ${String(step)}`;
+}
+
+function namedTenants(stragglers: readonly string[], pending: number): string {
+	const unnamed = pending - stragglers.length;
+
+	return unnamed > 0
+		? `${stragglers.join(', ')} and ${String(unnamed)} more`
+		: stragglers.join(', ');
 }
 
 export class InvalidCacheNameError extends CliUsageError {

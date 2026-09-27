@@ -28,7 +28,7 @@ import {
 import { controlDeploymentTransitions } from '../control/deployment-transitions.ts';
 import {
 	controlLocalStepStatus,
-	controlLocalStepWake
+	enqueueLocalStepWakes
 } from '../control/local-step.ts';
 
 import { authoriseRequest, noPendingCache } from './authorise.ts';
@@ -152,11 +152,11 @@ export const controlRouter = os.router({
 		)
 	},
 	localStep: {
-		status: os.localStep.status.handler(({ context, input }) =>
-			controlLocalStepStatus(context.env, input.requiredStep)
+		status: os.localStep.status.handler(({ context }) =>
+			controlLocalStepStatus(context.env)
 		),
-		wake: os.localStep.wake.handler(({ input, context }) =>
-			controlLocalStepWake(context.logger, context.env, input.limit)
+		wake: os.localStep.wake.handler(({ context }) =>
+			enqueueLocalStepWakes(context.env)
 		)
 	},
 	oidcTrust: {

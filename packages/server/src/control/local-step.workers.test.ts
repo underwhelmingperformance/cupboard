@@ -3,9 +3,12 @@ import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
 	expansionLocalStep,
-	localStep
+	type LocalStep,
+	localStep,
+	localStepSampleSize,
+	localStepStallWindowMs
 } from '@cupboard/protocol/deployment';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -17,53 +20,115 @@ import { recordLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 import {
 	asOneInvocation,
+	offboardTenant,
 	provisionNamedTenant,
 	recordTransition,
-	suspendTenant
+	suspendTenant,
+	testBase
 } from '../test-support.ts';
 
 import {
 	controlLocalStepStatus,
-	controlLocalStepWake,
-	requiredLocalStep
+	enqueueLocalStepWakes,
+	type LocalStepWakeMessage,
+	requiredLocalStep,
+	wakeLocalStepTenants
 } from './local-step.ts';
 
 const logger = rootLogger();
 const laterStep = localStep(currentLocalStep + 1);
+const now = testBase.getTime();
+const windowStart = now - localStepStallWindowMs;
+
+class InjectedWakeFault extends Error {
+	constructor() {
+		super();
+		this.name = 'InjectedWakeFault';
+	}
+}
+
+interface LocalStepFacts {
+	readonly localStep?: LocalStep;
+	readonly attemptedAt?: IsoTimestamp;
+	readonly progressedAt?: IsoTimestamp;
+	readonly error?: string;
+}
 
 function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
-async function storedStep(name: string): Promise<number | null | undefined> {
-	const row = await database()
-		.select({ localStep: d1Schema.tenant.localStep })
-		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(name)))
-		.get();
-
-	return row?.localStep;
+function tenant(name: string): TenantId {
+	return tenantIdSchema.parse(name);
 }
 
-function setStoredStep(name: string, step: number): Promise<unknown> {
+function at(ms: number): IsoTimestamp {
+	return isoTimestamp(new Date(ms));
+}
+
+function writeFacts(name: string, facts: LocalStepFacts): Promise<unknown> {
 	return database()
 		.update(d1Schema.tenant)
-		.set({ localStep: localStep(step) })
-		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(name)))
+		.set({
+			localStep: facts.localStep,
+			localStepAttemptedAt: facts.attemptedAt,
+			localStepProgressedAt: facts.progressedAt,
+			localStepError: facts.error
+		})
+		.where(eq(d1Schema.tenant.id, tenant(name)))
 		.run();
 }
 
-function wake(limit: number): Promise<{
-	current: number;
-	required: number;
-	woken: number;
-	failed: number;
-}> {
-	return controlLocalStepWake(logger, env, limit);
+// The tenant row's local-step columns. An empty column reads as undefined.
+async function factsOf(name: string): Promise<LocalStepFacts> {
+	const row = await database()
+		.select({
+			localStep: d1Schema.tenant.localStep,
+			attemptedAt: d1Schema.tenant.localStepAttemptedAt,
+			progressedAt: d1Schema.tenant.localStepProgressedAt,
+			error: d1Schema.tenant.localStepError
+		})
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, tenant(name)))
+		.get();
+
+	if (row === undefined) {
+		throw new Error(`No tenant row for ${name}`);
+	}
+
+	return {
+		...(row.localStep !== null && { localStep: row.localStep }),
+		...(row.attemptedAt !== null && { attemptedAt: row.attemptedAt }),
+		...(row.progressedAt !== null && { progressedAt: row.progressedAt }),
+		...(row.error !== null && { error: row.error })
+	};
 }
 
-function tenant(name: string): TenantId {
-	return tenantIdSchema.parse(name);
+// Provisions a tenant row with the given local-step columns. The tenant's
+// object is never configured.
+async function pendingTenant(
+	name: string,
+	facts?: LocalStepFacts
+): Promise<void> {
+	await provisionNamedTenant(name, { configure: false });
+
+	if (facts !== undefined) {
+		await writeFacts(name, facts);
+	}
+}
+
+function queueCollector(
+	sent: LocalStepWakeMessage[][]
+): Pick<Queue<LocalStepWakeMessage>, 'sendBatch'> {
+	return {
+		sendBatch: (batch) => {
+			sent.push(Array.from(batch, (entry) => entry.body));
+
+			return Promise.resolve({
+				metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } }
+			});
+		}
+	};
 }
 
 describe('required local step', () => {
@@ -102,240 +167,252 @@ describe('required local step', () => {
 	});
 });
 
-describe('local step', () => {
-	it('counts a tenant that has never reported as pending and names it', async () => {
-		await provisionNamedTenant('step-unreported');
+describe('local step status', () => {
+	// A tenant with an attempt at the outstanding work is working while its
+	// last progress is inside the window, even after a failed page, and while
+	// it has not failed before its first progress. Without such an attempt it
+	// is unwoken, and a failure or progress outside the window makes it stalled.
+	it('classifies each pending tenant against the stall window', async () => {
+		const error = 'InjectedPageFault';
+		const recent = at(now - 60_000);
+		const outside = at(windowStart - 1);
+
+		await pendingTenant('ready', { localStep: expansionLocalStep });
+		await pendingTenant('unwoken-never');
+		await pendingTenant('unwoken-old', {
+			attemptedAt: outside,
+			progressedAt: outside
+		});
+		await pendingTenant('unwoken-after-recording', { progressedAt: recent });
+		await pendingTenant('suspended');
+		await suspendTenant('suspended');
+		await provisionNamedTenant('offboarding');
+		await offboardTenant('offboarding');
+		await pendingTenant('working', {
+			attemptedAt: at(windowStart),
+			progressedAt: at(windowStart)
+		});
+		await pendingTenant('working-after-failure', {
+			attemptedAt: recent,
+			progressedAt: recent,
+			error
+		});
+		await pendingTenant('working-before-progress', { attemptedAt: recent });
+		await pendingTenant('stalled-old-error', {
+			attemptedAt: outside,
+			error
+		});
+		await pendingTenant('stalled-no-progress', {
+			attemptedAt: recent,
+			progressedAt: outside
+		});
+		await pendingTenant('stalled-never-progressed', {
+			attemptedAt: recent,
+			error
+		});
 
 		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			required: expansionLocalStep,
-			ready: 0,
-			pending: 1,
-			stragglers: [tenant('step-unreported')]
-		});
-	});
-
-	it('brings every active tenant to the current step without traffic', async () => {
-		await recordTransition('cache-identity', 'complete');
-		await provisionNamedTenant('step-one');
-		await provisionNamedTenant('step-two');
-
-		await expect(wake(10)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: currentLocalStep,
-			woken: 2,
-			failed: 0,
-			outcomes: [
+			ready: 1,
+			pending: 10,
+			working: 3,
+			stalled: 3,
+			unwoken: 4,
+			stalledSample: [
 				{
-					tenant: tenant('step-one'),
-					kind: 'recorded',
-					step: currentLocalStep
+					tenant: tenant('stalled-never-progressed'),
+					attemptedAt: recent,
+					error
 				},
-				{ tenant: tenant('step-two'), kind: 'recorded', step: currentLocalStep }
-			]
-		});
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: currentLocalStep,
-			ready: 2,
-			pending: 0,
-			stragglers: []
-		});
-	});
-
-	// Until the deploy records cache-identity complete, an object reports at
-	// most step 4, so a tenant there has reached the required local step.
-	// Counting it as pending would stop the deploy before the contract
-	// migrations, and the deploy records the transition complete only after
-	// those migrations have run.
-	it('counts a tenant at step 4 as ready before the cache-identity contract', async () => {
-		await provisionNamedTenant('step-expanded');
-
-		const first = await wake(10);
-		const status = await controlLocalStepStatus(env);
-		const second = await wake(10);
-
-		expect({ first, status, second }).toStrictEqual({
-			first: {
-				current: currentLocalStep,
-				required: expansionLocalStep,
-				woken: 1,
-				failed: 0,
-				outcomes: [
-					{
-						tenant: tenant('step-expanded'),
-						kind: 'recorded',
-						step: expansionLocalStep
-					}
-				]
-			},
-			status: {
-				current: currentLocalStep,
-				required: expansionLocalStep,
-				ready: 1,
-				pending: 0,
-				stragglers: []
-			},
-			second: {
-				current: currentLocalStep,
-				required: expansionLocalStep,
-				woken: 0,
-				failed: 0,
-				outcomes: []
-			}
-		});
-	});
-
-	it("counts against the step in the caller's query", async () => {
-		await provisionNamedTenant('step-asked');
-		await wake(10);
-
-		await expect(
-			controlLocalStepStatus(env, currentLocalStep)
-		).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: currentLocalStep,
-			ready: 0,
-			pending: 1,
-			stragglers: [tenant('step-asked')]
-		});
-	});
-
-	it('leaves an unconfigured tenant pending and counts the wake as failed', async () => {
-		await provisionNamedTenant('step-unconfigured', { configure: false });
-
-		await expect(wake(10)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: expansionLocalStep,
-			woken: 0,
-			failed: 1,
-			outcomes: [{ tenant: tenant('step-unconfigured'), kind: 'unconfigured' }]
-		});
-		await expect(storedStep('step-unconfigured')).resolves.toBeNull();
-	});
-
-	it('advances past a failed tenant on the next bounded wake', async () => {
-		await recordTransition('cache-identity', 'complete');
-		await provisionNamedTenant('step-a-failed', { configure: false });
-		await provisionNamedTenant('step-b-ready');
-		const first = await wake(1);
-		const second = await wake(1);
-		expect({
-			first,
-			second,
-			step: await storedStep('step-b-ready')
-		}).toStrictEqual({
-			first: {
-				current: currentLocalStep,
-				required: currentLocalStep,
-				woken: 0,
-				failed: 1,
-				outcomes: [{ tenant: tenant('step-a-failed'), kind: 'unconfigured' }]
-			},
-			second: {
-				current: currentLocalStep,
-				required: currentLocalStep,
-				woken: 1,
-				failed: 0,
-				outcomes: [
-					{
-						tenant: tenant('step-b-ready'),
-						kind: 'recorded',
-						step: currentLocalStep
-					}
-				]
-			},
-			step: currentLocalStep
-		});
-	});
-
-	it('wakes a suspended tenant before it resumes', async () => {
-		await recordTransition('cache-identity', 'complete');
-		await provisionNamedTenant('step-suspended');
-		await suspendTenant('step-suspended');
-
-		const before = await controlLocalStepStatus(env);
-		const result = await wake(10);
-
-		expect({
-			before,
-			result,
-			after: await controlLocalStepStatus(env)
-		}).toStrictEqual({
-			before: {
-				current: currentLocalStep,
-				required: currentLocalStep,
-				ready: 0,
-				pending: 1,
-				stragglers: [tenant('step-suspended')]
-			},
-			result: {
-				current: currentLocalStep,
-				required: currentLocalStep,
-				woken: 1,
-				failed: 0,
-				outcomes: [
-					{
-						tenant: tenant('step-suspended'),
-						kind: 'recorded',
-						step: currentLocalStep
-					}
-				]
-			},
-			after: {
-				current: currentLocalStep,
-				required: currentLocalStep,
-				ready: 1,
-				pending: 0,
-				stragglers: []
-			}
-		});
-	});
-
-	it('wakes no more tenants than the limit allows', async () => {
-		await recordTransition('cache-identity', 'complete');
-		await provisionNamedTenant('step-batch-a');
-		await provisionNamedTenant('step-batch-b');
-
-		await expect(wake(1)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: currentLocalStep,
-			woken: 1,
-			failed: 0,
-			outcomes: [
 				{
-					tenant: tenant('step-batch-a'),
-					kind: 'recorded',
-					step: currentLocalStep
-				}
+					tenant: tenant('stalled-no-progress'),
+					attemptedAt: recent,
+					progressedAt: outside
+				},
+				{ tenant: tenant('stalled-old-error'), attemptedAt: outside, error }
+			],
+			unwokenSample: [
+				{ tenant: tenant('suspended') },
+				{ tenant: tenant('unwoken-after-recording') },
+				{ tenant: tenant('unwoken-never') },
+				{ tenant: tenant('unwoken-old'), attemptedAt: outside }
 			]
 		});
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: currentLocalStep,
-			ready: 1,
-			pending: 1,
-			stragglers: [tenant('step-batch-b')]
+	});
+});
+
+describe('local step wake', () => {
+	it('enqueues one message for every twenty tenants that are not working', async () => {
+		const names = Array.from(
+			{ length: localStepSampleSize + 2 },
+			(_, index) => `wake-${String(index).padStart(2, '0')}`
+		);
+
+		for (const name of names) {
+			await pendingTenant(name);
+		}
+		await pendingTenant('wake-working', {
+			attemptedAt: at(now),
+			progressedAt: at(now)
+		});
+		await pendingTenant('wake-ready', { localStep: expansionLocalStep });
+
+		const sent: LocalStepWakeMessage[][] = [];
+		const response = await enqueueLocalStepWakes(env, queueCollector(sent));
+		const tenants = names.map((name) => tenant(name));
+
+		expect({ response, sent }).toStrictEqual({
+			response: {
+				required: expansionLocalStep,
+				enqueued: names.length,
+				pending: names.length + 1
+			},
+			sent: [
+				[
+					{ kind: 'local-step', tenants: tenants.slice(0, 20) },
+					{ kind: 'local-step', tenants: tenants.slice(20) }
+				]
+			]
+		});
+	});
+});
+
+describe('local step wake message', () => {
+	it('lets a woken object record its step and its attempt', async () => {
+		await recordTransition('cache-identity', 'complete');
+		await provisionNamedTenant('woken');
+
+		await wakeLocalStepTenants(logger, env, [tenant('woken')]);
+
+		await expect(factsOf('woken')).resolves.toStrictEqual({
+			localStep: currentLocalStep,
+			progressedAt: at(now)
 		});
 	});
 
-	it('does not select a tenant that is already past the current step', async () => {
-		await provisionNamedTenant('step-ahead');
-		await setStoredStep('step-ahead', laterStep);
+	// Recording a step clears the attempt time, so a tenant that recorded step 4
+	// a moment ago is not counted as working once step 5 is required.
+	it('wakes a tenant again once the required step rises above the step that it recorded', async () => {
+		await provisionNamedTenant('raised');
+		await wakeLocalStepTenants(logger, env, [tenant('raised')]);
+		await recordTransition('cache-identity', 'complete');
 
-		await expect(wake(10)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: expansionLocalStep,
-			woken: 0,
-			failed: 0,
-			outcomes: []
+		const sent: LocalStepWakeMessage[][] = [];
+		const response = await enqueueLocalStepWakes(env, queueCollector(sent));
+
+		expect({ response, sent }).toStrictEqual({
+			response: { required: currentLocalStep, enqueued: 1, pending: 1 },
+			sent: [[{ kind: 'local-step', tenants: [tenant('raised')] }]]
 		});
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			required: expansionLocalStep,
-			ready: 1,
-			pending: 0,
-			stragglers: []
+	});
+
+	it('records the error of a wake that rejects and skips tenants that are no longer pending', async () => {
+		await pendingTenant('rejects', {
+			attemptedAt: at(windowStart),
+			progressedAt: at(windowStart)
+		});
+		await pendingTenant('already-ready', { localStep: expansionLocalStep });
+		await provisionNamedTenant('offboarded');
+		await offboardTenant('offboarded');
+		const called: TenantId[] = [];
+
+		await wakeLocalStepTenants(
+			logger,
+			env,
+			[tenant('already-ready'), tenant('offboarded'), tenant('rejects')],
+			(id) => {
+				called.push(id);
+
+				return Promise.reject(new InjectedWakeFault());
+			}
+		);
+
+		expect({
+			called,
+			rejects: await factsOf('rejects'),
+			alreadyReady: await factsOf('already-ready')
+		}).toStrictEqual({
+			called: [tenant('rejects')],
+			rejects: {
+				attemptedAt: at(now),
+				progressedAt: at(windowStart),
+				error: 'InjectedWakeFault'
+			},
+			alreadyReady: { localStep: expansionLocalStep }
+		});
+	});
+
+	// The consumer can hear of a failed wake after the object has continued and
+	// written a newer attempt, for example when the call rejects after the page
+	// has run.
+	it('leaves an attempt that the object wrote after the failed wake started', async () => {
+		const later = at(now + 1000);
+		await pendingTenant('continued', {
+			attemptedAt: at(windowStart),
+			progressedAt: at(windowStart)
+		});
+
+		await wakeLocalStepTenants(
+			logger,
+			env,
+			[tenant('continued')],
+			async (id) => {
+				await writeFacts(id, { attemptedAt: later, progressedAt: later });
+
+				throw new InjectedWakeFault();
+			}
+		);
+
+		await expect(factsOf('continued')).resolves.toStrictEqual({
+			attemptedAt: later,
+			progressedAt: later
+		});
+	});
+
+	// A page that started before the wake commits its attempt while the wake is
+	// in flight, so the attempt time is older than the wake's start although
+	// the write is newer.
+	it('leaves an attempt that a page started before the failed wake wrote during it', async () => {
+		const pageStartedAt = at(now - 1000);
+		await pendingTenant('overlapped', {
+			attemptedAt: at(windowStart),
+			progressedAt: at(windowStart)
+		});
+
+		await wakeLocalStepTenants(
+			logger,
+			env,
+			[tenant('overlapped')],
+			async (id) => {
+				await writeFacts(id, {
+					attemptedAt: pageStartedAt,
+					progressedAt: pageStartedAt
+				});
+
+				throw new InjectedWakeFault();
+			}
+		);
+
+		await expect(factsOf('overlapped')).resolves.toStrictEqual({
+			attemptedAt: pageStartedAt,
+			progressedAt: pageStartedAt
+		});
+	});
+
+	it('records an error for a tenant whose object is not configured', async () => {
+		await pendingTenant('unconfigured');
+
+		await wakeLocalStepTenants(logger, env, [tenant('unconfigured')]);
+		const facts = await factsOf('unconfigured');
+
+		// The error summary starts with the error's name.
+		expect({
+			...facts,
+			error: facts.error?.split(':', 1)[0]
+		}).toStrictEqual({
+			attemptedAt: at(now),
+			error: 'TenantNotConfiguredError'
 		});
 	});
 
@@ -346,7 +423,7 @@ describe('local step', () => {
 		await recordTransition('cache-identity', 'complete');
 		const id = tenant('step-rolled-back');
 		await provisionNamedTenant(id);
-		await setStoredStep(id, laterStep);
+		await writeFacts(id, { localStep: laterStep });
 
 		// A wake finds the step recorded and runs no page. A page that runs anyway,
 		// as a pass does for a request made before the newer build recorded its
@@ -363,10 +440,10 @@ describe('local step', () => {
 			)
 		);
 
-		expect({ wake, page, stored: await storedStep(id) }).toStrictEqual({
+		expect({ wake, page, facts: await factsOf(id) }).toStrictEqual({
 			wake: { kind: 'recorded', step: laterStep, progressed: false },
 			page: { kind: 'recorded', step: currentLocalStep, progressed: false },
-			stored: laterStep
+			facts: { localStep: laterStep }
 		});
 	});
 });

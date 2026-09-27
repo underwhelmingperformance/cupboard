@@ -5,7 +5,7 @@ import {
 	localStepSchema
 } from '@cupboard/protocol/deployment';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
+import { and, eq, type SQL, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { recordLocalStepAttempt } from '../db/local-step-attempts.ts';
@@ -34,11 +34,10 @@ import {
  * Matches a tenant row whose object has not recorded `step`. A null step means
  * it has not been woken since the column was added.
  */
-export function belowLocalStep(step: LocalStep): SQL | undefined {
-	return or(
-		isNull(d1Schema.tenant.localStep),
-		lt(d1Schema.tenant.localStep, step)
-	);
+export function belowLocalStep(step: LocalStep): SQL {
+	const { localStep } = d1Schema.tenant;
+
+	return sql`(${localStep} IS NULL OR ${localStep} < ${step})`;
 }
 
 /**

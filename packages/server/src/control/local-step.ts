@@ -3,19 +3,27 @@ import { type TenantId } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
 	type LocalStep,
+	localStepSampleSize,
+	localStepStallWindowMs,
 	type LocalStepStatus,
-	localStepStragglerSampleSize,
-	type LocalStepWakeOutcome,
 	type LocalStepWakeResponse,
 	requiredLocalStepFrom
 } from '@cupboard/protocol/deployment';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, asc, count, eq, gt, gte, lte, or, type SQL } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, or, type SQL, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
+import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { readRecordedTransitions } from '../db/deployment-transitions.ts';
-import { belowLocalStep } from '../do/local-step.ts';
+import { summariseLocalStepError } from '../db/local-step-attempts.ts';
+import { batchNonEmpty } from '../do/bulk.ts';
+import { jsonValueLists } from '../do/json-list.ts';
+import { belowLocalStep, type LocalStepOutcome } from '../do/local-step.ts';
+import { TenantNotConfiguredError } from '../errors.ts';
+import { queueSendBatchSize } from '../policy/queues.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
@@ -24,15 +32,77 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 // the invocation's budget.
 const wakeConcurrency = 4;
 
+/**
+ * The most tenants that one wake message lists.
+ */
+export const localStepWakeBatchSize = 20;
+
+/**
+ * A maintenance-queue message that wakes each listed tenant's object.
+ */
+export interface LocalStepWakeMessage {
+	readonly kind: 'local-step';
+	readonly tenants: readonly TenantId[];
+}
+
+/**
+ * The pending tenants that a wake sends a message for: those that are stalled
+ * or unwoken, in slug order.
+ */
+export interface LocalStepWakeSelection {
+	readonly required: LocalStep;
+	readonly pending: number;
+	readonly tenants: readonly TenantId[];
+}
+
+/**
+ * Calls one tenant object's `reportLocalStep`.
+ */
+export type ReportLocalStep = (
+	tenant: TenantId,
+	required: LocalStep
+) => Promise<LocalStepOutcome>;
+
+const { tenant } = d1Schema;
+
 const resumableTenant = or(
-	eq(d1Schema.tenant.status, 'active'),
-	eq(d1Schema.tenant.status, 'suspended')
+	eq(tenant.status, 'active'),
+	eq(tenant.status, 'suspended')
 );
 
-// The tenants that a wake selects: those that can still be woken and have not
-// reached the required local step.
-function stragglerFilter(requiredStep: LocalStep): SQL | undefined {
-	return and(resumableTenant, belowLocalStep(requiredStep));
+const statusCountsSchema = z.object({
+	ready: z.number().int().nonnegative(),
+	pending: z.number().int().nonnegative(),
+	working: z.number().int().nonnegative(),
+	stalled: z.number().int().nonnegative(),
+	unwoken: z.number().int().nonnegative()
+});
+
+/**
+ * The classes of a pending tenant, as `localStepStatusSchema` defines them,
+ * for the stall window that starts at `since`. A tenant row matches exactly
+ * one class. A row that has an attempt at the outstanding work is working or
+ * stalled according to its last progress; a row without one is unwoken.
+ */
+function pendingClasses(since: IsoTimestamp): {
+	readonly working: SQL;
+	readonly stalled: SQL;
+	readonly unwoken: SQL;
+} {
+	const attemptedAt = tenant.localStepAttemptedAt;
+	const progressedAt = tenant.localStepProgressedAt;
+	const error = tenant.localStepError;
+	const unwoken = sql`(${attemptedAt} IS NULL OR (${attemptedAt} < ${since} AND ${error} IS NULL))`;
+
+	return {
+		working: sql`(NOT ${unwoken} AND (${progressedAt} >= ${since} OR (${progressedAt} IS NULL AND ${error} IS NULL)))`,
+		stalled: sql`(NOT ${unwoken} AND (${progressedAt} < ${since} OR (${progressedAt} IS NULL AND ${error} IS NOT NULL)))`,
+		unwoken
+	};
+}
+
+function windowStart(now: Date): IsoTimestamp {
+	return isoTimestamp(new Date(now.getTime() - localStepStallWindowMs));
 }
 
 /**
@@ -46,180 +116,240 @@ export async function requiredLocalStep(env: Env): Promise<LocalStep> {
 }
 
 /**
- * Reports how many active or suspended tenants have reached the required step,
- * and lists some of those that have not. The step is the one in the caller's
- * query, or else the required local step.
+ * Reports how many active or suspended tenants have reached the required local
+ * step, and classifies the pending tenants against the stall window before
+ * `now`. It reads the transitions and then runs one D1 batch of three
+ * statements: the counts, and a sample of the stalled and of the unwoken
+ * tenants.
  */
 export async function controlLocalStepStatus(
 	env: Env,
-	requiredStep?: LocalStep
+	now: Date = new Date()
 ): Promise<LocalStepStatus> {
 	const database = controlDatabase(env);
-	const required = requiredStep ?? (await requiredLocalStep(env));
-	const ready = await countTenants(
-		database,
-		and(resumableTenant, gte(d1Schema.tenant.localStep, required))
-	);
-	const pendingFilter = stragglerFilter(required);
-	const pending = await countTenants(database, pendingFilter);
-	const stragglers = await selectStragglers(
-		database,
-		localStepStragglerSampleSize,
-		pendingFilter
-	);
+	const required = await requiredLocalStep(env);
+	const pending = belowLocalStep(required);
+	const classes = pendingClasses(windowStart(now));
+	const counted = (condition: SQL): SQL<number> =>
+		sql<number>`count(case when ${condition} then 1 end)`;
+	const counts = database
+		.select({
+			ready: counted(sql`NOT ${pending}`),
+			pending: counted(pending),
+			working: counted(sql`${pending} AND ${classes.working}`),
+			stalled: counted(sql`${pending} AND ${classes.stalled}`),
+			unwoken: counted(sql`${pending} AND ${classes.unwoken}`)
+		})
+		.from(tenant)
+		.where(resumableTenant);
+	const stalledSample = database
+		.select({
+			tenant: tenant.id,
+			attemptedAt: tenant.localStepAttemptedAt,
+			progressedAt: tenant.localStepProgressedAt,
+			error: tenant.localStepError
+		})
+		.from(tenant)
+		.where(and(resumableTenant, pending, classes.stalled))
+		.orderBy(asc(tenant.id))
+		.limit(localStepSampleSize);
+	const unwokenSample = database
+		.select({ tenant: tenant.id, attemptedAt: tenant.localStepAttemptedAt })
+		.from(tenant)
+		.where(and(resumableTenant, pending, classes.unwoken))
+		.orderBy(asc(tenant.id))
+		.limit(localStepSampleSize);
+	const [countRows, stalledRows, unwokenRows] = await database.batch([
+		counts,
+		stalledSample,
+		unwokenSample
+	]);
 
 	return {
 		current: currentLocalStep,
 		required,
-		ready,
-		pending,
-		stragglers: stragglers.map(({ id }) => id)
+		...statusCountsSchema.parse(countRows[0]),
+		stalledSample: stalledRows.map((row) => ({
+			tenant: row.tenant,
+			...(row.attemptedAt !== null && { attemptedAt: row.attemptedAt }),
+			...(row.progressedAt !== null && { progressedAt: row.progressedAt }),
+			...(row.error !== null && { error: row.error })
+		})),
+		unwokenSample: unwokenRows.map((row) => ({
+			tenant: row.tenant,
+			...(row.attemptedAt !== null && { attemptedAt: row.attemptedAt })
+		}))
 	};
 }
 
 /**
- * Wakes up to `limit` tenants that have not reached the required step, so each
- * applies its pending migrations and records how far it has come.
- *
- * A tenant that records no step is counted as failed. It stays in the
- * straggler list, so the next call retries it.
+ * Selects the pending tenants to wake: every pending tenant that is not
+ * working, measured against the stall window before `now`. One D1 statement
+ * reads every pending tenant, so the selection also counts them.
  */
-export async function controlLocalStepWake(
-	logger: Logger,
+export async function selectLocalStepWakes(
 	env: Env,
-	limit: number
-): Promise<LocalStepWakeResponse> {
+	now: Date = new Date()
+): Promise<LocalStepWakeSelection> {
 	const database = controlDatabase(env);
 	const required = await requiredLocalStep(env);
-	const straggler = stragglerFilter(required);
-	const previous = await database
-		.select()
-		.from(d1Schema.localStepWakeCursor)
-		.where(eq(d1Schema.localStepWakeCursor.id, 1))
-		.get();
-	const after = previous?.afterTenant;
-	const first = await selectStragglers(
-		database,
-		limit,
-		straggler,
-		after === undefined ? undefined : gt(d1Schema.tenant.id, after)
-	);
-	const wrapped =
-		after === undefined || first.length === limit
-			? []
-			: await selectStragglers(
-					database,
-					limit - first.length,
-					straggler,
-					lte(d1Schema.tenant.id, after)
-				);
-	const stragglers = [...first, ...wrapped];
-	const last = stragglers.at(-1);
-	if (last !== undefined) {
-		if (after === undefined) {
-			await database
-				.insert(d1Schema.localStepWakeCursor)
-				.values({ id: 1, afterTenant: last.id })
-				.onConflictDoNothing()
-				.run();
-		} else {
-			await database
-				.update(d1Schema.localStepWakeCursor)
-				.set({ afterTenant: last.id })
-				.where(
-					and(
-						eq(d1Schema.localStepWakeCursor.id, 1),
-						eq(d1Schema.localStepWakeCursor.afterTenant, after)
-					)
-				)
-				.run();
-		}
-	}
-	const outcomes = await mapWithConcurrency(
-		stragglers,
-		wakeConcurrency,
-		async ({ id }) => wakeTenant(logger, env, id, required)
-	);
-	const woken = outcomes.filter(
-		(outcome) => outcome.kind === 'recorded' || outcome.kind === 'advanced'
-	).length;
+	const { working } = pendingClasses(windowStart(now));
+	const rows = await database
+		.select({
+			id: tenant.id,
+			wake: sql<number>`case when ${working} then 0 else 1 end`
+		})
+		.from(tenant)
+		.where(and(resumableTenant, belowLocalStep(required)))
+		.orderBy(asc(tenant.id))
+		.all();
 
 	return {
-		current: currentLocalStep,
 		required,
-		woken,
-		failed: outcomes.length - woken,
-		outcomes
+		pending: rows.length,
+		tenants: rows.filter((row) => row.wake === 1).map((row) => row.id)
 	};
 }
 
-async function wakeTenant(
+/**
+ * Enqueues a wake for every pending tenant that is not working, with up to
+ * `localStepWakeBatchSize` tenants in each message. `localStep.wake` calls
+ * this, and every cron tick enqueues the same selection.
+ */
+export async function enqueueLocalStepWakes(
+	env: Env,
+	queue: Pick<Queue<LocalStepWakeMessage>, 'sendBatch'> = env.MAINTENANCE_QUEUE
+): Promise<LocalStepWakeResponse> {
+	const selection = await selectLocalStepWakes(env);
+	const messages = localStepWakeMessages(selection.tenants);
+
+	for (const batch of chunk(messages, queueSendBatchSize)) {
+		await queue.sendBatch(batch.map((body) => ({ body })));
+	}
+
+	return {
+		required: selection.required,
+		enqueued: selection.tenants.length,
+		pending: selection.pending
+	};
+}
+
+/**
+ * The wake messages for `tenants`, each listing up to
+ * `localStepWakeBatchSize` of them.
+ */
+export function localStepWakeMessages(
+	tenants: readonly TenantId[]
+): LocalStepWakeMessage[] {
+	return chunk(tenants, localStepWakeBatchSize).map((batch) => ({
+		kind: 'local-step',
+		tenants: batch
+	}));
+}
+
+/**
+ * Wakes each listed tenant that is still below the required local step, with
+ * `wakeConcurrency` wakes in flight. Each woken object runs a page of its
+ * work, continues on its alarm, and writes its own attempts to its tenant row.
+ * When a wake rejects, or finds an unconfigured object, this function writes
+ * the failure itself, as soon as that wake ends. The write applies only while
+ * the tenant is still pending and the row's attempt time is still the one
+ * that this function read before the wake, so a failure does not replace an
+ * attempt that the object wrote in the meantime.
+ *
+ * It throws only when D1 cannot be read or written, so the queue delivers
+ * the message again.
+ */
+export async function wakeLocalStepTenants(
 	logger: Logger,
 	env: Env,
-	tenant: TenantId,
+	tenants: readonly TenantId[],
+	report: ReportLocalStep = (id, required) =>
+		tenantServer(env, id).reportLocalStep(required)
+): Promise<void> {
+	const database = controlDatabase(env);
+	const required = await requiredLocalStep(env);
+	const selected = await batchNonEmpty(
+		database,
+		jsonValueLists(tenants).map((list) =>
+			database
+				.select({ id: tenant.id, attemptedAt: tenant.localStepAttemptedAt })
+				.from(tenant)
+				.where(
+					and(
+						inArray(tenant.id, list),
+						resumableTenant,
+						belowLocalStep(required)
+					)
+				)
+				.orderBy(asc(tenant.id))
+		)
+	);
+	const pending = selected.flat();
+
+	await mapWithConcurrency(pending, wakeConcurrency, async (row) => {
+		const failure = await wakeTenant(logger, report, row.id, required);
+
+		if (failure === undefined) {
+			return;
+		}
+
+		await recordWakeFailure(database, row, required, failure);
+	});
+}
+
+// Writes a failed wake's error to the tenant row, unless the tenant has
+// reached `required` or the row's attempt time differs from the one read
+// before the wake. An attempt that reached the row in between changes that
+// time, whenever its page started.
+async function recordWakeFailure(
+	database: Database,
+	row: { readonly id: TenantId; readonly attemptedAt: IsoTimestamp | null },
+	required: LocalStep,
+	error: string
+): Promise<void> {
+	const unchangedAttempt =
+		row.attemptedAt === null
+			? isNull(tenant.localStepAttemptedAt)
+			: eq(tenant.localStepAttemptedAt, row.attemptedAt);
+
+	await database
+		.update(tenant)
+		.set({
+			localStepAttemptedAt: isoTimestamp(new Date()),
+			localStepError: error
+		})
+		.where(
+			and(eq(tenant.id, row.id), belowLocalStep(required), unchangedAttempt)
+		)
+		.run();
+}
+
+// Returns the error of a wake that rejected or found an unconfigured object,
+// or undefined when the object ran the wake.
+async function wakeTenant(
+	logger: Logger,
+	report: ReportLocalStep,
+	id: TenantId,
 	required: LocalStep
-): Promise<LocalStepWakeOutcome> {
+): Promise<string | undefined> {
 	try {
-		const outcome = await tenantServer(env, tenant).reportLocalStep(required);
+		const outcome = await report(id, required);
 
-		if (outcome.kind === 'unconfigured') {
-			// The registry holds a row whose Durable Object was never configured, so
-			// a create failed part way through. Retrying the create repairs it.
-			logger.warn('local step wake found an unconfigured tenant', { tenant });
-
-			return { tenant, kind: 'unconfigured' };
+		if (outcome.kind !== 'unconfigured') {
+			return undefined;
 		}
 
-		if (outcome.kind === 'incomplete') {
-			// The object has more work than one page allows, so it left its step
-			// unrecorded and continues on its alarm.
-			logger.info('local step wake made partial progress', {
-				tenant,
-				projected: outcome.projected
-			});
-			return { tenant, kind: 'advanced', projected: outcome.projected };
-		}
+		// The registry has a row whose Durable Object was never configured, so a
+		// create failed part way through. Retrying the create repairs it.
+		logger.warn('local step wake found an unconfigured tenant', { tenant: id });
 
-		if (outcome.kind === 'failed') {
-			logger.warn('local step wake failed', { tenant, error: outcome.error });
-
-			return { tenant, kind: 'failed' };
-		}
-
-		return { tenant, kind: 'recorded', step: outcome.step };
+		return summariseLocalStepError(new TenantNotConfiguredError());
 	} catch (error) {
-		logger.warn('local step wake failed', { tenant, error });
+		logger.warn('local step wake failed', { tenant: id, error });
 
-		return { tenant, kind: 'failed' };
+		return summariseLocalStepError(error);
 	}
-}
-
-async function countTenants(
-	database: Database,
-	where: SQL | undefined
-): Promise<number> {
-	const [row] = await database
-		.select({ tenants: count() })
-		.from(d1Schema.tenant)
-		.where(where);
-
-	return row?.tenants ?? 0;
-}
-
-function selectStragglers(
-	database: Database,
-	limit: number,
-	filter: SQL | undefined,
-	position?: SQL
-): Promise<{ id: TenantId }[]> {
-	// A stable order lets the persisted cursor resume after the last attempted tenant.
-	return database
-		.select({ id: d1Schema.tenant.id })
-		.from(d1Schema.tenant)
-		.where(and(filter, position))
-		.orderBy(asc(d1Schema.tenant.id))
-		.limit(limit)
-		.all();
 }
 
 function controlDatabase(env: Env): Database {
