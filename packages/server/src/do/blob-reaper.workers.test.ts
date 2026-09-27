@@ -3,6 +3,7 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
@@ -62,6 +63,48 @@ function failD1Batch(database: D1Database, failureNumber: number): D1Database {
 		exec: database.exec.bind(database),
 		withSession: database.withSession.bind(database),
 		dump: () => Promise.reject(new Error('dump is not supported here'))
+	};
+}
+
+// The Workers runtime sets a `statement` property with the SQL text on each
+// bound D1 statement. The type declarations omit it.
+const boundStatementSchema = z.object({ statement: z.string() });
+
+/**
+ * Runs `reference` once, after the reaper has read its candidates and before
+ * the batch that arms deadlines on `table` reaches D1.
+ */
+function referenceBeforeArm(
+	database: D1Database,
+	table: string,
+	reference: () => Promise<unknown>
+): { readonly database: D1Database; hasReferenced(): boolean } {
+	const armStatement = `update "${table}" set "delete_after"`;
+	let hasReferenced = false;
+	const isArm = (statement: D1PreparedStatement): boolean =>
+		boundStatementSchema
+			.safeParse(statement)
+			.data?.statement.startsWith(armStatement) ?? false;
+
+	return {
+		database: {
+			prepare: database.prepare.bind(database),
+			async batch(statements) {
+				if (
+					!hasReferenced &&
+					statements.some((statement) => isArm(statement))
+				) {
+					hasReferenced = true;
+					await reference();
+				}
+
+				return database.batch(statements);
+			},
+			exec: database.exec.bind(database),
+			withSession: database.withSession.bind(database),
+			dump: () => Promise.reject(new Error('dump is not supported here'))
+		},
+		hasReferenced: () => hasReferenced
 	};
 }
 
@@ -363,6 +406,58 @@ describe('blob reaper', () => {
 			thirdPresent: true
 		});
 	});
+
+	it.each([
+		{
+			kind: 'NAR',
+			table: 'blob_state',
+			seed: () => seedBlobStates([syntheticNarHash(1)]),
+			reference: () =>
+				env.CUPBOARD_DB.prepare(
+					"INSERT INTO blob_ref (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES ('v1', ?, 'default', '00000000000000000000000000000000', 1, 1)"
+				)
+					.bind(syntheticNarHash(1))
+					.run(),
+			reap: (database: D1Database) =>
+				runBlobReaper(rootLogger(), { ...env, CUPBOARD_DB: database }),
+			deadlines: async () => {
+				const rows = await blobStateArmTimes();
+
+				return rows.map((row) => row.deleteAfter);
+			}
+		},
+		{
+			kind: 'CAS',
+			table: 'cas_object',
+			seed: () => seedCasObjects([syntheticCasDigest(1)]),
+			reference: () =>
+				env.CUPBOARD_DB.prepare(
+					"INSERT INTO attestation_ref (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES ('v1', ?, 'default', '00000000000000000000000000000000', 1, 'https://slsa.dev/provenance/v1')"
+				)
+					.bind(syntheticCasDigest(1))
+					.run(),
+			reap: (database: D1Database) =>
+				runCasReaper(rootLogger(), { ...env, CUPBOARD_DB: database }),
+			deadlines: async () => {
+				const rows = await casObjectRows();
+
+				return rows.map((row) => row.deleteAfter);
+			}
+		}
+	])(
+		'leaves a $kind object unarmed when a reference arrives after the candidate read',
+		async ({ table, seed, reference, reap, deadlines }) => {
+			await seed();
+			const injection = referenceBeforeArm(env.CUPBOARD_DB, table, reference);
+
+			await reap(injection.database);
+
+			expect({
+				hasReferenced: injection.hasReferenced(),
+				deadlines: await deadlines()
+			}).toStrictEqual({ hasReferenced: true, deadlines: [undefined] });
+		}
+	);
 
 	it('arms candidate batches beyond one D1 parameter chunk', async () => {
 		const narHashes = Array.from({ length: 120 }, (_, index) =>
