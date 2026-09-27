@@ -4,16 +4,20 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import { type TrustRuleId, trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
 import { env } from 'cloudflare:workers';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import {
 	adminGrants,
 	cacheWriteGrants,
@@ -74,6 +78,34 @@ const controlRuleGrants = [
 		resources: { tenant: { exact: 'acme', validate: 'tenant' as const } }
 	}
 ];
+
+/**
+ * Stores a control rule with a subject pattern, which an earlier build
+ * accepted and the add procedure now refuses, and returns its ID.
+ */
+async function insertPatternRule(
+	createdAt: string,
+	disabledAt?: string
+): Promise<TrustRuleId> {
+	const id = trustRuleIdSchema.parse(crypto.randomUUID());
+
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.controlTrust)
+		.values({
+			id,
+			issuer: 'https://idp.example.test',
+			audience: 'cupboard-control',
+			claimsJson: JSON.stringify({ sub: { pattern: 'automation-*' } }),
+			permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+			createdAt: isoTimestampSchema.parse(createdAt),
+			...(disabledAt !== undefined && {
+				disabledAt: isoTimestampSchema.parse(disabledAt)
+			})
+		})
+		.run();
+
+	return id;
+}
 
 function controlClient(token?: string): ControlClient {
 	const link = new OpenAPILink(controlContract, {
@@ -163,6 +195,31 @@ describe('control contract round trip', () => {
 			fetchedId: id,
 			removed: { id, removed: true },
 			disabledInListing: true
+		});
+	});
+
+	it('lists the readable control trust rules and reports each rule with a subject pattern', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const readable = await client.oidcTrust.add({
+			issuer: 'https://idp.example.test',
+			audience: 'cupboard-control',
+			claims: { sub: 'automation' },
+			permittedGrants: [{ type: 'cupboard_wildcard' }]
+		});
+		const enabledId = await insertPatternRule('2999-01-01T00:00:00.000Z');
+		const disabledId = await insertPatternRule(
+			'2999-01-02T00:00:00.000Z',
+			'2999-01-03T00:00:00.000Z'
+		);
+
+		const listed = await client.oidcTrust.list();
+
+		expect(listed).toStrictEqual({
+			rules: [readable],
+			unreadable: [
+				{ id: enabledId, disabled: false },
+				{ id: disabledId, disabled: true }
+			]
 		});
 	});
 

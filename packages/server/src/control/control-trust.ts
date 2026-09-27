@@ -14,7 +14,8 @@ import {
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
 	type TrustRuleId,
-	trustRuleIdSchema
+	trustRuleIdSchema,
+	type UnreadableOidcTrustRule
 } from '@cupboard/protocol/oidc';
 import type { OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
@@ -168,8 +169,22 @@ export async function listControlTrust(
 			asc(d1Schema.controlTrust.id)
 		)
 		.all();
+	const rules: OidcTrustSummary[] = [];
+	const unreadable: UnreadableOidcTrustRule[] = [];
 
-	return { rules: rows.map((row) => summaryFromRow(row, canUseLoopbackHttp)) };
+	for (const row of rows) {
+		try {
+			rules.push(summaryFromRow(row, canUseLoopbackHttp));
+		} catch (error) {
+			if (!(error instanceof StoredControlTrustInvalidError)) {
+				throw error;
+			}
+
+			unreadable.push({ id: row.id, disabled: Boolean(row.disabledAt) });
+		}
+	}
+
+	return unreadable.length === 0 ? { rules } : { rules, unreadable };
 }
 
 export async function getControlTrust(

@@ -222,8 +222,22 @@ export const oidcTrustSummarySchema = z.strictObject({
 export type OidcTrustSummary = z.output<typeof oidcTrustSummarySchema>;
 export type OidcTrustSummaryInput = z.input<typeof oidcTrustSummarySchema>;
 
+/**
+ * A stored control rule that fails validation when the server reads it. The
+ * `disabled` flag identifies rules that have already been disabled and remain
+ * only as a record.
+ */
+export const unreadableOidcTrustRuleSchema = z.strictObject({
+	id: trustRuleIdSchema,
+	disabled: z.boolean()
+});
+export type UnreadableOidcTrustRule = z.output<
+	typeof unreadableOidcTrustRuleSchema
+>;
+
 export const oidcTrustListResponseSchema = z.strictObject({
-	rules: z.array(oidcTrustSummarySchema)
+	rules: z.array(oidcTrustSummarySchema),
+	unreadable: z.array(unreadableOidcTrustRuleSchema).optional()
 });
 export type OidcTrustListResponse = z.output<
 	typeof oidcTrustListResponseSchema

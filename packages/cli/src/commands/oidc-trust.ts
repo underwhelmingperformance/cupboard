@@ -10,7 +10,8 @@ import {
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
 	type TrustRuleId,
-	trustRuleIdSchema
+	trustRuleIdSchema,
+	type UnreadableOidcTrustRule
 } from '@cupboard/protocol/oidc';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
@@ -46,6 +47,10 @@ import {
 	collectSubstitutions,
 	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
 } from './oidc-trust/rule-builder.ts';
+
+type OidcTrustListResult = readonly (
+	OidcTrustSummary | (UnreadableOidcTrustRule & { readonly unreadable: true })
+)[];
 
 interface GithubPrOptions {
 	readonly repo: string;
@@ -787,16 +792,35 @@ export async function runOidcTrustList(
 	reporter: Reporter,
 	client: Pick<OidcTrustClient, 'list'>
 ): Promise<void> {
-	const { rules } = await reporter.phase('Listing OIDC trust rules', () =>
-		client.list()
+	const { rules, unreadable = [] } = await reporter.phase(
+		'Listing OIDC trust rules',
+		() => client.list()
 	);
+	const data: OidcTrustListResult = [
+		...rules,
+		...unreadable.map((rule) => ({ ...rule, unreadable: true as const }))
+	];
 
 	reporter.result({
 		kind: 'oidc-trust-rules',
-		data: rules,
+		data,
 		rows: rules.map((rule) => trustRow(rule)),
-		empty: 'No OIDC trust rules.'
+		empty: unreadable.length === 0 ? 'No OIDC trust rules.' : undefined
 	});
+
+	for (const { id, disabled: isDisabled } of unreadable) {
+		if (isDisabled) {
+			reporter.info(
+				`The server cannot read trust rule ${id}. The rule is disabled and remains only as a record.`
+			);
+			continue;
+		}
+
+		reporter.warn(
+			`The server cannot read trust rule ${id}, which is enabled`,
+			'ID token exchanges fail until you remove the rule'
+		);
+	}
 }
 
 export async function runOidcTrustAdd(
