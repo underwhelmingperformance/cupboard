@@ -1,5 +1,9 @@
 import { SmartCoercionPlugin } from '@orpc/json-schema';
-import { OpenAPIHandler } from '@orpc/openapi/fetch';
+import {
+	OpenAPIHandler,
+	type OpenAPIHandlerOptions
+} from '@orpc/openapi/fetch';
+import { type Context } from '@orpc/server';
 import { ResponseHeadersPlugin } from '@orpc/server/plugins';
 import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4';
 
@@ -8,30 +12,44 @@ import { type ControlOrpcContext, controlRouter } from './control-router.ts';
 import { tenantRouter } from './tenant-router.ts';
 
 /**
- * Smart coercion converts query-string values before the contract schemas
- * validate them. This handler is shared by every Durable Object in the isolate,
- * so request-specific state must arrive through the context.
+ * The options for every contract handler. Smart coercion converts query-string
+ * values before the contract schemas validate them. Every response to a
+ * matched procedure is `no-store`, because the admin APIs return mutable state.
  */
-export const tenantOrpcHandler = new OpenAPIHandler<TenantOrpcContext>(
-	tenantRouter,
-	{
+export function contractHandlerOptions<
+	T extends Context
+>(): OpenAPIHandlerOptions<T> {
+	return {
 		plugins: [
 			new ResponseHeadersPlugin(),
 			new SmartCoercionPlugin({
 				schemaConverters: [new ZodToJsonSchemaConverter()]
 			})
+		],
+		adapterInterceptors: [
+			async (options) => {
+				const result = await options.next();
+
+				if (result.matched) {
+					result.response.headers.set('cache-control', 'no-store');
+				}
+
+				return result;
+			}
 		]
-	}
+	};
+}
+
+/**
+ * This handler is shared by every Durable Object in the isolate, so
+ * request-specific state must arrive through the context.
+ */
+export const tenantOrpcHandler = new OpenAPIHandler<TenantOrpcContext>(
+	tenantRouter,
+	contractHandlerOptions()
 );
 
 export const controlOrpcHandler = new OpenAPIHandler<ControlOrpcContext>(
 	controlRouter,
-	{
-		plugins: [
-			new ResponseHeadersPlugin(),
-			new SmartCoercionPlugin({
-				schemaConverters: [new ZodToJsonSchemaConverter()]
-			})
-		]
-	}
+	contractHandlerOptions()
 );
