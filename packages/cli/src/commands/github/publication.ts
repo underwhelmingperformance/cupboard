@@ -148,6 +148,34 @@ export class TagsIgnoreUnmodelledFinding extends CheckFinding {
 	}
 }
 
+export class TagPatternCoverageFinding extends CheckFinding {
+	readonly status = 'unverified' as const;
+
+	constructor(public readonly pattern: string) {
+		super('tag coverage');
+	}
+
+	detail(): string {
+		return `the tags filter '${this.pattern}' admits several tag names with different OIDC claims; the check does not test a fabricated tag; use an exact tag filter or review trust rules for every matching tag`;
+	}
+}
+
+export class BranchFilterCoverageFinding extends CheckFinding {
+	readonly status = 'unverified' as const;
+
+	constructor(
+		public readonly filter: 'branches' | 'branches-ignore',
+		public readonly patterns: readonly string[],
+		public readonly branch: string
+	) {
+		super('branch coverage');
+	}
+
+	detail(): string {
+		return `the ${this.filter} filter (${this.patterns.join(', ')}) can start runs for branches other than ${this.branch}; the check models only ${this.branch}; use one exact branch filter or review trust rules for every matching branch`;
+	}
+}
+
 export class PresetTagPushFinding extends CheckFinding {
 	readonly status = 'unverified' as const;
 
@@ -161,19 +189,19 @@ export class PresetTagPushFinding extends CheckFinding {
 }
 
 export class PushCoverageFinding extends CheckFinding {
-	readonly status = 'ok' as const;
+	readonly status = 'unverified' as const;
 
 	constructor(public readonly branch: string) {
 		super('push coverage');
 	}
 
 	detail(): string {
-		return `the push event has no branch or tag filter, so pushes to every branch and tag start runs; the check models only pushes to ${this.branch}`;
+		return `the push event has no branch or tag filter, so pushes to every branch and tag start runs; the check models only pushes to ${this.branch}; add branch or tag filters for the refs that should publish`;
 	}
 }
 
 export class PresetPushFilterFinding extends CheckFinding {
-	readonly status = 'ok' as const;
+	readonly status = 'unverified' as const;
 
 	constructor(public readonly branch: string) {
 		super('push coverage');
@@ -233,14 +261,14 @@ export class JobConditionUndecidedFinding extends CheckFinding {
 }
 
 export class ManualRunBranchFinding extends CheckFinding {
-	readonly status = 'ok' as const;
+	readonly status = 'unverified' as const;
 
 	constructor(public readonly branch: string) {
 		super('manual run');
 	}
 
 	detail(): string {
-		return `the check models manual runs on ${this.branch}; manual runs on other branches are not covered`;
+		return `the check models workflow_dispatch on ${this.branch}, but GitHub can start this workflow on other branches with different OIDC claims; review trust rules for those branches`;
 	}
 }
 
@@ -508,10 +536,24 @@ function pushReferences(
 			: 'select-branch';
 
 	if (hasBranchFilter || !hasTagFilter) {
-		references.push(
-			branchFilterFinding(trigger, branch, remedy) ??
-				branchReference(context, 'push', branch)
-		);
+		const filterFinding = branchFilterFinding(trigger, branch, remedy);
+
+		references.push(filterFinding ?? branchReference(context, 'push', branch));
+
+		if (filterFinding === undefined && hasBranchFilter) {
+			const filter =
+				filters.branches === undefined ? 'branches-ignore' : 'branches';
+			const patterns = filters[filter] ?? [];
+
+			if (
+				filter !== 'branches' ||
+				patterns.some((pattern) => pattern !== branch)
+			) {
+				references.push(
+					new BranchFilterCoverageFinding(filter, patterns, branch)
+				);
+			}
+		}
 	}
 
 	if (!hasBranchFilter && !hasTagFilter) {
@@ -542,11 +584,17 @@ function pushReferences(
 	for (const glob of tagGlobs) {
 		const pattern = ReferencePattern.parse(glob);
 
-		references.push(
-			pattern === undefined
-				? new ReferenceFilterUnsupportedFinding('tags', glob)
-				: { trigger: 'push', ref: { kind: 'tag', pattern } }
-		);
+		if (pattern === undefined) {
+			references.push(new ReferenceFilterUnsupportedFinding('tags', glob));
+			continue;
+		}
+
+		if (pattern.glob.includes('*')) {
+			references.push(new TagPatternCoverageFinding(glob));
+			continue;
+		}
+
+		references.push({ trigger: 'push', ref: { kind: 'tag', pattern } });
 	}
 
 	return references;

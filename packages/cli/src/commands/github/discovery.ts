@@ -373,12 +373,18 @@ function isDirectPublicationStep(step: WorkflowStep, tenant: URL): boolean {
 			: cupboardAction.exec(step.uses.toLowerCase())?.[1];
 
 	if (action !== undefined && publishingActions.has(action)) {
-		const isSetup = action === 'setup';
-		const url = step.with?.[isSetup ? 'cache-url' : 'url'];
+		if (action === 'setup') {
+			const provisionCache = step.with?.['provision-cache'];
 
-		if (isSetup && url === undefined) {
-			return false;
+			if (
+				provisionCache === undefined ||
+				(typeof provisionCache === 'string' && provisionCache.trim() === '')
+			) {
+				return false;
+			}
 		}
+
+		const url = step.with?.[action === 'setup' ? 'cache-url' : 'url'];
 
 		return (
 			typeof url !== 'string' ||

@@ -56,7 +56,9 @@ const url = new URL('https://cupboard.supply/t/laney');
 const repository = 'iainlane/dotfiles';
 const path = '.github/workflows/publish.yml';
 const content = `
-on: push
+on:
+  push:
+    branches: [main]
 jobs:
   packages:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
@@ -69,6 +71,10 @@ jobs:
       url: https://cupboard.supply/t/laney
       cache: systems
 `;
+const unmergedBranchContent = content.replace(
+	'branches: [main]',
+	'branches: [feature/publish]'
+);
 
 function mainBranchRule(cache?: string): OidcTrustAddBodyInput {
 	return buildAddBody({
@@ -332,7 +338,7 @@ it('shows the claims, cache, root and actions before confirmation', async () => 
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['v1.2.3']
 jobs:
   packages:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
@@ -384,7 +390,7 @@ resources:
 			body: [
 				'Add planned rule 1\trepository ID 1234, ref refs/heads/main; workflow underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
 				...grantLines(1),
-				'Add planned rule 2\trepository ID 1234, ref pattern ^refs/tags/v[^/]*$; workflow underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
+				'Add planned rule 2\trepository ID 1234, ref refs/tags/v1.2.3; workflow underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
 				...grantLines(2),
 				'Checked jobs\tThe repair checked the planned rules against the discovered jobs on main. It does not read workflow files at tags or on other branches.'
 			].join('\n')
@@ -397,7 +403,7 @@ it('reports applied rules when a later tenant write fails', async () => {
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['v1.2.3']
 jobs:
   packages:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
@@ -452,7 +458,7 @@ it('rethrows the abort reason after an earlier tenant write', async () => {
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['v1.2.3']
 jobs:
   packages:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
@@ -775,7 +781,10 @@ it('repairs a missing preset view without asking for a trust scope or adding rul
 		list: () => Promise.resolve([path]),
 		read: () =>
 			Promise.resolve(`
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 jobs:
   publish:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
@@ -859,7 +868,9 @@ jobs:
 it.each([
 	{
 		name: 'an installable job that skips signing',
-		trigger: `on: push`,
+		trigger: `on:
+  push:
+    branches: [main]`,
 		inputs: `      cache: packages
       attest: false`,
 		ref: 'refs/heads/main',
@@ -869,9 +880,9 @@ it.each([
 		name: 'a tag-only publishing workflow',
 		trigger: `on:
   push:
-    tags: ['v*']`,
+    tags: ['v1.2.3']`,
 		inputs: '',
-		ref: { pattern: '^refs/tags/v[^/]*$' },
+		ref: 'refs/tags/v1.2.3',
 		grant: buildCacheGrant({ allow: ['push', 'attest'] })
 	}
 ])('adds the rule for $name', async ({ trigger, inputs, ref, grant }) => {
@@ -914,8 +925,57 @@ ${inputs}
 	]);
 });
 
+it.each([
+	{ name: 'unfiltered pushes', trigger: 'on: push', status: 'failed' },
+	{
+		name: 'wildcard tags',
+		trigger: `on:
+  push:
+    tags: ['v*']`,
+		status: 'unverified'
+	}
+])(
+	'does not offer a partial trust repair for $name',
+	async ({ trigger, status }) => {
+		const { ui, added, client, dependencies, check } = await fixture(
+			undefined,
+			`
+${trigger}
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+`
+		);
+		const error = await rejection(
+			runDiscoveredGithubRepair(
+				url,
+				{ trustScope: 'exact' },
+				ui,
+				client,
+				dependencies,
+				check
+			)
+		);
+
+		expect({
+			status: check.jobs.map((job) => job.status),
+			problem:
+				error instanceof GithubRepairUnavailableError ? error.problem : error,
+			added
+		}).toStrictEqual({
+			status: [status],
+			problem: 'no-repairable-job',
+			added: []
+		});
+	}
+);
+
 const customViewWorkflow = `
-on: push
+on:
+  push:
+    branches: [main]
 jobs:
   publish:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
@@ -1003,7 +1063,9 @@ it('repairs the jobs that it can and still reports an unverified job', async () 
 	const { ui, added, client, dependencies, check } = await fixture(
 		undefined,
 		`
-on: push
+on:
+  push:
+    branches: [main]
 jobs:
   packages:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
@@ -1218,7 +1280,7 @@ it.each([
 	async ({ script, yes }) => {
 		const { ui, added, client, dependencies, check } = await fixture(
 			{ ...script, confirm: 'yes' },
-			content,
+			unmergedBranchContent,
 			{ branch: 'feature/publish', defaultBranch: 'main' }
 		);
 		const error = await rejection(
@@ -1243,7 +1305,7 @@ it.each([
 it('shows an unmerged branch in the preview at a terminal', async () => {
 	const { ui, captured, client, dependencies, check } = await fixture(
 		{ interactive: true, confirm: 'no' },
-		content,
+		unmergedBranchContent,
 		{ branch: 'feature/publish', defaultBranch: 'main' }
 	);
 

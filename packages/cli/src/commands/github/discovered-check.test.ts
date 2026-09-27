@@ -47,16 +47,16 @@ import {
 	RootGrantPrefixUnverifiedFinding
 } from './finding.ts';
 import {
+	BranchFilterCoverageFinding,
 	CustomReuseViewFinding,
 	ForkPullRequestFinding,
+	ManualRunBranchFinding,
 	PublicationUnmodelledFinding,
 	PushCoverageFinding,
-	ReferenceFilterExcludesFinding
+	ReferenceFilterExcludesFinding,
+	TagPatternCoverageFinding
 } from './publication.ts';
-import {
-	RepositoryTrustRuleMissingFinding,
-	TrustRuleClaimMismatchFinding
-} from './trust-selection.ts';
+import { RepositoryTrustRuleMissingFinding } from './trust-selection.ts';
 
 const tenant = new URL('https://cupboard.supply/t/laney');
 const repository = 'iainlane/dotfiles';
@@ -757,7 +757,7 @@ jobs:
 	]);
 });
 
-it('does not accept a branch rule for a tag-only publishing workflow', async () => {
+it('does not decide wildcard tag coverage from one fabricated tag', async () => {
 	const reference =
 		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
 	const rule = oidcTrustSummarySchema.parse({
@@ -800,26 +800,154 @@ jobs:
 			caller: path,
 			job: 'publish',
 			workflowRef: reference,
-			status: 'failed',
+			status: 'unverified',
 			findings: [
 				{
 					trigger: 'push',
-					finding: new TrustRuleClaimMismatchFinding(
-						'trust rule',
-						{
-							id: rule.id,
-							issuer: rule.issuer,
-							audience: rule.audience,
-							claims: rule.claims,
-							permittedGrants: rule.permittedGrants
-						},
-						{
-							claim: 'ref',
-							expected: 'refs/heads/main',
-							presented: 'refs/tags/v0'
-						}
-					)
+					finding: new TagPatternCoverageFinding('v*')
 				}
+			]
+		}
+	]);
+});
+
+it.each([
+	{
+		name: 'an unfiltered push',
+		filter: '',
+		ref: 'refs/heads/main',
+		coverage: new PushCoverageFinding('main'),
+		checksModelledRef: true
+	},
+	{
+		name: 'a wildcard tag filter',
+		filter: "    tags: ['v*']",
+		ref: 'refs/tags/v1.2.3',
+		coverage: new TagPatternCoverageFinding('v*'),
+		checksModelledRef: false
+	},
+	{
+		name: 'a wildcard branch filter',
+		filter: "    branches: ['ma*']",
+		ref: 'refs/heads/main',
+		coverage: new BranchFilterCoverageFinding('branches', ['ma*'], 'main'),
+		checksModelledRef: true
+	},
+	{
+		name: 'a branches-ignore filter',
+		filter: "    branches-ignore: ['develop']",
+		ref: 'refs/heads/main',
+		coverage: new BranchFilterCoverageFinding(
+			'branches-ignore',
+			['develop'],
+			'main'
+		),
+		checksModelledRef: true
+	}
+])(
+	'does not report ready for $name on one matching ref',
+	async ({ filter, ref, coverage, checksModelledRef }) => {
+		const reference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+		const rule = oidcTrustSummarySchema.parse({
+			id: 'one-ref',
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenant.href,
+			claims: { repository_id: '1234', ref, job_workflow_ref: reference },
+			permittedGrants: [buildCacheGrant({ allow: ['push', 'attest'] })],
+			disabled: false
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			fixture({ rules: [rule] }).client,
+			defaultDependencies({
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  push:
+${filter}
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+`)
+				}
+			})
+		);
+
+		expect(
+			result.jobs.map((job) => ({
+				status: job.status,
+				findings: job.findings.map(({ finding }) => finding)
+			}))
+		).toStrictEqual([
+			{
+				status: 'unverified',
+				findings: checksModelledRef
+					? [
+							coverage,
+							new PassedCheckFinding('trust rule'),
+							new PassedCheckFinding('root grant')
+						]
+					: [coverage]
+			}
+		]);
+	}
+);
+
+it('does not report ready for manual runs on other branches', async () => {
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+	const rule = oidcTrustSummarySchema.parse({
+		id: 'main-only',
+		issuer: 'https://token.actions.githubusercontent.com',
+		audience: tenant.href,
+		claims: {
+			repository_id: '1234',
+			ref: 'refs/heads/main',
+			job_workflow_ref: reference
+		},
+		permittedGrants: [buildCacheGrant({ allow: ['push', 'attest'] })],
+		disabled: false
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main' },
+		capturingReporter([]),
+		fixture({ rules: [rule] }).client,
+		defaultDependencies({
+			source: {
+				...source,
+				read: () =>
+					Promise.resolve(`
+on: workflow_dispatch
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+`)
+			}
+		})
+	);
+
+	expect(
+		result.jobs.map((job) => ({
+			status: job.status,
+			findings: job.findings.map(({ finding }) => finding)
+		}))
+	).toStrictEqual([
+		{
+			status: 'unverified',
+			findings: [
+				new ManualRunBranchFinding('main'),
+				new PassedCheckFinding('trust rule'),
+				new PassedCheckFinding('root grant')
 			]
 		}
 	]);
