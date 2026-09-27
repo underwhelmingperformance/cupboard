@@ -18,11 +18,13 @@ The flake publish workflow uses a view on `main` in two ways:
   to the default cache by reference. cupboard already stores the bytes, so
   nothing is uploaded again.
 
-`cupboard github setup`, in [the quickstart](./quickstart.md), creates a view
-for each repository. It's called `pull-requests-<repository-id>`, and it
-combines that repository's pull-request caches. The view is public, unless you
-pass read credentials to `github setup`. This page explains how views work, and
-how to define them yourself.
+`cupboard github setup`, in [the quickstart][quickstart], creates a view for
+each repository. It's called `pull-requests-<repository-id>`, and it combines
+that repository's pull-request caches. The view uses the access selected for new
+pull-request caches, which defaults to the tenant's default cache access. This
+page explains how views work and how to define them yourself.
+
+[quickstart]: ./quickstart.md
 
 ## Defining a view
 
@@ -133,9 +135,9 @@ a view whose priority isn't greater than the destination's. If you raise a
 cache's priority number, raise the priority numbers of its views too.
 
 `actions/setup` reads both priorities from the `nix-cache-info` responses. It
-doesn't assume a default: it refuses a response that has no `Priority` line, and
-it fails when the destination cache doesn't exist yet, because a missing cache
-has no `nix-cache-info`.
+doesn't assume a default: it refuses a response that has no `Priority` line. If
+the run creates a missing pull-request cache, it checks the new cache's response
+before configuring the view.
 
 ## Private views
 
@@ -147,13 +149,14 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
   pull-requests-123456 --access private --select prefix:gh-123456-pr-
 ```
 
-A private view only accepts the tenant read credential. A cache read credential
-doesn't work, even for a view over that one cache, because a view can serve
-paths from any cache that it includes. If your tenant has no tenant read
-credential, none of its private views can be read.
+A private view accepts a read token with the exact `view:content-read` grant.
+The GitHub workflow obtains one through OIDC when its trust rule permits that
+view. An operator-issued tenant read credential also works as a static pair. A
+cache read credential does not work for a view, even over one cache, because a
+view can serve paths from any cache that it includes. See [Private caches in
+CI][private-ci] for the workflow's read options.
 
-In CI, pass the tenant read credential to the flake publish workflow as the
-`fallback_read_*` secrets. See [Private caches in CI](./private-caches.md).
+[private-ci]: ./private-caches.md
 
 ## How the flake publish workflow uses a view
 

@@ -168,6 +168,7 @@ describe('tenant routing', () => {
 				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				authorization_details_types_supported: [
 					'cupboard_cache',
+					'cupboard_view',
 					'cupboard_domain',
 					'cupboard_wildcard'
 				],
@@ -193,6 +194,7 @@ describe('tenant routing', () => {
 				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				authorization_details_types_supported: [
 					'cupboard_cache',
+					'cupboard_view',
 					'cupboard_domain',
 					'cupboard_wildcard'
 				],

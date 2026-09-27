@@ -173,6 +173,7 @@ export class AuthKeysService {
 			grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 			authorization_details_types_supported: [
 				'cupboard_cache',
+				'cupboard_view',
 				'cupboard_domain',
 				'cupboard_wildcard'
 			],
@@ -357,6 +358,10 @@ export class AuthKeysService {
 			throw new UnauthenticatedError();
 		}
 
+		return this.authenticateToken(token);
+	}
+
+	async authenticateToken(token: string): Promise<AccessClaims> {
 		const keys = await this.authVerificationKeys();
 
 		try {

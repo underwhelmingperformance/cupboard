@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildViewContentReadGrant,
 	collectSubstitutions,
 	DuplicateCaptureVariableError,
 	expandAllow,
@@ -114,6 +116,50 @@ describe('collectSubstitutions', () => {
 				captures: ['head_ref=^(?<pr>.+)$']
 			})
 		).toThrow(DuplicateCaptureVariableError);
+	});
+});
+
+it('builds content-read grants without publication or root authority', () => {
+	const substitutions = collectSubstitutions({
+		templateSource: 'github-pr',
+		captures: []
+	});
+
+	expect({
+		cache: buildCacheContentReadGrant({
+			cacheTemplate: 'gh-{repository_id}-pr-{pr}',
+			substitutions
+		}),
+		view: buildViewContentReadGrant('pull-requests-1234')
+	}).toStrictEqual({
+		cache: {
+			type: 'cupboard_cache',
+			actions: ['cache:content-read'],
+			resources: {
+				cache: {
+					kind: 'named',
+					equalsTemplate: 'gh-{repository_id}-pr-{pr}',
+					substitutions: {
+						repository_id: { claim: 'repository_id' },
+						pr: {
+							claim: 'ref',
+							capture: {
+								pattern: '^refs/pull/(?<pr>[0-9]+)/merge$',
+								group: 'pr'
+							}
+						}
+					},
+					validate: 'cacheName'
+				}
+			}
+		},
+		view: {
+			type: 'cupboard_view',
+			actions: ['view:content-read'],
+			resources: {
+				view: { exact: 'pull-requests-1234', validate: 'reuseViewName' }
+			}
+		}
 	});
 });
 

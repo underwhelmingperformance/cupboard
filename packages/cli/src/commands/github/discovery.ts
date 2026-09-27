@@ -29,6 +29,8 @@ import { jobConditionOutcome } from './job-condition.ts';
 
 type WorkflowInput = string | number | boolean;
 type WorkflowInputs = Readonly<Record<string, WorkflowInput>>;
+export type ReadCredentialWiring =
+	'none' | 'configured' | 'incomplete' | 'unknown';
 
 export interface WorkflowSource {
 	resolveBranch(repository: string, branch: string): Promise<string>;
@@ -68,6 +70,10 @@ export interface DiscoveredPublishingJob {
 	readonly kind: 'flake' | 'installable';
 	readonly workflowRef: string;
 	readonly inputs: WorkflowInputs;
+	readonly readCredentialWiring?: {
+		readonly cache: ReadCredentialWiring;
+		readonly view: ReadCredentialWiring;
+	};
 	readonly triggers: readonly WorkflowTrigger[];
 }
 
@@ -163,6 +169,7 @@ const jobSchema = z.looseObject({
 	if: z.union([z.string(), z.boolean()]).optional().catch(undefined),
 	uses: z.string().optional().catch(undefined),
 	with: mappingSchema.optional().catch(undefined),
+	secrets: z.unknown().optional(),
 	steps: stepsSchema
 });
 const jobsSchema = z
@@ -513,9 +520,80 @@ interface VisitContext {
 	readonly path: string;
 	readonly reference: string;
 	readonly inputs: WorkflowInputs;
+	readonly secretKeys: ReadonlySet<string> | 'unknown';
 	readonly triggers: readonly WorkflowTrigger[];
 	readonly conditions: readonly (string | boolean)[];
 	readonly ancestors: ReadonlySet<string>;
+}
+
+function secretKeys(
+	secrets: unknown,
+	inherited: ReadonlySet<string> | 'unknown'
+): ReadonlySet<string> | 'unknown' {
+	if (secrets === undefined) {
+		return new Set();
+	}
+
+	if (secrets === 'inherit') {
+		return inherited === 'unknown' || inherited.size === 0
+			? 'unknown'
+			: inherited;
+	}
+
+	if (
+		typeof secrets !== 'object' ||
+		secrets === null ||
+		Array.isArray(secrets)
+	) {
+		return 'unknown';
+	}
+
+	return new Set(Object.keys(secrets));
+}
+
+function readCredentialWiring(
+	keys: ReadonlySet<string> | 'unknown'
+): DiscoveredPublishingJob['readCredentialWiring'] {
+	if (keys === 'unknown') {
+		return { cache: 'unknown', view: 'unknown' };
+	}
+
+	const pair = (user: string, password: string): ReadCredentialWiring => {
+		const hasUser = keys.has(user);
+		const hasPassword = keys.has(password);
+
+		if (hasUser !== hasPassword) {
+			return 'incomplete';
+		}
+
+		return hasUser ? 'configured' : 'none';
+	};
+	const current = pair('read_user', 'read_password');
+	const legacy = pair('fallback_read_user', 'fallback_read_password');
+	const destination = pair(
+		'destination_read_user',
+		'destination_read_password'
+	);
+	const defaultCredential: ReadCredentialWiring =
+		current === 'incomplete' || legacy === 'incomplete'
+			? 'incomplete'
+			: current === 'configured' && legacy === 'configured'
+				? 'unknown'
+				: current === 'configured' || legacy === 'configured'
+					? 'configured'
+					: 'none';
+	const cache: ReadCredentialWiring =
+		defaultCredential === 'incomplete' || destination === 'incomplete'
+			? 'incomplete'
+			: defaultCredential === 'unknown'
+				? 'unknown'
+				: defaultCredential === 'configured' || destination === 'configured'
+					? 'configured'
+					: 'none';
+
+	return cache === 'none' && defaultCredential === 'none'
+		? undefined
+		: { cache, view: defaultCredential };
 }
 
 export async function discoverPublishingJobs(
@@ -725,6 +803,7 @@ export async function discoverPublishingJobs(
 					path: nested.path,
 					reference: nested.ref,
 					inputs: supplied,
+					secretKeys: secretKeys(job.secrets, context.secretKeys),
 					triggers,
 					conditions,
 					ancestors
@@ -771,10 +850,7 @@ export async function discoverPublishingJobs(
 				continue;
 			}
 
-			if (
-				!isTargetTenant(target, tenant) ||
-				(kind === 'flake' && supplied.push === false)
-			) {
+			if (!isTargetTenant(target, tenant)) {
 				continue;
 			}
 
@@ -787,7 +863,7 @@ export async function discoverPublishingJobs(
 						workflowRef: workflowReference
 					}),
 					detail:
-						'the push input is dynamic, so the check cannot determine whether this job publishes'
+						'the push input is dynamic, so the check cannot determine whether this job publishes or only reads'
 				});
 				continue;
 			}
@@ -802,12 +878,17 @@ export async function discoverPublishingJobs(
 				continue;
 			}
 
+			const readSecrets = readCredentialWiring(
+				secretKeys(job.secrets, context.secretKeys)
+			);
+
 			jobs.push({
 				caller,
 				job: label,
 				kind,
 				workflowRef: workflowReference,
 				inputs: supplied,
+				...(readSecrets !== undefined && { readCredentialWiring: readSecrets }),
 				triggers
 			});
 		}
@@ -853,6 +934,7 @@ export async function discoverPublishingJobs(
 			path,
 			reference: revision,
 			inputs: {},
+			secretKeys: new Set(),
 			triggers,
 			conditions: [],
 			ancestors: new Set()

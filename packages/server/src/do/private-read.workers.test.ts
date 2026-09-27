@@ -1,11 +1,20 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
+import { oidcIssuerSchema } from '@cupboard/protocol/oidc';
+import {
+	readTokenBasicUser,
+	readTokenPasswordPrefix
+} from '@cupboard/protocol/read-access';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	cacheWriteGrants,
 	currentNarObjectKey,
+	fixtureWorkerServer,
 	initialiseViaWorker,
+	issueTokenForTenant,
+	issueWorkerSignedToken,
 	namedCache,
 	narBytes,
 	provisionFixtureTenant,
@@ -42,6 +51,14 @@ async function makeDefaultPrivate(token: string): Promise<void> {
 function authorised(): RequestInit {
 	return {
 		headers: { authorization: `Basic ${btoa(`${readUser}:${readPassword}`)}` }
+	};
+}
+
+function tokenBasic(token: string): RequestInit {
+	return {
+		headers: {
+			authorization: `Basic ${btoa(`${readTokenBasicUser}:${readTokenPasswordPrefix}${token}`)}`
+		}
 	};
 }
 
@@ -104,6 +121,181 @@ describe('per-cache private reads', () => {
 			cacheInfoControl: 'no-store'
 		});
 	});
+
+	it('uses an exact read grant for all private cache routes', async () => {
+		const admin = await initialiseViaWorker();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPathToTenant(fixtureTenant, admin, metadata);
+		await putCache(admin, { kind: 'default' }, 'private');
+		await putCache(admin, namedCache('other'), 'private');
+
+		const readToken = await issueWorkerSignedToken([
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				cache: { kind: 'default' }
+			}
+		]);
+		const writeToken = await issueWorkerSignedToken(
+			cacheWriteGrants([], { kind: 'default' })
+		);
+		const otherTenantToken = await issueTokenForTenant(
+			fixtureWorkerServer(),
+			oidcIssuerSchema.parse('other-tenant'),
+			[
+				{
+					type: 'cupboard_cache',
+					actions: ['cache:content-read'],
+					cache: { kind: 'default' }
+				}
+			]
+		);
+		const path = `/${metadata.storePathHash}.narinfo`;
+		const routes = [
+			{ path: '/nix-cache-info', init: {} },
+			{ path, init: {} },
+			{ path: `/${await currentNarObjectKey(metadata.narHash)}`, init: {} },
+			{ path: '/attestations/' + metadata.storePathHash, init: {} },
+			{ path: '/attestation-bundles/' + 'a'.repeat(64), init: {} },
+			{
+				path: '/api/v1/missing-paths',
+				init: {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
+				}
+			},
+			{
+				path: '/api/v1/attested-paths',
+				init: {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
+				}
+			}
+		];
+		const observed = await Promise.all(
+			routes.map(async (route) => {
+				const headers = new Headers(route.init.headers);
+				headers.set(
+					'authorization',
+					new Headers(tokenBasic(readToken).headers).get('authorization') ?? ''
+				);
+				const response = await readFetch(route.path, {
+					...route.init,
+					headers
+				});
+
+				return {
+					path: route.path,
+					status: response.status,
+					cacheControl: response.headers.get('cache-control')
+				};
+			})
+		);
+		const bearer = await readFetch(path, {
+			headers: { authorization: `Bearer ${readToken}` }
+		});
+		const wrongCache = await readFetch(
+			'/cache/other/nix-cache-info',
+			tokenBasic(readToken)
+		);
+		const writeOnly = await readFetch(path, tokenBasic(writeToken));
+		const otherTenant = await readFetch(path, tokenBasic(otherTenantToken));
+
+		expect({
+			observed,
+			bearer: bearer.status,
+			wrongCache: wrongCache.status,
+			writeOnly: writeOnly.status,
+			otherTenant: otherTenant.status
+		}).toStrictEqual({
+			observed: [
+				{
+					path: '/nix-cache-info',
+					status: StatusCodes.OK,
+					cacheControl: 'no-store'
+				},
+				{ path, status: StatusCodes.OK, cacheControl: 'no-store' },
+				{
+					path: routes[2]?.path,
+					status: StatusCodes.OK,
+					cacheControl: 'no-store'
+				},
+				{
+					path: routes[3]?.path,
+					status: StatusCodes.NOT_FOUND,
+					cacheControl: 'no-store'
+				},
+				{
+					path: routes[4]?.path,
+					status: StatusCodes.NOT_FOUND,
+					cacheControl: 'no-store'
+				},
+				{
+					path: '/api/v1/missing-paths',
+					status: StatusCodes.OK,
+					cacheControl: 'no-store'
+				},
+				{
+					path: '/api/v1/attested-paths',
+					status: StatusCodes.OK,
+					cacheControl: 'no-store'
+				}
+			],
+			bearer: StatusCodes.OK,
+			wrongCache: StatusCodes.UNAUTHORIZED,
+			writeOnly: StatusCodes.UNAUTHORIZED,
+			otherTenant: StatusCodes.UNAUTHORIZED
+		});
+	});
+
+	it.each(['expired', 'malformed', 'invalid signature'] as const)(
+		'rejects a %s content token at the private read route',
+		async (failure) => {
+			const admin = await initialiseViaWorker();
+			await putCache(admin, { kind: 'default' }, 'private');
+			const validToken = await issueWorkerSignedToken(
+				[
+					{
+						type: 'cupboard_cache',
+						actions: ['cache:content-read'],
+						cache: { kind: 'default' }
+					}
+				],
+				'route-test',
+				failure === 'expired'
+					? new Date(Date.now() - 60 * 60 * 1000)
+					: new Date()
+			);
+			const token =
+				failure === 'malformed'
+					? 'malformed'
+					: failure === 'invalid signature'
+						? validToken.replace(
+								/\.([^.]+)$/u,
+								(_, signature: string) =>
+									`.${signature.startsWith('A') ? 'B' : 'A'}${signature.slice(1)}`
+							)
+						: validToken;
+			const basic = await readFetch('/nix-cache-info', tokenBasic(token));
+			const bearer = await readFetch('/nix-cache-info', {
+				headers: { authorization: `Bearer ${token}` }
+			});
+
+			expect({
+				basic: basic.status,
+				basicControl: basic.headers.get('cache-control'),
+				bearer: bearer.status,
+				bearerControl: bearer.headers.get('cache-control')
+			}).toStrictEqual({
+				basic: StatusCodes.UNAUTHORIZED,
+				basicControl: 'no-store',
+				bearer: StatusCodes.UNAUTHORIZED,
+				bearerControl: 'no-store'
+			});
+		}
+	);
 
 	it('forces no-store on an authorised named-cache nix-cache-info', async () => {
 		const token = await initialiseViaWorker();

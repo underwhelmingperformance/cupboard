@@ -10,6 +10,12 @@ inputs:
   cupboard-path:
     description: Path to the cupboard executable that actions/setup installed.
     required: true
+  read-session-target:
+    description: Internal setup output for private OIDC reads.
+    required: false
+  read-session-view:
+    description: Internal setup output for an additional private reuse view.
+    required: false
   cache:
     description:
       Named cache that the paths were published to. Leave empty for the default
@@ -89,6 +95,8 @@ runs:
       env:
         URL: ${{ inputs.url }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         CACHE: ${{ inputs.cache }}
         AUDIENCE: ${{ inputs.audience }}
         READ_USER: ${{ inputs.read-user }}
@@ -107,6 +115,9 @@ runs:
           --receipt-file "$RECEIPT_FILE"
           --checksums-file "$CHECKSUMS_FILE"
           --bundle "$BUNDLE")
-        node --experimental-transform-types \
-          --disable-warning=ExperimentalWarning \
-          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"
+        source "$GITHUB_ACTION_PATH/../read-session.sh"
+        run_with_read_session \
+          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
+          node --experimental-transform-types \
+            --disable-warning=ExperimentalWarning \
+            "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

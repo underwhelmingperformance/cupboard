@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -1207,58 +1211,48 @@ describe('joinRoot', () => {
 
 describe('availableCachePaths', () => {
 	it('queries a large closure without issuing one narinfo request per path', async () => {
-		vi.useFakeTimers();
+		const paths = Array.from({ length: 18_662 }, (_, index) =>
+			numberedStorePath(index)
+		);
+		const fetcher: typeof fetch = (input, init) => {
+			const url =
+				typeof input === 'string'
+					? input
+					: input instanceof URL
+						? input.href
+						: input.url;
 
-		try {
-			const paths = Array.from({ length: 18_662 }, (_, index) =>
-				numberedStorePath(index)
+			if (!url.endsWith('/api/v1/missing-paths')) {
+				throw new TypeError('fetch failed');
+			}
+
+			if (typeof init?.body !== 'string') {
+				throw new TypeError('availability query body is not a string');
+			}
+
+			const body = cacheAvailabilityRequestSchema.parse(JSON.parse(init.body));
+
+			return Promise.resolve(
+				Response.json(
+					{
+						missingStorePathHashes: body.storePathHashes
+					},
+					{
+						headers: { 'content-type': 'application/json' },
+						status: 200
+					}
+				)
 			);
-			const fetcher: typeof fetch = (input, init) => {
-				const url =
-					typeof input === 'string'
-						? input
-						: input instanceof URL
-							? input.href
-							: input.url;
+		};
 
-				if (!url.endsWith('/api/v1/missing-paths')) {
-					throw new TypeError('fetch failed');
-				}
+		const available = await availableCachePaths({
+			baseUrl: new URL('https://cupboard.example/t/acme'),
+			cache: namedCache('pr-1'),
+			paths,
+			fetcher
+		});
 
-				if (typeof init?.body !== 'string') {
-					throw new TypeError('availability query body is not a string');
-				}
-
-				const body = cacheAvailabilityRequestSchema.parse(
-					JSON.parse(init.body)
-				);
-
-				return Promise.resolve(
-					Response.json(
-						{
-							missingStorePathHashes: body.storePathHashes
-						},
-						{
-							headers: { 'content-type': 'application/json' },
-							status: 200
-						}
-					)
-				);
-			};
-
-			const pending = availableCachePaths({
-				baseUrl: new URL('https://cupboard.example/t/acme'),
-				cache: namedCache('pr-1'),
-				paths,
-				fetcher
-			});
-			await vi.advanceTimersByTimeAsync(60_000);
-			const available = await pending;
-
-			expect(available).toStrictEqual(new Set());
-		} finally {
-			vi.useRealTimers();
-		}
+		expect(available).toStrictEqual(new Set());
 	});
 
 	it('returns only paths whose narinfo is available', async () => {
@@ -1490,6 +1484,40 @@ describe('availableCachePaths', () => {
 				'content-type': 'application/json'
 			}
 		]);
+	});
+
+	it('uses the wrapper credential for a direct availability probe', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-read-'));
+		const netrcFile = path.join(directory, 'netrc');
+		const headers: string[] = [];
+
+		try {
+			await writeFile(
+				netrcFile,
+				'machine cupboard.example login cupboard-oidc password token\n'
+			);
+			vi.stubEnv('NIX_CONFIG', `netrc-file = ${netrcFile}`);
+
+			await availableCachePaths({
+				baseUrl: new URL('https://cupboard.example/t/acme'),
+				cache: namedCache('pr-1'),
+				paths: [firstPath],
+				fetcher: (_input, init) => {
+					headers.push(new Headers(init?.headers).get('authorization') ?? '');
+
+					return Promise.resolve(
+						Response.json({ missingStorePathHashes: [] }, { status: 200 })
+					);
+				}
+			});
+
+			expect(headers).toStrictEqual([
+				`Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`
+			]);
+		} finally {
+			vi.unstubAllEnvs();
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 });
 

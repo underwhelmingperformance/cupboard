@@ -188,17 +188,26 @@ Add `--access private` if the view is private.
 ### "Stored tenant state differs from what github setup would write"
 
 `cupboard github setup` never replaces a trust rule or a reuse view that already
-exists. This happens, for example, when you pass a read credential to make the
-quickstart's pull-request view private. Change or remove each item that the
-message lists, then run setup again. For the reuse view, see
-[Configuring the tenant](./ci/private-caches.md#configuring-the-tenant).
+exists. For example, `--cache-access-mode private` can conflict with a public
+view that setup created earlier. Without an explicit mode, new pull-request
+caches inherit the tenant default cache's access. Change or remove each item
+that the message lists, then run setup again. For the reuse view, see [Choose
+the cache access][ci-cache-access].
+
+[ci-cache-access]: ./ci/private-caches.md#choose-the-cache-access
 
 ### A private cache refuses the credential
 
-If a cache has its own credential, it accepts only that credential. Pass that
-credential in the `destination_read_*` secrets. A private reuse view accepts
-only the tenant read credential, which goes in the `fallback_read_*` secrets.
-See [Private caches in CI](./ci/private-caches.md).
+If a cache has its own static credential, the tenant's static credential does
+not read it. Pass the cache's pair in `destination_read_user` and
+`destination_read_password`, or omit static credentials and authorise the job's
+exact `cache:content-read` grant. A private reuse view accepts a tenant static
+credential through `read_user` and `read_password`, or a Cupboard read token
+with the exact `view:content-read` grant. A supplied static pair takes
+precedence, so a rejected pair does not trigger an OIDC retry. See [Private
+caches in CI][ci-private-caches].
+
+[ci-private-caches]: ./ci/private-caches.md
 
 ### A cohort refuses to build
 

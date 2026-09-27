@@ -184,6 +184,7 @@ export type SubstituterLocation =
 			readonly kind: 'http';
 			readonly baseUrl: URL;
 			readonly credential?: BasicCredential;
+			readonly credentialForRequest?: () => BasicCredential | undefined;
 	  }
 	| { readonly kind: 'file'; readonly directory: string };
 
@@ -217,7 +218,7 @@ export interface SubstituterEnvironment {
 	/**
 	Supplies netrc contents for selecting credentials for each HTTP host.
 	*/
-	readonly netrc?: string;
+	readonly netrc?: string | (() => string | undefined);
 }
 
 export interface OpenedSubstituters {
@@ -654,7 +655,7 @@ type DocumentOutcome =
 async function fetchDocument(
 	url: URL,
 	uri: string,
-	credential: BasicCredential | undefined,
+	credentialForRequest: () => BasicCredential | undefined,
 	dependencies: SubstituterEnvironment
 ): Promise<DocumentOutcome> {
 	const fetcher = dependencies.fetch ?? undiciFetch;
@@ -670,6 +671,7 @@ async function fetchDocument(
 		}
 
 		let response: Response;
+		const credential = credentialForRequest();
 
 		try {
 			response = await fetcher(url, {
@@ -1073,12 +1075,21 @@ function substituterLocation(
 		return;
 	}
 
-	const credential = substituterCredential(parsed, dependencies.netrc);
+	const netrc = dependencies.netrc;
+	const credential = substituterCredential(
+		parsed,
+		typeof netrc === 'string' ? netrc : undefined
+	);
+	const credentialForRequest =
+		typeof netrc === 'function' && parsed.username === ''
+			? () => substituterCredential(parsed, netrc())
+			: undefined;
 
 	return {
 		kind: 'http',
 		baseUrl: withoutParameters(parsed),
-		...(credential !== undefined && { credential })
+		...(credential !== undefined && { credential }),
+		...(credentialForRequest !== undefined && { credentialForRequest })
 	};
 }
 
@@ -1135,7 +1146,7 @@ async function readDocument(
 		return fetchDocument(
 			new URL(`${canonicalHref(location.baseUrl)}/${documentPath}`),
 			uri,
-			location.credential,
+			location.credentialForRequest ?? (() => location.credential),
 			dependencies
 		);
 	}

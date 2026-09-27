@@ -1,8 +1,11 @@
 # Private caches
 
-A private cache only serves store paths to Nix clients that send a username and
-password with each request. This page explains where you get those credentials,
-and how to give them to Nix without leaking them to other users of the machine.
+A private cache checks every request for read access. Nix sends a username and
+password, which can come from a static read credential or a short-lived CI
+token. This page explains how to configure static credentials on a machine. The
+[CI guide][private-ci] covers OIDC reads in GitHub Actions.
+
+[private-ci]: ../ci/private-caches.md
 
 Set up the cache as a normal substituter first, as described in
 [Using a cache](./nix-clients.md). The public signing key at `/pubkey` doesn't
@@ -10,8 +13,8 @@ need a credential, even for a private cache. Everything else does.
 
 ## Read credentials
 
-A read credential is the username and password that Nix uses to read a private
-cache. There are two kinds.
+A static read credential is the username and password that Nix uses to read a
+private cache. There are two kinds.
 
 The tenant read credential reads most private caches in the tenant. It works for
 every private cache that doesn't have a credential of its own. It also works for
@@ -22,9 +25,12 @@ credential, it accepts only that one, and the tenant read credential no longer
 works for it. Use a cache read credential when you want to share one cache with
 a reader who shouldn't see the tenant's other private caches.
 
-Only the deployment's operator can issue read credentials of either kind, so ask
-them for one. The operator's side is described in
-[Read credentials](../operator/tenants.md#read-credentials).
+Only the deployment's operator can issue static read credentials of either kind,
+so ask them for one. An authorised CI job can instead obtain a short-lived OIDC
+token for a particular cache or reuse view. The operator's static credential
+procedure is described in [Read credentials][operator-reads].
+
+[operator-reads]: ../operator/tenants.md#read-credentials
 
 The username is `cupboard`, unless the operator chose a different one. The
 password is 43 characters long. The deployment doesn't keep a copy of the
@@ -36,7 +42,8 @@ the operator has to issue a new one.
 Nix can read a credential from two places. Each suits one kind of credential.
 
 A netrc file contains one username and password for each host. You tell Nix
-where the file is with the `netrc-file` setting. Use it for the tenant read
+where the file is with the `netrc-file` setting. Use it for a tenant read
+credential or a short-lived Cupboard read token in CI. For a static tenant
 credential:
 
 ```

@@ -16,6 +16,10 @@ import { type CheckFinding, FailedCheckFinding } from './finding.ts';
 export function describeAuthorizationDetail(
 	detail: AuthorizationDetail
 ): string {
+	if (detail.type === 'cupboard_view') {
+		return `${detail.actions.join(', ')} on view ${detail.view}`;
+	}
+
 	if (detail.type !== 'cupboard_cache') {
 		return detail.type;
 	}

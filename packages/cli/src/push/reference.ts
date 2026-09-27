@@ -7,7 +7,7 @@ import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 
-import { resilientFetcher } from '../client/transport.ts';
+import { cacheReadFetcher } from '../client/transport.ts';
 import {
 	NarInfoUnavailableError,
 	NarInfoUnparsableError,
@@ -48,7 +48,7 @@ export async function fetchReferenceMetadata(
 	storePathHash: StorePathHash,
 	dependencies: ReferenceFetchDependencies = {}
 ): Promise<ReferenceMetadata> {
-	const fetcher = dependencies.fetch ?? resilientFetcher('replay-safe');
+	const fetcher = cacheReadFetcher(source.url, dependencies.fetch);
 	const target = new URL(
 		`${canonicalHref(source.url)}/${storePathHash}.narinfo`
 	);

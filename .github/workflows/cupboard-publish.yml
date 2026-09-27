@@ -156,6 +156,9 @@ jobs:
         id: build
         with:
           installables: ${{ inputs.installable }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
           # A cached output provides no evidence of a build in this run. Rebuild
           # cached final derivations when provenance is required so a retry after
           # an attachment failure produces a new receipt.
@@ -183,9 +186,9 @@ jobs:
           ttl: ${{ inputs.ttl }}
           permanent: ${{ inputs.ttl == '' && inputs.permanent }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
 
-      # This workflow exposes no read credentials and therefore supports only
-      # public-read caches. Use the flake workflow for a private cache.
       - name: Attest committed paths
         id: attest
         if: ${{ inputs.attest }}
@@ -194,12 +197,17 @@ jobs:
           receipt-file: ${{ steps.build.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
 
       - uses: $/actions/attest-attach
         if: ${{ inputs.attest && steps.attest.outputs.bundles != '' }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
           cache: ${{ inputs.cache }}
           receipt-file: ${{ steps.build.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}

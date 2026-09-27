@@ -17,11 +17,15 @@ import {
 } from '@cupboard/protocol/cache-availability';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type LocalStep } from '@cupboard/protocol/deployment';
+import { isCoveredByToken } from '@cupboard/protocol/grants';
 import type {
 	R2CredentialCheck,
 	VerifyReportInput
 } from '@cupboard/protocol/reports';
-import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
+import {
+	type ReuseViewName,
+	reuseViewNameSchema
+} from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CommitBatchEntry,
@@ -59,11 +63,13 @@ import {
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
 	DatabaseOverloadedError,
+	InvalidAccessTokenError,
 	LocalSchemaMigrationPendingError,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	SubrequestTimeoutError,
 	TenantNotConfiguredError,
+	UnauthenticatedError,
 	UploadNotFoundError,
 	ZstdUnavailableError
 } from '../errors.ts';
@@ -993,7 +999,34 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.context.requireTenant()
 		);
 
-		return guardPrivateViewRead(request, verifier);
+		return guardPrivateViewRead(request, {
+			verifier,
+			isTokenAuthorised: (token) =>
+				this.isReadTokenAuthorised(token, 'view:content-read', {
+					view: view.name
+				})
+		});
+	}
+
+	private async isReadTokenAuthorised(
+		token: string,
+		operation: 'cache:content-read' | 'view:content-read',
+		resource: { readonly cache: CacheScope } | { readonly view: ReuseViewName }
+	): Promise<boolean> {
+		try {
+			const claims = await this.authKeys.authenticateToken(token);
+
+			return isCoveredByToken(claims.grants, operation, resource);
+		} catch (error) {
+			if (
+				error instanceof InvalidAccessTokenError ||
+				error instanceof UnauthenticatedError
+			) {
+				return false;
+			}
+
+			throw error;
+		}
 	}
 
 	// Authenticate the HTTP upgrade before creating a socket. Store the session
@@ -2871,6 +2904,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} catch {
 			return false;
 		}
+	}
+
+	async authoriseCacheContentRead(
+		token: string,
+		cache: CacheScope
+	): Promise<boolean> {
+		return this.isReadTokenAuthorised(token, 'cache:content-read', { cache });
 	}
 
 	// Only RPC callers can stage negotiate hints. The Worker puts the returned

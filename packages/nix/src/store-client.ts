@@ -197,7 +197,6 @@ export function substituterClientOver(
 	dependencies: NixConfigEnvironment,
 	signal?: AbortSignal
 ): SubstituterClient {
-	const netrc = netrcContents(transfer.netrcFile, dependencies);
 	const proxied = proxiedFetch(dependencies.env);
 	const reach = {
 		storeDirectory: directories.storeDirectory,
@@ -205,7 +204,7 @@ export function substituterClientOver(
 		openStore: openLocalStoreDatabase,
 		transfer,
 		...(signal !== undefined && { signal }),
-		...(netrc !== undefined && { netrc }),
+		netrc: () => netrcContents(transfer.netrcFile, dependencies),
 		...(proxied !== undefined && { fetch: proxied })
 	};
 

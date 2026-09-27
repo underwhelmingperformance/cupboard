@@ -1,15 +1,20 @@
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { env } from 'node:process';
+import process, { env } from 'node:process';
+import { fileURLToPath } from 'node:url';
 
+import { withReadAuthentication } from '@cupboard/nix';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
+	cacheNameSchema,
 	type CachePriority,
 	type CacheScope,
+	cacheScopeSchema,
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
@@ -19,15 +24,22 @@ import {
 	reuseViewPrioritySchema
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
+import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from '@cupboard/shared/child-process';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { workflowCommands } from '@cupboard/shared/github-actions';
 import {
 	basicAuthHeader,
 	type BasicCredential,
-	type ReadUser
+	type ReadUser,
+	readUserInputSchema
 } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
+import { z } from 'zod';
 
 import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import { acquireCupboard } from '../cupboard-acquisition.ts';
@@ -36,21 +48,25 @@ import {
 	type ResolvedCupboard,
 	serialiseResolvedCupboard
 } from '../cupboard-resolution.ts';
-import { runCupboard } from '../cupboard-run.ts';
+import { inspectCommandOptions, runCupboard } from '../cupboard-run.ts';
 import {
+	CacheAccessProbeError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
+	CommandFailedError,
 	CupboardReleaseSelectionConflictError,
 	DestinationReadCredentialCacheCountError,
 	DestinationReadCredentialConflictError,
 	DestinationReadPasswordRequiredError,
 	DestinationReadUserRequiredError,
 	PrivateSubstitutersCacheUrlRequiredError,
-	ProvisionCacheAccessRequiredError,
 	ProvisionCacheResultError,
 	ProvisionCacheUrlRequiredError,
+	ReadConfigurationFailedError,
+	ReadConfigurationScopeError,
+	ReadConfigurationUnavailableError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError
@@ -96,6 +112,7 @@ export interface SetupOptions {
 	readonly cache?: string;
 	readonly includeDefaultCache?: string;
 	readonly provisionCache?: string;
+	readonly cacheAccessMode?: string;
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
@@ -116,7 +133,6 @@ export interface SetupOptions {
  */
 export interface ProvisionCache {
 	readonly name: string;
-	readonly access: string;
 	readonly rootTtl: string;
 }
 
@@ -133,6 +149,7 @@ export interface SetupInputs {
 	readonly caches: readonly CacheSelection[];
 	readonly privateSubstituters: readonly URL[];
 	readonly provisionCache: ProvisionCache | undefined;
+	readonly cacheAccessMode: 'public' | 'private' | undefined;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: ReadUser | '';
@@ -147,10 +164,26 @@ export interface SetupActionDependencies {
 	readonly installRelease?: typeof installCupboard;
 	readonly mask?: (value: string) => void;
 	readonly run?: typeof runCupboard;
+	readonly configureWithReadAccess?: (
+		binaryPath: string,
+		inputs: ConfigureNixInputs,
+		target: URL,
+		reuseView: string,
+		signal?: AbortSignal
+	) => Promise<void>;
 	readonly signal?: AbortSignal;
 }
 
-interface ConfigureNixInputs extends SetupInputs {
+interface ConfigureNixInputs extends Pick<
+	SetupInputs,
+	| 'caches'
+	| 'privateSubstituters'
+	| 'reuseView'
+	| 'trustedPublicKey'
+	| 'readUser'
+	| 'readPassword'
+	| 'nixConfigFile'
+> {
 	readonly cacheUrl: URL;
 	readonly environment: Environment;
 }
@@ -235,9 +268,10 @@ export function registerSetupCommand(
 			'--provision-cache <name>',
 			"Create a missing cache with the run's OIDC token before configuring Nix."
 		)
+		.option('--cache-access-mode <mode>', 'Cache access: public or private.')
 		.option(
 			'--provision-cache-access <mode>',
-			'Required read access for the cache: public or private.'
+			'Deprecated alias for --cache-access-mode.'
 		)
 		.option(
 			'--provision-cache-ttl <duration>',
@@ -263,6 +297,16 @@ export function registerSetupCommand(
 		)
 		.action((options: SetupOptions) =>
 			setupAction(options, environment, undefined, {
+				...(signal !== undefined && { signal })
+			})
+		);
+
+	program
+		.command('setup-configure')
+		.description('Configure Nix during an owned read session.')
+		.requiredOption('--input-file <path>')
+		.action((options: { readonly inputFile: string }) =>
+			setupConfigureAction(options.inputFile, environment, undefined, {
 				...(signal !== undefined && { signal })
 			})
 		);
@@ -327,6 +371,7 @@ export function resolveSetupInputs(
 	) {
 		throw new CupboardReleaseSelectionConflictError('cupboard');
 	}
+	const provisionCache = resolveProvisionCache(options, cacheUrl);
 
 	return {
 		cupboard,
@@ -362,7 +407,11 @@ export function resolveSetupInputs(
 					}
 		),
 		privateSubstituters,
-		provisionCache: resolveProvisionCache(options, cacheUrl),
+		provisionCache,
+		cacheAccessMode: resolveCacheAccessMode(
+			options,
+			provisionCache !== undefined
+		),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -393,17 +442,33 @@ function resolveProvisionCache(
 		throw new ProvisionCacheUrlRequiredError();
 	}
 
-	const access = provided(options.provisionCacheAccess);
-
-	if (access === undefined) {
-		throw new ProvisionCacheAccessRequiredError();
-	}
-
 	return {
 		name,
-		access,
 		rootTtl: provided(options.provisionCacheTtl) ?? ''
 	};
+}
+
+function resolveCacheAccessMode(
+	options: SetupOptions,
+	isProvisioning: boolean
+): 'public' | 'private' | undefined {
+	const mode = provided(options.cacheAccessMode);
+	const legacyMode = isProvisioning
+		? provided(options.provisionCacheAccess)
+		: undefined;
+	if (mode !== undefined && legacyMode !== undefined && mode !== legacyMode) {
+		throw new ProvisionCacheResultError(
+			'cache-access-mode and provision-cache-access specify different access modes.'
+		);
+	}
+	const access = mode ?? legacyMode;
+	if (access !== undefined && access !== 'public' && access !== 'private') {
+		throw new ProvisionCacheResultError(
+			`Unknown cache access mode "${access}". Use public or private.`
+		);
+	}
+
+	return access;
 }
 
 /**
@@ -564,11 +629,46 @@ export async function setupAction(
 	if (inputs.cacheUrl === undefined) {
 		return;
 	}
+	const cacheUrl = inputs.cacheUrl;
+	const viewAccess = await probeReuseViewAccess(
+		cacheUrl,
+		inputs.reuseView,
+		dependencies
+	);
 
 	if (inputs.provisionCache !== undefined) {
+		const targetAccess = await probeCacheAccess(
+			cacheUrlFor(cacheUrl, {
+				kind: 'named',
+				name: cacheNameSchema.parse(inputs.provisionCache.name)
+			}),
+			dependencies,
+			true
+		);
+		const requestedAccess =
+			inputs.cacheAccessMode ??
+			targetAccess ??
+			(await probeCacheAccess(
+				cacheUrlFor(cacheUrl, { kind: 'default' }),
+				dependencies
+			));
+		if (viewAccess !== undefined && requestedAccess !== viewAccess) {
+			throw new ProvisionCacheResultError(
+				`Reuse view "${inputs.reuseView}" has ${viewAccess} access; ${requestedAccess} cache access is required. Choose matching access before rerunning this workflow.`
+			);
+		}
+		if (
+			targetAccess !== undefined &&
+			inputs.cacheAccessMode !== undefined &&
+			targetAccess !== inputs.cacheAccessMode
+		) {
+			throw new ProvisionCacheResultError(
+				`Cache "${inputs.provisionCache.name}" has ${targetAccess} access; ${inputs.cacheAccessMode} access is required. Ask the cache administrator to change its access before rerunning this workflow.`
+			);
+		}
 		const results = await (dependencies.run ?? runCupboard)(
 			acquired.binaryPath,
-			provisionCacheArguments(inputs.cacheUrl, inputs.provisionCache),
+			provisionCacheArguments(cacheUrl, inputs.provisionCache, requestedAccess),
 			environment,
 			{
 				...(dependencies.signal !== undefined && {
@@ -587,26 +687,264 @@ export async function setupAction(
 				'The cache creation command did not report the requested cache. Upgrade cupboard and retry.'
 			);
 		}
-		if (parsed.data.access !== inputs.provisionCache.access) {
+		if (
+			(inputs.cacheAccessMode !== undefined &&
+				parsed.data.access !== requestedAccess) ||
+			(viewAccess !== undefined && parsed.data.access !== viewAccess)
+		) {
 			throw new ProvisionCacheResultError(
-				`Cache "${inputs.provisionCache.name}" has ${parsed.data.access} access; ${inputs.provisionCache.access} access is required. Ask the cache administrator to change its access before rerunning this workflow.`
+				`Cache "${inputs.provisionCache.name}" has ${parsed.data.access} access; ${viewAccess ?? requestedAccess} access is required. Ask the cache administrator to change its access before rerunning this workflow.`
 			);
 		}
 	}
 
-	await configureNix(
-		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
-		reporter,
+	const configureInputs = { ...inputs, cacheUrl, environment };
+	const privateDestinations = await Promise.all(
+		inputs.caches.map(async (selection) => {
+			const destination = cacheUrlFor(cacheUrl, selection.cache);
+			const access = await probeCacheAccess(destination, dependencies);
+			if (
+				inputs.cacheAccessMode !== undefined &&
+				access !== inputs.cacheAccessMode
+			) {
+				throw new ProvisionCacheResultError(
+					`Cache at ${canonicalHref(destination)} has ${access} access; ${inputs.cacheAccessMode} access is required.`
+				);
+			}
+			if (viewAccess !== undefined && access !== viewAccess) {
+				throw new ProvisionCacheResultError(
+					`Cache at ${canonicalHref(destination)} has ${access} access; reuse view "${inputs.reuseView}" has ${viewAccess} access.`
+				);
+			}
+
+			return access === 'private' &&
+				inputs.readUser === '' &&
+				selection.credential === undefined
+				? destination
+				: undefined;
+		})
+	);
+	const oidcDestinations = privateDestinations.filter(
+		(url) => url !== undefined
+	);
+	if (oidcDestinations.length > 1) {
+		throw new ReadConfigurationScopeError();
+	}
+	const requiresOidcView = viewAccess === 'private' && inputs.readUser === '';
+	const oidcDestination = oidcDestinations[0];
+	if (requiresOidcView || oidcDestination !== undefined) {
+		const target =
+			oidcDestination ?? reuseViewUrlFor(cacheUrl, inputs.reuseView);
+		const readSessionView =
+			oidcDestination === undefined || !requiresOidcView
+				? ''
+				: inputs.reuseView;
+		await setOutput(environment, 'read-session-target', canonicalHref(target));
+		await setOutput(environment, 'read-session-view', readSessionView);
+		await (dependencies.configureWithReadAccess ?? configureWithReadAccess)(
+			acquired.binaryPath,
+			configureInputs,
+			target,
+			readSessionView,
+			dependencies.signal
+		);
+		return;
+	}
+
+	await setOutput(environment, 'read-session-target', '');
+	await setOutput(environment, 'read-session-view', '');
+	await configureNix(configureInputs, reporter, {
+		...(dependencies.fetch !== undefined && { fetch: dependencies.fetch }),
+		...(dependencies.signal !== undefined && { signal: dependencies.signal })
+	});
+}
+
+const configureCredentialSchema = z.object({
+	user: readUserInputSchema,
+	password: z.string()
+});
+const configureCacheSelectionSchema = z.object({
+	cache: cacheScopeSchema,
+	credential: configureCredentialSchema.optional()
+});
+const configureNixPayloadSchema = z.object({
+	cacheUrl: z.url(),
+	caches: z.array(configureCacheSelectionSchema),
+	privateSubstituters: z.array(z.url()),
+	reuseView: z.string(),
+	trustedPublicKey: z.string(),
+	readUser: z.union([z.literal(''), readUserInputSchema]),
+	readPassword: z.string(),
+	nixConfigFile: z.string()
+});
+
+export async function setupConfigureAction(
+	inputFile: string,
+	environment: Environment = env,
+	reporter: Reporter = createGithubReporter(),
+	dependencies: CacheInfoFetchDependencies = {}
+): Promise<void> {
+	const contents = await readFile(inputFile, 'utf8');
+	const payload: unknown = JSON.parse(contents);
+	const parsed = configureNixPayloadSchema.parse(payload);
+
+	const configureInputs = {
+		...parsed,
+		cacheUrl: new URL(parsed.cacheUrl),
+		privateSubstituters: parsed.privateSubstituters.map((url) => new URL(url)),
+		environment
+	};
+	await configureNix(configureInputs, reporter, dependencies);
+}
+
+async function configureWithReadAccess(
+	binaryPath: string,
+	inputs: ConfigureNixInputs,
+	target: URL,
+	reuseView: string,
+	signal?: AbortSignal
+): Promise<void> {
+	let isSupported: boolean;
+	try {
+		const options = await inspectCommandOptions(binaryPath, ['run'], signal);
+		isSupported = options.has('--github-oidc');
+	} catch (error) {
+		signal?.throwIfAborted();
+		if (!(error instanceof CommandFailedError)) {
+			throw error;
+		}
+		isSupported = false;
+	}
+	if (!isSupported) {
+		throw new ReadConfigurationUnavailableError();
+	}
+
+	const inputFile = path.join(
+		requireEnvironment(inputs.environment, 'RUNNER_TEMP'),
+		`cupboard-setup-configure-${randomUUID()}.json`
+	);
+	await writeFile(
+		inputFile,
+		JSON.stringify({
+			cacheUrl: canonicalHref(inputs.cacheUrl),
+			caches: inputs.caches,
+			privateSubstituters: inputs.privateSubstituters.map((url) =>
+				canonicalHref(url)
+			),
+			reuseView: inputs.reuseView,
+			trustedPublicKey: inputs.trustedPublicKey,
+			readUser: inputs.readUser,
+			readPassword: inputs.readPassword,
+			nixConfigFile: inputs.nixConfigFile
+		}),
+		{ flag: 'wx', mode: 0o600 }
+	);
+
+	try {
+		const child = spawn(
+			binaryPath,
+			[
+				'run',
+				canonicalHref(target),
+				'--github-oidc',
+				...(reuseView === '' ? [] : ['--reuse-view', reuseView]),
+				'--',
+				process.execPath,
+				'--experimental-transform-types',
+				'--disable-warning=ExperimentalWarning',
+				fileURLToPath(new URL('../main.ts', import.meta.url)),
+				'setup-configure',
+				'--input-file',
+				inputFile
+			],
+			{ stdio: 'inherit', env: process.env }
+		);
+		const result = await waitForAbortableChildProcess(
+			observeChildProcess(child),
+			signal
+		);
+		if (result.error !== undefined || result.status !== 0) {
+			throw new ReadConfigurationFailedError(result.status);
+		}
+	} finally {
+		await rm(inputFile, { force: true });
+	}
+}
+
+async function probeReuseViewAccess(
+	cacheUrl: URL,
+	reuseView: string,
+	dependencies: CacheInfoFetchDependencies
+): Promise<'public' | 'private' | undefined> {
+	if (reuseView === '') {
+		return undefined;
+	}
+
+	return probeCacheAccess(reuseViewUrlFor(cacheUrl, reuseView), dependencies);
+}
+
+function probeCacheAccess(
+	cacheUrl: URL,
+	dependencies: CacheInfoFetchDependencies
+): Promise<'public' | 'private'>;
+function probeCacheAccess(
+	cacheUrl: URL,
+	dependencies: CacheInfoFetchDependencies,
+	isAbsentAllowed: true
+): Promise<'public' | 'private' | undefined>;
+async function probeCacheAccess(
+	cacheUrl: URL,
+	dependencies: CacheInfoFetchDependencies,
+	isAbsentAllowed = false
+): Promise<'public' | 'private' | undefined> {
+	const target = `${canonicalHref(cacheUrl)}/nix-cache-info`;
+
+	return fetchWithProbeDeadline(
+		retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe'),
+		target,
 		{
-			...(dependencies.fetch !== undefined && { fetch: dependencies.fetch }),
-			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+			...(dependencies.signal !== undefined && {
+				signal: dependencies.signal
+			})
+		},
+		async (response) => {
+			if (response.status === 200) {
+				try {
+					CacheInfo.parse(
+						await readResponseText(response, {
+							description: 'cache information',
+							maximumBytes: maximumCacheInfoBytes,
+							...(dependencies.signal !== undefined && {
+								signal: dependencies.signal
+							})
+						})
+					);
+				} catch (error) {
+					throw new CacheInfoInvalidError('destination', target, {
+						cause: error
+					});
+				}
+
+				return 'public';
+			}
+
+			await discardResponseBody(response);
+			if (response.status === 401) {
+				return 'private';
+			}
+			if (isAbsentAllowed && response.status === 404) {
+				return;
+			}
+
+			throw new CacheAccessProbeError(target, response.status);
 		}
 	);
 }
 
 function provisionCacheArguments(
 	cacheUrl: URL,
-	provision: ProvisionCache
+	provision: ProvisionCache,
+	access: 'public' | 'private'
 ): readonly string[] {
 	return [
 		'cache',
@@ -616,7 +954,7 @@ function provisionCacheArguments(
 		'--github-oidc',
 		'--if-absent',
 		'--access',
-		provision.access,
+		access,
 		...(provision.rootTtl === '' ? [] : ['--root-ttl', provision.rootTtl])
 	];
 }
@@ -724,8 +1062,6 @@ export interface ResolveSubstitutersOptions {
  * the view. The returned list puts the caches before the view. This ordering
  * prevents a divergent input-addressed path in the view from replacing the path
  * selected from a destination cache.
- * The probes use Basic authentication because the runner's netrc applies only
- * to later Nix reads, and fetch ignores a credential in the URL.
  */
 export async function resolveSubstituters(
 	options: ResolveSubstitutersOptions,
@@ -740,7 +1076,12 @@ export async function resolveSubstituters(
 	}
 
 	const viewUrl = reuseViewUrlFor(options.cacheUrl, options.reuseView);
-	const fetcher = retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe');
+	const fetcher = retryingFetcher(
+		withReadAuthentication(dependencies.fetch ?? fetch, {
+			tenantUrl: options.cacheUrl
+		}),
+		'replay-safe'
+	);
 	const tenantHeaders =
 		options.readUser === ''
 			? undefined
@@ -792,8 +1133,6 @@ async function configureNix(
 		inputs.trustedPublicKey === ''
 			? await fetchTrustedPublicKey(inputs, reporter, dependencies)
 			: inputs.trustedPublicKey;
-	// A reuse view and its destination use the same host. If the tenant requires
-	// authentication, one host-scoped netrc entry supplies both reads.
 	const cupboardSubstituters = await resolveSubstituters(
 		{
 			cacheUrl: inputs.cacheUrl,

@@ -1,3 +1,4 @@
+import { withReadAuthentication } from '@cupboard/nix';
 import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import {
 	type CacheScope,
@@ -41,7 +42,12 @@ export function destinationServedPaths(
 ): Promise<ReadonlySet<StorePathString>> {
 	return availablePathsAt(
 		cacheUrl(options.baseUrl, options.cache),
-		options,
+		{
+			...options,
+			fetcher: withReadAuthentication(options.fetcher ?? fetch, {
+				tenantUrl: options.baseUrl
+			})
+		},
 		cacheAvailabilityMaxPaths
 	);
 }
@@ -58,7 +64,12 @@ export function viewServedPaths(
 ): Promise<ReadonlySet<StorePathString>> {
 	return availablePathsAt(
 		reuseViewUrl(options.baseUrl, options.view.trim()),
-		options,
+		{
+			...options,
+			fetcher: withReadAuthentication(options.fetcher ?? fetch, {
+				tenantUrl: options.baseUrl
+			})
+		},
 		reuseViewAvailabilityMaxPaths
 	);
 }
@@ -78,7 +89,12 @@ export function attestedServedPaths(
 		readonly cache: CacheScope;
 	}
 ): Promise<ReadonlySet<StorePathString>> {
-	return attestedPathsAt(cacheUrl(options.baseUrl, options.cache), options);
+	return attestedPathsAt(cacheUrl(options.baseUrl, options.cache), {
+		...options,
+		fetcher: withReadAuthentication(options.fetcher ?? fetch, {
+			tenantUrl: options.baseUrl
+		})
+	});
 }
 
 export interface TenantProbeOptions {

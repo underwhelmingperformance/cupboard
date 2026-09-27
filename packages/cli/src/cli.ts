@@ -48,6 +48,7 @@ import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerReuseViewCommands } from './commands/reuse-view.ts';
 import { registerRootCommands } from './commands/root.ts';
+import { registerRunCommand } from './commands/run.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
 import { registerWhoamiCommand } from './commands/whoami.ts';
@@ -169,6 +170,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerAttestCommands(program, options);
 	registerPushCommand(program, options);
 	registerBuildPushCommand(program, options);
+	registerRunCommand(program, options);
 	registerConfigCommand(program, options);
 	registerPubkeyCommand(program, options);
 	registerStatsCommand(program, options);

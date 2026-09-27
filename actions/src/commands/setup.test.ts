@@ -1,5 +1,12 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import {
+	access,
+	mkdtemp,
+	readFile,
+	rm,
+	stat,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -22,7 +29,6 @@ import {
 	DestinationReadUserRequiredError,
 	PrivateSubstitutersCacheUrlRequiredError,
 	ProbeTimeoutError,
-	ProvisionCacheAccessRequiredError,
 	ProvisionCacheUrlRequiredError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
@@ -280,6 +286,7 @@ describe('resolveSetupInputs', () => {
 		caches: [{ cache: defaultCache }],
 		privateSubstituters: [],
 		provisionCache: undefined,
+		cacheAccessMode: undefined,
 		reuseView: '',
 		trustedPublicKey: '',
 		readUser: '',
@@ -624,6 +631,9 @@ describe('resolveSubstituters', () => {
 			const rejection =
 				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
 
+			await vi.waitFor(() => {
+				expect(signals).toHaveLength(2);
+			});
 			await vi.advanceTimersByTimeAsync(30_000);
 			await rejection;
 
@@ -771,6 +781,44 @@ describe('resolveSubstituters', () => {
 				authorization: `Basic ${Buffer.from('alice:secret').toString('base64')}`
 			}
 		]);
+	});
+
+	it('uses the wrapper credential when probing a private view', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-read-')
+		);
+		const netrcFile = path.join(directory, 'netrc');
+		const authorizations: (string | undefined)[] = [];
+
+		try {
+			await writeFile(
+				netrcFile,
+				'machine cache.example.test login cupboard-oidc password token\n'
+			);
+			vi.stubEnv('NIX_CONFIG', `netrc-file = ${netrcFile}`);
+
+			await resolveSubstituters(
+				{
+					...baseOptions,
+					cacheUrl: new URL('https://cache.example.test/t/acme'),
+					reuseView: 'reuse'
+				},
+				{
+					fetch: stubFetch(
+						(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 40),
+						{ authorizations }
+					)
+				}
+			);
+
+			expect(authorizations).toStrictEqual([
+				`Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`,
+				`Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`
+			]);
+		} finally {
+			vi.unstubAllEnvs();
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 
 	it.each([
@@ -1179,18 +1227,34 @@ describe('resolveSetupInputs reuse view', () => {
 // invocations, plus whether each ran before `configureNix` wrote its file.
 async function runSetup(options: {
 	readonly provisionCache?: string;
+	readonly cacheAccessMode?: string;
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
 	readonly existingAccess?: 'public' | 'private';
+	readonly defaultAccess?: 'public' | 'private';
+	readonly readUser?: string;
+	readonly readPassword?: string;
+	readonly destinationReadUser?: string;
+	readonly destinationReadPassword?: string;
+	readonly reuseView?: string;
+	readonly viewAccess?: 'public' | 'private';
+	readonly malformedAccessBody?: boolean;
+	readonly captureReadConfiguration?: boolean;
 }): Promise<{
 	readonly invocations: readonly (readonly string[])[];
 	readonly wroteNixConfigFirst: readonly boolean[];
+	readonly readConfigurations?: readonly {
+		readonly target: string;
+		readonly reuseView: string;
+	}[];
 }> {
 	const directory = await mkdtemp(
 		path.join(tmpdir(), 'cupboard-setup-provision-')
 	);
 	const invocations: (readonly string[])[] = [];
 	const wroteNixConfigFirst: boolean[] = [];
+	const readConfigurations: { target: string; reuseView: string }[] = [];
+	let createdAccess: 'public' | 'private' | undefined;
 
 	try {
 		await setupAction(
@@ -1217,6 +1281,10 @@ async function runSetup(options: {
 					}),
 				run: (_binaryPath, arguments_) => {
 					invocations.push(arguments_);
+					const access = arguments_[arguments_.indexOf('--access') + 1];
+					if (access === 'public' || access === 'private') {
+						createdAccess = access;
+					}
 					wroteNixConfigFirst.push(
 						readdirSync(directory).some((entry) =>
 							entry.startsWith('cupboard-nix-')
@@ -1228,7 +1296,7 @@ async function runSetup(options: {
 							kind: 'cache',
 							data: {
 								scope: namedCache(options.provisionCache ?? 'pr-1'),
-								access: options.existingAccess ?? options.provisionCacheAccess,
+								access: options.existingAccess ?? createdAccess,
 								priority: 40,
 								storePaths: 0,
 								defaultRootRetention: { kind: 'permanent' },
@@ -1238,11 +1306,48 @@ async function runSetup(options: {
 						}
 					]);
 				},
-				fetch: stubFetch(() => cacheInfoBody(40))
+				configureWithReadAccess: (_binaryPath, _inputs, target, reuseView) => {
+					readConfigurations.push({
+						target: canonicalHref(target),
+						reuseView
+					});
+					return Promise.resolve();
+				},
+				fetch: stubFetch(
+					(url) =>
+						options.malformedAccessBody &&
+						url.endsWith('/cache/pr-1/nix-cache-info')
+							? '<html>Sign in</html>'
+							: cacheInfoBody(url.includes('/reuse/') ? 80 : 40),
+					{
+						status: (url) => {
+							if (url.endsWith('/cache/pr-1/nix-cache-info')) {
+								const access = options.existingAccess ?? createdAccess;
+								return access === undefined
+									? 404
+									: access === 'private'
+										? 401
+										: 200;
+							}
+
+							return (url.includes('/reuse/') &&
+								options.viewAccess === 'private') ||
+								(url.endsWith('/nix-cache-info') &&
+									!url.includes('/cache/') &&
+									options.defaultAccess === 'private')
+								? 401
+								: 200;
+						}
+					}
+				)
 			}
 		);
 
-		return { invocations, wroteNixConfigFirst };
+		return {
+			invocations,
+			wroteNixConfigFirst,
+			...(options.captureReadConfiguration && { readConfigurations })
+		};
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
@@ -1350,6 +1455,170 @@ describe('destination read credentials', () => {
 });
 
 describe('setupAction cache provisioning', () => {
+	it('validates an explicit access mode for an existing cache without provisioning', async () => {
+		await expect(
+			runSetup({
+				cacheAccessMode: 'private',
+				existingAccess: 'public'
+			})
+		).rejects.toThrow('has public access; private access is required');
+	});
+	it('keeps the deprecated provisioning alias scoped to provisioning', async () => {
+		expect(
+			await runSetup({
+				provisionCacheAccess: 'private',
+				existingAccess: 'public'
+			})
+		).toStrictEqual({ invocations: [], wroteNixConfigFirst: [] });
+	});
+
+	it('starts an owned read session for a private destination without a reuse view', async () => {
+		expect(
+			await runSetup({
+				existingAccess: 'private',
+				captureReadConfiguration: true
+			})
+		).toStrictEqual({
+			invocations: [],
+			wroteNixConfigFirst: [],
+			readConfigurations: [
+				{
+					target: 'https://cache.example.test/t/acme/cache/pr-1',
+					reuseView: ''
+				}
+			]
+		});
+	});
+
+	it('starts a view-only read session when the destination uses a static credential', async () => {
+		expect(
+			await runSetup({
+				existingAccess: 'private',
+				reuseView: 'prior',
+				viewAccess: 'private',
+				captureReadConfiguration: true,
+				destinationReadUser: 'alice',
+				destinationReadPassword: readPassword
+			})
+		).toStrictEqual({
+			invocations: [],
+			wroteNixConfigFirst: [],
+			readConfigurations: [
+				{
+					target: 'https://cache.example.test/t/acme/reuse/prior',
+					reuseView: ''
+				}
+			]
+		});
+	});
+
+	it('refuses an invalid public cache-info response before creating a cache', async () => {
+		await expect(
+			runSetup({
+				provisionCache: 'pr-1',
+				existingAccess: 'public',
+				malformedAccessBody: true
+			})
+		).rejects.toBeInstanceOf(CacheInfoInvalidError);
+	});
+	it.each([
+		{ provisionCacheAccess: 'public', viewAccess: 'private' },
+		{ provisionCacheAccess: 'private', viewAccess: 'public' }
+	] as const)(
+		'refuses $provisionCacheAccess creation against a $viewAccess reuse view',
+		async ({ provisionCacheAccess, viewAccess }) => {
+			await expect(
+				runSetup({
+					provisionCache: 'pr-1',
+					provisionCacheAccess,
+					reuseView: 'prior',
+					viewAccess
+				})
+			).rejects.toThrow(
+				`Reuse view "prior" has ${viewAccess} access; ${provisionCacheAccess} cache access is required`
+			);
+		}
+	);
+	it('keeps an existing private cache after its static secret is removed', async () => {
+		expect(
+			await runSetup({
+				provisionCache: 'pr-1',
+				existingAccess: 'private'
+			})
+		).toStrictEqual({
+			invocations: [
+				[
+					'cache',
+					'create',
+					'https://cache.example.test/t/acme',
+					'pr-1',
+					'--github-oidc',
+					'--if-absent',
+					'--access',
+					'private'
+				]
+			],
+			wroteNixConfigFirst: [false]
+		});
+	});
+
+	it('inherits the default cache access even with a static read credential', async () => {
+		expect(
+			await runSetup({
+				provisionCache: 'pr-1',
+				readUser: 'alice',
+				readPassword
+			})
+		).toStrictEqual({
+			invocations: [
+				[
+					'cache',
+					'create',
+					'https://cache.example.test/t/acme',
+					'pr-1',
+					'--github-oidc',
+					'--if-absent',
+					'--access',
+					'public'
+				]
+			],
+			wroteNixConfigFirst: [false]
+		});
+	});
+
+	it('inherits private access from the default cache without static credentials', async () => {
+		expect(
+			await runSetup({
+				provisionCache: 'pr-1',
+				defaultAccess: 'private'
+			})
+		).toStrictEqual({
+			invocations: [
+				[
+					'cache',
+					'create',
+					'https://cache.example.test/t/acme',
+					'pr-1',
+					'--github-oidc',
+					'--if-absent',
+					'--access',
+					'private'
+				]
+			],
+			wroteNixConfigFirst: [false]
+		});
+	});
+
+	it('refuses an explicit public policy for an existing private cache', async () => {
+		await expect(
+			runSetup({
+				provisionCache: 'pr-1',
+				provisionCacheAccess: 'public',
+				existingAccess: 'private'
+			})
+		).rejects.toThrow('has private access; public access is required');
+	});
+
 	it('refuses a previously public cache before configuring private publication', async () => {
 		await expect(
 			runSetup({
@@ -1360,7 +1629,7 @@ describe('setupAction cache provisioning', () => {
 		).rejects.toThrow('has public access; private access is required');
 	});
 	it('creates nothing when no cache is named', async () => {
-		expect(await runSetup({})).toStrictEqual({
+		expect(await runSetup({ existingAccess: 'public' })).toStrictEqual({
 			invocations: [],
 			wroteNixConfigFirst: []
 		});
@@ -1405,10 +1674,14 @@ describe('setupAction cache provisioning', () => {
 		).toThrow(ProvisionCacheUrlRequiredError);
 	});
 
-	it('refuses to create a cache whose access the workflow did not state', async () => {
-		await expect(runSetup({ provisionCache: 'pr-1' })).rejects.toBeInstanceOf(
-			ProvisionCacheAccessRequiredError
-		);
+	it('rejects conflicting explicit access aliases', async () => {
+		await expect(
+			runSetup({
+				provisionCache: 'pr-1',
+				cacheAccessMode: 'public',
+				provisionCacheAccess: 'private'
+			})
+		).rejects.toThrow('specify different access modes');
 	});
 });
 

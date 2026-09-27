@@ -34,6 +34,39 @@ export abstract class FailedCheckFinding extends CheckFinding {
 	readonly status = 'failed' as const;
 }
 
+export class ReadAuthenticationUnverifiedFinding extends CheckFinding {
+	readonly status = 'unverified' as const;
+
+	constructor(public readonly resource: 'cache' | 'view') {
+		super('read authentication');
+	}
+
+	detail(): string {
+		return `the workflow's ${this.resource} read-secret wiring is inherited or ambiguous`;
+	}
+}
+
+export class ReadAuthenticationConfiguredFinding extends CheckFinding {
+	readonly status = 'ok' as const;
+	constructor(public readonly resource: 'cache' | 'view') {
+		super('read authentication');
+	}
+
+	detail(): string {
+		return `the workflow declares a complete ${this.resource} read-secret pair; secret values are not inspected`;
+	}
+}
+
+export class ReadAuthenticationIncompleteFinding extends FailedCheckFinding {
+	constructor(public readonly resource: 'cache' | 'view') {
+		super('read authentication');
+	}
+
+	detail(): string {
+		return `the workflow declares only part of a ${this.resource} read-secret pair`;
+	}
+}
+
 export class PassedCheckFinding extends CheckFinding {
 	readonly status = 'ok' as const;
 
@@ -122,6 +155,21 @@ export class ReuseViewCacheAccessMismatchFinding extends FailedCheckFinding {
 
 	detail(): string {
 		return `${this.cacheNames.join(', ')} ${this.cacheNames.length === 1 ? 'is' : 'are'} ${this.cacheAccess}; the ${this.viewName} view aggregates only ${this.viewAccess} caches, so the view never serves ${this.cacheNames.length === 1 ? 'it' : 'them'}`;
+	}
+}
+
+export class ReuseViewAccessModeMismatchFinding extends FailedCheckFinding {
+	constructor(
+		check: string,
+		public readonly viewName: string,
+		public readonly viewAccess: string,
+		public readonly requestedAccess: string
+	) {
+		super(check);
+	}
+
+	detail(): string {
+		return `reuse view ${this.viewName} is ${this.viewAccess}; the workflow selects ${this.requestedAccess} for pull-request caches`;
 	}
 }
 

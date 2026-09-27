@@ -548,6 +548,25 @@ describe('claimsForAdd', () => {
 });
 
 describe('githubPrAddBody', () => {
+	it('adds a separate content-read grant for a private PR cache', () => {
+		const original = githubPrAddBody(tenantBase, identity, {
+			repo: 'acme/infra'
+		});
+		const privateRule = githubPrAddBody(tenantBase, identity, {
+			repo: 'acme/infra',
+			readCache: true
+		});
+
+		expect(privateRule.permittedGrants).toStrictEqual([
+			...original.permittedGrants,
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				resources: { cache: prCacheBinding }
+			}
+		]);
+	});
+
 	it('grants the upload, retention and attestation operations a publication performs, scoped to the per-PR cache and root', () => {
 		expect(
 			githubPrAddBody(tenantBase, identity, { repo: 'acme/infra' })
@@ -663,6 +682,35 @@ describe('githubTagAddBody', () => {
 });
 
 describe('githubBranchAddBody', () => {
+	it('adds exact cache and view content-read grants to a private branch rule', () => {
+		const original = githubBranchAddBody(tenantBase, identity, {
+			repo: 'acme/infra',
+			branch: 'main'
+		});
+		const privateRule = githubBranchAddBody(tenantBase, identity, {
+			repo: 'acme/infra',
+			branch: 'main',
+			readCache: true,
+			readView: 'pull-requests-1234'
+		});
+
+		expect(privateRule.permittedGrants).toStrictEqual([
+			...original.permittedGrants,
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				resources: { cache: { kind: 'default' } }
+			},
+			{
+				type: 'cupboard_view',
+				actions: ['view:content-read'],
+				resources: {
+					view: { exact: 'pull-requests-1234', validate: 'reuseViewName' }
+				}
+			}
+		]);
+	});
+
 	it('gates the branch via the ref claim and matches the workflow file at any ref', () => {
 		expect(
 			githubBranchAddBody(tenantBase, identity, {

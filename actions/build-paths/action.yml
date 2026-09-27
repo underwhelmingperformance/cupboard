@@ -3,6 +3,16 @@ description:
   Builds Nix installables and writes a receipt that lists the outputs this job
   built itself.
 inputs:
+  cupboard-path:
+    description:
+      Path to the cupboard executable when private OIDC reads are used.
+    required: false
+  read-session-target:
+    description: Internal setup output for private OIDC reads.
+    required: false
+  read-session-view:
+    description: Internal setup output for an additional private reuse view.
+    required: false
   installables:
     description: Nix installables to build, one per line.
     required: false
@@ -77,18 +87,24 @@ runs:
       shell: bash
       env:
         INSTALLABLES: ${{ inputs.installables }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         INSTALLABLES_FILE: ${{ inputs.installables-file }}
         KEEP_GOING: ${{ inputs.keep-going }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
         REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
       run: |
-        node --experimental-transform-types \
-          --disable-warning=ExperimentalWarning \
-          "$GITHUB_ACTION_PATH/../src/main.ts" build \
-          --installables "$INSTALLABLES" \
-          --installables-file "$INSTALLABLES_FILE" \
-          --keep-going "$KEEP_GOING" \
-          --max-jobs "$MAX_JOBS" \
-          --allow-failure "$ALLOW_FAILURE" \
-          --require-provenance "$REQUIRE_PROVENANCE"
+        source "$GITHUB_ACTION_PATH/../read-session.sh"
+        run_with_read_session \
+          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
+          node --experimental-transform-types \
+            --disable-warning=ExperimentalWarning \
+            "$GITHUB_ACTION_PATH/../src/main.ts" build \
+            --installables "$INSTALLABLES" \
+            --installables-file "$INSTALLABLES_FILE" \
+            --keep-going "$KEEP_GOING" \
+            --max-jobs "$MAX_JOBS" \
+            --allow-failure "$ALLOW_FAILURE" \
+            --require-provenance "$REQUIRE_PROVENANCE"

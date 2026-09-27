@@ -1,6 +1,7 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { type CacheListEntry } from '@cupboard/protocol/caches';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
 	type OidcTrustAddBodyInput,
@@ -32,7 +33,9 @@ import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
 import { trustGrantRows } from '../oidc-trust/format.ts';
 import {
 	buildAddBody,
+	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildViewContentReadGrant,
 	jobWorkflowReferenceClaim
 } from '../oidc-trust/rule-builder.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
@@ -68,7 +71,10 @@ import {
 	type UnverifiedJobWorkflow,
 	type WorkflowDiscovery
 } from './discovery.ts';
-import { ReuseViewMissingFinding } from './finding.ts';
+import {
+	ReadAuthenticationUnverifiedFinding,
+	ReuseViewMissingFinding
+} from './finding.ts';
 import {
 	isPresetJob,
 	jobCache,
@@ -76,6 +82,10 @@ import {
 	type PublicationCase,
 	type ReuseViewRequirement
 } from './publication.ts';
+import {
+	type PublicationReadAuthority,
+	publicationReadAuthority
+} from './read-authority.ts';
 import {
 	AmbiguousTrustRulesFinding,
 	describeAuthorizationDetail,
@@ -221,6 +231,7 @@ interface PlannedView {
 interface ModelledCase {
 	readonly job: DiscoveredPublishingJob;
 	readonly publication: PublicationCase;
+	readonly read: PublicationReadAuthority;
 	readonly needsTrustRule: boolean;
 }
 
@@ -256,7 +267,9 @@ function repairReference(
 // See installableRequests for why every push requests the attestation
 // operations, including a push from a job that skips signing.
 function grantsForJob(
-	job: DiscoveredPublishingJob
+	job: DiscoveredPublishingJob,
+	publication: PublicationCase,
+	read: PublicationReadAuthority
 ): OidcTrustAddBodyInput['permittedGrants'] {
 	const cache = jobCache(job);
 
@@ -279,16 +292,32 @@ function grantsForJob(
 	const hasRoot = root !== undefined && root !== '';
 
 	return [
-		buildCacheGrant({
-			...(cache.scope.kind === 'named' && { cache: cache.scope.name }),
-			...(hasRoot && { root: `${root.replace(/\/$/u, '')}/` }),
-			allow: [
-				'push',
-				'attest',
-				...(hasRoot || job.kind === 'flake' ? ['root'] : []),
-				...(job.kind === 'flake' ? ['attach'] : [])
-			]
-		})
+		...(publication.requests.length > 0
+			? [
+					buildCacheGrant({
+						...(cache.scope.kind === 'named' && { cache: cache.scope.name }),
+						...(hasRoot && { root: `${root.replace(/\/$/u, '')}/` }),
+						allow: [
+							'push',
+							'attest',
+							...(hasRoot || job.kind === 'flake' ? ['root'] : []),
+							...(job.kind === 'flake' ? ['attach'] : [])
+						]
+					})
+				]
+			: []),
+		...(read.cacheAccess === 'private' && read.cacheWiring === 'none'
+			? [
+					buildCacheContentReadGrant({
+						...(read.cache.kind === 'named' && { cache: read.cache.name })
+					})
+				]
+			: []),
+		...(publication.reuseView !== undefined &&
+		read.viewAccess === 'private' &&
+		read.viewWiring === 'none'
+			? [buildViewContentReadGrant(publication.reuseView.name)]
+			: [])
 	];
 }
 
@@ -297,6 +326,10 @@ function triggerClaim(
 	publication: PublicationCase
 ): OidcTrustAddBodyInput['claims'] {
 	if (publication.trigger === 'pull_request') {
+		if (publication.requests.length === 0) {
+			return { event_name: 'pull_request' };
+		}
+
 		throw new GithubRepairUnavailableError(
 			'unsupported-rule',
 			`pull-request runs of ${jobLabel(job)} publish to the cache and root of its branch runs`
@@ -315,14 +348,31 @@ function bodyForCase(
 	result: DiscoveredGithubCheckResult,
 	job: DiscoveredPublishingJob,
 	publication: PublicationCase,
+	read: PublicationReadAuthority,
 	reference: string
 ): OidcTrustAddBodyInput {
 	const isPreset = isPresetJob(job);
 
+	if (publication.requests.length === 0) {
+		return buildAddBody({
+			issuer: githubActionsIssuer,
+			audience: audienceSchema.parse(url),
+			claims: {
+				repository_id: String(result.identity.repositoryId),
+				repository_owner_id: String(result.identity.repositoryOwnerId),
+				...triggerClaim(job, publication),
+				job_workflow_ref: jobWorkflowReferenceClaim(reference)
+			},
+			permittedGrants: grantsForJob(job, publication, read),
+			display: { provider: 'github', repository: result.identity.fullName }
+		});
+	}
+
 	if (isPreset && publication.trigger === 'pull_request') {
 		return githubPrAddBody(url, result.identity, {
 			repo: result.identity.fullName,
-			jobWorkflowRef: reference
+			jobWorkflowRef: reference,
+			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none'
 		});
 	}
 
@@ -337,7 +387,13 @@ function bodyForCase(
 		return githubBranchAddBody(url, result.identity, {
 			repo: result.identity.fullName,
 			branch: publication.ref.name,
-			jobWorkflowRef: reference
+			jobWorkflowRef: reference,
+			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none',
+			...(publication.reuseView !== undefined &&
+				read.viewAccess === 'private' &&
+				read.viewWiring === 'none' && {
+					readView: publication.reuseView.name
+				})
 		});
 	}
 
@@ -350,7 +406,7 @@ function bodyForCase(
 			...triggerClaim(job, publication),
 			job_workflow_ref: jobWorkflowReferenceClaim(reference)
 		},
-		permittedGrants: grantsForJob(job),
+		permittedGrants: grantsForJob(job, publication, read),
 		display: { provider: 'github', repository: result.identity.fullName }
 	});
 }
@@ -600,10 +656,15 @@ function checkUnmodelledJob(
 function checkModelledCase(
 	job: string,
 	publication: PublicationCase,
+	read: PublicationReadAuthority,
 	existing: readonly OidcTrustRule[],
 	candidates: readonly OidcTrustRule[]
 ): void {
-	const { claims, requests } = publication;
+	const { claims } = publication;
+	const requests: readonly AuthorizationDetails[] = [
+		...publication.requests,
+		...read.requests
+	];
 
 	if (
 		checkTrustRule('current trust rules', existing, claims, requests).status !==
@@ -645,13 +706,15 @@ function checkModelledCase(
  * planned rule could match its runs with at least as many claims as an
  * existing rule that could also match them.
  */
-function checkPlannedRulesKeepOtherJobs(
+async function checkPlannedRulesKeepOtherJobs(
 	url: URL,
 	result: DiscoveredGithubCheckResult,
 	branches: readonly CheckedBranch[],
 	existing: readonly OidcTrustRule[],
-	planned: readonly OidcTrustRule[]
-): void {
+	planned: readonly OidcTrustRule[],
+	client: GithubCheckClient,
+	dependencies: DiscoveredGithubCheckDependencies
+): Promise<void> {
 	const repaired = new Set(result.repairableJobs);
 	const candidates = [...existing, ...planned];
 
@@ -679,7 +742,21 @@ function checkPlannedRulesKeepOtherJobs(
 			}
 
 			for (const publication of model.cases) {
-				checkModelledCase(jobLabel(job), publication, existing, candidates);
+				const read = await publicationReadAuthority(
+					job,
+					publication,
+					url,
+					result.identity.repositoryId,
+					client,
+					dependencies.fetchCacheAccess
+				);
+				checkModelledCase(
+					jobLabel(job),
+					publication,
+					read,
+					existing,
+					candidates
+				);
 			}
 		}
 
@@ -707,9 +784,17 @@ function checkRetainedRules(
 	result: DiscoveredGithubCheckResult,
 	job: DiscoveredPublishingJob,
 	publication: PublicationCase,
+	read: PublicationReadAuthority,
 	finding: TrustRuleGrantMissingFinding
 ): void {
-	const planned = bodyForCase(url, result, job, publication, job.workflowRef);
+	const planned = bodyForCase(
+		url,
+		result,
+		job,
+		publication,
+		read,
+		job.workflowRef
+	);
 	const blocking = finding.rules.find(
 		(rule) => claimCount(rule) >= claimCount(planned)
 	);
@@ -726,12 +811,14 @@ function checkRetainedRules(
 	);
 }
 
-function modelRepairableJobs(
+async function modelRepairableJobs(
 	url: URL,
 	result: DiscoveredGithubCheckResult,
 	existing: ReturnType<typeof activeMatcherRules>,
-	retainedGrantMissingRules: Set<string>
-): ModelledCase[] {
+	retainedGrantMissingRules: Set<string>,
+	client: GithubCheckClient,
+	dependencies: DiscoveredGithubCheckDependencies
+): Promise<ModelledCase[]> {
 	const modelled: ModelledCase[] = [];
 
 	for (const job of result.repairableJobs) {
@@ -748,15 +835,23 @@ function modelRepairableJobs(
 		}
 
 		for (const publication of model.cases) {
+			const read = await publicationReadAuthority(
+				job,
+				publication,
+				url,
+				result.identity.repositoryId,
+				client,
+				dependencies.fetchCacheAccess
+			);
 			const finding = checkTrustRule(
 				'current trust rules',
 				existing,
 				publication.claims,
-				publication.requests
+				[...publication.requests, ...read.requests]
 			);
 
 			if (finding instanceof TrustRuleGrantMissingFinding) {
-				checkRetainedRules(url, result, job, publication, finding);
+				checkRetainedRules(url, result, job, publication, read, finding);
 
 				for (const rule of finding.rules) {
 					retainedGrantMissingRules.add(rule.id);
@@ -766,6 +861,7 @@ function modelRepairableJobs(
 			modelled.push({
 				job,
 				publication,
+				read,
 				needsTrustRule: finding.status !== 'ok'
 			});
 		}
@@ -812,11 +908,13 @@ export async function runDiscoveredGithubRepair(
 	]);
 	const existing = activeMatcherRules(listed.rules);
 	const retainedGrantMissingRules = new Set<string>();
-	const modelled = modelRepairableJobs(
+	const modelled = await modelRepairableJobs(
 		url,
 		result,
 		existing,
-		retainedGrantMissingRules
+		retainedGrantMissingRules,
+		client,
+		dependencies
 	);
 	const requiresNewTrustRule = modelled.some((item) => item.needsTrustRule);
 
@@ -901,7 +999,7 @@ export async function runDiscoveredGithubRepair(
 	pattern ??= '';
 	const desired: OidcTrustAddBodyInput[] = [];
 
-	for (const { job, publication, needsTrustRule } of modelled) {
+	for (const { job, publication, read, needsTrustRule } of modelled) {
 		if (!needsTrustRule) {
 			continue;
 		}
@@ -921,7 +1019,7 @@ export async function runDiscoveredGithubRepair(
 			);
 		}
 
-		desired.push(bodyForCase(url, result, job, publication, reference));
+		desired.push(bodyForCase(url, result, job, publication, read, reference));
 	}
 
 	const additions = mergeBodies(desired).filter((body) =>
@@ -961,7 +1059,7 @@ export async function runDiscoveredGithubRepair(
 			'planned trust rules',
 			candidates,
 			item.publication.claims,
-			item.publication.requests
+			[...item.publication.requests, ...item.read.requests]
 		);
 
 		if (finding.status !== 'ok') {
@@ -996,7 +1094,15 @@ export async function runDiscoveredGithubRepair(
 		});
 	}
 
-	checkPlannedRulesKeepOtherJobs(url, result, branches, existing, planned);
+	await checkPlannedRulesKeepOtherJobs(
+		url,
+		result,
+		branches,
+		existing,
+		planned,
+		client,
+		dependencies
+	);
 
 	const presetViewName = pullRequestViewName(result.identity.repositoryId);
 	const missingViews: PlannedView[] = [];
@@ -1010,15 +1116,55 @@ export async function runDiscoveredGithubRepair(
 			dependencies.fetchCacheInfo
 		);
 
-		if (finding.status === 'ok') {
-			continue;
-		}
-
 		if (view.name !== presetViewName) {
+			if (finding.status === 'ok') {
+				continue;
+			}
+
 			throw new GithubRepairUnavailableError(
 				'custom-view',
 				`reuse view ${view.name} needs an operator to choose its selectors: ${finding.detail() ?? finding.status}`
 			);
+		}
+
+		const selectedAccess = [
+			...new Set(
+				modelled.flatMap(({ publication, read }) =>
+					publication.reuseView?.name === view.name &&
+					read.selectedViewAccess !== undefined
+						? [read.selectedViewAccess]
+						: []
+				)
+			)
+		];
+
+		if (selectedAccess.length !== 1) {
+			throw new GithubRepairUnavailableError(
+				'view-access',
+				`the jobs do not select one access mode for reuse view ${view.name}`
+			);
+		}
+
+		const access = selectedAccess[0];
+
+		if (access === undefined) {
+			throw new GithubRepairUnavailableError(
+				'view-access',
+				`the access mode of reuse view ${view.name} is unknown`
+			);
+		}
+
+		const existingView = views.views.find((entry) => entry.name === view.name);
+
+		if (existingView !== undefined && existingView.access !== access) {
+			throw new GithubRepairUnavailableError(
+				'view-access',
+				`reuse view ${view.name} is ${existingView.access}, but the jobs select ${access}`
+			);
+		}
+
+		if (finding.status === 'ok') {
+			continue;
 		}
 
 		if (!(finding instanceof ReuseViewMissingFinding)) {
@@ -1030,7 +1176,6 @@ export async function runDiscoveredGithubRepair(
 		}
 
 		const destination = await dependencies.fetchCacheInfo(view.destination);
-		const access = options.readUser === undefined ? 'public' : 'private';
 		const caches = await pullRequestCaches(
 			client,
 			result.identity.repositoryId
@@ -1040,7 +1185,7 @@ export async function runDiscoveredGithubRepair(
 		if (mismatched.length > 0) {
 			throw new GithubRepairUnavailableError(
 				'view-access',
-				`the pull-request caches ${mismatched.map((cache) => cacheLabel(cache.scope)).join(', ')} are not ${access}, and a ${access} view includes only ${access} caches; ${access === 'public' ? 'pass --read-user and --read-password' : 'omit --read-user'} to match them`
+				`the pull-request caches ${mismatched.map((cache) => cacheLabel(cache.scope)).join(', ')} are not ${access}, and a ${access} view includes only ${access} caches; choose a matching cache-access-mode`
 			);
 		}
 
@@ -1243,7 +1388,13 @@ export async function runDiscoveredGithubRepair(
 
 	const repaired = new Set(result.repairableJobs.map((job) => jobLabel(job)));
 	const stillFailing = verified.jobs.filter(
-		(job) => repaired.has(jobLabel(job)) && job.status !== 'ready'
+		(job) =>
+			repaired.has(jobLabel(job)) &&
+			job.findings.some(
+				({ finding }) =>
+					finding.status !== 'ok' &&
+					!(finding instanceof ReadAuthenticationUnverifiedFinding)
+			)
 	);
 	const failed = stillFailing.filter((job) => job.status === 'failed');
 
@@ -1259,8 +1410,15 @@ export async function runDiscoveredGithubRepair(
 		);
 	}
 
+	const isStaticReadUnverified = verified.jobs.some(
+		(job) =>
+			repaired.has(jobLabel(job)) &&
+			job.findings.some(
+				({ finding }) => finding instanceof ReadAuthenticationUnverifiedFinding
+			)
+	);
 	ui.success(
-		`Applied ${String(additions.length + missingViews.length)} tenant configuration change(s). The repaired publishing jobs now pass.`
+		`Applied ${String(additions.length + missingViews.length)} tenant configuration change(s). ${isStaticReadUnverified ? 'The publication grants now pass, but the workflow read secrets remain unverified.' : 'The repaired publishing jobs now pass.'}`
 	);
 	finishDiscoveredGithubCheck(verified);
 }

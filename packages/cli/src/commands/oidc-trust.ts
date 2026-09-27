@@ -43,7 +43,9 @@ import {
 } from './oidc-trust/github.ts';
 import {
 	buildAddBody,
+	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildViewContentReadGrant,
 	collectSubstitutions,
 	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
 } from './oidc-trust/rule-builder.ts';
@@ -59,6 +61,7 @@ interface GithubPrOptions {
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
 	readonly attest?: boolean;
+	readonly readCache?: boolean;
 }
 
 interface GithubTagOptions {
@@ -76,6 +79,8 @@ interface GithubBranchOptions {
 	readonly jobWorkflowRef?: string;
 	readonly audience?: Audience;
 	readonly attest?: boolean;
+	readonly readCache?: boolean;
+	readonly readView?: string;
 }
 
 // GitHub presets grant attestation by default. The dedicated `--no-attest`
@@ -333,7 +338,18 @@ export function githubPrAddBody(
 					templateSource: 'github-pr',
 					captures: []
 				})
-			})
+			}),
+			...(options.readCache === true
+				? [
+						buildCacheContentReadGrant({
+							cacheTemplate,
+							substitutions: collectSubstitutions({
+								templateSource: 'github-pr',
+								captures: []
+							})
+						})
+					]
+				: [])
 		],
 		display: { provider: 'github', repository: identity.fullName }
 	});
@@ -404,7 +420,11 @@ export function githubBranchAddBody(
 			buildCacheGrant({
 				allow: withAttest(['push', 'root', 'attach'], options.attest),
 				root: `github:${identity.fullName}/${options.branch}/`
-			})
+			}),
+			...(options.readCache === true ? [buildCacheContentReadGrant({})] : []),
+			...(options.readView === undefined
+				? []
+				: [buildViewContentReadGrant(options.readView)])
 		],
 		display: { provider: 'github', repository: identity.fullName }
 	});

@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
+import { withReadAuthentication } from '@cupboard/nix';
 import {
 	type CacheScope,
 	type StoreDirectory,
@@ -677,6 +678,7 @@ function absoluteStorePath(
 }
 
 interface ProbeOptions {
+	readonly baseUrl: URL;
 	readonly paths: readonly StorePathString[];
 	readonly credentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;
@@ -684,7 +686,6 @@ interface ProbeOptions {
 
 export function availableCachePaths(
 	options: ProbeOptions & {
-		readonly baseUrl: URL;
 		readonly cache: CacheScope;
 	}
 ): Promise<Set<StorePathString>> {
@@ -711,7 +712,12 @@ async function availablePathsAt(
 	);
 
 	const batches = chunk(pathsByHash.keys().toArray(), maximumBatchSize);
-	const fetcher = retryingFetcher(options.fetcher ?? fetch, 'replay-safe');
+	const fetcher = retryingFetcher(
+		withReadAuthentication(options.fetcher ?? fetch, {
+			tenantUrl: options.baseUrl
+		}),
+		'replay-safe'
+	);
 	const headers = {
 		'content-type': 'application/json',
 		...(options.credentials !== undefined &&

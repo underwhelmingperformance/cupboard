@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
+import { withReadAuthentication } from '@cupboard/nix';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
@@ -412,7 +413,12 @@ async function committedPathInfos(
 	inputs: AttestInputs,
 	dependencies: AttestDependencies
 ): Promise<readonly CommittedPathInfo[]> {
-	const fetcher = retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe');
+	const fetcher = retryingFetcher(
+		withReadAuthentication(dependencies.fetch ?? fetch, {
+			tenantUrl: inputs.url
+		}),
+		'replay-safe'
+	);
 	const base = canonicalHref(cacheUrlFor(inputs.url, inputs.cache));
 	const credential = readCredential(inputs);
 

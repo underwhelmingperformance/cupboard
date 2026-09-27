@@ -328,9 +328,14 @@ fails. The workflow never falls back to building from source.
 
 To check that a manifest builds, set `push: false`. The run builds every cohort
 directly. It doesn't consult the cache when planning, publishes nothing, signs
-nothing, and doesn't need `rootDrvPath`.
+nothing, and doesn't need `rootDrvPath`. Nix can still substitute from the
+selected cache while building. With the pull-request preset, a read-only run
+selects the tenant's default cache and neither creates nor removes a
+pull-request cache.
 
-The run still needs the same permissions, and a trust rule that accepts it.
+A public cache needs no read grant. A private cache needs its exact
+`cache:content-read` grant or a static read credential. A read-only run does not
+need publication grants.
 
 ## Making the most of the runners
 

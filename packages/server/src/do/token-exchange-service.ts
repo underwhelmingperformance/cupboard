@@ -674,11 +674,21 @@ export class TokenExchangeService {
 		extra: Pick<TokenResponse, 'issued_token_type'>,
 		family?: RefreshTokenFamily
 	): Promise<PreparedIssuedResponse> {
-		const isInteractive = isRuleInteractive(rule);
 		const granted =
 			authority.kind === 'external'
 				? resolveRequestedGrants(rule, authority.claims, requested)
 				: attenuatedGrants(authority.grants, requested);
+		const isContentReadOnly =
+			granted.length > 0 &&
+			granted.every(
+				(detail) =>
+					(detail.type === 'cupboard_cache' &&
+						detail.actions.every(
+							(action) => action === 'cache:content-read'
+						)) ||
+					detail.type === 'cupboard_view'
+			);
+		const isInteractive = isRuleInteractive(rule) && !isContentReadOnly;
 		const ttlSeconds = isInteractive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
 		const accessToken = await this.issueRuleToken(
 			rule,

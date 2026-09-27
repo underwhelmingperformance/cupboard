@@ -1185,6 +1185,66 @@ describe('openSubstituters', () => {
 		]);
 	});
 
+	it('reads renewed netrc credentials for later requests on an open substituter', async () => {
+		const { fetch: fetcher, credentials } = caches({
+			'https://cache.example': {
+				cacheInfo: 'StoreDir: /nix/store\nWantMassQuery: 1\n'
+			}
+		});
+		let netrc = 'machine cache.example login first password one\n';
+		const options = {
+			fetch: fetcher,
+			netrc: () => netrc,
+			storeDirectory,
+			substitute: true,
+			fallback: false
+		};
+		const client = new SubstituterClient(
+			() => openSubstituters(['https://cache.example'], options),
+			options
+		);
+
+		await client.querySubstitutablePaths([appPath]);
+		netrc = 'machine cache.example login second password two\n';
+		await client.querySubstitutablePaths([libraryPath]);
+
+		expect(credentials).toStrictEqual([
+			`Basic ${Buffer.from('first:one').toString('base64')}`,
+			`Basic ${Buffer.from('first:one').toString('base64')}`,
+			`Basic ${Buffer.from('second:two').toString('base64')}`
+		]);
+	});
+
+	it('reports a malformed replacement netrc without retrying it as a network failure', async () => {
+		const { fetch: fetcher, requests } = caches({
+			'https://cache.example': {
+				cacheInfo: 'StoreDir: /nix/store\nWantMassQuery: 1\n'
+			}
+		});
+		let netrc = 'machine cache.example login first password one\n';
+		const options = {
+			fetch: fetcher,
+			netrc: () => netrc,
+			storeDirectory,
+			substitute: true,
+			fallback: false
+		};
+		const client = new SubstituterClient(
+			() => openSubstituters(['https://cache.example'], options),
+			options
+		);
+
+		await client.querySubstitutablePaths([appPath]);
+		netrc = 'machine cache.example login first password "unterminated\n';
+		await expect(client.querySubstitutablePaths([libraryPath])).rejects.toThrow(
+			'The netrc file is invalid'
+		);
+		expect(requests).toStrictEqual([
+			'https://cache.example/nix-cache-info',
+			`https://cache.example/${appPath.slice('/nix/store/'.length, '/nix/store/'.length + 32)}.narinfo`
+		]);
+	});
+
 	it('sends no credentials for a host absent from netrc', async () => {
 		const { fetch: fetcher, credentials } = caches({
 			'https://cache.example': { cacheInfo: 'StoreDir: /nix/store\n' }

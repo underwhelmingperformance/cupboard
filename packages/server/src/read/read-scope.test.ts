@@ -3,6 +3,10 @@ import {
 	type CacheScope,
 	firstCacheGeneration
 } from '@cupboard/nix-store/scalars';
+import {
+	readTokenBasicUser,
+	readTokenPasswordPrefix
+} from '@cupboard/protocol/read-access';
 import { readUserSchema } from '@cupboard/shared/http';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -93,7 +97,7 @@ async function guard(row: Row): Promise<'served' | 'refused'> {
 		request(credentials[row.offered]),
 		entry,
 		row.scope,
-		cacheVerifier
+		{ cacheVerifier, isTokenAuthorised: () => Promise.resolve(false) }
 	);
 
 	return denied === undefined ? 'served' : 'refused';
@@ -178,7 +182,8 @@ describe('guardScopedRead', () => {
 		const denied = await guardScopedRead(
 			request(),
 			{ status: 'active' },
-			privateScope
+			privateScope,
+			{ isTokenAuthorised: () => Promise.resolve(false) }
 		);
 
 		expect({
@@ -189,6 +194,62 @@ describe('guardScopedRead', () => {
 			status: StatusCodes.UNAUTHORIZED,
 			challenge: 'Basic realm="cupboard"',
 			cacheControl: 'no-store'
+		});
+	});
+
+	it('routes a token password to the scoped verifier without changing static Basic', async () => {
+		const calls: { token: string; cache: CacheScope }[] = [];
+		const authentication = {
+			cacheVerifier: await verifier(readTokenBasicUser, 'static-password'),
+			isTokenAuthorised: (token: string, cache: CacheScope) => {
+				calls.push({ token, cache });
+				return Promise.resolve(token === 'signed-token');
+			}
+		};
+
+		const staticRead = await guardScopedRead(
+			request([readTokenBasicUser, 'static-password']),
+			{ status: 'active' },
+			privateScope,
+			authentication
+		);
+		const tokenRead = await guardScopedRead(
+			request([readTokenBasicUser, `${readTokenPasswordPrefix}signed-token`]),
+			{ status: 'active' },
+			privateScope,
+			authentication
+		);
+		const bearerRead = await guardScopedRead(
+			new Request('https://cupboard.test/nix-cache-info', {
+				headers: { authorization: 'Bearer signed-token' }
+			}),
+			{ status: 'active' },
+			privateScope,
+			authentication
+		);
+		const refused = await guardScopedRead(
+			request([readTokenBasicUser, `${readTokenPasswordPrefix}wrong`]),
+			{ status: 'active' },
+			privateScope,
+			authentication
+		);
+
+		expect({
+			staticRead: staticRead?.status ?? 'served',
+			tokenRead: tokenRead?.status ?? 'served',
+			bearerRead: bearerRead?.status ?? 'served',
+			refused: refused?.status,
+			calls
+		}).toStrictEqual({
+			staticRead: 'served',
+			tokenRead: 'served',
+			bearerRead: 'served',
+			refused: StatusCodes.UNAUTHORIZED,
+			calls: [
+				{ token: 'signed-token', cache: namedCache },
+				{ token: 'signed-token', cache: namedCache },
+				{ token: 'wrong', cache: namedCache }
+			]
 		});
 	});
 });

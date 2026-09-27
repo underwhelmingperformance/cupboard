@@ -11,7 +11,7 @@ import {
 import { buildReceiptSchema } from '@cupboard/protocol/build';
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import { createGithubReporter } from '@cupboard/reporter';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	CacheAccessProbeError,
@@ -734,6 +734,65 @@ describe('attestAction committed cache verification', () => {
 				checksums: `${'bb'.repeat(32)}  ${path.basename(remotePath)}\n`
 			});
 		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('uses a renewed wrapper credential for the committed narinfo only', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+		const netrcFile = path.join(directory, 'netrc');
+		const requests: { url: string; authorization: string | undefined }[] = [];
+
+		try {
+			await writeFile(
+				netrcFile,
+				'machine cache.example.test login cupboard-oidc password token\n'
+			);
+			vi.stubEnv('NIX_CONFIG', `netrc-file = ${netrcFile}`);
+
+			await attestAction(
+				{
+					receiptFile,
+					checksumsFile: path.join(directory, 'subjects.txt'),
+					url: 'https://cache.example.test/t/acme',
+					cache: 'builds'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				createGithubReporter(),
+				{
+					fetch: (input, init) => {
+						const url = requestUrl(input);
+						requests.push({
+							url,
+							authorization:
+								new Headers(init?.headers).get('authorization') ?? undefined
+						});
+
+						return Promise.resolve(
+							url.endsWith('/nix-cache-info')
+								? new Response(undefined, { status: 401 })
+								: new Response(committedNarInfo(remotePath, 0xbb))
+						);
+					}
+				}
+			);
+
+			expect(requests).toStrictEqual([
+				{
+					url: 'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
+					authorization: undefined
+				},
+				{
+					url: 'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo',
+					authorization: `Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`
+				}
+			]);
+		} finally {
+			vi.unstubAllEnvs();
 			await rm(directory, { recursive: true, force: true });
 		}
 	});

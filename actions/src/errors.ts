@@ -1780,3 +1780,30 @@ export class ProvisionCacheResultError extends CodedError {
 		this.name = 'ProvisionCacheResultError';
 	}
 }
+
+export class ReadConfigurationUnavailableError extends CodedError {
+	constructor() {
+		super(
+			'This private cache or reuse view needs a newer cupboard CLI with the run --github-oidc command. Upgrade cupboard-version or use a static read credential.'
+		);
+		this.name = 'ReadConfigurationUnavailableError';
+	}
+}
+
+export class ReadConfigurationFailedError extends CodedError {
+	constructor(status: number | null) {
+		super(
+			`Could not configure Nix read access: cupboard run exited with status ${String(status)}`
+		);
+		this.name = 'ReadConfigurationFailedError';
+	}
+}
+
+export class ReadConfigurationScopeError extends CodedError {
+	constructor() {
+		super(
+			'Automatic OIDC read access in setup supports one destination cache and an optional reuse view. Supply static read credentials when configuring several caches.'
+		);
+		this.name = 'ReadConfigurationScopeError';
+	}
+}

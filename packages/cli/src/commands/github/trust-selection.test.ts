@@ -8,11 +8,24 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	AmbiguousTrustRulesFinding,
+	describeAuthorizationDetail,
 	InteractiveTrustRuleFinding,
 	SplitTrustAuthorityFinding,
 	TrustRuleGrantMissingFinding,
 	trustSelectionFinding
 } from './trust-selection.ts';
+
+it('describes an exact view read grant', () => {
+	const detail = authorizationDetailSchema.parse({
+		type: 'cupboard_view',
+		actions: ['view:content-read'],
+		view: 'reuse'
+	});
+
+	expect(describeAuthorizationDetail(detail)).toBe(
+		'view:content-read on view reuse'
+	);
+});
 
 const rule = oidcTrustSummarySchema.parse({
 	id: 'branch',

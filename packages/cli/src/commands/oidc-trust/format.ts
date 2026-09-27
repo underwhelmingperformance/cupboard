@@ -63,6 +63,13 @@ function grantSummary(grant: PermittedGrant): string {
 		return `cache ${cacheBinding(grant.resources.cache)}: ${grant.actions.join(', ')}`;
 	}
 
+	if (grant.type === 'cupboard_view') {
+		const view =
+			grant.resources.view.exact ?? grant.resources.view.equalsTemplate;
+
+		return `view ${view ?? '?'}: ${grant.actions.join(', ')}`;
+	}
+
 	if (grant.type === 'cupboard_tenant') {
 		const tenant =
 			grant.resources.tenant.exact ?? grant.resources.tenant.equalsTemplate;

@@ -1,5 +1,7 @@
 export { activityLogRecords, copySources } from './activity-log.ts';
 export { NarFileTooLargeError, UnexpectedNarShapeError } from './nar-file.ts';
+export type { NetrcCredential } from './netrc.ts';
+export { netrcCredentialFor } from './netrc.ts';
 export type {
 	NixDependencies,
 	RealPath,
@@ -45,6 +47,8 @@ export {
 } from './nix-store.ts';
 export type { ReadKeyFile } from './offer-acceptance.ts';
 export { offerAcceptance } from './offer-acceptance.ts';
+export type { ReadAuthenticationOptions } from './read-authentication.ts';
+export { withReadAuthentication } from './read-authentication.ts';
 export type { NixDaemonClientOptions, NixStoreKind } from './store-client.ts';
 export { createNixDaemonStoreClient } from './store-client.ts';
 export type {

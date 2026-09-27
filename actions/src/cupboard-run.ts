@@ -25,7 +25,8 @@ import { type Environment, requireEnvironment } from './inputs.ts';
 export type CupboardResultProtocol = 'result-file' | 'legacy-stderr';
 export type CacheSelectionSyntax = 'url' | 'flag';
 
-export type CacheCommand = readonly ['push'] | readonly ['attest', 'attach'];
+export type CacheCommand =
+	readonly ['push'] | readonly ['attest', 'attach'] | readonly ['run'];
 
 /**
  * The long options that a command's `--help` output lists. Released CLIs

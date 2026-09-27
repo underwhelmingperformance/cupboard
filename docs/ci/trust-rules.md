@@ -181,8 +181,12 @@ used.
 A grant applies whether the cache is public or private. Making a cache private
 doesn't change which jobs can write to it.
 
-Trust rules never let anyone read a private cache. Reading one needs a
-[read credential](../use/private-caches.md#read-credentials).
+Trust rules can grant a CI job `cache:content-read` for one cache or
+`view:content-read` for one reuse view. The job exchanges its GitHub OIDC
+identity token for a short-lived Cupboard read token. A static [read
+credential][static-credential] remains an option.
+
+[static-credential]: ../use/private-caches.md#read-credentials
 
 ### Which roots a grant applies to
 

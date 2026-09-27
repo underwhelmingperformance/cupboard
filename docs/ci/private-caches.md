@@ -1,74 +1,21 @@
 # Private caches in CI
 
-The [quickstart](./quickstart.md) assumes anyone can read your caches. This page
-explains how to change that setup so the pull-request caches and the reuse view
-are private. You can make the default cache private too, if you like.
+The [quickstart][quickstart] uses public caches. A GitHub Actions job can also
+read a private destination cache and reuse view without a stored read password.
+The job exchanges its GitHub OIDC identity token for a short-lived Cupboard read
+token for each private resource. Trust rules authorise these reads separately
+from publication.
 
-## Getting read credentials
+[quickstart]: ./quickstart.md
 
-Only the deployment's operator can issue
-[read credentials](../use/private-caches.md#read-credentials). Ask them for:
+## Choose the cache access
 
-- the tenant read credential, which the workflow needs for the reuse view;
-- a cache read credential for each cache that the workflow publishes to, if that
-  cache has one of its own.
-
-Store each user name and password as a repository or environment secret.
-
-## Configuring the tenant
-
-Pass the tenant read credential to `cupboard github setup`. The reuse view that
-it creates is then private. In this example, the shell variables `read_user` and
-`read_password` contain the credential:
-
-```sh
-cupboard github setup https://cupboard.example.workers.dev/t/acme \
-  --repo acme/app \
-  --workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*' \
-  --read-user "$read_user" --read-password "$read_password"
-```
-
-If you've already followed the quickstart, the tenant has a public view called
-`pull-requests-<repository-id>`. `github setup` never replaces a view. With the
-credential, it reports that the view differs, changes nothing and exits with an
-error. Make the existing view private first. `reuse-view set` replaces the
-view's whole definition, so give its selector and its current priority as well.
-`cupboard reuse-view list` shows the priority:
-
-```sh
-cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
-  pull-requests-123456 --access private --select prefix:gh-123456-pr- \
-  --priority 50
-```
-
-Here `123456` is the repository ID. Then run `github setup` with the credential
-as above.
-
-A reuse view only includes caches that are public or private to match the view
-itself. So a public view never serves a private pull-request cache. Pull-request
-caches that already exist keep their access. Change each one with
-`cupboard cache set-access`, or remove it. `cupboard github check` tells you if
-the view and the existing pull-request caches don't match. Pass it `--read-user`
-and `--read-password` too, so that it can read the private view.
-
-If you want the default cache to be private too, change it:
-
-```sh
-cupboard cache set-access https://cupboard.example.workers.dev/t/acme \
-  --access private
-```
-
-## Passing the credentials to the workflow
-
-The workflow takes two pairs of secrets. Each pair is a user name and password,
-used to read a different place:
-
-| Secrets                                              | Used to read                                                                                   |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `destination_read_user`, `destination_read_password` | The cache that the run publishes to: the pull request's cache, or the default cache on `main`. |
-| `fallback_read_user`, `fallback_read_password`       | The reuse view. This always takes the tenant read credential.                                  |
-
-Add them to the job that calls the workflow:
+For the `pull-request-and-branch` preset, a new pull-request cache inherits the
+tenant's default cache access. Set `cache-access-mode: private` when the default
+cache is public but pull-request caches should be private. An existing cache
+keeps its access; an explicit mode that disagrees with it fails. The reuse view
+must have the same access as the pull-request caches. Adding or removing a
+secret does not change these access modes.
 
 ```yaml
 jobs:
@@ -77,54 +24,102 @@ jobs:
     with:
       url: https://cupboard.example.workers.dev/t/acme
       preset: pull-request-and-branch
+      cache-access-mode: private
       trusted-public-key: cupboard-acme-1:...
-    secrets:
-      destination_read_user: ${{ secrets.CUPBOARD_READ_USER }}
-      destination_read_password: ${{ secrets.CUPBOARD_READ_PASSWORD }}
-      fallback_read_user: ${{ secrets.CUPBOARD_READ_USER }}
-      fallback_read_password: ${{ secrets.CUPBOARD_READ_PASSWORD }}
 ```
 
-For each pair that you use, supply both the user name and the password.
+Pass the same access mode when configuring the tenant:
 
-### How the preset uses the credentials
+```sh
+cupboard github setup https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app \
+  --workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*' \
+  --cache-access-mode private
+```
 
-With the preset, two more things apply.
+`github setup` configures the reuse view and trust rules for the selected
+access. If a view or pull-request cache already exists with different access,
+the command reports the mismatch instead of changing it. To change a cache, use
+`cupboard cache set-access`. To replace a view, pass its full definition to
+`cupboard reuse-view set`, including its selector and current priority:
 
-First, `fallback_read_user` decides whether new pull-request caches are private.
-If you set it, they're created private. If you don't, they're created public. If
-a pull request's cache already exists and doesn't match, the run fails. Change
-the cache with `cupboard cache set-access`, or remove it.
+```sh
+cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
+  pull-requests-123456 --access private --select prefix:gh-123456-pr- \
+  --priority 50
+```
 
-Second, the same destination secrets are used by pull-request runs and by `main`
-runs, so they have to work for both caches. Pull-request caches don't have
-credentials of their own, so the tenant read credential works for them. If your
-default cache has its own cache read credential, the tenant read credential
-won't work for it. In that case, choose both the user name and password based on
-the event. For example:
+Here `123456` is the repository ID. Check the view's priority with
+`cupboard reuse-view list` before replacing it. Run `cupboard github setup`
+again, then run `cupboard github check` against the calling workflow. The
+default cache has its own access mode and read grant for branch runs.
+
+When `push: false`, a pull-request run reads from the tenant's default cache. It
+neither creates nor removes a pull-request cache, and `cache-access-mode` does
+not change the selected default cache. The run can substitute from an existing
+baseline without a cache-creation grant.
+
+## How the workflow reads
+
+Public resources remain readable without a content-read grant. For a private
+resource, `cupboard run` requests its exact content-read grant and renews the
+credential while that job's plan, build or attestation command runs. It writes
+the credential to a private netrc file for Nix. Direct HTTP readers use the
+current credential for each request. The file is removed when the command
+finishes. The cache checks every request against the selected resource.
+
+The workflows install Nix in single-user mode on the GitHub runner. An
+independently installed multi-user Nix daemon must trust the runner user before
+it accepts the job's temporary `netrc-file` setting. A remote `ssh-ng` store
+uses its own Nix configuration and credentials for substitutions that it
+performs; the runner's temporary netrc file stays on the runner. Configure
+private substituters on the remote daemon separately. See [Building
+elsewhere][building-elsewhere].
+
+[building-elsewhere]: ./building-elsewhere.md
+
+## Optional static read credentials
+
+You can continue to pass an operator-issued username and password. A supplied
+static pair takes precedence for its resource. Cupboard does not switch to OIDC
+after the cache rejects that pair. A failed direct read reports the refusal; Nix
+may build a path that it could not substitute. See [Read
+credentials][static-reads] for issuing and protecting static credentials.
+
+[static-reads]: ../use/private-caches.md#read-credentials
+
+The flake workflow accepts these optional secrets:
+
+| Secrets                                              | Use                                                                                      |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `read_user`, `read_password`                         | Default static pair for the selected cache and reuse view. It may be cache-specific.     |
+| `destination_read_user`, `destination_read_password` | Override for the selected destination cache when it needs a different static credential. |
+| `fallback_read_user`, `fallback_read_password`       | Deprecated aliases for the default pair.                                                 |
+
+Supply both values in each pair that you use. If both the default pair and its
+deprecated alias are supplied, they must match. The destination override applies
+to the cache that the run selects. For a read-only pull-request run, that is the
+default cache.
+
+For example, one static credential can read both the default cache and the reuse
+view:
 
 ```yaml
-destination_read_user:
-  ${{ github.event_name == 'pull_request' && secrets.TENANT_READ_USER ||
-  secrets.MAIN_READ_USER }}
-destination_read_password:
-  ${{ github.event_name == 'pull_request' && secrets.TENANT_READ_PASSWORD ||
-  secrets.MAIN_READ_PASSWORD }}
+secrets:
+  read_user: ${{ secrets.CUPBOARD_READ_USER }}
+  read_password: ${{ secrets.CUPBOARD_READ_PASSWORD }}
 ```
 
-### When a wrong credential is noticed
-
-If the run uses a reuse view, the workflow checks both pairs against the caches
-before it publishes anything. Otherwise, a wrong destination pair is only
-noticed when a cohort job first reads the cache, and the run fails at that
-point.
+If a destination uses its own credential, add the matching destination pair. The
+pair applies to both branch and pull-request runs, so use event-specific secrets
+if their selected caches require different credentials.
 
 ## Reading other private caches
 
-A run can also download from private caches that it doesn't publish to. For
-example, a private cache in another tenant might have a dependency. List these
-in the `private_substituters` secret, one URL per line, with the credential in
-the URL:
+The `private_substituters` secret lists additional private cache URLs, one per
+line, with a static credential in each URL. These caches may belong to another
+tenant. The workflow adds them to Nix without changing the publication
+destination:
 
 ```yaml
 secrets:
@@ -133,27 +128,16 @@ secrets:
     }}@cupboard.example.workers.dev/t/partner/cache/deps
 ```
 
-The workflow adds these to Nix in the jobs that evaluate and build the targets.
-They don't change where the run publishes. That's still decided by `cache` or
-`preset`.
-
-Some details:
-
-- Each line can point at any host, and lines for the same host can use different
-  passwords.
-- Percent-encode any reserved characters in the user name and password.
-- Give Nix each cache's public key, using `trusted-public-key` or `nix-config`.
-- Remote builders are set up separately. See
-  [Building elsewhere](./building-elsewhere.md).
+Percent-encode reserved characters in the username and password. Supply each
+cache's trusted public key through `trusted-public-key` or `nix-config`. A
+remote store needs independent access to these substituters.
 
 ## Attestations for private caches
 
-When the destination cache is private, the workflow signs attestations in a way
-that keeps them from being published outside the cache:
+When the destination is private, the workflow signs attestations without
+publishing them outside that cache. Each attestation covers one path, uses a
+timestamp instead of a public transparency-log entry, and is not uploaded to
+GitHub. [Attestations for private caches][private-attestations] explains what
+they can still reveal.
 
-- Each attestation covers only one path.
-- It has a timestamp instead of an entry in a public transparency log.
-- It isn't uploaded to GitHub.
-
-[Attestations for private caches](./attestation.md#private-caches) explains what
-they still reveal.
+[private-attestations]: ./attestation.md#private-caches

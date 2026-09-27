@@ -15,6 +15,7 @@ import {
 	type Substitution
 } from './grants.ts';
 import { type OidcClaims } from './oidc-trust-match.ts';
+import { reuseViewNameSchema } from './reuse-views.ts';
 
 // Grant bindings resolve resource names only from string-valued claims. Callers
 // that issue authority must verify the claims first. Resolution fails closed:
@@ -32,6 +33,10 @@ type TenantBinding = Extract<
 	PermittedGrant,
 	{ type: 'cupboard_tenant' }
 >['resources']['tenant'];
+type ViewBinding = Extract<
+	PermittedGrant,
+	{ type: 'cupboard_view' }
+>['resources']['view'];
 
 function stringClaims(claims: OidcClaims): Record<string, string> {
 	const rendered: Record<string, string> = {};
@@ -140,6 +145,17 @@ function renderTenant(
 	return renderBindingValue(binding, claims);
 }
 
+function renderView(
+	binding: ViewBinding,
+	claims: Record<string, string>
+): string | undefined {
+	const raw = renderBindingValue(binding, claims);
+
+	return raw === undefined
+		? undefined
+		: reuseViewNameSchema.safeParse(raw).data;
+}
+
 // A trailing slash grants every root below the prefix. Without it, the names
 // must match exactly. Token authorisation uses the same containment rule.
 function isRootWithin(requested: string, granted: string): boolean {
@@ -185,6 +201,15 @@ function isGrantPermitted(
 				tenant !== undefined &&
 				requested.type === 'cupboard_tenant' &&
 				requested.tenant === tenant
+			);
+		}
+		case 'cupboard_view': {
+			const view = renderView(permitted.resources.view, claims);
+
+			return (
+				view !== undefined &&
+				requested.type === 'cupboard_view' &&
+				requested.view === view
 			);
 		}
 		case 'cupboard_cache': {
