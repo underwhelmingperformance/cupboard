@@ -53,6 +53,7 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard tenant list`](#cupboard-tenant-list)
   - [`cupboard tenant suspend`](#cupboard-tenant-suspend)
   - [`cupboard tenant resume`](#cupboard-tenant-resume)
+  - [`cupboard tenant quota`](#cupboard-tenant-quota)
   - [`cupboard tenant set-quota`](#cupboard-tenant-set-quota)
   - [`cupboard tenant clear-quota`](#cupboard-tenant-clear-quota)
   - [`cupboard tenant rotate-credential`](#cupboard-tenant-rotate-credential)
@@ -1271,6 +1272,7 @@ Commands:
   list <url>                                            List every tenant and its state, including removed tenants.
   suspend [options] <url> <id>                          Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.
   resume <url> <id>                                     Resume a suspended tenant.
+  quota <url> <id>                                      Show a tenant's storage quota and charged bytes.
   set-quota <url> <id> <bytes>                          Set a tenant's storage quota. It can't be less than the tenant already stores.
   clear-quota <url> <id>                                Remove a tenant's storage quota, leaving it unlimited.
   rotate-credential [options] <url> <id>                Replace the tenant read credential, and print the new password.
@@ -1343,6 +1345,21 @@ Options:
 Usage: cupboard tenant resume [options] <url> <id>
 
 Resume a suspended tenant.
+
+Arguments:
+  url         deployment URL (e.g. https://cupboard.example.workers.dev)
+  id          tenant slug
+
+Options:
+  -h, --help  display help for command
+```
+
+#### cupboard tenant quota
+
+```text
+Usage: cupboard tenant quota [options] <url> <id>
+
+Show a tenant's storage quota and charged bytes.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)

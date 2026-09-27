@@ -523,6 +523,80 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('reads a tenant quota through a tenant-scoped operator grant', async () => {
+		const admin = controlClient(await issueControlAdminToken());
+		await admin.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud',
+			quotaBytes: 100
+		});
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE tenant_usage SET bytes = 40, cas_bytes = 10 WHERE tenant = 'acme'"
+		).run();
+		const allowed = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('acme', ['tenant:read-quota'])
+			)
+		);
+		const wrongTenant = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('beta', ['tenant:read-quota'])
+			)
+		);
+		const mutationOnly = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('acme', ['tenant:set-quota'])
+			)
+		);
+		const read = await allowed.tenants.getQuota({ id: 'acme' });
+		const [wrongTenantError] = await safe(
+			wrongTenant.tenants.getQuota({ id: 'acme' })
+		);
+		const [mutationOnlyError] = await safe(
+			mutationOnly.tenants.getQuota({ id: 'acme' })
+		);
+		const [mutationError] = await safe(
+			allowed.tenants.setQuota({
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 1000 }
+			})
+		);
+		const stillStored = await admin.tenants.getQuota({ id: 'acme' });
+		const forbidden = {
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN,
+			data: undefined
+		};
+
+		expect({
+			read,
+			wrongTenantError: quotaContractErrorSchema.parse(wrongTenantError),
+			mutationOnlyError: quotaContractErrorSchema.parse(mutationOnlyError),
+			mutationError: quotaContractErrorSchema.parse(mutationError),
+			stillStored
+		}).toStrictEqual({
+			read: {
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 100 },
+				usedBytes: 50
+			},
+			wrongTenantError: forbidden,
+			mutationOnlyError: forbidden,
+			mutationError: forbidden,
+			stillStored: {
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 100 },
+				usedBytes: 50
+			}
+		});
+	});
+
 	it('requires the set-quota operation on that tenant', async () => {
 		const admin = controlClient(await issueControlAdminToken());
 		await admin.tenants.create({

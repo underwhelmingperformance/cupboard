@@ -117,8 +117,7 @@ export const tenantSetQuotaBodySchema = z.strictObject({
 });
 export type TenantSetQuotaBody = z.output<typeof tenantSetQuotaBodySchema>;
 
-// The tenant's quota after the change, and how many bytes the tenant is
-// currently charged for.
+// The tenant's quota and how many bytes the tenant is currently charged for.
 export const tenantQuotaResponseSchema = z.strictObject({
 	id: tenantIdSchema,
 	quota: tenantQuotaSchema,

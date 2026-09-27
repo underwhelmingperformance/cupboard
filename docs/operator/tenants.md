@@ -127,6 +127,18 @@ A quota limits how much storage a tenant can use. Each file that the tenant
 stores is counted once, at its compressed size, however many store paths or
 caches use it. This covers both NARs and attestations.
 
+To inspect the quota and charged bytes without changing either value:
+
+```sh
+cupboard tenant quota https://cupboard.example.workers.dev acme
+```
+
+The command uses the control API. A control token without the wildcard grant
+needs a `cupboard_tenant` grant with `tenant:read-quota` for `acme`. The command
+can read the quota of a suspended tenant or a tenant in offboarding. Once
+removal finishes, the tenant's usage row is deleted and the command reports that
+the tenant has been retired.
+
 To set a quota of 50 GB on the `acme` tenant:
 
 ```sh

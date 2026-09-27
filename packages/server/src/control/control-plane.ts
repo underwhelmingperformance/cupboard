@@ -118,6 +118,7 @@ import {
 	clearCacheReadCredential,
 	clearTenantReadCredential,
 	ensureTenant,
+	getTenantQuota,
 	listTenants,
 	resumeTenant,
 	setCacheReadCredential,
@@ -607,6 +608,13 @@ export function controlTenantSetQuota(
 		quota,
 		isoTimestamp(new Date())
 	);
+}
+
+export function controlTenantGetQuota(
+	env: Env,
+	id: TenantId
+): Promise<TenantQuotaResponse> {
+	return getTenantQuota(controlDatabase(env), id);
 }
 
 export async function controlTenantRotateReadCredential(

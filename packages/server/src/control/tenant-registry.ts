@@ -528,6 +528,45 @@ export async function setTenantQuota(
 	throw new TenantQuotaBelowUsageError(id, tenant.usedBytes);
 }
 
+export async function getTenantQuota(
+	database: Database,
+	id: TenantId
+): Promise<TenantQuotaResponse> {
+	const usageJoin = eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id);
+	const row = await database
+		.select({
+			status: d1Schema.tenant.status,
+			usageTenant: d1Schema.tenantUsage.tenant,
+			quotaBytes: d1Schema.tenantUsage.quotaBytes,
+			usedBytes: sql<number>`${d1Schema.tenantUsage.bytes} + ${d1Schema.tenantUsage.casBytes}`
+		})
+		.from(d1Schema.tenant)
+		.leftJoin(d1Schema.tenantUsage, usageJoin)
+		.where(eq(d1Schema.tenant.id, id))
+		.get();
+
+	if (row === undefined) {
+		throw new TenantNotFoundError(id);
+	}
+
+	if (row.status === 'offboarded') {
+		throw new TenantRetiredError(id);
+	}
+
+	if (row.usageTenant === null) {
+		throw new TenantUsageMissingError(id);
+	}
+
+	return {
+		id,
+		quota:
+			row.quotaBytes === null
+				? { kind: 'unlimited' }
+				: { kind: 'limited', bytes: row.quotaBytes },
+		usedBytes: row.usedBytes
+	};
+}
+
 /**
 Replaces the read credential only while the tenant is active or suspended.
 */
