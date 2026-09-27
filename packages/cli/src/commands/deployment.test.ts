@@ -27,7 +27,8 @@ const expanded: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'expanded', updatedAt: recorded },
 		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
-		{ id: 'attestation-path-index', state: 'expanded', updatedAt: recorded }
+		{ id: 'attestation-path-index', state: 'expanded', updatedAt: recorded },
+		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -35,7 +36,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 	transitions: [
 		{ id: 'cache-identity', state: 'complete', updatedAt: recorded },
 		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
-		{ id: 'attestation-path-index', state: 'complete', updatedAt: recorded }
+		{ id: 'attestation-path-index', state: 'complete', updatedAt: recorded },
+		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -200,6 +202,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition attestation-path-index',
 							value: `expanded ${since}`
 						},
+						{
+							label: 'Transition local-step-attempts',
+							value: `complete ${since}`
+						},
 						{ label: 'Required local step', value: '4' },
 						{ label: 'Ready tenants', value: '1' },
 						{ label: 'Pending tenants', value: '1' },
@@ -239,6 +245,10 @@ describe('runDeploymentStatus', () => {
 					},
 					{
 						label: 'Transition attestation-path-index',
+						value: `complete ${since}`
+					},
+					{
+						label: 'Transition local-step-attempts',
 						value: `complete ${since}`
 					},
 					{ label: `Transition ${row.id}`, value },

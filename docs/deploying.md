@@ -455,7 +455,7 @@ suspended tenant must reach now: the contract step of the first incomplete
 transition that has one, else this build's final step. Once `cache-identity` is
 complete, the required local step is never below 5.
 
-This release defines three transitions:
+This release defines four transitions:
 
 - `cache-identity`: migrations `0000` to `0027` are its expand migrations and
   `0028` to `0030` its contract migrations. Its expand migrations include the
@@ -471,13 +471,17 @@ This release defines three transitions:
   the index must be created after it. The deploy applies `0032` after the
   upload, once both Workers serve this build, and the inheritance lookup scans
   `attestation_ref` until then.
+- `local-step-attempts`: migration `0033` adds the columns that record each
+  tenant's last attempt at its local-step work. It has no contract migrations
+  and no contract step.
 
 A transition is _independent_ when its expand migrations do not depend on the
 contract migrations of the transitions before it and do not change existing
 rows. Once every earlier transition has expanded, the deploy may apply an
 independent transition's expand migrations ahead of the earlier transitions'
 contract migrations. A transition that is not independent is _dependent_.
-`deployment-transitions` and `attestation-path-index` are independent.
+`deployment-transitions`, `attestation-path-index` and `local-step-attempts` are
+independent.
 
 The `deployment_transition` table has one row for each transition that the
 deploy has started. The state is `expanded` once the transition's expand

@@ -3,6 +3,7 @@ import {
 	cacheNameSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { expansionLocalStep } from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -21,7 +22,8 @@ import {
 	beforeCacheIdentityContract,
 	latestMigrationIndex,
 	migrateThrough,
-	testServerFor
+	testServerFor,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import {
@@ -117,20 +119,22 @@ describe('cache access migration', () => {
 				stage: 'assert-cache_identity',
 				cursor: 1000,
 				sourceRows: 1000,
-				declaredSourceWrites: 0
+				declaredSourceWrites: 0,
+				hasCommitted: true
 			},
 			assertionProgress: [{ stage: 28, cursor: 1000 }],
-			assertionResult: { kind: 'complete' },
+			assertionResult: { kind: 'complete', hasCommitted: true },
 			first: {
 				kind: 'pending',
 				migration: '0052_cache_identity_contract',
 				stage: 'copy-cache_identity',
 				cursor: 1000,
 				sourceRows: 1000,
-				declaredSourceWrites: 1000
+				declaredSourceWrites: 1000,
+				hasCommitted: true
 			},
 			progress: [{ stage: 10, cursor: 1000 }],
-			contractResult: { kind: 'complete' },
+			contractResult: { kind: 'complete', hasCommitted: true },
 			cacheCount: 3001,
 			selectorId: 9001
 		});
@@ -387,19 +391,20 @@ describe('cache access migration', () => {
 			retryAfter: '1',
 			cacheControl: 'no-store'
 		});
-		const beforeCompletion = await runInDurableObject(
-			server,
-			async (instance, state) => ({
-				outcome: await instance.reportLocalStep(),
-				legacyTables: state.storage.sql
-					.exec(
-						"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cache'"
-					)
-					.toArray()
-			})
+		const beforeCompletion = await withoutAlarmArming(
+			() =>
+				runInDurableObject(server, async (instance, state) => ({
+					outcome: await instance.reportLocalStep(expansionLocalStep),
+					legacyTables: state.storage.sql
+						.exec(
+							"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cache'"
+						)
+						.toArray()
+				})),
+			server
 		);
 		expect(beforeCompletion).toStrictEqual({
-			outcome: { kind: 'incomplete', projected: 0 },
+			outcome: { kind: 'incomplete', projected: 0, progressed: true },
 			legacyTables: [{ name: 'cache' }]
 		});
 		const pendingTenant = await d1

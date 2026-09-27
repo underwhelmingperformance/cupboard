@@ -58,7 +58,8 @@ export const expansionLocalStep: LocalStep = localStep(4);
 export const transitionIdSchema = z.enum([
 	'cache-identity',
 	'deployment-transitions',
-	'attestation-path-index'
+	'attestation-path-index',
+	'local-step-attempts'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -280,6 +281,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: [],
 		contract: ['0032_attestation_ref_path_index.sql'],
 		independent: true
+	},
+	{
+		id: 'local-step-attempts',
+		expand: ['0033_tenant_local_step_attempts.sql'],
+		contract: [],
+		independent: true
 	}
 ];
 
@@ -445,6 +452,20 @@ export type DeploymentTransitionsResponse = z.input<
 >;
 
 export const localStepStragglerSampleSize = 20;
+
+/**
+ * How long a tenant's local-step work may go without progress before it
+ * counts as stalled. Each page of the work is bounded, and a page that saves a
+ * cursor or moves an item makes progress. A tenant object that has made no
+ * progress for this long stops retrying until the next wake.
+ */
+export const localStepStallWindowMs = 10 * 60 * 1000;
+
+/**
+ * The longest error summary that a tenant row records for a failed attempt at
+ * its local-step work.
+ */
+export const localStepErrorMaxLength = 500;
 
 export const localStepStatusQuerySchema = z.strictObject({
 	requiredStep: localStepSchema.optional()

@@ -32,12 +32,13 @@ describe('server initialisation over a migrated store', () => {
 		await useTestServer(serverName);
 
 		const outcome = await runInDurableObject(currentServer(), (instance) =>
-			instance.reportLocalStep()
+			instance.reportLocalStep(currentLocalStep)
 		);
 
 		expect(outcome).toStrictEqual({
 			kind: 'recorded',
-			step: currentLocalStep
+			step: currentLocalStep,
+			progressed: true
 		});
 	});
 });

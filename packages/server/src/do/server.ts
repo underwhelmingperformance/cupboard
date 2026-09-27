@@ -13,11 +13,13 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
+import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	R2CredentialCheck,
 	VerifyReportInput
 } from '@cupboard/protocol/reports';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CommitBatchEntry,
 	commitCapabilitiesHeader,
@@ -46,6 +48,7 @@ import migrations from '../../drizzle/migrations.js';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import { type ResolvedCache } from '../db/cache.ts';
+import { summariseLocalStepError } from '../db/local-step-attempts.ts';
 import * as schema from '../db/schema.ts';
 import { isD1Overload } from '../db/transient.ts';
 import {
@@ -163,7 +166,12 @@ import {
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { LegacyRetentionService } from './legacy-retention-service.ts';
-import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
+import {
+	type LocalStepOutcome,
+	readRecordedLocalStep,
+	recordLocalStep
+} from './local-step.ts';
+import { type LocalStepContinuation, LocalStepRun } from './local-step-run.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassSubrequests,
@@ -276,6 +284,7 @@ type MaintenancePassKey =
 	| 'attestation-inheritance'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
+	| 'local-step'
 	| 'managed-retirement'
 	| 'reconcile'
 	| 'signing-key-backfill'
@@ -495,12 +504,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly offboarding: OffboardingService;
 	private readonly maintenanceEligibility: MaintenanceEligibilityService;
 	private readonly maintenanceRetry: MaintenanceRetrySchedule;
+	private readonly localStepRun: LocalStepRun;
 	readonly context: ServerContext;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
 		this.context = new ServerContext(ctx, env);
 		this.maintenanceRetry = new MaintenanceRetrySchedule(ctx.storage);
+		this.localStepRun = new LocalStepRun(this.context);
 		this.cacheListingProjection = new CacheListingProjection(this.context);
 
 		this.tenantIdentity = new TenantIdentityService(this.context);
@@ -1599,10 +1610,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		if (expansion.kind === 'pending') {
-			throw new LocalSchemaMigrationPendingError(
-				expansion.migration,
-				expansion.stage
-			);
+			throw new LocalSchemaMigrationPendingError(expansion);
 		}
 		await this.assertZstdAvailable();
 
@@ -1617,7 +1625,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			tenant
 		);
 
-		if (!isCatalogueComplete || !isLocalCacheCatalogueComplete(this.context)) {
+		const isReconciling =
+			!isCatalogueComplete || !isLocalCacheCatalogueComplete(this.context);
+
+		if (isReconciling) {
 			const outcome = await reconcileStoredCacheCatalogue(this.context, tenant);
 
 			if (outcome.status === 'pending') {
@@ -1630,10 +1641,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		if (contraction.kind === 'pending') {
-			throw new LocalSchemaMigrationPendingError(
-				contraction.migration,
-				contraction.stage
-			);
+			throw new LocalSchemaMigrationPendingError({
+				...contraction,
+				hasCommitted:
+					expansion.hasCommitted || isReconciling || contraction.hasCommitted
+			});
 		}
 
 		if (this.cacheListingProjection.hasPending()) {
@@ -2258,6 +2270,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				key: 'attestation-inheritance',
 				workAt: () => Promise.resolve(this.attestations.nextInheritanceAt()),
 				run: () => this.drainAttestationInheritance()
+			},
+			{
+				key: 'local-step',
+				workAt: readyWhen(() => this.localStepRun.isPending()),
+				run: () => this.continueLocalStep(logger)
 			}
 		];
 	}
@@ -2392,6 +2409,188 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return (await this.ctx.storage.get(gcContinuationKey)) !== undefined;
 	}
 
+	/**
+	 * Runs the next page of local-step work from the alarm, in the same
+	 * exclusive section as a wake. The pass reports a stall for a page that made
+	 * no progress or failed, so the next page waits for the retry delay. An
+	 * error thrown by the page becomes a failed page and never leaves the pass.
+	 * Once the object has recorded the step or given up, the pass has no work,
+	 * and it reports progress so that it leaves no retry deadline behind, even
+	 * when the attempt cannot be written.
+	 */
+	private continueLocalStep(logger: Logger): Promise<MaintenanceProgress> {
+		return this.runExclusiveMaintenance('local-step', async () => {
+			// A wake that finished the work while this pass waited for the section
+			// removed the request.
+			if (!(await this.localStepRun.isPending())) {
+				return 'progressed';
+			}
+
+			const now = Date.now();
+			let outcome: LocalStepOutcome;
+
+			try {
+				outcome = await this.runLocalStepPage(now);
+			} catch (error) {
+				logger.warn('local step page failed', { error });
+				outcome = { kind: 'failed', error: summariseLocalStepError(error) };
+			}
+
+			const continuation = await this.localStepRun.settle(outcome, now);
+			const progress: MaintenanceProgress =
+				continuation === 'stalled' ? 'stalled' : 'progressed';
+
+			try {
+				await this.localStepRun.recordAttempt(outcome, now, continuation);
+			} catch (error) {
+				logger.warn('local step attempt was not recorded', { error });
+
+				return continuation === 'progressed' ? 'stalled' : progress;
+			}
+
+			return progress;
+		});
+	}
+
+	// A page is one bounded interval of the local schema migrations, or one call
+	// of `recordLocalStep` once they are complete. The caller holds the
+	// `local-step` exclusive section.
+	//
+	// A wake passes the step that it asks for as `requested`. When the tenant
+	// row already records that step, the wake runs no page, stores no request
+	// and writes no attempt, so an idle object does not read as working.
+	// Otherwise the wake stores the request once the migrations have started:
+	// admission refuses a store whose migration journal is empty while any
+	// table exists, and the first storage key creates a table.
+	private async runLocalStepPage(
+		now: number,
+		requested?: LocalStep
+	): Promise<LocalStepOutcome> {
+		const logger = rootLogger().with({ method: 'local-step' });
+		const request = async (): Promise<void> => {
+			if (requested === undefined) {
+				return;
+			}
+
+			await this.localStepRun.request(requested);
+			// A reset during the page ends the call before it arms the alarm for the
+			// next page. Arm the retry now, so the alarm continues the work.
+			await armAlarmNoLaterThan(this.ctx.storage, now + noProgressRetryMs);
+		};
+
+		try {
+			await this.initialise();
+		} catch (error) {
+			if (error instanceof LocalSchemaMigrationPendingError) {
+				await request();
+
+				return {
+					kind: 'incomplete',
+					projected: 0,
+					progressed: error.pending.hasCommitted
+				};
+			}
+
+			// The reconciliation reports more to do only after it has reconciled a
+			// page and saved its cursor.
+			if (error instanceof CacheCatalogueMigrationPendingError) {
+				await request();
+
+				return { kind: 'incomplete', projected: 0, progressed: true };
+			}
+
+			if (error instanceof TenantNotConfiguredError) {
+				return { kind: 'unconfigured' };
+			}
+
+			throw error;
+		}
+
+		try {
+			if (requested !== undefined) {
+				const recorded = await readRecordedLocalStep(this.context);
+
+				if (recorded !== undefined && recorded >= requested) {
+					return { kind: 'recorded', step: recorded, progressed: false };
+				}
+			}
+
+			await request();
+			const wanted = requested ?? (await this.localStepRun.requested());
+
+			return await this.metered('local-step', () =>
+				recordLocalStep(
+					this.context,
+					this.objectFamilies(),
+					isoTimestamp(new Date(now)),
+					wanted
+				)
+			);
+		} catch (error) {
+			logger.warn('local step page failed', { error });
+
+			return { kind: 'failed', error: summariseLocalStepError(error) };
+		}
+	}
+
+	// A wake runs its page outside the alarm, so it arms the alarm for the page
+	// that follows.
+	private async scheduleLocalStep(
+		continuation: LocalStepContinuation
+	): Promise<void> {
+		if (continuation === 'stalled') {
+			await this.recordMaintenanceProgress('local-step', 'stalled');
+
+			return;
+		}
+
+		await this.recordMaintenanceProgress('local-step', 'progressed');
+
+		if (continuation === 'progressed') {
+			await this.ctx.storage.setAlarm(Date.now());
+		}
+	}
+
+	// The alarm continues pending schema migrations before any maintenance pass
+	// runs. An interval that committed migration work is progress for a pending
+	// wake, so it is written to the tenant row like a page.
+	private async recordLocalStepMigration(
+		error:
+			LocalSchemaMigrationPendingError | CacheCatalogueMigrationPendingError
+	): Promise<void> {
+		const hasCommitted =
+			error instanceof CacheCatalogueMigrationPendingError ||
+			error.pending.hasCommitted;
+
+		if (!hasCommitted) {
+			return;
+		}
+
+		try {
+			await this.runExclusiveMaintenance('local-step', async () => {
+				if (!(await this.localStepRun.isPending())) {
+					return;
+				}
+
+				const now = Date.now();
+				const outcome: LocalStepOutcome = {
+					kind: 'incomplete',
+					projected: 0,
+					progressed: true
+				};
+
+				const continuation = await this.localStepRun.settle(outcome, now);
+				await this.localStepRun.recordAttempt(outcome, now, continuation);
+			});
+		} catch (error_) {
+			rootLogger()
+				.with({ trigger: 'alarm' })
+				.warn('local step migration progress was not recorded', {
+					error: error_
+				});
+		}
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		try {
 			await this.initialise();
@@ -2466,6 +2665,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await this.ctx.storage.setAlarm(
 				Date.now() + error.retryAfterSeconds * 1000
 			);
+			await this.recordLocalStepMigration(error);
 			return;
 		}
 		const logger = rootLogger().with({ trigger: 'alarm' });
@@ -2750,35 +2950,39 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Runs the work this build's steps require, applying any pending migrations
-	 * first, and records the step this object has reached in its tenant row.
-	 * This is the only path that records the step; serving traffic does not.
+	 * Starts this object's local-step work towards `required` and runs its
+	 * first page. Applies any pending migrations first. This is the only path
+	 * that starts the work; serving traffic does not. The whole call runs in
+	 * the `local-step` exclusive section, so it cannot interleave with a page
+	 * that the alarm runs or with another wake. When the tenant row already
+	 * records `required`, the call reports `recorded` without running a page.
+	 *
+	 * While pages make progress, the `local-step` maintenance pass runs the
+	 * next page on the alarm at once. After a page without progress it retries
+	 * after the maintenance retry delay, and it stops once no page has made
+	 * progress for `localStepStallWindowMs` or once the object has recorded
+	 * `required`. A failed page, a page without progress and a page that
+	 * records a step each write an attempt to the tenant row; the write of a
+	 * page that made progress can be skipped by the progress-write throttle.
+	 *
 	 * Reports `unconfigured` when the control plane has not configured this
-	 * object, which then has no tenant row to update, and `incomplete` when the
-	 * step's work did not fit one invocation.
+	 * object, which then has no tenant row to update, `incomplete` when the
+	 * page left work to do, and `failed` with a summary of the error when the
+	 * page threw. The call rejects when initialisation throws anything other
+	 * than a pending migration or an unconfigured tenant, and when the attempt
+	 * cannot be written.
 	 */
-	async reportLocalStep(): Promise<LocalStepOutcome> {
-		try {
-			await this.initialise();
-		} catch (error) {
-			if (
-				error instanceof CacheCatalogueMigrationPendingError ||
-				error instanceof LocalSchemaMigrationPendingError
-			) {
-				return { kind: 'incomplete', projected: 0 };
-			}
+	async reportLocalStep(required: LocalStep): Promise<LocalStepOutcome> {
+		return this.runExclusiveMaintenance('local-step', async () => {
+			const now = Date.now();
+			const outcome = await this.runLocalStepPage(now, required);
+			const continuation = await this.localStepRun.settle(outcome, now);
 
-			if (error instanceof TenantNotConfiguredError) {
-				return { kind: 'unconfigured' };
-			}
-			throw error;
-		}
+			await this.scheduleLocalStep(continuation);
+			await this.localStepRun.recordAttempt(outcome, now, continuation);
 
-		return this.runExclusiveMaintenance('local-step', () =>
-			this.metered('local-step', () =>
-				recordLocalStep(this.context, this.objectFamilies())
-			)
-		);
+			return outcome;
+		});
 	}
 
 	async runAuthKeyRetirement(): Promise<void> {

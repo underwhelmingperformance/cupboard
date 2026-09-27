@@ -138,7 +138,7 @@ export async function controlLocalStepWake(
 	const outcomes = await mapWithConcurrency(
 		stragglers,
 		wakeConcurrency,
-		async ({ id }) => wakeTenant(logger, env, id)
+		async ({ id }) => wakeTenant(logger, env, id, required)
 	);
 	const woken = outcomes.filter(
 		(outcome) => outcome.kind === 'recorded' || outcome.kind === 'advanced'
@@ -156,10 +156,11 @@ export async function controlLocalStepWake(
 async function wakeTenant(
 	logger: Logger,
 	env: Env,
-	tenant: TenantId
+	tenant: TenantId,
+	required: LocalStep
 ): Promise<LocalStepWakeOutcome> {
 	try {
-		const outcome = await tenantServer(env, tenant).reportLocalStep();
+		const outcome = await tenantServer(env, tenant).reportLocalStep(required);
 
 		if (outcome.kind === 'unconfigured') {
 			// The registry holds a row whose Durable Object was never configured, so
@@ -170,14 +171,19 @@ async function wakeTenant(
 		}
 
 		if (outcome.kind === 'incomplete') {
-			// The object made progress but has more work than one invocation
-			// allows, so it left its step unrecorded. It stays a straggler and a
-			// later pass wakes it again.
+			// The object has more work than one page allows, so it left its step
+			// unrecorded and continues on its alarm.
 			logger.info('local step wake made partial progress', {
 				tenant,
 				projected: outcome.projected
 			});
 			return { tenant, kind: 'advanced', projected: outcome.projected };
+		}
+
+		if (outcome.kind === 'failed') {
+			logger.warn('local step wake failed', { tenant, error: outcome.error });
+
+			return { tenant, kind: 'failed' };
 		}
 
 		return { tenant, kind: 'recorded', step: outcome.step };
