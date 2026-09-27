@@ -37,6 +37,7 @@ export interface TenantClient {
 	create(input: TenantCreateBody): Promise<TenantSummary>;
 	suspend(input: { id: TenantId }): Promise<TenantMutateResponse>;
 	resume(input: { id: TenantId }): Promise<TenantMutateResponse>;
+	getQuota(input: { id: TenantId }): Promise<TenantQuotaResponse>;
 	setQuota(input: {
 		id: TenantId;
 		quota: TenantQuota;
@@ -247,6 +248,20 @@ export function registerTenantCommands(
 		.action(async (url: URL, id: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			await runTenantResume(
+				tenantIdSchema.parse(id),
+				reporter,
+				tenantClient(url, programOptions)
+			);
+		});
+
+	tenant
+		.command('quota')
+		.description("Show a tenant's storage quota and charged bytes.")
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.argument('<id>', 'tenant slug')
+		.action(async (url: URL, id: string) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			await runTenantQuota(
 				tenantIdSchema.parse(id),
 				reporter,
 				tenantClient(url, programOptions)
@@ -515,6 +530,25 @@ export async function runTenantSetQuota(
 		client.setQuota({ id, quota })
 	);
 
+	reportTenantQuota(reporter, result);
+}
+
+export async function runTenantQuota(
+	id: TenantId,
+	reporter: Reporter,
+	client: Pick<TenantClient, 'getQuota'>
+): Promise<void> {
+	const result = await reporter.phase('Reading tenant quota', () =>
+		client.getQuota({ id })
+	);
+
+	reportTenantQuota(reporter, result);
+}
+
+function reportTenantQuota(
+	reporter: Reporter,
+	result: TenantQuotaResponse
+): void {
 	reporter.result({
 		kind: 'tenant-quota',
 		data: result,

@@ -11,8 +11,9 @@ An operator is anyone whose control-plane trust rule gives the
 [wildcard grant](../concepts.md#signing-in-and-trust-rules). The claim creates
 such a rule for the admin, with the ID `signup`.
 
-Being an operator doesn't give you access to a tenant's caches or settings. You
-only have that if you're also the tenant's owner or one of its administrators.
+An operator token cannot call a tenant's own APIs. Cache, key, trust-rule and
+policy commands require the tenant's owner or administrator authority. Operators
+can inspect and change a tenant's quota through the control API.
 
 ## Adding operators
 

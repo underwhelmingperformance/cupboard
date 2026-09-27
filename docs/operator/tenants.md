@@ -128,6 +128,18 @@ attestation bundle is counted once per tenant, however many store paths or
 caches refer to it. NARs are charged by compressed file size. Attestation
 bundles are charged by their stored byte length.
 
+To inspect the quota and charged bytes without changing either value:
+
+```sh
+cupboard tenant quota https://cupboard.example.workers.dev acme
+```
+
+The command uses the control API. A control token without the wildcard grant
+needs a `cupboard_tenant` grant with `tenant:read-quota` for `acme`. The command
+can read the quota of a suspended tenant or a tenant in offboarding. Once
+removal finishes, the tenant's usage row is deleted and the command reports that
+the tenant has been retired.
+
 To set a quota of 50 GB on the `acme` tenant:
 
 ```sh

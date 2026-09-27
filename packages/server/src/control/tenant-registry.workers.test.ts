@@ -44,6 +44,7 @@ import {
 	clearTenantReadCredential,
 	ensureTenant,
 	finaliseOffboardedTenant,
+	getTenantQuota,
 	listTenants,
 	resumeTenant,
 	setCacheReadCredential,
@@ -1331,6 +1332,89 @@ function limitedTo(bytes: number): TenantQuota {
 }
 
 const unlimited: TenantQuota = { kind: 'unlimited' };
+
+describe('getTenantQuota', () => {
+	it('reads the limit and charged bytes while a tenant changes state', async () => {
+		await provision(quotaBody(acme, 100));
+		await chargeUsage(acme, 60, 20);
+		const active = await getTenantQuota(database(), acme);
+		await setTenantStatus(database(), acme, 'suspended');
+		const suspended = await getTenantQuota(database(), acme);
+		await setTenantStatus(database(), acme, 'offboarding');
+		const offboarding = await getTenantQuota(database(), acme);
+
+		expect({
+			active,
+			suspended,
+			offboarding,
+			stored: await usageRow(acme)
+		}).toStrictEqual({
+			active: { id: acme, quota: limitedTo(100), usedBytes: 80 },
+			suspended: { id: acme, quota: limitedTo(100), usedBytes: 80 },
+			offboarding: { id: acme, quota: limitedTo(100), usedBytes: 80 },
+			stored: { quotaBytes: 100 }
+		});
+	});
+
+	it('reports unlimited storage without changing the usage row', async () => {
+		await provision(createBody(acme));
+		await chargeUsage(acme, 60, 20);
+
+		expect({
+			read: await getTenantQuota(database(), acme),
+			stored: await usageRow(acme)
+		}).toStrictEqual({
+			read: { id: acme, quota: unlimited, usedBytes: 80 },
+			stored: { quotaBytes: undefined }
+		});
+	});
+
+	it.each([
+		{
+			name: 'missing tenant',
+			setup: () => Promise.resolve(),
+			expected: {
+				name: 'TenantNotFoundError',
+				status: StatusCodes.NOT_FOUND,
+				id: acme
+			}
+		},
+		{
+			name: 'offboarded tenant',
+			setup: async () => {
+				await provision(createBody(acme));
+				await setTenantStatus(database(), acme, 'offboarding');
+				await finaliseOffboardedTenant(database(), acme);
+			},
+			expected: {
+				name: 'TenantRetiredError',
+				status: StatusCodes.GONE,
+				tenant: acme
+			}
+		},
+		{
+			name: 'missing usage row',
+			setup: async () => {
+				await provision(createBody(acme));
+				await database()
+					.delete(d1Schema.tenantUsage)
+					.where(eq(d1Schema.tenantUsage.tenant, acme))
+					.run();
+			},
+			expected: {
+				name: 'TenantUsageMissingError',
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				tenant: acme
+			}
+		}
+	])('refuses a $name', async ({ setup, expected }) => {
+		await setup();
+
+		const rejected = await rejectedBy(() => getTenantQuota(database(), acme));
+
+		expect(errorFields(rejected)).toStrictEqual(expected);
+	});
+});
 
 describe('setTenantQuota', () => {
 	it('raises, lowers to the charged bytes, and clears a quota', async () => {

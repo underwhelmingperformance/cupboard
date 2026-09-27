@@ -30,6 +30,7 @@ import {
 	runTenantClearCredential,
 	runTenantCreate,
 	runTenantList,
+	runTenantQuota,
 	runTenantRemove,
 	runTenantResume,
 	runTenantRotateCacheCredential,
@@ -61,6 +62,8 @@ function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 		create: () => Promise.resolve(summary()),
 		suspend: ({ id }) => Promise.resolve({ id, status: 'suspended' }),
 		resume: ({ id }) => Promise.resolve({ id, status: 'active' }),
+		getQuota: ({ id }) =>
+			Promise.resolve({ id, quota: { kind: 'unlimited' }, usedBytes: 0 }),
 		setQuota: ({ id, quota }) => Promise.resolve({ id, quota, usedBytes: 0 }),
 		rotateReadCredential: ({ id }) =>
 			Promise.resolve({ id, hasCredential: true }),
@@ -319,6 +322,42 @@ describe('runTenantSetQuota', () => {
 
 		expect({ calls, rows }).toStrictEqual({
 			calls: [{ id: acme, quota }],
+			rows: [
+				[
+					{ label: 'Tenant', value: 'acme' },
+					{ label: 'Quota', value: label },
+					{ label: 'Used', value: '1.5 MB' }
+				]
+			]
+		});
+	});
+});
+
+describe('runTenantQuota', () => {
+	it.each([
+		{
+			name: 'a limit',
+			quota: { kind: 'limited', bytes: 5_000_000 } satisfies TenantQuota,
+			label: '5 MB'
+		},
+		{
+			name: 'unlimited storage',
+			quota: { kind: 'unlimited' } satisfies TenantQuota,
+			label: 'unlimited'
+		}
+	])('reads $name without changing it', async ({ quota, label }) => {
+		const rows: ResultRow[][] = [];
+		const calls: unknown[] = [];
+
+		await runTenantQuota(acme, reporter(rows), {
+			getQuota: (input: { id: typeof acme }) => {
+				calls.push(input);
+				return Promise.resolve({ id: input.id, quota, usedBytes: 1_500_000 });
+			}
+		});
+
+		expect({ calls, rows }).toStrictEqual({
+			calls: [{ id: acme }],
 			rows: [
 				[
 					{ label: 'Tenant', value: 'acme' },

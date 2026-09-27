@@ -81,6 +81,7 @@ const tenantOperationSchema = z.enum([
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
 	'tenant:clear-cache-read-credential',
+	'tenant:read-quota',
 	'tenant:set-quota'
 ]);
 export const tenantOperations = tenantOperationSchema.options;
@@ -160,6 +161,7 @@ export const operationSchema = z.enum([
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
 	'tenant:clear-cache-read-credential',
+	'tenant:read-quota',
 	'tenant:set-quota',
 	'membership:rebuild',
 	'deployment:read',

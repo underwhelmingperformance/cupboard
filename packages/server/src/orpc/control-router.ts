@@ -18,6 +18,7 @@ import {
 	controlTenantClearCacheReadCredential,
 	controlTenantClearReadCredential,
 	controlTenantCreate,
+	controlTenantGetQuota,
 	controlTenantList,
 	controlTenantOffboard,
 	controlTenantResume,
@@ -97,6 +98,9 @@ export const controlRouter = os.router({
 		),
 		resume: os.tenants.resume.handler(({ input, context }) =>
 			controlTenantResume(context.env, input.id)
+		),
+		getQuota: os.tenants.getQuota.handler(({ input, context }) =>
+			controlTenantGetQuota(context.env, input.id)
 		),
 		setQuota: os.tenants.setQuota.handler(({ input, context }) =>
 			controlTenantSetQuota(context.env, input.id, input.quota)

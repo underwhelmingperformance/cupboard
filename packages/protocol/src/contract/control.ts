@@ -140,6 +140,16 @@ export const controlContract = {
 			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
 
+		getQuota: controlProcedure
+			.meta({
+				requires: 'tenant:read-quota',
+				resource: { tenant: { field: 'id' } },
+				replaySafety: 'replay-safe'
+			})
+			.route({ method: 'GET', path: '/tenants/{id}/quota' })
+			.input(z.strictObject({ id: tenantIdSchema }))
+			.output(tenantQuotaResponseSchema),
+
 		// Setting the same quota twice has the same result as setting it once, so a
 		// retry is safe.
 		setQuota: controlProcedure
