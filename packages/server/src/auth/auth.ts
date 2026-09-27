@@ -37,10 +37,11 @@ const authorizationDetailsClaim = 'authorization_details';
 export const adminJwtTtlSeconds = ttlSecondsSchema.parse(10 * 60);
 export const writeJwtTtlSeconds = ttlSecondsSchema.parse(15 * 60);
 // Every refresh token in a family shares its original expiry. Keep each spent
-// token's hash until then so a replay can revoke the active token.
+// token's hash until then so a later replay can revoke the active token.
 export const refreshTokenFamilyTtlSeconds = ttlSecondsSchema.parse(
 	30 * 24 * 60 * 60
 );
+export const refreshTokenRetryGraceMs = 60_000;
 // A client can rotate twice during each access-token lifetime throughout the
 // complete family lifetime. Reaching the bound ends the family instead of
 // discarding a spent bearer that must still detect replay.

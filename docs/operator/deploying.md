@@ -130,7 +130,9 @@ Push something to the new tenant, then set up your Nix clients as described in
 `init` also shows `PUSH_ID_SIGNING_KEY`, with a note to save it, but you don't
 need a copy. Both Workers keep it. When a deploy finds that only one Worker has
 the key, it generates a new one for both, and pushes that were in progress have
-to be run again. If `PUSH_ID_SIGNING_KEY` is set in the environment, `init`
+to be run again. Changing the key also prevents recovery of a refresh response
+that was lost during the previous minute. The current successor refresh token
+remains valid. If `PUSH_ID_SIGNING_KEY` is set in the environment, `init`
 uploads that value to both Workers on every deploy.
 
 ## The instance name

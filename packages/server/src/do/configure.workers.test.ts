@@ -153,6 +153,14 @@ describe('configure RPC', () => {
 						tenantIdentity
 					}
 				});
+				const members = database
+					.select()
+					.from(refreshTokenMembers)
+					.all()
+					.map((member) => ({
+						...member,
+						successorEnvelope: member.successorEnvelope ?? undefined
+					}));
 
 				return {
 					memberDeletePlan,
@@ -167,7 +175,7 @@ describe('configure RPC', () => {
 						.where(eq(oidcTrust.id, trustRuleIdSchema.parse('owner')))
 						.get(),
 					families: database.select().from(refreshTokenFamilies).all(),
-					members: database.select().from(refreshTokenMembers).all()
+					members
 				};
 			}
 		);
@@ -206,6 +214,7 @@ describe('configure RPC', () => {
 					familyId: 'family-197',
 					generation: 0,
 					secretHash: 'hash',
+					successorEnvelope: undefined,
 					createdAt: '2026-01-01T00:00:00.000Z'
 				}
 			]

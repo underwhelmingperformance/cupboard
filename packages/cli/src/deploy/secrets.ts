@@ -16,7 +16,8 @@ export function generateWrapSecret(): string {
 /**
  * Generate a fresh `PUSH_ID_SIGNING_KEY`: a high-entropy base64 secret. Used on
  * a first deploy when the operator has not supplied one. It must stay stable
- * afterwards, as a different value invalidates in-flight push ids.
+ * afterwards, as a different value invalidates in-flight push ids and recovery
+ * of recently consumed refresh tokens.
  */
 export function generatePushIdSigningKey(): string {
 	return randomBytes(32).toString('base64');

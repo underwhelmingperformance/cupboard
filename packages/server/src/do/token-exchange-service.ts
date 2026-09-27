@@ -1,7 +1,9 @@
 import { type Logger } from '@cupboard/logger';
-import { type TtlSeconds } from '@cupboard/nix-store/scalars';
+import { hexToBytes } from '@cupboard/nix-store/encoding';
+import { type TenantId, type TtlSeconds } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
+	isAuthorizationDetailCovered,
 	storedAuthorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 import {
@@ -29,8 +31,8 @@ import {
 	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
 import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, inArray } from 'drizzle-orm';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
 	type AccessClaims,
@@ -38,6 +40,7 @@ import {
 	issueAccessJwt,
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds,
+	refreshTokenRetryGraceMs,
 	verifyAccessJwt,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
@@ -47,6 +50,8 @@ import {
 	parseRequestedGrants,
 	resolveRequestedGrants
 } from '../authz/issuance.ts';
+import { pushIdSigningKey } from '../blob/push-credential.ts';
+import { type PushIdSigningKey } from '../blob/push-id.ts';
 import { isConstantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -84,6 +89,11 @@ interface PreparedRefreshToken {
 interface PreparedIssuedResponse {
 	readonly body: TokenResponse;
 	readonly refreshToken?: PreparedRefreshToken;
+}
+
+interface RefreshEnvelopeContext {
+	readonly signingKey: PushIdSigningKey;
+	readonly tenant: TenantId;
 }
 
 type IssuanceAuthority =
@@ -357,8 +367,7 @@ export class TokenExchangeService {
 		}
 
 		// Hash the secret before loading its member. After response preparation, the
-		// rotation transaction checks the active member and generation. A concurrent
-		// presentation that loses that comparison revokes the family.
+		// rotation transaction checks the active member and generation.
 		const presentedHash = await sha256Hex(presented.secret);
 
 		const member = this.context.db
@@ -400,9 +409,7 @@ export class TokenExchangeService {
 			family.activeMemberId !== member.id ||
 			family.generation !== member.generation
 		) {
-			this.revokeFamily(family.id);
-			this.logFamilyRevocation(logger, 'replay');
-			throw new StaleRefreshTokenError();
+			return this.retryConsumedToken(logger, presented, member, body);
 		}
 
 		const snapshot = this.oidcTrust
@@ -438,17 +445,28 @@ export class TokenExchangeService {
 			this.revokeFamily(family.id);
 			throw new StaleRefreshTokenError();
 		}
+		const successor = parseRefreshToken(prepared.refreshToken.token);
+
+		if (successor === undefined) {
+			throw new StaleRefreshTokenError();
+		}
+
+		const envelope = await sealRefreshSuccessor(
+			this.refreshEnvelopeContext(),
+			presented,
+			successor
+		);
 
 		const rotation = this.rotateFamily(
 			family,
 			member,
 			prepared.refreshToken,
+			envelope,
 			snapshot
 		);
 
 		if (rotation === 'stale-member') {
-			this.logFamilyRevocation(logger, 'replay');
-			throw new StaleRefreshTokenError();
+			return this.retryConsumedToken(logger, presented, member, body);
 		}
 
 		if (rotation === 'rule-changed') {
@@ -456,6 +474,152 @@ export class TokenExchangeService {
 		}
 
 		return oauthJsonResponse(prepared.body);
+	}
+
+	private async retryConsumedToken(
+		logger: Logger,
+		presented: RefreshToken,
+		member: RefreshTokenMember,
+		body: RefreshTokenGrantRequest
+	): Promise<Response> {
+		const family = this.context.db
+			.select()
+			.from(schema.refreshTokenFamilies)
+			.where(eq(schema.refreshTokenFamilies.id, member.familyId))
+			.get();
+
+		if (family === undefined) {
+			throw new StaleRefreshTokenError();
+		}
+
+		const nowIso = isoTimestamp(new Date());
+
+		if (family.expiresAt <= nowIso) {
+			this.revokeFamily(family.id);
+			throw new StaleRefreshTokenError();
+		}
+
+		const successor = this.context.db
+			.select()
+			.from(schema.refreshTokenMembers)
+			.where(eq(schema.refreshTokenMembers.id, family.activeMemberId))
+			.get();
+		const spent = this.context.db
+			.select()
+			.from(schema.refreshTokenMembers)
+			.where(eq(schema.refreshTokenMembers.id, member.id))
+			.get();
+		const isWithinGrace =
+			spent?.familyId === family.id &&
+			spent.secretHash === member.secretHash &&
+			successor?.familyId === family.id &&
+			successor.generation === member.generation + 1 &&
+			family.generation === successor.generation &&
+			isWithinRefreshRetryGrace(successor.createdAt, nowIso);
+
+		if (!isWithinGrace) {
+			this.revokeFamily(family.id);
+			this.logFamilyRevocation(logger, 'replay');
+			throw new StaleRefreshTokenError();
+		}
+
+		const secret = await openRefreshSuccessor(
+			this.refreshEnvelopeContext(),
+			presented,
+			successor.id,
+			spent.successorEnvelope
+		);
+
+		if (secret === undefined) {
+			throw new StaleRefreshTokenError();
+		}
+
+		const secretHash = await sha256Hex(secret);
+
+		if (!(await isConstantTimeEqual(successor.secretHash, secretHash, 64))) {
+			throw new StaleRefreshTokenError();
+		}
+
+		const snapshot = this.oidcTrust
+			.enabledOidcTrustRuleSnapshots(logger)
+			.find((candidate) => candidate.rule.id === family.ruleId);
+
+		if (snapshot === undefined || !isRuleInteractive(snapshot.rule)) {
+			this.revokeFamily(family.id);
+			throw new StaleRefreshTokenError();
+		}
+
+		const grants = this.familyGrants(family);
+		const requested = parseRequestedGrants(body.authorization_details);
+
+		if (requested !== undefined && !hasSameAuthority(requested, grants)) {
+			throw new StaleRefreshTokenError();
+		}
+
+		const accessToken = await this.issueRuleToken(
+			snapshot.rule,
+			family.subject,
+			grants,
+			adminJwtTtlSeconds
+		);
+		const responseTime = isoTimestamp(new Date());
+
+		if (
+			family.expiresAt <= responseTime ||
+			!isWithinRefreshRetryGrace(successor.createdAt, responseTime)
+		) {
+			this.revokeFamily(family.id);
+			this.logFamilyRevocation(logger, 'replay');
+			throw new StaleRefreshTokenError();
+		}
+
+		const isCurrent = this.context.db.transaction((transaction) => {
+			if (!this.oidcTrust.isEnabledSnapshotCurrent(snapshot, transaction)) {
+				this.revokeFamily(family.id, transaction);
+				return false;
+			}
+
+			const active = transaction
+				.select({
+					id: schema.refreshTokenFamilies.id,
+					grantsJson: schema.refreshTokenFamilies.grantsJson,
+					expiresAt: schema.refreshTokenFamilies.expiresAt
+				})
+				.from(schema.refreshTokenFamilies)
+				.where(
+					and(
+						eq(schema.refreshTokenFamilies.id, family.id),
+						eq(schema.refreshTokenFamilies.activeMemberId, successor.id),
+						eq(schema.refreshTokenFamilies.generation, successor.generation)
+					)
+				)
+				.get();
+			const transactionTime = isoTimestamp(new Date());
+
+			if (
+				active === undefined ||
+				active.expiresAt <= transactionTime ||
+				!isWithinRefreshRetryGrace(successor.createdAt, transactionTime) ||
+				active.grantsJson !== family.grantsJson
+			) {
+				this.revokeFamily(family.id, transaction);
+				return false;
+			}
+
+			return true;
+		});
+
+		if (!isCurrent) {
+			throw new StaleRefreshTokenError();
+		}
+
+		return oauthJsonResponse({
+			access_token: accessToken,
+			token_type: 'Bearer',
+			expires_in: adminJwtTtlSeconds,
+			refresh_token: `${successor.id}.${secret}`,
+			authorization_details: grants
+		} satisfies TokenResponse);
 	}
 
 	private async issuedResponse(
@@ -605,6 +769,7 @@ export class TokenExchangeService {
 		family: RefreshTokenFamily,
 		member: RefreshTokenMember,
 		successor: PreparedRefreshToken,
+		envelope: string,
 		snapshot: OidcTrustRuleSnapshot
 	): RefreshTokenRotationOutcome {
 		return this.context.db.transaction((transaction) => {
@@ -634,13 +799,27 @@ export class TokenExchangeService {
 			const [advanced] = advancedRows;
 
 			if (advanced === undefined) {
-				this.revokeFamily(family.id, transaction);
 				return 'stale-member';
 			}
 
 			transaction
 				.insert(schema.refreshTokenMembers)
 				.values(successor.member)
+				.run();
+			transaction
+				.update(schema.refreshTokenMembers)
+				.set({ successorEnvelope: envelope })
+				.where(eq(schema.refreshTokenMembers.id, member.id))
+				.run();
+			transaction
+				.update(schema.refreshTokenMembers)
+				.set({ successorEnvelope: sql`NULL` })
+				.where(
+					and(
+						eq(schema.refreshTokenMembers.familyId, family.id),
+						eq(schema.refreshTokenMembers.generation, member.generation - 1)
+					)
+				)
 				.run();
 
 			return 'rotated';
@@ -700,6 +879,13 @@ export class TokenExchangeService {
 		);
 	}
 
+	private refreshEnvelopeContext(): RefreshEnvelopeContext {
+		return {
+			signingKey: pushIdSigningKey(this.context.env),
+			tenant: this.context.requireTenant()
+		};
+	}
+
 	revokeRuleFamilies(
 		ruleId: TrustRuleId,
 		database: RefreshTokenDatabase = this.context.db
@@ -756,6 +942,25 @@ function configuredAudiences(
 	return new Set(rules.map((rule) => rule.audience));
 }
 
+function hasSameAuthority(
+	left: AuthorizationDetails,
+	right: AuthorizationDetails
+): boolean {
+	return (
+		left.every((detail) => isAuthorizationDetailCovered(right, detail)) &&
+		right.every((detail) => isAuthorizationDetailCovered(left, detail))
+	);
+}
+
+function isWithinRefreshRetryGrace(
+	createdAt: IsoTimestamp,
+	now: IsoTimestamp
+): boolean {
+	const elapsedMs = Date.parse(now) - Date.parse(createdAt);
+
+	return elapsedMs >= 0 && elapsedMs <= refreshTokenRetryGraceMs;
+}
+
 // A refresh token is spelled `<id>.<secret>`. The ID selects the row, and the
 // secret proves possession against the stored hash.
 function parseRefreshToken(token: string): RefreshToken | undefined {
@@ -773,6 +978,99 @@ function parseRefreshToken(token: string): RefreshToken | undefined {
 
 function randomSecretHex(): string {
 	return bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+async function refreshEnvelopeKey(
+	context: RefreshEnvelopeContext,
+	presented: RefreshToken,
+	successorId: string
+): Promise<CryptoKey> {
+	const encoder = new TextEncoder();
+	const material = await crypto.subtle.importKey(
+		'raw',
+		encoder.encode(context.signingKey),
+		'HKDF',
+		false,
+		['deriveKey']
+	);
+
+	return crypto.subtle.deriveKey(
+		{
+			name: 'HKDF',
+			hash: 'SHA-256',
+			salt: encoder.encode(presented.secret),
+			info: encoder.encode(
+				JSON.stringify([
+					'cupboard/refresh-envelope/v2',
+					context.tenant,
+					presented.id,
+					successorId
+				])
+			)
+		},
+		material,
+		{ name: 'AES-GCM', length: 256 },
+		false,
+		['encrypt', 'decrypt']
+	);
+}
+
+async function sealRefreshSuccessor(
+	context: RefreshEnvelopeContext,
+	presented: RefreshToken,
+	successor: RefreshToken
+): Promise<string> {
+	const iv = crypto.getRandomValues(new Uint8Array(12));
+	const key = await refreshEnvelopeKey(context, presented, successor.id);
+	const ciphertext = await crypto.subtle.encrypt(
+		{ name: 'AES-GCM', iv },
+		key,
+		new TextEncoder().encode(successor.secret)
+	);
+
+	return `${bytesToHex(iv)}.${bytesToHex(new Uint8Array(ciphertext))}`;
+}
+
+async function openRefreshSuccessor(
+	context: RefreshEnvelopeContext,
+	presented: RefreshToken,
+	successorId: string,
+	envelope: string | null
+): Promise<string | undefined> {
+	if (envelope === null) {
+		return undefined;
+	}
+
+	const [ivHex, ciphertextHex, extra] = envelope.split('.', 3);
+
+	if (
+		ivHex === undefined ||
+		ciphertextHex === undefined ||
+		extra !== undefined ||
+		!/^[\da-f]{24}$/iu.test(ivHex) ||
+		!/^[\da-f]{160}$/iu.test(ciphertextHex)
+	) {
+		return undefined;
+	}
+
+	const key = await refreshEnvelopeKey(context, presented, successorId);
+	let secret: ArrayBuffer;
+
+	try {
+		secret = await crypto.subtle.decrypt(
+			{ name: 'AES-GCM', iv: hexToBytes(ivHex) },
+			key,
+			hexToBytes(ciphertextHex)
+		);
+	} catch (error) {
+		if (error instanceof DOMException && error.name === 'OperationError') {
+			return undefined;
+		}
+
+		throw error;
+	}
+
+	return new TextDecoder().decode(secret);
 }
 
 async function sha256Hex(value: string): Promise<string> {
