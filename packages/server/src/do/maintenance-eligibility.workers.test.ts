@@ -95,6 +95,43 @@ describe('maintenance eligibility projection', () => {
 		});
 	});
 
+	it('schedules a deferred upload at its retry deadline while a fresh row remains due', async () => {
+		const retryAt = isoTimestampSchema.parse('2026-01-01T00:05:00.000Z');
+		const expired = isoTimestampSchema.parse('2020-01-01T00:00:00.000Z');
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const service = new MaintenanceEligibilityService(instance.context);
+			instance.context.db
+				.insert(schema.pendingUploads)
+				.values({
+					...pendingUpload(instance.context, 'deferred', expired, 'committing'),
+					settleRetryAfter: retryAt
+				})
+				.run();
+			await service.reconcile(now);
+		});
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: retryAt,
+			reconciledAt: now.toISOString()
+		});
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			instance.context.db
+				.insert(schema.pendingUploads)
+				.values(pendingUpload(instance.context, 'fresh', expired, 'pending'))
+				.run();
+			await new MaintenanceEligibilityService(instance.context).reconcile(
+				new Date(now.getTime() + 1000)
+			);
+		});
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: wakeImmediately,
+			reconciledAt: '2026-01-01T00:00:01.000Z'
+		});
+	});
+
 	it('can invalidate an idle projection before deferred work is created', async () => {
 		const projectionWriteFailure = new MaintenanceProjectionTestError('insert');
 

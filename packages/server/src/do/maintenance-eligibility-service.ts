@@ -8,7 +8,6 @@ import {
 	isNotNull,
 	isNull,
 	lte,
-	or,
 	type SQL,
 	sql
 } from 'drizzle-orm';
@@ -33,20 +32,25 @@ export class MaintenanceEligibilityService {
 
 	// Indexed existence checks keep this calculation independent of the number
 	// of pending uploads and queued deletions.
-	private hasImmediateWork(): boolean {
-		const awaitingVerification = this.context.db
-			.select({ present: sql`1` })
-			.from(schema.pendingUploads)
-			.where(
-				or(
-					eq(schema.pendingUploads.verdict, 'pending'),
-					eq(schema.pendingUploads.verdict, 'committing')
-				)
-			)
-			.limit(1)
-			.get();
+	private hasImmediateWork(now: IsoTimestamp): boolean {
+		const awaitingVerification = this.context.db.all<{ present: number }>(
+			sql`SELECT 1 AS present FROM pending_upload INDEXED BY pending_upload_settle_retry_after_idx
+			WHERE (verdict = 'pending' OR verdict = 'committing')
+			  AND settle_retry_after <= ${now}
+			LIMIT 1`
+		);
+		if (awaitingVerification.length > 0) {
+			return true;
+		}
 
-		if (awaitingVerification !== undefined) {
+		const awaitingFirstAttempt = this.context.db.all<{ present: number }>(
+			sql`SELECT 1 AS present FROM pending_upload INDEXED BY pending_upload_settle_retry_after_idx
+			WHERE (verdict = 'pending' OR verdict = 'committing')
+			  AND settle_retry_after IS NULL
+			LIMIT 1`
+		);
+
+		if (awaitingFirstAttempt.length > 0) {
 			return true;
 		}
 
@@ -60,12 +64,13 @@ export class MaintenanceEligibilityService {
 	}
 
 	private earliestUploadExpiry(): IsoTimestamp | undefined {
-		const pendingUploadExpiry = this.context.db
-			.select({ expiresAt: schema.pendingUploads.expiresAt })
-			.from(schema.pendingUploads)
-			.orderBy(asc(schema.pendingUploads.expiresAt))
-			.limit(1)
-			.get()?.expiresAt;
+		const pendingUploadExpiry = this.context.db.all<{
+			expiresAt: IsoTimestamp;
+		}>(sql`SELECT expires_at AS expiresAt
+			FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
+			WHERE verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota'
+			ORDER BY expires_at, id
+			LIMIT 1`)[0]?.expiresAt;
 		const pendingAttestationExpiry = this.context.db
 			.select({ expiresAt: schema.pendingAttestations.expiresAt })
 			.from(schema.pendingAttestations)
@@ -129,8 +134,9 @@ export class MaintenanceEligibilityService {
 
 	// Choose the earliest upload, attestation, root, grace, auth-key, or
 	// managed-cache retirement deadline when no immediate work is recorded.
-	private earliestFutureWake(): IsoTimestamp | undefined {
+	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
+			this.earliestSettleRetry(now),
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
 			this.earliestGraceExpiry(),
@@ -141,10 +147,23 @@ export class MaintenanceEligibilityService {
 			.toSorted(byCodeUnit)[0];
 	}
 
-	private nextWakeAt(): IsoTimestamp | undefined {
-		return this.hasImmediateWork()
+	private earliestSettleRetry(now: IsoTimestamp): IsoTimestamp | undefined {
+		return (
+			this.context.db.all<{ retryAfter: IsoTimestamp }>(
+				sql`SELECT settle_retry_after AS retryAfter
+					FROM pending_upload INDEXED BY pending_upload_settle_retry_after_idx
+					WHERE (verdict = 'pending' OR verdict = 'committing')
+					  AND settle_retry_after > ${now}
+					ORDER BY settle_retry_after
+					LIMIT 1`
+			)[0]?.retryAfter ?? undefined
+		);
+	}
+
+	private nextWakeAt(now: IsoTimestamp): IsoTimestamp | undefined {
+		return this.hasImmediateWork(now)
 			? wakeImmediately
-			: this.earliestFutureWake();
+			: this.earliestFutureWake(now);
 	}
 
 	retirementRevision(
@@ -236,7 +255,7 @@ export class MaintenanceEligibilityService {
 	async reconcile(now: Date = new Date()): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const reconciledAt = isoTimestamp(now);
-		const nextWakeAt = this.nextWakeAt();
+		const nextWakeAt = this.nextWakeAt(reconciledAt);
 
 		await this.context.d1
 			.insert(d1Schema.tenantMaintenanceEligibility)

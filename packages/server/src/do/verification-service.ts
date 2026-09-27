@@ -56,6 +56,7 @@ import {
 	type RequestOrigin,
 	verifyClaimLeaseMs
 } from '../http/http.ts';
+import { pendingSettleRetryDelayMs } from '../policy/verification.ts';
 
 import { type AttestationsService } from './attestations-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
@@ -504,6 +505,7 @@ function claimableFilter(now: Date) {
 	const leasedBefore = isoTimestamp(
 		new Date(now.getTime() - verifyClaimLeaseMs)
 	);
+	const nowIso = isoTimestamp(now);
 
 	return and(
 		or(
@@ -517,6 +519,10 @@ function claimableFilter(now: Date) {
 		or(
 			isNull(schema.pendingUploads.claimedAt),
 			lte(schema.pendingUploads.claimedAt, leasedBefore)
+		),
+		or(
+			isNull(schema.pendingUploads.settleRetryAfter),
+			lte(schema.pendingUploads.settleRetryAfter, nowIso)
 		)
 	);
 }
@@ -2012,13 +2018,15 @@ export class VerificationService {
 					}
 
 					return pending;
-				} catch {
+				} catch (error) {
 					signal?.throwIfAborted();
-					this.releaseLease(pending.id, owner);
-					logger.warn('pending upload recovery probe failed', {
-						kind: 'committed-recovery',
-						reason: 'commit-state-probe-failed'
-					});
+					this.recordFallbackFailure(
+						logger,
+						pending,
+						owner,
+						error,
+						'commit-state-probe-failed'
+					);
 					return undefined;
 				}
 			}
@@ -2043,6 +2051,60 @@ export class VerificationService {
 				)
 			)
 			.run();
+	}
+
+	private recordFallbackFailure(
+		logger: Logger,
+		pending: PendingUploadRow,
+		owner: string,
+		error: unknown,
+		reason: string
+	): void {
+		const now = new Date();
+		const failures = pending.settleFailures + 1;
+		const retryDate = new Date(
+			now.getTime() + pendingSettleRetryDelayMs(failures)
+		);
+		const lastError = error instanceof Error ? error.message : String(error);
+		const awaitingFilter = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+		const ownedRow = and(
+			eq(schema.pendingUploads.id, pending.id),
+			eq(schema.pendingUploads.claimOwner, owner),
+			awaitingFilter
+		);
+		const [failure] = this.context.db
+			.update(schema.pendingUploads)
+			.set({
+				settleFailures: sql`${schema.pendingUploads.settleFailures} + 1`,
+				settleRetryAfter: isoTimestamp(retryDate),
+				lastSettleError: lastError.slice(0, 512),
+				claimedAt: sql`null`,
+				claimOwner: sql`null`
+			})
+			.where(ownedRow)
+			.returning({
+				failures: schema.pendingUploads.settleFailures
+			})
+			.all();
+
+		if (failure === undefined) {
+			return;
+		}
+
+		const properties = {
+			uploadId: pending.id,
+			kind:
+				pending.r2Key === narObjectKey(pending.narHash)
+					? 'reuse'
+					: 'committed-recovery',
+			reason,
+			failures: failure.failures,
+			lastError
+		};
+		logger.warn('pending upload verification failed', properties);
 	}
 
 	private async renewClaimsWhile<T>(
@@ -2702,16 +2764,13 @@ export class VerificationService {
 						continue;
 					}
 
-					// Release the lease after a transient fault so another pass can retry
-					// this row while the current pass continues with the others.
-					this.releaseLease(pending.id, owner);
-					logger.warn('could not settle pending upload without decoding', {
-						kind:
-							pending.r2Key === narObjectKey(pending.narHash)
-								? 'reuse'
-								: 'committed-recovery',
-						reason: 'prepare-failed'
-					});
+					this.recordFallbackFailure(
+						logger,
+						pending,
+						owner,
+						error,
+						'prepare-failed'
+					);
 				}
 			}
 
@@ -2746,16 +2805,15 @@ export class VerificationService {
 					if (didApply) {
 						settled += 1;
 					}
-				} catch {
+				} catch (error) {
 					signal?.throwIfAborted();
-					this.releaseLease(item.pending.id, owner);
-					logger.warn('could not apply reuse verdict', {
-						kind:
-							item.pending.r2Key === narObjectKey(item.pending.narHash)
-								? 'reuse'
-								: 'committed-recovery',
-						reason: 'materialisation-failed'
-					});
+					this.recordFallbackFailure(
+						logger,
+						item.pending,
+						item.owner,
+						error,
+						'materialisation-failed'
+					);
 				}
 			}
 

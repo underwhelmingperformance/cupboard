@@ -363,6 +363,9 @@ export const pendingUploads = sqliteTable(
 		verdict: text('verdict', {
 			enum: ['committing', 'pending', 'servable', 'mismatch', 'over-quota']
 		}),
+		settleFailures: integer('settle_failures').notNull().default(0),
+		settleRetryAfter: text('settle_retry_after').$type<IsoTimestamp>(),
+		lastSettleError: text('last_settle_error'),
 		// Verification re-reads the subscribed session before sending a terminal
 		// verdict, so a reconnect can replace this value while verification is running.
 		sessionId: text('session_id').$type<SessionId>(),
@@ -396,6 +399,11 @@ export const pendingUploads = sqliteTable(
 				sql`${table.verdict} IS NULL OR ${table.verdict} = 'servable' OR ${table.verdict} = 'mismatch' OR ${table.verdict} = 'over-quota'`
 			),
 		index('pending_upload_verdict_idx').on(table.verdict),
+		index('pending_upload_settle_retry_after_idx')
+			.on(table.settleRetryAfter)
+			.where(
+				sql`${table.verdict} = 'pending' OR ${table.verdict} = 'committing'`
+			),
 		index('pending_upload_r2_key_idx').on(table.r2Key),
 		index('pending_upload_recorded_verdict_idx')
 			.on(table.id)

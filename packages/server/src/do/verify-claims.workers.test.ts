@@ -783,14 +783,25 @@ describe('claiming a verification batch', () => {
 				const second = committedProbe.mock.calls.map(
 					([, metadata]) => metadata.storePathHash
 				);
+				const failures = instance.context.db
+					.select({
+						id: schema.pendingUploads.id,
+						count: schema.pendingUploads.settleFailures
+					})
+					.from(schema.pendingUploads)
+					.orderBy(schema.pendingUploads.id)
+					.all();
 
-				expect({ first, second }).toStrictEqual({
+				expect({ first, second, failures }).toStrictEqual({
 					first: ordered
 						.slice(0, 2)
 						.map((upload) => upload.metadata.storePathHash),
 					second: ordered
 						.slice(2)
-						.map((upload) => upload.metadata.storePathHash)
+						.map((upload) => upload.metadata.storePathHash),
+					failures: ordered
+						.map((upload) => ({ id: upload.uploadId, count: 0 }))
+						.toSorted((left, right) => byCodeUnit(left.id, right.id))
 				});
 			} finally {
 				committedProbe.mockRestore();
@@ -986,9 +997,7 @@ describe('claiming a verification batch', () => {
 				);
 				const warnings = capture.logs
 					.filter(
-						(record) =>
-							record.message ===
-							'could not settle pending upload without decoding'
+						(record) => record.message === 'pending upload verification failed'
 					)
 					.map((record) => record.properties);
 
@@ -1027,13 +1036,25 @@ describe('claiming a verification batch', () => {
 				{ id: uploadIdSchema.parse('b-faulting-reuse') }
 			],
 			warnings: [
-				{ kind: 'reuse', reason: 'prepare-failed' },
-				{ kind: 'reuse', reason: 'prepare-failed' }
+				{
+					uploadId: uploadIdSchema.parse('a-faulting-reuse'),
+					kind: 'reuse',
+					reason: 'prepare-failed',
+					failures: 1,
+					lastError: 'sensitive reuse provider error'
+				},
+				{
+					uploadId: uploadIdSchema.parse('b-faulting-reuse'),
+					kind: 'reuse',
+					reason: 'prepare-failed',
+					failures: 1,
+					lastError: 'sensitive reuse provider error'
+				}
 			]
 		});
 	});
 
-	it('does not log recovery probe errors or upload IDs', async () => {
+	it('logs the row and error when a recovery probe fails', async () => {
 		const token = await initialise();
 		const fresh = await deferFreshUpload(
 			token,
@@ -1076,7 +1097,7 @@ describe('claiming a verification batch', () => {
 
 		const warnings = capture.logs
 			.filter(
-				(record) => record.message === 'pending upload recovery probe failed'
+				(record) => record.message === 'pending upload verification failed'
 			)
 			.map((record) => ({
 				level: record.level,
@@ -1087,8 +1108,11 @@ describe('claiming a verification batch', () => {
 			{
 				level: 'warning',
 				properties: {
+					uploadId: fresh.uploadId,
 					kind: 'committed-recovery',
-					reason: 'commit-state-probe-failed'
+					reason: 'commit-state-probe-failed',
+					failures: 1,
+					lastError: `sensitive-provider-error:${fresh.uploadId}`
 				}
 			}
 		]);

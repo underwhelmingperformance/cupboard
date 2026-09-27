@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -11,8 +12,10 @@ import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
+import { pendingSettleRetryDelayMs } from '../policy/verification.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import {
+	asOneInvocation,
 	collectVerificationPasses,
 	commitPath,
 	currentServer,
@@ -20,6 +23,7 @@ import {
 	deferFreshUpload,
 	expectSingleCommitDecision,
 	expectSingleUploadDecision,
+	fetchNarInfo,
 	initialise,
 	markUploadCommitting,
 	markUploadPendingVerification,
@@ -36,6 +40,7 @@ import {
 } from '../test-support.ts';
 
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
+import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import {
 	ActiveVerificationClaims,
@@ -420,6 +425,181 @@ describe('batched verify fault isolation', () => {
 				properties: { kind: 'fresh', reason: 'verification-failed' }
 			}
 		]);
+	});
+
+	it('backs off repeated reuse faults and recovers after the probe succeeds', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('fallback-failure-limit');
+		const committed = uploadMetadata({
+			name: 'fallback-failure-source',
+			storePathHash: '8'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		await commitPath(token, committed, nar);
+		const reused = uploadMetadata({
+			...committed,
+			name: 'fallback-failure-reuse',
+			storePathHash: '9'.repeat(32)
+		});
+		const upload = expectSingleCommitDecision(
+			await negotiateUploads(token, [reused]),
+			reused
+		);
+		await markUploadPendingVerification(upload.uploadId);
+		const capture = startCapture();
+
+		try {
+			await runInDurableObject(currentServer(), async (instance) => {
+				const verification = (
+					instance as unknown as { verification: VerificationService }
+				).verification;
+				const probeTarget = verification as unknown as {
+					isCurrentNarPresent: (
+						narHash: NixSha256HashString
+					) => Promise<boolean>;
+				};
+				const probe = vi
+					.spyOn(probeTarget, 'isCurrentNarPresent')
+					.mockRejectedValue(new Error('persistent canonical probe failure'));
+
+				try {
+					for (let attempt = 1; attempt <= 11; attempt += 1) {
+						await asOneInvocation(() =>
+							verification.processPendingWithoutDecode(rootLogger(), 1)
+						);
+						const row = instance.context.db
+							.select({
+								verdict: schema.pendingUploads.verdict,
+								failures: schema.pendingUploads.settleFailures,
+								retryAfter: schema.pendingUploads.settleRetryAfter,
+								lastError: schema.pendingUploads.lastSettleError
+							})
+							.from(schema.pendingUploads)
+							.where(eq(schema.pendingUploads.id, upload.uploadId))
+							.get();
+
+						const retryDate = new Date(
+							Date.now() + pendingSettleRetryDelayMs(attempt)
+						);
+						expect(row).toStrictEqual({
+							verdict: 'pending',
+							failures: attempt,
+							lastError: 'persistent canonical probe failure',
+							retryAfter: isoTimestamp(retryDate)
+						});
+						await asOneInvocation(() =>
+							verification.processPendingWithoutDecode(rootLogger(), 1)
+						);
+						expect(probe).toHaveBeenCalledTimes(attempt);
+						instance.context.db
+							.update(schema.pendingUploads)
+							.set({ settleRetryAfter: isoTimestamp(new Date(0)) })
+							.where(eq(schema.pendingUploads.id, upload.uploadId))
+							.run();
+					}
+				} finally {
+					probe.mockRestore();
+				}
+				await asOneInvocation(() =>
+					verification.processPendingWithoutDecode(rootLogger(), 1)
+				);
+			});
+		} finally {
+			capture.stop();
+		}
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		await fetchNarInfo(reused.storePathHash);
+
+		expect(
+			capture.logs
+				.filter(
+					(record) => record.message === 'pending upload verification failed'
+				)
+				.map((record) => record.properties)
+		).toStrictEqual(
+			Array.from({ length: 11 }, (_, index) => ({
+				uploadId: upload.uploadId,
+				kind: 'reuse',
+				reason: 'prepare-failed',
+				failures: index + 1,
+				lastError: 'persistent canonical probe failure'
+			}))
+		);
+	});
+
+	it('retries publication after a committed edge has been charged', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publication-retry');
+		const committed = uploadMetadata({
+			name: 'publication-source',
+			storePathHash: '6'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		await commitPath(token, committed, nar);
+		const reused = uploadMetadata({
+			...committed,
+			name: 'publication-retry',
+			storePathHash: '7'.repeat(32)
+		});
+		const upload = expectSingleCommitDecision(
+			await negotiateUploads(token, [reused]),
+			reused
+		);
+		await markUploadPendingVerification(upload.uploadId);
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const verification = (
+				instance as unknown as { verification: VerificationService }
+			).verification;
+			const objects = (
+				verification as unknown as { narInfoObjects: NarInfoObjectsService }
+			).narInfoObjects;
+			const publish = vi
+				.spyOn(objects, 'publishNarInfoObjectWhile')
+				.mockRejectedValue(new Error('publication unavailable'));
+
+			try {
+				await asOneInvocation(() =>
+					verification.processPendingWithoutDecode(rootLogger(), 1)
+				);
+			} finally {
+				publish.mockRestore();
+			}
+
+			const pending = instance.context.db
+				.select({
+					verdict: schema.pendingUploads.verdict,
+					failures: schema.pendingUploads.settleFailures,
+					lastError: schema.pendingUploads.lastSettleError
+				})
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, upload.uploadId))
+				.get();
+			expect(pending).toStrictEqual({
+				verdict: 'pending',
+				failures: 1,
+				lastError: 'publication unavailable'
+			});
+
+			instance.context.db
+				.update(schema.pendingUploads)
+				.set({ settleRetryAfter: isoTimestamp(new Date(0)) })
+				.where(eq(schema.pendingUploads.id, upload.uploadId))
+				.run();
+			await asOneInvocation(() =>
+				verification.processPendingWithoutDecode(rootLogger(), 1)
+			);
+		});
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		await fetchNarInfo(reused.storePathHash);
 	});
 
 	it('stops a held recovery probe before the RPC leases fresh rows', async () => {

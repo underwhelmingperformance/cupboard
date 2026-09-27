@@ -61,6 +61,7 @@ import m0058 from './0058_managed_retirement_blocker_indexes.sql';
 import m0059 from './0059_managed_retirement_wake.sql';
 import m0060 from './0060_managed_retirement_recheck.sql';
 import m0061 from './0061_attestation_inheritance_queue.sql';
+import m0062 from './0062_pending_upload_settle_retry.sql';
 
 export default {
 	journal,
@@ -126,6 +127,7 @@ export default {
 		m0058,
 		m0059,
 		m0060,
-		m0061
+		m0061,
+		m0062
 	}
 };
