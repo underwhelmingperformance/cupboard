@@ -16,7 +16,7 @@ import {
 	oidcTrustSummarySchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
-import type { ResultRow } from '@cupboard/reporter';
+import type { ResultPayload, ResultRow } from '@cupboard/reporter';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildProgram } from '../cli.ts';
@@ -156,6 +156,7 @@ function trustClient(overrides: Partial<OidcTrustClient>): OidcTrustClient {
 describe('runOidcTrustList', () => {
 	it('reports a row per rule, flagging disabled ones', async () => {
 		const results: ResultRow[][] = [];
+		const payloads: ResultPayload[] = [];
 		const response = oidcTrustListResponseSchema.parse({
 			rules: [
 				summary({
@@ -168,24 +169,123 @@ describe('runOidcTrustList', () => {
 			]
 		});
 
-		await runOidcTrustList(reporter(results), {
+		const captured = reporter(results);
+
+		await runOidcTrustList(
+			{
+				...captured,
+				result(payload) {
+					payloads.push(payload);
+					captured.result(payload);
+				}
+			},
+			{
+				list: () => Promise.resolve(response)
+			}
+		);
+
+		const rows = [
+			{
+				label: 'owner',
+				value:
+					'wildcard https://idp.example.test/realms/a · owner-1 aud=https://cache.example.workers.dev'
+			},
+			{
+				label: 'rule-1',
+				value:
+					'1 grant(s) https://token.actions.githubusercontent.com aud=https://cache.example.workers.dev (disabled)'
+			}
+		];
+
+		expect({ results, payloads }).toStrictEqual({
+			results: [rows],
+			payloads: [
+				{
+					kind: 'oidc-trust-rules',
+					data: response.rules,
+					rows,
+					empty: 'No OIDC trust rules.'
+				}
+			]
+		});
+	});
+
+	it('warns about an enabled rule that the server cannot read, and notes a disabled one', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+		const warns: string[] = [];
+		const response = oidcTrustListResponseSchema.parse({
+			rules: [summary({ id: 'rule-1' })],
+			unreadable: [
+				{ id: 'rule-2', disabled: false },
+				{ id: 'rule-3', disabled: true }
+			]
+		});
+
+		await runOidcTrustList(reporter(results, infos, warns), {
 			list: () => Promise.resolve(response)
 		});
 
-		expect(results).toStrictEqual([
-			[
-				{
-					label: 'owner',
-					value:
-						'wildcard https://idp.example.test/realms/a · owner-1 aud=https://cache.example.workers.dev'
-				},
-				{
-					label: 'rule-1',
-					value:
-						'1 grant(s) https://token.actions.githubusercontent.com aud=https://cache.example.workers.dev (disabled)'
-				}
+		expect({ results, infos, warns }).toStrictEqual({
+			results: [
+				[
+					{
+						label: 'rule-1',
+						value:
+							'1 grant(s) https://token.actions.githubusercontent.com aud=https://cache.example.workers.dev'
+					}
+				]
+			],
+			infos: [
+				'The server cannot read trust rule rule-3. The rule is disabled and remains only as a record.'
+			],
+			warns: [
+				'The server cannot read trust rule rule-2, which is enabled: ID token exchanges fail until you remove the rule'
 			]
-		]);
+		});
+	});
+
+	it('does not report an empty rule list when an unreadable rule exists', async () => {
+		const results: ResultRow[][] = [];
+		const payloads: ResultPayload[] = [];
+		const infos: string[] = [];
+		const warns: string[] = [];
+		const captured = reporter(results, infos, warns);
+
+		await runOidcTrustList(
+			{
+				...captured,
+				result(payload) {
+					payloads.push(payload);
+					captured.result(payload);
+				}
+			},
+			{
+				list: () =>
+					Promise.resolve({
+						rules: [],
+						unreadable: [
+							{ id: trustRuleIdSchema.parse('rule-2'), disabled: false }
+						]
+					})
+			}
+		);
+
+		expect({ results, payloads, infos, warns }).toStrictEqual({
+			results: [[]],
+			payloads: [
+				{
+					kind: 'oidc-trust-rules',
+					data: [{ id: 'rule-2', disabled: false, unreadable: true }],
+					rows: [],
+					empty: undefined
+				}
+			],
+			infos: [],
+			warns: [
+				'The server cannot read trust rule rule-2, which is enabled: ID token exchanges fail until you remove the rule'
+			]
+		});
 	});
 
 	it('reports nothing when there are no rules', async () => {
