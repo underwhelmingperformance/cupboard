@@ -87,10 +87,6 @@ function fittedBatch(
 		}
 
 		if (width === 1) {
-			if (parameters > maxBoundParameters) {
-				throw new StatementParameterLimitError(parameters, maxBoundParameters);
-			}
-
 			throw new StatementParameterLimitError(parameters, maxBoundParameters);
 		}
 
