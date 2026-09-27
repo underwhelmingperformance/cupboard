@@ -8,7 +8,6 @@ import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { StatusCodes } from 'http-status-codes';
 import {
 	createLocalJWKSet,
-	errors as joseErrors,
 	exportJWK,
 	generateKeyPair,
 	type JSONWebKeySet,
@@ -28,7 +27,6 @@ import {
 	OidcAuthorisedPartyMissingError,
 	OidcDiscoveryError,
 	OidcDiscoveryStore,
-	OidcKeysUnreachableError,
 	OidcTokenDecodeError,
 	OidcTokenVerificationError,
 	OidcUntrustedAudienceError,
@@ -744,28 +742,29 @@ describe('verifyInboundOidcToken', () => {
 		});
 	});
 
-	it('classifies a JWKS retrieval failure as an unreachable issuer', async () => {
+	it('passes an unexpected fault in the audience check through unchanged', async () => {
 		const idp = await inboundIssuer();
-		const token = await idp.sign({ sub: 'owner' });
+		const token = await idp.signWithAudience([audience, 'another-client'], {
+			sub: 'owner',
+			azp: audience
+		});
+		const fault = new TypeError('the audience set cannot be read');
+		class FaultyAudienceSet extends Set<string> {
+			override has(): boolean {
+				throw fault;
+			}
+		}
 
 		const error = await rejectedBy(() =>
 			verifyInboundOidcToken(
-				() => Promise.reject(new joseErrors.JWKSTimeout()),
+				createLocalJWKSet(idp.jwks),
 				token,
-				verifyOptions(),
+				verifyOptions({ trustedAudiences: new FaultyAudienceSet() }),
 				now
 			)
 		);
 
-		expect(error).toBeInstanceOf(OidcKeysUnreachableError);
-		if (!(error instanceof OidcKeysUnreachableError)) {
-			throw error;
-		}
-
-		expect(errorShape(error)).toStrictEqual({
-			name: 'OidcKeysUnreachableError',
-			hasCause: true
-		});
+		expect(error).toBe(fault);
 	});
 });
 
@@ -1242,6 +1241,89 @@ describe('fetchOidcDiscovery', () => {
 });
 
 describe('OidcDiscoveryStore', () => {
+	it.each([
+		{
+			name: 'a failed JWKS fetch as an unreachable issuer',
+			jwks: () => Promise.reject(new TypeError('fetch failed')),
+			expected: { name: 'OidcKeysUnreachableError', hasCause: true }
+		},
+		{
+			name: 'a JWKS response other than 200 as an unreachable issuer',
+			jwks: () =>
+				Promise.resolve(
+					new Response('unavailable', {
+						status: StatusCodes.SERVICE_UNAVAILABLE
+					})
+				),
+			expected: { name: 'OidcKeysUnreachableError', hasCause: true }
+		},
+		{
+			name: 'a JWKS body that is not JSON as an unreachable issuer',
+			jwks: () => Promise.resolve(new Response('<html></html>')),
+			expected: { name: 'OidcKeysUnreachableError', hasCause: true }
+		},
+		{
+			name: 'a JSON body that is not a key set as an unreachable issuer',
+			jwks: () => Promise.resolve(Response.json({ keys: 'none' })),
+			expected: { name: 'OidcKeysUnreachableError', hasCause: true }
+		},
+		{
+			name: 'a token whose key is absent from the JWKS as a bad token',
+			jwks: () => Promise.resolve(Response.json({ keys: [] })),
+			expected: { name: 'OidcTokenVerificationError', hasCause: true }
+		}
+	])('classifies $name', async ({ jwks, expected }) => {
+		const idp = await inboundIssuer();
+		const fetcher: typeof fetch = (input) =>
+			requestUrl(input) === metadataUrl ? successfulOidcMetadata() : jwks();
+		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
+		const resolved = await store.resolve(issuer);
+		const token = await idp.sign({ sub: 'owner' });
+
+		const error = await rejectedBy(() =>
+			verifyInboundOidcToken(
+				resolved.resolver,
+				token,
+				verifyOptions({ algorithms: resolved.algorithms }),
+				now
+			)
+		);
+
+		expect(error instanceof Error ? errorShape(error) : error).toStrictEqual(
+			expected
+		);
+	});
+
+	it('passes a fault in key import through unchanged', async () => {
+		const idp = await inboundIssuer();
+		const fetcher: typeof fetch = (input) =>
+			requestUrl(input) === metadataUrl
+				? successfulOidcMetadata()
+				: Promise.resolve(Response.json(idp.jwks));
+		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
+		const resolved = await store.resolve(issuer);
+		const token = await idp.sign({ sub: 'owner' });
+		const fault = new TypeError('the key could not be imported');
+		const importKey = vi
+			.spyOn(crypto.subtle, 'importKey')
+			.mockRejectedValue(fault);
+
+		try {
+			const error = await rejectedBy(() =>
+				verifyInboundOidcToken(
+					resolved.resolver,
+					token,
+					verifyOptions({ algorithms: resolved.algorithms }),
+					now
+				)
+			);
+
+			expect(error).toBe(fault);
+		} finally {
+			importKey.mockRestore();
+		}
+	});
+
 	it('requests the JWKS with manual redirect handling', async () => {
 		const idp = await inboundIssuer();
 		const requested: {

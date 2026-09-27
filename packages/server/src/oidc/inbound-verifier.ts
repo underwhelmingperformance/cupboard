@@ -9,8 +9,10 @@ import {
 } from '../errors.ts';
 
 import {
+	OidcDiscoveryError,
 	type OidcDiscoveryStore,
 	OidcKeysUnreachableError,
+	OidcTokenVerificationError,
 	verifyInboundOidcToken
 } from './oidc.ts';
 
@@ -23,11 +25,14 @@ const issuerRetryDelayMs = 100;
  *
  * A failure to fetch the issuer's metadata or keys is an
  * `IssuerUnavailableError`, which the client can retry. The verifier retries it
- * once itself after a short delay. Every other verification failure is a
- * `SubjectTokenVerificationFailedError`.
+ * once itself after a short delay. A token that fails verification is a
+ * `SubjectTokenVerificationFailedError`. Any other error propagates unchanged
+ * and becomes a 500.
  */
 export class InboundTokenVerifier {
-	constructor(private readonly discovery: OidcDiscoveryStore) {}
+	constructor(
+		private readonly discovery: Pick<OidcDiscoveryStore, 'resolve'>
+	) {}
 
 	private async verifyOnce(
 		target: OidcTrustVerificationTarget,
@@ -39,7 +44,11 @@ export class InboundTokenVerifier {
 		try {
 			issuer = await this.discovery.resolve(target.issuer);
 		} catch (error: unknown) {
-			throw new IssuerUnavailableError(target.issuer, { cause: error });
+			if (error instanceof OidcDiscoveryError) {
+				throw new IssuerUnavailableError(target.issuer, { cause: error });
+			}
+
+			throw error;
 		}
 
 		try {
@@ -60,7 +69,11 @@ export class InboundTokenVerifier {
 				throw new IssuerUnavailableError(target.issuer, { cause: error });
 			}
 
-			throw new SubjectTokenVerificationFailedError();
+			if (error instanceof OidcTokenVerificationError) {
+				throw new SubjectTokenVerificationFailedError();
+			}
+
+			throw error;
 		}
 	}
 
