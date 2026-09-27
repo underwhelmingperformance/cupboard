@@ -274,14 +274,16 @@ describe('control plane POST /signup', () => {
 				subject_token: subjectToken,
 				...form
 			});
-			await response.text();
+			const body = await response.text();
 
 			expect({
 				status: response.status,
+				body,
 				fetched: idp.fetched,
 				...(await seededAdmin())
 			}).toStrictEqual({
 				status: StatusCodes.FORBIDDEN,
+				body: 'The signup claim was refused. Check that CUPBOARD_SIGNUP_SECRET is set on the control Worker and that claim_secret contains the same value.\n',
 				fetched: [],
 				admin: undefined,
 				trust: []
@@ -300,14 +302,16 @@ describe('control plane POST /signup', () => {
 			{ subject_token: subjectToken, claim_secret: claimSecret },
 			{ CUPBOARD_SIGNUP_SECRET: '', CUPBOARD_LOCAL_DEV: '1' }
 		);
-		await response.text();
+		const body = await response.text();
 
 		expect({
 			status: response.status,
+			body,
 			fetched: idp.fetched,
 			...(await seededAdmin())
 		}).toStrictEqual({
 			status: StatusCodes.FORBIDDEN,
+			body: 'The signup claim was refused. Check that CUPBOARD_SIGNUP_SECRET is set on the control Worker and that claim_secret contains the same value.\n',
 			fetched: [],
 			admin: undefined,
 			trust: []

@@ -408,7 +408,9 @@ export class SignupForbiddenError extends ServerHttpError {
 	readonly status = StatusCodes.FORBIDDEN;
 
 	constructor() {
-		super('The signup claim did not satisfy the deployment gate');
+		super(
+			'The signup claim was refused. Check that CUPBOARD_SIGNUP_SECRET is set on the control Worker and that claim_secret contains the same value.'
+		);
 		this.name = 'SignupForbiddenError';
 	}
 }
