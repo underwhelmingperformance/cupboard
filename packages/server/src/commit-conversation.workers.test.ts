@@ -55,6 +55,48 @@ describe('commit conversation frame reader', () => {
 		expect(conversation.socket.readyState).toBe(WebSocket.READY_STATE_CLOSED);
 	});
 
+	it('runs another verification pass when a pass leaves the deferred upload without a verdict', async () => {
+		const { server, conversation } = openConversation();
+		server.addEventListener('message', () => {
+			server.send(
+				JSON.stringify({
+					ev: 'deferred',
+					uploadId,
+					storePathHash: 'a'.repeat(32),
+					narHash: 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+				})
+			);
+		});
+		let passes = 0;
+
+		const result = await completeCommitSession(
+			conversation,
+			uploadId,
+			() => {
+				passes += 1;
+
+				// The first pass leaves the upload pending; the second records it.
+				if (passes === 2) {
+					server.send(
+						JSON.stringify({ ev: 'verdict', uploadId, status: 'servable' })
+					);
+				}
+
+				return Promise.resolve();
+			},
+			{}
+		);
+
+		expect({ result, passes }).toStrictEqual({
+			result: {
+				storePathHash: 'a'.repeat(32),
+				narHash: 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347',
+				status: 'committed'
+			},
+			passes: 2
+		});
+	});
+
 	it('rejects a frame read started after the socket has closed', async () => {
 		const { server, conversation, closed } = openConversation();
 		server.close();
