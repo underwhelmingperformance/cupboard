@@ -304,7 +304,9 @@ the destination already serves appears in "Already served by the cache" instead.
 
 Publishing by reference requires `main` to have the same derivations as the pull
 request. The run may build an output if `main` has moved on, or if the output
-depends on the commit itself, for example through `self.rev`.
+depends on the commit itself, for example through `self.rev`. Investigate
+unexpected rebuilding by comparing the derivations and publication logs from the
+pull request and `main`.
 
 If a run is refused, see
 [Troubleshooting](../troubleshooting.md#ci-publication).
