@@ -871,7 +871,7 @@ describe('modelPublishingJob event filters', () => {
 		).toStrictEqual(expected);
 	});
 
-	it('reports a preset tag push as unverified', () => {
+	it('reports a preset tag push as failed', () => {
 		const result = modelPublishingJob(
 			{
 				...job,
