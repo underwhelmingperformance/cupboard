@@ -59,6 +59,8 @@ import {
 	CustomReuseViewFinding,
 	ForkPullRequestFinding,
 	ManualRunBranchFinding,
+	PresetPushFilterFinding,
+	PresetTagPushFinding,
 	PublicationUnmodelledFinding,
 	PushCoverageFinding,
 	ReferenceFilterExcludesFinding,
@@ -1172,6 +1174,110 @@ jobs:
 		]);
 	}
 );
+
+it.each([
+	{
+		name: 'an unfiltered preset push',
+		filter: '',
+		finding: new PresetPushFilterFinding('main')
+	},
+	{
+		name: 'a preset tag push',
+		filter: "    tags: ['v*']",
+		finding: new PresetTagPushFinding()
+	}
+])('reports $name as failed', async ({ filter, finding }) => {
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
+	const rule = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(
+			tenant,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{ repo: repository, branch: 'main', jobWorkflowRef: reference }
+		),
+		id: 'all-runs',
+		disabled: false
+	});
+	const view = reuseViewSummarySchema.parse({
+		name: 'pull-requests-1234',
+		access: 'public',
+		selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+		priority: 50,
+		revision: 1,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z'
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main' },
+		capturingReporter([]),
+		fixture({ rules: [rule], views: [view] }).client,
+		defaultDependencies({
+			fetchCacheInfo: (url) => {
+				const priority = cachePrioritySchema.parse(
+					url.pathname.includes('/reuse/') ? 50 : 40
+				);
+
+				return Promise.resolve(
+					new CacheInfo(servedStoreDirectory, true, priority)
+				);
+			},
+			source: {
+				...source,
+				read: () =>
+					Promise.resolve(`
+on:
+  push:
+${filter}
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+`)
+			}
+		})
+	);
+
+	expect({
+		jobs: result.jobs,
+		isRepairOffered: isRepairOffered(result)
+	}).toStrictEqual({
+		jobs: [
+			{
+				caller: path,
+				job: 'publish',
+				workflowRef: reference,
+				status: 'failed',
+				findings:
+					filter === ''
+						? [
+								{ trigger: 'push', finding },
+								{
+									trigger: 'push',
+									finding: new PassedCheckFinding('trust rule')
+								},
+								{
+									trigger: 'push',
+									finding: new PassedCheckFinding('root grant')
+								},
+								{
+									trigger: 'push',
+									finding: new PassedCheckFinding('reuse view')
+								}
+							]
+						: [{ trigger: 'push', finding }]
+			}
+		],
+		isRepairOffered: false
+	});
+});
 
 it('does not report ready for manual runs on other branches', async () => {
 	const reference =

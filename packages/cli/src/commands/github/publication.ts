@@ -177,7 +177,7 @@ export class BranchFilterCoverageFinding extends CheckFinding {
 }
 
 export class PresetTagPushFinding extends CheckFinding {
-	readonly status = 'unverified' as const;
+	readonly status = 'failed' as const;
 
 	constructor() {
 		super('ref filter');
@@ -201,7 +201,7 @@ export class PushCoverageFinding extends CheckFinding {
 }
 
 export class PresetPushFilterFinding extends CheckFinding {
-	readonly status = 'unverified' as const;
+	readonly status = 'failed' as const;
 
 	constructor(public readonly branch: string) {
 		super('push coverage');
