@@ -371,8 +371,8 @@ export function registerLoginCommand(
 			kind: 'login',
 			data: { url: target, scope, storedIn },
 			rows: [
-				{ label: 'Cache URL', value: target },
-				{ label: 'Session', value: 'admin token cached' },
+				{ label: 'URL', value: target },
+				{ label: 'Session', value: 'saved' },
 				{ label: 'Stored', value: storedIn }
 			]
 		});
