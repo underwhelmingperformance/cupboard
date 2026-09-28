@@ -127,9 +127,11 @@ The control plane is one Worker with a D1 database. Each tenant is a Durable
 Object, which keeps the tenant's narinfos, roots, keys and trust rules in its
 own SQLite database. NARs and attestations are in R2, stored once however many
 tenants publish them. R2 doesn't charge for egress, so serving builds costs
-storage and requests, not bandwidth. An hourly cron job queues maintenance for
-the tenants that are due, which runs garbage collection and key retirement for
-each tenant at least every six hours.
+storage and requests, not bandwidth. An hourly cron job queues garbage
+collection and key retirement for up to 100 due tenants. An active tenant
+becomes due when it has work to do or six hours have passed since its
+maintenance eligibility was last reconciled. Queue delivery, other due tenants
+and maintenance failures can delay completion.
 [Architecture](./docs/contributing/architecture.md) goes through it in detail.
 
 ## Status
