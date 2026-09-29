@@ -1545,25 +1545,27 @@ describe('cache generation gate', () => {
 			strandedNar
 		);
 
-		// Read the marker in the same invocation as the deletion. Once that
-		// invocation ends, workerd can deliver the due alarm. The first pass
-		// queues the stranded edge and rearms the alarm; the next retires the
-		// edge and clears the marker.
-		const queuedForDrain = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				const cache = instance.context.cacheRepository.require(buildsCache);
-				await instance.runCacheTeardown(buildsCache, origin);
+		// A due alarm can run while a Durable Object callback awaits. Keep alarm
+		// arming disabled so only the explicit drain passes can clear the marker.
+		const queuedForDrain = await withoutAlarmArming(async () => {
+			const marker = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const cache = instance.context.cacheRepository.require(buildsCache);
+					await instance.runCacheTeardown(buildsCache, origin);
 
-				return state.storage.get(`${teardownEntryPrefix}${String(cache.id)}`);
-			}
-		);
+					return state.storage.get(`${teardownEntryPrefix}${String(cache.id)}`);
+				}
+			);
 
-		await driveToCompletion(
-			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending(buildsCache)) === undefined,
-			3
-		);
+			await driveToCompletion(
+				() => currentServer().resumeCacheTeardown(1),
+				async () => (await teardownPending(buildsCache)) === undefined,
+				3
+			);
+
+			return marker;
+		});
 
 		const read = await readFetch(seededNarPath(strandedNar));
 
@@ -1586,7 +1588,9 @@ describe('cache generation gate', () => {
 		const committed = indexedMetadata(0, committedNar);
 		const stranded = indexedMetadata(1, strandedNar);
 
-		await pushPath(token, committed, buildsCache, committedNar);
+		await withoutAlarmArming(() =>
+			pushPath(token, committed, buildsCache, committedNar)
+		);
 		// Seed a reference edge without a narinfo row. An interrupted earlier
 		// deletion can leave this state. The transaction that queues the teardown reads
 		// the narinfo rows, so it cannot find this one.
@@ -1596,18 +1600,10 @@ describe('cache generation gate', () => {
 			strandedNar
 		);
 
-		// Delete and drain inside one Durable Object invocation. The deletion arms
-		// an alarm, and a pass that alarm ran would drain the whole cache at the
-		// deployed cap before this test could observe the state a full chunk
-		// leaves.
-		//
-		// Each pass takes a cap of one against a queue holding exactly one entry:
-		// the chunk fills the cap and still empties the queue, so the pass has to
-		// sweep for the stranded edge before it can decide that the teardown is
-		// over.
-		const drained = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
+		// An alarm pass uses the deployed cap and would drain the queue before
+		// this test can inspect the state left by its cap-one pass.
+		const drained = await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
 				const cache = instance.context.cacheRepository.require(buildsCache);
 				const marker = (): Promise<unknown> =>
 					state.storage.get(`${teardownEntryPrefix}${String(cache.id)}`);
@@ -1633,7 +1629,7 @@ describe('cache generation gate', () => {
 					pending: await marker(),
 					queued: queuedPaths()
 				};
-			}
+			})
 		);
 
 		expect({
