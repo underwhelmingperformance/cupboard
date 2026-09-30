@@ -289,6 +289,41 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
+	it('verifies a closure above ten thousand paths in bounded query pages', async () => {
+		const dependencies = Array.from({ length: 10_001 }, (_, index) =>
+			path(`${index.toString().padStart(32, '0')}-dependency`)
+		);
+		const local = new Map([
+			[appPath, held(appPath, dependencies)],
+			...dependencies.map((storePath) => [storePath, held(storePath)] as const)
+		]);
+		const store = new FakeStore(
+			local,
+			new Map(local.keys().map((storePath) => [storePath, offer()]))
+		);
+		const verdict = await resolveSubstitutableClosure(appPath, store.queries);
+		expect({
+			verdict,
+			queried: store.heldBatches.flat(),
+			maximumHeldBatch: Math.max(
+				...store.heldBatches.map((batch) => batch.length)
+			),
+			maximumOfferedBatch: Math.max(
+				...store.offeredBatches.map((batch) => batch.length)
+			)
+		}).toStrictEqual({
+			verdict: {
+				kind: 'served',
+				pathCount: 10_002,
+				downloadSize: 0,
+				narSize: 0
+			},
+			queried: [appPath, ...dependencies],
+			maximumHeldBatch: 32,
+			maximumOfferedBatch: 32
+		});
+	});
+
 	it('returns over-cap before querying a frontier above the limit', async () => {
 		const store = new FakeStore(
 			new Map([

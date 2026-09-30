@@ -120,6 +120,56 @@ const copyPathActivity = 100;
 
 type NixLoggerField = number | string;
 
+type NixActivityObserver = (
+	activityType: number,
+	fields: readonly NixLoggerField[]
+) => void;
+
+class NixBuildExecutions {
+	private readonly derivations = new Map<string, NixBuildResult['execution']>();
+
+	constructor(targets: readonly NixDerivedPathString[]) {
+		for (const target of targets) {
+			const [derivation, outputs, nested] = target.split('^', 3);
+			if (
+				outputs !== undefined &&
+				nested === undefined &&
+				derivation?.endsWith('.drv') === true
+			) {
+				this.derivations.set(derivation, undefined);
+			}
+		}
+	}
+
+	record(activityType: number, fields: readonly NixLoggerField[]): void {
+		const [derivation, machine] = fields;
+		if (
+			activityType !== 105 ||
+			typeof derivation !== 'string' ||
+			typeof machine !== 'string' ||
+			!this.derivations.has(derivation)
+		) {
+			return;
+		}
+
+		const existing = this.derivations.get(derivation);
+		this.derivations.set(
+			derivation,
+			machine === '' && existing !== 'remote' ? 'local' : 'remote'
+		);
+	}
+
+	forResult(result: NixBuildResult): NixBuildResult {
+		const [derivation] = result.target.split('^', 1);
+		const execution =
+			derivation !== undefined && result.outcome.kind === 'built'
+				? this.derivations.get(derivation)
+				: undefined;
+
+		return execution === undefined ? result : { ...result, execution };
+	}
+}
+
 export interface NixCopyRecord {
 	readonly storePath: StorePathString;
 	readonly source: string;
@@ -1528,15 +1578,17 @@ class NixDaemonConnection {
 		};
 	}
 
-	private async processStderr(): Promise<void> {
+	private async processStderr(onActivity?: NixActivityObserver): Promise<void> {
 		let hasMoreMessages = true;
 
 		while (hasMoreMessages) {
-			hasMoreMessages = await this.processNextStderrMessage();
+			hasMoreMessages = await this.processNextStderrMessage(onActivity);
 		}
 	}
 
-	private async processNextStderrMessage(): Promise<boolean> {
+	private async processNextStderrMessage(
+		onActivity?: NixActivityObserver
+	): Promise<boolean> {
 		const messageType = await this.readInteger();
 
 		if (messageType === stderrLast) {
@@ -1564,6 +1616,7 @@ class NixDaemonConnection {
 			const fields = await this.readLoggerFields();
 			await this.readInteger();
 			this.recordCopyActivity(activityType, fields);
+			onActivity?.(activityType, fields);
 			return true;
 		}
 
@@ -2166,8 +2219,11 @@ class NixDaemonConnection {
 		request.writeStringSet(targets.map((target) => legacyDerivedPath(target)));
 		request.writeInteger(encodeBuildMode(mode));
 
+		const executions = new NixBuildExecutions(targets);
 		await this.transport.write(request.bytes());
-		await this.processStderr();
+		await this.processStderr((activityType, fields) => {
+			executions.record(activityType, fields);
+		});
 
 		const count = await this.readCount(
 			'build results',
@@ -2176,7 +2232,7 @@ class NixDaemonConnection {
 		const results: NixBuildResult[] = [];
 
 		for (let index = 0; index < count; index += 1) {
-			results.push(await this.readKeyedBuildResult());
+			results.push(executions.forResult(await this.readKeyedBuildResult()));
 		}
 
 		return results;

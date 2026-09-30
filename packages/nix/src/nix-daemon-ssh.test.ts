@@ -313,6 +313,68 @@ describe('parseSshNgStoreUri', () => {
 });
 
 describe('createSshNixDaemonConnector', () => {
+	it.each([
+		{
+			uri: 'ssh-ng://build@example.test?remote-store=daemon',
+			command: 'ssh',
+			commandArguments: [
+				'build@example.test',
+				'-x',
+				'-oRemoteCommand=none',
+				'--',
+				'nix-daemon',
+				'--stdio',
+				'--option',
+				'builders',
+				"''",
+				'--store',
+				'daemon'
+			]
+		},
+		{
+			uri: 'ssh-ng://localhost?remote-store=daemon',
+			command: 'nix-daemon',
+			commandArguments: [
+				'--stdio',
+				'--option',
+				'builders',
+				'',
+				'--store',
+				'daemon'
+			]
+		}
+	])(
+		'disables builders in the startup command for $uri',
+		async ({ uri, command, commandArguments }) => {
+			const spec = parseSshNgStoreUri(uri);
+			if (spec === undefined) {
+				throw new Error('Expected a valid SSH store URI');
+			}
+			const commands: {
+				command: string;
+				commandArguments: readonly string[];
+			}[] = [];
+			const run: DaemonCommandRunner = (command, commandArguments) => {
+				commands.push({ command, commandArguments });
+				return new FakeDaemonChild(
+					new FakeDaemonTransport({}, { expectSetOptions: false })
+				);
+			};
+			const client = new NixDaemonStoreClient({
+				shouldPreserveDaemonOptions: true,
+				connect: createSshNixDaemonConnector(spec, run, {
+					disableRemoteBuilders: true,
+					env: {}
+				})
+			});
+
+			await expect(client.queryValidPaths([appPath])).resolves.toStrictEqual(
+				[]
+			);
+			expect(commands).toStrictEqual([{ command, commandArguments }]);
+		}
+	);
+
 	it('closing one concurrent daemon connection leaves the other SSH transport open', async () => {
 		const commands: string[][] = [];
 		const disposeKnownHosts = [vi.fn(), vi.fn()];

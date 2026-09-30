@@ -7,22 +7,15 @@ import {
 	type NixValidPathInfo
 } from './nix-store.ts';
 
-/**
- * The maximum number of distinct closure paths that may be queried. If one
- * round discovers enough references to exceed the limit, the next round
- * returns `over-cap` without querying them.
- */
-export const defaultSubstitutableClosureCap = 10_000;
-
 export interface SubstitutableClosureOptions {
 	/**
-	 * Limits the number of distinct closure paths that may be queried. Defaults
-	 * to {@link defaultSubstitutableClosureCap}.
+	 * Limits the number of distinct closure paths when explicitly supplied.
+	 * The default walk has no total path limit.
 	 */
 	readonly maxPaths?: number;
 	/**
-	 * Abandons the walk between rounds using the signal's reason. In-flight
-	 * store and substituter queries finish before the current round stops.
+	 * Abandons the walk between query pages using the signal's reason. In-flight
+	 * store and substituter queries finish before the current page stops.
 	 */
 	readonly signal?: AbortSignal;
 	/**
@@ -87,8 +80,8 @@ export interface SubstitutableClosureQueries {
 /**
  * Checks every path in the closure recorded by the local store. References
  * advertised by substituters are not authoritative and cannot reduce the
- * required closure. Each frontier is queried once from the local store and
- * once from the selected substituters.
+ * required closure. Each frontier is queried in pages of at most 32 paths
+ * from the local store and the selected substituters.
  *
  * Paths are checked in frontier order. Local absence takes precedence over a
  * missing offer, a NAR hash mismatch, and consumer-policy rejection. The first
@@ -96,19 +89,18 @@ export interface SubstitutableClosureQueries {
  * and sums its download and NAR sizes.
  *
  * The walk reads metadata only and never fetches a NAR. It observes aborts
- * between frontiers; in-flight queries finish before the current frontier
- * stops. The caller selects both the substituters and the offer-acceptance
- * policy.
+ * between pages; in-flight queries finish before the current page stops.
+ * The caller selects both the substituters and the offer-acceptance policy.
  */
 export async function resolveSubstitutableClosure(
 	root: StorePathString,
 	queries: SubstitutableClosureQueries,
 	options: SubstitutableClosureOptions = {}
 ): Promise<SubstitutableClosureVerdict> {
-	const maxPaths = positiveSafeInteger(
-		options.maxPaths ?? defaultSubstitutableClosureCap,
-		'maxPaths'
-	);
+	const maxPaths =
+		options.maxPaths === undefined
+			? undefined
+			: positiveSafeInteger(options.maxPaths, 'maxPaths');
 	const claimed = new Set<string>();
 	let frontier = claimUnseen([root], claimed);
 	let downloadSize = 0;
@@ -117,46 +109,52 @@ export async function resolveSubstitutableClosure(
 	while (frontier.length > 0) {
 		options.signal?.throwIfAborted();
 
-		if (claimed.size > maxPaths) {
+		if (maxPaths !== undefined && claimed.size > maxPaths) {
 			return { kind: 'over-cap', maxPaths };
 		}
 
-		const [heldInfos, offeredInfos] = await Promise.all([
-			queries.heldLocally(frontier),
-			queries.offered(frontier)
-		]);
-		const held = new Map(heldInfos.map((info) => [info.storePath, info]));
-		const offered = new Map(offeredInfos.map((info) => [info.storePath, info]));
 		const references: StorePathString[] = [];
+		for (let offset = 0; offset < frontier.length; offset += 32) {
+			options.signal?.throwIfAborted();
+			const page = frontier.slice(offset, offset + 32);
+			const [heldInfos, offeredInfos] = await Promise.all([
+				queries.heldLocally(page),
+				queries.offered(page)
+			]);
+			options.signal?.throwIfAborted();
+			const held = new Map(heldInfos.map((info) => [info.storePath, info]));
+			const offered = new Map(
+				offeredInfos.map((info) => [info.storePath, info])
+			);
 
-		for (const storePath of frontier) {
-			const local = held.get(storePath);
+			for (const storePath of page) {
+				const local = held.get(storePath);
 
-			if (local === undefined) {
-				return { kind: 'not-held-locally', storePath };
+				if (local === undefined) {
+					return { kind: 'not-held-locally', storePath };
+				}
+
+				const offer = offered.get(storePath);
+
+				if (offer === undefined) {
+					return { kind: 'not-served', storePath };
+				}
+
+				const divergent = narHashMismatch(storePath, local, offer);
+
+				if (divergent !== undefined) {
+					return divergent;
+				}
+
+				if (!(await (options.accepts ?? willAcceptEveryOffer)(offer))) {
+					return { kind: 'refused', storePath };
+				}
+
+				downloadSize += offer.downloadSize;
+				narSize += offer.narSize;
+				references.push(...local.references);
 			}
-
-			const offer = offered.get(storePath);
-
-			if (offer === undefined) {
-				return { kind: 'not-served', storePath };
-			}
-
-			const divergent = narHashMismatch(storePath, local, offer);
-
-			if (divergent !== undefined) {
-				return divergent;
-			}
-
-			if (!(await (options.accepts ?? willAcceptEveryOffer)(offer))) {
-				return { kind: 'refused', storePath };
-			}
-
-			downloadSize += offer.downloadSize;
-			narSize += offer.narSize;
-			references.push(...local.references);
 		}
-
 		frontier = claimUnseen(references, claimed);
 	}
 

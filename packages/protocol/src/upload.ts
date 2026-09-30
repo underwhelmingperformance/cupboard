@@ -62,6 +62,27 @@ export const uploadPathMetadataSchema = z
 	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
 export type UploadPathMetadata = z.output<typeof uploadPathMetadataSchema>;
 
+const referencePublicationEntrySchema = z.strictObject({
+	storePath: storePathSchema,
+	kind: z.enum(['target', 'intermediate']),
+	source: z.string(),
+	narinfo: z.string()
+});
+
+export const referencePublicationManifestSchema = z.strictObject({
+	version: z.literal(1),
+	paths: z
+		.array(referencePublicationEntrySchema)
+		.refine(
+			(paths) =>
+				new Set(paths.map((entry) => entry.storePath)).size === paths.length,
+			'Each store path must appear once in the reference manifest'
+		)
+});
+export type ReferencePublicationManifestInput = z.input<
+	typeof referencePublicationManifestSchema
+>;
+
 // An identifier signed by the server when it issues upload credentials. The
 // identifier scopes staging objects to `staging/<pushId>/`, so one credential
 // can cover every upload in the push. The restricted format prevents the

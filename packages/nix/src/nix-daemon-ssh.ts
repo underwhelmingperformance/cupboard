@@ -205,6 +205,7 @@ interface KnownHostsFile {
 }
 
 export interface NixSshConnectorDependencies {
+	readonly disableRemoteBuilders?: boolean;
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly knownHostsFile?: (host: string, publicKey: string) => KnownHostsFile;
 }
@@ -227,6 +228,9 @@ export function createSshNixDaemonConnector(
 	const daemonArguments = [
 		...remoteProgram,
 		'--stdio',
+		...(dependencies.disableRemoteBuilders === true
+			? ['--option', 'builders', shouldUseNativeLocalhost(spec) ? '' : "''"]
+			: []),
 		...remoteStoreArguments
 	];
 	const command = daemonArguments[0];
