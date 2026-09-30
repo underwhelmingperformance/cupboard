@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	commitUpload,
+	CommitVerdictError,
 	expectSingleUploadDecision,
 	expectStats,
 	initialise,
@@ -18,7 +19,7 @@ import {
 describe('concurrent writes', () => {
 	beforeEach(resetTestServer);
 
-	it('settles two concurrent commits of one path, both reporting success', async () => {
+	it('reports one publisher for two concurrent commits of one path', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -34,32 +35,48 @@ describe('concurrent writes', () => {
 		await putNarBytes(first.r2Key);
 		await putNarBytes(second.r2Key);
 
-		// Only one commit materialises the path. The other can report `committed` if
-		// it waits for the shared verdict, or `already-present` if the first commit
-		// settles before the second frame is processed. Both statuses are successful;
-		// the final accounting must still contain one path and one blob charge.
-		const settled = await Promise.all([
+		const settled = await Promise.allSettled([
 			commitUpload(token, first.uploadId),
 			commitUpload(token, second.uploadId)
 		]);
-		const statuses = settled.map((outcome) => outcome.status);
-
+		const outcomes = settled.map((result) => {
+			if (result.status === 'fulfilled') {
+				return result.value;
+			}
+			expect(result.reason).toStrictEqual(new CommitVerdictError('absent'));
+			return {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			};
+		});
 		expect({
-			paths: settled.map((outcome) => ({
-				storePathHash: outcome.storePathHash,
-				narHash: outcome.narHash
-			})),
-			allSettled: statuses.every(
-				(status) => status === 'committed' || status === 'already-present'
+			outcomes: outcomes.toSorted((left, right) =>
+				left.status.localeCompare(right.status)
 			),
-			anyCommitted: statuses.includes('committed')
+			retry: await negotiateUploads(token, [metadata])
 		}).toStrictEqual({
-			paths: [
-				{ storePathHash: metadata.storePathHash, narHash: metadata.narHash },
-				{ storePathHash: metadata.storePathHash, narHash: metadata.narHash }
+			outcomes: [
+				{
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					status: 'already-present'
+				},
+				{
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					status: 'committed'
+				}
 			],
-			allSettled: true,
-			anyCommitted: true
+			retry: {
+				uploads: [
+					{
+						action: 'skip',
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash
+					}
+				]
+			}
 		});
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
@@ -79,9 +96,23 @@ describe('concurrent writes', () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
-		await Promise.all(
+		const settled = await Promise.allSettled(
 			Array.from({ length: 4 }, () => pushPath(token, metadata))
 		);
+		for (const result of settled) {
+			if (result.status === 'rejected') {
+				expect(result.reason).toStrictEqual(new CommitVerdictError('absent'));
+			}
+		}
+		expect(await negotiateUploads(token, [metadata])).toStrictEqual({
+			uploads: [
+				{
+					action: 'skip',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 

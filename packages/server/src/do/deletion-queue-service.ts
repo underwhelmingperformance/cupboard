@@ -250,9 +250,9 @@ export function cacheReferenceSelect(
 }
 
 /**
- * Builds the usage-credit update and edge delete that retire one chunk of
- * narinfo edges. Both statements use the same edge filter, which the credit
- * update embeds in its `count(*)` subquery.
+ * Builds statements to retire one chunk of narinfo references and their
+ * publication records. The quota update counts only references matched by
+ * the reference deletion.
  *
  * The parameter test imports this builder so it inspects the production
  * statements instead of maintaining a separate filter.
@@ -289,7 +289,21 @@ export function fencedEdgeRetirement(
 				updatedAt: now
 			})
 			.where(eq(d1Schema.tenantUsage.tenant, tenant)),
-		edgeDelete: database.delete(d1Schema.blobReference).where(edgeFilter)
+		edgeDelete: database.delete(d1Schema.blobReference).where(edgeFilter),
+		publicationDelete: database.delete(d1Schema.publication).where(
+			and(
+				eq(d1Schema.publication.tenant, tenant),
+				cacheIdentityCondition(
+					d1Schema.publication.cacheKind,
+					d1Schema.publication.cacheName,
+					cache
+				),
+				batch.matches({
+					storePathHash: d1Schema.publication.storePathHash,
+					generation: d1Schema.publication.generation
+				})
+			)
+		)
 	};
 }
 
@@ -474,6 +488,17 @@ export class DeletionQueueService {
 			edgeExists
 		);
 
+		const publicationFilter = and(
+			eq(d1Schema.publication.tenant, tenant),
+			cacheIdentityCondition(
+				d1Schema.publication.cacheKind,
+				d1Schema.publication.cacheName,
+				cache.scope
+			),
+			eq(d1Schema.publication.storePathHash, storePathHash),
+			eq(d1Schema.publication.generation, generation)
+		);
+
 		await this.context.d1.batch([
 			this.context.d1
 				.update(d1Schema.tenantUsage)
@@ -482,7 +507,8 @@ export class DeletionQueueService {
 					updatedAt: now
 				})
 				.where(creditNarInfoFilter),
-			this.context.d1.delete(d1Schema.blobReference).where(edgeFilter)
+			this.context.d1.delete(d1Schema.blobReference).where(edgeFilter),
+			this.context.d1.delete(d1Schema.publication).where(publicationFilter)
 		]);
 
 		const hashReferencedFilter = and(
@@ -776,15 +802,20 @@ export class DeletionQueueService {
 		// Compute the credit from edges that still exist, then delete those exact
 		// generations in the same transaction. Replays cannot double-credit.
 		for (const entries of jsonRowLists(batch)) {
-			const { creditUpdate, edgeDelete } = fencedEdgeRetirement(
-				this.context.d1,
-				tenant,
-				cache.scope,
-				entries,
-				now
-			);
+			const { creditUpdate, edgeDelete, publicationDelete } =
+				fencedEdgeRetirement(
+					this.context.d1,
+					tenant,
+					cache.scope,
+					entries,
+					now
+				);
 
-			await this.context.d1.batch([creditUpdate, edgeDelete]);
+			await this.context.d1.batch([
+				creditUpdate,
+				edgeDelete,
+				publicationDelete
+			]);
 		}
 
 		// A shared hash retains its presence row until its final edge is retired.

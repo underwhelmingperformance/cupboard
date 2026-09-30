@@ -59,12 +59,17 @@ function storedCacheColumn(column: AnySQLiteColumn): SQL {
 	return sql`coalesce(${column}, ${absentCacheColumn})`;
 }
 
-export function blobReferenceMatch(rows: JsonRowList<BlobReferenceKey>): SQL {
+export function blobReferenceMatch(
+	rows: JsonRowList<BlobReferenceKey>,
+	table:
+		| typeof d1Schema.blobReference
+		| typeof d1Schema.publication = d1Schema.blobReference
+): SQL {
 	return rows.matches({
-		cacheKind: storedCacheColumn(d1Schema.blobReference.cacheKind),
-		cacheName: storedCacheColumn(d1Schema.blobReference.cacheName),
-		storePathHash: d1Schema.blobReference.storePathHash,
-		generation: d1Schema.blobReference.generation
+		cacheKind: storedCacheColumn(table.cacheKind),
+		cacheName: storedCacheColumn(table.cacheName),
+		storePathHash: table.storePathHash,
+		generation: table.generation
 	});
 }
 
@@ -157,13 +162,23 @@ export class OffboardingService {
 			cacheKind: listedCacheColumn(reference.cacheKind),
 			cacheName: listedCacheColumn(reference.cacheName)
 		}));
-		const deletes = jsonRowLists(keys).map((rows) => {
+		const deletes = jsonRowLists(keys).flatMap((rows) => {
 			const keyFilter = and(
 				eq(d1Schema.blobReference.tenant, tenant),
 				blobReferenceMatch(rows)
 			);
 
-			return this.context.d1.delete(d1Schema.blobReference).where(keyFilter);
+			return [
+				this.context.d1.delete(d1Schema.blobReference).where(keyFilter),
+				this.context.d1
+					.delete(d1Schema.publication)
+					.where(
+						and(
+							eq(d1Schema.publication.tenant, tenant),
+							blobReferenceMatch(rows, d1Schema.publication)
+						)
+					)
+			];
 		});
 
 		await batchNonEmpty(this.context.d1, deletes);

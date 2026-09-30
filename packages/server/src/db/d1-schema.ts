@@ -15,6 +15,7 @@ import type { LocalStep } from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import type { ReadUser } from '@cupboard/shared/http';
 import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 import {
@@ -176,6 +177,35 @@ export const blobReference = sqliteTable(
 			table.cacheName,
 			table.cacheGeneration
 		)
+	]
+);
+
+export const publication = sqliteTable(
+	'publication',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		uploadId: text('upload_id').$type<UploadId>(),
+		// The generation of the cache name when this edge was committed.
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull()
+	},
+	(table) => [
+		check(
+			'publication_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		uniqueIndex('publication_default_identity_idx')
+			.on(table.tenant, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('publication_named_identity_idx')
+			.on(table.tenant, table.cacheName, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'named'`)
 	]
 );
 

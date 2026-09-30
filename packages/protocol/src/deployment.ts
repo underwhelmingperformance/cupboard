@@ -59,7 +59,8 @@ export const transitionIdSchema = z.enum([
 	'cache-identity',
 	'deployment-transitions',
 	'attestation-path-index',
-	'local-step-attempts'
+	'local-step-attempts',
+	'publication-identity'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -285,6 +286,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 	{
 		id: 'local-step-attempts',
 		expand: ['0033_tenant_local_step_attempts.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'publication-identity',
+		expand: ['0034_publication_identity.sql'],
 		contract: [],
 		independent: true
 	}

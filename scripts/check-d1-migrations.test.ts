@@ -107,7 +107,8 @@ describe('checkD1Migrations', () => {
 			replayed: [
 				'deployment-transitions',
 				'attestation-path-index',
-				'local-step-attempts'
+				'local-step-attempts',
+				'publication-identity'
 			]
 		});
 	});

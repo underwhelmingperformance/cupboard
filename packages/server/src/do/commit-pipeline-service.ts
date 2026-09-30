@@ -130,6 +130,11 @@ interface ChargeGateRow {
 	readonly usageTenant: TenantId | null;
 }
 
+type PublicationColumns = Pick<
+	typeof d1Schema.publication.$inferInsert,
+	'uploadId'
+>;
+
 interface CanonicalBlobFacts {
 	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;
@@ -137,7 +142,16 @@ interface CanonicalBlobFacts {
 	readonly incarnation: number;
 }
 
+interface MaterialisationCharge {
+	readonly cache: ResolvedCache;
+	readonly metadata: UploadPathNegotiation;
+	readonly generation: NarInfoGeneration;
+	readonly blob: CanonicalBlobFacts;
+	readonly publication: PublicationColumns;
+}
+
 export interface MaterialiseRequest {
+	readonly uploadId?: UploadId;
 	readonly cache: ResolvedCache;
 	readonly metadata: UploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
@@ -261,7 +275,8 @@ export class CommitPipelineService {
 	// the response to its commit frame.
 	private notifyUploadWaiters(
 		uploadId: UploadId,
-		excludeSessionId: SessionId | null | undefined
+		excludeSessionId: SessionId | null | undefined,
+		status: 'committed' | 'already-present'
 	): void {
 		const row = this.context.db
 			.select({
@@ -301,7 +316,7 @@ export class CommitPipelineService {
 			sendCommitSessionFrame(socket, {
 				ev: 'verdict',
 				uploadId,
-				status: 'servable',
+				status: status === 'committed' ? 'servable' : 'absent',
 				...(grace !== undefined && { grace })
 			});
 		}
@@ -338,6 +353,7 @@ export class CommitPipelineService {
 		const generation = reserved.generation;
 
 		let outcome = await this.materialiseBatched(logger, {
+			uploadId,
 			cache,
 			metadata,
 			generation,
@@ -352,6 +368,7 @@ export class CommitPipelineService {
 		if (isProbeFromPrefetch && outcome.kind === 'over-quota') {
 			const freshProbe = await this.probeMaterialisation(metadata);
 			outcome = await this.materialiseBatched(logger, {
+				uploadId,
 				cache,
 				metadata,
 				generation,
@@ -396,7 +413,13 @@ export class CommitPipelineService {
 				metadata.narHash
 			);
 
-			this.notifyUploadWaiters(uploadId, committingSessionId);
+			const status = await this.publicationStatus(
+				cache,
+				uploadId,
+				metadata,
+				generation
+			);
+			this.notifyUploadWaiters(uploadId, committingSessionId, status);
 			this.uploadState.clearPendingUpload(uploadId);
 
 			return {
@@ -404,7 +427,7 @@ export class CommitPipelineService {
 				response: {
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash,
-					status: 'committed'
+					status
 				},
 				...(graceDecision?.reportsGrace === true && {
 					grace:
@@ -486,7 +509,13 @@ export class CommitPipelineService {
 				generation,
 				metadata.narHash
 			);
-			this.notifyUploadWaiters(uploadId, committingSessionId);
+			const status = await this.publicationStatus(
+				cache,
+				uploadId,
+				metadata,
+				generation
+			);
+			this.notifyUploadWaiters(uploadId, committingSessionId, status);
 			this.uploadState.clearPendingUpload(uploadId);
 
 			return {
@@ -494,7 +523,7 @@ export class CommitPipelineService {
 				response: {
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash,
-					status: 'committed'
+					status
 				},
 				...(graceDecision?.reportsGrace === true && {
 					grace: confirmed.matched ? confirmed.fact : {}
@@ -580,17 +609,17 @@ export class CommitPipelineService {
 
 	// Keep the usage updates, reference and ownership inserts, and reaper disarm
 	// in one batch. Their predicates make a replay idempotent and refuse every
-	// write unless the tenant is still active and has a usage row. The inserts
-	// need the usage-row predicate as much as the updates do: without it they
-	// would store an edge the updates never charged.
+	// write unless the tenant is still active and has a usage row. The first edge
+	// also fixes the publisher: local finalisation can stop after D1 commits, so
+	// recording the identity later would let a retry change the publishing run.
+	// The inserts need the usage-row predicate as much as the updates do: without
+	// it they would store an edge that the updates never charged.
 	private chargeStatements(
 		tenant: TenantId,
-		cache: ResolvedCache,
-		metadata: UploadPathNegotiation,
-		generation: NarInfoGeneration,
-		blob: { readonly fileSize: number },
+		charge: MaterialisationCharge,
 		now: IsoTimestamp
 	): BatchItem<'sqlite'>[] {
+		const { cache, metadata, generation, blob, publication } = charge;
 		const usageRowPresent = exists(
 			this.context.d1
 				.select({ one: sql`1` })
@@ -666,6 +695,36 @@ export class CommitPipelineService {
 					updatedAt: now
 				})
 				.where(creditBytesFilter),
+			this.context.d1
+				.insert(d1Schema.publication)
+				.select((qb) =>
+					qb
+						.select({
+							tenant: sql<TenantId>`${tenant}`.as('tenant'),
+							cacheKind: sql<
+								typeof cacheIdentity.cacheKind
+							>`${cacheIdentity.cacheKind}`.as('cache_kind'),
+							cacheName: sql<
+								typeof cacheIdentity.cacheName
+							>`${cacheIdentity.cacheName}`.as('cache_name'),
+							storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
+								'store_path_hash'
+							),
+							generation: sql<number>`${generation}`.as('generation'),
+							narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
+								'nar_hash'
+							),
+							uploadId: sql`${publication.uploadId ?? sql`null`}`.as(
+								'upload_id'
+							),
+							cacheGeneration: currentCacheGeneration(tenant, cache.scope).as(
+								'cache_generation'
+							)
+						})
+						.from(d1Schema.tenant)
+						.where(and(chargeableTenantFilter, edgeMissing))
+				)
+				.onConflictDoNothing(),
 			this.context.d1
 				.insert(d1Schema.blobReference)
 				.select((qb) =>
@@ -749,11 +808,9 @@ export class CommitPipelineService {
 	// cannot be recorded without its corresponding usage charge.
 	private async reserveEdgeAndCharge(
 		tenant: TenantId,
-		cache: ResolvedCache,
-		metadata: UploadPathNegotiation,
-		generation: NarInfoGeneration,
-		blob: { readonly fileSize: number }
+		charge: MaterialisationCharge
 	): Promise<ChargeOutcome> {
+		const { metadata, blob } = charge;
 		const now = isoTimestamp(new Date());
 
 		let gateRows: ChargeGateRow[];
@@ -761,7 +818,7 @@ export class CommitPipelineService {
 		try {
 			const [gate] = await this.context.d1.batch([
 				this.tenantChargeGateSelect(tenant),
-				...this.chargeStatements(tenant, cache, metadata, generation, blob, now)
+				...this.chargeStatements(tenant, charge, now)
 			]);
 			gateRows = gate;
 		} catch (error) {
@@ -797,23 +854,11 @@ export class CommitPipelineService {
 	// back and the flush retries each request separately to isolate the failure.
 	private async reserveEdgesAndCharge(
 		tenant: TenantId,
-		charges: readonly {
-			readonly cache: ResolvedCache;
-			readonly metadata: UploadPathNegotiation;
-			readonly generation: NarInfoGeneration;
-			readonly blob: CanonicalBlobFacts;
-		}[]
+		charges: readonly MaterialisationCharge[]
 	): Promise<BatchChargeOutcome> {
 		const now = isoTimestamp(new Date());
 		const statements = charges.flatMap((charge) =>
-			this.chargeStatements(
-				tenant,
-				charge.cache,
-				charge.metadata,
-				charge.generation,
-				charge.blob,
-				now
-			)
+			this.chargeStatements(tenant, charge, now)
 		);
 
 		let gateRows: ChargeGateRow[];
@@ -933,6 +978,7 @@ export class CommitPipelineService {
 			readonly request: MaterialiseRequest;
 			readonly narInfo: NarInfo;
 			readonly blob: CanonicalBlobFacts;
+			readonly publication: PublicationColumns;
 		}[] = [];
 
 		for (const [index, request] of requests.entries()) {
@@ -955,7 +1001,8 @@ export class CommitPipelineService {
 				index,
 				request,
 				narInfo: fenced.narInfo,
-				blob: fenced.blob
+				blob: fenced.blob,
+				publication: { uploadId: request.uploadId }
 			});
 		}
 
@@ -970,19 +1017,20 @@ export class CommitPipelineService {
 				cache: charge.request.cache,
 				metadata: charge.request.metadata,
 				generation: charge.request.generation,
-				blob: charge.blob
+				blob: charge.blob,
+				publication: charge.publication
 			}))
 		);
 
 		if (charged.kind === 'retry-individually') {
 			for (const charge of chargeable) {
-				const single = await this.reserveEdgeAndCharge(
-					tenant,
-					charge.request.cache,
-					charge.request.metadata,
-					charge.request.generation,
-					charge.blob
-				);
+				const single = await this.reserveEdgeAndCharge(tenant, {
+					cache: charge.request.cache,
+					metadata: charge.request.metadata,
+					generation: charge.request.generation,
+					blob: charge.blob,
+					publication: charge.publication
+				});
 				outcomes[charge.index] =
 					single.kind === 'charged'
 						? { kind: 'materialised', narInfo: charge.narInfo }
@@ -1968,6 +2016,36 @@ export class CommitPipelineService {
 		);
 
 		return new Map(facts);
+	}
+
+	async publicationStatus(
+		cache: ResolvedCache,
+		uploadId: UploadId,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration
+	): Promise<'committed' | 'already-present'> {
+		const tenant = this.context.requireTenant();
+		const publisher = await this.context.d1
+			.select({ uploadId: d1Schema.publication.uploadId })
+			.from(d1Schema.publication)
+			.where(
+				and(
+					eq(d1Schema.publication.tenant, tenant),
+					cacheIdentityCondition(
+						d1Schema.publication.cacheKind,
+						d1Schema.publication.cacheName,
+						cache.scope
+					),
+					eq(d1Schema.publication.cacheGeneration, cache.generation),
+					eq(d1Schema.publication.storePathHash, metadata.storePathHash),
+					eq(d1Schema.publication.generation, generation),
+					eq(d1Schema.publication.narHash, metadata.narHash),
+					eq(d1Schema.publication.uploadId, uploadId)
+				)
+			)
+			.get();
+
+		return publisher === undefined ? 'already-present' : 'committed';
 	}
 
 	// A generation is committed only when its exact D1 edge and narinfo object

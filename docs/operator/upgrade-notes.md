@@ -82,6 +82,11 @@ jobs continue to run anonymously without a matching CI trust rule or
   each tenant's last attempt at its migration work. It's independent, so it
   doesn't block an upgrade.
 
+The independent `publication-identity` transition adds migration `0034`. It
+records which upload committed each NAR reference so the server can distinguish
+a completed upload from a competing or repeated commit. Existing reservations
+are not copied because they do not establish which upload completed publication.
+
 ### Exit statuses and output
 
 These changes affect scripts that check the CLI's exit status or parse its text

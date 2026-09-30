@@ -114,9 +114,9 @@ const settlePrepareSubrequests = 3;
 // containing the status, usage, reference-edge and presence changes.
 const settleChargeSubrequests = 2;
 
-// Publication reads the shared blob row, writes the narinfo object, and
-// removes the private staging object.
-const settlePublishSubrequests = 3;
+// Publication reads the shared blob row and publisher, writes the narinfo
+// object, and removes the private staging object.
+const settlePublishSubrequests = 4;
 
 // Re-reading one row's shared blob row and presence row uses one D1 batch
 // and one R2 head.
@@ -645,6 +645,20 @@ export class VerificationService {
 		return row === undefined ? captured : row.sessionId;
 	}
 
+	private async publicationVerdict(
+		pending: PendingUploadRow,
+		metadata: UploadPathNegotiation,
+		generation: NarInfoGeneration
+	): Promise<'servable' | 'absent'> {
+		const status = await this.commitPipeline.publicationStatus(
+			this.cache(pending.cacheId),
+			pending.id,
+			metadata,
+			generation
+		);
+		return status === 'committed' ? 'servable' : 'absent';
+	}
+
 	private notifyWaiters(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		status: UploadStatusResponse['status']
@@ -1010,11 +1024,16 @@ export class VerificationService {
 			metadata.storePath
 		);
 
+		const verdict = await this.publicationVerdict(
+			pending,
+			metadata,
+			generation
+		);
 		if (!this.uploadState.clearPendingUpload(pending.id, owner)) {
 			return 'ignored';
 		}
 
-		this.notifyWaiters(pending, 'servable');
+		this.notifyWaiters(pending, verdict);
 		await this.deleteStagingObject(pending);
 
 		return 'applied';
@@ -1170,6 +1189,7 @@ export class VerificationService {
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 
 		let outcome = await this.commitPipeline.materialiseBatched(logger, {
+			uploadId: pending.id,
 			cache: this.cache(pending.cacheId),
 			metadata,
 			generation,
@@ -1205,6 +1225,7 @@ export class VerificationService {
 			}
 
 			const retried = await this.commitPipeline.materialiseBatched(logger, {
+				uploadId: pending.id,
 				cache: this.cache(pending.cacheId),
 				metadata,
 				generation,
@@ -1286,10 +1307,15 @@ export class VerificationService {
 			if (reclaim === 'committed-current') {
 				signal?.throwIfAborted();
 				await this.inheritAfterCommit(pending, metadata, generation);
+				const verdict = await this.publicationVerdict(
+					pending,
+					metadata,
+					generation
+				);
 				const didApply = this.uploadState.clearPendingUpload(pending.id, owner);
 
 				if (didApply) {
-					this.notifyWaiters(pending, 'servable');
+					this.notifyWaiters(pending, verdict);
 				}
 
 				return didApply;
@@ -1342,10 +1368,15 @@ export class VerificationService {
 			await this.inheritAfterCommit(pending, metadata, generation);
 			// Once the narinfo is durable, notify waiters and remove the upload row and
 			// private staging bytes.
+			const verdict = await this.publicationVerdict(
+				pending,
+				metadata,
+				generation
+			);
 			const wasCleared = this.uploadState.clearPendingUpload(pending.id, owner);
 
 			if (wasCleared) {
-				this.notifyWaiters(pending, 'servable');
+				this.notifyWaiters(pending, verdict);
 				await this.deleteStagingObject(pending);
 			}
 
@@ -3130,17 +3161,22 @@ export class VerificationService {
 				}
 
 				// A concurrent pass has already committed this generation, so this
-				// missing verdict is stale. Clear the pending row and report `servable`
-				// to the waiter without pruning the path's root.
+				// missing verdict is stale. Clear the pending row without pruning the
+				// path's root, and report whether this upload published the generation.
 				if (reclaim === 'committed-current') {
 					signal?.throwIfAborted();
+					const verdict = await this.publicationVerdict(
+						pending,
+						metadata,
+						reserved.generation
+					);
 					const didApply = this.uploadState.clearPendingUpload(
 						pending.id,
 						owner
 					);
 
 					if (didApply) {
-						this.notifyWaiters(pending, 'servable');
+						this.notifyWaiters(pending, verdict);
 					}
 
 					return didApply;

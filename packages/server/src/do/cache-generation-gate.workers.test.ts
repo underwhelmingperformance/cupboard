@@ -1681,11 +1681,11 @@ describe('cache generation gate', () => {
 					maxFencedRetireRows) *
 					perChunk
 		}).toStrictEqual({
-			oneChunk: 9,
-			twoChunks: 15,
-			perChunk: 6,
+			oneChunk: 10,
+			twoChunks: 17,
+			perChunk: 7,
 			perPass: 3,
-			worstCase: 27
+			worstCase: 31
 		});
 	}, 240_000);
 
