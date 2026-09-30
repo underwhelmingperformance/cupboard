@@ -39,6 +39,7 @@ import { z } from 'zod';
 import {
 	AttestationAttachResponseMismatchError,
 	AttestationBundleInvalidError,
+	AttestationBundleTransportUnavailableError,
 	AttestationDivergedPathError,
 	AttestationNegotiationMismatchError,
 	AttestationSubjectNotPushedError,
@@ -52,13 +53,19 @@ import {
 	type ReferenceFetchDependencies
 } from '../push/reference.ts';
 
+import {
+	type AttestationBundleClient,
+	groupAttestationBundles,
+	runBundleAttachment
+} from './bundle-transport.ts';
+
 export interface AttestationBundleSource {
 	readonly path: string;
 }
 
 export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
 
-export interface AttestationAttachClient {
+export interface AttestationAttachClient extends Partial<AttestationBundleClient> {
 	negotiateAttestations(
 		body: Omit<AttestationNegotiateRequestInput, 'pushId'>
 	): Promise<AttestationNegotiateResponseInput>;
@@ -66,12 +73,19 @@ export interface AttestationAttachClient {
 	attachAttestation(uploadId: string): Promise<AttestationAttachResponseInput>;
 }
 
-export function requireAttestationAttachClient(client: {
-	negotiateAttestations?: AttestationAttachClient['negotiateAttestations'];
-	attachAttestation?: AttestationAttachClient['attachAttestation'];
-	uploadNar: AttestationAttachClient['uploadNar'];
-}): AttestationAttachClient {
-	const { negotiateAttestations, attachAttestation } = client;
+export function requireAttestationAttachClient(
+	client: Partial<AttestationBundleClient> & {
+		negotiateAttestations?: AttestationAttachClient['negotiateAttestations'];
+		attachAttestation?: AttestationAttachClient['attachAttestation'];
+		uploadNar: AttestationAttachClient['uploadNar'];
+	}
+): AttestationAttachClient {
+	const {
+		negotiateAttestations,
+		attachAttestation,
+		negotiateAttestationBundles,
+		attachAttestationPaths
+	} = client;
 
 	if (negotiateAttestations === undefined) {
 		throw new AttestationUploadUnavailableError('negotiateAttestations');
@@ -84,7 +98,13 @@ export function requireAttestationAttachClient(client: {
 	return {
 		negotiateAttestations: (body) => negotiateAttestations(body),
 		attachAttestation: (uploadId) => attachAttestation(uploadId),
-		uploadNar: (r2Key, body) => client.uploadNar(r2Key, body)
+		uploadNar: (r2Key, body) => client.uploadNar(r2Key, body),
+		...(negotiateAttestationBundles !== undefined && {
+			negotiateAttestationBundles: (body) => negotiateAttestationBundles(body)
+		}),
+		...(attachAttestationPaths !== undefined && {
+			attachAttestationPaths: (id, body) => attachAttestationPaths(id, body)
+		})
 	};
 }
 
@@ -117,7 +137,7 @@ export interface AttestationPathInfo {
 }
 
 interface AttestationSubject {
-	readonly name: string;
+	readonly name?: string;
 	readonly sha256: Sha256HexDigest;
 }
 
@@ -181,15 +201,7 @@ export async function prepareAttestationBundles(
 	pathInfos: readonly AttestationPathInfo[],
 	options: PrepareAttestationBundlesOptions
 ): Promise<readonly PreparedAttestationBundle[]> {
-	const bySubject = new Map(
-		pathInfos.map((pathInfo) => [
-			attestationSubjectKey({
-				name: StorePath.basename(pathInfo.storePath),
-				sha256: pathInfo.narHash.digestHex()
-			}),
-			pathInfo
-		])
-	);
+	const byDigest = Map.groupBy(pathInfos, (info) => info.narHash.digestHex());
 	const prepared: PreparedAttestationBundle[] = [];
 	const seen = new Set<string>();
 
@@ -199,7 +211,7 @@ export async function prepareAttestationBundles(
 		const digest = sha256Hex(bytes);
 
 		const unmatched = parsed.subjects.filter(
-			(subject) => !bySubject.has(attestationSubjectKey(subject))
+			(subject) => !byDigest.has(subject.sha256)
 		);
 
 		if (unmatched.length > 0) {
@@ -209,22 +221,11 @@ export async function prepareAttestationBundles(
 			);
 		}
 
-		const matched = parsed.subjects.map((subject) => {
-			const pathInfo = bySubject.get(attestationSubjectKey(subject));
-
-			if (pathInfo === undefined) {
-				throw new AttestationSubjectNotPushedError(source.path, [
-					subject.sha256
-				]);
-			}
-
-			return pathInfo;
-		});
+		const matched = parsed.subjects.flatMap(
+			(subject) => byDigest.get(subject.sha256) ?? []
+		);
 
 		for (const pathInfo of matched) {
-			// The bundle describes the local bytes, but the cache committed a
-			// different NAR for this store path, so the attach can never succeed:
-			// fail here, before any bundle uploads, with both hashes named.
 			const diverged = options.divergent.get(
 				StorePath.hash(pathInfo.storePath)
 			);
@@ -242,10 +243,6 @@ export async function prepareAttestationBundles(
 	}
 
 	return prepared;
-}
-
-function attestationSubjectKey(subject: AttestationSubject): string {
-	return `${subject.name}\0${subject.sha256}`;
 }
 
 function recordPreparedBundle(
@@ -384,6 +381,33 @@ export async function runAttestationAttachment(
 	log: StepLog,
 	options: AttestationAttachmentOptions
 ): Promise<AttestationAttachOutcome> {
+	const groups = groupAttestationBundles(prepared);
+	const { negotiateAttestationBundles, attachAttestationPaths } =
+		options.client;
+	if (
+		negotiateAttestationBundles !== undefined &&
+		attachAttestationPaths !== undefined
+	) {
+		try {
+			return await runBundleAttachment(groups, log, {
+				client: {
+					negotiateAttestationBundles: (body) =>
+						negotiateAttestationBundles(body),
+					attachAttestationPaths: (id, body) =>
+						attachAttestationPaths(id, body),
+					uploadNar: (key, bytes) => options.client.uploadNar(key, bytes)
+				},
+				...(options.skipUnservable !== undefined && {
+					skipUnservable: options.skipUnservable
+				})
+			});
+		} catch (error) {
+			if (!(error instanceof AttestationBundleTransportUnavailableError)) {
+				throw error;
+			}
+		}
+	}
+
 	const negotiateStep = log.group('negotiate');
 	const decisions: AttestationDecisionInput[] = [];
 
@@ -558,8 +582,9 @@ export async function runAttestAttach(
 				readBundle,
 				divergent: new Map()
 			});
+			const bundleCount = new Set(bundles.map((bundle) => bundle.digest)).size;
 			readStep.success(
-				`${formatCount(bundles.length)} ${bundles.length === 1 ? 'bundle' : 'bundles'}`
+				`${formatCount(bundleCount)} ${bundleCount === 1 ? 'bundle' : 'bundles'} for ${formatCount(bundles.length)} path references`
 			);
 
 			return {
@@ -726,7 +751,7 @@ const dsseEnvelopeSchema = z.object({
 });
 
 const sigstoreBundleSubjectSchema = z.object({
-	name: z.string().min(1),
+	name: z.string().optional(),
 	digest: z.object({
 		sha256: sha256HexDigestSchema
 	})
@@ -789,7 +814,7 @@ export function parseAttestationBundle(
 
 	return {
 		subjects: statement.data.subject.map((subject) => ({
-			name: subject.name,
+			...(subject.name !== undefined && { name: subject.name }),
 			sha256: subject.digest.sha256
 		}))
 	};

@@ -26,13 +26,14 @@ export function innerRequest(context: Context<WorkerHonoEnv>): Request {
  * and absent in development and tests, where the same read app runs in process.
  */
 export async function cachedTenantRead(
-	context: Context<WorkerHonoEnv>
+	context: Context<WorkerHonoEnv>,
+	readRequest: Request = context.req.raw
 ): Promise<Response> {
 	// The in-process app takes the same canonical request as the service binding,
 	// so development and tests receive the same environment as the deployed
 	// tenant Worker.
 	const request = canonicalCacheRequest(
-		context.req.raw,
+		readRequest,
 		context.get('cacheVersion')
 	);
 	const { CUPBOARD_TENANT: service } = context.env as Partial<

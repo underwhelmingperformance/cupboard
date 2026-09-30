@@ -8,9 +8,14 @@ import {
 	type NixSha256HashString,
 	storedReferencesSchema,
 	type StorePathHash,
+	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
+import {
+	type CacheMetadataEntry,
+	cacheMetadataMaxCandidateBytes
+} from '@cupboard/protocol/cache-metadata';
 import {
 	type ReuseViewName,
 	type ReuseViewRevision,
@@ -36,19 +41,26 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import {
+	MetadataCandidateBudgetExceededError,
+	MetadataNarInfoInvalidError,
+	MetadataNarInfoTooLargeError,
 	SharedFactsUnavailableError,
 	StoredReferencesInvalidError,
 	StoredSignaturesInvalidError
 } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
+import { renderCacheMetadataEntry } from '../read/metadata-read.ts';
 
 import { batchNonEmpty, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type JsonRowList, jsonRowLists, jsonValueLists } from './json-list.ts';
 import { reuseViewSelectorsFromRows } from './reuse-view-selectors.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
-import { requireSubrequestsFor } from './subrequest-slice.ts';
+import {
+	hasSubrequestsFor,
+	requireSubrequestsFor
+} from './subrequest-slice.ts';
 
 /**
  * The most distinct NARs one store path may have among its backed copies
@@ -79,10 +91,25 @@ interface GateSnapshot {
 
 interface GateBatchSnapshot {
 	readonly tenant: TenantId;
-	readonly revision: number;
+	readonly revision: ReuseViewRevision;
 	readonly access: CacheAccessMode;
 	readonly candidates: readonly CandidateRow[];
+	readonly inputBytes: number;
 }
+
+type BatchVerificationOptions =
+	| { readonly metadata: true; readonly inputBytes: number }
+	| { readonly metadata?: false };
+
+export type ReuseViewMetadataBatch =
+	| {
+			readonly kind: 'ready';
+			readonly revision: ReuseViewRevision;
+			readonly access: CacheAccessMode;
+			readonly entries: Iterable<CacheMetadataEntry>;
+	  }
+	| { readonly kind: 'changed' }
+	| { readonly kind: 'unavailable' };
 
 interface BlobFields {
 	readonly fileHash: NixSha256HashString;
@@ -325,20 +352,81 @@ export class ReuseViewLookupService {
 				schema.cacheIdentities,
 				eq(schema.cacheIdentities.id, schema.narInfos.cacheId)
 			)
-			.where(
-				and(
-					hashFilter,
-					eq(schema.cacheIdentities.access, access),
-					isNull(schema.cacheIdentities.deletedAt),
-					cacheSelectorsCondition(
-						schema.cacheIdentities.kind,
-						schema.cacheIdentities.name,
-						selectors
-					)
-				)
-			)
+			.where(this.candidateFilter(selectors, access, hashFilter))
 			.orderBy(schema.narInfos.storePathHash, schema.narInfos.cacheId)
 			.all();
+	}
+
+	private candidateFilter(
+		selectors: readonly ReuseViewSelector[],
+		access: CacheAccessMode,
+		hashFilter: SQL
+	): SQL | undefined {
+		return and(
+			hashFilter,
+			eq(schema.cacheIdentities.access, access),
+			isNull(schema.cacheIdentities.deletedAt),
+			cacheSelectorsCondition(
+				schema.cacheIdentities.kind,
+				schema.cacheIdentities.name,
+				selectors
+			)
+		);
+	}
+
+	private requireMetadataCandidateBudget(
+		selectors: readonly ReuseViewSelector[],
+		access: CacheAccessMode,
+		storePathHashes: readonly StorePathHash[]
+	): number {
+		const columns = getTableColumns(schema.narInfos);
+		const keys = Object.keys(columns);
+		// A row's escaped JSON can exceed SQLite's value limit even when each
+		// stored column fits.
+		const fixedRowBytes =
+			new TextEncoder().encode(JSON.stringify(keys)).byteLength +
+			keys.length * 3;
+		const maximumRows = Math.floor(
+			cacheMetadataMaxCandidateBytes / fixedRowBytes
+		);
+		const scalarBytes = Object.values(columns).map(
+			(column) => sql<number>`coalesce(length(cast(${column} as blob)), 4)`
+		);
+		const rowBytes = sql<number>`${fixedRowBytes} + ${sql.join(scalarBytes, sql` + `)}`;
+		let candidates = 0;
+		let bytes = 2;
+
+		for (const hashes of jsonValueLists(storePathHashes)) {
+			const rows = this.context.db
+				.select({
+					cacheId: schema.narInfos.cacheId,
+					storePathHash: schema.narInfos.storePathHash,
+					bytes: rowBytes
+				})
+				.from(schema.narInfos)
+				.innerJoin(
+					schema.cacheIdentities,
+					eq(schema.cacheIdentities.id, schema.narInfos.cacheId)
+				)
+				.where(
+					this.candidateFilter(
+						selectors,
+						access,
+						inArray(schema.narInfos.storePathHash, hashes)
+					)
+				)
+				.limit(maximumRows + 1 - candidates)
+				.all();
+			const separators =
+				rows.length === 0 ? 0 : rows.length - (candidates === 0 ? 1 : 0);
+			candidates += rows.length;
+			bytes += rows.reduce((total, row) => total + row.bytes, separators);
+
+			if (bytes > cacheMetadataMaxCandidateBytes) {
+				throw new MetadataCandidateBudgetExceededError(candidates, bytes);
+			}
+		}
+		return bytes;
 	}
 
 	private candidateRowFilter(candidate: CandidateRow): SQL | undefined {
@@ -400,7 +488,8 @@ export class ReuseViewLookupService {
 	private snapshotCandidateBatch(
 		view: ReuseViewName,
 		access: CacheAccessMode,
-		storePathHashes: readonly StorePathHash[]
+		storePathHashes: readonly StorePathHash[],
+		options: { readonly metadata?: boolean } = {}
 	): GateBatchSnapshot | undefined {
 		const viewRow = this.context.db
 			.select({
@@ -416,6 +505,16 @@ export class ReuseViewLookupService {
 		}
 
 		const selectors = this.viewSelectors(view);
+
+		const inputBytes =
+			options.metadata === true
+				? this.requireMetadataCandidateBudget(
+						selectors,
+						viewRow.access,
+						storePathHashes
+					)
+				: 0;
+
 		const candidates = jsonValueLists(storePathHashes).flatMap((hashes) =>
 			this.candidateRows(
 				selectors,
@@ -428,7 +527,8 @@ export class ReuseViewLookupService {
 			tenant: this.context.requireTenant(),
 			revision: viewRow.revision,
 			access: viewRow.access,
-			candidates
+			candidates,
+			inputBytes
 		};
 	}
 
@@ -550,7 +650,8 @@ export class ReuseViewLookupService {
 		view: ReuseViewName,
 		tenant: TenantId,
 		access: CacheAccessMode,
-		candidates: readonly CandidateRow[]
+		candidates: readonly CandidateRow[],
+		options: BatchVerificationOptions = {}
 	): Promise<VerifiedCandidates> {
 		if (candidates.length === 0) {
 			return { candidates: [], blobs: new Map() };
@@ -611,24 +712,35 @@ export class ReuseViewLookupService {
 			ownershipPages.flat().map((row) => row.narHash)
 		);
 
-		const backed = withinDistinctNarLimit(
-			logger,
-			view,
-			candidates.filter(
-				(candidate) =>
-					committedCandidates.has(this.candidateVersionKey(candidate)) &&
-					blobs.has(candidate.narHash) &&
-					ownedHashes.has(candidate.narHash)
-			)
+		const committed = candidates.filter(
+			(candidate) =>
+				committedCandidates.has(this.candidateVersionKey(candidate)) &&
+				blobs.has(candidate.narHash) &&
+				ownedHashes.has(candidate.narHash)
 		);
-		// The Worker sized this batch so that its worst case, `reuseDistinctNarLimit`
-		// heads per hash, fits one invocation's slice; a batch that does not fit is
-		// a defect in that sizing.
+		const backed =
+			options.metadata === true
+				? committed
+				: withinDistinctNarLimit(logger, view, committed);
+		const metadataHeads = new Set(backed.map((candidate) => candidate.narHash))
+			.size;
+
+		if (options.metadata === true && !hasSubrequestsFor(metadataHeads)) {
+			throw new MetadataCandidateBudgetExceededError(
+				candidates.length,
+				options.inputBytes
+			);
+		}
+
 		requireSubrequestsFor(
-			distinctNarCounts(backed)
-				.values()
-				.reduce((heads, count) => heads + count, 0),
-			'reuse-view availability probe'
+			options.metadata === true
+				? metadataHeads
+				: distinctNarCounts(backed)
+						.values()
+						.reduce((heads, count) => heads + count, 0),
+			options.metadata === true
+				? 'reuse-view metadata probe'
+				: 'reuse-view availability probe'
 		);
 		const presentHashes = await this.sharedFacts(() =>
 			presentNarObjects(
@@ -888,6 +1000,42 @@ export class ReuseViewLookupService {
 		);
 	}
 
+	private *renderMetadataEntries(
+		logger: Logger,
+		view: ReuseViewName,
+		storePaths: readonly StorePathString[],
+		settled: VerifiedCandidates
+	): Generator<CacheMetadataEntry> {
+		const candidatesByHash = Map.groupBy(
+			settled.candidates,
+			(candidate) => candidate.storePathHash
+		);
+
+		for (const storePath of storePaths) {
+			let entry: CacheMetadataEntry;
+
+			try {
+				const hash = StorePath.hash(storePath);
+				const narInfo = this.renderSingleCandidate(logger, view, hash, {
+					candidates: candidatesByHash.get(hash) ?? [],
+					blobs: settled.blobs
+				});
+				entry = renderCacheMetadataEntry(storePath, narInfo);
+			} catch (error) {
+				if (
+					error instanceof MetadataNarInfoTooLargeError ||
+					error instanceof MetadataNarInfoInvalidError
+				) {
+					throw error;
+				}
+
+				throw new MetadataNarInfoInvalidError(storePath, error);
+			}
+
+			yield entry;
+		}
+	}
+
 	// A shared-state fault must remain distinguishable from a missing path. The
 	// latter can make Nix rebuild a path that the cache still has.
 	private async sharedFacts<T>(read: () => Promise<T>): Promise<T> {
@@ -929,6 +1077,56 @@ export class ReuseViewLookupService {
 		}
 
 		return this.renderSingleCandidate(logger, view, storePathHash, settled);
+	}
+
+	/**
+	 * Renders complete narinfos from one verified view snapshot. A mutation
+	 * invalidates the batch explicitly, so the caller can retry the request.
+	 * Entries render as the caller consumes them to permit a bounded response.
+	 */
+	async metadata(
+		logger: Logger,
+		view: ReuseViewName,
+		access: CacheAccessMode,
+		storePaths: readonly StorePathString[]
+	): Promise<ReuseViewMetadataBatch> {
+		const uniqueHashes = [
+			...new Set(storePaths.map((storePath) => StorePath.hash(storePath)))
+		];
+		const snapshot = await this.context.criticalSection(() =>
+			Promise.resolve(
+				this.snapshotCandidateBatch(view, access, uniqueHashes, {
+					metadata: true
+				})
+			)
+		);
+
+		if (snapshot === undefined) {
+			return { kind: 'unavailable' };
+		}
+
+		const verified = await this.verifyCandidates(
+			logger,
+			view,
+			snapshot.tenant,
+			snapshot.access,
+			snapshot.candidates,
+			{ metadata: true, inputBytes: snapshot.inputBytes }
+		);
+		const settled = await this.context.criticalSection(() =>
+			Promise.resolve(this.revalidateCandidates(snapshot, view, verified))
+		);
+
+		if (settled === undefined) {
+			return { kind: 'changed' };
+		}
+
+		return {
+			kind: 'ready',
+			revision: snapshot.revision,
+			access: snapshot.access,
+			entries: this.renderMetadataEntries(logger, view, storePaths, settled)
+		};
 	}
 
 	/**

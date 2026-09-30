@@ -65,6 +65,7 @@ import {
 	DatabaseOverloadedError,
 	InvalidAccessTokenError,
 	LocalSchemaMigrationPendingError,
+	MetadataScopeChangedError,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	SubrequestTimeoutError,
@@ -110,6 +111,10 @@ import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
+import {
+	cacheMetadataPageResponse,
+	parseCacheMetadataRequest
+} from '../read/metadata-page.ts';
 import {
 	guardPrivateViewRead,
 	missingStorePathHashes,
@@ -983,6 +988,63 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return context.json(response, StatusCodes.OK, {
 				'cache-control': 'no-store'
 			});
+		});
+
+		this.app.post('/reuse/:view/api/v1/path-info', async (context) => {
+			const request = await parseCacheMetadataRequest(context.req.raw);
+			const view = requestedView(context);
+			if (view !== undefined) {
+				const denied = await this.guardReuseViewRead(context.req.raw, view);
+				if (denied !== undefined) {
+					return denied;
+				}
+			}
+			const version =
+				view === undefined
+					? 'view:missing'
+					: `view:${String(view.revision)}:${view.access}`;
+			if (
+				request.expectedScopeVersion !== undefined &&
+				request.expectedScopeVersion !== version
+			) {
+				throw new MetadataScopeChangedError();
+			}
+			if (view === undefined) {
+				return cacheMetadataPageResponse(
+					version,
+					request.storePaths,
+					request.storePaths.map((storePath) => ({
+						storePath,
+						status: 'missing'
+					}))
+				);
+			}
+			const batch = await this.reuseLookup.metadata(
+				context.get('logger'),
+				view.name,
+				view.access,
+				request.storePaths
+			);
+			if (
+				batch.kind === 'changed' ||
+				batch.kind === 'unavailable' ||
+				batch.revision !== view.revision
+			) {
+				throw new MetadataScopeChangedError();
+			}
+			const response = await cacheMetadataPageResponse(
+				version,
+				request.storePaths,
+				batch.entries
+			);
+			const current = requestedView(context);
+			if (
+				current?.revision !== view.revision ||
+				current.access !== view.access
+			) {
+				throw new MetadataScopeChangedError();
+			}
+			return response;
 		});
 	}
 

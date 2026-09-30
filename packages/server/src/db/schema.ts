@@ -416,7 +416,8 @@ export const pendingAttestations = sqliteTable(
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
-		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>(),
+		validatedBundleJson: text('validated_bundle_json'),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
@@ -430,6 +431,20 @@ export const pendingAttestations = sqliteTable(
 		index('pending_attestation_cache_id_idx').on(table.cacheId),
 		index('pending_attestation_expires_at_idx').on(table.expiresAt),
 		index('pending_attestation_r2_key_idx').on(table.r2Key)
+	]
+);
+
+export const pendingAttestationSubjects = sqliteTable(
+	'pending_attestation_subject',
+	{
+		uploadId: text('upload_id').$type<UploadId>().notNull(),
+		subjectName: text('subject_name').notNull(),
+		narDigest: text('nar_digest').$type<Sha256HexDigest>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.uploadId, table.subjectName, table.narDigest]
+		})
 	]
 );
 
@@ -464,8 +479,8 @@ export const narInfoDeletions = sqliteTable(
 /**
  * Committed paths that have yet to inherit attestations from other caches. The
  * maintenance alarm drains the rows. A row leaves the queue when inheritance
- * ends, when its narinfo row no longer has the queued generation, or after a
- * bounded number of attempts.
+ * ends or its narinfo row no longer has the queued generation. Failed attempts
+ * remain queued for a retry.
  */
 export const attestationInheritances = sqliteTable(
 	'attestation_inheritance',
@@ -474,6 +489,8 @@ export const attestationInheritances = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		sourcePredicateType: text('source_predicate_type').$type<PredicateType>(),
+		sourceDigest: text('source_digest').$type<Sha256HexDigest>(),
 		attempts: integer('attempts').notNull().default(0),
 		notBefore: text('not_before').$type<IsoTimestamp>().notNull()
 	},

@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { IneffectiveCtlogThresholdError } from '@cupboard/shared/sigstore';
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
@@ -8,11 +12,31 @@ import {
 } from '../errors.ts';
 
 import {
+	appendPathFile,
 	InvalidVerifierThresholdError,
 	parseVerifierThreshold,
 	registerAttestCommands,
 	trustRows
 } from './attest.ts';
+
+describe('appendPathFile', () => {
+	it('combines direct bundle paths with a manifest without an argument-size limit', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-bundles-'));
+		const manifest = path.join(directory, 'bundles.txt');
+		const paths = Array.from({ length: 1600 }, (_, index) =>
+			path.join(directory, `${String(index)}.sigstore.json`)
+		);
+
+		try {
+			await writeFile(manifest, `\n${paths.join('\n')}\n`);
+			expect(
+				await appendPathFile(['direct.sigstore.json'], manifest)
+			).toStrictEqual(['direct.sigstore.json', ...paths]);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+});
 
 interface VerifyThresholds {
 	readonly tlogThreshold?: number;
@@ -90,6 +114,24 @@ describe('parseVerifierThreshold', () => {
 });
 
 describe('attest attach command', () => {
+	it('reads path files alongside positional paths', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const pathsFile = path.join(directory, 'paths.txt');
+		try {
+			await writeFile(pathsFile, '\n/nix/store/first\r\n/nix/store/second\n\n');
+
+			expect(
+				await appendPathFile(['/nix/store/positional'], pathsFile)
+			).toStrictEqual([
+				'/nix/store/positional',
+				'/nix/store/first',
+				'/nix/store/second'
+			]);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('requires at least one --attestation bundle before authenticating', async () => {
 		const program = silentProgram();
 

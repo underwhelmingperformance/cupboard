@@ -2,6 +2,7 @@ import { rootLogger } from '@cupboard/logger';
 import {
 	narInfoGenerationSchema,
 	predicateTypeSchema,
+	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -13,7 +14,10 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { reserveObjectIncarnation } from '../blob/object-incarnation.ts';
+import {
+	lateWriteTombstoneHorizonMs,
+	reserveObjectIncarnation
+} from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
@@ -21,6 +25,7 @@ import { runCasReaperDemote } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
+	authorisedFetch,
 	casObjectRows,
 	clearBlobStorage,
 	commitPath,
@@ -45,11 +50,37 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
+import { AttestationCasService } from './attestation-cas-service.ts';
+import { BlobReaperService } from './blob-reaper-service.ts';
+
 const textEncoder = new TextEncoder();
 const predicateType = predicateTypeSchema.parse(
 	'https://slsa.dev/provenance/v1'
 );
 const storePathHash = storePathHashSchema.parse('a'.repeat(32));
+
+async function casLifecycleRows(digest: Sha256HexDigest) {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const objects = await database
+		.select()
+		.from(d1Schema.casObject)
+		.where(eq(d1Schema.casObject.digest, digest));
+	const registry = await database
+		.select()
+		.from(d1Schema.objectIncarnation)
+		.where(eq(d1Schema.objectIncarnation.objectId, digest));
+
+	return {
+		objects: objects.map((row) => ({
+			...row,
+			deleteAfter: row.deleteAfter ?? undefined
+		})),
+		registry: registry.map((row) => ({
+			...row,
+			reservationOwner: row.reservationOwner ?? undefined
+		}))
+	};
+}
 
 describe('attestation CAS lifecycle', () => {
 	beforeEach(async () => {
@@ -660,6 +691,252 @@ describe('attestation CAS lifecycle', () => {
 			}
 		});
 	});
+
+	it.each(['reference-demotion', 'object-retirement'] as const)(
+		'fences missing-object repair against stale %s',
+		async (phase) => {
+			const token = await initialise();
+			const nar = await verifiableNar(`missing-repair-${phase}`);
+			const metadata = uploadMetadata({
+				storePathHash,
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			await commitPath(token, metadata, nar);
+
+			const bytes = textEncoder.encode('repaired bundle');
+			const bundle = await fileAttestationReference({
+				uploadId: `missing-repair-${phase}`,
+				bytes,
+				storePathHash,
+				generation: 0,
+				predicateType
+			});
+			const staging = bundle.stagingKey;
+			const measured = await currentServer().measureAttestationBundle(staging);
+			const before = {
+				refs: await attestationReferenceRows(),
+				presence: await tenantCasBlobRows(),
+				usage: await tenantUsageRow()
+			};
+			await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
+
+			const demoted = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const cas = new AttestationCasService(instance.context);
+					const reaper = new BlobReaperService(
+						instance.context.d1,
+						env.BLOBS,
+						{ demote: () => Promise.resolve() },
+						{
+							async demote(_tenant, demotions) {
+								await cas.promoteMeasuredBundle(staging, measured, {
+									restoreMissingObject: true
+								});
+
+								if (phase === 'reference-demotion') {
+									for (const demotion of demotions) {
+										await cas.removeCapturedReference(
+											{
+												cache: defaultCache(),
+												storePathHash,
+												generation: narInfoGenerationSchema.parse(0),
+												predicateType,
+												digest: bundle.digest
+											},
+											demotion.fenceIncarnation
+										);
+									}
+								}
+							}
+						},
+						instance.context.subrequestsPerInvocation
+					);
+
+					return reaper.demoteMissingCasObjects(rootLogger(), 10, {
+						read: () => Promise.resolve(''),
+						advance: () => Promise.resolve()
+					});
+				}
+			);
+			const read = await authorisedFetch(
+				`/attestation-bundles/${bundle.digest}`,
+				token
+			);
+			const now = isoTimestamp(new Date());
+
+			expect({
+				demoted,
+				...(await casLifecycleRows(bundle.digest)),
+				refs: await attestationReferenceRows(),
+				presence: await tenantCasBlobRows(),
+				usage: await tenantUsageRow(),
+				read: {
+					status: read.status,
+					bytes: new Uint8Array(await read.arrayBuffer())
+				}
+			}).toStrictEqual({
+				demoted: 0,
+				objects: [
+					{
+						digest: bundle.digest,
+						size: bundle.size,
+						incarnation: 3,
+						storedAt: now,
+						deleteAfter: undefined
+					}
+				],
+				registry: [
+					{
+						kind: 'cas',
+						objectId: bundle.digest,
+						incarnation: 3,
+						state: 'live',
+						reservationOwner: undefined,
+						updatedAt: now
+					}
+				],
+				...before,
+				read: { status: StatusCodes.OK, bytes }
+			});
+		}
+	);
+
+	it.each(['reservation', 'bytes'] as const)(
+		'retries a missing-object repair after losing the %s response',
+		async (phase) => {
+			const bytes = textEncoder.encode('repair retry');
+			const bundle = await fileAttestationReference({
+				uploadId: 'repair-retry',
+				bytes,
+				storePathHash,
+				generation: 0,
+				predicateType
+			});
+			const measured = await currentServer().measureAttestationBundle(
+				bundle.stagingKey
+			);
+			const before = {
+				refs: await attestationReferenceRows(),
+				presence: await tenantCasBlobRows(),
+				usage: await tenantUsageRow()
+			};
+			await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
+			const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+			const originalPut = env.BLOBS.put.bind(env.BLOBS);
+			const failure = new Error('repair response lost');
+			const lost =
+				phase === 'reservation'
+					? vi
+							.spyOn(env.CUPBOARD_DB, 'batch')
+							.mockImplementationOnce(async (statements) => {
+								await originalBatch(statements);
+								throw failure;
+							})
+					: vi
+							.spyOn(env.BLOBS, 'put')
+							.mockImplementationOnce(async (key, value, options) => {
+								await originalPut(key, value, options);
+								throw failure;
+							});
+
+			try {
+				await runInDurableObject(currentServer(), async (instance) => {
+					await expect(
+						new AttestationCasService(instance.context).promoteMeasuredBundle(
+							bundle.stagingKey,
+							measured,
+							{ restoreMissingObject: true }
+						)
+					).rejects.toThrow('repair response lost');
+				});
+			} finally {
+				lost.mockRestore();
+			}
+
+			await runCasReaperDemote(rootLogger(), env, 10);
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const now = isoTimestamp(new Date());
+			expect({
+				...(await casLifecycleRows(bundle.digest)),
+				refs: await attestationReferenceRows(),
+				presence: await tenantCasBlobRows(),
+				usage: await tenantUsageRow()
+			}).toStrictEqual({
+				objects: [],
+				registry: [
+					{
+						kind: 'cas',
+						objectId: bundle.digest,
+						incarnation: 3,
+						state: 'pending',
+						reservationOwner: undefined,
+						updatedAt: now
+					}
+				],
+				...before
+			});
+
+			await runInDurableObject(currentServer(), (instance) =>
+				new AttestationCasService(instance.context).promoteMeasuredBundle(
+					bundle.stagingKey,
+					measured,
+					{ restoreMissingObject: true }
+				)
+			);
+			const stored = await env.BLOBS.get(
+				await currentCasObjectKey(bundle.digest)
+			);
+			const removalDeadline = isoTimestamp(
+				new Date(Date.now() + lateWriteTombstoneHorizonMs)
+			);
+			expect({
+				...(await casLifecycleRows(bundle.digest)),
+				deletions: await database
+					.select()
+					.from(d1Schema.objectDeletion)
+					.orderBy(d1Schema.objectDeletion.incarnation),
+				refs: await attestationReferenceRows(),
+				presence: await tenantCasBlobRows(),
+				usage: await tenantUsageRow(),
+				bytes:
+					stored === null
+						? undefined
+						: new Uint8Array(await stored.arrayBuffer())
+			}).toStrictEqual({
+				objects: [
+					{
+						digest: bundle.digest,
+						size: bundle.size,
+						incarnation: 3,
+						storedAt: now,
+						deleteAfter: undefined
+					}
+				],
+				registry: [
+					{
+						kind: 'cas',
+						objectId: bundle.digest,
+						incarnation: 3,
+						state: 'live',
+						reservationOwner: undefined,
+						updatedAt: now
+					}
+				],
+				deletions: [1, 2].map((incarnation) => ({
+					kind: 'cas',
+					objectId: bundle.digest,
+					incarnation,
+					removeAfter: removalDeadline
+				})),
+				...before,
+				bytes
+			});
+		}
+	);
 
 	it('leaves a present CAS object and its references intact when a demote is routed for it', async () => {
 		const bundle = await fileAttestationReference({

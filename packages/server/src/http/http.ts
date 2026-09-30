@@ -70,8 +70,6 @@ export const maxVerificationRpcRows = verificationBatchSize;
 // expires.
 export const verifyClaimLeaseMs = 6 * 60 * 1000;
 
-export const maxAttestationBundleBytes = 1024 * 1024;
-
 export const narInfoCacheTtlSeconds = 3600;
 
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}, must-revalidate`;

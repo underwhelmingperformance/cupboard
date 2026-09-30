@@ -63,6 +63,8 @@ import m0060 from './0060_managed_retirement_recheck.sql';
 import m0061 from './0061_attestation_inheritance_queue.sql';
 import m0062 from './0062_pending_upload_settle_retry.sql';
 import m0063 from './0063_refresh_successor_recovery.sql';
+import m0064 from './0064_attestation-bundle-pages.sql';
+import m0065 from './0065_attestation-inheritance-cursor.sql';
 
 export default {
 	journal,
@@ -130,6 +132,8 @@ export default {
 		m0060,
 		m0061,
 		m0062,
-		m0063
+		m0063,
+		m0064,
+		m0065
 	}
 };

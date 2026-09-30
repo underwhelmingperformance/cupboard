@@ -14,6 +14,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
+import migrations from '../../drizzle/migrations.js';
 import { cacheScopeFromRow } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -32,6 +33,7 @@ import {
 } from '../test-support.ts';
 
 import { barrierTriggers } from './garbage-collection-service.ts';
+import { applyMigrations, migrationsThrough } from './migrate.ts';
 
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
@@ -57,6 +59,147 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('preserves pending uploads and committed narinfo rows through attestation migrations', async () => {
+		const server = testServerFor('migration-attestation-preservation');
+		const migrated = await runInDurableObject(
+			server,
+			async (_instance, state) => {
+				await migrateThrough(state, 63);
+				const narInfoSchema = () => ({
+					columns: state.storage.sql
+						.exec('PRAGMA table_info(narinfo)')
+						.toArray(),
+					indexes: state.storage.sql
+						.exec('PRAGMA index_list(narinfo)')
+						.toArray(),
+					rows: state.storage.sql.exec('SELECT * FROM narinfo').toArray()
+				});
+				state.storage.sql.exec(
+					"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (1, '11111111111111111111111111111111', '/nix/store/11111111111111111111111111111111-publication', 'sha256:nar', 10, '[]', '2026-09-27T12:00:00.000Z')"
+				);
+				const before = narInfoSchema();
+				state.storage.sql.exec(
+					"INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at) VALUES ('publication-upload', 1, 'sha256:nar', 'staging/publication-upload', '{}', '2026-09-27T12:00:00.000Z', '2026-09-27T12:15:00.000Z')"
+				);
+				const pendingUploadSchema = () => ({
+					columns: state.storage.sql
+						.exec('PRAGMA table_info(pending_upload)')
+						.toArray(),
+					rows: state.storage.sql.exec('SELECT * FROM pending_upload').toArray()
+				});
+				const beforeUploads = pendingUploadSchema();
+				await migrateThrough(state, 65);
+				return {
+					before,
+					unchanged: narInfoSchema(),
+					beforeUploads,
+					unchangedUploads: pendingUploadSchema()
+				};
+			}
+		);
+
+		expect(migrated).toStrictEqual({
+			before: migrated.before,
+			unchanged: migrated.before,
+			beforeUploads: migrated.beforeUploads,
+			unchangedUploads: migrated.beforeUploads
+		});
+	});
+
+	it('preserves queued inheritance retries when adding the source cursor', async () => {
+		const server = testServerFor('migration-inheritance-cursor');
+		const queued = {
+			cache_id: 1,
+			store_path_hash: '1'.repeat(32),
+			generation: 7,
+			nar_hash: `sha256:${'1'.repeat(52)}`,
+			attempts: 3,
+			not_before: '2026-09-28T09:00:00.000Z'
+		};
+		const migrated = await runInDurableObject(
+			server,
+			async (_instance, state) => {
+				await migrateThrough(state, 64);
+				state.storage.sql.exec(
+					'INSERT INTO attestation_inheritance (cache_id, store_path_hash, generation, nar_hash, attempts, not_before) VALUES (?, ?, ?, ?, ?, ?)',
+					queued.cache_id,
+					queued.store_path_hash,
+					queued.generation,
+					queued.nar_hash,
+					queued.attempts,
+					queued.not_before
+				);
+				await migrateThrough(state, 65);
+				return state.storage.sql
+					.exec(
+						'SELECT cache_id, store_path_hash, generation, nar_hash, attempts, not_before, source_predicate_type IS NULL AND source_digest IS NULL AS unstarted FROM attestation_inheritance'
+					)
+					.toArray();
+			}
+		);
+		expect(migrated).toStrictEqual([{ ...queued, unstarted: 1 }]);
+	});
+
+	it('preserves pending upload expiry and staging ownership through the paged bundle migration', async () => {
+		const server = testServerFor('migration-attestation-bundles');
+		const records = Array.from({ length: 1001 }, (_, index) => ({
+			id: `bundle-${String(index)}`,
+			cache_id: 1,
+			store_path_hash: '1'.repeat(32),
+			digest: 'a'.repeat(64),
+
+			r2_key: `staging/bundle-${String(index)}`,
+			created_at: '2026-09-27T12:00:00.000Z',
+			expires_at: '2026-09-27T12:15:00.000Z'
+		}));
+		const migrated = await runInDurableObject(
+			server,
+			async (_instance, state) => {
+				await migrateThrough(state, 63);
+				const triggers = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'pending_attestation' ORDER BY name"
+						)
+						.toArray();
+				const originalTriggers = triggers();
+				state.storage.sql.exec(
+					"INSERT INTO pending_attestation (id, cache_id, store_path_hash, digest, predicate_type, r2_key, created_at, expires_at) SELECT json_extract(value, '$.id'), json_extract(value, '$.cache_id'), json_extract(value, '$.store_path_hash'), json_extract(value, '$.digest'), NULL, json_extract(value, '$.r2_key'), json_extract(value, '$.created_at'), json_extract(value, '$.expires_at') FROM json_each(?)",
+					JSON.stringify(records)
+				);
+				const first = await applyMigrations(
+					drizzle(state.storage),
+					migrationsThrough(migrations, 64)
+				);
+				await migrateThrough(state, 64);
+				return {
+					first: first.kind,
+					originalTriggers,
+					migratedTriggers: triggers(),
+					rows: state.storage.sql
+						.exec(
+							'SELECT id, cache_id, store_path_hash, digest, r2_key, created_at, expires_at, validated_bundle_json IS NULL AS unvalidated FROM pending_attestation ORDER BY rowid'
+						)
+						.toArray()
+				};
+			}
+		);
+		expect(migrated).toStrictEqual({
+			first: 'pending',
+			originalTriggers: [
+				{ name: 'managed_retirement_pending_attestation_delete' }
+			],
+			migratedTriggers: [
+				{ name: 'managed_retirement_pending_attestation_delete' },
+				{ name: 'pending_attestation_delete_subjects' }
+			],
+			rows: records.map((row) => ({
+				...row,
+				unvalidated: 1
+			}))
+		});
+	});
+
 	it('preserves a pre-0007 narinfo through the 0007 and 0008 table recreations', async () => {
 		const server = testServerFor('migration-recreates');
 		const signedHash = 'a'.repeat(32);

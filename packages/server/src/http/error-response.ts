@@ -8,6 +8,7 @@ import {
 	DatabaseOverloadedError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
+	MetadataHttpError,
 	OAuthError,
 	ServerHttpError,
 	TenantDispatchInterruptedError,
@@ -47,6 +48,18 @@ export function serverHttpErrorResponse(error: ServerHttpError): Response {
 	// stored this response would keep retrying against a cache instead of the
 	// origin, well past whatever made it transient.
 	const headers = serverHttpErrorHeaders(error);
+	if (error instanceof MetadataHttpError) {
+		headers.set('content-type', 'application/json');
+		headers.set('cache-control', 'no-store');
+		return Response.json(
+			{
+				code: error.code,
+				message: error.message,
+				...(error.storePath !== undefined && { storePath: error.storePath })
+			},
+			{ status: error.status, headers }
+		);
+	}
 
 	return new Response(`${error.message}\n`, {
 		status: error.status,

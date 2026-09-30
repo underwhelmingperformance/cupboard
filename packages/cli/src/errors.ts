@@ -1208,6 +1208,41 @@ export class AttestationUploadUnavailableError extends CliError {
 	}
 }
 
+export class AttestationBundleTransportUnavailableError extends CliError {
+	constructor(options: ErrorOptions) {
+		super(
+			'Bundle attachment transport is unavailable on this server.',
+			options
+		);
+		this.name = 'AttestationBundleTransportUnavailableError';
+	}
+}
+
+export class AttestationBundleResponseMismatchError extends CliError {
+	constructor(
+		public readonly operation: 'negotiation' | 'attachment',
+		public readonly mismatch: 'missing' | 'duplicate' | 'unexpected',
+		public readonly identity: string
+	) {
+		const detail = {
+			missing: 'omitted the requested result for',
+			duplicate: 'returned multiple results for',
+			unexpected: 'returned an unrequested result for'
+		}[mismatch];
+		super(`Attestation ${operation} ${detail} ${identity}`);
+		this.name = 'AttestationBundleResponseMismatchError';
+	}
+}
+
+export class AttestationPathUnservableError extends CliError {
+	constructor(public readonly storePathHash: string) {
+		super(
+			`The cache no longer serves ${storePathHash}; attachment was not recorded`
+		);
+		this.name = 'AttestationPathUnservableError';
+	}
+}
+
 export class UnexpectedAttestationDecisionError extends CliError {
 	constructor(
 		public readonly storePathHash: string,
@@ -1283,7 +1318,9 @@ export class AttestationsDisabledError extends CliUsageError {
 
 export class AttestAttachBundleRequiredError extends CliUsageError {
 	constructor() {
-		super('attest attach requires at least one --attestation bundle');
+		super(
+			'attest attach requires at least one bundle through --attestation or --attestations-file'
+		);
 		this.name = 'AttestAttachBundleRequiredError';
 	}
 }
@@ -1979,6 +2016,30 @@ export class BuildProvenanceIncompleteError extends Error {
 			`The build did not produce current-run provenance for: ${missingPaths.join(', ')}`
 		);
 		this.name = 'BuildProvenanceIncompleteError';
+	}
+}
+
+/**
+The rebuild completed without observed execution of each selected derivation.
+*/
+export class BuildObservationMissingError extends CliError {
+	constructor(public readonly installables: readonly string[]) {
+		super(
+			`The rebuild did not observe a build for ${installables.join(', ')}; check the selected Nix store and its build logs.`
+		);
+		this.name = 'BuildObservationMissingError';
+	}
+}
+
+/**
+Configured remote builders can reuse outputs without executing the derivation.
+*/
+export class BuildRebuildRemoteDispatchError extends CliError {
+	constructor() {
+		super(
+			'Rebuilding requires execution in the selected Nix store. Configured remote builders cannot guarantee that execution. Select the remote store directly.'
+		);
+		this.name = 'BuildRebuildRemoteDispatchError';
 	}
 }
 

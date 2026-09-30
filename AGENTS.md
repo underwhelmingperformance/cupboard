@@ -96,8 +96,8 @@ This is a pnpm workspace.
   middleware; services take parsed values and return typed protocol objects,
   with the route layer doing the parsing and rendering. Only the following
   endpoints handle raw Request/Response: OAuth, the Nix binary-cache protocol,
-  the cache's read probes (`missing-paths` and `attested-paths`), the commit
-  WebSocket, and streamed object serves.
+  the cache's read probes (`missing-paths`, `attested-paths` and `path-info`),
+  the commit WebSocket, and streamed object serves.
 - Hono answers HEAD by re-dispatching the request to the GET handler with the
   body stripped, so register reads with `.get()`; an explicit HEAD registration
   never matches.

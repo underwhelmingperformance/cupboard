@@ -10,6 +10,10 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import {
+	type CacheMetadataError,
+	cacheMetadataErrorCodes
+} from '@cupboard/protocol/cache-metadata';
+import {
 	type OidcIssuer,
 	type SubjectTokenProblem,
 	subjectTokenProblems
@@ -33,6 +37,74 @@ export abstract class ServerHttpError extends Error {
 
 export abstract class InvalidRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
+}
+
+export abstract class MetadataHttpError extends ServerHttpError {
+	abstract readonly code: CacheMetadataError['code'];
+	readonly storePath?: StorePathString;
+}
+
+export class MetadataRequestTooLargeError extends MetadataHttpError {
+	readonly code = cacheMetadataErrorCodes.requestTooLarge;
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+	constructor() {
+		super(
+			'The metadata request exceeds 64 KiB. Split the store paths into smaller pages.'
+		);
+		this.name = 'MetadataRequestTooLargeError';
+	}
+}
+
+export class MetadataNarInfoTooLargeError extends MetadataHttpError {
+	readonly code = cacheMetadataErrorCodes.narInfoTooLarge;
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+	constructor(
+		public override readonly storePath: StorePathString,
+		maximumBytes: number
+	) {
+		super(
+			`The metadata for ${storePath} exceeds ${String(maximumBytes)} bytes and cannot fit in one metadata page.`
+		);
+		this.name = 'MetadataNarInfoTooLargeError';
+	}
+}
+
+export class MetadataNarInfoInvalidError extends MetadataHttpError {
+	readonly code = cacheMetadataErrorCodes.narInfoInvalid;
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+	constructor(
+		public override readonly storePath: StorePathString | undefined,
+		public override readonly cause: unknown
+	) {
+		super(
+			storePath === undefined
+				? 'The cache returned invalid narinfo metadata.'
+				: `The cache returned invalid narinfo metadata for ${storePath}.`
+		);
+		this.name = 'MetadataNarInfoInvalidError';
+	}
+}
+
+export class MetadataCandidateBudgetExceededError extends MetadataHttpError {
+	readonly code = cacheMetadataErrorCodes.candidateBudget;
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+	constructor(candidates: number, bytes: number) {
+		super(
+			`The metadata page has ${String(candidates)} cache candidates and ${String(bytes)} bytes of candidate metadata and exceeds its metadata or object-read budget. Split the page before retrying; a single path that exceeds the budget requires a narrower reuse view.`
+		);
+		this.name = 'MetadataCandidateBudgetExceededError';
+	}
+}
+
+export class MetadataScopeChangedError extends MetadataHttpError {
+	readonly code = cacheMetadataErrorCodes.scopeChanged;
+	readonly status = StatusCodes.CONFLICT;
+	constructor() {
+		super(
+			'The cache or reuse view changed during closure discovery. Refresh the closure metadata before publishing.'
+		);
+		this.name = 'MetadataScopeChangedError';
+	}
 }
 
 export const uploadPageSplitHeader = 'x-cupboard-upload-page-split';
@@ -1273,9 +1345,14 @@ export class AttestationSubjectMismatchError extends ServerHttpError {
 
 	constructor(
 		public readonly expectedNarHash: string,
-		public readonly subjectDigest: string
+		public readonly subjectDigest: string,
+		public readonly expectedSubjectName?: string
 	) {
-		super('Attestation subject digest does not match the committed NAR');
+		super(
+			expectedSubjectName === undefined
+				? 'Attestation subject digest does not match the committed NAR'
+				: `Attestation bundle has no subject for ${expectedSubjectName} with the committed NAR hash`
+		);
 		this.name = 'AttestationSubjectMismatchError';
 	}
 }

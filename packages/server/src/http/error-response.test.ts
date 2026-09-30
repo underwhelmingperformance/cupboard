@@ -1,4 +1,9 @@
 import { type Capture, startCapture } from '@cupboard/logger/testing';
+import { storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheMetadataErrorCodes,
+	cacheMetadataErrorSchema
+} from '@cupboard/protocol/cache-metadata';
 import { Hono } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -6,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
 	InsufficientScopeError,
 	InvalidAccessTokenError,
+	MetadataNarInfoInvalidError,
+	MetadataNarInfoTooLargeError,
 	UnauthenticatedError
 } from '../errors.ts';
 
@@ -120,6 +127,43 @@ describe('serverErrorHandler', () => {
 			properties: { ray: 'ray-9', error: boom }
 		});
 	});
+
+	it.each(['invalid', 'too-large', 'unscoped'] as const)(
+		'serialises the affected path for a %s metadata error',
+		async (kind) => {
+			const storePath = storePathSchema.parse(
+				`/nix/store/${'3'.repeat(32)}-metadata`
+			);
+			const error =
+				kind === 'too-large'
+					? new MetadataNarInfoTooLargeError(storePath, 1024)
+					: new MetadataNarInfoInvalidError(
+							kind === 'unscoped' ? undefined : storePath,
+							new Error('invalid metadata')
+						);
+			const response = await appThatThrows(error).request('/');
+			const body = cacheMetadataErrorSchema.parse(await response.json());
+			expect({
+				status: response.status,
+				cacheControl: response.headers.get('cache-control'),
+				body
+			}).toStrictEqual({
+				status:
+					kind === 'too-large'
+						? StatusCodes.REQUEST_TOO_LONG
+						: StatusCodes.INTERNAL_SERVER_ERROR,
+				cacheControl: 'no-store',
+				body: {
+					code:
+						kind === 'too-large'
+							? cacheMetadataErrorCodes.narInfoTooLarge
+							: cacheMetadataErrorCodes.narInfoInvalid,
+					message: error.message,
+					...(kind !== 'unscoped' && { storePath })
+				}
+			});
+		}
+	);
 
 	it.each([
 		{ flag: 'retryable' },

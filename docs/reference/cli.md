@@ -359,7 +359,7 @@ Options:
   -h, --help                         display help for command
 
 Commands:
-  attach [options] <url> <paths...>  Attach Sigstore attestation bundles to
+  attach [options] <url> [paths...]  Attach Sigstore attestation bundles to
                                      store paths that are already published to
                                      the cache.
   verify [options] [bundles...]      Verify Sigstore attestation bundles, either
@@ -370,7 +370,7 @@ Commands:
 #### cupboard attest attach
 
 ```text
-Usage: cupboard attest attach [options] <url> <paths...>
+Usage: cupboard attest attach [options] <url> [paths...]
 
 Attach Sigstore attestation bundles to store paths that are already published to
 the cache.
@@ -381,6 +381,8 @@ Arguments:
   paths                       published store paths to attach the bundles to
 
 Options:
+  --paths-file <path>         read additional published store paths from this
+                              file, one per line
   --github-oidc               sign in with the job's GitHub Actions OIDC token
                               instead of your saved `cupboard login` session
   --audience <audience>       OIDC audience to request with --github-oidc
@@ -392,6 +394,8 @@ Options:
   --attestation <bundle>      a Sigstore bundle file to attach (repeatable).
                               Every in-toto subject in the bundle must match one
                               of the given store paths. (default: [])
+  --attestations-file <path>  read additional Sigstore bundle paths from this
+                              file, one per line
   -h, --help                  display help for command
 
 Examples:
