@@ -9,6 +9,15 @@ procedure is enough.
 
 These notes apply to the first release after v0.0.35.
 
+### CI read acquisition
+
+Upgrade the deployed Worker before using this release's
+`cupboard run --github-oidc`. Read acquisition uses a new extension grant at the
+tenant token endpoint; an older Worker returns `unsupported_grant_type`. Setup
+also needs this release's CLI for OIDC-backed configuration. Public read-only
+jobs continue to run anonymously without a matching CI trust rule or
+`id-token: write`.
+
 ### Updating a deployment needs an admin token
 
 - `cupboard init` now needs an admin token to update a deployment that has an

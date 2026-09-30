@@ -12,6 +12,7 @@ import {
 	isClaimSatisfied,
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
+import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 
 import {
@@ -426,7 +427,8 @@ function trustFindings(
 	isPreset: boolean,
 	publication: PublicationCase,
 	rules: readonly OidcTrustRule[],
-	requests: readonly AuthorizationDetails[]
+	requests: readonly AuthorizationDetails[],
+	readResources: readonly ReadResourceState[]
 ): CheckFinding[] {
 	if (requests.length === 0) {
 		return [];
@@ -440,7 +442,8 @@ function trustFindings(
 		'trust rule',
 		rules,
 		publication.claims,
-		requests
+		requests,
+		readResources
 	);
 
 	if (publication.requests.length === 0) {
@@ -490,10 +493,13 @@ async function inspectPublication(
 		client,
 		dependencies.fetchCacheAccess
 	);
-	const findings = trustFindings(isPreset, publication, rules, [
-		...publication.requests,
-		...read.requests
-	]);
+	const findings = trustFindings(
+		isPreset,
+		publication,
+		rules,
+		[...publication.requests, ...read.requests],
+		read.resources
+	);
 	for (const [resource, access, wiring] of [
 		['cache', read.cacheAccess, read.cacheWiring],
 		['view', read.viewAccess, read.viewWiring]
