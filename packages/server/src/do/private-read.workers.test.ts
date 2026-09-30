@@ -68,6 +68,56 @@ describe('per-cache private reads', () => {
 		await recordTransition('cache-identity', 'complete');
 	});
 
+	it('accepts scoped metadata authority only for an absent cache and never streams private content', async () => {
+		const admin = await initialiseViaWorker();
+		const cache = namedCache('pending');
+		const metadata = await issueWorkerSignedToken([
+			{ type: 'cupboard_cache', cache, actions: ['cache:read'] }
+		]);
+		const credential = tokenBasic(metadata);
+		const absent = await readFetch('/cache/pending/nix-cache-info', credential);
+		const other = await readFetch('/cache/other/nix-cache-info', credential);
+		const missing = await readFetch('/cache/pending/api/v1/missing-paths', {
+			...credential,
+			method: 'POST',
+			headers: {
+				...Object.fromEntries(new Headers(credential.headers)),
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ storePathHashes: ['0'.repeat(32)] })
+		});
+
+		expect({
+			absent: absent.status,
+			caching: absent.headers.get('cache-control'),
+			other: other.status,
+			missing: await missing.json()
+		}).toStrictEqual({
+			absent: StatusCodes.NOT_FOUND,
+			caching: 'no-store',
+			other: StatusCodes.UNAUTHORIZED,
+			missing: { missingStorePathHashes: ['0'.repeat(32)] }
+		});
+
+		await putCache(admin, cache, 'private');
+		const existing = await readFetch(
+			'/cache/pending/nix-cache-info',
+			credential
+		);
+		const content = await readFetch(
+			`/cache/pending/${'0'.repeat(32)}.narinfo`,
+			credential
+		);
+
+		expect({
+			existing: existing.status,
+			content: content.status
+		}).toStrictEqual({
+			existing: StatusCodes.UNAUTHORIZED,
+			content: StatusCodes.UNAUTHORIZED
+		});
+	});
+
 	it('serves reads publicly when no credential is configured', async () => {
 		const token = await initialiseViaWorker();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

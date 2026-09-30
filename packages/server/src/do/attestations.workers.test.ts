@@ -286,36 +286,63 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('reports no attestations for a cache that does not exist', async () => {
+	it('requires the read challenge before it reveals a missing cache', async () => {
 		await initialiseViaWorker();
-		const response = await readFetch('/cache/absent/api/v1/attested-paths', {
+		await provisionFixtureTenant({
+			read: { user: 'alice', password: 'secret' }
+		});
+		const unauthorised = await readFetch(
+			'/cache/absent/api/v1/attested-paths',
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ storePathHashes: [uniqueStorePathHash()] })
+			}
+		);
+		const authorised = await readFetch('/cache/absent/api/v1/attested-paths', {
 			method: 'POST',
-			headers: { 'content-type': 'application/json' },
+			headers: {
+				'content-type': 'application/json',
+				authorization: `Basic ${btoa('alice:secret')}`
+			},
 			body: JSON.stringify({ storePathHashes: [uniqueStorePathHash()] })
 		});
 
 		expect({
-			status: response.status,
-			body: attestationStatusResponseSchema.parse(await response.json())
+			unauthorised: unauthorised.status,
+			authorised: authorised.status,
+			body: attestationStatusResponseSchema.parse(await authorised.json())
 		}).toStrictEqual({
-			status: StatusCodes.OK,
+			unauthorised: StatusCodes.UNAUTHORIZED,
+			authorised: StatusCodes.OK,
 			body: { attestedStorePathHashes: [] }
 		});
 	});
 
 	it.each([
-		{ cache: 'the default cache', path: '/api/v1/attested-paths' },
+		{
+			cache: 'the default cache',
+			path: '/api/v1/attested-paths',
+			authorization: undefined
+		},
 		{
 			cache: 'a cache that does not exist',
-			path: '/cache/absent/api/v1/attested-paths'
+			path: '/cache/absent/api/v1/attested-paths',
+			authorization: `Basic ${btoa('alice:secret')}`
 		}
 	])(
 		'refuses an attestation probe for more than the maximum number of paths in $cache',
-		async ({ path }) => {
+		async ({ path, authorization }) => {
 			await initialiseViaWorker();
+			await provisionFixtureTenant({
+				read: { user: 'alice', password: 'secret' }
+			});
 			const response = await readFetch(path, {
 				method: 'POST',
-				headers: { 'content-type': 'application/json' },
+				headers: {
+					'content-type': 'application/json',
+					...(authorization !== undefined && { authorization })
+				},
 				body: JSON.stringify({
 					storePathHashes: Array.from(
 						{ length: attestationStatusMaxPaths + 1 },
