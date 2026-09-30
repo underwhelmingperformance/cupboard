@@ -1010,13 +1010,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async isReadTokenAuthorised(
 		token: string,
-		operation: 'cache:content-read' | 'view:content-read',
+		operation:
+			| 'cache:read'
+			| 'cache:content-read'
+			| 'view:content-read'
+			| readonly ('cache:read' | 'cache:content-read')[],
 		resource: { readonly cache: CacheScope } | { readonly view: ReuseViewName }
 	): Promise<boolean> {
 		try {
 			const claims = await this.authKeys.authenticateToken(token);
 
-			return isCoveredByToken(claims.grants, operation, resource);
+			const operations =
+				typeof operation === 'string' ? [operation] : operation;
+
+			return operations.some((required) =>
+				isCoveredByToken(claims.grants, required, resource)
+			);
 		} catch (error) {
 			if (
 				error instanceof InvalidAccessTokenError ||
@@ -2908,9 +2917,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	async authoriseCacheContentRead(
 		token: string,
-		cache: CacheScope
+		cache: CacheScope,
+		isAbsent = false
 	): Promise<boolean> {
-		return this.isReadTokenAuthorised(token, 'cache:content-read', { cache });
+		return this.isReadTokenAuthorised(
+			token,
+			isAbsent ? ['cache:content-read', 'cache:read'] : 'cache:content-read',
+			{ cache }
+		);
 	}
 
 	// Only RPC callers can stage negotiate hints. The Worker puts the returned

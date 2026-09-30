@@ -223,20 +223,15 @@ function guardRead(
 				tenantServer(
 					context.env,
 					context.get('tenant')
-				).authoriseCacheContentRead(token, cache)
+				).authoriseCacheContentRead(token, cache, context.get('isCacheDeleted'))
 		}
 	);
 }
 
 /**
- * Authenticates a read of cache content and refuses it while the addressed
- * cache is deleted.
- *
- * Cache deletion retains the read credential and removes narinfo and
- * attestation objects asynchronously. Authentication can therefore succeed
- * while those objects remain. Return 404 after authentication so the objects
- * are inaccessible without revealing the cache state to an unauthenticated
- * reader.
+ * Deletion retains credentials and removes content asynchronously.
+ * Authentication can therefore succeed while objects remain. Return 404
+ * before object-serving code can expose those residual objects.
  */
 async function guardContentRead(
 	context: Context<WorkerHonoEnv>

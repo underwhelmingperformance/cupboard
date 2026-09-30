@@ -144,17 +144,26 @@ describe('named cache reads', () => {
 		});
 	});
 
-	it('returns 404 for metadata of a missing named cache', async () => {
+	it('keeps a missing named cache indistinguishable from a private one', async () => {
 		await initialiseViaWorker();
+		await provisionFixtureTenant({
+			read: { user: 'alice', password: 'secret' }
+		});
 
-		const response = await readFetch('/cache/missing/nix-cache-info');
+		const unauthorised = await readFetch('/cache/missing/nix-cache-info');
+		const authorisedResponse = await readFetch(
+			'/cache/missing/nix-cache-info',
+			authorised()
+		);
 
 		expect({
-			status: response.status,
-			cacheControl: response.headers.get('cache-control')
+			unauthorised: unauthorised.status,
+			authorised: authorisedResponse.status,
+			authorisedCacheControl: authorisedResponse.headers.get('cache-control')
 		}).toStrictEqual({
-			status: StatusCodes.NOT_FOUND,
-			cacheControl: 'no-store'
+			unauthorised: StatusCodes.UNAUTHORIZED,
+			authorised: StatusCodes.NOT_FOUND,
+			authorisedCacheControl: 'no-store'
 		});
 	});
 
