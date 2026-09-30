@@ -1,8 +1,10 @@
 import {
 	cacheUrl,
+	parseTenantCacheUrl,
 	reuseViewUrl,
 	urlWithCredential
 } from '@cupboard/nix-store/cache-url';
+import { InvalidTenantCacheUrlError } from '@cupboard/nix-store/errors';
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { type BasicCredential } from '@cupboard/shared/http';
 
@@ -45,7 +47,15 @@ export function substituterUrlFor(
  * base rather than nesting it under a cache-specific prefix.
  */
 export function reuseViewUrlFor(baseUrl: URL, view: string): URL {
-	return reuseViewUrl(baseUrl, view.trim());
+	let tenantUrl = baseUrl;
+	try {
+		tenantUrl = parseTenantCacheUrl(baseUrl).tenantUrl;
+	} catch (error) {
+		if (!(error instanceof InvalidTenantCacheUrlError)) {
+			throw error;
+		}
+	}
+	return reuseViewUrl(tenantUrl, view.trim());
 }
 
 export function cachePublicKeyRequestHeaders(): Readonly<

@@ -10,16 +10,19 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { withReadAuthentication } from '@cupboard/nix';
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { createGithubReporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
 import { probeDeadlineMs } from '../cache-probe.ts';
 import {
 	BooleanInputInvalidError,
+	CacheAccessProbeError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
@@ -30,9 +33,11 @@ import {
 	PrivateSubstitutersCacheUrlRequiredError,
 	ProbeTimeoutError,
 	ProvisionCacheUrlRequiredError,
+	ReadConfigurationScopeError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError,
+	StaticReadCredentialRejectedError,
 	UrlInputInvalidError
 } from '../errors.ts';
 
@@ -43,6 +48,8 @@ import {
 	resolveSubstituters,
 	type ResolveSubstitutersOptions,
 	setupAction,
+	type SetupActionDependencies,
+	setupConfigureAction,
 	type SetupOptions,
 	writeNetrc
 } from './setup.ts';
@@ -503,18 +510,21 @@ function cacheInfoBody(priority: number): string {
 function stubFetch(
 	bodyFor: (url: string) => string,
 	options: {
-		readonly status?: (url: string) => number;
+		readonly status?: (
+			url: string,
+			authorization: string | undefined
+		) => number;
 		readonly authorizations?: (string | undefined)[];
 	} = {}
 ): typeof fetch {
 	return (input, init) => {
 		const url = requestUrl(input);
 		const body = bodyFor(url);
-		const status = options.status?.(url) ?? 200;
+		const authorization =
+			new Headers(init?.headers).get('authorization') ?? undefined;
+		const status = options.status?.(url, authorization) ?? StatusCodes.OK;
 
-		options.authorizations?.push(
-			new Headers(init?.headers).get('authorization') ?? undefined
-		);
+		options.authorizations?.push(authorization);
 
 		return Promise.resolve(new Response(body, { status }));
 	};
@@ -527,6 +537,104 @@ describe('resolveSubstituters', () => {
 		readUser: '',
 		readPassword: ''
 	};
+	it.each(
+		[30, 40, 50].flatMap((viewPriority) => [
+			{
+				viewPriority,
+				cacheUrl: new URL('https://cache.example.test/t/acme'),
+				cache: namedCache('pr-1')
+			},
+			{
+				viewPriority,
+				cacheUrl: new URL('https://cache.example.test/t/acme/cache/pr-1'),
+				cache: defaultCache
+			}
+		])
+	)(
+		'uses first-write priority at $cacheUrl with view priority $viewPriority',
+		async ({ viewPriority, cacheUrl, cache }) => {
+			const outcome = resolveSubstituters(
+				{
+					...baseOptions,
+					cacheUrl,
+					caches: [{ cache }],
+					reuseView: 'reuse'
+				},
+				{
+					fetch: stubFetch(
+						(url) => cacheInfoBody(url.includes('/reuse/') ? viewPriority : 10),
+						{
+							status: (url) =>
+								url.includes('/cache/pr-1/')
+									? StatusCodes.NOT_FOUND
+									: StatusCodes.OK
+						}
+					)
+				}
+			);
+			if (viewPriority <= 40) {
+				await expect(outcome).rejects.toBeInstanceOf(ReuseViewPriorityError);
+				return;
+			}
+			const substituters = await outcome;
+			expect(substituters.map((url) => canonicalHref(url))).toStrictEqual([
+				'https://cache.example.test/t/acme/cache/pr-1',
+				'https://cache.example.test/t/acme/reuse/reuse'
+			]);
+		}
+	);
+
+	it.each([StatusCodes.NOT_FOUND])(
+		'uses first-write priority when the pending destination answers %s',
+		async (pendingStatus) => {
+			const substituters = await resolveSubstituters(
+				{
+					...baseOptions,
+					cacheUrl: new URL('https://cache.example.test/t/acme'),
+					caches: [{ cache: namedCache('pr-1') }],
+					reuseView: 'reuse'
+				},
+				{
+					fetch: stubFetch(
+						(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 10),
+						{
+							status: (url) =>
+								url.includes('/cache/pr-1/') ? pendingStatus : StatusCodes.OK
+						}
+					)
+				}
+			);
+
+			expect(substituters.map((url) => canonicalHref(url))).toStrictEqual([
+				'https://cache.example.test/t/acme/cache/pr-1',
+				'https://cache.example.test/t/acme/reuse/reuse'
+			]);
+		}
+	);
+
+	it('refuses a destination that answers 401', async () => {
+		await expect(
+			resolveSubstituters(
+				{
+					...baseOptions,
+					cacheUrl: new URL('https://cache.example.test/t/acme'),
+					caches: [{ cache: namedCache('pr-1') }],
+					reuseView: 'reuse'
+				},
+				{
+					fetch: stubFetch(
+						(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 10),
+						{
+							status: (url) =>
+								url.includes('/cache/pr-1/')
+									? StatusCodes.UNAUTHORIZED
+									: StatusCodes.OK
+						}
+					)
+				}
+			)
+		).rejects.toBeInstanceOf(CacheInfoFetchError);
+	});
 
 	it('returns only the destination without probing when no view is set', async () => {
 		const requests: string[] = [];
@@ -683,7 +791,8 @@ describe('resolveSubstituters', () => {
 		'throws CacheInfoFetchError for a non-2xx %s response',
 		async (side, failingUrl) => {
 			const fetcher = stubFetch(() => cacheInfoBody(40), {
-				status: (url) => (url === failingUrl ? 503 : 200)
+				status: (url) =>
+					url === failingUrl ? StatusCodes.SERVICE_UNAVAILABLE : StatusCodes.OK
 			});
 			let failure: unknown;
 
@@ -783,43 +892,49 @@ describe('resolveSubstituters', () => {
 		]);
 	});
 
-	it('uses the wrapper credential when probing a private view', async () => {
-		const directory = await mkdtemp(
-			path.join(tmpdir(), 'cupboard-setup-read-')
-		);
-		const netrcFile = path.join(directory, 'netrc');
-		const authorizations: (string | undefined)[] = [];
-
-		try {
-			await writeFile(
-				netrcFile,
-				'machine cache.example.test login cupboard-oidc password token\n'
+	it.each([
+		'https://cache.example.test/t/acme',
+		'https://cache.example.test/t/acme/cache/new'
+	])(
+		'uses the wrapper credential when probing a private view from %s',
+		async (cacheUrl) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-setup-read-')
 			);
-			vi.stubEnv('NIX_CONFIG', `netrc-file = ${netrcFile}`);
+			const netrcFile = path.join(directory, 'netrc');
+			const authorizations: (string | undefined)[] = [];
 
-			await resolveSubstituters(
-				{
-					...baseOptions,
-					cacheUrl: new URL('https://cache.example.test/t/acme'),
-					reuseView: 'reuse'
-				},
-				{
-					fetch: stubFetch(
-						(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 40),
-						{ authorizations }
-					)
-				}
-			);
+			try {
+				await writeFile(
+					netrcFile,
+					'machine cache.example.test login cupboard-oidc password token\n'
+				);
+				vi.stubEnv('NIX_CONFIG', `netrc-file = ${netrcFile}`);
 
-			expect(authorizations).toStrictEqual([
-				`Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`,
-				`Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`
-			]);
-		} finally {
-			vi.unstubAllEnvs();
-			await rm(directory, { recursive: true, force: true });
+				await resolveSubstituters(
+					{
+						...baseOptions,
+						cacheUrl: new URL(cacheUrl),
+						reuseView: 'reuse'
+					},
+					{
+						fetch: stubFetch(
+							(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 40),
+							{ authorizations }
+						)
+					}
+				);
+
+				expect(authorizations).toStrictEqual([
+					`Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`,
+					`Basic ${Buffer.from('cupboard-oidc:token').toString('base64')}`
+				]);
+			} finally {
+				vi.unstubAllEnvs();
+				await rm(directory, { recursive: true, force: true });
+			}
 		}
-	});
+	);
 
 	it.each([
 		[
@@ -1040,6 +1155,237 @@ describe('setupAction cache-credential masking', () => {
 });
 
 describe('setupAction Nix configuration', () => {
+	it('preserves an accepted ambient netrc for subsequent steps', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-ambient-')
+		);
+		const tenantUrl = new URL('https://cache.example.test/t/acme');
+		const netrcFile = path.join(directory, 'custom-netrc');
+		const environmentFile = path.join(directory, 'github-env');
+		const outputFile = path.join(directory, 'github-output');
+		const inheritedConfig = `netrc-file = ${netrcFile}\nmax-jobs = 2`;
+		const authorization = `Basic ${Buffer.from('alice:secret').toString('base64')}`;
+		const fetcher = stubFetch(() => cacheInfoBody(40), {
+			status: (_url, supplied) =>
+				supplied === authorization ? StatusCodes.OK : StatusCodes.UNAUTHORIZED
+		});
+
+		try {
+			await writeFile(
+				netrcFile,
+				'machine cache.example.test login alice password secret\n'
+			);
+			vi.stubEnv('NIX_CONFIG', inheritedConfig);
+
+			await setupAction(
+				{
+					installDir: path.join(directory, 'bin'),
+					addToPath: 'false',
+					cacheUrl: tenantUrl.href,
+					cache: 'builds',
+					trustedPublicKey: 'acme:AAAA'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_ENV: environmentFile,
+					GITHUB_OUTPUT: outputFile,
+					NIX_CONFIG: inheritedConfig
+				},
+				createGithubReporter(),
+				{
+					installRelease: () =>
+						Promise.resolve({
+							binaryPath: path.join(directory, 'bin', 'cupboard'),
+							version: 'v1.2.3',
+							sourceCommit: 'd'.repeat(40)
+						}),
+					fetch: fetcher
+				}
+			);
+
+			const outputs = await readActionOutputs(outputFile);
+			const generatedConfigFile = outputs['nix-config-file'];
+
+			if (generatedConfigFile === undefined) {
+				throw new Error('setup did not output the generated Nix config path');
+			}
+
+			const exportedConfig = await readEnvironmentValue(
+				environmentFile,
+				'NIX_CONFIG'
+			);
+			vi.stubEnv('NIX_CONFIG', exportedConfig);
+			const subsequent = await withReadAuthentication(fetcher, { tenantUrl })(
+				new URL(`${tenantUrl.href}/cache/builds/nix-cache-info`)
+			);
+
+			expect({
+				exportedConfig,
+				generatedConfig: await readFile(generatedConfigFile, 'utf8'),
+				target: outputs['read-session-target'],
+				view: outputs['read-session-view'],
+				subsequentStatus: subsequent.status
+			}).toStrictEqual({
+				exportedConfig: `${inheritedConfig}\ninclude ${generatedConfigFile}\n`,
+				generatedConfig:
+					'extra-substituters = https://cache.example.test/t/acme/cache/builds\nextra-trusted-public-keys = acme:AAAA\n',
+				target: '',
+				view: '',
+				subsequentStatus: StatusCodes.OK
+			});
+		} finally {
+			vi.unstubAllEnvs();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{ caches: 'builds,release', state: 'existing' },
+		{ caches: 'release,builds', state: 'existing' },
+		{ caches: 'builds,release', state: 'absent' },
+		{ caches: 'release,builds', state: 'absent' }
+	] as const)(
+		'acquires only the unresolved destination with $caches and $state state',
+		async ({ caches, state }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-setup-mixed-')
+			);
+			const outputFile = path.join(directory, 'github-output');
+			const sessions: unknown[] = [];
+			const fetcher = stubFetch(() => cacheInfoBody(40), {
+				status: (url) =>
+					url.includes('/cache/builds/')
+						? StatusCodes.UNAUTHORIZED
+						: StatusCodes.OK
+			});
+
+			try {
+				await setupAction(
+					{
+						installDir: path.join(directory, 'bin'),
+						addToPath: 'false',
+						cacheUrl: 'https://cache.example.test/t/acme',
+						cache: caches,
+						trustedPublicKey: 'acme:AAAA'
+					},
+					{
+						RUNNER_TEMP: directory,
+						GITHUB_ENV: path.join(directory, 'github-env'),
+						GITHUB_OUTPUT: outputFile,
+						NIX_CONFIG: 'max-jobs = 2'
+					},
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: path.join(directory, 'bin', 'cupboard'),
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: fetcher,
+						configureWithReadAccess: async (
+							_binaryPath,
+							inputs,
+							target,
+							view
+						) => {
+							sessions.push({
+								target: target.href,
+								view,
+								resources: inputs.readResources
+							});
+							const payloadFile = path.join(directory, 'payload.json');
+							const factsFile = path.join(directory, 'facts.json');
+
+							await writeFile(
+								factsFile,
+								JSON.stringify({
+									authorization_details: [],
+									read_resources: inputs.readResources?.map((resource) => ({
+										...resource,
+										state:
+											state === 'absent'
+												? {
+														kind: 'absent',
+														firstWrite: { access: 'public', priority: 40 }
+													}
+												: { kind: 'existing', access: 'private', priority: 40 }
+									}))
+								})
+							);
+							await writeFile(
+								payloadFile,
+								JSON.stringify({ ...inputs, cacheUrl: inputs.cacheUrl.href })
+							);
+							await setupConfigureAction(
+								payloadFile,
+								{
+									...inputs.environment,
+									NIX_CONFIG:
+										'max-jobs = 2\nnetrc-file = /temporary/session-netrc',
+									CUPBOARD_READ_ACCESS_FILE: factsFile
+								},
+								createGithubReporter(),
+								{ fetch: fetcher }
+							);
+						}
+					}
+				);
+
+				const outputs = await readActionOutputs(outputFile);
+				const configFile = outputs['nix-config-file'];
+
+				if (configFile === undefined) {
+					throw new Error('setup did not output the generated Nix config path');
+				}
+
+				expect({
+					sessions,
+					target: outputs['read-session-target'],
+					view: outputs['read-session-view'],
+					exportedConfig: await readEnvironmentValue(
+						path.join(directory, 'github-env'),
+						'NIX_CONFIG'
+					),
+					config: await readFile(configFile, 'utf8')
+				}).toStrictEqual({
+					sessions: [
+						{
+							target: 'https://cache.example.test/t/acme/cache/builds',
+							view: '',
+							resources: [
+								{
+									type: 'cupboard_cache',
+									cache: namedCache('builds'),
+									mode: 'content'
+								}
+							]
+						}
+					],
+					target: 'https://cache.example.test/t/acme/cache/builds',
+					view: '',
+					exportedConfig: `max-jobs = 2\ninclude ${configFile}\n`,
+					config: `extra-substituters = ${caches
+						.split(',')
+						.map((cache) => `https://cache.example.test/t/acme/cache/${cache}`)
+						.join(' ')}\nextra-trusted-public-keys = acme:AAAA\n`
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it('still refuses multiple unresolved OIDC destinations', async () => {
+		await expect(
+			runSetup({
+				includeDefaultCache: 'true',
+				existingAccess: 'private',
+				defaultAccess: 'private'
+			})
+		).rejects.toBeInstanceOf(ReadConfigurationScopeError);
+	});
+
 	it('keeps cache credentials in a protected file and includes it by path', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-setup-config-')
@@ -1116,6 +1462,181 @@ describe('setupAction Nix configuration', () => {
 			callerConfig: `!include ${generatedConfigFile}\n`
 		});
 	});
+
+	it('requests the read session for a challenged cache even with a public default', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-config-')
+		);
+		const outputFile = path.join(directory, 'github-output');
+		const readSessions: string[] = [];
+
+		try {
+			await setupAction(
+				{
+					installDir: path.join(directory, 'bin'),
+					addToPath: 'false',
+					cacheUrl: 'https://cache.example.test/t/acme',
+					cache: 'fresh',
+					trustedPublicKey: 'acme:AAAA',
+					nixConfigFile: path.join(directory, 'caller-nix.conf')
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_ENV: path.join(directory, 'github-env'),
+					GITHUB_OUTPUT: outputFile
+				},
+				createGithubReporter(),
+				{
+					installRelease: () =>
+						Promise.resolve({
+							binaryPath: path.join(directory, 'bin', 'cupboard'),
+							version: 'v1.2.3',
+							sourceCommit: 'd'.repeat(40)
+						}),
+					fetch: stubFetch(() => cacheInfoBody(40), {
+						status: (url) =>
+							url.includes('/cache/fresh')
+								? StatusCodes.UNAUTHORIZED
+								: StatusCodes.OK
+					}),
+					configureWithReadAccess: (_binaryPath, _inputs, target) => {
+						readSessions.push(canonicalHref(target));
+						return Promise.resolve();
+					}
+				}
+			);
+
+			const outputs = await readActionOutputs(outputFile);
+
+			expect({
+				target: outputs['read-session-target'],
+				view: outputs['read-session-view'],
+				readSessions
+			}).toStrictEqual({
+				target: 'https://cache.example.test/t/acme/cache/fresh',
+				view: '',
+				readSessions: ['https://cache.example.test/t/acme/cache/fresh']
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('validates a challenged cache against authenticated facts inside the owned operation', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-config-')
+		);
+
+		try {
+			await expect(
+				setupAction(
+					{
+						installDir: path.join(directory, 'bin'),
+						addToPath: 'false',
+						cacheUrl: 'https://cache.example.test/t/acme',
+						cache: 'fresh',
+						cacheAccessMode: 'private',
+						trustedPublicKey: 'acme:AAAA',
+						nixConfigFile: path.join(directory, 'caller-nix.conf')
+					},
+					{
+						RUNNER_TEMP: directory,
+						GITHUB_ENV: path.join(directory, 'github-env'),
+						GITHUB_OUTPUT: path.join(directory, 'github-output')
+					},
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: path.join(directory, 'bin', 'cupboard'),
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: stubFetch(() => cacheInfoBody(40), {
+							status: (url) =>
+								url.includes('/cache/fresh')
+									? StatusCodes.UNAUTHORIZED
+									: StatusCodes.OK
+						}),
+						configureWithReadAccess: async (_binaryPath, inputs) => {
+							const factsFile = path.join(directory, 'facts.json');
+							const payloadFile = path.join(directory, 'payload.json');
+
+							await writeFile(
+								factsFile,
+								JSON.stringify({
+									authorization_details: [],
+									read_resources: [
+										{
+											type: 'cupboard_cache',
+											cache: namedCache('fresh'),
+											mode: 'content',
+											state: {
+												kind: 'absent',
+												firstWrite: { access: 'public', priority: 40 }
+											}
+										}
+									]
+								})
+							);
+							await writeFile(
+								payloadFile,
+								JSON.stringify({ ...inputs, cacheUrl: inputs.cacheUrl.href })
+							);
+							await setupConfigureAction(payloadFile, {
+								...inputs.environment,
+								CUPBOARD_READ_ACCESS_FILE: factsFile
+							});
+						}
+					}
+				)
+			).rejects.toThrow('has public access; private access is required');
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('refuses a read credential that the cache rejects', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-config-')
+		);
+
+		try {
+			await expect(
+				setupAction(
+					{
+						installDir: path.join(directory, 'bin'),
+						addToPath: 'false',
+						cacheUrl: 'https://cache.example.test/t/acme',
+						cache: 'fresh',
+						readUser: 'alice',
+						readPassword: 'wrong',
+						trustedPublicKey: 'acme:AAAA',
+						nixConfigFile: path.join(directory, 'caller-nix.conf')
+					},
+					{
+						RUNNER_TEMP: directory,
+						GITHUB_ENV: path.join(directory, 'github-env'),
+						GITHUB_OUTPUT: path.join(directory, 'github-output')
+					},
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: path.join(directory, 'bin', 'cupboard'),
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: stubFetch(() => cacheInfoBody(40), {
+							status: () => StatusCodes.UNAUTHORIZED
+						})
+					}
+				)
+			).rejects.toBeInstanceOf(StaticReadCredentialRejectedError);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
 });
 
 describe('setupAction cancellation', () => {
@@ -1156,7 +1677,7 @@ describe('setupAction cancellation', () => {
 				}),
 				installDir: path.join(directory, 'bin'),
 				addToPath: 'false',
-				cacheUrl: 'https://cache.example.test'
+				cacheUrl: 'https://cache.example.test/t/acme'
 			},
 			{
 				RUNNER_TEMP: directory,
@@ -1226,18 +1747,26 @@ describe('resolveSetupInputs reuse view', () => {
 // Drives `setupAction` with stubbed dependencies and records the cupboard
 // invocations, plus whether each ran before `configureNix` wrote its file.
 async function runSetup(options: {
+	readonly cacheUrl?: string;
+	readonly cache?: string;
+	readonly includeDefaultCache?: string;
 	readonly provisionCache?: string;
 	readonly cacheAccessMode?: string;
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
 	readonly existingAccess?: 'public' | 'private';
 	readonly defaultAccess?: 'public' | 'private';
+	readonly defaultStatus?: number;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 	readonly destinationReadUser?: string;
 	readonly destinationReadPassword?: string;
+	readonly cacheCredentials?: string;
 	readonly reuseView?: string;
 	readonly viewAccess?: 'public' | 'private';
+	readonly viewStatus?: number;
+	readonly expectedDestinationAuthorization?: string;
+	readonly onProvision?: () => void;
 	readonly malformedAccessBody?: boolean;
 	readonly captureReadConfiguration?: boolean;
 }): Promise<{
@@ -1255,6 +1784,37 @@ async function runSetup(options: {
 	const wroteNixConfigFirst: boolean[] = [];
 	const readConfigurations: { target: string; reuseView: string }[] = [];
 	let createdAccess: 'public' | 'private' | undefined;
+	const run: NonNullable<SetupActionDependencies['run']> = (
+		_binaryPath,
+		arguments_
+	) => {
+		options.onProvision?.();
+		invocations.push(arguments_);
+		const access = arguments_[arguments_.indexOf('--access') + 1];
+
+		if (access === 'public' || access === 'private') {
+			createdAccess = access;
+		}
+
+		wroteNixConfigFirst.push(
+			readdirSync(directory).some((entry) => entry.startsWith('cupboard-nix-'))
+		);
+
+		return Promise.resolve([
+			{
+				kind: 'cache',
+				data: {
+					scope: namedCache(options.provisionCache ?? 'pr-1'),
+					access: options.existingAccess ?? createdAccess,
+					priority: 40,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootRetentionOverrides: []
+				}
+			}
+		]);
+	};
 
 	try {
 		await setupAction(
@@ -1279,39 +1839,116 @@ async function runSetup(options: {
 						version: 'v1.2.3',
 						sourceCommit: 'd'.repeat(40)
 					}),
-				run: (_binaryPath, arguments_) => {
-					invocations.push(arguments_);
-					const access = arguments_[arguments_.indexOf('--access') + 1];
-					if (access === 'public' || access === 'private') {
-						createdAccess = access;
-					}
-					wroteNixConfigFirst.push(
-						readdirSync(directory).some((entry) =>
-							entry.startsWith('cupboard-nix-')
-						)
-					);
-
-					return Promise.resolve([
-						{
-							kind: 'cache',
-							data: {
-								scope: namedCache(options.provisionCache ?? 'pr-1'),
-								access: options.existingAccess ?? createdAccess,
-								priority: 40,
-								storePaths: 0,
-								defaultRootRetention: { kind: 'permanent' },
-								grace: { kind: 'none' },
-								rootRetentionOverrides: []
-							}
-						}
-					]);
-				},
-				configureWithReadAccess: (_binaryPath, _inputs, target, reuseView) => {
+				run,
+				configureWithReadAccess: async (
+					_binaryPath,
+					inputs,
+					target,
+					reuseView
+				) => {
 					readConfigurations.push({
 						target: canonicalHref(target),
 						reuseView
 					});
-					return Promise.resolve();
+
+					if (options.defaultStatus === StatusCodes.NOT_FOUND) {
+						throw new CacheAccessProbeError(
+							`${inputs.cacheUrl.href}/nix-cache-info`,
+							StatusCodes.NOT_FOUND
+						);
+					}
+					const payloadFile = path.join(directory, 'payload.json');
+					const factsFile = path.join(directory, 'facts.json');
+					const facts = [
+						...inputs.caches
+							.filter(
+								(selection) =>
+									selection.credential === undefined && inputs.readUser === ''
+							)
+							.map((selection) => ({
+								type: 'cupboard_cache',
+								cache: selection.cache,
+								mode: 'content',
+								state:
+									options.existingAccess === undefined
+										? {
+												kind: 'absent',
+												firstWrite: {
+													access: options.defaultAccess ?? 'public',
+													priority: 40
+												}
+											}
+										: {
+												kind: 'existing',
+												access: options.existingAccess,
+												priority: 40
+											}
+							})),
+						...(inputs.reuseView !== '' && inputs.readUser === ''
+							? [
+									{
+										type: 'cupboard_view',
+										view: inputs.reuseView,
+										state:
+											options.viewStatus === 404
+												? { kind: 'absent' }
+												: {
+														kind: 'existing',
+														access: options.viewAccess ?? 'public',
+														priority: 80
+													}
+									}
+								]
+							: [])
+					];
+
+					await writeFile(
+						factsFile,
+						JSON.stringify({ read_resources: facts, authorization_details: [] })
+					);
+					await writeFile(
+						payloadFile,
+						JSON.stringify({
+							...inputs,
+							cacheUrl: inputs.cacheUrl.href,
+							privateSubstituters: inputs.privateSubstituters.map(
+								(url) => url.href
+							)
+						})
+					);
+					await setupConfigureAction(
+						payloadFile,
+						{ ...inputs.environment, CUPBOARD_READ_ACCESS_FILE: factsFile },
+						createGithubReporter(),
+						{
+							run,
+							fetch: stubFetch(
+								(url) => cacheInfoBody(url.includes('/reuse/') ? 80 : 40),
+								{
+									status: (url, authorization) => {
+										if (url.includes('/cache/pr-1/')) {
+											if (
+												createdAccess === undefined &&
+												options.existingAccess === undefined
+											) {
+												return 404;
+											}
+
+											if (
+												authorization === undefined &&
+												options.destinationReadUser !== undefined &&
+												options.existingAccess === 'private'
+											) {
+												return 401;
+											}
+										}
+
+										return 200;
+									}
+								}
+							)
+						}
+					);
 				},
 				fetch: stubFetch(
 					(url) =>
@@ -1320,23 +1957,50 @@ async function runSetup(options: {
 							? '<html>Sign in</html>'
 							: cacheInfoBody(url.includes('/reuse/') ? 80 : 40),
 					{
-						status: (url) => {
+						status: (url, authorization) => {
+							if (url.includes('/reuse/') && options.viewStatus !== undefined) {
+								return options.viewStatus;
+							}
+							const challengedPrivateStatus = () =>
+								authorization === undefined
+									? StatusCodes.UNAUTHORIZED
+									: StatusCodes.OK;
+
 							if (url.endsWith('/cache/pr-1/nix-cache-info')) {
 								const access = options.existingAccess ?? createdAccess;
-								return access === undefined
-									? 404
-									: access === 'private'
-										? 401
-										: 200;
+
+								if (
+									access === 'private' &&
+									options.expectedDestinationAuthorization !== undefined &&
+									authorization !== options.expectedDestinationAuthorization
+								) {
+									return StatusCodes.UNAUTHORIZED;
+								}
+								if (access === undefined) {
+									return StatusCodes.NOT_FOUND;
+								}
+
+								return access === 'private'
+									? challengedPrivateStatus()
+									: StatusCodes.OK;
+							}
+							if (
+								!url.includes('/reuse/') &&
+								options.defaultStatus !== undefined
+							) {
+								return options.defaultStatus;
 							}
 
-							return (url.includes('/reuse/') &&
-								options.viewAccess === 'private') ||
+							if (
+								(url.includes('/reuse/') && options.viewAccess === 'private') ||
 								(url.endsWith('/nix-cache-info') &&
 									!url.includes('/cache/') &&
 									options.defaultAccess === 'private')
-								? 401
-								: 200;
+							) {
+								return challengedPrivateStatus();
+							}
+
+							return StatusCodes.OK;
 						}
 					}
 				)
@@ -1455,6 +2119,133 @@ describe('destination read credentials', () => {
 });
 
 describe('setupAction cache provisioning', () => {
+	it.each(['destination-read', 'cache-credentials'] as const)(
+		'uses %s ahead of a distinct tenant credential during provisioning',
+		async (kind) => {
+			const result = await runSetup({
+				provisionCache: 'pr-1',
+				existingAccess: 'private',
+				cacheAccessMode: 'private',
+				readUser: 'tenant',
+				readPassword: 'tenant-secret',
+				...(kind === 'destination-read'
+					? {
+							destinationReadUser: 'destination',
+							destinationReadPassword: readPassword
+						}
+					: {
+							cacheCredentials: JSON.stringify([
+								{
+									cache: namedCache('pr-1'),
+									credential: {
+										user: 'destination',
+										password: readPassword
+									}
+								}
+							])
+						}),
+				expectedDestinationAuthorization: `Basic ${Buffer.from(`destination:${readPassword}`).toString('base64')}`
+			});
+
+			expect(result).toStrictEqual({
+				invocations: [
+					[
+						'cache',
+						'create',
+						'https://cache.example.test/t/acme',
+						'pr-1',
+						'--github-oidc',
+						'--if-absent',
+						'--access',
+						'private'
+					]
+				],
+				wroteNixConfigFirst: [false]
+			});
+		}
+	);
+
+	it('refuses a configured missing reuse view before provisioning', async () => {
+		let provisions = 0;
+
+		await expect(
+			runSetup({
+				provisionCache: 'pr-1',
+				reuseView: 'prior',
+				viewStatus: 404,
+				onProvision: () => {
+					provisions++;
+				}
+			})
+		).rejects.toBeInstanceOf(CacheAccessProbeError);
+
+		expect(provisions).toBe(0);
+	});
+
+	it.each(
+		(['public', 'private'] as const).flatMap((defaultAccess) => [
+			{
+				cacheUrl: 'https://cache.example.test/t/acme',
+				cache: 'pr-1',
+				defaultAccess
+			},
+			{
+				cacheUrl: 'https://cache.example.test/t/acme/cache/pr-1',
+				cache: '',
+				defaultAccess
+			}
+		])
+	)(
+		'configures an absent named cache at $cacheUrl with inherited $defaultAccess access without creating it',
+		async (target) => {
+			expect(
+				await runSetup({
+					...target,
+					captureReadConfiguration: true
+				})
+			).toStrictEqual({
+				invocations: [],
+				wroteNixConfigFirst: [],
+				readConfigurations: [
+					{
+						target: 'https://cache.example.test/t/acme/cache/pr-1',
+						reuseView: ''
+					}
+				]
+			});
+		}
+	);
+
+	it.each([
+		{
+			cacheUrl: 'https://cache.example.test/t/acme',
+			cache: '',
+			defaultStatus: StatusCodes.NOT_FOUND
+		},
+		{
+			cacheUrl: 'https://cache.example.test/t/acme/cache/pr-1/cache/pr-1',
+			cache: ''
+		},
+		{ defaultStatus: StatusCodes.NOT_FOUND }
+	])(
+		'preserves the probe error for missing default or invalid cache URLs: %j',
+		async (options) => {
+			await expect(runSetup(options)).rejects.toThrow();
+		}
+	);
+
+	it.each([
+		{ defaultAccess: 'public', cacheAccessMode: 'private' },
+		{ defaultAccess: 'private', cacheAccessMode: 'public' }
+	] as const)(
+		'refuses an absent cache with inherited $defaultAccess access when $cacheAccessMode is required',
+		async (options) => {
+			await expect(runSetup(options)).rejects.toThrow(
+				`has ${options.defaultAccess} access; ${options.cacheAccessMode} access is required`
+			);
+		}
+	);
+
 	it('validates an explicit access mode for an existing cache without provisioning', async () => {
 		await expect(
 			runSetup({

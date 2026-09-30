@@ -36,14 +36,13 @@ inputs:
     description: Named destination cache. Leave empty to use the default cache.
     required: false
   cupboard-path:
-    description:
-      Path to the cupboard executable when private OIDC reads are used.
+    description: Path to the cupboard executable when OIDC read access is used.
     required: false
   read-session-target:
-    description: Internal setup output for private OIDC reads.
+    description: Internal setup output for OIDC read access.
     required: false
   read-session-view:
-    description: Internal setup output for an additional private reuse view.
+    description: Internal setup output for an additional reuse view.
     required: false
   read-user:
     description: User name of a read credential for a private destination cache.

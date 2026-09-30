@@ -36,8 +36,9 @@ on:
         description:
           Access for a pull-request cache that the preset creates, public or
           private. When omitted, a new cache inherits the tenant's default cache
-          access. An existing cache keeps its access. Set an explicit mode when
-          the new cache must differ from the default cache.
+          access. An existing cache keeps its access, and an explicit mode must
+          match it. Set an explicit mode when the new cache must differ from the
+          default cache.
         required: false
         default: ''
         type: string

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	cachePublicKeyRequestHeaders,
 	cacheUrlFor,
+	reuseViewUrlFor,
 	substituterUrlFor
 } from './substituters.ts';
 
@@ -25,6 +26,23 @@ describe('cacheUrlFor', () => {
 		const substituter = cacheUrlFor(new URL(baseUrl), cache);
 
 		expect(canonicalHref(substituter)).toBe(expected);
+	});
+});
+
+describe('reuseViewUrlFor', () => {
+	it.each([
+		['https://cache.example.test', 'https://cache.example.test/reuse/prior'],
+		[
+			'https://cache.example.test/t/acme',
+			'https://cache.example.test/t/acme/reuse/prior'
+		],
+		[
+			'https://cache.example.test/t/acme/cache/new',
+			'https://cache.example.test/t/acme/reuse/prior'
+		]
+	])('uses the tenant boundary for %s', (url, expected) => {
+		const view = reuseViewUrlFor(new URL(url), 'prior');
+		expect(canonicalHref(view)).toBe(expected);
 	});
 });
 

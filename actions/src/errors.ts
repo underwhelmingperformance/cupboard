@@ -1071,6 +1071,13 @@ export class CacheAccessProbeError extends CodedError {
 	}
 }
 
+export class StaticReadCredentialRejectedError extends CodedError {
+	constructor(public readonly url: URL) {
+		super(`The configured read credential was rejected by ${url.href}`);
+		this.name = 'StaticReadCredentialRejectedError';
+	}
+}
+
 /**
  * Nix defaults a missing cache priority to 30. The reuse-view check must compare
  * the configured values, so it rejects a document without a parseable priority.
@@ -1784,7 +1791,7 @@ export class ProvisionCacheResultError extends CodedError {
 export class ReadConfigurationUnavailableError extends CodedError {
 	constructor() {
 		super(
-			'This private cache or reuse view needs a newer cupboard CLI with the run --github-oidc command. Upgrade cupboard-version or use a static read credential.'
+			'This cache configuration needs a newer cupboard CLI with server-resolved run --github-oidc support. Upgrade cupboard-version or configure an existing cache with a static read credential.'
 		);
 		this.name = 'ReadConfigurationUnavailableError';
 	}
