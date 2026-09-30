@@ -7,16 +7,21 @@ import {
 	copySources,
 	createProcessNixDaemonConnector,
 	type DaemonCommandRunner,
+	discoverNixStoreConfig,
 	Nix,
 	type NixBuildMode,
 	type NixBuildResult,
+	type NixBuildSettings,
 	type NixDaemonClientOptions,
 	type NixDaemonSession,
 	type NixDaemonSetOptions,
 	NixDaemonUnavailableError,
 	type NixDerivedPathString,
-	parseSshNgStoreUri
+	type NixValidPathInfo,
+	parseSshNgStoreUri,
+	selectPublicationPaths
 } from '@cupboard/nix';
+import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import { Derivation } from '@cupboard/nix-store/derivation';
 import {
 	type CacheScope,
@@ -40,6 +45,10 @@ import {
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
 import {
+	type ReferencePublicationManifestInput,
+	referencePublicationManifestSchema
+} from '@cupboard/protocol/upload';
+import {
 	createGithubReporter,
 	type Reporter,
 	type ReporterResultEvent
@@ -51,6 +60,7 @@ import {
 	waitForAbortableChildProcess
 } from '@cupboard/shared/child-process';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -59,6 +69,8 @@ import {
 	runCupboard as defaultRunCupboard
 } from '../cupboard-run.ts';
 import {
+	BuildObservationMissingError,
+	BuildRebuildRemoteDispatchError,
 	CohortEvaluationDriftError,
 	CohortJsonInvalidError,
 	CohortJsonSchemaError,
@@ -96,14 +108,24 @@ import {
 	RunRootRequiredError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
+import { copyNixPaths, type NixCopyDependencies } from '../nix-copy.ts';
 import {
 	isEnabled,
 	provided,
 	providedCacheSelection,
+	providedChoice,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
 import { cacheUrlFor } from '../substituters.ts';
+
+import { buildActivities } from './build.ts';
+import {
+	type CachedClosureReference,
+	type CachedClosureSource,
+	type LocalStoreUri,
+	materialiseCachedClosure
+} from './materialise-cached-closure.ts';
 
 function isNixDerivedPathString(value: unknown): value is NixDerivedPathString {
 	if (typeof value !== 'string') {
@@ -248,6 +270,8 @@ const partitionSchema = z.object({
 	leftUpstream: z.array(z.string()),
 	alreadyValid: z.array(z.string()),
 	buildSet: z.array(nixDerivedPathSchema),
+	rebuildSet: z.array(nixDerivedPathSchema).default([]),
+	closureTargets: z.array(storePathSchema).default([]),
 	dependencyBuilds: z.array(dependencyBuildSchema).default([]),
 	dependencyCopies: z.array(dependencyCopySchema).default([]),
 	counts: z.object({
@@ -372,8 +396,9 @@ export interface BuildCohortOptions {
 	readonly readPassword?: string;
 	readonly maxJobs?: string;
 	readonly store?: string;
-	readonly push?: string;
-	readonly requireProvenance?: string;
+	readonly publish?: string;
+	readonly build?: string;
+	readonly substituter?: string;
 	readonly bestEffort?: string;
 	readonly gcBetweenCohorts?: string;
 	readonly runRoot?: string;
@@ -402,8 +427,10 @@ export interface BuildCohortInputs {
 	readonly readPassword: string;
 	readonly maxJobs: string;
 	readonly store: string;
+	readonly publish: 'none' | 'outputs' | 'closure';
 	readonly push: boolean;
-	readonly requireProvenance: boolean;
+	readonly build: 'missing' | 'rebuild';
+	readonly substituter: 'leave' | 'copy';
 	readonly allBestEffort: boolean;
 	readonly gcBetweenCohorts: boolean;
 	readonly runRoot: string;
@@ -529,6 +556,26 @@ export function resolveBuildCohortInputs(
 				path.join(runnerTemporary, `cupboard-cohort-${name}`)
 		);
 
+	const publish = providedChoice(
+		'publish',
+		options.publish,
+		['none', 'outputs', 'closure'],
+		'none'
+	);
+	const isPushEnabled = publish !== 'none';
+	const build = providedChoice(
+		'build',
+		options.build,
+		['missing', 'rebuild'],
+		'missing'
+	);
+	const substituter = providedChoice(
+		'substituter',
+		options.substituter,
+		['leave', 'copy'],
+		'leave'
+	);
+
 	return {
 		cohort: cohort.data,
 		url,
@@ -544,12 +591,10 @@ export function resolveBuildCohortInputs(
 		readPassword,
 		maxJobs,
 		store: provided(options.store) ?? '',
-		push: isEnabled('push', options.push, false),
-		requireProvenance: isEnabled(
-			'require-provenance',
-			options.requireProvenance,
-			false
-		),
+		publish,
+		push: isPushEnabled,
+		build,
+		substituter,
 		allBestEffort: isEnabled('best-effort', options.bestEffort, false),
 		gcBetweenCohorts: isEnabled(
 			'gc-between-cohorts',
@@ -631,14 +676,16 @@ export function registerBuildCohortCommand(
 			'remote ssh-ng store the plan and the build run against'
 		)
 		.option(
-			'--push <boolean>',
-			'publish the cohort: stream the build through cupboard build-push and set the target roots (true or false)',
-			'false'
+			'--publish <scope>',
+			'control published paths: none, outputs, or closure'
 		)
 		.option(
-			'--require-provenance <boolean>',
-			'require provenance from this run for every final output (true or false)',
-			'false'
+			'--build <mode>',
+			'control target builds: missing reuses available outputs; rebuild builds them again'
+		)
+		.option(
+			'--substituter <mode>',
+			'control publication of externally substituted targets: leave or copy'
 		)
 		.option(
 			'--gc-between-cohorts <boolean>',
@@ -692,6 +739,9 @@ export function registerBuildCohortCommand(
 }
 
 export interface BuildCohortDependencies {
+	readonly selectPublicationPaths?: typeof selectPublicationPaths;
+	readonly buildSettings?: NixBuildSettings;
+	readonly fetcher?: typeof fetch;
 	readonly runCupboard?: typeof defaultRunCupboard;
 	readonly runNixBuild?: typeof runNixBuild;
 	readonly runNixBuildWithResults?: typeof runNixBuildWithResults;
@@ -700,9 +750,67 @@ export interface BuildCohortDependencies {
 	readonly materialiseDerivationGraph?: typeof materialiseDerivationGraph;
 	readonly resolveLocalDerivationGraph?: typeof resolveLocalDerivationGraph;
 	readonly withLocalDerivationRoots?: WithLocalDerivationRoots;
+	readonly withLocalStoreSession?: <T>(
+		use: (
+			session: Pick<
+				NixDaemonSession,
+				'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
+			>,
+			localStore: LocalStoreUri
+		) => Promise<T>
+	) => Promise<T>;
+	readonly materialiseCachedClosure?: typeof materialiseCachedClosure;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly reporter?: Reporter;
 	readonly signal?: AbortSignal;
+}
+
+function cachedClosureSources(
+	inputs: BuildCohortInputs,
+	partition: PartitionData | undefined
+): readonly CachedClosureSource[] {
+	const targets = new Set<string>(partition?.closureTargets);
+	if (targets.size === 0) {
+		return [];
+	}
+	const destination = (partition?.attachOnly ?? [])
+		.filter((storePath) => targets.has(storePath))
+		.map((storePath) => storePathSchema.parse(storePath));
+	const view = (partition?.publishByReference ?? [])
+		.filter((storePath) => targets.has(storePath))
+		.map((storePath) => storePathSchema.parse(storePath));
+	const sources: CachedClosureSource[] = [];
+
+	if (targets.size > 0) {
+		sources.push({
+			url: cacheUrlFor(inputs.url, inputs.cache),
+			paths: destination,
+			...(inputs.readUser !== '' && {
+				credential: {
+					user: readUserInputSchema.parse(inputs.readUser),
+					password: inputs.readPassword
+				}
+			})
+		});
+	}
+
+	if (inputs.reuseView !== '') {
+		sources.push({
+			url: new URL(
+				`reuse/${inputs.reuseView}`,
+				`${canonicalHref(inputs.url)}/`
+			),
+			paths: view,
+			...(inputs.fallbackReadUser !== '' && {
+				credential: {
+					user: readUserInputSchema.parse(inputs.fallbackReadUser),
+					password: inputs.fallbackReadPassword
+				}
+			})
+		});
+	}
+
+	return sources;
 }
 
 export async function buildCohortAction(
@@ -713,6 +821,15 @@ export async function buildCohortAction(
 	dependencies.signal?.throwIfAborted();
 
 	const inputs = resolveBuildCohortInputs(options, environment);
+	if (
+		inputs.build === 'rebuild' &&
+		inputs.store === '' &&
+		(inputs.cohort.remote ||
+			(dependencies.buildSettings ?? discoverNixStoreConfig().building)
+				.builders !== undefined)
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
 	const members = membersOf(inputs.cohort);
 	const queryable = members.filter(
 		(member) => member.queryInstallable !== undefined
@@ -744,6 +861,25 @@ export async function buildCohortAction(
 		dependencies.resolveLocalDerivationGraph ?? resolveLocalDerivationGraph;
 	const withLocalDerivationRoots =
 		dependencies.withLocalDerivationRoots ?? runWithLocalDerivationRoots;
+	const withLocalStoreSession =
+		dependencies.withLocalStoreSession ??
+		(<T>(
+			use: (
+				session: Pick<
+					NixDaemonSession,
+					'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
+				>,
+				localStore: LocalStoreUri
+			) => Promise<T>
+		) => {
+			const opened = openLocalDerivationRootStore(dependencies.signal, {});
+
+			return opened.nix.withConnection((session) =>
+				use(session, opened.copyStoreUri)
+			);
+		});
+	const materialiseClosure =
+		dependencies.materialiseCachedClosure ?? materialiseCachedClosure;
 	const reporter = dependencies.reporter ?? createGithubReporter();
 	const cupboardRunDependencies =
 		dependencies.signal === undefined
@@ -773,7 +909,9 @@ export async function buildCohortAction(
 		// Recheck build-set outputs immediately before realisation. Remove any target
 		// that has become available in the destination or reuse view since planning.
 		const reprobe =
-			result === undefined || inputs.requireProvenance
+			result === undefined ||
+			inputs.build === 'rebuild' ||
+			inputs.substituter !== 'leave'
 				? undefined
 				: await reprobeCohort(
 						inputs,
@@ -787,13 +925,24 @@ export async function buildCohortAction(
 		const partition =
 			result === undefined
 				? undefined
-				: withdrawFromPartition(result.partition, reprobe?.withdrawn ?? []);
-		const provenanceRebuilds = new Set(
-			partition !== undefined && inputs.requireProvenance
-				? provenanceRebuildInstallables(partition, queryable)
-				: []
-		);
-		if (inputs.requireProvenance) {
+				: withdrawFromPartition(
+						result.partition,
+						reprobe?.withdrawn ?? [],
+						inputs.publish === 'closure'
+					);
+		const closureSources = cachedClosureSources(inputs, partition);
+		const closureReferences = new Map<
+			string,
+			readonly CachedClosureReference[]
+		>();
+		const recordClosureReferences = (
+			source: URL,
+			paths: readonly CachedClosureReference[]
+		): void => {
+			closureReferences.set(canonicalHref(source), paths);
+		};
+		const provenanceRebuilds = new Set<string>(partition?.rebuildSet);
+		if (inputs.build === 'rebuild') {
 			for (const member of unqueryable) {
 				provenanceRebuilds.add(member.installable);
 			}
@@ -869,12 +1018,15 @@ export async function buildCohortAction(
 		}
 
 		const context: SettleCohortBuildContext = {
+			selectPublicationPaths:
+				dependencies.selectPublicationPaths ?? selectPublicationPaths,
 			inputs,
 			members,
 			partition,
 			result,
 			reprobe,
 			provenanceRebuilds,
+			closureReferences,
 			isStreamed,
 			environment,
 			runCupboard,
@@ -882,7 +1034,7 @@ export async function buildCohortAction(
 		};
 
 		if (execution.kind === 'remote') {
-			if (remoteTargets.length === 0) {
+			if (remoteTargets.length === 0 && closureSources.length === 0) {
 				await settleCohortBuild(context, { built: [] });
 				return;
 			}
@@ -942,7 +1094,8 @@ export async function buildCohortAction(
 				failures,
 				publicationPaths,
 				currentProvenanceRebuilds,
-				copiedFrom
+				copiedFrom,
+				resolveClosure
 			) => {
 				const targetResults = results.filter((result) =>
 					remoteTargetSet.has(canonicalNixDerivedPath(result.target))
@@ -1013,6 +1166,7 @@ export async function buildCohortAction(
 						resultBuilds: targetResults,
 						publicationBuilds: results,
 						copiedFrom,
+						resolveClosure,
 						incompleteRoots: incompleteRootsFor(members, failures),
 						...(terminalFailure !== undefined && { terminalFailure })
 					}
@@ -1038,9 +1192,38 @@ export async function buildCohortAction(
 						{
 							copyPaths: copiedPaths,
 							...(dependencyBuilds.length > 0 && { dependencyBuilds }),
-							...(inputs.requireProvenance && {
-								requireProvenance: true
+							...(inputs.build === 'rebuild' && {
+								rebuild: true
 							}),
+							...(closureSources.length > 0 && {
+								materialiseClosure: (
+									session: Pick<
+										NixDaemonSession,
+										'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
+									>
+								) =>
+									withLocalStoreSession(async (localNix, localStore) => {
+										await mkdir(path.dirname(inputs.receiptFile), {
+											recursive: true
+										});
+
+										return materialiseClosure({
+											sources: closureSources,
+											store: inputs.store,
+											localStore,
+											nix: session,
+											localNix,
+											onReferenced: recordClosureReferences,
+											...(dependencies.fetcher !== undefined && {
+												fetch: dependencies.fetcher
+											}),
+											...(dependencies.signal && {
+												signal: dependencies.signal
+											})
+										});
+									})
+							}),
+							publishClosure: inputs.publish === 'closure',
 							onTargetStarted: (target) => {
 								reporter.info(
 									`Building remote target ${installablesByTarget.get(target) ?? target}`
@@ -1053,7 +1236,9 @@ export async function buildCohortAction(
 								bar.advance();
 							},
 							copy: () =>
-								runCopy(copiedPaths, inputs.store, dependencies.signal)
+								copiedPaths.length === 0
+									? Promise.resolve()
+									: runCopy(copiedPaths, inputs.store, dependencies.signal)
 						}
 					)
 			);
@@ -1064,6 +1249,8 @@ export async function buildCohortAction(
 		// resolves the targets' own output paths and pins them with local out-links
 		// until the roots are set; for an unstreamed cohort it is the build itself.
 		let build: NixBuildCommandResult;
+		const buildPolicy: [] | [RunNixBuildOptions] =
+			inputs.build === 'rebuild' && !inputs.push ? [{ rebuild: true }] : [];
 
 		if (streamedFailure === undefined) {
 			build =
@@ -1074,11 +1261,15 @@ export async function buildCohortAction(
 							inputs.maxJobs,
 							inputs.store,
 							inputs.outLinkDirectory,
-							dependencies.signal
+							dependencies.signal,
+							...buildPolicy
 						);
 		} else {
 			build = {
-				paths: streamedFailure.receipt.paths,
+				paths: [
+					...streamedFailure.receipt.paths,
+					...(streamedFailure.receipt.leftUpstream ?? [])
+				],
 				status: streamedFailure.error.status,
 				// The streamed run published through `cupboard build-push`, which
 				// records the copies it watched in the receipt it writes. This
@@ -1125,12 +1316,35 @@ export async function buildCohortAction(
 			});
 		}
 
-		await settleCohortBuild(context, {
-			built: build.paths,
-			localBuilds: localOwnership.builds,
-			copiedFrom: build.copiedFrom,
-			incompleteRoots: localOwnership.incompleteRoots
-		});
+		const settle = (publicationPaths: readonly string[]) =>
+			settleCohortBuild(context, {
+				built: build.paths,
+				publicationPaths,
+				localBuilds: localOwnership.builds,
+				copiedFrom: build.copiedFrom,
+				incompleteRoots: localOwnership.incompleteRoots
+			});
+
+		if (closureSources.length === 0) {
+			await settle(build.paths);
+		} else {
+			await withLocalStoreSession(async (session, localStore) => {
+				await mkdir(path.dirname(inputs.receiptFile), { recursive: true });
+				const cachedPaths = await materialiseClosure({
+					sources: closureSources,
+					store: '',
+					localStore,
+					nix: session,
+					onReferenced: recordClosureReferences,
+					...(dependencies.fetcher !== undefined && {
+						fetch: dependencies.fetcher
+					}),
+					...(dependencies.signal && { signal: dependencies.signal })
+				});
+
+				await settle([...new Set([...build.paths, ...cachedPaths])]);
+			});
+		}
 
 		if (build.status === 0) {
 			return;
@@ -1279,7 +1493,10 @@ async function resolveStreamedBuildOwners(options: {
 		resolveLocalBuildOwners({
 			members: options.members,
 			buildInstallables: survivingInstallables,
-			builtPaths: options.receipt.paths,
+			builtPaths: [
+				...options.receipt.paths,
+				...(options.receipt.leftUpstream ?? [])
+			],
 			inputs: options.inputs,
 			runNix: options.runNix,
 			allowIncomplete: true,
@@ -1331,13 +1548,88 @@ async function writeRemoteFailureReceipt(
 	await writeFile(receiptFile, `${JSON.stringify(receipt, undefined, 2)}\n`);
 }
 
+export async function mergeCohortReceipts(
+	receiptFile: string,
+	shouldIncludeExisting: boolean,
+	additionalFiles: readonly string[]
+): Promise<void> {
+	if (additionalFiles.length === 0) {
+		return;
+	}
+
+	const receipts = await Promise.all(
+		[...(shouldIncludeExisting ? [receiptFile] : []), ...additionalFiles].map(
+			async (file) =>
+				buildReceiptV3Schema.parse(JSON.parse(await readFile(file, 'utf8')))
+		)
+	);
+	const subjects = new Map<string, BuildReceiptV3['subjects'][number]>();
+	const originPriority = {
+		'store-held': 0,
+		copied: 1,
+		republished: 2,
+		built: 3
+	} as const;
+
+	for (const receipt of receipts) {
+		for (const subject of receipt.subjects) {
+			const previous = subjects.get(subject.storePath);
+
+			if (
+				previous === undefined ||
+				originPriority[subject.origin] > originPriority[previous.origin]
+			) {
+				subjects.set(subject.storePath, subject);
+			}
+		}
+	}
+
+	const receipt = buildReceiptV3Schema.parse({
+		...(shouldIncludeExisting && receipts[0]),
+		version: 3,
+		paths: [...new Set(receipts.flatMap((item) => item.paths))].toSorted(
+			byCodeUnit
+		),
+		subjects: subjects
+			.values()
+			.toArray()
+			.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath)),
+		uploaded: [
+			...new Set(receipts.flatMap((item) => item.uploaded ?? []))
+		].toSorted(byCodeUnit)
+	});
+
+	await writeFile(receiptFile, `${JSON.stringify(receipt, undefined, 2)}\n`);
+}
+
+function remotePublicationDerivation(
+	storePath: string,
+	results: readonly NixBuildResult[]
+): { readonly derivation?: string } {
+	const result = results.find(
+		(result) =>
+			'outputs' in result.outcome &&
+			Object.values(result.outcome.outputs).includes(
+				storePathSchema.parse(storePath)
+			)
+	);
+	const derivation =
+		result === undefined ? undefined : derivationPathOf(result.target);
+	return derivation === undefined ? {} : { derivation };
+}
+
 interface SettleCohortBuildContext {
+	readonly selectPublicationPaths: typeof selectPublicationPaths;
 	readonly inputs: BuildCohortInputs;
 	readonly members: readonly CohortMember[];
 	readonly partition: PartitionData | undefined;
 	readonly result: PlanCohortResultData | undefined;
 	readonly reprobe: PlanReprobeResultData | undefined;
 	readonly provenanceRebuilds: ReadonlySet<string>;
+	readonly closureReferences: ReadonlyMap<
+		string,
+		readonly CachedClosureReference[]
+	>;
 	readonly isStreamed: boolean;
 	readonly environment: Environment;
 	readonly runCupboard: typeof defaultRunCupboard;
@@ -1350,6 +1642,9 @@ interface SettleCohortBuildContext {
 async function settleCohortBuild(
 	context: SettleCohortBuildContext,
 	build: {
+		readonly resolveClosure?: (
+			paths: readonly StorePathString[]
+		) => ReturnType<Nix['resolveClosure']>;
 		readonly built: readonly string[];
 		readonly publicationPaths?: readonly string[];
 		readonly resultBuilds?: readonly NixBuildResult[];
@@ -1370,6 +1665,7 @@ async function settleCohortBuild(
 		result,
 		reprobe,
 		provenanceRebuilds,
+		closureReferences,
 		isStreamed,
 		environment,
 		runCupboard,
@@ -1392,19 +1688,112 @@ async function settleCohortBuild(
 		'observed-copies.json'
 	);
 	const claimable = claimableOutputPaths(publicationBuilds, provenanceRebuilds);
-	const alreadyHeld = receiptAlreadyHeldPaths(
-		partition?.alreadyValid ?? [],
-		claimable
-	);
 
-	// A plain `nix build` prints only results for the requested installables, so
-	// every output is a target path. The intermediate-paths file remains empty.
-	const targetPaths = [...(partition?.attachOnly ?? []), ...built].toSorted(
-		(left, right) => left.localeCompare(right)
-	);
-	const intermediatePaths: readonly string[] = [];
+	const streamedReceipt = isStreamed
+		? buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
+			)
+		: undefined;
+	const realised = new Set(built);
+	const leftFromReceipt = streamedReceipt?.leftUpstream ?? [];
+	if (
+		leftFromReceipt.some(
+			(storePath) =>
+				!realised.has(storePath) ||
+				(streamedReceipt?.failed?.includes(storePath) ?? false) ||
+				streamedReceipt?.subjects.some(
+					(subject) =>
+						subject.storePath === storePath && subject.origin === 'built'
+				)
+		)
+	) {
+		throw new Error(
+			'The build receipt excludes a path that is not a successfully realised selected output'
+		);
+	}
+	const remoteCandidates = built.map((storePath) => ({
+		storePath,
+		origin: claimable.includes(storePath)
+			? ('built' as const)
+			: ('store-held' as const),
+		...remotePublicationDerivation(storePath, resultBuilds)
+	}));
+	const selection =
+		isStreamed || !inputs.push
+			? {
+					published: built.filter(
+						(storePath) =>
+							!leftFromReceipt.includes(storePathSchema.parse(storePath))
+					),
+					leftUpstream: leftFromReceipt
+				}
+			: await context.selectPublicationPaths(remoteCandidates, {
+					substituter: inputs.build === 'rebuild' ? 'copy' : inputs.substituter,
+					tenantUrl: parseTenantCacheUrl(inputs.url).tenantUrl,
+					...(inputs.store !== '' && { storeUri: inputs.store }),
+					...(cupboardRunDependencies?.signal !== undefined && {
+						signal: cupboardRunDependencies.signal
+					})
+				});
+	const selectedTargets = selection.published;
+	const excludedTargets = new Set(selection.leftUpstream);
+	if (
+		!isStreamed &&
+		inputs.publish === 'closure' &&
+		selection.leftUpstream.length > 0 &&
+		selectedTargets.length > 0 &&
+		build.resolveClosure === undefined
+	) {
+		throw new Error(
+			'The selected store cannot resolve the retained publication closure'
+		);
+	}
+	const selectedPublicationPaths =
+		isStreamed && inputs.publish === 'closure'
+			? [
+					...new Set([
+						...(streamedReceipt?.paths ?? []),
+						...publicationPaths.filter(
+							(storePath) =>
+								!excludedTargets.has(storePathSchema.parse(storePath))
+						)
+					])
+				]
+			: !isStreamed &&
+				  inputs.publish === 'closure' &&
+				  selection.leftUpstream.length > 0
+				? selectedTargets.length === 0
+					? []
+					: [
+							...new Set([
+								...selectedTargets,
+								...(
+									(await build.resolveClosure?.(
+										selectedTargets.map((storePath) =>
+											storePathSchema.parse(storePath)
+										)
+									)) ?? []
+								).map((info) => info.storePath),
+								...closureReferences
+									.values()
+									.flatMap((entries) => entries.map((entry) => entry.storePath))
+							])
+						]
+				: publicationPaths.filter(
+						(storePath) =>
+							!excludedTargets.has(storePathSchema.parse(storePath))
+					);
+	const targetPaths = [
+		...new Set([...(partition?.attachOnly ?? []), ...selectedTargets])
+	].toSorted(byCodeUnit);
+	const targetPathSet = new Set(targetPaths);
+	const intermediatePaths = [...new Set(selectedPublicationPaths)]
+		.filter((storePath) => !targetPathSet.has(storePath))
+		.toSorted(byCodeUnit);
 	const referencePaths = partition?.publishByReference ?? [];
-	const leftUpstream = partition?.leftUpstream ?? [];
+	const leftUpstream = [
+		...new Set([...(partition?.leftUpstream ?? []), ...selection.leftUpstream])
+	];
 
 	await mkdir(path.dirname(inputs.targetPathsFile), { recursive: true });
 	await mkdir(path.dirname(copiedFromFile), { recursive: true });
@@ -1437,45 +1826,31 @@ async function settleCohortBuild(
 
 	// Remote-store builds cannot use the local post-build hook. Publish their
 	// keyed daemon results once to read back NAR hashes and derivers for the
-	// receipt. Claim only outputs that the keyed results report as built; exclude
-	// substituted and already-valid paths. Per-root pushes then reuse these paths.
+	// receipt. The receipt records these paths as held in the selected store;
+	// the runner cannot attest to a build that the remote store performed.
+	// Per-root pushes then reuse these paths.
 	const isReconciled =
-		inputs.push && inputs.store !== '' && publicationPaths.length > 0;
+		inputs.push && inputs.store !== '' && selectedPublicationPaths.length > 0;
 
 	if (isReconciled) {
+		const publicationPathsFile = `${inputs.targetPathsFile}.publication`;
+		await writeFile(publicationPathsFile, linesOf(selectedPublicationPaths));
 		await runCupboard(
 			inputs.cupboardPath,
-			cohortReceiptPushArguments(
-				inputs,
-				publicationPaths,
-				alreadyHeld,
-				claimable,
-				copiedFromFile
-			),
+			cohortReceiptPushArguments(inputs, publicationPathsFile, copiedFromFile),
 			environment,
 			cupboardRunDependencies
 		);
 
-		if (inputs.requireProvenance) {
-			const receipt = buildReceiptV3Schema.parse(
-				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
+		if (inputs.build === 'rebuild') {
+			const reportedBuilt = new Set(claimable);
+			const missing = built.filter(
+				(storePath) => !reportedBuilt.has(storePath)
 			);
-			// The receipt describes every published path, so a target satisfies
-			// the requirement only when its subject records that this run built
-			// it.
-			const claimed = new Set<string>(
-				receipt.subjects
-					.filter((subject) => subject.origin === 'built')
-					.map((subject) => subject.storePath)
-			);
-			// The destination already holds an attestation for a target the plan
-			// left attached, so only the paths this run built need a receipt
-			// subject.
-			const missing = built.filter((storePath) => !claimed.has(storePath));
 
 			if (missing.length > 0) {
 				throw new Error(
-					`The remote build did not produce current-run provenance for: ${missing.join(', ')}`
+					`The selected remote store did not report rebuilding: ${missing.join(', ')}`
 				);
 			}
 		}
@@ -1489,12 +1864,18 @@ async function settleCohortBuild(
 		);
 	}
 
+	let publicationReceipts: readonly string[] = [];
 	if (inputs.push) {
-		await publishCohort({
+		publicationReceipts = await publishCohort({
 			inputs,
+			collectReceipts:
+				(partition?.closureTargets.length ?? 0) > 0 ||
+				referencePaths.length > 0,
 			members,
 			paths: { targetPaths, intermediatePaths, referencePaths },
 			attachOnlyPaths: partition?.attachOnly ?? [],
+			closureReferences,
+			copiedFromFile,
 			leftUpstreamPaths: leftUpstream,
 			environment,
 			runCupboard,
@@ -1504,9 +1885,17 @@ async function settleCohortBuild(
 			incompleteRoots
 		});
 	}
+	await mergeCohortReceipts(
+		inputs.receiptFile,
+		isStreamed || isReconciled || terminalFailure !== undefined,
+		publicationReceipts
+	);
 
 	const receiptFile =
-		isStreamed || isReconciled || terminalFailure !== undefined
+		isStreamed ||
+		isReconciled ||
+		terminalFailure !== undefined ||
+		publicationReceipts.length > 0
 			? inputs.receiptFile
 			: '';
 
@@ -1535,15 +1924,13 @@ async function settleCohortBuild(
  * The cohorts file one supervised `cupboard build-push` run consumes. A strict
  * build keeps every target in one cohort so they share work; a best-effort
  * build puts one target in each cohort so every failure can be attributed to
- * its target. Both modes keep the attempt loop and the local re-verification of
- * remotely built derivations.
+ * its target.
  */
 export function buildPushCohortsFile(
 	installables: readonly string[],
 	maxJobs: string,
 	shouldSeparateTargets = false,
-	rebuildInstallables: ReadonlySet<string> = new Set(),
-	requiresProvenance = false
+	rebuildInstallables: ReadonlySet<string> = new Set()
 ): { readonly cohorts: readonly Record<string, unknown>[] } {
 	const unique = [...new Set(installables)];
 	const groups = shouldSeparateTargets
@@ -1561,7 +1948,6 @@ export function buildPushCohortsFile(
 			) && {
 				rebuild: true
 			}),
-			...(requiresProvenance && { requireProvenance: true }),
 			keepGoing: !shouldSeparateTargets,
 			...(maxJobs !== '' && { maxJobs: Number(maxJobs) })
 		}))
@@ -1586,6 +1972,8 @@ export function cohortBuildPushArguments(
 		| 'runRootPermanent'
 		| 'receiptFile'
 		| 'allBestEffort'
+		| 'publish'
+		| 'substituter'
 	>,
 	cohortsFile: string
 ): readonly string[] {
@@ -1600,6 +1988,11 @@ export function cohortBuildPushArguments(
 		'--receipt-file',
 		inputs.receiptFile,
 		'--aggregate-receipt-v3',
+		'--substituter',
+		inputs.substituter,
+		...(inputs.publish === 'none'
+			? []
+			: ['--publication-scope', inputs.publish]),
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.gcBetweenCohorts ? ['--gc-between-cohorts'] : []),
 		...(inputs.allBestEffort ? ['--keep-going-cohorts'] : []),
@@ -1630,8 +2023,7 @@ async function runBuildPushCohort(
 				buildInstallables,
 				inputs.maxJobs,
 				inputs.allBestEffort,
-				provenanceRebuilds,
-				inputs.requireProvenance
+				provenanceRebuilds
 			),
 			undefined,
 			2
@@ -1666,16 +2058,15 @@ export function cohortReceiptPushArguments(
 		| 'runRootPermanent'
 		| 'receiptFile'
 	>,
-	paths: readonly string[],
-	alreadyHeld: readonly string[],
-	claimable: readonly string[],
+	pathsFile: string,
 	copiedFromFile: string
 ): readonly string[] {
 	return [
 		'--no-colour',
 		'push',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
-		...paths,
+		'--paths-file',
+		pathsFile,
 		'--github-oidc',
 		'--no-retain',
 		'--store',
@@ -1684,12 +2075,6 @@ export function cohortReceiptPushArguments(
 		inputs.receiptFile,
 		'--copied-from-file',
 		copiedFromFile,
-		...(alreadyHeld.length === 0
-			? ['--no-already-held']
-			: alreadyHeld.flatMap((storePath) => ['--already-held', storePath])),
-		...(claimable.length === 0
-			? ['--no-claimable']
-			: claimable.flatMap((storePath) => ['--claimable', storePath])),
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
@@ -1831,9 +2216,14 @@ export function rootGroups(
 }
 
 interface CohortPushExtras {
+	readonly pathsFile?: string;
 	readonly intermediatePathsFile: string;
 	readonly referencePathsFile: string;
 	readonly referenceSource: string;
+	readonly referenceManifestFile?: string;
+	readonly receiptFile?: string;
+	readonly referenceReceiptFile?: string;
+	readonly copiedFromFile?: string;
 }
 
 /**
@@ -1860,12 +2250,14 @@ export function cohortPushArguments(
 		| 'fallbackReadUser'
 		| 'fallbackReadPassword'
 		| 'reuseView'
+		| 'publish'
 	>,
 	group: CohortRootGroup,
 	extras: CohortPushExtras
 ): readonly string[] {
+	const hasReferences = extras.referencePathsFile !== '';
 	const viewSource =
-		extras.referencePathsFile !== '' && inputs.reuseView !== ''
+		hasReferences && inputs.reuseView !== ''
 			? `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`
 			: '';
 	const isViewReference =
@@ -1879,11 +2271,17 @@ export function cohortPushArguments(
 		'--no-colour',
 		'push',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
-		...group.paths,
+		...(extras.pathsFile === undefined
+			? group.paths
+			: ['--paths-file', extras.pathsFile]),
 		'--github-oidc',
 		...(group.complete ? ['--root', group.root] : ['--no-retain']),
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
-		...(inputs.store === '' ? [] : ['--store', inputs.store]),
+		...(inputs.store === '' &&
+		(extras.receiptFile === undefined || extras.receiptFile === '')
+			? []
+			: ['--store', inputs.store || 'auto']),
+		...(inputs.publish === 'closure' ? ['--closure'] : []),
 		...(inputs.ttl !== '' && group.complete ? ['--ttl', inputs.ttl] : []),
 		...(inputs.permanent && group.complete ? ['--permanent'] : []),
 		...(extras.intermediatePathsFile === ''
@@ -1897,9 +2295,25 @@ export function cohortPushArguments(
 					'--reference-source',
 					extras.referenceSource
 				]),
-		...(readUser !== '' && extras.referencePathsFile !== ''
+		...(extras.referenceManifestFile === undefined
+			? []
+			: ['--reference-manifest', extras.referenceManifestFile]),
+		...(readUser !== '' && hasReferences
 			? ['--read-user', readUser, '--read-password', readPassword]
 			: []),
+		...(extras.receiptFile === undefined || extras.receiptFile === ''
+			? []
+			: [
+					'--receipt-file',
+					extras.receiptFile,
+					...(extras.copiedFromFile === undefined
+						? []
+						: ['--copied-from-file', extras.copiedFromFile])
+				]),
+		...(extras.referenceReceiptFile === undefined ||
+		extras.referenceReceiptFile === ''
+			? []
+			: ['--reference-receipt-file', extras.referenceReceiptFile]),
 		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
 		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
 		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
@@ -1908,6 +2322,8 @@ export function cohortPushArguments(
 
 interface PublishCohortOptions {
 	readonly inputs: BuildCohortInputs;
+	readonly collectReceipts: boolean;
+	readonly copiedFromFile: string;
 	readonly members: readonly CohortMember[];
 	readonly paths: {
 		readonly targetPaths: readonly string[];
@@ -1915,6 +2331,10 @@ interface PublishCohortOptions {
 		readonly referencePaths: readonly string[];
 	};
 	readonly attachOnlyPaths: readonly string[];
+	readonly closureReferences: ReadonlyMap<
+		string,
+		readonly CachedClosureReference[]
+	>;
 	readonly leftUpstreamPaths: readonly string[];
 	readonly environment: Environment;
 	readonly runCupboard: typeof defaultRunCupboard;
@@ -1924,10 +2344,20 @@ interface PublishCohortOptions {
 	readonly incompleteRoots: ReadonlySet<string>;
 }
 
-// One push per exact root group. A reference path is published only under the
-// root that owns it, so a group made up entirely of reference paths can still
-// be published without adding paths to any other root's retained set.
-async function publishCohort(options: PublishCohortOptions): Promise<void> {
+async function writeReferenceManifest(
+	file: string,
+	paths: ReferencePublicationManifestInput['paths']
+): Promise<void> {
+	const manifest = referencePublicationManifestSchema.parse({
+		version: 1,
+		paths
+	});
+	await writeFile(file, `${JSON.stringify(manifest)}\n`);
+}
+
+async function publishCohort(
+	options: PublishCohortOptions
+): Promise<readonly string[]> {
 	const {
 		inputs,
 		members,
@@ -1956,9 +2386,131 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 		cacheUrlFor(inputs.url, inputs.cache)
 	);
 	const attachOnly = new Set(options.attachOnlyPaths);
-	const hasIntermediates = paths.intermediatePaths.length > 0;
+	const targetPathsFile = async (
+		index: number,
+		localPaths: readonly string[]
+	): Promise<Pick<CohortPushExtras, 'pathsFile'>> => {
+		if (localPaths.length === 0) {
+			return {};
+		}
 
+		const pathsFile = `${inputs.targetPathsFile}.${String(index)}`;
+		await writeFile(pathsFile, linesOf(localPaths));
+		return { pathsFile };
+	};
+	const hasIntermediates = paths.intermediatePaths.length > 0;
+	const receiptFiles: string[] = [];
+	const receiptForPush = (
+		index: number,
+		kind: string,
+		localPaths: readonly string[],
+		referencePathsFile: string,
+		intermediatePathsFile: string
+	): Pick<
+		CohortPushExtras,
+		'receiptFile' | 'referenceReceiptFile' | 'copiedFromFile'
+	> => {
+		if (!options.collectReceipts) {
+			return {};
+		}
+
+		const hasFullReceipt =
+			(inputs.store === '' && inputs.publish === 'closure') ||
+			(referencePathsFile !== '' &&
+				(localPaths.length > 0 || intermediatePathsFile !== ''));
+		const hasReferenceReceipt = referencePathsFile !== '' && !hasFullReceipt;
+
+		if (!hasFullReceipt && !hasReferenceReceipt) {
+			return {};
+		}
+
+		const receiptFile = `${inputs.receiptFile}.${String(index)}.${kind}`;
+		receiptFiles.push(receiptFile);
+
+		return hasFullReceipt
+			? { receiptFile, copiedFromFile: options.copiedFromFile }
+			: { referenceReceiptFile: receiptFile };
+	};
+	const selected = new Set(allTargetPaths);
+	const prepared = new Map<string, { source: string; narinfo: string }>();
+	const referenceIntermediates: ReferencePublicationManifestInput['paths'] = [];
+	for (const [source, references] of options.closureReferences) {
+		for (const reference of references) {
+			prepared.set(reference.storePath, { source, narinfo: reference.narinfo });
+			if (!selected.has(reference.storePath)) {
+				referenceIntermediates.push({
+					...reference,
+					source,
+					kind: 'intermediate'
+				});
+			}
+		}
+	}
+	if (referenceIntermediates.length > 0) {
+		const referenceManifestFile = `${inputs.referencePathsFile}.closure.json`;
+		await writeReferenceManifest(referenceManifestFile, referenceIntermediates);
+		const receiptFile = `${inputs.receiptFile}.closure`;
+		receiptFiles.push(receiptFile);
+		await runCupboard(
+			inputs.cupboardPath,
+			cohortPushArguments(
+				inputs,
+				{ root: '', paths: [], referencePaths: [], complete: false },
+				{
+					intermediatePathsFile: '',
+					referencePathsFile: '',
+					referenceManifestFile,
+					referenceSource: '',
+					referenceReceiptFile: receiptFile
+				}
+			),
+			environment,
+			cupboardRunDependencies
+		);
+	}
 	for (const [index, group] of groups.entries()) {
+		const cachedTargets = group.paths.flatMap((storePath) => {
+			const reference = prepared.get(storePath);
+			return reference === undefined
+				? []
+				: [{ storePath, kind: 'target' as const, ...reference }];
+		});
+		if (cachedTargets.length > 0) {
+			const cached = new Set(cachedTargets.map((entry) => entry.storePath));
+			const localPaths = group.paths.filter(
+				(storePath) => !cached.has(storePath)
+			);
+			const targetExtras = await targetPathsFile(index, localPaths);
+			const referenceManifestFile = `${inputs.referencePathsFile}.${String(index)}.json`;
+			await writeReferenceManifest(referenceManifestFile, cachedTargets);
+			const receiptFile = `${inputs.receiptFile}.${String(index)}.manifest`;
+			receiptFiles.push(receiptFile);
+			await runCupboard(
+				inputs.cupboardPath,
+				cohortPushArguments(
+					inputs,
+					{
+						...group,
+						paths: localPaths
+					},
+					{
+						...targetExtras,
+						intermediatePathsFile:
+							index === 0 && hasIntermediates
+								? inputs.intermediatePathsFile
+								: '',
+						referencePathsFile: '',
+						referenceSource: '',
+						referenceManifestFile,
+						receiptFile,
+						copiedFromFile: options.copiedFromFile
+					}
+				),
+				environment,
+				cupboardRunDependencies
+			);
+			continue;
+		}
 		const attachOnlyPaths = group.paths.filter((targetPath) =>
 			attachOnly.has(targetPath)
 		);
@@ -1977,14 +2529,32 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 				await writeFile(referencePathsFile, linesOf(group.referencePaths));
 			}
 
+			const intermediatePathsFile =
+				index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '';
+			const localPaths = group.paths.filter(
+				(storePath) => !group.referencePaths.includes(storePath)
+			);
+			const receiptExtras = receiptForPush(
+				index,
+				'main',
+				localPaths,
+				referencePathsFile,
+				intermediatePathsFile
+			);
+			const targetExtras = await targetPathsFile(index, localPaths);
 			await runCupboard(
 				inputs.cupboardPath,
-				cohortPushArguments(inputs, group, {
-					intermediatePathsFile:
-						index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '',
-					referencePathsFile,
-					referenceSource: referencePathsFile === '' ? '' : referenceSource
-				}),
+				cohortPushArguments(
+					inputs,
+					{ ...group, paths: localPaths },
+					{
+						...targetExtras,
+						intermediatePathsFile,
+						referencePathsFile,
+						referenceSource: referencePathsFile === '' ? '' : referenceSource,
+						...receiptExtras
+					}
+				),
 				environment,
 				cupboardRunDependencies
 			);
@@ -2006,7 +2576,8 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 					{
 						intermediatePathsFile: '',
 						referencePathsFile: reusePathsFile,
-						referenceSource
+						referenceSource,
+						...receiptForPush(index, 'reuse', [], reusePathsFile, '')
 					}
 				),
 				environment,
@@ -2027,27 +2598,40 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 			await writeFile(destinationPathsFile, linesOf(destinationPaths));
 		}
 
+		const localPaths = group.paths.filter(
+			(targetPath) => !destinationPaths.includes(targetPath)
+		);
+		const intermediatePathsFile =
+			index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '';
+		const targetExtras = await targetPathsFile(index, localPaths);
 		await runCupboard(
 			inputs.cupboardPath,
 			cohortPushArguments(
 				inputs,
 				{
 					...group,
-					paths: group.paths.filter(
-						(targetPath) => !destinationPaths.includes(targetPath)
-					)
+					paths: localPaths
 				},
 				{
-					intermediatePathsFile:
-						index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '',
+					...targetExtras,
+					intermediatePathsFile,
 					referencePathsFile: destinationPathsFile,
-					referenceSource: destinationPathsFile === '' ? '' : destinationSource
+					referenceSource: destinationPathsFile === '' ? '' : destinationSource,
+					...receiptForPush(
+						index,
+						'destination',
+						localPaths,
+						destinationPathsFile,
+						intermediatePathsFile
+					)
 				}
 			),
 			environment,
 			cupboardRunDependencies
 		);
 	}
+
+	return receiptFiles;
 }
 
 function partitionCounts(partition: PartitionData): {
@@ -2080,7 +2664,8 @@ function linesOf(paths: readonly string[]): string {
  */
 export function withdrawFromPartition(
 	partition: PartitionData,
-	withdrawn: readonly WithdrawnTargetData[]
+	withdrawn: readonly WithdrawnTargetData[],
+	shouldPublishClosure = false
 ): PartitionData {
 	if (withdrawn.length === 0) {
 		return partition;
@@ -2103,39 +2688,18 @@ export function withdrawFromPartition(
 			...partition.publishByReference,
 			...pathsOf('publishByReference')
 		],
+		closureTargets: shouldPublishClosure
+			? [
+					...new Set([
+						...partition.closureTargets,
+						...withdrawn.map((target) => target.storePath)
+					])
+				]
+			: partition.closureTargets,
 		buildSet: partition.buildSet.filter(
 			(installable) => !withdrawnInstallables.has(installable)
 		)
 	};
-}
-
-/**
-Targets already obtainable before this run need explicit rebuild mode.
-*/
-export function provenanceRebuildInstallables(
-	partition: PartitionData,
-	queryable: readonly CohortMember[]
-): readonly string[] {
-	const alreadyValid = new Set(partition.alreadyValid);
-
-	return queryable.flatMap((member) => {
-		if (member.queryInstallable === undefined) {
-			return [];
-		}
-
-		const installable = canonicalNixDerivedPath(
-			nixDerivedPathSchema.parse(member.queryInstallable)
-		);
-		// A target without one predictable output cannot participate in the
-		// planner's path-validity question. Prime it to resolve its selected
-		// outputs, then rebuild it under publication supervision so a rerun still
-		// establishes current-invocation provenance.
-		const wasAlreadyValid =
-			member.expectedPath === undefined ||
-			alreadyValid.has(member.expectedPath);
-
-		return wasAlreadyValid ? [installable] : [];
-	});
 }
 
 // Recheck the destination and reuse view through `cupboard plan reprobe`. This
@@ -2378,10 +2942,12 @@ async function planCohort(
 		'--plan-file',
 		planFile,
 		'--github-oidc',
-		// A served path counts as having provenance only when the cache also holds
-		// a build-provenance statement for it, so a provenance run asks the plan to
-		// build every served path without one.
-		...(inputs.requireProvenance ? ['--require-attested'] : []),
+		'--build',
+		inputs.build,
+		'--substituter',
+		inputs.substituter,
+		'--publish',
+		inputs.publish,
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(inputs.reuseView === '' ? [] : ['--reuse-view', inputs.reuseView]),
 		...(inputs.reuseView !== '' && inputs.fallbackReadUser !== ''
@@ -2496,14 +3062,24 @@ export function nixBuildArguments(
 	maxJobs: string,
 	store: string,
 	outLinkDirectory: string,
-	logFile: string
+	logFile: string,
+	options: {
+		readonly rebuild?: boolean;
+		readonly outLink?: boolean;
+		readonly disableRemoteBuilders?: boolean;
+	} = {}
 ): readonly string[] {
 	return [
 		'build',
+		...(options.rebuild === true ? ['--rebuild'] : []),
+		...(options.rebuild === true || options.disableRemoteBuilders === true
+			? ['--option', 'builders', '']
+			: []),
 		'--keep-going',
 		'--print-out-paths',
-		'--out-link',
-		path.join(outLinkDirectory, 'result'),
+		...(options.outLink === false
+			? ['--no-link']
+			: ['--out-link', path.join(outLinkDirectory, 'result')]),
 		// The log records the store each copied path was read from. For a path
 		// the run substituted rather than built, that record is how the receipt
 		// can say where the path came from.
@@ -2772,6 +3348,16 @@ export interface CapturedNixProcessDependencies {
 	) => CapturedNixProcess;
 	readonly maximumStdoutBytes?: number;
 	readonly scheduler?: ChildProcessEscalationScheduler;
+}
+
+export interface RunNixBuildOptions extends Partial<CapturedNixProcessDependencies> {
+	readonly rebuild?: boolean;
+	readonly buildSettings?: NixBuildSettings;
+	readonly nix?: Pick<
+		Nix,
+		'readDerivation' | 'queryValidPaths' | 'queryPathInfo'
+	>;
+	readonly evaluationNix?: Pick<Nix, 'readDerivation'>;
 }
 
 export interface NixDerivationShowDependencies {
@@ -3198,17 +3784,26 @@ function localDerivationRootStoreOptions(
 function openLocalDerivationRootStore(
 	signal: AbortSignal | undefined,
 	dependencies: LocalDerivationRootDependencies
-): Pick<Nix, 'withConnection'> {
+): {
+	readonly nix: Pick<Nix, 'withConnection'>;
+	readonly copyStoreUri: LocalStoreUri;
+} {
 	const openNix = dependencies.openNix ?? defaultOpenNixForAvailability;
 
 	try {
-		return openNix(systemDaemonRootStoreOptions(signal));
+		return {
+			nix: openNix(systemDaemonRootStoreOptions(signal)),
+			copyStoreUri: 'daemon'
+		};
 	} catch (error) {
 		if (!(error instanceof NixDaemonUnavailableError)) {
 			throw error;
 		}
 
-		return openNix(localDerivationRootStoreOptions(signal, dependencies));
+		return {
+			nix: openNix(localDerivationRootStoreOptions(signal, dependencies)),
+			copyStoreUri: 'local'
+		};
 	}
 }
 
@@ -3226,7 +3821,7 @@ export async function runWithLocalDerivationRoots<T>(
 	dependencies: LocalDerivationRootDependencies = {}
 ): Promise<T> {
 	signal?.throwIfAborted();
-	const nix = openLocalDerivationRootStore(signal, dependencies);
+	const { nix } = openLocalDerivationRootStore(signal, dependencies);
 
 	return nix.withConnection(async (session) => {
 		const uniqueDerivations = new Set(derivations);
@@ -3240,65 +3835,15 @@ export async function runWithLocalDerivationRoots<T>(
 }
 
 /**
- * Native Nix copy arguments for paths that the action must place in the
- * selected remote store.
- */
-export function nixCopyArguments(
-	paths: readonly StorePathString[],
-	store: string
-): readonly string[] {
-	return ['copy', '--to', store, '--', ...paths];
-}
-
-/**
- * The injectable process launcher for `runNixCopy`. Tests supply their own
- * start function so the copy's process lifecycle is deterministic.
- */
-export interface RunNixCopyDependencies {
-	readonly start: (
-		arguments_: readonly string[],
-		signal: AbortSignal | undefined
-	) => AbortableChildProcessLifecycle;
-}
-
-function startNixCopy(
-	arguments_: readonly string[],
-	_signal: AbortSignal | undefined
-): AbortableChildProcessLifecycle {
-	const child = spawn('nix', arguments_, {
-		stdio: 'inherit'
-	});
-
-	return observeChildProcess(child);
-}
-
-const defaultRunNixCopyDependencies: RunNixCopyDependencies = {
-	start: startNixCopy
-};
-
-/**
  * Copies the required local store paths to the remote build store.
  */
 export async function runNixCopy(
 	paths: readonly StorePathString[],
 	store: string,
 	signal?: AbortSignal,
-	dependencies: RunNixCopyDependencies = defaultRunNixCopyDependencies
+	dependencies: NixCopyDependencies = {}
 ): Promise<void> {
-	signal?.throwIfAborted();
-
-	const result = await waitForAbortableChildProcess(
-		dependencies.start(nixCopyArguments(paths, store), signal),
-		signal
-	);
-
-	if (result.error !== undefined) {
-		throw result.error;
-	}
-
-	if (result.status !== 0) {
-		throw new CommandFailedError('nix copy', result.status);
-	}
+	await copyNixPaths({ paths, to: store }, signal, dependencies);
 }
 
 /**
@@ -3313,7 +3858,10 @@ type RemoteBuildPublisher = (
 	failures: readonly RemoteCohortBuildFailure[],
 	publicationPaths: readonly StorePathString[],
 	provenanceRebuilds: ReadonlySet<NixDerivedPathString>,
-	copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
+	copiedFrom: ReadonlyMap<StorePathString, readonly string[]>,
+	resolveClosure?: (
+		paths: readonly StorePathString[]
+	) => ReturnType<Nix['resolveClosure']>
 ) => Promise<void>;
 
 /**
@@ -3333,6 +3881,7 @@ export async function runNixBuildWithResults(
 ): Promise<void> {
 	const discovered = Nix.openForAvailability(undefined, {
 		storeUri: store,
+		...(options?.rebuild === true && { disableRemoteBuilders: true }),
 		...(signal !== undefined && { signal })
 	});
 	const nix =
@@ -3340,6 +3889,7 @@ export async function runNixBuildWithResults(
 			? discovered
 			: Nix.openForAvailability(undefined, {
 					storeUri: store,
+					...(options?.rebuild === true && { disableRemoteBuilders: true }),
 					setOptions: remoteBuildSetOptions(maxJobs),
 					...(signal !== undefined && { signal })
 				});
@@ -3357,7 +3907,8 @@ export async function runNixBuildWithResults(
 					failures,
 					publicationPaths,
 					provenanceRebuilds,
-					nix.observedCopies()
+					nix.observedCopies(),
+					(paths) => session.resolveClosure(paths)
 				),
 			options
 		)
@@ -3382,14 +3933,21 @@ export interface RemoteBuildSessionOptions {
 	derivations are included in `copyPaths`.
 	*/
 	readonly dependencyBuilds?: readonly RemoteDependencyBuild[];
+	readonly publishClosure?: boolean;
+	readonly materialiseClosure?: (
+		session: Pick<
+			NixDaemonSession,
+			'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
+		>
+	) => Promise<readonly StorePathString[]>;
 	/**
 	Called immediately before the store realises one dependency.
 	*/
 	readonly onDependencyStarted?: (dependency: NixDerivedPathString) => void;
 	/**
-	Require every successful target to have current-run build evidence.
+	Build every selected target again in the selected Nix store.
 	*/
-	readonly requireProvenance?: boolean;
+	readonly rebuild?: boolean;
 	/**
 	Called before the daemon starts work on one target.
 	*/
@@ -3478,12 +4036,9 @@ export async function buildAndRootNixResults(
 	const provenanceRebuilds = new Set<NixDerivedPathString>();
 	const queryCurrentValidity = session.queryValidPaths;
 
-	if (
-		queryCurrentValidity === undefined &&
-		options?.requireProvenance === true
-	) {
+	if (queryCurrentValidity === undefined && options?.rebuild === true) {
 		throw new Error(
-			'Provenance-required remote builds need selected-store validity queries'
+			'Rebuilding remote targets needs selected-store validity queries'
 		);
 	}
 
@@ -3494,8 +4049,9 @@ export async function buildAndRootNixResults(
 
 		if (
 			dependencyResult !== undefined &&
-			(options?.requireProvenance !== true ||
-				dependencyResult.outcome.kind === 'built')
+			(options?.rebuild !== true ||
+				(dependencyResult.outcome.kind === 'built' &&
+					dependencyResult.execution === 'local'))
 		) {
 			options?.onTargetCompleted?.(build.target);
 			continue;
@@ -3509,11 +4065,11 @@ export async function buildAndRootNixResults(
 
 		const selectedOutputs = build.outputs.values().toArray();
 		const currentlyValid =
-			queryCurrentValidity !== undefined && options?.requireProvenance === true
+			queryCurrentValidity !== undefined && options?.rebuild === true
 				? new Set(await queryCurrentValidity.call(session, selectedOutputs))
 				: new Set<StorePathString>();
 		let buildMode: NixBuildMode =
-			options?.requireProvenance === true &&
+			options?.rebuild === true &&
 			selectedOutputs.every((output) => currentlyValid.has(output))
 				? 'check'
 				: 'normal';
@@ -3525,9 +4081,12 @@ export async function buildAndRootNixResults(
 
 		if (
 			buildMode === 'normal' &&
-			options?.requireProvenance === true &&
+			options?.rebuild === true &&
 			reconciliation.failures.length === 0 &&
-			reconciliation.results.some((result) => result.outcome.kind !== 'built')
+			reconciliation.results.some(
+				(result) =>
+					result.outcome.kind !== 'built' || result.execution !== 'local'
+			)
 		) {
 			buildMode = 'check';
 			returned = await session.buildPathsWithResults(
@@ -3537,8 +4096,30 @@ export async function buildAndRootNixResults(
 			reconciliation = reconcileBuildResults([build], returned);
 		}
 
-		if (buildMode === 'check' && reconciliation.failures.length === 0) {
-			provenanceRebuilds.add(build.target);
+		if (options?.rebuild === true && reconciliation.failures.length === 0) {
+			const notBuilt = reconciliation.results.filter(
+				(result) =>
+					result.outcome.kind !== 'built' || result.execution !== 'local'
+			);
+
+			if (notBuilt.length > 0) {
+				const built = reconciliation.results.filter(
+					(result) =>
+						result.outcome.kind === 'built' && result.execution === 'local'
+				);
+				reconciliation = {
+					results: built,
+					outputs: buildResultOutputPaths(built),
+					failures: notBuilt.map((result) => ({
+						target: result.target,
+						kind: 'target',
+						outcome: 'not-built',
+						message: `the rebuild did not prove execution in the selected store (result: ${result.outcome.kind}; execution: ${result.execution ?? 'unobserved'})`
+					}))
+				};
+			} else if (buildMode === 'check') {
+				provenanceRebuilds.add(build.target);
+			}
 		}
 
 		for (const output of reconciliation.outputs) {
@@ -3560,10 +4141,29 @@ export async function buildAndRootNixResults(
 		}
 	}
 
-	const outputPaths = buildResultOutputPaths(results);
+	const targetSet = new Set(expectedBuilds.map((build) => build.target));
+	const outputPaths = buildResultOutputPaths(
+		options?.publishClosure === false
+			? results.filter((result) =>
+					targetSet.has(canonicalNixDerivedPath(result.target))
+				)
+			: results
+	);
 	const publicationInfos =
-		outputPaths.length === 0 ? [] : await session.resolveClosure(outputPaths);
-	const publicationPaths = publicationInfos.map((info) => info.storePath);
+		outputPaths.length === 0 || options?.publishClosure === false
+			? []
+			: await session.resolveClosure(outputPaths);
+	const builtPublicationPaths =
+		options?.publishClosure === false
+			? outputPaths
+			: publicationInfos.map((info) => info.storePath);
+	const cachedClosurePaths =
+		options?.materialiseClosure === undefined
+			? []
+			: await options.materialiseClosure(session);
+	const publicationPaths = [
+		...new Set([...builtPublicationPaths, ...cachedClosurePaths])
+	].toSorted(byCodeUnit);
 	const publicationPathSet = new Set(publicationPaths);
 	const remainingDependencyFailures = dependencyFailures.filter((failure) => {
 		if (failure.kind !== 'dependency') {
@@ -4258,21 +4858,6 @@ async function resolveLocalBuildOwners(options: {
 }
 
 /**
- * The already-held paths to pass to a receipt push. The push records no subject
- * for a path it is told the store already held. A provenance rebuild realises a
- * path the store already had, so every path this run claims as built is removed
- * from the list.
- */
-export function receiptAlreadyHeldPaths(
-	alreadyValid: readonly string[],
-	claimable: readonly string[]
-): readonly string[] {
-	const claimed = new Set(claimable);
-
-	return alreadyValid.filter((storePath) => !claimed.has(storePath));
-}
-
-/**
 Outputs this invocation's keyed daemon results say it actually built.
 */
 export function claimableOutputPaths(
@@ -4297,31 +4882,237 @@ export async function runNixBuild(
 	store: string,
 	outLinkDirectory: string,
 	signal?: AbortSignal,
-	dependencies: CapturedNixProcessDependencies = defaultCapturedNixProcessDependencies
+	options: RunNixBuildOptions = {}
 ): Promise<NixBuildCommandResult> {
 	signal?.throwIfAborted();
 
+	if (
+		store === '' &&
+		options.rebuild === true &&
+		(options.buildSettings ?? discoverNixStoreConfig().building).builders !==
+			undefined
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
+
 	await mkdir(outLinkDirectory, { recursive: true });
 
+	const nix =
+		options.rebuild === true
+			? (options.nix ??
+				Nix.openForAvailability(undefined, {
+					storeUri: store === '' ? 'auto' : store,
+					...(signal !== undefined && { signal })
+				}))
+			: undefined;
+	const evaluationNix =
+		nix === undefined
+			? undefined
+			: (options.evaluationNix ??
+				(store === ''
+					? nix
+					: Nix.openForAvailability(undefined, {
+							storeUri: 'auto',
+							...(signal !== undefined && { signal })
+						})));
+	const initiallyValid =
+		nix === undefined || evaluationNix === undefined
+			? new Set<string>()
+			: await initiallyValidBuildOutputs(evaluationNix, nix, installables);
 	const logFile = path.join(outLinkDirectory, 'activity.jsonl');
+	const checkLogFile = path.join(outLinkDirectory, 'check-activity.jsonl');
+	await Promise.all([
+		rm(logFile, { force: true }),
+		rm(checkLogFile, { force: true })
+	]);
 	const arguments_ = nixBuildArguments(
 		installables,
 		maxJobs,
 		store,
 		outLinkDirectory,
-		logFile
+		logFile,
+		{ rebuild: false, disableRemoteBuilders: options.rebuild === true }
 	);
 
+	const processDependencies: CapturedNixProcessDependencies = {
+		start: options.start ?? defaultCapturedNixProcessDependencies.start,
+		...(options.maximumStdoutBytes !== undefined && {
+			maximumStdoutBytes: options.maximumStdoutBytes
+		}),
+		...(options.scheduler !== undefined && { scheduler: options.scheduler })
+	};
 	const { status, stdout } = await runCapturedNixProcess(
 		'nix build',
 		arguments_,
 		signal,
-		dependencies
+		processDependencies
 	);
 
 	const paths = stdout.split(/\r?\n/u).filter((line) => line !== '');
+	const copiedFrom = await readCopySources(logFile);
 
-	return { paths, status, copiedFrom: await readCopySources(logFile) };
+	if (status !== 0 || nix === undefined) {
+		return { paths, status, copiedFrom };
+	}
+
+	const checkInstallables = await buildOnlyChecks(
+		evaluationNix ?? nix,
+		nix,
+		installables,
+		paths,
+		initiallyValid,
+		logFile
+	);
+
+	if (checkInstallables.length > 0) {
+		const check = await runCapturedNixProcess(
+			'nix build --rebuild',
+			nixBuildArguments(
+				checkInstallables,
+				maxJobs,
+				store,
+				outLinkDirectory,
+				checkLogFile,
+				{ rebuild: true, outLink: false }
+			),
+			signal,
+			processDependencies
+		);
+
+		if (check.status !== 0) {
+			throw new CommandFailedError('nix build --rebuild', check.status);
+		}
+	}
+
+	const logs = await Promise.all(
+		[logFile, checkLogFile].map(async (file) => {
+			try {
+				return await readFile(file, 'utf8');
+			} catch {
+				return '';
+			}
+		})
+	);
+	const activities = logs.flatMap((log) => buildActivities(log));
+	const observed = new Set(
+		activities
+			.filter((activity) => activity.machine === '')
+			.map((activity) => activity.derivation)
+	);
+	const infos = await Promise.all(
+		paths.map((storePath) => nix.queryPathInfo(storePath))
+	);
+	if (
+		activities.some(
+			(activity) =>
+				activity.machine !== '' &&
+				infos.some((info) => info.deriver === activity.derivation)
+		)
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
+	const unobserved = infos
+		.filter((info) => info.deriver === undefined || !observed.has(info.deriver))
+		.map((info) => info.storePath);
+
+	if (unobserved.length > 0) {
+		throw new BuildObservationMissingError(unobserved);
+	}
+
+	return { paths, status, copiedFrom: copySources(logs) };
+}
+
+async function initiallyValidBuildOutputs(
+	evaluationNix: Pick<Nix, 'readDerivation'>,
+	nix: Pick<Nix, 'queryValidPaths'>,
+	installables: readonly string[]
+): Promise<ReadonlySet<string>> {
+	const outputs: StorePathString[] = [];
+
+	for (const installable of installables) {
+		const [rawDerivation, selection] = installable.split('^', 2);
+		const derivation = storePathSchema.safeParse(rawDerivation);
+
+		if (!derivation.success || !derivation.data.endsWith('.drv')) {
+			continue;
+		}
+
+		const declared = await evaluationNix.readDerivation(derivation.data);
+		const names =
+			selection === undefined || selection === '*'
+				? declared.outputs.keys()
+				: selection.split(',').values();
+
+		for (const name of names) {
+			const output = declared.outputs.get(name);
+
+			if (output !== undefined) {
+				outputs.push(output);
+			}
+		}
+	}
+
+	return new Set(await nix.queryValidPaths(outputs));
+}
+
+async function buildOnlyChecks(
+	evaluationNix: Pick<Nix, 'readDerivation'>,
+	nix: Pick<Nix, 'queryPathInfo'>,
+	installables: readonly string[],
+	paths: readonly string[],
+	initiallyValid: ReadonlySet<string>,
+	logFile: string
+): Promise<readonly string[]> {
+	let log = '';
+
+	try {
+		log = await readFile(logFile, 'utf8');
+	} catch {
+		// Nix may reuse every output without creating an activity log.
+	}
+
+	const executed = new Set(
+		buildActivities(log).map((activity) => activity.derivation)
+	);
+	const infos: readonly NixValidPathInfo[] = await Promise.all(
+		paths.map((storePath) => nix.queryPathInfo(storePath))
+	);
+	const checks = new Set<string>();
+	const derivations = new Map<
+		string,
+		Awaited<ReturnType<Nix['readDerivation']>>
+	>();
+
+	for (const info of infos) {
+		if (info.deriver === undefined) {
+			return installables;
+		}
+
+		if (!initiallyValid.has(info.storePath) && executed.has(info.deriver)) {
+			continue;
+		}
+
+		let derivation = derivations.get(info.deriver);
+		if (derivation === undefined) {
+			try {
+				derivation = await evaluationNix.readDerivation(info.deriver);
+			} catch {
+				return installables;
+			}
+			derivations.set(info.deriver, derivation);
+		}
+
+		const output = [...derivation.outputs].find(
+			([, storePath]) => storePath === info.storePath
+		);
+		if (output === undefined) {
+			return installables;
+		}
+
+		checks.add(`${info.deriver}^${output[0]}`);
+	}
+
+	return [...checks].toSorted(byCodeUnit);
 }
 
 // Nix creates the activity log when the build starts, so an invocation that

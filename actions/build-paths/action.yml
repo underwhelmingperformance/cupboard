@@ -1,8 +1,20 @@
 name: Build cupboard store paths
 description:
-  Builds Nix installables and writes a receipt that lists the outputs this job
-  built itself.
+  Realises Nix installables and records how their outputs were obtained.
 inputs:
+  inline-paths:
+    description:
+      Control how path lists are returned. `true` writes inline path outputs as
+      well as files. `false` returns files and counts without inline path
+      outputs. Use `false` for large path lists.
+    required: false
+    default: 'true'
+  publication-url:
+    description: >-
+      Destination tenant or cache URL. With `substituter: leave`, this keeps
+      paths from the destination and its tenant reuse views selected for
+      publication. Supply this when the destination is a configured substituter.
+    required: false
   cupboard-path:
     description: Path to the cupboard executable when OIDC read access is used.
     required: false
@@ -33,26 +45,64 @@ inputs:
     description: Let the step succeed even if all five build attempts fail.
     required: false
     default: 'false'
-  require-provenance:
+  build:
     description:
-      Rebuild every output that Nix downloaded or that was already in the store,
-      locally and one at a time, so the receipt lists every output as built by
-      this job. Without this, the receipt only lists the outputs that the job
-      built itself.
+      Control when to build the requested outputs. `missing` uses an output from
+      the store or a substituter when one is available, and builds it otherwise.
+      `rebuild` builds each output again in the selected Nix store, even if it
+      is already available. Nix may still fetch dependencies from substituters.
     required: false
-    default: 'false'
+    default: missing
+  substituter:
+    description: >-
+      Control whether to publish outputs available from external substituters.
+      `copy` selects them for publication. `leave` keeps them upstream if
+      consumers can obtain matching NARs for the output and all its runtime
+      references under the configured signature policy. Both modes select
+      outputs built in this run.
+    required: false
+    default: copy
 outputs:
   paths:
-    description: Output paths of the installables, one per line.
+    description:
+      Output paths of the installables, one per line. Available when
+      inline-paths is true; paths-file always contains the full list.
     value: ${{ steps.build.outputs.paths }}
+  built-paths:
+    description:
+      Output paths with observed runner-local build evidence, one per line.
+      Available when inline-paths is true; built-receipt-file always records
+      these paths.
+    value: ${{ steps.build.outputs.built-paths }}
+  publish-paths:
+    description:
+      Selected output paths to publish under the substituter policy. Available
+      when inline-paths is true; publish-paths-file always contains the full
+      list.
+    value: ${{ steps.build.outputs.publish-paths }}
+  paths-count:
+    description: Number of realised output paths, including paths left upstream.
+    value: ${{ steps.build.outputs.paths-count }}
+  publish-paths-count:
+    description: Number of selected output paths to publish.
+    value: ${{ steps.build.outputs.publish-paths-count }}
+  built-paths-count:
+    description:
+      Number of output paths with observed runner-local build evidence.
+    value: ${{ steps.build.outputs.built-paths-count }}
   paths-file:
     description: File that lists the output paths of the installables.
     value: ${{ steps.build.outputs.paths-file }}
+  publish-paths-file:
+    description: File that lists the selected output paths to publish.
+    value: ${{ steps.build.outputs.publish-paths-file }}
   receipt-file:
-    description:
-      Path to the receipt, which lists the outputs that this job built. Pass it
-      to actions/attest.
+    description: Path to the receipt for all realised outputs.
     value: ${{ steps.build.outputs.receipt-file }}
+  built-receipt-file:
+    description:
+      Receipt restricted to paths with observed runner-local build evidence.
+    value: ${{ steps.build.outputs.built-receipt-file }}
 runs:
   using: composite
   steps:
@@ -86,6 +136,7 @@ runs:
       shell: bash
       env:
         INSTALLABLES: ${{ inputs.installables }}
+        INLINE_PATHS: ${{ inputs.inline-paths }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
@@ -93,7 +144,9 @@ runs:
         KEEP_GOING: ${{ inputs.keep-going }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
-        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
+        BUILD: ${{ inputs.build }}
+        SUBSTITUTER: ${{ inputs.substituter }}
+        PUBLICATION_URL: ${{ inputs.publication-url }}
       run: |
         source "$GITHUB_ACTION_PATH/../read-session.sh"
         run_with_read_session \
@@ -102,8 +155,11 @@ runs:
             --disable-warning=ExperimentalWarning \
             "$GITHUB_ACTION_PATH/../src/main.ts" build \
             --installables "$INSTALLABLES" \
+            --inline-paths "$INLINE_PATHS" \
             --installables-file "$INSTALLABLES_FILE" \
             --keep-going "$KEEP_GOING" \
             --max-jobs "$MAX_JOBS" \
             --allow-failure "$ALLOW_FAILURE" \
-            --require-provenance "$REQUIRE_PROVENANCE"
+            --build "$BUILD" \
+            --substituter "$SUBSTITUTER" \
+            --publication-url "$PUBLICATION_URL"

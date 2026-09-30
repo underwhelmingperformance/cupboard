@@ -687,9 +687,11 @@ export async function reconcileBuild(
 	// Preserve publication provenance from streaming. `publishRequired`
 	// independently confirms final availability.
 	for (const [storePath, streamed] of options.outcomes) {
-		if (streamed.outcome === 'published') {
-			ledger.published.add(storePath);
+		if (streamed.outcome !== 'published') {
+			continue;
 		}
+
+		ledger.published.add(storePath);
 	}
 
 	const infos = await publishRequired(required, options, ledger);

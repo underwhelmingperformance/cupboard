@@ -263,6 +263,7 @@ describe('canonical acquisition composition', () => {
 		expect(actionOutputs('push')).toStrictEqual({
 			'cupboard-path': '${{ steps.push.outputs.cupboard-path }}',
 			'cupboard-version': '${{ steps.push.outputs.cupboard-version }}',
+			'receipt-file': '${{ steps.push.outputs.receipt-file }}',
 			'uploaded-paths': '${{ steps.push.outputs.uploaded-paths }}',
 			'reused-blobs': '${{ steps.push.outputs.reused-blobs }}',
 			'skipped-paths': '${{ steps.push.outputs.skipped-paths }}',
@@ -293,7 +294,8 @@ describe('attestation outputs', () => {
 			'bundle-path': '${{ steps.attest.outputs.bundle-path }}',
 			'origin-bundle-path': '${{ steps.attest.outputs.origin-bundle-path }}',
 			bundles: '${{ steps.attest.outputs.bundles }}',
-			'checksums-file': '${{ steps.subjects.outputs.checksums-file }}',
+			'bundles-file': '${{ steps.attest.outputs.bundles-file }}',
+			'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 			'subject-count': '${{ steps.subjects.outputs.subject-count }}',
 			'built-checksums-file':
 				'${{ steps.subjects.outputs.built-checksums-file }}',

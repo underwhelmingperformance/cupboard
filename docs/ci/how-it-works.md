@@ -18,9 +18,10 @@ running side by side.
    and splits the targets into groups called cohorts, which are explained below.
    When you use the preset, this is also where a pull request's cache is
    created.
-3. The cohort jobs do the building. There's one job per cohort, each on the
-   runner that the cohort's `os` specifies. Each job builds its targets,
-   publishes them, and signs their provenance.
+3. The cohort jobs realise the targets. There's one job per cohort, each on the
+   runner that the cohort's `os` specifies. The `build`, `substituter`,
+   `publish` and `attest` inputs decide what each job builds, publishes and
+   signs.
 
 When an unmerged pull request is closed, the run is different. The configure job
 runs, then a remove-cache job removes the pull request's cache. There's no
@@ -47,10 +48,11 @@ tenant needs a [trust rule](./trust-rules.md) that accepts the workflow.
 
 ## How targets are grouped into cohorts
 
-A cohort is a set of targets that are built together, in one job, with a single
-`nix build`. By default, every target is a cohort of its own, so each target
-gets its own job. If you give several targets the same `cohort` label in the
-manifest, they share a job instead.
+A cohort is a set of targets processed together in one job. When its targets
+need a build, the job passes them to `nix build` together. By default, every
+target is a cohort of its own, so each target gets its own job. If you give
+several targets the same `cohort` label in the manifest, they share a job
+instead.
 
 The plan job evaluates the manifest once, with `nix eval --json`, and checks it
 before grouping the targets:
@@ -60,12 +62,12 @@ before grouping the targets:
   `bestEffort` settings.
 - No target may go over the limits on retention roots.
 
-The plan doesn't skip targets that the cache already has, even when their roots
-are set. A retention root shows that the cache keeps a target's outputs, but not
-that their build provenance was attached, so a run that failed after publishing
-would otherwise never attach it. Every cohort gets a job, and that job checks
-the cache for each target's outputs and their build provenance, and builds a
-target that lacks either.
+With `build: missing` and `publish: outputs`, the plan can skip a target whose
+root already retains the outputs that the destination cache serves. It can also
+skip a cohort when each target already has its required path in the destination.
+An attestation's presence does not decide whether to build. With
+`build: rebuild`, each requested output is built again on the configured
+builder, even if it is already available. Nix may still substitute dependencies.
 
 If you turn on `enable-packing`, the plan works differently. It measures the
 size of each target's closure, and packs small unlabelled cohorts into as few
@@ -82,40 +84,46 @@ Each cohort job goes through these steps:
 3. It evaluates each target's `attr` again, and fails if the result no longer
    matches the `rootDrvPath` that the plan used. This catches a flake that
    changed between jobs.
-4. It sorts the targets into four groups, described below, and prints how many
-   are in each.
-5. It builds the targets in the "To build" group. The job publishes every path
-   as Nix finishes building it, not just the targets themselves.
-6. Once the build has succeeded and every target is available, it sets each
-   target's retention root.
-7. It signs attestations for the paths that it built, and attaches the
-   attestations to those paths in the cache.
+4. It sorts the targets by how they are available, and prints the groups in the
+   log. `build: rebuild` puts each requested output in the build work even if
+   the output was already available.
+5. It builds the requested outputs that the selected build mode requires. With
+   `publish: outputs`, it publishes the selected outputs. With
+   `publish: closure`, it also publishes their runtime references. With
+   `publish: none`, it publishes nothing.
+6. After publication succeeds, it sets each published target's retention root.
+7. With `attest: true`, it signs build provenance for builds observed on the
+   runner plus an attribute report for successful local verification rebuilds,
+   and attaches those bundles to the published paths. Signing and attachment
+   happen after publication; a failure fails the job but does not remove paths
+   from the cache.
 
 ### The four groups in the log
 
 In step 4, each target ends up in one of these groups. The group names are the
 labels that you'll see in the job's log.
 
-| Log label                   | Which targets                                                                                                  | What happens                                       |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| Already served by the cache | The destination cache already has them, with build provenance attached.                                        | Their roots are set. Nothing is built or uploaded. |
-| Reused from the tenant      | Another cache in the reuse view has them.                                                                      | They're published by reference (see below).        |
-| Left to upstream caches     | The runner already has them, and an upstream cache such as cache.nixos.org serves them with a valid signature. | They're left there, and not copied into cupboard.  |
-| To build                    | Everything else.                                                                                               | They're built, published and attested.             |
+| Log label                   | Which targets                                                                                         | What happens                                                                        |
+| --------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Already served by the cache | The destination cache already serves their outputs.                                                   | With `build: missing`, the run can set their roots without another build or upload. |
+| Reused from the tenant      | Another cache in the reuse view serves their outputs.                                                 | The run can publish them by reference (see below).                                  |
+| Left to upstream caches     | An external substituter serves their outputs and `substituter: leave` excludes them from publication. | Consumers need that substituter to fetch them.                                      |
+| To build                    | The selected build mode requires a build for these outputs.                                           | The run builds them and publishes the selected paths unless `publish: none`.        |
 
 Publishing by reference means the destination cache starts serving a store path
 that your tenant already stores in another cache. The bytes aren't uploaded
-again. A target published this way gets no build provenance from this run,
-because this run didn't build it. Instead, its build-origin attestation records
-where it came from. If the other cache is public, the destination also inherits
-that cache's attestations for the path, including its build provenance. See
-[Attestations of reused paths](./attestation.md#attestations-of-reused-paths).
+again. A target published this way gets no new build provenance from this run,
+because this run didn't build it. If the source cache is public, the destination
+can inherit its eligible attestations for the path. Inheritance preserves the
+original bundle and signature. See [Attestations of reused
+paths][reused-attestations].
 
-Sometimes the destination has a target but no provenance for it. This can happen
-if an earlier run's signing step failed. The job lists these targets as "Served
-but not attested", and treats them as "To build". It rebuilds only the target's
-final derivation, substituting its dependencies, so that the job has a build to
-sign.
+[reused-attestations]: ./attestation.md#attestations-of-reused-paths
+
+If an earlier run published a target but its signing step failed, a later run
+with `build: missing` can still reuse the target. Set `build: rebuild` to build
+each requested output again and produce new build evidence. Dependencies may
+still be substituted.
 
 ### When a cache has lost a NAR
 

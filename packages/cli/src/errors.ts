@@ -1357,31 +1357,6 @@ export class ReceiptFileRequiresStoreError extends CliUsageError {
 	}
 }
 
-export class BuildStoreRequiresAlreadyHeldError extends CliUsageError {
-	constructor() {
-		super(
-			'--store with --receipt-file requires --already-held (repeated for ' +
-				'each path, or --no-already-held for none). Without the pre-build ' +
-				'path set, cupboard cannot distinguish outputs built by this run ' +
-				'from paths already present in the store.'
-		);
-		this.name = 'BuildStoreRequiresAlreadyHeldError';
-	}
-}
-
-export class BuildStoreRequiresClaimableError extends CliUsageError {
-	constructor() {
-		super(
-			'--store with --receipt-file requires --claimable (repeated for ' +
-				'each path whose realisation this invocation observed, or ' +
-				'--no-claimable for none). Without evidence from this invocation, cupboard ' +
-				'cannot distinguish a build from an output that appeared before or ' +
-				'during the run.'
-		);
-		this.name = 'BuildStoreRequiresClaimableError';
-	}
-}
-
 export class OidcRetentionChoiceRequiredError extends CliUsageError {
 	constructor() {
 		super(

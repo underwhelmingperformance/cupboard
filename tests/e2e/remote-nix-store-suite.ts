@@ -12,7 +12,6 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { buildReceiptV3Schema } from '@cupboard/protocol/build';
-import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import {
 	parseReporterResults,
 	type Reporter,
@@ -44,12 +43,17 @@ import {
 import { writeCachedSession } from '../../packages/cli/src/auth/token-store.ts';
 import { buildProgram as buildCliProgram } from '../../packages/cli/src/cli.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
+import { parsePathFile } from '../../packages/cli/src/commands/push.ts';
 import { PublicationCollection } from '../../packages/cli/src/push/publication.ts';
 import { runPush } from '../../packages/cli/src/push/push.ts';
 import { Nix } from '../../packages/nix/src/nix.ts';
 import { NixDaemonRemoteError } from '../../packages/nix/src/nix-daemon.ts';
 import { createProcessNixDaemonConnector } from '../../packages/nix/src/nix-daemon-process.ts';
-import type { NixDerivedPathString } from '../../packages/nix/src/nix-store.ts';
+import type {
+	NixBuildResult,
+	NixDerivedPathString
+} from '../../packages/nix/src/nix-store.ts';
+import { createNixDaemonStoreClient } from '../../packages/nix/src/store-client.ts';
 import { settleCleanups } from '../support/cleanup.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import {
@@ -269,6 +273,58 @@ export function describeRemoteNixStore(): void {
 			);
 		});
 
+		it('observes remote-store execution for cold builds and warm checks', async () => {
+			const store = remoteStore();
+			const member = await prepareExecutionDerivation(
+				store,
+				'direct-execution'
+			);
+			const client = createNixDaemonStoreClient(undefined, undefined, {
+				storeUri: store.storeUri,
+				disableRemoteBuilders: true
+			});
+			const cold = await client.buildPathsWithResults([member.target]);
+			const warm = await client.buildPathsWithResults([member.target]);
+			const checked = await client.buildPathsWithResults(
+				[member.target],
+				'check'
+			);
+
+			expect({
+				cold: executionResults(cold),
+				warm: executionResults(warm),
+				checked: executionResults(checked),
+				executions: await store.exec(['cat', member.counter])
+			}).toStrictEqual({
+				cold: [
+					{
+						target: member.target,
+						outcome: { kind: 'built', outputs: { out: member.output } },
+						execution: 'local'
+					}
+				],
+				warm: [
+					{
+						target: member.target,
+						outcome: { kind: 'already-valid', outputs: { out: member.output } },
+						execution: undefined
+					}
+				],
+				checked: [
+					{
+						target: member.target,
+						outcome: { kind: 'built', outputs: { out: member.output } },
+						execution: 'local'
+					}
+				],
+				executions: 'xx'
+			});
+		});
+
+		it('distinguishes onward builder dispatch from execution in the selected remote store', async () => {
+			await runOnwardExecutionEvidence(remoteStore());
+		});
+
 		it('rejects a host key that does not identify the remote store', async () => {
 			const store = remoteStore();
 			const nix = Nix.openForAvailability(undefined, {
@@ -457,7 +513,7 @@ export function describeRemoteNixStore(): void {
 			await runCancelledBuildCohort(remoteStore());
 		}, 300_000);
 
-		it('publishes mixed already-valid and new outputs but claims only the new output', async () => {
+		it('publishes mixed already-valid and new outputs without inferring remote execution', async () => {
 			await runAlreadyValidPublication(remoteStore());
 		}, 300_000);
 
@@ -521,6 +577,118 @@ async function preparedSshOptions(
 	}
 
 	return options.slice('NIX_SSHOPTS='.length);
+}
+
+function executionResults(results: readonly NixBuildResult[]) {
+	return results.map(({ target, outcome, execution }) => ({
+		target,
+		outcome,
+		execution
+	}));
+}
+
+async function prepareExecutionDerivation(
+	store: NixSshStoreFixture,
+	name: string
+) {
+	const counter = `/tmp/cupboard-${name}-counter`;
+	const script = `(umask 000; printf x >> ${counter}); printf cupboard-execution > "$out"`;
+	const expression = `derivation {
+		name = "cupboard-${name}";
+		system = builtins.currentSystem;
+		builder = "/bin/sh";
+		args = [ "-c" ${JSON.stringify(script)} ];
+	}`;
+	const derivation = storePathSchema.parse(
+		await store.exec(['nix-instantiate', '--expr', expression])
+	);
+	const output = storePathSchema.parse(
+		await store.exec(['nix-store', '--query', '--outputs', derivation])
+	);
+	const target: NixDerivedPathString = `${derivation}^out`;
+
+	return { counter, expression, derivation, output, target };
+}
+
+async function runOnwardExecutionEvidence(
+	store: NixSshStoreFixture
+): Promise<void> {
+	const config = await store.exec(['cat', '/etc/nix/nix.conf']);
+	const system = await store.exec([
+		'nix',
+		'eval',
+		'--raw',
+		'--impure',
+		'--expr',
+		'builtins.currentSystem'
+	]);
+	const onwardStore = 'local?root=/cupboard-onward-store';
+	const onwardUri = `ssh-ng://localhost?remote-store=${encodeURIComponent(onwardStore)}`;
+	const warm = await prepareExecutionDerivation(store, 'onward-warm');
+	const cold = await prepareExecutionDerivation(store, 'onward-cold');
+	const selected = await prepareExecutionDerivation(store, 'onward-disabled');
+	await store.exec([
+		'nix',
+		'build',
+		'--store',
+		onwardStore,
+		'--no-link',
+		'--impure',
+		'--expr',
+		warm.expression
+	]);
+	const client = createNixDaemonStoreClient(undefined, undefined, {
+		storeUri: store.storeUri
+	});
+	await expect(
+		client.queryValidPaths([warm.output, cold.output, selected.output])
+	).resolves.toStrictEqual([]);
+
+	try {
+		await store.writeFile(
+			'/etc/nix/nix.conf',
+			`${config}\nbuilders = ${onwardUri} ${system} - 1 1\nmax-jobs = 1\n`
+		);
+		const reused = await client.buildPathsWithResults([warm.target]);
+		const delegated = await client.buildPathsWithResults([cold.target]);
+		const restricted = createNixDaemonStoreClient(undefined, undefined, {
+			storeUri: store.storeUri,
+			disableRemoteBuilders: true
+		});
+		const local = await restricted.buildPathsWithResults([selected.target]);
+
+		expect({
+			reused: executionResults(reused),
+			delegated: executionResults(delegated),
+			local: executionResults(local),
+			localExecutions: await store.exec(['cat', selected.counter])
+		}).toStrictEqual({
+			reused: [
+				{
+					target: warm.target,
+					outcome: { kind: 'built', outputs: { out: warm.output } },
+					execution: 'remote'
+				}
+			],
+			delegated: [
+				{
+					target: cold.target,
+					outcome: { kind: 'built', outputs: { out: cold.output } },
+					execution: 'remote'
+				}
+			],
+			local: [
+				{
+					target: selected.target,
+					outcome: { kind: 'built', outputs: { out: selected.output } },
+					execution: 'local'
+				}
+			],
+			localExecutions: 'x'
+		});
+	} finally {
+		await store.writeFile('/etc/nix/nix.conf', `${config}\n`);
+	}
 }
 
 async function runRemoteBuild(
@@ -758,7 +926,7 @@ async function runCancelledBuildCohort(
 							url: server.tenantUrl.href,
 							cupboardPath: 'in-process-cupboard',
 							store: store.blockingTransportConfiguredStoreUri,
-							push: 'true',
+							publish: 'outputs',
 							receiptFile
 						},
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
@@ -916,7 +1084,7 @@ async function runAlreadyValidPublication(
 							url: server.tenantUrl.href,
 							cupboardPath: 'in-process-cupboard',
 							store: store.storeUri,
-							push: 'true',
+							publish: 'outputs',
 							receiptFile
 						},
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
@@ -969,7 +1137,10 @@ async function runAlreadyValidPublication(
 						checksumsFile: initialChecksumsFile,
 						url: server.tenantUrl.href
 					},
-					{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: initialAttestOutput },
+					{
+						RUNNER_TEMP: runDirectory,
+						GITHUB_OUTPUT: initialAttestOutput
+					},
 					silentReporter()
 				);
 				const provenanceReceiptFile = path.join(
@@ -988,7 +1159,7 @@ async function runAlreadyValidPublication(
 
 				// Model a rerun after publication succeeded but signing or attachment
 				// did not: the remote output and destination object both exist, yet
-				// this invocation must execute the derivation and claim it anew.
+				// this invocation must execute the derivation again.
 				await withSshOptions(undefined, () =>
 					buildCohortAction(
 						{
@@ -1007,8 +1178,8 @@ async function runAlreadyValidPublication(
 							url: server.tenantUrl.href,
 							cupboardPath: 'in-process-cupboard',
 							store: store.storeUri,
-							push: 'true',
-							requireProvenance: 'true',
+							publish: 'outputs',
+							build: 'rebuild',
 							receiptFile: provenanceReceiptFile
 						},
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
@@ -1036,12 +1207,11 @@ async function runAlreadyValidPublication(
 				// the expectation sorts too.
 				const describedPaths = [
 					{
-						origin: 'built' as const,
+						origin: 'store-held' as const,
 						storePath: coldMember.output,
 						narHash: coldInfo.narHash.digestHex(),
 						derivation: coldMember.derivation,
-						buildStore: store.storeUri,
-						verification: 'build-store' as const
+						buildStore: store.storeUri
 					},
 					// The remote store already held this output, so the run
 					// publishes it and records it as the store's own work.
@@ -1072,6 +1242,10 @@ async function runAlreadyValidPublication(
 					].toSorted((left, right) => byCodeUnit(left.root, right.root)),
 					attestation: {
 						checksums: await readFile(initialChecksumsFile, 'utf8'),
+						builtChecksums: await readFile(
+							path.join(runDirectory, 'built-subjects.txt'),
+							'utf8'
+						),
 						outputs: await readFile(initialAttestOutput, 'utf8')
 					}
 				}).toStrictEqual({
@@ -1086,12 +1260,11 @@ async function runAlreadyValidPublication(
 						paths: [member.output],
 						subjects: [
 							{
-								origin: 'built',
+								origin: 'store-held',
 								storePath: member.output,
 								narHash: info.narHash.digestHex(),
 								derivation: member.derivation,
-								buildStore: store.storeUri,
-								verification: 'build-store'
+								buildStore: store.storeUri
 							}
 						],
 						uploaded: []
@@ -1123,9 +1296,6 @@ async function runAlreadyValidPublication(
 							]
 						}
 					].toSorted((left, right) => byCodeUnit(left.root, right.root)),
-					// The build-origin statement covers both published paths, while
-					// the build-provenance statement covers only the one this run
-					// built.
 					attestation: {
 						checksums: describedPaths
 							.map(
@@ -1133,13 +1303,14 @@ async function runAlreadyValidPublication(
 									`${subject.narHash}  ${path.basename(subject.storePath)}\n`
 							)
 							.join(''),
+						builtChecksums: '\n',
 						outputs:
 							`checksums-file=${initialChecksumsFile}\n` +
 							'subject-count=2\n' +
 							`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
-							'built-subject-count=1\n' +
-							`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
-							`predicate-type=${buildOriginPredicateType}\n` +
+							'built-subject-count=0\n' +
+							'predicate-file=\n' +
+							'predicate-type=\n' +
 							'destination-access=public\n'
 					}
 				});
@@ -1205,8 +1376,8 @@ async function runAlreadyValidPublication(
 							url: server.tenantUrl.href,
 							cupboardPath: 'in-process-cupboard',
 							store: store.storeUri,
-							push: 'true',
-							requireProvenance: 'true',
+							publish: 'outputs',
+							build: 'rebuild',
 							receiptFile: retryReceiptFile
 						},
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
@@ -1398,8 +1569,8 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 							url: activeServer.tenantUrl.href,
 							cupboardPath: 'in-process-cupboard',
 							store: storeUri,
-							push: 'true',
-							requireProvenance: 'true',
+							publish: 'closure',
+							build: 'rebuild',
 							receiptFile
 						},
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
@@ -1453,9 +1624,6 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						`The successful cohort closure contained ${String(privateReferences.length)} private runtime references; expected one`
 					);
 				}
-				// The receipt describes every published path. A member's output is
-				// this run's build; the private runtime reference in the closure is
-				// work the remote store already held.
 				const expectedSubjects = closurePaths.map((storePath) => {
 					const member = members.find(({ outputs }) =>
 						outputs.includes(storePath)
@@ -1477,12 +1645,11 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 					}
 
 					return {
-						origin: 'built' as const,
+						origin: 'store-held' as const,
 						storePath,
 						narHash: info.narHash.digestHex(),
 						derivation: member.derivation,
-						buildStore: storeUri,
-						verification: 'build-store' as const
+						buildStore: storeUri
 					};
 				});
 				const buildOutput = await readFile(outputFile, 'utf8');
@@ -1587,12 +1754,19 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						checksumsFile,
 						url: activeServer.tenantUrl.href
 					},
-					{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: attestOutput },
+					{
+						RUNNER_TEMP: runDirectory,
+						GITHUB_OUTPUT: attestOutput
+					},
 					silentReporter()
 				);
 
 				expect({
 					checksums: await readFile(checksumsFile, 'utf8'),
+					builtChecksums: await readFile(
+						path.join(runDirectory, 'built-subjects.txt'),
+						'utf8'
+					),
 					outputs: await readFile(attestOutput, 'utf8')
 				}).toStrictEqual({
 					checksums: expectedSubjects
@@ -1601,13 +1775,14 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 								`${subject.narHash}  ${path.basename(subject.storePath)}\n`
 						)
 						.join(''),
+					builtChecksums: '\n',
 					outputs:
 						`checksums-file=${checksumsFile}\n` +
 						`subject-count=${String(closurePaths.length)}\n` +
 						`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
-						`built-subject-count=${String(paths.length)}\n` +
-						`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
-						`predicate-type=${buildOriginPredicateType}\n` +
+						'built-subject-count=0\n' +
+						'predicate-file=\n' +
+						'predicate-type=\n' +
 						'destination-access=public\n'
 				});
 
@@ -1645,7 +1820,10 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 							checksumsFile: rejectedChecksumsFile,
 							url: activeServer.tenantUrl.href
 						},
-						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: rejectedOutput },
+						{
+							RUNNER_TEMP: runDirectory,
+							GITHUB_OUTPUT: rejectedOutput
+						},
 						silentReporter(),
 						{ fetch: tamperedFetch }
 					)
@@ -1739,7 +1917,7 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 								url: server.tenantUrl.href,
 								cupboardPath: 'in-process-cupboard',
 								store: store.storeUri,
-								push: 'true',
+								publish: 'outputs',
 								receiptFile
 							},
 							{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
@@ -1818,12 +1996,11 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 						paths: [successful.output],
 						subjects: [
 							{
-								origin: 'built',
+								origin: 'store-held',
 								storePath: successful.output,
 								narHash: info.narHash.digestHex(),
 								derivation: successful.derivation,
-								buildStore: store.storeUri,
-								verification: 'build-store'
+								buildStore: store.storeUri
 							}
 						],
 						terminalFailure: {
@@ -1965,7 +2142,7 @@ async function runSixTargetRemotePublication(
 							url: server.tenantUrl.href,
 							cupboardPath: 'in-process-cupboard',
 							store: store.storeUri,
-							push: 'true',
+							publish: 'outputs',
 							receiptFile
 						},
 						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
@@ -2003,12 +2180,11 @@ async function runSixTargetRemotePublication(
 					}
 
 					return {
-						origin: 'built' as const,
+						origin: 'store-held' as const,
 						storePath,
 						narHash: info.narHash.digestHex(),
 						derivation: member.derivation,
-						buildStore: store.storeUri,
-						verification: 'build-store' as const
+						buildStore: store.storeUri
 					};
 				});
 				const receipt = buildReceiptV3Schema.parse(
@@ -2183,7 +2359,7 @@ function publicationCupboard(
 			return publicationPlanResults(
 				plan.members,
 				plan.initiallyAvailable,
-				arguments_.includes('--require-attested')
+				optionValue(arguments_, '--build') === 'rebuild'
 			);
 		}
 
@@ -2338,12 +2514,9 @@ function publicationReprobeResults(
 function publicationPlanResults(
 	members: readonly Pick<RemotePreparedMember, 'target'>[],
 	initiallyAvailable?: RemotePublicationPlan['initiallyAvailable'],
-	// `--require-attested` asks the planner to build a served path the cache
-	// holds no attestation for. No test in this suite creates an attestation, so
-	// every served path is unattested under that flag.
-	requiresAttested = false
+	shouldRebuild = false
 ): readonly ReporterResultEvent[] {
-	const attached = requiresAttested ? undefined : initiallyAvailable;
+	const attached = shouldRebuild ? undefined : initiallyAvailable;
 	const isAttached = (target: NixDerivedPathString): boolean =>
 		attached?.target === target;
 
@@ -2356,15 +2529,15 @@ function publicationPlanResults(
 					publishByReference: [],
 					leftUpstream: [],
 					leftUpstreamRejections: [],
-					unattested:
-						requiresAttested && initiallyAvailable !== undefined
-							? [initiallyAvailable.output]
-							: [],
+					closureTargets: [],
 					alreadyValid:
 						initiallyAvailable === undefined ? [] : [initiallyAvailable.output],
 					buildSet: members
 						.map((member) => member.target)
 						.filter((target) => !isAttached(target)),
+					rebuildSet: shouldRebuild
+						? members.map((member) => member.target)
+						: [],
 					dependencyBuilds: [],
 					dependencyCopies: [],
 					counts: {
@@ -2401,9 +2574,10 @@ function publicationLocallyCopyablePlanResults(
 					publishByReference: [],
 					leftUpstream: [],
 					leftUpstreamRejections: [],
-					unattested: [],
+					closureTargets: [],
 					alreadyValid: [],
 					buildSet: members.map((member) => member.target),
+					rebuildSet: [],
 					dependencyBuilds: [],
 					dependencyCopies: [],
 					counts: {
@@ -2427,7 +2601,7 @@ async function runPublicationPush(
 	plan: RemotePublicationPlan,
 	arguments_: readonly string[]
 ): Promise<void> {
-	const targets = storePathSchema.array().parse(pushTargets(arguments_));
+	const targets = storePathSchema.array().parse(await pushTargets(arguments_));
 	const storeUri = requiredOption(arguments_, '--store');
 	const receiptFile = optionValue(arguments_, '--receipt-file');
 	const root = optionValue(arguments_, '--root');
@@ -2533,11 +2707,19 @@ function optionValues(arguments_: readonly string[], name: string): string[] {
 	return values;
 }
 
-function pushTargets(arguments_: readonly string[]): readonly string[] {
+async function pushTargets(
+	arguments_: readonly string[]
+): Promise<readonly string[]> {
 	const values = arguments_.slice(3);
 	const firstOption = values.findIndex((argument) => argument.startsWith('--'));
+	const positional = firstOption === -1 ? values : values.slice(0, firstOption);
+	const pathsFile = optionValue(arguments_, '--paths-file');
+	const filePaths =
+		pathsFile === undefined
+			? []
+			: parsePathFile(await readFile(pathsFile, 'utf8'));
 
-	return firstOption === -1 ? values : values.slice(0, firstOption);
+	return [...positional, ...filePaths];
 }
 
 function ignore(): void {

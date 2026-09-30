@@ -54,10 +54,10 @@ Here `123456` is the repository ID. Check the view's priority with
 again, then run `cupboard github check` against the calling workflow. The
 default cache has its own access mode and read grant for branch runs.
 
-When `push: false`, a pull-request run reads from the tenant's default cache. It
-neither creates nor removes a pull-request cache, and `cache-access-mode` does
-not change the selected default cache. The run can substitute from an existing
-baseline without a cache-creation grant.
+When `publish: none`, a pull-request run reads from the tenant's default cache.
+It neither creates nor removes a pull-request cache, and `cache-access-mode`
+does not change the selected default cache. The run can substitute from an
+existing baseline without a cache-creation grant.
 
 ## How the workflow reads
 

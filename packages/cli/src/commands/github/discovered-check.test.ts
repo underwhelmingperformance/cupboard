@@ -327,65 +327,72 @@ ${scenario.input}`;
 	});
 });
 
-it.each([
-	{
-		access: 'public' as const,
-		rules: [] as readonly unknown[],
-		secrets: '',
-		status: 'ready',
-		findings: []
-	},
-	{
-		access: 'private' as const,
-		rules: [
-			oidcTrustSummarySchema.parse({
-				id: 'read-only',
-				issuer: 'https://token.actions.githubusercontent.com',
-				audience: tenant.href,
-				claims: { repository_id: '1234', event_name: 'pull_request' },
-				permittedGrants: [buildCacheContentReadGrant({})],
-				disabled: false
-			})
-		],
-		secrets: '',
-		status: 'ready',
-		findings: [new PassedCheckFinding('trust rule')]
-	},
-	{
-		access: 'private' as const,
-		rules: [] as readonly unknown[],
-		secrets: `
+it.each(
+	[
+		{
+			access: 'public' as const,
+			rules: [] as readonly unknown[],
+			secrets: '',
+			status: 'ready',
+			findings: []
+		},
+		{
+			access: 'private' as const,
+			rules: [
+				oidcTrustSummarySchema.parse({
+					id: 'read-only',
+					issuer: 'https://token.actions.githubusercontent.com',
+					audience: tenant.href,
+					claims: { repository_id: '1234', event_name: 'pull_request' },
+					permittedGrants: [buildCacheContentReadGrant({})],
+					disabled: false
+				})
+			],
+			secrets: '',
+			status: 'ready',
+			findings: [new PassedCheckFinding('trust rule')]
+		},
+		{
+			access: 'private' as const,
+			rules: [] as readonly unknown[],
+			secrets: `
     secrets:
       destination_read_user: \${{ secrets.CACHE_USER }}
       destination_read_password: \${{ secrets.CACHE_PASSWORD }}`,
-		status: 'ready',
-		findings: [new ReadAuthenticationConfiguredFinding('cache')]
-	},
-	{
-		access: 'private' as const,
-		rules: [] as readonly unknown[],
-		secrets: '\n    secrets: inherit',
-		status: 'unverified',
-		findings: [new ReadAuthenticationUnverifiedFinding('cache')]
-	},
-	{
-		access: 'private' as const,
-		rules: [] as readonly unknown[],
-		secrets:
-			'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
-		status: 'failed',
-		findings: [new ReadAuthenticationIncompleteFinding('cache')]
-	},
-	{
-		access: 'public' as const,
-		rules: [] as readonly unknown[],
-		secrets:
-			'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
-		status: 'failed',
-		findings: [new ReadAuthenticationIncompleteFinding('cache')]
-	}
-])(
-	'checks $access read-only pull requests with declared secrets $secrets',
+			status: 'ready',
+			findings: [new ReadAuthenticationConfiguredFinding('cache')]
+		},
+		{
+			access: 'private' as const,
+			rules: [] as readonly unknown[],
+			secrets: '\n    secrets: inherit',
+			status: 'unverified',
+			findings: [new ReadAuthenticationUnverifiedFinding('cache')]
+		},
+		{
+			access: 'private' as const,
+			rules: [] as readonly unknown[],
+			secrets:
+				'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
+			status: 'failed',
+			findings: [new ReadAuthenticationIncompleteFinding('cache')]
+		},
+		{
+			access: 'public' as const,
+			rules: [] as readonly unknown[],
+			secrets:
+				'\n    secrets:\n      destination_read_user: ${{ secrets.CACHE_USER }}',
+			status: 'failed',
+			findings: [new ReadAuthenticationIncompleteFinding('cache')]
+		}
+	].flatMap((scenario) =>
+		['push: false', 'publish: none'].map((publicationInput) => ({
+			...scenario,
+			publicationInput
+		}))
+	)
+)(
+	'checks $access read-only pull requests with $publicationInput and declared secrets $secrets',
 	async (scenario) => {
 		const readOnlyWorkflow = `
 on: pull_request
@@ -395,7 +402,7 @@ jobs:
     with:
       url: https://cupboard.supply/t/laney
       preset: pull-request-and-branch
-      push: false${scenario.secrets}
+      ${scenario.publicationInput}${scenario.secrets}
 `;
 		const { client, dependencies } = fixture({
 			rules: scenario.rules,

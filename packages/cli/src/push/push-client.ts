@@ -185,6 +185,16 @@ export function pushClientFor(
 			}),
 		attachAttestation: (uploadId) =>
 			callInCache(rpc.attestations.attach, cache, { id: uploadId }),
+		negotiateAttestationBundles: async (body) =>
+			callInCache(rpc.attestations.negotiateBundles, cache, {
+				pushId: await session.pushId(),
+				...body
+			}),
+		attachAttestationPaths: (uploadId, body) =>
+			callInCache(rpc.attestations.attachPaths, cache, {
+				id: uploadId,
+				storePathHashes: [...body.storePathHashes]
+			}),
 		setRoot: (name, body) =>
 			callInCache(rpc.roots.set, cache, { name, ...body })
 	};

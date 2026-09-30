@@ -1,4 +1,7 @@
+import process from 'node:process';
+
 import { attest, buildSLSAProvenancePredicate } from '@actions/attest';
+import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import type { Reporter } from '@cupboard/reporter';
 import { backoffDelay } from '@cupboard/shared/retry';
 import type { InternalError } from '@sigstore/sign';
@@ -6,9 +9,14 @@ import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import {
+	type AttestationStoreWriter,
+	writeToAttestationStore
+} from './attestation-store.ts';
+import {
 	AttestationSelfCheckError,
 	AttestationSigningError
 } from './errors.ts';
+import type { Environment } from './inputs.ts';
 
 export interface AttestationSubject {
 	readonly name: string;
@@ -269,7 +277,10 @@ export interface SigningDisclosure {
 	readonly services: readonly DisclosedService[];
 	readonly publications: readonly PublicationDestination[];
 	readonly grouping: SubjectGrouping;
-	readonly subjectCount: number;
+	readonly subjects: {
+		readonly built: number;
+		readonly custom: number;
+	};
 }
 
 /**
@@ -300,7 +311,7 @@ const profileServices = {
  */
 export function signingDisclosure(
 	policy: SigningPolicy,
-	subjectCount: number
+	subjects: SigningDisclosure['subjects']
 ): SigningDisclosure {
 	const instance = sigstoreInstanceFor(policy.profile);
 	const instances: readonly SigstoreInstance[] =
@@ -311,7 +322,7 @@ export function signingDisclosure(
 	return {
 		instances,
 		grouping: policy.grouping,
-		subjectCount,
+		subjects,
 		services: disclosedServices.filter((service) => contacted.has(service)),
 		publications: publicationDestinations.filter((destination) => {
 			if (destination === 'rekor') {
@@ -362,7 +373,7 @@ export function disclosureLines(
 
 	return [
 		heading,
-		groupingLine(disclosure),
+		...groupingLines(disclosure),
 		'Signing can contact the following external services.',
 		...disclosure.services.map((service) => `  ${serviceDisclosure[service]}`),
 		'Signing publishes evidence or complete bundles to the following destinations.',
@@ -372,16 +383,27 @@ export function disclosureLines(
 	];
 }
 
-function groupingLine(disclosure: SigningDisclosure): string {
-	const subjects = counted(
-		disclosure.subjectCount,
-		'accepted subject',
-		'accepted subjects'
-	);
+function groupingLines(disclosure: SigningDisclosure): readonly string[] {
+	return [
+		{
+			label: 'SLSA build provenance',
+			count: disclosure.subjects.built,
+			origin: 'built'
+		},
+		{
+			label: 'custom predicate',
+			count: disclosure.subjects.custom,
+			origin: 'accepted'
+		}
+	]
+		.filter((entry) => entry.count > 0)
+		.map(({ label, count, origin }) => {
+			const paths = counted(count, `${origin} path`, `${origin} paths`);
 
-	return disclosure.grouping === 'individual'
-		? `Signing one statement for each of the ${subjects}. Each bundle will contain one subject.`
-		: `Signing one statement for all ${subjects}. Each bundle will contain the name and digest of every subject.`;
+			return disclosure.grouping === 'individual'
+				? `Signing ${label} for ${paths}, one statement per path. Each bundle will contain one subject.`
+				: `Signing ${label} for ${paths} in batches. Each bundle will contain the names and digests of its subjects.`;
+		});
 }
 
 function counted(count: number, singular: string, plural: string): string {
@@ -450,16 +472,21 @@ export interface GithubSignerOptions {
 	readonly policy: SigningPolicy;
 }
 
+export interface GithubSignerDependencies {
+	readonly writeAttestation?: AttestationStoreWriter;
+	readonly environment?: Environment;
+}
+
 /**
  * Signs statements through `@actions/attest`, which selects the Sigstore
  * instance from the repository's visibility. This is the signer for the
  * `sigstore-default` profile. The `tsa-only` and `rekor-and-tsa` profiles use a
- * directly constructed Sigstore client instead. `upload-to-github` decides whether
- * `@actions/attest` writes the signed bundle to the repository's attestation
- * store, where `gh attestation verify` finds it.
+ * directly constructed Sigstore client instead. The action writes a signed
+ * bundle to GitHub's attestation store only after checking its byte length.
  */
 export function githubStatementSigner(
-	options: GithubSignerOptions
+	options: GithubSignerOptions,
+	dependencies: GithubSignerDependencies = {}
 ): StatementSigner {
 	const subjects = options.subjects.map((subject) => ({
 		name: subject.name,
@@ -472,17 +499,32 @@ export function githubStatementSigner(
 			predicateType: statement.predicateType,
 			predicate: statement.predicate,
 			token: options.githubToken,
-			skipWrite: !options.policy.uploadToGithub
+			skipWrite: true
+		});
+		const bundle = `${JSON.stringify(attestation.bundle)}\n`;
+		const evidence = serialisedBundleEvidence(
+			attestation.bundle.verificationMaterial
+		);
+
+		if (
+			!options.policy.uploadToGithub ||
+			Buffer.byteLength(bundle) > maxAttestationBundleBytes
+		) {
+			return { bundle, evidence };
+		}
+
+		const attestationId = await (
+			dependencies.writeAttestation ?? writeToAttestationStore
+		)({
+			bundle,
+			githubToken: options.githubToken,
+			environment: dependencies.environment ?? process.env
 		});
 
 		return {
-			bundle: `${JSON.stringify(attestation.bundle)}\n`,
-			evidence: serialisedBundleEvidence(
-				attestation.bundle.verificationMaterial
-			),
-			...(attestation.attestationID !== undefined && {
-				attestationId: attestation.attestationID
-			})
+			bundle,
+			evidence,
+			attestationId
 		};
 	};
 }

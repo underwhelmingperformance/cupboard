@@ -10,7 +10,7 @@ Always reference them from `underwhelmingperformance/cupboard`, because the acti
 
 ### cupboard-flake-publish.yml
 
-Plans, builds, publishes and attests every target in a flake manifest. A cohort job does not rebuild a target that the cache already has with build provenance.
+Realises the targets in a flake manifest. The defaults are `build: missing`, `substituter: leave`, `publish: outputs` and `attest: true`. Each input can be set independently.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
@@ -30,7 +30,7 @@ The calling job must grant:
 | --- | --- | --- | --- |
 | `url` | string | **required** | Tenant URL to publish to. |
 | `targets` | string | `.#cupboardOutputs` | Flake attribute that evaluates to the target manifest. |
-| `preset` | string |  | Choose the cache, root prefix and TTL from the event that triggered the run. The only preset is pull-request-and-branch. A pull_request run publishes to the cache gh-&lt;repository-id>-pr-&lt;number>, with roots under github:&lt;repository>/pr-&lt;number>/ that expire after 14 days. When push is true, the workflow creates that cache if it does not exist. When push is false, the run reads from the tenant's default cache and does not create or remove a pull-request cache. The preset refuses a pull request from a fork. When an unmerged pull request is closed and push is true, the run removes that pull request's cache. A run on the branch in the branch input publishes to the default cache, with permanent roots under github:&lt;repository>/&lt;branch>/. The preset fails any other run. Cannot be combined with cache, root-prefix, ttl or permanent. Leave empty to set those inputs yourself. |
+| `preset` | string |  | Choose the cache, root prefix and TTL from the event that triggered the run. The only preset is pull-request-and-branch. A pull_request run publishes to the cache gh-&lt;repository-id>-pr-&lt;number>, with roots under github:&lt;repository>/pr-&lt;number>/ that expire after 14 days. When `publish` is `outputs` or `closure`, the workflow creates that cache if it does not exist. With `publish: none`, it reads from the tenant's default cache without creating or removing a pull-request cache. The preset refuses a pull request from a fork. When an unmerged pull request is closed and publication is enabled, the run removes that pull request's cache. A run on the branch in the branch input publishes to the default cache, with permanent roots under github:&lt;repository>/&lt;branch>/. The preset fails any other run. Cannot be combined with cache, root-prefix, ttl or permanent. Leave empty to set those inputs yourself. |
 | `cache-access-mode` | string |  | Access for a pull-request cache that the preset creates, public or private. When omitted, a new cache inherits the tenant's default cache access. An existing cache keeps its access, and an explicit mode must match it. Set an explicit mode when the new cache must differ from the default cache. |
 | `branch` | string | `main` | Branch whose runs publish to the default cache under the pull-request-and-branch preset. Must match the --branch option of cupboard github setup. |
 | `cache` | string |  | Named cache to publish to. Leave empty to publish to the default cache. If this cache needs a different static read credential from read_user and read_password, supply destination_read_user and destination_read_password. |
@@ -43,7 +43,11 @@ The calling job must grant:
 | `trusted-public-key` | string |  | Nix public key to trust for reads from the tenant's caches. If empty, each job downloads the tenant's current key from /pubkey and trusts it. |
 | `cupboard-version` | string |  | An exact cupboard release tag to install, or latest. If empty, the workflow installs the release that was published from its own commit. If there is no such release, it builds cupboard from that commit. |
 | `maximise-space` | boolean | `false` | Free disk space before building by deleting preinstalled software, such as language toolchains, the Android and .NET SDKs and Docker images on Linux, and Xcode on macOS. The software is not restored, so only use this on ephemeral GitHub-hosted runners. |
-| `push` | boolean | `true` | Publish the cohorts' outputs. When false, the run builds every cohort without checking the cache, and publishes and signs nothing. |
+| `build` | string | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
+| `substituter` | string | `leave` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. The reuse view is part of this tenant and can publish paths by reference. |
+| `publish` | string | `outputs` | Control which paths are published. `none` publishes no paths. `outputs` publishes selected requested outputs. `closure` also publishes their runtime references. With `outputs` or `closure`, a successful run with no selected outputs replaces its retention roots with empty path lists. |
+| `push` | boolean | `true` | Publish the selected paths and update retention roots. When false, publication is disabled regardless of the publish input. |
+| `attest` | boolean | `true` | Sign and attach SLSA build provenance for paths built on the runner in this run. A missing attestation does not change the build choice. The workflow skips signing when publication is disabled. |
 | `gc-between-cohorts` | boolean | `false` | Run garbage collection on the runner's Nix store after each cohort in a job has been published. This frees the disk space that the published paths used, and a later build downloads them from the cache if it needs them. It only happens on GitHub-hosted runners that use their own store. On a self-hosted runner, or when store is set, the job prints a notice and leaves the store as it is. |
 | `nix-config` | string |  | Flake attribute that evaluates to extra nix.conf text for the plan and cohort jobs. These settings override the workflow's own, such as always-allow-substitutes. |
 | `input-known-hosts` | string |  | known_hosts lines for every SSH host that serves a private flake input. Required when input_ssh_key is set. |
@@ -51,7 +55,7 @@ The calling job must grant:
 | `builder-known-hosts` | string |  | known_hosts lines for every remote builder. Required when builders is set. |
 | `store-known-hosts` | string |  | known_hosts lines for the remote store. Required unless the store uses port 22 and its URI includes base64-ssh-public-host-key. |
 | `store-ambient-identity` | boolean | `false` | Connect to the remote store with the runner's SSH agent or default key files instead of store_ssh_key. Only use this on a self-hosted runner that is dedicated to this job. When it is false and store_ssh_key is not set, the job's SSH configuration turns off the runner's agent and default key files, so authentication with a key fails. |
-| `store` | string |  | ssh-ng:// URI of a remote store. Every cohort job plans, builds and publishes using that store, so the build outputs never reach the runner's disk. Packing also measures sizes in this store. If empty, each job uses its runner's store. Supply the private key as store_ssh_key, not as an ssh-key parameter in the URI. |
+| `store` | string |  | ssh-ng:// URI of a remote store. Cohort jobs use it as their selected store for realisation and any enabled publication. Requested outputs built by a job remain in that store. Packing also measures sizes there. If empty, each job uses its runner's store. Supply the private key as store_ssh_key, not as an ssh-key parameter in the URI. |
 | `plan-runner` | string | `ubuntu-latest` | Runner label for the configure, plan and cache-removal jobs. The plan job evaluates the flake with the input SSH key and can request an OIDC token. If your repository has self-hosted runners, keep this on a GitHub-hosted label or restrict the job with runner groups. See docs/security.md#runners. |
 | `enable-packing` | boolean | `false` | Pack small single-target cohorts into as few jobs as fit within pack-capacity, using measured closure sizes. Without packing, each cohort gets its own job. Off by default. A cohort without a measurement is not packed. |
 | `pack-capacity` | string |  | Disk space in bytes that each packed job can use. Required when enable-packing is true. |
@@ -75,7 +79,7 @@ The calling job must grant:
 
 ### cupboard-publish.yml
 
-Builds one flake installable on one runner, then publishes it and signs its build provenance. For a private destination, the workflow exchanges its GitHub OIDC identity token for a short-lived Cupboard read token.
+Realises one flake installable on one runner. The defaults are `build: missing`, `substituter: copy`, `publish: outputs` and `attest: true`. For a private destination, the workflow can obtain a short-lived Cupboard read token through GitHub OIDC.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@vX.Y.Z
@@ -94,12 +98,15 @@ The calling job must grant:
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
 | `url` | string | **required** | Tenant URL or cache URL to publish to. |
-| `installable` | string | `.` | Flake installable to build and publish. |
+| `installable` | string | `.` | Flake installable to realise and, when enabled, publish. |
 | `cache` | string |  | Named cache to publish to. Leave empty to publish to the default cache. |
 | `root` | string |  | Start of the retention root name. The workflow appends the runner's Nix system, such as x86_64-linux, so each platform has its own root. If empty, the root is github:&lt;repository>/&lt;ref name>, without the system. |
 | `ttl` | string |  | How long the root lasts after it was last set, such as 7d. If empty, the root is permanent when permanent is true, and follows the cache's retention settings otherwise. |
 | `permanent` | boolean | `true` | Keep the root permanently when ttl is empty. Set it to false to use the cache's retention settings instead. |
-| `attest` | boolean | `true` | When true, sign build provenance for the published paths and attach it in the cache. The job then rebuilds every output that it did not build itself, so the provenance covers all of them. |
+| `build` | string | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
+| `substituter` | string | `copy` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. With `publish: closure`, all runtime references of selected outputs are published, including substituted dependencies. |
+| `publish` | string | `outputs` | Control which paths are published. `none` skips publication and retention updates. `outputs` publishes selected output paths. `closure` also publishes all their runtime references. If no outputs remain selected, `outputs` and `closure` replace the retention root with an empty path list. |
+| `attest` | boolean | `true` | Sign and attach SLSA build provenance for paths built on the runner in this run. A missing attestation does not change the build choice. The workflow skips signing when publication is disabled. |
 | `runs-on` | string | `ubuntu-24.04` | Runner label to build on. |
 | `trusted-public-key` | string |  | Nix public key to trust for reads from the cache. If empty, the job downloads the cache's current key from /pubkey and trusts it. |
 | `cupboard-version` | string |  | An exact cupboard release tag to install, or latest. If empty, the workflow installs the release that was published from its own commit. If there is no such release, it builds cupboard from that commit. |
@@ -157,7 +164,7 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 
 ### actions/build-paths
 
-Builds Nix installables and writes a receipt that lists the outputs this job built itself.
+Realises Nix installables and records how their outputs were obtained.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
@@ -167,6 +174,8 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 
 | Input | Default | Description |
 | --- | --- | --- |
+| `inline-paths` | `true` | Control how path lists are returned. `true` writes inline path outputs as well as files. `false` returns files and counts without inline path outputs. Use `false` for large path lists. |
+| `publication-url` |  | Destination tenant or cache URL. With `substituter: leave`, this keeps paths from the destination and its tenant reuse views selected for publication. Supply this when the destination is a configured substituter. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
 | `read-session-target` |  | Internal setup output for OIDC read access. |
 | `read-session-view` |  | Internal setup output for an additional reuse view. |
@@ -175,15 +184,23 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | `keep-going` | `false` | Keep building the other installables after one of them fails. |
 | `max-jobs` |  | Maximum number of local build jobs. Leave empty to use the value from the Nix configuration. |
 | `allow-failure` | `false` | Let the step succeed even if all five build attempts fail. |
-| `require-provenance` | `false` | Rebuild every output that Nix downloaded or that was already in the store, locally and one at a time, so the receipt lists every output as built by this job. Without this, the receipt only lists the outputs that the job built itself. |
+| `build` | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
+| `substituter` | `copy` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. |
 
 #### Outputs
 
 | Output | Description |
 | --- | --- |
-| `paths` | Output paths of the installables, one per line. |
+| `paths` | Output paths of the installables, one per line. Available when inline-paths is true; paths-file always contains the full list. |
+| `built-paths` | Output paths with observed runner-local build evidence, one per line. Available when inline-paths is true; built-receipt-file always records these paths. |
+| `publish-paths` | Selected output paths to publish under the substituter policy. Available when inline-paths is true; publish-paths-file always contains the full list. |
+| `paths-count` | Number of realised output paths, including paths left upstream. |
+| `publish-paths-count` | Number of selected output paths to publish. |
+| `built-paths-count` | Number of output paths with observed runner-local build evidence. |
 | `paths-file` | File that lists the output paths of the installables. |
-| `receipt-file` | Path to the receipt, which lists the outputs that this job built. Pass it to actions/attest. |
+| `publish-paths-file` | File that lists the selected output paths to publish. |
+| `receipt-file` | Path to the receipt for all realised outputs. |
+| `built-receipt-file` | Receipt restricted to paths with observed runner-local build evidence. |
 
 ### actions/push
 
@@ -198,7 +215,8 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 | Input | Default | Description |
 | --- | --- | --- |
 | `url` | **required** | Tenant URL or cache URL to publish to. |
-| `paths` |  | Store paths to publish, one per line. A path that resolves to a store path, such as a `result` symlink, also works. Build flake outputs before you publish them. Required unless root-groups is set. |
+| `paths` |  | Store paths to publish, one per line. A path that resolves to a store path, such as a `result` symlink, also works. Build flake outputs before you publish them. Required unless paths-file, root-groups or an explicit root is set. An explicit root with no paths replaces that root with an empty path list. |
+| `paths-file` |  | File containing store paths to publish, one per line. Use this input for large path lists. The installed Cupboard CLI must support push --paths-file. An empty file with an explicit root replaces that root with an empty path list. |
 | `cupboard-path` |  | Path to a cupboard executable that an earlier actions/setup step installed. When it is set, the action does not install a release. |
 | `read-session-target` |  | Internal setup output for OIDC read access. |
 | `read-session-view` |  | Internal setup output for an additional reuse view. |
@@ -210,6 +228,8 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 | `install-dir` |  | Directory to download the cupboard binary into. Defaults to cupboard-bin under RUNNER_TEMP. |
 | `cache` |  | Named cache to publish to. Leave empty for the default cache. |
 | `store` |  | ssh-ng:// URI of a remote store to read the paths from. Leave empty to read from the store that Nix uses on this runner. |
+| `closure` | `false` | Publish the complete realised closure of the paths, including referenced dependencies, when true. This does not rebuild those dependencies. |
+| `build-receipt-file` |  | Receipt from actions/build-paths. When set, the action writes a receipt for every path that the cache serves after this push, including closure references, and retains matching current-run build claims. |
 | `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL without a trailing slash, also when url is a cache URL. |
 | `root` |  | Retention root to set for the published paths. Defaults to github:&lt;repository>/&lt;ref name>. |
 | `ttl` |  | How long the root lasts after it was last set, such as 7d or 12h. |
@@ -237,10 +257,11 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 | `reused-blobs` | Number of paths published with NAR files that the cache already stored. |
 | `skipped-paths` | Number of paths left out because the cache already had them. |
 | `uploaded-bytes` | Total number of bytes uploaded to the cache. |
+| `receipt-file` | Receipt for the paths served after this push. Empty when build-receipt-file is unset. |
 
 ### actions/attest
 
-Signs Sigstore attestations for the paths in a build receipt. SLSA build provenance covers the paths that the job built. Build origin covers every path in the receipt and records how each one became available. Before signing, the action checks each path's NAR hash, and any deriver in the receipt, against the narinfo in the destination cache.
+Signs SLSA provenance for paths built on the runner in this run. Before signing, the action checks each path's NAR hash and any recorded deriver against the destination narinfo.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
@@ -250,10 +271,11 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 
 | Input | Default | Description |
 | --- | --- | --- |
+| `inline-bundles` | `true` | Control how bundle lists are returned. `true` writes inline bundle outputs as well as files. `false` returns files without inline bundle outputs. Use `false` for large bundle lists. |
 | `receipt-file` | **required** | Receipt written earlier in the job by actions/build-paths or by a cohort build in the flake publish workflow. |
-| `checksums-file` |  | Where to write the checksums of every path to attest. Defaults to a file under RUNNER_TEMP. |
+| `checksums-file` |  | Where to write the checksums of every accepted receipt path. Defaults to a file under RUNNER_TEMP. |
 | `built-checksums-file` |  | Where to write the checksums of the paths that the job built. The build-provenance attestations cover these paths. Defaults to a file next to the checksums file. |
-| `predicate-file` |  | Where to write the build-origin predicate. Defaults to a file next to the checksums file. |
+| `predicate-file` |  | Where to write the SCAI reproduction report. Empty when no local verification rebuild succeeded. Defaults to a file next to the checksums file. |
 | `url` | **required** | Tenant URL of the destination. Before signing, the action checks every path against the narinfo in this tenant's cache. |
 | `cache` |  | Named destination cache. Leave empty to use the default cache. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
@@ -270,17 +292,18 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 
 | Output | Description |
 | --- | --- |
-| `bundle-path` | Paths of the build-provenance bundles, one per line. Empty when the job built none of the paths in the receipt. |
-| `origin-bundle-path` | Paths of the build-origin bundles, one per line. Empty for a receipt from actions/build-paths, which does not record origins, or when no path in the receipt has a recorded origin. |
-| `bundles` | Paths to the generated SLSA build-provenance and build-origin bundles, one per line. Empty when the action signed nothing. Run actions/attest-attach when this output is non-empty and pass it as that action's bundle input. |
-| `checksums-file` | Path to the checksums of every attested path. The build-origin attestations cover these paths. |
-| `subject-count` | Number of attested paths. |
-| `built-checksums-file` | Path to the checksums of the attested paths that the job built. The build-provenance attestations cover these paths. |
-| `built-subject-count` | Number of attested paths that the job built. |
+| `bundle-path` | Paths of the build-provenance bundles, one per line. Empty when the job built none of the paths in the receipt. Available when inline-bundles is true; bundles-file always lists all generated bundles. |
+| `origin-bundle-path` | Paths of the SCAI attribute-report bundles, one per line. Empty when the report has no assertions. The action signs no build-origin statement. |
+| `bundles` | Paths to the generated bundles, one per line. Available when inline-bundles is true. Empty when the action signed no statements. Use bundles-file for publication workflows. |
+| `bundles-file` | File containing the generated bundle paths, one per line. Pass this file to actions/attest-attach. |
+| `checksums-file` | Path to the checksums of the receipt paths selected for signing. Pass this file to actions/attest-attach with the generated bundles. |
+| `subject-count` | Number of accepted receipt paths. |
+| `built-checksums-file` | Path to the checksums of the accepted paths that the job built. The build-provenance attestations cover these paths. |
+| `built-subject-count` | Number of accepted paths that the job built. |
 
 ### actions/attest-attach
 
-Attaches signed Sigstore bundles to the paths in a build receipt. actions/attest signs the bundles after the paths are published, so this action only attaches them to paths that the destination cache already serves.
+Attaches signed Sigstore bundles to the selected paths in a publication receipt. actions/attest signs the bundles after publication and writes the checksums of the paths covered by those bundles.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
@@ -298,9 +321,10 @@ uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
 | `audience` |  | Audience of the GitHub OIDC token. Defaults to url without a trailing slash. |
 | `read-user` |  | User name of a read credential for a private destination cache. |
 | `read-password` |  | Password of a read credential for a private destination cache. |
-| `receipt-file` | **required** | Receipt written by the build step earlier in the job. |
-| `checksums-file` | **required** | Checksums file from actions/attest. It must list every path in the receipt with the path's NAR hash, and no other path, or the step fails. |
-| `bundle` | **required** | Bundle files from actions/attest, one per line. Empty lines are ignored. |
+| `receipt-file` | **required** | Receipt for the paths published earlier in the job. |
+| `checksums-file` | **required** | Checksums file from actions/attest. Each listed path must be eligible for signing and have the NAR hash recorded in the receipt. The file may omit paths that were not built in this run. |
+| `bundle` |  | Bundle files from actions/attest, one per line. Empty lines are ignored. |
+| `bundles-file` |  | File containing bundle paths, one per line. |
 
 ## Internal actions
 

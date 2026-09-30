@@ -10,7 +10,16 @@ inputs:
     description:
       Store paths to publish, one per line. A path that resolves to a store
       path, such as a `result` symlink, also works. Build flake outputs before
-      you publish them. Required unless root-groups is set.
+      you publish them. Required unless paths-file, root-groups or an explicit
+      root is set. An explicit root with no paths replaces that root with an
+      empty path list.
+    required: false
+  paths-file:
+    description:
+      File containing store paths to publish, one per line. Use this input for
+      large path lists. The installed Cupboard CLI must support push
+      --paths-file. An empty file with an explicit root replaces that root with
+      an empty path list.
     required: false
   cupboard-path:
     description:
@@ -57,6 +66,18 @@ inputs:
     description:
       ssh-ng:// URI of a remote store to read the paths from. Leave empty to
       read from the store that Nix uses on this runner.
+    required: false
+  closure:
+    description:
+      Publish the complete realised closure of the paths, including referenced
+      dependencies, when true. This does not rebuild those dependencies.
+    required: false
+    default: 'false'
+  build-receipt-file:
+    description:
+      Receipt from actions/build-paths. When set, the action writes a receipt
+      for every path that the cache serves after this push, including closure
+      references, and retains matching current-run build claims.
     required: false
   audience:
     description:
@@ -170,6 +191,11 @@ outputs:
   uploaded-bytes:
     description: Total number of bytes uploaded to the cache.
     value: ${{ steps.push.outputs.uploaded-bytes }}
+  receipt-file:
+    description:
+      Receipt for the paths served after this push. Empty when
+      build-receipt-file is unset.
+    value: ${{ steps.push.outputs.receipt-file }}
 runs:
   using: composite
   steps:
@@ -222,6 +248,7 @@ runs:
       env:
         URL: ${{ inputs.url }}
         PATHS: ${{ inputs.paths }}
+        PATHS_FILE: ${{ inputs.paths-file }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
@@ -233,6 +260,8 @@ runs:
         INSTALL_DIR: ${{ inputs.install-dir }}
         CACHE: ${{ inputs.cache }}
         STORE: ${{ inputs.store }}
+        CLOSURE: ${{ inputs.closure }}
+        BUILD_RECEIPT_FILE: ${{ inputs.build-receipt-file }}
         AUDIENCE: ${{ inputs.audience }}
         ROOT: ${{ inputs.root }}
         TTL: ${{ inputs.ttl }}
@@ -258,6 +287,7 @@ runs:
         args=(push
           --url "$URL"
           --paths "$PATHS"
+          --paths-file "$PATHS_FILE"
           --cupboard-path "$CUPBOARD_PATH"
           --cupboard-version "$CUPBOARD_VERSION"
           --include-prereleases "$INCLUDE_PRERELEASES"
@@ -267,6 +297,8 @@ runs:
           --install-dir "$INSTALL_DIR"
           --cache "$CACHE"
           --store "$STORE"
+          --closure "$CLOSURE"
+          --build-receipt-file "$BUILD_RECEIPT_FILE"
           --audience "$AUDIENCE"
           --root "$ROOT"
           --ttl "$TTL"

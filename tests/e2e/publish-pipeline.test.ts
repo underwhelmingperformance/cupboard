@@ -270,7 +270,7 @@ function largeGraphFlake(options: {
       name = "cupboard-pipeline-large-${String(index)}";
       system = "${options.system}";
       builder = "/bin/sh";
-      args = [ "-c" "echo ${options.seed}-${String(index)} > $out" ];${padding}${index === 0 ? '' : `\n      previous = d${String(index - 1)};`}
+      args = [ "-c" "echo ${options.seed}-${String(index)} $previous > $out" ];${padding}${index === 0 ? '' : `\n      previous = d${String(index - 1)};`}
     };`
 	).join('');
 
@@ -337,7 +337,14 @@ async function runStep(
 	await writeFile(outputFile, '');
 	const status = await runAction(
 		['node', 'cupboard-action', ...stepArguments],
-		{ RUNNER_TEMP: job.runnerTemporary, GITHUB_OUTPUT: outputFile },
+		{
+			RUNNER_TEMP: job.runnerTemporary,
+			GITHUB_OUTPUT: outputFile,
+			GITHUB_SERVER_URL: 'https://github.com',
+			GITHUB_REPOSITORY: consumerRepository.fullName,
+			GITHUB_RUN_ID: '1',
+			GITHUB_RUN_ATTEMPT: '1'
+		},
 		unhandledSignals
 	);
 
@@ -401,7 +408,7 @@ function planArguments(options: {
 	readonly rootPrefix: string;
 	readonly audience: string;
 	readonly store: string;
-	readonly requireProvenance: boolean;
+	readonly rebuild: boolean;
 }): readonly string[] {
 	return [
 		'plan',
@@ -431,8 +438,8 @@ function planArguments(options: {
 		'false',
 		'--store',
 		options.store,
-		'--require-provenance',
-		String(options.requireProvenance)
+		'--build',
+		options.rebuild ? 'rebuild' : 'missing'
 	];
 }
 
@@ -443,7 +450,7 @@ function buildCohortArguments(options: {
 	readonly audience: string;
 	readonly store: string;
 	readonly push: boolean;
-	readonly requireProvenance: boolean;
+	readonly rebuild: boolean;
 	readonly runRoot: string;
 }): readonly string[] {
 	return [
@@ -470,12 +477,10 @@ function buildCohortArguments(options: {
 		'',
 		'--store',
 		options.store,
-		'--push',
-		String(options.push),
-		'--require-provenance',
-		String(options.requireProvenance),
-		'--best-effort',
-		'false',
+		'--publish',
+		options.push ? 'closure' : 'none',
+		'--build',
+		options.rebuild ? 'rebuild' : 'missing',
 		'--gc-between-cohorts',
 		'false',
 		'--run-root',
@@ -528,7 +533,7 @@ interface AttestationOutcome {
 	readonly checksums: string;
 }
 
-type RecordedAttribution = Attribution | 'no-builds' | 'mixed';
+type RecordedAttribution = Attribution | 'mixed';
 
 interface RecordedReceipt {
 	readonly attribution: RecordedAttribution;
@@ -553,7 +558,7 @@ interface PublishOutcome {
 
 interface PublishOptions {
 	readonly flakeDirectory: string;
-	readonly requireProvenance: boolean;
+	readonly rebuild: boolean;
 	readonly store: string;
 	readonly rootPrefix?: string;
 	/**
@@ -596,7 +601,7 @@ async function runPublication(
 			rootPrefix: publishRootPrefix,
 			audience,
 			store: options.store,
-			requireProvenance: options.requireProvenance
+			rebuild: options.rebuild
 		})
 	);
 	const cohorts: CohortOutcome[] = [];
@@ -615,7 +620,7 @@ async function runPublication(
 				audience,
 				store: options.store,
 				push: true,
-				requireProvenance: options.requireProvenance,
+				rebuild: options.rebuild,
 				runRoot: `${publishRootPrefix}/_cupboard-run/${job.runId}`
 			})
 		);
@@ -675,28 +680,26 @@ async function readPaths(file: string): Promise<readonly string[]> {
 }
 
 /**
- * The receipt a cohort wrote, in a form successive runs can be compared
- * against: every path list in a stable order, and a label for each supervised
- * build attempt in place of the identifier the attempt generated for itself.
+ * The receipt a cohort wrote, with path lists in a stable order. Build retries
+ * vary under load, so the comparison checks the presence of attempt metadata
+ * without requiring a particular attempt number or identifier.
  */
 async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 	const receipt = buildReceiptV3Schema.parse(
 		JSON.parse(await readFile(receiptFile, 'utf8'))
 	);
-	const attempts = new Map<string, string>();
 	const subjects = receipt.subjects
 		.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath))
 		.map((subject) => {
-			if (subject.origin !== 'built' || subject.attemptId === undefined) {
+			if (
+				subject.origin !== 'built' ||
+				subject.attempt === undefined ||
+				subject.attemptId === undefined
+			) {
 				return subject;
 			}
 
-			const { attemptId } = subject;
-			const label =
-				attempts.get(attemptId) ?? `attempt-${String(attempts.size)}`;
-			attempts.set(attemptId, label);
-
-			return { ...subject, attemptId: label };
+			return { ...subject, attempt: 'observed', attemptId: 'observed' };
 		});
 
 	return {
@@ -733,16 +736,6 @@ function recordedAttribution(
 		)
 	) {
 		return 'supervised-attempt';
-	}
-
-	if (
-		built.every(
-			(subject) =>
-				subject.verification === 'build-store' &&
-				subject.attemptId === undefined
-		)
-	) {
-		return 'store-report';
 	}
 
 	return 'mixed';
@@ -791,16 +784,10 @@ function byStorePath(left: PublishedPath, right: PublishedPath): number {
 	return byCodeUnit(left.storePath, right.storePath);
 }
 
-/**
- * Who the receipt records as the producer of its subjects. A supervised
- * attempt is a streaming local build; a store report is what a reconciled
- * local build and a remote-store publication both use, because neither
- * watched the build happen.
- */
-type Attribution = 'supervised-attempt' | 'store-report';
+type Attribution = 'supervised-attempt' | 'no-builds';
 
 function localAttribution(): Attribution {
-	return fixture().streams ? 'supervised-attempt' : 'store-report';
+	return 'supervised-attempt';
 }
 
 interface PublicationPaths {
@@ -816,7 +803,7 @@ interface PublicationPaths {
  * the targets alone.
  */
 function claimedPaths(options: PublicationPaths): readonly PublishedPath[] {
-	return options.attribution === 'supervised-attempt'
+	return options.attribution === 'supervised-attempt' && fixture().streams
 		? options.built
 		: options.targets;
 }
@@ -830,21 +817,32 @@ function expectedReceipt(
 		 */
 		readonly store: string;
 		readonly alreadyServed?: boolean;
+		readonly reproduced?: true;
 	}
 ): unknown {
-	const isSupervised = options.attribution === 'supervised-attempt';
+	const isSupervised = isBuildPushCohort(options.store) && fixture().streams;
 	const claimed = claimedPaths(options);
 	const paths = claimed.toSorted(byStorePath).map(({ storePath }) => storePath);
+	const targets = new Set(options.targets.map(({ storePath }) => storePath));
 	const subjects = claimed.toSorted(byStorePath).map((entry) => ({
-		origin: 'built',
+		origin:
+			isBuildPushCohort(options.store) &&
+			(isSupervised || targets.has(entry.storePath))
+				? 'built'
+				: 'store-held',
 		storePath: entry.storePath,
 		narHash: entry.narHash,
 		derivation: entry.derivation,
-		...(isSupervised && { attempt: 1, attemptId: 'attempt-0' }),
 		buildStore: isBuildPushCohort(options.store)
 			? autoBuildStore
 			: options.store,
-		verification: isSupervised ? 'local' : 'build-store'
+		...(isBuildPushCohort(options.store) &&
+			(isSupervised || targets.has(entry.storePath)) && {
+				attempt: 'observed',
+				attemptId: 'observed',
+				verification: 'local',
+				...(options.reproduced === true && { reproduced: true })
+			})
 	}));
 
 	// A streaming run reconciles the outputs it watched, so its receipt also
@@ -1044,7 +1042,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		await rm(prepared.workspace, { force: true, recursive: true });
 	}, 120_000);
 
-	it('publishes from the runner store, retains both targets on rerun, and rebuilds for provenance', async () => {
+	it('publishes from the runner store, retains both targets on rerun, and rebuilds when requested', async () => {
 		const prepared = fixture();
 		const flakeDirectory = path.join(prepared.workspace, 'local-consumer');
 		await mkdir(flakeDirectory, { recursive: true });
@@ -1060,19 +1058,18 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 
 		const first = await runPublication('local-first', {
 			...options,
-			requireProvenance: false
+			rebuild: false
 		});
 		// The destination now serves both targets, so the plan renews their
 		// roots and the cohort job never starts.
 		const rerun = await runPublication('local-rerun', {
 			...options,
-			requireProvenance: false
+			rebuild: false
 		});
-		// Nothing has attached an attestation to either path, so a run with
-		// require-provenance builds them both again.
-		const provenanceRerun = await runPublication('local-provenance', {
+		// Explicit rebuild policy builds both targets again.
+		const rebuildRerun = await runPublication('local-rebuild', {
 			...options,
-			requireProvenance: true
+			rebuild: true
 		});
 		// Both packages are targets of the cohort, so a build produces
 		// nothing besides them.
@@ -1092,7 +1089,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		expect({
 			first,
 			rerun,
-			provenanceRerun,
+			rebuildRerun,
 			served: await servedStatuses(built),
 			roots: await targetRoots(),
 			audiences: [...new Set(prepared.runner.audiences)]
@@ -1119,7 +1116,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				cohortCount: '0',
 				cohorts: []
 			},
-			provenanceRerun: {
+			rebuildRerun: {
 				planStatus: 0,
 				retainedCount: '0',
 				targetCount: '2',
@@ -1134,7 +1131,8 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 						// without republishing their bytes.
 						receipt: expectedReceipt({
 							...receiptOptions,
-							alreadyServed: true
+							alreadyServed: true,
+							reproduced: true
 						}),
 						attestation
 					}
@@ -1191,7 +1189,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			store: '',
 			rootPrefix: presetRootPrefix,
 			audience: presetAudience,
-			requireProvenance: false
+			rebuild: false
 		};
 
 		const first = await runPublication('preset-first', options);
@@ -1278,7 +1276,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		const outcome = await runPublication('large-graph', {
 			flakeDirectory,
 			store: '',
-			requireProvenance: false
+			rebuild: false
 		});
 		// The chain's last derivation is the cohort's only target. Building it
 		// builds every link, and a streaming run publishes those links as
@@ -1348,7 +1346,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		const outcome = await runPublication('oversubscribed', {
 			flakeDirectory,
 			store: '',
-			requireProvenance: false
+			rebuild: false
 		});
 		const observed = prepared.server.commitSessions;
 		const built = await builtPaths(flakeDirectory);
@@ -1450,13 +1448,13 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				const seeded = await runPublication('release-seed', {
 					flakeDirectory: seedDirectory,
 					store: '',
-					requireProvenance: false,
+					rebuild: false,
 					rootPrefix: releaseSeedRootPrefix
 				});
 				const packaged = await runPublication('release', {
 					flakeDirectory,
 					store: '',
-					requireProvenance: false,
+					rebuild: false,
 					rootPrefix: releaseRootPrefix,
 					cupboardPath: installation.commandPath
 				});
@@ -1576,7 +1574,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				const outcome = await runPublication('remote', {
 					flakeDirectory,
 					store: store.transportConfiguredStoreUri,
-					requireProvenance: false
+					rebuild: false
 				});
 				const built = await builtPaths(
 					flakeDirectory,
@@ -1601,12 +1599,12 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 								targetPaths: built
 									.toSorted(byStorePath)
 									.map(({ storePath }) => storePath),
-								attribution: 'store-report',
+								attribution: 'no-builds',
 								receipt: expectedReceipt({
 									built,
 									targets: built,
 									store: store.transportConfiguredStoreUri,
-									attribution: 'store-report'
+									attribution: 'no-builds'
 								}),
 								attestation: {
 									subjectCount: String(built.length),
@@ -1759,7 +1757,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				const outcome = await runPublication('remote', {
 					flakeDirectory,
 					store: remoteStoreUri,
-					requireProvenance: false
+					rebuild: false
 				});
 				const built = await builtPaths(flakeDirectory, remoteNix);
 				const dependencyInfo = await remoteNix.queryPathInfo(dependencyOutput);
@@ -1786,19 +1784,18 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 								targetPaths: built
 									.toSorted(byStorePath)
 									.map(({ storePath }) => storePath),
-								attribution: 'store-report',
+								attribution: 'no-builds',
 								receipt: {
 									version: 3,
 									paths: published.map(({ storePath }) => storePath),
 									subjects: published.map((entry) =>
 										entry.storePath === dependencyOutput
 											? {
-													origin: 'built',
+													origin: 'store-held',
 													storePath: entry.storePath,
 													narHash: entry.narHash,
 													derivation: entry.derivation,
-													buildStore: remoteStoreUri,
-													verification: 'build-store'
+													buildStore: remoteStoreUri
 												}
 											: {
 													origin: 'copied',

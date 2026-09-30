@@ -4,6 +4,8 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 
+import { type PreparedReference } from './reference-manifest.ts';
+
 /**
  * Targets participate in target retention. Intermediates are published without
  * being added to a target root or pin.
@@ -20,17 +22,20 @@ export interface PublicationEntry {
 	readonly storePath: StorePathString;
 	readonly kind: PublicationKind;
 	readonly source: PublicationMetadataSource;
+	readonly reference?: PreparedReference;
 }
 
 export interface PublicationInput {
 	readonly targets: readonly string[];
 	readonly intermediatePaths?: readonly string[];
 	readonly referencePaths?: readonly string[];
+	readonly references?: readonly PreparedReference[];
 }
 
 interface PublicationDeclaration {
 	readonly kind: PublicationKind;
 	readonly source: PublicationMetadataSource;
+	readonly reference?: PreparedReference;
 }
 
 /**
@@ -66,6 +71,18 @@ export class PublicationCollection {
 			if (!byPath.has(storePath)) {
 				byPath.set(storePath, { kind: 'intermediate', source: 'local' });
 			}
+		}
+
+		const references = input.references ?? [];
+		for (const reference of references) {
+			byPath.set(reference.storePath, {
+				kind:
+					byPath.get(reference.storePath)?.kind === 'target'
+						? 'target'
+						: reference.kind,
+				source: 'reference',
+				reference
+			});
 		}
 
 		return new PublicationCollection(

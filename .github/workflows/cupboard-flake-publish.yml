@@ -15,20 +15,21 @@ on:
         default: '.#cupboardOutputs'
         type: string
       preset:
-        description:
+        description: >-
           Choose the cache, root prefix and TTL from the event that triggered
           the run. The only preset is pull-request-and-branch. A pull_request
           run publishes to the cache gh-<repository-id>-pr-<number>, with roots
           under github:<repository>/pr-<number>/ that expire after 14 days. When
-          push is true, the workflow creates that cache if it does not exist.
-          When push is false, the run reads from the tenant's default cache and
-          does not create or remove a pull-request cache. The preset refuses a
-          pull request from a fork. When an unmerged pull request is closed and
-          push is true, the run removes that pull request's cache. A run on the
-          branch in the branch input publishes to the default cache, with
-          permanent roots under github:<repository>/<branch>/. The preset fails
-          any other run. Cannot be combined with cache, root-prefix, ttl or
-          permanent. Leave empty to set those inputs yourself.
+          `publish` is `outputs` or `closure`, the workflow creates that cache
+          if it does not exist. With `publish: none`, it reads from the tenant's
+          default cache without creating or removing a pull-request cache. The
+          preset refuses a pull request from a fork. When an unmerged pull
+          request is closed and publication is enabled, the run removes that
+          pull request's cache. A run on the branch in the branch input
+          publishes to the default cache, with permanent roots under
+          github:<repository>/<branch>/. The preset fails any other run. Cannot
+          be combined with cache, root-prefix, ttl or permanent. Leave empty to
+          set those inputs yourself.
         required: false
         default: ''
         type: string
@@ -129,10 +130,49 @@ on:
         required: false
         default: false
         type: boolean
+      build:
+        description: >-
+          Control when to build the requested outputs. `missing` uses an output
+          from the store or a substituter when one is available, and builds it
+          otherwise. `rebuild` builds each output again in the selected Nix
+          store, even if it is already available. Nix may still fetch
+          dependencies from substituters.
+        required: false
+        default: missing
+        type: string
+      substituter:
+        description: >-
+          Control whether to publish outputs available from external
+          substituters. `copy` selects them for publication. `leave` keeps them
+          upstream if consumers can obtain matching NARs for the output and all
+          its runtime references under the configured signature policy. Both
+          modes select outputs built in this run. The reuse view is part of this
+          tenant and can publish paths by reference.
+        required: false
+        default: leave
+        type: string
+      publish:
+        description: >-
+          Control which paths are published. `none` publishes no paths.
+          `outputs` publishes selected requested outputs. `closure` also
+          publishes their runtime references. With `outputs` or `closure`, a
+          successful run with no selected outputs replaces its retention roots
+          with empty path lists.
+        required: false
+        default: outputs
+        type: string
       push:
-        description:
-          Publish the cohorts' outputs. When false, the run builds every cohort
-          without checking the cache, and publishes and signs nothing.
+        description: >-
+          Publish the selected paths and update retention roots. When false,
+          publication is disabled regardless of the publish input.
+        required: false
+        default: true
+        type: boolean
+      attest:
+        description: >-
+          Sign and attach SLSA build provenance for paths built on the runner in
+          this run. A missing attestation does not change the build choice. The
+          workflow skips signing when publication is disabled.
         required: false
         default: true
         type: boolean
@@ -198,11 +238,11 @@ on:
         type: boolean
       store:
         description:
-          ssh-ng:// URI of a remote store. Every cohort job plans, builds and
-          publishes using that store, so the build outputs never reach the
-          runner's disk. Packing also measures sizes in this store. If empty,
-          each job uses its runner's store. Supply the private key as
-          store_ssh_key, not as an ssh-key parameter in the URI.
+          ssh-ng:// URI of a remote store. Cohort jobs use it as their selected
+          store for realisation and any enabled publication. Requested outputs
+          built by a job remain in that store. Packing also measures sizes
+          there. If empty, each job uses its runner's store. Supply the private
+          key as store_ssh_key, not as an ssh-key parameter in the URI.
         required: false
         default: ''
         type: string
@@ -307,6 +347,7 @@ jobs:
       contents: read # resolve cupboard releases
     outputs:
       cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
+      publish: ${{ steps.resolve.outputs.publish }}
       cache: ${{ steps.resolve.outputs.cache }}
       root-prefix: ${{ steps.resolve.outputs.root-prefix }}
       ttl: ${{ steps.resolve.outputs.ttl }}
@@ -340,8 +381,12 @@ jobs:
         id: resolve
         env:
           PRESET: ${{ inputs.preset }}
-          CACHE_ACCESS_MODE: ${{ inputs.cache-access-mode }}
+          BUILD: ${{ inputs.build }}
+          SUBSTITUTER: ${{ inputs.substituter }}
+          PUBLISH: ${{ inputs.publish }}
           PUSH: ${{ inputs.push }}
+          ATTEST: ${{ inputs.attest }}
+          CACHE_ACCESS_MODE: ${{ inputs.cache-access-mode }}
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
@@ -369,6 +414,27 @@ jobs:
           DESTINATION_READ_PASSWORD: ${{ secrets.destination_read_password }}
         run: |
           set -euo pipefail
+          case "${BUILD}" in
+            missing|rebuild) ;;
+            *) echo '::error::build must be missing or rebuild'; exit 1 ;;
+          esac
+          case "${SUBSTITUTER}" in
+            leave|copy) ;;
+            *) echo '::error::substituter must be leave or copy'; exit 1 ;;
+          esac
+          case "${PUBLISH}" in
+            none|outputs|closure) ;;
+            *) echo '::error::publish must be none, outputs, or closure'; exit 1 ;;
+          esac
+          case "${ATTEST}" in
+            true|false) ;;
+            *) echo '::error::attest must be true or false'; exit 1 ;;
+          esac
+          case "${PUSH}" in
+            true) ;;
+            false) PUBLISH=none ;;
+            *) echo '::error::push must be true or false'; exit 1 ;;
+          esac
           for pair in READ FALLBACK_READ DESTINATION_READ; do
             user="${pair}_USER"
             password="${pair}_PASSWORD"
@@ -485,7 +551,7 @@ jobs:
                 pr_cache="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
                 TTL=14d
                 PERMANENT=false
-                if [ "${PUSH}" = true ]; then
+                if [ "${PUBLISH}" != none ]; then
                   CACHE="${pr_cache}"
                   PROVISION_CACHE="${CACHE}"
                   if [ "${EVENT_ACTION}" = closed ] && [ "${MERGED}" != true ]; then
@@ -516,6 +582,7 @@ jobs:
               ;;
           esac
           {
+            echo "publish=${PUBLISH}"
             echo "cache=${CACHE}"
             echo "root-prefix=${ROOT_PREFIX}"
             echo "ttl=${TTL}"
@@ -602,7 +669,8 @@ jobs:
           cupboard: ${{ needs.configure.outputs.cupboard }}
           provision-cache: ${{ needs.configure.outputs.provision-cache }}
           cache-access-mode:
-            ${{ github.event_name == 'pull_request' && inputs.push &&
+            ${{ github.event_name == 'pull_request' &&
+            needs.configure.outputs.publish != 'none' &&
             inputs.cache-access-mode || '' }}
           provision-cache-ttl:
             ${{ needs.configure.outputs.provision-cache-ttl }}
@@ -620,14 +688,14 @@ jobs:
         id: targets
         env:
           TARGETS: ${{ inputs.targets }}
-          PUSH: ${{ inputs.push }}
+          PUBLISH: ${{ needs.configure.outputs.publish }}
           CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
           READ_SESSION_TARGET: ${{ steps.setup.outputs.read-session-target }}
           READ_SESSION_VIEW: ${{ steps.setup.outputs.read-session-view }}
         run: |
           set -euo pipefail
           evaluation=(nix eval --json "${TARGETS}")
-          if [[ "${PUSH}" != true ]]; then
+          if [[ "${PUBLISH}" == none ]]; then
             evaluation+=(--apply 'targets: map (target: builtins.removeAttrs target ["rootDrvPath"]) targets')
           fi
           if [[ -n "${READ_SESSION_TARGET}" ]]; then
@@ -653,7 +721,7 @@ jobs:
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
-          optimise: ${{ inputs.push }}
+          optimise: ${{ needs.configure.outputs.publish != 'none' }}
           read-user:
             ${{ secrets.destination_read_user || secrets.read_user ||
             secrets.fallback_read_user }}
@@ -663,9 +731,9 @@ jobs:
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
-          # A retention root does not prove that provenance was attached.
-          # Re-run cached targets so a previous attachment failure is retried.
-          require-provenance: ${{ inputs.push }}
+          build: ${{ inputs.build }}
+          substituter: ${{ inputs.substituter }}
+          publish: ${{ needs.configure.outputs.publish }}
 
       - name: Summarise plan
         env:
@@ -754,7 +822,8 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           cache-access-mode:
-            ${{ github.event_name == 'pull_request' && inputs.push &&
+            ${{ github.event_name == 'pull_request' &&
+            needs.configure.outputs.publish != 'none' &&
             inputs.cache-access-mode || '' }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           destination-read-user: ${{ secrets.destination_read_user }}
@@ -794,8 +863,9 @@ jobs:
           fallback-read-password:
             ${{ secrets.read_password || secrets.fallback_read_password }}
           store: ${{ inputs.store }}
-          push: ${{ inputs.push }}
-          require-provenance: ${{ inputs.push }}
+          publish: ${{ needs.configure.outputs.publish }}
+          build: ${{ inputs.build }}
+          substituter: ${{ inputs.substituter }}
           gc-between-cohorts:
             ${{ inputs.gc-between-cohorts && runner.environment ==
             'github-hosted' && inputs.store == '' }}
@@ -808,15 +878,13 @@ jobs:
           run-root-ttl: ${{ inputs.run-root-ttl }}
           run-root-permanent: ${{ inputs.run-root-permanent }}
 
-      # A streamed cohort derives its receipt from the supervised build. A
-      # remote-store cohort records only the queryable outputs that Nix reports
-      # as results of this invocation. Substituted, already-valid and floating
-      # paths are not build evidence. A cohort that published nothing writes no
-      # receipt.
       - uses: $/actions/attest
         id: attest
-        if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
+        if:
+          ${{ inputs.attest && needs.configure.outputs.publish != 'none' &&
+          steps.build-cohort.outputs.receipt-file != '' }}
         with:
+          inline-bundles: false
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
@@ -830,14 +898,11 @@ jobs:
             ${{ secrets.destination_read_password || secrets.read_password ||
             secrets.fallback_read_password }}
 
-      # `actions/attest` checks the receipt against committed narinfos, so attach
-      # only after this run has published. When the run builds none of the
-      # cohort's paths, `actions/attest` signs only build-origin bundles.
-      # `bundles` lists them and `bundle-path` does not.
       - uses: $/actions/attest-attach
         if:
-          ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
-          steps.attest.outputs.bundles != '' }}
+          ${{ inputs.attest && needs.configure.outputs.publish != 'none' &&
+          steps.build-cohort.outputs.receipt-file != '' &&
+          steps.attest.outputs.bundles-file != '' }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
@@ -852,7 +917,7 @@ jobs:
             secrets.fallback_read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
-          bundle: ${{ steps.attest.outputs.bundles }}
+          bundles-file: ${{ steps.attest.outputs.bundles-file }}
 
       # At this point, every retention root has been set on the destination and
       # attestation has read the committed narinfos. Remove this build's

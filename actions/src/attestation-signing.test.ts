@@ -1,4 +1,5 @@
 import type { AttestOptions, Predicate } from '@actions/attest';
+import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -403,27 +404,39 @@ describe('signingDisclosure', () => {
 		'discloses $profile with upload-to-github $uploadToGithub',
 		({ profile, uploadToGithub, expected }) => {
 			expect(
-				signingDisclosure({ profile, uploadToGithub, grouping: 'run' }, 3)
-			).toStrictEqual({ ...expected, grouping: 'run', subjectCount: 3 });
+				signingDisclosure(
+					{ profile, uploadToGithub, grouping: 'run' },
+					{ built: 2, custom: 1 }
+				)
+			).toStrictEqual({
+				...expected,
+				grouping: 'run',
+				subjects: { built: 2, custom: 1 }
+			});
 		}
 	);
 
 	it('renders one line for each contact and each publication', () => {
 		const disclosure = signingDisclosure(
 			{ profile: 'sigstore-default', uploadToGithub: true, grouping: 'run' },
-			3
+			{ built: 2, custom: 1 }
 		);
 		const lines = disclosureLines(disclosure);
 		const listed = disclosure.services.length + disclosure.publications.length;
 
 		expect({
 			heading: lines[0],
+			scopes: lines.slice(1, 3),
 			total: lines.length,
 			listed: lines.filter((line) => line.startsWith('  ')).length
 		}).toStrictEqual({
 			heading:
 				"The repository's visibility selects the Sigstore instance: the public-good instance for a public repository, the GitHub instance otherwise. The lines below cover both.",
-			total: listed + 4,
+			scopes: [
+				'Signing SLSA build provenance for 2 built paths in batches. Each bundle will contain the names and digests of its subjects.',
+				'Signing custom predicate for 1 accepted path in batches. Each bundle will contain the names and digests of its subjects.'
+			],
+			total: listed + 5,
 			listed
 		});
 	});
@@ -543,32 +556,42 @@ describe('githubStatementSigner', () => {
 		'delegates sigstore-default with upload-to-github $uploadToGithub',
 		async ({ uploadToGithub }) => {
 			mocks.attest.mockReset();
+			const writeAttestation = vi.fn().mockResolvedValue('42');
 			mocks.attest.mockResolvedValue({
 				bundle,
-				certificate: 'certificate',
-				attestationID: '42'
+				certificate: 'certificate'
 			});
 
-			const result = await githubStatementSigner({
-				subjects: [
-					{
-						name: 'abcdefghijklmnopqrstuvwxyz012345-app',
-						sha256: '11'.repeat(32)
+			const result = await githubStatementSigner(
+				{
+					subjects: [
+						{
+							name: 'abcdefghijklmnopqrstuvwxyz012345-app',
+							sha256: '11'.repeat(32)
+						}
+					],
+					githubToken: 'token',
+					policy: {
+						profile: 'sigstore-default',
+						uploadToGithub,
+						grouping: 'run'
 					}
-				],
-				githubToken: 'token',
-				policy: {
-					profile: 'sigstore-default',
-					uploadToGithub,
-					grouping: 'run'
+				},
+				{
+					writeAttestation,
+					environment: { GITHUB_REPOSITORY: 'acme/app' }
 				}
-			})(statement);
+			)(statement);
 
-			expect({ result, calls: mocks.attest.mock.calls }).toStrictEqual({
+			expect({
+				result,
+				calls: mocks.attest.mock.calls,
+				writes: writeAttestation.mock.calls
+			}).toStrictEqual({
 				result: {
 					bundle: `${JSON.stringify(bundle)}\n`,
 					evidence: { tlogEntryCount: 1, timestampCount: 1 },
-					attestationId: '42'
+					...(uploadToGithub && { attestationId: '42' })
 				},
 				calls: [
 					[
@@ -582,10 +605,21 @@ describe('githubStatementSigner', () => {
 							predicateType: statement.predicateType,
 							predicate: statement.predicate,
 							token: 'token',
-							skipWrite: !uploadToGithub
+							skipWrite: true
 						}
 					]
-				]
+				],
+				writes: uploadToGithub
+					? [
+							[
+								{
+									bundle: `${JSON.stringify(bundle)}\n`,
+									githubToken: 'token',
+									environment: { GITHUB_REPOSITORY: 'acme/app' }
+								}
+							]
+						]
+					: []
 			});
 		}
 	);
@@ -613,6 +647,39 @@ describe('githubStatementSigner', () => {
 		expect(result.evidence).toStrictEqual({
 			tlogEntryCount: 0,
 			timestampCount: 0
+		});
+	});
+
+	it('does not upload a bundle that the destination cache would reject', async () => {
+		const writeAttestation = vi.fn().mockResolvedValue('42');
+		const oversizedBundle = {
+			verificationMaterial: {
+				tlogEntries: [],
+				certificate: 'a'.repeat(maxAttestationBundleBytes)
+			}
+		};
+		mocks.attest.mockReset();
+		mocks.attest.mockResolvedValue({ bundle: oversizedBundle });
+
+		const result = await githubStatementSigner(
+			{
+				subjects: [],
+				githubToken: 'token',
+				policy: {
+					profile: 'sigstore-default',
+					uploadToGithub: true,
+					grouping: 'run'
+				}
+			},
+			{ writeAttestation }
+		)(statement);
+
+		expect({ result, writes: writeAttestation.mock.calls }).toStrictEqual({
+			result: {
+				bundle: `${JSON.stringify(oversizedBundle)}\n`,
+				evidence: { tlogEntryCount: 0, timestampCount: 0 }
+			},
+			writes: []
 		});
 	});
 

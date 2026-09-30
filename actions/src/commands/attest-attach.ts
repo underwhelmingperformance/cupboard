@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { env } from 'node:process';
 
@@ -15,10 +16,13 @@ import type { Command } from 'commander';
 
 import {
 	type CacheSelectionSyntax,
+	cacheSelectionSyntax,
 	detectCacheSelectionSyntax,
+	inspectCommandOptions,
 	runCupboard as defaultRunCupboard
 } from '../cupboard-run.ts';
 import {
+	AttestationAttachmentCapabilitiesError,
 	AttestationAttachmentIncompleteError,
 	AttestationAttachmentResultError,
 	AttestationBundlesMissingError,
@@ -27,7 +31,7 @@ import {
 	ReadPasswordRequiredError,
 	ReadUserRequiredError
 } from '../errors.ts';
-import { type Environment } from '../inputs.ts';
+import { type Environment, parseLines } from '../inputs.ts';
 import {
 	collectLines,
 	provided,
@@ -48,6 +52,7 @@ export interface AttestAttachOptions {
 	readonly receiptFile?: string;
 	readonly checksumsFile?: string;
 	readonly bundle: readonly string[];
+	readonly bundlesFile?: string;
 }
 
 export interface AttestAttachInputs {
@@ -60,12 +65,19 @@ export interface AttestAttachInputs {
 	readonly receiptFile: string;
 	readonly checksumsFile: string;
 	readonly bundles: readonly string[];
+	readonly bundlesFile: string;
 }
 
 export interface AttestAttachDependencies {
 	readonly detectCacheSelectionSyntax?: typeof detectCacheSelectionSyntax;
+	readonly inspectCommandOptions?: typeof inspectCommandOptions;
 	readonly runCupboard?: typeof defaultRunCupboard;
 	readonly signal?: AbortSignal;
+}
+
+interface AttestationManifests {
+	readonly pathsFile: string;
+	readonly bundlesFile: string;
 }
 
 export function registerAttestAttachCommand(
@@ -92,17 +104,21 @@ export function registerAttestAttachCommand(
 		)
 		.requiredOption(
 			'--receipt-file <path>',
-			'current-run receipt produced by the build action'
+			'receipt for paths published by this run'
 		)
 		.requiredOption(
 			'--checksums-file <path>',
-			'checksums for the signed receipt subjects'
+			'checksums for the receipt subjects selected for signing'
 		)
 		.option(
 			'--bundle <path>',
 			'Sigstore attestation bundle to attach (repeatable, or newline-delimited)',
 			collectLines,
 			[]
+		)
+		.option(
+			'--bundles-file <path>',
+			'Read bundle paths from this file, one per line'
 		)
 		.action((options: AttestAttachOptions) =>
 			attestAttachAction(options, environment, undefined, {
@@ -127,17 +143,19 @@ export function resolveAttestAttachInputs(
 	}
 
 	const receiptFile = provided(options.receiptFile);
-
 	if (receiptFile === undefined) {
 		throw new MissingInputError('receipt-file');
 	}
+
 	const checksumsFile = provided(options.checksumsFile);
 
 	if (checksumsFile === undefined) {
 		throw new MissingInputError('checksums-file');
 	}
 
-	if (options.bundle.length === 0) {
+	const bundlesFile = provided(options.bundlesFile) ?? '';
+
+	if (bundlesFile === '' && options.bundle.length === 0) {
 		throw new AttestationBundlesMissingError();
 	}
 
@@ -161,7 +179,8 @@ export function resolveAttestAttachInputs(
 		readPassword,
 		receiptFile,
 		checksumsFile,
-		bundles: options.bundle
+		bundles: options.bundle,
+		bundlesFile
 	};
 }
 
@@ -172,7 +191,8 @@ export function resolveAttestAttachInputs(
 export function attestAttachArguments(
 	inputs: AttestAttachInputs,
 	paths: readonly string[],
-	cacheSyntax: CacheSelectionSyntax
+	cacheSyntax: CacheSelectionSyntax,
+	manifests?: AttestationManifests
 ): readonly string[] {
 	return [
 		'--no-colour',
@@ -183,7 +203,9 @@ export function attestAttachArguments(
 				? inputs.url
 				: cacheUrlFor(inputs.url, inputs.cache)
 		),
-		...paths,
+		...(manifests === undefined
+			? paths
+			: ['--paths-file', manifests.pathsFile]),
 		'--github-oidc',
 		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
 		...(cacheSyntax === 'flag' && inputs.cache.kind === 'named'
@@ -197,7 +219,9 @@ export function attestAttachArguments(
 					'--read-password',
 					inputs.readPassword
 				]),
-		...inputs.bundles.flatMap((bundle) => ['--attestation', bundle])
+		...(manifests === undefined
+			? inputs.bundles.flatMap((bundle) => ['--attestation', bundle])
+			: ['--attestations-file', manifests.bundlesFile])
 	];
 }
 
@@ -249,49 +273,119 @@ export async function attestAttachAction(
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
+	const eligible = receipt.subjects;
 	const checksums = parseChecksums(
 		await readFile(inputs.checksumsFile, 'utf8')
 	);
-	const mismatched = receipt.subjects
+	const selected = eligible.filter((subject) =>
+		checksums.has(path.basename(subject.storePath))
+	);
+	const mismatched = selected
 		.filter(
 			(subject) =>
 				checksums.get(path.basename(subject.storePath)) !== subject.narHash
 		)
 		.map((subject) => subject.storePath);
 	const eligibleNames = new Set(
-		receipt.subjects.map((subject) => path.basename(subject.storePath))
+		eligible.map((subject) => path.basename(subject.storePath))
 	);
 	const unexpectedNames = checksums
 		.keys()
 		.filter((name) => !eligibleNames.has(name))
 		.toArray();
 
-	if (mismatched.length > 0 || unexpectedNames.length > 0) {
-		throw new AttestationChecksumsMismatchError(mismatched, unexpectedNames);
+	const missing =
+		receipt.version === 2
+			? eligible
+					.filter((subject) => !checksums.has(path.basename(subject.storePath)))
+					.map((subject) => subject.storePath)
+			: [];
+
+	if (
+		mismatched.length > 0 ||
+		missing.length > 0 ||
+		unexpectedNames.length > 0
+	) {
+		throw new AttestationChecksumsMismatchError(
+			[...mismatched, ...missing],
+			unexpectedNames
+		);
 	}
 
-	const subjectPaths = receipt.subjects.map((subject) => subject.storePath);
+	const subjectPaths = selected.map((subject) => subject.storePath);
 
 	if (subjectPaths.length === 0) {
 		reporter.warn(
-			'The build receipt contains no provenance subjects; skipping attachment'
+			'The checksums file selects no receipt subjects; skipping attestation attachment'
 		);
 		return;
 	}
 
 	const runCupboard = dependencies.runCupboard ?? defaultRunCupboard;
-	const cacheSyntax =
-		inputs.cache.kind === 'default'
-			? 'url'
-			: await (
-					dependencies.detectCacheSelectionSyntax ?? detectCacheSelectionSyntax
-				)(inputs.cupboardPath, ['attest', 'attach'], dependencies.signal);
+	const bundles = [
+		...inputs.bundles,
+		...(inputs.bundlesFile === ''
+			? []
+			: parseLines(await readFile(inputs.bundlesFile, 'utf8')))
+	];
+	if (bundles.length === 0) {
+		throw new AttestationBundlesMissingError();
+	}
 
-	const results = await runCupboard(
-		inputs.cupboardPath,
-		attestAttachArguments(inputs, subjectPaths, cacheSyntax),
-		environment,
-		dependencies.signal === undefined ? {} : { signal: dependencies.signal }
+	const directArguments = attestAttachArguments(inputs, subjectPaths, 'flag');
+	const canUseLegacyArguments =
+		inputs.bundlesFile === '' &&
+		subjectPaths.length === 1 &&
+		Buffer.byteLength(directArguments.join('\0')) <= 64 * 1024;
+
+	if (canUseLegacyArguments) {
+		const syntax =
+			inputs.cache.kind === 'default'
+				? 'url'
+				: await (
+						dependencies.detectCacheSelectionSyntax ??
+						detectCacheSelectionSyntax
+					)(inputs.cupboardPath, ['attest', 'attach'], dependencies.signal);
+		const results = await runCupboard(
+			inputs.cupboardPath,
+			attestAttachArguments(inputs, subjectPaths, syntax),
+			environment,
+			dependencies.signal === undefined ? {} : { signal: dependencies.signal }
+		);
+		requireSettledAttachment(results, subjectPaths);
+		return;
+	}
+
+	const commandOptions = await (
+		dependencies.inspectCommandOptions ?? inspectCommandOptions
+	)(inputs.cupboardPath, ['attest', 'attach'], dependencies.signal);
+	const missingOptions = ['--paths-file', '--attestations-file'].filter(
+		(option) => !commandOptions.has(option)
 	);
-	requireSettledAttachment(results, subjectPaths);
+	if (missingOptions.length > 0) {
+		throw new AttestationAttachmentCapabilitiesError(missingOptions);
+	}
+	const syntax = cacheSelectionSyntax(commandOptions);
+	const directory = await mkdtemp(
+		path.join(environment.RUNNER_TEMP ?? tmpdir(), 'cupboard-attach-')
+	);
+	const manifests = {
+		pathsFile: path.join(directory, 'paths.txt'),
+		bundlesFile: path.join(directory, 'bundles.txt')
+	};
+
+	try {
+		await writeFile(manifests.pathsFile, `${subjectPaths.join('\n')}\n`);
+		await writeFile(manifests.bundlesFile, `${bundles.join('\n')}\n`);
+		dependencies.signal?.throwIfAborted();
+		const results = await runCupboard(
+			inputs.cupboardPath,
+			attestAttachArguments(inputs, [], syntax, manifests),
+			environment,
+			dependencies.signal === undefined ? {} : { signal: dependencies.signal }
+		);
+		requireSettledAttachment(results, subjectPaths);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
 }

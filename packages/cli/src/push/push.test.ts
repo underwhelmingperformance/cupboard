@@ -1347,12 +1347,12 @@ describe('runPush', () => {
 
 	it('attaches a multi-subject bundle to every matching closure path', async () => {
 		const roots: SetRootCall[] = [];
-		const negotiations: Omit<AttestationNegotiateRequestInput, 'pushId'>[] = [];
+		const negotiations: unknown[] = [];
 		const uploaded: {
 			readonly r2Key: string;
 			readonly body: Uint8Array;
 		}[] = [];
-		const attached: string[] = [];
+		const attached: unknown[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 		const bundle = sigstoreBundleBytes(
@@ -1367,26 +1367,22 @@ describe('runPush', () => {
 			closure: true,
 			client: {
 				...skipClient(roots, clientCalls),
-				negotiateAttestations(body) {
+				negotiateAttestations() {
+					throw new Error('Expected bundle negotiation');
+				},
+				attachAttestation() {
+					throw new Error('Expected paged attachment');
+				},
+				negotiateAttestationBundles(body) {
 					negotiations.push(body);
-
 					return Promise.resolve({
 						bundles: [
 							{
 								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
 								digest: bundleDigest,
-								uploadId: 'attestation-app',
-								r2Key: 'staging/attestations/attestation-app',
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							},
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(runtimePath),
-								digest: bundleDigest,
-								uploadId: 'attestation-runtime',
-								r2Key: 'staging/attestations/attestation-runtime',
-								expiresAt: '2026-05-18T12:00:00.000Z'
+								uploadId: 'attestation-build',
+								r2Key: 'staging/attestations/attestation-build',
+								expiresAt: '2099-01-01T00:00:00.000Z'
 							}
 						]
 					});
@@ -1394,18 +1390,16 @@ describe('runPush', () => {
 				async uploadNar(r2Key, body) {
 					uploaded.push({ r2Key, body: await collectReadableStream(body) });
 				},
-				attachAttestation(uploadId) {
-					attached.push(uploadId);
-					const storePathHash =
-						uploadId === 'attestation-app'
-							? StorePath.hash(appPath)
-							: StorePath.hash(runtimePath);
-
+				attachAttestationPaths(uploadId, body) {
+					attached.push({ uploadId, ...body });
 					return Promise.resolve({
-						storePathHash,
-						digest: bundleDigest,
-						predicateType: 'https://slsa.dev/provenance/v1',
-						status: 'attached'
+						expiresAt: '2099-01-01T00:00:00.000Z',
+						paths: body.storePathHashes.map((storePathHash) => ({
+							storePathHash,
+							digest: bundleDigest,
+							predicateType: 'https://slsa.dev/provenance/v1',
+							status: 'attached'
+						}))
 					});
 				}
 			} satisfies PushClient,
@@ -1417,25 +1411,24 @@ describe('runPush', () => {
 			})
 		});
 
-		expect(negotiations).toStrictEqual([
-			{
-				bundles: [
-					{ storePathHash: StorePath.hash(appPath), digest: bundleDigest },
-					{ storePathHash: StorePath.hash(runtimePath), digest: bundleDigest }
-				]
-			}
-		]);
-		expect(attached).toStrictEqual(['attestation-app', 'attestation-runtime']);
-		expect(uploaded).toStrictEqual([
-			{
-				r2Key: 'staging/attestations/attestation-app',
-				body: Buffer.from(bundle)
-			},
-			{
-				r2Key: 'staging/attestations/attestation-runtime',
-				body: Buffer.from(bundle)
-			}
-		]);
+		expect({ negotiations, attached, uploaded }).toStrictEqual({
+			negotiations: [{ bundles: [{ digest: bundleDigest }] }],
+			attached: [
+				{
+					uploadId: 'attestation-build',
+					storePathHashes: [
+						StorePath.hash(appPath),
+						StorePath.hash(runtimePath)
+					]
+				}
+			],
+			uploaded: [
+				{
+					r2Key: 'staging/attestations/attestation-build',
+					body: Buffer.from(bundle)
+				}
+			]
+		});
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
@@ -1448,7 +1441,7 @@ describe('runPush', () => {
 				},
 				{
 					label: 'Attestation upload',
-					value: formatBytes(bundle.byteLength * 2)
+					value: formatBytes(bundle.byteLength)
 				},
 				{ label: 'Pinned paths', value: '1' },
 				{ label: 'Pin expiry', value: 'permanent' }
@@ -2302,105 +2295,294 @@ describe('runPush', () => {
 		});
 	});
 
-	it('publishes a reference entry commit-only, without the store or a NAR read', async () => {
-		const nixCalls: NixCall[] = [];
-		const roots: SetRootCall[] = [];
-		const negotiations: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
-		const commits: string[] = [];
-		const fetched: string[] = [];
-		let narReads = 0;
+	it.each(['target', 'intermediate'] as const)(
+		'publishes a reference %s without the store or a NAR read',
+		async (kind) => {
+			const nixCalls: NixCall[] = [];
+			const roots: SetRootCall[] = [];
+			const negotiations: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
+			const commits: string[] = [];
+			const fetched: string[] = [];
+			let narReads = 0;
 
-		await runPush(
-			PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
-			reporter([]),
-			{
-				command: 'cupboard push',
-				credential: 'cupboard-login',
-				referenceSource: {
-					url: new URL('https://cache.example.workers.dev/t/acme')
-				},
-				fetchReferenceMetadata: (source, storePathHash) => {
-					fetched.push(`${source.url.href} ${storePathHash}`);
-
-					return Promise.resolve(referenceMetadata());
-				},
-				client: {
-					preview: unexpectedPreviewCall,
-					negotiate(body) {
-						negotiations.push(body);
-
-						return Promise.resolve(
-							uploadNegotiateResponseSchema.parse({
-								uploads: [
+			await runPush(
+				PublicationCollection.of({
+					targets: [],
+					...(kind === 'target'
+						? { referencePaths: [appPath] }
+						: {
+								references: [
 									{
-										action: 'commit',
-										storePathHash: StorePath.hash(appPath),
-										narHash: appDigest.narHash.toString(),
-										uploadId: 'reuse-app'
+										storePath: appPath,
+										kind: 'intermediate' as const,
+										source: new URL('https://cache.example.workers.dev/t/acme'),
+										metadata: referenceMetadata()
 									}
 								]
 							})
-						);
-					},
-					uploadNar: unexpectedUploadNarCall,
-					commit(target) {
-						commits.push(target.uploadId);
-
-						return Promise.resolve(fallbackCommitResponse());
-					},
-					setRoot(name, body) {
-						roots.push({ fields: { name, ...body } });
-
-						return Promise.resolve(rootSummary({ name, ...body }));
-					}
-				} satisfies PushClient,
-				createNarArchive: () => {
-					narReads += 1;
-
-					return new FakeNarArchive(appDigest);
-				},
-				nix: nixStore({}, nixCalls)
-			}
-		);
-
-		expect({
-			nixCalls,
-			fetched,
-			negotiations,
-			commits,
-			narReads,
-			roots
-		}).toStrictEqual({
-			nixCalls: [],
-			fetched: [
-				`https://cache.example.workers.dev/t/acme ${StorePath.hash(appPath)}`
-			],
-			negotiations: [
+				}),
+				reporter([]),
 				{
-					paths: [
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					referenceSource: {
+						url: new URL('https://cache.example.workers.dev/t/acme')
+					},
+					fetchReferenceMetadata: (source, storePathHash) => {
+						fetched.push(`${source.url.href} ${storePathHash}`);
+
+						return Promise.resolve(referenceMetadata());
+					},
+					client: {
+						preview: unexpectedPreviewCall,
+						negotiate(body) {
+							negotiations.push(body);
+
+							return Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: [
+										{
+											action: 'commit',
+											storePathHash: StorePath.hash(appPath),
+											narHash: appDigest.narHash.toString(),
+											uploadId: 'reuse-app'
+										}
+									]
+								})
+							);
+						},
+						uploadNar: unexpectedUploadNarCall,
+						commit(target) {
+							commits.push(target.uploadId);
+
+							return Promise.resolve(fallbackCommitResponse());
+						},
+						setRoot(name, body) {
+							roots.push({ fields: { name, ...body } });
+
+							return Promise.resolve(rootSummary({ name, ...body }));
+						}
+					} satisfies PushClient,
+					createNarArchive: () => {
+						narReads += 1;
+
+						return new FakeNarArchive(appDigest);
+					},
+					nix: nixStore({}, nixCalls)
+				}
+			);
+
+			expect({
+				nixCalls,
+				fetched,
+				negotiations,
+				commits,
+				narReads,
+				roots
+			}).toStrictEqual({
+				nixCalls: [],
+				fetched:
+					kind === 'target'
+						? [
+								`https://cache.example.workers.dev/t/acme ${StorePath.hash(appPath)}`
+							]
+						: [],
+				negotiations: [
+					{
+						paths: [
+							{
+								storePathHash: StorePath.hash(appPath),
+								storePath: appPath,
+								narHash: appDigest.narHash.toString(),
+								narSize: 123,
+								references: []
+							}
+						]
+					}
+				],
+				commits: ['reuse-app'],
+				narReads: 0,
+				roots:
+					kind === 'target'
+						? [
+								{
+									fields: {
+										name: `pin:${StorePath.hash(appPath)}`,
+										retention: { kind: 'inherit' },
+										targets: [appPath]
+									}
+								}
+							]
+						: []
+			});
+		}
+	);
+
+	it.each([false, true])(
+		'rejects a changed cached NAR before retaining a metadata snapshot (dry run: %s)',
+		async (dryRun) => {
+			const cacheHash = digest(9, 999).narHash.toString();
+			const clientCalls: unknown[] = [];
+			const roots: SetRootCall[] = [];
+			const warnings: { label: string; value?: string }[] = [];
+			const client: PushClient = {
+				...divergentSkipClient(cacheHash, roots, clientCalls),
+				preview(body) {
+					clientCalls.push({
+						method: 'preview',
+						paths: body.paths.map((path) => path.storePath)
+					});
+					return Promise.resolve(
+						uploadPreviewResponseSchema.parse({
+							uploads: body.paths.map((path) => ({
+								action: 'skip',
+								storePathHash: path.storePathHash,
+								narHash: cacheHash
+							}))
+						})
+					);
+				}
+			};
+			let outcome: unknown;
+			try {
+				await runPush(
+					PublicationCollection.of({
+						targets: [],
+						references: [
+							{
+								storePath: appPath,
+								kind: 'target',
+								source: new URL('https://cache.example.workers.dev/t/acme'),
+								metadata: referenceMetadata()
+							}
+						]
+					}),
+					reporter([], warnings),
+					{
+						command: 'cupboard push',
+						credential: 'cupboard-login',
+						client,
+						dryRun
+					}
+				);
+				outcome = { pushed: true };
+			} catch (error) {
+				outcome = z
+					.object({
+						name: z.string(),
+						storePath: z.string(),
+						expectedNarHash: z.string(),
+						cacheNarHash: z.string()
+					})
+					.parse(error);
+			}
+			expect({ outcome, clientCalls, roots, warnings }).toStrictEqual({
+				outcome: {
+					name: 'ReferenceSnapshotDivergedError',
+					storePath: appPath,
+					expectedNarHash: appDigest.narHash.toString(),
+					cacheNarHash: cacheHash
+				},
+				clientCalls: [
+					{ method: dryRun ? 'preview' : 'negotiate', paths: [appPath] }
+				],
+				roots: [],
+				warnings: []
+			});
+		}
+	);
+
+	it.each(['reference', 'reconciled'] as const)(
+		'uses mixed-source metadata snapshots in a %s receipt without refetching',
+		async (receiptKind) => {
+			const firstSource = 'https://cache.example.workers.dev/t/acme';
+			const secondSource = `${firstSource}/reuse/release`;
+			const clientCalls: unknown[] = [];
+			const roots: SetRootCall[] = [];
+			const fetched: string[] = [];
+			let storeOpens = 0;
+			const receipt = await runPush(
+				PublicationCollection.of({
+					targets: [],
+					references: [
 						{
-							storePathHash: StorePath.hash(appPath),
 							storePath: appPath,
-							narHash: appDigest.narHash.toString(),
-							narSize: 123,
-							references: []
+							kind: 'target',
+							source: new URL(firstSource),
+							metadata: referenceMetadata()
+						},
+						{
+							storePath: runtimePath,
+							kind: 'intermediate',
+							source: new URL(secondSource),
+							metadata: {
+								...referenceMetadata(),
+								upload: {
+									...referenceUploadFields(),
+									storePath: runtimePath,
+									storePathHash: StorePath.hash(runtimePath),
+									narHash: runtimeDigest.narHash.toString()
+								}
+							}
 						}
 					]
-				}
-			],
-			commits: ['reuse-app'],
-			narReads: 0,
-			roots: [
+				}),
+				reporter([]),
 				{
-					fields: {
-						name: `pin:${StorePath.hash(appPath)}`,
-						retention: { kind: 'inherit' },
-						targets: [appPath]
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					retain: false,
+					...(receiptKind === 'reference'
+						? { referenceReceipt: true }
+						: { buildStore: 'auto' }),
+					client: skipClient(roots, clientCalls),
+					openStore: () => {
+						storeOpens += 1;
+						return nixStore({});
+					},
+					fetchReferenceMetadata: (source) => {
+						fetched.push(source.url.href);
+						return Promise.reject(
+							new Error('snapshot paths must not be fetched')
+						);
 					}
 				}
-			]
-		});
-	});
+			);
+			expect({
+				receipt,
+				fetched,
+				storeOpens,
+				roots,
+				clientCalls
+			}).toStrictEqual({
+				receipt: {
+					version: 3,
+					paths: [appPath, runtimePath],
+					uploaded: [],
+					subjects: [
+						{
+							storePath: appPath,
+							origin: 'republished',
+							narHash: appDigest.narHash.digestHex(),
+							signatures: [referenceSignature],
+							metadataSource: firstSource
+						},
+						{
+							storePath: runtimePath,
+							origin: 'republished',
+							narHash: runtimeDigest.narHash.digestHex(),
+							signatures: [referenceSignature],
+							metadataSource: secondSource
+						}
+					]
+				},
+				fetched: [],
+				storeOpens: 0,
+				roots: [],
+				clientCalls: [{ method: 'negotiate', paths: [appPath, runtimePath] }]
+			});
+		}
+	);
 
 	it('reports a typed per-path failure when a reference entry requires an upload', async () => {
 		const payloads: ResultPayload[] = [];
@@ -4437,8 +4619,9 @@ function receiptPush(
 	appInfo: NixValidPathInfo,
 	dependencies: Pick<
 		PushDependencies,
-		'buildStore' | 'alreadyHeld' | 'claimable' | 'delegated' | 'copiedFrom'
-	>
+		'buildStore' | 'alreadyHeld' | 'claimable' | 'copiedFrom'
+	>,
+	action: 'upload' | 'commit' | 'skip' = 'upload'
 ): Promise<BuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
 		command: 'cupboard push',
@@ -4451,12 +4634,14 @@ function receiptPush(
 					uploadNegotiateResponseSchema.parse({
 						uploads: [
 							{
-								action: 'upload',
+								action,
 								storePathHash: StorePath.hash(appPath),
 								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
+								...(action !== 'skip' && { uploadId: 'upload-app' }),
+								...(action === 'upload' && {
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								})
 							},
 							{
 								action: 'skip',
@@ -4466,7 +4651,12 @@ function receiptPush(
 						]
 					})
 				),
-			uploadNar: () => Promise.resolve(),
+			uploadNar: () => {
+				if (action !== 'upload') {
+					throw new Error('The push must not upload a NAR');
+				}
+				return Promise.resolve();
+			},
 			commit: () => Promise.resolve(fallbackCommitResponse()),
 			setRoot: unexpectedSetRootCall
 		} satisfies PushClient,
@@ -4490,7 +4680,7 @@ describe('the build receipt a push writes', () => {
 		buildStore
 	};
 
-	it('records build provenance when store metadata supplies a deriver', async () => {
+	it('does not infer a current-run build from store metadata', async () => {
 		const receipt = await receiptPush(
 			pathInfo(appPath, appDigest, [], appDrv),
 			{ buildStore }
@@ -4501,12 +4691,11 @@ describe('the build receipt a push writes', () => {
 			paths: [appPath, runtimePath],
 			subjects: [
 				{
-					origin: 'built',
+					origin: 'store-held',
 					storePath: appPath,
 					narHash: appDigest.narHash.digestHex(),
 					derivation: appDrv,
-					buildStore,
-					verification: 'build-store'
+					buildStore
 				},
 				runtimeSubject
 			],
@@ -4514,13 +4703,40 @@ describe('the build receipt a push writes', () => {
 		});
 	});
 
-	it('records the builder when a remote builder produced the output', async () => {
-		// A builder produced appPath and the build store copied it back, so
-		// the store leaves `ultimate` false. The `delegated` map supplies the
-		// builder for that deriver.
+	it.each([
+		{ action: 'commit' as const, uploaded: [appPath] },
+		{ action: 'skip' as const, uploaded: [] }
+	])(
+		'records publication outcomes for a $action decision',
+		async ({ action, uploaded }) => {
+			const receipt = await receiptPush(
+				pathInfo(appPath, appDigest, [], appDrv),
+				{ buildStore },
+				action
+			);
+
+			expect(receipt).toStrictEqual({
+				version: 3,
+				paths: [appPath, runtimePath],
+				subjects: [
+					{
+						origin: 'store-held',
+						storePath: appPath,
+						narHash: appDigest.narHash.digestHex(),
+						derivation: appDrv,
+						buildStore
+					},
+					runtimeSubject
+				],
+				uploaded
+			});
+		}
+	);
+
+	it('does not infer execution from a delegated build request', async () => {
 		const receipt = await receiptPush(
 			{ ...pathInfo(appPath, appDigest, [], appDrv), ultimate: false },
-			{ buildStore, delegated: new Map([[appDrv, 'ssh://b1']]) }
+			{ buildStore, claimable: [appPath], alreadyHeld: [] }
 		);
 
 		expect(receipt).toStrictEqual({
@@ -4528,13 +4744,11 @@ describe('the build receipt a push writes', () => {
 			paths: [appPath, runtimePath],
 			subjects: [
 				{
-					origin: 'built',
+					origin: 'copied',
 					storePath: appPath,
 					narHash: appDigest.narHash.digestHex(),
 					derivation: appDrv,
-					buildStore,
-					machine: 'ssh://b1',
-					verification: 'build-store'
+					signatures: []
 				},
 				runtimeSubject
 			],
@@ -4642,16 +4856,93 @@ describe('the build receipt a push writes', () => {
 		}
 	);
 
-	it('records the source cache for a reference entry', async () => {
+	it.each([
+		{
+			name: 'a build receipt',
+			claims: { buildStore, claimable: [] },
+			action: 'skip' as const,
+			uploaded: []
+		},
+		{
+			name: 'a reference receipt without a build store',
+			claims: { referenceReceipt: true },
+			action: 'skip' as const,
+			uploaded: []
+		},
+		{
+			name: 'a metadata-only reuse-view commit',
+			claims: { buildStore, claimable: [] },
+			action: 'commit' as const,
+			uploaded: [appPath]
+		}
+	])(
+		'records the source cache for $name',
+		async ({ claims, action, uploaded }) => {
+			const receipt = await runPush(
+				PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
+				reporter([]),
+				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					retain: false,
+					...claims,
+					referenceSource: {
+						url: new URL('https://cache.example.workers.dev/t/acme')
+					},
+					fetchReferenceMetadata: () => Promise.resolve(referenceMetadata()),
+					client: {
+						preview: unexpectedPreviewCall,
+						negotiate: () =>
+							Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: [
+										{
+											action,
+											storePathHash: StorePath.hash(appPath),
+											narHash: appDigest.narHash.toString(),
+											...(action === 'commit' && { uploadId: 'reuse-app' })
+										}
+									]
+								})
+							),
+						uploadNar: unexpectedUploadNarCall,
+						commit: () => Promise.resolve(fallbackCommitResponse()),
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient,
+					createNarArchive: () => new FakeNarArchive(appDigest),
+					compressNar: (nar) => fakeNarUpload(nar, appDigest)
+				}
+			);
+
+			expect(receipt).toStrictEqual({
+				version: 3,
+				paths: [appPath],
+				subjects: [
+					{
+						origin: 'republished',
+						storePath: appPath,
+						narHash: appDigest.narHash.digestHex(),
+						signatures: [referenceSignature],
+						metadataSource: 'https://cache.example.workers.dev/t/acme'
+					}
+				],
+				uploaded
+			});
+		}
+	);
+
+	it('excludes local paths from a mixed reference receipt', async () => {
 		const receipt = await runPush(
-			PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
+			PublicationCollection.of({
+				targets: [runtimePath],
+				referencePaths: [appPath]
+			}),
 			reporter([]),
 			{
 				command: 'cupboard push',
 				credential: 'cupboard-login',
 				retain: false,
-				buildStore,
-				claimable: [],
+				referenceReceipt: true,
 				referenceSource: {
 					url: new URL('https://cache.example.workers.dev/t/acme')
 				},
@@ -4666,6 +4957,11 @@ describe('the build receipt a push writes', () => {
 										action: 'skip',
 										storePathHash: StorePath.hash(appPath),
 										narHash: appDigest.narHash.toString()
+									},
+									{
+										action: 'skip',
+										storePathHash: StorePath.hash(runtimePath),
+										narHash: runtimeDigest.narHash.toString()
 									}
 								]
 							})
@@ -4674,8 +4970,9 @@ describe('the build receipt a push writes', () => {
 					commit: () => Promise.resolve(fallbackCommitResponse()),
 					setRoot: unexpectedSetRootCall
 				} satisfies PushClient,
-				createNarArchive: () => new FakeNarArchive(appDigest),
-				compressNar: (nar) => fakeNarUpload(nar, appDigest)
+				nix: nixStore({
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				})
 			}
 		);
 

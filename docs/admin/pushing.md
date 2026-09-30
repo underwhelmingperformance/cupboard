@@ -70,6 +70,28 @@ When it finishes, `push` prints a summary that counts each case:
 | Already cached | Store paths published by reusing a NAR that the tenant already had. |
 | Skipped        | Store paths that were already in this cache.                        |
 
+### Publishing captured cache metadata
+
+`--reference-manifest <path>` publishes existing tenant NARs from captured
+narinfos. It reads neither the source cache nor a Nix store. The destination
+still checks that the tenant stores each declared NAR before it commits the
+reference. If a NAR was collected, publication fails. If the destination serves
+a different NAR for the same store path, publication fails before it updates the
+target root or pins. Refresh the manifest before retrying.
+
+The JSON file contains `version: 1` and a `paths` array. Each entry contains:
+
+- `storePath`: the complete Nix store path, which must match the narinfo.
+- `kind`: `target` to retain the path under the selected root or a pin, or
+  `intermediate` to publish it without adding a retention target.
+- `source`: the cache or reuse-view URL from which the narinfo was read.
+- `narinfo`: the complete narinfo text, including its line breaks.
+
+The manifest can include paths from several sources. Every path must appear
+once. `--reference-receipt-file` records each path's source URL and NAR hash as
+republished metadata. The receipt does not claim that the run built or copied
+NAR bytes.
+
 ## Choosing how long store paths are kept
 
 cupboard only keeps a store path while something keeps it, usually a retention

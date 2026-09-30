@@ -46,7 +46,10 @@ export interface BatchStore {
  * collected target means for the run; this module only reports the outcome.
  */
 export type BatchPathOutcome =
-	| { readonly outcome: 'published'; readonly storePath: StorePathString }
+	| {
+			readonly outcome: 'published';
+			readonly storePath: StorePathString;
+	  }
 	| {
 			readonly outcome: 'destination-served';
 			readonly storePath: StorePathString;

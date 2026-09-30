@@ -1,11 +1,16 @@
 import { spawn } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
-import { Nix } from '@cupboard/nix';
+import { discoverNixStoreConfig, Nix } from '@cupboard/nix';
 import { type CacheScope } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import {
+	type BuildReceiptV3,
+	buildReceiptV3Schema
+} from '@cupboard/protocol/build';
 import {
 	type PushSummary,
 	pushSummaryResultKind,
@@ -44,6 +49,7 @@ import {
 	type MissingGracePath,
 	MissingInputError,
 	PermanentRetentionConflictError,
+	PushPathsFileUnsupportedError,
 	PushPathsMissingError,
 	PushSummaryMissingError,
 	PushSummaryResponseError,
@@ -90,6 +96,7 @@ const rootGroupsSchema = z.array(rootGroupSchema);
 export interface PushOptions {
 	readonly url?: string;
 	readonly paths: readonly string[];
+	readonly pathsFile?: string;
 	readonly cupboardPath?: string;
 	readonly cupboardVersion?: string;
 	readonly includePrereleases?: string;
@@ -99,6 +106,8 @@ export interface PushOptions {
 	readonly installDir?: string;
 	readonly cache?: string;
 	readonly store?: string;
+	readonly closure?: string;
+	readonly buildReceiptFile?: string;
 	readonly audience?: string;
 	readonly root?: string;
 	readonly ttl?: string;
@@ -127,8 +136,12 @@ export interface PushInputs {
 	readonly installDirectory: string;
 	readonly url: URL;
 	readonly paths: readonly string[];
+	readonly pathsFile?: string;
 	readonly cache: CacheScope;
 	readonly store: string;
+	readonly closure?: boolean;
+	readonly buildReceiptFile: string;
+	readonly publicationReceiptFile: string;
 	readonly audience: string;
 	readonly root: string;
 	readonly ttl: string;
@@ -185,11 +198,14 @@ const defaultRunPushCupboardDependencies: RunPushCupboardDependencies = {
 interface PushArgumentsOptions {
 	readonly url: URL;
 	readonly paths: readonly string[];
+	readonly pathsFile?: string;
 	readonly audience: string;
 	readonly root: string;
 	readonly cache: CacheScope;
 	readonly cacheSyntax: CacheSelectionSyntax;
 	readonly store: string;
+	readonly closure?: boolean;
+	readonly receiptFile?: string;
 	readonly ttl: string;
 	readonly permanent: boolean;
 	readonly retain: boolean;
@@ -220,6 +236,10 @@ export function registerPushCommand(
 			[]
 		)
 		.option(
+			'--paths-file <path>',
+			'file containing store paths to publish, one per line'
+		)
+		.option(
 			'--cupboard-path <path>',
 			'use this pre-acquired cupboard executable and skip release installation'
 		)
@@ -248,6 +268,14 @@ export function registerPushCommand(
 		.option(
 			'--store <uri>',
 			'read path metadata and NAR bytes from this remote ssh-ng store'
+		)
+		.option(
+			'--closure <boolean>',
+			'publish every path in the realised closure: true or false'
+		)
+		.option(
+			'--build-receipt-file <path>',
+			'build receipt whose matching current-run build claims are included in the publication receipt'
 		)
 		.option(
 			'--audience <audience>',
@@ -322,11 +350,19 @@ export function resolvePushInputs(
 
 	const rootGroups = parseRootGroups(options.rootGroups);
 
-	if (rootGroups.length === 0 && options.paths.length === 0) {
+	if (
+		rootGroups.length === 0 &&
+		options.paths.length === 0 &&
+		provided(options.pathsFile) === undefined &&
+		provided(options.root) === undefined
+	) {
 		throw new PushPathsMissingError();
 	}
 
-	if (rootGroups.length > 0 && options.paths.length > 0) {
+	if (
+		rootGroups.length > 0 &&
+		(options.paths.length > 0 || provided(options.pathsFile) !== undefined)
+	) {
 		throw new RootGroupsPathsConflictError();
 	}
 
@@ -439,8 +475,17 @@ export function resolvePushInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		url,
 		paths: options.paths,
+		...(provided(options.pathsFile) !== undefined && {
+			pathsFile: provided(options.pathsFile)
+		}),
 		cache: providedCacheSelection(options.cache),
 		store: provided(options.store) ?? '',
+		...(isEnabled('closure', options.closure, false) && { closure: true }),
+		buildReceiptFile: provided(options.buildReceiptFile) ?? '',
+		publicationReceiptFile: path.join(
+			requireEnvironment(environment, 'RUNNER_TEMP'),
+			'cupboard-push-receipt.json'
+		),
 		audience: provided(options.audience) ?? '',
 		root: isRetained
 			? (explicitRoot ??
@@ -524,6 +569,11 @@ export async function pushAction(
 	const commandOptions = await (
 		dependencies.inspectCommandOptions ?? inspectCommandOptions
 	)(installedCupboard.binaryPath, ['push'], dependencies.signal);
+	requirePathsFileSupport(
+		inputs.pathsFile,
+		installedCupboard.version,
+		commandOptions
+	);
 	const { permanence, unsupported } = permanenceForCommand(
 		inputs,
 		commandOptions
@@ -541,6 +591,17 @@ export async function pushAction(
 		cacheSelectionSyntax(commandOptions)
 	);
 	const summaries: PushSummary[] = [];
+	const shouldWriteReceipt = inputs.buildReceiptFile !== '';
+	const receiptFiles = argumentsPerPush.map((_, index) =>
+		pushReceiptFile(
+			inputs.publicationReceiptFile,
+			index,
+			argumentsPerPush.length
+		)
+	);
+	if (shouldWriteReceipt) {
+		await Promise.all(receiptFiles.map((file) => rm(file, { force: true })));
+	}
 
 	for (const arguments_ of argumentsPerPush) {
 		const run = await runPushCupboard({
@@ -558,6 +619,22 @@ export async function pushAction(
 	const summary = aggregatePushSummaries(summaries);
 
 	await publishPushOutputs(environment, summary);
+	if (shouldWriteReceipt) {
+		const publications = await Promise.all(
+			receiptFiles.map(async (file) =>
+				buildReceiptV3Schema.parse(JSON.parse(await readFile(file, 'utf8')))
+			)
+		);
+		const build = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(inputs.buildReceiptFile, 'utf8'))
+		);
+		const receipt = mergePublishedBuildSubjects(publications, build);
+		await writeFile(
+			inputs.publicationReceiptFile,
+			`${JSON.stringify(receipt, undefined, 2)}\n`
+		);
+		await setOutput(environment, 'receipt-file', inputs.publicationReceiptFile);
+	}
 
 	if (!inputs.requireGrace) {
 		return;
@@ -606,6 +683,16 @@ export function permanenceForCommand(
 		},
 		unsupported
 	};
+}
+
+export function requirePathsFileSupport(
+	pathsFile: string | undefined,
+	version: string,
+	options: CommandOptions
+): void {
+	if (pathsFile !== undefined && !options.has('--paths-file')) {
+		throw new PushPathsFileUnsupportedError(version);
+	}
 }
 
 export interface PushCupboard {
@@ -870,6 +957,82 @@ function resolveStorePaths(nix: Nix, paths: readonly string[]): string[] {
 	return paths.map((storePath) => nix.toStorePath(storePath));
 }
 
+function pushReceiptFile(file: string, index: number, count: number): string {
+	return count === 1 ? file : `${file}.${String(index)}`;
+}
+
+export function mergePublishedBuildSubjects(
+	publications: readonly BuildReceiptV3[],
+	build: BuildReceiptV3
+): BuildReceiptV3 {
+	const paths = new Set(publications.flatMap((receipt) => receipt.paths));
+	const subjects = new Map<string, BuildReceiptV3['subjects'][number]>();
+
+	for (const receipt of publications) {
+		for (const subject of receipt.subjects) {
+			if (!paths.has(subject.storePath)) {
+				throw new Error(
+					`Publication receipt includes an unpublished subject: ${subject.storePath}`
+				);
+			}
+
+			const previous = subjects.get(subject.storePath);
+			if (
+				previous !== undefined &&
+				(previous.narHash !== subject.narHash ||
+					previous.derivation !== subject.derivation)
+			) {
+				throw new Error(
+					`Publication receipts disagree about ${subject.storePath}`
+				);
+			}
+
+			subjects.set(subject.storePath, subject);
+		}
+	}
+	const missing = [...paths].filter((storePath) => !subjects.has(storePath));
+	if (missing.length > 0) {
+		throw new Error(
+			`Publication receipt omits subjects for: ${missing.join(', ')}`
+		);
+	}
+
+	for (const subject of build.subjects) {
+		if (subject.origin !== 'built' || !paths.has(subject.storePath)) {
+			continue;
+		}
+
+		const published = subjects.get(subject.storePath);
+		if (
+			published?.narHash !== subject.narHash ||
+			published.derivation !== subject.derivation
+		) {
+			throw new Error(
+				`Published path ${subject.storePath} does not match its build receipt`
+			);
+		}
+
+		subjects.set(subject.storePath, subject);
+	}
+
+	const sorted = (values: readonly string[]): string[] =>
+		[...new Set(values)].toSorted(byCodeUnit);
+
+	return buildReceiptV3Schema.parse({
+		version: 3,
+		paths: sorted([...paths]),
+		subjects: subjects
+			.values()
+			.toArray()
+			.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath)),
+		uploaded: sorted(publications.flatMap((receipt) => receipt.uploaded ?? [])),
+		failed: sorted(publications.flatMap((receipt) => receipt.failed ?? [])),
+		collected: sorted(
+			publications.flatMap((receipt) => receipt.collected ?? [])
+		)
+	});
+}
+
 export function buildPushArguments(
 	options: PushArgumentsOptions
 ): readonly string[] {
@@ -882,6 +1045,9 @@ export function buildPushArguments(
 				: cacheUrlFor(options.url, options.cache)
 		),
 		...options.paths,
+		...(options.pathsFile === undefined
+			? []
+			: ['--paths-file', options.pathsFile]),
 		'--github-oidc',
 		// Let the CLI derive the default audience from its canonical Worker URL so
 		// canonicalisation and defaulting happen in one place.
@@ -891,6 +1057,15 @@ export function buildPushArguments(
 			? ['--cache', options.cache.name]
 			: []),
 		...(options.store === '' ? [] : ['--store', options.store]),
+		...(options.closure ? ['--closure'] : []),
+		...(options.receiptFile === undefined
+			? []
+			: [
+					'--receipt-file',
+					options.receiptFile,
+					'--no-already-held',
+					'--no-claimable'
+				]),
 		...(options.ttl === '' ? [] : ['--ttl', options.ttl]),
 		...(options.permanent ? ['--permanent'] : []),
 		...(options.retain ? [] : ['--no-retain']),
@@ -928,9 +1103,13 @@ export function pushArgumentsForInvocations(
 	inputs: Pick<
 		PushInputs,
 		| 'url'
+		| 'pathsFile'
 		| 'audience'
 		| 'cache'
 		| 'store'
+		| 'closure'
+		| 'buildReceiptFile'
+		| 'publicationReceiptFile'
 		| 'ttl'
 		| 'permanent'
 		| 'retain'
@@ -945,17 +1124,32 @@ export function pushArgumentsForInvocations(
 		| 'runRootPermanent'
 	>,
 	pushes: readonly PushInvocation[],
-	cacheSyntax: CacheSelectionSyntax
+	cacheSyntax: CacheSelectionSyntax,
+	configuredStore: () => string = () => discoverNixStoreConfig().storeUri
 ): readonly (readonly string[])[] {
+	const store =
+		inputs.buildReceiptFile === '' || inputs.store !== ''
+			? inputs.store
+			: configuredStore();
+
 	return pushes.map((push, index) =>
 		buildPushArguments({
 			url: inputs.url,
 			paths: push.paths,
+			...(inputs.pathsFile !== undefined && { pathsFile: inputs.pathsFile }),
 			audience: inputs.audience,
 			root: push.root,
 			cache: inputs.cache,
 			cacheSyntax,
-			store: inputs.store,
+			store,
+			closure: inputs.closure,
+			...(inputs.buildReceiptFile !== '' && {
+				receiptFile: pushReceiptFile(
+					inputs.publicationReceiptFile,
+					index,
+					pushes.length
+				)
+			}),
 			ttl: inputs.ttl,
 			permanent: inputs.permanent,
 			retain: inputs.retain,

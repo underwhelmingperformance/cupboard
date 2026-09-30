@@ -71,9 +71,9 @@ The check reports these jobs as unverified, for manual review:
   the check cannot detect that publication from the caller's inputs.
 - A job with a dynamic tenant URL, because the check cannot determine which
   tenant the job targets.
-- A job with cupboard workflow inputs that the check cannot evaluate. For
-  example, when the `push` input is dynamic, the check cannot determine whether
-  the job publishes at all.
+- A job with cupboard workflow inputs that the check cannot evaluate. A dynamic
+  `publish` input, for example, prevents a static check from determining whether
+  the job publishes paths.
 - A job without the flake preset that runs for `pull_request`. The job's
   pull-request runs publish to the same cache and root as its branch runs, so a
   `pull_request` trust rule would let any pull request from the repository write
@@ -82,11 +82,13 @@ The check reports these jobs as unverified, for manual review:
   request's outputs to a separate cache, or publish pull requests to a separate
   cache.
 
-For `push: false`, the check models the selected cache read without publication
-or cache-removal grants. A pull-request run with the flake preset reads from the
-tenant's default cache. A public read needs no trust grant. A private read needs
-the exact cache content-read grant unless the workflow supplies a static read
-pair.
+For `publish: none` and the flake workflow's older `push: false`, the check
+models the selected cache read without publication or cache-removal grants. A
+pull-request run with the flake preset reads from the tenant's default cache. A
+public read needs no trust grant. A private read needs the exact cache
+content-read grant unless the workflow supplies a static read pair. When
+publication is enabled, the flake preset can remove an unmerged pull request's
+cache on the `closed` event. The check does not cover that removal.
 
 The check can see that a workflow declares an explicit static username and
 password pair, but GitHub does not reveal the secret values. It reports the pair

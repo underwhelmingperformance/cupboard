@@ -166,8 +166,15 @@ export type PlannedSubstitutionPolicy =
 	  }
 	| { readonly kind: 'unknown' };
 
+export type BuildPolicy = 'missing' | 'rebuild';
+export type SubstituterPolicy = 'leave' | 'copy';
+export type PublishScope = 'none' | 'outputs' | 'closure';
+
 export interface AvailabilityPartitionOptions {
 	readonly targets: readonly AvailabilityTarget[];
+	readonly build?: BuildPolicy;
+	readonly substituter?: SubstituterPolicy;
+	readonly publish?: PublishScope;
 	readonly plannedLocalClosure?: ReadonlySet<StorePathString>;
 	readonly plannedSubstitutableDerivations?: ReadonlySet<StorePathString>;
 	readonly plannedFloatingOutputs?: ReadonlySet<NixDerivedPathString>;
@@ -186,16 +193,6 @@ export interface AvailabilityPartitionOptions {
 		| 'unreachableSubstituters'
 	>;
 	readonly destinationProbes: DestinationProbes;
-	/**
-	 * Returns the given paths with build provenance in the destination cache. A
-	 * plan that requires attested availability sets this field, and a
-	 * destination-served path with no provenance then joins the build set.
-	 * When the field is unset, a target is attach-only whenever the destination
-	 * cache serves its path.
-	 */
-	readonly attestedServed?: (
-		paths: readonly StorePathString[]
-	) => Promise<ReadonlySet<StorePathString>>;
 	/**
 	 * Re-queries paths whose availability remained unknown, bypassing any cache
 	 * used by the first query. Called only when at least one path is unknown.
@@ -225,6 +222,16 @@ export interface AvailabilityPartition {
 	readonly leftUpstreamRejections: readonly LeftUpstreamRejection[];
 	readonly buildSet: readonly NixDerivedPathString[];
 	/**
+	 * Selected target installables that require a forced rebuild. Each also
+	 * appears in `buildSet`.
+	 */
+	readonly rebuildSet: readonly NixDerivedPathString[];
+	/**
+	 * Target paths served by the destination or reuse view whose runtime closures
+	 * need publication. The action processes these paths without building them.
+	 */
+	readonly closureTargets: readonly StorePathString[];
+	/**
 	 * Outputs to realise before the targets in `buildSet` that require them. The
 	 * `requiredBy` lets the action remove dependencies used only by targets that
 	 * the final probe withdraws.
@@ -235,13 +242,6 @@ export interface AvailabilityPartition {
 	 * `requiredBy` lets the action omit paths used only by withdrawn targets.
 	 */
 	readonly dependencyCopies: readonly AvailabilityDependencyCopy[];
-	/**
-	 * Paths the destination cache serves without holding build provenance for
-	 * them. A run that asked for attested availability builds these targets, so
-	 * each of them is in `buildSet` by its installable and absent from
-	 * `attachOnly`. The list is empty for every other run.
-	 */
-	readonly unattested: readonly StorePathString[];
 	readonly counts: {
 		readonly willBuild: number;
 		readonly willSubstitute: number;
@@ -350,24 +350,16 @@ function shouldQueryAvailabilityForTarget(
 	target: AvailabilityTarget,
 	destinationServedPaths: ReadonlySet<StorePathString>,
 	viewServedPaths: ReadonlySet<StorePathString>,
-	attestedServedPaths: ReadonlySet<StorePathString> | undefined
+	build: BuildPolicy
 ): boolean {
-	if (target.expectedPath === undefined) {
+	if (build === 'rebuild' || target.expectedPath === undefined) {
 		return true;
 	}
 
-	const isTargetServedByDestination = destinationServedPaths.has(
-		target.expectedPath
+	return (
+		!destinationServedPaths.has(target.expectedPath) &&
+		!viewServedPaths.has(target.expectedPath)
 	);
-
-	if (isTargetServedByDestination) {
-		return (
-			attestedServedPaths !== undefined &&
-			!attestedServedPaths.has(target.expectedPath)
-		);
-	}
-
-	return !viewServedPaths.has(target.expectedPath);
 }
 
 /**
@@ -411,25 +403,15 @@ export async function partitionAvailability(
 			options.destinationProbes.viewServed(knownPaths),
 			options.store.queryValidPaths(knownPaths)
 		]);
-	const servedPaths = options.targets.flatMap((target) => {
-		if (target.expectedPath === undefined) {
-			return [];
-		}
-
-		return destinationServedPaths.has(target.expectedPath)
-			? [target.expectedPath]
-			: [];
-	});
-	const attestedServedPaths =
-		options.attestedServed === undefined
-			? undefined
-			: await options.attestedServed([...new Set(servedPaths)]);
+	const build = options.build ?? 'missing';
+	const substituter = options.substituter ?? 'leave';
+	const publish = options.publish ?? 'outputs';
 	const availabilityTargets = options.targets.filter((target) =>
 		shouldQueryAvailabilityForTarget(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
-			attestedServedPaths
+			build
 		)
 	);
 	const queriedMissing =
@@ -506,22 +488,22 @@ export async function partitionAvailability(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
-			substitutableExternal
+			substitutableExternal,
+			build,
+			substituter
 		)
 	}));
 	const rejections = await confirmCandidates(classified, options);
 	const rejectedPaths = new Set(
 		rejections.map((rejection) => rejection.storePath)
 	);
-	const unattested = unattestedPaths(classified, attestedServedPaths);
-
 	for (const { target, classification } of classified) {
-		addToBucket(
-			buckets,
-			target,
-			builtWhenUnattested(confirmed(classification, rejectedPaths), unattested)
-		);
+		addToBucket(buckets, target, confirmed(classification, rejectedPaths));
 	}
+	const closureTargets =
+		publish === 'closure'
+			? [...new Set([...attachOnly, ...publishByReference])]
+			: [];
 
 	return {
 		attachOnly,
@@ -529,9 +511,10 @@ export async function partitionAvailability(
 		leftUpstream,
 		leftUpstreamRejections: rejections,
 		buildSet,
+		rebuildSet: build === 'rebuild' ? [...buildSet] : [],
+		closureTargets,
 		dependencyBuilds: finallyAccounted.dependencyBuilds,
 		dependencyCopies: finallyAccounted.dependencyCopies,
-		unattested: unattested.values().toArray().toSorted(byCodeUnit),
 		counts: {
 			willBuild: partition.willBuild.length,
 			willSubstitute: partition.willSubstitute.length,
@@ -1179,62 +1162,23 @@ function confirmed(
 	return { bucket: 'buildSet' };
 }
 
-function unattestedPaths(
-	classified: readonly ClassifiedTarget[],
-	attestedServedPaths: ReadonlySet<StorePathString> | undefined
-): ReadonlySet<StorePathString> {
-	if (attestedServedPaths === undefined) {
-		return new Set();
-	}
-
-	const attachOnlyPaths = new Set(
-		classified.flatMap(({ classification }) =>
-			classification.bucket === 'attachOnly' ? [classification.path] : []
-		)
-	);
-
-	if (attachOnlyPaths.size === 0) {
-		return new Set();
-	}
-
-	return new Set(
-		attachOnlyPaths
-			.values()
-			.filter((storePath) => !attestedServedPaths.has(storePath))
-	);
-}
-
-// Attaching a target to its root publishes a path already served by the
-// destination cache. When that cache holds no attestation for the path, the
-// published target has no provenance, so a run that requires attested
-// availability puts the target in the build set and attaches an attestation to
-// the newly built output.
-function builtWhenUnattested(
-	classification: Classification,
-	unattested: ReadonlySet<StorePathString>
-): Classification {
-	if (
-		classification.bucket !== 'attachOnly' ||
-		!unattested.has(classification.path)
-	) {
-		return classification;
-	}
-
-	return { bucket: 'buildSet' };
-}
-
 /**
  * Classifies one target from the destination, view and substitutability
- * answers that apply to it, checked in that order of precedence. Exported so a
- * later re-probe over a subset of the same targets classifies by these rules
- * and no others.
+ * answers under the selected build and substituter policies. Exported for a
+ * later re-probe over a subset of the same targets.
  */
 export function classify(
 	target: AvailabilityTarget,
 	destinationServedPaths: ReadonlySet<StorePathString>,
 	viewServedPaths: ReadonlySet<StorePathString>,
-	substitutableExternal: ReadonlySet<StorePathString>
+	substitutableExternal: ReadonlySet<StorePathString>,
+	build: BuildPolicy = 'missing',
+	substituter: SubstituterPolicy = 'leave'
 ): Classification {
+	if (build === 'rebuild') {
+		return { bucket: 'buildSet' };
+	}
+
 	const path = target.expectedPath;
 
 	if (path === undefined) {
@@ -1250,7 +1194,9 @@ export function classify(
 	}
 
 	if (substitutableExternal.has(path)) {
-		return { bucket: 'leftUpstream', path };
+		return substituter === 'copy'
+			? { bucket: 'buildSet' }
+			: { bucket: 'leftUpstream', path };
 	}
 
 	return { bucket: 'buildSet' };

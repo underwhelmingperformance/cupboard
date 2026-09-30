@@ -2,11 +2,21 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { setOutput as setGithubOutput } from '@actions/core';
+import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
+import {
+	type BuildReceipt,
+	buildReceiptSchema
+} from '@cupboard/protocol/build';
 import {
 	type BuildOriginPredicate,
 	buildOriginPredicateSchema,
 	buildOriginPredicateType
 } from '@cupboard/protocol/build-origin';
+import {
+	type ScaiAttributeReport,
+	scaiAttributeReportSchema,
+	scaiPredicateType
+} from '@cupboard/protocol/scai';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { chunk } from '@cupboard/shared/collections';
 import type { Command } from 'commander';
@@ -33,27 +43,38 @@ import {
 	subjectsPerStatement
 } from '../attestation-signing.ts';
 import {
+	AttestationBundleTooLargeForSubjectError,
 	AttestationPredicateFileError,
+	AttestationSubjectNotAcceptedError,
 	AttestationSubjectsMissingError,
 	BuildOriginSubjectMissingError,
 	MissingInputError,
 	PredicateGroupingUnsupportedError,
+	PredicateSourceConflictError,
 	PredicateTypeRequiredError
 } from '../errors.ts';
 import { isEnabled, provided, providedChoice } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
 import {
+	reproducedSubjects,
+	reproductionReport
+} from '../reproduction-report.ts';
+import {
+	inTotoStatement,
 	type SigstoreSignerDependencies,
 	statementSignerFor
 } from '../sigstore-signing.ts';
 
 export interface AttestSignOptions {
+	readonly receiptFile?: string;
+	readonly inlineBundles?: string;
 	readonly checksumsFile?: string;
 	readonly builtChecksumsFile?: string;
 	readonly predicateFile?: string;
 	readonly predicateType?: string;
 	readonly bundleFile?: string;
 	readonly originBundleFile?: string;
+	readonly bundlesFile?: string;
 	readonly githubToken?: string;
 	readonly destinationAccess?: string;
 	readonly signingProfile?: string;
@@ -62,12 +83,16 @@ export interface AttestSignOptions {
 }
 
 export interface AttestSignInputs {
+	readonly receiptFile: string;
+	readonly shouldEmitInlineBundles: boolean;
 	readonly checksumsFile: string;
+	readonly signedChecksumsFile: string;
 	readonly builtChecksumsFile: string;
 	readonly predicateFile: string;
 	readonly predicateType: string;
 	readonly bundleFile: string;
 	readonly originBundleFile: string;
+	readonly bundlesFile: string;
 	readonly githubToken: string;
 	readonly policy: SigningPolicy;
 }
@@ -77,6 +102,7 @@ export interface AttestSignInputs {
  */
 export interface AttestSignIo {
 	readonly readText: (filePath: string) => Promise<string>;
+	readonly writeText: (filePath: string, contents: string) => Promise<void>;
 	readonly writeBundle: (
 		filePath: string,
 		signed: SignedAttestation
@@ -99,12 +125,13 @@ export interface AttestSignDependencies extends SigningDependencies {
 	readonly io?: AttestSignIo;
 }
 
-// The `attest` command validates the build-origin predicate against its schema
-// before it writes the file, so this command signs the document as it stands.
-// The only check here is that the document is a JSON object, because that is
-// what the predicate field of an in-toto statement takes.
 const predicateDocumentSchema = z.looseObject({});
 const maximumGithubAttestationSubjects = 1024;
+// Base64 expands the statement payload, and the certificate and witnesses add
+// bytes. Check the signed bundle below because witness sizes can vary.
+const maximumStatementPayloadBytes = Math.floor(
+	((maxAttestationBundleBytes - 64 * 1024) * 3) / 4
+);
 
 export function registerAttestSignCommand(
 	program: Command,
@@ -113,23 +140,27 @@ export function registerAttestSignCommand(
 	program
 		.command('attest-sign')
 		.description(
-			'Sign build provenance and build-origin statements for the resolved subjects.'
+			'Sign build provenance and an optional custom predicate for the resolved subjects.'
 		)
 		.requiredOption(
 			'--checksums-file <path>',
-			'Read the accepted receipt subjects from this checksums file. The build-origin statements cover them.'
+			'Read accepted receipt subjects from this checksums file.'
 		)
 		.requiredOption(
 			'--built-checksums-file <path>',
 			'Read the subjects this run built from this checksums file. The build-provenance statements cover them.'
 		)
 		.option(
+			'--receipt-file <path>',
+			'Generate reproduction assertions from this validated build receipt. Cannot be combined with --predicate-file.'
+		)
+		.option(
 			'--predicate-file <path>',
-			'Sign this build-origin predicate. Requires --predicate-type. Without it the run signs build provenance alone.'
+			'Read an optional custom predicate from this file. Requires --predicate-type.'
 		)
 		.option(
 			'--predicate-type <type>',
-			'In-toto predicate type of the build-origin predicate. Required with --predicate-file.'
+			'In-toto predicate type of the custom predicate. Required with --predicate-file.'
 		)
 		.option(
 			'--bundle-file <path>',
@@ -137,7 +168,15 @@ export function registerAttestSignCommand(
 		)
 		.option(
 			'--origin-bundle-file <path>',
-			'Write the build-origin bundles under this base path. Defaults to a file beside the checksums file.'
+			'Write custom predicate bundles under this base path. Defaults to a file beside the checksums file.'
+		)
+		.option(
+			'--bundles-file <path>',
+			'Write generated bundle paths to this file, one per line.'
+		)
+		.option(
+			'--inline-bundles <boolean>',
+			'Control how bundle lists are returned. true writes inline bundle outputs as well as files; false returns files without inline bundle outputs.'
 		)
 		.option(
 			'--github-token <token>',
@@ -157,7 +196,7 @@ export function registerAttestSignCommand(
 		)
 		.option(
 			'--subject-grouping <grouping>',
-			"Select how many subjects each statement covers. run signs one statement for all accepted subjects, up to the per-statement limit. individual signs a separate statement for each subject, so each bundle contains one subject. The default depends on the destination cache's access."
+			"Select how subjects are grouped within each statement type. run signs batches of up to 1024 subjects. individual signs a separate statement for each subject. The default depends on the destination cache's access."
 		)
 		.action((options: AttestSignOptions) =>
 			attestSignAction(options, createGithubReporter(), dependencies)
@@ -187,15 +226,28 @@ export function resolveAttestSignInputs(
 
 	const predicateFile = provided(options.predicateFile) ?? '';
 	const predicateType = provided(options.predicateType) ?? '';
+	const receiptFile = provided(options.receiptFile) ?? '';
+
+	if (receiptFile !== '' && predicateFile !== '') {
+		throw new PredicateSourceConflictError();
+	}
 
 	if (predicateFile !== '' && predicateType === '') {
 		throw new PredicateTypeRequiredError();
 	}
 
 	const bundleDirectory = path.dirname(path.resolve(checksumsFile));
+	const shouldEmitInlineBundles = isEnabled(
+		'inline-bundles',
+		options.inlineBundles,
+		true
+	);
 
 	return {
+		receiptFile,
+		shouldEmitInlineBundles,
 		checksumsFile,
+		signedChecksumsFile: path.join(bundleDirectory, 'signed-subjects.txt'),
 		builtChecksumsFile,
 		predicateFile,
 		predicateType,
@@ -206,7 +258,10 @@ export function resolveAttestSignInputs(
 			path.join(bundleDirectory, 'provenance.sigstore.json'),
 		originBundleFile:
 			provided(options.originBundleFile) ??
-			path.join(bundleDirectory, 'build-origin.sigstore.json')
+			path.join(bundleDirectory, 'build-origin.sigstore.json'),
+		bundlesFile:
+			provided(options.bundlesFile) ??
+			(shouldEmitInlineBundles ? '' : path.join(bundleDirectory, 'bundles.txt'))
 	};
 }
 
@@ -276,6 +331,10 @@ async function readPredicate(
 
 const nodeAttestSignIo: AttestSignIo = {
 	readText: (filePath) => readFile(filePath, 'utf8'),
+	async writeText(filePath, contents) {
+		await mkdir(path.dirname(filePath), { recursive: true });
+		await writeFile(filePath, contents);
+	},
 	async writeBundle(filePath, signed) {
 		await mkdir(path.dirname(filePath), { recursive: true });
 		await writeFile(filePath, signed.bundle);
@@ -283,9 +342,9 @@ const nodeAttestSignIo: AttestSignIo = {
 };
 
 /**
- * Build provenance covers only paths built by this run. The action does not
- * sign build provenance when this run built none of the published paths.
- * Build-origin attestations cover every accepted receipt subject.
+ * Build provenance covers paths built by this run. An explicit custom predicate
+ * applies to the explicitly selected subjects. Generated reproduction reports
+ * cover only the subjects with locally observed successful verification checks.
  */
 export async function attestSignAction(
 	options: AttestSignOptions,
@@ -301,30 +360,32 @@ export async function attestSignAction(
 	}
 
 	const builtSubjects = await readSubjects(inputs.builtChecksumsFile, io);
+	requireAcceptedSubjects(builtSubjects, subjects);
 	const signerFor = dependencies.signerFor ?? statementSignerFor;
 	const provenanceStatement =
 		dependencies.provenanceStatement ?? slsaProvenanceStatement;
 	const signing: SigningDependencies =
 		dependencies.delay === undefined ? {} : { delay: dependencies.delay };
 	const setOutput = dependencies.setOutput ?? setGithubOutput;
-	// Read the build-origin predicate before signing. If this read happened
-	// later, an unreadable file could fail the run after the action had already
-	// recorded a provenance attestation in the repository.
-	const originPredicate =
-		inputs.predicateFile === ''
-			? undefined
-			: await readPredicate(inputs.predicateFile, io);
-
-	const originStatement =
-		originPredicate === undefined
-			? undefined
-			: originStatementFor(inputs, originPredicate, subjects);
+	const custom = await resolveCustomStatement(inputs, io, subjects);
+	const signedSubjects =
+		custom === undefined
+			? builtSubjects
+			: coveredSubjects(subjects, [
+					...builtSubjects.map((subject) => subject.name),
+					...custom.subjects.map((subject) => subject.name)
+				]);
 	const disclosed = disclosureLines(
-		signingDisclosure(inputs.policy, subjects.length)
+		signingDisclosure(inputs.policy, {
+			built: builtSubjects.length,
+			custom: custom === undefined ? 0 : custom.subjects.length
+		})
 	);
 
-	for (const line of disclosed) {
-		reporter.info(line);
+	if (signedSubjects.length > 0) {
+		for (const line of disclosed) {
+			reporter.info(line);
+		}
 	}
 
 	const provenanceBundles =
@@ -342,14 +403,13 @@ export async function attestSignAction(
 					io
 				});
 
-	await setOutput('bundle-path', bundlePaths(provenanceBundles));
-
-	const originBundles =
-		originStatement === undefined
+	const customBundles =
+		custom === undefined
 			? []
 			: await signSubjectBatches({
-					subjects,
-					statementFor: originStatement,
+					subjects: custom.subjects,
+					statementFor: custom.statementFor,
+					canSplitSubjects: custom.canSplitSubjects,
 					bundleFile: inputs.originBundleFile,
 					githubToken: inputs.githubToken,
 					policy: inputs.policy,
@@ -359,10 +419,29 @@ export async function attestSignAction(
 					io
 				});
 
-	await setOutput('origin-bundle-path', bundlePaths(originBundles));
-
-	const bundles = [...provenanceBundles, ...originBundles];
-	await setOutput('bundles', bundlePaths(bundles));
+	const bundles = [...provenanceBundles, ...customBundles];
+	const bundleList = bundlePaths(bundles);
+	const bundlesFile = inputs.bundlesFile;
+	if (inputs.shouldEmitInlineBundles) {
+		await setOutput('bundle-path', bundlePaths(provenanceBundles));
+		await setOutput('origin-bundle-path', bundlePaths(customBundles));
+		await setOutput('bundles', bundleList);
+	}
+	if (bundlesFile !== '') {
+		await io.writeText(
+			bundlesFile,
+			bundleList.concat(bundles.length === 0 ? '' : '\n')
+		);
+		await setOutput('bundles-file', bundles.length === 0 ? '' : bundlesFile);
+	}
+	await io.writeText(
+		inputs.signedChecksumsFile,
+		signedSubjects
+			.map((subject) => `${subject.sha256}  ${subject.name}`)
+			.join('\n')
+			.concat(signedSubjects.length === 0 ? '' : '\n')
+	);
+	await setOutput('checksums-file', inputs.signedChecksumsFile);
 
 	const produced = producedLines(
 		inputs.policy.profile,
@@ -409,26 +488,163 @@ type StatementFor = (
 	subjects: readonly AttestationSubject[]
 ) => AttestationStatement;
 
+interface CustomStatement {
+	readonly subjects: readonly AttestationSubject[];
+	readonly statementFor: StatementFor;
+	readonly canSplitSubjects?: boolean;
+}
+
+// The subjects listed in the signed-checksums file: everything a signed
+// statement covers, in the accepted order.
+function coveredSubjects(
+	accepted: readonly AttestationSubject[],
+	covered: readonly string[]
+): readonly AttestationSubject[] {
+	const names = new Set(covered);
+
+	return accepted.filter((subject) => names.has(subject.name));
+}
+
+function requireAcceptedSubjects(
+	selected: readonly AttestationSubject[],
+	accepted: readonly AttestationSubject[]
+): void {
+	const acceptedByName = new Map(
+		accepted.map((subject) => [subject.name, subject.sha256])
+	);
+	const mismatched = selected.filter(
+		(subject) => acceptedByName.get(subject.name) !== subject.sha256
+	);
+
+	if (mismatched.length > 0) {
+		throw new AttestationSubjectNotAcceptedError(
+			mismatched.map((subject) => subject.name)
+		);
+	}
+}
+
 function runStatement(statement: AttestationStatement): StatementFor {
 	return () => statement;
 }
 
-/**
- * Returns the build-origin statement for a group of subjects. With individual
- * grouping, the predicate contains only the entries for the current subject.
- * The source predicate contains every accepted subject, so signing it unchanged
- * would disclose the other subjects in each bundle.
- */
+function customStatementFor(
+	inputs: AttestSignInputs,
+	predicate: object,
+	subjects: readonly AttestationSubject[]
+): CustomStatement {
+	if (inputs.predicateType === scaiPredicateType) {
+		return scaiStatementFor(inputs, predicate, subjects);
+	}
+
+	return originStatementFor(inputs, predicate, subjects);
+}
+
+async function resolveCustomStatement(
+	inputs: AttestSignInputs,
+	io: AttestSignIo,
+	subjects: readonly AttestationSubject[]
+): Promise<CustomStatement | undefined> {
+	if (inputs.receiptFile !== '') {
+		const source = await io.readText(inputs.receiptFile);
+		const document: unknown = JSON.parse(source);
+		return reproductionStatementFor(
+			buildReceiptSchema.parse(document),
+			subjects
+		);
+	}
+
+	if (inputs.predicateFile === '') {
+		return undefined;
+	}
+	const predicate = await readPredicate(inputs.predicateFile, io);
+	return customStatementFor(inputs, predicate, subjects);
+}
+
+function scaiStatementFor(
+	inputs: AttestSignInputs,
+	predicate: object,
+	subjects: readonly AttestationSubject[]
+): CustomStatement {
+	const report = scaiAttributeReportSchema.parse(predicate);
+
+	if (
+		subjects.length > 1 &&
+		(inputs.policy.grouping === 'individual' ||
+			subjects.length > maximumGithubAttestationSubjects ||
+			Buffer.byteLength(
+				JSON.stringify(
+					inTotoStatement(subjects, {
+						predicateType: scaiPredicateType,
+						predicate: report
+					})
+				)
+			) > maximumStatementPayloadBytes)
+	) {
+		throw new PredicateGroupingUnsupportedError(scaiPredicateType);
+	}
+
+	return {
+		subjects,
+		statementFor: runStatement({
+			predicateType: scaiPredicateType,
+			predicate: report
+		}),
+		canSplitSubjects: false
+	};
+}
+
+function reproductionStatementFor(
+	receipt: BuildReceipt,
+	accepted: readonly AttestationSubject[]
+): CustomStatement | undefined {
+	const reproduced = reproducedSubjects(receipt);
+	if (reproduced.length === 0) {
+		return undefined;
+	}
+
+	const selected = reproduced.map((subject) => ({
+		name: path.basename(subject.storePath),
+		sha256: subject.sha256
+	}));
+	requireAcceptedSubjects(selected, accepted);
+	const reproducedByDigest = Map.groupBy(
+		reproduced,
+		(subject) => subject.sha256
+	);
+	const subjects = accepted.filter((subject) =>
+		reproducedByDigest.has(subject.sha256)
+	);
+
+	return {
+		subjects,
+		statementFor: (group) => {
+			const digests = new Set(group.map((subject) => subject.sha256));
+			const assertions = digests
+				.values()
+				.flatMap((digest) => reproducedByDigest.get(digest) ?? [])
+				.toArray();
+
+			return {
+				predicateType: scaiPredicateType,
+				predicate: reproductionReport(assertions, group.length === 1)
+			};
+		}
+	};
+}
+
 function originStatementFor(
 	inputs: AttestSignInputs,
 	predicate: object,
 	subjects: readonly AttestationSubject[]
-): StatementFor {
+): CustomStatement {
 	if (inputs.policy.grouping === 'run') {
-		return runStatement({
-			predicateType: inputs.predicateType,
-			predicate
-		});
+		return {
+			subjects,
+			statementFor: runStatement({
+				predicateType: inputs.predicateType,
+				predicate
+			})
+		};
 	}
 
 	if (inputs.predicateType !== buildOriginPredicateType) {
@@ -444,10 +660,13 @@ function originStatementFor(
 		soleSubjectPredicate(parsed, [subject]);
 	}
 
-	return (group) => ({
-		predicateType: inputs.predicateType,
-		predicate: soleSubjectPredicate(parsed, group)
-	});
+	return {
+		subjects,
+		statementFor: (group) => ({
+			predicateType: inputs.predicateType,
+			predicate: soleSubjectPredicate(parsed, group)
+		})
+	};
 }
 
 function soleSubjectPredicate(
@@ -474,6 +693,7 @@ function soleSubjectPredicate(
 interface SubjectBatchSigning {
 	readonly subjects: readonly AttestationSubject[];
 	readonly statementFor: StatementFor;
+	readonly canSplitSubjects?: boolean;
 	readonly bundleFile: string;
 	readonly githubToken: string;
 	readonly policy: SigningPolicy;
@@ -495,24 +715,122 @@ async function signSubjectBatches(
 		)
 	);
 
-	for (const [index, subjects] of subjectBatches.entries()) {
-		const signed = await signStatement(
-			options.statementFor(subjects),
-			options.signerFor({
-				subjects,
-				githubToken: options.githubToken,
-				policy: options.policy
-			}),
-			options.reporter,
-			options.signing
-		);
-		const file = bundleFileForBatch(options.bundleFile, index);
+	for (const subjects of subjectBatches) {
+		const signedBatches = await signFittingBatch(options, subjects);
+		for (const signed of signedBatches) {
+			const file = bundleFileForBatch(options.bundleFile, bundles.length);
 
-		await options.io.writeBundle(file, signed);
-		bundles.push({ file, signed });
+			await options.io.writeBundle(file, signed);
+			bundles.push({ file, signed });
+		}
 	}
 
 	return bundles;
+}
+
+async function signFittingBatch(
+	options: SubjectBatchSigning,
+	subjects: readonly AttestationSubject[]
+): Promise<readonly SignedAttestation[]> {
+	const statement = options.statementFor(subjects);
+	const payloadBytes = Buffer.byteLength(
+		JSON.stringify(inTotoStatement(subjects, statement))
+	);
+
+	if (payloadBytes > maximumStatementPayloadBytes) {
+		const split = await splitFittingBatch(options, subjects, statement);
+		if (split !== undefined) {
+			return split;
+		}
+	}
+
+	const signed = await signStatement(
+		statement,
+		options.signerFor({
+			subjects,
+			githubToken: options.githubToken,
+			policy: options.policy
+		}),
+		options.reporter,
+		options.signing
+	);
+	const bundleBytes = Buffer.byteLength(signed.bundle);
+
+	if (bundleBytes <= maxAttestationBundleBytes) {
+		return [signed];
+	}
+
+	const split = await splitFittingBatch(options, subjects, statement);
+	if (split !== undefined) {
+		return split;
+	}
+
+	const [subject] = subjects;
+	if (subject === undefined) {
+		throw new AttestationSubjectsMissingError(options.bundleFile);
+	}
+
+	throw new AttestationBundleTooLargeForSubjectError(
+		subject.name,
+		bundleBytes,
+		maxAttestationBundleBytes
+	);
+}
+
+async function splitFittingBatch(
+	options: SubjectBatchSigning,
+	subjects: readonly AttestationSubject[],
+	statement: AttestationStatement
+): Promise<readonly SignedAttestation[] | undefined> {
+	if (subjects.length > 1) {
+		if (options.canSplitSubjects === false) {
+			throw new PredicateGroupingUnsupportedError(statement.predicateType);
+		}
+		return signSplitBatch(options, subjects);
+	}
+
+	if (statement.predicateType !== scaiPredicateType) {
+		return undefined;
+	}
+	const report: ScaiAttributeReport = scaiAttributeReportSchema.parse(
+		statement.predicate
+	);
+	if (report.attributes.length < 2) {
+		return undefined;
+	}
+
+	const midpoint = Math.floor(report.attributes.length / 2);
+	const partitions = [
+		report.attributes.slice(0, midpoint),
+		report.attributes.slice(midpoint)
+	];
+	const signed: SignedAttestation[] = [];
+	for (const attributes of partitions) {
+		signed.push(
+			...(await signFittingBatch(
+				{
+					...options,
+					statementFor: runStatement({
+						...statement,
+						predicate: { ...report, attributes }
+					})
+				},
+				subjects
+			))
+		);
+	}
+	return signed;
+}
+
+async function signSplitBatch(
+	options: SubjectBatchSigning,
+	subjects: readonly AttestationSubject[]
+): Promise<readonly SignedAttestation[]> {
+	const midpoint = Math.floor(subjects.length / 2);
+	const first = await signFittingBatch(options, subjects.slice(0, midpoint));
+	const second = await signFittingBatch(options, subjects.slice(midpoint));
+
+	return [...first, ...second];
 }
 
 function bundleFileForBatch(bundleFile: string, index: number): string {

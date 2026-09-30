@@ -1,11 +1,16 @@
 name: Attest cupboard store paths
 description:
-  Signs Sigstore attestations for the paths in a build receipt. SLSA build
-  provenance covers the paths that the job built. Build origin covers every path
-  in the receipt and records how each one became available. Before signing, the
-  action checks each path's NAR hash, and any deriver in the receipt, against
-  the narinfo in the destination cache.
+  Signs SLSA provenance for paths built on the runner in this run. Before
+  signing, the action checks each path's NAR hash and any recorded deriver
+  against the destination narinfo.
 inputs:
+  inline-bundles:
+    description:
+      Control how bundle lists are returned. `true` writes inline bundle outputs
+      as well as files. `false` returns files without inline bundle outputs. Use
+      `false` for large bundle lists.
+    required: false
+    default: 'true'
   receipt-file:
     description:
       Receipt written earlier in the job by actions/build-paths or by a cohort
@@ -13,8 +18,8 @@ inputs:
     required: true
   checksums-file:
     description:
-      Where to write the checksums of every path to attest. Defaults to a file
-      under RUNNER_TEMP.
+      Where to write the checksums of every accepted receipt path. Defaults to a
+      file under RUNNER_TEMP.
     required: false
   built-checksums-file:
     description:
@@ -24,8 +29,9 @@ inputs:
     required: false
   predicate-file:
     description:
-      Where to write the build-origin predicate. Defaults to a file next to the
-      checksums file.
+      Where to write the SCAI reproduction report. Empty when no local
+      verification rebuild succeeded. Defaults to a file next to the checksums
+      file.
     required: false
   url:
     description:
@@ -86,35 +92,40 @@ outputs:
   bundle-path:
     description:
       Paths of the build-provenance bundles, one per line. Empty when the job
-      built none of the paths in the receipt.
+      built none of the paths in the receipt. Available when inline-bundles is
+      true; bundles-file always lists all generated bundles.
     value: ${{ steps.attest.outputs.bundle-path }}
   origin-bundle-path:
     description:
-      Paths of the build-origin bundles, one per line. Empty for a receipt from
-      actions/build-paths, which does not record origins, or when no path in the
-      receipt has a recorded origin.
+      Paths of the SCAI attribute-report bundles, one per line. Empty when the
+      report has no assertions. The action signs no build-origin statement.
     value: ${{ steps.attest.outputs.origin-bundle-path }}
   bundles:
     description:
-      Paths to the generated SLSA build-provenance and build-origin bundles, one
-      per line. Empty when the action signed nothing. Run actions/attest-attach
-      when this output is non-empty and pass it as that action's bundle input.
+      Paths to the generated bundles, one per line. Available when
+      inline-bundles is true. Empty when the action signed no statements. Use
+      bundles-file for publication workflows.
     value: ${{ steps.attest.outputs.bundles }}
+  bundles-file:
+    description:
+      File containing the generated bundle paths, one per line. Pass this file
+      to actions/attest-attach.
+    value: ${{ steps.attest.outputs.bundles-file }}
   checksums-file:
     description:
-      Path to the checksums of every attested path. The build-origin
-      attestations cover these paths.
-    value: ${{ steps.subjects.outputs.checksums-file }}
+      Path to the checksums of the receipt paths selected for signing. Pass this
+      file to actions/attest-attach with the generated bundles.
+    value: ${{ steps.attest.outputs.checksums-file }}
   subject-count:
-    description: Number of attested paths.
+    description: Number of accepted receipt paths.
     value: ${{ steps.subjects.outputs.subject-count }}
   built-checksums-file:
     description:
-      Path to the checksums of the attested paths that the job built. The
+      Path to the checksums of the accepted paths that the job built. The
       build-provenance attestations cover these paths.
     value: ${{ steps.subjects.outputs.built-checksums-file }}
   built-subject-count:
-    description: Number of attested paths that the job built.
+    description: Number of accepted paths that the job built.
     value: ${{ steps.subjects.outputs.built-subject-count }}
 runs:
   using: composite
@@ -198,14 +209,14 @@ runs:
       if: ${{ steps.subjects.outputs.subject-count != '0' }}
       shell: bash
       env:
+        RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ steps.subjects.outputs.checksums-file }}
         BUILT_CHECKSUMS_FILE: ${{ steps.subjects.outputs.built-checksums-file }}
-        PREDICATE_FILE: ${{ steps.subjects.outputs.predicate-file }}
-        PREDICATE_TYPE: ${{ steps.subjects.outputs.predicate-type }}
         DESTINATION_ACCESS: ${{ steps.subjects.outputs.destination-access }}
         SIGNING_PROFILE: ${{ inputs.signing-profile }}
         UPLOAD_TO_GITHUB: ${{ inputs.upload-to-github }}
         SUBJECT_GROUPING: ${{ inputs.subject-grouping }}
+        INLINE_BUNDLES: ${{ inputs.inline-bundles }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
       run: |
         node --experimental-transform-types \
@@ -213,10 +224,11 @@ runs:
           "$GITHUB_ACTION_PATH/../src/main.ts" attest-sign \
           --checksums-file "$CHECKSUMS_FILE" \
           --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
-          --predicate-file "$PREDICATE_FILE" \
-          --predicate-type "$PREDICATE_TYPE" \
+          --receipt-file "$RECEIPT_FILE" \
           --destination-access "$DESTINATION_ACCESS" \
           --signing-profile "$SIGNING_PROFILE" \
           --upload-to-github "$UPLOAD_TO_GITHUB" \
           --subject-grouping "$SUBJECT_GROUPING" \
+          --inline-bundles "$INLINE_BUNDLES" \
+          --bundles-file "$RUNNER_TEMP/cupboard-attest/bundles.txt" \
           --github-token "$GH_TOKEN"

@@ -9,7 +9,7 @@ import {
 	storePathSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 
 import { runCohortSequence } from '../build-push/cohorts.ts';
@@ -192,6 +192,23 @@ describe('aggregateCohortTargets', () => {
 });
 
 describe('aggregateBuildReceipts', () => {
+	it('keeps left-upstream selection without adding signing subjects', () => {
+		expect(
+			aggregateBuildReceipts([
+				{ version: 3, paths: [], subjects: [], leftUpstream: [pathA] },
+				{ version: 3, paths: [pathB], subjects: [] }
+			])
+		).toStrictEqual({
+			version: 3,
+			paths: [pathB],
+			subjects: [],
+			uploaded: [],
+			failed: [],
+			collected: [],
+			leftUpstream: [pathA]
+		});
+	});
+
 	it('preserves successful paths and exact failed targets across a sequence', () => {
 		expect(
 			aggregateBuildReceipts([
@@ -290,6 +307,21 @@ async function parseBuildPush(arguments_: readonly string[]): Promise<unknown> {
 }
 
 describe('registerBuildPushCommand', () => {
+	it.each([['--closure'], ['--intermediate-paths-file', 'paths.txt']])(
+		'rejects publication scope combined with %s',
+		async (...conflict) => {
+			const result = await parseBuildPush([
+				tenantUrl,
+				'--publication-scope',
+				'outputs',
+				...conflict,
+				'--cohorts-file',
+				'plan.json'
+			]);
+			expect(result).toBeInstanceOf(CommanderError);
+		}
+	);
+
 	it('recognises a cache name only before the command boundary', async () => {
 		const result = await parseBuildPush([
 			`${tenantUrl}/cache/release`,

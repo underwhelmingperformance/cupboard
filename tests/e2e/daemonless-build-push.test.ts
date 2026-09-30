@@ -408,6 +408,7 @@ function daemonlessDependencies(options: {
 async function runDaemonlessCohort(options: {
 	readonly derivation: StorePathString;
 	readonly run: string;
+	readonly rebuild?: boolean;
 	readonly client: PushClient;
 }): Promise<unknown> {
 	const prepared = store();
@@ -424,7 +425,11 @@ async function runDaemonlessCohort(options: {
 		{
 			invocation: {
 				kind: 'constructed',
-				build: { installables: [`${options.derivation}^*`], attempts: 1 }
+				build: {
+					installables: [`${options.derivation}^*`],
+					attempts: 1,
+					...(options.rebuild !== undefined && { rebuild: options.rebuild })
+				}
 			},
 			receiptFile
 		},
@@ -443,59 +448,64 @@ async function runDaemonlessCohort(options: {
 }
 
 describe('build-push without a Nix daemon', () => {
-	it('builds in a store of its own and publishes the completed output', async () => {
-		const seed = randomUUID().replaceAll('-', '');
-		const environment = daemonlessEnvironment();
-		const derivation = await instantiate(seed, environment);
-		const nix = Nix.open(daemonlessStoreDependencies());
-		const record: RecordedCache = {
-			negotiated: [],
-			uploaded: [],
-			committed: []
-		};
-		const receipt = await runDaemonlessCohort({
-			derivation,
-			run: seed,
-			client: recordingClient(record)
-		});
-		const [output] = await nix.queryDerivationOutputPaths([derivation]);
-		const storePath = storePathSchema.parse(output);
-		const info = await nix.queryPathInfo(storePath);
+	it.each([false, true])(
+		'builds a cold output and publishes it with rebuild=%s',
+		async (rebuild) => {
+			const seed = randomUUID().replaceAll('-', '');
+			const environment = daemonlessEnvironment();
+			const derivation = await instantiate(seed, environment);
+			const nix = Nix.open(daemonlessStoreDependencies());
+			const record: RecordedCache = {
+				negotiated: [],
+				uploaded: [],
+				committed: []
+			};
+			const receipt = await runDaemonlessCohort({
+				derivation,
+				run: seed,
+				rebuild,
+				client: recordingClient(record)
+			});
+			const [output] = await nix.queryDerivationOutputPaths([derivation]);
+			const storePath = storePathSchema.parse(output);
+			const info = await nix.queryPathInfo(storePath);
 
-		expect({
-			negotiated: record.negotiated,
-			committed: record.committed,
-			uploadedNars: record.uploaded.length,
-			builtLocally: info.ultimate,
-			receipt
-		}).toStrictEqual({
-			negotiated: [storePath, storePath],
-			committed: [StorePath.hash(storePath)],
-			uploadedNars: 1,
-			builtLocally: true,
-			receipt: {
-				version: 3,
-				paths: [storePath],
-				outcomes: [{ outcome: 'built', storePath }],
-				failed: [],
-				collected: [],
-				subjects: [
-					{
-						origin: 'built',
-						storePath,
-						narHash: info.narHash.digestHex(),
-						derivation,
-						buildStore: 'auto',
-						verification: 'local',
-						attempt: 1,
-						attemptId: 'attempt-1'
-					}
-				],
-				uploaded: [storePath],
-				childExitStatus: 0
-			}
-		});
-	}, 120_000);
+			expect({
+				negotiated: record.negotiated,
+				committed: record.committed,
+				uploadedNars: record.uploaded.length,
+				builtLocally: info.ultimate,
+				receipt
+			}).toStrictEqual({
+				negotiated: [storePath, storePath],
+				committed: [StorePath.hash(storePath)],
+				uploadedNars: 1,
+				builtLocally: true,
+				receipt: {
+					version: 3,
+					paths: [storePath],
+					outcomes: [{ outcome: 'built', storePath }],
+					failed: [],
+					collected: [],
+					subjects: [
+						{
+							origin: 'built',
+							storePath,
+							narHash: info.narHash.digestHex(),
+							derivation,
+							buildStore: 'auto',
+							verification: 'local',
+							attempt: 1,
+							attemptId: 'attempt-1'
+						}
+					],
+					uploaded: [storePath],
+					childExitStatus: 0
+				}
+			});
+		},
+		120_000
+	);
 
 	// The first run built the path, so Nix marked it as ultimate. The second run
 	// publishes the existing path and does not claim it as a build result.
@@ -689,7 +699,9 @@ describe('build-push without a Nix daemon', () => {
 						narHash: info.narHash.digestHex(),
 						derivation,
 						buildStore: 'auto',
-						verification: 'build-store'
+						verification: 'local',
+						attempt: 1,
+						attemptId: 'attempt-1'
 					}
 				],
 				uploaded: [storePath],

@@ -67,6 +67,7 @@ import {
 	requireAttestationAttachClient,
 	runAttestationAttachment
 } from '../attest/attach.ts';
+import type { AttestationBundleClient } from '../attest/bundle-transport.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { isStaleUploadError } from '../client/rpc-errors.ts';
@@ -108,6 +109,7 @@ import {
 	type ReferenceMetadata,
 	type ReferenceSource
 } from './reference.ts';
+import { ReferenceSnapshotDivergedError } from './reference-manifest.ts';
 
 export type PushStore = Pick<
 	Nix,
@@ -161,32 +163,14 @@ export interface PushDependencies {
 	 */
 	readonly command: PushCommand;
 	readonly credential: PushCredential;
-	/**
-	 * `alreadyHeld` and `claimable` constrain which published paths can be
-	 * attributed to this build invocation.
-	 */
 	readonly buildStore?: string;
+	readonly referenceReceipt?: boolean;
 	/**
-	 * Paths already present in the build store when this run began. Their
-	 * presence after the build is not evidence that this invocation realised
-	 * them.
+	 * Compatibility inputs for older callers. A push records store metadata;
+	 * these path lists cannot establish that this invocation built an output.
 	 */
 	readonly alreadyHeld?: readonly string[];
-	/**
-	 * Paths whose realisation this build invocation established. Other paths use
-	 * store-derived provenance because post-build presence does not prove that the
-	 * invocation realised them. `undefined` preserves the internal default that
-	 * every published path is eligible; receipt-producing callers must provide the
-	 * set explicitly.
-	 */
 	readonly claimable?: readonly string[];
-	/**
-	 * The builder for each delegated derivation, keyed by derivation path.
-	 * When a published path's deriver appears here, a builder produced that
-	 * path at this run's request, and the receipt subject records the builder
-	 * in `machine`.
-	 */
-	readonly delegated?: ReadonlyMap<string, string>;
 	/**
 	 * Copy sources observed by a supervised build, keyed by store path. Without an
 	 * activity log, copied subjects contain no source URL.
@@ -203,7 +187,7 @@ export const defaultUploadConcurrency = 6;
  * and WebSocket commit remain raw protocol operations because they stream bytes
  * or use temporary upload credentials.
  */
-export interface PushClient {
+export interface PushClient extends Partial<AttestationBundleClient> {
 	negotiate(
 		body: Omit<UploadNegotiateRequestInput, 'pushId'>
 	): Promise<UploadNegotiateResponse>;
@@ -384,6 +368,13 @@ export async function runPush(
 	reporter: Reporter,
 	dependencies: PushDependencies
 ): Promise<BuildReceiptV3 | undefined> {
+	if (
+		dependencies.referenceReceipt === true &&
+		dependencies.referenceSource === undefined &&
+		publication.referenceEntries.some((entry) => entry.reference === undefined)
+	) {
+		throw new ReferenceSourcePairError();
+	}
 	// Validate the retention before any upload work: an invalid root name or
 	// target must fail fast, not after NARs are built and committed. Only the
 	// declared targets are retained; intermediates join no root or pin.
@@ -446,9 +437,9 @@ interface PushRuntimeDependencies {
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
 	readonly buildStore?: string;
+	readonly referenceReceipt?: boolean;
 	readonly alreadyHeld?: readonly string[];
 	readonly claimable?: readonly string[];
-	readonly delegated?: ReadonlyMap<string, string>;
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
@@ -465,6 +456,8 @@ type ResolvedPushPath =
 			readonly kind: PublicationKind;
 			readonly storePath: StorePathString;
 			readonly metadata: ReferenceMetadata;
+			readonly sourceUrl: string;
+			readonly captured: boolean;
 	  };
 
 interface CollectedPath {
@@ -557,21 +550,23 @@ async function resolveReferenceEntries(
 
 	const source = dependencies.referenceSource;
 
-	if (source === undefined) {
-		throw new ReferenceSourcePairError();
-	}
-
 	const fetchMetadata =
 		dependencies.fetchReferenceMetadata ?? fetchReferenceMetadataFromSource;
 	const resolved = await mapWithConcurrency(
 		entries,
 		defaultUploadConcurrency,
 		async (entry, index) => {
-			const metadata = await fetchMetadata(
-				source,
-				StorePath.hash(entry.storePath),
-				{ signal: dependencies.signal }
-			);
+			const referenceSource = entry.reference?.source ?? source?.url;
+			if (referenceSource === undefined) {
+				throw new ReferenceSourcePairError();
+			}
+			const metadata =
+				entry.reference?.metadata ??
+				(await fetchMetadata(
+					source ?? { url: referenceSource },
+					StorePath.hash(entry.storePath),
+					{ signal: dependencies.signal }
+				));
 
 			if (metadata.upload.storePath !== entry.storePath) {
 				throw new ReferencePathMismatchError(
@@ -586,7 +581,9 @@ async function resolveReferenceEntries(
 					source: 'reference' as const,
 					kind: entry.kind,
 					storePath: entry.storePath,
-					metadata
+					metadata,
+					sourceUrl: canonicalHref(referenceSource),
+					captured: entry.reference !== undefined
 				}
 			};
 		}
@@ -599,61 +596,12 @@ async function resolveReferenceEntries(
 
 interface ReceiptClaims {
 	readonly buildStore: string;
-	readonly alreadyHeld: ReadonlySet<string>;
-	/**
-	`undefined` leaves every published path eligible for build attribution.
-	*/
-	readonly claimable: ReadonlySet<string> | undefined;
-	readonly delegated: ReadonlyMap<string, string>;
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
-	readonly referenceSource: string | undefined;
-}
-
-// Claim a current-run build only when the selected store reports a deriver and
-// the run's evidence shows it realised the path. Pre-existing and ineligible
-// paths are excluded. `ultimate` proves the selected store built the output;
-// activity logs can instead prove a delegated builder produced it. Any other
-// path falls back to store-derived provenance in `publishedSubjects`.
-function builtSubject(
-	claims: ReceiptClaims,
-	pathInfo: NixValidPathInfo
-): BuildSubjectV3Input | undefined {
-	if (pathInfo.deriver === undefined) {
-		return undefined;
-	}
-
-	if (
-		claims.claimable !== undefined &&
-		!claims.claimable.has(pathInfo.storePath)
-	) {
-		return undefined;
-	}
-
-	if (claims.alreadyHeld.has(pathInfo.storePath)) {
-		return undefined;
-	}
-
-	const machine = claims.delegated.get(pathInfo.deriver);
-
-	if (machine === undefined && !pathInfo.ultimate) {
-		return undefined;
-	}
-
-	return {
-		origin: 'built',
-		storePath: pathInfo.storePath,
-		narHash: pathInfo.narHash.digestHex(),
-		derivation: pathInfo.deriver,
-		buildStore: claims.buildStore,
-		...(machine !== undefined && { machine }),
-		verification: 'build-store'
-	};
 }
 
 /**
- * Current-run build evidence and reference narinfos establish preferred
- * subjects for paths that reached a final servable outcome;
- * `publishedSubjects` fills the remainder from selected-store metadata.
+ * Describes published paths from reference narinfos or selected-store metadata.
+ * Neither source establishes execution during the current invocation.
  */
 function reconciledReceipt(
 	claims: ReceiptClaims,
@@ -682,22 +630,14 @@ function reconciledReceipt(
 	);
 	const described = new Map<string, BuildSubjectV3Input>();
 
-	for (const pathInfo of infos) {
-		const subject = builtSubject(claims, pathInfo);
-
-		if (subject !== undefined) {
-			described.set(pathInfo.storePath, subject);
-		}
-	}
-
 	for (const path of resolved) {
-		if (path.source !== 'reference' || claims.referenceSource === undefined) {
+		if (path.source !== 'reference') {
 			continue;
 		}
 
 		described.set(
 			path.storePath,
-			republishedSubject(path.metadata, claims.referenceSource)
+			republishedSubject(path.metadata, path.sourceUrl)
 		);
 	}
 
@@ -712,6 +652,49 @@ function reconciledReceipt(
 			copiedFrom: claims.copiedFrom
 		}),
 		uploaded: [...published].toSorted(byCodeUnit)
+	});
+}
+
+function referenceReceipt(
+	resolved: readonly ResolvedPushPath[],
+	summaryPaths: readonly PushSummaryPathInput[]
+): BuildReceiptV3 {
+	const references = new Map<
+		string,
+		Extract<ResolvedPushPath, { readonly source: 'reference' }>
+	>(
+		resolved.flatMap((path) =>
+			path.source === 'reference' ? [[path.storePath, path] as const] : []
+		)
+	);
+	const paths = new Set<StorePathString>();
+	const uploaded = new Set<StorePathString>();
+
+	for (const path of summaryPaths) {
+		const reference =
+			path.storePath === undefined ? undefined : references.get(path.storePath);
+		if (reference === undefined) {
+			continue;
+		}
+		if (path.outcome === 'committed') {
+			uploaded.add(reference.storePath);
+		}
+		if (path.outcome === 'committed' || path.outcome === 'already-present') {
+			paths.add(reference.storePath);
+		}
+	}
+
+	return buildReceiptV3Schema.parse({
+		version: 3,
+		paths: [...paths].toSorted(byCodeUnit),
+		subjects: resolved
+			.flatMap((reference) =>
+				reference.source === 'reference' && paths.has(reference.storePath)
+					? [republishedSubject(reference.metadata, reference.sourceUrl)]
+					: []
+			)
+			.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath)),
+		uploaded: [...uploaded].toSorted(byCodeUnit)
 	});
 }
 
@@ -844,6 +827,7 @@ async function runPushFlow(
 
 	const divergent = divergentSkips(resolved, negotiation.uploads);
 
+	requireReferenceSnapshotIdentity(resolved, divergent);
 	warnDivergentSkips(reporter, divergent);
 
 	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
@@ -1239,22 +1223,16 @@ async function runPushFlow(
 			});
 		}
 
+		if (dependencies.referenceReceipt === true) {
+			return referenceReceipt(resolved, summaryPaths);
+		}
+
 		return dependencies.buildStore === undefined
 			? undefined
 			: reconciledReceipt(
 					{
 						buildStore: dependencies.buildStore,
-						alreadyHeld: new Set(dependencies.alreadyHeld),
-						claimable:
-							dependencies.claimable === undefined
-								? undefined
-								: new Set(dependencies.claimable),
-						delegated: dependencies.delegated ?? new Map(),
-						copiedFrom: dependencies.copiedFrom ?? new Map(),
-						referenceSource:
-							dependencies.referenceSource === undefined
-								? undefined
-								: canonicalHref(dependencies.referenceSource.url)
+						copiedFrom: dependencies.copiedFrom ?? new Map()
 					},
 					resolved,
 					summaryPaths
@@ -1301,7 +1279,9 @@ async function reportDryRun(
 		}
 	);
 
-	warnDivergentSkips(reporter, divergentSkips(resolved, preview.uploads));
+	const divergent = divergentSkips(resolved, preview.uploads);
+	requireReferenceSnapshotIdentity(resolved, divergent);
+	warnDivergentSkips(reporter, divergent);
 
 	const wouldUpload = preview.uploads.filter(
 		(decision) => decision.action === 'upload'
@@ -2032,6 +2012,26 @@ function divergentSkips(
 	}
 
 	return divergent;
+}
+
+function requireReferenceSnapshotIdentity(
+	resolved: readonly ResolvedPushPath[],
+	divergent: ReadonlyMap<StorePathHash, DivergentSkip>
+): void {
+	for (const path of resolved) {
+		if (path.source !== 'reference' || !path.captured) {
+			continue;
+		}
+		const difference = divergent.get(StorePath.hash(path.storePath));
+		if (difference === undefined) {
+			continue;
+		}
+		throw new ReferenceSnapshotDivergedError(
+			path.storePath,
+			difference.localNarHash,
+			difference.cacheNarHash
+		);
+	}
 }
 
 // Different NAR hashes for the same store path are evidence of a

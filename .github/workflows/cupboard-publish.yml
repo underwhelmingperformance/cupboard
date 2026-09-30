@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       installable:
-        description: Flake installable to build and publish.
+        description: Flake installable to realise and, when enabled, publish.
         required: false
         type: string
         default: '.'
@@ -47,14 +47,46 @@ on:
         required: false
         type: boolean
         default: true
-      attest:
-        description:
-          When true, sign build provenance for the published paths and attach it
-          in the cache. The job then rebuilds every output that it did not build
-          itself, so the provenance covers all of them.
+      build:
+        description: >-
+          Control when to build the requested outputs. `missing` uses an output
+          from the store or a substituter when one is available, and builds it
+          otherwise. `rebuild` builds each output again in the selected Nix
+          store, even if it is already available. Nix may still fetch
+          dependencies from substituters.
         required: false
-        type: boolean
+        type: string
+        default: missing
+      substituter:
+        description: >-
+          Control whether to publish outputs available from external
+          substituters. `copy` selects them for publication. `leave` keeps them
+          upstream if consumers can obtain matching NARs for the output and all
+          its runtime references under the configured signature policy. Both
+          modes select outputs built in this run. With `publish: closure`, all
+          runtime references of selected outputs are published, including
+          substituted dependencies.
+        required: false
+        type: string
+        default: copy
+      publish:
+        description: >-
+          Control which paths are published. `none` skips publication and
+          retention updates. `outputs` publishes selected output paths.
+          `closure` also publishes all their runtime references. If no outputs
+          remain selected, `outputs` and `closure` replace the retention root
+          with an empty path list.
+        required: false
+        type: string
+        default: outputs
+      attest:
+        description: >-
+          Sign and attach SLSA build provenance for paths built on the runner in
+          this run. A missing attestation does not change the build choice. The
+          workflow skips signing when publication is disabled.
+        required: false
         default: true
+        type: boolean
       runs-on:
         description: Runner label to build on.
         required: false
@@ -95,6 +127,30 @@ jobs:
             echo '::error::The reusable cupboard workflows require GitHub Cloud because GitHub Enterprise Server does not provide job.workflow_repository, job.workflow_ref or job.workflow_sha'
             exit 1
           fi
+
+      - name: Validate publication options
+        env:
+          BUILD: ${{ inputs.build }}
+          SUBSTITUTER: ${{ inputs.substituter }}
+          PUBLISH: ${{ inputs.publish }}
+          ATTEST: ${{ inputs.attest }}
+        run: |
+          case "${BUILD}" in
+            missing|rebuild) ;;
+            *) echo '::error::build must be missing or rebuild'; exit 1 ;;
+          esac
+          case "${SUBSTITUTER}" in
+            leave|copy) ;;
+            *) echo '::error::substituter must be leave or copy'; exit 1 ;;
+          esac
+          case "${PUBLISH}" in
+            none|outputs|closure) ;;
+            *) echo '::error::publish must be none, outputs, or closure'; exit 1 ;;
+          esac
+          case "${ATTEST}" in
+            true|false) ;;
+            *) echo '::error::attest must be true or false'; exit 1 ;;
+          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -156,20 +212,20 @@ jobs:
         id: build
         with:
           installables: ${{ inputs.installable }}
+          inline-paths: false
+          publication-url: ${{ inputs.url }}
+          build: ${{ inputs.build }}
+          substituter: ${{ inputs.substituter }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
-          # A cached output provides no evidence of a build in this run. Rebuild
-          # cached final derivations when provenance is required so a retry after
-          # an attachment failure produces a new receipt.
-          require-provenance: ${{ inputs.attest }}
 
       # A retention root holds one set of paths, and each push replaces that
       # set completely, so builds for different systems must retain under
       # sibling roots. Append this builder's system to the caller's prefix.
       - name: Resolve the retention root
         id: root
-        if: ${{ inputs.root != '' }}
+        if: ${{ inputs.publish != 'none' && inputs.root != '' }}
         env:
           ROOT: ${{ inputs.root }}
         run:
@@ -178,23 +234,29 @@ jobs:
 
       - uses: $/actions/push
         id: push
+        if: ${{ inputs.publish != 'none' }}
         with:
           url: ${{ inputs.url }}
-          paths: ${{ steps.build.outputs.paths }}
+          paths-file: ${{ steps.build.outputs.publish-paths-file }}
+          closure: ${{ inputs.publish == 'closure' }}
+          build-receipt-file: ${{ steps.build.outputs.receipt-file }}
           cache: ${{ inputs.cache }}
-          root: ${{ steps.root.outputs.root || '' }}
+          root:
+            ${{ steps.root.outputs.root || format('github:{0}/{1}',
+            github.repository, github.ref_name) }}
           ttl: ${{ inputs.ttl }}
           permanent: ${{ inputs.ttl == '' && inputs.permanent }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
 
-      - name: Attest committed paths
+      - name: Attest built paths
         id: attest
-        if: ${{ inputs.attest }}
+        if: ${{ inputs.attest && steps.push.outcome == 'success' }}
         uses: $/actions/attest
         with:
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
+          inline-bundles: false
+          receipt-file: ${{ steps.push.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
@@ -202,13 +264,13 @@ jobs:
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
 
       - uses: $/actions/attest-attach
-        if: ${{ inputs.attest && steps.attest.outputs.bundles != '' }}
+        if: ${{ inputs.attest && steps.attest.outputs.bundles-file != '' }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
           cache: ${{ inputs.cache }}
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
+          receipt-file: ${{ steps.push.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
-          bundle: ${{ steps.attest.outputs.bundles }}
+          bundles-file: ${{ steps.attest.outputs.bundles-file }}

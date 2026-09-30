@@ -17,7 +17,7 @@ import {
 import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
 import { Command } from 'commander';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	type RecordedCall,
@@ -46,6 +46,7 @@ import {
 import type { CohortTarget } from '../plan/cohort-target.ts';
 
 import {
+	planRootClient,
 	requeryUnknownWith,
 	resolvePlannedSubstitutionPolicy
 } from './plan-cohort.ts';
@@ -193,10 +194,6 @@ function dependencies(
 		confirmUpstreamAvailability: () => Promise.resolve({ kind: 'confirmed' }),
 		destinationServed: () => Promise.resolve(new Set()),
 		viewServed: () => Promise.resolve(new Set()),
-		attestedServed: () =>
-			Promise.reject(
-				new Error('the attestation probe must not be called in this test')
-			),
 		capacityProbe: () =>
 			Promise.resolve({ available: 10_000_000_000, capacity: 10_000_000_000 }),
 		...overrides
@@ -298,7 +295,8 @@ describe('runPlanCohort', () => {
 				buildSet: [],
 				dependencyBuilds: [],
 				dependencyCopies: [],
-				unattested: [],
+				rebuildSet: [],
+				closureTargets: [],
 				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
 				narSize: 0,
@@ -381,7 +379,8 @@ describe('runPlanCohort', () => {
 						buildSet: [otherPath],
 						dependencyBuilds: [],
 						dependencyCopies: [],
-						unattested: [],
+						rebuildSet: [],
+						closureTargets: [],
 						counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
 						downloadSize: 0,
 						narSize: 0,
@@ -438,7 +437,8 @@ describe('runPlanCohort', () => {
 					}
 				],
 				dependencyCopies: [],
-				unattested: [],
+				rebuildSet: [],
+				closureTargets: [],
 				counts: { willBuild: 1, willSubstitute: 1, unknown: 0 },
 				downloadSize: 10,
 				narSize: 20,
@@ -705,7 +705,8 @@ describe('runPlanCohort', () => {
 				buildSet: [appPath],
 				dependencyBuilds: [],
 				dependencyCopies: [],
-				unattested: [],
+				rebuildSet: [],
+				closureTargets: [],
 				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
 				narSize: 0,
@@ -761,7 +762,8 @@ describe('runPlanCohort', () => {
 					buildSet: [],
 					dependencyBuilds: [],
 					dependencyCopies: [],
-					unattested: [],
+					rebuildSet: [],
+					closureTargets: [],
 					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 					downloadSize: 0,
 					narSize: 0,
@@ -794,93 +796,167 @@ describe('runPlanCohort', () => {
 		}
 	});
 
-	it.each([
-		{
-			name: 'attaches a served path the cache also holds an attestation for',
-			attested: [appPath],
-			attachOnly: [appPath],
-			buildSet: [],
-			unattested: [],
-			extraRows: []
-		},
-		{
-			name: 'builds a served path the cache holds no attestation for',
-			attested: [],
-			attachOnly: [],
-			buildSet: [appPath],
-			unattested: [appPath],
-			extraRows: [{ label: 'Served but not attested', value: '1' }]
-		}
-	])('with attested availability required, $name', async (row) => {
+	it('records forced rebuild installables in the cohort plan', async () => {
 		const payloads: ResultPayload[] = [];
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
-		const asked: (readonly StorePathString[])[] = [];
-		const attested = new Set(row.attested);
-		const probing = dependencies({
-			rootClient: recordingRootClient(buildRequired([appPath])),
-			destinationServed: () => Promise.resolve(new Set([appPath])),
-			attestedServed: (paths) => {
-				asked.push(paths);
+		const missingCalls: (readonly string[])[] = [];
+		const store = {
+			...missingStore(emptyMissing()),
+			queryMissing: (installables: readonly string[]) => {
+				missingCalls.push(installables);
 
-				return Promise.resolve(attested);
+				return Promise.resolve(emptyMissing());
 			}
-		});
+		};
+		const rootClient = recordingRootClient(buildRequired([appPath]));
 
 		try {
 			await runPlanCohort(
-				runOptions({ targets: [target()], planFile, requireAttested: true }),
+				runOptions({
+					targets: [target()],
+					planFile,
+					build: 'rebuild',
+					substituter: 'copy',
+					publish: 'closure'
+				}),
 				reporter(payloads),
-				probing
+				dependencies({
+					rootClient,
+					destinationServed: () => Promise.resolve(new Set([appPath])),
+					store
+				})
 			);
-
-			const expectedResult = {
-				partition: {
-					attachOnly: row.attachOnly,
-					publishByReference: [],
-					leftUpstream: [],
-					leftUpstreamRejections: [],
-					buildSet: row.buildSet,
-					dependencyBuilds: [],
-					dependencyCopies: [],
-					unattested: row.unattested,
-					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
-					downloadSize: 0,
-					narSize: 0,
-					unknownCount: 0,
-					alreadyValid: [],
-					unreachableSubstituters: [],
-					ceiling: { value: 0, source: 'configured' }
-				},
-				capacity: {
-					available: 10_000_000_000,
-					capacity: 10_000_000_000,
-					headroom: defaultHeadroomAbsoluteMinimum
-				}
-			};
 
 			const plan: unknown = JSON.parse(await readFile(planFile, 'utf8'));
 
-			expect({ asked, plan, payloads }).toStrictEqual({
-				asked: [[appPath]],
-				plan: expectedResult,
-				payloads: [
-					{
-						kind: 'plan-cohort',
-						data: expectedResult,
-						rows: [
-							{
-								label: 'Already served by the cache',
-								value: String(row.attachOnly.length)
-							},
-							{ label: 'Reused from the tenant', value: '0' },
-							{ label: 'Left to upstream caches', value: '0' },
-							{ label: 'To build', value: String(row.buildSet.length) },
-							...row.extraRows,
-							{ label: 'Plan file', value: planFile }
-						]
+			expect({ missingCalls, plan }).toStrictEqual({
+				missingCalls: [[appPath]],
+				plan: {
+					partition: {
+						attachOnly: [],
+						publishByReference: [],
+						leftUpstream: [],
+						leftUpstreamRejections: [],
+						buildSet: [appPath],
+						rebuildSet: [appPath],
+						closureTargets: [],
+						dependencyBuilds: [],
+						dependencyCopies: [],
+						counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+						downloadSize: 0,
+						narSize: 0,
+						alreadyValid: [],
+						unknownCount: 0,
+						ceiling: { value: 0, source: 'configured' },
+						unreachableSubstituters: []
+					},
+					capacity: {
+						available: 10_000_000_000,
+						capacity: 10_000_000_000,
+						headroom: defaultHeadroomAbsoluteMinimum
 					}
-				]
+				}
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('does not set retention roots when publication is disabled', async () => {
+		const payloads: ResultPayload[] = [];
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const rootClient = recordingRootClient(buildRequired([appPath]));
+
+		try {
+			await runPlanCohort(
+				runOptions({ targets: [target()], planFile, publish: 'none' }),
+				reporter(payloads),
+				dependencies({ rootClient })
+			);
+
+			const plan: unknown = JSON.parse(await readFile(planFile, 'utf8'));
+
+			expect({ rootCalls: rootClient.ensure.calls, plan }).toStrictEqual({
+				rootCalls: [],
+				plan: {
+					partition: {
+						attachOnly: [],
+						publishByReference: [],
+						leftUpstream: [],
+						leftUpstreamRejections: [],
+						buildSet: [appPath],
+						rebuildSet: [],
+						closureTargets: [],
+						dependencyBuilds: [],
+						dependencyCopies: [],
+						counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+						downloadSize: 0,
+						narSize: 0,
+						alreadyValid: [],
+						unknownCount: 0,
+						ceiling: { value: 0, source: 'configured' },
+						unreachableSubstituters: []
+					},
+					capacity: {
+						available: 10_000_000_000,
+						capacity: 10_000_000_000,
+						headroom: defaultHeadroomAbsoluteMinimum
+					}
+				}
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('keeps a destination-served target available for closure publication without rebuilding it', async () => {
+		const payloads: ResultPayload[] = [];
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const storeIdentity = { kind: 'ssh-ng' as const, uri: 'ssh-ng://builder' };
+		const rootClient = recordingRootClient(buildRequired([appPath]));
+
+		try {
+			await runPlanCohort(
+				runOptions({
+					targets: [target()],
+					planFile,
+					storeIdentity,
+					build: 'missing',
+					substituter: 'leave',
+					publish: 'closure'
+				}),
+				reporter(payloads),
+				dependencies({
+					rootClient,
+					destinationServed: () => Promise.resolve(new Set([appPath]))
+				})
+			);
+
+			const plan: unknown = JSON.parse(await readFile(planFile, 'utf8'));
+
+			expect(plan).toStrictEqual({
+				partition: {
+					attachOnly: [appPath],
+					publishByReference: [],
+					leftUpstream: [],
+					leftUpstreamRejections: [],
+					buildSet: [],
+					rebuildSet: [],
+					closureTargets: [appPath],
+					dependencyBuilds: [],
+					dependencyCopies: [],
+					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+					downloadSize: 0,
+					narSize: 0,
+					alreadyValid: [],
+					unknownCount: 0,
+					ceiling: { value: 0, source: 'configured' },
+					unreachableSubstituters: []
+				},
+				capacity: { skipped: 'remote-store' }
 			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
@@ -905,6 +981,57 @@ function silentProgram(): Command {
 }
 
 describe('plan cohort command', () => {
+	it.each([
+		{ publish: 'none' as const, authenticated: false },
+		{ publish: 'outputs' as const, authenticated: true },
+		{ publish: 'closure' as const, authenticated: true }
+	])(
+		'requests a write client only for publish: $publish',
+		async ({ publish, authenticated }) => {
+			const client = recordingRootClient(buildRequired([]));
+			const authenticate = vi.fn(() => Promise.resolve(client));
+
+			expect({
+				rootClient: await planRootClient(publish, authenticate),
+				authenticated: authenticate.mock.calls.length > 0
+			}).toStrictEqual({
+				rootClient: authenticated ? client : undefined,
+				authenticated
+			});
+		}
+	);
+
+	it.each([
+		{ flag: '--build', value: 'copy', allowed: 'missing or rebuild' },
+		{
+			flag: '--substituter',
+			value: 'rebuild',
+			allowed: 'leave or copy'
+		},
+		{
+			flag: '--publish',
+			value: 'all',
+			allowed: 'none, outputs or closure'
+		}
+	])('rejects invalid $flag choice', async ({ flag, value, allowed }) => {
+		await expect(
+			silentProgram().parseAsync(
+				[
+					'plan',
+					'cohort',
+					'https://cache.example.workers.dev/t/acme',
+					'--targets-file',
+					'targets.json',
+					flag,
+					value
+				],
+				{ from: 'user' }
+			)
+		).rejects.toMatchObject({
+			message: `error: option '${flag} <mode>' argument '${value}' is invalid. must be ${allowed}`
+		});
+	});
+
 	it.each([
 		{
 			flag: '--read-user',

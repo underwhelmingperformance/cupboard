@@ -46,8 +46,11 @@ import {
 	type AvailabilityCeilingConfig,
 	type AvailabilityPartition,
 	type AvailabilityTarget,
+	type BuildPolicy,
 	partitionAvailability,
 	type PlannedSubstitutionPolicy,
+	type PublishScope,
+	type SubstituterPolicy,
 	UnknownPathsCeilingError,
 	type UnknownRequeryOutcome,
 	type UpstreamAvailabilityCandidate,
@@ -180,7 +183,9 @@ export interface PlanCohortOptions {
 	readonly planFile?: string;
 	readonly store?: string;
 	readonly storePath?: string;
-	readonly requireAttested?: boolean;
+	readonly build?: BuildPolicy;
+	readonly substituter?: SubstituterPolicy;
+	readonly publish?: PublishScope;
 	readonly unknownCeiling?: number;
 	readonly unknownCeilingUntrustedFallback?: number;
 	readonly headroomAbsoluteMinimum?: number;
@@ -223,7 +228,7 @@ export type PlanCohortRefusal =
 	  };
 
 export interface PlanCohortDependencies {
-	readonly rootClient: Pick<RootClient, 'ensure'>;
+	readonly rootClient?: Pick<RootClient, 'ensure'>;
 	readonly store: Pick<
 		Nix,
 		| 'queryMissing'
@@ -244,10 +249,14 @@ export interface PlanCohortDependencies {
 	readonly viewServed: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
-	readonly attestedServed: (
-		paths: readonly StorePathString[]
-	) => Promise<ReadonlySet<StorePathString>>;
 	readonly capacityProbe: StoreCapacityProbe;
+}
+
+export function planRootClient(
+	publish: PublishScope,
+	create: () => Promise<Pick<RootClient, 'ensure'>>
+): Promise<Pick<RootClient, 'ensure'> | undefined> {
+	return publish === 'none' ? Promise.resolve(undefined) : create();
 }
 
 export interface PlanCohortRunOptions {
@@ -262,11 +271,9 @@ export interface PlanCohortRunOptions {
 	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
 	readonly planFile: string;
-	/**
-	 * Whether the destination cache must hold build provenance for a served
-	 * output path before the plan leaves that target unbuilt.
-	 */
-	readonly requireAttested?: boolean;
+	readonly build?: BuildPolicy;
+	readonly substituter?: SubstituterPolicy;
+	readonly publish?: PublishScope;
 	readonly ceiling: AvailabilityCeilingConfig;
 	readonly detected: DetectedCapacityOptions;
 	readonly headroom?: Partial<HeadroomConfig>;
@@ -353,8 +360,22 @@ export function registerPlanCommands(
 			`directory whose free space to check (default: ${defaultStorePath})`
 		)
 		.option(
-			'--require-attested',
-			'build a target even if the cache has it, unless the cache also has its build provenance attestation'
+			'--build <mode>',
+			'Control when to build the requested outputs (default: missing): missing uses an available output and builds it otherwise; rebuild builds each output again on the configured builder, even if it is already available. Nix may still fetch dependencies from substituters.',
+			parseBuildPolicy,
+			'missing'
+		)
+		.option(
+			'--substituter <mode>',
+			'how to handle externally served target outputs: leave keeps them upstream; copy publishes them to the destination (default: leave)',
+			parseSubstituterPolicy,
+			'leave'
+		)
+		.option(
+			'--publish <mode>',
+			'which paths to publish: none skips publication; outputs selects target outputs; closure includes their runtime references (default: outputs)',
+			parsePublishScope,
+			'outputs'
 		)
 		.option(
 			'--unknown-ceiling <count>',
@@ -399,31 +420,39 @@ export function registerPlanCommands(
 				const reporter = commandUi(program, programOptions).reporter();
 				const input = await readCohortPlanInput(options.targetsFile);
 				const { targets } = input;
-				const uniqueRoots = [...new Set(targets.map((target) => target.root))];
 				const urlTarget = cacheTargetFromUrl(url);
 				const target =
 					cacheName === undefined
 						? urlTarget
 						: cacheTargetWithName(urlTarget, cacheName);
-				const credential = await authenticateForPush(
-					CupboardClient.fromUrl(target.tenantUrl, {
-						cache: target.cache,
-						signal: programOptions.signal
-					}),
-					{
-						githubOidc: options.githubOidc,
-						audience:
-							options.audience ?? audienceSchema.parse(target.tenantUrl),
-						authorizationDetails: uniqueRoots.flatMap((root) =>
-							rootEnsureAuthorizationDetails({ cache: target.cache, root })
-						)
+				const cache = target.cache;
+				const rootClient = await planRootClient(
+					options.publish ?? 'outputs',
+					async () => {
+						const uniqueRoots = [
+							...new Set(targets.map((target) => target.root))
+						];
+						const credential = await authenticateForPush(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: uniqueRoots.flatMap((root) =>
+									rootEnsureAuthorizationDetails({ cache, root })
+								)
+							}
+						);
+
+						return tenantRpc(target.tenantUrl, {
+							credential,
+							signal: programOptions.signal
+						}).roots;
 					}
 				);
-				const cache = target.cache;
-				const rpc = tenantRpc(target.tenantUrl, {
-					credential,
-					signal: programOptions.signal
-				});
 				// Pass the run's abort signal to every store. Aborting the plan then
 				// cancels any substituter query still in progress.
 				const storeSelection = {
@@ -481,7 +510,9 @@ export function registerPlanCommands(
 						...(input.plannedLocalOutputs !== undefined && {
 							plannedLocalOutputs: input.plannedLocalOutputs
 						}),
-						...(options.requireAttested === true && { requireAttested: true }),
+						build: options.build ?? 'missing',
+						substituter: options.substituter ?? 'leave',
+						publish: options.publish ?? 'outputs',
 						ceiling: {
 							value: options.unknownCeiling ?? defaultUnknownCeiling,
 							untrustedFallback:
@@ -508,7 +539,7 @@ export function registerPlanCommands(
 					},
 					reporter,
 					{
-						rootClient: rpc.roots,
+						...(rootClient !== undefined && { rootClient }),
 						store: nix,
 						requeryUnknown: (storePaths) =>
 							requeryUnknownWith(
@@ -533,7 +564,6 @@ export function registerPlanCommands(
 						}),
 						destinationServed: probes.destinationServed,
 						viewServed: probes.viewServed,
-						attestedServed: probes.attestedServed,
 						capacityProbe: defaultCapacityProbe
 					}
 				);
@@ -549,14 +579,22 @@ export async function runPlanCohort(
 	reporter: Reporter,
 	dependencies: PlanCohortDependencies
 ): Promise<void> {
-	await reporter.phase('Checking retention roots', () =>
-		ensureCohortRoots(
-			options.targets,
-			options.cache,
-			options.retention,
-			dependencies.rootClient
-		)
-	);
+	if (options.publish !== 'none') {
+		const rootClient = dependencies.rootClient;
+
+		if (rootClient === undefined) {
+			throw new TypeError('A root client is required when publishing paths');
+		}
+
+		await reporter.phase('Checking retention roots', () =>
+			ensureCohortRoots(
+				options.targets,
+				options.cache,
+				options.retention,
+				rootClient
+			)
+		);
+	}
 	const availabilityTargets: AvailabilityTarget[] = options.targets.map(
 		(target) => ({
 			attr: target.attr,
@@ -579,6 +617,9 @@ export async function runPlanCohort(
 			() =>
 				partitionAvailability({
 					targets: availabilityTargets,
+					build: options.build ?? 'missing',
+					substituter: options.substituter ?? 'leave',
+					publish: options.publish ?? 'outputs',
 					plannedSubstitutionPolicy: options.plannedSubstitutionPolicy,
 					...(options.plannedLocalClosure !== undefined && {
 						plannedLocalClosure: new Set(options.plannedLocalClosure)
@@ -606,9 +647,6 @@ export async function runPlanCohort(
 						destinationServed: dependencies.destinationServed,
 						viewServed: dependencies.viewServed
 					},
-					...(options.requireAttested === true && {
-						attestedServed: dependencies.attestedServed
-					}),
 					storeIdentity: options.storeIdentity,
 					requeryUnknown: dependencies.requeryUnknown,
 					confirmUpstreamAvailability: dependencies.confirmUpstreamAvailability,
@@ -703,14 +741,6 @@ export async function runPlanCohort(
 						{
 							label: 'Dependencies to build',
 							value: String(partition.dependencyBuilds.length)
-						}
-					]),
-			...(partition.unattested.length === 0
-				? []
-				: [
-						{
-							label: 'Served but not attested',
-							value: String(partition.unattested.length)
 						}
 					]),
 			// Availability results exclude these substituters because their queries
@@ -881,6 +911,51 @@ function parseCount(value: string): number {
 	}
 
 	return Number(value);
+}
+
+function parseBuildPolicy(value: string): BuildPolicy {
+	switch (value) {
+		case 'missing': {
+			return 'missing';
+		}
+		case 'rebuild': {
+			return 'rebuild';
+		}
+		default: {
+			throw new InvalidArgumentError('must be missing or rebuild');
+		}
+	}
+}
+
+function parseSubstituterPolicy(value: string): SubstituterPolicy {
+	switch (value) {
+		case 'leave': {
+			return 'leave';
+		}
+		case 'copy': {
+			return 'copy';
+		}
+		default: {
+			throw new InvalidArgumentError('must be leave or copy');
+		}
+	}
+}
+
+function parsePublishScope(value: string): PublishScope {
+	switch (value) {
+		case 'none': {
+			return 'none';
+		}
+		case 'outputs': {
+			return 'outputs';
+		}
+		case 'closure': {
+			return 'closure';
+		}
+		default: {
+			throw new InvalidArgumentError('must be none, outputs or closure');
+		}
+	}
 }
 
 function parseFraction(value: string): number {
