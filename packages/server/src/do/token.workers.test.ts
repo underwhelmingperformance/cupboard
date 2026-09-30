@@ -829,13 +829,17 @@ async function installTrustedIdp(
 		protectedType?: string;
 		tokenAudience?: string | string[];
 		azp?: string;
+		issuer?: string;
+		claims?: Readonly<Record<string, unknown>>;
 	} = {}
 ): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
 	const jwk = await exportJWK(idp.publicKey);
-	const signer = new SignJWT(
-		options.azp === undefined ? {} : { azp: options.azp }
-	);
+	const issuer = options.issuer ?? 'https://idp.test';
+	const signer = new SignJWT({
+		...options.claims,
+		...(options.azp !== undefined && { azp: options.azp })
+	});
 	const subjectToken = await signer
 		.setProtectedHeader({
 			alg: 'RS256',
@@ -844,7 +848,7 @@ async function installTrustedIdp(
 				typ: options.protectedType
 			})
 		})
-		.setIssuer('https://idp.test')
+		.setIssuer(issuer)
 		.setAudience(options.tokenAudience ?? 'cupboard-aud')
 		.setSubject('alice')
 		.setIssuedAt()
@@ -859,7 +863,7 @@ async function installTrustedIdp(
 			.insert(oidcTrust)
 			.values({
 				id: trustRuleIdSchema.parse(`${scope}-rule`),
-				issuer: 'https://idp.test',
+				issuer,
 				audience: 'cupboard-aud',
 				claimsJson: JSON.stringify({ sub: 'alice' }),
 				permittedGrantsJson: JSON.stringify(trustClassGrants[scope]),
@@ -876,12 +880,12 @@ async function installTrustedIdp(
 		}
 		const url = input instanceof Request ? input.url : String(input);
 
-		if (url === 'https://idp.test/.well-known/openid-configuration') {
+		if (url === `${issuer}/.well-known/openid-configuration`) {
 			return Promise.resolve(
 				Response.json({
-					issuer: 'https://idp.test',
-					jwks_uri: 'https://idp.test/jwks',
-					authorization_endpoint: 'https://idp.test/authorize',
+					issuer,
+					jwks_uri: `${issuer}/jwks`,
+					authorization_endpoint: `${issuer}/authorize`,
 					response_types_supported: ['id_token'],
 					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
@@ -889,7 +893,7 @@ async function installTrustedIdp(
 			);
 		}
 
-		if (url === 'https://idp.test/jwks') {
+		if (url === `${issuer}/jwks`) {
 			return Promise.resolve(
 				Response.json({ keys: [{ ...jwk, kid: 'idp', alg: 'RS256' }] })
 			);

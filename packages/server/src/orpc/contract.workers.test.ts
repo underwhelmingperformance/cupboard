@@ -1,6 +1,18 @@
-import { signingKeyIdSchema } from '@cupboard/nix-store/scalars';
-import { attestationUploadDecisionSchema } from '@cupboard/protocol/attestations';
+import { rootLogger } from '@cupboard/logger';
+import {
+	narInfoGenerationSchema,
+	predicateTypeSchema,
+	signingKeyIdSchema
+} from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
+import {
+	attestationAttachMaxPaths,
+	attestationBundleDecisionSchema,
+	attestationUploadDecisionSchema
+} from '@cupboard/protocol/attestations';
 import { tenantContract } from '@cupboard/protocol/contract';
+import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { uploadActionDecisionSchema } from '@cupboard/protocol/upload';
 import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
@@ -9,15 +21,26 @@ import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { and, eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import * as schema from '../db/schema.ts';
+import { AttestationCasService } from '../do/attestation-cas-service.ts';
+import { AttestationsService } from '../do/attestations-service.ts';
+import { CacheRegistrationService } from '../do/cache-registration-service.ts';
+import { NarInfoObjectsService } from '../do/narinfo-objects-service.ts';
+import { casObjectKey } from '../http/http.ts';
+import { runCasReaper } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	attestationReferenceRows,
 	bootstrap,
 	cacheWriteGrants,
+	currentCasObjectKey,
 	currentOrigin,
 	currentServer,
 	defaultCache,
@@ -28,6 +51,7 @@ import {
 	narDigestHex,
 	pushPath,
 	putNarBytes,
+	readFetch,
 	recordTransition,
 	resetTestServer,
 	sigstoreBundleBytes,
@@ -60,6 +84,7 @@ function tenantClient(token: string): TenantClient {
 
 describe('tenant contract round trip', () => {
 	beforeEach(resetTestServer);
+	afterEach(() => vi.restoreAllMocks());
 
 	it('refuses usage when the accounting row is missing', async () => {
 		const init = await bootstrap();
@@ -812,6 +837,619 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('uploads one bundle and attaches its subjects across repeated pages', async () => {
+		await useTestServer('contract-bundle-pages');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const nar = await verifiableNar('contract-bundle-page');
+		const metadata = uploadMetadata({
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPath(init.token, metadata, defaultCache(), nar);
+		const bundle = bundleForSubjects([
+			{
+				name: StorePath.basename(metadata.storePath),
+				digest: narDigestHex(nar.narHash)
+			}
+		]);
+		const digest = await sha256HexBytes(bundle);
+		const negotiated =
+			await client.attestations.negotiateBundles.inDefaultCache({
+				pushId: testPushId,
+				bundles: [{ digest }]
+			});
+		const decision = attestationBundleDecisionSchema.parse(
+			negotiated.bundles[0]
+		);
+		expect(decision.action).toBe('upload');
+		if (decision.action !== 'upload') {
+			throw new Error('Expected a new bundle upload');
+		}
+		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
+		const page = {
+			id: decision.uploadId,
+			storePathHashes: [metadata.storePathHash]
+		};
+		const attachment =
+			await client.attestations.attachPaths.inDefaultCache(page);
+		const replay = await client.attestations.attachPaths.inDefaultCache(page);
+		expect({ attachment, replay }).toStrictEqual({
+			attachment: {
+				paths: [
+					{
+						storePathHash: metadata.storePathHash,
+						digest,
+						predicateType: 'https://slsa.dev/provenance/v1',
+						status: 'attached'
+					}
+				],
+				expiresAt: attachment.expiresAt
+			},
+			replay: {
+				paths: [
+					{
+						storePathHash: metadata.storePathHash,
+						digest,
+						predicateType: 'https://slsa.dev/provenance/v1',
+						status: 'already-present'
+					}
+				],
+				expiresAt: replay.expiresAt
+			}
+		});
+		const reused = await client.attestations.negotiateBundles.inDefaultCache({
+			pushId: testPushId,
+			bundles: [{ digest }]
+		});
+		expect(reused.bundles).toStrictEqual([
+			{
+				action: 'reuse',
+				digest,
+				uploadId: z.string().parse(reused.bundles[0]?.uploadId),
+				expiresAt: z.string().parse(reused.bundles[0]?.expiresAt)
+			}
+		]);
+	});
+
+	it.each(['default', 'default-private', 'public', 'private'] as const)(
+		'attaches multiple subjects with one validation in the %s cache',
+		async (kind) => {
+			const fixture = await bundleFixture(kind, 3);
+			const measured = vi.spyOn(
+				AttestationCasService.prototype,
+				'measureStagedBundle'
+			);
+			const promoted = vi.spyOn(
+				AttestationCasService.prototype,
+				'promoteMeasuredBundle'
+			);
+			const decision = await stageFixtureBundle(
+				fixture,
+				bundleForSubjects(fixture.subjects)
+			);
+			const first = await fixture.attach(decision.uploadId, [
+				fixture.hash(0),
+				'a'.repeat(32)
+			]);
+			const remaining = await fixture.attach(
+				decision.uploadId,
+				fixture.hashes.slice(1)
+			);
+			const replay = await fixture.attach(decision.uploadId, fixture.hashes);
+			expect({
+				first: first.paths,
+				remaining: remaining.paths,
+				replay: replay.paths,
+				measured: measured.mock.calls.length,
+				promoted: promoted.mock.calls.length
+			}).toStrictEqual({
+				first: [
+					pathOutcome(fixture.hash(0), decision.digest, 'attached'),
+					pathOutcome('a'.repeat(32), decision.digest, 'unservable')
+				],
+				remaining: fixture.hashes
+					.slice(1)
+					.map((hash) => pathOutcome(hash, decision.digest, 'attached')),
+				replay: fixture.hashes.map((hash) =>
+					pathOutcome(hash, decision.digest, 'already-present')
+				),
+				measured: 1,
+				promoted: 1
+			});
+		}
+	);
+
+	it('attaches a bundle with more subjects than one request without widening SQL parameters', async () => {
+		const fixture = await bundleFixture(
+			'default',
+			attestationAttachMaxPaths + 1
+		);
+		const measured = vi.spyOn(
+			AttestationCasService.prototype,
+			'measureStagedBundle'
+		);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		const first = await fixture.attach(
+			decision.uploadId,
+			fixture.hashes.slice(0, attestationAttachMaxPaths)
+		);
+		const second = await fixture.attach(
+			decision.uploadId,
+			fixture.hashes.slice(attestationAttachMaxPaths)
+		);
+		expect({
+			paths: [...first.paths, ...second.paths],
+			measured: measured.mock.calls.length
+		}).toStrictEqual({
+			paths: fixture.hashes.map((hash) =>
+				pathOutcome(hash, decision.digest, 'attached')
+			),
+			measured: 1
+		});
+	}, 60_000);
+
+	it('rejects a bundle whose subject digest differs from the committed NAR', async () => {
+		const fixture = await bundleFixture('default', 1);
+		const subject = fixture.subject(0);
+		const wrong = { ...subject, digest: 'b'.repeat(64) };
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects([wrong])
+		);
+		await expect(
+			fixture.attach(decision.uploadId, fixture.hashes)
+		).rejects.toMatchObject({
+			status: StatusCodes.UNPROCESSABLE_ENTITY,
+			message: `Attestation bundle has no subject for ${fixture.subject(0).name} with the committed NAR hash`
+		});
+	});
+
+	it.each([undefined, '_', 'different-store-path'])(
+		'attaches a matching NAR digest with subject name %s across repeated pages',
+		async (name) => {
+			const fixture = await bundleFixture('default', 2);
+			const decision = await stageFixtureBundle(
+				fixture,
+				bundleForSubjects([
+					{
+						...(name !== undefined && { name }),
+						digest: fixture.subject(0).digest
+					}
+				])
+			);
+			const first = await fixture.attach(decision.uploadId, [fixture.hash(0)]);
+			const second = await fixture.attach(decision.uploadId, [fixture.hash(1)]);
+			const replay = await fixture.attach(decision.uploadId, fixture.hashes);
+
+			expect({
+				first: first.paths,
+				second: second.paths,
+				replay: replay.paths
+			}).toStrictEqual({
+				first: [pathOutcome(fixture.hash(0), decision.digest, 'attached')],
+				second: [pathOutcome(fixture.hash(1), decision.digest, 'attached')],
+				replay: fixture.hashes.map((hash) =>
+					pathOutcome(hash, decision.digest, 'already-present')
+				)
+			});
+		}
+	);
+
+	it('authorises bundle attachment from the pending cache and rejects a different route cache', async () => {
+		const fixture = await bundleFixture('private', 1);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		const restricted = tenantClient(
+			await issueServerSignedToken(cacheWriteGrants())
+		);
+		await expect(
+			restricted.attestations.attachPaths.inDefaultCache({
+				id: decision.uploadId,
+				storePathHashes: fixture.hashes
+			})
+		).rejects.toMatchObject({ status: StatusCodes.FORBIDDEN });
+		await expect(
+			fixture.client.attestations.attachPaths.inDefaultCache({
+				id: decision.uploadId,
+				storePathHashes: fixture.hashes
+			})
+		).rejects.toMatchObject({ status: StatusCodes.BAD_REQUEST });
+		const unrelated =
+			await fixture.client.attestations.negotiateBundles.inDefaultCache({
+				pushId: testPushId,
+				bundles: [{ digest: decision.digest }]
+			});
+		expect(unrelated.bundles.map((bundle) => bundle.action)).toStrictEqual([
+			'upload'
+		]);
+	});
+
+	it('preserves staged bytes during collection and restores a lost CAS object before the next page', async () => {
+		const fixture = await bundleFixture('default', 2);
+		const measured = vi.spyOn(
+			AttestationCasService.prototype,
+			'measureStagedBundle'
+		);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		await fixture.attach(decision.uploadId, [fixture.hash(0)]);
+		await fixture.client.gc.runAll();
+		const staged = await env.BLOBS.head(decision.r2Key);
+		const objects = await env.BLOBS.list({ prefix: 'cas/' });
+		await env.BLOBS.delete(objects.objects.map((object) => object.key));
+		const next = await fixture.attach(decision.uploadId, [fixture.hash(1)]);
+		expect({
+			staged: staged !== null,
+			paths: next.paths,
+			measured: measured.mock.calls.length
+		}).toStrictEqual({
+			staged: true,
+			paths: [pathOutcome(fixture.hash(1), decision.digest, 'attached')],
+			measured: 2
+		});
+	});
+
+	it.each(['before-claim', 'before-reference'] as const)(
+		'claims a validated bundle when collection runs %s',
+		async (interleaving) => {
+			const fixture = await bundleFixture('default', 2);
+			const bundle = bundleForSubjects(fixture.subjects);
+			const decision = await stageFixtureBundle(fixture, bundle);
+			await fixture.attach(decision.uploadId, [fixture.hash(0)]);
+			const referenceRows = await attestationReferenceRows();
+			const references = referenceRows.filter(
+				(reference) => reference.digest === decision.digest
+			);
+			const [reference] = references;
+			if (reference === undefined) {
+				throw new Error('Expected the first page to attach the bundle');
+			}
+			for (const reference of references) {
+				await currentServer().removeAttestationReference({
+					...reference,
+					generation: narInfoGenerationSchema.parse(reference.generation),
+					predicateType: predicateTypeSchema.parse(reference.predicateType)
+				});
+			}
+			await env.CUPBOARD_DB.prepare(
+				'UPDATE cas_object SET delete_after = ? WHERE digest = ?'
+			)
+				.bind(isoTimestamp(new Date(0)), decision.digest)
+				.run();
+			const originalKey = await currentCasObjectKey(decision.digest);
+			const original = await env.CUPBOARD_DB.prepare(
+				'SELECT incarnation FROM cas_object WHERE digest = ?'
+			)
+				.bind(decision.digest)
+				.first<{ incarnation: number }>();
+			if (original === null) {
+				throw new Error('Expected the first page to promote the bundle');
+			}
+			const measured = vi.spyOn(
+				AttestationCasService.prototype,
+				'measureStagedBundle'
+			);
+			let collected: number | undefined;
+			const collect = async () => {
+				collected = await runCasReaper(
+					rootLogger(),
+					env,
+					10,
+					() => Promise.resolve(),
+					'collect'
+				);
+			};
+			if (interleaving === 'before-claim') {
+				const head = env.BLOBS.head.bind(env.BLOBS);
+				vi.spyOn(env.BLOBS, 'head').mockImplementation(async (key) => {
+					const result = await head(key);
+					if (key === originalKey && collected === undefined) {
+						await collect();
+					}
+					return result;
+				});
+			} else {
+				const reserve = await runInDurableObject(
+					currentServer(),
+					(instance) => {
+						const service = new AttestationCasService(instance.context);
+						return service.reserveReferenceAndCharge.bind(service);
+					}
+				);
+				vi.spyOn(
+					AttestationCasService.prototype,
+					'reserveReferenceAndCharge'
+				).mockImplementation(async (...arguments_) => {
+					await collect();
+					return reserve(...arguments_);
+				});
+			}
+			const next = await fixture.attach(decision.uploadId, [fixture.hash(1)]);
+			const list = await readFetch(`/attestations/${fixture.hash(1)}`);
+			expect({
+				collected,
+				paths: next.paths,
+				listStatus: list.status,
+				list: list.ok ? await list.json() : undefined,
+				objectKey: await currentCasObjectKey(decision.digest),
+				measured: measured.mock.calls.length
+			}).toStrictEqual({
+				collected: interleaving === 'before-claim' ? 1 : 0,
+				paths: [pathOutcome(fixture.hash(1), decision.digest, 'attached')],
+				listStatus: StatusCodes.OK,
+				list: {
+					attestations: [
+						{
+							digest: decision.digest,
+							predicateType: 'https://slsa.dev/provenance/v1',
+							size: bundle.byteLength
+						}
+					]
+				},
+				objectKey:
+					interleaving === 'before-claim'
+						? casObjectKey(reference.digest, original.incarnation + 1)
+						: originalKey,
+				measured: interleaving === 'before-claim' ? 1 : 0
+			});
+		}
+	);
+
+	it('renegotiates an active session after staging and CAS bytes disappear', async () => {
+		const fixture = await bundleFixture('default', 3);
+		const bundle = bundleForSubjects(fixture.subjects);
+		const decision = await stageFixtureBundle(fixture, bundle);
+		await fixture.attach(decision.uploadId, [fixture.hash(0)]);
+		await env.BLOBS.delete(decision.r2Key);
+		const available = await fixture.attach(decision.uploadId, [
+			fixture.hash(1)
+		]);
+		expect(available.paths).toStrictEqual([
+			pathOutcome(fixture.hash(1), decision.digest, 'attached')
+		]);
+		const objects = await env.BLOBS.list({ prefix: 'cas/' });
+		await env.BLOBS.delete(objects.objects.map((object) => object.key));
+		await expect(
+			fixture.attach(decision.uploadId, [fixture.hash(2)])
+		).rejects.toMatchObject({
+			status: StatusCodes.NOT_FOUND,
+			message: 'Attestation upload not found'
+		});
+		const pending = await runInDurableObject(currentServer(), (instance) => ({
+			uploads: instance.context.db
+				.select()
+				.from(schema.pendingAttestations)
+				.where(eq(schema.pendingAttestations.id, decision.uploadId))
+				.all(),
+			subjects: instance.context.db
+				.select()
+				.from(schema.pendingAttestationSubjects)
+				.where(
+					eq(schema.pendingAttestationSubjects.uploadId, decision.uploadId)
+				)
+				.all()
+		}));
+		expect(pending).toStrictEqual({ uploads: [], subjects: [] });
+		const replacement = await stageFixtureBundle(fixture, bundle);
+		const recovered = await fixture.attach(replacement.uploadId, [
+			fixture.hash(2)
+		]);
+		expect(recovered.paths).toStrictEqual([
+			pathOutcome(fixture.hash(2), replacement.digest, 'attached')
+		]);
+	});
+
+	it('expires the pending bundle and removes its staged bytes', async () => {
+		const fixture = await bundleFixture('default', 1);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		await fixture.attach(decision.uploadId, fixture.hashes);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.pendingAttestations)
+				.set({ expiresAt: isoTimestamp(new Date(0)) })
+				.where(eq(schema.pendingAttestations.id, decision.uploadId))
+				.run();
+		});
+		await expect(
+			fixture.attach(decision.uploadId, fixture.hashes)
+		).rejects.toMatchObject({ status: StatusCodes.NOT_FOUND });
+		const remaining = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db.select().from(schema.pendingAttestationSubjects).all()
+		);
+		expect(await env.BLOBS.head(decision.r2Key)).toBeNull();
+		expect(remaining).toStrictEqual([]);
+	});
+
+	it('completes a page when several list writes exceed one collective storage deadline', async () => {
+		const fixture = await bundleFixture('default', 3);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		const write = await boundListWriter();
+		vi.spyOn(
+			AttestationsService.prototype,
+			'materialiseList'
+		).mockImplementation(async (...arguments_) => {
+			await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+			await write(...arguments_);
+		});
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.gateBudgetMs = 5000;
+		});
+		try {
+			const page = await fixture.attach(decision.uploadId, fixture.hashes);
+			expect(page.paths).toStrictEqual(
+				fixture.hashes.map((hash) =>
+					pathOutcome(hash, decision.digest, 'attached')
+				)
+			);
+		} finally {
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.gateBudgetMs = 25_000;
+			});
+		}
+	}, 30_000);
+
+	it('retries a partial page without validating or promoting the bundle again', async () => {
+		const fixture = await bundleFixture('default', 3);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		const measured = vi.spyOn(
+			AttestationCasService.prototype,
+			'measureStagedBundle'
+		);
+		const promoted = vi.spyOn(
+			AttestationCasService.prototype,
+			'promoteMeasuredBundle'
+		);
+		const write = await boundListWriter();
+		let writes = 0;
+		vi.spyOn(
+			AttestationsService.prototype,
+			'materialiseList'
+		).mockImplementation(async (...arguments_) => {
+			writes += 1;
+			if (writes === 2) {
+				throw new Error('Simulated list write failure');
+			}
+			await write(...arguments_);
+		});
+		await expect(
+			fixture.attach(decision.uploadId, fixture.hashes)
+		).rejects.toMatchObject({ status: StatusCodes.INTERNAL_SERVER_ERROR });
+		const replay = await fixture.attach(decision.uploadId, fixture.hashes);
+		expect({
+			paths: replay.paths,
+			measured: measured.mock.calls.length,
+			promoted: promoted.mock.calls.length
+		}).toStrictEqual({
+			paths: [
+				pathOutcome(fixture.hash(0), decision.digest, 'already-present'),
+				pathOutcome(fixture.hash(1), decision.digest, 'already-present'),
+				pathOutcome(fixture.hash(2), decision.digest, 'attached')
+			],
+			measured: 1,
+			promoted: 1
+		});
+	});
+
+	it('rejects quota exhaustion before promoting a new bundle', async () => {
+		const fixture = await bundleFixture('default', 1);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		const promoted = vi.spyOn(
+			AttestationCasService.prototype,
+			'promoteMeasuredBundle'
+		);
+		await env.CUPBOARD_DB.prepare(
+			'UPDATE tenant_usage SET quota_bytes = bytes + cas_bytes WHERE tenant = ?'
+		)
+			.bind(fixtureTenant)
+			.run();
+		await expect(
+			fixture.attach(decision.uploadId, fixture.hashes)
+		).rejects.toMatchObject({ status: StatusCodes.INSUFFICIENT_STORAGE });
+		expect(promoted.mock.calls).toStrictEqual([]);
+	});
+
+	it('does not create a cache for an empty bundle request', async () => {
+		const fixture = await bundleFixture('default', 1);
+		expect(
+			await fixture.client.attestations.negotiateBundles.inNamedCache({
+				cacheName: 'unused',
+				pushId: testPushId,
+				bundles: []
+			})
+		).toStrictEqual({ bundles: [] });
+		await expect(
+			fixture.client.caches.get.inNamedCache({ cacheName: 'unused' })
+		).rejects.toMatchObject({ status: StatusCodes.NOT_FOUND });
+	});
+
+	it('does not attach a path whose local metadata has no committed D1 reference', async () => {
+		const fixture = await bundleFixture('default', 2);
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		await fixture.attach(decision.uploadId, [fixture.hash(0)]);
+		await runInDurableObject(currentServer(), (instance) => {
+			const filter = and(
+				eq(d1Schema.blobReference.tenant, fixtureTenant),
+				eq(d1Schema.blobReference.storePathHash, fixture.hash(1))
+			);
+			return instance.context.d1
+				.delete(d1Schema.blobReference)
+				.where(filter)
+				.run();
+		});
+		const next = await fixture.attach(decision.uploadId, [fixture.hash(1)]);
+		expect(next.paths).toStrictEqual([
+			pathOutcome(fixture.hash(1), decision.digest, 'unservable')
+		]);
+	});
+
+	it('reports absent and collected pending IDs to attachment callers without weakening cache grants', async () => {
+		const fixture = await bundleFixture('default', 1);
+		const scoped = tenantClient(
+			await issueServerSignedToken(cacheWriteGrants())
+		);
+		const readGrants = authorizationDetailsSchema.parse([
+			{ type: 'cupboard_cache', cache: defaultCache(), actions: ['cache:read'] }
+		]);
+		const noAttach = tenantClient(await issueServerSignedToken(readGrants));
+		const absent = {
+			id: '00000000-0000-4000-8000-000000000000',
+			storePathHashes: fixture.hashes
+		};
+		await expect(
+			scoped.attestations.attachPaths.inDefaultCache(absent)
+		).rejects.toMatchObject({ status: StatusCodes.NOT_FOUND });
+		await expect(
+			noAttach.attestations.attachPaths.inDefaultCache(absent)
+		).rejects.toMatchObject({ status: StatusCodes.FORBIDDEN });
+		await expect(
+			scoped.attestations.attach.inDefaultCache({ id: absent.id })
+		).rejects.toMatchObject({ status: StatusCodes.FORBIDDEN });
+		const decision = await stageFixtureBundle(
+			fixture,
+			bundleForSubjects(fixture.subjects)
+		);
+		await fixture.attach(decision.uploadId, fixture.hashes);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.pendingAttestations)
+				.set({ expiresAt: isoTimestamp(new Date(0)) })
+				.where(eq(schema.pendingAttestations.id, decision.uploadId))
+				.run();
+		});
+		await fixture.client.gc.runAll();
+		await expect(
+			scoped.attestations.attachPaths.inDefaultCache({
+				id: decision.uploadId,
+				storePathHashes: fixture.hashes
+			})
+		).rejects.toMatchObject({ status: StatusCodes.NOT_FOUND });
+	});
+
 	it('rejects attestation negotiation under a forged push id', async () => {
 		await useTestServer('contract-attestations-forged');
 		const init = await bootstrap();
@@ -851,3 +1489,151 @@ describe('tenant contract round trip', () => {
 		});
 	});
 });
+
+function bundleForSubjects(
+	subjects: readonly { readonly name?: string; readonly digest: string }[]
+): Uint8Array {
+	const statement = {
+		_type: 'https://in-toto.io/Statement/v1',
+		predicateType: 'https://slsa.dev/provenance/v1',
+		predicate: {},
+		subject: subjects.map((subject) => ({
+			name: subject.name,
+			digest: { sha256: subject.digest }
+		}))
+	};
+	const bundle = {
+		mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+		verificationMaterial: { publicKey: { hint: 'test-key' }, tlogEntries: [] },
+		dsseEnvelope: {
+			payload: btoa(JSON.stringify(statement)),
+			payloadType: 'application/vnd.in-toto+json',
+			signatures: [{ sig: btoa('signature') }]
+		}
+	};
+	return new TextEncoder().encode(JSON.stringify(bundle));
+}
+
+type BundleCache = 'default' | 'default-private' | 'public' | 'private';
+async function bundleFixture(kind: BundleCache, count: number) {
+	if (kind === 'default-private') {
+		await recordTransition('cache-identity', 'complete');
+	}
+	await useTestServer(`bundle-pages-${kind}-${String(count)}`);
+	const init = await bootstrap();
+	const client = tenantClient(init.token);
+	const cache = kind.startsWith('default')
+		? defaultCache()
+		: namedCache(`bundles-${kind}`);
+	if (cache.kind === 'named') {
+		await client.caches.put.inNamedCache({
+			cacheName: cache.name,
+			access: kind === 'private' ? 'private' : 'public',
+			priority: 30
+		});
+	}
+	if (kind === 'default-private') {
+		await client.caches.update.inDefaultCache({
+			kind: 'access',
+			access: 'private'
+		});
+	}
+	const nar = await verifiableNar(`bundle-subjects-${kind}-${String(count)}`);
+	const metadata = Array.from({ length: count }, (_, index) =>
+		uploadMetadata({
+			storePathHash: String(index + 1).padStart(32, '0'),
+			name: 'bundle-subject',
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		})
+	);
+	for (const path of metadata) {
+		await pushPath(init.token, path, cache, nar);
+	}
+	const hashes = metadata.map((path) => path.storePathHash);
+	const subjects = metadata.map((path) => ({
+		name: StorePath.basename(path.storePath),
+		digest: narDigestHex(path.narHash)
+	}));
+	return {
+		client,
+		hashes,
+		subjects,
+		hash: (index: number) => {
+			const hash = hashes[index];
+			if (hash === undefined) {
+				throw new Error('The bundle fixture has no path at this index');
+			}
+			return hash;
+		},
+		subject: (index: number) => {
+			const subject = subjects[index];
+			if (subject === undefined) {
+				throw new Error('The bundle fixture has no subject at this index');
+			}
+			return subject;
+		},
+		negotiate: (digest: string) =>
+			cache.kind === 'default'
+				? client.attestations.negotiateBundles.inDefaultCache({
+						pushId: testPushId,
+						bundles: [{ digest }]
+					})
+				: client.attestations.negotiateBundles.inNamedCache({
+						cacheName: cache.name,
+						pushId: testPushId,
+						bundles: [{ digest }]
+					}),
+		attach: (id: string, storePathHashes: readonly string[]) =>
+			cache.kind === 'default'
+				? client.attestations.attachPaths.inDefaultCache({
+						id,
+						storePathHashes: [...storePathHashes]
+					})
+				: client.attestations.attachPaths.inNamedCache({
+						cacheName: cache.name,
+						id,
+						storePathHashes: [...storePathHashes]
+					})
+	};
+}
+async function stageFixtureBundle(
+	fixture: Awaited<ReturnType<typeof bundleFixture>>,
+	bytes: Uint8Array
+) {
+	const digest = await sha256HexBytes(bytes);
+	const negotiated = await fixture.negotiate(digest);
+	const decision = attestationBundleDecisionSchema.parse(negotiated.bundles[0]);
+	if (decision.action !== 'upload') {
+		throw new Error('Expected a new bundle upload');
+	}
+	await env.BLOBS.put(decision.r2Key, bytes, { sha256: hexBytes(digest) });
+	return decision;
+}
+function pathOutcome(
+	storePathHash: string,
+	digest: string,
+	status: 'attached' | 'already-present' | 'unservable'
+) {
+	return {
+		storePathHash,
+		digest,
+		predicateType: 'https://slsa.dev/provenance/v1',
+		status
+	};
+}
+
+async function boundListWriter() {
+	return runInDurableObject(currentServer(), (instance) => {
+		const context = instance.context;
+		const service = new AttestationsService(
+			context,
+			new CacheRegistrationService(context),
+			new AttestationCasService(context),
+			new NarInfoObjectsService(context)
+		);
+		return service.materialiseList.bind(service);
+	});
+}

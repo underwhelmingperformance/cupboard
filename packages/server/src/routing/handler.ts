@@ -5,7 +5,12 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { reuseViewAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
+import {
+	cacheMetadataCapability,
+	cacheMetadataCapabilityHeader
+} from '@cupboard/protocol/cache-metadata';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
@@ -22,6 +27,7 @@ import {
 	withSubrequestSlice
 } from '../do/subrequest-slice.ts';
 import {
+	MetadataScopeChangedError,
 	TenantAdmissionUnavailableError,
 	TenantWritesStoppedError
 } from '../errors.ts';
@@ -35,6 +41,7 @@ import {
 import { parseRequestBody } from '../http/parse.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
+import { parseCacheMetadataRequest } from '../read/metadata-page.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
 import {
@@ -65,6 +72,8 @@ const cacheAvailabilityPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
 const attestationStatusPathPattern =
 	/^(?:\/cache\/[^/]+)?\/api\/v1\/attested-paths$/u;
+const cacheMetadataPathPattern =
+	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/path-info$/u;
 
 function buildApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
@@ -75,6 +84,23 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// Initialise logging before admission so early refusals include request fields.
 	// Add the tenant field only after the slug is admitted.
 	app.use(loggerMiddleware);
+	app.use('/t/:tenant/*', async (context, next) => {
+		await next();
+		if (
+			!/\/(?:[^/]+\.narinfo|nix-cache-info|api\/v1\/(?:missing-paths|attested-paths|path-info))$/u.test(
+				new URL(context.req.url).pathname
+			)
+		) {
+			return;
+		}
+		const headers = new Headers(context.res.headers);
+		headers.set(cacheMetadataCapabilityHeader, cacheMetadataCapability);
+		context.res = new Response(context.res.body, {
+			status: context.res.status,
+			statusText: context.res.statusText,
+			headers
+		});
+	});
 
 	// Keep `/_health` as an alias for the conventional `/healthz` endpoint.
 	// Liveness is public and performs no dependency checks; the authenticated
@@ -266,6 +292,33 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	app.post('/t/:tenant/reuse/:view/api/v1/missing-paths', async (context) =>
 		withoutStoring(await answerReuseViewAvailability(context))
 	);
+	app.post('/t/:tenant/reuse/:view/api/v1/path-info', async (context) => {
+		const request = await parseCacheMetadataRequest(context.req.raw);
+		const target = new URL(context.req.url);
+		target.pathname = context.get('tenantRest');
+		const response = await tenantServer(
+			context.env,
+			context.get('tenant')
+		).fetch(
+			new Request(target, {
+				method: 'POST',
+				headers: context.req.raw.headers,
+				body: JSON.stringify(request)
+			})
+		);
+		try {
+			if (
+				response.ok &&
+				(await tenantStatus(context.env, context.get('tenant'))) !== 'active'
+			) {
+				throw new MetadataScopeChangedError();
+			}
+		} catch (error) {
+			await discardResponseBody(response);
+			throw error;
+		}
+		return withoutStoring(response);
+	});
 	app.all('/t/:tenant/reuse/*', () => uncachedNotFoundResponse());
 
 	// Compute shared D1 hints on the Worker before entering the tenant Durable
@@ -476,7 +529,7 @@ function admittedWriteStatus(
 		: undefined;
 }
 
-// The two read-only POST endpoints bypass the write gate. A WebSocket upgrade
+// Read-only POST probes bypass the write gate. A WebSocket upgrade
 // is sent as a GET request, but the only socket route commits uploads and must
 // be gated as a write.
 function isTenantWrite(inner: Request): boolean {
@@ -515,7 +568,8 @@ function isReadProbeRequest(method: string, pathname: string): boolean {
 	return (
 		method === 'POST' &&
 		(cacheAvailabilityPathPattern.test(pathname) ||
-			attestationStatusPathPattern.test(pathname))
+			attestationStatusPathPattern.test(pathname) ||
+			cacheMetadataPathPattern.test(pathname))
 	);
 }
 

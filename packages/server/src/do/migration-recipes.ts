@@ -1215,10 +1215,60 @@ WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
 	};
 }
 
+function attestationBundlePagesRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-attestation-bundle-shadow',
+				statements: [statementAt(statements, 1), statementAt(statements, 9)]
+			},
+			copyStage(
+				{ table: 'pending_attestation', create: 1, copy: 2, indexes: [] },
+				statements
+			),
+			{
+				kind: 'batch',
+				name: 'switch-attestation-bundle-shadow',
+				statements: [
+					'DROP TRIGGER `managed_retirement_pending_attestation_delete`;',
+					'DROP INDEX `pending_attestation_cache_id_idx`;',
+					'DROP INDEX `pending_attestation_expires_at_idx`;',
+					'DROP INDEX `pending_attestation_r2_key_idx`;',
+					'ALTER TABLE `pending_attestation` RENAME TO `__bounded_old_pending_attestation`;',
+					statementAt(statements, 4),
+					statementAt(statements, 6),
+					statementAt(statements, 7),
+					statementAt(statements, 8),
+					statementAt(statements, 10),
+					statementAt(statements, 11)
+				]
+			},
+			drainStage('pending_attestation'),
+			{
+				kind: 'batch',
+				name: 'finish-attestation-bundle-shadow',
+				statements: ['DROP TABLE `__bounded_old_pending_attestation`;']
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
+	if (tag === '0064_attestation-bundle-pages') {
+		return attestationBundlePagesRecipe(tag, statements);
+	}
+
 	if (tag === '0043_cache_access_backfill') {
 		return cacheAccessBackfillRecipe(tag, statements);
 	}

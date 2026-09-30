@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { env } from 'node:process';
 
 import { storePathSchema } from '@cupboard/nix-store/scalars';
@@ -40,7 +41,7 @@ import { pushClientFor } from '../push/push-client.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-import { resolvePushPath } from './push.ts';
+import { parsePathFile, resolvePushPath } from './push.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -104,10 +105,23 @@ interface AttachOptions {
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly attestation: readonly string[];
+	readonly attestationsFile?: string;
+	readonly pathsFile?: string;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
 	return [...previous, value];
+}
+
+export async function appendPathFile(
+	paths: readonly string[],
+	pathsFile: string | undefined
+): Promise<readonly string[]> {
+	if (pathsFile === undefined) {
+		return paths;
+	}
+
+	return [...paths, ...parsePathFile(await readFile(pathsFile, 'utf8'))];
 }
 
 export function registerAttestCommands(
@@ -126,7 +140,11 @@ export function registerAttestCommands(
 			'Attach Sigstore attestation bundles to store paths that are already published to the cache.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<paths...>', 'published store paths to attach the bundles to')
+		.argument('[paths...]', 'published store paths to attach the bundles to')
+		.option(
+			'--paths-file <path>',
+			'read additional published store paths from this file, one per line'
+		)
 		.option(
 			'--github-oidc',
 			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
@@ -151,6 +169,10 @@ export function registerAttestCommands(
 			collect,
 			[]
 		)
+		.option(
+			'--attestations-file <path>',
+			'read additional Sigstore bundle paths from this file, one per line'
+		)
 		.addHelpText(
 			'after',
 			[
@@ -162,31 +184,40 @@ export function registerAttestCommands(
 			].join('\n')
 		)
 		.action(async (url: URL, paths: string[], options: AttachOptions) => {
-			if (options.attestation.length === 0) {
+			const bundlePaths = await appendPathFile(
+				options.attestation,
+				options.attestationsFile
+			);
+			if (bundlePaths.length === 0) {
 				throw new AttestAttachBundleRequiredError();
 			}
 
-			const resolved = await resolveAuthorisedCachePositionals(url, paths, {
-				minimumPayload: 1,
-				payloadDescription: 'a published store path',
-				parsePayloadEntry: (entry) => entry,
-				authorise: (target) =>
-					authenticateForPush(
-						CupboardClient.fromUrl(target.tenantUrl, {
-							cache: target.cache,
-							signal: programOptions.signal
-						}),
-						{
-							githubOidc: options.githubOidc,
-							audience:
-								options.audience ?? audienceSchema.parse(target.tenantUrl),
-							authorizationDetails: attestAttachAuthorizationDetails({
-								cache: target.cache
-							})
-						}
-					),
-				signal: programOptions.signal
-			});
+			const requestedPaths = await appendPathFile(paths, options.pathsFile);
+			const resolved = await resolveAuthorisedCachePositionals(
+				url,
+				requestedPaths,
+				{
+					minimumPayload: 1,
+					payloadDescription: 'a published store path',
+					parsePayloadEntry: (entry) => entry,
+					authorise: (target) =>
+						authenticateForPush(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache: target.cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: attestAttachAuthorizationDetails({
+									cache: target.cache
+								})
+							}
+						),
+					signal: programOptions.signal
+				}
+			);
 			const reporter = commandUi(program, programOptions).reporter();
 			const cache = resolved.target.cache;
 			const resolvedPaths = resolved.payload.map((path) =>
@@ -216,7 +247,7 @@ export function registerAttestCommands(
 						signal: programOptions.signal
 					})
 				),
-				attestations: options.attestation.map((path) => ({ path })),
+				attestations: bundlePaths.map((path) => ({ path })),
 				pathInfos
 			});
 		});

@@ -8,11 +8,17 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
+	AttestationAttachPathsResponseInput,
 	AttestationAttachResponseInput,
+	AttestationBundleNegotiateRequestInput,
+	AttestationBundleNegotiateResponseInput,
 	AttestationDecisionInput,
 	AttestationNegotiateRequestInput
 } from '@cupboard/protocol/attestations';
-import { attestationNegotiateMaxBundles } from '@cupboard/protocol/attestations';
+import {
+	attestationAttachMaxPaths,
+	attestationNegotiateMaxBundles
+} from '@cupboard/protocol/attestations';
 import {
 	type Reporter,
 	type ResultPayload,
@@ -26,8 +32,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
 	AttestationAttachResponseMismatchError,
 	AttestationBundleInvalidError,
+	AttestationBundleResponseMismatchError,
 	AttestationNegotiationMismatchError,
-	AttestationSubjectNotPushedError,
+	AttestationPathUnservableError,
 	AttestationUploadUnavailableError,
 	NarInfoUnavailableError,
 	ReferencePathMismatchError
@@ -37,6 +44,7 @@ import {
 	type AttestationAttachClient,
 	type AttestationPathInfo,
 	parseAttestationBundle,
+	prepareAttestationBundles,
 	type PreparedAttestationBundle,
 	readCommittedAttestationPathInfos,
 	requireAttestationAttachClient,
@@ -170,7 +178,7 @@ function sha256Hex(bytes: Uint8Array): string {
 }
 
 interface BundleSubject {
-	readonly name: string;
+	readonly name?: string;
 	readonly digest: string;
 }
 
@@ -384,6 +392,606 @@ function recordedClient(
 		}
 	};
 }
+
+const transportExpiry = () =>
+	new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+function transportFixture(paths = 1, bundleCount = 1) {
+	const prepared: PreparedAttestationBundle[] = Array.from(
+		{ length: bundleCount },
+		(_, bundleIndex) =>
+			Array.from({ length: paths }, (_, pathIndex) => ({
+				storePathHash: StorePath.hash(
+					`/nix/store/${(pathIndex + bundleIndex * (paths === 1 ? 1 : 0)).toString(2).padStart(32, '0')}-path`
+				),
+				digest: bundleIndex.toString(16).padStart(64, '0'),
+				bytes: new Uint8Array([bundleIndex])
+			}))
+	).flat();
+	const expiry = transportExpiry;
+	const responseFor = (
+		digest: string,
+		paths: readonly string[]
+	): AttestationAttachPathsResponseInput => ({
+		expiresAt: expiry(),
+		paths: paths.map((storePathHash) => ({
+			storePathHash,
+			digest,
+			predicateType: 'https://slsa.dev/provenance/v1',
+			status: 'attached'
+		}))
+	});
+	const uploaded: { key: string; bytes: Uint8Array }[] = [];
+	const client = {
+		negotiateAttestations:
+			vi.fn<AttestationAttachClient['negotiateAttestations']>(),
+		attachAttestation: vi.fn<AttestationAttachClient['attachAttestation']>(),
+		negotiateAttestationBundles: vi.fn(
+			(
+				body: Omit<AttestationBundleNegotiateRequestInput, 'pushId'>
+			): Promise<AttestationBundleNegotiateResponseInput> =>
+				Promise.resolve({
+					bundles: body.bundles.map(({ digest }) => ({
+						action: 'upload',
+						digest,
+						uploadId: digest,
+						r2Key: `staging/${digest}`,
+						expiresAt: expiry()
+					}))
+				})
+		),
+		uploadNar: vi.fn(async (key: string, body: ReadableStream<Uint8Array>) => {
+			uploaded.push({
+				key,
+				bytes: new Uint8Array(await collectReadableStream(body))
+			});
+		}),
+		attachAttestationPaths: vi.fn(
+			(id: string, body: { readonly storePathHashes: readonly string[] }) =>
+				Promise.resolve(responseFor(id, body.storePathHashes))
+		)
+	};
+	const group = { error: vi.fn(), message: vi.fn(), success: vi.fn() };
+	const log: StepLog = { group: () => group, message: vi.fn(), warn: vi.fn() };
+	return { prepared, client, log, uploaded, responseFor, expiry };
+}
+
+describe('bundle attachment transport', () => {
+	it.each([
+		{ description: 'a public bundle', paths: 1600, bundleCount: 1 },
+		{
+			description: 'overlapping provenance and publication bundles',
+			paths: 1600,
+			bundleCount: 2
+		},
+		{ description: 'private individual bundles', paths: 1, bundleCount: 130 }
+	])(
+		'uploads each distinct bundle once for $description',
+		async ({ paths, bundleCount }) => {
+			const fixture = transportFixture(paths, bundleCount);
+			const { prepared, client, log } = fixture;
+			const outcome = await runAttestationAttachment(prepared, log, { client });
+			const pages = client.attachAttestationPaths.mock.calls.toSorted(
+				([left], [right]) => left.localeCompare(right)
+			);
+			expect({
+				negotiated: client.negotiateAttestationBundles.mock.calls.flatMap(
+					([body]) => body.bundles
+				),
+				uploaded: fixture.uploaded,
+				attachedPairs: pages.flatMap(([digest, body]) =>
+					body.storePathHashes.map((storePathHash) => ({
+						digest,
+						storePathHash
+					}))
+				),
+				boundedPages: pages.every(
+					([, body]) => body.storePathHashes.length <= attestationAttachMaxPaths
+				),
+				outcome,
+				legacyCalls: client.negotiateAttestations.mock.calls
+			}).toStrictEqual({
+				negotiated: Array.from({ length: bundleCount }, (_, index) => ({
+					digest: index.toString(16).padStart(64, '0')
+				})),
+				uploaded: Array.from({ length: bundleCount }, (_, index) => ({
+					key: `staging/${index.toString(16).padStart(64, '0')}`,
+					bytes: new Uint8Array([index])
+				})),
+				attachedPairs: prepared.map(({ digest, storePathHash }) => ({
+					digest,
+					storePathHash
+				})),
+				boundedPages: true,
+				outcome: {
+					attached: prepared.length,
+					reused: 0,
+					uploadedBytes: bundleCount,
+					unservableStorePathHashes: new Set(),
+					bundles: prepared.map(({ digest, storePathHash }) => ({
+						digest,
+						storePathHash,
+						outcome: 'attached'
+					}))
+				},
+				legacyCalls: []
+			});
+		}
+	);
+
+	it.each(['missing', 'duplicate', 'unexpected'] as const)(
+		'rejects %s negotiation decisions before upload',
+		async (mismatch) => {
+			const { prepared, client, log, expiry } = transportFixture();
+			const digest = '0'.repeat(64);
+			const decision = {
+				action: 'reuse' as const,
+				digest,
+				uploadId: digest,
+				expiresAt: expiry()
+			};
+			client.negotiateAttestationBundles.mockResolvedValue({
+				bundles:
+					mismatch === 'missing'
+						? []
+						: mismatch === 'duplicate'
+							? [decision, decision]
+							: [{ ...decision, digest: 'f'.repeat(64) }]
+			});
+			await expect(
+				runAttestationAttachment(prepared, log, { client })
+			).rejects.toThrow(
+				new AttestationBundleResponseMismatchError(
+					'negotiation',
+					mismatch,
+					mismatch === 'unexpected' ? 'f'.repeat(64) : digest
+				)
+			);
+			expect({
+				uploads: client.uploadNar.mock.calls,
+				attachments: client.attachAttestationPaths.mock.calls
+			}).toStrictEqual({ uploads: [], attachments: [] });
+		}
+	);
+
+	it.each(['missing', 'duplicate', 'unexpected-path', 'wrong-digest'] as const)(
+		'rejects a %s attachment result',
+		async (kind) => {
+			const { prepared, client, log, responseFor } = transportFixture();
+			const digest = '0'.repeat(64);
+			const storePathHash = StorePath.hash(
+				'/nix/store/00000000000000000000000000000000-path'
+			);
+			const unexpectedPath = StorePath.hash(runtimePath);
+			client.attachAttestationPaths.mockImplementation(() => {
+				const response = responseFor(digest, [storePathHash]);
+				return Promise.resolve({
+					...response,
+					paths:
+						kind === 'missing'
+							? []
+							: kind === 'duplicate'
+								? [...response.paths, ...response.paths]
+								: response.paths.map((entry) => ({
+										...entry,
+										...(kind === 'wrong-digest'
+											? { digest: 'f'.repeat(64) }
+											: { storePathHash: unexpectedPath })
+									}))
+				});
+			});
+			const mismatch =
+				kind === 'missing' || kind === 'duplicate' ? kind : 'unexpected';
+			const identity = `${kind === 'unexpected-path' ? unexpectedPath : storePathHash} ${kind === 'wrong-digest' ? 'f'.repeat(64) : digest}`;
+			await expect(
+				runAttestationAttachment(prepared, log, { client })
+			).rejects.toThrow(
+				new AttestationBundleResponseMismatchError(
+					'attachment',
+					mismatch,
+					identity
+				)
+			);
+		}
+	);
+
+	it.each(['upload', 'reuse'] as const)(
+		'deduplicates overlapping copies of the same digest with an %s decision',
+		async (action) => {
+			const { prepared, client, log, expiry } = transportFixture(2);
+			client.negotiateAttestationBundles.mockImplementation((body) =>
+				Promise.resolve({
+					bundles: body.bundles.map(({ digest }) => ({
+						action,
+						digest,
+						uploadId: digest,
+						r2Key: `staging/${digest}`,
+						expiresAt: expiry()
+					}))
+				})
+			);
+			const outcome = await runAttestationAttachment(
+				[...prepared, ...prepared],
+				log,
+				{ client }
+			);
+			expect({
+				negotiations: client.negotiateAttestationBundles.mock.calls,
+				pages: client.attachAttestationPaths.mock.calls,
+				uploadedBytes: outcome.uploadedBytes,
+				bundles: outcome.bundles
+			}).toStrictEqual({
+				negotiations: [[{ bundles: [{ digest: '0'.repeat(64) }] }]],
+				pages: [
+					[
+						'0'.repeat(64),
+						{ storePathHashes: prepared.map((entry) => entry.storePathHash) }
+					]
+				],
+				uploadedBytes: action === 'upload' ? 1 : 0,
+				bundles: prepared.map(({ digest, storePathHash }) => ({
+					digest,
+					storePathHash,
+					outcome: 'attached'
+				}))
+			});
+			expect(client.uploadNar).toHaveBeenCalledTimes(
+				action === 'upload' ? 1 : 0
+			);
+		}
+	);
+
+	it.each([true, false])(
+		'preserves mixed page outcomes with skipUnservable=%s',
+		async (skipUnservable) => {
+			const { prepared, client, log, responseFor } = transportFixture(
+				attestationAttachMaxPaths + 1
+			);
+			const unavailable = prepared.at(-1);
+			if (unavailable === undefined) {
+				throw new Error('Expected the second page subject');
+			}
+			client.attachAttestationPaths.mockImplementation((id, body) =>
+				Promise.resolve({
+					...responseFor(id, body.storePathHashes),
+					paths: responseFor(id, body.storePathHashes).paths.map(
+						(entry, index) => ({
+							...entry,
+							status:
+								entry.storePathHash === unavailable.storePathHash
+									? 'unservable'
+									: index === 0
+										? 'already-present'
+										: 'attached'
+						})
+					)
+				})
+			);
+			const result = runAttestationAttachment(prepared, log, {
+				client,
+				skipUnservable
+			});
+			if (!skipUnservable) {
+				await expect(result).rejects.toThrow(
+					new AttestationPathUnservableError(unavailable.storePathHash)
+				);
+				return;
+			}
+			expect(await result).toStrictEqual({
+				attached: attestationAttachMaxPaths - 1,
+				reused: 1,
+				uploadedBytes: 1,
+				unservableStorePathHashes: new Set([unavailable.storePathHash]),
+				bundles: prepared.map(({ digest, storePathHash }, index) => ({
+					digest,
+					storePathHash,
+					outcome:
+						index === 0
+							? 'reused'
+							: storePathHash === unavailable.storePathHash
+								? 'unservable'
+								: 'attached'
+				}))
+			});
+		}
+	);
+
+	it('negotiates later work only after the preceding batch completes', async () => {
+		const { prepared, client, log, responseFor, expiry } = transportFixture(
+			1,
+			7
+		);
+		let now = Date.parse('2050-01-01T00:00:00.000Z');
+		const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+		const negotiatedAt: number[] = [];
+		try {
+			client.negotiateAttestationBundles.mockImplementation((body) => {
+				negotiatedAt.push(now);
+				return Promise.resolve({
+					bundles: body.bundles.map(({ digest }) => ({
+						action: 'reuse',
+						digest,
+						uploadId: digest,
+						expiresAt: expiry()
+					}))
+				});
+			});
+			let completed = 0;
+			client.attachAttestationPaths.mockImplementation((id, body) => {
+				completed += 1;
+				if (completed === 6) {
+					now += 16 * 60 * 1000;
+				}
+				return Promise.resolve(responseFor(id, body.storePathHashes));
+			});
+			await runAttestationAttachment(prepared, log, { client });
+			expect(negotiatedAt).toStrictEqual([
+				Date.parse('2050-01-01T00:00:00.000Z'),
+				Date.parse('2050-01-01T00:16:00.000Z')
+			]);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it.each(['elapsed', 'not-found', 'persistent-not-found'] as const)(
+		'renews the current page after %s without losing earlier outcomes',
+		async (reason) => {
+			const { prepared, client, log, responseFor, expiry } = transportFixture(
+				attestationAttachMaxPaths + 1
+			);
+			let now = Date.parse('2050-01-01T00:00:00.000Z');
+			const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+			let session = 0;
+			const missing = new ORPCError('NOT_FOUND');
+			try {
+				client.negotiateAttestationBundles.mockImplementation((body) => {
+					session += 1;
+					return Promise.resolve({
+						bundles: body.bundles.map(({ digest }) => ({
+							action: 'reuse',
+							digest,
+							uploadId: String(session),
+							expiresAt: expiry()
+						}))
+					});
+				});
+				client.attachAttestationPaths.mockImplementation((id, body) => {
+					const isSecondPage = body.storePathHashes.length === 1;
+					if (
+						isSecondPage &&
+						reason !== 'elapsed' &&
+						(id === '1' || reason === 'persistent-not-found')
+					) {
+						return Promise.reject(missing);
+					}
+					const response = responseFor('0'.repeat(64), body.storePathHashes);
+					if (!isSecondPage && reason === 'elapsed') {
+						now += 16 * 60 * 1000;
+					}
+					return Promise.resolve(response);
+				});
+				const result = runAttestationAttachment(prepared, log, {
+					client,
+					skipUnservable: true
+				});
+				if (reason === 'persistent-not-found') {
+					await expect(result).rejects.toBe(missing);
+				} else {
+					const outcome = await result;
+					expect(outcome.bundles).toStrictEqual(
+						prepared.map(({ digest, storePathHash }) => ({
+							digest,
+							storePathHash,
+							outcome: 'attached'
+						}))
+					);
+				}
+				const firstPage = prepared
+					.slice(0, attestationAttachMaxPaths)
+					.map((entry) => entry.storePathHash);
+				const secondPage = prepared
+					.slice(attestationAttachMaxPaths)
+					.map((entry) => entry.storePathHash);
+				expect(client.attachAttestationPaths.mock.calls).toStrictEqual([
+					['1', { storePathHashes: firstPage }],
+					...(reason === 'elapsed'
+						? []
+						: [['1', { storePathHashes: secondPage }]]),
+					['2', { storePathHashes: secondPage }]
+				]);
+				expect(client.uploadNar.mock.calls).toStrictEqual([]);
+			} finally {
+				clock.mockRestore();
+			}
+		}
+	);
+
+	it.each([1, 2])(
+		'uses the legacy API when bundle negotiation is absent (%s subjects)',
+		async (paths) => {
+			const { prepared, client, log } = transportFixture(paths);
+			const record: RecordedClient = {
+				negotiations: [],
+				uploads: [],
+				attached: []
+			};
+			const legacy = recordedClient(record, { decide: () => 'upload' });
+			client.negotiateAttestationBundles.mockRejectedValue(
+				new ORPCError('NOT_FOUND')
+			);
+			const result = await runAttestationAttachment(prepared, log, {
+				client: { ...client, ...legacy }
+			});
+			expect({
+				result,
+				record,
+				pages: client.attachAttestationPaths.mock.calls
+			}).toStrictEqual({
+				result: {
+					attached: prepared.length,
+					reused: 0,
+					uploadedBytes: prepared.length,
+					unservableStorePathHashes: new Set(),
+					bundles: prepared.map(({ storePathHash, digest }) => ({
+						storePathHash,
+						digest,
+						outcome: 'attached'
+					}))
+				},
+				record: {
+					negotiations: [
+						{
+							bundles: prepared.map(({ storePathHash, digest }) => ({
+								storePathHash,
+								digest
+							}))
+						}
+					],
+					uploads: prepared.map(({ storePathHash, bytes }) => ({
+						r2Key: `staging/attestations/${storePathHash}`,
+						body: Buffer.from(bytes)
+					})),
+					attached: prepared.map(
+						({ storePathHash }) => `attestation-${storePathHash}`
+					)
+				},
+				pages: []
+			});
+		}
+	);
+
+	it('attaches every subject through a legacy client without changing the signed bundle', async () => {
+		const bundle = sigstoreBundleBytes(
+			bundleSubject(appPath, appHash),
+			bundleSubject(runtimePath, runtimeHash)
+		);
+		const digest = sha256Hex(bundle);
+		const record: RecordedClient = {
+			negotiations: [],
+			uploads: [],
+			attached: []
+		};
+		const payloads: ResultPayload[] = [];
+		await runAttestAttach([appPath, runtimePath], reporter([], [], payloads), {
+			client: recordedClient(record, { decide: () => 'upload' }),
+			pathInfos: [
+				pathInfo(appPath, appHash),
+				pathInfo(runtimePath, runtimeHash)
+			],
+			attestations: [{ path: 'shared.sigstore.json' }],
+			readAttestationBundle: () => Promise.resolve(bundle)
+		});
+		const paths = [appPath, runtimePath];
+		expect({
+			record,
+			summaries: payloads.map(({ kind, data }) => ({ kind, data }))
+		}).toStrictEqual({
+			record: {
+				negotiations: [
+					{
+						bundles: paths.map((path) => ({
+							storePathHash: StorePath.hash(path),
+							digest
+						}))
+					}
+				],
+				uploads: paths.map((path) => ({
+					r2Key: `staging/attestations/${StorePath.hash(path)}`,
+					body: Buffer.from(bundle)
+				})),
+				attached: paths.map((path) => `attestation-${StorePath.hash(path)}`)
+			},
+			summaries: [
+				{
+					kind: 'attestation-attach-summary',
+					data: {
+						attached: 2,
+						reused: 0,
+						unservable: 0,
+						uploadedBytes: bundle.byteLength * 2,
+						paths: paths.map((storePath) => ({
+							storePathHash: StorePath.hash(storePath),
+							storePath,
+							outcome: 'attached'
+						}))
+					}
+				}
+			]
+		});
+	});
+
+	it.each([
+		new ORPCError('UNAUTHORIZED'),
+		new ORPCError('FORBIDDEN'),
+		new ORPCError('INTERNAL_SERVER_ERROR'),
+		new ORPCError('NOT_FOUND', { defined: true }),
+		new Error('connection refused')
+	])(
+		'keeps an unexpected bundle negotiation failure fatal: %s',
+		async (error) => {
+			const { prepared, client, log } = transportFixture(2);
+			client.negotiateAttestationBundles.mockRejectedValue(error);
+			await expect(
+				runAttestationAttachment(prepared, log, { client })
+			).rejects.toBe(error);
+			expect({
+				legacyNegotiation: client.negotiateAttestations.mock.calls,
+				legacyAttachment: client.attachAttestation.mock.calls,
+				upload: client.uploadNar.mock.calls,
+				attachment: client.attachAttestationPaths.mock.calls
+			}).toStrictEqual({
+				legacyNegotiation: [],
+				legacyAttachment: [],
+				upload: [],
+				attachment: []
+			});
+		}
+	);
+
+	it('does not fall back after the server accepted grouped negotiation', async () => {
+		const { prepared, client, log, expiry } = transportFixture();
+		const error = new ORPCError('NOT_FOUND');
+		client.negotiateAttestationBundles
+			.mockResolvedValueOnce({
+				bundles: prepared.map(({ digest }) => ({
+					action: 'upload',
+					digest,
+					uploadId: digest,
+					r2Key: `staging/${digest}`,
+					expiresAt: expiry()
+				}))
+			})
+			.mockRejectedValueOnce(error);
+		client.attachAttestationPaths.mockRejectedValueOnce(
+			new ORPCError('NOT_FOUND')
+		);
+		await expect(
+			runAttestationAttachment(prepared, log, { client })
+		).rejects.toBe(error);
+		expect({
+			legacyNegotiation: client.negotiateAttestations.mock.calls,
+			legacyAttachment: client.attachAttestation.mock.calls,
+			groupedNegotiations: client.negotiateAttestationBundles.mock.calls,
+			groupedAttachments: client.attachAttestationPaths.mock.calls
+		}).toStrictEqual({
+			legacyNegotiation: [],
+			legacyAttachment: [],
+			groupedNegotiations: [
+				[{ bundles: prepared.map(({ digest }) => ({ digest })) }],
+				[{ bundles: prepared.map(({ digest }) => ({ digest })) }]
+			],
+			groupedAttachments: [
+				[
+					prepared[0]?.digest,
+					{
+						storePathHashes: prepared.map(({ storePathHash }) => storePathHash)
+					}
+				]
+			]
+		});
+	});
+});
 
 describe('runAttestAttach', () => {
 	it('negotiates a closure larger than the protocol cap in bounded batches', async () => {
@@ -618,12 +1226,9 @@ describe('runAttestAttach', () => {
 		});
 	});
 
-	it('keeps identical NAR digests attached to their named store paths', async () => {
-		const record: RecordedClient = {
-			negotiations: [],
-			uploads: [],
-			attached: []
-		};
+	it('attaches identical NAR digests to all selected store paths', async () => {
+		const negotiations: unknown[] = [];
+		const pages: unknown[] = [];
 		const sharedHash = appHash;
 		const bundle = sigstoreBundleBytes(
 			bundleSubject(appPath, sharedHash),
@@ -631,7 +1236,35 @@ describe('runAttestAttach', () => {
 		);
 
 		await runAttestAttach([appPath, runtimePath], reporter([]), {
-			client: recordedClient(record, { decide: () => 'skip' }),
+			client: {
+				...recordedClient(
+					{ negotiations: [], uploads: [], attached: [] },
+					{ decide: () => 'skip' }
+				),
+				negotiateAttestationBundles(body) {
+					negotiations.push(body);
+					return Promise.resolve({
+						bundles: body.bundles.map(({ digest }) => ({
+							action: 'reuse',
+							digest,
+							uploadId: digest,
+							expiresAt: transportExpiry()
+						}))
+					});
+				},
+				attachAttestationPaths(id, body) {
+					pages.push(body);
+					return Promise.resolve({
+						expiresAt: transportExpiry(),
+						paths: body.storePathHashes.map((storePathHash) => ({
+							storePathHash,
+							digest: id,
+							predicateType: 'https://slsa.dev/provenance/v1',
+							status: 'already-present'
+						}))
+					});
+				}
+			},
 			pathInfos: [
 				pathInfo(appPath, sharedHash),
 				pathInfo(runtimePath, sharedHash)
@@ -640,39 +1273,64 @@ describe('runAttestAttach', () => {
 			readAttestationBundle: () => Promise.resolve(bundle)
 		});
 
-		expect(record.negotiations).toStrictEqual([
-			{
-				bundles: [
-					{
-						storePathHash: StorePath.hash(appPath),
-						digest: sha256Hex(bundle)
-					},
-					{
-						storePathHash: StorePath.hash(runtimePath),
-						digest: sha256Hex(bundle)
-					}
-				]
-			}
-		]);
+		expect({ negotiations, pages }).toStrictEqual({
+			negotiations: [{ bundles: [{ digest: sha256Hex(bundle) }] }],
+			pages: [
+				{
+					storePathHashes: [
+						StorePath.hash(appPath),
+						StorePath.hash(runtimePath)
+					]
+				}
+			]
+		});
 	});
 
-	it('refuses a matching digest under a different subject name', async () => {
-		const bundle = sigstoreBundleBytes({
-			name: StorePath.basename(runtimePath),
-			digest: narDigestHex(appHash)
-		});
+	it.each([undefined, '_', StorePath.basename(runtimePath)])(
+		'matches a NAR digest with subject name %s',
+		async (name) => {
+			const bundle = sigstoreBundleBytes({
+				...(name !== undefined && { name }),
+				digest: narDigestHex(appHash)
+			});
 
-		await expect(
-			runAttestAttach([appPath], reporter([]), {
-				client: recordedClient(
-					{ negotiations: [], uploads: [], attached: [] },
-					{ decide: () => 'skip' }
-				),
-				pathInfos: [pathInfo(appPath, appHash)],
-				attestations: [{ path: 'wrong-name.sigstore.json' }],
-				readAttestationBundle: () => Promise.resolve(bundle)
-			})
-		).rejects.toBeInstanceOf(AttestationSubjectNotPushedError);
+			const prepared = await prepareAttestationBundles(
+				[pathInfo(appPath, appHash)],
+				{
+					sources: [{ path: 'bundle.sigstore.json' }],
+					readBundle: () => Promise.resolve(bundle),
+					divergent: new Map()
+				}
+			);
+
+			expect(prepared).toStrictEqual([
+				{
+					storePathHash: StorePath.hash(appPath),
+					digest: sha256Hex(bundle),
+					bytes: bundle
+				}
+			]);
+		}
+	);
+
+	it('matches one subject to every selected store path with the same NAR digest', async () => {
+		const bundle = sigstoreBundleBytes(bundleSubject(appPath, appHash));
+		const prepared = await prepareAttestationBundles(
+			[pathInfo(appPath, appHash), pathInfo(runtimePath, appHash)],
+			{
+				sources: [{ path: 'bundle.sigstore.json' }],
+				readBundle: () => Promise.resolve(bundle),
+				divergent: new Map()
+			}
+		);
+
+		expect(prepared).toStrictEqual(
+			[appPath, runtimePath].map((storePath) => ({
+				storePathHash: StorePath.hash(storePath),
+				digest: sha256Hex(bundle),
+				bytes: bundle
+			}))
+		);
 	});
 
 	it('refuses a bundle that mixes selected and unrelated subjects', async () => {

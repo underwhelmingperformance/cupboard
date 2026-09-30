@@ -83,6 +83,7 @@ import {
 	recordTransition,
 	resetTestServer,
 	resolvedCache,
+	restartTestServers,
 	sigstoreBundleBytes,
 	tenantCasBlobRows,
 	tenantUsageRow,
@@ -589,6 +590,82 @@ describe('attestation attach and reads', () => {
 			inherited: [...digests, digest].toSorted(byCodeUnit)
 		});
 	});
+
+	it.each([64, 128])(
+		'inherits a valid source after %s missing sources across repeated drains',
+		async (missingCount) => {
+			const { destination, metadata, digest } =
+				await reusedPathWithSourceBundle('missing-source-pages');
+			const missing = Array.from({ length: missingCount }, (_, index) =>
+				sha256HexDigestSchema.parse((index + 1).toString(16).padStart(64, '0'))
+			);
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			for (const page of chunk(missing, 25)) {
+				await database.insert(d1Schema.casObject).values(
+					page.map((digest) => ({
+						digest,
+						size: 1,
+						storedAt: isoTimestamp(new Date())
+					}))
+				);
+			}
+			for (const page of chunk(missing, 10)) {
+				await database.insert(d1Schema.attestationReference).values(
+					page.map((digest) => ({
+						tenant: fixtureTenant,
+						cacheKind: 'default' as const,
+						storePathHash: metadata.storePathHash,
+						generation: narInfoGenerationSchema.parse(0),
+						predicateType: predicateTypeSchema.parse(predicateType),
+						digest
+					}))
+				);
+			}
+			const heads = vi.spyOn(env.BLOBS, 'head');
+			const pages = [];
+			for (let page = 0; page <= missingCount / 64; page += 1) {
+				pages.push({
+					progress: await drainInheritance(),
+					queued: await queuedInheritances()
+				});
+				await restartTestServers();
+				const resumed = await fixtureWorkerServer().fetch(
+					new Request(`${internalOrigin}/pubkey`)
+				);
+				await resumed.arrayBuffer();
+				await makeQueuedInheritancesDue();
+			}
+			const missingHeads = heads.mock.calls
+				.map(([key]) => key)
+				.filter((key) =>
+					missing.some((digest) => key === casObjectKey(digest))
+				);
+			const list = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+			);
+			expect({
+				pages,
+				missingHeads,
+				listStatus: list.status,
+				listed: list.ok
+					? attestationListSchema
+							.parse(await list.json())
+							.attestations.map((attestation) => attestation.digest)
+					: []
+			}).toStrictEqual({
+				pages: [
+					...Array.from({ length: missingCount / 64 }, () => ({
+						progress: 'progressed',
+						queued: [{ storePathHash: metadata.storePathHash, attempts: 0 }]
+					})),
+					{ progress: 'progressed', queued: [] }
+				],
+				missingHeads: missing.map((digest) => casObjectKey(digest)),
+				listStatus: StatusCodes.OK,
+				listed: [digest]
+			});
+		}
+	);
 
 	it('searches the path index for inheritance sources', async () => {
 		const destination = namedCache('indexed-sources');

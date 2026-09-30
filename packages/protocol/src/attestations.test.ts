@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	attestationAttachMaxPaths,
+	attestationAttachPathsRequestSchema,
+	attestationBundleNegotiateMaxBundles,
+	attestationBundleNegotiateRequestSchema,
 	attestationNegotiateMaxBundles,
 	attestationNegotiateRequestSchema
 } from './attestations.ts';
@@ -49,5 +53,39 @@ describe('attestationNegotiateRequestSchema', () => {
 		expect(
 			attestationNegotiateRequestSchema.safeParse({ pushId, ...value }).success
 		).toBe(false);
+	});
+});
+
+describe('bundle attachment pages', () => {
+	it('accepts a full path page and rejects the next path', () => {
+		const request = {
+			id: '00000000-0000-4000-8000-000000000000',
+			storePathHashes: Array.from({ length: attestationAttachMaxPaths }, () =>
+				'1'.repeat(32)
+			)
+		};
+		expect({
+			accepted: attestationAttachPathsRequestSchema.safeParse(request).success,
+			oversized: attestationAttachPathsRequestSchema.safeParse({
+				...request,
+				storePathHashes: [...request.storePathHashes, '1'.repeat(32)]
+			}).success
+		}).toStrictEqual({ accepted: true, oversized: false });
+	});
+	it('bounds distinct bundles independently of their subject lists', () => {
+		const bundles = Array.from(
+			{ length: attestationBundleNegotiateMaxBundles },
+			() => ({ digest: 'a'.repeat(64) })
+		);
+		expect({
+			accepted: attestationBundleNegotiateRequestSchema.safeParse({
+				pushId,
+				bundles
+			}).success,
+			oversized: attestationBundleNegotiateRequestSchema.safeParse({
+				pushId,
+				bundles: [...bundles, { digest: 'b'.repeat(64) }]
+			}).success
+		}).toStrictEqual({ accepted: true, oversized: false });
 	});
 });

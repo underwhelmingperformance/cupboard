@@ -345,6 +345,40 @@ export const tenantRouter = os.router({
 		)
 	},
 	attestations: {
+		negotiateBundles: {
+			inDefaultCache: os.attestations.negotiateBundles.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.attestations.negotiateBundles(context.cache, {
+						pushId: input.pushId,
+						bundles: input.bundles
+					})
+			),
+			inNamedCache: os.attestations.negotiateBundles.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.attestations.negotiateBundles(context.cache, {
+						pushId: input.pushId,
+						bundles: input.bundles
+					})
+			)
+		},
+		attachPaths: {
+			inDefaultCache: os.attestations.attachPaths.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.attestations.attachPaths(
+						context.cache,
+						input.id,
+						input.storePathHashes
+					)
+			),
+			inNamedCache: os.attestations.attachPaths.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.attestations.attachPaths(
+						context.cache,
+						input.id,
+						input.storePathHashes
+					)
+			)
+		},
 		negotiate: {
 			inDefaultCache: os.attestations.negotiate.inDefaultCache.handler(
 				({ input, context }) =>

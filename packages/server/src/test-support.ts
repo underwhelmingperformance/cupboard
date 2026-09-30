@@ -94,6 +94,7 @@ import { withCleanup } from '@cupboard/shared/cleanup';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { withDeadline } from '@cupboard/shared/timeout';
 import {
+	abortAllDurableObjects,
 	createExecutionContext,
 	runInDurableObject,
 	waitOnExecutionContext
@@ -296,6 +297,23 @@ export async function resetTestServer(): Promise<void> {
 	await provisionFixtureTenant();
 	await configureFixtureTenant(harness.server);
 	await configureFixtureTenant(fixtureWorkerServer());
+}
+
+/**
+ * Resets in-memory Durable Objects and refreshes the harness's stubs while
+ * preserving persisted storage.
+ */
+export async function restartTestServers(): Promise<void> {
+	const serverIds = testServersUsed().map((stub) => stub.id);
+	const currentId = harness.server.id;
+	await abortAllDurableObjects();
+
+	const namespace = env.CUPBOARD_DO as DurableObjectNamespace<CupboardServer>;
+	harness.server = namespace.get(currentId);
+	harness.serversUsed.clear();
+	for (const id of serverIds) {
+		harness.serversUsed.add(namespace.get(id));
+	}
 }
 
 /**
@@ -1085,9 +1103,15 @@ export function cacheWriteGrants(
  */
 export function issueServerSignedToken(
 	grants: AuthorizationDetails,
-	subject = 'grant-test'
+	subject = 'grant-test',
+	auditClaims?: Readonly<Record<string, unknown>>
 ): Promise<string> {
-	return issueServerSignedTokenFor(harness.server, grants, subject);
+	return issueServerSignedTokenFor(
+		harness.server,
+		grants,
+		subject,
+		auditClaims
+	);
 }
 
 export function issueWorkerSignedToken(
@@ -1099,6 +1123,7 @@ export function issueWorkerSignedToken(
 		fixtureWorkerServer(),
 		grants,
 		subject,
+		undefined,
 		issuedAt
 	);
 }
@@ -1107,6 +1132,7 @@ async function issueServerSignedTokenFor(
 	stub: DurableObjectStub<CupboardServer>,
 	grants: AuthorizationDetails,
 	subject = 'grant-test',
+	auditClaims?: Readonly<Record<string, unknown>>,
 	issuedAt = new Date()
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
@@ -1119,7 +1145,8 @@ async function issueServerSignedTokenFor(
 			subject: oidcSubjectSchema.parse(subject),
 			grants,
 			kid: key.kid,
-			ttlSeconds: ttlSecondsSchema.parse(600)
+			ttlSeconds: ttlSecondsSchema.parse(600),
+			auditClaims
 		},
 		issuedAt
 	);

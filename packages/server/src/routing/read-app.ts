@@ -25,6 +25,7 @@ import {
 	serveNarInfo
 } from '../read/read.ts';
 
+import { answerCacheMetadata } from './cache-metadata.ts';
 import {
 	answerAvailabilityInChunks,
 	cacheAvailabilityChunkSizeFor
@@ -205,6 +206,11 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			request.storePathHashes,
 			cacheAvailabilityChunkSizeFor(subrequestsPerInvocation(context.env))
 		);
+	});
+
+	app.post('/api/v1/path-info', async (context) => {
+		const denied = await guardRead(context);
+		return denied ?? answerCacheMetadata(context);
 	});
 
 	return app;

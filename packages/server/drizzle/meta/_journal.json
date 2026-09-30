@@ -449,6 +449,20 @@
 			"when": 1790506449909,
 			"tag": "0063_refresh_successor_recovery",
 			"breakpoints": true
+		},
+		{
+			"idx": 64,
+			"version": "6",
+			"when": 1790553036025,
+			"tag": "0064_attestation-bundle-pages",
+			"breakpoints": true
+		},
+		{
+			"idx": 65,
+			"version": "6",
+			"when": 1790583673821,
+			"tag": "0065_attestation-inheritance-cursor",
+			"breakpoints": true
 		}
 	]
 }

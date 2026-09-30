@@ -1,5 +1,9 @@
 import {
+	attestationAttachPathsRequestSchema,
+	attestationAttachPathsResponseSchema,
 	attestationAttachResponseSchema,
+	attestationBundleNegotiateRequestSchema,
+	attestationBundleNegotiateResponseSchema,
 	attestationNegotiateRequestSchema,
 	attestationNegotiateResponseSchema
 } from '../attestations.ts';
@@ -12,6 +16,28 @@ import { cacheScopedProcedure } from './cache-scoped.ts';
 // attach verifies the staged bundle and records its reference. Nix-facing list
 // and bundle reads stay outside this contract.
 export const attestationsContract = {
+	negotiateBundles: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/attestations/bundles',
+			requires: 'attestation:negotiate',
+			maintenance: true
+		},
+		attestationBundleNegotiateRequestSchema.shape,
+		attestationBundleNegotiateResponseSchema
+	),
+	attachPaths: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/attestations/bundles/{id}/attach',
+			requires: 'attestation:attach',
+			resource: { cache: { pending: true, missingDenies: false } },
+			maintenance: true,
+			replaySafety: 'replay-safe'
+		},
+		attestationAttachPathsRequestSchema.shape,
+		attestationAttachPathsResponseSchema
+	),
 	negotiate: cacheScopedProcedure(
 		{
 			method: 'POST',

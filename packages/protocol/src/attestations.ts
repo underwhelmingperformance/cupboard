@@ -13,6 +13,13 @@ import {
 import { isoTimestampSchema } from './scalars.ts';
 import { pushIdSchema, uploadIdSchema } from './upload.ts';
 
+export const maxAttestationBundleBytes = 1024 * 1024;
+
+// The media type the cache serves for a stored attestation bundle: a Sigstore
+// bundle wrapping the statement's DSSE envelope.
+export const attestationBundleMediaType =
+	'application/vnd.dev.sigstore.bundle+json';
+
 export const attestationDescriptorSchema = z.strictObject({
 	digest: sha256HexDigestSchema,
 	predicateType: predicateTypeSchema,
@@ -157,4 +164,82 @@ export type AttestationNegotiateResponseInput = z.input<
 >;
 export type AttestationAttachResponseInput = z.input<
 	typeof attestationAttachResponseSchema
+>;
+
+// Each path needs a committed-edge read, retried once on failure, three
+// reference/charge calls and two list publication calls. The remaining calls
+// cover bundle validation and promotion, cache registration and availability
+// checks.
+export const attestationAttachPathSubrequests = 7;
+export const attestationAttachOverheadSubrequests = 30;
+export const attestationAttachMaxPaths = Math.floor(
+	(workersInvocationAllowances.free.subrequests -
+		subrequestSafetyReserve -
+		attestationAttachOverheadSubrequests) /
+		attestationAttachPathSubrequests
+);
+
+// Reuse checks a committed cache reference, reads CAS metadata and copies the
+// object to staging. Each distinct digest uses at most five calls.
+export const attestationBundleNegotiateMaxBundles = Math.floor(
+	(workersInvocationAllowances.free.subrequests -
+		subrequestSafetyReserve -
+		10) /
+		5
+);
+export const attestationBundleNegotiateRequestSchema = z.strictObject({
+	pushId: pushIdSchema,
+	bundles: z
+		.array(z.strictObject({ digest: sha256HexDigestSchema }))
+		.max(attestationBundleNegotiateMaxBundles)
+});
+export const attestationBundleDecisionSchema = z.discriminatedUnion('action', [
+	z.strictObject({
+		action: z.literal('upload'),
+		digest: sha256HexDigestSchema,
+		uploadId: uploadIdSchema,
+		r2Key: z.string(),
+		expiresAt: isoTimestampSchema
+	}),
+	z.strictObject({
+		action: z.literal('reuse'),
+		digest: sha256HexDigestSchema,
+		uploadId: uploadIdSchema,
+		expiresAt: isoTimestampSchema
+	})
+]);
+export const attestationBundleNegotiateResponseSchema = z.strictObject({
+	bundles: z.array(attestationBundleDecisionSchema)
+});
+export const attestationAttachPathsRequestSchema = z.strictObject({
+	id: uploadIdSchema,
+	storePathHashes: z
+		.array(storePathHashSchema)
+		.min(1)
+		.max(attestationAttachMaxPaths)
+});
+const attestationPathOutcomeSchema = z.strictObject({
+	storePathHash: storePathHashSchema,
+	digest: sha256HexDigestSchema,
+	predicateType: predicateTypeSchema,
+	status: z.enum(['attached', 'already-present', 'unservable'])
+});
+export const attestationAttachPathsResponseSchema = z.strictObject({
+	paths: z.array(attestationPathOutcomeSchema).max(attestationAttachMaxPaths),
+	expiresAt: isoTimestampSchema
+});
+export type AttestationBundleNegotiateRequest = z.output<
+	typeof attestationBundleNegotiateRequestSchema
+>;
+export type AttestationBundleNegotiateRequestInput = z.input<
+	typeof attestationBundleNegotiateRequestSchema
+>;
+export type AttestationBundleDecisionInput = z.input<
+	typeof attestationBundleDecisionSchema
+>;
+export type AttestationBundleNegotiateResponseInput = z.input<
+	typeof attestationBundleNegotiateResponseSchema
+>;
+export type AttestationAttachPathsResponseInput = z.input<
+	typeof attestationAttachPathsResponseSchema
 >;
