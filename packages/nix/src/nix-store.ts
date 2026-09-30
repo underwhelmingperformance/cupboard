@@ -148,6 +148,12 @@ export type NixBuildOutcome =
 export interface NixBuildResult {
 	readonly target: NixDerivedPathString;
 	readonly outcome: NixBuildOutcome;
+	/**
+	 * Matching build activity from this operation, present only for a built
+	 * result. Remote activity takes precedence because forwarded builder logs
+	 * can also contain local activity. A remote hook can reuse existing outputs.
+	 */
+	readonly execution?: 'local' | 'remote';
 	readonly timesBuilt: number;
 	readonly nonDeterministic: boolean;
 	readonly startTime: number;

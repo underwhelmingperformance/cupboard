@@ -55,13 +55,16 @@ export type BuildStore = z.output<typeof buildStoreSchema>;
 
 export const autoBuildStore = 'auto';
 
-// How the run established that a producer built this subject.
+// How the run established the producing build for this subject.
 //
-// `local` means the activity log recorded a supervised attempt on the
-// coordinating machine. `build-store` means the selected store reported the
-// path as one of its builds, but the run did not observe that build. When
-// available, `machine` identifies the builder from the activity log. The receipt
-// records the producer but does not determine whether that producer is trusted.
+// `local` means the activity log recorded a supervised producing execution on
+// the coordinating machine: an original build, or a verification rebuild that
+// reproduced the store's existing output. `build-store` means the run
+// established the producer without observing an execution: a remote builder
+// executed the build, or the run attributed the path to the store's own
+// records after the fact. When available, `machine` identifies the builder
+// from the activity log. The receipt records the producer but does not
+// determine whether that producer is trusted.
 export const subjectVerificationSchema = z.enum(['local', 'build-store']);
 export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
 
@@ -110,12 +113,18 @@ const subjectIdentityFields = {
 	narHash: sha256HexDigestSchema
 };
 
+// A `built` subject additionally records `reproduced` when the producing
+// execution was a verification rebuild: the run re-executed the derivation and
+// Nix reported the same output as the path the store already contained. The
+// attestation step asserts `REPRODUCIBLE` for such a subject in a SCAI
+// attribute report.
 export const builtOriginFields = {
 	...subjectIdentityFields,
 	derivation: derivationPathSchema,
 	buildStore: buildStoreSchema,
 	machine: z.string().min(1).optional(),
-	verification: subjectVerificationSchema
+	verification: subjectVerificationSchema,
+	reproduced: z.literal(true).optional()
 };
 
 export const storeHeldOriginFields = {
@@ -303,6 +312,9 @@ export type BuildReceiptV2 = z.output<typeof buildReceiptV2Schema>;
 export const buildReceiptV3Schema = z.strictObject({
 	version: z.literal(3),
 	subjects: z.array(buildSubjectV3Schema),
+	// Requested outputs excluded as publication targets. A listed path can still
+	// occur in paths when another selected target's closure requires it.
+	leftUpstream: z.array(storePathSchema).optional(),
 	...buildReceiptFields
 });
 export type BuildReceiptV3 = z.output<typeof buildReceiptV3Schema>;

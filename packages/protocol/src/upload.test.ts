@@ -12,6 +12,7 @@ import {
 	commitCreditCapabilityToken,
 	commitSessionFrameSchema,
 	commitSessionRequestSchema,
+	referencePublicationManifestSchema,
 	retentionMarkerAttribute,
 	retentionMarkerAttributeValue,
 	statsResponseSchema,
@@ -42,6 +43,21 @@ const negotiationPath = {
 	narSize: 1234,
 	references: [`${storePathHash}-name`]
 };
+
+describe('referencePublicationManifestSchema', () => {
+	it('preserves a list of targets and intermediates without a total path cap', () => {
+		const paths = Array.from({ length: 256 }, (_, index) => ({
+			storePath: `/nix/store/${String(index).padStart(32, '0')}-path`,
+			kind: index === 0 ? 'target' : 'intermediate',
+			source: 'https://cupboard.example.workers.dev/t/acme',
+			narinfo: 'captured narinfo text'
+		}));
+		const manifest = { version: 1, paths };
+		expect(referencePublicationManifestSchema.parse(manifest)).toStrictEqual(
+			manifest
+		);
+	});
+});
 
 describe('uploadNegotiateRequestSchema', () => {
 	it('defines the upload grace-facts acknowledgement', () => {

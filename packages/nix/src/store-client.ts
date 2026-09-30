@@ -262,6 +262,10 @@ function localStoreOver(
  */
 export interface NixDaemonClientOptions {
 	/**
+	 * Execute builds in this store without using configured remote builders.
+	 */
+	readonly disableRemoteBuilders?: boolean;
+	/**
 	 * Selects the store. Defaults to the discovered `store` setting.
 	 */
 	readonly storeUri?: string;
@@ -307,7 +311,13 @@ export function createNixDaemonStoreClient(
 		);
 
 		return new NixDaemonStoreClient({
-			connect: options.connect ?? createSshNixDaemonConnector(sshRemote),
+			connect:
+				options.connect ??
+				createSshNixDaemonConnector(sshRemote, undefined, {
+					...(options.disableRemoteBuilders === true && {
+						disableRemoteBuilders: true
+					})
+				}),
 			storeDirectory,
 			maxConnectionAge: sshRemote.maxConnectionAge,
 			maxConnections: sshRemote.maxConnections ?? 1,
@@ -327,7 +337,11 @@ export function createNixDaemonStoreClient(
 		connect: options.connect,
 		storeDirectory: config.storeDirectory,
 		setOptions: { ...config.daemonSetOptions, ...options.setOptions },
-		overrides: { ...config.daemonOverrides, ...options.overrides },
+		overrides: {
+			...config.daemonOverrides,
+			...options.overrides,
+			...(options.disableRemoteBuilders === true && { builders: '' })
+		},
 		signal: options.signal
 	});
 }

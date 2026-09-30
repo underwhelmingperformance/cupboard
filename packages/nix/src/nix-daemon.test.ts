@@ -132,7 +132,7 @@ const copyPathActivity = 100;
 interface ScriptedDaemonResponses {
 	readonly features?: Buffer;
 	readonly postHandshake?: Buffer;
-	readonly operation: Buffer;
+	readonly operation: Buffer | readonly Buffer[];
 }
 
 class ScriptedDaemonTransport implements NixDaemonTransport {
@@ -164,7 +164,9 @@ class ScriptedDaemonTransport implements NixDaemonTransport {
 			return integerFrame(stderrLast);
 		}
 
-		return this.responses.operation;
+		return Buffer.isBuffer(this.responses.operation)
+			? this.responses.operation
+			: this.responses.operation[this.writeCount - 5];
 	}
 
 	write(): Promise<void> {
@@ -292,6 +294,57 @@ function missingResponse(buildPaths: readonly string[]): Buffer {
 	response.writeInteger(0);
 
 	return response.bytes();
+}
+
+function buildActivityFrames(
+	activities: readonly (readonly (string | number)[])[]
+): Buffer {
+	const response = new ProtocolWriter();
+
+	for (const fields of activities) {
+		response.writeInteger(stderrStartActivity);
+		response.writeInteger(1);
+		response.writeInteger(2);
+		response.writeInteger(105);
+		response.writeString('building');
+		response.writeInteger(fields.length);
+		for (const field of fields) {
+			response.writeInteger(typeof field === 'number' ? 0 : 1);
+			if (typeof field === 'number') {
+				response.writeInteger(field);
+				continue;
+			}
+			response.writeString(field);
+		}
+		response.writeInteger(0);
+	}
+
+	return response.bytes();
+}
+
+function buildResponse(
+	result: FakeBuildResult,
+	activities: readonly (readonly (string | number)[])[] = []
+): Buffer {
+	const response = new ProtocolWriter();
+	response.writeInteger(stderrLast);
+	response.writeInteger(1);
+	response.writeString(result.target);
+	response.writeInteger(result.status);
+	response.writeString(result.errorMessage);
+	response.writeInteger(result.timesBuilt);
+	response.writeBoolean(result.nonDeterministic);
+	response.writeInteger(result.startTime);
+	response.writeInteger(result.stopTime);
+	response.writeBoolean(false);
+	response.writeBoolean(false);
+	response.writeInteger(result.builtOutputs.length);
+	for (const output of result.builtOutputs) {
+		response.writeString(output.id);
+		response.writeString(output.realisation);
+	}
+
+	return Buffer.concat([buildActivityFrames(activities), response.bytes()]);
 }
 
 interface BuildResultCase {
@@ -1525,6 +1578,171 @@ describe('NixDaemonStoreClient', () => {
 			expect(transport?.closed).toBe(true);
 		}
 	);
+
+	it.each([
+		{
+			name: 'local build',
+			activities: [[buildDrvPath, '']],
+			execution: 'local'
+		},
+		{
+			name: 'remote hook',
+			activities: [[buildDrvPath, 'ssh-ng://builder']],
+			execution: 'remote'
+		},
+		{ name: 'no activity', activities: [], execution: undefined },
+		{
+			name: 'unrelated derivation',
+			activities: [[`${libraryPath}.drv`, '']],
+			execution: undefined
+		},
+		{
+			name: 'malformed machine',
+			activities: [[buildDrvPath, 0]],
+			execution: undefined
+		},
+		{
+			name: 'remote hook with forwarded local activity',
+			activities: [
+				[buildDrvPath, 'ssh-ng://builder'],
+				[buildDrvPath, '']
+			],
+			execution: 'remote'
+		},
+		{
+			name: 'local activity followed by a remote hook',
+			activities: [
+				[buildDrvPath, ''],
+				[buildDrvPath, 'ssh-ng://builder']
+			],
+			execution: 'remote'
+		}
+	])(
+		'reports operation build execution for $name',
+		async ({ activities, execution }) => {
+			const build = buildResultCases[0];
+			if (build === undefined) {
+				throw new Error('The build result fixture is missing');
+			}
+			const client = new NixDaemonStoreClient({
+				connect: () =>
+					Promise.resolve(
+						new ScriptedDaemonTransport({
+							operation: buildResponse(build.result, activities)
+						})
+					)
+			});
+
+			await expect(
+				client.buildPathsWithResults(build.targets)
+			).resolves.toStrictEqual([
+				{ ...build.expected, ...(execution !== undefined && { execution }) }
+			]);
+		}
+	);
+
+	it.each(
+		buildResultCases.filter(({ expected }) => expected.outcome.kind !== 'built')
+	)(
+		'does not claim execution for $name even with matching activity',
+		async ({ targets, result, expected }) => {
+			const client = new NixDaemonStoreClient({
+				connect: () =>
+					Promise.resolve(
+						new ScriptedDaemonTransport({
+							operation: buildResponse(result, [[buildDrvPath, '']])
+						})
+					)
+			});
+
+			await expect(
+				client.buildPathsWithResults(targets)
+			).resolves.toStrictEqual([expected]);
+		}
+	);
+
+	it('does not reuse build activity across queued operations or failed attempts', async () => {
+		const build = buildResultCases[0];
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+		const operations = [
+			Buffer.concat([
+				buildActivityFrames([[buildDrvPath, '']]),
+				missingResponse([])
+			]),
+			buildResponse(build.result),
+			buildResponse({ ...build.result, status: 3, errorMessage: 'failed' }, [
+				[buildDrvPath, '']
+			]),
+			buildResponse(build.result),
+			buildResponse(build.result, [[buildDrvPath, '']]),
+			buildResponse(build.result)
+		];
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new ScriptedDaemonTransport({
+						operation: operations
+					})
+				)
+		});
+
+		const outcomes = await client.withConnection(async (session) => {
+			await session.queryMissing(build.targets);
+			return Promise.all(
+				Array.from({ length: 5 }, () =>
+					session.buildPathsWithResults(build.targets)
+				)
+			);
+		});
+		expect(outcomes).toStrictEqual([
+			[build.expected],
+			[
+				{
+					...build.expected,
+					outcome: { kind: 'permanent-failure', message: 'failed' }
+				}
+			],
+			[build.expected],
+			[{ ...build.expected, execution: 'local' }],
+			[build.expected]
+		]);
+	});
+
+	it('keeps build execution separate across concurrent daemon connections', async () => {
+		const build = buildResultCases[0];
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+		const operations = [
+			buildResponse(build.result, [[buildDrvPath, '']]),
+			buildResponse(build.result, [[buildDrvPath, 'ssh-ng://builder']]),
+			buildResponse(build.result)
+		];
+		const client = new NixDaemonStoreClient({
+			maxConnections: 3,
+			connect: () => {
+				const operation = operations.shift();
+				if (operation === undefined) {
+					throw new Error('Unexpected daemon connection');
+				}
+				return Promise.resolve(new ScriptedDaemonTransport({ operation }));
+			}
+		});
+
+		await expect(
+			Promise.all(
+				Array.from({ length: 3 }, () =>
+					client.buildPathsWithResults(build.targets)
+				)
+			)
+		).resolves.toStrictEqual([
+			[{ ...build.expected, execution: 'local' }],
+			[{ ...build.expected, execution: 'remote' }],
+			[build.expected]
+		]);
+	});
 
 	it('encodes a provenance rebuild as daemon check mode', async () => {
 		const build = buildResultCases[0];
