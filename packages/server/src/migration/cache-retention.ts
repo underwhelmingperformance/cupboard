@@ -128,9 +128,9 @@ async function advanceRules(
 		.where(
 			and(
 				eq(schema.legacyRetentionPolicies.kind, 'root-name-prefix'),
-				...(ruleCursor === null
-					? []
-					: [gt(schema.legacyRetentionPolicies.id, ruleCursor)])
+				ruleCursor === null
+					? undefined
+					: gt(schema.legacyRetentionPolicies.id, ruleCursor)
 			)
 		)
 		.orderBy(asc(schema.legacyRetentionPolicies.id))
@@ -219,10 +219,6 @@ function advanceCaches(
 ): CacheRetentionMigrationOutcome {
 	const afterCacheId =
 		cacheCursor === 0 ? undefined : cacheIdSchema.parse(cacheCursor);
-	const cursorConditions =
-		afterCacheId === undefined
-			? []
-			: [gt(schema.cacheIdentities.id, afterCacheId)];
 	const caches = database
 		.select({
 			id: schema.cacheIdentities.id,
@@ -231,7 +227,14 @@ function advanceCaches(
 			access: schema.cacheIdentities.access
 		})
 		.from(schema.cacheIdentities)
-		.where(and(...cursorConditions, isNull(schema.cacheIdentities.deletedAt)))
+		.where(
+			and(
+				afterCacheId === undefined
+					? undefined
+					: gt(schema.cacheIdentities.id, afterCacheId),
+				isNull(schema.cacheIdentities.deletedAt)
+			)
+		)
 		.orderBy(asc(schema.cacheIdentities.id))
 		.limit(batchSize)
 		.all();

@@ -10,7 +10,12 @@ import { cacheIdSchema } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { BoundValueLengthError } from '../errors.ts';
 
-import { jsonRowLists, jsonValueLists } from './json-list.ts';
+import {
+	jsonRowList,
+	jsonRowLists,
+	jsonValueList,
+	jsonValueLists
+} from './json-list.ts';
 
 const throwStub = (): never => {
 	throw new Error('storage stub: not executed');
@@ -67,6 +72,29 @@ function selectByHashes(count: number) {
 }
 
 describe('a list bound as one JSON parameter', () => {
+	it('binds one list even when it is empty', () => {
+		const { sql: text, params } = database
+			.select({ storePathHash: schema.narInfos.storePathHash })
+			.from(schema.narInfos)
+			.where(inArray(schema.narInfos.storePathHash, jsonValueList([])))
+			.toSQL();
+
+		expect({ text, params, rows: jsonRowList([]).rows }).toStrictEqual({
+			text: 'select "store_path_hash" from "narinfo" where "narinfo"."store_path_hash" in (select value from json_each(?))',
+			params: ['[]'],
+			rows: []
+		});
+	});
+
+	it('refuses one list above the bound string limit', () => {
+		const oversized = 'x'.repeat(2_000_001);
+
+		expect(() => jsonValueList([oversized])).toThrow(BoundValueLengthError);
+		expect(() => jsonRowList([{ value: oversized }])).toThrow(
+			BoundValueLengthError
+		);
+	});
+
 	it('expands the list in SQL rather than binding its values', () => {
 		const { sql: text, params } = selectByHashes(3);
 

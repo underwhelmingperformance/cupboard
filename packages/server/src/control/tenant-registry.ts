@@ -14,7 +14,6 @@ import type {
 	TenantQuota,
 	TenantQuotaResponse,
 	TenantReadCredential,
-	TenantStatus,
 	TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
@@ -22,10 +21,10 @@ import {
 	and,
 	eq,
 	exists,
-	inArray,
 	lte,
+	ne,
 	notExists,
-	notInArray,
+	or,
 	type SQL,
 	sql
 } from 'drizzle-orm';
@@ -278,20 +277,26 @@ function provisioningStatements(
 		})
 		.from(d1Schema.tenant)
 		.where(tenantFilter);
-	const noStoredState = [
-		d1Schema.tenantBlob,
-		d1Schema.tenantCasBlob,
-		d1Schema.blobReference,
-		d1Schema.attestationReference
-	].map((table) => {
+	type StoredStateTable =
+		| typeof d1Schema.tenantBlob
+		| typeof d1Schema.tenantCasBlob
+		| typeof d1Schema.blobReference
+		| typeof d1Schema.attestationReference;
+	const noStoredState = (table: StoredStateTable): SQL => {
 		const belongsToTenant = eq(table.tenant, body.id);
 		const rows = database
 			.select({ one: sql`1` })
 			.from(table)
 			.where(belongsToTenant);
 		return notExists(rows);
-	});
-	const emptyTenantFilter = and(tenantFilter, ...noStoredState);
+	};
+	const emptyTenantFilter = and(
+		tenantFilter,
+		noStoredState(d1Schema.tenantBlob),
+		noStoredState(d1Schema.tenantCasBlob),
+		noStoredState(d1Schema.blobReference),
+		noStoredState(d1Schema.attestationReference)
+	);
 	const usageRow = database
 		.select({
 			tenant: d1Schema.tenant.id,
@@ -368,18 +373,6 @@ export async function listTenants(
 	return rows.map((row) => toSummary(row));
 }
 
-// The statuses from which each status change may start. The hourly drain
-// selects only `offboarding` rows. Suspending an `offboarding` tenant would
-// take it out of the drain, so suspension starts only from `active` or
-// `suspended`. Offboarding is idempotent, and no change starts from
-// `offboarded`.
-const statusMoveSources: Readonly<
-	Record<'suspended' | 'offboarding', readonly TenantStatus[]>
-> = {
-	suspended: ['active', 'suspended'],
-	offboarding: ['active', 'suspended', 'offboarding']
-};
-
 // Sets a tenant's status and returns its summary. Every request reads this D1 row
 // before admission, so suspension stops reads and writes as soon as the update
 // commits. Offboarding refuses new work while the bounded drain runs.
@@ -388,15 +381,19 @@ export async function setTenantStatus(
 	id: TenantId,
 	status: 'suspended' | 'offboarding'
 ): Promise<TenantSummary> {
+	// The hourly drain selects only `offboarding` rows. Suspending one would
+	// take it out of the drain, so only offboarding can retain that status.
+	const sourceStatus = or(
+		eq(d1Schema.tenant.status, 'active'),
+		eq(d1Schema.tenant.status, 'suspended'),
+		status === 'offboarding'
+			? eq(d1Schema.tenant.status, 'offboarding')
+			: undefined
+	);
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set({ status })
-		.where(
-			and(
-				eq(d1Schema.tenant.id, id),
-				inArray(d1Schema.tenant.status, statusMoveSources[status])
-			)
-		)
+		.where(and(eq(d1Schema.tenant.id, id), sourceStatus))
 		.returning();
 	const row = updated[0];
 
@@ -707,7 +704,8 @@ export async function clearCacheReadCredential(
 function liveTenantFilter(id: TenantId): SQL | undefined {
 	return and(
 		eq(d1Schema.tenant.id, id),
-		notInArray(d1Schema.tenant.status, ['offboarding', 'offboarded'])
+		ne(d1Schema.tenant.status, 'offboarding'),
+		ne(d1Schema.tenant.status, 'offboarded')
 	);
 }
 

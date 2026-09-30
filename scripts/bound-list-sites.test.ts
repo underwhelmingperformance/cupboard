@@ -3,8 +3,8 @@ import path from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
-// Every statement in `packages/server` binds a list as one JSON parameter, so
-// that no statement's parameter count follows the data it reads.
+// Statements in `packages/server` normally bind a list as one JSON parameter,
+// so their parameter count does not follow the number of values they read.
 // `statement-parameters.test.ts` compares the count at one value and at ten
 // thousand, which covers the statements it has a case for. This test covers the
 // rest: a statement with no case there is invisible to it. Such a site has no
@@ -13,9 +13,8 @@ import { describe, expect, it } from 'vitest';
 //
 // A finding is a call whose parameter count grows with its input: `inArray` or
 // `notInArray` over an array rather than a bound list, a multi-row `.values()`,
-// or a spread `or`/`and`. A site whose width cannot follow runtime data is
-// listed in `fixedWidthSites` with the reason, so adding one is a decision a
-// reviewer sees.
+// or a spread `or`/`and`. Every such site must use a bound-list helper or
+// fixed SQL predicates, so the statement cannot grow with a runtime array.
 //
 // This test reads the server package with the TypeScript API, which needs Node,
 // so it lives here: that package's lint rules forbid Node imports, and its
@@ -36,126 +35,6 @@ interface BoundListSite {
 	*/
 	readonly argument: string;
 }
-
-/**
- * The sites whose width cannot follow runtime data, each with the reason. A new
- * entry means a reader has checked that the list has a fixed length, or that
- * its elements are themselves bound lists.
- */
-const fixedWidthSites: readonly (BoundListSite & {
-	readonly reason: string;
-})[] = [
-	{
-		kind: 'inArray',
-		file: 'src/blob/object-incarnation-recovery.ts',
-		argument: "['pending', 'live']",
-		reason: 'The two incarnation states, written as literals.'
-	},
-	{
-		kind: 'inArray',
-		file: 'src/do/upload-state-service.ts',
-		argument: "['pending', 'committing']",
-		reason: 'The two live commit verdicts, written as literals.'
-	},
-	{
-		kind: 'inArray',
-		file: 'src/do/commit-pipeline-service.ts',
-		argument: "['committing', 'pending']",
-		reason: 'The two live commit verdicts, written as literals.'
-	},
-	{
-		kind: 'and',
-		file: 'src/control/tenant-registry.ts',
-		argument: 'and(tenantFilter, ...noStoredState)',
-		reason: 'The four ownership and reference tables, written as a fixed array.'
-	},
-	{
-		kind: 'notInArray',
-		file: 'src/control/tenant-registry.ts',
-		argument: "['offboarding', 'offboarded']",
-		reason: 'The two terminal tenant statuses, written as literals.'
-	},
-	{
-		kind: 'inArray',
-		file: 'src/control/tenant-registry.ts',
-		argument: 'statusMoveSources[status]',
-		reason:
-			'The permitted source statuses of a tenant status change: at most three, from a constant table.'
-	},
-	{
-		kind: 'inArray',
-		file: 'src/control/global-admin.ts',
-		argument: 'issuers',
-		reason:
-			'The principal issuer, and the legacy issuer when there is one: two at most.'
-	},
-	{
-		kind: 'or',
-		file: 'src/db/cache.ts',
-		argument: 'or( ...jsonRowLists( selectors.map((selector) => l',
-		reason:
-			'One disjunct per bound list, not per selector. A view with more selectors produces longer lists, not more disjuncts.'
-	},
-	{
-		kind: 'or',
-		file: 'src/do/attestations-service.ts',
-		argument: 'or( ...jsonValueLists(pathHashes).map((list) => in',
-		reason:
-			'One disjunct per bound list, not per path. A drain page has at most `inheritanceDrainPageSize` (100) paths.'
-	},
-	{
-		kind: 'or',
-		file: 'src/do/attestations-service.ts',
-		argument: 'or( ...jsonValueLists(narHashes).map((list) => inA',
-		reason:
-			'One disjunct per bound list, not per NAR hash. A drain page has at most `inheritanceDrainPageSize` (100) paths.'
-	},
-	{
-		kind: 'or',
-		file: 'src/do/attestations-service.ts',
-		argument: 'or( ...jsonRowLists(destinationVersions).map((list',
-		reason:
-			'One disjunct per bound list, not per destination version. A drain page has at most `inheritanceDrainPageSize` (100) paths.'
-	},
-	{
-		kind: 'and',
-		file: 'src/migration/cache-retention.ts',
-		argument: "and( eq(schema.legacyRetentionPolicies.kind, 'root",
-		reason:
-			'The spread holds the keyset cursor: one condition once the migration has a cursor, none before that.'
-	},
-	{
-		kind: 'and',
-		file: 'src/migration/cache-retention.ts',
-		argument: 'and(...cursorConditions, isNull(schema.cacheIdenti',
-		reason:
-			'The spread holds the keyset cursor: one condition once the migration has a cursor, none before that.'
-	},
-	{
-		kind: 'values',
-		file: 'src/test-support.ts',
-		argument: 'batch.map((narHash) => ({ narHash, fileHash: narHa',
-		reason: 'Fixture seeding. The helper chunks the batch it inserts.'
-	},
-	{
-		kind: 'values',
-		file: 'src/test-support.ts',
-		argument: "batch.map((narHash) => ({ kind: 'nar' as const, ob",
-		reason: 'Fixture seeding. The helper chunks the batch it inserts.'
-	},
-	{
-		kind: 'values',
-		file: 'src/test-support.ts',
-		argument: 'batch.map((digest) => ({ digest, size: 1, storedAt',
-		reason: 'Fixture seeding. The helper chunks the batch it inserts.'
-	},
-	{
-		kind: 'values',
-		file: 'src/test-support.ts',
-		argument: "batch.map((digest) => ({ kind: 'cas' as const, obj",
-		reason: 'Fixture seeding. The helper chunks the batch it inserts.'
-	}
-];
 
 function isArrayLike(type: ts.Type, checker: ts.TypeChecker): boolean {
 	if (checker.isArrayType(type) || checker.isTupleType(type)) {
@@ -245,33 +124,10 @@ function scanPackage(): readonly BoundListSite[] {
 	return sites;
 }
 
-function isSameSite(left: BoundListSite, right: BoundListSite): boolean {
-	return (
-		left.kind === right.kind &&
-		left.file === right.file &&
-		left.argument === right.argument
-	);
-}
-
 const sites = scanPackage();
 
 describe('statements that could bind one parameter for each value', () => {
-	it('are all either bound lists or listed as fixed width', () => {
-		const unaccounted = sites.filter((site) =>
-			fixedWidthSites.every((allowed) => !isSameSite(allowed, site))
-		);
-
-		expect(unaccounted).toStrictEqual([]);
-	});
-
-	// An entry that matches nothing would hide the next site that resembles it.
-	it('still exist for every entry the allowlist names', () => {
-		const stale = fixedWidthSites.filter((allowed) =>
-			sites.every((site) => !isSameSite(allowed, site))
-		);
-
-		expect(
-			stale.map((entry) => `${entry.file}: ${entry.argument}`)
-		).toStrictEqual([]);
+	it('use a bound list or fixed SQL predicates', () => {
+		expect(sites).toStrictEqual([]);
 	});
 });

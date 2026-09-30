@@ -2041,7 +2041,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.attestations.drainInheritanceQueue(logger)
 		);
 		const hasReleasedDeletion = outcome.dequeued.some((path) =>
-			this.deletionQueue.hasDeletionForEarlierGeneration(
+			this.deletionQueue.hasDeletionReleasedByInheritance(
 				path.cacheId,
 				path.storePathHash,
 				path.generation,

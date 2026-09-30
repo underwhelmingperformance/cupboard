@@ -154,9 +154,9 @@ import {
 	listGenerationMetadataKey
 } from './do/attestations-service.ts';
 import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
-import { chunk } from './do/bulk.ts';
 import { CacheRegistrationService } from './do/cache-registration-service.ts';
 import type { ServerContext } from './do/context.ts';
+import { jsonValueLists } from './do/json-list.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations, migrationsThrough } from './do/migrate.ts';
 import { NarInfoObjectsService } from './do/narinfo-objects-service.ts';
@@ -1787,28 +1787,36 @@ export async function seedBlobStates(
 	const verifiedAt = isoTimestamp(new Date());
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-	// Each row binds six parameters, so the insert is chunked under D1's
-	// bound-parameter limit.
-	for (const batch of chunk(narHashes, 12)) {
+	for (const hashes of jsonValueLists(narHashes)) {
+		const hash = hashes.element();
+
 		await database.batch([
-			database.insert(blobState).values(
-				batch.map((narHash) => ({
-					narHash,
-					fileHash: narHash,
-					fileSize: 1,
-					compression: 'zstd' as const,
-					narSize: 1,
-					verifiedAt
-				}))
-			),
-			database.insert(d1Schema.objectIncarnation).values(
-				batch.map((narHash) => ({
-					kind: 'nar' as const,
-					objectId: narHash,
-					incarnation: 1,
-					state: 'live' as const
-				}))
-			)
+			database
+				.insert(blobState)
+				.select(
+					hashes.insertSource([
+						hash,
+						hash,
+						sql`1`,
+						sql`'zstd'`,
+						sql`1`,
+						sql`1`,
+						sql`${verifiedAt}`,
+						sql`null`
+					])
+				),
+			database
+				.insert(d1Schema.objectIncarnation)
+				.select(
+					hashes.insertSource([
+						sql`'nar'`,
+						hash,
+						sql`1`,
+						sql`'live'`,
+						sql`null`,
+						sql`'1970-01-01T00:00:00.000Z'`
+					])
+				)
 		]);
 	}
 }
@@ -1822,19 +1830,33 @@ export async function seedCasObjects(
 	const storedAt = isoTimestamp(new Date());
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-	for (const batch of chunk(digests, 20)) {
+	for (const hashes of jsonValueLists(digests)) {
+		const hash = hashes.element();
+
 		await database.batch([
 			database
 				.insert(d1Schema.casObject)
-				.values(batch.map((digest) => ({ digest, size: 1, storedAt }))),
-			database.insert(d1Schema.objectIncarnation).values(
-				batch.map((digest) => ({
-					kind: 'cas' as const,
-					objectId: digest,
-					incarnation: 1,
-					state: 'live' as const
-				}))
-			)
+				.select(
+					hashes.insertSource([
+						hash,
+						sql`1`,
+						sql`1`,
+						sql`${storedAt}`,
+						sql`null`
+					])
+				),
+			database
+				.insert(d1Schema.objectIncarnation)
+				.select(
+					hashes.insertSource([
+						sql`'cas'`,
+						hash,
+						sql`1`,
+						sql`'live'`,
+						sql`null`,
+						sql`'1970-01-01T00:00:00.000Z'`
+					])
+				)
 		]);
 	}
 }

@@ -30,7 +30,18 @@ import {
 	DsseDecodeError,
 	inTotoStatementSchema
 } from '@cupboard/shared/in-toto';
-import { and, desc, eq, inArray, lte, or, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	desc,
+	eq,
+	inArray,
+	lte,
+	notExists,
+	or,
+	type SQL,
+	sql
+} from 'drizzle-orm';
+import { alias } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 
 import {
@@ -84,7 +95,7 @@ import {
 } from './bulk.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
 import { type ServerContext } from './context.ts';
-import { jsonRowLists, jsonValueLists } from './json-list.ts';
+import { jsonRowList, jsonValueList, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	affordableSubrequestOperations,
@@ -108,33 +119,33 @@ export const inheritanceLookupSubrequests = 1;
 // Writing the destination's list reads its descriptors from D1 and puts it in R2.
 export const inheritanceListSubrequests = 2;
 
-// A bundle costs a head of its CAS object and three D1 calls to reference it.
-export const inheritedBundleSubrequests = 4;
+// A bundle costs one CAS head, one source revalidation and three reference calls.
+export const inheritedBundleSubrequests = 5;
 
-// The most bundles that a path inherits for one NAR. A lookup reads one more
-// source so it can report that a path has more sources than the cap.
-export const maxInheritedBundlesPerPath = 64;
+// One pass reads at most 65 sources per path. With 100 queued paths, the
+// prefetched D1 result has at most 6,500 rows. Referencing 64 bundles uses at
+// most 320 subrequests and leaves capacity to write the attestation list.
+export const maxInheritedBundlesPerPass = 64;
 
 // The most queued paths that one maintenance pass reads. The pass looks up the
 // sources of each cache's paths in one D1 batch.
 export const inheritanceDrainPageSize = 100;
 
-// The drain makes at most this many attempts for a queued path. It records each
-// attempt before the work, so an attempt that the runtime interrupts also
-// counts. After the last attempt fails, the drain removes the row and logs a
-// warning.
-export const maxInheritanceAttempts = 5;
-
 export const inheritanceRetryDelayMs = 60 * 1000;
+const inheritanceMaxRetryDelayMs = 60 * 60 * 1000;
+const inheritanceContinuationDelayMs = 1;
 
 /**
- * How an inheritance attempt ended. `source-cap` means the sources exceeded
- * {@link maxInheritedBundlesPerPath}. `budget-exhausted` means the subrequest
- * slice ran out before every source was inherited. `superseded` means the
- * path no longer has the queued generation.
+ * How an inheritance attempt ended. `budget-exhausted` means more work
+ * remains for another pass. `superseded` means the path no longer has
+ * the queued generation.
  */
 type InheritanceResult =
-	'complete' | 'over-quota' | 'budget-exhausted' | 'source-cap' | 'superseded';
+	| 'complete'
+	| 'over-quota'
+	| 'budget-exhausted'
+	| 'budget-exhausted-after-progress'
+	| 'superseded';
 
 /**
  * A queued path that the drain removed from the queue.
@@ -166,8 +177,6 @@ export interface InheritanceSourceRow {
 export interface ExistingInheritanceRow {
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
-	readonly predicateType: PredicateType;
-	readonly digest: Sha256HexDigest;
 }
 
 /**
@@ -697,7 +706,8 @@ export class AttestationsService {
 		cache: ResolvedCache,
 		candidates: SQL,
 		limit: number,
-		exclude?: SQL
+		exclude?: SQL,
+		destinationGeneration?: NarInfoGeneration
 	) {
 		const sameSourceReference = and(
 			eq(d1Schema.blobReference.tenant, d1Schema.attestationReference.tenant),
@@ -723,6 +733,38 @@ export class AttestationsService {
 		const tenant = this.context.requireTenant();
 		const publicSource = eq(d1Schema.cacheLifecycle.access, 'public');
 		const allowedSource = or(publicSource, destinationIdentity);
+		const destinationReference = alias(
+			d1Schema.attestationReference,
+			'destination_attestation_ref'
+		);
+		const destinationMatch = and(
+			eq(destinationReference.tenant, tenant),
+			cacheIdentityCondition(
+				destinationReference.cacheKind,
+				destinationReference.cacheName,
+				cache.scope
+			),
+			eq(
+				destinationReference.storePathHash,
+				d1Schema.attestationReference.storePathHash
+			),
+			destinationGeneration === undefined
+				? undefined
+				: eq(destinationReference.generation, destinationGeneration),
+			eq(
+				destinationReference.predicateType,
+				d1Schema.attestationReference.predicateType
+			),
+			eq(destinationReference.digest, d1Schema.attestationReference.digest)
+		);
+		const destinationQuery = this.context.d1
+			.select({ digest: destinationReference.digest })
+			.from(destinationReference)
+			.where(destinationMatch);
+		const alreadyInherited =
+			destinationGeneration === undefined
+				? undefined
+				: notExists(destinationQuery);
 
 		const distinctSources = this.context.d1
 			.selectDistinct({
@@ -746,7 +788,8 @@ export class AttestationsService {
 					candidates,
 					authorisedByCacheGeneration(),
 					allowedSource,
-					exclude
+					exclude,
+					alreadyInherited
 				)
 			)
 			.as('distinct_inheritance_sources');
@@ -812,17 +855,7 @@ export class AttestationsService {
 		}
 
 		for (const row of live) {
-			const attempt = this.startInheritanceAttempt(
-				logger,
-				cache,
-				row,
-				dequeued
-			);
-
-			if (attempt === undefined) {
-				hasProgressed = true;
-				continue;
-			}
+			const attempt = this.startInheritanceAttempt(row);
 
 			try {
 				const result = await this.inheritFromTenant(logger, {
@@ -833,11 +866,18 @@ export class AttestationsService {
 					prefetch
 				});
 
-				if (result === 'budget-exhausted') {
+				if (
+					result === 'budget-exhausted' ||
+					result === 'budget-exhausted-after-progress'
+				) {
 					// Running out of subrequests is not a failed attempt.
 					this.restoreInheritanceRow(row);
 
-					return { hasProgressed, isBudgetExhausted: true };
+					return {
+						hasProgressed:
+							hasProgressed || result === 'budget-exhausted-after-progress',
+						isBudgetExhausted: true
+					};
 				}
 
 				if (result !== 'complete') {
@@ -850,14 +890,7 @@ export class AttestationsService {
 
 				this.dequeueInheritance(row, dequeued);
 			} catch (error) {
-				await this.recordInheritanceFailure(
-					logger,
-					cache,
-					row,
-					attempt,
-					error,
-					dequeued
-				);
+				await this.recordInheritanceFailure(logger, cache, row, attempt, error);
 			}
 
 			hasProgressed = true;
@@ -895,28 +928,17 @@ export class AttestationsService {
 		);
 	}
 
-	// Records the attempt before any work, and schedules the retry at the same
-	// time. Returns the attempt number, or `undefined` when the path has used
-	// every attempt and has left the queue.
+	// Record the attempt before work, so a runtime interruption also delays the
+	// next retry.
 	private startInheritanceAttempt(
-		logger: Logger,
-		cache: ResolvedCache,
-		row: typeof schema.attestationInheritances.$inferSelect,
-		dequeued: DequeuedInheritance[]
-	): number | undefined {
-		if (row.attempts >= maxInheritanceAttempts) {
-			logger.warn('attestation inheritance abandoned', {
-				cache: cache.scope,
-				storePathHash: row.storePathHash,
-				attempts: row.attempts
-			});
-			this.dequeueInheritance(row, dequeued);
-
-			return undefined;
-		}
-
+		row: typeof schema.attestationInheritances.$inferSelect
+	): number {
 		const attempt = row.attempts + 1;
-		const retryAt = new Date(Date.now() + inheritanceRetryDelayMs);
+		const delay = Math.min(
+			inheritanceRetryDelayMs * 2 ** Math.min(row.attempts, 6),
+			inheritanceMaxRetryDelayMs
+		);
+		const retryAt = new Date(Date.now() + delay);
 
 		this.updateInheritanceRow(row, {
 			attempts: attempt,
@@ -929,9 +951,10 @@ export class AttestationsService {
 	private restoreInheritanceRow(
 		row: typeof schema.attestationInheritances.$inferSelect
 	): void {
+		const retryAt = new Date(Date.now() + inheritanceContinuationDelayMs);
 		this.updateInheritanceRow(row, {
 			attempts: row.attempts,
-			notBefore: row.notBefore
+			notBefore: isoTimestamp(retryAt)
 		});
 	}
 
@@ -983,8 +1006,7 @@ export class AttestationsService {
 		cache: ResolvedCache,
 		row: typeof schema.attestationInheritances.$inferSelect,
 		attempt: number,
-		error: unknown,
-		dequeued: DequeuedInheritance[]
+		error: unknown
 	): Promise<void> {
 		const details = {
 			cache: cache.scope,
@@ -994,18 +1016,12 @@ export class AttestationsService {
 			errorMessage: error instanceof Error ? error.message : String(error)
 		};
 
-		if (attempt >= maxInheritanceAttempts) {
-			logger.warn('attestation inheritance abandoned', details);
-			this.dequeueInheritance(row, dequeued);
-
-			return;
-		}
-
 		logger.warn('attestation inheritance failed', details);
-		await armAlarmNoLaterThan(
-			this.context.ctx.storage,
-			Date.now() + inheritanceRetryDelayMs
+		const delay = Math.min(
+			inheritanceRetryDelayMs * 2 ** Math.min(row.attempts, 6),
+			inheritanceMaxRetryDelayMs
 		);
+		await armAlarmNoLaterThan(this.context.ctx.storage, Date.now() + delay);
 	}
 
 	// The cache's generation is part of the key, so a cache created after a
@@ -1063,7 +1079,7 @@ export class AttestationsService {
 	/**
 	 * Inherits attestations for one page of queued paths. A path leaves the
 	 * queue when inheritance ends, when its narinfo row no longer has the queued
-	 * generation, or after {@link maxInheritanceAttempts} attempts. A path whose
+	 * generation. A path whose
 	 * inheritance runs out of subrequests stays queued for the next pass.
 	 */
 	async drainInheritanceQueue(
@@ -1127,23 +1143,17 @@ export class AttestationsService {
 		const pathHashes = [
 			...new Set(uniqueCandidates.map((row) => row.storePathHash))
 		];
-		const narHashes = [...new Set(uniqueCandidates.map((row) => row.narHash))];
-		// Match the paths and the NAR hashes as two lists. D1 returns no rows for
-		// a row-value `in` over `attestation_ref` and `blob_ref` when SQLite
-		// searches both tables with the list. The lookup can therefore return a
-		// source for a pair that is not a candidate, and callers read only the
-		// candidate pairs.
+		// Keep the indexed path filter separate from the exact-pair check. D1's
+		// row-value IN predicate returns no rows across both reference tables.
+		const candidatePairs = jsonRowList(uniqueCandidates);
 		const candidateFilter =
 			and(
-				or(
-					...jsonValueLists(pathHashes).map((list) =>
-						inArray(d1Schema.attestationReference.storePathHash, list)
-					)
+				inArray(
+					d1Schema.attestationReference.storePathHash,
+					jsonValueList(pathHashes)
 				),
-				or(
-					...jsonValueLists(narHashes).map((list) =>
-						inArray(d1Schema.blobReference.narHash, list)
-					)
+				candidatePairs.anyRow(
+					sql`${d1Schema.attestationReference.storePathHash} = ${candidatePairs.column('storePathHash')} and ${d1Schema.blobReference.narHash} = ${candidatePairs.column('narHash')}`
 				)
 			) ?? sql`false`;
 		const destinationVersions = this.narInfoObjects
@@ -1152,15 +1162,10 @@ export class AttestationsService {
 				storePathHash: row.storePathHash,
 				generation: row.generation
 			}));
-		const requestedVersions =
-			or(
-				...jsonRowLists(destinationVersions).map((list) =>
-					list.matches({
-						storePathHash: d1Schema.attestationReference.storePathHash,
-						generation: d1Schema.attestationReference.generation
-					})
-				)
-			) ?? sql`false`;
+		const requestedVersions = jsonRowList(destinationVersions).matches({
+			storePathHash: d1Schema.attestationReference.storePathHash,
+			generation: d1Schema.attestationReference.generation
+		});
 		const existingFilter = and(
 			eq(d1Schema.attestationReference.tenant, this.context.requireTenant()),
 			cacheIdentityCondition(
@@ -1176,18 +1181,20 @@ export class AttestationsService {
 			this.inheritanceSourceQuery(
 				cache,
 				candidateFilter,
-				maxInheritedBundlesPerPath + 1,
+				maxInheritedBundlesPerPass + 1,
 				sql`not (${existingFilter})`
 			),
 			this.context.d1
 				.select({
 					storePathHash: d1Schema.attestationReference.storePathHash,
-					generation: d1Schema.attestationReference.generation,
-					predicateType: d1Schema.attestationReference.predicateType,
-					digest: d1Schema.attestationReference.digest
+					generation: d1Schema.attestationReference.generation
 				})
 				.from(d1Schema.attestationReference)
 				.where(existingFilter)
+				.groupBy(
+					d1Schema.attestationReference.storePathHash,
+					d1Schema.attestationReference.generation
+				)
 		]);
 		const sources = Map.groupBy(rows, (row) =>
 			inheritanceSourceKey(row.storePathHash, row.narHash)
@@ -1224,8 +1231,11 @@ export class AttestationsService {
 		}
 
 		const listSubrequests = inheritanceListSubrequests;
-		const lookup =
-			prefetchedSources === undefined ? inheritanceLookupSubrequests : 0;
+		const requiresLookup =
+			prefetchedSources === undefined ||
+			prefetchedSources.length > maxInheritedBundlesPerPass ||
+			(prefetchedExisting ?? []).length > 0;
+		const lookup = requiresLookup ? inheritanceLookupSubrequests : 0;
 
 		if (!hasSubrequestsFor(lookup + listSubrequests)) {
 			return 'budget-exhausted';
@@ -1233,7 +1243,7 @@ export class AttestationsService {
 
 		const tenant = this.context.requireTenant();
 		const maxRows = Math.min(
-			maxInheritedBundlesPerPath,
+			maxInheritedBundlesPerPass,
 			affordableSubrequestOperations(
 				inheritedBundleSubrequests,
 				lookup + listSubrequests
@@ -1252,19 +1262,14 @@ export class AttestationsService {
 			eq(d1Schema.attestationReference.generation, generation)
 		);
 		const existingQuery = this.context.d1
-			.select({
-				predicateType: d1Schema.attestationReference.predicateType,
-				digest: d1Schema.attestationReference.digest
-			})
+			.select({ storePathHash: d1Schema.attestationReference.storePathHash })
 			.from(d1Schema.attestationReference)
-			.where(existingFilter);
+			.where(existingFilter)
+			.limit(1);
 		let sourceRows: readonly InheritanceSourceRow[];
-		let existingRows: {
-			predicateType: PredicateType;
-			digest: Sha256HexDigest;
-		}[];
+		let hasExisting: boolean;
 
-		if (prefetchedSources === undefined) {
+		if (requiresLookup) {
 			const sourceFilter =
 				and(
 					eq(d1Schema.attestationReference.storePathHash, storePathHash),
@@ -1275,39 +1280,34 @@ export class AttestationsService {
 				this.inheritanceSourceQuery(
 					cache,
 					sourceFilter,
-					maxInheritedBundlesPerPath + 1
+					maxInheritedBundlesPerPass + 1,
+					undefined,
+					generation
 				),
 				existingQuery
 			]);
-			[sourceRows, existingRows] = result;
+			sourceRows = result[0];
+			hasExisting = result[1].length > 0;
 		} else {
 			sourceRows = prefetchedSources;
-			existingRows = (prefetchedExisting ?? []).map((row) => ({
-				predicateType: row.predicateType,
-				digest: row.digest
-			}));
+			hasExisting = false;
 		}
-		const existing = new Set(
-			existingRows.map((row) => JSON.stringify([row.predicateType, row.digest]))
-		);
-
-		const isExisting = (row: InheritanceSourceRow): boolean =>
-			existing.has(JSON.stringify([row.predicateType, row.digest]));
 		// An earlier attempt can create references and stop before it writes the
 		// list, for example when the runtime resets the Durable Object or the list
 		// write fails. The sources of those references can be gone by the retry.
 		// Write the list whenever the destination already has a reference for
 		// this generation.
-		let shouldWriteList = existingRows.length > 0;
-		const missingRows = sourceRows
-			.slice(0, maxInheritedBundlesPerPath)
-			.filter((row) => !isExisting(row));
+		let shouldWriteList = hasExisting;
+		let hasInherited = false;
+		let isSourceObjectMissing = false;
+		const missingRows = sourceRows.slice(0, maxInheritedBundlesPerPass);
 		let result: InheritanceResult = 'complete';
 
-		if (missingRows.length > maxRows) {
+		if (
+			missingRows.length > maxRows ||
+			sourceRows.length > maxInheritedBundlesPerPass
+		) {
 			result = 'budget-exhausted';
-		} else if (sourceRows.length > maxInheritedBundlesPerPath) {
-			result = 'source-cap';
 		}
 
 		try {
@@ -1327,36 +1327,58 @@ export class AttestationsService {
 						storePathHash,
 						digest: row.digest
 					});
+					isSourceObjectMissing = true;
 					continue;
 				}
 
-				// The drain creates a reference inside the input gate, and only while
-				// the path still has this generation. It therefore creates no
-				// reference for a generation that a concurrent commit or deletion has
-				// replaced or removed.
-				const outcome = await this.context.criticalSection(() =>
-					Promise.resolve(
-						this.isQueuedGenerationCurrent(cache, request)
-							? this.attestationCas.reserveReferenceAndCharge(
-									{
-										cache: cache.scope,
-										storePathHash,
-										generation,
-										predicateType: row.predicateType,
-										digest: row.digest
-									},
-									row.size
-								)
-							: 'superseded'
-					)
-				);
+				// Source access and reference generations can change during prefetch
+				// or the CAS head. Revalidate them inside the destination write gate.
+				const outcome = await this.context.criticalSection(async () => {
+					if (!this.isQueuedGenerationCurrent(cache, request)) {
+						return 'superseded';
+					}
+
+					const sourceFilter =
+						and(
+							eq(d1Schema.attestationReference.storePathHash, storePathHash),
+							eq(d1Schema.blobReference.narHash, narHash),
+							eq(
+								d1Schema.attestationReference.predicateType,
+								row.predicateType
+							),
+							eq(d1Schema.attestationReference.digest, row.digest),
+							eq(d1Schema.casObject.incarnation, row.incarnation),
+							otherSource
+						) ?? sql`false`;
+					const [source] = await this.inheritanceSourceQuery(
+						cache,
+						sourceFilter,
+						1
+					).all();
+
+					if (source === undefined) {
+						return;
+					}
+
+					return this.attestationCas.reserveReferenceAndCharge(
+						{
+							cache: cache.scope,
+							storePathHash,
+							generation,
+							predicateType: source.predicateType,
+							digest: source.digest
+						},
+						source.size
+					);
+				});
 
 				if (outcome === 'superseded' || outcome === 'over-quota') {
 					result = outcome;
 					break;
 				}
 
-				shouldWriteList = true;
+				shouldWriteList ||= outcome !== undefined;
+				hasInherited ||= outcome === 'referenced';
 			}
 		} catch (error) {
 			// Write the list for the references that this attempt created, but
@@ -1377,11 +1399,19 @@ export class AttestationsService {
 			throw error;
 		}
 
-		if (shouldWriteList) {
+		if (shouldWriteList && result !== 'budget-exhausted') {
 			await this.writeInheritedList(request);
 		}
 
-		return result;
+		if (isSourceObjectMissing && result === 'budget-exhausted') {
+			throw new Error(
+				'An attestation source object is missing while more bundles await inheritance'
+			);
+		}
+
+		return result === 'budget-exhausted' && hasInherited
+			? 'budget-exhausted-after-progress'
+			: result;
 	}
 
 	async negotiate(

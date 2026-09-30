@@ -13,9 +13,9 @@ import {
 	eq,
 	exists,
 	gte,
-	inArray,
 	lte,
 	notExists,
+	or,
 	sql,
 	type SQLWrapper
 } from 'drizzle-orm';
@@ -39,6 +39,13 @@ interface ObjectIncarnationIdentity {
 	readonly kind: SharedObjectKind;
 	readonly objectId: string;
 	readonly incarnation: number;
+}
+
+function recoverableObjectState() {
+	return or(
+		eq(d1Schema.objectIncarnation.state, 'pending'),
+		eq(d1Schema.objectIncarnation.state, 'live')
+	);
 }
 
 function objectKey(row: ObjectIncarnationIdentity): R2ObjectKey {
@@ -75,7 +82,7 @@ export async function drainObjectDeletions(
 					d1Schema.objectIncarnation.incarnation,
 					d1Schema.objectDeletion.incarnation
 				),
-				inArray(d1Schema.objectIncarnation.state, ['pending', 'live'])
+				recoverableObjectState()
 			)
 		);
 	const due = and(
@@ -215,7 +222,7 @@ async function didRetireIncarnation(
 				eq(d1Schema.objectIncarnation.kind, row.kind),
 				eq(d1Schema.objectIncarnation.objectId, row.objectId),
 				eq(d1Schema.objectIncarnation.incarnation, row.incarnation),
-				inArray(d1Schema.objectIncarnation.state, ['pending', 'live']),
+				recoverableObjectState(),
 				lte(d1Schema.objectIncarnation.updatedAt, staleBefore),
 				stateRowBehind
 			)
@@ -291,7 +298,7 @@ async function didRecoverNar(
 				eq(d1Schema.objectIncarnation.kind, 'nar'),
 				eq(d1Schema.objectIncarnation.objectId, narHash),
 				eq(d1Schema.objectIncarnation.incarnation, row.incarnation),
-				inArray(d1Schema.objectIncarnation.state, ['pending', 'live']),
+				recoverableObjectState(),
 				lte(d1Schema.objectIncarnation.updatedAt, staleBefore)
 			)
 		)
@@ -343,7 +350,7 @@ async function didRecoverCas(
 				eq(d1Schema.objectIncarnation.kind, 'cas'),
 				eq(d1Schema.objectIncarnation.objectId, row.objectId),
 				eq(d1Schema.objectIncarnation.incarnation, row.incarnation),
-				inArray(d1Schema.objectIncarnation.state, ['pending', 'live']),
+				recoverableObjectState(),
 				lte(d1Schema.objectIncarnation.updatedAt, staleBefore)
 			)
 		)
@@ -418,7 +425,7 @@ export async function recoverAbandonedIncarnations(
 		.where(
 			and(
 				eq(d1Schema.objectIncarnation.kind, kind),
-				inArray(d1Schema.objectIncarnation.state, ['pending', 'live']),
+				recoverableObjectState(),
 				lte(d1Schema.objectIncarnation.updatedAt, staleBefore),
 				stateRowBehind
 			)
@@ -448,7 +455,7 @@ export async function recoverAbandonedIncarnations(
 						eq(d1Schema.objectIncarnation.kind, row.kind),
 						eq(d1Schema.objectIncarnation.objectId, row.objectId),
 						eq(d1Schema.objectIncarnation.incarnation, row.incarnation),
-						inArray(d1Schema.objectIncarnation.state, ['pending', 'live']),
+						recoverableObjectState(),
 						lte(d1Schema.objectIncarnation.updatedAt, staleBefore)
 					)
 				)

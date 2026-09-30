@@ -343,15 +343,14 @@ export class UploadStateService {
 	// their current sessions open. The verdict index limits the read to `pending`
 	// and `committing` rows.
 	sessionsAwaitingVerdict(): ReadonlySet<SessionId> {
+		const liveVerdict = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
 		const rows = this.context.db
 			.selectDistinct({ sessionId: schema.pendingUploads.sessionId })
 			.from(schema.pendingUploads)
-			.where(
-				and(
-					isNotNull(schema.pendingUploads.sessionId),
-					inArray(schema.pendingUploads.verdict, ['pending', 'committing'])
-				)
-			)
+			.where(and(isNotNull(schema.pendingUploads.sessionId), liveVerdict))
 			.all();
 
 		return new Set(
