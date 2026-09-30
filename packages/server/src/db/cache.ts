@@ -6,11 +6,11 @@ import {
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
-import { or, type SQL, sql } from 'drizzle-orm';
+import { type SQL, sql } from 'drizzle-orm';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { z } from 'zod';
 
-import { jsonRowLists } from '../do/json-list.ts';
+import { jsonRowList } from '../do/json-list.ts';
 
 /**
  * The surrogate key of a `cache_identity` row, stored in the `cache_id` columns
@@ -140,17 +140,12 @@ export function cacheSelectorsCondition(
 		return undefined;
 	}
 
-	// The selectors travel as one JSON parameter, so a view of any width costs
-	// the statement the same parameters. Each row of the list states the kind it
-	// is, and the predicate applies the comparison that kind calls for.
-	return or(
-		...jsonRowLists(
-			selectors.map((selector) => listedCacheSelector(selector))
-		).map((listed) =>
-			listed.anyRow(
-				sql`(${listed.column('kind')} = 'default' and ${kind} = 'default' and ${name} is null) or (${listed.column('kind')} = 'named' and ${kind} = 'named' and ${name} = ${listed.column('name')}) or (${listed.column('kind')} = 'prefix' and ${kind} = 'named' and ${name} >= ${listed.column('lower')} and ${name} < ${listed.column('upper')}) or (${listed.column('kind')} = 'all-named' and ${kind} = 'named')`
-			)
-		)
+	const listed = jsonRowList(
+		selectors.map((selector) => listedCacheSelector(selector))
+	);
+
+	return listed.anyRow(
+		sql`(${listed.column('kind')} = 'default' and ${kind} = 'default' and ${name} is null) or (${listed.column('kind')} = 'named' and ${kind} = 'named' and ${name} = ${listed.column('name')}) or (${listed.column('kind')} = 'prefix' and ${kind} = 'named' and ${name} >= ${listed.column('lower')} and ${name} < ${listed.column('upper')}) or (${listed.column('kind')} = 'all-named' and ${kind} = 'named')`
 	);
 }
 

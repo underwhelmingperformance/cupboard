@@ -41,6 +41,23 @@ const utf8 = new TextEncoder();
 interface SerialisedList<T> {
 	readonly values: readonly T[];
 	readonly json: string;
+	readonly bytes: number;
+}
+
+function serialiseList<T>(values: readonly T[]): SerialisedList<T> {
+	const json = JSON.stringify(values);
+
+	return { values, json, bytes: utf8.encode(json).length };
+}
+
+function singleList<T>(values: readonly T[]): SerialisedList<T> {
+	const list = serialiseList(values);
+
+	if (list.bytes > maxBoundStringBytes) {
+		throw new BoundValueLengthError(list.bytes, maxBoundStringBytes);
+	}
+
+	return list;
 }
 
 /**
@@ -53,15 +70,14 @@ function serialiseLists<T>(values: readonly T[]): readonly SerialisedList<T>[] {
 		return [];
 	}
 
-	const json = JSON.stringify(values);
-	const bytes = utf8.encode(json).length;
+	const list = serialiseList(values);
 
-	if (bytes <= maxBoundStringBytes) {
-		return [{ values, json }];
+	if (list.bytes <= maxBoundStringBytes) {
+		return [list];
 	}
 
 	if (values.length === 1) {
-		throw new BoundValueLengthError(bytes, maxBoundStringBytes);
+		throw new BoundValueLengthError(list.bytes, maxBoundStringBytes);
 	}
 
 	const middle = Math.ceil(values.length / 2);
@@ -185,6 +201,29 @@ class JsonRowList<T extends JsonListRow<T>> {
 }
 
 export type { JsonRowList, JsonValueList };
+
+/**
+ * Binds one list as one JSON parameter. Refuses a list above SQLite's bound
+ * string limit; callers that need larger lists can use {@link jsonValueLists}.
+ */
+export function jsonValueList<T extends JsonListValue>(
+	values: readonly T[]
+): JsonValueList<T> {
+	const list = singleList(values);
+	return new JsonValueList(list.values, list.json);
+}
+
+/**
+ * Binds one row list as one JSON parameter. Refuses a list above SQLite's
+ * bound string limit; callers that need larger lists can use
+ * {@link jsonRowLists}.
+ */
+export function jsonRowList<T extends JsonListRow<T>>(
+	rows: readonly T[]
+): JsonRowList<T> {
+	const list = singleList(rows);
+	return new JsonRowList(list.values, list.json);
+}
 
 /**
  * Prepares `values` for statements that bind the list as one JSON parameter.

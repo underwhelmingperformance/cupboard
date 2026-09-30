@@ -24,7 +24,7 @@ import {
 	inheritanceListSubrequests,
 	inheritanceLookupSubrequests,
 	inheritedBundleSubrequests,
-	maxInheritedBundlesPerPath
+	maxInheritedBundlesPerPass
 } from './attestations-service.ts';
 import {
 	reuseDistinctNarLimit,
@@ -95,8 +95,8 @@ const chunkedRequests: readonly ChunkedRequest[] = [
 		fanOut: 'One attestation list head per distinct committed path.'
 	},
 	{
-		chunk: 'maxInheritedBundlesPerPath',
-		items: maxInheritedBundlesPerPath,
+		chunk: 'maxInheritedBundlesPerPass',
+		items: maxInheritedBundlesPerPass,
 		requestsPerItem: inheritedBundleSubrequests,
 		d1Calls: inheritanceLookupSubrequests + inheritanceListSubrequests,
 		fanOut:

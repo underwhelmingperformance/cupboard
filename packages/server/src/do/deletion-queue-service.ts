@@ -68,13 +68,10 @@ import {
 	subrequestsAvailable
 } from './subrequest-slice.ts';
 
-// A new generation of a path inherits attestations from an earlier generation
-// with the same NAR after it commits, once the maintenance alarm drains the
-// inheritance queue. A queued narinfo deletion is deferred while an upload of
-// the same path and NAR is pending in the cache, or while the inheritance queue
-// has a newer generation of that path with the same NAR. Retiring the edge
-// earlier would leave inheritance with no source. This predicate is the only
-// definition of a deferred deletion.
+// A queued narinfo deletion keeps the source edge while another eligible cache
+// still needs its attestations. The destination has a pending upload until its
+// inheritance row is queued, so both states protect the source during commit.
+// Private sources are available only to a newer generation in the same cache.
 //
 // The unary `+` removes the TEXT affinity of `store_path_hash`. With the
 // affinity, SQLite converts the `json_extract` side and cannot search
@@ -83,8 +80,21 @@ function deferredDeletionCondition(now: IsoTimestamp): SQL<boolean> {
 	const deletion = schema.narInfoDeletions;
 	const pending = schema.pendingUploads;
 	const inheritance = schema.attestationInheritances;
+	const crossCache = crossCacheInheritanceCondition(now);
 
-	return sql`(exists (select 1 from ${pending} where ${pending.cacheId} = ${deletion.cacheId} and ${pending.narHash} = ${deletion.narHash} and ${pending.expiresAt} > ${now} and json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}) or exists (select 1 from ${inheritance} where ${inheritance.cacheId} = ${deletion.cacheId} and ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash} and ${inheritance.generation} > ${deletion.generation}))`.mapWith(
+	return sql`(${crossCache} or exists (select 1 from ${pending} where ${pending.cacheId} = ${deletion.cacheId} and ${pending.narHash} = ${deletion.narHash} and (${pending.expiresAt} > ${now} or ${pending.verdict} = 'committing') and json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}) or exists (select 1 from ${inheritance} where ${inheritance.cacheId} = ${deletion.cacheId} and ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash} and ${inheritance.generation} > ${deletion.generation}))`.mapWith(
+		Boolean
+	);
+}
+
+function crossCacheInheritanceCondition(now: IsoTimestamp): SQL<boolean> {
+	const deletion = schema.narInfoDeletions;
+	const pending = schema.pendingUploads;
+	const inheritance = schema.attestationInheritances;
+	const identities = schema.cacheIdentities;
+	const publicSource = sql`exists (select 1 from ${identities} where ${identities.id} = ${deletion.cacheId} and ${identities.access} = 'public')`;
+
+	return sql`(${publicSource} and exists (select 1 from ${identities} destination_cache where destination_cache.id != ${deletion.cacheId} and (exists (select 1 from ${pending} where ${pending.cacheId} = destination_cache.id and ${pending.narHash} = ${deletion.narHash} and (${pending.expiresAt} > ${now} or ${pending.verdict} = 'committing') and json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}) or exists (select 1 from ${inheritance} where ${inheritance.cacheId} = destination_cache.id and ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash}))))`.mapWith(
 		Boolean
 	);
 }
@@ -1020,25 +1030,28 @@ export class DeletionQueueService {
 
 	/**
 	 * The earliest time at which a pending upload that defers a withdrawn
-	 * deletion expires, or `undefined` when no pending upload defers one. A
-	 * deletion deferred by the inheritance queue becomes work when the drain
-	 * removes its inheritance queue row, and the drain reports that.
+	 * deletion expires, or `undefined` when no pending upload defers one.
+	 * This includes another cache's upload when the source cache is public.
+	 * The inheritance drain reports when it removes a queue row that deferred
+	 * a deletion.
 	 */
 	earliestPendingDeferralEnd(now: Date = new Date()): number | undefined {
 		const deletion = schema.narInfoDeletions;
 		const pending = schema.pendingUploads;
+		const identities = schema.cacheIdentities;
 		const unexpired = gt(pending.expiresAt, isoTimestamp(now));
+		const publicSource = sql`exists (select 1 from ${identities} where ${identities.id} = ${deletion.cacheId} and ${identities.access} = 'public')`;
+		const eligibleCache = or(
+			eq(pending.cacheId, deletion.cacheId),
+			publicSource
+		);
+		const matchingNar = eq(pending.narHash, deletion.narHash);
+		const matchingPath = sql`json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}`;
+		const matchingDeletion = and(eligibleCache, matchingNar, matchingPath);
 		const row = this.context.db
 			.select({ expiresAt: sql<string | null>`min(${pending.expiresAt})` })
 			.from(pending)
-			.innerJoin(
-				deletion,
-				and(
-					eq(pending.cacheId, deletion.cacheId),
-					eq(pending.narHash, deletion.narHash),
-					sql`json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}`
-				)
-			)
+			.innerJoin(deletion, matchingDeletion)
 			.where(and(unexpired, eq(deletion.withdrawn, true)))
 			.get();
 
@@ -1082,26 +1095,39 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Whether the queue has a deletion for an earlier generation of this path
-	 * with the same NAR. Such a deletion becomes work once the inheritance queue
-	 * no longer has the path.
+	 * Whether removing this inheritance released a deletion for the same path
+	 * and NAR in an earlier generation or a public source cache.
 	 */
-	hasDeletionForEarlierGeneration(
+	hasDeletionReleasedByInheritance(
 		cacheId: CacheId,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
 		narHash: NixSha256HashString
 	): boolean {
 		const table = schema.narInfoDeletions;
+		const identities = schema.cacheIdentities;
+		const publicSource = and(
+			eq(identities.id, table.cacheId),
+			eq(identities.access, 'public')
+		);
+		const publicSourceRow = this.context.db
+			.select({ one: sql`1` })
+			.from(identities)
+			.where(publicSource);
+		const eligibleSource = or(
+			and(eq(table.cacheId, cacheId), lt(table.generation, generation)),
+			and(sql`${table.cacheId} != ${cacheId}`, exists(publicSourceRow))
+		);
+		const deferred = deferredDeletionCondition(isoTimestamp(new Date()));
 		const row = this.context.db
 			.select({ storePathHash: table.storePathHash })
 			.from(table)
 			.where(
 				and(
-					eq(table.cacheId, cacheId),
 					eq(table.storePathHash, storePathHash),
 					eq(table.narHash, narHash),
-					lt(table.generation, generation)
+					eligibleSource,
+					sql`not ${deferred}`
 				)
 			)
 			.limit(1)
@@ -1144,7 +1170,10 @@ export class DeletionQueueService {
 		generation: NarInfoGeneration,
 		shouldDeferForInheritance = true
 	): Promise<QueuedNarInfoRetirement> {
-		const deferred = deferredDeletionCondition(isoTimestamp(new Date()));
+		const now = isoTimestamp(new Date());
+		const deferred = shouldDeferForInheritance
+			? deferredDeletionCondition(now)
+			: crossCacheInheritanceCondition(now);
 		const found = this.context.db
 			.select({ queued: schema.narInfoDeletions, isDeferred: deferred })
 			.from(schema.narInfoDeletions)
@@ -1182,7 +1211,7 @@ export class DeletionQueueService {
 
 		// The edge stays for inheritance, but readers stop receiving the queued
 		// generation's narinfo.
-		if (shouldDeferForInheritance && found.isDeferred) {
+		if (found.isDeferred) {
 			if (!wasNewerCommitted) {
 				await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
 			}
@@ -1598,8 +1627,8 @@ export class DeletionQueueService {
 				);
 			});
 
-			// An explicit delete retires the edge even while an upload of the same
-			// path and NAR is pending. That upload commits a new generation.
+			// An explicit delete retires the edge despite a pending upload in this
+			// cache. A public source still supplies another cache's inheritance.
 			const retirement = await this.retireQueuedNarInfoEdge(
 				cache,
 				storePathHash,

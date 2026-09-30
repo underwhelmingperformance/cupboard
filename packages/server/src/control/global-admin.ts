@@ -1,7 +1,7 @@
 import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { legacyNormalisedIssuer } from '@cupboard/protocol/oidc-issuer';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, exists, inArray, sql } from 'drizzle-orm';
+import { and, eq, exists, or, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -33,10 +33,12 @@ async function repairMissingAudience(
 	claimsJson: string,
 	legacyIssuer: string | undefined
 ): Promise<void> {
-	const issuers =
+	const matchingIssuer = or(
+		eq(d1Schema.globalAdmin.issuer, principal.issuer),
 		legacyIssuer === undefined
-			? [principal.issuer]
-			: [principal.issuer, legacyIssuer];
+			? undefined
+			: eq(d1Schema.globalAdmin.issuer, legacyIssuer)
+	);
 	const bootstrapRuleFilter = and(
 		eq(d1Schema.controlTrust.id, bootstrapTrustId),
 		eq(d1Schema.controlTrust.issuer, d1Schema.globalAdmin.issuer),
@@ -56,7 +58,7 @@ async function repairMissingAudience(
 			and(
 				eq(d1Schema.globalAdmin.id, singletonId),
 				eq(d1Schema.globalAdmin.subject, principal.subject),
-				inArray(d1Schema.globalAdmin.issuer, issuers),
+				matchingIssuer,
 				eq(d1Schema.globalAdmin.audience, ''),
 				matchingBootstrapRule
 			)

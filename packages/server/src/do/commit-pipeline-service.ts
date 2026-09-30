@@ -539,7 +539,10 @@ export class CommitPipelineService {
 	): boolean {
 		const awaitingVerdict = or(
 			isNull(schema.pendingUploads.verdict),
-			inArray(schema.pendingUploads.verdict, ['committing', 'pending'])
+			or(
+				eq(schema.pendingUploads.verdict, 'committing'),
+				eq(schema.pendingUploads.verdict, 'pending')
+			)
 		);
 		const rivalFilter = and(
 			eq(schema.pendingUploads.cacheId, cache.id),

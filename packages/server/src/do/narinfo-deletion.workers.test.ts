@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import {
 	type CacheScope,
+	firstCacheGeneration,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
@@ -29,18 +30,21 @@ import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
+	attestationReferenceRows,
 	authorisedFetch,
 	blobReferenceRows,
 	commitPath,
 	commitUpload,
 	currentServer,
 	defaultCache,
+	fileAttestationReference,
 	flakyD1,
 	initialise,
 	namedCache,
 	narInfoDeletionRows,
 	negotiateUploads,
 	putNarBytes,
+	putTestCache,
 	resetTestServer,
 	resolvedCache,
 	singleDecision,
@@ -50,7 +54,8 @@ import {
 	testServerFor,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { AttestationCasService } from './attestation-cas-service.ts';
@@ -285,6 +290,86 @@ describe('narinfo deletion queue', () => {
 		]);
 	});
 
+	it('keeps a public source edge while another cache has a pending reference commit', async () => {
+		const token = await initialise();
+		const destination = namedCache('pending-reference-destination');
+		await putTestCache(token, destination);
+		const nar = await verifiableNar('pending-reference-source');
+		const metadata = uploadMetadata({
+			storePathHash: syntheticStorePathHash(82),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await commitPath(token, metadata, nar);
+		const pending = singleDecision(
+			await negotiateUploads(token, [metadata], destination)
+		);
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const cache = resolvedCache(instance.context);
+				instance.context.db
+					.delete(narInfos)
+					.where(
+						and(
+							eq(narInfos.cacheId, cache.id),
+							eq(narInfos.storePathHash, metadata.storePathHash)
+						)
+					)
+					.run();
+				instance.context.db
+					.insert(narInfoDeletions)
+					.values({
+						cacheId: cache.id,
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash,
+						generation: narInfoGenerationSchema.parse(0),
+						createdAt: isoTimestamp(new Date())
+					})
+					.run();
+				const queue = buildDeletionQueue(instance.context);
+				const retired = await instance.context.criticalSection(() =>
+					queue.flushQueuedNarInfoDeletions()
+				);
+				return {
+					retired,
+					wakeScheduled: queue.earliestPendingDeferralEnd() !== undefined
+				};
+			}
+		);
+		const deletionRows = await narInfoDeletionRows();
+		const referenceRows = await blobReferenceRows();
+		expect({
+			pending: pending.action,
+			outcome,
+			deletions: deletionRows.map((row) => ({
+				cache: row.cache,
+				storePathHash: row.storePathHash
+			})),
+			edges: referenceRows.map((row) => ({
+				cache: row.cache,
+				storePathHash: row.storePathHash
+			}))
+		}).toStrictEqual({
+			pending: 'commit',
+			outcome: { retired: 0, wakeScheduled: true },
+			deletions: [
+				{
+					cache: defaultCache(),
+					storePathHash: metadata.storePathHash
+				}
+			],
+			edges: [
+				{
+					cache: defaultCache(),
+					storePathHash: metadata.storePathHash
+				}
+			]
+		});
+	});
+
 	it.each([
 		{ name: 'with a deferred deletion', isDeferred: true },
 		{ name: 'without a deferral', isDeferred: false }
@@ -451,6 +536,237 @@ describe('narinfo deletion queue', () => {
 			edges: await blobReferenceRows()
 		}).toStrictEqual({ queued: [], edges: [] });
 	});
+
+	it.each([1, 2])(
+		'resumes public source retirement after %i destinations finish inheritance',
+		async (destinationCount) =>
+			withoutAlarmArming(async () => {
+				const token = await initialise();
+				const nar = await verifiableNar('released-public-source');
+				const metadata = uploadMetadata({
+					storePathHash: syntheticStorePathHash(83),
+					narHash: nar.narHash,
+					narSize: nar.narSize,
+					fileHash: nar.fileHash,
+					fileSize: nar.narBytes.byteLength
+				});
+				await commitPath(token, metadata, nar);
+				await runInDurableObject(currentServer(), (instance) =>
+					buildAttestations(instance.context).drainInheritanceQueue(
+						rootLogger()
+					)
+				);
+				const bundle = await fileAttestationReference({
+					uploadId: 'released-source-bundle',
+					bytes: new TextEncoder().encode('source evidence'),
+					storePathHash: metadata.storePathHash,
+					generation: 0
+				});
+				const destinations = Array.from(
+					{ length: destinationCount },
+					(_unused, index) => namedCache(`destination-${String(index)}`)
+				);
+
+				for (const destination of destinations) {
+					await putTestCache(token, destination);
+					const decision = singleDecision(
+						await negotiateUploads(token, [metadata], destination)
+					);
+					if (decision.action !== 'commit') {
+						throw new Error('the destination must reuse the source NAR');
+					}
+					await commitUpload(token, decision.uploadId, destination);
+				}
+
+				const queued = await runInDurableObject(
+					currentServer(),
+					async (instance, state) => {
+						const source = resolvedCache(instance.context);
+						const now = isoTimestamp(new Date());
+						instance.context.db
+							.delete(narInfos)
+							.where(eq(narInfos.cacheId, source.id))
+							.run();
+						buildDeletionQueue(instance.context).enqueueNarInfoDeletion(
+							instance.context.db,
+							source,
+							metadata.storePathHash,
+							metadata.narHash,
+							narInfoGenerationSchema.parse(0),
+							now
+						);
+						await instance.context.criticalSection(() =>
+							buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions()
+						);
+						await state.storage.delete(gcContinuationKey);
+
+						if (destinationCount === 2) {
+							const destination = destinations[1];
+							if (destination === undefined) {
+								throw new Error('the second destination must exist');
+							}
+							const later =
+								instance.context.cacheRepository.require(destination);
+							const notBefore = isoTimestamp(new Date(Date.now() + 60_000));
+							instance.context.db
+								.update(attestationInheritances)
+								.set({ notBefore })
+								.where(eq(attestationInheritances.cacheId, later.id))
+								.run();
+						}
+						return instance.context.db.select().from(narInfoDeletions).all();
+					}
+				);
+				const drainAlarm = () =>
+					runInDurableObject(currentServer(), async (instance, state) => {
+						await state.storage.put(
+							maintenancePassCursorKey,
+							'garbage-collection'
+						);
+						await instance.alarm();
+						return state.storage.get(gcContinuationKey);
+					});
+				const firstContinuation = await drainAlarm();
+
+				if (destinationCount === 2) {
+					expect({
+						continuation: firstContinuation,
+						queued: await narInfoDeletionRows()
+					}).toStrictEqual({
+						continuation: undefined,
+						queued: [
+							{
+								cache: defaultCache(),
+								storePathHash: metadata.storePathHash,
+								narHash: metadata.narHash,
+								generation: 0
+							}
+						]
+					});
+					await runInDurableObject(currentServer(), (instance) => {
+						instance.context.db
+							.update(attestationInheritances)
+							.set({ notBefore: isoTimestamp(new Date()) })
+							.run();
+					});
+				}
+				const continuation =
+					destinationCount === 2 ? await drainAlarm() : firstContinuation;
+				const predicateType = 'https://slsa.dev/provenance/v1';
+				const expectedReferences = [defaultCache(), ...destinations].map(
+					(cache) => ({
+						tenant: fixtureTenant,
+						cache,
+						storePathHash: metadata.storePathHash,
+						generation: 0,
+						predicateType,
+						digest: bundle.digest
+					})
+				);
+				const references = await attestationReferenceRows();
+				const destinationEdges = destinations.map((cache) => ({
+					tenant: fixtureTenant,
+					cache,
+					storePathHash: metadata.storePathHash,
+					generation: 0,
+					narHash: metadata.narHash,
+					cacheGeneration: firstCacheGeneration
+				}));
+
+				expect({
+					continuation,
+					queued: await runInDurableObject(currentServer(), (instance) =>
+						instance.context.db.select().from(narInfoDeletions).all()
+					),
+					references
+				}).toStrictEqual({
+					continuation: [{ scope: 'tenant' }],
+					queued,
+					references: expectedReferences
+				});
+
+				await runMaintenanceAlarms(6);
+				const retiredEdges = await blobReferenceRows();
+
+				expect({
+					queued: await narInfoDeletionRows(),
+					references: await attestationReferenceRows(),
+					edges: retiredEdges.toSorted((left, right) =>
+						byCodeUnit(JSON.stringify(left.cache), JSON.stringify(right.cache))
+					)
+				}).toStrictEqual({
+					queued: [],
+					references: expectedReferences.slice(1),
+					edges: destinationEdges
+				});
+			})
+	);
+
+	it.each([
+		{ source: 'same', generation: 0, matchesNar: true, released: true },
+		{ source: 'same', generation: 1, matchesNar: true, released: false },
+		{ source: 'same', generation: 2, matchesNar: true, released: false },
+		{ source: 'public', generation: 2, matchesNar: true, released: true },
+		{ source: 'private', generation: 0, matchesNar: true, released: false },
+		{ source: 'public', generation: 0, matchesNar: false, released: false }
+	] as const)(
+		'checks released deletion identity for $source generation $generation (matching NAR: $matchesNar)',
+		async ({ source, generation, matchesNar, released }) => {
+			const path = syntheticStorePathHash(84);
+			const narHash = syntheticNarHash(84);
+			const queuedNar = matchesNar ? narHash : syntheticNarHash(85);
+			const createdAt = isoTimestamp(new Date());
+			const result = await runInDurableObject(currentServer(), (instance) => {
+				const destination = resolvedCache(instance.context);
+				const sourceCache =
+					source === 'same'
+						? destination
+						: instance.context.cacheRepository.resolveOrCreate(
+								buildsCache,
+								source
+							);
+				instance.context.db
+					.insert(narInfoDeletions)
+					.values({
+						cacheId: sourceCache.id,
+						storePathHash: path,
+						narHash: queuedNar,
+						generation: narInfoGenerationSchema.parse(generation),
+						createdAt,
+						withdrawn: true
+					})
+					.run();
+
+				return {
+					released: buildDeletionQueue(
+						instance.context
+					).hasDeletionReleasedByInheritance(
+						destination.id,
+						path,
+						narInfoGenerationSchema.parse(1),
+						narHash
+					),
+					queued: instance.context.db.select().from(narInfoDeletions).all(),
+					sourceId: sourceCache.id
+				};
+			});
+
+			expect(result).toStrictEqual({
+				released,
+				queued: [
+					{
+						cacheId: result.sourceId,
+						storePathHash: path,
+						narHash: queuedNar,
+						generation,
+						createdAt,
+						withdrawn: true
+					}
+				],
+				sourceId: result.sourceId
+			});
+		}
+	);
 
 	it.each([
 		{ name: 'a collection pass', withdrawnBy: 'collection' },
@@ -921,8 +1237,8 @@ describe('narinfo deletion queue', () => {
 		const withUploads = await flushRowsRead(entries.slice(4));
 
 		expect({ withoutUploads, withUploads }).toStrictEqual({
-			withoutUploads: 70,
-			withUploads: 70
+			withoutUploads: 94,
+			withUploads: 94
 		});
 	});
 

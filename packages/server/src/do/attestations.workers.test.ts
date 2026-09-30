@@ -5,8 +5,10 @@ import {
 	narInfoGenerationSchema,
 	predicateTypeSchema,
 	type Sha256HexDigest,
-	sha256HexDigestSchema
+	sha256HexDigestSchema,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	attestationAttachResponseSchema,
 	type AttestationDecision,
@@ -49,6 +51,7 @@ import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
 	casObjectKey,
+	internalOrigin,
 	type R2ObjectKey
 } from '../http/http.ts';
 import { runReaperDemote } from '../routing/scheduled.ts';
@@ -77,6 +80,7 @@ import {
 	putNarBytes,
 	putWorkerTestCache,
 	readFetch,
+	recordTransition,
 	resetTestServer,
 	resolvedCache,
 	sigstoreBundleBytes,
@@ -97,8 +101,7 @@ import {
 	inheritanceListSubrequests,
 	inheritanceLookupSubrequests,
 	inheritanceSourceKey,
-	inheritedBundleSubrequests,
-	maxInheritanceAttempts
+	inheritedBundleSubrequests
 } from './attestations-service.ts';
 import { chunk, maxBoundParameters } from './bulk.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
@@ -384,29 +387,148 @@ describe('attestation attach and reads', () => {
 		}
 	});
 
-	it('prefetches attestations for every path when one path has more than the per-path limit', async () => {
-		const first = await committedPathBundle();
-		const secondHash = uniqueStorePathHash();
-		const second = uploadMetadata({
-			storePathHash: secondHash,
-			narHash: first.nar.narHash,
-			narSize: first.nar.narSize,
-			fileHash: first.nar.fileHash,
-			fileSize: first.nar.narBytes.byteLength
-		});
-		await pushPathThroughTenant(fixtureTenant, first.token, second, first.nar);
-		const destination = namedCache('prefetch-destination');
-		await putWorkerTestCache(first.token, destination);
-		const digests = Array.from({ length: 131 }, (_, index) =>
+	it.each([2, 100])(
+		'prefetches exact pairs for %i candidates within the D1 parameter limit',
+		async (candidateCount) => {
+			const first = await committedPathBundle();
+			const secondNar = await verifiableNar('second-prefetch-source');
+			const second = uploadMetadata({
+				storePathHash: uniqueStorePathHash(),
+				narHash: secondNar.narHash,
+				narSize: secondNar.narSize,
+				fileHash: secondNar.fileHash,
+				fileSize: secondNar.narBytes.byteLength
+			});
+			await pushPathThroughTenant(
+				fixtureTenant,
+				first.token,
+				second,
+				secondNar
+			);
+			const destination = namedCache('prefetch-destination');
+			await putWorkerTestCache(first.token, destination);
+			const digests = Array.from({ length: 131 }, (_, index) =>
+				sha256HexDigestSchema.parse((index + 1).toString(16).padStart(64, '0'))
+			);
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const lastDigest = digests.at(-1);
+
+			if (lastDigest === undefined) {
+				throw new Error('the test needs a last digest');
+			}
+
+			for (const page of chunk(digests, 25)) {
+				await database.insert(d1Schema.casObject).values(
+					page.map((digest) => ({
+						digest,
+						size: 1,
+						storedAt: isoTimestamp(new Date())
+					}))
+				);
+			}
+
+			const firstPathDigests = digests.slice(0, 130);
+			for (const page of chunk(firstPathDigests, 10)) {
+				await database.insert(d1Schema.attestationReference).values(
+					page.map((digest) => ({
+						tenant: fixtureTenant,
+						cacheKind: 'default' as const,
+						storePathHash: first.metadata.storePathHash,
+						generation: narInfoGenerationSchema.parse(0),
+						predicateType: predicateTypeSchema.parse(predicateType),
+						digest
+					}))
+				);
+			}
+
+			await database.insert(d1Schema.attestationReference).values({
+				tenant: fixtureTenant,
+				cacheKind: 'default',
+				storePathHash: second.storePathHash,
+				generation: narInfoGenerationSchema.parse(0),
+				predicateType: predicateTypeSchema.parse(predicateType),
+				digest: lastDigest
+			});
+
+			const candidates = [
+				first.metadata,
+				second,
+				...Array.from({ length: candidateCount - 2 }, () => ({
+					storePathHash: storePathHashSchema.parse(uniqueStorePathHash()),
+					narHash: first.nar.narHash
+				}))
+			];
+			const parameterCounts: number[] = [];
+			const originalPrepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
+			const prepare = vi
+				.spyOn(env.CUPBOARD_DB, 'prepare')
+				.mockImplementation((query) => {
+					const statement = originalPrepare(query);
+					if (query.includes('distinct_inheritance_sources')) {
+						const originalBind = statement.bind.bind(statement);
+						statement.bind = (...values: unknown[]) => {
+							parameterCounts.push(values.length);
+							return originalBind(...values);
+						};
+					}
+					return statement;
+				});
+
+			try {
+				const result = await runInDurableObject(
+					fixtureWorkerServer(),
+					async (instance) => {
+						const service = attestationsFor(instance.context);
+						const cache = resolvedCache(instance.context, destination);
+						const prefetched = await service.prefetchInheritanceSources(
+							cache,
+							candidates
+						);
+						const mismatched = await service.prefetchInheritanceSources(cache, [
+							{
+								storePathHash: first.metadata.storePathHash,
+								narHash: second.narHash
+							},
+							{
+								storePathHash: second.storePathHash,
+								narHash: first.nar.narHash
+							}
+						]);
+						return {
+							first: prefetched.sources.get(
+								inheritanceSourceKey(
+									first.metadata.storePathHash,
+									first.nar.narHash
+								)
+							)?.length,
+							second: prefetched.sources
+								.get(inheritanceSourceKey(second.storePathHash, second.narHash))
+								?.map((row) => row.digest),
+							mismatched: [...mismatched.sources]
+						};
+					}
+				);
+				expect({
+					result,
+					withinLimit: parameterCounts.map((count) => count <= 100)
+				}).toStrictEqual({
+					result: { first: 65, second: [lastDigest], mismatched: [] },
+					withinLimit: [true, true]
+				});
+			} finally {
+				prepare.mockRestore();
+			}
+		}
+	);
+
+	it('continues inheriting after a path exceeds one pass of bundles', async () => {
+		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
+			'many-inherited-bundles'
+		);
+		const digests = Array.from({ length: 65 }, (_, index) =>
 			sha256HexDigestSchema.parse((index + 1).toString(16).padStart(64, '0'))
 		);
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const lastDigest = digests.at(-1);
-
-		if (lastDigest === undefined) {
-			throw new Error('the test needs a last digest');
-		}
-
 		for (const page of chunk(digests, 25)) {
 			await database.insert(d1Schema.casObject).values(
 				page.map((digest) => ({
@@ -416,55 +538,56 @@ describe('attestation attach and reads', () => {
 				}))
 			);
 		}
-
-		const firstPathDigests = digests.slice(0, 130);
-		for (const page of chunk(firstPathDigests, 10)) {
+		for (const page of chunk(digests, 10)) {
 			await database.insert(d1Schema.attestationReference).values(
 				page.map((digest) => ({
 					tenant: fixtureTenant,
 					cacheKind: 'default' as const,
-					storePathHash: first.metadata.storePathHash,
+					storePathHash: metadata.storePathHash,
 					generation: narInfoGenerationSchema.parse(0),
 					predicateType: predicateTypeSchema.parse(predicateType),
 					digest
 				}))
 			);
 		}
-
-		await database.insert(d1Schema.attestationReference).values({
-			tenant: fixtureTenant,
-			cacheKind: 'default',
-			storePathHash: second.storePathHash,
-			generation: narInfoGenerationSchema.parse(0),
-			predicateType: predicateTypeSchema.parse(predicateType),
-			digest: lastDigest
-		});
-
-		const prefetched = await runInDurableObject(
-			fixtureWorkerServer(),
-			(instance) => {
-				const service = new AttestationsService(
-					instance.context,
-					new CacheRegistrationService(instance.context),
-					new AttestationCasService(instance.context),
-					new NarInfoObjectsService(instance.context)
-				);
-
-				return service.prefetchInheritanceSources(
-					resolvedCache(instance.context, destination),
-					[first.metadata, second]
-				);
-			}
+		await Promise.all(
+			digests.map((digest) =>
+				env.BLOBS.put(casObjectKey(digest, 1), new Uint8Array([1]))
+			)
 		);
 
+		const first = await drainInheritance();
+		const firstQueue = await queuedInheritances();
+		await makeQueuedInheritancesDue();
+		const second = await drainInheritance();
+		const secondQueue = await queuedInheritances();
+		const inherited = await database
+			.select({ digest: d1Schema.attestationReference.digest })
+			.from(d1Schema.attestationReference)
+			.where(
+				and(
+					eq(d1Schema.attestationReference.cacheKind, 'named'),
+					eq(d1Schema.attestationReference.cacheName, destination.name),
+					eq(
+						d1Schema.attestationReference.storePathHash,
+						metadata.storePathHash
+					)
+				)
+			)
+			.orderBy(d1Schema.attestationReference.digest);
 		expect({
-			first: prefetched.sources.get(
-				inheritanceSourceKey(first.metadata.storePathHash, first.nar.narHash)
-			)?.length,
-			second: prefetched.sources
-				.get(inheritanceSourceKey(second.storePathHash, first.nar.narHash))
-				?.map((row) => row.digest)
-		}).toStrictEqual({ first: 65, second: [lastDigest] });
+			first,
+			firstQueue,
+			second,
+			secondQueue,
+			inherited: inherited.map((row) => row.digest)
+		}).toStrictEqual({
+			first: 'progressed',
+			firstQueue: [{ storePathHash: metadata.storePathHash, attempts: 0 }],
+			second: 'progressed',
+			secondQueue: [],
+			inherited: [...digests, digest].toSorted(byCodeUnit)
+		});
 	});
 
 	it('searches the path index for inheritance sources', async () => {
@@ -681,6 +804,115 @@ describe('attestation attach and reads', () => {
 			heads.mockRestore();
 		}
 	});
+
+	it.each([
+		{ pauseAfter: 'prefetch', revocation: 'private' },
+		{ pauseAfter: 'head', revocation: 'private' },
+		{ pauseAfter: 'prefetch', revocation: 'recreation' }
+	] as const)(
+		'does not inherit a bundle after source $revocation following $pauseAfter',
+		async ({ pauseAfter, revocation }) => {
+			await recordTransition('cache-identity', 'complete');
+			const source = namedCache('revoked-source');
+			const destination = namedCache('revoked-destination');
+			const token = await initialiseViaWorker();
+			await putWorkerTestCache(token, source);
+			await putWorkerTestCache(token, destination);
+			const nar = await verifiableNar('revoked-inheritance-source');
+			const metadata = uploadMetadata({
+				storePathHash: uniqueStorePathHash(),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			await pushPathThroughTenant(fixtureTenant, token, metadata, nar, source);
+			const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+			const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+			await attachBundle(token, metadata.storePathHash, bundle, source);
+			await pushPathThroughTenant(
+				fixtureTenant,
+				token,
+				metadata,
+				nar,
+				destination
+			);
+			const prefetch = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					attestationsFor(instance.context).prefetchInheritanceSources(
+						resolvedCache(instance.context, destination),
+						[metadata]
+					)
+			);
+			const revokeSource = async (): Promise<void> => {
+				if (revocation === 'private') {
+					await putWorkerTestCache(token, source, 'private');
+					return;
+				}
+
+				const removed = await authorisedWorkerFetch(
+					`/caches/${source.name}?force=true`,
+					token,
+					{ method: 'DELETE' }
+				);
+				expect(removed.status).toBe(StatusCodes.OK);
+				await putWorkerTestCache(token, source);
+			};
+
+			if (pauseAfter === 'prefetch') {
+				await revokeSource();
+			} else {
+				const head = env.BLOBS.head.bind(env.BLOBS);
+				vi.spyOn(env.BLOBS, 'head').mockImplementationOnce(async (key) => {
+					const object = await head(key);
+					await revokeSource();
+
+					return object;
+				});
+			}
+
+			const result = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					attestationsFor(instance.context).inheritFromTenant(rootLogger(), {
+						cache: resolvedCache(instance.context, destination),
+						storePathHash: metadata.storePathHash,
+						generation: narInfoGenerationSchema.parse(0),
+						narHash: metadata.narHash,
+						...(pauseAfter === 'prefetch' && { prefetch })
+					})
+			);
+			const sourceRead = await readFetch(
+				cacheScopedPath(source, `/attestation-bundles/${digest}`)
+			);
+			const destinationRead = await readFetch(
+				cacheScopedPath(destination, `/attestation-bundles/${digest}`)
+			);
+			const destinationList = await readFetch(
+				cacheScopedPath(destination, `/attestations/${metadata.storePathHash}`)
+			);
+
+			expect({
+				prefetchedDigests: prefetch.sources
+					.get(inheritanceSourceKey(metadata.storePathHash, metadata.narHash))
+					?.map((row) => row.digest),
+				result,
+				sourceStatus: sourceRead.status,
+				destinationStatus: destinationRead.status,
+				listStatus: destinationList.status
+			}).toStrictEqual({
+				prefetchedDigests: [digest],
+				result: 'complete',
+				sourceStatus:
+					revocation === 'private'
+						? StatusCodes.UNAUTHORIZED
+						: StatusCodes.NOT_FOUND,
+				destinationStatus: StatusCodes.NOT_FOUND,
+				listStatus: StatusCodes.NOT_FOUND
+			});
+		}
+	);
 
 	it('inherits the source cache bundle after the commit when another cache reuses the path', async () => {
 		const destination = namedCache('reused');
@@ -1094,7 +1326,7 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('abandons a path after the last attempt fails', async () => {
+	it('keeps a path queued after repeated transient failures', async () => {
 		const { destination, metadata } = await reusedPathWithSourceBundle(
 			'abandoned-inheritance'
 		);
@@ -1104,7 +1336,7 @@ describe('attestation attach and reads', () => {
 		const attempts: number[][] = [];
 		const calls = await (async () => {
 			try {
-				for (let attempt = 1; attempt <= maxInheritanceAttempts; attempt += 1) {
+				for (let attempt = 1; attempt <= 6; attempt += 1) {
 					await drainInheritance();
 					const queued = await queuedInheritances();
 					attempts.push(queued.map((row) => row.attempts));
@@ -1126,9 +1358,164 @@ describe('attestation attach and reads', () => {
 			attempts,
 			listStatus: list.status
 		}).toStrictEqual({
-			calls: maxInheritanceAttempts,
-			attempts: [[1], [2], [3], [4], []],
+			calls: 6,
+			attempts: [[1], [2], [3], [4], [5], [6]],
 			listStatus: StatusCodes.NOT_FOUND
+		});
+	});
+
+	it('inherits a public source bundle when its path is collected before the drain', async () => {
+		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
+			'source-collected-before-inheritance'
+		);
+		const first = await runInDurableObject(
+			fixtureWorkerServer(),
+			async (instance) => {
+				const cache = resolvedCache(instance.context);
+				instance.context.db
+					.delete(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cacheId, cache.id),
+							eq(schema.narInfos.storePathHash, metadata.storePathHash)
+						)
+					)
+					.run();
+				instance.context.db
+					.insert(schema.narInfoDeletions)
+					.values({
+						cacheId: cache.id,
+						storePathHash: metadata.storePathHash,
+						generation: narInfoGenerationSchema.parse(0),
+						narHash: metadata.narHash,
+						createdAt: isoTimestamp(new Date())
+					})
+					.run();
+				const narInfoObjects = new NarInfoObjectsService(instance.context);
+				const attestationCas = new AttestationCasService(instance.context);
+				const attestations = attestationsFor(instance.context);
+				const deletionQueue = new DeletionQueueService(
+					instance.context,
+					attestationCas,
+					attestations,
+					narInfoObjects
+				);
+				return instance.context.criticalSection(() =>
+					deletionQueue.flushQueuedNarInfoDeletions()
+				);
+			}
+		);
+		await drainInheritance();
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const references = await database
+			.select({
+				cacheKind: d1Schema.attestationReference.cacheKind,
+				cacheName: d1Schema.attestationReference.cacheName,
+				digest: d1Schema.attestationReference.digest
+			})
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.digest, digest));
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+		expect({
+			first,
+			references: references.map((row) => ({
+				...row,
+				cacheName: row.cacheName ?? 'default'
+			})),
+			listStatus: list.status
+		}).toStrictEqual({
+			first: 0,
+			references: [
+				{ cacheKind: 'default', cacheName: 'default', digest },
+				{ cacheKind: 'named', cacheName: destination.name, digest }
+			],
+			listStatus: StatusCodes.OK
+		});
+		const retired = await runInDurableObject(
+			fixtureWorkerServer(),
+			(instance) => {
+				const narInfoObjects = new NarInfoObjectsService(instance.context);
+				const attestationCas = new AttestationCasService(instance.context);
+				const deletionQueue = new DeletionQueueService(
+					instance.context,
+					attestationCas,
+					attestationsFor(instance.context),
+					narInfoObjects
+				);
+				return instance.context.criticalSection(() =>
+					deletionQueue.flushQueuedNarInfoDeletions()
+				);
+			}
+		);
+		const remaining = await database
+			.select({
+				cacheKind: d1Schema.attestationReference.cacheKind,
+				cacheName: d1Schema.attestationReference.cacheName,
+				digest: d1Schema.attestationReference.digest
+			})
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.digest, digest));
+		const destinationList = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+		expect({
+			retired,
+			remaining,
+			destinationListStatus: destinationList.status
+		}).toStrictEqual({
+			retired: 1,
+			remaining: [{ cacheKind: 'named', cacheName: destination.name, digest }],
+			destinationListStatus: StatusCodes.OK
+		});
+	});
+
+	it('inherits a public source bundle after its path is explicitly deleted', async () => {
+		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
+			'source-explicitly-deleted'
+		);
+		const deleted = await runInDurableObject(
+			fixtureWorkerServer(),
+			(instance) => {
+				const narInfoObjects = new NarInfoObjectsService(instance.context);
+				const attestationCas = new AttestationCasService(instance.context);
+				const queue = new DeletionQueueService(
+					instance.context,
+					attestationCas,
+					attestationsFor(instance.context),
+					narInfoObjects
+				);
+				return queue.deleteStorePath(
+					defaultCacheScope,
+					metadata.storePathHash,
+					internalOrigin
+				);
+			}
+		);
+		await drainInheritance();
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const references = await database
+			.select({
+				cacheKind: d1Schema.attestationReference.cacheKind,
+				digest: d1Schema.attestationReference.digest
+			})
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.digest, digest));
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+		expect({ deleted, references, listStatus: list.status }).toStrictEqual({
+			deleted: {
+				storePathHash: metadata.storePathHash,
+				deleted: true,
+				narScheduledForDeletion: false
+			},
+			references: [
+				{ cacheKind: 'default', digest },
+				{ cacheKind: 'named', digest }
+			],
+			listStatus: StatusCodes.OK
 		});
 	});
 

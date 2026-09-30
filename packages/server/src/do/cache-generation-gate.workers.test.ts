@@ -93,10 +93,6 @@ const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const tenantReader = { user: 'alice', password: 'secret' };
 const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
-// A Durable Object may hold six outgoing connections at once, so push in groups
-// of that size to fill a large cache without queueing behind the cap.
-const pushConcurrency = 6;
-
 // The narinfo version the first commit of a path takes.
 const firstNarInfoGeneration = 0;
 
@@ -404,8 +400,8 @@ async function deletionStatements(
 			throw new Error('The deletion statement fixture was not committed.');
 		}
 
-		for (let start = 1; start < paths.length; start += 6) {
-			const batch = paths.slice(start, start + 6);
+		for (let start = 1; start < paths.length; start += 5) {
+			const batch = paths.slice(start, start + 5);
 			instance.context.db
 				.insert(narInfos)
 				.values(
@@ -487,15 +483,12 @@ async function teardownPassStatements(
 	await useTestServer(server);
 	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
-	for (let start = 0; start < storePaths; start += pushConcurrency) {
-		await Promise.all(
-			Array.from(
-				{ length: Math.min(pushConcurrency, storePaths - start) },
-				(_, offset) =>
-					pushPath(token, indexedMetadata(start + offset), buildsCache)
-			)
-		);
-	}
+	await withoutAlarmArming(async () => {
+		for (let index = 0; index < storePaths; index += 1) {
+			await pushPath(token, indexedMetadata(index), buildsCache);
+		}
+	});
+	await drainAttestationInheritance();
 
 	const counting = countingD1(env.CUPBOARD_DB);
 
