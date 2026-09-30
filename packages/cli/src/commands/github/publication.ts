@@ -306,6 +306,13 @@ export function isPresetJob(job: DiscoveredPublishingJob): boolean {
 	);
 }
 
+export function isReadOnlyJob(job: DiscoveredPublishingJob): boolean {
+	return (
+		job.inputs.publish === 'none' ||
+		(job.kind === 'flake' && job.inputs.push === false)
+	);
+}
+
 function unresolved(reason: string): JobCache {
 	return { outcome: 'unresolved', reason };
 }
@@ -692,11 +699,12 @@ export function modelPublishingJob(
 	}
 
 	const isPreset = isPresetJob(job);
+	const isReadOnly = isReadOnlyJob(job);
 	const cacheAccessMode = scalar(job, 'cache-access-mode');
 
 	if (
 		isPreset &&
-		job.inputs.push !== false &&
+		!isReadOnly &&
 		(cacheAccessMode === undefined ||
 			!['', 'public', 'private'].includes(cacheAccessMode))
 	) {
@@ -743,11 +751,7 @@ export function modelPublishingJob(
 
 	const attestInput = job.inputs.attest;
 
-	if (
-		attestInput !== undefined &&
-		typeof attestInput !== 'boolean' &&
-		job.kind === 'installable'
-	) {
+	if (attestInput !== undefined && typeof attestInput !== 'boolean') {
 		return unmodelled('attest must be a literal boolean');
 	}
 
@@ -790,11 +794,9 @@ export function modelPublishingJob(
 			const claims = claimsForReference(tenant, identity, job, entry);
 
 			if (job.kind === 'installable') {
-				const requests = installableRequests(
-					cache.scope,
-					rootPrefix,
-					attestInput !== false
-				);
+				const requests = isReadOnly
+					? []
+					: installableRequests(cache.scope, rootPrefix, attestInput !== false);
 
 				if (requests === undefined) {
 					return unmodelled(`root '${rootPrefix}' is invalid`);
@@ -804,7 +806,6 @@ export function modelPublishingJob(
 				continue;
 			}
 
-			const isReadOnly = job.inputs.push === false;
 			const publicationCache: CacheScope =
 				isPreset && isPullRequest && !isReadOnly
 					? {

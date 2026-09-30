@@ -68,22 +68,30 @@ inputs:
       outputs must be built on the runner instead. Leave empty to use the
       runner's store.
     required: false
-  push:
-    description:
-      When true, publish the cohort and set each target's root. On the runner,
-      outputs are published as they are built. With a remote store, they are
-      published from the store after the build. When false, the action only
-      builds.
+  publish:
+    description: >-
+      Control which paths are published. `none` publishes no paths. `outputs`
+      publishes requested outputs. `closure` also publishes their runtime
+      references.
     required: false
-  require-provenance:
-    description:
-      Require build provenance from this run for every target output. The action
-      only skips a target's build when the cache already serves the target's
-      outputs and has a build-provenance attestation for them. It builds every
-      other target's final derivation, even when the output is already in the
-      build store.
+    default: none
+  build:
+    description: >-
+      Control when to build the requested outputs. `missing` uses an output from
+      the store or a substituter when one is available, and builds it otherwise.
+      `rebuild` builds each output again in the selected Nix store, even if it
+      is already available. Nix may still fetch dependencies from substituters.
     required: false
-    default: 'false'
+    default: missing
+  substituter:
+    description: >-
+      Control whether to publish outputs available from external substituters.
+      `copy` selects them for publication. `leave` keeps them upstream if
+      consumers can obtain matching NARs for the output and all its runtime
+      references under the configured signature policy. Both modes select
+      outputs built in this run.
+    required: false
+    default: leave
   best-effort:
     description:
       Let the step succeed when a target's build fails. The action first
@@ -217,8 +225,9 @@ runs:
         FALLBACK_READ_PASSWORD: ${{ inputs.fallback-read-password }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         STORE: ${{ inputs.store }}
-        PUSH: ${{ inputs.push }}
-        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
+        PUBLISH: ${{ inputs.publish }}
+        BUILD: ${{ inputs.build }}
+        SUBSTITUTER: ${{ inputs.substituter }}
         BEST_EFFORT: ${{ inputs.best-effort }}
         GC_BETWEEN_COHORTS: ${{ inputs.gc-between-cohorts }}
         RUN_ROOT: ${{ inputs.run-root }}
@@ -246,8 +255,9 @@ runs:
           --fallback-read-password "$FALLBACK_READ_PASSWORD"
           --max-jobs "$MAX_JOBS"
           --store "$STORE"
-          --push "$PUSH"
-          --require-provenance "$REQUIRE_PROVENANCE"
+          --publish "$PUBLISH"
+          --build "$BUILD"
+          --substituter "$SUBSTITUTER"
           --best-effort "$BEST_EFFORT"
           --gc-between-cohorts "$GC_BETWEEN_COHORTS"
           --run-root "$RUN_ROOT"

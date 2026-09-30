@@ -18,12 +18,7 @@ import {
 	type BuildReceiptV3Input,
 	type BuildSubjectV3Input
 } from '@cupboard/protocol/build';
-import {
-	type BuildOriginPredicate,
-	buildOriginPredicateSchema,
-	buildOriginPredicateType,
-	type BuildOriginSubjectInput
-} from '@cupboard/protocol/build-origin';
+import { scaiPredicateType } from '@cupboard/protocol/scai';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -35,6 +30,7 @@ import {
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
+import { StatusCodes } from 'http-status-codes';
 
 import type { DestinationAccess } from '../attestation-signing.ts';
 import { fetchWithProbeDeadline } from '../cache-probe.ts';
@@ -56,6 +52,10 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import {
+	type ReproducedSubject,
+	reproductionReport
+} from '../reproduction-report.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
 interface StorePathDigest {
@@ -94,10 +94,11 @@ export interface CommittedPathInfo {
 interface AttestationSubjects {
 	readonly subjects: readonly StorePathDigest[];
 	readonly built: readonly StorePathDigest[];
+	readonly reproduced: readonly ReproducedSubject[];
 	readonly skipped: readonly string[];
 }
 
-async function cacheAccess(
+export async function cacheAccess(
 	fetcher: typeof fetch,
 	cacheUrl: URL
 ): Promise<DestinationAccess> {
@@ -109,12 +110,13 @@ async function cacheAccess(
 		undefined,
 		async (response) => {
 			await discardResponseBody(response);
+			const status: StatusCodes = response.status;
 
-			if (response.status === 200) {
+			if (status === StatusCodes.OK) {
 				return 'public';
 			}
 
-			if (response.status === 401) {
+			if (status === StatusCodes.UNAUTHORIZED) {
 				return 'private';
 			}
 
@@ -152,7 +154,7 @@ export function attestationSubjects(
 		});
 	}
 
-	return { subjects, built: subjects, skipped };
+	return { subjects, built: subjects, reproduced: [], skipped };
 }
 
 export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
@@ -174,6 +176,7 @@ export function provenancedSubjects(
 ): AttestationSubjects {
 	const subjects: StorePathDigest[] = [];
 	const built: StorePathDigest[] = [];
+	const reproduced: ReproducedSubject[] = [];
 	const named = new Set(receipt.subjects.map((subject) => subject.storePath));
 	const skipped = receipt.paths.filter((storePath) => !named.has(storePath));
 
@@ -187,12 +190,27 @@ export function provenancedSubjects(
 
 		subjects.push(digest);
 
-		if (subject.origin === 'built') {
-			built.push(digest);
+		// Build provenance covers the executions this run supervised on the
+		// coordinating machine. A verification rebuild counts: the run
+		// re-executed the derivation here and Nix matched the stored output.
+		// A remote builder's execution and a path attributed to the store's
+		// records describe builds this run cannot report on.
+		if (!(
+			subject.origin === 'built' &&
+			subject.verification === 'local' &&
+			(subject.machine ?? '') === ''
+		)) {
+			continue;
+		}
+
+		built.push(digest);
+
+		if (subject.reproduced === true) {
+			reproduced.push({ ...digest, derivation: subject.derivation });
 		}
 	}
 
-	return { subjects, built, skipped };
+	return { subjects, built, reproduced, skipped };
 }
 
 function requireBacked(
@@ -228,52 +246,6 @@ function requireUnmoved(
 	}
 }
 
-// Attempt fields belong to run-local attribution. Rebuild a `built` subject
-// without them before writing the durable build-origin statement.
-function originSubject(subject: BuildSubjectV3Input): BuildOriginSubjectInput {
-	if (subject.origin === 'built') {
-		return {
-			origin: 'built',
-			storePath: subject.storePath,
-			narHash: subject.narHash,
-			derivation: subject.derivation,
-			buildStore: subject.buildStore,
-			...(subject.machine !== undefined && { machine: subject.machine }),
-			verification: subject.verification
-		};
-	}
-
-	return subject;
-}
-
-/**
- * Version 2 receipts record no origin, so they produce no predicate. A version
- * 3 receipt also produces no predicate when the run accepted no subjects.
- * Otherwise, the predicate includes the recorded origin of every accepted
- * subject.
- */
-export function buildOriginPredicateFor(
-	receipt: BuildReceipt,
-	subjects: readonly StorePathDigest[]
-): BuildOriginPredicate | undefined {
-	if (receipt.version !== 3) {
-		return undefined;
-	}
-
-	const accepted = new Set(subjects.map((subject) => subject.storePath));
-	const origins: BuildOriginSubjectInput[] = receipt.subjects
-		.filter((subject) => accepted.has(subject.storePath))
-		.map((subject) => originSubject(subject));
-
-	if (origins.length === 0) {
-		return undefined;
-	}
-
-	// The statement is signed under this repository's identity, so its contents
-	// are checked against the schema before the file is written.
-	return buildOriginPredicateSchema.parse({ subjects: origins });
-}
-
 export function renderChecksums(digests: readonly StorePathDigest[]): string {
 	return digests
 		.map((digest) => `${digest.sha256}  ${path.basename(digest.storePath)}`)
@@ -304,7 +276,7 @@ export function registerAttestCommand(
 		)
 		.option(
 			'--predicate-file <path>',
-			'Write the build-origin predicate here. Defaults to a file beside the checksums file.'
+			'Write the SCAI attribute report for reproduced subjects here. Defaults to a file beside the checksums file.'
 		)
 		.requiredOption(
 			'--url <url>',
@@ -370,7 +342,7 @@ export function resolveAttestInputs(
 			path.join(path.dirname(checksumsFile), 'built-subjects.txt'),
 		predicateFile:
 			provided(options.predicateFile) ??
-			path.join(path.dirname(checksumsFile), 'build-origin.json')
+			path.join(path.dirname(checksumsFile), 'attribute-report.json')
 	};
 }
 
@@ -494,7 +466,7 @@ export async function attestAction(
 		retryingFetcher(fetcher, 'replay-safe'),
 		cacheUrlFor(inputs.url, inputs.cache)
 	);
-	const { subjects, built, skipped } = await resolveAttestation(
+	const { subjects, built, reproduced, skipped } = await resolveAttestation(
 		receipt,
 		inputs,
 		{ ...dependencies, fetch: fetcher }
@@ -508,29 +480,35 @@ export async function attestAction(
 
 	const checksumsFile = path.resolve(inputs.checksumsFile);
 	const builtChecksumsFile = path.resolve(inputs.builtChecksumsFile);
+	const predicateFile = path.resolve(inputs.predicateFile);
+	const report =
+		reproduced.length === 0
+			? undefined
+			: reproductionReport(reproduced, subjects.length === 1);
 
 	await mkdir(path.dirname(checksumsFile), { recursive: true });
 	await writeFile(checksumsFile, renderChecksums(subjects));
 	await mkdir(path.dirname(builtChecksumsFile), { recursive: true });
 	await writeFile(builtChecksumsFile, renderChecksums(built));
 
-	const predicate = buildOriginPredicateFor(receipt, subjects);
-	const predicateFile =
-		predicate === undefined ? '' : path.resolve(inputs.predicateFile);
-
-	if (predicate !== undefined) {
+	if (report !== undefined) {
 		await mkdir(path.dirname(predicateFile), { recursive: true });
-		await writeFile(
-			predicateFile,
-			`${JSON.stringify(predicate, undefined, 2)}\n`
-		);
+		await writeFile(predicateFile, `${JSON.stringify(report)}\n`);
 	}
 
 	await setOutput(environment, 'checksums-file', checksumsFile);
 	await setOutput(environment, 'subject-count', String(subjects.length));
 	await setOutput(environment, 'built-checksums-file', builtChecksumsFile);
 	await setOutput(environment, 'built-subject-count', String(built.length));
-	await setOutput(environment, 'predicate-file', predicateFile);
-	await setOutput(environment, 'predicate-type', buildOriginPredicateType);
+	await setOutput(
+		environment,
+		'predicate-file',
+		report === undefined ? '' : predicateFile
+	);
+	await setOutput(
+		environment,
+		'predicate-type',
+		report === undefined ? '' : scaiPredicateType
+	);
 	await setOutput(environment, 'destination-access', destinationAccess);
 }

@@ -1,9 +1,9 @@
 name: Plan cupboard flake publication
 description:
   Evaluates the target manifest, groups the targets into cohorts, and writes the
-  matrix for the cohort jobs. Unless require-provenance is true, it also sets
-  the roots of targets that the cache already has, and leaves those targets out
-  of the matrix.
+  matrix for the cohort jobs. For output-only publication of missing builds, it
+  also sets the roots of targets that the cache already has, and leaves those
+  targets out of the matrix.
 inputs:
   targets:
     description: Target manifest to plan, as JSON.
@@ -78,12 +78,31 @@ inputs:
       planning, so floating content-addressed outputs must be built on the
       runner instead.
     required: false
-  require-provenance:
-    description:
-      Keep targets that the cache already has in the matrix, so the cohort jobs
-      can build and attest every published target.
+  build:
+    description: >-
+      Control when to build the requested outputs. `missing` uses an output from
+      the store or a substituter when one is available, and builds it otherwise.
+      `rebuild` builds each output again on the configured builder, even if it
+      is already available. Nix may still fetch dependencies from substituters.
     required: false
-    default: 'false'
+    default: missing
+  substituter:
+    description: >-
+      Control whether to publish outputs available from external substituters.
+      `copy` selects them for publication. `leave` keeps them upstream if
+      consumers can obtain matching NARs for the output and all its runtime
+      references under the configured signature policy. Both modes select
+      outputs built in this run. Closure publication also copies missing runtime
+      references of every selected output.
+    required: false
+    default: leave
+  publish:
+    description: >-
+      Control which paths are published. `none` publishes no paths. `outputs`
+      publishes requested outputs. `closure` also publishes their runtime
+      references.
+    required: false
+    default: outputs
 outputs:
   plan-file:
     description: Path to the plan, which the cohort jobs read.
@@ -175,7 +194,9 @@ runs:
         ENABLE_PACKING: ${{ inputs.enable-packing }}
         PACK_CAPACITY: ${{ inputs.pack-capacity }}
         STORE: ${{ inputs.store }}
-        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
+        BUILD: ${{ inputs.build }}
+        SUBSTITUTER: ${{ inputs.substituter }}
+        PUBLISH: ${{ inputs.publish }}
       run: |
         args=(plan
           --targets "$TARGETS"
@@ -192,7 +213,7 @@ runs:
           --optimise "$OPTIMISE"
           --enable-packing "$ENABLE_PACKING"
           --store "$STORE")
-        args+=(--require-provenance "$REQUIRE_PROVENANCE")
+        args+=(--build "$BUILD" --substituter "$SUBSTITUTER" --publish "$PUBLISH")
         if [ -n "$PACK_CAPACITY" ]; then
           args+=(--pack-capacity "$PACK_CAPACITY")
         fi

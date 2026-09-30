@@ -2,7 +2,14 @@ import { readdir, readlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { copySources, type Nix } from '@cupboard/nix';
+import {
+	copySources,
+	defaultNixConfigEnvironment,
+	discoverNixStoreConfig,
+	type Nix,
+	type PublicationSelection,
+	selectPublicationPaths
+} from '@cupboard/nix';
 import { derivationPathOf } from '@cupboard/nix-store/derivation';
 import {
 	type RootName,
@@ -12,7 +19,6 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	autoBuildStore,
-	type BuildEvent,
 	type BuildReceiptV3,
 	buildReceiptV3Schema,
 	type BuildSubjectV3Input,
@@ -44,9 +50,12 @@ import type { WaitTimeoutSeconds } from '../duration.ts';
 import {
 	BuildCommandFailedError,
 	BuildEventHandlingError,
+	BuildObservationMissingError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
+	BuildRebuildRemoteDispatchError,
 	CliAbortError,
+	CliUsageError,
 	type PushCredential,
 	PushIncompleteError,
 	type UntrustedDaemonError
@@ -64,9 +73,9 @@ import {
 
 import {
 	type BuildAttempt,
-	delegatedMachines,
 	parseBuildActivities,
-	receiptSubjects
+	receiptSubjects,
+	type VerifiedBuildOutput
 } from './attribution.ts';
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
 import { renderHookScript } from './hook-script.ts';
@@ -141,6 +150,9 @@ export interface BuildPushRunOptions {
 	readonly retention?: RootRetentionRequest;
 	readonly runRoot?: UploadAttachRootInput;
 	readonly closure?: boolean;
+	readonly publicationScope?: 'outputs' | 'closure';
+	readonly substituter?: 'leave' | 'copy';
+	readonly tenantUrl?: URL;
 	readonly intermediatePaths?: readonly StorePathString[];
 	readonly receiptFile?: string;
 	readonly wait?: boolean;
@@ -153,6 +165,8 @@ export type BuildPushStore = ReconcileOptions['store'] &
 	Pick<Nix, 'queryPathInfo' | 'queryValidPaths' | 'readDerivation'>;
 
 export interface BuildPushDependencies {
+	readonly selectPublicationPaths?: typeof selectPublicationPaths;
+	readonly signal?: AbortSignal;
 	readonly client: PushClient;
 	readonly credential: PushCredential;
 	readonly store: BuildPushStore;
@@ -198,6 +212,15 @@ function childFailure(exit: ChildExit): BuildCommandFailedError {
 	);
 }
 
+class PublicationScopeInvalidError extends CliUsageError {
+	constructor() {
+		super(
+			'An explicit publication scope requires installable cohorts and cannot be combined with --closure or --intermediate-paths-file'
+		);
+		this.name = 'PublicationScopeInvalidError';
+	}
+}
+
 /**
  * Runs one cohort using the publication mode supported by the selected Nix
  * store. A daemonless store streams after the hook registers GC roots. A trusted
@@ -210,6 +233,14 @@ export async function runBuildPush(
 	reporter: Reporter,
 	dependencies: BuildPushDependencies
 ): Promise<BuildReceiptV3> {
+	if (
+		options.publicationScope !== undefined &&
+		(options.invocation.kind !== 'constructed' ||
+			options.closure === true ||
+			(options.intermediatePaths?.length ?? 0) > 0)
+	) {
+		throw new PublicationScopeInvalidError();
+	}
 	const mode = await selectBuildPushMode(dependencies.preflight);
 
 	reporter.info(buildPushModeDescription(mode));
@@ -391,8 +422,10 @@ async function runProtectedStreamedBuildPush(
 
 				await protectEventPaths(event.outputPaths, signal);
 
-				for (const outputPath of event.outputPaths) {
-					batcher.enqueue(outputPath);
+				if (options.publicationScope === undefined) {
+					for (const outputPath of event.outputPaths) {
+						batcher.enqueue(outputPath);
+					}
 				}
 
 				maxQueueDepth = Math.max(maxQueueDepth, batcher.candidates.length);
@@ -431,7 +464,11 @@ async function runProtectedStreamedBuildPush(
 			dependencies.environment ?? process.env,
 			hookScriptPath
 		);
-		const { exit, attempts } = await reporter.phase(buildPushPhases.build, () =>
+		const {
+			exit,
+			attempts,
+			preExisting = []
+		} = await reporter.phase(buildPushPhases.build, () =>
 			runInvocation(
 				options.invocation,
 				environment,
@@ -459,8 +496,13 @@ async function runProtectedStreamedBuildPush(
 			options.invocation,
 			dependencies,
 			attempts,
-			eventPaths,
-			accepted
+			options.invocation.kind === 'constructed' &&
+				options.invocation.build.rebuild === true &&
+				exit.status === 0
+				? orderedUnique([...eventPaths, ...(selectedTargetPaths ?? [])])
+				: eventPaths,
+			preExisting,
+			true
 		);
 		const terminalFailure = terminalFailureFor(
 			options.invocation,
@@ -469,6 +511,13 @@ async function runProtectedStreamedBuildPush(
 		);
 
 		return settleRun(options, reporter, dependencies, {
+			observedDerivations: new Set(
+				attempts.flatMap((attempt) =>
+					parseBuildActivities(attempt.log).map(
+						(activity) => activity.derivation
+					)
+				)
+			),
 			mode: 'streamed',
 			exit,
 			batcher,
@@ -505,10 +554,7 @@ async function runInvocation(
 	runtimeDirectory: string,
 	dependencies: BuildPushDependencies,
 	targetLinkDirectory: string
-): Promise<{
-	readonly exit: ChildExit;
-	readonly attempts: readonly SupervisedAttempt[];
-}> {
+): Promise<BuildExecution> {
 	if (invocation.kind === 'command') {
 		const exit = await superviseBuild({
 			command: invocation.command,
@@ -525,14 +571,46 @@ async function runInvocation(
 		return { exit, attempts: [] };
 	}
 
+	if (invocation.build.rebuild === true) {
+		return runRebuild(
+			invocation.build,
+			environment,
+			runtimeDirectory,
+			dependencies,
+			targetLinkDirectory
+		);
+	}
+
+	return runConstructedBuild(
+		invocation.build,
+		environment,
+		runtimeDirectory,
+		dependencies,
+		path.join(targetLinkDirectory, outLinkName)
+	);
+}
+
+interface BuildExecutionAttempt extends SupervisedAttempt {
+	readonly verifiedOutputs?: readonly VerifiedBuildOutput[];
+}
+
+interface BuildExecution {
+	readonly preExisting?: readonly string[];
+	readonly exit: ChildExit;
+	readonly attempts: readonly BuildExecutionAttempt[];
+}
+
+async function runConstructedBuild(
+	build: ConstructedBuild,
+	environment: ChildEnvironment,
+	runtimeDirectory: string,
+	dependencies: BuildPushDependencies,
+	outLink?: string
+): Promise<BuildExecution> {
+	await createRuntimeDirectory(runtimeDirectory);
 	return superviseAttemptedBuild({
-		command: (logFile) =>
-			constructedNixCommand(
-				invocation.build,
-				logFile,
-				path.join(targetLinkDirectory, outLinkName)
-			),
-		attempts: invocation.build.attempts ?? defaultBuildAttempts,
+		command: (logFile) => constructedNixCommand(build, logFile, outLink),
+		attempts: build.attempts ?? defaultBuildAttempts,
 		environment,
 		runtimeDirectory,
 		...(dependencies.signalSource !== undefined && {
@@ -550,6 +628,244 @@ async function runInvocation(
 	});
 }
 
+async function runRebuild(
+	build: ConstructedBuild,
+	environment: ChildEnvironment,
+	runtimeDirectory: string,
+	dependencies: BuildPushDependencies,
+	targetLinkDirectory: string
+): Promise<BuildExecution> {
+	if (
+		discoverNixStoreConfig({ ...defaultNixConfigEnvironment, env: environment })
+			.building.builders !== undefined
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
+	const declaredByTarget = new Map<string, readonly string[]>();
+	for (const installable of build.installables) {
+		declaredByTarget.set(
+			installable,
+			await declaredOutputs(
+				{ ...build, installables: [installable] },
+				dependencies.store
+			)
+		);
+	}
+	const initiallyValid = new Set(
+		await dependencies.store.queryValidPaths(
+			declaredByTarget.values().toArray().flat()
+		)
+	);
+	const normal = await runConstructedBuild(
+		{ ...build, rebuild: false },
+		environment,
+		runtimeDirectory,
+		dependencies,
+		path.join(targetLinkDirectory, outLinkName)
+	);
+	if (normal.exit.status !== 0) {
+		return { ...normal, preExisting: [...initiallyValid] };
+	}
+
+	const attempts = [...normal.attempts];
+	const completed = new Set(
+		normal.attempts
+			.filter((attempt) => attempt.exit.status === 0)
+			.flatMap((attempt) =>
+				parseBuildActivities(attempt.log)
+					.filter((activity) => activity.machine === '')
+					.map((activity) => activity.derivation)
+			)
+	);
+	const linked = await outLinkTargets(targetLinkDirectory);
+	const finalInfos = await dependencies.store.queryValidPathsInfo(linked);
+	let failure: ChildExit | undefined;
+
+	for (const [index, installable] of build.installables.entries()) {
+		let selected = declaredByTarget.get(installable) ?? [];
+		if (selected.length === 0) {
+			const derivation = derivationPathOf(installable);
+			selected =
+				build.installables.length === 1
+					? linked
+					: finalInfos
+							.filter(
+								(info) =>
+									derivation !== undefined && info.deriver === derivation
+							)
+							.map((info) => info.storePath);
+		}
+		if (selected.length === 0) {
+			const links = path.join(targetLinkDirectory, String(index));
+			await createRuntimeDirectory(links);
+			const resolved = await runConstructedBuild(
+				{ ...build, installables: [installable], rebuild: false },
+				environment,
+				runtimeDirectory,
+				dependencies,
+				path.join(links, outLinkName)
+			);
+			appendBuildAttempts(attempts, resolved.attempts);
+			if (resolved.exit.status !== 0) {
+				return {
+					exit: resolved.exit,
+					attempts,
+					preExisting: [...initiallyValid]
+				};
+			}
+			for (const attempt of resolved.attempts) {
+				if (attempt.exit.status === 0) {
+					for (const activity of parseBuildActivities(attempt.log)) {
+						if (activity.machine === '') {
+							completed.add(activity.derivation);
+						}
+					}
+				}
+			}
+			selected = await outLinkTargets(links);
+		}
+
+		const infos = await dependencies.store.queryValidPathsInfo(selected);
+		const requestedDerivation = derivationPathOf(installable);
+		const targetDerivations = new Set([
+			...(requestedDerivation === undefined ? [] : [requestedDerivation]),
+			...infos.flatMap((info) =>
+				info.deriver === undefined ? [] : [info.deriver]
+			)
+		]);
+		if (
+			attempts.some(
+				(attempt) =>
+					attempt.exit.status === 0 &&
+					parseBuildActivities(attempt.log).some(
+						(activity) =>
+							activity.machine !== '' &&
+							targetDerivations.has(activity.derivation)
+					)
+			)
+		) {
+			throw new BuildRebuildRemoteDispatchError();
+		}
+		const requiresCheck =
+			selected.length === 0 ||
+			infos.length !== selected.length ||
+			infos.some(
+				(info) =>
+					initiallyValid.has(info.storePath) ||
+					info.deriver === undefined ||
+					!completed.has(info.deriver)
+			);
+		if (!requiresCheck) {
+			continue;
+		}
+		const checked = await runConstructedBuild(
+			{ ...build, installables: [installable], rebuild: true },
+			environment,
+			runtimeDirectory,
+			dependencies
+		);
+		if (checked.exit.status === 0) {
+			if (
+				checked.attempts.some(
+					(attempt) =>
+						attempt.exit.status === 0 &&
+						parseBuildActivities(attempt.log).some(
+							(activity) =>
+								activity.machine !== '' &&
+								targetDerivations.has(activity.derivation)
+						)
+				)
+			) {
+				throw new BuildRebuildRemoteDispatchError();
+			}
+			const checkedDerivations = new Set(
+				checked.attempts
+					.filter((attempt) => attempt.exit.status === 0)
+					.flatMap((attempt) =>
+						parseBuildActivities(attempt.log)
+							.filter((activity) => activity.machine === '')
+							.map((activity) => activity.derivation)
+					)
+			);
+			if (
+				selected.length === 0 ||
+				infos.length !== selected.length ||
+				infos.some(
+					(info) =>
+						!checkedDerivations.has(
+							derivationPathOf(installable) ?? info.deriver ?? ''
+						)
+				)
+			) {
+				throw new BuildObservationMissingError([installable]);
+			}
+			const checkedInfos =
+				await dependencies.store.queryValidPathsInfo(selected);
+			if (
+				infos.some((info) =>
+					checkedInfos.every(
+						(checkedInfo) =>
+							checkedInfo.storePath !== info.storePath ||
+							checkedInfo.deriver !== info.deriver ||
+							checkedInfo.narHash.digestHex() !== info.narHash.digestHex()
+					)
+				)
+			) {
+				throw new BuildObservationMissingError([installable]);
+			}
+			const verifiedAttempts = checked.attempts.map((attempt) => {
+				if (attempt.exit.status !== 0) {
+					return { ...attempt, verifiedOutputs: [] };
+				}
+
+				const activities = parseBuildActivities(attempt.log);
+				const verifiedOutputs = checkedInfos.flatMap((info) =>
+					info.deriver !== undefined &&
+					activities.some(
+						(activity) =>
+							activity.derivation === info.deriver && activity.machine === ''
+					)
+						? [
+								{
+									storePath: info.storePath,
+									narHash: info.narHash.digestHex(),
+									derivation: info.deriver
+								}
+							]
+						: []
+				);
+
+				return { ...attempt, verifiedOutputs };
+			});
+			appendBuildAttempts(attempts, verifiedAttempts);
+			continue;
+		}
+		appendBuildAttempts(attempts, checked.attempts);
+		failure ??= checked.exit;
+		if (build.keepGoing !== true || checked.exit.signal !== undefined) {
+			break;
+		}
+	}
+	return {
+		exit: failure ?? normal.exit,
+		attempts,
+		preExisting: failure === undefined ? [] : [...initiallyValid]
+	};
+}
+
+function appendBuildAttempts(
+	attempts: BuildExecutionAttempt[],
+	additional: readonly BuildExecutionAttempt[]
+): void {
+	const offset = attempts.length;
+	attempts.push(
+		...additional.map((attempt) => ({
+			...attempt,
+			attempt: offset + attempt.attempt
+		}))
+	);
+}
+
 // Construct a `nix build` invocation and request an activity log for derivation
 // and builder attribution. When provided, the out-link records realised outputs
 // and keeps them alive during publication. Streaming hook events identify their
@@ -563,6 +879,7 @@ function constructedNixCommand(
 		'nix',
 		'build',
 		...(build.rebuild === true ? ['--rebuild'] : []),
+		...(build.rebuild === true ? ['--option', 'builders', ''] : []),
 		...(outLink === undefined ? ['--no-link'] : ['--out-link', outLink]),
 		'--option',
 		'json-log-path',
@@ -592,25 +909,29 @@ function watchedCopySources(
 	);
 }
 
-// Join completed hook paths to build-start activity by deriver. The hook emits
-// events only for builds executed in this run, so these paths do not need a
-// pre-run validity exclusion.
 async function attributeSubjects(
 	invocation: BuildInvocation,
 	dependencies: BuildPushDependencies,
-	attempts: readonly SupervisedAttempt[],
+	attempts: readonly BuildExecutionAttempt[],
 	eventPaths: readonly StorePathString[],
-	completed: readonly BuildEvent[]
+	preExisting: readonly string[],
+	canAttributeMultipleOutputs: boolean
 ): Promise<readonly BuildSubjectV3Input[]> {
 	if (invocation.kind !== 'constructed' || eventPaths.length === 0) {
 		return [];
 	}
 
-	const observed: readonly BuildAttempt[] = attempts.map((attempt) => ({
-		attempt: attempt.attempt,
-		attemptId: attempt.attemptId,
-		activities: parseBuildActivities(attempt.log)
-	}));
+	const observed: readonly BuildAttempt[] = attempts
+		.filter((attempt) => attempt.exit.status === 0)
+		.toReversed()
+		.map((attempt) => ({
+			attempt: attempt.attempt,
+			attemptId: attempt.attemptId,
+			activities: parseBuildActivities(attempt.log),
+			...(attempt.verifiedOutputs !== undefined && {
+				verifiedOutputs: attempt.verifiedOutputs
+			})
+		}));
 
 	if (observed.length === 0) {
 		return [];
@@ -618,7 +939,20 @@ async function attributeSubjects(
 
 	const infos = await dependencies.store.queryValidPathsInfo(eventPaths);
 
-	return receiptSubjects(observed, infos, new Set(), autoBuildStore, completed);
+	const attributable = canAttributeMultipleOutputs
+		? infos
+		: Map.groupBy(infos, (info) => info.deriver)
+				.values()
+				.filter((outputs) => outputs.length === 1)
+				.toArray()
+				.flat();
+
+	return receiptSubjects(
+		observed,
+		attributable,
+		new Set(preExisting),
+		autoBuildStore
+	);
 }
 
 // Classify a non-zero exit as a target build failure only when a constructed
@@ -688,27 +1022,13 @@ async function runReconciledLocalBuildPush(
 		const declared = await declaredOutputs(build, dependencies.store);
 		const initiallyValid = await dependencies.store.queryValidPaths(declared);
 		const { exit, attempts } = await reporter.phase(buildPushPhases.build, () =>
-			superviseAttemptedBuild({
-				command: (logFile) =>
-					constructedNixCommand(
-						build,
-						logFile,
-						path.join(outLinkDirectory, outLinkName)
-					),
-				attempts: build.attempts ?? defaultBuildAttempts,
-				environment: dependencies.environment ?? process.env,
-				runtimeDirectory: buildDirectory,
-				...(dependencies.signalSource !== undefined && {
-					signalSource: dependencies.signalSource
-				}),
-				...(dependencies.nextAttemptId !== undefined && {
-					nextAttemptId: dependencies.nextAttemptId
-				}),
-				...(dependencies.startDelay !== undefined && {
-					startDelay: dependencies.startDelay
-				}),
-				removeRuntimeDirectory
-			})
+			runInvocation(
+				invocation,
+				dependencies.environment ?? process.env,
+				buildDirectory,
+				dependencies,
+				outLinkDirectory
+			)
 		);
 		const realised = await realisedOutputs(
 			outLinkDirectory,
@@ -717,23 +1037,31 @@ async function runReconciledLocalBuildPush(
 		);
 
 		const attemptLogs = attempts.map((attempt) => attempt.log);
-		const delegated = delegatedMachines(
-			attempts.map((attempt) => ({
-				attempt: attempt.attempt,
-				attemptId: attempt.attemptId,
-				activities: parseBuildActivities(attempt.log)
-			}))
+		const subjects = await attributeSubjects(
+			invocation,
+			dependencies,
+			attempts,
+			realised
+				.filter((storePath) => declared.includes(storePath))
+				.map((storePath) => storePathSchema.parse(storePath)),
+			build.rebuild === true && exit.status === 0 ? [] : initiallyValid,
+			build.rebuild === true && exit.status === 0
 		);
 		const terminalFailure = terminalFailureFor(invocation, attempts, exit);
+		if (exit.status === 0) {
+			requireCompleteProvenance(invocation, realised, subjects);
+		}
 		const receipt = await publishRealised(
 			{
+				observedDerivations: new Set(
+					attempts.flatMap((attempt) =>
+						parseBuildActivities(attempt.log).map(
+							(activity) => activity.derivation
+						)
+					)
+				),
 				realised,
-				declared,
-				// `--rebuild` executes every selected final derivation even when
-				// its output was valid beforehand. Those paths are therefore
-				// current-run provenance candidates rather than exclusions.
-				alreadyHeld: build.rebuild === true ? [] : initiallyValid,
-				delegated,
+				subjects,
 				copiedFrom: watchedCopySources(attemptLogs),
 				exit,
 				...(terminalFailure !== undefined && { terminalFailure })
@@ -742,8 +1070,6 @@ async function runReconciledLocalBuildPush(
 			reporter,
 			dependencies
 		);
-		requireCompleteProvenance(invocation, realised, receipt.subjects);
-
 		try {
 			await writeReceiptFile(options.receiptFile, receipt);
 		} catch (error) {
@@ -772,7 +1098,12 @@ async function runReconciledLocalBuildPush(
 		}
 
 		await dependencies.settledTargets?.(
-			realised.map((storePath) => storePathSchema.parse(storePath))
+			realised
+				.filter(
+					(storePath) =>
+						!receipt.leftUpstream?.includes(storePathSchema.parse(storePath))
+				)
+				.map((storePath) => storePathSchema.parse(storePath))
 		);
 
 		return receipt;
@@ -833,31 +1164,112 @@ async function outLinkTargets(
 ): Promise<readonly StorePathString[]> {
 	const entries = await readdir(directory, { withFileTypes: true });
 	const targets = await Promise.all(
-		entries
-			.filter((entry) => entry.isSymbolicLink())
-			.map((entry) => readlink(path.join(directory, entry.name)))
+		entries.map(async (entry) => {
+			const file = path.join(directory, entry.name);
+			if (entry.isDirectory()) {
+				return outLinkTargets(file);
+			}
+			return entry.isSymbolicLink() ? [await readlink(file)] : [];
+		})
 	);
 
-	return targets.flatMap((target) => {
-		const parsed = storePathSchema.safeParse(target);
+	return orderedUnique(
+		targets.flat().flatMap((target) => {
+			const parsed = storePathSchema.safeParse(target);
 
-		return parsed.success ? [parsed.data] : [];
-	});
+			return parsed.success ? [parsed.data] : [];
+		})
+	);
 }
 
 interface RealisedBuild {
+	readonly observedDerivations: ReadonlySet<string>;
 	readonly realised: readonly string[];
-	readonly declared: readonly string[];
-	readonly alreadyHeld: readonly string[];
-	readonly delegated: ReadonlyMap<string, string>;
+	readonly subjects: readonly BuildSubjectV3Input[];
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly exit: ChildExit;
 	readonly terminalFailure?: TerminalBuildFailureInput;
 }
 
+async function selectRealisedTargets(
+	paths: readonly string[],
+	subjects: readonly BuildSubjectV3Input[],
+	options: BuildPushRunOptions,
+	dependencies: BuildPushDependencies,
+	observedDerivations: ReadonlySet<string> = new Set()
+): ReturnType<typeof selectPublicationPaths> {
+	if (
+		options.substituter !== 'leave' ||
+		(options.invocation.kind === 'constructed' &&
+			options.invocation.build.rebuild === true)
+	) {
+		return {
+			published: paths.map((storePath) => storePathSchema.parse(storePath)),
+			leftUpstream: []
+		};
+	}
+	const pathInfos = await dependencies.store.queryValidPathsInfo(paths);
+	const infos = new Map(pathInfos.map((info) => [info.storePath, info]));
+	const byPath = new Map(
+		subjects.map((subject) => [subject.storePath, subject])
+	);
+	return (dependencies.selectPublicationPaths ?? selectPublicationPaths)(
+		paths.map((storePath) => {
+			const subject = byPath.get(storePathSchema.parse(storePath));
+			return {
+				storePath,
+				origin:
+					subject?.origin === 'built' ||
+					observedDerivations.has(
+						infos.get(storePathSchema.parse(storePath))?.deriver ?? ''
+					)
+						? 'built'
+						: 'store-held',
+				...((subject?.derivation ??
+					infos.get(storePathSchema.parse(storePath))?.deriver) !==
+					undefined && {
+					derivation:
+						subject?.derivation ??
+						infos.get(storePathSchema.parse(storePath))?.deriver
+				})
+			};
+		}),
+		{
+			substituter:
+				options.invocation.kind === 'constructed' &&
+				options.invocation.build.rebuild === true
+					? 'copy'
+					: (options.substituter ?? 'copy'),
+			...(options.tenantUrl !== undefined && { tenantUrl: options.tenantUrl }),
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		}
+	);
+}
+
+async function clearExcludedRoot(
+	selection: PublicationSelection,
+	exit: ChildExit,
+	options: BuildPushRunOptions,
+	dependencies: BuildPushDependencies
+) {
+	if (
+		exit.status !== 0 ||
+		options.root === undefined ||
+		selection.published.length > 0 ||
+		selection.leftUpstream.length === 0
+	) {
+		return;
+	}
+	await dependencies.client.setRoot(options.root, {
+		targets: [],
+		retention: options.retention ?? { kind: 'inherit' }
+	});
+	return { root: options.root, applied: true, targets: [] };
+}
+
 // Publish the reconciled outputs together. A publication failure after a
 // successful build uses a classified sysexits code; a failed build preserves
-// the child's status. An empty result skips the push and leaves the root intact.
+// the child's status.
 async function publishRealised(
 	built: RealisedBuild,
 	options: BuildPushRunOptions,
@@ -865,8 +1277,15 @@ async function publishRealised(
 	dependencies: BuildPushDependencies
 ): Promise<BuildReceiptV3> {
 	const { exit } = built;
+	const selection = await selectRealisedTargets(
+		built.realised,
+		built.subjects,
+		options,
+		dependencies,
+		built.observedDerivations
+	);
 	const publication = PublicationCollection.of({
-		targets: [...built.realised],
+		targets: [...selection.published],
 		...(options.intermediatePaths !== undefined && {
 			intermediatePaths: [...options.intermediatePaths]
 		})
@@ -874,10 +1293,21 @@ async function publishRealised(
 	const childExitStatus = childExitCode(exit);
 
 	if (publication.entries.length === 0) {
+		try {
+			await clearExcludedRoot(selection, exit, options, dependencies);
+		} catch (error) {
+			if (isAbortError(error)) {
+				throw error;
+			}
+			throw publicationFailure(error);
+		}
 		return buildReceiptV3Schema.parse({
 			version: 3,
 			paths: [],
 			subjects: [],
+			...(selection.leftUpstream.length > 0 && {
+				leftUpstream: [...selection.leftUpstream]
+			}),
 			childExitStatus,
 			...(built.terminalFailure !== undefined && {
 				terminalFailure: built.terminalFailure
@@ -896,9 +1326,6 @@ async function publishRealised(
 			client: dependencies.client,
 			nix: dependencies.store,
 			buildStore: autoBuildStore,
-			alreadyHeld: built.alreadyHeld,
-			claimable: built.declared,
-			delegated: built.delegated,
 			copiedFrom: built.copiedFrom,
 			retain: shouldRetainTargets,
 			...(shouldRetainTargets && { root: options.root }),
@@ -906,7 +1333,11 @@ async function publishRealised(
 				retention: options.retention ?? { kind: 'inherit' }
 			}),
 			...(options.runRoot !== undefined && { runRoot: options.runRoot }),
-			...(options.closure !== undefined && { closure: options.closure }),
+			...((options.closure !== undefined ||
+				options.publicationScope !== undefined) && {
+				closure:
+					options.publicationScope === 'closure' || options.closure === true
+			}),
 			...(options.wait !== undefined && { wait: options.wait }),
 			...(options.waitTimeoutSeconds !== undefined && {
 				waitTimeoutSeconds: options.waitTimeoutSeconds
@@ -937,8 +1368,23 @@ async function publishRealised(
 		throw publicationFailure(undefined);
 	}
 
+	const builtByPath = new Map(
+		built.subjects.map((subject) => [subject.storePath, subject])
+	);
+
 	return buildReceiptV3Schema.parse({
 		...published,
+		...(selection.leftUpstream.length > 0 && {
+			leftUpstream: [...selection.leftUpstream]
+		}),
+		subjects: published.subjects.map((subject) => {
+			const evidence = builtByPath.get(subject.storePath);
+
+			return evidence?.narHash === subject.narHash &&
+				evidence.derivation === subject.derivation
+				? evidence
+				: subject;
+		}),
 		childExitStatus,
 		...(built.terminalFailure !== undefined && {
 			terminalFailure: built.terminalFailure
@@ -959,6 +1405,7 @@ function publicationFailure(cause: unknown): BuildPublicationFailedError {
 }
 
 interface RunFacts {
+	readonly observedDerivations: ReadonlySet<string>;
 	readonly mode: BuildSummaryInput['mode'];
 	readonly exit: ChildExit;
 	readonly batcher: BuildOutputBatcher;
@@ -1024,19 +1471,35 @@ async function settleRun(
 			facts.eventPaths.filter(
 				(eventPath) => !declaredIntermediates.has(eventPath)
 			);
+		const selection = await selectRealisedTargets(
+			targetPaths,
+			facts.subjects,
+			options,
+			dependencies,
+			facts.observedDerivations
+		);
+		const publishedTargets = selection.published;
 		const targetSet = new Set(targetPaths);
 		const intermediates = new Set([
 			...declaredIntermediates,
-			...facts.eventPaths.filter((eventPath) => !targetSet.has(eventPath))
+			...(options.publicationScope === undefined
+				? facts.eventPaths.filter((eventPath) => !targetSet.has(eventPath))
+				: [])
 		]);
-		const targets: readonly ReconcileTarget[] = targetPaths.map(
+		const targets: readonly ReconcileTarget[] = publishedTargets.map(
 			(targetPath) => ({
 				installable: targetPath,
 				expectedPath: targetPath,
 				...(options.root !== undefined && { root: options.root })
 			})
 		);
-		requireCompleteProvenance(options.invocation, targetPaths, facts.subjects);
+		if (exit.status === 0) {
+			requireCompleteProvenance(
+				options.invocation,
+				targetPaths,
+				facts.subjects
+			);
+		}
 
 		const result = await reporter.phase(
 			buildPushPhases.reconcile,
@@ -1044,7 +1507,7 @@ async function settleRun(
 				const closureIntermediates = await closureExpansion(
 					options,
 					dependencies,
-					targetPaths
+					publishedTargets
 				);
 				const reconciled = await reconcileBuild({
 					targets,
@@ -1085,21 +1548,45 @@ async function settleRun(
 			}
 		);
 
+		const clearedRoot =
+			result.failures.length === 0
+				? await clearExcludedRoot(selection, exit, options, dependencies)
+				: undefined;
+		const settledResult =
+			clearedRoot === undefined
+				? result
+				: { ...result, roots: [...result.roots, clearedRoot] };
 		await reporter.phase(buildPushPhases.retention, (ctx) => {
-			const applied = result.roots.filter((root) => root.applied).length;
+			const applied = settledResult.roots.filter((root) => root.applied).length;
 
 			ctx.fact(
 				'roots',
-				`${formatCount(applied)}/${formatCount(result.roots.length)} replaced`
+				`${formatCount(applied)}/${formatCount(settledResult.roots.length)} replaced`
 			);
 		});
 
-		await writeReceiptFile(options.receiptFile, result.receipt);
-		reportSummary(reporter, dependencies, facts, targets.length, result);
+		await writeReceiptFile(options.receiptFile, {
+			...result.receipt,
+			...(selection.leftUpstream.length > 0 && {
+				leftUpstream: [...selection.leftUpstream]
+			})
+		});
+		reportSummary(
+			reporter,
+			dependencies,
+			facts,
+			targetPaths.length,
+			settledResult
+		);
 		raiseExitContract(exit, result);
-		await dependencies.settledTargets?.(targetPaths);
+		await dependencies.settledTargets?.(publishedTargets);
 
-		return result.receipt;
+		return {
+			...result.receipt,
+			...(selection.leftUpstream.length > 0 && {
+				leftUpstream: [...selection.leftUpstream]
+			})
+		};
 	} catch (error) {
 		if (
 			isAbortError(error) ||
@@ -1128,7 +1615,10 @@ async function closureExpansion(
 	dependencies: BuildPushDependencies,
 	targetPaths: readonly StorePathString[]
 ): Promise<readonly StorePathString[]> {
-	if (options.closure !== true || targetPaths.length === 0) {
+	if (
+		(options.closure !== true && options.publicationScope !== 'closure') ||
+		targetPaths.length === 0
+	) {
 		return [];
 	}
 

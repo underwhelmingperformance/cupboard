@@ -1,8 +1,8 @@
 name: Attach cupboard attestation bundles
 description:
-  Attaches signed Sigstore bundles to the paths in a build receipt.
-  actions/attest signs the bundles after the paths are published, so this action
-  only attaches them to paths that the destination cache already serves.
+  Attaches signed Sigstore bundles to the selected paths in a publication
+  receipt. actions/attest signs the bundles after publication and writes the
+  checksums of the paths covered by those bundles.
 inputs:
   url:
     description: Tenant URL of the destination.
@@ -33,17 +33,21 @@ inputs:
     description: Password of a read credential for a private destination cache.
     required: false
   receipt-file:
-    description: Receipt written by the build step earlier in the job.
+    description: Receipt for the paths published earlier in the job.
     required: true
   checksums-file:
     description:
-      Checksums file from actions/attest. It must list every path in the receipt
-      with the path's NAR hash, and no other path, or the step fails.
+      Checksums file from actions/attest. Each listed path must be eligible for
+      signing and have the NAR hash recorded in the receipt. The file may omit
+      paths that were not built in this run.
     required: true
   bundle:
     description:
       Bundle files from actions/attest, one per line. Empty lines are ignored.
-    required: true
+    required: false
+  bundles-file:
+    description: File containing bundle paths, one per line.
+    required: false
 runs:
   using: composite
   steps:
@@ -104,6 +108,7 @@ runs:
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         BUNDLE: ${{ inputs.bundle }}
+        BUNDLES_FILE: ${{ inputs.bundles-file }}
       run: |
         args=(attest-attach
           --url "$URL"
@@ -114,7 +119,8 @@ runs:
           --read-password "$READ_PASSWORD"
           --receipt-file "$RECEIPT_FILE"
           --checksums-file "$CHECKSUMS_FILE"
-          --bundle "$BUNDLE")
+          --bundle "$BUNDLE"
+          --bundles-file "$BUNDLES_FILE")
         source "$GITHUB_ACTION_PATH/../read-session.sh"
         run_with_read_session \
           "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \

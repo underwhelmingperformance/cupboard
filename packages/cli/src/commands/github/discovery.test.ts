@@ -225,7 +225,7 @@ jobs:
 		});
 	});
 
-	it('discovers a flake workflow that reads without publishing', async () => {
+	it('matches a named cache URL and discovers read-only workflows', async () => {
 		const result = await discoverPublishingJobs(
 			repository,
 			'main',
@@ -243,6 +243,16 @@ jobs:
     with:
       url: https://cupboard.supply/t/laney
       push: false
+  no-flake-publication:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      publish: none
+  no-installable-publication:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      publish: none
 `
 			})
 		);
@@ -270,9 +280,70 @@ jobs:
 						push: false
 					},
 					triggers: triggers('push')
+				},
+				{
+					caller: '.github/workflows/build.yml',
+					job: 'no-flake-publication',
+					kind: 'flake',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					inputs: {
+						url: 'https://cupboard.supply/t/laney',
+						publish: 'none'
+					},
+					triggers: triggers('push')
+				},
+				{
+					caller: '.github/workflows/build.yml',
+					job: 'no-installable-publication',
+					kind: 'installable',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
+					inputs: {
+						url: 'https://cupboard.supply/t/laney',
+						publish: 'none'
+					},
+					triggers: triggers('push')
 				}
 			],
 			unverified: []
+		});
+	});
+
+	it('reports a dynamic publication mode for either reusable workflow', async () => {
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source({
+				'.github/workflows/build.yml': `
+on: push
+jobs:
+  flake:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      publish: \${{ inputs.publish }}
+  installable:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      publish: \${{ inputs.publish }}
+`
+			})
+		);
+
+		expect(result).toStrictEqual({
+			revision: 'a'.repeat(40),
+			jobs: [],
+			unverified: ['flake', 'installable'].map((job) => ({
+				caller: '.github/workflows/build.yml',
+				job,
+				workflow: 'cupboard',
+				workflowRef: `underwhelmingperformance/cupboard/.github/workflows/cupboard-${job === 'flake' ? 'flake-publish' : 'publish'}.yml@refs/tags/v0.0.35`,
+				detail:
+					'the publish input is dynamic or invalid, so the check cannot determine whether this job publishes'
+			}))
 		});
 	});
 

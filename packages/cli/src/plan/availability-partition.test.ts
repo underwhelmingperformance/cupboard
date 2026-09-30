@@ -133,7 +133,10 @@ class RecordingStore implements Pick<
 	): Promise<readonly string[]> {
 		this.substitutableCalls.push(paths);
 
-		return Promise.resolve(this.substitutable);
+		const requested = new Set(paths);
+		return Promise.resolve(
+			this.substitutable.filter((storePath) => requested.has(storePath))
+		);
 	}
 
 	querySubstitutablePathInfos(
@@ -166,9 +169,10 @@ function expectedPartition(
 		leftUpstream: [],
 		leftUpstreamRejections: [],
 		buildSet: [],
+		rebuildSet: [],
+		closureTargets: [],
 		dependencyBuilds: [],
 		dependencyCopies: [],
-		unattested: [],
 		counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 		downloadSize: 0,
 		narSize: 0,
@@ -211,6 +215,152 @@ function baseOptions(
 describe('partitionAvailability', () => {
 	const appPath = path('11111111111111111111111111111111-app');
 	const otherPath = path('22222222222222222222222222222222-other');
+	const externalPath = path('33333333333333333333333333333333-external');
+	const missingPath = path('44444444444444444444444444444444-missing');
+	it.each([
+		{
+			build: 'missing',
+			substituter: 'leave',
+			publish: 'none',
+			expected: {
+				attachOnly: [appPath],
+				publishByReference: [otherPath],
+				leftUpstream: [externalPath],
+				buildSet: [missingPath],
+				rebuildSet: [],
+				closureTargets: [],
+				confirmations: [{ installable: externalPath, storePath: externalPath }]
+			}
+		},
+		{
+			build: 'missing',
+			substituter: 'leave',
+			publish: 'outputs',
+			expected: {
+				attachOnly: [appPath],
+				publishByReference: [otherPath],
+				leftUpstream: [externalPath],
+				buildSet: [missingPath],
+				rebuildSet: [],
+				closureTargets: [],
+				confirmations: [{ installable: externalPath, storePath: externalPath }]
+			}
+		},
+		{
+			build: 'missing',
+			substituter: 'copy',
+			publish: 'outputs',
+			expected: {
+				attachOnly: [appPath],
+				publishByReference: [otherPath],
+				leftUpstream: [],
+				buildSet: [externalPath, missingPath],
+				rebuildSet: [],
+				closureTargets: [],
+				confirmations: []
+			}
+		},
+		{
+			build: 'missing',
+			substituter: 'leave',
+			publish: 'closure',
+			expected: {
+				attachOnly: [appPath],
+				publishByReference: [otherPath],
+				leftUpstream: [externalPath],
+				buildSet: [missingPath],
+				rebuildSet: [],
+				closureTargets: [appPath, otherPath],
+				confirmations: [{ installable: externalPath, storePath: externalPath }]
+			}
+		},
+		{
+			build: 'missing',
+			substituter: 'copy',
+			publish: 'closure',
+			expected: {
+				attachOnly: [appPath],
+				publishByReference: [otherPath],
+				leftUpstream: [],
+				buildSet: [externalPath, missingPath],
+				rebuildSet: [],
+				closureTargets: [appPath, otherPath],
+				confirmations: []
+			}
+		},
+		{
+			build: 'rebuild',
+			substituter: 'leave',
+			publish: 'closure',
+			expected: {
+				attachOnly: [],
+				publishByReference: [],
+				leftUpstream: [],
+				buildSet: [appPath, otherPath, externalPath, missingPath],
+				rebuildSet: [appPath, otherPath, externalPath, missingPath],
+				closureTargets: [],
+				confirmations: []
+			}
+		},
+		{
+			build: 'rebuild',
+			substituter: 'copy',
+			publish: 'outputs',
+			expected: {
+				attachOnly: [],
+				publishByReference: [],
+				leftUpstream: [],
+				buildSet: [appPath, otherPath, externalPath, missingPath],
+				rebuildSet: [appPath, otherPath, externalPath, missingPath],
+				closureTargets: [],
+				confirmations: []
+			}
+		}
+	] as const)(
+		'applies $build build, $substituter substituter and $publish publication to every source',
+		async ({ build, substituter, publish, expected }) => {
+			const confirmations: UpstreamAvailabilityCandidate[] = [];
+			const store = new RecordingStore(
+				emptyMissing(),
+				[externalPath],
+				[externalPath]
+			);
+			const partition = await partitionAvailability(
+				baseOptions({
+					build,
+					substituter,
+					publish,
+					targets: [
+						target(),
+						target({ expectedPath: otherPath, installable: otherPath }),
+						target({ expectedPath: externalPath, installable: externalPath }),
+						target({ expectedPath: missingPath, installable: missingPath })
+					],
+					store,
+					confirmUpstreamAvailability: (candidate) => {
+						confirmations.push(candidate);
+
+						return Promise.resolve({ kind: 'confirmed' });
+					},
+					destinationProbes: probesFrom({
+						destinationServed: () => Promise.resolve(new Set([appPath])),
+						viewServed: () => Promise.resolve(new Set([otherPath]))
+					})
+				})
+			);
+
+			expect({
+				attachOnly: partition.attachOnly,
+				publishByReference: partition.publishByReference,
+				leftUpstream: partition.leftUpstream,
+				buildSet: partition.buildSet,
+				rebuildSet: partition.rebuildSet,
+				closureTargets: partition.closureTargets,
+				confirmations
+			}).toStrictEqual(expected);
+		}
+	);
+
 	it.each([
 		{
 			name: 'schedules a known target that the destination cannot serve',
@@ -423,67 +573,7 @@ describe('partitionAvailability', () => {
 		}
 	);
 
-	it('does not ask the cache about attestations when the run does not require them', async () => {
-		const partition = await partitionAvailability(
-			baseOptions({
-				targets: [target({ expectedPath: appPath, installable: appPath })],
-				destinationProbes: probesFrom({
-					destinationServed: () => Promise.resolve(new Set([appPath]))
-				})
-			})
-		);
-
-		expect({
-			attachOnly: partition.attachOnly,
-			buildSet: partition.buildSet,
-			unattested: partition.unattested
-		}).toStrictEqual({
-			attachOnly: [appPath],
-			buildSet: [],
-			unattested: []
-		});
-	});
-
-	it.each([
-		{
-			name: 'attaches a served path with a cache attestation',
-			attested: [appPath],
-			expected: { attachOnly: [appPath], buildSet: [], unattested: [] }
-		},
-		{
-			name: 'builds a served path without a cache attestation',
-			attested: [],
-			expected: { attachOnly: [], buildSet: [appPath], unattested: [appPath] }
-		}
-	])(
-		'with attested availability required, $name',
-		async ({ attested, expected }) => {
-			const asked: (readonly StorePathString[])[] = [];
-
-			const partition = await partitionAvailability(
-				baseOptions({
-					targets: [target({ expectedPath: appPath, installable: appPath })],
-					destinationProbes: probesFrom({
-						destinationServed: () => Promise.resolve(new Set([appPath]))
-					}),
-					attestedServed: (paths) => {
-						asked.push(paths);
-
-						return Promise.resolve(new Set(attested));
-					}
-				})
-			);
-
-			expect({
-				asked,
-				attachOnly: partition.attachOnly,
-				buildSet: partition.buildSet,
-				unattested: partition.unattested
-			}).toStrictEqual({ asked: [[appPath]], ...expected });
-		}
-	);
-
-	it('does not count Nix work for an attested destination path', async () => {
+	it('does not count Nix work for a destination path under use policy', async () => {
 		const store = new RecordingStore(
 			missingWith({
 				willSubstitute: [appPath],
@@ -498,7 +588,6 @@ describe('partitionAvailability', () => {
 				destinationProbes: probesFrom({
 					destinationServed: () => Promise.resolve(new Set([appPath]))
 				}),
-				attestedServed: () => Promise.resolve(new Set([appPath])),
 				store
 			})
 		);
@@ -507,65 +596,6 @@ describe('partitionAvailability', () => {
 			expectedPartition({ attachOnly: [appPath] })
 		);
 		expect(store.missingCalls).toStrictEqual([]);
-	});
-
-	it('asks only about the attach-only paths, and adds the unattested path to the build set', async () => {
-		const asked: (readonly StorePathString[])[] = [];
-
-		const partition = await partitionAvailability(
-			baseOptions({
-				targets: [
-					target({ expectedPath: appPath, installable: appPath }),
-					target({ expectedPath: otherPath, installable: otherPath })
-				],
-				destinationProbes: probesFrom({
-					destinationServed: () => Promise.resolve(new Set([appPath]))
-				}),
-				attestedServed: (paths) => {
-					asked.push(paths);
-
-					return Promise.resolve(new Set());
-				}
-			})
-		);
-
-		expect({
-			asked,
-			attachOnly: partition.attachOnly,
-			buildSet: partition.buildSet,
-			unattested: partition.unattested
-		}).toStrictEqual({
-			asked: [[appPath]],
-			attachOnly: [],
-			buildSet: [appPath, otherPath],
-			unattested: [appPath]
-		});
-	});
-
-	it('does not query attestations for a path that the destination cannot serve', async () => {
-		const queried: StorePathString[][] = [];
-		const partition = await partitionAvailability(
-			baseOptions({
-				targets: [target({ expectedPath: appPath, installable: appPath })],
-				attestedServed: (paths) => {
-					queried.push([...paths]);
-
-					return Promise.resolve(new Set());
-				}
-			})
-		);
-
-		expect({
-			queried: queried.flat(),
-			attachOnly: partition.attachOnly,
-			buildSet: partition.buildSet,
-			unattested: partition.unattested
-		}).toStrictEqual({
-			queried: [],
-			attachOnly: [],
-			buildSet: [appPath],
-			unattested: []
-		});
 	});
 
 	it('does not inspect substitute references for an attach-only target', async () => {
@@ -2056,6 +2086,8 @@ describe('partitionAvailability', () => {
 				leftUpstream: [],
 				leftUpstreamRejections: [],
 				buildSet: [appInstallable, otherInstallable],
+				rebuildSet: [],
+				closureTargets: [],
 				dependencyBuilds: [
 					{
 						path: nestedOutput,
@@ -2064,7 +2096,6 @@ describe('partitionAvailability', () => {
 					}
 				],
 				dependencyCopies: [],
-				unattested: [],
 				counts: { willBuild: 1, willSubstitute: 3, unknown: 0 },
 				downloadSize: 0,
 				narSize: 0,
@@ -2147,6 +2178,8 @@ describe('partitionAvailability', () => {
 			leftUpstream: [],
 			leftUpstreamRejections: [],
 			buildSet: [appInstallable],
+			rebuildSet: [],
+			closureTargets: [],
 			dependencyBuilds: [
 				{
 					path: libraryOutput,
@@ -2155,7 +2188,6 @@ describe('partitionAvailability', () => {
 				}
 			],
 			dependencyCopies: [],
-			unattested: [],
 			counts: { willBuild: 1, willSubstitute: 1, unknown: 0 },
 			downloadSize: 20,
 			narSize: 30,

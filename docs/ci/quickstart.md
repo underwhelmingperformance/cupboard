@@ -10,10 +10,10 @@ builds your flake and publishes the results to cupboard. When you've finished:
   same outputs, the `main` run reuses them instead of building them again.
 
 You don't need to write the build steps yourself. cupboard provides a reusable
-GitHub Actions workflow, `cupboard-flake-publish.yml`, that builds the outputs,
-publishes them, and signs a record of how each one was built (its build
-provenance). Your repository calls that workflow from a short workflow file of
-its own.
+GitHub Actions workflow, `cupboard-flake-publish.yml`, that realises the
+outputs, publishes selected paths, and signs evidence for observed builds and
+new publications. Your repository calls that workflow from a short workflow file
+of its own.
 
 The examples use the tenant `acme` at
 `https://cupboard.example.workers.dev/t/acme` and the repository `acme/app`.
@@ -202,8 +202,13 @@ Then fill in your own values:
 
 The `preset: pull-request-and-branch` line tells the workflow to decide where to
 publish based on what triggered the run. Without it, you'd have to set the cache
-and root names yourself. For pull request `#42` and for `main`, the preset does
-this:
+and root names yourself. The other defaults use available outputs, leave outputs
+from external substituters upstream, publish selected outputs, and sign build
+provenance for builds observed on the runner. Reused or substituted outputs
+receive no new build claim. You can change each decision with `build`,
+`substituter`, `publish` and `attest`; see
+[Choosing publication behaviour](./flake-publish.md#choosing-publication-behaviour).
+For pull request `#42` and for `main`, the preset does this:
 
 | Event                         | Publishes to                   | Retention root                   | Kept for                       |
 | ----------------------------- | ------------------------------ | -------------------------------- | ------------------------------ |
@@ -290,15 +295,16 @@ which jobs it can only report for manual review, and what the repair changes.
 Open a pull request from the branch. Its run should publish to a cache called
 `gh-<repository-id>-pr-<number>`.
 
-When you merge the pull request, the `main` run starts. Its build work is split
-into jobs, one for each group of targets. Each job's log shows how many of its
-targets are in each group. "Reused from the tenant" should count all of the
-job's targets, and "To build" should be 0. That means `main` published the pull
-request's outputs without building them again.
+When you merge the pull request, the `main` run starts. Its work is split into
+jobs, one for each group of targets. Each job's log shows how many targets were
+already served by the destination, reused from the pull-request caches, left to
+upstream caches or built. When the derivations match, "Reused from the tenant"
+can show outputs published by reference without rebuilding them. A target that
+the destination already serves appears in "Already served by the cache" instead.
 
-This only works when `main` has exactly the same derivations as the pull
-request. It won't happen if `main` has moved on since, or if an output depends
-on the commit itself, for example through `self.rev`.
+Publishing by reference requires `main` to have the same derivations as the pull
+request. The run may build an output if `main` has moved on, or if the output
+depends on the commit itself, for example through `self.rev`.
 
 If a run is refused, see
 [Troubleshooting](../troubleshooting.md#ci-publication).

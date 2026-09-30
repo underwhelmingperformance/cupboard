@@ -100,6 +100,24 @@ export class BuildAttemptsInvalidError extends UsageError {
 	}
 }
 
+export class BuildObservationMissingError extends CodedError {
+	constructor(public readonly storePaths: readonly string[]) {
+		super(
+			`build: rebuild did not observe a build for ${storePaths.join(', ')}; check the selected Nix store and its build logs`
+		);
+		this.name = 'BuildObservationMissingError';
+	}
+}
+
+export class BuildRebuildRemoteDispatchError extends UsageError {
+	constructor() {
+		super(
+			'build: rebuild requires execution in the selected Nix store. Configured remote builders cannot guarantee that execution. Use store: ssh-ng://... in the flake publishing workflow to select that machine.'
+		);
+		this.name = 'BuildRebuildRemoteDispatchError';
+	}
+}
+
 export class GithubEndpointInvalidError extends UsageError {
 	constructor(public readonly input: string) {
 		super(`${input} must be a credential-safe HTTPS URL`);
@@ -158,14 +176,14 @@ export class RemoteOutputPathUnknownDuringPlanningError extends UsageError {
 
 export class PushPathsMissingError extends UsageError {
 	constructor() {
-		super('paths is required and must contain at least one path');
+		super('Provide paths, paths-file, root-groups, or an explicit root');
 		this.name = 'PushPathsMissingError';
 	}
 }
 
 export class RootGroupsPathsConflictError extends UsageError {
 	constructor() {
-		super('root-groups cannot be combined with paths');
+		super('root-groups cannot be combined with paths or paths-file');
 		this.name = 'RootGroupsPathsConflictError';
 	}
 }
@@ -219,6 +237,13 @@ export class RetentionChoiceConflictError extends UsageError {
 	}
 }
 
+export class PublicationModeConflictError extends UsageError {
+	constructor(reason: string) {
+		super(reason);
+		this.name = 'PublicationModeConflictError';
+	}
+}
+
 export class GraceWaitConflictError extends UsageError {
 	constructor() {
 		super('require-grace cannot be combined with wait: false');
@@ -262,22 +287,27 @@ export class PredicateTypeRequiredError extends UsageError {
 	}
 }
 
-/**
- * Individual grouping requires each statement to contain only its subject. The
- * action must therefore filter the predicate as well as the in-toto subject
- * list. It knows how to filter only a build-origin predicate, so it rejects any
- * other predicate type.
- */
+export class PredicateSourceConflictError extends UsageError {
+	constructor() {
+		super(
+			'receipt-file and predicate-file cannot be combined; select one predicate source'
+		);
+		this.name = 'PredicateSourceConflictError';
+	}
+}
+
 export class PredicateGroupingUnsupportedError extends UsageError {
 	constructor(public readonly predicateType: string) {
-		super('subject-grouping individual requires a build-origin predicate');
+		super(
+			`Cannot partition the supplied ${predicateType} predicate across subjects. Select one subject, use run grouping with a report that fits one bundle, or generate reproduction reports with receipt-file.`
+		);
 		this.name = 'PredicateGroupingUnsupportedError';
 	}
 }
 
 export class BuildOriginSubjectMissingError extends UsageError {
 	constructor(public readonly subjects: readonly string[]) {
-		super('the build-origin predicate contains none of the requested subjects');
+		super('the build-origin predicate omits a requested subject');
 		this.name = 'BuildOriginSubjectMissingError';
 	}
 }
@@ -286,6 +316,15 @@ export class AttestationSubjectsMissingError extends UsageError {
 	constructor(public readonly checksumsFile: string) {
 		super(`${checksumsFile} lists no subject to sign`);
 		this.name = 'AttestationSubjectsMissingError';
+	}
+}
+
+export class AttestationSubjectNotAcceptedError extends UsageError {
+	constructor(public readonly subjects: readonly string[]) {
+		super(
+			`Selected subject digests do not match the accepted receipt checksums for: ${subjects.join(', ')}`
+		);
+		this.name = 'AttestationSubjectNotAcceptedError';
 	}
 }
 
@@ -766,6 +805,15 @@ export class CupboardVersionOutputMissingError extends CodedError {
 	}
 }
 
+export class PushPathsFileUnsupportedError extends UsageError {
+	constructor(public readonly version: string) {
+		super(
+			`Cupboard ${version} does not support paths-file; install a release with the push --paths-file option or pass a small path list through paths`
+		);
+		this.name = 'PushPathsFileUnsupportedError';
+	}
+}
+
 export class InvalidChecksumLineError extends CodedError {
 	constructor(public readonly line: string) {
 		super(`invalid checksum line: ${line}`);
@@ -881,19 +929,19 @@ export class CommittedSubjectInvalidError extends CodedError {
 	}
 }
 
-export class ProvenanceSubjectsIncompleteError extends CodedError {
-	constructor(public readonly storePaths: readonly string[]) {
-		super(
-			`Could not establish current-run build provenance for: ${storePaths.join(', ')}`
-		);
-		this.name = 'ProvenanceSubjectsIncompleteError';
-	}
-}
-
 export class AttestationAttachmentResultError extends CodedError {
 	constructor(message: string, options: { readonly cause?: unknown } = {}) {
 		super(message, withCause(options.cause));
 		this.name = 'AttestationAttachmentResultError';
+	}
+}
+
+export class AttestationAttachmentCapabilitiesError extends CodedError {
+	constructor(public readonly missingOptions: readonly string[]) {
+		super(
+			`The installed cupboard does not support ${missingOptions.join(' and ')}. Update cupboard before retrying attestation attachment.`
+		);
+		this.name = 'AttestationAttachmentCapabilitiesError';
 	}
 }
 
@@ -917,7 +965,7 @@ export class AttestationChecksumsMismatchError extends CodedError {
 				? ''
 				: `; unexpected signed subjects: ${unexpectedNames.join(', ')}`;
 		super(
-			`Signed subject checksums do not exactly match the build receipt${missing === '' ? '' : ` for: ${missing}`}${unexpected}`
+			`Signed subject checksums do not match eligible receipt subjects${missing === '' ? '' : ` for: ${missing}`}${unexpected}`
 		);
 		this.name = 'AttestationChecksumsMismatchError';
 	}
@@ -939,6 +987,19 @@ export class AttestationSigningError extends CodedError {
 			withCause(options.cause)
 		);
 		this.name = 'AttestationSigningError';
+	}
+}
+
+export class AttestationBundleTooLargeForSubjectError extends CodedError {
+	constructor(
+		public readonly subject: string,
+		public readonly observedBytes: number,
+		public readonly maximumBytes: number
+	) {
+		super(
+			`The signed attestation for ${subject} is ${String(observedBytes)} bytes, exceeding the destination cache's ${String(maximumBytes)}-byte bundle limit`
+		);
+		this.name = 'AttestationBundleTooLargeForSubjectError';
 	}
 }
 

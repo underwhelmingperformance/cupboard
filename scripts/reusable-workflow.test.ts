@@ -419,7 +419,7 @@ describe('cupboard acquisition', () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const publishingSetup = allSteps(workflow).filter(
 			(entry) =>
-				entry.job !== 'remove-cache' &&
+				['plan', 'cohort'].includes(entry.job) &&
 				entry.step.uses === cupboardAction('setup')
 		);
 		const setupInputs = publishingSetup.map(({ step }) =>
@@ -535,32 +535,47 @@ describe('cupboard acquisition', () => {
 				{
 					'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
 					'cache-access-mode':
-						"${{ github.event_name == 'pull_request' && inputs.push && inputs.cache-access-mode || '' }}",
+						"${{ github.event_name == 'pull_request' && needs.configure.outputs.publish != 'none' && inputs.cache-access-mode || '' }}",
 					'provision-cache-ttl':
 						'${{ needs.configure.outputs.provision-cache-ttl }}'
 				}
 			],
 			accessModes: [
-				"${{ github.event_name == 'pull_request' && inputs.push && inputs.cache-access-mode || '' }}",
-				"${{ github.event_name == 'pull_request' && inputs.push && inputs.cache-access-mode || '' }}"
+				"${{ github.event_name == 'pull_request' && needs.configure.outputs.publish != 'none' && inputs.cache-access-mode || '' }}",
+				"${{ github.event_name == 'pull_request' && needs.configure.outputs.publish != 'none' && inputs.cache-access-mode || '' }}"
 			]
 		});
 	});
 
-	it('rebuilds a cached output when the publish workflow attests', async () => {
+	it('passes the independent build and substituter choices to the simple build action', async () => {
 		const workflow = await loadWorkflow(publishWorkflow);
 
 		expect(inputsOf(workflow, cupboardAction('build-paths'))).toStrictEqual([
 			{
 				installables: '${{ inputs.installable }}',
+				'inline-paths': false,
+				'publication-url': '${{ inputs.url }}',
+				build: '${{ inputs.build }}',
+				substituter: '${{ inputs.substituter }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
-				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
-				// A cached output is no evidence that this run built anything, so a
-				// retry after a failed attachment produces a new receipt.
-				'require-provenance': '${{ inputs.attest }}'
+				'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
 			}
 		]);
+	});
+
+	it('validates the four simple workflow choices', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		const validation = shellOf(
+			workflow,
+			'publish',
+			'Validate publication options'
+		);
+
+		expect(validation).toContain('missing|rebuild)');
+		expect(validation).toContain('leave|copy)');
+		expect(validation).toContain('none|outputs|closure)');
+		expect(validation).toContain('true|false)');
 	});
 
 	it('reuses one acquisition across setup and push in the publish workflow', async () => {
@@ -750,15 +765,17 @@ describe('cohort planning and publication', () => {
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
-				optimise: '${{ inputs.push }}',
+				optimise: "${{ needs.configure.outputs.publish != 'none' }}",
+				publish: '${{ needs.configure.outputs.publish }}',
+				build: '${{ inputs.build }}',
+				substituter: '${{ inputs.substituter }}',
 				'read-user':
 					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
 				'read-password':
 					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
-				store: '${{ inputs.store }}',
-				'require-provenance': '${{ inputs.push }}'
+				store: '${{ inputs.store }}'
 			}
 		]);
 	});
@@ -832,8 +849,9 @@ describe('cohort planning and publication', () => {
 				// including one that sets `preferLocalBuild`; a caller that wants that
 				// policy sets `max-jobs` through `nix-config`.
 				store: '${{ inputs.store }}',
-				push: '${{ inputs.push }}',
-				'require-provenance': '${{ inputs.push }}',
+				publish: '${{ needs.configure.outputs.publish }}',
+				build: '${{ inputs.build }}',
+				substituter: '${{ inputs.substituter }}',
 				'gc-between-cohorts':
 					"${{ inputs.gc-between-cohorts && runner.environment == 'github-hosted' && inputs.store == '' }}",
 				'run-root':
@@ -846,6 +864,72 @@ describe('cohort planning and publication', () => {
 });
 
 describe('attestation', () => {
+	it('passes the resolver build checksums to the signer', async () => {
+		const source: unknown = parse(
+			await readFile(
+				new URL('../actions/attest/action.yml', import.meta.url),
+				'utf8'
+			)
+		);
+		const action = z
+			.object({ runs: z.object({ steps: stepsSchema }) })
+			.parse(source);
+		const sign = action.runs.steps.find((step) => step.id === 'attest');
+		expect({
+			builtChecksums: sign?.env?.BUILT_CHECKSUMS_FILE,
+			suppliedToSigner: sign?.run?.includes(
+				'--built-checksums-file "$BUILT_CHECKSUMS_FILE"'
+			)
+		}).toStrictEqual({
+			builtChecksums: '${{ steps.subjects.outputs.built-checksums-file }}',
+			suppliedToSigner: true
+		});
+	});
+
+	it.each([publishWorkflow, flakeWorkflow])(
+		'uses the Boolean build-provenance switch in %s',
+		async (file) => {
+			const workflow = await loadWorkflow(file);
+			const input = workflow.on.workflow_call?.inputs.attest;
+			expect({ type: input?.type, default: input?.default }).toStrictEqual({
+				type: 'boolean',
+				default: true
+			});
+		}
+	);
+
+	it('publishes selected outputs by default in the simple workflow', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		const push = allSteps(workflow).find(
+			({ step }) => step.uses === cupboardAction('push')
+		)?.step;
+		const inputs = workflow.on.workflow_call?.inputs;
+
+		expect({
+			defaults: {
+				build: inputs?.build?.default,
+				substituter: inputs?.substituter?.default,
+				publish: inputs?.publish?.default,
+				attest: inputs?.attest?.default
+			},
+			pathsFile: push?.with?.['paths-file'],
+			closure: push?.with?.closure,
+			buildReceipt: push?.with?.['build-receipt-file'],
+			if: push?.if
+		}).toStrictEqual({
+			defaults: {
+				build: 'missing',
+				substituter: 'copy',
+				publish: 'outputs',
+				attest: true
+			},
+			pathsFile: '${{ steps.build.outputs.publish-paths-file }}',
+			closure: "${{ inputs.publish == 'closure' }}",
+			buildReceipt: '${{ steps.build.outputs.receipt-file }}',
+			if: "${{ inputs.publish != 'none' }}"
+		});
+	});
+
 	it('signs the receipt after publication and attaches the bundle after signing', async () => {
 		const workflows = await Promise.all(
 			reusableWorkflows.map(async ({ name, file }) => ({
@@ -902,6 +986,7 @@ describe('attestation', () => {
 		}).toStrictEqual({
 			flake: [
 				{
+					'inline-bundles': false,
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
@@ -917,7 +1002,8 @@ describe('attestation', () => {
 			],
 			publish: [
 				{
-					'receipt-file': '${{ steps.build.outputs.receipt-file }}',
+					'inline-bundles': false,
+					'receipt-file': '${{ steps.push.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ inputs.cache }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
@@ -936,11 +1022,11 @@ describe('attestation', () => {
 			gated: [
 				{
 					uses: cupboardAction('attest'),
-					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}"
+					if: "${{ inputs.attest && needs.configure.outputs.publish != 'none' && steps.build-cohort.outputs.receipt-file != '' }}"
 				},
 				{
 					uses: cupboardAction('attest-attach'),
-					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundles != '' }}"
+					if: "${{ inputs.attest && needs.configure.outputs.publish != 'none' && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundles-file != '' }}"
 				}
 			],
 			attach: [
@@ -957,7 +1043,7 @@ describe('attestation', () => {
 						'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
-					bundle: '${{ steps.attest.outputs.bundles }}'
+					'bundles-file': '${{ steps.attest.outputs.bundles-file }}'
 				}
 			]
 		},
@@ -967,11 +1053,11 @@ describe('attestation', () => {
 			gated: [
 				{
 					uses: cupboardAction('attest'),
-					if: '${{ inputs.attest }}'
+					if: "${{ inputs.attest && steps.push.outcome == 'success' }}"
 				},
 				{
 					uses: cupboardAction('attest-attach'),
-					if: "${{ inputs.attest && steps.attest.outputs.bundles != '' }}"
+					if: "${{ inputs.attest && steps.attest.outputs.bundles-file != '' }}"
 				}
 			],
 			attach: [
@@ -982,9 +1068,9 @@ describe('attestation', () => {
 						'${{ steps.setup.outputs.read-session-target }}',
 					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 					cache: '${{ inputs.cache }}',
-					'receipt-file': '${{ steps.build.outputs.receipt-file }}',
+					'receipt-file': '${{ steps.push.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
-					bundle: '${{ steps.attest.outputs.bundles }}'
+					'bundles-file': '${{ steps.attest.outputs.bundles-file }}'
 				}
 			]
 		}
@@ -1284,6 +1370,7 @@ const execFileAsync = promisify(execFile);
 async function resolvePublicationEvent(event: {
 	readonly action: string;
 	readonly merged: boolean;
+	readonly publish?: 'none' | 'outputs' | 'closure';
 	readonly push?: boolean;
 	readonly credentials?: Readonly<Record<string, string | undefined>>;
 }): Promise<Record<string, string>> {
@@ -1307,7 +1394,11 @@ async function resolvePublicationEvent(event: {
 					Object.keys(step.env ?? {}).map((key) => [key, ''])
 				),
 				PRESET: 'pull-request-and-branch',
+				BUILD: 'missing',
+				SUBSTITUTER: 'copy',
+				PUBLISH: event.publish ?? 'outputs',
 				PUSH: String(event.push ?? true),
+				ATTEST: 'true',
 				PERMANENT: 'false',
 				EVENT_NAME: 'pull_request',
 				EVENT_ACTION: event.action,
@@ -1379,24 +1470,28 @@ describe('pull-request cache lifecycle', () => {
 		}
 	);
 
-	it('uses the default cache without provisioning or removal for a read-only pull request', async () => {
-		expect(
-			await resolvePublicationEvent({
-				action: 'closed',
-				merged: false,
-				push: false
-			})
-		).toStrictEqual({
-			cache: '',
-			'root-prefix': 'github:acme/infra/pr-7',
-			ttl: '14d',
-			permanent: 'false',
-			'reuse-view': '',
-			'provision-cache': '',
-			'provision-cache-ttl': '14d',
-			'remove-cache': ''
-		});
-	});
+	it.each([{ publish: 'none' as const }, { push: false }])(
+		'uses the default cache without provisioning or removal for read-only input %s',
+		async (selection) => {
+			expect(
+				await resolvePublicationEvent({
+					action: 'closed',
+					merged: false,
+					...selection
+				})
+			).toStrictEqual({
+				publish: 'none',
+				cache: '',
+				'root-prefix': 'github:acme/infra/pr-7',
+				ttl: '14d',
+				permanent: 'false',
+				'reuse-view': '',
+				'provision-cache': '',
+				'provision-cache-ttl': '14d',
+				'remove-cache': ''
+			});
+		}
+	);
 
 	it.each([
 		{ action: 'opened', merged: false, removed: '' },
@@ -1406,6 +1501,7 @@ describe('pull-request cache lifecycle', () => {
 		'resolves a $action pull request with merged=$merged',
 		async ({ action, merged, removed }) => {
 			expect(await resolvePublicationEvent({ action, merged })).toStrictEqual({
+				publish: 'outputs',
 				cache: 'gh-1234-pr-7',
 				'root-prefix': 'github:acme/infra/pr-7',
 				ttl: '14d',

@@ -69,15 +69,15 @@ export async function fetchReferenceMetadata(
 	});
 
 	try {
-		const narInfo = NarInfo.parse(body);
-
-		return {
-			upload: referenceMetadata(narInfo),
-			signatures: [...narInfo.sigs]
-		};
+		return parseReferenceMetadata(body);
 	} catch (error) {
 		throw new NarInfoUnparsableError(target, { cause: error });
 	}
+}
+
+export function parseReferenceMetadata(body: string): ReferenceMetadata {
+	const narInfo = NarInfo.parse(body);
+	return { upload: referenceMetadata(narInfo), signatures: [...narInfo.sigs] };
 }
 
 function referenceMetadata(narInfo: NarInfo): UploadPathMetadataFields {

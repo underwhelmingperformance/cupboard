@@ -18,8 +18,8 @@ workflows also refuse to run anywhere except github.com.
 
 ## The simpler workflow: `cupboard-publish.yml`
 
-This workflow builds one flake installable on one runner, publishes it, and
-signs its build provenance:
+This workflow realises one flake installable on one runner, can publish selected
+outputs, and can sign build provenance:
 
 ```yaml
 jobs:
@@ -51,12 +51,19 @@ Things to know before you use it:
   replaces the previous platform's root.
 - Roots are permanent by default. Set `ttl` to make the root expire, or set
   `permanent: false` to use the cache's default root lifetime.
-- By default, the job builds every output itself. Build provenance can only
-  describe a build that the job saw. If an output was downloaded from a cache,
-  or was already in the runner's store, the job rebuilds it with
-  `nix build --rebuild` before signing. If the rebuild produces different
-  contents, the job fails. Set `attest: false` to publish without build
-  provenance.
+- The defaults are `build: missing`, `substituter: copy`, `publish: outputs` and
+  `attest: true`. An available output can be used without building it again. The
+  workflow selects substituted outputs for publication. It signs build
+  provenance only for builds observed on the runner.
+- Set `build: rebuild` when the run must execute every requested output again.
+  This builds each requested output again in the selected Nix store, even if it
+  is already available. Nix may still substitute dependencies. Set
+  `attest: false` to publish without signing new evidence.
+- With `substituter: leave`, an output stays upstream only if consumers can
+  obtain matching NARs for the output and all its runtime references under the
+  configured signature policy. Outputs built in this run remain selected. Set
+  `publish: closure` to include every runtime reference of each selected
+  published output. With `publish: none`, the workflow signs nothing.
 - The CLI version matches the workflow version, in the same way as for the flake
   publish workflow. See
   [Selecting the cupboard version](./flake-publish.md#selecting-the-cupboard-version).
@@ -66,6 +73,14 @@ Things to know before you use it:
 - The job needs a trust rule of its own. The rules that `cupboard github setup`
   adds accept only the flake publish workflow. See
   [Trust rules for these jobs](#trust-rules-for-these-jobs).
+
+The `attest` input remains a boolean. Set `attest: false` to publish without
+signing new build provenance. A missing attestation does not cause an available
+output to be rebuilt. Set `build: rebuild` when every requested output must be
+built again; dependencies may still be substituted. See [Choosing publication
+behaviour][publication-behaviour] for all four inputs and their interactions.
+
+[publication-behaviour]: ./flake-publish.md#choosing-publication-behaviour
 
 ## Building a job from the actions
 
@@ -92,12 +107,17 @@ jobs:
         uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
         with:
           installables: .#package
-          require-provenance: true
-      - uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
+          inline-paths: false
+          publication-url: https://cupboard.example.workers.dev/t/acme
+          build: rebuild
+          substituter: copy
+      - id: push
+        uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
         with:
           url: https://cupboard.example.workers.dev/t/acme
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
-          paths: ${{ steps.build.outputs.paths }}
+          paths-file: ${{ steps.build.outputs.publish-paths-file }}
+          build-receipt-file: ${{ steps.build.outputs.receipt-file }}
           root:
             github:${{ github.repository }}/${{ github.ref_name }}/x86_64-linux
           permanent: true
@@ -105,15 +125,16 @@ jobs:
         uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
         with:
           url: https://cupboard.example.workers.dev/t/acme
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
-      - if: ${{ steps.attest.outputs.bundles != '' }}
+          inline-bundles: false
+          receipt-file: ${{ steps.push.outputs.receipt-file }}
+      - if: ${{ steps.attest.outputs.bundles-file != '' }}
         uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
         with:
           url: https://cupboard.example.workers.dev/t/acme
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
+          receipt-file: ${{ steps.push.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
-          bundle: ${{ steps.attest.outputs.bundles }}
+          bundles-file: ${{ steps.attest.outputs.bundles-file }}
 ```
 
 The steps do the following:
@@ -122,26 +143,25 @@ The steps do the following:
    they don't install it.
 2. `setup` installs the cupboard CLI. Because `cache-url` is set, it also adds
    the cache to Nix's substituters for the rest of the job.
-3. `build-paths` builds the installables. It writes a receipt, a file listing
-   the outputs that this job built. `require-provenance` makes it rebuild any
-   output that Nix downloaded instead of building. Without that, a rerun after a
-   failed signing step would download everything from the cache, and there would
-   be no build to attest.
-4. `push` publishes the outputs and sets their retention root.
-5. `attest` checks every path in the receipt against the cache. It fails if the
-   cache is missing a path, or has different contents for it. It then signs
-   build provenance for the paths that this job built.
+3. `build-paths` builds each requested output again in the selected Nix store,
+   even if Nix could obtain it from a substituter or the runner's store.
+   Dependencies may still be substituted. It writes a receipt describing how
+   each output became available and lists the output paths selected for
+   publication.
+4. `push` publishes the selected outputs, sets their retention root, and writes
+   a receipt for the paths that the destination cache serves.
+5. `attest` checks the receipt against the cache. It fails if a path that it
+   will sign is missing or has different contents. It then signs build
+   provenance for builds observed on the runner.
 6. `attest-attach` attaches the signed bundles to the paths in the cache.
 
-Keep the `if:` condition on the last step, and pass `bundles` to it. `attest`
-lists the build-provenance bundles in `bundle-path`, the build-origin bundles in
-`origin-bundle-path`, and both kinds in `bundles`. `bundles` is empty only when
-`attest` signed nothing. `attest-attach` fails if it is given no bundles at all,
-so the condition skips the step in that case. Don't test `bundle-path` instead.
-A receipt from the flake publish workflow's cohort build can list paths that the
-job published but didn't build. If the job built none of them, `attest` signs
-only build-origin bundles and `bundle-path` is empty, so a condition on
-`bundle-path` would skip those bundles.
+Keep the `if:` condition on the last step, and pass `bundles-file` to it.
+`attest` lists build-provenance bundles in `bundle-path`. `bundles-file`
+contains the manifest of all bundles. Set `inline-bundles: false` when the next
+step uses the manifest. The default is `true`, which also returns complete
+inline lists. `attest-attach` fails if it is given no bundles, so the condition
+skips the step when `bundles-file` is empty. A cohort can publish a path without
+building it; that path receives no new build provenance from this run.
 
 Every action also installs a pinned version of Node.js and pnpm. They stay on
 `PATH` for the rest of the job.
@@ -298,23 +318,36 @@ List the installables in `installables`, one per line. If the list is long and
 generated, write it to a file and pass `installables-file` instead. Action
 inputs have a size limit, and the limit doesn't apply to a file.
 
+Set `inline-paths: false` when later steps use the path files. The action always
+writes files and counts. By default, the action also writes inline path lists to
+the step outputs.
+
 If the build fails, the action tries again, up to five attempts in total, and
 waits longer after each failure. If every attempt fails, the step fails. Set
 `allow-failure` to let the job continue anyway.
 
-The receipt only lists outputs that this job built itself. If an output was
-built on a remote builder, or by an earlier failed attempt, the action rebuilds
-it locally with `nix build --rebuild` before listing it. If the rebuild produces
-different contents, the step fails. With `require-provenance`, outputs that were
-downloaded or already in the store are rebuilt the same way, locally and one at
-a time. An output with no derivation can't be rebuilt, so it fails the step.
+The receipt records how the requested outputs became available. Set
+`build: rebuild` to build every requested output again in the selected Nix
+store, even if it is already available. Nix may still substitute dependencies.
+
+With `substituter: leave`, supply `publication-url` with the destination tenant
+or cache URL. The build action keeps paths from that tenant selected for
+publication, including public cache and reuse-view results. Without this URL,
+the action cannot distinguish public tenant caches from external substituters.
+
+`substituter: leave` excludes an output from publication only when external
+consumers can obtain matching NARs for the output and all its runtime
+references. `substituter: copy` includes those outputs. Outputs built in this
+run remain selected, including builds dispatched to a configured remote builder.
+When a requested output has no recorded derivation, the action passes its
+installable to Nix for the rebuild.
 
 The action writes the receipt and the list of paths to fixed locations in
 `$RUNNER_TEMP`. A second `build-paths` step in the same job overwrites them.
 
-A `build-paths` receipt only produces build provenance. Build-origin
-attestations need the more detailed receipt that the flake publish workflow
-writes.
+The receipt can support SLSA build provenance for outputs built on the runner in
+this run when the Nix activity log records the build. Outputs reused from the
+selected store or obtained from a substituter receive no new build claim.
 
 ### `push`
 

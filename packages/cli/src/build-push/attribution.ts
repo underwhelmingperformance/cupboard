@@ -1,10 +1,6 @@
 import { activityLogRecords, type NixValidPathInfo } from '@cupboard/nix';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import type {
-	BuildEvent,
-	BuildSubjectV3Input,
-	SubjectVerification
-} from '@cupboard/protocol/build';
+import type { BuildSubjectV3Input } from '@cupboard/protocol/build';
 import { z } from 'zod';
 
 /**
@@ -19,6 +15,13 @@ export interface BuildAttempt {
 	readonly attempt: number;
 	readonly attemptId: string;
 	readonly activities: readonly BuildActivity[];
+	readonly verifiedOutputs?: readonly VerifiedBuildOutput[];
+}
+
+export interface VerifiedBuildOutput {
+	readonly storePath: string;
+	readonly narHash: string;
+	readonly derivation: string;
 }
 
 // `json-log-path` emits JSON lines. A `start` record with activity type 105
@@ -30,7 +33,7 @@ const buildActivityStartSchema = z.object({
 });
 
 /**
-Returns the last build-start record for each derivation in a JSON log.
+Returns build activity for each derivation, preserving any remote dispatch.
 */
 export function parseBuildActivities(log: string): readonly BuildActivity[] {
 	const activities = new Map<string, BuildActivity>();
@@ -43,6 +46,12 @@ export function parseBuildActivities(log: string): readonly BuildActivity[] {
 		}
 
 		const [derivation, machine] = start.data.fields;
+		const previous = activities.get(derivation);
+
+		if (previous !== undefined && previous.machine !== '') {
+			continue;
+		}
+
 		activities.set(derivation, { derivation, machine });
 	}
 
@@ -52,30 +61,6 @@ export function parseBuildActivities(log: string): readonly BuildActivity[] {
 		.toSorted((left, right) => byCodeUnit(left.derivation, right.derivation));
 }
 
-/**
- * The first attempt for a derivation determines its remote builder, matching
- * the attempt used for receipt attribution.
- */
-export function delegatedMachines(
-	attempts: readonly BuildAttempt[]
-): ReadonlyMap<string, string> {
-	const machines = new Map<string, string>();
-
-	for (const attempt of attempts) {
-		for (const activity of attempt.activities) {
-			if (activity.machine !== '' && !machines.has(activity.derivation)) {
-				machines.set(activity.derivation, activity.machine);
-			}
-		}
-	}
-
-	return machines;
-}
-
-function verificationOf(activity: BuildActivity): SubjectVerification {
-	return activity.machine === '' ? 'local' : 'build-store';
-}
-
 interface FirstBuild {
 	readonly attempt: number;
 	readonly attemptId: string;
@@ -83,22 +68,23 @@ interface FirstBuild {
 }
 
 /**
- * Attributes each newly realised final path to the first attempt that built
- * its deriver. The subject records the selected build store and whether Nix
- * ran the build locally or delegated it. Paths that predate the run retain
- * store-derived provenance. With one attempt, a hook event and an ultimate
- * store path also establish a build from this run when activity is missing.
+ * Attributes known outputs to successful local attempts. Callers exclude paths
+ * that were valid before the invocation unless a successful rebuild checked
+ * them, and supply only attempts that completed successfully.
  */
 export function receiptSubjects(
 	attempts: readonly BuildAttempt[],
 	finalInfos: readonly NixValidPathInfo[],
 	preExisting: ReadonlySet<string>,
-	buildStore: string,
-	completed: readonly BuildEvent[] = []
+	buildStore: string
 ): readonly BuildSubjectV3Input[] {
 	const firstBuild = new Map<string, FirstBuild>();
 
 	for (const attempt of attempts) {
+		if (attempt.verifiedOutputs !== undefined) {
+			continue;
+		}
+
 		for (const activity of attempt.activities) {
 			if (!firstBuild.has(activity.derivation)) {
 				firstBuild.set(activity.derivation, {
@@ -112,25 +98,34 @@ export function receiptSubjects(
 
 	return finalInfos
 		.flatMap((info): BuildSubjectV3Input[] => {
-			if (info.deriver === undefined || preExisting.has(info.storePath)) {
+			const checked = attempts.find((attempt) =>
+				attempt.verifiedOutputs?.some(
+					(output) =>
+						output.storePath === info.storePath &&
+						output.narHash === info.narHash.digestHex() &&
+						output.derivation === info.deriver &&
+						attempt.activities.some(
+							(activity) =>
+								activity.derivation === output.derivation &&
+								activity.machine === ''
+						)
+				)
+			);
+			if (
+				info.deriver === undefined ||
+				!info.ultimate ||
+				(checked === undefined && preExisting.has(info.storePath))
+			) {
 				return [];
 			}
 
-			const activityBuild = firstBuild.get(info.deriver);
-			const hookBuild =
-				activityBuild === undefined &&
-				attempts.length === 1 &&
-				info.ultimate &&
-				completed.some(
-					(event) =>
-						event.derivation === info.deriver &&
-						event.outputPaths.includes(info.storePath)
-				)
-					? attempts[0]
-					: undefined;
-			const built = activityBuild ?? hookBuild;
+			const original = firstBuild.get(info.deriver);
+			const built = checked ?? original;
 
-			if (built === undefined) {
+			if (
+				built === undefined ||
+				(checked === undefined && original?.activity.machine !== '')
+			) {
 				return [];
 			}
 
@@ -143,14 +138,8 @@ export function receiptSubjects(
 					attempt: built.attempt,
 					attemptId: built.attemptId,
 					buildStore,
-					...(activityBuild?.activity.machine !== undefined &&
-						activityBuild.activity.machine !== '' && {
-							machine: activityBuild.activity.machine
-						}),
-					verification:
-						activityBuild === undefined
-							? 'build-store'
-							: verificationOf(activityBuild.activity)
+					verification: 'local',
+					...(checked !== undefined && { reproduced: true })
 				}
 			];
 		})

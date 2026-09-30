@@ -17,7 +17,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { StorePath } from '@cupboard/nix-store/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
 	buildReceiptV3Schema,
 	invocationIdSchema
@@ -31,6 +31,7 @@ import type { Reporter, ResultPayload } from '@cupboard/reporter';
 import { genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { FakeCommitSocket } from '../client/commit-socket.test-support.ts';
 import {
@@ -41,8 +42,10 @@ import {
 import {
 	AdminApiTransientError,
 	BuildCommandFailedError,
+	BuildObservationMissingError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
+	BuildRebuildRemoteDispatchError,
 	CliAbortError,
 	CliError,
 	CommitCapacityQueuedError,
@@ -79,6 +82,10 @@ const pathA = storePathSchema.parse(
 const pathB = storePathSchema.parse(
 	'/nix/store/1123456789abcdfghijklmnpqrsvwxyz-app-dev'
 );
+const pathC = storePathSchema.parse(
+	'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-runtime'
+);
+const drvB = '/nix/store/9123456789abcdfghijklmnpqrsvwxyz-dependency.drv';
 const drvA = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
 const invocationId = invocationIdSchema.parse('invocation-under-test');
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
@@ -336,11 +343,24 @@ function recordingReporter(record: RecordedRun): Reporter {
 	};
 }
 
+interface RebuildTargetFixture {
+	readonly installable: string;
+	readonly derivation: string;
+	readonly paths: readonly StorePathString[];
+	readonly origin: 'built' | 'substituted' | 'existing';
+	readonly machine?: string;
+}
+
 interface ConstructedFlowConfig {
+	readonly targets?: readonly RebuildTargetFixture[];
 	readonly succeedOn: number;
+	readonly dependencyPaths?: readonly StorePathString[];
 	readonly installables?: readonly string[];
 	readonly attempts?: number;
 	readonly rebuild?: boolean;
+	readonly failCheck?: boolean;
+	readonly checkDerivations?: readonly string[];
+	readonly builders?: string;
 	readonly requireProvenance?: boolean;
 	readonly omitActivity?: boolean;
 	readonly suppressEvent?: boolean;
@@ -359,6 +379,11 @@ interface FlowConfig {
 	readonly eventOutputProtection?: 'failed';
 	readonly stalledProtectionCall?: number;
 	readonly valid?: readonly StorePathString[];
+	readonly closurePaths?: readonly StorePathString[];
+	readonly closurePathsByTarget?: ReadonlyMap<
+		string,
+		readonly StorePathString[]
+	>;
 	readonly alreadyValid?: readonly StorePathString[];
 	readonly declaredOutputs?: readonly StorePathString[];
 	readonly outPaths?: readonly StorePathString[];
@@ -370,9 +395,14 @@ interface FlowConfig {
 	readonly sessionOpenFailure?: Error;
 	readonly runtimeRemovalFailure?: Error;
 	readonly options?: Partial<BuildPushRunOptions>;
+	readonly externallyServed?: readonly StorePathString[];
 }
 
 interface FlowRun extends RecordedRun {
+	readonly commands: readonly {
+		readonly rebuild: boolean;
+		readonly installables: readonly string[];
+	}[];
 	readonly error: unknown;
 	readonly preflight: BuildPushPreflight;
 	readonly receiptFile: string;
@@ -380,21 +410,25 @@ interface FlowRun extends RecordedRun {
 	readonly attemptIdsIssued: number;
 	readonly negotiatedPaths: readonly (readonly StorePathString[])[];
 	readonly rootSets: readonly string[];
+	readonly rootRequests: readonly {
+		readonly name: string;
+		readonly body: Parameters<PushClient['setRoot']>[1];
+	}[];
 	readonly settledTargets: readonly StorePathString[];
 	readonly batchSessions: number;
 	readonly protectionCalls: number;
 	readonly rootLinkDirectory: string;
 }
 
-function activityLine(machine: string): string {
+function activityLine(machine: string, derivation = drvA): string {
 	return JSON.stringify({
 		action: 'start',
 		id: 1,
 		level: 3,
 		parent: 0,
-		text: `building '${drvA}'`,
+		text: `building '${derivation}'`,
 		type: 105,
-		fields: [drvA, machine]
+		fields: [derivation, machine]
 	});
 }
 
@@ -407,10 +441,15 @@ const stubNixScript = [
 	"const fs = require('node:fs');",
 	"const net = require('node:net');",
 	'const args = process.argv.slice(2);',
-	"if (process.env.STUB_REQUIRE_REBUILD === 'true' && !args.includes('--rebuild')) process.exit(2);",
+	"const targets = JSON.parse(process.env.STUB_TARGETS || '[]').filter((target) => args.slice(args.indexOf('--') + 1).includes(target.installable));",
+	"const rebuild = args.includes('--rebuild');",
+	String.raw`fs.appendFileSync(process.env.STUB_COMMANDS_FILE, JSON.stringify({ rebuild, installables: args.slice(args.indexOf('--') + 1) }) + '\n');`,
+	"if (rebuild && !fs.existsSync(process.env.STUB_COUNT_FILE) && targets.some((target) => target.origin === 'built')) process.exit(2);",
 	"if (args.includes('--store') && !(args.indexOf('--') < args.indexOf('--store'))) process.exit(2);",
 	"const logFile = args[args.indexOf('json-log-path') + 1];",
-	String.raw`fs.writeFileSync(logFile, process.env.STUB_LOG_LINE + '\n');`,
+	"const builtTargets = targets.filter((target) => rebuild || target.origin === 'built');",
+	String.raw`const activity = rebuild && process.env.STUB_CHECK_DERIVATIONS ? JSON.parse(process.env.STUB_CHECK_DERIVATIONS).map((derivation) => JSON.stringify({ action: 'start', type: 105, fields: [derivation, ''] })).join('\n') : targets.length === 0 ? process.env.STUB_LOG_LINE : builtTargets.map((target) => JSON.stringify({ action: 'start', type: 105, fields: [target.derivation, target.machine || ''] })).join('\n');`,
+	String.raw`fs.writeFileSync(logFile, activity + '\n');`,
 	'let runs = 0;',
 	'try {',
 	"\truns = Number(fs.readFileSync(process.env.STUB_COUNT_FILE, 'utf8'));",
@@ -418,6 +457,7 @@ const stubNixScript = [
 	'runs += 1;',
 	'fs.writeFileSync(process.env.STUB_COUNT_FILE, String(runs));',
 	'if (runs < Number(process.env.STUB_SUCCEED_ON)) process.exit(1);',
+	"if (rebuild && process.env.STUB_FAIL_CHECK === '1') process.exit(1);",
 	"const outLinkIndex = args.indexOf('--out-link');",
 	'if (outLinkIndex !== -1) {',
 	'\tconst outLink = args[outLinkIndex + 1];',
@@ -429,12 +469,18 @@ const stubNixScript = [
 	'\t});',
 	'}',
 	'if (!process.env.STUB_SOCKET) process.exit(0);',
-	'const socket = net.connect(process.env.STUB_SOCKET, () => {',
-	'\tsocket.resume();',
-	"\tsocket.write(process.env.STUB_EVENT + '\\n');",
+	'const send = (event) => new Promise((resolve, reject) => {',
+	'\tconst socket = net.connect(process.env.STUB_SOCKET, () => {',
+	'\t\tsocket.resume();',
+	"\t\tsocket.write(event + '\\n');",
+	'\t});',
+	"\tsocket.on('close', resolve);",
+	"\tsocket.on('error', reject);",
 	'});',
-	"socket.on('close', () => process.exit(0));",
-	"socket.on('error', () => process.exit(1));"
+	'void (async () => {',
+	'\tif (process.env.STUB_DEPENDENCY_EVENT) await send(process.env.STUB_DEPENDENCY_EVENT);',
+	'\tawait send(process.env.STUB_EVENT);',
+	'})().then(() => process.exit(0), () => process.exit(1));'
 ].join('\n');
 
 async function stubNixEnvironment(
@@ -453,15 +499,36 @@ async function stubNixEnvironment(
 	return {
 		...process.env,
 		PATH: `${stubDirectory}:${process.env.PATH ?? ''}`,
+		NIX_CONFIG: `${process.env.NIX_CONFIG ?? ''}\nbuilders = ${constructed.builders ?? ''}\n`,
 		STUB_LOG_LINE:
 			constructed.omitActivity === true
 				? ''
-				: activityLine(constructed.machine ?? ''),
+				: [
+						activityLine(constructed.machine ?? ''),
+						...(constructed.dependencyPaths === undefined
+							? []
+							: [activityLine('', drvB)])
+					].join('\n'),
 		STUB_COUNT_FILE: stubCountFile(workspace),
 		STUB_SUCCEED_ON: String(constructed.succeedOn),
-		STUB_REQUIRE_REBUILD: String(constructed.rebuild === true),
+		STUB_TARGETS: JSON.stringify(constructed.targets ?? []),
+		STUB_FAIL_CHECK: constructed.failCheck === true ? '1' : '0',
+		STUB_CHECK_DERIVATIONS:
+			constructed.checkDerivations === undefined
+				? ''
+				: JSON.stringify(constructed.checkDerivations),
+		STUB_COMMANDS_FILE: path.join(workspace, 'commands.jsonl'),
 		STUB_SOCKET: constructed.suppressEvent === true ? '' : socketPath,
 		STUB_OUT_PATHS: outPaths.join(' '),
+		STUB_DEPENDENCY_EVENT:
+			constructed.dependencyPaths === undefined
+				? ''
+				: JSON.stringify({
+						version: 1,
+						invocationId,
+						derivation: drvB,
+						outputPaths: constructed.dependencyPaths
+					}),
 		STUB_EVENT: JSON.stringify({
 			version: 1,
 			invocationId,
@@ -519,6 +586,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	const sleeps: number[] = [];
 	const negotiatedPaths: StorePathString[][] = [];
 	const rootSets: string[] = [];
+	const rootRequests: {
+		name: string;
+		body: Parameters<PushClient['setRoot']>[1];
+	}[] = [];
 	let settledTargets: readonly StorePathString[] = [];
 	let attemptIdsIssued = 0;
 	let batchSessions = 0;
@@ -578,6 +649,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			}),
 		setRoot: (name, _body) => {
 			rootSets.push(name);
+			rootRequests.push({ name, body: _body });
 
 			return Promise.resolve({
 				name: rootNameSchema.parse(name),
@@ -601,13 +673,23 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 	const held = (): ReadonlySet<StorePathString> =>
 		hasBuilt() ? valid : alreadyValid;
+	const infoFor = (storePath: StorePathString): NixValidPathInfo => ({
+		...pathInfo(storePath, ultimatePaths.has(storePath)),
+		deriver:
+			config.constructed?.targets?.find((target) =>
+				target.paths.includes(storePath)
+			)?.derivation ??
+			(config.constructed?.dependencyPaths?.includes(storePath) === true
+				? drvB
+				: drvA)
+	});
 	const store: BuildPushStore = {
 		storeKind: 'local-filesystem',
 		queryPathInfo: (candidate) => {
 			const storePath = storePathSchema.parse(candidate);
 
 			return valid.has(storePath)
-				? Promise.resolve(pathInfo(storePath, ultimatePaths.has(storePath)))
+				? Promise.resolve(infoFor(storePath))
 				: Promise.reject(new NixStorePathNotFoundError(storePath));
 		},
 		queryValidPathsInfo: (paths) => {
@@ -618,7 +700,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				paths
 					.map((candidate) => storePathSchema.parse(candidate))
 					.filter((candidate) => holds.has(candidate))
-					.map((candidate) => pathInfo(candidate, ultimatePaths.has(candidate)))
+					.map((candidate) => infoFor(candidate))
 			);
 		},
 		queryValidPaths: (paths) => {
@@ -634,9 +716,15 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 			return Promise.resolve([...(config.declaredOutputs ?? [])]);
 		},
-		readDerivation: () => {
+		readDerivation: (derivation) => {
 			recordCall('readDerivation');
-			const outputs = (config.declaredOutputs ?? [])
+			const outputs = (
+				config.constructed?.targets?.find(
+					(target) => target.derivation === derivation
+				)?.paths ??
+				config.declaredOutputs ??
+				[]
+			)
 				.map(
 					(output, index) =>
 						`("${index === 0 ? 'out' : 'dev'}","${output}","","")`
@@ -649,11 +737,42 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				)
 			);
 		},
-		resolveClosure: () => Promise.resolve([]),
+		resolveClosure: (targets) =>
+			Promise.resolve(
+				(config.closurePathsByTarget === undefined
+					? (config.closurePaths ?? [])
+					: [
+							...new Set(
+								targets.flatMap(
+									(target) => config.closurePathsByTarget?.get(target) ?? []
+								)
+							)
+						]
+				).map((storePath) => infoFor(storePath))
+			),
 		narFromPath: () => emptyNar
 	};
 
 	const dependencies: BuildPushDependencies = {
+		selectPublicationPaths: (candidates, options) => {
+			const leftUpstream = (config.externallyServed ?? []).filter(
+				(storePath) =>
+					options.substituter === 'leave' &&
+					candidates.some(
+						(candidate) =>
+							candidate.storePath === storePath && candidate.origin !== 'built'
+					)
+			);
+			return Promise.resolve({
+				published: candidates
+					.filter(
+						(candidate) =>
+							!leftUpstream.includes(storePathSchema.parse(candidate.storePath))
+					)
+					.map((candidate) => storePathSchema.parse(candidate.storePath)),
+				leftUpstream
+			});
+		},
 		client,
 		credential: 'cupboard-login',
 		store,
@@ -758,8 +877,20 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		thrown = error;
 	}
 
+	const commandsFile = path.join(workspace, 'commands.jsonl');
+	const commands = existsSync(commandsFile)
+		? await readFile(commandsFile, 'utf8')
+		: '';
 	return {
 		...record,
+		commands: commands
+			.split('\n')
+			.filter(Boolean)
+			.map((line) =>
+				z
+					.object({ rebuild: z.boolean(), installables: z.array(z.string()) })
+					.parse(JSON.parse(line))
+			),
 		error: thrown,
 		preflight,
 		receiptFile,
@@ -767,6 +898,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		attemptIdsIssued,
 		negotiatedPaths,
 		rootSets,
+		rootRequests,
 		settledTargets,
 		batchSessions,
 		protectionCalls,
@@ -1206,6 +1338,7 @@ describe('runBuildPush', () => {
 				'readDerivation before the build',
 				'queryValidPaths before the build',
 				'queryValidPaths after the build',
+				'queryValidPathsInfo after the build',
 				'queryValidPathsInfo after the build'
 			]
 		});
@@ -1279,15 +1412,16 @@ describe('runBuildPush', () => {
 		};
 	}
 
-	function subjectClaimed(verification: string, machine?: string): unknown {
+	function subjectClaimed(): unknown {
 		return {
 			origin: 'built',
 			storePath: pathA,
 			narHash: narHash.digestHex(),
 			derivation: drvA,
 			buildStore: 'auto',
-			...(machine !== undefined && { machine }),
-			verification
+			attempt: 1,
+			attemptId: 'attempt-1',
+			verification: 'local'
 		};
 	}
 
@@ -1299,7 +1433,7 @@ describe('runBuildPush', () => {
 				declaredOutputs: [pathA],
 				ultimatePaths: [pathA]
 			},
-			verification: 'build-store'
+			subject: subjectClaimed()
 		},
 		{
 			name: 'an output that a remote builder produced for this run',
@@ -1311,12 +1445,11 @@ describe('runBuildPush', () => {
 				},
 				declaredOutputs: [pathA]
 			},
-			verification: 'build-store',
-			machine: 'ssh://builder-1'
+			subject: copiedSubject(pathA)
 		}
-	])('claims $name against the store the run built in', async (row) => {
+	])('classifies $name from execution evidence', async (row) => {
 		await expect(reconciledReceipt(row.config)).resolves.toStrictEqual(
-			receiptOver([subjectClaimed(row.verification, row.machine)])
+			receiptOver([row.subject])
 		);
 	});
 
@@ -1447,7 +1580,7 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	it('publishes failed-build survivors and still records their builder', async () => {
+	it('publishes failed-build survivors without claiming remote execution', async () => {
 		const run = await runFlow({
 			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			constructed: {
@@ -1476,17 +1609,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [
-					{
-						origin: 'built',
-						storePath: pathA,
-						narHash: narHash.digestHex(),
-						derivation: drvA,
-						buildStore: 'auto',
-						machine: 'ssh://builder-1',
-						verification: 'build-store'
-					}
-				],
+				subjects: [copiedSubject(pathA)],
 				childExitStatus: 1,
 				terminalFailure: {
 					kind: 'target-build',
@@ -1750,7 +1873,9 @@ describe('runBuildPush', () => {
 
 	it('runs a constructed invocation under the attempt loop and attributes its subjects', async () => {
 		const run = await runFlow({
-			constructed: { succeedOn: 2 },
+			constructed: { succeedOn: 2, installables: [`${drvA}^out`] },
+			declaredOutputs: [pathA],
+			ultimatePaths: [pathA],
 			valid: [pathA]
 		});
 
@@ -1775,8 +1900,8 @@ describe('runBuildPush', () => {
 						storePath: pathA,
 						narHash: narHash.digestHex(),
 						derivation: drvA,
-						attempt: 1,
-						attemptId: 'attempt-1',
+						attempt: 2,
+						attemptId: 'attempt-2',
 						buildStore: 'auto',
 						verification: 'local'
 					}
@@ -1787,6 +1912,386 @@ describe('runBuildPush', () => {
 				failed: [],
 				collected: []
 			}
+		});
+	});
+
+	it.each([
+		{
+			scope: 'outputs' as const,
+			published: [pathA],
+			closure: [pathA, pathC],
+			built: [pathA]
+		},
+		{
+			scope: 'closure' as const,
+			published: [pathA, pathC],
+			closure: [pathA, pathC],
+			built: [pathA]
+		},
+		{
+			scope: 'closure' as const,
+			published: [pathA, pathB],
+			closure: [pathA, pathB],
+			built: [pathA, pathB]
+		}
+	])(
+		'limits $scope publication when the hook observes a build dependency',
+		async ({ scope, published, closure, built }) => {
+			const run = await runFlow({
+				constructed: {
+					succeedOn: 1,
+					dependencyPaths: [pathB],
+					installables: [`${drvA}^out`]
+				},
+				declaredOutputs: [pathA],
+				ultimatePaths: [pathA, pathB],
+				valid: [pathA, pathB, pathC],
+				outPaths: [pathA],
+				closurePaths: closure,
+				options: { publicationScope: scope },
+				action: 'upload'
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				error: run.error,
+				negotiated: [...new Set(run.negotiatedPaths.flat())].toSorted(
+					byCodeUnit
+				),
+				published: receipt.paths,
+				built: receipt.subjects
+					.filter((subject) => subject.origin === 'built')
+					.map((subject) => subject.storePath)
+			}).toStrictEqual({
+				error: undefined,
+				negotiated: published,
+				published,
+				built
+			});
+		}
+	);
+
+	it.each(['outputs', 'closure'] as const)(
+		'leaves a cold substituted target upstream before %s publication',
+		async (scope) => {
+			const run = await runFlow({
+				constructed: {
+					succeedOn: 1,
+					targets: [
+						{
+							installable: `${drvA}^out`,
+							derivation: drvA,
+							paths: [pathA],
+							origin: 'substituted'
+						}
+					],
+					installables: [`${drvA}^out`]
+				},
+				declaredOutputs: [pathA],
+				valid: [pathA, pathC],
+				outPaths: [pathA],
+				closurePaths: [pathA, pathC],
+				externallyServed: [pathA],
+				options: { publicationScope: scope, substituter: 'leave' },
+				action: 'upload'
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				error: run.error,
+				negotiated: run.negotiatedPaths,
+				paths: receipt.paths,
+				subjects: receipt.subjects,
+				leftUpstream: receipt.leftUpstream
+			}).toStrictEqual({
+				error: undefined,
+				negotiated: [],
+				paths: [],
+				subjects: [],
+				leftUpstream: [pathA]
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'fallback build',
+			origin: 'built' as const,
+			machine: '',
+			preflightFailure: undefined,
+			alreadyValid: [],
+			substituter: 'leave' as const,
+			rebuild: false,
+			expected: [pathA],
+			left: []
+		},
+		{
+			name: 'remote observed build',
+			origin: 'built' as const,
+			machine: 'ssh://builder',
+			preflightFailure: undefined,
+			alreadyValid: [],
+			substituter: 'leave' as const,
+			rebuild: false,
+			expected: [pathA],
+			left: []
+		},
+		{
+			name: 'untrusted observed build',
+			origin: 'built' as const,
+			machine: '',
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			alreadyValid: [],
+			substituter: 'leave' as const,
+			rebuild: false,
+			expected: [pathA],
+			left: []
+		},
+		{
+			name: 'copy policy',
+			origin: 'substituted' as const,
+			machine: '',
+			preflightFailure: undefined,
+			alreadyValid: [],
+			substituter: 'copy' as const,
+			rebuild: false,
+			expected: [pathA],
+			left: []
+		},
+		{
+			name: 'selected rebuild',
+			origin: 'existing' as const,
+			machine: '',
+			preflightFailure: undefined,
+			alreadyValid: [pathA],
+			substituter: 'leave' as const,
+			rebuild: true,
+			expected: [pathA],
+			left: []
+		}
+	])(
+		'keeps $name selected independently of attestation eligibility',
+		async ({
+			origin,
+			machine,
+			preflightFailure,
+			alreadyValid,
+			substituter,
+			rebuild,
+			expected,
+			left
+		}) => {
+			const run = await runFlow({
+				constructed: {
+					succeedOn: 1,
+					rebuild,
+					targets: [
+						{
+							installable: `${drvA}^out`,
+							derivation: drvA,
+							paths: [pathA],
+							origin,
+							machine
+						}
+					],
+					installables: [`${drvA}^out`]
+				},
+				declaredOutputs: [pathA],
+				valid: [pathA],
+				ultimatePaths: origin === 'built' || rebuild ? [pathA] : [],
+				alreadyValid,
+				outPaths: [pathA],
+				externallyServed: [pathA],
+				preflightFailure,
+				options: { publicationScope: 'outputs', substituter },
+				action: 'upload'
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				error: run.error,
+				paths: receipt.paths,
+				left: receipt.leftUpstream ?? []
+			}).toStrictEqual({ error: undefined, paths: expected, left });
+		}
+	);
+
+	it('publishes only the retained multi-output target and its runtime closure', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				targets: [
+					{
+						installable: `${drvA}^out,dev`,
+						derivation: drvA,
+						paths: [pathA, pathB],
+						origin: 'substituted'
+					}
+				],
+				installables: [`${drvA}^out,dev`]
+			},
+			declaredOutputs: [pathA, pathB],
+			valid: [pathA, pathB, pathC],
+			outPaths: [pathA, pathB],
+			externallyServed: [pathA],
+			closurePathsByTarget: new Map([
+				[pathA, [pathA]],
+				[pathB, [pathB, pathC]]
+			]),
+			options: { publicationScope: 'closure', substituter: 'leave' },
+			action: 'upload'
+		});
+		const receipt = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(run.receiptFile, 'utf8'))
+		);
+		expect({
+			error: run.error,
+			paths: receipt.paths,
+			leftUpstream: receipt.leftUpstream,
+			negotiated: [...new Set(run.negotiatedPaths.flat())].toSorted(byCodeUnit)
+		}).toStrictEqual({
+			error: undefined,
+			paths: [pathB, pathC],
+			leftUpstream: [pathA],
+			negotiated: [pathB, pathC]
+		});
+	});
+
+	it.each([undefined, new UntrustedDaemonError('not-trusted')])(
+		'clears the requested root after all targets are left upstream (%s)',
+		async (preflightFailure) => {
+			const root = rootNameSchema.parse('github:owner/repo/main');
+			const run = await runFlow({
+				constructed: {
+					succeedOn: 1,
+					targets: [
+						{
+							installable: `${drvA}^out`,
+							derivation: drvA,
+							paths: [pathA],
+							origin: 'substituted'
+						}
+					],
+					installables: [`${drvA}^out`]
+				},
+				declaredOutputs: [pathA],
+				valid: [pathA],
+				outPaths: [pathA],
+				externallyServed: [pathA],
+				preflightFailure,
+				options: {
+					publicationScope: 'outputs',
+					substituter: 'leave',
+					root,
+					retention: { kind: 'permanent' }
+				}
+			});
+			expect({ error: run.error, roots: run.rootRequests }).toStrictEqual({
+				error: undefined,
+				roots: [
+					{
+						name: root,
+						body: { targets: [], retention: { kind: 'permanent' } }
+					}
+				]
+			});
+		}
+	);
+
+	it.each([undefined, new UntrustedDaemonError('not-trusted')])(
+		'preserves the root when required build evidence is missing before leaving a target upstream (%s)',
+		async (preflightFailure) => {
+			const root = rootNameSchema.parse('github:owner/repo/main');
+			const run = await runFlow({
+				constructed: {
+					succeedOn: 1,
+					rebuild: false,
+					requireProvenance: true,
+					targets: [
+						{
+							installable: `${drvA}^out`,
+							derivation: drvA,
+							paths: [pathA],
+							origin: 'substituted'
+						}
+					],
+					installables: [`${drvA}^out`]
+				},
+				declaredOutputs: [pathA],
+				valid: [pathA],
+				outPaths: [pathA],
+				externallyServed: [pathA],
+				preflightFailure,
+				options: {
+					publicationScope: 'outputs',
+					substituter: 'leave',
+					root,
+					retention: { kind: 'permanent' }
+				}
+			});
+			expect({
+				error: run.error,
+				roots: run.rootRequests,
+				negotiated: run.negotiatedPaths
+			}).toStrictEqual({
+				error:
+					preflightFailure === undefined
+						? new BuildPublicationFailedError([], 74, {
+								cause: new BuildProvenanceIncompleteError([pathA])
+							})
+						: new BuildProvenanceIncompleteError([pathA]),
+				roots: [],
+				negotiated: []
+			});
+		}
+	);
+
+	it('publishes a left-upstream target when another selected target requires it at runtime', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				targets: [
+					{
+						installable: `${drvA}^out`,
+						derivation: drvA,
+						paths: [pathA],
+						origin: 'built'
+					},
+					{
+						installable: `${drvB}^out`,
+						derivation: drvB,
+						paths: [pathB],
+						origin: 'substituted'
+					}
+				],
+				installables: [`${drvA}^out`, `${drvB}^out`]
+			},
+			declaredOutputs: [pathA, pathB],
+			valid: [pathA, pathB],
+			ultimatePaths: [pathA],
+			outPaths: [pathA, pathB],
+			externallyServed: [pathB],
+			closurePathsByTarget: new Map([
+				[pathA, [pathA, pathB]],
+				[pathB, [pathB]]
+			]),
+			options: { publicationScope: 'closure', substituter: 'leave' },
+			action: 'upload'
+		});
+		const receipt = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(run.receiptFile, 'utf8'))
+		);
+		expect({
+			error: run.error,
+			paths: receipt.paths,
+			leftUpstream: receipt.leftUpstream
+		}).toStrictEqual({
+			error: undefined,
+			paths: [pathA, pathB],
+			leftUpstream: [pathB]
 		});
 	});
 
@@ -1819,10 +2324,11 @@ describe('runBuildPush', () => {
 					storePath,
 					narHash: narHash.digestHex(),
 					derivation: drvA,
-					attempt: 1,
-					attemptId: 'attempt-1',
+					attempt: 2,
+					attemptId: 'attempt-2',
 					buildStore: 'auto',
-					verification: 'local'
+					verification: 'local',
+					reproduced: true
 				})),
 				outcomes: [pathA, pathB].map((storePath) => ({
 					outcome: 'destination-served',
@@ -1846,7 +2352,10 @@ describe('runBuildPush', () => {
 					narHash: narHash.digestHex(),
 					derivation: drvA,
 					buildStore: 'auto',
-					verification: 'build-store'
+					attempt: 2,
+					attemptId: 'attempt-2',
+					verification: 'local',
+					reproduced: true
 				})),
 				childExitStatus: 0,
 				uploaded: []
@@ -1880,9 +2389,344 @@ describe('runBuildPush', () => {
 				receipt
 			}).toStrictEqual({
 				error: undefined,
-				attemptIdsIssued: 1,
+				attemptIdsIssued: 2,
 				receipt: expectedReceipt
 			});
+		}
+	);
+
+	it.each(
+		[
+			{ name: 'streamed', preflightFailure: undefined },
+			{
+				name: 'reconciled',
+				preflightFailure: new UntrustedDaemonError('not-trusted')
+			}
+		].flatMap((mode) =>
+			(['built', 'substituted', 'existing', 'mixed'] as const).map(
+				(scenario) => ({ ...mode, scenario })
+			)
+		)
+	)(
+		'realises $scenario outputs before checking reused targets in $name mode',
+		async ({ preflightFailure, scenario }) => {
+			const first: RebuildTargetFixture = {
+				installable: `${drvA}^out`,
+				derivation: drvA,
+				paths: [pathA],
+				origin:
+					scenario === 'substituted' || scenario === 'existing'
+						? scenario
+						: 'built'
+			};
+			const targets: readonly RebuildTargetFixture[] =
+				scenario === 'mixed'
+					? [
+							first,
+							{
+								installable: `${drvB}^out`,
+								derivation: drvB,
+								paths: [pathB],
+								origin: 'substituted'
+							}
+						]
+					: [first];
+			const paths = targets.flatMap((target) => target.paths);
+			const run = await runFlow({
+				...(preflightFailure && { preflightFailure }),
+				constructed: {
+					succeedOn: 1,
+					rebuild: true,
+					installables: targets.map((target) => target.installable),
+					targets
+				},
+				valid: paths,
+				alreadyValid: scenario.endsWith('existing') ? paths : [],
+				declaredOutputs: paths,
+				outPaths: paths,
+				ultimatePaths: paths
+			});
+			expect({ error: run.error, commands: run.commands }).toStrictEqual({
+				error: undefined,
+				commands: [
+					{
+						rebuild: false,
+						installables: targets.map((target) => target.installable)
+					},
+					...targets
+						.filter((target) => target.origin !== 'built')
+						.map((target) => ({
+							rebuild: true,
+							installables: [target.installable]
+						}))
+				]
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect(
+				receipt.subjects.map((subject) => ({
+					path: subject.storePath,
+					origin: subject.origin
+				}))
+			).toStrictEqual(
+				paths.map((storePath) => ({
+					path: storePath,
+					origin: 'built'
+				}))
+			);
+		}
+	);
+
+	it.each([
+		{ name: 'streamed', preflightFailure: undefined },
+		{
+			name: 'reconciled',
+			preflightFailure: new UntrustedDaemonError('not-trusted')
+		}
+	])(
+		'does not claim reused outputs after a failed check in $name mode',
+		async ({ preflightFailure }) => {
+			const run = await runFlow({
+				...(preflightFailure !== undefined && { preflightFailure }),
+				constructed: {
+					succeedOn: 1,
+					attempts: 1,
+					rebuild: true,
+					failCheck: true,
+					installables: [`${drvA}^*`]
+				},
+				valid: [pathA, pathB],
+				alreadyValid: [pathA, pathB],
+				declaredOutputs: [pathA, pathB],
+				outPaths: [pathA, pathB],
+				ultimatePaths: [pathA, pathB]
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				failed: run.error instanceof BuildCommandFailedError,
+				exit: receipt.childExitStatus,
+				built: receipt.subjects.filter((subject) => subject.origin === 'built')
+			}).toStrictEqual({ failed: true, exit: 1, built: [] });
+		}
+	);
+
+	it.each(
+		[
+			{ name: 'streamed', preflightFailure: undefined },
+			{
+				name: 'reconciled',
+				preflightFailure: new UntrustedDaemonError('not-trusted')
+			}
+		].flatMap((mode) =>
+			[
+				{ activity: 'no derivations', checkDerivations: [] },
+				{ activity: 'another derivation', checkDerivations: [drvB] }
+			].map((activity) => ({ ...mode, ...activity }))
+		)
+	)(
+		'rejects a successful rebuild with $activity in $name mode',
+		async ({ preflightFailure, checkDerivations }) => {
+			const installable = `${drvA}^out`;
+			const run = await runFlow({
+				...(preflightFailure !== undefined && { preflightFailure }),
+				constructed: {
+					succeedOn: 1,
+					rebuild: true,
+					omitActivity: true,
+					checkDerivations,
+					installables: [installable]
+				},
+				valid: [pathA],
+				alreadyValid: [pathA],
+				declaredOutputs: [pathA],
+				outPaths: [pathA],
+				ultimatePaths: [pathA],
+				options: { root: rootNameSchema.parse('release') }
+			});
+
+			expect({
+				error: run.error,
+				receiptExists: existsSync(run.receiptFile),
+				rootSets: run.rootSets
+			}).toStrictEqual({
+				error: new BuildObservationMissingError([installable]),
+				receiptExists: false,
+				rootSets: []
+			});
+		}
+	);
+
+	it.each([undefined, new UntrustedDaemonError('not-trusted')])(
+		'rejects configured builders before rebuilding (preflight: %s)',
+		async (preflightFailure) => {
+			const run = await runFlow({
+				...(preflightFailure !== undefined && { preflightFailure }),
+				constructed: {
+					succeedOn: 1,
+					rebuild: true,
+					builders: 'ssh-ng://builder x86_64-linux',
+					installables: [`${drvA}^out`]
+				},
+				valid: [pathA],
+				declaredOutputs: [pathA],
+				outPaths: [pathA]
+			});
+			expect({
+				error: run.error,
+				commands: run.commands,
+				rootSets: run.rootSets
+			}).toStrictEqual({
+				error: new BuildRebuildRemoteDispatchError(),
+				commands: [],
+				rootSets: []
+			});
+		}
+	);
+
+	it.each(
+		[
+			{ name: 'streamed', preflightFailure: undefined },
+			{
+				name: 'reconciled',
+				preflightFailure: new UntrustedDaemonError('not-trusted')
+			}
+		].flatMap((mode) =>
+			['built', 'existing'].map((origin) => ({ ...mode, origin }))
+		)
+	)(
+		'rejects a delegated $origin output as rebuild evidence in $name mode',
+		async ({ preflightFailure, origin }) => {
+			const installable = `${drvA}^out`;
+			const run = await runFlow({
+				...(preflightFailure !== undefined && { preflightFailure }),
+				constructed: {
+					succeedOn: 1,
+					rebuild: true,
+					installables: [installable],
+					targets: [
+						{
+							installable,
+							derivation: drvA,
+							paths: [pathA],
+							origin: origin === 'built' ? 'built' : 'existing',
+							machine: 'ssh://builder'
+						}
+					]
+				},
+				valid: [pathA],
+				alreadyValid: origin === 'existing' ? [pathA] : [],
+				declaredOutputs: [pathA],
+				outPaths: [pathA]
+			});
+			expect({
+				error: run.error,
+				receiptExists: existsSync(run.receiptFile),
+				rootSets: run.rootSets
+			}).toStrictEqual({
+				error: new BuildRebuildRemoteDispatchError(),
+				receiptExists: false,
+				rootSets: []
+			});
+		}
+	);
+
+	it('does not infer individual outputs from a successful reconciled multi-output build', async () => {
+		const run = await runFlow({
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
+			valid: [pathA, pathB],
+			alreadyValid: [pathA],
+			declaredOutputs: [pathA, pathB],
+			ultimatePaths: [pathA, pathB]
+		});
+		const receipt = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(run.receiptFile, 'utf8'))
+		);
+
+		expect(receipt.subjects).toStrictEqual([
+			heldSubject(pathA),
+			heldSubject(pathB)
+		]);
+	});
+
+	it.each([true, false])(
+		'does not claim an existing output after a failed reconciled-local rebuild (missing activity: %s)',
+		async (omitActivity) => {
+			const run = await runFlow({
+				preflightFailure: new UntrustedDaemonError('not-trusted'),
+				constructed: {
+					succeedOn: 2,
+					attempts: 1,
+					rebuild: true,
+					requireProvenance: true,
+					omitActivity,
+					installables: [`${drvA}^out`]
+				},
+				valid: [pathA],
+				alreadyValid: [pathA],
+				declaredOutputs: [pathA],
+				ultimatePaths: [pathA]
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+
+			expect(receipt).toStrictEqual({
+				version: 3,
+				paths: [pathA],
+				subjects: [
+					{
+						origin: 'store-held',
+						storePath: pathA,
+						narHash: narHash.digestHex(),
+						derivation: drvA,
+						buildStore: 'auto'
+					}
+				],
+				childExitStatus: 1,
+				terminalFailure: omitActivity
+					? { kind: 'command' }
+					: { kind: 'target-build', failedTargets: [`${drvA}^out`] },
+				uploaded: []
+			});
+		}
+	);
+
+	it.each([
+		{ name: 'streamed', preflightFailure: undefined },
+		{
+			name: 'reconciled local',
+			preflightFailure: new UntrustedDaemonError('not-trusted')
+		}
+	])(
+		'does not claim a remote builder output in $name mode without producer evidence',
+		async ({ preflightFailure }) => {
+			const run = await runFlow({
+				...(preflightFailure !== undefined && { preflightFailure }),
+				constructed: {
+					succeedOn: 1,
+					machine: 'ssh://builder',
+					installables: [`${drvA}^out`]
+				},
+				valid: [pathA],
+				declaredOutputs: [pathA]
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+
+			expect(receipt.subjects).toStrictEqual([
+				{
+					origin: 'copied',
+					storePath: pathA,
+					narHash: narHash.digestHex(),
+					derivation: drvA,
+					signatures: []
+				}
+			]);
 		}
 	);
 
@@ -1918,11 +2762,10 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	it('attributes a current-run hook output when Nix omits its activity', async () => {
+	it('publishes a hook output without claiming a build when activity is missing', async () => {
 		const run = await runFlow({
 			constructed: {
 				succeedOn: 1,
-				requireProvenance: true,
 				omitActivity: true
 			},
 			valid: [pathA],
@@ -1937,18 +2780,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [
-					{
-						origin: 'built',
-						storePath: pathA,
-						narHash: narHash.digestHex(),
-						derivation: drvA,
-						attempt: 1,
-						attemptId: 'attempt-1',
-						buildStore: 'auto',
-						verification: 'build-store'
-					}
-				],
+				subjects: [heldSubject(pathA)],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				childExitStatus: 0,
 				uploaded: [],
@@ -2003,7 +2835,7 @@ describe('runBuildPush', () => {
 		}
 	);
 
-	it('keeps the first recorded builder across a retry', async () => {
+	it('does not infer remote execution after a retry', async () => {
 		const run = await runFlow({
 			constructed: {
 				succeedOn: 2,
@@ -2025,19 +2857,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [
-					{
-						origin: 'built',
-						storePath: pathA,
-						narHash: narHash.digestHex(),
-						derivation: drvA,
-						attempt: 1,
-						attemptId: 'attempt-1',
-						buildStore: 'auto',
-						machine: 'ssh://builder-1',
-						verification: 'build-store'
-					}
-				],
+				subjects: [copiedSubject(pathA)],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				childExitStatus: 0,
 				uploaded: [],

@@ -90,6 +90,98 @@ const installableRequests = [
 ];
 
 describe('modelPublishingJob', () => {
+	it.each<{ name: string; inputJob: DiscoveredPublishingJob }>([
+		{
+			name: 'installable workflow with publication disabled',
+			inputJob: {
+				...installableJob,
+				inputs: { ...installableJob.inputs, publish: 'none' },
+				triggers: triggers('schedule')
+			}
+		},
+		{
+			name: 'flake preset with publication disabled',
+			inputJob: {
+				...job,
+				inputs: { ...job.inputs, publish: 'none' },
+				triggers: triggers('pull_request')
+			}
+		},
+		...(['outputs', 'closure'] as const).map((publish) => ({
+			name: `flake push:false with publish:${publish}`,
+			inputJob: {
+				...job,
+				inputs: { ...job.inputs, push: false, publish },
+				triggers: triggers('pull_request')
+			}
+		}))
+	])('models $name without write grants', ({ inputJob }) => {
+		const result = modelPublishingJob(inputJob, identity, tenant, 'main');
+
+		expect(result.cases.map(({ requests }) => requests)).toStrictEqual([[]]);
+	});
+
+	it('does not apply the old flake push input to an installable workflow', () => {
+		const result = modelPublishingJob(
+			{
+				...installableJob,
+				inputs: { ...installableJob.inputs, push: false },
+				triggers: triggers('schedule')
+			},
+			identity,
+			tenant,
+			'main'
+		);
+
+		expect(result.cases.map(({ requests }) => requests)).toStrictEqual([
+			installableRequests
+		]);
+	});
+
+	it.each([installableJob, job])(
+		'rejects a string attestation mode for the $kind workflow',
+		(inputJob) => {
+			expect(
+				modelPublishingJob(
+					{ ...inputJob, inputs: { ...inputJob.inputs, attest: 'both' } },
+					identity,
+					tenant,
+					'main'
+				)
+			).toStrictEqual({
+				cases: [],
+				findings: [
+					{
+						finding: new PublicationUnmodelledFinding(
+							'attest must be a literal boolean'
+						)
+					}
+				]
+			});
+		}
+	);
+
+	it('models the installable workflow with explicit attest: true', () => {
+		const baseline = modelPublishingJob(
+			{ ...installableJob, triggers: triggers('schedule') },
+			identity,
+			tenant,
+			'main'
+		);
+		const result = modelPublishingJob(
+			{
+				...installableJob,
+				inputs: { ...installableJob.inputs, attest: true },
+				triggers: triggers('schedule')
+			},
+			identity,
+			tenant,
+			'main'
+		);
+
+		expect(result).toStrictEqual(baseline);
+	});
+
 	it('models both publications from the flake preset', () => {
 		const result = modelPublishingJob(job, identity, tenant, 'main');
 		const prCache = {

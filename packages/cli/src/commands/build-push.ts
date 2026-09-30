@@ -30,7 +30,7 @@ import type {
 	RootSetBody
 } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
-import type { Command } from 'commander';
+import { type Command, Option } from 'commander';
 import { z } from 'zod';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
@@ -90,6 +90,8 @@ interface BuildPushOptions {
 	readonly permanent?: boolean;
 	readonly retain?: boolean;
 	readonly closure?: boolean;
+	readonly publicationScope?: 'outputs' | 'closure';
+	readonly substituter?: 'leave' | 'copy';
 	readonly intermediatePathsFile?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
@@ -304,7 +306,12 @@ export function aggregateBuildReceipts(
 		...(terminalFailure !== undefined && { terminalFailure }),
 		uploaded: unique(parsed.flatMap((receipt) => receipt.uploaded ?? [])),
 		failed: unique(parsed.flatMap((receipt) => receipt.failed ?? [])),
-		collected: unique(parsed.flatMap((receipt) => receipt.collected ?? []))
+		collected: unique(parsed.flatMap((receipt) => receipt.collected ?? [])),
+		...(parsed.some((receipt) => receipt.leftUpstream !== undefined) && {
+			leftUpstream: unique(
+				parsed.flatMap((receipt) => receipt.leftUpstream ?? [])
+			)
+		})
 	});
 }
 
@@ -455,6 +462,22 @@ export function registerBuildPushCommand(
 		.option(
 			'--closure',
 			'publish the whole closure of the built outputs (by default, only the built outputs)'
+		)
+		.addOption(
+			new Option(
+				'--publication-scope <scope>',
+				'Control which paths build-push publishes for installable cohorts. `outputs` publishes the selected outputs; `closure` also publishes their runtime references. Publication starts after the build.'
+			)
+				.choices(['outputs', 'closure'])
+				.conflicts(['closure', 'intermediatePathsFile'])
+		)
+		.addOption(
+			new Option(
+				'--substituter <mode>',
+				'Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references. Both modes select outputs built in this run.'
+			)
+				.choices(['leave', 'copy'])
+				.default('copy')
 		)
 		.option(
 			'--intermediate-paths-file <path>',
@@ -645,6 +668,8 @@ export function registerBuildPushCommand(
 					return runBuildPush(
 						{
 							invocation,
+							substituter: options.substituter,
+							tenantUrl: target.tenantUrl,
 							...(cohorts.length === 1 &&
 								targetRoot !== undefined && {
 									root: targetRoot
@@ -658,6 +683,9 @@ export function registerBuildPushCommand(
 										options.runRootPermanent
 									)
 								}
+							}),
+							...(options.publicationScope !== undefined && {
+								publicationScope: options.publicationScope
 							}),
 							...(options.closure !== undefined && {
 								closure: options.closure
@@ -676,6 +704,9 @@ export function registerBuildPushCommand(
 						},
 						reporter,
 						{
+							...(programOptions.signal !== undefined && {
+								signal: programOptions.signal
+							}),
 							client: pushClient,
 							credential:
 								options.githubOidc === true ? 'github-oidc' : 'cupboard-login',

@@ -17,7 +17,12 @@ import {
 	type DiscoveredPublishingJob,
 	type ReadCredentialWiring
 } from './discovery.ts';
-import { isPresetJob, jobCache, type PublicationCase } from './publication.ts';
+import {
+	isPresetJob,
+	isReadOnlyJob,
+	jobCache,
+	type PublicationCase
+} from './publication.ts';
 
 export interface PublicationReadAuthority {
 	readonly cache: CacheScope;
@@ -45,11 +50,10 @@ export async function publicationReadAuthority(
 	}
 
 	const isPreset = isPresetJob(job);
+	const isReadOnly = isReadOnlyJob(job);
 	const cacheMode = job.inputs['cache-access-mode'];
 	const isPullRequest =
-		isPreset &&
-		publication.trigger === 'pull_request' &&
-		job.inputs.push !== false;
+		isPreset && publication.trigger === 'pull_request' && !isReadOnly;
 	const cache: CacheScope = isPullRequest
 		? {
 				kind: 'named',
@@ -58,7 +62,7 @@ export async function publicationReadAuthority(
 		: selectedCache.scope;
 	const selectedViewAccess =
 		isPreset &&
-		job.inputs.push !== false &&
+		!isReadOnly &&
 		(cacheMode === 'public' || cacheMode === 'private')
 			? cacheMode
 			: isPreset

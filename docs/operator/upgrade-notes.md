@@ -123,6 +123,115 @@ statuses.
   other rule options, which it used to ignore. Remove them from invocations that
   use `--from-file`.
 
+### Choosing cache access in CI
+
+Read credentials no longer choose whether a new CI cache is public or private.
+New caches inherit the tenant's default cache access unless `cache-access-mode`
+specifies `public` or `private`. Existing caches keep their access, and an
+explicit mode that disagrees with an existing cache fails.
+
+The earlier flake workflow created private pull-request caches when
+`fallback_read_user` was supplied. If the tenant's default cache is public and
+your caller relied on that behaviour, set `cache-access-mode: private` in the
+reusable workflow. The reuse view must use the same access as those caches. See
+[Private caches in CI][private-caches-ci] for configuring access and OIDC reads.
+
+Custom jobs that use `actions/setup` can continue to pass
+`provision-cache-access`; it is a deprecated alias for `cache-access-mode`.
+
+[private-caches-ci]: ../ci/private-caches.md#choose-the-cache-access
+
+### Choosing what CI builds and publishes
+
+The reusable workflows use four separate inputs: `build` chooses whether to
+rebuild requested outputs, `substituter` chooses whether externally substituted
+outputs are selected for publication, `publish` chooses the published path set,
+and `attest` enables build provenance. The defaults are `build: missing`,
+`publish: outputs` and `attest: true`. The flake workflow defaults to
+`substituter: leave`; the simpler workflow defaults to `substituter: copy`.
+
+| v0.0.35 caller                                                                                                   | Change for this release                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Flake workflow with `push: false`                                                                                | No input change is required. `push: false` disables publication and signing. `publish: none` also disables them. Add `build: rebuild` if the run must build every requested output again.               |
+| Flake workflow with `push: true` or no `push` input                                                              | The defaults publish selected outputs, but an available output is no longer rebuilt just because its attestation is missing. Add `build: rebuild` if the job must execute every requested output again. |
+| Simple workflow with `attest: false`                                                                             | No change is required. The input remains a boolean.                                                                                                                                                     |
+| Simple workflow with `attest: true` or no `attest` input, when every output needs build provenance from this run | Add `build: rebuild`. Dependencies may still be substituted.                                                                                                                                            |
+
+The new flake-workflow `attest` input is also a boolean and defaults to `true`.
+Both workflows sign build provenance only for builds observed on the runner.
+Reused or substituted outputs receive no fresh build claim. The destination can
+inherit eligible existing attestations without changing the original bundles or
+signatures. Signing and attachment still happen after publication. If either
+fails, the workflow fails, but the paths remain in the cache. A rerun that
+reuses those paths does not recreate build evidence for the earlier attempt.
+
+Custom jobs must remove `require-provenance` from `actions/build-paths`. The
+replacement `build` input defaults to `missing`, which can reuse an available
+output. Set `build: rebuild` when the job must execute each requested derivation
+again. Dependencies can still be substituted, and execution on a remote builder
+does not establish runner-local provenance.
+
+Custom jobs should set `inline-bundles: false` on `actions/attest`, pass
+`steps.attest.outputs.bundles-file` to the `bundles-file` input of
+`actions/attest-attach`, and run attachment when that file output is not empty.
+The manifest includes every bundle. The `bundles` and `bundle-path` outputs
+remain complete when `inline-bundles` is `true`, which is the default. File mode
+omits these inline outputs explicitly.
+
+`actions/attest` signs SLSA build provenance for observed local builds and SCAI
+`REPRODUCIBLE` assertions for successful local verification rebuilds. Its
+`predicate-file` input chooses where to write that reproduction report. The
+`origin-bundle-path` output lists the signed SCAI bundles when `inline-bundles`
+is `true`; it is empty when no output was reproduced. All signed bundles are
+listed in `bundles-file`. The action no longer generates build-origin statements
+or new reports about inherited bundles. Existing signed bundles, including
+build-origin and SCAI reports, remain attachable and independently verifiable.
+
+For build output lists, set `inline-paths: false` on `actions/build-paths` and
+pass `steps.build.outputs.publish-paths-file` to `actions/push` through its
+`paths-file` input. Files avoid the process argument and Actions output limits
+for large lists. The reusable workflows already use files for both lists.
+
+The CLI uses grouped attachment when the server supports it: each distinct
+bundle is uploaded once, then its subjects are attached in pages. With an older
+server, the CLI uses the existing per-path attachment API. That fallback uploads
+the same signed bundle for each path and preserves its subjects and signatures.
+Ordinary publication jobs do not need a server upgrade for multi-subject
+attachment.
+
+Attestation attachment now matches subjects by their NAR digest. A subject can
+omit its name or use a descriptive name that differs from the store-path
+basename. Every selected path with matching NAR bytes can receive the bundle;
+selected-path authorisation and committed NAR identity checks still apply.
+
+`cupboard attest attach` accepts `--paths-file` and `--attestations-file` for
+lists of store paths and bundle files, respectively. Each file contains one path
+per line. `actions/attest-attach` passes these files to the CLI so large lists
+do not depend on command-line or environment-variable limits.
+
+For remote rebuilds, use `store: ssh-ng://...` to select the machine. Delegated
+builders cannot guarantee execution because Nix can reuse an output already on
+the builder. A cohort with `remote: true` and no `store` cannot use
+`build: rebuild`; use `build: missing` to keep delegated reuse, or select the
+remote store directly. The selected store must have local build slots and
+support the target's system and required features. Cupboard disables onward
+dispatch for rebuilds and checks observed execution independently of attestation
+signing.
+
+`build: rebuild` builds each requested output again in the selected Nix store,
+even if the output is already available. Nix may still substitute dependencies.
+The workflow signs SLSA provenance only for builds observed on the runner. A
+delegated builder or selected remote store does not provide that evidence.
+`publish: closure` also publishes every runtime reference of each selected
+output that reaches the cache, including substituted dependencies. Setting
+`publish: none` skips signing whatever `attest` specifies. See [Choosing
+publication behaviour][publication-behaviour] and [the simpler
+workflow][simpler-workflow] for examples and the full interaction table.
+
+[publication-behaviour]: ../ci/flake-publish.md#choosing-publication-behaviour
+[simpler-workflow]:
+  ../ci/custom-jobs.md#the-simpler-workflow-cupboard-publishyml
+
 ## v0.0.34
 
 This release changes how cupboard identifies caches, and how stored grants and

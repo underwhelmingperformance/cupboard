@@ -1,10 +1,13 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { env } from 'node:process';
+import { Writable } from 'node:stream';
 
 import {
 	type DaemonCommandRunner,
 	Nix,
+	type NixBuildMode,
 	type NixBuildResult,
 	type NixDaemonClientOptions,
 	NixDaemonStoreClient,
@@ -14,6 +17,7 @@ import {
 } from '@cupboard/nix';
 import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -22,7 +26,9 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { buildReceiptV3Schema } from '@cupboard/protocol/build';
 import {
 	describeUnknownPathsRefusal,
 	unknownPathsCeilingRefusalSchema
@@ -33,12 +39,15 @@ import {
 	terminationGracePeriodMs
 } from '@cupboard/shared/child-process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { buildProgram } from '../../../packages/cli/src/cli.ts';
 import { FakeDaemonChild } from '../../../tests/support/fake-daemon-child.ts';
 import { FakeDaemonTransport } from '../../../tests/support/fake-daemon-transport.ts';
 import { runCupboard } from '../cupboard-run.ts';
 import {
+	BuildObservationMissingError,
+	BuildRebuildRemoteDispatchError,
 	CohortJsonInvalidError,
 	CohortJsonSchemaError,
 	CohortPlanCommandError,
@@ -74,16 +83,14 @@ import {
 	buildPushCohortsFile,
 	canonicalNixDerivedPath,
 	type CapturedNixProcess,
+	cohortBuildPushArguments,
 	cohortPushArguments,
 	cohortReceiptPushArguments,
 	materialiseDerivationGraph,
 	nixBuildArguments,
-	nixCopyArguments,
 	nixDerivationShowArguments,
 	parseNixDerivationShow,
 	planReprobeArguments,
-	provenanceRebuildInstallables,
-	receiptAlreadyHeldPaths,
 	type RemoteBuildSessionOptions,
 	remoteBuildSetOptions,
 	resolveBuildCohortInputs,
@@ -126,6 +133,11 @@ function argumentValue(
 	const index = argv.indexOf(flag);
 
 	return index === -1 ? undefined : argv[index + 1];
+}
+
+async function readPathManifest(file: string): Promise<readonly string[]> {
+	const contents = await readFile(file, 'utf8');
+	return contents.trim().split('\n').filter(Boolean);
 }
 
 function evaluatedDerivations(
@@ -186,6 +198,7 @@ function remoteResult(
 	output = libraryBuiltPath
 ): NixBuildResult {
 	return {
+		...(kind === 'built' && { execution: 'local' as const }),
 		target: derivedPath(target),
 		outcome: {
 			kind,
@@ -356,6 +369,43 @@ function baseOptions(): BuildCohortOptions {
 	};
 }
 
+it.each(['outputs', 'closure'] as const)(
+	'passes the %s publication scope to a local streamed build',
+	(publish) => {
+		const inputs = resolveBuildCohortInputs(
+			{ ...baseOptions(), publish },
+			{ RUNNER_TEMP: '/tmp' }
+		);
+
+		expect(cohortBuildPushArguments(inputs, '/tmp/cohorts.json')).toStrictEqual(
+			[
+				'--no-colour',
+				'build-push',
+				baseOptions().url,
+				'--github-oidc',
+				'--no-retain',
+				'--cohorts-file',
+				'/tmp/cohorts.json',
+				'--receipt-file',
+				'/tmp/cupboard-cohort-receipt.json',
+				'--aggregate-receipt-v3',
+				'--substituter',
+				'leave',
+				'--publication-scope',
+				publish
+			]
+		);
+	}
+);
+
+beforeEach(() => {
+	vi.stubEnv('NIX_CONFIG', `${env.NIX_CONFIG ?? ''}\nbuilders =\n`);
+});
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
+
 describe('resolveBuildCohortInputs', () => {
 	it('parses a cohort-matrix entry into resolved inputs', () => {
 		const inputs = resolveBuildCohortInputs(baseOptions(), {
@@ -421,6 +471,18 @@ describe('resolveBuildCohortInputs', () => {
 		).toThrow(RetentionChoiceConflictError);
 	});
 
+	it('does not publish when the publication scope is none', () => {
+		const inputs = resolveBuildCohortInputs(
+			{ ...baseOptions(), publish: 'none' },
+			{ RUNNER_TEMP: '/tmp' }
+		);
+
+		expect({ publish: inputs.publish, push: inputs.push }).toStrictEqual({
+			publish: 'none',
+			push: false
+		});
+	});
+
 	it.each([
 		{ name: 'no cache input', options: {}, expected: defaultCache },
 		{
@@ -450,11 +512,11 @@ describe('resolveBuildCohortInputs', () => {
 
 	it('enables current-invocation provenance rebuilds explicitly', () => {
 		const inputs = resolveBuildCohortInputs(
-			{ ...baseOptions(), requireProvenance: 'true' },
+			{ ...baseOptions(), build: 'rebuild' },
 			{ RUNNER_TEMP: '/tmp' }
 		);
 
-		expect(inputs.requireProvenance).toBe(true);
+		expect(inputs.build).toBe('rebuild');
 	});
 
 	it('passes the remote store through', () => {
@@ -662,82 +724,259 @@ describe('nixBuildArguments', () => {
 	});
 });
 
+describe('runNixBuild rebuild policy', () => {
+	it('rejects a successful check command with no observed build', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-rebuild-'));
+		const derivation = libraryQueryInstallable.slice(0, -4);
+		const start = vi.fn((arguments_: readonly string[]) => {
+			const process = new ControlledNixProcess();
+
+			setImmediate(() => {
+				process.emitStdout(
+					arguments_.includes('--rebuild') ? '' : `${libraryBuiltPath}\n`
+				);
+				process.emitClose(0);
+			});
+
+			return process;
+		});
+		const nix = {
+			readDerivation: () =>
+				Promise.resolve(Derivation.parse(remoteDerivation(derivation))),
+			queryValidPaths: () => Promise.resolve([libraryBuiltPath]),
+			queryPathInfo: (storePath: string) =>
+				Promise.resolve({
+					...remotePathInfo(storePath),
+					deriver: derivation
+				})
+		};
+
+		try {
+			await expect(
+				runNixBuild([libraryQueryInstallable], '', '', directory, undefined, {
+					start,
+					nix,
+					evaluationNix: nix,
+					rebuild: true
+				})
+			).rejects.toStrictEqual(
+				new BuildObservationMissingError([libraryBuiltPath])
+			);
+		} finally {
+			await rm(directory, { recursive: true });
+		}
+	});
+
+	it.each([
+		{
+			name: 'a fresh local build',
+			initiallyValid: [],
+			machine: '',
+			store: '',
+			outputs: [libraryBuiltPath],
+			checks: []
+		},
+		{
+			name: 'a fresh delegated build',
+			initiallyValid: [],
+			machine: 'ssh-ng://builder@example.test',
+			store: '',
+			outputs: [libraryBuiltPath],
+			checks: []
+		},
+		{
+			name: 'a substituted output',
+			initiallyValid: [],
+			machine: undefined,
+			store: '',
+			outputs: [libraryBuiltPath],
+			checks: [libraryQueryInstallable],
+			copyDuringCheck: true
+		},
+		{
+			name: 'an output already in the store',
+			initiallyValid: [libraryBuiltPath],
+			machine: undefined,
+			store: '',
+			outputs: [libraryBuiltPath],
+			checks: [libraryQueryInstallable]
+		},
+		{
+			name: 'an available remote-store output',
+			initiallyValid: [libraryBuiltPath],
+			machine: undefined,
+			store: 'ssh-ng://build@example.test',
+			outputs: [libraryBuiltPath],
+			checks: [libraryQueryInstallable]
+		}
+	])('requires execution for $name', async (scenario) => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-rebuild-'));
+		const derivation = libraryQueryInstallable.slice(0, -4);
+		const calls: string[][] = [];
+		const start = vi.fn((arguments_: readonly string[]) => {
+			const process = new ControlledNixProcess();
+			calls.push([...arguments_]);
+
+			setImmediate(() => {
+				void (async () => {
+					if (
+						arguments_.includes('--rebuild') ||
+						scenario.machine !== undefined
+					) {
+						const logFile = argumentValue(arguments_, 'json-log-path');
+
+						if (logFile === undefined) {
+							throw new Error('Expected the activity log path');
+						}
+
+						await writeFile(
+							logFile,
+							[
+								JSON.stringify({
+									action: 'start',
+									type: 105,
+									fields: [derivation, scenario.machine ?? '']
+								}),
+								...(arguments_.includes('--rebuild') &&
+								scenario.copyDuringCheck === true
+									? [
+											JSON.stringify({
+												action: 'start',
+												type: 100,
+												fields: [
+													referencePath,
+													'https://cache.example',
+													'local'
+												]
+											})
+										]
+									: [])
+							].join('\n') + '\n'
+						);
+					}
+
+					process.emitStdout(`${scenario.outputs.join('\n')}\n`);
+					process.emitClose(0);
+				})().catch((error: unknown) => {
+					process.emitError(
+						error instanceof Error ? error : new Error(String(error))
+					);
+				});
+			});
+
+			return process;
+		});
+		const nix = {
+			readDerivation: () =>
+				Promise.resolve(Derivation.parse(remoteDerivation(derivation))),
+			queryValidPaths: () => Promise.resolve(scenario.initiallyValid),
+			queryPathInfo: (storePath: string) =>
+				Promise.resolve({
+					...remotePathInfo(storePath),
+					deriver: derivation
+				})
+		};
+
+		try {
+			const operation = runNixBuild(
+				[libraryQueryInstallable],
+				'',
+				scenario.store,
+				directory,
+				undefined,
+				{ start, nix, evaluationNix: nix, rebuild: true }
+			);
+			if (scenario.machine !== undefined && scenario.machine !== '') {
+				await expect(operation).rejects.toStrictEqual(
+					new BuildRebuildRemoteDispatchError()
+				);
+				expect(
+					calls.map((arguments_) => arguments_.includes('--rebuild'))
+				).toStrictEqual([false]);
+				return;
+			}
+			const result = await operation;
+
+			expect({
+				result,
+				commands: calls.map((arguments_) => ({
+					rebuild: arguments_.includes('--rebuild'),
+					store: argumentValue(arguments_, '--store') ?? '',
+					installables: arguments_.slice(arguments_.indexOf('--') + 1)
+				}))
+			}).toStrictEqual({
+				result: {
+					paths: scenario.outputs,
+					status: 0,
+					copiedFrom:
+						scenario.copyDuringCheck === true
+							? new Map([[referencePath, ['https://cache.example']]])
+							: new Map()
+				},
+				commands: [
+					{
+						rebuild: false,
+						store: scenario.store,
+						installables: [libraryQueryInstallable]
+					},
+					...scenario.checks.map((installable) => ({
+						rebuild: true,
+						store: scenario.store,
+						installables: [installable]
+					}))
+				]
+			});
+		} finally {
+			await rm(directory, { recursive: true });
+		}
+	});
+});
+
 describe('buildPushCohortsFile', () => {
-	it('separates ordinary builds from provenance rebuilds', () => {
+	it('separates ordinary builds from rebuilds', () => {
 		expect(
 			buildPushCohortsFile(
 				[libraryQueryInstallable, floatingQueryInstallable],
 				'',
 				false,
-				new Set([floatingQueryInstallable]),
-				true
+				new Set([floatingQueryInstallable])
 			)
 		).toStrictEqual({
 			cohorts: [
 				{
 					installables: [libraryQueryInstallable],
-					requireProvenance: true,
 					keepGoing: true
 				},
 				{
 					installables: [floatingQueryInstallable],
 					rebuild: true,
-					requireProvenance: true,
 					keepGoing: true
 				}
 			]
 		});
 	});
 
-	it('keeps each best-effort target attributable while rebuilding for provenance', () => {
+	it('keeps each best-effort target separate while rebuilding', () => {
 		expect(
 			buildPushCohortsFile(
 				[libraryQueryInstallable, floatingQueryInstallable],
 				'',
 				true,
-				new Set([floatingQueryInstallable]),
-				true
+				new Set([floatingQueryInstallable])
 			)
 		).toStrictEqual({
 			cohorts: [
 				{
 					installables: [libraryQueryInstallable],
-					requireProvenance: true,
 					keepGoing: false
 				},
 				{
 					installables: [floatingQueryInstallable],
 					rebuild: true,
-					requireProvenance: true,
 					keepGoing: false
 				}
 			]
 		});
-	});
-});
-
-describe('nixCopyArguments', () => {
-	it('copies the complete local derivation closures to the exact remote store', () => {
-		expect(
-			nixCopyArguments(
-				[
-					storePathSchema.parse(
-						'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
-					),
-					storePathSchema.parse(
-						'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
-					)
-				],
-				'ssh-ng://build@example.test?remote-store=/srv/nix'
-			)
-		).toStrictEqual([
-			'copy',
-			'--to',
-			'ssh-ng://build@example.test?remote-store=/srv/nix',
-			'--',
-			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
-			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
-		]);
 	});
 });
 
@@ -751,6 +990,13 @@ class ControlledNixProcess implements CapturedNixProcess {
 	private stdoutListener: ((chunk: string) => void) | undefined;
 
 	readonly signals: NodeJS.Signals[] = [];
+	readonly inputs: string[] = [];
+	readonly stdin = new Writable({
+		write: (chunk: Uint8Array, _encoding, callback) => {
+			this.inputs.push(Buffer.from(chunk).toString('utf8'));
+			callback();
+		}
+	});
 
 	onceError(listener: (error: Error) => void): void {
 		this.errorListener = listener;
@@ -831,6 +1077,50 @@ class ControlledEscalationScheduler implements ChildProcessEscalationScheduler {
 }
 
 describe('runNixCopy', () => {
+	it('sends a large copy list through stdin with constant arguments', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-copy-stdin-')
+		);
+		const log = path.join(directory, 'copy.json');
+		const executable = path.join(directory, 'nix');
+		const paths = Array.from({ length: 40_000 }, (_, index) =>
+			storePathSchema.parse(
+				`/nix/store/${String(index).padStart(32, '0')}-runtime-dependency`
+			)
+		);
+		await writeFile(
+			executable,
+			String.raw`#!/usr/bin/env node
+const {writeFileSync} = require('node:fs');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+ writeFileSync(process.env.FAKE_NIX_COPY_LOG, JSON.stringify({arguments: process.argv.slice(2), paths: input.split('\n').filter(Boolean)}));
+});
+`
+		);
+		await chmod(executable, 0o755);
+		vi.stubEnv('PATH', `${directory}:${env.PATH ?? ''}`);
+		vi.stubEnv('FAKE_NIX_COPY_LOG', log);
+		try {
+			await runNixCopy(paths, 'ssh-ng://builder?remote-store=/srv/nix');
+			const observed: unknown = JSON.parse(await readFile(log, 'utf8'));
+			expect(observed).toStrictEqual({
+				arguments: [
+					'copy',
+					'--to',
+					'ssh-ng://builder?remote-store=/srv/nix',
+					'--stdin'
+				],
+				paths
+			});
+		} finally {
+			vi.unstubAllEnvs();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('waits for process closure before propagating the exact cancellation reason', async () => {
 		const process = new ControlledNixProcess();
 		const controller = new AbortController();
@@ -862,13 +1152,7 @@ describe('runNixCopy', () => {
 			signals: ['SIGTERM'],
 			start: [
 				[
-					[
-						'copy',
-						'--to',
-						'ssh-ng://build@example.test',
-						'--',
-						'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
-					],
+					['copy', '--to', 'ssh-ng://build@example.test', '--stdin'],
 					controller.signal
 				]
 			]
@@ -1474,7 +1758,7 @@ describe('buildAndRootNixResults', () => {
 			() => Promise.resolve(),
 			{
 				copyPaths: [],
-				requireProvenance: true,
+				rebuild: true,
 				copy: () => Promise.resolve()
 			}
 		);
@@ -1483,6 +1767,91 @@ describe('buildAndRootNixResults', () => {
 			{
 				targets: [libraryQueryInstallable],
 				mode: 'check'
+			}
+		]);
+	});
+
+	it.each([
+		{ initial: undefined, checked: 'local', succeeds: true },
+		{ initial: 'remote', checked: 'local', succeeds: true },
+		{ initial: undefined, checked: undefined, succeeds: false },
+		{ initial: 'remote', checked: 'remote', succeeds: false }
+	] as const)(
+		'requires selected-store execution after an unproven build: $initial $checked',
+		async ({ initial, checked, succeeds }) => {
+			const modes: (NixBuildMode | undefined)[] = [];
+			const run = buildAndRootNixResults(
+				{
+					readDerivation: (drvPath) =>
+						Promise.resolve(remoteDerivation(drvPath)),
+					queryValidPaths: () => Promise.resolve([]),
+					buildPathsWithResults: (_targets, mode) => {
+						modes.push(mode);
+						const { execution: _execution, ...result } = remoteResult('built');
+						const execution = mode === 'check' ? checked : initial;
+						return Promise.resolve([
+							{ ...result, ...(execution !== undefined && { execution }) }
+						]);
+					},
+					resolveClosure: ownPathClosure,
+					addTempRoot: () => Promise.resolve()
+				},
+				[derivedPath(libraryQueryInstallable)],
+				() => Promise.resolve(),
+				{ copyPaths: [], rebuild: true, copy: () => Promise.resolve() }
+			);
+			if (succeeds) {
+				await run;
+			} else {
+				await expect(run).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+			}
+			expect(modes).toStrictEqual(['normal', 'check']);
+		}
+	);
+
+	it('rejects a check result that did not rebuild the selected output', async () => {
+		const publications: unknown[] = [];
+		const run = buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => Promise.resolve(remoteDerivation(drvPath)),
+				queryValidPaths: (paths) => Promise.resolve(paths),
+				buildPathsWithResults: ([target]) =>
+					Promise.resolve([
+						target === libraryQueryInstallable
+							? remoteResult('already-valid')
+							: remoteResult('built', appQueryInstallable, appPath)
+					]),
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[derivedPath(libraryQueryInstallable), derivedPath(appQueryInstallable)],
+			(results, failures, paths, provenanceRebuilds) => {
+				publications.push({ results, failures, paths, provenanceRebuilds });
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [],
+				rebuild: true,
+				copy: () => Promise.resolve()
+			}
+		);
+
+		await expect(run).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+		expect(publications).toStrictEqual([
+			{
+				results: [remoteResult('built', appQueryInstallable, appPath)],
+				failures: [
+					{
+						target: derivedPath(libraryQueryInstallable),
+						kind: 'target',
+						outcome: 'not-built',
+						message:
+							'the rebuild did not prove execution in the selected store (result: already-valid; execution: unobserved)'
+					}
+				],
+				paths: [appPath],
+				provenanceRebuilds: new Set([derivedPath(appQueryInstallable)])
 			}
 		]);
 	});
@@ -1506,7 +1875,7 @@ describe('buildAndRootNixResults', () => {
 			() => Promise.resolve(),
 			{
 				copyPaths: [],
-				requireProvenance: true,
+				rebuild: true,
 				copy: () => Promise.resolve()
 			}
 		);
@@ -1550,7 +1919,7 @@ describe('buildAndRootNixResults', () => {
 			() => Promise.resolve(),
 			{
 				copyPaths: [],
-				requireProvenance: true,
+				rebuild: true,
 				copy: () => Promise.resolve()
 			}
 		);
@@ -1579,7 +1948,7 @@ describe('buildAndRootNixResults', () => {
 			() => Promise.resolve(),
 			{
 				copyPaths: [],
-				requireProvenance: true,
+				rebuild: true,
 				copy: () => Promise.resolve()
 			}
 		);
@@ -1604,7 +1973,7 @@ describe('buildAndRootNixResults', () => {
 
 					return Promise.resolve([
 						target === libraryQueryInstallable
-							? remoteResult('already-valid')
+							? remoteResult('built')
 							: remoteResult('built', target, floatingBuiltPath)
 					]);
 				},
@@ -1622,7 +1991,7 @@ describe('buildAndRootNixResults', () => {
 			},
 			{
 				copyPaths: [],
-				requireProvenance: true,
+				rebuild: true,
 				copy: () => Promise.resolve()
 			}
 		);
@@ -2061,7 +2430,7 @@ describe('buildAndRootNixResults', () => {
 						installables: [derivedPath(libraryQueryInstallable)]
 					}
 				],
-				requireProvenance: true,
+				rebuild: true,
 				copy: () => Promise.resolve()
 			}
 		);
@@ -2888,18 +3257,26 @@ function planCohortSuccess(
 	dependencyCopies: readonly {
 		readonly path: StorePathString;
 		readonly requiredBy: readonly NixDerivedPathString[];
-	}[] = []
+	}[] = [],
+	rebuildSet: readonly string[] = [],
+	availability: {
+		readonly attachOnly?: readonly string[];
+		readonly publishByReference?: readonly string[];
+		readonly closureTargets?: readonly string[];
+	} = {}
 ): readonly ReporterResultEvent[] {
 	return [
 		{
 			kind: 'plan-cohort',
 			data: {
 				partition: {
-					attachOnly: [appPath],
-					publishByReference: [],
+					attachOnly: availability.attachOnly ?? [appPath],
+					publishByReference: availability.publishByReference ?? [],
+					closureTargets: availability.closureTargets ?? [],
 					leftUpstream: [leftUpstreamPath],
 					alreadyValid: [appPath],
 					buildSet,
+					rebuildSet,
 					dependencyBuilds,
 					dependencyCopies,
 					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
@@ -3006,6 +3383,35 @@ describe('buildCohortAction', () => {
 	afterEach(async () => {
 		await rm(directory, { recursive: true, force: true });
 	});
+
+	it.each([
+		{ remote: true, builders: undefined },
+		{ remote: false, builders: 'ssh-ng://builder x86_64-linux' }
+	])(
+		'rejects remote dispatch before planning a rebuild: $remote $builders',
+		async ({ remote, builders }) => {
+			const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
+			await expect(
+				buildCohortAction(
+					{
+						...baseOptions(),
+						cohortJson: remotelyQueryableCohortJson({ remote }),
+						build: 'rebuild'
+					},
+					environment,
+					{
+						runCupboard: runCupboardMock,
+						buildSettings: {
+							systems: ['x86_64-linux'],
+							features: [],
+							...(builders !== undefined && { builders })
+						}
+					}
+				)
+			).rejects.toStrictEqual(new BuildRebuildRemoteDispatchError());
+			expect(runCupboardMock.mock.calls).toStrictEqual([]);
+		}
+	);
 
 	it('rejects a planned remote target that is not a derivation', async () => {
 		await expect(
@@ -3167,6 +3573,12 @@ describe('buildCohortAction', () => {
 				'--targets-file',
 				'--plan-file',
 				'--github-oidc',
+				'--build',
+				'missing',
+				'--substituter',
+				'leave',
+				'--publish',
+				'none',
 				'--reuse-view',
 				'pr-view',
 				'--view-read-user',
@@ -3239,70 +3651,57 @@ describe('buildCohortAction', () => {
 		});
 	});
 
-	it.each([
-		{
-			name: 'does',
-			requireProvenance: 'true',
-			attested: ['--require-attested']
-		},
-		{
-			name: 'does not',
-			requireProvenance: 'false',
-			attested: []
-		}
-	])(
-		'a run that $name require provenance asks the plan for attested availability',
-		async ({ requireProvenance, attested }) => {
-			const calls: (readonly string[])[] = [];
-			const runCupboardMock = vi.fn<typeof runCupboard>(
-				(binaryPath, arguments_, passedEnvironment) => {
-					calls.push(arguments_);
+	it('passes the build and substituter choices to the cohort planner', async () => {
+		const calls: (readonly string[])[] = [];
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			(binaryPath, arguments_, passedEnvironment) => {
+				calls.push(arguments_);
 
-					return cupboardStub()(binaryPath, arguments_, passedEnvironment);
-				}
-			);
+				return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+			}
+		);
 
-			await buildCohortAction(
-				{ ...baseOptions(), requireProvenance },
-				environment,
-				{
-					runCupboard: runCupboardMock,
-					runNixBuild: vi.fn(() =>
-						Promise.resolve({
-							paths: [libraryBuiltPath],
-							status: 0,
-							copiedFrom: new Map()
-						})
-					)
-				}
-			);
+		await buildCohortAction(
+			{ ...baseOptions(), substituter: 'copy' },
+			environment,
+			{
+				runCupboard: runCupboardMock,
+				runNixBuild: vi.fn(() =>
+					Promise.resolve({
+						paths: [libraryBuiltPath],
+						status: 0,
+						copiedFrom: new Map()
+					})
+				)
+			}
+		);
 
-			expect(
-				calls.find((arguments_) => arguments_[1] === 'plan')
-			).toStrictEqual([
-				'--no-colour',
-				'plan',
-				'cohort',
-				'https://cache.example.test/t/acme',
-				'--targets-file',
-				path.join(
-					directory,
-					'cupboard-plan-cohort-targets-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
-				),
-				'--plan-file',
-				path.join(
-					directory,
-					'cupboard-plan-cohort-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
-				),
-				'--github-oidc',
-				...attested
-			]);
-		}
-	);
+		expect(calls.find((arguments_) => arguments_[1] === 'plan')).toStrictEqual([
+			'--no-colour',
+			'plan',
+			'cohort',
+			'https://cache.example.test/t/acme',
+			'--targets-file',
+			path.join(
+				directory,
+				'cupboard-plan-cohort-targets-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
+			),
+			'--plan-file',
+			path.join(
+				directory,
+				'cupboard-plan-cohort-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
+			),
+			'--github-oidc',
+			'--build',
+			'missing',
+			'--substituter',
+			'copy',
+			'--publish',
+			'none'
+		]);
+	});
 
-	// The plan moves any served path without an attestation into the build set,
-	// so the action builds that set and leaves the attached targets alone.
-	it('builds only the plan build set when the run requires provenance', async () => {
+	it('builds only the installables in the plan build set', async () => {
 		const runNixBuild = vi.fn((installables: readonly string[]) =>
 			Promise.resolve({
 				paths: installables.includes(libraryQueryInstallable)
@@ -3317,7 +3716,7 @@ describe('buildCohortAction', () => {
 			{
 				...baseOptions(),
 				cohortJson: remotelyQueryableCohortJson(),
-				requireProvenance: 'true'
+				build: 'missing'
 			},
 			environment,
 			{ runCupboard: vi.fn<typeof runCupboard>(cupboardStub()), runNixBuild }
@@ -3334,6 +3733,42 @@ describe('buildCohortAction', () => {
 			targetPaths: [appPath, libraryBuiltPath]
 		});
 	});
+
+	it.each(['', 'ssh-ng://build@example.test'])(
+		'rebuilds a build-only cohort in store %s',
+		async (store) => {
+			const runNixBuild = vi.fn(() =>
+				Promise.resolve({
+					paths: [libraryBuiltPath],
+					status: 0,
+					copiedFrom: new Map()
+				})
+			);
+
+			await buildCohortAction(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson({ remote: store !== '' }),
+					publish: 'none',
+					build: 'rebuild',
+					store
+				},
+				environment,
+				{ runCupboard: vi.fn<typeof runCupboard>(cupboardStub()), runNixBuild }
+			);
+
+			expect(runNixBuild.mock.calls).toStrictEqual([
+				[
+					[libraryQueryInstallable],
+					'',
+					store,
+					outLinkDirectory(directory),
+					undefined,
+					{ rebuild: true }
+				]
+			]);
+		}
+	);
 
 	it.each([
 		{ name: 'ordinary publication', requireProvenance: false },
@@ -3430,6 +3865,7 @@ describe('buildCohortAction', () => {
 					{
 						...baseOptions(),
 						cohortJson: remotelyQueryableCohortJson({
+							remote: false,
 							installables: [
 								'.#packages.x86_64-linux.app^out',
 								'.#packages.x86_64-linux.lib^out',
@@ -3441,9 +3877,9 @@ describe('buildCohortAction', () => {
 								multiOutputQueryInstallable
 							]
 						}),
-						push: 'true',
+						publish: 'outputs',
 						bestEffort: 'true',
-						...(requireProvenance && { requireProvenance: 'true' })
+						...(requireProvenance && { build: 'rebuild' })
 					},
 					environment,
 					{
@@ -3489,7 +3925,7 @@ describe('buildCohortAction', () => {
 			})
 		);
 		const run = buildCohortAction(
-			{ ...baseOptions(), push: 'true' },
+			{ ...baseOptions(), publish: 'outputs' },
 			environment,
 			{
 				runCupboard: runCupboardMock,
@@ -3529,7 +3965,7 @@ describe('buildCohortAction', () => {
 					copiedFrom: new Map()
 				});
 			const run = buildCohortAction(
-				{ ...baseOptions(), push: 'true' },
+				{ ...baseOptions(), publish: 'outputs' },
 				environment,
 				{
 					runCupboard: vi.fn<typeof runCupboard>(cupboardStub()),
@@ -3568,7 +4004,7 @@ describe('buildCohortAction', () => {
 
 		await expect(
 			buildCohortAction(
-				{ ...baseOptions(), push: 'true', bestEffort: 'true' },
+				{ ...baseOptions(), publish: 'outputs', bestEffort: 'true' },
 				environment,
 				{ runCupboard: runCupboardMock }
 			)
@@ -3606,7 +4042,7 @@ describe('buildCohortAction', () => {
 
 		await expect(
 			buildCohortAction(
-				{ ...baseOptions(), push: 'true', bestEffort: 'true' },
+				{ ...baseOptions(), publish: 'outputs', bestEffort: 'true' },
 				environment,
 				{ runCupboard: runCupboardMock }
 			)
@@ -3655,7 +4091,7 @@ describe('buildCohortAction', () => {
 
 		await expect(
 			buildCohortAction(
-				{ ...baseOptions(), bestEffort: 'true', push: 'false' },
+				{ ...baseOptions(), bestEffort: 'true', publish: 'none' },
 				environment,
 				{
 					runCupboard: runCupboardMock,
@@ -3782,6 +4218,12 @@ describe('buildCohortAction', () => {
 			'--targets-file',
 			'--plan-file',
 			'--github-oidc',
+			'--build',
+			'missing',
+			'--substituter',
+			'leave',
+			'--publish',
+			'none',
 			...planStoreArguments
 		]);
 		expect(runNixBuild).toHaveBeenCalledExactlyOnceWith(
@@ -4395,7 +4837,7 @@ describe('planReprobeArguments', () => {
 
 describe('cohortReceiptPushArguments', () => {
 	const url = new URL('https://cache.example.test/t/acme');
-	const paths = [appPath, libraryBuiltPath];
+	const pathsFile = '/tmp/publication-paths.txt';
 
 	it.each<{
 		readonly name: string;
@@ -4403,10 +4845,6 @@ describe('cohortReceiptPushArguments', () => {
 			BuildCohortInputs,
 			'audience' | 'cache' | 'runRoot' | 'runRootTtl' | 'runRootPermanent'
 		>;
-		readonly alreadyHeld: readonly string[];
-		readonly held: readonly string[];
-		readonly claimable: readonly string[];
-		readonly evidence: readonly string[];
 		readonly extra: readonly string[];
 	}>([
 		{
@@ -4418,14 +4856,10 @@ describe('cohortReceiptPushArguments', () => {
 				runRootTtl: '',
 				runRootPermanent: false
 			},
-			alreadyHeld: [],
-			held: ['--no-already-held'],
-			claimable: [],
-			evidence: ['--no-claimable'],
 			extra: []
 		},
 		{
-			name: 'a path the store already held is named as claimed by nothing',
+			name: 'publication does not infer build claims from path flags',
 			inputs: {
 				audience: '',
 				cache: defaultCache,
@@ -4433,10 +4867,6 @@ describe('cohortReceiptPushArguments', () => {
 				runRootTtl: '',
 				runRootPermanent: false
 			},
-			alreadyHeld: [libraryBuiltPath],
-			held: ['--already-held', libraryBuiltPath],
-			claimable: [libraryBuiltPath],
-			evidence: ['--claimable', libraryBuiltPath],
 			extra: []
 		},
 		{
@@ -4455,13 +4885,9 @@ describe('cohortReceiptPushArguments', () => {
 				'github:owner/repo/_cupboard-run/1',
 				'--run-root-ttl',
 				'2d'
-			],
-			alreadyHeld: [],
-			held: ['--no-already-held'],
-			claimable: [],
-			evidence: ['--no-claimable']
+			]
 		}
-	])('$name', ({ inputs, alreadyHeld, held, claimable, evidence, extra }) => {
+	])('$name', ({ inputs, extra }) => {
 		expect(
 			cohortReceiptPushArguments(
 				{
@@ -4470,9 +4896,7 @@ describe('cohortReceiptPushArguments', () => {
 					receiptFile: '/tmp/receipt.json',
 					...inputs
 				},
-				paths,
-				alreadyHeld,
-				claimable,
+				pathsFile,
 				'/tmp/observed-copies.json'
 			)
 		).toStrictEqual([
@@ -4481,7 +4905,8 @@ describe('cohortReceiptPushArguments', () => {
 			inputs.cache.kind === 'default'
 				? canonicalHref(url)
 				: `${canonicalHref(url)}/cache/${inputs.cache.name}`,
-			...paths,
+			'--paths-file',
+			pathsFile,
 			'--github-oidc',
 			'--no-retain',
 			'--store',
@@ -4490,8 +4915,6 @@ describe('cohortReceiptPushArguments', () => {
 			'/tmp/receipt.json',
 			'--copied-from-file',
 			'/tmp/observed-copies.json',
-			...held,
-			...evidence,
 			...extra
 		]);
 	});
@@ -4507,6 +4930,8 @@ describe('withdrawFromPartition', () => {
 			derivedPath(libraryQueryInstallable),
 			derivedPath(appQueryInstallable)
 		],
+		rebuildSet: [],
+		closureTargets: [],
 		dependencyBuilds: [],
 		dependencyCopies: [],
 		counts: { willBuild: 2, willSubstitute: 0, unknown: 0 },
@@ -4540,116 +4965,6 @@ describe('withdrawFromPartition', () => {
 			publishByReference: [referencePath, floatingBuiltPath],
 			buildSet: []
 		});
-	});
-});
-
-describe('provenanceRebuildInstallables', () => {
-	it('rebuilds only targets the selected local build store already held', () => {
-		expect(
-			provenanceRebuildInstallables(
-				{
-					attachOnly: [appPath],
-					publishByReference: [],
-					leftUpstream: [],
-					alreadyValid: [appPath, libraryBuiltPath],
-					buildSet: [
-						derivedPath(appQueryInstallable),
-						derivedPath(libraryQueryInstallable)
-					],
-					dependencyBuilds: [],
-					dependencyCopies: [],
-					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
-					downloadSize: 0,
-					narSize: 0,
-					unknownCount: 0,
-					ceiling: { value: 0, source: 'configured' }
-				},
-				[
-					{
-						attr: 'app',
-						installable: '.#app',
-						queryInstallable: appQueryInstallable,
-						expectedPath: appPath,
-						root: 'app'
-					},
-					{
-						attr: 'library',
-						installable: '.#library',
-						queryInstallable: libraryQueryInstallable,
-						expectedPath: libraryBuiltPath,
-						root: 'library'
-					}
-				]
-			)
-		).toStrictEqual([appQueryInstallable, libraryQueryInstallable]);
-	});
-
-	it.each([
-		{
-			name: 'a selected multi-output derivation',
-			queryInstallable:
-				'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv^out,dev'
-		},
-		{
-			name: 'a floating-output derivation',
-			queryInstallable: floatingQueryInstallable
-		}
-	])('rebuilds $name whose output path cannot be predicted', (row) => {
-		expect(
-			provenanceRebuildInstallables(
-				{
-					attachOnly: [],
-					publishByReference: [],
-					leftUpstream: [],
-					alreadyValid: [],
-					buildSet: [derivedPath(row.queryInstallable)],
-					dependencyBuilds: [],
-					dependencyCopies: [],
-					counts: { willBuild: 1, willSubstitute: 0, unknown: 1 },
-					downloadSize: 0,
-					narSize: 0,
-					unknownCount: 1,
-					ceiling: { value: 0, source: 'configured' }
-				},
-				[
-					{
-						attr: 'target',
-						installable: '.#target',
-						queryInstallable: row.queryInstallable,
-						root: 'target'
-					}
-				]
-			)
-		).toStrictEqual([
-			canonicalNixDerivedPath(derivedPath(row.queryInstallable))
-		]);
-	});
-});
-
-describe('receiptAlreadyHeldPaths', () => {
-	it.each([
-		{
-			name: 'keeps a path this run does not claim',
-			alreadyValid: [appPath, libraryBuiltPath],
-			claimable: [],
-			expected: [appPath, libraryBuiltPath]
-		},
-		{
-			name: 'drops a rebuilt path this run claims',
-			alreadyValid: [appPath, libraryBuiltPath],
-			claimable: [libraryBuiltPath],
-			expected: [appPath]
-		},
-		{
-			name: 'returns an empty list when the store held nothing before the build',
-			alreadyValid: [],
-			claimable: [libraryBuiltPath],
-			expected: []
-		}
-	])('$name', ({ alreadyValid, claimable, expected }) => {
-		expect(receiptAlreadyHeldPaths(alreadyValid, claimable)).toStrictEqual(
-			expected
-		);
 	});
 });
 
@@ -4834,7 +5149,7 @@ describe('rootGroups', () => {
 			throw new Error('Expected the surviving shared-root group');
 		}
 		const inputs = resolveBuildCohortInputs(
-			{ ...baseOptions(), push: 'true', ttl: '7d' },
+			{ ...baseOptions(), publish: 'outputs', ttl: '7d' },
 			{ RUNNER_TEMP: '/tmp' }
 		);
 
@@ -4923,7 +5238,7 @@ describe('rootGroups', () => {
 		const inputs = resolveBuildCohortInputs(
 			{
 				...baseOptions(),
-				push: 'true',
+				publish: 'outputs',
 				readUser: 'reader',
 				readPassword: 'secret'
 			},
@@ -4980,7 +5295,7 @@ describe('rootGroups', () => {
 			const inputs = resolveBuildCohortInputs(
 				{
 					...baseOptions(),
-					push: 'true',
+					publish: 'outputs',
 					reuseView: 'pr-view',
 					readUser: 'destination',
 					readPassword: 'destination-secret',
@@ -5153,7 +5468,7 @@ describe('cohort pushes accepted by the real CLI parser', () => {
 		'accepts the zero-positional $name form',
 		async ({ group, referenceSource, options }) => {
 			const inputs = resolveBuildCohortInputs(
-				{ ...baseOptions(), push: 'true', ...options },
+				{ ...baseOptions(), publish: 'outputs', ...options },
 				{ RUNNER_TEMP: '/tmp' }
 			);
 			const arguments_ = cohortPushArguments(inputs, group, {
@@ -5185,6 +5500,95 @@ describe('buildCohortAction publication', () => {
 		await rm(directory, { recursive: true, force: true });
 	});
 
+	it('publishes a large remote closure through files with exact per-root targets', async () => {
+		const references = Array.from(
+			{ length: 40_000 },
+			(_, index) =>
+				`/nix/store/${index.toString(16).replaceAll('e', 'g').padStart(32, '0')}-dependency`
+		);
+		const publicationPaths = [libraryBuiltPath, ...references];
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'closure',
+				store: 'ssh-ng://build@example.test'
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			publicationPaths
+		);
+		const publication =
+			run.calls.find(
+				(call) =>
+					call.includes('--no-retain') && call.includes('--receipt-file')
+			) ?? [];
+		const rooted =
+			run.calls.find(
+				(call) => call.includes('--root') && call.includes('--paths-file')
+			) ?? [];
+		const executable = path.join(directory, 'manifest-receiver');
+		const processLog = path.join(directory, 'manifest-process.json');
+		await writeFile(
+			executable,
+			String.raw`#!/usr/bin/env node
+const { readFileSync, writeFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('--help')) {
+  process.stdout.write('  --result-file <file>\n');
+} else {
+  const file = args[args.indexOf('--paths-file') + 1];
+  writeFileSync(${JSON.stringify(processLog)}, JSON.stringify({ arguments: args, paths: readFileSync(file, 'utf8').trim().split('\n') }));
+  writeFileSync(args[args.indexOf('--result-file') + 1], '');
+}
+`
+		);
+		await chmod(executable, 0o755);
+		await runCupboard(executable, publication, environment);
+		const processResult: unknown = JSON.parse(
+			await readFile(processLog, 'utf8')
+		);
+		expect(processResult).toStrictEqual({
+			arguments: [
+				'--output-mode',
+				'github',
+				'--result-file',
+				expect.any(String),
+				...publication
+			],
+			paths: publicationPaths.toSorted(byCodeUnit)
+		});
+		expect({
+			publicationTargets: await readPathManifest(
+				argumentValue(publication, '--paths-file') ?? ''
+			),
+			rootTargets: await readPathManifest(
+				argumentValue(rooted, '--paths-file') ?? ''
+			),
+			intermediates: await readPathManifest(
+				path.join(directory, 'cupboard-cohort-intermediate-paths.txt')
+			),
+			inlineTargets: [...publication, ...rooted].filter((argument) =>
+				argument.startsWith('/nix/store/')
+			),
+			obsoleteFlags: [...publication, ...rooted].filter((argument) =>
+				[
+					'--claimable',
+					'--already-held',
+					'--no-claimable',
+					'--no-already-held'
+				].includes(argument)
+			)
+		}).toStrictEqual({
+			publicationTargets: publicationPaths.toSorted(byCodeUnit),
+			rootTargets: [libraryBuiltPath],
+			intermediates: references.toSorted(byCodeUnit),
+			inlineTargets: [],
+			obsoleteFlags: []
+		});
+	}, 30_000);
+
 	interface PublicationRun {
 		readonly calls: readonly (readonly string[])[];
 		readonly planInput: unknown;
@@ -5196,6 +5600,8 @@ describe('buildCohortAction publication', () => {
 		readonly informationCount: number;
 		readonly warnings: readonly string[];
 		readonly buildError: unknown;
+		readonly materialiseCalls: readonly unknown[];
+		readonly publicationTenantUrls: readonly (string | undefined)[];
 		readonly remoteConnection: {
 			readonly signal: AbortSignal;
 			readonly lifecycle: readonly string[];
@@ -5235,6 +5641,18 @@ describe('buildCohortAction publication', () => {
 			readonly reprobedBuildSet?: readonly string[];
 			readonly withdrawn?: readonly Record<string, unknown>[];
 			readonly captureBuildError?: boolean;
+			readonly attachOnly?: readonly string[];
+			readonly publishByReference?: readonly string[];
+			readonly referenceUploaded?: boolean;
+			readonly closureTargets?: readonly string[];
+			readonly referencedClosure?: readonly StorePathString[];
+			readonly materialisedClosure?: readonly StorePathString[];
+			readonly localStore?: 'daemon' | 'local';
+			readonly externallyServed?: readonly string[];
+			readonly streamedLeftUpstream?: readonly string[];
+			readonly streamedPublicationPaths?: readonly string[];
+			readonly streamedFailed?: readonly string[];
+			readonly streamedBuilt?: readonly string[];
 		} = {}
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
@@ -5250,6 +5668,8 @@ describe('buildCohortAction publication', () => {
 		}[] = [];
 		let isRemoteConnectionOpen = false;
 		let buildError: unknown;
+		const materialiseCalls: unknown[] = [];
+		const publicationTenantUrls: (string | undefined)[] = [];
 		let planInput: unknown;
 		const runCupboardMock = vi.fn<typeof runCupboard>(
 			async (_binaryPath, arguments_) => {
@@ -5271,36 +5691,185 @@ describe('buildCohortAction publication', () => {
 					if (targetsFile !== undefined) {
 						planInput = JSON.parse(await readFile(targetsFile, 'utf8'));
 					}
+				} else if (arguments_[1] === 'build-push') {
+					const leftUpstream = flowPlan.streamedLeftUpstream ?? [];
+					const paths =
+						flowPlan.streamedPublicationPaths ??
+						builtPaths.filter((storePath) => !leftUpstream.includes(storePath));
+					await writeFile(
+						arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '',
+						JSON.stringify({
+							version: 3,
+							paths,
+							subjects: paths.map((storePath) =>
+								flowPlan.streamedBuilt?.includes(storePath)
+									? {
+											origin: 'built',
+											storePath,
+											narHash: 'aa'.repeat(32),
+											derivation: `${storePath}.drv`,
+											buildStore: 'auto',
+											verification: 'local'
+										}
+									: {
+											origin: 'store-held',
+											storePath,
+											narHash: 'aa'.repeat(32),
+											buildStore: 'auto'
+										}
+							),
+							...(flowPlan.streamedFailed !== undefined && {
+								failed: flowPlan.streamedFailed
+							}),
+							...(leftUpstream.length > 0 && { leftUpstream })
+						})
+					);
 				}
-
 				const receiptIndex = arguments_.indexOf('--receipt-file');
+				const referenceReceiptIndex = arguments_.indexOf(
+					'--reference-receipt-file'
+				);
+				const readPaths = async (
+					option: string
+				): Promise<readonly string[]> => {
+					const index = arguments_.indexOf(option);
+
+					if (index === -1) {
+						return [];
+					}
+
+					const contents = await readFile(arguments_[index + 1] ?? '', 'utf8');
+
+					return contents.split('\n').filter((storePath) => storePath !== '');
+				};
+
+				const manifestIndex = arguments_.indexOf('--reference-manifest');
+				const manifestEntrySchema = z.object({
+					storePath: z.string(),
+					source: z.string()
+				});
+				const manifestSchema = z.object({
+					paths: z.array(manifestEntrySchema)
+				});
+				const manifestText =
+					manifestIndex === -1
+						? undefined
+						: await readFile(arguments_[manifestIndex + 1] ?? '', 'utf8');
+				const manifestEntries =
+					manifestText === undefined
+						? []
+						: manifestSchema.parse(JSON.parse(manifestText)).paths;
+				const manifestSources = new Map(
+					manifestEntries.map((entry) => [entry.storePath, entry.source])
+				);
+				if (referenceReceiptIndex !== -1) {
+					const references = [
+						...(await readPaths('--reference-paths-file')),
+						...manifestEntries.map((entry) => entry.storePath)
+					];
+					await writeFile(
+						arguments_[referenceReceiptIndex + 1] ?? '',
+						`${JSON.stringify({
+							version: 3,
+							paths: references,
+							subjects: references.map((storePath) => ({
+								origin: 'republished',
+								storePath,
+								narHash: 'aa'.repeat(32),
+								signatures: [],
+								metadataSource:
+									manifestSources.get(storePath) ??
+									arguments_[arguments_.indexOf('--reference-source') + 1]
+							})),
+							...(flowPlan.referenceUploaded && { uploaded: references })
+						})}\n`
+					);
+				}
 
 				if (receiptIndex !== -1 && arguments_[1] === 'push') {
 					const firstOption = arguments_.findIndex(
 						(argument, index) => index >= 3 && argument.startsWith('--')
 					);
 					const receiptFile = arguments_[receiptIndex + 1] ?? '';
-					const paths = arguments_.slice(
-						3,
-						firstOption === -1 ? arguments_.length : firstOption
-					);
-					// cupboard claims exactly the paths the push declared
-					// claimable, so this double writes a receipt with a subject
-					// for each of them.
-					const subjects = arguments_.flatMap((argument, index) =>
-						argument === '--claimable'
-							? [
-									{
-										origin: 'built',
-										storePath: arguments_[index + 1] ?? '',
-										narHash: 'aa'.repeat(32),
-										derivation: `${arguments_[index + 1] ?? ''}.drv`,
-										buildStore: 'auto',
-										verification: 'local'
-									}
-								]
-							: []
-					);
+					const positionalPaths = [
+						...arguments_.slice(
+							3,
+							firstOption === -1 ? arguments_.length : firstOption
+						),
+						...(await readPaths('--paths-file'))
+					];
+					const isRootReceipt =
+						/\.\d+\.(?:main|destination|reuse|manifest)$/u.test(receiptFile);
+					const references = isRootReceipt
+						? [
+								...(await readPaths('--reference-paths-file')),
+								...manifestEntries.map((entry) => entry.storePath)
+							]
+						: [];
+					const intermediates = isRootReceipt
+						? await readPaths('--intermediate-paths-file')
+						: [];
+					const paths = [
+						...new Set([...positionalPaths, ...references, ...intermediates])
+					];
+					const copiedFromIndex = arguments_.indexOf('--copied-from-file');
+					const copiedFrom =
+						copiedFromIndex === -1
+							? {}
+							: z
+									.record(z.string(), z.array(z.string()))
+									.parse(
+										JSON.parse(
+											await readFile(
+												arguments_[copiedFromIndex + 1] ?? '',
+												'utf8'
+											)
+										)
+									);
+					const subjects = isRootReceipt
+						? paths.map((storePath) =>
+								references.includes(storePath)
+									? {
+											origin: 'republished',
+											storePath,
+											narHash: 'aa'.repeat(32),
+											signatures: [],
+											metadataSource:
+												manifestSources.get(storePath) ??
+												arguments_[arguments_.indexOf('--reference-source') + 1]
+										}
+									: copiedFrom[storePath] === undefined
+										? {
+												origin: 'store-held',
+												storePath,
+												narHash: 'aa'.repeat(32),
+												buildStore:
+													arguments_[arguments_.indexOf('--store') + 1]
+											}
+										: {
+												origin: 'copied',
+												storePath,
+												narHash: 'aa'.repeat(32),
+												signatures: [],
+												copiedFrom: copiedFrom[storePath]
+											}
+							)
+						: positionalPaths.map((storePath) =>
+								copiedFrom[storePath] === undefined
+									? {
+											origin: 'store-held',
+											storePath,
+											narHash: 'aa'.repeat(32),
+											buildStore: arguments_[arguments_.indexOf('--store') + 1]
+										}
+									: {
+											origin: 'copied',
+											storePath,
+											narHash: 'aa'.repeat(32),
+											signatures: [],
+											copiedFrom: copiedFrom[storePath]
+										}
+							);
 					await writeFile(
 						receiptFile,
 						`${JSON.stringify({ version: 3, paths, subjects })}\n`
@@ -5312,7 +5881,9 @@ describe('buildCohortAction publication', () => {
 						measuredCapacity,
 						plannedBuildSet,
 						flowPlan.dependencyBuilds,
-						flowPlan.dependencyCopies
+						flowPlan.dependencyCopies,
+						options.build === 'rebuild' ? plannedBuildSet : [],
+						flowPlan
 					),
 					reprobe: planReprobeSuccess(
 						flowPlan.withdrawn,
@@ -5322,6 +5893,9 @@ describe('buildCohortAction publication', () => {
 			}
 		);
 		const localOutputs = new Map<string, readonly string[]>([
+			[appQueryInstallable, [appPath]],
+			[libraryQueryInstallable, [libraryBuiltPath]],
+			[floatingQueryInstallable, [floatingBuiltPath]],
 			['.#packages.x86_64-linux.app^out', [appPath]],
 			['.#packages.x86_64-linux.lib^out', [libraryBuiltPath]],
 			[
@@ -5425,7 +5999,10 @@ describe('buildCohortAction publication', () => {
 					failures: readonly RemoteCohortBuildFailure[],
 					publicationPaths: readonly StorePathString[],
 					provenanceRebuilds: ReadonlySet<NixDerivedPathString>,
-					copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
+					copiedFrom: ReadonlyMap<StorePathString, readonly string[]>,
+					resolveClosure?: (
+						paths: readonly StorePathString[]
+					) => ReturnType<Nix['resolveClosure']>
 				) => Promise<void>,
 				receivedSignal?: AbortSignal,
 				buildOptions?: RemoteBuildSessionOptions
@@ -5470,7 +6047,14 @@ describe('buildCohortAction publication', () => {
 							failures,
 							paths,
 							provenanceRebuilds,
-							observedCopies
+							observedCopies,
+							(targets) =>
+								Promise.resolve(
+									(targets.includes(storePathSchema.parse(appPath))
+										? (publicationPaths ?? targets)
+										: targets
+									).map((storePath) => remotePathInfo(storePath))
+								)
 						),
 					buildOptions
 				);
@@ -5493,6 +6077,32 @@ describe('buildCohortAction publication', () => {
 		);
 
 		await buildCohortAction(options, environment, {
+			selectPublicationPaths: (candidates, selectionOptions) => {
+				publicationTenantUrls.push(selectionOptions.tenantUrl?.href);
+				const leftUpstream =
+					selectionOptions.substituter === 'leave'
+						? (flowPlan.externallyServed ?? [])
+								.filter((storePath) =>
+									candidates.some(
+										(candidate) =>
+											candidate.storePath === storePath &&
+											candidate.origin !== 'built'
+									)
+								)
+								.map((storePath) => storePathSchema.parse(storePath))
+						: [];
+				return Promise.resolve({
+					published: candidates
+						.filter(
+							(candidate) =>
+								!leftUpstream.includes(
+									storePathSchema.parse(candidate.storePath)
+								)
+						)
+						.map((candidate) => storePathSchema.parse(candidate.storePath)),
+					leftUpstream
+				});
+			},
 			runCupboard: runCupboardMock,
 			runNixBuild,
 			runNixBuildWithResults,
@@ -5501,6 +6111,49 @@ describe('buildCohortAction publication', () => {
 			resolveLocalDerivationGraph,
 			runNixCopy,
 			withLocalDerivationRoots,
+			withLocalStoreSession: (use) =>
+				use(
+					{
+						addTempRoot: () => Promise.resolve(),
+						buildPathsWithResults: () => Promise.resolve([]),
+						resolveClosure: () => Promise.resolve([])
+					},
+					flowPlan.localStore ?? 'daemon'
+				),
+			materialiseCachedClosure: (closureOptions) => {
+				materialiseCalls.push({
+					sources: closureOptions.sources,
+					store: closureOptions.store,
+					localStore: closureOptions.localStore
+				});
+				for (const source of closureOptions.sources) {
+					if (source.paths.length > 0) {
+						closureOptions.onReferenced(
+							source.url,
+							(flowPlan.referencedClosure ?? source.paths).map((storePath) => ({
+								storePath,
+								narinfo: NarInfo.fromFields({
+									storePath,
+									url: 'nar/fixture.nar.zst',
+									compression: 'zstd',
+									fileHash: NixSha256Hash.fromDigest(
+										Buffer.alloc(32, 0xaa)
+									).toString(),
+									fileSize: 1,
+									narHash: NixSha256Hash.fromDigest(
+										Buffer.alloc(32, 0xaa)
+									).toString(),
+									narSize: 1,
+									references: [],
+									sigs: []
+								}).render()
+							}))
+						);
+					}
+				}
+
+				return Promise.resolve(flowPlan.materialisedClosure ?? []);
+			},
 			reporter: recordingReporter(warnings, progress, information),
 			signal
 		});
@@ -5535,6 +6188,8 @@ describe('buildCohortAction publication', () => {
 			informationCount: information.length,
 			warnings,
 			buildError,
+			materialiseCalls,
+			publicationTenantUrls,
 			remoteConnection: {
 				signal,
 				lifecycle,
@@ -5582,6 +6237,7 @@ describe('buildCohortAction publication', () => {
 		const options: BuildCohortOptions = {
 			...baseOptions(),
 			cohortJson: cohortJson({
+				remote: false,
 				attrs: [
 					'.#packages.x86_64-linux.app',
 					'.#packages.x86_64-linux.multi',
@@ -5604,8 +6260,8 @@ describe('buildCohortAction publication', () => {
 					'github:owner/repo/main/floating'
 				]
 			}),
-			push: 'true',
-			requireProvenance: 'true'
+			publish: 'outputs',
+			build: 'rebuild'
 		};
 		const unpredictableInstallables = [
 			multiOutputQueryInstallable,
@@ -5628,7 +6284,6 @@ describe('buildCohortAction publication', () => {
 					{
 						installables,
 						rebuild: true,
-						requireProvenance: true,
 						keepGoing: true
 					}
 				]
@@ -5651,81 +6306,288 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it("publishes an all-reference cohort under each path's exact root", async () => {
-		const allReferences = [appPath, libraryBuiltPath, floatingBuiltPath];
-		const plan: readonly ReporterResultEvent[] = [
+	it('publishes cached dependencies alongside a streamed target without retaining dependency roots', async () => {
+		const run = await runPublicationFlow(
 			{
-				kind: 'plan-cohort',
-				data: {
-					partition: {
-						attachOnly: [],
-						publishByReference: allReferences,
-						leftUpstream: [leftUpstreamPath],
-						alreadyValid: allReferences,
-						buildSet: [],
-						counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
-						downloadSize: 0,
-						narSize: 0,
-						unknownCount: 0,
-						ceiling: { value: 5, source: 'configured' }
-					},
-					capacity: measuredCapacity
-				}
+				...baseOptions(),
+				publish: 'closure',
+				cohortJson: remotelyQueryableCohortJson({
+					remote: false,
+					attrs: ['.#packages.x86_64-linux.app', '.#packages.x86_64-linux.lib'],
+					installables: [
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.lib^out'
+					],
+					queryInstallables: [appQueryInstallable, libraryQueryInstallable],
+					expectedPaths: [appPath, libraryBuiltPath],
+					roots: ['github:owner/repo/main/app', 'github:owner/repo/main/lib']
+				})
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				closureTargets: [appPath],
+				materialisedClosure: [appPath, referencePath].map((storePath) =>
+					storePathSchema.parse(storePath)
+				),
+				streamedPublicationPaths: [libraryBuiltPath]
 			}
-		];
-		const runCupboardMock = vi.fn<typeof runCupboard>(
-			cupboardStub({
-				plan,
-				reprobe: planReprobeSuccess([], [])
-			})
 		);
-		const options: BuildCohortOptions = {
-			...baseOptions(),
-			cohortJson: remotelyQueryableCohortJson({
-				expectedPaths: allReferences
-			}),
-			push: 'true',
-			reuseView: 'pr-view'
-		};
-
-		await buildCohortAction(options, environment, {
-			runCupboard: runCupboardMock,
-			runNixBuild: vi.fn(() =>
-				Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
-			)
-		});
-
-		const inputs = resolveBuildCohortInputs(options, environment);
-		const pushCalls = runCupboardMock.mock.calls
-			.map((call) => call[1])
-			.filter((arguments_) => arguments_[1] === 'push');
-		const referenceFiles = await Promise.all(
-			allReferences.map((_reference, index) =>
-				readFile(`${inputs.referencePathsFile}.${String(index)}`, 'utf8')
-			)
+		const roots = await Promise.all(
+			run.calls
+				.filter((call) => call[1] === 'push' && call.includes('--root'))
+				.map(async (call) => ({
+					root: argumentValue(call, '--root'),
+					targets: call.includes('--paths-file')
+						? await readPathManifest(argumentValue(call, '--paths-file') ?? '')
+						: [],
+					intermediates: call.includes('--intermediate-paths-file')
+						? await readPathManifest(
+								argumentValue(call, '--intermediate-paths-file') ?? ''
+							)
+						: []
+				}))
 		);
+		const receiptText = await readFile(
+			path.join(directory, 'cupboard-cohort-receipt.json'),
+			'utf8'
+		);
+		const receipt = buildReceiptV3Schema.parse(JSON.parse(receiptText));
 
-		expect({ pushCalls, referenceFiles }).toStrictEqual({
-			pushCalls: allReferences.map((reference, index) => [
-				'--no-colour',
-				'push',
-				url,
-				reference,
-				'--github-oidc',
-				'--root',
-				[
-					'github:owner/repo/main/app',
-					'github:owner/repo/main/lib',
-					'github:owner/repo/main/floating'
-				][index],
-				'--reference-paths-file',
-				`${inputs.referencePathsFile}.${String(index)}`,
-				'--reference-source',
-				`${url}/reuse/pr-view`
-			]),
-			referenceFiles: allReferences.map((reference) => `${reference}\n`)
+		expect({
+			targets: await readPathManifest(
+				path.join(directory, 'cupboard-cohort-target-paths.txt')
+			),
+			intermediates: await readPathManifest(
+				path.join(directory, 'cupboard-cohort-intermediate-paths.txt')
+			),
+			roots,
+			published: receipt.paths
+		}).toStrictEqual({
+			targets: [appPath, libraryBuiltPath],
+			intermediates: [referencePath],
+			published: [appPath, libraryBuiltPath, referencePath],
+			roots: [
+				{
+					root: 'github:owner/repo/main/app',
+					targets: [],
+					intermediates: [referencePath]
+				},
+				{
+					root: 'github:owner/repo/main/lib',
+					targets: [libraryBuiltPath],
+					intermediates: []
+				}
+			]
 		});
 	});
+
+	it.each(['', '/cache/release'])(
+		'uses the tenant boundary for remote publication selection with destination suffix %s',
+		async (suffix) => {
+			const run = await runPublicationFlow(
+				{
+					...baseOptions(),
+					url: `${url}${suffix}`,
+					store: 'ssh-ng://build@example.test',
+					publish: 'outputs',
+					cohortJson: remotelyQueryableCohortJson()
+				},
+				[libraryBuiltPath],
+				[remoteResult('substituted')]
+			);
+
+			expect(run.publicationTenantUrls).toStrictEqual([url]);
+		}
+	);
+
+	it.each([
+		{ store: '', publish: 'outputs' },
+		{ store: '', publish: 'closure' },
+		{ store: 'ssh-ng://build@example.test', publish: 'outputs' },
+		{ store: 'ssh-ng://build@example.test', publish: 'closure' }
+	])(
+		'leaves a cold substituted target upstream before cohort publication ($store, $publish)',
+		async ({ store, publish }) => {
+			const options = {
+				...baseOptions(),
+				store,
+				publish,
+				cohortJson: remotelyQueryableCohortJson({
+					remote: store !== '',
+					attrs: ['.#packages.x86_64-linux.app', '.#packages.x86_64-linux.lib'],
+					installables: [
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.lib^out'
+					],
+					queryInstallables: [appQueryInstallable, libraryQueryInstallable],
+					expectedPaths: [appPath, libraryBuiltPath],
+					roots: ['github:owner/repo/main/app', 'github:owner/repo/main/lib']
+				})
+			};
+			const run = await runPublicationFlow(
+				options,
+				[libraryBuiltPath],
+				[remoteResult('substituted')],
+				[libraryQueryInstallable],
+				[libraryBuiltPath, referencePath],
+				new Map(),
+				{
+					externallyServed: [libraryBuiltPath],
+					streamedLeftUpstream: [libraryBuiltPath]
+				}
+			);
+			const pushes = run.calls.filter((call) => call[1] === 'push');
+			const leftText = await readFile(
+				path.join(directory, 'cupboard-cohort-left-upstream.json'),
+				'utf8'
+			);
+			const left: unknown = JSON.parse(leftText);
+			expect({
+				targets: await readFile(
+					path.join(directory, 'cupboard-cohort-target-paths.txt'),
+					'utf8'
+				),
+				intermediates: await readFile(
+					path.join(directory, 'cupboard-cohort-intermediate-paths.txt'),
+					'utf8'
+				),
+				left,
+				roots: pushes.map((call) => call[call.indexOf('--root') + 1]),
+				bytePushes: pushes.filter((call) => call.includes('--no-retain'))
+			}).toStrictEqual({
+				targets: `${appPath}\n`,
+				intermediates: '',
+				left: { leftUpstream: [leftUpstreamPath, libraryBuiltPath] },
+				roots: ['github:owner/repo/main/app', 'github:owner/repo/main/lib'],
+				bytePushes: []
+			});
+			if (store !== '') {
+				return;
+			}
+			const receiptText = await readFile(
+				path.join(directory, 'cupboard-cohort-receipt.json'),
+				'utf8'
+			);
+			const receiptJson: unknown = JSON.parse(receiptText);
+			const receipt = buildReceiptV3Schema.parse(receiptJson);
+			expect({
+				paths: receipt.paths,
+				subjects: receipt.subjects,
+				left: receipt.leftUpstream
+			}).toStrictEqual({ paths: [], subjects: [], left: [libraryBuiltPath] });
+		}
+	);
+
+	it.each(['', 'ssh-ng://build@example.test'])(
+		'publishes a retained target closure without retaining an excluded target root (%s)',
+		async (store) => {
+			const options = {
+				...baseOptions(),
+				store,
+				publish: 'closure',
+				cohortJson: remotelyQueryableCohortJson({
+					remote: store !== '',
+					attrs: ['.#packages.x86_64-linux.app', '.#packages.x86_64-linux.lib'],
+					installables: [
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.lib^out'
+					],
+					queryInstallables: [appQueryInstallable, libraryQueryInstallable],
+					expectedPaths: [appPath, libraryBuiltPath],
+					roots: ['github:owner/repo/main/app', 'github:owner/repo/main/lib']
+				})
+			};
+			const run = await runPublicationFlow(
+				options,
+				[appPath, libraryBuiltPath],
+				[
+					remoteResult('built', appQueryInstallable, appPath),
+					remoteResult('substituted')
+				],
+				[appQueryInstallable, libraryQueryInstallable],
+				[appPath, libraryBuiltPath],
+				new Map(),
+				{
+					attachOnly: [],
+					externallyServed: [libraryBuiltPath],
+					streamedLeftUpstream: [libraryBuiltPath],
+					streamedPublicationPaths: [appPath, libraryBuiltPath]
+				}
+			);
+			const roots = await Promise.all(
+				run.calls
+					.filter((call) => call[1] === 'push' && call.includes('--root'))
+					.map(async (call) => ({
+						root: call[call.indexOf('--root') + 1],
+						targets: call.includes('--paths-file')
+							? await readPathManifest(
+									argumentValue(call, '--paths-file') ?? ''
+								)
+							: []
+					}))
+			);
+			expect({
+				targets: await readFile(
+					path.join(directory, 'cupboard-cohort-target-paths.txt'),
+					'utf8'
+				),
+				intermediates: await readFile(
+					path.join(directory, 'cupboard-cohort-intermediate-paths.txt'),
+					'utf8'
+				),
+				roots
+			}).toStrictEqual({
+				targets: `${appPath}\n`,
+				intermediates: `${libraryBuiltPath}\n`,
+				roots: [
+					{ root: 'github:owner/repo/main/app', targets: [appPath] },
+					{ root: 'github:owner/repo/main/lib', targets: [] }
+				]
+			});
+		}
+	);
+
+	it.each([
+		{ name: 'a foreign output', left: [referencePath], failed: [], built: [] },
+		{
+			name: 'a failed output',
+			left: [libraryBuiltPath],
+			failed: [libraryBuiltPath],
+			built: []
+		},
+		{
+			name: 'an observed build',
+			left: [libraryBuiltPath],
+			failed: [],
+			built: [libraryBuiltPath]
+		}
+	])(
+		'rejects left-upstream receipt entries for $name',
+		async ({ left, failed, built }) => {
+			await expect(
+				runPublicationFlow(
+					{ ...baseOptions(), publish: 'outputs' },
+					[libraryBuiltPath, floatingBuiltPath],
+					[],
+					[libraryQueryInstallable],
+					undefined,
+					new Map(),
+					{
+						streamedLeftUpstream: left,
+						streamedPublicationPaths: [libraryBuiltPath],
+						streamedFailed: failed,
+						streamedBuilt: built
+					}
+				)
+			).rejects.toThrow(
+				'The build receipt excludes a path that is not a successfully realised selected output'
+			);
+		}
+	);
 
 	it('replaces every complete all-left-upstream root with an empty target list', async () => {
 		const upstreamPaths = [appPath, libraryBuiltPath, floatingBuiltPath];
@@ -5760,7 +6622,7 @@ describe('buildCohortAction publication', () => {
 			cohortJson: remotelyQueryableCohortJson({
 				expectedPaths: upstreamPaths
 			}),
-			push: 'true'
+			publish: 'outputs'
 		};
 
 		await buildCohortAction(options, environment, {
@@ -5797,7 +6659,7 @@ describe('buildCohortAction publication', () => {
 			cohortJson: cohortJson({
 				expectedPaths: [appPath, libraryBuiltPath, undefined]
 			}),
-			push: 'true',
+			publish: 'outputs',
 			gcBetweenCohorts: 'true',
 			reuseView: 'pr-view',
 			cache: 'builds',
@@ -5846,6 +6708,10 @@ describe('buildCohortAction publication', () => {
 					'--receipt-file',
 					receiptFile,
 					'--aggregate-receipt-v3',
+					'--substituter',
+					'leave',
+					'--publication-scope',
+					'outputs',
 					'--gc-between-cohorts',
 					'--run-root',
 					runRoot,
@@ -5874,7 +6740,8 @@ describe('buildCohortAction publication', () => {
 					'--no-colour',
 					'push',
 					cacheUrl,
-					libraryBuiltPath,
+					'--paths-file',
+					`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.1`,
 					'--github-oidc',
 					'--root',
 					'github:owner/repo/main/lib',
@@ -5889,7 +6756,8 @@ describe('buildCohortAction publication', () => {
 					'--no-colour',
 					'push',
 					cacheUrl,
-					floatingBuiltPath,
+					'--paths-file',
+					`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.2`,
 					'--github-oidc',
 					'--root',
 					'github:owner/repo/main/floating',
@@ -5939,7 +6807,7 @@ describe('buildCohortAction publication', () => {
 			cohortJson: cohortJson({
 				expectedPaths: [appPath, libraryBuiltPath, undefined]
 			}),
-			push: 'true',
+			publish: 'outputs',
 			reuseView: 'pr-view',
 			cache: 'release',
 			ttl: '7d',
@@ -6028,8 +6896,16 @@ describe('buildCohortAction publication', () => {
 					}
 
 					targetsFileContents = JSON.parse(await readFile(targetsFile, 'utf8'));
+				} else if (arguments_[1] === 'build-push') {
+					await writeFile(
+						arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '',
+						JSON.stringify({
+							version: 3,
+							paths: [libraryBuiltPath],
+							subjects: []
+						})
+					);
 				}
-
 				return stub(binaryPath, arguments_, passedEnvironment, dependencies);
 			}
 		);
@@ -6055,7 +6931,7 @@ describe('buildCohortAction publication', () => {
 					expectedPaths: [libraryBuiltPath],
 					roots: ['github:owner/repo/main/lib']
 				}),
-				push: 'true'
+				publish: 'outputs'
 			},
 			environment,
 			{
@@ -6118,7 +6994,7 @@ describe('buildCohortAction publication', () => {
 			buildCohortAction(
 				{
 					...baseOptions(),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				environment,
@@ -6155,7 +7031,7 @@ describe('buildCohortAction publication', () => {
 			{
 				...baseOptions(),
 				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
+				publish: 'outputs',
 				store: 'ssh-ng://build@example.test'
 			},
 			environment,
@@ -6207,9 +7083,9 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it.each([{ push: 'true' }, { push: 'false' }])(
-		'writes the local derivation graph into the plan only when push is true (push=$push)',
-		async ({ push }) => {
+	it.each([{ publish: 'outputs' }, { publish: 'none' }])(
+		'writes the local derivation graph into the plan only when publication is enabled (publish=$publish)',
+		async ({ publish }) => {
 			let targetsFileContents: unknown;
 			const stub = cupboardStub({
 				plan: planCohortSuccess(measuredCapacity, []),
@@ -6238,7 +7114,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push,
+					publish,
 					store: 'ssh-ng://build@example.test'
 				},
 				environment,
@@ -6282,7 +7158,7 @@ describe('buildCohortAction publication', () => {
 						root: 'github:owner/repo/main/floating'
 					}
 				],
-				...(push === 'true' && {
+				...(publish !== 'none' && {
 					plannedLocalClosure: [
 						'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
 						'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
@@ -6315,7 +7191,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				environment,
@@ -6358,7 +7234,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				environment,
@@ -6446,7 +7322,7 @@ describe('buildCohortAction publication', () => {
 						expectedPaths: [undefined, undefined],
 						roots: ['github:owner/repo/stable', 'github:owner/repo/latest']
 					}),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				environment,
@@ -6550,7 +7426,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				environment,
@@ -6599,7 +7475,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				[],
@@ -6620,7 +7496,7 @@ describe('buildCohortAction publication', () => {
 						'github:owner/repo/main/shared'
 					]
 				}),
-				push: 'true',
+				publish: 'outputs',
 				store: 'ssh-ng://build@example.test'
 			},
 			[libraryBuiltPath],
@@ -6634,7 +7510,7 @@ describe('buildCohortAction publication', () => {
 			(arguments_) =>
 				arguments_[1] === 'push' &&
 				!arguments_.includes('--receipt-file') &&
-				arguments_.includes(libraryBuiltPath)
+				arguments_.includes('--paths-file')
 		);
 
 		const isProtocolError = run.buildError instanceof RemoteCohortProtocolError;
@@ -6645,7 +7521,8 @@ describe('buildCohortAction publication', () => {
 				'--no-colour',
 				'push',
 				url,
-				libraryBuiltPath,
+				'--paths-file',
+				`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.1`,
 				'--github-oidc',
 				'--no-retain',
 				'--store',
@@ -6663,7 +7540,7 @@ describe('buildCohortAction publication', () => {
 					expectedPaths: [appPath, libraryBuiltPath, floatingBuiltPath],
 					roots: [sharedRoot, sharedRoot, 'github:owner/repo/main/floating']
 				}),
-				push: 'true',
+				publish: 'outputs',
 				store: 'ssh-ng://build@example.test'
 			},
 			[],
@@ -6686,7 +7563,7 @@ describe('buildCohortAction publication', () => {
 			(arguments_) =>
 				arguments_[1] === 'push' &&
 				!arguments_.includes('--receipt-file') &&
-				arguments_.includes(libraryBuiltPath)
+				arguments_.includes('--paths-file')
 		);
 
 		expect({
@@ -6698,7 +7575,8 @@ describe('buildCohortAction publication', () => {
 				'--no-colour',
 				'push',
 				url,
-				libraryBuiltPath,
+				'--paths-file',
+				`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.0`,
 				'--github-oidc',
 				'--root',
 				sharedRoot,
@@ -6720,7 +7598,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				[],
@@ -6732,7 +7610,14 @@ describe('buildCohortAction publication', () => {
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
 			paths: [libraryBuiltPath],
-			subjects: [],
+			subjects: [
+				{
+					origin: 'store-held',
+					storePath: libraryBuiltPath,
+					narHash: 'aa'.repeat(32),
+					buildStore: 'ssh-ng://build@example.test'
+				}
+			],
 			terminalFailure: {
 				kind: 'target-build',
 				failedTargets: [floatingQueryInstallable]
@@ -6748,7 +7633,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					bestEffort: 'true',
 					store: 'ssh-ng://build@example.test'
 				},
@@ -6773,7 +7658,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					bestEffort: 'true',
 					store: 'ssh-ng://build@example.test'
 				},
@@ -6801,7 +7686,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'closure',
 					bestEffort: 'true',
 					store: 'ssh-ng://build@example.test'
 				},
@@ -6827,12 +7712,10 @@ describe('buildCohortAction publication', () => {
 			paths: [appPath],
 			subjects: [
 				{
-					origin: 'built',
+					origin: 'store-held',
 					storePath: appPath,
 					narHash: 'aa'.repeat(32),
-					derivation: `${appPath}.drv`,
-					buildStore: 'auto',
-					verification: 'local'
+					buildStore: 'ssh-ng://build@example.test'
 				}
 			],
 			terminalFailure: {
@@ -6850,7 +7733,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					bestEffort: 'true',
 					store: 'ssh-ng://build@example.test'
 				},
@@ -6880,12 +7763,10 @@ describe('buildCohortAction publication', () => {
 			paths: [floatingBuiltPath],
 			subjects: [
 				{
-					origin: 'built',
+					origin: 'store-held',
 					storePath: floatingBuiltPath,
 					narHash: 'aa'.repeat(32),
-					derivation: `${floatingBuiltPath}.drv`,
-					buildStore: 'auto',
-					verification: 'local'
+					buildStore: 'ssh-ng://build@example.test'
 				}
 			],
 			terminalFailure: {
@@ -6903,7 +7784,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				[],
@@ -6928,12 +7809,10 @@ describe('buildCohortAction publication', () => {
 			paths: [libraryBuiltPath],
 			subjects: [
 				{
-					origin: 'built',
+					origin: 'store-held',
 					storePath: libraryBuiltPath,
 					narHash: 'aa'.repeat(32),
-					derivation: `${libraryBuiltPath}.drv`,
-					buildStore: 'auto',
-					verification: 'local'
+					buildStore: 'ssh-ng://build@example.test'
 				}
 			],
 			terminalFailure: { kind: 'command' }
@@ -6949,7 +7828,7 @@ describe('buildCohortAction publication', () => {
 				cohortJson: remotelyQueryableCohortJson({
 					expectedPaths: [appPath, libraryBuiltPath, floatingBuiltPath]
 				}),
-				push: 'true',
+				publish: 'outputs',
 				bestEffort: 'true',
 				store: 'ssh-ng://build@example.test'
 			},
@@ -7005,7 +7884,7 @@ describe('buildCohortAction publication', () => {
 				{
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
-					push: 'true',
+					publish: 'outputs',
 					bestEffort: 'true',
 					store: 'ssh-ng://build@example.test'
 				},
@@ -7018,7 +7897,14 @@ describe('buildCohortAction publication', () => {
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
 			paths: [libraryBuiltPath],
-			subjects: [],
+			subjects: [
+				{
+					origin: 'store-held',
+					storePath: libraryBuiltPath,
+					narHash: 'aa'.repeat(32),
+					buildStore: 'ssh-ng://build@example.test'
+				}
+			],
 			terminalFailure: {
 				kind: 'target-build',
 				failedTargets: [floatingQueryInstallable]
@@ -7087,7 +7973,7 @@ describe('buildCohortAction publication', () => {
 							'github:owner/repo/main'
 						]
 					}),
-					push: 'true',
+					publish: 'outputs',
 					bestEffort: 'true',
 					store: 'ssh-ng://build@example.test'
 				},
@@ -7126,7 +8012,7 @@ describe('buildCohortAction publication', () => {
 					'github:owner/repo/main'
 				]
 			}),
-			push: 'true'
+			publish: 'outputs'
 		});
 
 		expect(run.calls.map((call) => call[1])).toStrictEqual([
@@ -7144,14 +8030,18 @@ describe('buildCohortAction publication', () => {
 			path.join(directory, `cupboard-build-cohorts-${cohortKey}.json`),
 			'--receipt-file',
 			path.join(directory, 'cupboard-cohort-receipt.json'),
-			'--aggregate-receipt-v3'
+			'--aggregate-receipt-v3',
+			'--substituter',
+			'leave',
+			'--publication-scope',
+			'outputs'
 		]);
 		expect(run.calls[2]).toStrictEqual([
 			'--no-colour',
 			'push',
 			url,
-			libraryBuiltPath,
-			floatingBuiltPath,
+			'--paths-file',
+			`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.0`,
 			'--github-oidc',
 			'--root',
 			'github:owner/repo/main',
@@ -7173,7 +8063,7 @@ describe('buildCohortAction publication', () => {
 						'github:owner/repo/main'
 					]
 				}),
-				push: 'true',
+				publish: 'closure',
 				store: 'ssh-ng://build@example.test'
 			},
 			[libraryBuiltPath],
@@ -7193,8 +8083,8 @@ describe('buildCohortAction publication', () => {
 				'--no-colour',
 				'push',
 				url,
-				libraryBuiltPath,
-				referencePath,
+				'--paths-file',
+				`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.publication`,
 				'--github-oidc',
 				'--no-retain',
 				'--store',
@@ -7202,22 +8092,22 @@ describe('buildCohortAction publication', () => {
 				'--receipt-file',
 				receiptFile,
 				'--copied-from-file',
-				path.join(directory, 'observed-copies.json'),
-				'--already-held',
-				appPath,
-				'--claimable',
-				libraryBuiltPath
+				path.join(directory, 'observed-copies.json')
 			],
 			rootPush: [
 				'--no-colour',
 				'push',
 				url,
-				libraryBuiltPath,
+				'--paths-file',
+				`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.0`,
 				'--github-oidc',
 				'--root',
 				'github:owner/repo/main',
 				'--store',
 				'ssh-ng://build@example.test',
+				'--closure',
+				'--intermediate-paths-file',
+				path.join(directory, 'cupboard-cohort-intermediate-paths.txt'),
 				'--reference-paths-file',
 				`${path.join(directory, 'cupboard-cohort-reference-paths.txt')}.destination.0`,
 				'--reference-source',
@@ -7228,27 +8118,266 @@ describe('buildCohortAction publication', () => {
 				paths: [libraryBuiltPath, referencePath],
 				subjects: [
 					{
-						origin: 'built',
+						origin: 'store-held',
 						storePath: libraryBuiltPath,
 						narHash: 'aa'.repeat(32),
-						derivation: `${libraryBuiltPath}.drv`,
-						buildStore: 'auto',
-						verification: 'local'
+						buildStore: 'ssh-ng://build@example.test'
+					},
+					{
+						origin: 'store-held',
+						storePath: referencePath,
+						narHash: 'aa'.repeat(32),
+						buildStore: 'ssh-ng://build@example.test'
 					}
 				]
 			}
 		});
 	});
 
-	// The destination already holds an attestation for an attached target, so a
-	// provenance run publishes it with no receipt subject.
-	it('publishes an attached target alongside the remote build this run claims', async () => {
+	it('publishes a cached destination closure by reference without materialising it', async () => {
 		const run = await runPublicationFlow(
 			{
 				...baseOptions(),
 				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
-				requireProvenance: 'true',
+				publish: 'closure',
+				readUser: 'destination-reader',
+				readPassword: 'destination-secret'
+			},
+			[],
+			[],
+			[],
+			undefined,
+			new Map(),
+			{
+				closureTargets: [appPath],
+				referencedClosure: [
+					storePathSchema.parse(appPath),
+					storePathSchema.parse(referencePath)
+				]
+			}
+		);
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+		const receipt: unknown = JSON.parse(await readFile(receiptFile, 'utf8'));
+
+		expect({ materialiseCalls: run.materialiseCalls, receipt }).toStrictEqual({
+			materialiseCalls: [
+				{
+					sources: [
+						{
+							url: new URL(url),
+							paths: [appPath],
+							credential: {
+								user: 'destination-reader',
+								password: 'destination-secret'
+							}
+						}
+					],
+					store: '',
+					localStore: 'daemon'
+				}
+			],
+			receipt: {
+				version: 3,
+				paths: [appPath, referencePath],
+				subjects: [
+					{
+						origin: 'republished',
+						storePath: appPath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						metadataSource: url
+					},
+					{
+						origin: 'republished',
+						storePath: referencePath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						metadataSource: url
+					}
+				],
+				uploaded: []
+			}
+		});
+	});
+
+	it('records a reference-only publication when publishing outputs', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'outputs',
+				reuseView: 'release'
+			},
+			[],
+			[],
+			[],
+			undefined,
+			new Map(),
+			{
+				attachOnly: [],
+				publishByReference: [appPath],
+				referenceUploaded: true,
+				reprobedBuildSet: []
+			}
+		);
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+		const receipt: unknown = JSON.parse(await readFile(receiptFile, 'utf8'));
+
+		expect({ receiptLine: run.receiptLine, receipt }).toStrictEqual({
+			receiptLine: `receipt-file=${receiptFile}`,
+			receipt: {
+				version: 3,
+				paths: [appPath],
+				subjects: [
+					{
+						origin: 'republished',
+						storePath: appPath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						metadataSource: `${url}/reuse/release`
+					}
+				],
+				uploaded: [appPath]
+			}
+		});
+	});
+
+	it('keeps reference publications alongside remote build evidence', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'outputs',
+				reuseView: 'release',
+				store: 'ssh-ng://build@example.test'
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				attachOnly: [],
+				publishByReference: [appPath],
+				referenceUploaded: true
+			}
+		);
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+		const receipt: unknown = JSON.parse(await readFile(receiptFile, 'utf8'));
+
+		expect({ receiptLine: run.receiptLine, receipt }).toStrictEqual({
+			receiptLine: `receipt-file=${receiptFile}`,
+			receipt: {
+				version: 3,
+				paths: [appPath, libraryBuiltPath],
+				subjects: [
+					{
+						origin: 'republished',
+						storePath: appPath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						metadataSource: `${url}/reuse/release`
+					},
+					{
+						origin: 'store-held',
+						storePath: libraryBuiltPath,
+						narHash: 'aa'.repeat(32),
+						buildStore: 'ssh-ng://build@example.test'
+					}
+				],
+				uploaded: [appPath]
+			}
+		});
+	});
+
+	it('publishes a reuse-view closure by reference without staging it in the remote store', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'closure',
+				store: 'ssh-ng://build@example.test',
+				reuseView: 'release',
+				fallbackReadUser: 'view-reader',
+				fallbackReadPassword: 'view-secret'
+			},
+			[],
+			[],
+			[],
+			undefined,
+			new Map(),
+			{
+				attachOnly: [],
+				publishByReference: [appPath],
+				closureTargets: [appPath],
+				referencedClosure: [
+					storePathSchema.parse(appPath),
+					storePathSchema.parse(referencePath)
+				],
+				localStore: 'local'
+			}
+		);
+		const receipt: unknown = JSON.parse(
+			await readFile(
+				path.join(directory, 'cupboard-cohort-receipt.json'),
+				'utf8'
+			)
+		);
+
+		expect({ materialiseCalls: run.materialiseCalls, receipt }).toStrictEqual({
+			materialiseCalls: [
+				{
+					sources: [
+						{ url: new URL(url), paths: [] },
+						{
+							url: new URL(`${url}/reuse/release`),
+							paths: [appPath],
+							credential: {
+								user: 'view-reader',
+								password: 'view-secret'
+							}
+						}
+					],
+					store: 'ssh-ng://build@example.test',
+					localStore: 'local'
+				}
+			],
+			receipt: {
+				version: 3,
+				paths: [appPath, referencePath],
+				subjects: [
+					{
+						origin: 'republished',
+						storePath: appPath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						metadataSource: `${url}/reuse/release`
+					},
+					{
+						origin: 'republished',
+						storePath: referencePath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						metadataSource: `${url}/reuse/release`
+					}
+				],
+				uploaded: []
+			}
+		});
+		expect(run.resultBuilds).toStrictEqual([
+			[[], '', 'ssh-ng://build@example.test']
+		]);
+	});
+
+	// The destination already holds an attestation for an attached target, so a
+	// provenance run publishes it with no receipt subject.
+	it('publishes an attached target alongside a remote build', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'outputs',
+				build: 'rebuild',
 				store: 'ssh-ng://build@example.test'
 			},
 			[libraryBuiltPath],
@@ -7271,12 +8400,10 @@ describe('buildCohortAction publication', () => {
 				paths: [libraryBuiltPath],
 				subjects: [
 					{
-						origin: 'built',
+						origin: 'store-held',
 						storePath: libraryBuiltPath,
 						narHash: 'aa'.repeat(32),
-						derivation: `${libraryBuiltPath}.drv`,
-						buildStore: 'auto',
-						verification: 'local'
+						buildStore: 'ssh-ng://build@example.test'
 					}
 				]
 			},
@@ -7289,7 +8416,7 @@ describe('buildCohortAction publication', () => {
 			{
 				...baseOptions(),
 				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
+				publish: 'outputs',
 				store: 'ssh-ng://build@example.test'
 			},
 			[libraryBuiltPath],
@@ -7319,7 +8446,7 @@ describe('buildCohortAction publication', () => {
 				cohortJson: remotelyQueryableCohortJson({
 					expectedPaths: [appPath, libraryBuiltPath, floatingBuiltPath]
 				}),
-				push: 'true',
+				publish: 'outputs',
 				store: 'ssh-ng://build@example.test'
 			},
 			[floatingBuiltPath],
@@ -7370,7 +8497,7 @@ describe('buildCohortAction publication', () => {
 			{
 				...baseOptions(),
 				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
+				publish: 'outputs',
 				store: 'ssh-ng://build@example.test'
 			},
 			[appPath, floatingBuiltPath],
@@ -7434,7 +8561,7 @@ describe('buildCohortAction publication', () => {
 			{
 				...baseOptions(),
 				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
+				publish: 'outputs',
 				store: 'ssh-ng://build@example.test'
 			},
 			[appPath, floatingBuiltPath],
@@ -7475,7 +8602,7 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it('claims only the queryable remote output Nix reports this invocation built', async () => {
+	it('publishes queryable remote outputs without runner-local build claims', async () => {
 		const run = await runPublicationFlow({
 			...baseOptions(),
 			cohortJson: remotelyQueryableCohortJson({
@@ -7485,7 +8612,7 @@ describe('buildCohortAction publication', () => {
 					'github:owner/repo/main'
 				]
 			}),
-			push: 'true',
+			publish: 'outputs',
 			maxJobs: '0',
 			store: 'ssh-ng://build@example.test'
 		});
@@ -7571,7 +8698,8 @@ describe('buildCohortAction publication', () => {
 				'--no-colour',
 				'push',
 				url,
-				libraryBuiltPath,
+				'--paths-file',
+				`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.publication`,
 				'--github-oidc',
 				'--no-retain',
 				'--store',
@@ -7579,17 +8707,14 @@ describe('buildCohortAction publication', () => {
 				'--receipt-file',
 				receiptFile,
 				'--copied-from-file',
-				path.join(directory, 'observed-copies.json'),
-				'--already-held',
-				appPath,
-				'--claimable',
-				libraryBuiltPath
+				path.join(directory, 'observed-copies.json')
 			],
 			rootPush: [
 				'--no-colour',
 				'push',
 				url,
-				libraryBuiltPath,
+				'--paths-file',
+				`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.0`,
 				'--github-oidc',
 				'--root',
 				'github:owner/repo/main',
@@ -7660,7 +8785,7 @@ describe('buildCohortAction publication', () => {
 							'github:owner/repo/main'
 						]
 					}),
-					push: 'true',
+					publish: 'outputs',
 					store: 'ssh-ng://build@example.test'
 				},
 				[libraryBuiltPath, floatingBuiltPath],
@@ -7676,7 +8801,8 @@ describe('buildCohortAction publication', () => {
 					'--no-colour',
 					'push',
 					url,
-					libraryBuiltPath,
+					'--paths-file',
+					`${path.join(directory, 'cupboard-cohort-target-paths.txt')}.publication`,
 					'--github-oidc',
 					'--no-retain',
 					'--store',
@@ -7684,10 +8810,7 @@ describe('buildCohortAction publication', () => {
 					'--receipt-file',
 					path.join(directory, 'cupboard-cohort-receipt.json'),
 					'--copied-from-file',
-					path.join(directory, 'observed-copies.json'),
-					'--already-held',
-					appPath,
-					'--no-claimable'
+					path.join(directory, 'observed-copies.json')
 				],
 				resultBuilds: [
 					[[libraryQueryInstallable], '', 'ssh-ng://build@example.test']

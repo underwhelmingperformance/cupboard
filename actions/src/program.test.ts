@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import { markErrorReported } from '@cupboard/reporter';
 import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
 import { CommanderError } from 'commander';
@@ -26,6 +28,7 @@ function expectCommanderError(value: unknown): asserts value is CommanderError {
 describe('buildProgram', () => {
 	it('passes injected services to the attestation signer', async () => {
 		const outputs: (readonly [string, string])[] = [];
+		const files: (readonly [string, string])[] = [];
 		const subject = `${'11'.repeat(32)}  example`;
 
 		await buildProgram(noRunnerEnvironment, undefined, {
@@ -33,6 +36,11 @@ describe('buildProgram', () => {
 				io: {
 					readText(filePath) {
 						return Promise.resolve(filePath === 'subjects' ? subject : '');
+					},
+					writeText(filePath, contents) {
+						files.push([filePath, contents]);
+
+						return Promise.resolve();
 					},
 					writeBundle() {
 						return Promise.reject(new Error('no bundle should be written'));
@@ -54,11 +62,15 @@ describe('buildProgram', () => {
 			'token'
 		]);
 
-		expect(outputs).toStrictEqual([
-			['bundle-path', ''],
-			['origin-bundle-path', ''],
-			['bundles', '']
-		]);
+		expect({ outputs, files }).toStrictEqual({
+			outputs: [
+				['bundle-path', ''],
+				['origin-bundle-path', ''],
+				['bundles', ''],
+				['checksums-file', path.resolve('signed-subjects.txt')]
+			],
+			files: [[path.resolve('signed-subjects.txt'), '']]
+		});
 	});
 
 	it.each([

@@ -8,7 +8,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	type BuildAttempt,
-	delegatedMachines,
 	parseBuildActivities,
 	receiptSubjects
 } from './attribution.ts';
@@ -45,7 +44,7 @@ function info(
 		narSize: 4,
 		references: [],
 		signatures: [],
-		ultimate: false,
+		ultimate: true,
 		...(deriver !== undefined && { deriver })
 	};
 }
@@ -81,11 +80,11 @@ describe('parseBuildActivities', () => {
 			]
 		},
 		{
-			name: 'uses the later record for a repeated derivation',
+			name: 'preserves remote dispatch when nested logs report a local build',
 			log: [startLine(appDrv, 'ssh://builder-1'), startLine(appDrv, '')].join(
 				'\n'
 			),
-			expected: [{ derivation: appDrv, machine: '' }]
+			expected: [{ derivation: appDrv, machine: 'ssh://builder-1' }]
 		},
 		{
 			name: 'skips non-build records and malformed lines',
@@ -109,42 +108,107 @@ describe('parseBuildActivities', () => {
 	});
 });
 
-describe('delegatedMachines', () => {
+describe('receiptSubjects', () => {
+	it('does not reinterpret a check with a different final hash as an original build', () => {
+		const attempts: readonly BuildAttempt[] = [
+			{
+				...attempt(1, [{ derivation: appDrv, machine: '' }]),
+				verifiedOutputs: [
+					{ storePath: appPath, narHash: 'bb'.repeat(32), derivation: appDrv }
+				]
+			}
+		];
+
+		expect(
+			receiptSubjects(attempts, [info(appPath, appDrv)], new Set(), 'auto')
+		).toStrictEqual([]);
+	});
+
 	it.each([
 		{
-			name: 'maps a delegated derivation to its builder',
-			attempts: [attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }])],
-			expected: new Map([[appDrv, 'ssh://b1']])
+			name: 'a successful local check',
+			machine: '',
+			outputPath: appPath,
+			outputHash: narHash.digestHex(),
+			outputDrv: appDrv,
+			expected: true
 		},
 		{
-			name: 'omits locally built derivations',
-			attempts: [attempt(1, [{ derivation: appDrv, machine: '' }])],
-			expected: new Map()
+			name: 'remote activity',
+			machine: 'ssh-ng://builder',
+			outputPath: appPath,
+			outputHash: narHash.digestHex(),
+			outputDrv: appDrv,
+			expected: false
 		},
 		{
-			name: 'uses the first builder recorded across repeated attempts',
-			attempts: [
-				attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }]),
-				attempt(2, [{ derivation: appDrv, machine: 'ssh://b2' }])
-			],
-			expected: new Map([[appDrv, 'ssh://b1']])
+			name: 'another output path',
+			machine: '',
+			outputPath: libraryPath,
+			outputHash: narHash.digestHex(),
+			outputDrv: appDrv,
+			expected: false
 		},
 		{
-			name: 'maps each derivation independently',
-			attempts: [
-				attempt(1, [
-					{ derivation: appDrv, machine: '' },
-					{ derivation: libraryDrv, machine: 'ssh://b2' }
-				])
-			],
-			expected: new Map([[libraryDrv, 'ssh://b2']])
+			name: 'another NAR hash',
+			machine: '',
+			outputPath: appPath,
+			outputHash: 'bb'.repeat(32),
+			outputDrv: appDrv,
+			expected: false
+		},
+		{
+			name: 'another derivation',
+			machine: '',
+			outputPath: appPath,
+			outputHash: narHash.digestHex(),
+			outputDrv: libraryDrv,
+			expected: false
 		}
-	])('$name', ({ attempts, expected }) => {
-		expect(delegatedMachines(attempts)).toStrictEqual(expected);
-	});
-});
+	])(
+		'attributes reproduction only from matching check evidence: $name',
+		({ machine, outputPath, outputHash, outputDrv, expected }) => {
+			const attempts: readonly BuildAttempt[] = [
+				attempt(1, [{ derivation: appDrv, machine: '' }]),
+				{
+					...attempt(2, [{ derivation: appDrv, machine }]),
+					verifiedOutputs: [
+						{
+							storePath: outputPath,
+							narHash: outputHash,
+							derivation: outputDrv
+						}
+					]
+				}
+			];
 
-describe('receiptSubjects', () => {
+			expect(
+				receiptSubjects(
+					attempts,
+					[info(appPath, appDrv)],
+					new Set([appPath]),
+					'auto'
+				)
+			).toStrictEqual(
+				expected
+					? [
+							{
+								origin: 'built',
+								storePath: appPath,
+								narHash: narHash.digestHex(),
+								derivation: appDrv,
+								attempt: 2,
+								attemptId: 'attempt-2',
+								buildStore: 'auto',
+								verification: 'local',
+								reproduced: true
+							}
+						]
+					: []
+			);
+		}
+	);
+
 	it.each([
 		{
 			name: 'uses the earliest attempt for multi-attempt attribution',
@@ -181,23 +245,11 @@ describe('receiptSubjects', () => {
 			]
 		},
 		{
-			name: 'records the builder for a delegated build',
+			name: 'does not infer execution from a delegated build request',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }])],
 			infos: [info(appPath, appDrv)],
 			preExisting: new Set<string>(),
-			expected: [
-				{
-					origin: 'built',
-					storePath: appPath,
-					narHash: narHash.digestHex(),
-					derivation: appDrv,
-					attempt: 1,
-					attemptId: 'attempt-1',
-					buildStore: 'auto',
-					machine: 'ssh://b1',
-					verification: 'build-store'
-				}
-			]
+			expected: []
 		},
 		{
 			name: 'excludes a pre-existing path',

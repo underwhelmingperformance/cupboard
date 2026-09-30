@@ -11,6 +11,7 @@ import path from 'node:path';
 
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -25,8 +26,6 @@ import { z } from 'zod';
 import type { ProgramOptions } from '../cli.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
-	BuildStoreRequiresAlreadyHeldError,
-	BuildStoreRequiresClaimableError,
 	CliAbortError,
 	CommandPayloadRequiredError,
 	InvalidStoreUriError,
@@ -46,6 +45,7 @@ import {
 	parsePathFile,
 	pushCommandAuthorizationDetails,
 	receiptBuildStore,
+	ReferenceReceiptOptionError,
 	registerPushCommand,
 	resolvePushPath,
 	validateRetentionChoice
@@ -266,6 +266,16 @@ describe('receiptBuildStore', () => {
 			expected: 'ssh-ng://builder.example'
 		},
 		{
+			name: 'a receipt file with the local automatic store',
+			options: {
+				receiptFile: '/runner/temp/receipt.json',
+				store: 'auto',
+				alreadyHeld: false as const,
+				claimable: false as const
+			},
+			expected: 'auto'
+		},
+		{
 			name: 'a receipt file with a selected store and existing paths',
 			options: {
 				receiptFile: '/runner/temp/receipt.json',
@@ -285,23 +295,13 @@ describe('receiptBuildStore', () => {
 		).toThrow(ReceiptFileRequiresStoreError);
 	});
 
-	it('requires the caller to state which paths the build store already held', () => {
-		expect(() =>
+	it('records store metadata without legacy build-claim inputs', () => {
+		expect(
 			receiptBuildStore({
 				receiptFile: '/runner/temp/receipt.json',
 				store: 'ssh-ng://builder.example'
 			})
-		).toThrow(BuildStoreRequiresAlreadyHeldError);
-	});
-
-	it('requires claimable paths when recording a selected build store', () => {
-		expect(() =>
-			receiptBuildStore({
-				receiptFile: '/runner/temp/receipt.json',
-				store: 'ssh-ng://builder.example',
-				alreadyHeld: false
-			})
-		).toThrow(BuildStoreRequiresClaimableError);
+		).toBe('ssh-ng://builder.example');
 	});
 });
 
@@ -350,7 +350,8 @@ interface PushRun {
 
 async function parsePush(
 	arguments_: readonly string[],
-	programOptions: ProgramOptions = {}
+	programOptions: ProgramOptions = {},
+	queriedPaths?: string[][]
 ): Promise<PushRun> {
 	const tokenProviderRequests: CacheScope[] = [];
 	let openStoreCalls = 0;
@@ -373,8 +374,14 @@ async function parsePush(
 		},
 		openStore: () => {
 			openStoreCalls += 1;
-
-			return storeWithEveryPath();
+			const store = storeWithEveryPath();
+			return {
+				...store,
+				queryValidPathsInfo: (paths) => {
+					queriedPaths?.push([...paths]);
+					return store.queryValidPathsInfo(paths);
+				}
+			};
 		}
 	});
 
@@ -476,38 +483,220 @@ describe('pushCommandAuthorizationDetails', () => {
 });
 
 describe('push command', () => {
-	it('accepts a reference-file-only publication past positional parsing', async () => {
+	it.each([
+		{ suffix: '', cache: defaultCache },
+		{
+			suffix: '/cache/release',
+			cache: { kind: 'named', name: cacheNameSchema.parse('release') }
+		}
+	])(
+		'combines target path files and arguments for $cache.kind caches',
+		async ({ suffix, cache }) => {
+			const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+			const file = path.join(directory, 'paths.txt');
+			const argumentPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+			const filePaths = [
+				'/nix/store/1123456789abcdfghijklmnpqrsvwxyz-lib',
+				'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-runtime'
+			];
+			writeFileSync(file, `${filePaths.join('\n')}\n`);
+			const queriedPaths: string[][] = [];
+
+			try {
+				const run = await parsePush(
+					[
+						`https://cache.example.workers.dev/t/acme${suffix}`,
+						argumentPath,
+						'--paths-file',
+						file,
+						'--dry-run'
+					],
+					interrupted,
+					queriedPaths
+				);
+				expect({ run, queriedPaths }).toStrictEqual({
+					run: {
+						result: new CliAbortError(),
+						tokenProviderRequests: [cache],
+						openStoreCalls: 1
+					},
+					queriedPaths: [[argumentPath, ...filePaths]]
+				});
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it('reads a large target list without positional path arguments', async () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
-		const file = path.join(directory, 'references.txt');
-		writeFileSync(
-			file,
-			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\n'
+		const file = path.join(directory, 'paths.txt');
+		const paths = Array.from(
+			{ length: 40_000 },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-manifest-path`
 		);
+		writeFileSync(file, `${paths.join('\n')}\n`);
+		const queriedPaths: string[][] = [];
 
 		try {
 			const run = await parsePush(
 				[
 					'https://cache.example.workers.dev/t/acme',
-					'--reference-paths-file',
+					'--paths-file',
 					file,
-					'--reference-source',
-					'https://cache.example.workers.dev/t/acme/reuse/reuse',
 					'--dry-run'
 				],
-				interrupted
+				interrupted,
+				queriedPaths
 			);
+			expect({ run, queriedPaths }).toStrictEqual({
+				run: {
+					result: new CliAbortError(),
+					tokenProviderRequests: [defaultCache],
+					openStoreCalls: 1
+				},
+				queriedPaths: [paths]
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
 
-			// The run reached its first remote call, so positional parsing accepted
-			// the reference paths as a publication in their own right.
-			expect(run).toStrictEqual({
-				result: new CliAbortError(),
-				tokenProviderRequests: [defaultCache],
+	it.each([
+		{
+			flags: ['--root', 'main'],
+			result: new CliAbortError(),
+			tokenProviderRequests: [defaultCache]
+		},
+		{
+			flags: ['--dry-run'],
+			result: new CommandPayloadRequiredError('a store path'),
+			tokenProviderRequests: []
+		}
+	])(
+		'validates an empty target file with $flags',
+		async ({ flags, result, tokenProviderRequests }) => {
+			const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+			const file = path.join(directory, 'paths.txt');
+			writeFileSync(file, '\n');
+			try {
+				const run = await parsePush(
+					[
+						'https://cache.example.workers.dev/t/acme',
+						'--paths-file',
+						file,
+						...flags
+					],
+					interrupted
+				);
+				expect(run).toStrictEqual({
+					result,
+					tokenProviderRequests,
+					openStoreCalls: 0
+				});
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it('reports an unreadable target file before authenticating', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+		const file = path.join(directory, 'missing.txt');
+		try {
+			const run = await parsePush([
+				'https://cache.example.workers.dev/t/acme',
+				'--paths-file',
+				file
+			]);
+			const failure = run.result;
+			expect({
+				...run,
+				result:
+					failure instanceof Error && 'code' in failure
+						? { code: failure.code, message: failure.message }
+						: failure
+			}).toStrictEqual({
+				result: {
+					code: 'ENOENT',
+					message: `ENOENT: no such file or directory, open '${file}'`
+				},
+				tokenProviderRequests: [],
 				openStoreCalls: 0
 			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
 	});
+
+	it.each(['--reference-paths-file', '--reference-manifest'])(
+		'accepts a %s publication past positional parsing',
+		async (referenceOption) => {
+			const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+			const file = path.join(directory, 'references.txt');
+			writeFileSync(
+				file,
+				'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\n'
+			);
+
+			if (referenceOption === '--reference-manifest') {
+				const storePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
+				const hash = NixSha256Hash.fromDigest(Buffer.alloc(32)).toString();
+				writeFileSync(
+					file,
+					JSON.stringify({
+						version: 1,
+						paths: [
+							{
+								storePath,
+								kind: 'intermediate',
+								source: 'https://cache.example.workers.dev/t/acme/reuse/reuse',
+								narinfo: NarInfo.fromFields({
+									storePath,
+									url: 'nar/runtime.nar.zst',
+									compression: 'zstd',
+									fileHash: hash,
+									fileSize: 1,
+									narHash: hash,
+									narSize: 1,
+									references: [],
+									sigs: []
+								}).render()
+							}
+						]
+					})
+				);
+			}
+			try {
+				const run = await parsePush(
+					[
+						'https://cache.example.workers.dev/t/acme',
+						referenceOption,
+						file,
+						...(referenceOption === '--reference-manifest'
+							? []
+							: [
+									'--reference-source',
+									'https://cache.example.workers.dev/t/acme/reuse/reuse'
+								]),
+						'--dry-run'
+					],
+					interrupted
+				);
+
+				// The run reached its first remote call, so positional parsing accepted
+				// the reference paths as a publication in their own right.
+				expect(run).toStrictEqual({
+					result: new CliAbortError(),
+					tokenProviderRequests: [defaultCache],
+					openStoreCalls: 0
+				});
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
 
 	it('rejects a publication with no paths of any kind', async () => {
 		const run = await parsePush([
@@ -618,6 +807,24 @@ describe('push command', () => {
 		});
 	});
 
+	it('accepts the automatic local store for a receipt-producing push', async () => {
+		const run = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			'--store',
+			'auto',
+			'--no-retain',
+			'--root',
+			'main'
+		]);
+
+		expect(run).toStrictEqual({
+			result: new NoRetainConflictError('--root'),
+			tokenProviderRequests: [],
+			openStoreCalls: 0
+		});
+	});
+
 	it('rejects --run-root-ttl without --run-root before authenticating', async () => {
 		const run = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
@@ -658,6 +865,59 @@ describe('push command', () => {
 			openStoreCalls: 0
 		});
 	});
+
+	it.each([
+		{
+			name: 'missing reference inputs',
+			extraArguments: ['--reference-receipt-file', 'reference.json'],
+			reason: 'source' as const
+		},
+		{
+			name: 'a missing reference source',
+			extraArguments: [
+				'--reference-receipt-file',
+				'reference.json',
+				'--reference-paths-file',
+				'references.txt'
+			],
+			reason: 'source' as const
+		},
+		{
+			name: 'a missing reference paths file',
+			extraArguments: [
+				'--reference-receipt-file',
+				'reference.json',
+				'--reference-source',
+				'https://cache.example.workers.dev/t/acme'
+			],
+			reason: 'source' as const
+		},
+		{
+			name: 'a build receipt at the same time',
+			extraArguments: [
+				'--reference-receipt-file',
+				'reference.json',
+				'--receipt-file',
+				'build.json'
+			],
+			reason: 'conflict' as const
+		}
+	])(
+		'rejects $name before authenticating',
+		async ({ extraArguments, reason }) => {
+			const run = await parsePush([
+				'https://cache.example.workers.dev/t/acme',
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+				...extraArguments
+			]);
+
+			expect(run).toStrictEqual({
+				result: new ReferenceReceiptOptionError(reason),
+				tokenProviderRequests: [],
+				openStoreCalls: 0
+			});
+		}
+	);
 
 	it.each([
 		['--read-user', 'reader'],
@@ -711,6 +971,18 @@ describe('push command', () => {
 					file,
 					'--reference-source',
 					'https://cache.example.workers.dev/t/acme/reuse/reuse'
+				];
+			}
+		},
+		{
+			name: 'a target paths file listing a non-store path',
+			pushArguments: (directory: string, missing: string) => {
+				const file = path.join(directory, 'paths.txt');
+				writeFileSync(file, `${missing}\n`);
+				return [
+					'https://cache.example.workers.dev/t/acme',
+					'--paths-file',
+					file
 				];
 			}
 		},
@@ -772,30 +1044,33 @@ describe('push command', () => {
 		}
 	});
 
-	it('rejects an intermediate paths file listing a symlink outside the store before authenticating', async () => {
-		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
-		const target = path.join(directory, 'out');
-		const link = path.join(directory, 'intermediate');
-		const file = path.join(directory, 'intermediates.txt');
-		writeFileSync(target, 'artefact');
-		symlinkSync(target, link);
-		writeFileSync(file, `${link}\n`);
+	it.each(['--paths-file', '--intermediate-paths-file'])(
+		'rejects %s listing a symlink outside the store before authenticating',
+		async (option) => {
+			const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+			const target = path.join(directory, 'out');
+			const link = path.join(directory, 'intermediate');
+			const file = path.join(directory, 'intermediates.txt');
+			writeFileSync(target, 'artefact');
+			symlinkSync(target, link);
+			writeFileSync(file, `${link}\n`);
 
-		try {
-			const run = await parsePush([
-				'https://cache.example.workers.dev/t/acme',
-				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-				'--intermediate-paths-file',
-				file
-			]);
+			try {
+				const run = await parsePush([
+					'https://cache.example.workers.dev/t/acme',
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+					option,
+					file
+				]);
 
-			expect(run).toStrictEqual({
-				result: new InvalidStorePathError(realpathSync(target)),
-				tokenProviderRequests: [],
-				openStoreCalls: 0
-			});
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
+				expect(run).toStrictEqual({
+					result: new InvalidStorePathError(realpathSync(target)),
+					tokenProviderRequests: [],
+					openStoreCalls: 0
+				});
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
 		}
-	});
+	);
 });

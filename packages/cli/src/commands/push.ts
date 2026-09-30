@@ -37,8 +37,7 @@ import {
 } from '../duration.ts';
 import {
 	AttestationsDisabledError,
-	BuildStoreRequiresAlreadyHeldError,
-	BuildStoreRequiresClaimableError,
+	CliUsageError,
 	EmptyPublicationError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
@@ -53,6 +52,7 @@ import {
 import { PublicationCollection } from '../push/publication.ts';
 import { type PushStore, runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
+import { parseReferenceManifest } from '../push/reference-manifest.ts';
 import { parseReadUser } from '../read-user.ts';
 import { parseRootName } from '../root-name.ts';
 import { parseStoreUri } from '../store-uri.ts';
@@ -67,8 +67,10 @@ interface PushOptions {
 	readonly ttl?: TtlSeconds;
 	readonly permanent?: boolean;
 	readonly closure?: boolean;
+	readonly pathsFile?: string;
 	readonly intermediatePathsFile?: string;
 	readonly referencePathsFile?: string;
+	readonly referenceManifest?: string;
 	readonly referenceSource?: URL;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
@@ -77,6 +79,7 @@ interface PushOptions {
 	readonly runRootPermanent?: boolean;
 	readonly store?: string;
 	readonly receiptFile?: string;
+	readonly referenceReceiptFile?: string;
 	readonly alreadyHeld?: readonly string[] | false;
 	readonly claimable?: readonly string[] | false;
 	readonly copiedFromFile?: string;
@@ -87,6 +90,17 @@ interface PushOptions {
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
 	readonly retain?: boolean;
+}
+
+export class ReferenceReceiptOptionError extends CliUsageError {
+	constructor(reason: 'source' | 'conflict') {
+		super(
+			reason === 'source'
+				? '--reference-receipt-file requires --reference-manifest or both --reference-paths-file and --reference-source'
+				: '--reference-receipt-file cannot be combined with --receipt-file'
+		);
+		this.name = 'ReferenceReceiptOptionError';
+	}
 }
 
 /**
@@ -157,17 +171,8 @@ export function validateRetentionChoice(
 }
 
 /**
- * Returns the build store a push records a receipt against, or `undefined`
- * when the push writes no receipt. A receipt attributes every subject to the
- * store the run selected, so a push that reads the store Nix itself would use
- * has no explicit selection to record and is refused.
- *
- * Selecting a build store also requires the caller to state which paths that
- * store already held, with `--already-held` zero or more times or
- * `--no-already-held` for none, and which paths this invocation observed being
- * realised, with `--claimable` zero or more times or `--no-claimable` for none.
- * Those two explicit sets stop a receipt claiming an output that existed
- * before the run, or one that appeared between planning and the build.
+ * Returns the explicitly selected store for a publication receipt. The receipt
+ * describes store metadata and does not establish current-run build execution.
  */
 export function receiptBuildStore(
 	options: Pick<
@@ -181,14 +186,6 @@ export function receiptBuildStore(
 
 	if (options.store === undefined) {
 		throw new ReceiptFileRequiresStoreError();
-	}
-
-	if (options.alreadyHeld === undefined) {
-		throw new BuildStoreRequiresAlreadyHeldError();
-	}
-
-	if (options.claimable === undefined) {
-		throw new BuildStoreRequiresClaimableError();
 	}
 
 	return options.store;
@@ -378,6 +375,10 @@ export function registerPushCommand(
 			'publish the whole closure of the given paths (by default, only the given paths)'
 		)
 		.option(
+			'--paths-file <path>',
+			'file of target store paths, one per line. These paths are published with any positional paths and retained under --root when specified.'
+		)
+		.option(
 			'--intermediate-paths-file <path>',
 			'file of extra store paths, one per line, to publish without adding them to the root'
 		)
@@ -386,8 +387,12 @@ export function registerPushCommand(
 			'file of store paths, one per line, to publish by reference from --reference-source. The tenant must already store their NARs, so nothing is read from the local store or uploaded.'
 		)
 		.option(
+			'--reference-manifest <path>',
+			'JSON manifest of reference paths with their target or intermediate kind, source URL and captured narinfo. Publish this metadata without reading the source cache or local store.'
+		)
+		.option(
 			'--reference-source <url>',
-			'cache URL to read the narinfos of the --reference-paths-file paths from (required with --reference-paths-file)',
+			'cache URL to read narinfos for --reference-paths-file (required with --reference-paths-file)',
 			parseWorkerUrl
 		)
 		.option(
@@ -412,30 +417,34 @@ export function registerPushCommand(
 		.option('--run-root-permanent', 'keep the run root permanently')
 		.option(
 			'--store <uri>',
-			'read the store paths from this remote ssh-ng store (default: the store that Nix uses)',
-			parseStoreUri
+			'read paths from auto or a remote ssh-ng store (default: the store that Nix uses)',
+			(value: string) => (value === 'auto' ? value : parseStoreUri(value))
 		)
 		.option(
 			'--receipt-file <path>',
-			'write a build receipt (JSON) for the published paths to this file, recording --store as the build store. Requires --store, either --already-held or --no-already-held, and either --claimable or --no-claimable.'
+			'write a publication receipt (JSON) from the selected store metadata. Requires --store. A push does not claim that this run built any path.'
+		)
+		.option(
+			'--reference-receipt-file <path>',
+			'write a receipt for successfully published reference paths only. Requires --reference-manifest or both --reference-paths-file and --reference-source. The receipt does not claim that this run built or copied NAR bytes.'
 		)
 		.option(
 			'--already-held <path>',
-			'a store path that was already in the build store before the build started (repeatable). The receipt does not record it as built by this run.',
+			'accepted for compatibility with older callers (repeatable); does not affect receipt origins.',
 			collect
 		)
 		.option(
 			'--no-already-held',
-			'declare that there are no --already-held paths'
+			'accepted for compatibility with older callers; does not affect receipt origins'
 		)
 		.option(
 			'--claimable <path>',
-			'a store path that this build is known to have realised (repeatable). The receipt can record only these paths as built by this run.',
+			'accepted for compatibility with older callers (repeatable); cannot authorise a current-run build claim.',
 			collect
 		)
 		.option(
 			'--no-claimable',
-			'declare that there are no --claimable paths, so the receipt records none of the paths as built by this run'
+			'accepted for compatibility with older callers; a push never records current-run build claims'
 		)
 		.option(
 			'--copied-from-file <path>',
@@ -526,6 +535,20 @@ export function registerPushCommand(
 				throw new ReadCredentialPairError();
 			}
 
+			if (
+				options.referenceReceiptFile !== undefined &&
+				options.receiptFile !== undefined
+			) {
+				throw new ReferenceReceiptOptionError('conflict');
+			}
+			if (
+				options.referenceReceiptFile !== undefined &&
+				options.referenceManifest === undefined &&
+				(options.referencePathsFile === undefined ||
+					options.referenceSource === undefined)
+			) {
+				throw new ReferenceReceiptOptionError('source');
+			}
 			const buildStore = receiptBuildStore(options);
 
 			if (
@@ -544,6 +567,12 @@ export function registerPushCommand(
 			// the invalid path. One case is checked later: a first argument that
 			// could be a cache name. Only a cache lookup, which needs a token
 			// provider, determines whether the argument is a cache name or a path.
+			const filePaths =
+				options.pathsFile === undefined
+					? []
+					: resolvePushStorePaths(
+							parsePathFile(await readFile(options.pathsFile, 'utf8'))
+						);
 			const intermediatePaths =
 				options.intermediatePathsFile === undefined
 					? undefined
@@ -558,10 +587,18 @@ export function registerPushCommand(
 					: resolvePushStorePaths(
 							parsePathFile(await readFile(options.referencePathsFile, 'utf8'))
 						);
+			const references =
+				options.referenceManifest === undefined
+					? undefined
+					: parseReferenceManifest(
+							await readFile(options.referenceManifest, 'utf8')
+						);
 			const canAcceptEmptyPayload =
+				filePaths.length > 0 ||
 				(options.root !== undefined && options.dryRun !== true) ||
 				intermediatePaths !== undefined ||
-				referencePaths !== undefined;
+				referencePaths !== undefined ||
+				references !== undefined;
 			const resolved = await resolveAuthorisedCachePositionals(url, paths, {
 				minimumPayload: canAcceptEmptyPayload ? 0 : 1,
 				payloadDescription: 'a store path',
@@ -585,9 +622,10 @@ export function registerPushCommand(
 				signal: programOptions.signal
 			});
 			const publication = PublicationCollection.of({
-				targets: resolved.payload,
+				targets: [...resolved.payload, ...filePaths],
 				...(intermediatePaths !== undefined && { intermediatePaths }),
-				...(referencePaths !== undefined && { referencePaths })
+				...(referencePaths !== undefined && { referencePaths }),
+				...(references !== undefined && { references })
 			});
 
 			const isEmptyRootReplacement =
@@ -656,6 +694,9 @@ export function registerPushCommand(
 				}),
 				...(options.dryRun !== undefined && { dryRun: options.dryRun }),
 				...(buildStore !== undefined && { buildStore }),
+				...(options.referenceReceiptFile !== undefined && {
+					referenceReceipt: true
+				}),
 				...(options.alreadyHeld !== undefined && {
 					alreadyHeld: options.alreadyHeld === false ? [] : options.alreadyHeld
 				}),
@@ -665,13 +706,14 @@ export function registerPushCommand(
 				...(copiedFrom !== undefined && { copiedFrom })
 			});
 
-			if (receipt === undefined || options.receiptFile === undefined) {
+			const receiptFile = options.referenceReceiptFile ?? options.receiptFile;
+			if (receipt === undefined || receiptFile === undefined) {
 				return;
 			}
 
-			await mkdir(path.dirname(options.receiptFile), { recursive: true });
+			await mkdir(path.dirname(receiptFile), { recursive: true });
 			await writeFile(
-				options.receiptFile,
+				receiptFile,
 				`${JSON.stringify(receipt, undefined, '\t')}\n`
 			);
 		});

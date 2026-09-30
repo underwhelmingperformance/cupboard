@@ -1,6 +1,6 @@
 import process from 'node:process';
 
-import { createOctokitClient } from '@cupboard/shared/octokit';
+import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import {
 	type VerifiedBundle,
 	type VerifiedIdentityPolicy,
@@ -16,7 +16,6 @@ import {
 	TSAWitness,
 	type Witness
 } from '@sigstore/sign';
-import { z } from 'zod';
 
 import {
 	type AttestationStatement,
@@ -29,12 +28,17 @@ import {
 	type StatementSigner
 } from './attestation-signing.ts';
 import {
+	type AttestationStoreWriter,
+	writeToAttestationStore
+} from './attestation-store.ts';
+import {
 	AttestationBundleUnverifiedError,
-	AttestationEvidenceShapeError,
-	AttestationStoreWriteError,
-	MissingInputError
+	AttestationEvidenceShapeError
 } from './errors.ts';
 import type { Environment } from './inputs.ts';
+
+export type { AttestationStoreWriter } from './attestation-store.ts';
+export { writeToAttestationStore } from './attestation-store.ts';
 
 /**
  * A profile for which the action signs with a Sigstore client directly instead
@@ -330,77 +334,6 @@ export async function selfCheckBundle(
 	}
 }
 
-const repositoryPattern = /^([\w.-]+)\/([\w.-]+)$/u;
-const attestationStoreResponseSchema = z.looseObject({
-	id: z.union([z.number(), z.string()])
-});
-// The attestation-store endpoint accepts these three members. The loose schema
-// preserves every other member of the bundle document.
-const attestationBundleSchema = z.looseObject({
-	mediaType: z.string().optional(),
-	verificationMaterial: z.looseObject({}).optional(),
-	dsseEnvelope: z.looseObject({}).optional()
-});
-
-export interface AttestationStoreWrite {
-	readonly bundle: string;
-	readonly githubToken: string;
-	readonly environment: Environment;
-}
-
-export type AttestationStoreWriter = (
-	write: AttestationStoreWrite
-) => Promise<string>;
-
-function repositoryFrom(environment: Environment): readonly [string, string] {
-	const value = environment.GITHUB_REPOSITORY;
-
-	if (value === undefined || value === '') {
-		throw new MissingInputError('GITHUB_REPOSITORY');
-	}
-
-	const match = repositoryPattern.exec(value);
-	const owner = match?.[1];
-	const repo = match?.[2];
-
-	if (owner === undefined || repo === undefined) {
-		throw new AttestationStoreWriteError(value);
-	}
-
-	return [owner, repo];
-}
-
-/**
- * Records one bundle in the repository's attestation store. `gh attestation
- * verify` reads bundles from this store. `@actions/attest` writes to the same
- * endpoint for the profile it signs.
- */
-export async function writeToAttestationStore(
-	write: AttestationStoreWrite
-): Promise<string> {
-	const [owner, repo] = repositoryFrom(write.environment);
-	const octokit = createOctokitClient({
-		replaySafety: 'replay-safe',
-		auth: write.githubToken,
-		...(write.environment.GITHUB_API_URL !== undefined && {
-			baseUrl: write.environment.GITHUB_API_URL
-		})
-	});
-
-	const document = attestationBundleSchema.parse(JSON.parse(write.bundle));
-
-	try {
-		const response = await octokit.request(
-			'POST /repos/{owner}/{repo}/attestations',
-			{ owner, repo, bundle: document }
-		);
-
-		return String(attestationStoreResponseSchema.parse(response.data).id);
-	} catch (error) {
-		throw new AttestationStoreWriteError(`${owner}/${repo}`, { cause: error });
-	}
-}
-
 export interface SigstoreSignerOptions {
 	readonly subjects: readonly AttestationSubject[];
 	readonly profile: ClientSignedProfile;
@@ -458,7 +391,10 @@ export function sigstoreStatementSigner(
 
 		const signed: SignedAttestation = { bundle, evidence };
 
-		if (!options.uploadToGithub) {
+		if (
+			!options.uploadToGithub ||
+			Buffer.byteLength(bundle) > maxAttestationBundleBytes
+		) {
 			return signed;
 		}
 
@@ -486,7 +422,7 @@ export function statementSignerFor(
 	const { profile } = options.policy;
 
 	if (!isClientSignedProfile(profile)) {
-		return githubStatementSigner(options);
+		return githubStatementSigner(options, dependencies);
 	}
 
 	return sigstoreStatementSigner(

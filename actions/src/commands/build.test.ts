@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import {
 	chmod,
 	mkdir,
@@ -12,19 +13,35 @@ import path from 'node:path';
 import { env, execPath } from 'node:process';
 import { promisify } from 'node:util';
 
+import {
+	defaultSignatureSettings,
+	NixStorePathNotFoundError
+} from '@cupboard/nix';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { buildReceiptSchema } from '@cupboard/protocol/build';
-import { afterEach, describe, expect, it } from 'vitest';
+import {
+	buildReceiptSchema,
+	buildReceiptV3Schema
+} from '@cupboard/protocol/build';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { receiptSubjects as cliReceiptSubjects } from '../../../packages/cli/src/build-push/attribution.ts';
 import {
 	BuildAttemptsInvalidError,
-	BuildInstallableInvalidError
+	BuildInstallableInvalidError,
+	BuildObservationMissingError,
+	BuildRebuildRemoteDispatchError,
+	CommandFailedError
 } from '../errors.ts';
+import {
+	reproducedSubjects,
+	reproductionReport
+} from '../reproduction-report.ts';
 
+import { provenancedSubjects } from './attest.ts';
 import {
 	buildAction,
 	buildActivities,
@@ -40,14 +57,75 @@ const app = storePathSchema.parse(
 const library = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 );
+const availabilitySettings = {
+	substitution: {
+		substitute: true,
+		alwaysAllowSubstitutes: false,
+		fallback: true,
+		substituters: ['https://upstream.example']
+	},
+	signatures: defaultSignatureSettings
+};
 
-function buildStart(derivation: string) {
+function buildStart(derivation: string, machine = '') {
 	return JSON.stringify({
 		action: 'start',
 		type: 105,
-		fields: [derivation, '', 1, 1]
+		fields: [derivation, machine, 1, 1]
 	});
 }
+
+describe('CLI verification receipt', () => {
+	it('generates a flake reproduction report from a CLI verification receipt', () => {
+		const derivation = `${app}.drv`;
+		const subjects = cliReceiptSubjects(
+			[
+				{
+					attempt: 2,
+					attemptId: 'verification-attempt',
+					activities: [{ derivation, machine: '' }],
+					verifiedOutputs: [
+						{ storePath: app, narHash: 'aa'.repeat(32), derivation }
+					]
+				}
+			],
+			[{ ...pathInfo(app, derivation), ultimate: true }],
+			new Set([app]),
+			'auto'
+		);
+		const receipt = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [app],
+			subjects
+		});
+
+		expect({
+			receipt,
+			report: reproductionReport(reproducedSubjects(receipt))
+		}).toStrictEqual({
+			receipt: {
+				version: 3,
+				paths: [app],
+				subjects: [
+					{
+						origin: 'built',
+						storePath: app,
+						narHash: 'aa'.repeat(32),
+						derivation,
+						attempt: 2,
+						attemptId: 'verification-attempt',
+						buildStore: 'auto',
+						verification: 'local',
+						reproduced: true
+					}
+				]
+			},
+			report: {
+				attributes: [{ attribute: 'REPRODUCIBLE', conditions: { derivation } }]
+			}
+		});
+	});
+});
 
 describe('buildActivities', () => {
 	it('returns derivations from build-start activities', () => {
@@ -55,6 +133,18 @@ describe('buildActivities', () => {
 		const log = buildStart(derivation);
 
 		expect(buildActivities(log)).toStrictEqual([{ derivation, machine: '' }]);
+	});
+
+	it('preserves remote dispatch when a nested local activity follows it', () => {
+		const derivation = `${app}.drv`;
+		const log = [
+			buildStart(derivation, 'ssh-ng://builder'),
+			buildStart(derivation)
+		].join('\n');
+
+		expect(buildActivities(log)).toStrictEqual([
+			{ derivation, machine: 'ssh-ng://builder' }
+		]);
 	});
 
 	it('ignores unrelated internal JSON records', () => {
@@ -76,40 +166,60 @@ describe('buildActivities', () => {
 });
 
 describe('derivationsRequiringVerification', () => {
-	it('requires local verification for a derivation from an earlier attempt and for a remotely built derivation', () => {
-		const appDerivation = `${app}.drv`;
-		const libraryDerivation = `${library}.drv`;
+	it.each([
+		{
+			plannedFreshPath: true,
+			uncertainInitialPath: false,
+			expectedFreshCheck: false
+		},
+		{
+			plannedFreshPath: false,
+			uncertainInitialPath: false,
+			expectedFreshCheck: true
+		},
+		{
+			plannedFreshPath: true,
+			uncertainInitialPath: true,
+			expectedFreshCheck: true
+		}
+	])(
+		'checks existing, copied, unplanned and uncertain outputs: $plannedFreshPath $uncertainInitialPath',
+		({ plannedFreshPath, uncertainInitialPath, expectedFreshCheck }) => {
+			const appDerivation = `${app}.drv`;
+			const libraryDerivation = `${library}.drv`;
+			const fresh = storePathSchema.parse(
+				'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-fresh'
+			);
+			const freshDerivation = `${fresh}.drv`;
 
-		expect(
-			derivationsRequiringVerification(
-				[
-					{
-						attempt: 1,
-						attemptId: 'one',
-						activities: [
-							{ derivation: appDerivation, machine: '' },
-							{
-								derivation: '/nix/store/dependency.drv',
-								machine: 'builder'
-							}
-						]
-					},
-					{
-						attempt: 2,
-						attemptId: 'two',
-						activities: [{ derivation: libraryDerivation, machine: 'builder' }]
-					}
-				],
-				2,
-				[pathInfo(app, appDerivation), pathInfo(library, libraryDerivation)]
-			)
-		).toStrictEqual([appDerivation, libraryDerivation]);
-	});
+			expect(
+				derivationsRequiringVerification(
+					[
+						{ ...pathInfo(app, appDerivation), ultimate: true },
+						pathInfo(library, libraryDerivation),
+						{ ...pathInfo(fresh, freshDerivation), ultimate: true }
+					],
+					new Set([app]),
+					new Set([app, library, ...(plannedFreshPath ? [fresh] : [])]),
+					new Set(uncertainInitialPath ? [fresh] : [])
+				)
+			).toStrictEqual([
+				appDerivation,
+				libraryDerivation,
+				...(expectedFreshCheck ? [freshDerivation] : [])
+			]);
+		}
+	);
 });
 
 const temporaryDirectories: string[] = [];
 
+beforeEach(() => {
+	vi.stubEnv('NIX_CONFIG', `${env.NIX_CONFIG ?? ''}\nbuilders =\n`);
+});
+
 afterEach(async () => {
+	vi.unstubAllEnvs();
 	const directories = [...temporaryDirectories];
 	temporaryDirectories.length = 0;
 	await Promise.all(
@@ -120,6 +230,454 @@ afterEach(async () => {
 });
 
 describe('buildAction', () => {
+	it.each([
+		{ selection: 'NIX_REMOTE', warm: false },
+		{ selection: 'NIX_REMOTE', warm: true },
+		{ selection: 'store setting', warm: false },
+		{ selection: 'store setting', warm: true },
+		{ selection: 'local', warm: false },
+		{ selection: 'local', warm: true }
+	])(
+		'attributes execution in the selected store: $selection, warm=$warm',
+		async ({ selection, warm }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const remoteStore = 'ssh-ng://build@example.test?remote-store=/srv/nix';
+			const isRemote = selection !== 'local';
+			vi.stubEnv('NIX_CONF_DIR', directory);
+			vi.stubEnv('NIX_USER_CONF_FILES', path.join(directory, 'absent'));
+			vi.stubEnv(
+				'NIX_REMOTE',
+				selection === 'NIX_REMOTE' ? remoteStore : 'auto'
+			);
+			vi.stubEnv(
+				'NIX_CONFIG',
+				`builders =\n${selection === 'store setting' ? `store = ${remoteStore}\n` : ''}`
+			);
+			const derivation = `${app}.drv`;
+			const info = { ...pathInfo(app, derivation), ultimate: true };
+			const executions: string[] = [];
+			let pathQueries = 0;
+
+			await buildAction(
+				{
+					installables: ['.#app'],
+					attempts: '1',
+					build: warm ? 'rebuild' : 'missing'
+				},
+				{ RUNNER_TEMP: directory },
+				{
+					nextAttemptId: () => 'selected-store-attempt',
+					nix: {
+						queryPathInfo: () => {
+							pathQueries += 1;
+							return !warm && pathQueries === 1
+								? Promise.reject(new NixStorePathNotFoundError(app))
+								: Promise.resolve(info);
+						}
+					},
+					runNix: async (invocation) => {
+						if (invocation.arguments.includes('--dry-run')) {
+							return {
+								status: 0,
+								stdout: JSON.stringify([
+									{ drvPath: derivation, outputs: { out: app } }
+								])
+							};
+						}
+
+						const isCheck = invocation.arguments.includes('--rebuild');
+						executions.push(isCheck ? 'check' : 'normal');
+						const logFile =
+							invocation.arguments[
+								invocation.arguments.indexOf('json-log-path') + 1
+							];
+						if (logFile === undefined) {
+							throw new Error('missing json-log-path');
+						}
+						await writeFile(
+							logFile,
+							!warm || isCheck ? `${buildStart(derivation)}\n` : ''
+						);
+						return { status: 0, stdout: isCheck ? '' : `${app}\n` };
+					}
+				}
+			);
+
+			const receiptText = await readFile(
+				path.join(directory, 'cupboard-build-receipt.json'),
+				'utf8'
+			);
+			const receiptJson: unknown = JSON.parse(receiptText);
+			const receipt = buildReceiptV3Schema.parse(receiptJson);
+			const builtReceipt: unknown = JSON.parse(
+				await readFile(
+					path.join(directory, 'cupboard-built-receipt.json'),
+					'utf8'
+				)
+			);
+			const identity = {
+				storePath: app,
+				narHash: 'aa'.repeat(32),
+				derivation
+			};
+			const subject = isRemote
+				? { ...identity, origin: 'store-held', buildStore: remoteStore }
+				: {
+						...identity,
+						origin: 'built',
+						buildStore: 'auto',
+						verification: 'local',
+						...(warm && { reproduced: true }),
+						attempt: 1,
+						attemptId: 'selected-store-attempt'
+					};
+			expect({
+				executions,
+				receipt,
+				builtReceipt,
+				publishPaths: await readFile(
+					path.join(directory, 'cupboard-publish-paths.txt'),
+					'utf8'
+				),
+				slsaSubjects: provenancedSubjects(receipt, new Map([[app, info]])).built
+			}).toStrictEqual({
+				executions: warm ? ['normal', 'check'] : ['normal'],
+				receipt: { version: 3, paths: [app], subjects: [subject] },
+				builtReceipt: {
+					version: 3,
+					paths: isRemote ? [] : [app],
+					subjects: isRemote ? [] : [subject]
+				},
+				publishPaths: `${app}\n`,
+				slsaSubjects: isRemote
+					? []
+					: [{ storePath: app, sha256: 'aa'.repeat(32) }]
+			});
+		}
+	);
+
+	it.each([
+		{ substituter: 'leave', selected: [] },
+		{ substituter: 'copy', selected: [app, library] }
+	])(
+		'selects output paths for substituter $substituter',
+		async ({ substituter, selected }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const paths: readonly StorePathString[] = [app, library];
+
+			await buildAction(
+				{ installables: ['.#app'], attempts: '1', substituter },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'github-output')
+				},
+				{
+					availabilitySettings,
+					nix: {
+						queryPathInfo: (storePath) =>
+							Promise.resolve({
+								...pathInfo(
+									storePathSchema.parse(storePath),
+									`${storePath}.drv`
+								),
+								ultimate: storePath === library
+							})
+					},
+					availabilityNix: {
+						canSubstituteDerivation: () => Promise.resolve(true),
+						honoursSubstituterSettings: () =>
+							Promise.resolve({ isHonoured: true }),
+						resolveSubstitutableClosure: () =>
+							Promise.resolve({
+								kind: 'served',
+								pathCount: 1,
+								downloadSize: 1,
+								narSize: 1
+							})
+					},
+					runNix: async (invocation) => {
+						if (invocation.arguments.includes('--dry-run')) {
+							return { status: 0, stdout: '[]' };
+						}
+
+						const logFile =
+							invocation.arguments[
+								invocation.arguments.indexOf('json-log-path') + 1
+							];
+						if (logFile !== undefined) {
+							await writeFile(logFile, '');
+						}
+
+						return { status: 0, stdout: `${paths.join('\n')}\n` };
+					}
+				}
+			);
+
+			expect({
+				selected: await readFile(
+					path.join(directory, 'cupboard-publish-paths.txt'),
+					'utf8'
+				),
+				all: await readFile(
+					path.join(directory, 'cupboard-build-paths.txt'),
+					'utf8'
+				)
+			}).toStrictEqual({
+				selected: selected.length === 0 ? '' : `${selected.join('\n')}\n`,
+				all: `${paths.join('\n')}\n`
+			});
+		}
+	);
+
+	it.each([undefined, 'false'])(
+		'keeps large output lists complete with inline-paths %s',
+		async (inlinePaths) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const paths = Array.from({ length: 1000 }, (_, index) =>
+				storePathSchema.parse(`${app}-${String(index)}`)
+			);
+			const output = path.join(directory, 'github-output');
+			await buildAction(
+				{ installables: ['.#app'], attempts: '1', inlinePaths },
+				{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output },
+				{
+					nix: {
+						queryPathInfo: (storePath) =>
+							Promise.resolve(
+								pathInfo(storePathSchema.parse(storePath), `${app}.drv`)
+							)
+					},
+					runNix: async (invocation) => {
+						if (invocation.arguments.includes('--dry-run')) {
+							return { status: 0, stdout: '[]' };
+						}
+						await writeFile(
+							invocation.arguments[
+								invocation.arguments.indexOf('json-log-path') + 1
+							] ?? '',
+							''
+						);
+						return { status: 0, stdout: `${paths.join('\n')}\n` };
+					}
+				}
+			);
+			const outputs = await readFile(output, 'utf8');
+			const inline = (key: string): string | undefined =>
+				new RegExp(String.raw`^${key}<<([^\n]+)\n([\s\S]*?)\n\1$`, 'mu').exec(
+					outputs
+				)?.[2];
+			expect({
+				paths: await readFile(
+					path.join(directory, 'cupboard-build-paths.txt'),
+					'utf8'
+				),
+				published: await readFile(
+					path.join(directory, 'cupboard-publish-paths.txt'),
+					'utf8'
+				),
+				inlinePaths: inline('paths'),
+				inlinePublished: inline('publish-paths'),
+				counts: outputs.split('\n').filter((line) => /^.+-count=/u.test(line))
+			}).toStrictEqual({
+				paths: `${paths.join('\n')}\n`,
+				published: `${paths.join('\n')}\n`,
+				inlinePaths: inlinePaths === 'false' ? undefined : paths.join('\n'),
+				inlinePublished: inlinePaths === 'false' ? undefined : paths.join('\n'),
+				counts: [
+					'paths-count=1000',
+					'publish-paths-count=1000',
+					'built-paths-count=0'
+				]
+			});
+		}
+	);
+
+	it.each([
+		{ verdict: 'served', selected: '', queried: [app] },
+		{ verdict: 'not-served', selected: `${app}\n`, queried: [app] },
+		{ verdict: 'failed-query', selected: `${app}\n`, queried: [app] },
+		{ verdict: 'rejected-offer', selected: `${app}\n`, queried: [app] },
+		{ verdict: 'substitution-disabled', selected: `${app}\n`, queried: [] },
+		{ verdict: 'untrusted-daemon', selected: `${app}\n`, queried: [] },
+		{ verdict: 'runner-file', selected: `${app}\n`, queried: [] },
+		{ verdict: 'runner-loopback', selected: `${app}\n`, queried: [] }
+	] as const)(
+		'publishes a warm output under substituter leave when upstream is $verdict',
+		async ({ verdict, selected, queried }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const availabilityQueries: string[] = [];
+			const configuredSubstituter =
+				verdict === 'runner-file'
+					? 'file:///tmp/runner-cache'
+					: verdict === 'runner-loopback'
+						? 'http://127.0.0.1:8080'
+						: 'https://upstream.example';
+
+			await buildAction(
+				{ installables: ['.#app'], attempts: '1', substituter: 'leave' },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'github-output')
+				},
+				{
+					availabilitySettings: {
+						...availabilitySettings,
+						substitution: {
+							...availabilitySettings.substitution,
+							substituters: [configuredSubstituter]
+						}
+					},
+					nix: {
+						queryPathInfo: () => Promise.resolve(pathInfo(app, `${app}.drv`))
+					},
+					availabilityNix: {
+						canSubstituteDerivation: () =>
+							Promise.resolve(verdict !== 'substitution-disabled'),
+						honoursSubstituterSettings: () =>
+							Promise.resolve(
+								verdict === 'untrusted-daemon'
+									? { isHonoured: false, trust: 'not-trusted' }
+									: { isHonoured: true }
+							),
+						resolveSubstitutableClosure: async (storePath, options) => {
+							availabilityQueries.push(storePath);
+							if (verdict === 'failed-query') {
+								throw new Error('substituter unavailable');
+							}
+							if (verdict === 'rejected-offer') {
+								const accepted = await options?.accepts?.({
+									source: 'substituter',
+									storePath: app,
+									references: [],
+									narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa)),
+									narSize: 1,
+									signatures: [],
+									fromTrustedSubstituter: false,
+									downloadSize: 1
+								});
+								return accepted
+									? {
+											kind: 'served',
+											pathCount: 1,
+											downloadSize: 1,
+											narSize: 1
+										}
+									: { kind: 'refused', storePath: app };
+							}
+
+							return verdict === 'served'
+								? {
+										kind: 'served',
+										pathCount: 1,
+										downloadSize: 1,
+										narSize: 1
+									}
+								: { kind: 'not-served', storePath: app };
+						}
+					},
+					runNix: async ({ arguments: arguments_ }) => {
+						if (arguments_.includes('--dry-run')) {
+							return { status: 0, stdout: '[]' };
+						}
+
+						const logFile = arguments_[arguments_.indexOf('json-log-path') + 1];
+						if (logFile === undefined) {
+							throw new Error('missing json-log-path');
+						}
+						await writeFile(logFile, '');
+						return { status: 0, stdout: `${app}\n` };
+					}
+				}
+			);
+
+			expect({
+				availabilityQueries,
+				publishPaths: await readFile(
+					path.join(directory, 'cupboard-publish-paths.txt'),
+					'utf8'
+				)
+			}).toStrictEqual({
+				availabilityQueries: queried,
+				publishPaths: selected
+			});
+		}
+	);
+
+	it('records a substituted output as copied without claiming a local build', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		let pathQueries = 0;
+
+		await buildAction(
+			{ installables: ['.#app'], attempts: '1' },
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			{
+				nix: {
+					queryPathInfo: () => {
+						pathQueries += 1;
+						return pathQueries === 1
+							? Promise.reject(new Error('not present'))
+							: Promise.resolve(pathInfo(app, `${app}.drv`));
+					}
+				},
+				runNix: async (invocation) => {
+					if (invocation.arguments.includes('--dry-run')) {
+						return {
+							status: 0,
+							stdout: `[ { "outputs": { "out": "${app}" } } ]`
+						};
+					}
+
+					const logFile =
+						invocation.arguments[
+							invocation.arguments.indexOf('json-log-path') + 1
+						];
+					if (logFile === undefined) {
+						throw new Error('missing json-log-path');
+					}
+					await writeFile(logFile, '');
+					return { status: 0, stdout: `${app}\n` };
+				}
+			}
+		);
+
+		const receiptText = await readFile(
+			path.join(directory, 'cupboard-build-receipt.json'),
+			'utf8'
+		);
+		const receiptJson: unknown = JSON.parse(receiptText);
+		expect(buildReceiptSchema.parse(receiptJson)).toStrictEqual({
+			version: 3,
+			paths: [app],
+			subjects: [
+				{
+					origin: 'copied',
+					storePath: app,
+					narHash: 'aa'.repeat(32),
+					derivation: `${app}.drv`,
+					signatures: []
+				}
+			]
+		});
+	});
+
 	it('cancels retry backoff without waiting for its delay', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-build-test-')
@@ -300,7 +858,7 @@ process.stdin.on('end', () => {
 		]);
 	});
 
-	it('rebuilds a derivation recorded during a failed attempt before attributing the final output', async () => {
+	it('does not rebuild a derivation from a failed attempt under build missing', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-build-test-')
 		);
@@ -337,7 +895,7 @@ process.stdin.on('end', () => {
 					if (invocation.arguments.includes('--dry-run')) {
 						return {
 							status: 0,
-							stdout: `[{"outputs":{"out":"${app}"}}]`
+							stdout: `[{"drvPath":"${appDerivation}","outputs":{"out":"${app}","dev":null}}]`
 						};
 					}
 					if (invocation.arguments.includes('--rebuild')) {
@@ -400,38 +958,196 @@ process.stdin.on('end', () => {
 						'--stdin'
 					],
 					stdin: '.#app\n'
-				},
-				{
-					arguments: [
-						'build',
-						'--rebuild',
-						'--no-link',
-						'--builders',
-						'',
-						'--max-jobs',
-						'1',
-						'--stdin'
-					],
-					stdin: `${appDerivation}^*\n`
 				}
 			],
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [app],
 				subjects: [
 					{
+						origin: 'copied',
 						storePath: app,
 						narHash: 'aa'.repeat(32),
 						derivation: appDerivation,
-						attempt: 2,
-						attemptId: 'attempt-2'
+						signatures: []
 					}
 				]
 			}
 		});
 	});
 
-	it('rebuilds a substituted output before requiring it as a provenance subject', async () => {
+	it.each([
+		{ machine: '', changedHash: false },
+		{ machine: 'ssh-ng://builder', changedHash: false },
+		{ machine: '', changedHash: true }
+	])(
+		'preserves matching earlier execution for publication without attributing retry provenance ($machine, $changedHash)',
+		async ({ machine, changedHash }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			let attempt = 0;
+			const derivation = `${app}.drv`;
+			const libraryDerivation = `${library}.drv`;
+			await buildAction(
+				{
+					installables: ['.#app', '.#lib'],
+					attempts: '2',
+					substituter: 'leave',
+					keepGoing: 'true'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'github-output')
+				},
+				{
+					nextAttemptId: () => `attempt-${String(attempt + 1)}`,
+					sleep: () => Promise.resolve(),
+					availabilitySettings,
+					availabilityNix: {
+						canSubstituteDerivation: () => Promise.resolve(true),
+						honoursSubstituterSettings: () =>
+							Promise.resolve({ isHonoured: true }),
+						resolveSubstitutableClosure: () =>
+							Promise.resolve({
+								kind: 'served',
+								pathCount: 1,
+								downloadSize: 1,
+								narSize: 1
+							})
+					},
+					nix: {
+						queryPathInfo: (storePath) => {
+							if (attempt === 0 || (storePath === library && attempt === 1)) {
+								return Promise.reject(new NixStorePathNotFoundError(storePath));
+							}
+							if (storePath === library) {
+								return Promise.resolve({
+									...pathInfo(library, libraryDerivation),
+									ultimate: true
+								});
+							}
+
+							return Promise.resolve({
+								...pathInfo(app, derivation),
+								ultimate: true,
+								narHash: NixSha256Hash.fromDigest(
+									Buffer.alloc(32, changedHash && attempt === 2 ? 0xbb : 0xaa)
+								)
+							});
+						}
+					},
+					runNix: async (invocation) => {
+						if (invocation.arguments.includes('--dry-run')) {
+							return {
+								status: 0,
+								stdout: JSON.stringify([
+									{ drvPath: derivation, outputs: { out: app } },
+									{ drvPath: libraryDerivation, outputs: { out: library } }
+								])
+							};
+						}
+						attempt += 1;
+						const logFile =
+							invocation.arguments[
+								invocation.arguments.indexOf('json-log-path') + 1
+							];
+						if (logFile === undefined) {
+							throw new Error('missing json-log-path');
+						}
+						await writeFile(
+							logFile,
+							attempt === 1
+								? `${buildStart(derivation, machine)}\n`
+								: `${buildStart(libraryDerivation)}\n`
+						);
+						return {
+							status: attempt === 1 ? 1 : 0,
+							stdout: attempt === 1 ? '' : `${app}\n${library}\n`
+						};
+					}
+				}
+			);
+			const receiptText = await readFile(
+				path.join(directory, 'cupboard-build-receipt.json'),
+				'utf8'
+			);
+			const receipt = buildReceiptV3Schema.parse(JSON.parse(receiptText));
+			const builtReceiptText = await readFile(
+				path.join(directory, 'cupboard-built-receipt.json'),
+				'utf8'
+			);
+			const builtReceipt = buildReceiptV3Schema.parse(
+				JSON.parse(builtReceiptText)
+			);
+			const librarySubject = {
+				origin: 'built',
+				storePath: library,
+				narHash: 'aa'.repeat(32),
+				derivation: libraryDerivation,
+				attempt: 2,
+				attemptId: 'attempt-2',
+				buildStore: 'auto',
+				verification: 'local'
+			};
+
+			expect({
+				receipt,
+				builtReceipt,
+				published: await readFile(
+					path.join(directory, 'cupboard-publish-paths.txt'),
+					'utf8'
+				)
+			}).toStrictEqual({
+				receipt: {
+					version: 3,
+					paths: [app, library],
+					subjects: [
+						{
+							origin: 'store-held',
+							storePath: app,
+							narHash: (changedHash ? 'bb' : 'aa').repeat(32),
+							derivation,
+							buildStore: 'auto'
+						},
+						librarySubject
+					]
+				},
+				builtReceipt: {
+					version: 3,
+					paths: [library],
+					subjects: [librarySubject]
+				},
+				published: changedHash ? `${library}\n` : `${app}\n${library}\n`
+			});
+		}
+	);
+
+	it('rejects configured builders before planning a rebuild', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const runNix = vi.fn(() => Promise.resolve({ status: 0, stdout: '' }));
+		await expect(
+			buildAction(
+				{ installables: ['.#app'], build: 'rebuild' },
+				{ RUNNER_TEMP: directory },
+				{
+					buildSettings: {
+						systems: ['x86_64-linux'],
+						features: [],
+						builders: 'ssh-ng://builder x86_64-linux'
+					},
+					runNix
+				}
+			)
+		).rejects.toStrictEqual(new BuildRebuildRemoteDispatchError());
+		expect(runNix.mock.calls).toStrictEqual([]);
+	});
+
+	it('rebuilds a substituted output in the selected store', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-build-test-')
 		);
@@ -447,7 +1163,7 @@ process.stdin.on('end', () => {
 			{
 				installables: ['.#app'],
 				attempts: '1',
-				requireProvenance: 'true'
+				build: 'rebuild'
 			},
 			{
 				RUNNER_TEMP: directory,
@@ -464,7 +1180,10 @@ process.stdin.on('end', () => {
 							);
 						}
 
-						return Promise.resolve(pathInfo(app, appDerivation));
+						return Promise.resolve({
+							...pathInfo(app, appDerivation),
+							ultimate: pathQueries > 2
+						});
 					}
 				},
 				runNix: async (invocation) => {
@@ -472,10 +1191,18 @@ process.stdin.on('end', () => {
 					if (invocation.arguments.includes('--dry-run')) {
 						return {
 							status: 0,
-							stdout: `[{"outputs":{"out":"${app}"}}]`
+							stdout: `[{"drvPath":"${appDerivation}","outputs":{"out":"${app}","dev":null}}]`
 						};
 					}
 					if (invocation.arguments.includes('--rebuild')) {
+						const logFile =
+							invocation.arguments[
+								invocation.arguments.indexOf('json-log-path') + 1
+							];
+						if (logFile === undefined) {
+							throw new Error('missing json-log-path');
+						}
+						await writeFile(logFile, `${buildStart(appDerivation)}\n`);
 						return { status: 0, stdout: '' };
 					}
 
@@ -520,29 +1247,522 @@ process.stdin.on('end', () => {
 					arguments: [
 						'build',
 						'--rebuild',
-						'--no-link',
-						'--builders',
+						'--option',
+						'builders',
 						'',
-						'--max-jobs',
-						'1',
+						'--no-link',
+						'--option',
+						'json-log-path',
+						path.join(
+							directory,
+							'cupboard-nix-current-run-rebuild-1-rebuild.jsonl'
+						),
 						'--stdin'
 					],
-					stdin: `${appDerivation}^*\n`
+					stdin: `${appDerivation}^out\n`
 				}
 			],
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [app],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: app,
 						narHash: 'aa'.repeat(32),
 						derivation: appDerivation,
-						attempt: 2,
-						attemptId: 'current-run-rebuild'
+						attempt: 1,
+						attemptId: 'current-run-rebuild',
+						buildStore: 'auto',
+						verification: 'local',
+						reproduced: true
 					}
 				]
 			}
+		});
+	});
+
+	it('rebuilds an output already in the selected store', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const derivation = `${app}.drv`;
+		const invocations: string[][] = [];
+		let attempt = 0;
+
+		await buildAction(
+			{ installables: ['.#app'], attempts: '1', build: 'rebuild' },
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			{
+				nextAttemptId: () => `attempt-${String(++attempt)}`,
+				nix: {
+					queryPathInfo: () =>
+						Promise.resolve({ ...pathInfo(app, derivation), ultimate: true })
+				},
+				runNix: async ({ arguments: arguments_ }) => {
+					invocations.push([...arguments_]);
+					if (arguments_.includes('--dry-run')) {
+						return {
+							status: 0,
+							stdout: `[{"outputs":{"out":"${app}"}}]`
+						};
+					}
+
+					const logFile = arguments_[arguments_.indexOf('json-log-path') + 1];
+					if (logFile === undefined) {
+						throw new Error('missing json-log-path');
+					}
+					await writeFile(logFile, '');
+					if (arguments_.includes('--rebuild')) {
+						await writeFile(logFile, `${buildStart(derivation)}\n`);
+					}
+					return {
+						status: 0,
+						stdout: arguments_.includes('--rebuild') ? '' : `${app}\n`
+					};
+				}
+			}
+		);
+
+		const receiptText = await readFile(
+			path.join(directory, 'cupboard-build-receipt.json'),
+			'utf8'
+		);
+		const receipt: unknown = JSON.parse(receiptText);
+		expect({
+			invocations,
+			receipt: buildReceiptSchema.parse(receipt),
+			publishPaths: await readFile(
+				path.join(directory, 'cupboard-publish-paths.txt'),
+				'utf8'
+			)
+		}).toStrictEqual({
+			invocations: [
+				['build', '--dry-run', '--json', '--no-link', '--stdin'],
+				[
+					'build',
+					'--no-link',
+					'--print-out-paths',
+					'--option',
+					'json-log-path',
+					path.join(directory, 'cupboard-nix-attempt-1.jsonl'),
+					'--stdin'
+				],
+				[
+					'build',
+					'--rebuild',
+					'--option',
+					'builders',
+					'',
+					'--no-link',
+					'--option',
+					'json-log-path',
+					path.join(directory, 'cupboard-nix-attempt-2-1-rebuild.jsonl'),
+					'--stdin'
+				]
+			],
+			receipt: {
+				version: 3,
+				paths: [app],
+				subjects: [
+					{
+						origin: 'built',
+						storePath: app,
+						narHash: 'aa'.repeat(32),
+						derivation,
+						attempt: 1,
+						attemptId: 'attempt-2',
+						buildStore: 'auto',
+						verification: 'local',
+						reproduced: true
+					}
+				]
+			},
+			publishPaths: `${app}\n`
+		});
+	});
+
+	it.each(['realise', 'check'])(
+		'rejects delegated %s activity as rebuild evidence',
+		async (phase) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const derivation = `${app}.drv`;
+			await expect(
+				buildAction(
+					{ installables: ['.#app'], attempts: '1', build: 'rebuild' },
+					{
+						RUNNER_TEMP: directory,
+						GITHUB_OUTPUT: path.join(directory, 'github-output')
+					},
+					{
+						nix: {
+							queryPathInfo: () => Promise.resolve(pathInfo(app, derivation))
+						},
+						runNix: async ({ arguments: arguments_ }) => {
+							const logFile =
+								arguments_[arguments_.indexOf('json-log-path') + 1];
+							if (logFile !== undefined && !arguments_.includes('--dry-run')) {
+								const matchingPhase = arguments_.includes('--rebuild')
+									? 'check'
+									: 'realise';
+								await writeFile(
+									logFile,
+									matchingPhase === phase
+										? `${buildStart(derivation, 'ssh-ng://builder')}\n`
+										: ''
+								);
+							}
+							return {
+								status: 0,
+								stdout: arguments_.includes('--dry-run')
+									? `[{"outputs":{"out":"${app}"}}]`
+									: `${app}\n`
+							};
+						}
+					}
+				)
+			).rejects.toStrictEqual(new BuildRebuildRemoteDispatchError());
+			expect(
+				existsSync(path.join(directory, 'cupboard-build-receipt.json'))
+			).toBe(false);
+		}
+	);
+
+	it.each([true, false])(
+		'observes a fresh store build when the first activity log is present: %s',
+		async (hasActivityLog) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const derivation = `${app}.drv`;
+			const invocations: string[] = [];
+			let pathQueries = 0;
+
+			await buildAction(
+				{ installables: ['.#app'], attempts: '1', build: 'rebuild' },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'github-output')
+				},
+				{
+					nextAttemptId: () => 'fresh-local',
+					nix: {
+						queryPathInfo: () => {
+							pathQueries += 1;
+							return pathQueries === 1
+								? Promise.reject(new NixStorePathNotFoundError(app))
+								: Promise.resolve({
+										...pathInfo(app, derivation),
+										ultimate: true
+									});
+						}
+					},
+					runNix: async ({ arguments: arguments_ }) => {
+						if (arguments_.includes('--dry-run')) {
+							invocations.push('dry-run');
+							return { status: 0, stdout: `[{"outputs":{"out":"${app}"}}]` };
+						}
+						invocations.push(
+							arguments_.includes('--rebuild') ? 'rebuild' : 'realise'
+						);
+						const logFile = arguments_[arguments_.indexOf('json-log-path') + 1];
+						if (logFile === undefined) {
+							throw new Error('missing json-log-path');
+						}
+						if (hasActivityLog || arguments_.includes('--rebuild')) {
+							await writeFile(logFile, `${buildStart(derivation)}\n`);
+						}
+						return { status: 0, stdout: `${app}\n` };
+					}
+				}
+			);
+
+			const receiptText = await readFile(
+				path.join(directory, 'cupboard-build-receipt.json'),
+				'utf8'
+			);
+			const receipt: unknown = JSON.parse(receiptText);
+			expect({
+				invocations,
+				receipt: buildReceiptSchema.parse(receipt)
+			}).toStrictEqual({
+				invocations: [
+					'dry-run',
+					'realise',
+					...(hasActivityLog ? [] : ['rebuild'])
+				],
+				receipt: {
+					version: 3,
+					paths: [app],
+					subjects: [
+						{
+							origin: 'built',
+							storePath: app,
+							narHash: 'aa'.repeat(32),
+							derivation,
+							buildStore: 'auto',
+							attempt: 1,
+							attemptId: 'fresh-local',
+							verification: 'local',
+							...(!hasActivityLog && { reproduced: true })
+						}
+					]
+				}
+			});
+		}
+	);
+
+	it('retries a failed rebuild without attributing the failed check', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const derivation = `${app}.drv`;
+		const invocations: string[] = [];
+		const retryDelays: number[] = [];
+		let checkCount = 0;
+
+		await buildAction(
+			{ installables: ['.#app'], attempts: '2', build: 'rebuild' },
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			{
+				nextAttemptId: () => 'retry-check',
+				sleep: (delayMs) => {
+					retryDelays.push(delayMs);
+					return Promise.resolve();
+				},
+				nix: {
+					queryPathInfo: () =>
+						Promise.resolve({ ...pathInfo(app, derivation), ultimate: true })
+				},
+				runNix: async ({ arguments: arguments_ }) => {
+					if (arguments_.includes('--dry-run')) {
+						invocations.push('dry-run');
+						return {
+							status: 0,
+							stdout: `[{"outputs":{"out":"${app}"}}]`
+						};
+					}
+					if (arguments_.includes('--rebuild')) {
+						checkCount += 1;
+						invocations.push('rebuild');
+						const logFile = arguments_[arguments_.indexOf('json-log-path') + 1];
+						if (logFile === undefined) {
+							throw new Error('missing json-log-path');
+						}
+						await writeFile(logFile, `${buildStart(derivation)}\n`);
+						return {
+							status: checkCount === 1 ? 1 : 0,
+							stdout: ''
+						};
+					}
+					invocations.push('realise');
+					return { status: 0, stdout: `${app}\n` };
+				}
+			}
+		);
+
+		const receiptText = await readFile(
+			path.join(directory, 'cupboard-build-receipt.json'),
+			'utf8'
+		);
+		const receipt: unknown = JSON.parse(receiptText);
+		expect({
+			invocations,
+			retryDelays,
+			receipt: buildReceiptSchema.parse(receipt)
+		}).toStrictEqual({
+			invocations: ['dry-run', 'realise', 'rebuild', 'realise', 'rebuild'],
+			retryDelays: [15_000],
+			receipt: {
+				version: 3,
+				paths: [app],
+				subjects: [
+					{
+						origin: 'built',
+						storePath: app,
+						narHash: 'aa'.repeat(32),
+						derivation,
+						buildStore: 'auto',
+						attempt: 2,
+						attemptId: 'retry-check',
+						verification: 'local',
+						reproduced: true
+					}
+				]
+			}
+		});
+	});
+
+	it('rejects a pre-existing output when the rebuild has no build activity', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const derivation = `${app}.drv`;
+
+		await expect(
+			buildAction(
+				{ installables: ['.#app'], attempts: '1', build: 'rebuild' },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'github-output')
+				},
+				{
+					nix: {
+						queryPathInfo: () =>
+							Promise.resolve({ ...pathInfo(app, derivation), ultimate: true })
+					},
+					runNix: ({ arguments: arguments_ }) =>
+						Promise.resolve({
+							status: 0,
+							stdout: arguments_.includes('--dry-run')
+								? `[{"drvPath":"${derivation}","outputs":{"out":"${app}"}}]`
+								: arguments_.includes('--rebuild')
+									? ''
+									: `${app}\n`
+						})
+				}
+			)
+		).rejects.toMatchObject({
+			constructor: BuildObservationMissingError,
+			storePaths: [app]
+		});
+	});
+
+	it('fails when the selected store cannot complete a rebuild', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const derivation = `${app}.drv`;
+
+		await expect(
+			buildAction(
+				{ installables: ['.#app'], attempts: '1', build: 'rebuild' },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'github-output')
+				},
+				{
+					nix: {
+						queryPathInfo: () => Promise.resolve(pathInfo(app, derivation))
+					},
+					runNix: ({ arguments: arguments_ }) =>
+						Promise.resolve({
+							status: arguments_.includes('--rebuild') ? 7 : 0,
+							stdout: arguments_.includes('--dry-run')
+								? `[{"outputs":{"out":"${app}"}}]`
+								: `${app}\n`
+						})
+				}
+			)
+		).rejects.toMatchObject({
+			constructor: CommandFailedError,
+			command: 'nix build --rebuild',
+			status: 7
+		});
+	});
+
+	it('publishes an output from a configured remote builder without claiming a current-run build', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const derivation = `${app}.drv`;
+		const invocations: string[][] = [];
+		let pathQueries = 0;
+
+		await buildAction(
+			{
+				installables: ['.#app'],
+				attempts: '1',
+				build: 'missing',
+				substituter: 'leave'
+			},
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			{
+				nextAttemptId: () => 'remote-build',
+				nix: {
+					queryPathInfo: () => {
+						pathQueries += 1;
+						return pathQueries === 1
+							? Promise.reject(new Error('not present before build'))
+							: Promise.resolve(pathInfo(app, derivation));
+					}
+				},
+				runNix: async ({ arguments: arguments_ }) => {
+					invocations.push([...arguments_]);
+					if (arguments_.includes('--dry-run')) {
+						return { status: 0, stdout: `[{"outputs":{"out":"${app}"}}]` };
+					}
+
+					const logFile = arguments_[arguments_.indexOf('json-log-path') + 1];
+					if (logFile === undefined) {
+						throw new Error('missing json-log-path');
+					}
+					await writeFile(
+						logFile,
+						`${buildStart(derivation, 'ssh://builder')}\n`
+					);
+					return { status: 0, stdout: `${app}\n` };
+				}
+			}
+		);
+
+		const receiptText = await readFile(
+			path.join(directory, 'cupboard-build-receipt.json'),
+			'utf8'
+		);
+		const receipt: unknown = JSON.parse(receiptText);
+		expect({
+			invocations,
+			receipt: buildReceiptSchema.parse(receipt),
+			publishPaths: await readFile(
+				path.join(directory, 'cupboard-publish-paths.txt'),
+				'utf8'
+			)
+		}).toStrictEqual({
+			invocations: [
+				['build', '--dry-run', '--json', '--no-link', '--stdin'],
+				[
+					'build',
+					'--no-link',
+					'--print-out-paths',
+					'--option',
+					'json-log-path',
+					expect.stringMatching(/cupboard-nix-.+\.jsonl/u),
+					'--stdin'
+				]
+			],
+			receipt: {
+				version: 3,
+				paths: [app],
+				subjects: [
+					{
+						origin: 'copied',
+						storePath: app,
+						narHash: 'aa'.repeat(32),
+						derivation,
+						signatures: []
+					}
+				]
+			},
+			publishPaths: `${app}\n`
 		});
 	});
 });
@@ -579,7 +1799,10 @@ describe('receiptSubjects', () => {
 					activities: [{ derivation: libraryDerivation, machine: '' }]
 				}
 			],
-			[pathInfo(app, appDerivation), pathInfo(library, libraryDerivation)],
+			[
+				{ ...pathInfo(app, appDerivation), ultimate: true },
+				{ ...pathInfo(library, libraryDerivation), ultimate: true }
+			],
 			new Set([library])
 		);
 
@@ -610,6 +1833,40 @@ describe('receiptSubjects', () => {
 		expect(subjects).toStrictEqual([]);
 	});
 
+	it('does not attribute an output fetched from an already populated remote builder', () => {
+		const derivation = `${app}.drv`;
+		const subjects = receiptSubjects(
+			[
+				{
+					attempt: 1,
+					attemptId: 'one',
+					activities: [{ derivation, machine: 'ssh-ng://builder' }]
+				}
+			],
+			[pathInfo(app, derivation)],
+			new Set()
+		);
+
+		expect(subjects).toStrictEqual([]);
+	});
+
+	it('does not attribute a local activity to an output that the store copied', () => {
+		const derivation = `${app}.drv`;
+		const subjects = receiptSubjects(
+			[
+				{
+					attempt: 1,
+					attemptId: 'one',
+					activities: [{ derivation, machine: '' }]
+				}
+			],
+			[pathInfo(app, derivation)],
+			new Set()
+		);
+
+		expect(subjects).toStrictEqual([]);
+	});
+
 	it('attributes only pre-existing outputs whose final derivations were rebuilt', () => {
 		const appDerivation = `${app}.drv`;
 		const libraryDerivation = `${library}.drv`;
@@ -624,9 +1881,12 @@ describe('receiptSubjects', () => {
 					]
 				}
 			],
-			[pathInfo(app, appDerivation), pathInfo(library, libraryDerivation)],
+			[
+				{ ...pathInfo(app, appDerivation), ultimate: true },
+				{ ...pathInfo(library, libraryDerivation), ultimate: true }
+			],
 			new Set([app, library]),
-			new Set([appDerivation])
+			new Set([app])
 		);
 
 		expect(subjects).toStrictEqual([

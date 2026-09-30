@@ -77,6 +77,12 @@ build slots to run the derivation in.
 
 ## A remote store
 
+Use a remote store with `build: rebuild` to require execution on that machine.
+Configured remote builders cannot guarantee this: Nix can reuse outputs already
+on a builder, and its rebuild check runs in the selected store. Cupboard rejects
+a remotely dispatched target under this policy. Set `build: missing` to use
+configured remote builders with their normal reuse behaviour.
+
 Set the `store` input to an `ssh-ng://` store URI. Every cohort then plans,
 builds and publishes using that store:
 
@@ -95,6 +101,13 @@ The runner evaluates the flake and copies the derivations that the store needs.
 The Nix daemon on the store machine builds them. The job then streams the
 outputs from the store to cupboard. The runner's disk only needs room for the
 evaluation.
+
+With `build: rebuild`, cupboard disables onward dispatch to the store's remote
+builders and requires observed execution for every requested output. The store
+machine must support the target's system and required features, and have local
+build slots. A fresh build needs no second build; an existing or substituted
+output is rebuilt and checked against the cached output. Dependencies may still
+come from substituters.
 
 A remote store behaves differently from building on the runner in a few ways:
 

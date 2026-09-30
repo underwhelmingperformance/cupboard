@@ -485,6 +485,10 @@ Options:
                                     the cache's grace period keeps the paths
   --closure                         publish the whole closure of the given paths
                                     (by default, only the given paths)
+  --paths-file <path>               file of target store paths, one per line.
+                                    These paths are published with any
+                                    positional paths and retained under --root
+                                    when specified.
   --intermediate-paths-file <path>  file of extra store paths, one per line, to
                                     publish without adding them to the root
   --reference-paths-file <path>     file of store paths, one per line, to
@@ -492,9 +496,14 @@ Options:
                                     --reference-source. The tenant must already
                                     store their NARs, so nothing is read from
                                     the local store or uploaded.
-  --reference-source <url>          cache URL to read the narinfos of the
-                                    --reference-paths-file paths from (required
-                                    with --reference-paths-file)
+  --reference-manifest <path>       JSON manifest of reference paths with their
+                                    target or intermediate kind, source URL and
+                                    captured narinfo. Publish this metadata
+                                    without reading the source cache or local
+                                    store.
+  --reference-source <url>          cache URL to read narinfos for
+                                    --reference-paths-file (required with
+                                    --reference-paths-file)
   --read-user <user>                user name of the read credential for a
                                     private --reference-source
   --read-password <password>        password of the read credential for a
@@ -506,27 +515,30 @@ Options:
   --run-root-ttl <duration>         expire the run root after this duration
                                     (e.g. 7d, 12h)
   --run-root-permanent              keep the run root permanently
-  --store <uri>                     read the store paths from this remote ssh-ng
+  --store <uri>                     read paths from auto or a remote ssh-ng
                                     store (default: the store that Nix uses)
-  --receipt-file <path>             write a build receipt (JSON) for the
-                                    published paths to this file, recording
-                                    --store as the build store. Requires
-                                    --store, either --already-held or
-                                    --no-already-held, and either --claimable or
-                                    --no-claimable.
-  --already-held <path>             a store path that was already in the build
-                                    store before the build started (repeatable).
-                                    The receipt does not record it as built by
-                                    this run.
-  --no-already-held                 declare that there are no --already-held
-                                    paths
-  --claimable <path>                a store path that this build is known to
-                                    have realised (repeatable). The receipt can
-                                    record only these paths as built by this
-                                    run.
-  --no-claimable                    declare that there are no --claimable paths,
-                                    so the receipt records none of the paths as
-                                    built by this run
+  --receipt-file <path>             write a publication receipt (JSON) from the
+                                    selected store metadata. Requires --store. A
+                                    push does not claim that this run built any
+                                    path.
+  --reference-receipt-file <path>   write a receipt for successfully published
+                                    reference paths only. Requires
+                                    --reference-manifest or both
+                                    --reference-paths-file and
+                                    --reference-source. The receipt does not
+                                    claim that this run built or copied NAR
+                                    bytes.
+  --already-held <path>             accepted for compatibility with older
+                                    callers (repeatable); does not affect
+                                    receipt origins.
+  --no-already-held                 accepted for compatibility with older
+                                    callers; does not affect receipt origins
+  --claimable <path>                accepted for compatibility with older
+                                    callers (repeatable); cannot authorise a
+                                    current-run build claim.
+  --no-claimable                    accepted for compatibility with older
+                                    callers; a push never records current-run
+                                    build claims
   --copied-from-file <path>         JSON file, written by the build, that lists
                                     the stores each path was copied from
   --attestation <bundle>            a Sigstore bundle file to attach to the
@@ -618,6 +630,20 @@ Options:
                                     cache's grace period keeps the paths
   --closure                         publish the whole closure of the built
                                     outputs (by default, only the built outputs)
+  --publication-scope <scope>       Control which paths build-push publishes for
+                                    installable cohorts. `outputs` publishes the
+                                    selected outputs; `closure` also publishes
+                                    their runtime references. Publication starts
+                                    after the build. (choices: "outputs",
+                                    "closure")
+  --substituter <mode>              Control whether to publish outputs available
+                                    from external substituters. `copy` selects
+                                    them for publication. `leave` keeps them
+                                    upstream if consumers can obtain matching
+                                    NARs for the output and all its runtime
+                                    references. Both modes select outputs built
+                                    in this run. (choices: "leave", "copy",
+                                    default: "copy")
   --intermediate-paths-file <path>  file of extra store paths, one per line, to
                                     publish without adding them to the root
   --run-root <name>                 also add each published path to this run
@@ -2302,7 +2328,9 @@ Options:
   --plan-file <path>                            file to write the detailed plan to, as JSON
   --store <uri>                                 remote ssh-ng store to query for store paths and their sizes (default: the local Nix daemon)
   --store-path <path>                           directory whose free space to check (default: /nix/store)
-  --require-attested                            build a target even if the cache has it, unless the cache also has its build provenance attestation
+  --build <mode>                                Control when to build the requested outputs (default: missing): missing uses an available output and builds it otherwise; rebuild builds each output again on the configured builder, even if it is already available. Nix may still fetch dependencies from substituters. (default: "missing")
+  --substituter <mode>                          how to handle externally served target outputs: leave keeps them upstream; copy publishes them to the destination (default: leave) (default: "leave")
+  --publish <mode>                              which paths to publish: none skips publication; outputs selects target outputs; closure includes their runtime references (default: outputs) (default: "outputs")
   --unknown-ceiling <count>                     maximum number of store paths whose availability is still unknown after the store checks them again (default: 0)
   --unknown-ceiling-untrusted-fallback <count>  the same maximum when the store refuses to check them again (default: 5)
   --headroom-absolute-minimum <bytes>           minimum free space to leave in the store, in bytes

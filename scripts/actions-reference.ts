@@ -21,12 +21,12 @@ const publicWorkflows: readonly PublicWorkflow[] = [
 	{
 		file: 'cupboard-flake-publish',
 		summary:
-			'Plans, builds, publishes and attests every target in a flake manifest. A cohort job does not rebuild a target that the cache already has with build provenance.'
+			'Realises the targets in a flake manifest. The defaults are `build: missing`, `substituter: leave`, `publish: outputs` and `attest: true`. Each input can be set independently.'
 	},
 	{
 		file: 'cupboard-publish',
 		summary:
-			'Builds one flake installable on one runner, then publishes it and signs its build provenance. For a private destination, the workflow exchanges its GitHub OIDC identity token for a short-lived Cupboard read token.'
+			'Realises one flake installable on one runner. The defaults are `build: missing`, `substituter: copy`, `publish: outputs` and `attest: true`. For a private destination, the workflow can obtain a short-lived Cupboard read token through GitHub OIDC.'
 	}
 ];
 const publicActions = [

@@ -64,6 +64,7 @@ import {
 	isEnabled,
 	provided,
 	providedCacheSelection,
+	providedChoice,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -232,7 +233,9 @@ export interface PlanOptions {
 	readonly enablePacking?: string;
 	readonly packCapacity?: string;
 	readonly store?: string;
-	readonly requireProvenance?: string;
+	readonly build?: string;
+	readonly substituter?: string;
+	readonly publish?: string;
 }
 
 export interface PlanInputs {
@@ -252,7 +255,9 @@ export interface PlanInputs {
 	readonly enablePacking: boolean;
 	readonly packCapacity: number;
 	readonly store: string;
-	readonly requireProvenance: boolean;
+	readonly build: 'missing' | 'rebuild';
+	readonly substituter: 'leave' | 'copy';
+	readonly publish: 'none' | 'outputs' | 'closure';
 }
 
 /**
@@ -330,8 +335,16 @@ export function registerPlanCommand(
 			'remote ssh-ng store for cohort builds; remote planning requires predictable output paths'
 		)
 		.option(
-			'--require-provenance <value>',
-			'build cached targets again to produce provenance for this run: true or false'
+			'--build <mode>',
+			'control target builds: missing reuses available outputs; rebuild builds them again'
+		)
+		.option(
+			'--substituter <mode>',
+			'control publication of externally substituted targets: leave or copy'
+		)
+		.option(
+			'--publish <scope>',
+			'control published paths: none, outputs, or closure'
 		)
 		.action((options: PlanOptions) =>
 			planAction(options, environment, undefined, {
@@ -418,10 +431,23 @@ export function resolvePlanInputs(
 		enablePacking: isPackingEnabled,
 		packCapacity: resolvePackCapacity(isPackingEnabled, options.packCapacity),
 		store: provided(options.store) ?? '',
-		requireProvenance: isEnabled(
-			'require-provenance',
-			options.requireProvenance,
-			false
+		build: providedChoice(
+			'build',
+			options.build,
+			['missing', 'rebuild'],
+			'missing'
+		),
+		substituter: providedChoice(
+			'substituter',
+			options.substituter,
+			['leave', 'copy'],
+			'leave'
+		),
+		publish: providedChoice(
+			'publish',
+			options.publish,
+			['none', 'outputs', 'closure'],
+			'outputs'
 		)
 	};
 }
@@ -544,16 +570,30 @@ export async function planAction(
 		: { plan: unoptimisedPlan(inputs.targets), evaluations: [] };
 	// Only an optimised plan has the evaluated graph that the pre-filter needs.
 	// An unoptimised plan must keep every cohort in the matrix.
-	const cohortDecisions =
-		inputs.optimise && !inputs.requireProvenance
-			? await cohortPreFilter(
-					inputs,
-					plan,
-					evaluations,
-					dependencies.runner,
-					dependencies.signal
-				)
-			: plan.cohorts.map((cohort) => ({ key: cohort.key, pruned: false }));
+	let cohortDecisions: readonly CohortPreFilterDecision[];
+
+	if (
+		inputs.optimise &&
+		inputs.build === 'missing' &&
+		inputs.publish === 'outputs'
+	) {
+		const checked = await cohortPreFilter(
+			inputs,
+			{ cohorts: plan.cohorts },
+			evaluations,
+			dependencies.runner,
+			dependencies.signal
+		);
+		const byKey = new Map(checked.map((decision) => [decision.key, decision]));
+		cohortDecisions = plan.cohorts.map(
+			(cohort) => byKey.get(cohort.key) ?? { key: cohort.key, pruned: false }
+		);
+	} else {
+		cohortDecisions = plan.cohorts.map((cohort) => ({
+			key: cohort.key,
+			pruned: false
+		}));
+	}
 
 	await writePlan(
 		environment,
@@ -612,15 +652,12 @@ async function optimisedPlan(
 	return { plan, evaluations };
 }
 
-// Keep the provenance return before the cache probe. Provenance requires every
-// target to be rebuilt, so a probe cannot change the result and must not fail
-// this plan.
 async function retainedRootsFor(
 	inputs: PlanInputs,
 	evaluations: readonly TargetEvaluation[],
 	dependencies: PlanDependencies
 ): Promise<Set<string>> {
-	if (inputs.requireProvenance) {
+	if (inputs.build === 'rebuild' || inputs.publish !== 'outputs') {
 		return new Set<string>();
 	}
 
@@ -639,7 +676,6 @@ async function retainedRootsFor(
 		...credentials,
 		...fetcher
 	});
-
 	return ensureAvailableTargets(
 		inputs,
 		evaluations,

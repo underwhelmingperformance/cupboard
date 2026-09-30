@@ -267,15 +267,15 @@ describe('planAction', () => {
 	it.each([
 		{
 			name: 'queries the cache once when a cached target may be retained',
-			requireProvenance: 'false',
+			build: 'missing',
 			expectedUrls: ['https://cupboard.example/t/acme/api/v1/missing-paths']
 		},
 		{
-			name: 'does not query the cache when require-provenance keeps every target on the build set',
-			requireProvenance: 'true',
+			name: 'does not query the cache when the build policy rebuilds every selected target',
+			build: 'rebuild',
 			expectedUrls: []
 		}
-	])('$name', async ({ requireProvenance, expectedUrls }) => {
+	])('$name', async ({ build, expectedUrls }) => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
 		const evaluator: NixEvaluator = () =>
@@ -293,7 +293,7 @@ describe('planAction', () => {
 		const probe = recordingFetcher();
 
 		await planAction(
-			{ ...baseOptions, optimise: 'true', requireProvenance },
+			{ ...baseOptions, optimise: 'true', build },
 			{
 				RUNNER_TEMP: directory,
 				GITHUB_RUN_ID: '12345',
@@ -943,7 +943,9 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		enablePacking: false,
 		packCapacity: 0,
 		store: '',
-		requireProvenance: false,
+		build: 'missing',
+		substituter: 'leave',
+		publish: 'outputs',
 		...overrides
 	};
 }
@@ -1420,7 +1422,16 @@ describe('cohortPreFilter', () => {
 });
 
 describe('cohort-matrix output', () => {
-	it('rebuilds a cached target whose root does not prove completed provenance', async () => {
+	it.each([
+		{
+			reason: 'selected targets are rebuilt',
+			options: { build: 'rebuild' }
+		},
+		{
+			reason: 'their runtime closure must be published',
+			options: { publish: 'closure' }
+		}
+	])('keeps a cached target in the plan when $reason', async ({ options }) => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
 		const appNode = {
@@ -1439,9 +1450,7 @@ describe('cohort-matrix output', () => {
 			recordedCalls.push([...arguments_]);
 
 			if (!arguments_.includes('targets')) {
-				throw new Error(
-					'an unattested cached target must not be rooted by planning'
-				);
+				throw new Error('a cached target must remain in the plan');
 			}
 
 			await writeFile(
@@ -1453,7 +1462,7 @@ describe('cohort-matrix output', () => {
 		};
 
 		await planAction(
-			{ ...baseOptions, optimise: 'true', requireProvenance: 'true' },
+			{ ...baseOptions, optimise: 'true', ...options },
 			{
 				GITHUB_RUN_ID: '12345',
 				RUNNER_TEMP: planDirectory,
@@ -1479,6 +1488,71 @@ describe('cohort-matrix output', () => {
 		}).toStrictEqual({
 			rootCommands: [],
 			targetRetained: false,
+			cohortCount: true
+		});
+	});
+
+	it('skips a cached target when publishing selected outputs', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: {
+						[targetRootDrvPath]: {
+							env: { out: appStorePath },
+							inputs: { drvs: {} },
+							outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+						}
+					}
+				})
+			});
+		const calls: string[][] = [];
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			calls.push([...arguments_]);
+
+			if (arguments_.includes('targets')) {
+				await writeFile(
+					resultFileArgument(arguments_),
+					rootTargetsResultLine([storePath(appStorePath)])
+				);
+
+				return { stdout: '', stderr: '' };
+			}
+
+			const root = rootCommandTarget(arguments_);
+			await writeFile(resultFileArgument(arguments_), retainedResultLine(root));
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await planAction(
+			{ ...baseOptions, optimise: 'true', publish: 'outputs' },
+			{
+				GITHUB_RUN_ID: '12345',
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			},
+			undefined,
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: alwaysAvailableFetcher,
+				runner
+			}
+		);
+
+		const outputs = await readFile(path.join(directory, 'output'), 'utf8');
+
+		expect({
+			rootCommands: calls.map((arguments_) =>
+				arguments_.includes('targets') ? 'targets' : 'ensure'
+			),
+			targetRetained: outputs.includes('target-matrix={"include":[]}'),
+			cohortCount: outputs.includes('cohort-count=0\n')
+		}).toStrictEqual({
+			rootCommands: ['ensure', 'targets', 'ensure'],
+			targetRetained: true,
 			cohortCount: true
 		});
 	});

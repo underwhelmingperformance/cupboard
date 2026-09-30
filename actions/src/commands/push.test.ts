@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
+import { buildReceiptV3Schema } from '@cupboard/protocol/build';
 import {
 	type PushSummary,
 	type PushSummaryInput,
@@ -22,6 +23,7 @@ import {
 	LegacyPushSummaryError,
 	MissingInputError,
 	PermanentRetentionConflictError,
+	PushPathsFileUnsupportedError,
 	PushPathsMissingError,
 	PushSummaryMissingError,
 	PushSummaryResponseError,
@@ -45,6 +47,7 @@ import {
 	buildPushArguments,
 	hasUngracedPath,
 	inspectCupboardVersion,
+	mergePublishedBuildSubjects,
 	pathsMissingGraceDeadline,
 	permanenceForCommand,
 	publishPushAcquisitionOutputs,
@@ -53,6 +56,7 @@ import {
 	type PushInvocation,
 	type PushOptions,
 	requireGraceResultProtocol,
+	requirePathsFileSupport,
 	requirePushSummary,
 	resolvePushInputs,
 	runPushCupboard
@@ -70,6 +74,39 @@ const noExtras = {
 };
 
 describe('buildPushArguments', () => {
+	it('publishes targets from a manifest without adding the paths to argv', () => {
+		const inputs = resolvePushInputs(
+			{
+				url: 'https://cache.example.test/t/acme',
+				paths: [],
+				attestations: [],
+				pathsFile: '/tmp/targets.txt',
+				root: 'github:owner/repo/main',
+				cupboardPath: '/bin/cupboard'
+			},
+			{ RUNNER_TEMP: '/tmp' }
+		);
+		expect(
+			pushArgumentsForInvocations(
+				inputs,
+				[{ root: inputs.root, paths: [] }],
+				'url'
+			)
+		).toStrictEqual([
+			[
+				'--no-colour',
+				'push',
+				'https://cache.example.test/t/acme',
+				'--paths-file',
+				'/tmp/targets.txt',
+				'--github-oidc',
+				'--root',
+				'github:owner/repo/main',
+				'--wait-timeout',
+				'10m'
+			]
+		]);
+	});
 	it('selects a named cache through the legacy CLI flag', () => {
 		expect(
 			buildPushArguments({
@@ -199,6 +236,70 @@ describe('buildPushArguments', () => {
 		]);
 	});
 
+	it('publishes the realised closure when requested', () => {
+		expect(
+			buildPushArguments({
+				...noExtras,
+				url: new URL('https://cache.example.test'),
+				paths: ['/nix/store/a'],
+				audience: '',
+				root: '',
+				cache: { kind: 'default' },
+				cacheSyntax: 'url',
+				ttl: '',
+				retain: false,
+				wait: true,
+				waitTimeout: '',
+				attestations: [],
+				closure: true
+			})
+		).toStrictEqual([
+			'--no-colour',
+			'push',
+			'https://cache.example.test',
+			'/nix/store/a',
+			'--github-oidc',
+			'--closure',
+			'--no-retain'
+		]);
+	});
+
+	it('requests a publication receipt without claiming builds from store metadata', () => {
+		expect(
+			buildPushArguments({
+				...noExtras,
+				url: new URL('https://cache.example.test'),
+				paths: ['/nix/store/a'],
+				audience: '',
+				root: '',
+				cache: { kind: 'default' },
+				cacheSyntax: 'url',
+				store: 'auto',
+				closure: true,
+				receiptFile: '/tmp/publication.json',
+				ttl: '',
+				retain: false,
+				wait: true,
+				waitTimeout: '',
+				attestations: []
+			})
+		).toStrictEqual([
+			'--no-colour',
+			'push',
+			'https://cache.example.test',
+			'/nix/store/a',
+			'--github-oidc',
+			'--store',
+			'auto',
+			'--closure',
+			'--receipt-file',
+			'/tmp/publication.json',
+			'--no-already-held',
+			'--no-claimable',
+			'--no-retain'
+		]);
+	});
+
 	it('includes the intermediate, reference and run-root options', () => {
 		expect(
 			buildPushArguments({
@@ -244,8 +345,156 @@ describe('buildPushArguments', () => {
 	});
 });
 
+describe('requirePathsFileSupport', () => {
+	it.each([
+		{ pathsFile: undefined, supported: false },
+		{ pathsFile: '/tmp/targets.txt', supported: true }
+	])(
+		'accepts compatible paths-file selection ($pathsFile, $supported)',
+		({ pathsFile, supported }) => {
+			expect(() => {
+				requirePathsFileSupport(
+					pathsFile,
+					'v0.0.33',
+					new Set(supported ? ['--paths-file'] : [])
+				);
+			}).not.toThrow();
+		}
+	);
+	it('rejects a manifest when the installed CLI does not support it', () => {
+		expect(() => {
+			requirePathsFileSupport('/tmp/targets.txt', 'v0.0.33', new Set());
+		}).toThrow(new PushPathsFileUnsupportedError('v0.0.33'));
+	});
+});
+
 const url = 'https://cupboard.example/t/acme';
 const storePath = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo';
+const copiedPath = '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-copy';
+const heldPath = '/nix/store/cccccccccccccccccccccccccccccccc-held';
+
+describe('mergePublishedBuildSubjects', () => {
+	it('keeps closure subjects and imports only matching observed build claims', () => {
+		const publication = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [storePath, copiedPath, heldPath],
+			subjects: [
+				{
+					origin: 'store-held',
+					storePath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${storePath}.drv`,
+					buildStore: 'auto'
+				},
+				{
+					origin: 'copied',
+					storePath: copiedPath,
+					narHash: 'bb'.repeat(32),
+					signatures: []
+				},
+				{
+					origin: 'store-held',
+					storePath: heldPath,
+					narHash: 'cc'.repeat(32),
+					buildStore: 'auto'
+				}
+			],
+			uploaded: [storePath, copiedPath]
+		});
+		const build = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [storePath],
+			subjects: [
+				{
+					origin: 'built',
+					storePath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${storePath}.drv`,
+					attempt: 1,
+					attemptId: 'observed-build',
+					buildStore: 'auto',
+					machine: 'ssh://builder',
+					verification: 'build-store'
+				}
+			]
+		});
+
+		expect(mergePublishedBuildSubjects([publication], build)).toStrictEqual({
+			version: 3,
+			paths: [storePath, copiedPath, heldPath],
+			subjects: [
+				build.subjects[0],
+				publication.subjects[1],
+				publication.subjects[2]
+			],
+			uploaded: [storePath, copiedPath],
+			failed: [],
+			collected: []
+		});
+	});
+
+	it.each([
+		{ narHash: 'dd'.repeat(32), derivation: `${storePath}.drv` },
+		{ narHash: 'aa'.repeat(32), derivation: `${copiedPath}.drv` }
+	])('rejects a build claim that differs from the published path', (change) => {
+		const publication = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [storePath],
+			subjects: [
+				{
+					origin: 'store-held',
+					storePath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${storePath}.drv`,
+					buildStore: 'auto'
+				}
+			]
+		});
+		const build = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [storePath],
+			subjects: [
+				{
+					origin: 'built',
+					storePath,
+					...change,
+					attempt: 1,
+					attemptId: 'observed-build',
+					buildStore: 'auto',
+					verification: 'local'
+				}
+			]
+		});
+
+		expect(() => mergePublishedBuildSubjects([publication], build)).toThrow(
+			`Published path ${storePath} does not match its build receipt`
+		);
+	});
+
+	it('rejects a publication receipt that omits a closure subject', () => {
+		const publication = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [storePath, copiedPath],
+			subjects: [
+				{
+					origin: 'store-held',
+					storePath,
+					narHash: 'aa'.repeat(32),
+					buildStore: 'auto'
+				}
+			]
+		});
+		const build = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [storePath],
+			subjects: []
+		});
+
+		expect(() => mergePublishedBuildSubjects([publication], build)).toThrow(
+			`Publication receipt omits subjects for: ${copiedPath}`
+		);
+	});
+});
 
 const baseOptions: PushOptions = {
 	url,
@@ -254,6 +503,26 @@ const baseOptions: PushOptions = {
 };
 
 describe('resolvePushInputs', () => {
+	it('accepts an explicit empty root replacement', () => {
+		const inputs = resolvePushInputs(
+			{
+				...baseOptions,
+				paths: [],
+				root: 'github:owner/repo/main/x86_64-linux'
+			},
+			environment
+		);
+		expect({
+			root: inputs.root,
+			paths: inputs.paths,
+			retain: inputs.retain
+		}).toStrictEqual({
+			root: 'github:owner/repo/main/x86_64-linux',
+			paths: [],
+			retain: true
+		});
+	});
+
 	const environment = {
 		GITHUB_REPOSITORY: 'owner/repo',
 		GITHUB_REF_NAME: 'main',
@@ -273,6 +542,8 @@ describe('resolvePushInputs', () => {
 		paths: [storePath],
 		cache: { kind: 'default' },
 		store: '',
+		buildReceiptFile: '',
+		publicationReceiptFile: '/runner/temp/cupboard-push-receipt.json',
 		audience: '',
 		root: 'github:owner/repo/main',
 		ttl: '',
@@ -767,6 +1038,8 @@ describe('pushArgumentsForInvocations', () => {
 		| 'audience'
 		| 'cache'
 		| 'store'
+		| 'buildReceiptFile'
+		| 'publicationReceiptFile'
 		| 'ttl'
 		| 'permanent'
 		| 'retain'
@@ -784,6 +1057,8 @@ describe('pushArgumentsForInvocations', () => {
 		audience: '',
 		cache: { kind: 'default' },
 		store: '',
+		buildReceiptFile: '',
+		publicationReceiptFile: '/tmp/publication.json',
 		ttl: '',
 		permanent: false,
 		retain: true,
@@ -797,6 +1072,73 @@ describe('pushArgumentsForInvocations', () => {
 		runRootTtl: '24h',
 		runRootPermanent: false
 	};
+
+	it('writes a separate receipt for each retained root group', () => {
+		const pushes: readonly PushInvocation[] = [
+			{ root: 'github:owner/repo/app', paths: ['/nix/store/a'] },
+			{ root: 'github:owner/repo/lib', paths: ['/nix/store/b'] }
+		];
+		const invocations = pushArgumentsForInvocations(
+			{ ...baseInputs, buildReceiptFile: '/tmp/build.json', closure: true },
+			pushes,
+			'url'
+		);
+
+		expect(
+			invocations.map((arguments_) => ({
+				store: arguments_[arguments_.indexOf('--store') + 1],
+				closure: arguments_.includes('--closure'),
+				receipt: arguments_[arguments_.indexOf('--receipt-file') + 1],
+				alreadyHeld: arguments_.includes('--no-already-held'),
+				claimable: arguments_.includes('--no-claimable')
+			}))
+		).toStrictEqual([
+			{
+				store: 'auto',
+				closure: true,
+				receipt: '/tmp/publication.json.0',
+				alreadyHeld: true,
+				claimable: true
+			},
+			{
+				store: 'auto',
+				closure: true,
+				receipt: '/tmp/publication.json.1',
+				alreadyHeld: true,
+				claimable: true
+			}
+		]);
+	});
+
+	it.each([
+		{
+			name: 'the configured build store',
+			selectedStore: '',
+			expectedStore: 'ssh-ng://configured@example.test'
+		},
+		{
+			name: 'an explicitly selected store',
+			selectedStore: 'ssh-ng://selected@example.test',
+			expectedStore: 'ssh-ng://selected@example.test'
+		}
+	])('reads receipt paths from $name', ({ selectedStore, expectedStore }) => {
+		const invocations = pushArgumentsForInvocations(
+			{
+				...baseInputs,
+				store: selectedStore,
+				buildReceiptFile: '/tmp/build.json'
+			},
+			[{ root: 'github:owner/repo/main', paths: ['/nix/store/a'] }],
+			'url',
+			() => 'ssh-ng://configured@example.test'
+		);
+
+		expect(
+			invocations.map(
+				(arguments_) => arguments_[arguments_.indexOf('--store') + 1]
+			)
+		).toStrictEqual([expectedStore]);
+	});
 
 	it('builds a single push when there is one invocation', () => {
 		const pushes: readonly PushInvocation[] = [

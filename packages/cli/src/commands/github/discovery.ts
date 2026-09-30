@@ -854,6 +854,25 @@ export async function discoverPublishingJobs(
 				continue;
 			}
 
+			if (
+				supplied.publish !== undefined &&
+				supplied.publish !== 'none' &&
+				supplied.publish !== 'outputs' &&
+				supplied.publish !== 'closure'
+			) {
+				unverified.push({
+					caller,
+					job: label,
+					workflow: 'cupboard',
+					...(workflowReference !== undefined && {
+						workflowRef: workflowReference
+					}),
+					detail:
+						'the publish input is dynamic or invalid, so the check cannot determine whether this job publishes'
+				});
+				continue;
+			}
+
 			if (kind === 'flake' && typeof supplied.push === 'string') {
 				unverified.push({
 					caller,

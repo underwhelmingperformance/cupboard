@@ -1,16 +1,29 @@
 # Attestations
 
-When cupboard's GitHub Actions publish a store path, they can also sign a
-statement about where the path came from: which repository, commit and workflow
-built it, and how. The statement is signed with
-[Sigstore](https://www.sigstore.dev/) and stored in the cache next to the path.
-Anyone who downloads the path can check this signed statement before trusting
-the path.
+Cupboard's GitHub Actions can sign build provenance for store paths whose builds
+they observed on the runner. The statement identifies the repository, commit and
+workflow that built the path. It is signed with [Sigstore] and attached to the
+path in the destination cache. Anyone who downloads the path can verify the
+statement before trusting the path. The same signing also covers an attribute
+report, described below.
 
-The signed file is called a **bundle**, and the statement inside it is an
-**attestation**. This page explains what the attestations contain, how signing
-fits into a publishing run, how to keep a private cache's attestations private,
-and how to verify a bundle.
+[Sigstore]: https://www.sigstore.dev/
+
+The signed file is a **Sigstore bundle**, which contains an authenticated
+in-toto Statement and its verification material. This differs from an [in-toto
+Bundle], a JSON Lines collection of independently authenticated attestations.
+Sigstore's single-signature format also differs from the [in-toto Envelope]
+requirement to support multiple signatures; cupboard does not claim ITE-5
+conformance for that container.
+
+This page explains what the attestations contain, how signing fits into a
+publishing run, how to keep a private cache's attestations private, and how to
+verify a bundle.
+
+[in-toto Bundle]:
+  https://github.com/in-toto/attestation/blob/main/spec/v1/bundle.md
+[in-toto Envelope]:
+  https://github.com/in-toto/attestation/blob/main/spec/v1/envelope.md
 
 ## How a bundle refers to a store path
 
@@ -21,17 +34,17 @@ digest is the path's **NAR hash** in hexadecimal. The NAR hash is the hash of
 the path's contents as Nix serialises them, and it's also recorded in the path's
 narinfo.
 
-cupboard only attaches a bundle to a path if one of the bundle's subjects has
-that path's NAR hash. This means you can't attach an attestation made by
-`actions/attest-build-provenance` with its default settings. That action attests
-a file's own digest, which is not the NAR hash of any store path.
+The CLI matches each subject's SHA-256 digest against the selected published
+paths' NAR hashes before uploading a bundle. Subject names are optional and do
+not determine artifact identity. A bundle can apply to multiple selected store
+paths with identical NAR bytes. This means you can't attach an attestation made
+by `actions/attest-build-provenance` with its default settings. That action
+attests a file's own digest, which is not the NAR hash of any store path.
 
-## The two kinds of attestation
+## Build provenance
 
-### Build provenance
-
-Build provenance is a [SLSA v1](https://slsa.dev/provenance/v1) statement about
-the paths that a run built. It records:
+Build provenance is a [SLSA v1] statement about paths whose builds the run
+observed. It records:
 
 - the repository, ref and commit;
 - the event that triggered the run, and the workflow file that it started;
@@ -42,45 +55,82 @@ the paths that a run built. It records:
 
 Its predicate type is `https://slsa.dev/provenance/v1`.
 
-### Build origin
+Reusing or substituting an output does not create a new build claim. Builds on a
+delegated builder or a selected remote store do not provide runner-local SLSA
+provenance. Existing bundles can be inherited when the destination publishes the
+same store path and NAR, as described below.
 
-Build origin records how each published path became available during the run.
-Only the flake publish workflow produces it, because it needs the detailed
-receipt that the workflow writes (a version 3 receipt). Its predicate type is
-`https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2`.
+[SLSA v1]: https://slsa.dev/provenance/v1
 
-A path can become available in four ways, and the build-origin statement records
-different details for each:
+## Attribute report
 
-- The run built the path. The statement records the derivation, the store that
-  the path was built in, and how the run observed the build. If the build ran on
-  a remote builder that identified itself, the statement records the builder.
-- The path was already in the build store. The statement records that store, and
-  says that the run didn't see the path being built.
-- The path was copied into the store. The statement records the signatures and
-  content address that the store reported, and every source that the run saw it
-  copied from, including failed attempts.
-- The path was published by reference from another cache. No files were copied
-  in this case. The statement records the other cache, the NAR hash that the
-  destination publishes, and the deriver, content address and signatures that
-  the other cache reported. It can't say where the other cache's copy came from.
+With `attest: true`, a successful locally observed verification rebuild also
+produces a [SCAI] attribute report. Its predicate type is
+`https://in-toto.io/attestation/scai/v0.3`. The report asserts `REPRODUCIBLE`:
+Nix re-executed the recorded derivation on the runner and confirmed that the
+result matched the accepted output's NAR hash. The assertion's `conditions`
+records the derivation. This describes that verification procedure, not
+reproducibility across every environment. SCAI uses the same attribute spelling
+in an example, but leaves attribute meanings and condition formats to producers
+and consumers.
 
-A build-origin statement doesn't claim that a path is reproducible, or that
-whoever produced it is trustworthy. When the run didn't see where a copy came
-from, the statement doesn't say where it came from.
+For a single-subject report, the assertion applies to the statement subject and
+omits the optional `target`. A multi-subject report uses targets to identify the
+outputs of particular derivations. The action partitions generated assertions
+with their subjects to fit the subject and bundle-size limits.
+
+Reuse preserves existing signed attestations without creating a new property
+claim or collection report. A consumer verifies each original bundle's
+signature, signer and predicate independently.
+
+The action's internal `attest-sign` command also accepts supplied SCAI
+predicates. Statement subjects come from the selected checksums, not from
+assertion targets. SCAI permits a target to identify another resource, such as a
+dependency, and permits omitted targets, URI-only descriptors, an optional
+artifact producer and extension fields. Supplied fields are preserved when
+signing. A multi-subject supplied report must use `run` grouping and fit one
+bundle because the signer cannot infer how arbitrary assertions apply to subject
+subsets. A single-subject report can be partitioned into non-empty assertion
+lists without changing its subjects or evidence. Use `--receipt-file` to
+generate reproduction reports with known assertion associations, or
+`--predicate-file` and `--predicate-type` to sign a supplied report.
+
+[SCAI]: https://github.com/in-toto/attestation/blob/main/spec/predicates/scai.md
 
 ## How signing fits into a run
 
-1. The build step writes a **receipt**, which lists what the run built and what
-   it will publish.
+1. The build step writes a **receipt**, which records how the requested outputs
+   became available.
 2. The run publishes the paths.
-3. `actions/attest` reads the destination cache's narinfo for every path in the
-   receipt. If a path is missing, or its NAR hash or deriver doesn't match the
-   receipt, the step fails. Otherwise, the step signs the attestations.
+3. `actions/attest` checks the destination cache's narinfo for each subject
+   recorded in the receipt. If a subject is missing, or its NAR hash or recorded
+   deriver doesn't match the receipt, the step fails. Otherwise, the step signs
+   build provenance for builds observed on the runner and an attribute report
+   recording successful local verification rebuilds. The reusable workflows
+   enable this with `attest: true`, which is the default.
 4. `actions/attest-attach` attaches the bundles to the paths in the cache.
 
-The run signs after it publishes, so a bundle only ever describes a path that
-the cache has already accepted.
+When the server supports grouped attachment, the CLI uploads each distinct
+bundle once and sends the matching paths to the server in pages. The server
+checks each path's current NAR hash and committed generation before recording
+its reference to the bundle. The same procedure applies to public and private
+caches, including named caches. Large public statements therefore do not require
+a separate bundle upload for each subject.
+
+With an older server, the CLI uses the per-path attachment API and uploads the
+same signed bundle for each path. The fallback preserves every subject and
+signature.
+
+An active grouped attachment session renews its expiry as it processes paths.
+Later pages can still attach the bundle if the cache has retired an earlier
+path. The server removes staging bytes when the session expires, and R2 also
+removes staging objects a day after upload. If both staging and CAS bytes are
+gone, the CLI starts a new session and uploads the bundle again before retrying
+the page.
+
+The run signs after it publishes. Signing or attachment can fail after the paths
+become available in the cache; the workflow then fails. Publication and
+attestation attachment are separate operations.
 
 To sign, the action requests a certificate from Fulcio, and contacts a timestamp
 authority, Rekor, or both. The Sigstore client sends each of these requests up
@@ -91,26 +141,40 @@ to four attempts for each statement. It doesn't try again when it can't read the
 job's OIDC token, when Fulcio refuses to issue a certificate, or when the signed
 bundle fails the action's own check.
 
-If signing fails, the paths have already been published, but without
-attestations. Rerunning the flake publish workflow or `cupboard-publish.yml`
-rebuilds the paths and signs them. A job that you've written yourself needs
-`require-provenance: true` on `build-paths` to do the same. Without it, the
-rerun would download the paths from the cache instead of building them, and
-there would be no build to attest.
+If attachment fails, retained bundle files can be passed to
+`actions/attest-attach` again. A rerun that reuses an output does not recreate
+build provenance for the earlier attempt. Set `build: rebuild` when the new run
+must execute each requested builder again and produce fresh build evidence. Nix
+may still substitute dependencies, and delegated builders or selected remote
+stores do not produce runner-local SLSA provenance.
 
 ## Attestations of reused paths
 
 When a cache publishes a path, for example by reference from another cache in
-the tenant, it inherits the attestations that already exist for the same store
-path with the same NAR:
+the tenant, it can inherit attestations for the same store path and NAR:
 
 - from any public cache in the tenant that serves the path with that NAR;
 - from the cache's own earlier copy of the path, when that copy had the same
   NAR.
 
 Bundles in another private cache stay in that cache, even if the destination
-later becomes public. Inheritance runs shortly after the path is published, so a
-newly published path can briefly have no attestations.
+later becomes public. Inheritance runs after publication. While a destination
+publication or inheritance is pending, cupboard keeps eligible source
+attestation references so the destination can inherit them. If the source bundle
+was already unavailable when publication began, the destination cannot inherit
+it. A transient failure leaves inheritance queued for another attempt. A quota
+refusal removes the pending item.
+
+The destination creates its own CAS reference and attestation list for the
+committed path. Both refer to the original bundle bytes and signature. The
+inheritance process does not re-sign the source statement as a claim about the
+current run. The destination reference protects the bundle while the destination
+path remains retained.
+
+The cache's attestation list provides discovery, not trust. A listed digest
+identifies the stored bundle bytes. Verify those bytes and their signature, then
+evaluate the authenticated statement's predicate type and contents. The list's
+predicate-type metadata does not replace that verification.
 
 ## Signing profiles
 
@@ -155,23 +219,28 @@ where it may publish records. For `tsa-only` and `rekor-and-tsa` bundles, it
 then checks each bundle's timestamp or log entry, signature, predicate type and
 subjects before writing the bundle.
 
-The action writes bundles to `$RUNNER_TEMP/cupboard-attestations/`. Three of its
-outputs list the bundle files, one per line:
+By default, the action writes bundles beside the checksums file under
+`$RUNNER_TEMP/cupboard-attestations/`. The manifest is
+`$RUNNER_TEMP/cupboard-attest/bundles.txt`; `bundles-file` returns its path and
+lists all bundle files, one per line. Pass `bundles-file` to
+`actions/attest-attach`, and run that step only when `bundles-file` is not
+empty. [Writing your own publishing job][custom-jobs] shows the steps.
+
+[custom-jobs]: ./custom-jobs.md
+
+Set `inline-bundles: false` when attachment uses the manifest. The default is
+`true`, which also returns complete inline lists of bundle files, one per line:
 
 - `bundle-path` lists the build-provenance bundles. It's empty when the job
-  built none of the paths in the receipt.
-- `origin-bundle-path` lists the build-origin bundles.
-- `bundles` lists both kinds. It's empty only when the action signed nothing.
+  built none of the accepted paths in the receipt.
+- `origin-bundle-path` lists the attribute-report bundles. It's empty when the
+  report has no assertions. The action signs no build-origin statement.
+- `bundles` lists all generated bundles.
 
-Pass `bundles` to `actions/attest-attach`, and run that step only when `bundles`
-isn't empty. [Writing your own publishing job](./custom-jobs.md) shows the
-steps.
-
-Four more outputs describe the paths that the bundles cover.
-`built-checksums-file` and `built-subject-count` describe the paths that the job
-built, which the build-provenance bundles cover. `checksums-file` and
-`subject-count` describe every path in the receipt, which the build-origin
-bundles cover.
+`built-checksums-file` and `built-subject-count` describe accepted receipt paths
+whose builds the job observed. `subject-count` counts all accepted receipt
+paths. `checksums-file` lists the paths selected for signing and attachment.
+Pass that file with the bundle manifest to `actions/attest-attach`.
 
 ## Private caches
 
@@ -197,7 +266,7 @@ So think of each change to the defaults as a decision about what to disclose:
   not the statement itself. However, Rekor indexes the subject digests, so
   anyone who knows a NAR hash can find the entry.
 - With `subject-grouping: run`, each bundle lists up to 1,024 of the run's paths
-  and their origins. Anyone who has the bundle for one path learns about the
+  in one statement. Anyone who has the bundle for one path learns about the
   others in the same bundle.
 
 ## Verifying a bundle

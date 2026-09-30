@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import type { AttestOptions } from '@actions/attest';
+import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { verifyBundle } from '@cupboard/shared/sigstore';
 import {
 	githubInstanceBundle,
@@ -436,6 +437,42 @@ describe('sigstoreStatementSigner', () => {
 			AttestationEvidenceShapeError
 		);
 		expect(harness.uploaded).toStrictEqual([]);
+	});
+
+	it('does not upload a signed bundle that exceeds the cache limit', async () => {
+		const ordinaryBundle = bundleToJSON(shapedBundle({ timestamps: 1 }));
+		const envelope = ordinaryBundle.dsseEnvelope;
+		if (envelope === undefined) {
+			throw new Error('The fixture has no DSSE envelope');
+		}
+		const oversizedBundle = bundleFromJSON({
+			...ordinaryBundle,
+			dsseEnvelope: {
+				...envelope,
+				payload: 'a'.repeat(maxAttestationBundleBytes)
+			}
+		});
+		const harness = signerHarness(oversizedBundle);
+
+		const signed = await sigstoreStatementSigner(
+			{
+				subjects,
+				profile: 'tsa-only',
+				githubToken: 'token',
+				uploadToGithub: true
+			},
+			harness
+		)(statement);
+
+		expect({
+			oversized: Buffer.byteLength(signed.bundle) > maxAttestationBundleBytes,
+			attestationId: signed.attestationId,
+			uploaded: harness.uploaded
+		}).toStrictEqual({
+			oversized: true,
+			attestationId: undefined,
+			uploaded: []
+		});
 	});
 });
 
