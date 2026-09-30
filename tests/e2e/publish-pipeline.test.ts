@@ -1,6 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile
+} from 'node:fs/promises';
 import path from 'node:path';
 import process, { env } from 'node:process';
 
@@ -361,6 +368,27 @@ async function startJob(name: string): Promise<PublishJob> {
 	return { runnerTemporary, runId };
 }
 
+async function fixtureCapacityCommand(
+	commandPath: string,
+	directory: string
+): Promise<string> {
+	const wrapperPath = path.join(directory, 'cupboard');
+	// These fixtures build small files. Reserving a fraction of the runner's
+	// filesystem would make publication depend on unrelated disk usage.
+	await writeFile(
+		wrapperPath,
+		`#!/bin/sh
+case " $* " in
+  *" plan cohort "*) set -- "$@" --headroom-absolute-minimum 0 --headroom-fraction 0 ;;
+esac
+exec ${JSON.stringify(commandPath)} "$@"
+`
+	);
+	await chmod(wrapperPath, 0o755);
+
+	return wrapperPath;
+}
+
 /**
  * The argv `actions/plan` builds. Every input the composite declares is
  * passed, so an input the workflow left unset arrives as the empty string
@@ -547,9 +575,12 @@ async function runPublication(
 	const prepared = fixture();
 	const url = prepared.server.tenantUrl.href;
 	const publishRootPrefix = options.rootPrefix ?? rootPrefix;
-	const cupboardPath = options.cupboardPath ?? prepared.cupboard.path;
 	const audience = options.audience ?? '';
 	const job = await startJob(name);
+	const cupboardPath = await fixtureCapacityCommand(
+		options.cupboardPath ?? prepared.cupboard.path,
+		job.runnerTemporary
+	);
 	const targets = await runNix([
 		'eval',
 		'--json',
