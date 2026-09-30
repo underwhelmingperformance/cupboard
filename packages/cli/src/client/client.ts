@@ -10,10 +10,18 @@ import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	refreshTokenGrantType,
+	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
 	type TokenResponse,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
+import {
+	readAccessGrantType,
+	type ReadAccessResponse,
+	readAccessResponseSchema,
+	type ReadResource,
+	readResourcesSchema
+} from '@cupboard/protocol/read-access';
 import {
 	type SignupRequest,
 	type SignupResponse,
@@ -352,11 +360,39 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Exchanges an external OIDC subject token for a cupboard access token at the
-	 * OAuth `POST /token` endpoint. The endpoint is unauthenticated (the subject
-	 * token is the credential) and takes a urlencoded body, so it bypasses the
-	 * JSON request path the rest of the client uses.
-	 */
+	Acquires short-lived read authority and configuration facts for exact resources.
+	*/
+	async acquireReadAccess(
+		subjectToken: string,
+		resources: readonly ReadResource[]
+	): Promise<ReadAccessResponse> {
+		const intent = readResourcesSchema.parse(resources);
+
+		const response = await this.postTokenForm({
+			grant_type: readAccessGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(intent)
+		});
+
+		return this.parseJson(
+			'/token',
+			readAccessResponseSchema.refine(
+				(result) =>
+					JSON.stringify(
+						result.read_resources.map(
+							({ state: _state, ...resource }) => resource
+						)
+					) === JSON.stringify(intent),
+				'The read acquisition response must describe exactly the requested resources'
+			),
+			response
+		);
+	}
+
+	/**
+	Exchanges an external identity for the requested authority at the OAuth endpoint.
+	*/
 	async tokenExchange(
 		subjectToken: string,
 		subjectTokenType: string,

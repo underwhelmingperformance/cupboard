@@ -124,7 +124,7 @@ Commands:
   attest                                          Attach Sigstore attestations to published store paths, and verify them.
   push [options] <url> [paths...]                 Publish store paths to a cache.
   build-push [options] <url> [arguments...]       Run a build command and publish each output as soon as Nix builds it.
-  run [options] <cache-or-view-url> <command...>  Run a command with renewable private-cache read access in CI.
+  run [options] <cache-or-view-url> <command...>  Run a command with renewable cache read access in CI.
   config [options] <url> <pubkey> [caches...]     Print the nix.conf lines that add a tenant's caches as Nix substituters.
   pubkey <url>                                    Print the tenant's public signing keys, one per line (more than one during a key rotation).
   stats <url> [cache]                             Show how many store paths a cache has and how much storage they use.
@@ -683,16 +683,18 @@ Examples:
 ```text
 Usage: cupboard run <cache-or-view-url> [options] -- <command...>
 
-Run a command with renewable private-cache read access in CI.
+Run a command with renewable cache read access in CI.
 
 Arguments:
   cache-or-view-url      cache or reuse view URL
   command                command to run after --
 
 Options:
-  --github-oidc          request private-cache read access through GitHub
-                         Actions OIDC when needed
+  --github-oidc          acquire server-resolved read access through GitHub
+                         Actions OIDC
   --audience <audience>  OIDC audience (default: the tenant URL)
+  --cache-metadata       acquire only cache metadata for setup when content uses
+                         a static credential
   --reuse-view <name>    reuse view whose private cache content the command will
                          read
   -h, --help             display help for command
