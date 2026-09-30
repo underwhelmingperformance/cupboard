@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { renderNetrc } from '@cupboard/nix-store/nix-config';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { bestEffort, withCleanup } from '@cupboard/shared/cleanup';
 
 import { abortable, abortReason, delayMs, throwIfAborted } from '../abort.ts';
@@ -18,10 +20,13 @@ export interface ReadCredentialLease {
 	readonly user: string;
 	readonly password: string;
 	readonly expiresAtMs: number;
+	readonly resources?: readonly ReadResourceState[];
+	readonly authorizationDetails?: AuthorizationDetails;
 }
 
 export interface ReadCredentialFile {
 	readonly path: string;
+	readonly factsPath?: string;
 	replace(credential: ReadCredentialLease, signal: AbortSignal): Promise<void>;
 	remove(): Promise<void>;
 }
@@ -66,6 +71,7 @@ export async function withRenewingReadCredential<T>(
 	options: ReadCredentialSessionOptions,
 	operation: (context: {
 		readonly netrcFile: string;
+		readonly factsFile?: string;
 		readonly signal: AbortSignal;
 	}) => Promise<T>
 ): Promise<T> {
@@ -107,6 +113,7 @@ export async function withRenewingReadCredential<T>(
 				try {
 					const result = await operation({
 						netrcFile: file.path,
+						...(file.factsPath !== undefined && { factsFile: file.factsPath }),
 						signal: controller.signal
 					});
 					throwIfAborted(controller.signal);
@@ -250,15 +257,29 @@ async function createTemporaryReadCredentialFile(
 ): Promise<ReadCredentialFile> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-read-'));
 	const file = path.join(directory, 'netrc');
+	const factsPath = path.join(directory, 'read-access.json');
 
 	return {
 		path: file,
-		replace: (credential, signal) =>
-			writeSecretFile(
+		factsPath,
+		replace: async (credential, signal) => {
+			await writeSecretFile(
 				file,
 				`${renderNetrc(url, credential.user, credential.password)}${existingNetrc ?? ''}`,
 				signal
-			),
+			);
+
+			if (credential.resources !== undefined) {
+				await writeSecretFile(
+					factsPath,
+					JSON.stringify({
+						read_resources: credential.resources,
+						authorization_details: credential.authorizationDetails ?? []
+					}),
+					signal
+				);
+			}
+		},
 		remove: () => rm(directory, { recursive: true, force: true })
 	};
 }

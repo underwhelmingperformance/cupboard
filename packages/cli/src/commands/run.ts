@@ -7,11 +7,10 @@ import {
 	netrcCredentialFor,
 	type NixStoreConfig
 } from '@cupboard/nix';
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
-import type { AuthorizationDetails } from '@cupboard/protocol/grants';
-import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import {
+	readAccessFileEnvironment,
+	type ReadResource,
 	readTokenBasicUser,
 	readTokenPasswordPrefix
 } from '@cupboard/protocol/read-access';
@@ -19,18 +18,11 @@ import {
 	type ReuseViewName,
 	reuseViewNameSchema
 } from '@cupboard/protocol/reuse-views';
-import { discardResponseBody } from '@cupboard/shared/cleanup';
-import {
-	basicAuthHeader,
-	type BasicCredential,
-	readUserSchema
-} from '@cupboard/shared/http';
-import { readResponseText } from '@cupboard/shared/response-body';
+import { type BasicCredential, readUserSchema } from '@cupboard/shared/http';
 import { type Command, InvalidArgumentError } from 'commander';
 
-import { abortReason, throwIfAborted } from '../abort.ts';
+import { throwIfAborted } from '../abort.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
-import { contentReadAuthorizationDetails } from '../auth/attenuate.ts';
 import { fetchGithubOidcToken } from '../auth/github-oidc.ts';
 import {
 	type ReadCredentialLease,
@@ -48,14 +40,13 @@ import { cacheTargetFromUrl } from '../cache-target.ts';
 import type { ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
-import { CacheInfoTimeoutError, CliError } from '../errors.ts';
-
-const cacheInfoTimeoutMs = 30_000;
+import { CliError } from '../errors.ts';
 
 interface RunOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly reuseView?: ReuseViewName;
+	readonly cacheMetadata?: boolean;
 }
 
 interface ViewTarget {
@@ -68,8 +59,10 @@ type ReadTarget = CacheTarget | ViewTarget;
 interface IssueReadCredentialInput {
 	readonly target: ReadTarget;
 	readonly audience: Audience;
-	readonly authorizationDetails: AuthorizationDetails;
+	readonly resources: readonly ReadResource[];
 	readonly signal: AbortSignal;
+	readonly fetcher: typeof fetch;
+	readonly environment: NodeJS.ProcessEnv;
 }
 
 export interface RunReadAccessDependencies {
@@ -82,43 +75,10 @@ export interface RunReadAccessDependencies {
 	) => Promise<ReadCredentialLease>;
 	readonly runChild?: RunChild;
 	readonly signal?: AbortSignal;
-	readonly probeTimeoutMs?: number;
 	readonly renewal?: Pick<
 		ReadCredentialSessionOptions,
 		'renewalMarginMs' | 'safetyMarginMs' | 'retryDelayMs'
 	>;
-}
-
-export class ReadAccessProbeError extends CliError {
-	constructor(url: URL, status: number) {
-		super(
-			`Could not check cache read access at ${url.href}: HTTP ${String(status)}`
-		);
-		this.name = 'ReadAccessProbeError';
-	}
-}
-
-export class ReadAccessProbeDocumentError extends CliError {
-	constructor(url: URL, options: ErrorOptions) {
-		super(`Could not read valid cache information at ${url.href}`, options);
-		this.name = 'ReadAccessProbeDocumentError';
-	}
-}
-
-export class StaticReadCredentialRejectedError extends CliError {
-	constructor(url: URL) {
-		super(`The configured read credential was rejected by ${url.href}`);
-		this.name = 'StaticReadCredentialRejectedError';
-	}
-}
-
-export class ReadOidcRequiredError extends CliError {
-	constructor() {
-		super(
-			'A private cache or reuse view needs read access. Pass --github-oidc in CI or configure a static read credential.'
-		);
-		this.name = 'ReadOidcRequiredError';
-	}
 }
 
 export class UnreadableReadCredentialFileError extends CliError {
@@ -158,6 +118,13 @@ export async function runWithReadAccess(
 	dependencies: RunReadAccessDependencies = {}
 ): Promise<void> {
 	const environment = dependencies.environment ?? process.env;
+
+	if (options.githubOidc !== true) {
+		await runOwnedChild(command, environment, dependencies);
+
+		return;
+	}
+
 	const storeConfig = dependencies.storeConfig ?? discoverNixStoreConfig();
 	const fetcher = resilientFetcher('replay-safe', dependencies.fetcher);
 	const cache = 'cache' in target ? target.cache : undefined;
@@ -168,30 +135,6 @@ export async function runWithReadAccess(
 		viewName === undefined
 			? undefined
 			: reuseViewUrl(target.tenantUrl, viewName);
-	const isCachePrivate =
-		targetUrl !== undefined &&
-		(await requiresOidc(
-			targetUrl,
-			undefined,
-			fetcher,
-			dependencies.signal,
-			dependencies.probeTimeoutMs
-		));
-	const isViewPrivate =
-		viewUrl !== undefined &&
-		(await requiresOidc(
-			viewUrl,
-			undefined,
-			fetcher,
-			dependencies.signal,
-			dependencies.probeTimeoutMs
-		));
-
-	if (!isCachePrivate && !isViewPrivate) {
-		await runOwnedChild(command, environment, dependencies);
-		return;
-	}
-
 	let configuredNetrc: string | undefined;
 	let isNetrcUnreadable = false;
 	try {
@@ -220,15 +163,8 @@ export async function runWithReadAccess(
 					configuredNetrc
 				);
 	const requiresCacheOidc =
-		isCachePrivate &&
-		(cacheCredential === undefined ||
-			(await requiresOidc(
-				targetUrl,
-				cacheCredential,
-				fetcher,
-				dependencies.signal,
-				dependencies.probeTimeoutMs
-			)));
+		targetUrl !== undefined &&
+		(options.cacheMetadata === true || cacheCredential === undefined);
 	const viewCredential =
 		viewUrl === undefined
 			? undefined
@@ -238,55 +174,78 @@ export async function runWithReadAccess(
 					configuredNetrc
 				);
 	const requiresViewOidc =
-		isViewPrivate &&
-		(viewCredential === undefined ||
-			(await requiresOidc(
-				viewUrl,
-				viewCredential,
-				fetcher,
-				dependencies.signal,
-				dependencies.probeTimeoutMs
-			)));
+		viewUrl !== undefined && viewCredential === undefined;
 
 	if (!requiresCacheOidc && !requiresViewOidc) {
 		await runOwnedChild(command, environment, dependencies);
 		return;
 	}
 
-	if (options.githubOidc !== true) {
-		throw new ReadOidcRequiredError();
-	}
 	if (isNetrcUnreadable) {
 		throw new UnreadableReadCredentialFileError(
 			storeConfig.fileTransfer.netrcFile
 		);
 	}
 
-	const authorizationDetails = contentReadAuthorizationDetails({
-		...(requiresCacheOidc && cache !== undefined && { cache }),
-		...(requiresViewOidc && { view: viewName })
-	});
 	const issue = dependencies.issue ?? issueGithubReadCredential;
+	const resources: ReadResource[] = [
+		...(requiresCacheOidc && cache !== undefined
+			? [
+					{
+						type: 'cupboard_cache' as const,
+						cache,
+						mode:
+							options.cacheMetadata === true
+								? ('metadata' as const)
+								: ('content' as const)
+					}
+				]
+			: []),
+		...(requiresViewOidc && viewName !== undefined
+			? [{ type: 'cupboard_view' as const, view: viewName }]
+			: [])
+	];
 
 	await withRenewingReadCredential(
 		{
 			url: target.tenantUrl,
 			...dependencies.renewal,
 			...(configuredNetrc !== undefined && { existingNetrc: configuredNetrc }),
-			issue: (signal) =>
-				issue({
+			issue: async (signal) => {
+				const credential = await issue({
 					target,
 					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
-					authorizationDetails,
+					resources,
+					fetcher,
+					environment,
 					signal
-				}),
+				});
+
+				if (
+					!requiresViewOidc &&
+					cacheCredential !== undefined &&
+					options.cacheMetadata === true
+				) {
+					return {
+						...credential,
+						user: cacheCredential.user,
+						password: cacheCredential.password
+					};
+				}
+
+				return credential;
+			},
 			...(dependencies.signal !== undefined && { signal: dependencies.signal })
 		},
-		async ({ netrcFile, signal }) => {
+		async ({ netrcFile, factsFile, signal }) => {
 			const childEnvironment = environmentWithReadAccess(
 				environment,
 				netrcFile
 			);
+
+			if (factsFile !== undefined) {
+				childEnvironment[readAccessFileEnvironment] = factsFile;
+			}
 			await runOwnedChild(command, childEnvironment, {
 				...dependencies,
 				signal
@@ -380,95 +339,33 @@ function staticCredentialFor(
 			};
 }
 
-async function requiresOidc(
-	resource: URL,
-	staticCredential: BasicCredential | undefined,
-	fetcher: typeof fetch,
-	signal: AbortSignal | undefined,
-	timeoutMs = cacheInfoTimeoutMs
-): Promise<boolean> {
-	const info = new URL(resource);
-	info.pathname = `${resource.pathname.replace(/\/$/u, '')}/nix-cache-info`;
-	const timeoutSignal = AbortSignal.timeout(timeoutMs);
-	const requestSignal =
-		signal === undefined
-			? timeoutSignal
-			: AbortSignal.any([signal, timeoutSignal]);
-	let response: Response | undefined;
-
-	try {
-		response = await fetcher(info, {
-			signal: requestSignal,
-			...(staticCredential !== undefined && {
-				headers: basicAuthHeader(staticCredential)
-			})
-		});
-
-		if (response.ok) {
-			try {
-				CacheInfo.parse(
-					await readResponseText(response, {
-						description: `cache information from ${info.href}`,
-						maximumBytes: 1024 * 1024,
-						signal: requestSignal
-					})
-				);
-			} catch (error) {
-				throw new ReadAccessProbeDocumentError(info, { cause: error });
-			}
-
-			return false;
-		}
-
-		if (response.status === 401) {
-			if (staticCredential !== undefined) {
-				throw new StaticReadCredentialRejectedError(resource);
-			}
-
-			return true;
-		}
-
-		throw new ReadAccessProbeError(resource, response.status);
-	} catch (error) {
-		if (signal?.aborted === true) {
-			throw abortReason(signal);
-		}
-
-		if (timeoutSignal.aborted) {
-			throw new CacheInfoTimeoutError(info, timeoutMs, { cause: error });
-		}
-
-		throw error;
-	} finally {
-		if (response !== undefined) {
-			await discardResponseBody(response);
-		}
-	}
-}
-
 async function issueGithubReadCredential(
 	input: IssueReadCredentialInput
 ): Promise<ReadCredentialLease> {
 	const requestedAtMs = Date.now();
-	const client = CupboardClient.fromUrl(input.target.tenantUrl, {
-		cache: 'cache' in input.target ? input.target.cache : { kind: 'default' },
-		signal: input.signal
-	});
+	const client = new CupboardClient(
+		input.target.tenantUrl,
+		input.fetcher,
+		'cache' in input.target ? input.target.cache : { kind: 'default' },
+		input.signal
+	);
 	const subject = await fetchGithubOidcToken({
 		audience: input.audience,
 		signal: input.signal,
-		fetcher: client.fetcher
+		fetcher: client.fetcher,
+		environment: {
+			requestUrl: input.environment.ACTIONS_ID_TOKEN_REQUEST_URL,
+			requestToken: input.environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN
+		}
 	});
-	const exchanged = await client.tokenExchange(
-		subject,
-		subjectTokenTypeIdToken,
-		input.authorizationDetails
-	);
+	const exchanged = await client.acquireReadAccess(subject, input.resources);
 
 	return {
 		user: readTokenBasicUser,
 		password: `${readTokenPasswordPrefix}${exchanged.access_token}`,
-		expiresAtMs: requestedAtMs + exchanged.expires_in * 1000
+		expiresAtMs: requestedAtMs + exchanged.expires_in * 1000,
+		resources: exchanged.read_resources,
+		authorizationDetails: exchanged.authorization_details
 	};
 }
 
@@ -506,20 +403,22 @@ export function registerRunCommand(
 ): void {
 	program
 		.command('run')
-		.description(
-			'Run a command with renewable private-cache read access in CI.'
-		)
+		.description('Run a command with renewable cache read access in CI.')
 		.usage('<cache-or-view-url> [options] -- <command...>')
 		.argument('<cache-or-view-url>', 'cache or reuse view URL', parseWorkerUrl)
 		.argument('<command...>', 'command to run after --')
 		.option(
 			'--github-oidc',
-			'request private-cache read access through GitHub Actions OIDC when needed'
+			'acquire server-resolved read access through GitHub Actions OIDC'
 		)
 		.option(
 			'--audience <audience>',
 			'OIDC audience (default: the tenant URL)',
 			parseAudience
+		)
+		.option(
+			'--cache-metadata',
+			'acquire only cache metadata for setup when content uses a static credential'
 		)
 		.option(
 			'--reuse-view <name>',
@@ -528,6 +427,12 @@ export function registerRunCommand(
 		)
 		.action(async (url: URL, commandParts: string[], options: RunOptions) => {
 			const target = readTargetFromUrl(url);
+
+			if (options.cacheMetadata === true && 'view' in target) {
+				throw new InvalidArgumentError(
+					'--cache-metadata requires a cache URL.'
+				);
+			}
 			if ('view' in target && options.reuseView !== undefined) {
 				throw new InvalidArgumentError(
 					'A reuse view URL cannot be combined with --reuse-view.'
