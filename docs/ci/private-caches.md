@@ -61,12 +61,30 @@ baseline without a cache-creation grant.
 
 ## How the workflow reads
 
-Public resources remain readable without a content-read grant. For a private
-resource, `cupboard run` requests its exact content-read grant and renews the
-credential while that job's plan, build or attestation command runs. It writes
-the credential to a private netrc file for Nix. Direct HTTP readers use the
-current credential for each request. The file is removed when the command
-finishes. The cache checks every request against the selected resource.
+Public resources remain readable without a content-read grant or a matching CI
+trust rule. Setup keeps public read-only operations anonymous. When a
+destination challenges, setup acquires access for the configured destination and
+reuse view before validating their access modes and priorities.
+
+With `--github-oidc`, `cupboard run` sends the exact configured targets to the
+tenant's token endpoint. The server requires content-read authority for existing
+private resources. For public resources, the server includes a permitted
+content-read grant but otherwise omits that grant. For an absent destination,
+publication authority permits a metadata-only read token. The token authorises
+the absence response without creating a cache or granting private content
+access. The first push still creates a named destination implicitly.
+
+Every read-acquisition token expires after 15 minutes and has no refresh token.
+The wrapper repeats OIDC acquisition and exchange while the command runs. It
+writes the credential to a private netrc file for Nix. Direct HTTP readers use
+the current credential for each request. The file is removed when the command
+finishes. Without `--github-oidc`, the wrapper runs the child with its existing
+configuration; read failures are reported by the child.
+
+Setup validates `cache-access-mode` against authenticated configuration facts.
+For an absent destination, the facts describe the tenant's current first-write
+defaults. This is a configuration-time check. Another writer or a later change
+to the tenant default can change the cache's eventual creation settings.
 
 The workflows install Nix in single-user mode on the GitHub runner. An
 independently installed multi-user Nix daemon must trust the runner user before

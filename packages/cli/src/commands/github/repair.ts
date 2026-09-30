@@ -667,8 +667,13 @@ function checkModelledCase(
 	];
 
 	if (
-		checkTrustRule('current trust rules', existing, claims, requests).status !==
-		'ok'
+		checkTrustRule(
+			'current trust rules',
+			existing,
+			claims,
+			requests,
+			read.resources
+		).status !== 'ok'
 	) {
 		return;
 	}
@@ -677,7 +682,8 @@ function checkModelledCase(
 		'planned trust rules',
 		candidates,
 		claims,
-		requests
+		requests,
+		read.resources
 	);
 
 	if (finding.status === 'ok') {
@@ -847,7 +853,8 @@ async function modelRepairableJobs(
 				'current trust rules',
 				existing,
 				publication.claims,
-				[...publication.requests, ...read.requests]
+				[...publication.requests, ...read.requests],
+				read.resources
 			);
 
 			if (finding instanceof TrustRuleGrantMissingFinding) {
@@ -1059,7 +1066,8 @@ export async function runDiscoveredGithubRepair(
 			'planned trust rules',
 			candidates,
 			item.publication.claims,
-			[...item.publication.requests, ...item.read.requests]
+			[...item.publication.requests, ...item.read.requests],
+			item.read.resources
 		);
 
 		if (finding.status !== 'ok') {

@@ -3,7 +3,10 @@ import {
 	CacheInfo,
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	cachePrioritySchema
+} from '@cupboard/nix-store/scalars';
 import {
 	cacheListResponseSchema,
 	type CacheSummaryInput
@@ -15,8 +18,10 @@ import {
 	type OidcTrustSummaryInput,
 	oidcTrustSummarySchema
 } from '@cupboard/protocol/oidc';
+import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import {
 	reuseViewListResponseSchema,
+	reuseViewNameSchema,
 	type ReuseViewSelectorInput,
 	type ReuseViewSummaryInput
 } from '@cupboard/protocol/reuse-views';
@@ -38,10 +43,114 @@ import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
 import { type RepositoryIdentity } from '../oidc-trust/github.ts';
 
 import {
+	checkTrustRule,
 	type GithubCheckClient,
 	type GithubCheckOptions,
 	runGithubCheck
 } from './check.ts';
+import {
+	AmbiguousTrustRulesFinding,
+	SplitTrustAuthorityFinding
+} from './trust-selection.ts';
+
+describe('read-acquisition diagnostics', () => {
+	const cache = {
+		kind: 'named' as const,
+		name: cacheNameSchema.parse('builds')
+	};
+	const view = reuseViewNameSchema.parse('prior');
+	const claims = { iss: 'https://idp.example', aud: 'ci', sub: 'job' };
+	const cacheRule = oidcTrustSummarySchema.parse({
+		id: 'cache',
+		issuer: claims.iss,
+		audience: claims.aud,
+		claims: { sub: 'job' },
+		disabled: false,
+		permittedGrants: [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				resources: {
+					cache: { kind: 'named', exact: 'builds', validate: 'cacheName' }
+				}
+			}
+		]
+	});
+	const viewRule = oidcTrustSummarySchema.parse({
+		...cacheRule,
+		id: 'view',
+		permittedGrants: [
+			{
+				type: 'cupboard_view',
+				actions: ['view:content-read'],
+				resources: { view: { exact: view, validate: 'reuseViewName' } }
+			}
+		]
+	});
+
+	it('rejects private read authority split across two matching rules', () => {
+		const resources: ReadResourceState[] = [
+			{
+				type: 'cupboard_cache',
+				cache,
+				mode: 'content',
+				state: {
+					kind: 'existing',
+					access: 'private',
+					priority: cachePrioritySchema.parse(40)
+				}
+			},
+			{
+				type: 'cupboard_view',
+				view,
+				state: {
+					kind: 'existing',
+					access: 'private',
+					priority: cachePrioritySchema.parse(50)
+				}
+			}
+		];
+
+		expect(
+			checkTrustRule(
+				'read access',
+				[cacheRule, viewRule],
+				claims,
+				[],
+				resources
+			)
+		).toStrictEqual(
+			new SplitTrustAuthorityFinding('read access', [cacheRule, viewRule])
+		);
+	});
+
+	it('reports ambiguity for public read acquisition without preferring optional content authority', () => {
+		const resources: ReadResourceState[] = [
+			{
+				type: 'cupboard_cache',
+				cache,
+				mode: 'content',
+				state: {
+					kind: 'existing',
+					access: 'public',
+					priority: cachePrioritySchema.parse(40)
+				}
+			}
+		];
+
+		expect(
+			checkTrustRule(
+				'read access',
+				[cacheRule, viewRule],
+				claims,
+				[],
+				resources
+			)
+		).toStrictEqual(
+			new AmbiguousTrustRulesFinding('read access', [cacheRule, viewRule], [])
+		);
+	});
+});
 
 const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
 const pinnedWorkflowReference =

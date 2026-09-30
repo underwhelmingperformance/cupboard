@@ -94,6 +94,10 @@ export class AmbiguousTrustRulesFinding extends FailedCheckFinding {
 
 	detail(): string {
 		const ids = this.rules.map(({ id }) => id).join(', ');
+		if (this.request.length === 0) {
+			return `rules ${ids} match the modelled read acquisition; make their claims or required read grants disjoint, or disable one rule`;
+		}
+
 		const authority = this.request
 			.map((detail) => describeAuthorizationDetail(detail))
 			.join('; ');

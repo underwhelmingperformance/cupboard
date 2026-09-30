@@ -186,6 +186,13 @@ Trust rules can grant a CI job `cache:content-read` for one cache or
 identity token for a short-lived Cupboard read token. A static [read
 credential][static-credential] remains an option.
 
+Read acquisition resolves the configured cache and view together against one
+matching rule. Public resources require no content-read grant; acquisition
+includes a permitted content-read grant and omits an unpermitted public grant.
+An absent publication destination can receive scoped metadata-read authority.
+That token authorises an absence response but cannot read private content after
+creation. Existing private resources require their exact content-read grants.
+
 [static-credential]: ../use/private-caches.md#read-credentials
 
 ### Which roots a grant applies to

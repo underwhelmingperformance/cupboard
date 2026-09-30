@@ -2,9 +2,11 @@ import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import {
 	type CacheAccessMode,
 	cacheNameSchema,
+	cachePrioritySchema,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 
 import { contentReadAuthorizationDetails } from '../../auth/attenuate.ts';
@@ -20,6 +22,7 @@ import { isPresetJob, jobCache, type PublicationCase } from './publication.ts';
 export interface PublicationReadAuthority {
 	readonly cache: CacheScope;
 	readonly requests: readonly AuthorizationDetails[];
+	readonly resources: readonly ReadResourceState[];
 	readonly cacheAccess: CacheAccessMode;
 	readonly viewAccess?: CacheAccessMode;
 	readonly selectedViewAccess?: CacheAccessMode;
@@ -68,12 +71,17 @@ export async function publicationReadAuthority(
 	const cacheWiring = job.readCredentialWiring?.cache ?? 'none';
 	const viewWiring = job.readCredentialWiring?.view ?? 'none';
 	let viewAccess: CacheAccessMode | undefined;
+	let viewPriority = cachePrioritySchema.parse(50);
 
 	if (view !== undefined) {
 		const listed = await client.reuseViews.list();
-		viewAccess = listed.views.find(
+		const selected = listed.views.find(
 			(candidate) => candidate.name === view.name
-		)?.access;
+		);
+		viewAccess = selected?.access;
+		viewPriority = cachePrioritySchema.parse(
+			selected?.priority ?? viewPriority
+		);
 		if (
 			viewAccess === undefined &&
 			isPreset &&
@@ -83,26 +91,59 @@ export async function publicationReadAuthority(
 		}
 	}
 
+	const isCacheContent = cacheAccess === 'private' && cacheWiring === 'none';
+	const isViewContent =
+		view !== undefined && viewAccess === 'private' && viewWiring === 'none';
+	const isNeedsOidc = isPullRequest || isCacheContent || isViewContent;
+	const resources: ReadResourceState[] = isNeedsOidc
+		? [
+				...(cacheWiring === 'none'
+					? [
+							{
+								type: 'cupboard_cache' as const,
+								cache,
+								mode: 'content' as const,
+								state:
+									isPullRequest && cacheAccess === 'public'
+										? { kind: 'absent' as const }
+										: {
+												kind: 'existing' as const,
+												access: cacheAccess,
+												priority: cachePrioritySchema.parse(40)
+											}
+							}
+						]
+					: []),
+				...(view !== undefined &&
+				viewAccess !== undefined &&
+				viewWiring === 'none'
+					? [
+							{
+								type: 'cupboard_view' as const,
+								view: reuseViewNameSchema.parse(view.name),
+								state: {
+									kind: 'existing' as const,
+									access: viewAccess,
+									priority: viewPriority
+								}
+							}
+						]
+					: [])
+			]
+		: [];
+	const grants = contentReadAuthorizationDetails({
+		...(isCacheContent && { cache }),
+		...(isViewContent && { view: reuseViewNameSchema.parse(view.name) })
+	});
+
 	return {
 		cache,
+		resources,
 		cacheAccess,
 		...(viewAccess !== undefined && { viewAccess }),
 		...(selectedViewAccess !== undefined && { selectedViewAccess }),
 		cacheWiring,
 		viewWiring,
-		requests: [
-			...(cacheAccess === 'private' && cacheWiring === 'none'
-				? [contentReadAuthorizationDetails({ cache })]
-				: []),
-			...(view !== undefined &&
-			viewAccess === 'private' &&
-			viewWiring === 'none'
-				? [
-						contentReadAuthorizationDetails({
-							view: reuseViewNameSchema.parse(view.name)
-						})
-					]
-				: [])
-		]
+		requests: grants.length > 0 ? [grants] : []
 	};
 }

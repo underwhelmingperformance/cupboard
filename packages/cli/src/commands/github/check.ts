@@ -18,6 +18,10 @@ import {
 	type OidcClaims,
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
+import {
+	type ReadResourceState,
+	selectReadTrust
+} from '@cupboard/protocol/read-access';
 import { type ReuseViewSelectorInput } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { type ReadUser } from '@cupboard/shared/http';
@@ -174,7 +178,8 @@ export function checkTrustRule(
 	check: string,
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims,
-	requests: readonly AuthorizationDetails[]
+	requests: readonly AuthorizationDetails[],
+	readResources: readonly ReadResourceState[] = []
 ): CheckFinding {
 	for (const request of requests) {
 		const selection = selectModelledOidcTrust(rules, claims, request);
@@ -184,6 +189,20 @@ export function checkTrustRule(
 		}
 
 		const finding = trustSelectionFinding(check, request, selection);
+
+		if (finding !== undefined) {
+			return finding;
+		}
+	}
+
+	if (readResources.length > 0) {
+		const selection = selectReadTrust(rules, claims, readResources);
+
+		if (selection.outcome === 'identity-unmatched') {
+			return unmatchedFinding(check, rules, claims);
+		}
+
+		const finding = trustSelectionFinding(check, [], selection);
 
 		if (finding !== undefined) {
 			return finding;
