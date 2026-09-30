@@ -1,4 +1,5 @@
 import { type Logger } from '@cupboard/logger';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { hexToBytes } from '@cupboard/nix-store/encoding';
 import { type TenantId, type TtlSeconds } from '@cupboard/nix-store/scalars';
 import {
@@ -31,6 +32,17 @@ import {
 	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
 import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
+import {
+	type ReadAccessGrantRequest,
+	readAccessGrantRequestSchema,
+	readAccessGrantType,
+	type ReadAccessResponse,
+	type ReadResource,
+	readResourcesSchema,
+	type ReadResourceState,
+	readResourceStateSchema,
+	selectReadTrust
+} from '@cupboard/protocol/read-access';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
@@ -129,7 +141,7 @@ export class TokenExchangeService {
 
 	private async exchange(
 		logger: Logger,
-		body: TokenExchangeGrantRequest
+		body: TokenExchangeGrantRequest | ReadAccessGrantRequest
 	): Promise<Response> {
 		if (
 			body.subject_token_type !== subjectTokenTypeIdToken &&
@@ -150,7 +162,11 @@ export class TokenExchangeService {
 
 			return this.attenuatedResponse(
 				presented,
-				parseRequestedGrants(body.authorization_details)
+				parseRequestedGrants(
+					'authorization_details' in body
+						? body.authorization_details
+						: undefined
+				)
 			);
 		}
 
@@ -193,6 +209,11 @@ export class TokenExchangeService {
 
 			throw error;
 		}
+
+		if (body.grant_type === readAccessGrantType) {
+			return this.readAccessResponse(logger, snapshots, verified, body);
+		}
+
 		const requested = parseRequestedGrants(body.authorization_details);
 		const selection = selectOidcTrust(rules, verified, requested);
 
@@ -231,6 +252,122 @@ export class TokenExchangeService {
 		return this.issuedResponse(snapshot, subject, verified, requested, {
 			issued_token_type: issuedAccessTokenType
 		});
+	}
+
+	private resourceState(resource: ReadResource): ReadResourceState {
+		if (resource.type === 'cupboard_view') {
+			const view = this.context.db
+				.select({
+					access: schema.reuseViews.access,
+					priority: schema.reuseViews.priority
+				})
+				.from(schema.reuseViews)
+				.where(eq(schema.reuseViews.name, resource.view))
+				.get();
+
+			return readResourceStateSchema.parse({
+				...resource,
+				state:
+					view === undefined
+						? { kind: 'absent' }
+						: { kind: 'existing', ...view }
+			});
+		}
+
+		const cache = this.context.cacheRepository.resolve(resource.cache);
+
+		if (cache === undefined) {
+			const defaults =
+				resource.cache.kind === 'named'
+					? this.context.cacheRepository.require({ kind: 'default' })
+					: undefined;
+
+			return readResourceStateSchema.parse({
+				...resource,
+				state: {
+					kind: 'absent',
+					...(defaults !== undefined && {
+						firstWrite: {
+							access: defaults.access,
+							priority: CacheInfo.default.priority
+						}
+					})
+				}
+			});
+		}
+
+		const row = this.context.db
+			.select({ priority: schema.cacheIdentities.priority })
+			.from(schema.cacheIdentities)
+			.where(eq(schema.cacheIdentities.id, cache.id))
+			.get();
+
+		return readResourceStateSchema.parse({
+			...resource,
+			state: { kind: 'existing', access: cache.access, priority: row?.priority }
+		});
+	}
+
+	private async readAccessResponse(
+		logger: Logger,
+		snapshots: readonly OidcTrustRuleSnapshot[],
+		verified: VerifiedOidcClaims,
+		body: ReadAccessGrantRequest
+	): Promise<Response> {
+		let resources: ReadResource[];
+
+		try {
+			resources = readResourcesSchema.parse(JSON.parse(body.read_resources));
+		} catch {
+			throw new InvalidAuthorizationDetailsError('not-permitted');
+		}
+
+		const facts = resources.map((resource) => this.resourceState(resource));
+		const selection = selectReadTrust(
+			snapshots.map(({ rule }) => rule),
+			verified,
+			facts
+		);
+
+		if (selection.outcome === 'authority-unmatched') {
+			throw new InvalidAuthorizationDetailsError('not-permitted');
+		}
+
+		if (selection.outcome !== 'selected') {
+			throw new TenantSubjectTokenUntrustedError();
+		}
+
+		const snapshot = snapshots.find(({ rule }) => rule === selection.rule);
+
+		if (
+			snapshot === undefined ||
+			typeof verified.sub !== 'string' ||
+			verified.sub === ''
+		) {
+			throw new TenantSubjectTokenUntrustedError();
+		}
+
+		const token = await this.issueRuleToken(
+			selection.rule,
+			oidcSubjectSchema.parse(verified.sub),
+			selection.grants,
+			writeJwtTtlSeconds
+		);
+
+		if (!this.oidcTrust.isEnabledSnapshotCurrent(snapshot, this.context.db)) {
+			throw new TenantSubjectTokenUntrustedError();
+		}
+
+		logger.debug('read access acquired', { resources: facts.length });
+
+		return oauthJsonResponse({
+			access_token: token,
+			token_type: 'Bearer',
+			issued_token_type: issuedAccessTokenType,
+			expires_in: writeJwtTtlSeconds,
+			authorization_details: selection.grants,
+			read_resources: facts
+		} satisfies ReadAccessResponse);
 	}
 
 	// Return a generic refusal unless both claimed repository IDs exactly match an
@@ -917,6 +1054,13 @@ export class TokenExchangeService {
 
 	async handleToken(logger: Logger, request: Request): Promise<Response> {
 		const body = await parseFormBody(tokenRequestSchema, request);
+
+		if (body.grant_type === readAccessGrantType) {
+			return this.exchange(
+				logger,
+				parseFormValue(readAccessGrantRequestSchema, body)
+			);
+		}
 
 		if (body.grant_type === tokenExchangeGrantType) {
 			if (body.subject_token === undefined) {
