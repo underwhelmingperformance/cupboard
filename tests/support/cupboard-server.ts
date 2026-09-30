@@ -15,6 +15,7 @@ import {
 	type CacheAccessMode,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
+import { type TransitionId } from '@cupboard/protocol/deployment';
 import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
@@ -121,6 +122,7 @@ export class CupboardTestServer {
 		options: {
 			readonly bindings?: Readonly<Record<string, string>>;
 			readonly provision?: false | TenantProvisionSpec;
+			readonly completedTransitions?: readonly TransitionId[];
 		} = {}
 	): Promise<CupboardTestServer> {
 		const bundle = await bundleWorker(directory);
@@ -201,8 +203,31 @@ export class CupboardTestServer {
 		await applyD1Migrations(
 			await worker.getD1Database('CUPBOARD_DB', 'cupboard')
 		);
+
+		if (options.completedTransitions !== undefined) {
+			const database = await worker.getD1Database('CUPBOARD_DB', 'cupboard');
+			const timestamp = new Date().toISOString();
+
+			for (const transition of options.completedTransitions) {
+				await database
+					.prepare(
+						'INSERT OR REPLACE INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (?, ?, ?, ?)'
+					)
+					.bind(transition, 'complete', timestamp, timestamp)
+					.run();
+			}
+		}
 		const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
+		const requests: { method: string; path: string; status: number }[] = [];
 		const httpServer = createServer((request, response) => {
+			response.on('finish', () => {
+				requests.push({
+					method: request.method ?? 'GET',
+					path: new URL(request.url ?? '/', 'http://localhost').pathname,
+					status: response.statusCode
+				});
+			});
+
 			void forwardToWorker(worker, request, response);
 		});
 		const upgrades = new WebSocketServer({ noServer: true });
@@ -230,7 +255,8 @@ export class CupboardTestServer {
 			worker,
 			bucket,
 			httpServer,
-			commitCounters
+			commitCounters,
+			requests
 		);
 
 		// Mirror a deployment: the fixture tenant is provisioned through the control
@@ -251,7 +277,12 @@ export class CupboardTestServer {
 		private readonly worker: Miniflare,
 		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
 		private readonly server: Server,
-		private readonly commitCounters: CommitSessionCounters
+		private readonly commitCounters: CommitSessionCounters,
+		readonly requests: readonly {
+			method: string;
+			path: string;
+			status: number;
+		}[]
 	) {}
 
 	// Mints a control admin token at the bare-host `/token`, the control issuer,

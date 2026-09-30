@@ -11,10 +11,10 @@ inputs:
     description: Path to the cupboard executable that actions/setup installed.
     required: true
   read-session-target:
-    description: Internal setup output for private OIDC reads.
+    description: Internal setup output for OIDC read access.
     required: false
   read-session-view:
-    description: Internal setup output for an additional private reuse view.
+    description: Internal setup output for an additional reuse view.
     required: false
   cache:
     description:

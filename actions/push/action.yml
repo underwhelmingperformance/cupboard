@@ -18,10 +18,10 @@ inputs:
       installed. When it is set, the action does not install a release.
     required: false
   read-session-target:
-    description: Internal setup output for private OIDC reads.
+    description: Internal setup output for OIDC read access.
     required: false
   read-session-view:
-    description: Internal setup output for an additional private reuse view.
+    description: Internal setup output for an additional reuse view.
     required: false
   cupboard-version:
     description:

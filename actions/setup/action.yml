@@ -156,12 +156,13 @@ outputs:
   read-session-target:
     description:
       Cache or reuse-view URL that later steps must read through cupboard run.
-      Empty when public or static credentials cover the selected resources.
+      Includes configured public targets when an absent or private target needs
+      OIDC. Empty for anonymous public reads or accepted static credentials.
     value: ${{ steps.setup.outputs.read-session-target }}
   read-session-view:
     description:
-      Reuse view to add to cupboard run when both the destination and view need
-      GitHub OIDC read access. Empty otherwise.
+      Configured reuse view to add to cupboard run alongside the destination.
+      Empty for view-only sessions or when a static credential covers the view.
     value: ${{ steps.setup.outputs.read-session-view }}
 runs:
   using: composite
