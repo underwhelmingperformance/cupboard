@@ -11,6 +11,7 @@ import {
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
+import { readAccessGrantType } from '@cupboard/protocol/read-access';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 
@@ -170,7 +171,11 @@ export class AuthKeysService {
 			token_endpoint: `${base}/token`,
 			jwks_uri: `${base}/.well-known/jwks.json`,
 			response_types_supported: [],
-			grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
+			grant_types_supported: [
+				tokenExchangeGrantType,
+				refreshTokenGrantType,
+				readAccessGrantType
+			],
 			authorization_details_types_supported: [
 				'cupboard_cache',
 				'cupboard_view',

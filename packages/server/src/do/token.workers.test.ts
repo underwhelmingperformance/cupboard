@@ -1,6 +1,10 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
-import { cacheNameSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	type CacheScope,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
@@ -14,6 +18,10 @@ import {
 	tokenResponseSchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
+import {
+	readAccessGrantType,
+	readAccessResponseSchema
+} from '@cupboard/protocol/read-access';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq, sql } from 'drizzle-orm';
@@ -637,6 +645,144 @@ describe('POST /token', () => {
 			error: 'invalid_request',
 			problem: 'subject-token-invalid'
 		});
+	});
+});
+
+describe('server-resolved read acquisition', () => {
+	beforeEach(resetTestServer);
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it.each([
+		'[]',
+		'{',
+		JSON.stringify([
+			{
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: 'ci' },
+				actions: ['upload:commit']
+			}
+		]),
+		JSON.stringify([
+			{ type: 'cupboard_cache', cache: { kind: 'default' } },
+			{ type: 'cupboard_cache', cache: { kind: 'named', name: 'ci' } }
+		])
+	])('rejects malformed or excessive read intent %s', async (intent) => {
+		const subject = await installTrustedIdp('write');
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: intent
+		});
+
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: 400,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description:
+					'The requested authorization_details are not permitted',
+				problem: 'not-permitted'
+			}
+		});
+	});
+
+	it.each(['content', 'metadata'] as const)(
+		'keeps interactive read acquisition short-lived and read-only for %s intent',
+		async (mode) => {
+			const subject = await installTrustedIdp('admin');
+			const response = await postToken({
+				grant_type: readAccessGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify([
+					{ type: 'cupboard_cache', cache: { kind: 'default' }, mode }
+				])
+			});
+			const token = readAccessResponseSchema.parse(await response.json());
+
+			expect({
+				lifetime: token.expires_in,
+				refresh: token.refresh_token,
+				grants: token.authorization_details
+			}).toStrictEqual({
+				lifetime: 900,
+				refresh: undefined,
+				grants: [
+					{
+						type: 'cupboard_cache',
+						cache: { kind: 'default' },
+						actions: [mode === 'content' ? 'cache:content-read' : 'cache:read']
+					}
+				]
+			});
+		}
+	);
+
+	it('issues metadata authority for an absent publication destination without creating it', async () => {
+		const subject = await installTrustedIdp('write');
+		const cache = { kind: 'named' as const, name: cacheNameSchema.parse('ci') };
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify([{ type: 'cupboard_cache', cache }])
+		});
+
+		expect(response.status).toBe(StatusCodes.OK);
+
+		const result = readAccessResponseSchema.parse(await response.json());
+
+		expect({
+			expires: result.expires_in,
+			refresh: result.refresh_token,
+			grants: result.authorization_details,
+			facts: result.read_resources,
+			jwtGrants: decodeJwt(result.access_token).authorization_details
+		}).toStrictEqual({
+			expires: 900,
+			refresh: undefined,
+			grants: [{ type: 'cupboard_cache', cache, actions: ['cache:read'] }],
+			facts: [
+				{
+					type: 'cupboard_cache',
+					cache,
+					mode: 'content',
+					state: {
+						kind: 'absent',
+						firstWrite: { access: 'public', priority: 40 }
+					}
+				}
+			],
+			jwtGrants: [{ type: 'cupboard_cache', cache, actions: ['cache:read'] }]
+		});
+
+		const headers = {
+			authorization: `Basic ${btoa(`cupboard-oidc:cupboard-access+jwt:${result.access_token}`)}`
+		};
+		const absent = await fetchPath('/cache/ci/nix-cache-info', { headers });
+
+		expect(absent.status).toBe(StatusCodes.NOT_FOUND);
+
+		await putTestCache(
+			await issueServerSignedToken(adminGrants()),
+			cache,
+			'private'
+		);
+
+		const privateAcquisition = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify([{ type: 'cupboard_cache', cache }])
+		});
+
+		expect(privateAcquisition.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 });
 
@@ -2879,6 +3025,55 @@ async function exchangeWith(
 describe('requested grants', () => {
 	beforeEach(resetTestServer);
 
+	it('issues exact read access before a named cache exists without creating it', async () => {
+		const cache: CacheScope = {
+			kind: 'named',
+			name: cacheNameSchema.parse('future')
+		};
+		const subjectToken = await installTrustedIdp('read');
+		await installAdditionalTrustRule('future-cache-read-rule', [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				resources: {
+					cache: { kind: 'named', exact: 'future', validate: 'cacheName' }
+				}
+			}
+		]);
+		const before = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.cacheRepository.resolve(cache)
+		);
+		const requested = [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:content-read'],
+				cache
+			}
+		];
+		const issued = await exchange(subjectToken, requested);
+		const claims = decodeJwt(issued.access_token);
+
+		expect({
+			status: issued.status,
+			grants: issued.authorization_details,
+			claims: claims.authorization_details,
+			expiresIn: issued.expires_in,
+			refreshToken: issued.refresh_token,
+			before,
+			after: await runInDurableObject(currentServer(), (instance) =>
+				instance.context.cacheRepository.resolve(cache)
+			)
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			grants: requested,
+			claims: requested,
+			expiresIn: 900,
+			refreshToken: undefined,
+			before: undefined,
+			after: undefined
+		});
+	});
+
 	it('issues exact cache and view read grants without write authority', async () => {
 		const subjectToken = await installTrustedIdp('read');
 		const requested = [
@@ -3629,7 +3824,11 @@ describe('auth discovery endpoints', () => {
 				token_endpoint: `${origin}/t/v1/token`,
 				jwks_uri: `${origin}/t/v1/.well-known/jwks.json`,
 				response_types_supported: [],
-				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
+				grant_types_supported: [
+					tokenExchangeGrantType,
+					refreshTokenGrantType,
+					readAccessGrantType
+				],
 				authorization_details_types_supported: [
 					'cupboard_cache',
 					'cupboard_view',

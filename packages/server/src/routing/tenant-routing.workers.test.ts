@@ -5,6 +5,7 @@ import {
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
+import { readAccessGrantType } from '@cupboard/protocol/read-access';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { asc, eq } from 'drizzle-orm';
@@ -165,7 +166,11 @@ describe('tenant routing', () => {
 				token_endpoint: `${base}/token`,
 				jwks_uri: `${base}/.well-known/jwks.json`,
 				response_types_supported: [],
-				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
+				grant_types_supported: [
+					tokenExchangeGrantType,
+					refreshTokenGrantType,
+					readAccessGrantType
+				],
 				authorization_details_types_supported: [
 					'cupboard_cache',
 					'cupboard_view',
@@ -191,7 +196,11 @@ describe('tenant routing', () => {
 				token_endpoint: `${issuer}/token`,
 				jwks_uri: `${issuer}/.well-known/jwks.json`,
 				response_types_supported: [],
-				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
+				grant_types_supported: [
+					tokenExchangeGrantType,
+					refreshTokenGrantType,
+					readAccessGrantType
+				],
 				authorization_details_types_supported: [
 					'cupboard_cache',
 					'cupboard_view',
