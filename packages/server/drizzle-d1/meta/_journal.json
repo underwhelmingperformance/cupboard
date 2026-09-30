@@ -239,6 +239,13 @@
 			"when": 1790475405819,
 			"tag": "0033_tenant_local_step_attempts",
 			"breakpoints": true
+		},
+		{
+			"idx": 34,
+			"version": "6",
+			"when": 1790538558412,
+			"tag": "0034_publication_identity",
+			"breakpoints": true
 		}
 	]
 }

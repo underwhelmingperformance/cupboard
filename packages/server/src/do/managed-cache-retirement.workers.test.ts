@@ -636,6 +636,56 @@ describe('managed cache retirement', () => {
 		});
 	});
 
+	it('rechecks retirement when the last pending attestation is removed', async () => {
+		await createManagedCache('managed-retirement-last-attestation');
+		await makeRetirementDue();
+		const deadlines = await runInDurableObject(
+			currentServer(),
+			(instance, state) => {
+				const cache = instance.context.cacheRepository.require(managedCache);
+				state.storage.sql.exec(
+					`INSERT INTO pending_attestation
+				(id, cache_id, store_path_hash, digest, r2_key, created_at, expires_at)
+				VALUES ('first', ?, '${'a'.repeat(32)}', '${'b'.repeat(64)}', 'staging/first',
+				'2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z'),
+				('last', ?, '${'a'.repeat(32)}', '${'b'.repeat(64)}', 'staging/last',
+				'2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')`,
+					cache.id,
+					cache.id
+				);
+				instance.context.db
+					.update(schema.managedCacheRetirements)
+					.set({
+						revision: 7,
+						nextCheckAt: isoTimestamp(new Date('2099-01-01T00:00:00.000Z'))
+					})
+					.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+					.run();
+				const deadline = () =>
+					instance.context.db
+						.select({
+							revision: schema.managedCacheRetirements.revision,
+							nextCheckAt: schema.managedCacheRetirements.nextCheckAt
+						})
+						.from(schema.managedCacheRetirements)
+						.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+						.get();
+				state.storage.sql.exec(
+					"DELETE FROM pending_attestation WHERE id = 'first'"
+				);
+				const afterFirst = deadline();
+				state.storage.sql.exec(
+					"DELETE FROM pending_attestation WHERE id = 'last'"
+				);
+				return { afterFirst, afterLast: deadline() };
+			}
+		);
+		expect(deadlines).toStrictEqual({
+			afterFirst: { revision: 7, nextCheckAt: '2099-01-01T00:00:00.000Z' },
+			afterLast: { revision: 8, nextCheckAt: expiredDeadline }
+		});
+	});
+
 	it('does not stage a blocked retirement again before its next check', async () => {
 		const token = await createManagedCache('managed-retirement-deferred-claim');
 		await makeRetirementDue();

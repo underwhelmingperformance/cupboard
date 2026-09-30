@@ -28,7 +28,8 @@ const expanded: ParsedDeploymentTransitionsResponse = {
 		{ id: 'cache-identity', state: 'expanded', updatedAt: recorded },
 		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
 		{ id: 'attestation-path-index', state: 'expanded', updatedAt: recorded },
-		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded }
+		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded },
+		{ id: 'publication-identity', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -37,7 +38,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'cache-identity', state: 'complete', updatedAt: recorded },
 		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
 		{ id: 'attestation-path-index', state: 'complete', updatedAt: recorded },
-		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded }
+		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded },
+		{ id: 'publication-identity', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -205,6 +207,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition local-step-attempts',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition publication-identity',
+							value: `complete ${since}`
+						},
 						{ label: 'Required local step', value: '4' },
 						{ label: 'Ready tenants', value: '1' },
 						{
@@ -254,6 +260,10 @@ describe('runDeploymentStatus', () => {
 					},
 					{
 						label: 'Transition local-step-attempts',
+						value: `complete ${since}`
+					},
+					{
+						label: 'Transition publication-identity',
 						value: `complete ${since}`
 					},
 					{ label: `Transition ${row.id}`, value },
@@ -332,6 +342,10 @@ describe('runDeploymentStatus', () => {
 					value: `expanded ${since}`
 				},
 				{ label: 'Transition local-step-attempts', value: `complete ${since}` },
+				{
+					label: 'Transition publication-identity',
+					value: `complete ${since}`
+				},
 				{ label: 'Required local step', value: '4' },
 				{ label: 'Ready tenants', value: '4' },
 				{

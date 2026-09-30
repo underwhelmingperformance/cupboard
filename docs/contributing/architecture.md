@@ -101,6 +101,16 @@ checks that the tenant exists (this is called admission), authenticates reads
 from private caches, and makes the final decision on whether a write is allowed.
 It then passes the request on to the tenant's Durable Object when needed.
 
+The raw cache read probes use the same read credentials as the Nix routes.
+Availability and attestation probes report cache state; the metadata probe
+returns complete narinfos for a bounded page of store paths. For public caches,
+the metadata probe admits the page once and reads each canonical narinfo through
+`CachedTenantReads`, so each entry uses the existing Workers Cache. Private
+pages read committed versions and bounded R2 bodies. Reuse-view pages go to the
+tenant object, which verifies the selected candidates and rechecks the view
+revision before returning the page. Each page checks its source scope; the
+client's traversal across pages and sources is not an atomic closure snapshot.
+
 It also runs the **scheduled work**: the hourly cron trigger, and the consumer
 for the maintenance queue.
 
@@ -212,7 +222,7 @@ The key tells you what an object is:
 | `nar/<narHash>.nar.zst`                                     | Verified NARs, compressed with zstd. They're shared between tenants.                    |
 | `nar/<narHash>.<n>.nar.zst`                                 | A later copy (incarnation) of the same NAR, written after an earlier one was deleted.   |
 | `staging/<pushId>/<uploadId>.nar.zst`                       | Uploads that haven't been verified yet. This is the only place where clients can write. |
-| `staging/<pushId>/attestations/<uploadId>`                  | Attestation bundles that haven't been verified yet.                                     |
+| `staging/<pushId>/attestations/<uploadId>`                  | Attestation bundles awaiting attachment, removed on session expiry or by R2 lifecycle.  |
 | `cas/<sha256>[.<n>]`                                        | Attestation bundles, stored by the hash of their content and shared.                    |
 | `t/<tenant>/narinfo/[generation/<g>/][<cache>/]<hash>`      | Signed narinfos, ready to serve, one for each tenant and cache.                         |
 | `t/<tenant>/attestations/[generation/<g>/][<cache>/]<hash>` | The list of attestations for each store path.                                           |
@@ -585,7 +595,7 @@ an error when the artifact's files don't match the transitions. Once a release
 has shipped a transition, its migration lists don't change, and a new migration
 goes in a new transition.
 
-The current build defines four transitions:
+The current build defines five transitions:
 
 - `cache-identity`: migrations `0000` to `0027` are its expand migrations and
   `0028` to `0030` its contract migrations. Its expand migrations include the
@@ -604,6 +614,10 @@ The current build defines four transitions:
 - `local-step-attempts`: migration `0033` adds the columns of the `tenant` table
   that record each tenant's last attempt at its local-step work. It has no
   contract migrations and no contract step.
+- `publication-identity`: migration `0034` creates the independent `publication`
+  table, which records the upload that committed each NAR reference. The earlier
+  cache-identity contract rebuilds the reference table, so upload ownership uses
+  a separate table. This transition has no contract migrations or contract step.
 
 A transition is **independent** when its expand migrations don't depend on the
 contract migrations of the transitions before it and don't change existing rows.
