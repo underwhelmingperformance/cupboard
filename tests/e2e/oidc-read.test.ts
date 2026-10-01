@@ -31,7 +31,6 @@ import { z } from 'zod';
 
 import { setupAction } from '../../actions/src/commands/setup.ts';
 import { audienceSchema } from '../../packages/cli/src/audience.ts';
-import { ReadCredentialRenewalError } from '../../packages/cli/src/auth/read-credential-session.ts';
 import { runChild } from '../../packages/cli/src/build-push/supervisor.ts';
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
@@ -276,7 +275,7 @@ async function substitute(
 }
 
 describe('OIDC read acquisition and real Nix substitution', () => {
-	it('renews through OIDC, then cancels pending acquisition and cleans up after revocation', () =>
+	it('renews through OIDC, then stops immediately and cleans up after revocation', () =>
 		withReadFixture(
 			{ access: 'private', content: true, absent: false, scope: named },
 			async (context) => {
@@ -292,14 +291,8 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 
 				let identities = 0;
 				const clock = new ManualClock();
-				const pendingIdentity = Promise.withResolvers<undefined>();
 				const job = createServer((_request, response) => {
 					identities++;
-
-					if (identities === 4) {
-						pendingIdentity.resolve(undefined);
-						return;
-					}
 
 					response.writeHead(200, { 'content-type': 'application/json' });
 					response.end(JSON.stringify({ value: context.subject }));
@@ -372,19 +365,14 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 						}
 					);
 
-					await Promise.race([
-						(async () => {
-							await clock.advanceThroughDelay(600_000);
-							await clock.advanceThroughDelay(600_000);
-							await clock.advanceThroughDelay(30_000);
-							await pendingIdentity.promise;
-						})(),
-						session
-					]);
-					clock.advanceTo(1_470_000);
-					await expect(session).rejects.toBeInstanceOf(
-						ReadCredentialRenewalError
-					);
+					const refused = expect(session).rejects.toMatchObject({
+						name: 'ReadCredentialRenewalError',
+						exitCode: 77,
+						cause: { status: 400 }
+					});
+					await clock.advanceThroughDelay(600_000);
+					await clock.advanceThroughDelay(600_000);
+					await refused;
 
 					expect({
 						exchanges,
@@ -398,7 +386,7 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 							{ identity: 2, status: 200 },
 							{ identity: 3, status: 400 }
 						],
-						identities: 4,
+						identities: 3,
 						filesRemoved: true
 					});
 				} finally {
