@@ -5,6 +5,7 @@ import {
 	attestationAttachPathsRequestSchema,
 	attestationBundleNegotiateMaxBundles,
 	attestationBundleNegotiateRequestSchema,
+	attestationInfoRequestSchema,
 	attestationNegotiateMaxBundles,
 	attestationNegotiateRequestSchema
 } from './attestations.ts';
@@ -88,4 +89,30 @@ describe('bundle attachment pages', () => {
 			}).success
 		}).toStrictEqual({ accepted: true, oversized: false });
 	});
+});
+
+describe('attestation discovery request', () => {
+	it.each(['https://slsa.dev/provenance/v1', 'urn:example:predicate'])(
+		'accepts exact predicate URI %s',
+		(predicateType) => {
+			const request = {
+				storePathHashes: [storePathHash],
+				predicateTypes: [predicateType]
+			};
+			expect(attestationInfoRequestSchema.parse(request)).toStrictEqual(
+				request
+			);
+		}
+	);
+	it.each(['not-a-uri', 'https://example.org/\n'])(
+		'rejects invalid predicate URI %j',
+		(predicateType) => {
+			expect(
+				attestationInfoRequestSchema.safeParse({
+					storePathHashes: [storePathHash],
+					predicateTypes: [predicateType]
+				}).success
+			).toBe(false);
+		}
+	);
 });

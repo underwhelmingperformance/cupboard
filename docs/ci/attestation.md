@@ -25,6 +25,37 @@ verify a bundle.
 [in-toto Envelope]:
   https://github.com/in-toto/attestation/blob/main/spec/v1/envelope.md
 
+## Discover stored evidence
+
+Use `cupboard attest status` to inspect stored attestation metadata for several
+published paths:
+
+```sh
+cupboard attest status https://cupboard.example.workers.dev/t/acme \
+  --paths-file published-paths.txt \
+  --predicate-type https://slsa.dev/provenance/v1
+```
+
+The report distinguishes covered paths, published paths without matching
+evidence, and missing published paths. Omit `--predicate-type` to include every
+type, or repeat the option to match any of the exact predicate URIs. Use
+`--output-mode json` for structured results. Private caches accept the read
+credential options, a configured Nix netrc, or `--github-oidc` in GitHub
+Actions.
+
+A successful status check exits zero even when some paths have no evidence. Pass
+`--require-all` to exit one when any requested path lacks matching evidence.
+Invalid arguments exit two, a scope change during discovery exits 69, temporary
+service failures exit 75, and authentication refusals exit 77.
+
+Current servers support pages of up to 32 paths. The client uses bounded
+individual list reads when an older server does not advertise batch discovery.
+Authentication and storage failures fail the status check.
+
+Discovery reports stored descriptors. Use `attest verify` to check the bundle's
+signature, signer, issuer, predicate and NAR subject. Stored evidence does not
+change build selection or suppress provenance for a fresh local rebuild.
+
 ## How a bundle refers to a store path
 
 Each attestation lists its **subjects**: the things that it makes claims about.

@@ -1,4 +1,5 @@
 import {
+	nixSha256HashSchema,
 	positiveIntSchema,
 	predicateTypeSchema,
 	sha256HexDigestSchema,
@@ -34,32 +35,82 @@ export const attestationListSchema = z.strictObject({
 });
 export type AttestationList = z.output<typeof attestationListSchema>;
 
-// An attestation status request makes one D1 lookup, retried once after a
-// transient failure, and one R2 head per path.
-export const attestationStatusLookupCalls = 2;
+export const attestationInfoCapability = 'attestation-info-v1';
+export const attestationInfoMaxPaths = 32;
+export const attestationInfoMaxRequestBytes = 64 * 1024;
+export const attestationInfoMaxListBytes = 1024 * 1024;
+export const attestationInfoMaxResponseBytes = 4 * 1024 * 1024;
 
-// The lookup and the heads fit within the Free allowance less the safety
-// reserve.
-export const attestationStatusMaxPaths =
-	workersInvocationAllowances.free.subrequests -
-	subrequestSafetyReserve -
-	attestationStatusLookupCalls;
-
-export const attestationStatusRequestSchema = z.strictObject({
-	storePathHashes: z.array(storePathHashSchema).max(attestationStatusMaxPaths)
-});
-export type AttestationStatusRequest = z.output<
-	typeof attestationStatusRequestSchema
->;
-
-export const attestationStatusResponseSchema = z.strictObject({
-	attestedStorePathHashes: z
+export const attestationInfoRequestSchema = z.strictObject({
+	storePathHashes: z
 		.array(storePathHashSchema)
-		.max(attestationStatusMaxPaths)
+		.min(1)
+		.max(attestationInfoMaxPaths)
+		.refine(
+			(hashes) => new Set(hashes).size === hashes.length,
+			'Each store path hash must appear once in the discovery page'
+		),
+	predicateTypes: z
+		.array(
+			predicateTypeSchema.refine(
+				(value) => URL.canParse(value),
+				'Predicate filters must be absolute URIs'
+			)
+		)
+		.min(1)
+		.optional(),
+	expectedScopeVersion: z.string().min(1).max(128).optional()
 });
-export type AttestationStatusResponse = z.output<
-	typeof attestationStatusResponseSchema
+export type AttestationInfoRequest = z.output<
+	typeof attestationInfoRequestSchema
 >;
+
+const attestationInfoEntrySchema = z.discriminatedUnion('status', [
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.literal('missing')
+	}),
+	z.strictObject({
+		storePathHash: storePathHashSchema,
+		status: z.literal('found'),
+		narHash: nixSha256HashSchema,
+		attestations: z.array(attestationDescriptorSchema)
+	})
+]);
+export type AttestationInfoEntry = z.output<typeof attestationInfoEntrySchema>;
+export const attestationInfoResponseSchema = z
+	.strictObject({
+		scopeVersion: z.string().min(1).max(128),
+		entries: z
+			.array(attestationInfoEntrySchema)
+			.min(1)
+			.max(attestationInfoMaxPaths),
+		nextIndex: z
+			.number()
+			.int()
+			.positive()
+			.max(attestationInfoMaxPaths)
+			.optional()
+	})
+	.refine(
+		(value) =>
+			value.nextIndex === undefined || value.nextIndex === value.entries.length,
+		'The continuation must start after the processed prefix'
+	);
+export type AttestationInfoResponse = z.output<
+	typeof attestationInfoResponseSchema
+>;
+export const attestationInfoErrorSchema = z.strictObject({
+	code: z.enum([
+		'request-too-large',
+		'list-too-large',
+		'list-invalid',
+		'scope-changed'
+	]),
+	message: z.string(),
+	storePathHash: storePathHashSchema.optional()
+});
+export type AttestationInfoError = z.output<typeof attestationInfoErrorSchema>;
 
 const attestationBundleRequestSchema = z.strictObject({
 	storePathHash: storePathHashSchema,

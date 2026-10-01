@@ -111,6 +111,30 @@ tenant object, which verifies the selected candidates and rechecks the view
 revision before returning the page. Each page checks its source scope; the
 client's traversal across pages and sources is not an atomic closure snapshot.
 
+`POST /api/v1/attestation-info` discovers stored attestation descriptors for a
+cache. The same route is available under a named-cache prefix. It accepts up to
+32 unique store-path hashes, optional exact predicate-type filters and an
+optional expected scope version. Several predicate types match any of those
+types. An omitted filter returns every descriptor. Entries preserve request
+order and distinguish missing paths from published paths with an empty list.
+Published entries include the current NAR hash and each matching descriptor's
+digest, predicate type and size. Discovery reports metadata; bundle verification
+checks the signer, issuer, predicate and NAR subject.
+
+The Worker reads committed D1 reference generations and canonical R2 lists with
+at most six simultaneous object reads. Requests are limited to 64 KiB, lists to
+1 MiB and responses to 4 MiB. A partial page reports `nextIndex` after the
+processed prefix. The next request submits the remaining hashes and the previous
+page's `scopeVersion` as `expectedScopeVersion`. Lifecycle or access changes
+produce a `scope-changed` refusal. Private pages revalidate read credentials
+before returning. Malformed and oversized lists produce typed errors; provider
+failures remain temporary failures. Generation checks retain the existing
+acceptance of public lists without valid generation metadata.
+
+The read capability header advertises `attestation-info-v1`. Clients may use
+bounded individual list reads when this capability is absent. An authentication
+or storage failure does not permit fallback.
+
 It also runs the **scheduled work**: the hourly cron trigger, and the consumer
 for the maintenance queue.
 

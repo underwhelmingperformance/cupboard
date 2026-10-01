@@ -4,6 +4,7 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import { reuseViewAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
 import {
 	cacheMetadataCapability,
@@ -70,8 +71,8 @@ const versionBody = new TextBody(`${buildVersion}\n`);
 const uploadPreviewPathPattern = /^(?:\/cache\/[^/]+)?\/uploads\/preview$/u;
 const cacheAvailabilityPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
-const attestationStatusPathPattern =
-	/^(?:\/cache\/[^/]+)?\/api\/v1\/attested-paths$/u;
+const attestationInfoPathPattern =
+	/^(?:\/cache\/[^/]+)?\/api\/v1\/attestation-info$/u;
 const cacheMetadataPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/path-info$/u;
 
@@ -87,14 +88,17 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	app.use('/t/:tenant/*', async (context, next) => {
 		await next();
 		if (
-			!/\/(?:[^/]+\.narinfo|nix-cache-info|api\/v1\/(?:missing-paths|attested-paths|path-info))$/u.test(
+			!/\/(?:[^/]+\.narinfo|nix-cache-info|api\/v1\/(?:missing-paths|attestation-info|path-info))$/u.test(
 				new URL(context.req.url).pathname
 			)
 		) {
 			return;
 		}
 		const headers = new Headers(context.res.headers);
-		headers.set(cacheMetadataCapabilityHeader, cacheMetadataCapability);
+		headers.set(
+			cacheMetadataCapabilityHeader,
+			`${cacheMetadataCapability} ${attestationInfoCapability}`
+		);
 		context.res = new Response(context.res.body, {
 			status: context.res.status,
 			statusText: context.res.statusText,
@@ -568,7 +572,7 @@ function isReadProbeRequest(method: string, pathname: string): boolean {
 	return (
 		method === 'POST' &&
 		(cacheAvailabilityPathPattern.test(pathname) ||
-			attestationStatusPathPattern.test(pathname) ||
+			attestationInfoPathPattern.test(pathname) ||
 			cacheMetadataPathPattern.test(pathname))
 	);
 }
