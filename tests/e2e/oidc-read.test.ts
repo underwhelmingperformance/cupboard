@@ -35,6 +35,7 @@ import { runChild } from '../../packages/cli/src/build-push/supervisor.ts';
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { runWithReadAccess } from '../../packages/cli/src/commands/run.ts';
+import { CupboardHttpError } from '../../packages/cli/src/errors.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/store-config.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
@@ -64,6 +65,46 @@ const cases: ReadCase[] = (['public', 'private'] as const).flatMap((access) =>
 		{ access, content, absent: true, scope: named }
 	])
 );
+
+async function expectReadAuthorityRefusal(
+	request: Promise<ReadAccessResponse>,
+	uncovered: AuthorizationDetails,
+	advice: string
+): Promise<void> {
+	let error: unknown;
+	try {
+		await request;
+	} catch (error_) {
+		error = error_;
+	}
+	expect(error).toBeInstanceOf(CupboardHttpError);
+	if (!(error instanceof CupboardHttpError)) {
+		throw new Error('Expected a typed read authority refusal');
+	}
+	const body = z
+		.strictObject({
+			error: z.string(),
+			error_description: z.string(),
+			problem: z.string(),
+			detail: z.strictObject({
+				read_resources: z
+					.string()
+					.transform((value) =>
+						authorizationDetailsSchema.parse(JSON.parse(value))
+					)
+			})
+		})
+		.parse(JSON.parse(error.body));
+	expect({ status: error.status, body }).toStrictEqual({
+		status: 400,
+		body: {
+			error: 'invalid_authorization_details',
+			error_description: `The matching trust rules do not permit the requested read_resources. ${advice}`,
+			problem: 'read-resources-not-permitted',
+			detail: { read_resources: uncovered }
+		}
+	});
+}
 
 async function withReadFixture(
 	testCase: ReadCase,
@@ -625,9 +666,11 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 				const resources = [{ type: 'cupboard_view' as const, view }];
 
 				if (testCase.access === 'private' && !testCase.content) {
-					await expect(
-						context.client.acquireReadAccess(subject, resources)
-					).rejects.toThrow('not permitted');
+					await expectReadAuthorityRefusal(
+						context.client.acquireReadAccess(subject, resources),
+						[{ type: 'cupboard_view', actions: ['view:content-read'], view }],
+						"Add view:content-read for reuse view 'prior'."
+					);
 
 					return;
 				}
@@ -742,12 +785,28 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 					});
 
 					if (authority !== 'both') {
-						await expect(
+						await expectReadAuthorityRefusal(
 							context.client.acquireReadAccess(subject, [
 								{ type: 'cupboard_cache', cache: named, mode: 'content' },
 								{ type: 'cupboard_view', view }
-							])
-						).rejects.toThrow('not permitted');
+							]),
+							[
+								authority === 'cache-only'
+									? {
+											type: 'cupboard_view',
+											actions: ['view:content-read'],
+											view
+										}
+									: {
+											type: 'cupboard_cache',
+											actions: ['cache:content-read'],
+											cache: named
+										}
+							],
+							authority === 'cache-only'
+								? "Add view:content-read for reuse view 'prior'."
+								: "Add cache:content-read for cache 'builds'."
+						);
 
 						return;
 					}
@@ -853,9 +912,19 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 					!testCase.content &&
 					!testCase.absent
 				) {
-					await expect(
-						context.client.acquireReadAccess(context.subject, resources)
-					).rejects.toThrow('not permitted');
+					await expectReadAuthorityRefusal(
+						context.client.acquireReadAccess(context.subject, resources),
+						[
+							{
+								type: 'cupboard_cache',
+								actions: ['cache:content-read'],
+								cache: testCase.scope
+							}
+						],
+						testCase.scope.kind === 'default'
+							? 'Add cache:content-read for the default cache.'
+							: "Add cache:content-read for cache 'builds'."
+					);
 
 					return;
 				}
@@ -935,9 +1004,17 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 						const privateRead = await fetch(url, { headers });
 
 						expect(privateRead.status).toBe(401);
-						await expect(
-							context.client.acquireReadAccess(context.subject, resources)
-						).rejects.toThrow('not permitted');
+						await expectReadAuthorityRefusal(
+							context.client.acquireReadAccess(context.subject, resources),
+							[
+								{
+									type: 'cupboard_cache',
+									actions: ['cache:content-read'],
+									cache: testCase.scope
+								}
+							],
+							"Add cache:content-read for cache 'builds'."
+						);
 
 						return;
 					}

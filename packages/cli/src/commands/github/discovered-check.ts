@@ -10,7 +10,8 @@ import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { selectModelledOidcTrust } from '@cupboard/protocol/oidc-trust-diagnostics';
 import {
 	isClaimSatisfied,
-	type OidcTrustRule
+	type OidcTrustRule,
+	preferredModelledOidcTrustRules
 } from '@cupboard/protocol/oidc-trust-match';
 import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
@@ -393,26 +394,40 @@ function checkRootGrantPrefixes(
 				continue;
 			}
 
-			const hasPrefixGrant = selection.rule.permittedGrants.some((grant) => {
-				if (grant.type === 'cupboard_wildcard') {
-					return true;
-				}
+			const hasPrefixGrant = preferredModelledOidcTrustRules(
+				rules,
+				publication.claims
+			).some((rule) =>
+				rule.permittedGrants.some((grant) => {
+					if (grant.type === 'cupboard_wildcard') {
+						return true;
+					}
 
-				if (
-					grant.type !== 'cupboard_cache' ||
-					grant.resources.root === undefined
-				) {
-					return false;
-				}
+					if (
+						grant.type !== 'cupboard_cache' ||
+						grant.resources.root === undefined
+					) {
+						return false;
+					}
 
-				const root =
-					grant.resources.root.exact ?? grant.resources.root.equalsTemplate;
+					const root =
+						grant.resources.root.exact ?? grant.resources.root.equalsTemplate;
 
-				return (
-					root?.endsWith('/') === true &&
-					isGrantPermittedByRule([grant], detail, publication.claims)
-				);
-			});
+					return (
+						root?.endsWith('/') === true &&
+						isGrantPermittedByRule(
+							[grant],
+							{
+								...detail,
+								actions: detail.actions.filter((operation) =>
+									isRootOperation(operation)
+								)
+							},
+							publication.claims
+						)
+					);
+				})
+			);
 
 			if (!hasPrefixGrant) {
 				return new RootGrantPrefixUnverifiedFinding('root grant', detail.root);

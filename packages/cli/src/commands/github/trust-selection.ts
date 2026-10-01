@@ -94,30 +94,7 @@ export class AmbiguousTrustRulesFinding extends FailedCheckFinding {
 
 	detail(): string {
 		const ids = this.rules.map(({ id }) => id).join(', ');
-		if (this.request.length === 0) {
-			return `rules ${ids} match the modelled read acquisition; make their claims or required read grants disjoint, or disable one rule`;
-		}
-
-		const authority = this.request
-			.map((detail) => describeAuthorizationDetail(detail))
-			.join('; ');
-
-		return `rules ${ids} match the modelled claims and permit ${authority}; make their grants disjoint or disable one rule`;
-	}
-}
-
-export class SplitTrustAuthorityFinding extends FailedCheckFinding {
-	constructor(
-		check: string,
-		public readonly rules: readonly OidcTrustRule[]
-	) {
-		super(check);
-	}
-
-	detail(): string {
-		const ids = this.rules.map(({ id }) => id).join(', ');
-
-		return `rules ${ids} match the modelled claims, but no single rule permits the complete request; grant the request to one rule instead of splitting it across rules`;
+		return `rules ${ids} match the modelled claims but implicit authority requires one rule; request explicit grants or distinguish their claims`;
 	}
 }
 
@@ -172,15 +149,12 @@ export function trustSelectionFinding(
 	if (selection.outcome === 'authority-unmatched') {
 		const [refused] = selection.uncovered;
 
-		if (refused === undefined) {
-			return new SplitTrustAuthorityFinding(check, selection.rules);
-		}
-
 		return new TrustRuleGrantMissingFinding(check, selection.rules, refused);
 	}
 
-	if (isRuleInteractive(selection.rule)) {
-		return new InteractiveTrustRuleFinding(check, selection.rule);
+	const interactive = selection.rule;
+	if (interactive !== undefined && isRuleInteractive(interactive)) {
+		return new InteractiveTrustRuleFinding(check, interactive);
 	}
 
 	return undefined;

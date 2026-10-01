@@ -962,8 +962,7 @@ export class ReadResourcesNotPermittedError extends OAuthError {
 		});
 		super(
 			[
-				'The matching trust rule does not permit the requested read_resources.',
-				'One trust rule must cover all requested resources.',
+				'The matching trust rules do not permit the requested read_resources.',
 				...advice
 			].join(' ')
 		);
