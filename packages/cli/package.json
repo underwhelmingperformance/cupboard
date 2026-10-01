@@ -8,7 +8,7 @@
 		"@aws-sdk/client-s3": "catalog:",
 		"@aws-sdk/lib-storage": "catalog:",
 		"@cloudflare/workers-auth": "^0.9.0",
-		"@cloudflare/workers-utils": "^0.41.0",
+		"@cloudflare/workers-utils": "^0.44.0",
 		"@cupboard/cli-ui": "workspace:*",
 		"@cupboard/logger": "workspace:*",
 		"@cupboard/nix": "workspace:*",
