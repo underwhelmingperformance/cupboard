@@ -100,10 +100,12 @@ import {
 	inheritanceSourceKey,
 	inheritedBundleSubrequests
 } from './attestations-service.ts';
+import { fencedCasObjectDeletion } from './blob-reaper-service.ts';
 import { chunk, maxBoundParameters } from './bulk.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import { type ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
+import { jsonRowList } from './json-list.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { CupboardServer, maintenancePassCursorKey } from './server.ts';
 import {
@@ -1677,6 +1679,170 @@ describe('attestation attach and reads', () => {
 						sourceDigest: earlierDigest
 					}
 				],
+				queued: [],
+				listed: [earlierDigest, digest].toSorted(byCodeUnit)
+			});
+		}
+	);
+
+	it.each([
+		{ phase: 'initial-fetch', state: 'pending' },
+		{ phase: 'initial-fetch', state: 'live' },
+		{ phase: 'after-head', state: 'pending' },
+		{ phase: 'after-head', state: 'live' }
+	] as const)(
+		'retries inheritance with missing CAS metadata $phase while the replacement is $state',
+		async ({ phase, state }) => {
+			const { token, destination, metadata, digest } =
+				await reusedPathWithSourceBundle(`missing-cas-${phase}-${state}`);
+			const earlierBundle = sigstoreBundleBytes(
+				narDigestHex(metadata.narHash),
+				buildOriginPredicateType
+			);
+			const earlierDigest = sha256HexDigestSchema.parse(
+				await sha256HexBytes(earlierBundle)
+			);
+			await attachBundle(token, metadata.storePathHash, earlierBundle);
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const captured = await database
+				.select()
+				.from(d1Schema.casObject)
+				.where(eq(d1Schema.casObject.digest, digest))
+				.get();
+			if (captured === undefined) {
+				throw new Error('The inheritance fixture needs its CAS metadata.');
+			}
+			const key = casObjectKey(digest, captured.incarnation);
+			const object = await env.BLOBS.get(key);
+			if (object === null) {
+				throw new Error('The inheritance fixture needs its source bundle.');
+			}
+			const bytes = await object.arrayBuffer();
+			const replacement = captured.incarnation + 1;
+			const removeCaptured = async () => {
+				await database
+					.update(d1Schema.objectIncarnation)
+					.set({ incarnation: replacement, state })
+					.where(
+						and(
+							eq(d1Schema.objectIncarnation.kind, 'cas'),
+							eq(d1Schema.objectIncarnation.objectId, digest)
+						)
+					);
+				await env.BLOBS.put(casObjectKey(digest, replacement), bytes);
+				await env.BLOBS.delete(key);
+				await runInDurableObject(fixtureWorkerServer(), (instance) =>
+					new AttestationCasService(instance.context).removeCapturedReference(
+						{
+							cache: defaultCacheScope,
+							storePathHash: metadata.storePathHash,
+							generation: narInfoGenerationSchema.parse(0),
+							predicateType: predicateTypeSchema.parse(predicateType),
+							digest
+						},
+						captured.incarnation
+					)
+				);
+				const deletion = fencedCasObjectDeletion(
+					database,
+					jsonRowList([{ digest, incarnation: captured.incarnation }])
+				);
+				await database.batch([deletion.retire, deletion.remove]);
+			};
+			const originalHead = env.BLOBS.head.bind(env.BLOBS);
+			const head = vi
+				.spyOn(env.BLOBS, 'head')
+				.mockImplementation(async (requested) => {
+					const result = await originalHead(requested);
+					if (phase === 'after-head' && requested === key) {
+						await removeCaptured();
+					}
+					return result;
+				});
+			try {
+				if (phase === 'initial-fetch') {
+					await removeCaptured();
+				}
+				await drainInheritance();
+			} finally {
+				head.mockRestore();
+			}
+			const afterGap = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					instance.context.db
+						.select({
+							storePathHash: schema.attestationInheritances.storePathHash,
+							attempts: schema.attestationInheritances.attempts,
+							sourcePredicateType:
+								schema.attestationInheritances.sourcePredicateType,
+							sourceDigest: schema.attestationInheritances.sourceDigest
+						})
+						.from(schema.attestationInheritances)
+						.all()
+			);
+			const sourceReferences = await database
+				.select({ digest: d1Schema.attestationReference.digest })
+				.from(d1Schema.attestationReference)
+				.where(
+					and(
+						eq(d1Schema.attestationReference.digest, digest),
+						eq(d1Schema.attestationReference.cacheKind, 'default')
+					)
+				);
+			await database
+				.update(d1Schema.objectIncarnation)
+				.set({ state: 'live' })
+				.where(
+					and(
+						eq(d1Schema.objectIncarnation.kind, 'cas'),
+						eq(d1Schema.objectIncarnation.objectId, digest)
+					)
+				);
+			await database.insert(d1Schema.casObject).values({
+				...captured,
+				incarnation: replacement
+			});
+			await makeQueuedInheritancesDue();
+			const retryCalls = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					withSubrequestSlice(
+						async () => {
+							const before = subrequestsAvailable();
+							await attestationsFor(instance.context).drainInheritanceQueue(
+								rootLogger()
+							);
+							return before - subrequestsAvailable();
+						},
+						{ subrequests: 9, reserve: 0 }
+					)
+			);
+			const list = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+			);
+			expect({
+				afterGap,
+				sourceReferences,
+				retryCalls,
+				queued: await queuedInheritances(),
+				listed: list.ok
+					? attestationListSchema
+							.parse(await list.json())
+							.attestations.map((row) => row.digest)
+							.toSorted(byCodeUnit)
+					: []
+			}).toStrictEqual({
+				afterGap: [
+					{
+						storePathHash: metadata.storePathHash,
+						attempts: 1,
+						sourcePredicateType: buildOriginPredicateType,
+						sourceDigest: earlierDigest
+					}
+				],
+				sourceReferences: [{ digest }],
+				retryCalls: 9,
 				queued: [],
 				listed: [earlierDigest, digest].toSorted(byCodeUnit)
 			});
