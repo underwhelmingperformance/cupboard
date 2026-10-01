@@ -1261,10 +1261,128 @@ function attestationBundlePagesRecipe(
 	};
 }
 
+function publicationRecoveryMirror(target: string): readonly string[] {
+	const columns = [
+		'rowid',
+		'cache_id',
+		'store_path_hash',
+		'store_path',
+		'nar_hash',
+		'nar_size',
+		'references_json',
+		'deriver',
+		'ca',
+		'sigs_json',
+		'generation',
+		'signature_generation',
+		'pending_signature_generation',
+		'created_at'
+	];
+	const insert = `INSERT OR REPLACE INTO \`${target}\` (${columns.map((column) => `\`${column}\``).join(', ')}) VALUES (${columns.map((column) => `NEW.\`${column}\``).join(', ')});`;
+	const remove = `DELETE FROM \`${target}\` WHERE rowid = OLD.rowid;`;
+	return [
+		`CREATE TRIGGER \`__bounded_publication_narinfo_insert\` AFTER INSERT ON \`narinfo\` BEGIN ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_publication_narinfo_update\` AFTER UPDATE ON \`narinfo\` BEGIN ${remove} ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_publication_narinfo_delete\` AFTER DELETE ON \`narinfo\` BEGIN ${remove} END;`
+	];
+}
+
+const publicationRecoveryMirrorDrops = ['insert', 'update', 'delete'].map(
+	(event) => `DROP TRIGGER \`__bounded_publication_narinfo_${event}\`;`
+);
+
+function publicationRecoveryRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const table: RebuildTable = {
+		table: 'narinfo',
+		create: 1,
+		copy: 2,
+		indexes: statements.flatMap((statement, index) =>
+			statement.startsWith('CREATE INDEX ') ? [index] : []
+		)
+	};
+	const dropTriggers = statements.filter((statement) =>
+		statement.startsWith('DROP TRIGGER ')
+	);
+	const triggerStatements = statements.filter((statement) =>
+		statement.startsWith('CREATE TRIGGER ')
+	);
+
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-publication-recovery-shadow',
+				statements: [
+					statementAt(statements, 0),
+					statementAt(statements, table.create),
+					...table.indexes.map((index) =>
+						shadowIndex(statementAt(statements, index), table.table)
+					),
+					...publicationRecoveryMirror('__new_narinfo')
+				]
+			},
+			copyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-publication-recovery-shadow',
+				statements: [
+					...publicationRecoveryMirrorDrops,
+					...dropTriggers,
+					'ALTER TABLE `narinfo` RENAME TO `__bounded_old_narinfo`;',
+					'ALTER TABLE `__new_narinfo` RENAME TO `narinfo`;',
+					...triggerStatements
+				]
+			},
+			drainStage(table.table),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-publication-recovery-shadow',
+				statements: [
+					'DROP TABLE `__bounded_old_narinfo`;',
+					canonicalTable(statementAt(statements, table.create), table.table),
+					...table.indexes.map((index) =>
+						canonicalIndex(statementAt(statements, index), table.table)
+					),
+					...publicationRecoveryMirror('__bounded_canonical_narinfo')
+				]
+			},
+			canonicalCopyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-publication-recovery-shadow',
+				statements: [
+					...publicationRecoveryMirrorDrops,
+					...dropTriggers,
+					'ALTER TABLE `narinfo` RENAME TO `__bounded_noncanonical_narinfo`;',
+					'ALTER TABLE `__bounded_canonical_narinfo` RENAME TO `narinfo`;',
+					...triggerStatements
+				]
+			},
+			drainNoncanonicalStage(table.table),
+			{
+				kind: 'batch',
+				name: 'finish-publication-recovery-shadow',
+				statements: ['DROP TABLE `__bounded_noncanonical_narinfo`;']
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
+	if (tag === '0066_publication_recovery') {
+		return publicationRecoveryRecipe(tag, statements);
+	}
+
 	if (tag === '0064_attestation-bundle-pages') {
 		return attestationBundlePagesRecipe(tag, statements);
 	}

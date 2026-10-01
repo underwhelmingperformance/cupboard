@@ -152,7 +152,7 @@ export const subrequestsPerPendingSettleRow =
 // Promotion reserves and activates an incarnation through D1, copies the
 // staging bytes through R2, writes the blob row, and confirms the incarnation.
 // A failure can also queue an object deletion.
-const settlePromoteSubrequests = 9;
+const settlePromoteSubrequests = 17;
 
 /**
  * The maximum number of D1 and R2 calls needed to apply one recorded verdict.
@@ -713,6 +713,7 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<PreparedVerdict> {
+		await this.uploadState.migratePendingNarRefreshMarkers(uploadId);
 		signal?.throwIfAborted();
 		const pending = this.context.db
 			.select()
@@ -786,6 +787,7 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<PreparedWithoutDecode> {
+		await this.uploadState.migratePendingNarRefreshMarkers(pending.id);
 		signal?.throwIfAborted();
 
 		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
@@ -1091,8 +1093,8 @@ export class VerificationService {
 				return 'ignored';
 			}
 
-			if (staged.requiresActivation && staged.incarnation > 1) {
-				await this.uploadState.markPendingNarRefresh(pending.id);
+			if (staged.requiresNarInfoRefresh) {
+				this.uploadState.markPendingNarRefresh(pending.id);
 			}
 
 			const activation = await this.context.criticalSection(async () => {
@@ -1106,6 +1108,9 @@ export class VerificationService {
 				);
 
 				if (activation === 'retired') {
+					if (this.ownsActiveClaim(owner, pending.id, signal)) {
+						this.uploadState.clearPendingNarRefresh(pending.id);
+					}
 					return { result: 'ignored' as const, wasActivated: false };
 				}
 
@@ -1120,12 +1125,12 @@ export class VerificationService {
 			if (activation.wasActivated) {
 				await this.uploadState.clearCanonicalNarMissing(metadata.narHash);
 
-				if (await this.uploadState.hasPendingNarRefresh(pending.id)) {
+				if (this.uploadState.hasPendingNarRefresh(pending.id)) {
 					await this.context.env.MAINTENANCE_QUEUE.send({
 						kind: 'narinfo-refresh',
 						narHash: metadata.narHash
 					});
-					await this.uploadState.clearPendingNarRefresh(pending.id);
+					this.uploadState.clearPendingNarRefresh(pending.id);
 				}
 			}
 

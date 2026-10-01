@@ -44,7 +44,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
-import { and, asc, eq, gt, isNull, or } from 'drizzle-orm';
+import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -1749,6 +1749,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.get()?.complete ?? false;
 
 		this.oidcTrust.seedOwnerRule();
+		await this.uploadState.migratePendingNarRefreshMarkers();
 
 		this.context.dbCost.recordOutstanding();
 		logMethodFinished(rootLogger().with({ method: 'initialise' }), {
@@ -2755,6 +2756,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 		const logger = rootLogger().with({ trigger: 'alarm' });
+		await this.uploadState.migratePendingNarRefreshMarkers();
 		const now = Date.now();
 		this.commitCredit.closeExpiredSessions(now);
 		this.commitCredit.closeIdleSessions(now, () =>
@@ -3151,17 +3153,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 
 		return this.metered('enqueue-narinfo-reconciliation', async () => {
-			const withinCache =
-				after === undefined
-					? undefined
-					: and(
-							eq(schema.narInfos.cacheId, after.cacheId),
-							gt(schema.narInfos.storePathHash, after.storePathHash)
-						);
 			const afterCursor =
 				after === undefined
 					? undefined
-					: or(gt(schema.narInfos.cacheId, after.cacheId), withinCache);
+					: sql`(${schema.narInfos.cacheId}, ${schema.narInfos.storePathHash}) > (${after.cacheId}, ${after.storePathHash})`;
 			const page = this.context.db
 				.select({
 					cacheId: schema.narInfos.cacheId,

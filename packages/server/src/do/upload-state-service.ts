@@ -6,6 +6,7 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type SessionId,
 	type UploadId,
+	uploadIdSchema,
 	type UploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -21,6 +22,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import { chunk, maxOutgoingConnections, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
@@ -43,10 +45,6 @@ const maxStorageKeysPerGet = 128;
 
 function missingCanonicalNarKey(narHash: NixSha256HashString): string {
 	return `${missingCanonicalNarPrefix}${narHash}`;
-}
-
-function pendingNarRefreshKey(uploadId: UploadId): string {
-	return `${pendingNarRefreshPrefix}${uploadId}`;
 }
 
 export class UploadStateService {
@@ -172,20 +170,55 @@ export class UploadStateService {
 		await this.context.ctx.storage.delete(missingCanonicalNarKey(narHash));
 	}
 
-	async markPendingNarRefresh(uploadId: UploadId): Promise<void> {
-		await this.context.ctx.storage.put(pendingNarRefreshKey(uploadId), true);
+	markPendingNarRefresh(uploadId: UploadId): void {
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ narRefreshPending: true })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
 	}
 
-	async hasPendingNarRefresh(uploadId: UploadId): Promise<boolean> {
+	hasPendingNarRefresh(uploadId: UploadId): boolean {
 		return (
-			(await this.context.ctx.storage.get<boolean>(
-				pendingNarRefreshKey(uploadId)
-			)) === true
+			this.context.db
+				.select({ pending: schema.pendingUploads.narRefreshPending })
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.get()?.pending ?? false
 		);
 	}
 
-	async clearPendingNarRefresh(uploadId: UploadId): Promise<void> {
-		await this.context.ctx.storage.delete(pendingNarRefreshKey(uploadId));
+	clearPendingNarRefresh(uploadId: UploadId): void {
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ narRefreshPending: false })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	}
+
+	async migratePendingNarRefreshMarkers(uploadId?: UploadId): Promise<void> {
+		const key = `${pendingNarRefreshPrefix}${uploadId ?? ''}`;
+		const records =
+			uploadId === undefined
+				? await this.context.ctx.storage.list({
+						prefix: pendingNarRefreshPrefix,
+						limit: maxStorageKeysPerGet
+					})
+				: await this.context.ctx.storage.get([key]);
+		for (const [key, pending] of records) {
+			const parsedUploadId = uploadIdSchema.safeParse(
+				key.slice(pendingNarRefreshPrefix.length)
+			);
+			if (pending === true && parsedUploadId.success) {
+				this.markPendingNarRefresh(parsedUploadId.data);
+			}
+		}
+		if (records.size > 0) {
+			await this.context.ctx.storage.delete(records.keys().toArray());
+		}
+		if (records.size === maxStorageKeysPerGet) {
+			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+		}
 	}
 
 	/**

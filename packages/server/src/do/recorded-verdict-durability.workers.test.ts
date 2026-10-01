@@ -1,3 +1,4 @@
+import { subrequestSafetyReserve } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -25,7 +26,9 @@ import { boundedD1 } from './bounded-io.ts';
 import { maintenancePassCursorKey } from './server.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import {
+	pendingSettlePrefetchSubrequests,
 	type PendingVerificationBatch,
+	subrequestsPerRecordedVerdict,
 	type VerificationResult
 } from './verification-service.ts';
 
@@ -408,11 +411,17 @@ async function driveMalformedVerdict(server: string): Promise<{
 				.all();
 
 		await state.storage.deleteAlarm();
-		await withDeployedSubrequestAllowance(instance.context, 125, () =>
-			instance.recordVerifications(
-				claim.owner,
-				verifiedResults(claim.claims, uploads)
-			)
+		await withDeployedSubrequestAllowance(
+			instance.context,
+			subrequestSafetyReserve +
+				pendingSettlePrefetchSubrequests +
+				subrequestsPerRecordedVerdict +
+				3,
+			() =>
+				instance.recordVerifications(
+					claim.owner,
+					verifiedResults(claim.claims, uploads)
+				)
 		);
 
 		const held = heldRows();

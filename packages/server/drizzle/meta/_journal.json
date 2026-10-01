@@ -463,6 +463,13 @@
 			"when": 1790583673821,
 			"tag": "0065_attestation-inheritance-cursor",
 			"breakpoints": true
+		},
+		{
+			"idx": 66,
+			"version": "6",
+			"when": 1790884440337,
+			"tag": "0066_publication_recovery",
+			"breakpoints": true
 		}
 	]
 }
