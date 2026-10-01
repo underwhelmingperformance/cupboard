@@ -6866,143 +6866,212 @@ if (args.includes('--help')) {
 		);
 	});
 
-	it('builds a known producer before a streamed target that needs its output', async () => {
-		const dependencyPath = storePathSchema.parse(referencePath);
-		const dependencyInstallable = derivedPath(appQueryInstallable);
-		const targetInstallable = derivedPath(libraryQueryInstallable);
-		let targetsFileContents: unknown;
-		const stub = cupboardStub({
-			plan: [
-				{
-					kind: 'plan-cohort',
-					data: {
-						partition: {
-							attachOnly: [],
-							publishByReference: [],
-							leftUpstream: [],
-							alreadyValid: [],
-							buildSet: [targetInstallable],
-							dependencyBuilds: [
-								{
-									path: dependencyPath,
-									installables: [dependencyInstallable],
-									requiredBy: [targetInstallable]
-								}
-							],
-							dependencyCopies: [],
-							counts: { willBuild: 1, willSubstitute: 0, unknown: 1 },
-							downloadSize: 0,
-							narSize: 0,
-							unknownCount: 1,
-							ceiling: { value: 5, source: 'configured' }
-						},
-						capacity: measuredCapacity
+	it.each([
+		{ publish: 'outputs' as const, isRefused: false },
+		{ publish: 'built' as const, isRefused: false },
+		{ publish: 'built' as const, isRefused: true }
+	])(
+		'observes known producers for $publish publication before their streamed target (refused=$isRefused)',
+		async ({ publish, isRefused }) => {
+			const dependencyPath = storePathSchema.parse(referencePath);
+			const dependencyInstallable = derivedPath(appQueryInstallable);
+			const targetInstallable = derivedPath(libraryQueryInstallable);
+			let targetsFileContents: unknown;
+			let cohortsFileContents: unknown;
+			const refusal = new CupboardReportedError(2, [], undefined, true);
+			const stub = cupboardStub({
+				plan: [
+					{
+						kind: 'plan-cohort',
+						data: {
+							partition: {
+								attachOnly: [],
+								publishByReference: [],
+								leftUpstream: [],
+								alreadyValid: [],
+								buildSet: [targetInstallable],
+								dependencyBuilds: [
+									{
+										path: dependencyPath,
+										installables: [dependencyInstallable],
+										requiredBy: [targetInstallable]
+									}
+								],
+								dependencyCopies: [],
+								counts: { willBuild: 1, willSubstitute: 0, unknown: 1 },
+								downloadSize: 0,
+								narSize: 0,
+								unknownCount: 1,
+								ceiling: { value: 5, source: 'configured' }
+							},
+							capacity: measuredCapacity
+						}
 					}
-				}
-			],
-			reprobe: planReprobeSuccess([], [targetInstallable])
-		});
-		const runCupboardMock = vi.fn<typeof runCupboard>(
-			async (binaryPath, arguments_, passedEnvironment, dependencies) => {
-				if (arguments_[1] === 'plan' && arguments_[2] === 'cohort') {
-					const targetsFile =
-						arguments_[arguments_.indexOf('--targets-file') + 1];
-
-					if (targetsFile === undefined) {
-						throw new Error('plan cohort targets file is missing');
-					}
-
-					targetsFileContents = JSON.parse(await readFile(targetsFile, 'utf8'));
-				} else if (arguments_[1] === 'build-push') {
-					await writeFile(
-						arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '',
-						JSON.stringify({
-							version: 3,
-							paths: [libraryBuiltPath],
-							subjects: []
-						})
-					);
-				}
-				return stub(binaryPath, arguments_, passedEnvironment, dependencies);
-			}
-		);
-		const runNixBuild = vi.fn((installables: readonly string[]) =>
-			Promise.resolve({
-				paths: [
-					installables[0] === dependencyInstallable
-						? dependencyPath
-						: libraryBuiltPath
 				],
-				status: 0,
-				copiedFrom: new Map()
-			})
-		);
+				reprobe: planReprobeSuccess([], [targetInstallable])
+			});
+			const runCupboardMock = vi.fn<typeof runCupboard>(
+				async (binaryPath, arguments_, passedEnvironment, dependencies) => {
+					if (arguments_[1] === 'plan' && arguments_[2] === 'cohort') {
+						const targetsFile =
+							arguments_[arguments_.indexOf('--targets-file') + 1];
 
-		await buildCohortAction(
-			{
-				...baseOptions(),
-				cohortJson: cohortJson({
-					attrs: ['.#packages.x86_64-linux.lib'],
-					installables: ['.#packages.x86_64-linux.lib^out'],
-					queryInstallables: [libraryQueryInstallable],
-					expectedPaths: [libraryBuiltPath],
-					roots: ['github:owner/repo/main/lib']
-				}),
-				publish: 'outputs'
-			},
-			environment,
-			{
-				runCupboard: runCupboardMock,
-				runNixBuild,
-				resolveLocalDerivationGraph: (derivations) =>
-					Promise.resolve({
-						closure: [
-							...derivations,
-							storePathSchema.parse(
-								'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+						if (targetsFile === undefined) {
+							throw new Error('plan cohort targets file is missing');
+						}
+
+						targetsFileContents = JSON.parse(
+							await readFile(targetsFile, 'utf8')
+						);
+					} else if (arguments_[1] === 'build-push') {
+						if (isRefused) {
+							throw refusal;
+						}
+						cohortsFileContents = JSON.parse(
+							await readFile(
+								arguments_[arguments_.indexOf('--cohorts-file') + 1] ?? '',
+								'utf8'
 							)
-						],
-						floatingOutputs: [],
-						substitutableDerivations: [],
-						outputs: [
-							{
-								path: dependencyPath,
-								installable: dependencyInstallable
-							}
-						]
-					})
-			}
-		);
+						);
+						await writeFile(
+							arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '',
+							JSON.stringify({
+								version: 3,
+								paths:
+									publish === 'built'
+										? [libraryBuiltPath, dependencyPath, appPath]
+										: [libraryBuiltPath],
+								subjects: []
+							})
+						);
+					}
+					return stub(binaryPath, arguments_, passedEnvironment, dependencies);
+				}
+			);
+			const runNixBuild = vi.fn((installables: readonly string[]) =>
+				Promise.resolve({
+					paths: [
+						installables[0] === dependencyInstallable
+							? dependencyPath
+							: libraryBuiltPath
+					],
+					status: 0,
+					copiedFrom: new Map()
+				})
+			);
 
-		expect({
-			targetsFileContents,
-			builds: runNixBuild.mock.calls.map(([installables]) => installables)
-		}).toStrictEqual({
-			targetsFileContents: {
-				targets: [
+			let outcome: unknown;
+			try {
+				await buildCohortAction(
 					{
-						attr: '.#packages.x86_64-linux.lib',
-						installable: libraryQueryInstallable,
-						plannedLocalDerivation:
-							'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
-						expectedPath: libraryBuiltPath,
-						root: 'github:owner/repo/main/lib'
-					}
-				],
-				plannedLocalClosure: [
-					'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
-					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
-				],
-				plannedLocalOutputs: [
+						...baseOptions(),
+						cohortJson: cohortJson({
+							attrs: ['.#packages.x86_64-linux.lib'],
+							installables: ['.#packages.x86_64-linux.lib^out'],
+							queryInstallables: [libraryQueryInstallable],
+							expectedPaths: [libraryBuiltPath],
+							roots: ['github:owner/repo/main/lib']
+						}),
+						publish
+					},
+					environment,
 					{
-						path: dependencyPath,
-						installable: dependencyInstallable
+						runCupboard: runCupboardMock,
+						runNixBuild,
+						resolveLocalDerivationGraph: (derivations) =>
+							Promise.resolve({
+								closure: [
+									...derivations,
+									storePathSchema.parse(
+										'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+									)
+								],
+								floatingOutputs: [],
+								substitutableDerivations: [],
+								outputs: [
+									{
+										path: dependencyPath,
+										installable: dependencyInstallable
+									}
+								]
+							})
 					}
-				]
-			},
-			builds: [[dependencyInstallable], [targetInstallable]]
-		});
-	});
+				);
+			} catch (error) {
+				outcome = error;
+			}
+
+			if (isRefused) {
+				expect({ outcome, builds: runNixBuild.mock.calls }).toStrictEqual({
+					outcome: refusal,
+					builds: []
+				});
+				return;
+			}
+
+			expect({
+				outcome,
+				targetsFileContents,
+				cohortsFileContents,
+				targetPaths: await readFile(
+					path.join(directory, 'cupboard-cohort-target-paths.txt'),
+					'utf8'
+				),
+				intermediatePaths: await readFile(
+					path.join(directory, 'cupboard-cohort-intermediate-paths.txt'),
+					'utf8'
+				),
+				builds: runNixBuild.mock.calls.map(([installables]) => installables)
+			}).toStrictEqual({
+				outcome: undefined,
+				targetsFileContents: {
+					targets: [
+						{
+							attr: '.#packages.x86_64-linux.lib',
+							installable: libraryQueryInstallable,
+							plannedLocalDerivation:
+								'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+							expectedPath: libraryBuiltPath,
+							root: 'github:owner/repo/main/lib'
+						}
+					],
+					plannedLocalClosure: [
+						'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+						'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+					],
+					plannedLocalOutputs: [
+						{
+							path: dependencyPath,
+							installable: dependencyInstallable
+						}
+					]
+				},
+				cohortsFileContents: {
+					cohorts: [
+						{
+							installables: [targetInstallable],
+							keepGoing: true,
+							...(publish === 'built' && {
+								dependencyBuilds: [
+									{
+										path: dependencyPath,
+										installables: [dependencyInstallable]
+									}
+								]
+							})
+						}
+					]
+				},
+				targetPaths: `${libraryBuiltPath}\n`,
+				intermediatePaths:
+					publish === 'built' ? `${appPath}\n${dependencyPath}\n` : '',
+				builds:
+					publish === 'built'
+						? [[targetInstallable]]
+						: [[dependencyInstallable], [targetInstallable]]
+			});
+		}
+	);
 
 	it('refuses remote publication when planning left a target without a derived path', async () => {
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());

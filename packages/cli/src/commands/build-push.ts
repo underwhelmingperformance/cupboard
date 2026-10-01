@@ -109,7 +109,12 @@ interface BuildPushOptions {
 const commandCohortSchema = z.strictObject({
 	command: z.array(z.string().min(1)).min(1)
 });
+const dependencyBuildSchema = z.strictObject({
+	path: storePathSchema,
+	installables: z.array(z.string().min(1)).min(1)
+});
 const constructedCohortSchema = z.strictObject({
+	dependencyBuilds: z.array(dependencyBuildSchema).optional(),
 	installables: z.array(z.string().min(1)).min(1),
 	attempts: z.number().int().positive().optional(),
 	rebuild: z.boolean().optional(),
@@ -216,6 +221,9 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 			kind: 'constructed',
 			build: {
 				installables: cohort.installables,
+				...(cohort.dependencyBuilds !== undefined && {
+					dependencyBuilds: cohort.dependencyBuilds
+				}),
 				...(cohort.attempts !== undefined && { attempts: cohort.attempts }),
 				...(cohort.rebuild !== undefined && { rebuild: cohort.rebuild }),
 				...(cohort.requireProvenance !== undefined && {

@@ -434,6 +434,7 @@ describe('parseCohortsFile', () => {
 				{ command: ['nix', 'build', '--no-link', '.#app'] },
 				{
 					installables: ['.#lib'],
+					dependencyBuilds: [{ path: pathA, installables: ['.#producer'] }],
 					attempts: 2,
 					rebuild: true,
 					requireProvenance: true,
@@ -450,6 +451,7 @@ describe('parseCohortsFile', () => {
 				kind: 'constructed',
 				build: {
 					installables: ['.#lib'],
+					dependencyBuilds: [{ path: pathA, installables: ['.#producer'] }],
 					attempts: 2,
 					rebuild: true,
 					requireProvenance: true,
@@ -472,6 +474,30 @@ describe('parseCohortsFile', () => {
 	});
 
 	it.each([
+		{
+			name: 'an invalid dependency path',
+			contents: JSON.stringify({
+				cohorts: [
+					{
+						installables: ['.#app'],
+						dependencyBuilds: [
+							{ path: 'invalid', installables: ['.#producer'] }
+						]
+					}
+				]
+			})
+		},
+		{
+			name: 'a dependency without producers',
+			contents: JSON.stringify({
+				cohorts: [
+					{
+						installables: ['.#app'],
+						dependencyBuilds: [{ path: pathA, installables: [] }]
+					}
+				]
+			})
+		},
 		{ name: 'a body that is not JSON', contents: 'not json' },
 		{ name: 'a body with no cohorts', contents: '{"cohorts": []}' },
 		{
