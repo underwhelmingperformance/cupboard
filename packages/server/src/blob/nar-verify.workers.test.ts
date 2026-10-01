@@ -30,8 +30,10 @@ function compressedStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
 function neverProducingBody(): {
 	readonly stream: ReadableStream<Uint8Array>;
 	readonly wasCancelled: () => boolean;
+	readonly cancelled: Promise<undefined>;
 } {
 	let wasCancelled = false;
+	const cancelled = Promise.withResolvers<undefined>();
 
 	const stream = new ReadableStream<Uint8Array>({
 		pull() {
@@ -41,10 +43,15 @@ function neverProducingBody(): {
 		},
 		cancel() {
 			wasCancelled = true;
+			cancelled.resolve(undefined);
 		}
 	});
 
-	return { stream, wasCancelled: () => wasCancelled };
+	return {
+		stream,
+		wasCancelled: () => wasCancelled,
+		cancelled: cancelled.promise
+	};
 }
 
 function withStalledBody(
@@ -276,7 +283,7 @@ describe('verifyStoredNar', () => {
 			throw new Error('expected the staged object to exist');
 		}
 
-		const { stream, wasCancelled } = neverProducingBody();
+		const { stream, wasCancelled, cancelled } = neverProducingBody();
 		const { promise, resolve } = Promise.withResolvers<R2ObjectBody | null>();
 		const bucket = deferredGetBucket(env.BLOBS, r2Key, promise);
 
@@ -290,7 +297,7 @@ describe('verifyStoredNar', () => {
 		).rejects.toBeInstanceOf(SubrequestTimeoutError);
 
 		resolve(withStalledBody(real, stream));
-		await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+		await cancelled;
 
 		expect(wasCancelled()).toBe(true);
 	});

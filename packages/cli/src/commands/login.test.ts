@@ -1,6 +1,5 @@
-import { setTimeout as delay } from 'node:timers/promises';
-
 import type { TokenResponse } from '@cupboard/protocol/oidc';
+import lockfile from 'proper-lockfile';
 import { describe, expect, it, vi } from 'vitest';
 
 import { DeviceAuthorizationRequestError } from '../auth/oidc-login.ts';
@@ -47,24 +46,6 @@ function tokenResponse(name: string): TokenResponse {
 		expires_in: 600,
 		refresh_token: `refresh-${name}`
 	};
-}
-
-type Outcome<T> =
-	| { readonly kind: 'resolved'; readonly value: T }
-	| { readonly kind: 'rejected'; readonly error: unknown };
-
-async function outcomeOf<T>(promise: Promise<T>): Promise<Outcome<T>> {
-	try {
-		return { kind: 'resolved', value: await promise };
-	} catch (error) {
-		return { kind: 'rejected', error };
-	}
-}
-
-async function pendingAfter(ms: number): Promise<{ readonly kind: 'pending' }> {
-	await delay(ms);
-
-	return { kind: 'pending' };
 }
 
 describe('mapDeviceLoginError', () => {
@@ -376,28 +357,60 @@ describe('login session cache', () => {
 			});
 
 			await renewalEntered.promise;
+			const blocked = Promise.withResolvers<'blocked'>();
+			const originalLock = lockfile.lock.bind(lockfile);
+			const lockSpy = vi
+				.spyOn(lockfile, 'lock')
+				.mockImplementation(async (file, options) => {
+					try {
+						return await originalLock(file, options);
+					} catch (error) {
+						if (
+							error instanceof Error &&
+							'code' in error &&
+							error.code === 'ELOCKED'
+						) {
+							blocked.resolve('blocked');
+						}
+
+						throw error;
+					}
+				});
 			const login = cacheLoginSession(
 				tokenResponse('explicit-login'),
 				sessionTarget
 			);
-			const beforeRenewalFinishes = await Promise.race([
-				outcomeOf(login),
-				pendingAfter(50)
-			]);
 
-			releaseRenewal.resolve(undefined);
-			await Promise.all([renewal, login]);
+			try {
+				async function completedLogin(): Promise<'completed'> {
+					await login;
 
-			expect({
-				beforeRenewalFinishes,
-				session: await readCachedSession(sessionTarget)
-			}).toStrictEqual({
-				beforeRenewalFinishes: { kind: 'pending' },
-				session: {
-					accessToken: sessionToken('explicit-login'),
-					refreshToken: 'refresh-explicit-login'
+					return 'completed';
 				}
-			});
+
+				const beforeRenewalFinishes = await Promise.race([
+					completedLogin(),
+					blocked.promise
+				]);
+
+				releaseRenewal.resolve(undefined);
+				await Promise.all([renewal, login]);
+
+				expect({
+					beforeRenewalFinishes,
+					session: await readCachedSession(sessionTarget)
+				}).toStrictEqual({
+					beforeRenewalFinishes: 'blocked',
+					session: {
+						accessToken: sessionToken('explicit-login'),
+						refreshToken: 'refresh-explicit-login'
+					}
+				});
+			} finally {
+				releaseRenewal.resolve(undefined);
+				await Promise.allSettled([renewal, login]);
+				lockSpy.mockRestore();
+			}
 		}
 	);
 

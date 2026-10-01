@@ -61,6 +61,7 @@ interface IssueReadCredentialInput {
 	readonly audience: Audience;
 	readonly resources: readonly ReadResource[];
 	readonly signal: AbortSignal;
+	readonly now: () => number;
 	readonly fetcher: typeof fetch;
 	readonly environment: NodeJS.ProcessEnv;
 }
@@ -77,7 +78,7 @@ export interface RunReadAccessDependencies {
 	readonly signal?: AbortSignal;
 	readonly renewal?: Pick<
 		ReadCredentialSessionOptions,
-		'renewalMarginMs' | 'safetyMarginMs' | 'retryDelayMs'
+		'now' | 'wait' | 'renewalMarginMs' | 'safetyMarginMs' | 'retryDelayMs'
 	>;
 }
 
@@ -218,7 +219,8 @@ export async function runWithReadAccess(
 					resources,
 					fetcher,
 					environment,
-					signal
+					signal,
+					now: dependencies.renewal?.now ?? Date.now
 				});
 
 				if (
@@ -342,7 +344,7 @@ function staticCredentialFor(
 async function issueGithubReadCredential(
 	input: IssueReadCredentialInput
 ): Promise<ReadCredentialLease> {
-	const requestedAtMs = Date.now();
+	const requestedAtMs = input.now();
 	const client = new CupboardClient(
 		input.target.tenantUrl,
 		input.fetcher,

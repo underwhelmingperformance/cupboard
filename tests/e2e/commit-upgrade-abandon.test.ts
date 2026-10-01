@@ -1,5 +1,4 @@
 import { createConnection } from 'node:net';
-import { setTimeout as delay } from 'node:timers/promises';
 
 import { describe, expect, it } from 'vitest';
 
@@ -81,7 +80,11 @@ async function openingGrantOf(
 describe('a commit upgrade whose client leaves before the handshake', () => {
 	it('leaves the server holding no credit for it', () =>
 		withTemporaryDirectory('cupboard-e2e-abandon-', async (directory) => {
+			const abandoned = Promise.withResolvers<undefined>();
 			const server = await CupboardTestServer.start(directory, {
+				onAbandonedUpgrade: () => {
+					abandoned.resolve(undefined);
+				},
 				bindings: {
 					CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET: String(creditBudget)
 				}
@@ -95,12 +98,7 @@ describe('a commit upgrade whose client leaves before the handshake', () => {
 
 				await abandonCommitUpgrade(server, bearer);
 
-				// The abandonment happens inside the harness, after the worker has
-				// answered, so wait for the bridge to report it before asking what
-				// the server has left.
-				while (server.commitSessions.abandonedUpgrades === 0) {
-					await delay(20);
-				}
+				await abandoned.promise;
 
 				expect({
 					abandoned: server.commitSessions.abandonedUpgrades,

@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { runWithReadAccess } from '../../packages/cli/src/commands/run.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/store-config.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
+import { ManualClock } from '../support/manual-clock.ts';
 import { DivertedNixDaemon, isolatedEnvironment } from '../support/nix.ts';
 
 const isNixAvailable = spawnSync('nix-daemon', ['--version']).status === 0;
@@ -51,6 +52,9 @@ describe.skipIf(!isNixAvailable)(
 							readonly hasExpired: boolean;
 						}[] = [];
 						let firstExpiresAt = 0;
+						const clock = new ManualClock();
+						const targetRequested = Promise.withResolvers<undefined>();
+						const releaseTarget = Promise.withResolvers<undefined>();
 						const server = createServer((request, response) => {
 							void (async () => {
 								const raw = request.headers.authorization ?? '';
@@ -59,7 +63,7 @@ describe.skipIf(!isNixAvailable)(
 									: '';
 								const requestPath = request.url ?? '';
 								const hasExpired =
-									firstExpiresAt !== 0 && Date.now() >= firstExpiresAt;
+									firstExpiresAt !== 0 && clock.now() >= firstExpiresAt;
 								requests.push({ path: requestPath, credential, hasExpired });
 								if (
 									credential !== 'second:two' &&
@@ -82,12 +86,8 @@ describe.skipIf(!isNixAvailable)(
 										return;
 									}
 									if (selected === target) {
-										await new Promise((resolve) =>
-											setTimeout(
-												resolve,
-												Math.max(0, firstExpiresAt + 200 - Date.now())
-											)
-										);
+										targetRequested.resolve(undefined);
+										await releaseTarget.promise;
 									}
 									body = `StorePath: ${selected}\nURL: nar/${path.basename(selected)}.nar\nCompression: none\nNarHash: sha256:${narHash}\nNarSize: ${String(nar.length)}\nReferences: ${selected === target ? path.basename(dependency) : ''}\n`;
 								} else if (requestPath.startsWith('/t/acme/nar/')) {
@@ -131,7 +131,7 @@ describe.skipIf(!isNixAvailable)(
 								path.join(directory, 'client-home')
 							);
 							const config = discoverNixStoreConfig();
-							await runWithReadAccess(
+							const substitution = runWithReadAccess(
 								parseTenantCacheUrl(tenantUrl),
 								['nix-store', '--realise', target],
 								{ githubOidc: true },
@@ -152,7 +152,7 @@ describe.skipIf(!isNixAvailable)(
 									issue: () => {
 										issueCount += 1;
 										if (issueCount === 1) {
-											firstExpiresAt = Date.now() + 5000;
+											firstExpiresAt = clock.now() + 5000;
 											return Promise.resolve({
 												user: 'first',
 												password: 'one',
@@ -162,16 +162,30 @@ describe.skipIf(!isNixAvailable)(
 										return Promise.resolve({
 											user: 'second',
 											password: 'two',
-											expiresAtMs: Date.now() + 900_000
+											expiresAtMs: clock.now() + 900_000
 										});
 									},
 									renewal: {
+										now: clock.now,
+										wait: clock.wait,
 										renewalMarginMs: 3000,
 										safetyMarginMs: 1000,
 										retryDelayMs: 100
 									}
 								}
 							);
+
+							await Promise.race([
+								(async () => {
+									await targetRequested.promise;
+									await clock.advanceThroughDelay(2000);
+									await clock.waitForDelay(897_000);
+								})(),
+								substitution
+							]);
+							clock.advanceTo(firstExpiresAt + 200);
+							releaseTarget.resolve(undefined);
+							await substitution;
 
 							const authenticated = requests
 								.filter((request) => request.credential !== '')

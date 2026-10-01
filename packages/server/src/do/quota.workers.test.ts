@@ -680,13 +680,13 @@ describe('the probe-to-charge window', () => {
 	});
 
 	const releaseKey = 'test/probe-window-release';
+	const pausedKey = 'test/probe-window-paused';
 
 	// Promotion performs the first canonical head, so pause on the second head
-	// during materialisation. An R2 marker coordinates the requests without
-	// moving a promise outside the Durable Object request context.
+	// during materialisation. R2 markers coordinate the requests because a pending
+	// promise cannot be awaited from another Durable Object request context.
 	function holdProbeHead(canonicalKey: string): {
 		spy: MockInstance;
-		heads: () => number;
 	} {
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		let heads = 0;
@@ -697,11 +697,8 @@ describe('the probe-to-charge window', () => {
 					heads += 1;
 
 					if (heads === 2) {
-						for (let poll = 0; poll < 400; poll += 1) {
-							if ((await originalHead(releaseKey)) !== null) {
-								break;
-							}
-
+						await env.BLOBS.put(pausedKey, 'paused');
+						while ((await originalHead(releaseKey)) === null) {
 							await new Promise((resolve) => setTimeout(resolve, 25));
 						}
 					}
@@ -710,7 +707,7 @@ describe('the probe-to-charge window', () => {
 				return originalHead(key);
 			});
 
-		return { spy, heads: () => heads };
+		return { spy };
 	}
 
 	async function heldVerify(quotaOf: (nar: VerifiableNar) => number) {
@@ -738,9 +735,9 @@ describe('the probe-to-charge window', () => {
 		const held = holdProbeHead(narObjectKey(nar.narHash, 2));
 		const pass = verifyCurrentTenant();
 
-		await vi.waitFor(() => {
-			expect(held.heads()).toBe(2);
-		});
+		while ((await env.BLOBS.head(pausedKey)) === null) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
 
 		return { nar, metadata, decision, held, pass };
 	}

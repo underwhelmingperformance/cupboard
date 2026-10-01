@@ -655,9 +655,7 @@ describe('batched verify fault isolation', () => {
 						return held;
 					});
 				const controller = new AbortController();
-				const timer = setTimeout(() => {
-					controller.abort(new SubrequestTimeoutError('nar.verify.batch'));
-				}, 5);
+				vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
 
 				try {
 					const rpc = instance.claimVerificationBatchWithinBudget(
@@ -666,6 +664,7 @@ describe('batched verify fault isolation', () => {
 						20
 					);
 					await reached;
+					controller.abort(new SubrequestTimeoutError('nar.verify.batch'));
 
 					let isConsumerTimedOut = false;
 
@@ -675,6 +674,7 @@ describe('batched verify fault isolation', () => {
 						isConsumerTimedOut = error instanceof SubrequestTimeoutError;
 					}
 
+					await vi.advanceTimersByTimeAsync(20);
 					const rpcResult = await rpc;
 					release(false);
 
@@ -699,7 +699,7 @@ describe('batched verify fault isolation', () => {
 						rows
 					};
 				} finally {
-					clearTimeout(timer);
+					vi.useRealTimers();
 					release(false);
 					committedProbe.mockRestore();
 				}

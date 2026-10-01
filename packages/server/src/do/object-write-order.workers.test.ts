@@ -1,12 +1,13 @@
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
+import { bestEffort } from '@cupboard/shared/cleanup';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { narInfoObjectKey, type R2ObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
@@ -31,21 +32,41 @@ async function settled(pending: Promise<unknown>): Promise<void> {
 function stallingBucket(
 	target: R2Bucket,
 	stalledKey: string
-): { bucket: R2Bucket; release: () => void; landed: Promise<void> } {
+): {
+	bucket: R2Bucket;
+	release: () => void;
+	landed: Promise<void>;
+	puts: () => number;
+} {
 	const released = Promise.withResolvers<string>();
 	const landed = Promise.withResolvers<string>();
+	let puts = 0;
 	let hasStalled = false;
 
 	const bucket = new Proxy(target, {
 		get(bucketTarget, property) {
+			if (property === 'put') {
+				return (key: string, value: string, options?: R2PutOptions) => {
+					puts++;
+
+					return bucketTarget.put(key, value, options);
+				};
+			}
+
 			if (property === 'delete') {
 				return async (keys: string | string[]) => {
 					if (!hasStalled && keys === stalledKey) {
 						hasStalled = true;
-						await released.promise;
-						await bucketTarget.delete(keys);
-						landed.resolve('landed');
-						return;
+						const abandoned = (async () => {
+							await released.promise;
+							await bucketTarget.delete(keys);
+							landed.resolve('landed');
+						})();
+
+						throw new SubrequestTimeoutError(
+							'r2.delete',
+							bestEffort(() => abandoned)
+						);
 					}
 
 					await bucketTarget.delete(keys);
@@ -69,7 +90,8 @@ function stallingBucket(
 		release: () => {
 			released.resolve('released');
 		},
-		landed: settled(landed.promise)
+		landed: settled(landed.promise),
+		puts: () => puts
 	};
 }
 
@@ -92,6 +114,9 @@ async function narInfoObjectText(
 // late delete could remove the newly published narinfo.
 describe('path-keyed object write ordering', () => {
 	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
 
 	it('waits for an abandoned delete before issuing a later put', async () => {
 		const token = await initialise();
@@ -116,27 +141,21 @@ describe('path-keyed object write ordering', () => {
 			const cache = resolvedCache(context, cacheScope);
 			const storePathHash = storePathHashSchema.parse(metadata.storePathHash);
 			const key = narInfoObjectKey(fixtureTenant, storePathHash, cache.scope);
-			const { bucket, release, landed } = stallingBucket(
+			const { bucket, release, landed, puts } = stallingBucket(
 				context.env.BLOBS,
 				key
 			);
 
 			context.env = { ...context.env, BLOBS: boundedBlobs(bucket) };
-			context.gateBudgetMs = 50;
 
 			const service = new NarInfoObjectsService(context);
 
-			let error: unknown;
-
-			try {
-				await context.criticalSection(() =>
+			const deletion = expect(
+				context.criticalSection(() =>
 					service.deleteNarInfoObject(cache, storePathHash)
-				);
-			} catch (error_) {
-				error = error_;
-			}
-
-			expect(error).toBeInstanceOf(SubrequestTimeoutError);
+				)
+			).rejects.toBeInstanceOf(SubrequestTimeoutError);
+			await deletion;
 
 			const row = context.db
 				.select()
@@ -163,27 +182,34 @@ describe('path-keyed object write ordering', () => {
 				return;
 			}
 
-			let didPutSettle = false;
-			const put = (async () => {
-				await service.putNarInfoObject(
-					cache,
-					storePathHash,
-					{
-						generation: row.generation,
-						narHash: row.narHash,
-						narUrl: narInfo.url,
-						signatureGeneration:
-							row.pendingSignatureGeneration ?? row.signatureGeneration
-					},
-					narInfo
-				);
-				didPutSettle = true;
-			})();
+			const writeStarted = Promise.withResolvers<undefined>();
+			const write = context.objectWrites.write.bind(context.objectWrites);
+			vi.spyOn(context.objectWrites, 'write').mockImplementation(
+				<T>(
+					keys: readonly R2ObjectKey[],
+					mutate: () => Promise<T>
+				): Promise<T> => {
+					const pending = write(keys, mutate);
+					writeStarted.resolve(undefined);
 
-			await new Promise((resolve) => {
-				setTimeout(resolve, 25);
-			});
-			expect(didPutSettle).toBe(false);
+					return pending;
+				}
+			);
+			const put = service.putNarInfoObject(
+				cache,
+				storePathHash,
+				{
+					generation: row.generation,
+					narHash: row.narHash,
+					narUrl: narInfo.url,
+					signatureGeneration:
+						row.pendingSignatureGeneration ?? row.signatureGeneration
+				},
+				narInfo
+			);
+
+			await writeStarted.promise;
+			expect(puts()).toBe(0);
 
 			release();
 			await landed;

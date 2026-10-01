@@ -65,18 +65,8 @@ describe('verification sends verdicts only to the current session', () => {
 
 		await verifyCurrentTenant();
 
-		async function nextFrameResult() {
-			return { kind: 'frame', frame: await secondSession.nextFrame() } as const;
-		}
-
-		const verdictOrTimeout = await Promise.race([
-			nextFrameResult(),
-			new Promise<{ kind: 'timeout' }>((resolve) =>
-				setTimeout(() => {
-					resolve({ kind: 'timeout' });
-				}, 50)
-			)
-		]);
+		secondSession.socket.send(JSON.stringify({ op: 'test-barrier' }));
+		const afterVerification = await secondSession.nextFrame();
 		secondSession.socket.close();
 
 		const isUploadGone = await runInDurableObject(
@@ -94,10 +84,10 @@ describe('verification sends verdicts only to the current session', () => {
 
 		expect({
 			uploadGone: isUploadGone,
-			secondSessionGotVerdict: verdictOrTimeout.kind === 'frame'
+			afterVerification
 		}).toStrictEqual({
 			uploadGone: true,
-			secondSessionGotVerdict: false
+			afterVerification: { ev: 'unsupported', op: 'test-barrier' }
 		});
 	});
 

@@ -427,9 +427,7 @@ describe('BuildEventListener', () => {
 			await once(client, 'connect');
 
 			const drained = harness.listener.drain();
-			setTimeout(() => {
-				client.end(`${JSON.stringify(event)}\n`);
-			}, 10);
+			client.end(`${JSON.stringify(event)}\n`);
 			await drained;
 
 			expect({

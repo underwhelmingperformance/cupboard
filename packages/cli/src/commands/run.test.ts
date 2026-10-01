@@ -10,6 +10,8 @@ import {
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { describe, expect, it } from 'vitest';
 
+import { abortable } from '../abort.ts';
+
 import {
 	RunCommandFailedError,
 	runWithReadAccess,
@@ -26,6 +28,63 @@ const lease = {
 };
 
 describe('cupboard run', () => {
+	it('uses the renewal clock to calculate the issued credential expiry', async () => {
+		const waits: number[] = [];
+
+		await runWithReadAccess(
+			target,
+			['nix', 'build'],
+			{ githubOidc: true },
+			{
+				environment: {
+					ACTIONS_ID_TOKEN_REQUEST_URL: 'https://job.example/token',
+					ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'job-secret'
+				},
+				storeConfig: configuration,
+				readFile: () => Promise.resolve(''),
+				renewal: {
+					now: () => 0,
+					wait: (milliseconds, signal) => {
+						waits.push(milliseconds);
+
+						return abortable(
+							Promise.withResolvers<undefined>().promise,
+							signal
+						);
+					}
+				},
+				fetcher: (input) =>
+					Promise.resolve(
+						(input instanceof Request ? input.url : String(input)).startsWith(
+							'https://job.example/'
+						)
+							? Response.json({ value: 'signed-identity' })
+							: Response.json({
+									access_token: 'example',
+									token_type: 'Bearer',
+									expires_in: 900,
+									authorization_details: [],
+									read_resources: [
+										{
+											type: 'cupboard_cache',
+											cache: target.cache,
+											mode: 'content',
+											state: {
+												kind: 'existing',
+												access: 'public',
+												priority: 40
+											}
+										}
+									]
+								})
+					),
+				runChild: () => Promise.resolve({ status: 0, signal: undefined })
+			}
+		);
+
+		expect(waits).toStrictEqual([600_000]);
+	});
+
 	it('keeps a static netrc credential while acquiring metadata-only configuration facts', async () => {
 		const intents: unknown[] = [];
 		let netrc: string | undefined;
