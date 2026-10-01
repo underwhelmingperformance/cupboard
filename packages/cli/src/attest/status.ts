@@ -8,6 +8,7 @@ import {
 import {
 	attestationInfoCapability,
 	type AttestationInfoEntry,
+	attestationInfoErrorSchema,
 	attestationInfoMaxListBytes,
 	attestationInfoMaxPaths,
 	attestationInfoMaxResponseBytes,
@@ -26,7 +27,7 @@ import {
 
 import { throwIfAborted } from '../abort.ts';
 import { cacheReadFetcher } from '../client/transport.ts';
-import { CliError, CupboardHttpError } from '../errors.ts';
+import { CliError, CliUsageError, CupboardHttpError } from '../errors.ts';
 
 export interface AttestationDiscoveryOptions {
 	readonly url: URL;
@@ -63,6 +64,15 @@ export class AttestationDiscoveryScopeChangedError extends CliError {
 	}
 }
 
+class AttestationDiscoveryRequestLimitError extends CliUsageError {
+	constructor() {
+		super(
+			'The attestation discovery request exceeds the server limit. Use fewer or shorter predicate filters.'
+		);
+		this.name = 'AttestationDiscoveryRequestLimitError';
+	}
+}
+
 /**
 Returns stored descriptors without verifying bundle signatures or subjects.
 */
@@ -88,13 +98,22 @@ export async function readAttestationInfo(
 			signal: options.signal
 		});
 		if (!response.ok && response.status !== 404) {
-			const body = await readResponseText(response, {
-				description: 'Attestation discovery refusal',
-				maximumBytes: 8192,
-				signal: options.signal
-			});
 			if (response.status === 409) {
+				await discardResponseBody(response);
 				throw new AttestationDiscoveryScopeChangedError();
+			}
+			const body = await discoveryRefusalText(response, options.signal);
+			if (path === 'api/v1/attestation-info') {
+				const failure = parseDiscoveryFailure(body);
+				if (response.status === 413 && failure?.code === 'request-too-large') {
+					throw new AttestationDiscoveryRequestLimitError();
+				}
+				if (
+					(response.status === 413 && failure?.code === 'list-too-large') ||
+					(response.status === 502 && failure?.code === 'list-invalid')
+				) {
+					throw new InvalidAttestationDiscoveryError();
+				}
 			}
 			throw new CupboardHttpError(
 				init?.method ?? 'GET',
@@ -132,7 +151,7 @@ export async function readAttestationInfo(
 					await discardResponseBody(narResponse);
 					return { storePathHash: hash, status: 'missing' };
 				}
-				const text = await readResponseText(narResponse, {
+				const text = await discoveryText(narResponse, {
 					description: 'Attestation discovery narinfo',
 					maximumBytes: 1024 * 1024,
 					signal: options.signal
@@ -226,6 +245,47 @@ export async function readAttestationInfo(
 		}
 	}
 	return entries;
+}
+
+async function discoveryRefusalText(
+	response: Response,
+	signal?: AbortSignal
+): Promise<string> {
+	try {
+		return await readResponseText(response, {
+			description: 'Attestation discovery refusal',
+			maximumBytes: 8192,
+			signal
+		});
+	} catch {
+		throwIfAborted(signal);
+		return 'The error response body could not be read within the discovery limit.';
+	}
+}
+
+function parseDiscoveryFailure(body: string) {
+	try {
+		const result = attestationInfoErrorSchema.safeParse(JSON.parse(body));
+		return result.success ? result.data : undefined;
+	} catch {
+		return;
+	}
+}
+
+async function discoveryText(
+	response: Response,
+	options: {
+		readonly description: string;
+		readonly maximumBytes: number;
+		readonly signal?: AbortSignal;
+	}
+): Promise<string> {
+	try {
+		return await readResponseText(response, options);
+	} catch (error) {
+		throwIfAborted(options.signal);
+		throw new InvalidAttestationDiscoveryError(error);
+	}
 }
 
 function requestHeaders(
