@@ -65,6 +65,7 @@ import m0062 from './0062_pending_upload_settle_retry.sql';
 import m0063 from './0063_refresh_successor_recovery.sql';
 import m0064 from './0064_attestation-bundle-pages.sql';
 import m0065 from './0065_attestation-inheritance-cursor.sql';
+import m0066 from './0066_publication_recovery.sql';
 
 export default {
 	journal,
@@ -134,6 +135,7 @@ export default {
 		m0062,
 		m0063,
 		m0064,
-		m0065
+		m0065,
+		m0066
 	}
 };

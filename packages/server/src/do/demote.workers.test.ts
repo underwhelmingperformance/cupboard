@@ -49,7 +49,7 @@ function* countFromOne(): Generator<number, never> {
 
 const tenantNumbers = countFromOne();
 
-async function committedTenantPath(seed: string) {
+async function committedTenantPath(seed: string, emitted?: unknown[]) {
 	const tenant = tenantIdSchema.parse(
 		`demote-test-${String(tenantNumbers.next().value)}`
 	);
@@ -68,6 +68,23 @@ async function committedTenantPath(seed: string) {
 		fileHash: nar.fileHash,
 		fileSize: nar.narBytes.byteLength
 	});
+	if (emitted !== undefined) {
+		await runInDurableObject(testServerFor(tenant), (instance) => {
+			const queue = instance.context.env.MAINTENANCE_QUEUE;
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: async (message: unknown) => {
+						emitted.push(message);
+						return queue.send(message);
+					},
+					sendBatch: queue.sendBatch.bind(queue),
+					metrics: queue.metrics.bind(queue)
+				}
+			};
+			return Promise.resolve();
+		});
+	}
 
 	await pushPathToTenant(tenant, token, metadata, nar);
 
@@ -104,6 +121,25 @@ describe('missing blob demotion', () => {
 		await resetTestServer();
 
 		await clearBlobStorage();
+	});
+
+	it('does not queue a global refresh for the first upload of a NAR', async () => {
+		const emitted: unknown[] = [];
+		const first = await committedTenantPath('first-upload-refresh', emitted);
+		const refreshes = emitted.filter(
+			(message) =>
+				message !== null &&
+				typeof message === 'object' &&
+				'kind' in message &&
+				message.kind === 'narinfo-refresh'
+		);
+		expect({
+			refreshes,
+			present: await isNarPresent(first.narHash)
+		}).toStrictEqual({
+			refreshes: [],
+			present: true
+		});
 	});
 
 	it('does not queue another global refresh when a later tenant uploads the same NAR', async () => {
