@@ -1,10 +1,12 @@
 import { existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { abortable } from '../abort.ts';
+import { CupboardHttpError } from '../errors.ts';
 
 import {
 	type ReadCredentialFile,
@@ -40,6 +42,14 @@ function file() {
 	return { credentialFile, writes, isRemoved: () => isRemoved };
 }
 
+async function failureOf(operation: Promise<unknown>): Promise<unknown> {
+	try {
+		return await operation;
+	} catch (error) {
+		return error;
+	}
+}
+
 function options(
 	issue: (signal: AbortSignal) => Promise<ReadCredentialLease>,
 	credentialFile: ReadCredentialFile
@@ -64,6 +74,7 @@ function options(
 
 afterEach(() => {
 	vi.useRealTimers();
+	vi.unstubAllEnvs();
 });
 
 describe('withRenewingReadCredential', () => {
@@ -102,6 +113,77 @@ describe('withRenewingReadCredential', () => {
 			fileRemoved: true
 		});
 	});
+
+	it('uses RUNNER_TEMP for temporary read credentials', async () => {
+		const runnerTemporary = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-runner-')
+		);
+		vi.stubEnv('RUNNER_TEMP', runnerTemporary);
+
+		try {
+			const directory = await withRenewingReadCredential(
+				{
+					url,
+					issue: () => Promise.resolve(lease('token', Date.now() + 900_000))
+				},
+				({ netrcFile }) =>
+					Promise.resolve(path.dirname(path.dirname(netrcFile)))
+			);
+			expect(directory).toBe(runnerTemporary);
+		} finally {
+			await rm(runnerTemporary, { recursive: true, force: true });
+		}
+	});
+
+	it.each([400, 401, 403, 404])(
+		'stops immediately on permanent HTTP %s renewal refusal and preserves its cause',
+		async (status) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(0);
+			const fixture = file();
+			const entered = Promise.withResolvers<undefined>();
+			const refusal = new CupboardHttpError(
+				'POST',
+				'/oauth/token',
+				status,
+				'read access refused'
+			);
+			let requests = 0;
+			const session = withRenewingReadCredential(
+				options(() => {
+					requests += 1;
+					return requests === 1
+						? Promise.resolve(lease('first', 10_000))
+						: Promise.reject(refusal);
+				}, fixture.credentialFile),
+				async ({ signal }) => {
+					entered.resolve(undefined);
+					await abortable(Promise.withResolvers<undefined>().promise, signal);
+				}
+			);
+			await entered.promise;
+			const outcome = failureOf(session);
+			await vi.advanceTimersByTimeAsync(9000);
+			const error = await outcome;
+			expect(error).toBeInstanceOf(ReadCredentialRenewalError);
+			if (!(error instanceof ReadCredentialRenewalError)) {
+				throw new Error('Expected a read renewal error');
+			}
+			expect({
+				cause: error.cause,
+				exitCode: error.exitCode,
+				requests,
+				writes: fixture.writes,
+				removed: fixture.isRemoved()
+			}).toStrictEqual({
+				cause: refusal,
+				exitCode: 77,
+				requests: 2,
+				writes: ['first'],
+				removed: true
+			});
+		}
+	);
 
 	it('installs the first credential before work, renews independently, and removes the file after work', async () => {
 		vi.useFakeTimers();
@@ -146,47 +228,63 @@ describe('withRenewingReadCredential', () => {
 		expect(fixture.isRemoved()).toBe(true);
 	});
 
-	it('keeps the valid credential during a transient renewal failure', async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(0);
-		const fixture = file();
-		const entered = Promise.withResolvers<undefined>();
-		const complete = Promise.withResolvers<undefined>();
-		let requests = 0;
-		const session = withRenewingReadCredential(
-			options(() => {
-				requests += 1;
+	it.each([408, 429, 503])(
+		'keeps the valid credential during transient HTTP %s renewal failure',
+		async (status) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(0);
+			const fixture = file();
+			const entered = Promise.withResolvers<undefined>();
+			const complete = Promise.withResolvers<undefined>();
+			let requests = 0;
+			const session = withRenewingReadCredential(
+				options(() => {
+					requests += 1;
 
-				if (requests === 2) {
-					return Promise.reject(new Error('temporary exchange failure'));
+					if (requests === 2) {
+						return Promise.reject(
+							new CupboardHttpError(
+								'POST',
+								'/oauth/token',
+								status,
+								'temporary exchange failure'
+							)
+						);
+					}
+
+					return Promise.resolve(
+						requests === 1 ? lease('first', 10_000) : lease('second', 20_000)
+					);
+				}, fixture.credentialFile),
+				async ({ signal }) => {
+					entered.resolve(undefined);
+					await abortable(complete.promise, signal);
 				}
+			);
 
-				return Promise.resolve(
-					requests === 1 ? lease('first', 10_000) : lease('second', 20_000)
-				);
-			}, fixture.credentialFile),
-			async ({ signal }) => {
-				entered.resolve(undefined);
-				await abortable(complete.promise, signal);
-			}
-		);
+			await entered.promise;
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(fixture.writes).toStrictEqual(['first']);
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(fixture.writes).toStrictEqual(['first', 'second']);
 
-		await entered.promise;
-		await vi.advanceTimersByTimeAsync(5000);
-		expect(fixture.writes).toStrictEqual(['first']);
-		await vi.advanceTimersByTimeAsync(1000);
-		expect(fixture.writes).toStrictEqual(['first', 'second']);
+			complete.resolve(undefined);
+			await session;
+			expect(fixture.isRemoved()).toBe(true);
+		}
+	);
 
-		complete.resolve(undefined);
-		await session;
-		expect(fixture.isRemoved()).toBe(true);
-	});
-
-	it('aborts owned work with a read-auth error before the last credential expires', async () => {
+	it('preserves the last transient failure when aborting before credential expiry', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const fixture = file();
 		const entered = Promise.withResolvers<undefined>();
+		const temporaryError = new CupboardHttpError(
+			'POST',
+			'/oauth/token',
+			503,
+			'temporary exchange failure'
+		);
 		let requests = 0;
 		const session = withRenewingReadCredential(
 			options(() => {
@@ -194,7 +292,7 @@ describe('withRenewingReadCredential', () => {
 
 				return requests === 1
 					? Promise.resolve(lease('first', 4000))
-					: Promise.reject(new Error('temporary exchange failure'));
+					: Promise.reject(temporaryError);
 			}, fixture.credentialFile),
 			async ({ signal }) => {
 				entered.resolve(undefined);
@@ -203,11 +301,12 @@ describe('withRenewingReadCredential', () => {
 		);
 
 		await entered.promise;
-		const outcome = expect(session).rejects.toBeInstanceOf(
-			ReadCredentialRenewalError
-		);
+		const outcome = failureOf(session);
 		await vi.advanceTimersByTimeAsync(3000);
-		await outcome;
+		expect(await outcome).toMatchObject({
+			cause: temporaryError,
+			exitCode: 75
+		});
 		expect({
 			writes: fixture.writes,
 			removed: fixture.isRemoved()
