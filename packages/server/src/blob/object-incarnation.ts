@@ -20,6 +20,7 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { type JsonValueList } from '../do/json-list.ts';
+import { ObjectIncarnationReservationContendedError } from '../errors.ts';
 import { blobReaperGraceMs } from '../http/http.ts';
 
 export type SharedObjectKind = 'nar' | 'cas';
@@ -224,8 +225,8 @@ export async function queueObjectDeletion(
 
 /**
  * Returns the current object version, reserving a greater one when the previous
- * object is absent. D1 serialises the conditional update, so concurrent
- * promoters share one pending version.
+ * object is absent. Throws on contention so the caller can retry in a later
+ * invocation.
  */
 export async function reserveObjectIncarnation(
 	database: DrizzleD1Database<typeof d1Schema>,
@@ -240,64 +241,132 @@ export async function reserveObjectIncarnation(
 		eq(d1Schema.objectIncarnation.objectId, objectId)
 	);
 
-	for (;;) {
-		const [reserved] = await database
+	const [reserved] = await database
+		.update(d1Schema.objectIncarnation)
+		.set({
+			incarnation: sql`${d1Schema.objectIncarnation.incarnation} + 1`,
+			state: 'pending',
+			reservationOwner: reservationOwner ?? sql`null`,
+			updatedAt
+		})
+		.where(and(identityFilter, eq(d1Schema.objectIncarnation.state, 'absent')))
+		.returning({
+			incarnation: d1Schema.objectIncarnation.incarnation,
+			state: d1Schema.objectIncarnation.state
+		});
+
+	if (reserved !== undefined) {
+		return { incarnation: reserved.incarnation, state: 'pending' };
+	}
+
+	const insert = database
+		.insert(d1Schema.objectIncarnation)
+		.values({
+			kind,
+			objectId,
+			incarnation: firstVersionedObjectIncarnation,
+			state: 'pending',
+			reservationOwner,
+			updatedAt
+		})
+		.onConflictDoNothing()
+		.returning({
+			incarnation: d1Schema.objectIncarnation.incarnation,
+			state: d1Schema.objectIncarnation.state
+		});
+	const insertedIdentity = and(
+		identityFilter,
+		eq(d1Schema.objectIncarnation.incarnation, firstVersionedObjectIncarnation)
+	);
+	const queueLegacy = database
+		.insert(d1Schema.objectDeletion)
+		.select(
+			database
+				.select({
+					kind: d1Schema.objectIncarnation.kind,
+					objectId: d1Schema.objectIncarnation.objectId,
+					incarnation: sql<number>`1`.as('incarnation'),
+					removeAfter: sql<
+						typeof replacementRemoveAfter
+					>`${replacementRemoveAfter}`.as('remove_after')
+				})
+				.from(d1Schema.objectIncarnation)
+				.where(insertedIdentity)
+		)
+		.onConflictDoUpdate({
+			target: [
+				d1Schema.objectDeletion.kind,
+				d1Schema.objectDeletion.objectId,
+				d1Schema.objectDeletion.incarnation
+			],
+			set: {
+				removeAfter: sql`max(${d1Schema.objectDeletion.removeAfter}, excluded.remove_after)`
+			}
+		});
+	const [insertedRows] = await database.batch([insert, queueLegacy]);
+	const inserted = insertedRows.at(0);
+
+	if (inserted !== undefined) {
+		return { incarnation: inserted.incarnation, state: 'pending' };
+	}
+
+	const [current] = await database
+		.select({
+			incarnation: d1Schema.objectIncarnation.incarnation,
+			state: d1Schema.objectIncarnation.state,
+			reservationOwner: d1Schema.objectIncarnation.reservationOwner
+		})
+		.from(d1Schema.objectIncarnation)
+		.where(identityFilter);
+
+	if (
+		reservationOwner !== undefined &&
+		current?.state === 'pending' &&
+		current.reservationOwner !== reservationOwner
+	) {
+		const replace = database
 			.update(d1Schema.objectIncarnation)
 			.set({
 				incarnation: sql`${d1Schema.objectIncarnation.incarnation} + 1`,
-				state: 'pending',
-				reservationOwner: reservationOwner ?? sql`null`,
-				updatedAt
-			})
-			.where(
-				and(identityFilter, eq(d1Schema.objectIncarnation.state, 'absent'))
-			)
-			.returning({
-				incarnation: d1Schema.objectIncarnation.incarnation,
-				state: d1Schema.objectIncarnation.state
-			});
-
-		if (reserved !== undefined) {
-			return { incarnation: reserved.incarnation, state: 'pending' };
-		}
-
-		const insert = database
-			.insert(d1Schema.objectIncarnation)
-			.values({
-				kind,
-				objectId,
-				incarnation: firstVersionedObjectIncarnation,
-				state: 'pending',
 				reservationOwner,
 				updatedAt
 			})
-			.onConflictDoNothing()
+			.where(
+				and(
+					identityFilter,
+					eq(d1Schema.objectIncarnation.incarnation, current.incarnation),
+					eq(d1Schema.objectIncarnation.state, 'pending'),
+					current.reservationOwner === null
+						? sql`${d1Schema.objectIncarnation.reservationOwner} is null`
+						: eq(
+								d1Schema.objectIncarnation.reservationOwner,
+								current.reservationOwner
+							)
+				)
+			)
 			.returning({
 				incarnation: d1Schema.objectIncarnation.incarnation,
 				state: d1Schema.objectIncarnation.state
 			});
-		const insertedIdentity = and(
+		const replacementFilter = and(
 			identityFilter,
-			eq(
-				d1Schema.objectIncarnation.incarnation,
-				firstVersionedObjectIncarnation
-			)
+			eq(d1Schema.objectIncarnation.incarnation, current.incarnation + 1),
+			eq(d1Schema.objectIncarnation.reservationOwner, reservationOwner)
 		);
-		const queueLegacy = database
+		const superseded = database
+			.select({
+				kind: sql<SharedObjectKind>`${kind}`.as('kind'),
+				objectId: sql<string>`${objectId}`.as('object_id'),
+				incarnation: sql<number>`${current.incarnation}`.as('incarnation'),
+				removeAfter: sql<
+					typeof replacementRemoveAfter
+				>`${replacementRemoveAfter}`.as('remove_after')
+			})
+			.from(d1Schema.objectIncarnation)
+			.where(replacementFilter);
+		const queueSuperseded = database
 			.insert(d1Schema.objectDeletion)
-			.select(
-				database
-					.select({
-						kind: d1Schema.objectIncarnation.kind,
-						objectId: d1Schema.objectIncarnation.objectId,
-						incarnation: sql<number>`1`.as('incarnation'),
-						removeAfter: sql<
-							typeof replacementRemoveAfter
-						>`${replacementRemoveAfter}`.as('remove_after')
-					})
-					.from(d1Schema.objectIncarnation)
-					.where(insertedIdentity)
-			)
+			.select(superseded)
 			.onConflictDoUpdate({
 				target: [
 					d1Schema.objectDeletion.kind,
@@ -308,119 +377,46 @@ export async function reserveObjectIncarnation(
 					removeAfter: sql`max(${d1Schema.objectDeletion.removeAfter}, excluded.remove_after)`
 				}
 			});
-		const [insertedRows] = await database.batch([insert, queueLegacy]);
-		const inserted = insertedRows.at(0);
+		const [replacedRows] = await database.batch([replace, queueSuperseded]);
+		const replaced = replacedRows.at(0);
 
-		if (inserted !== undefined) {
-			return { incarnation: inserted.incarnation, state: 'pending' };
+		if (replaced !== undefined) {
+			return { incarnation: replaced.incarnation, state: 'pending' };
 		}
 
-		const [current] = await database
-			.select({
-				incarnation: d1Schema.objectIncarnation.incarnation,
-				state: d1Schema.objectIncarnation.state,
-				reservationOwner: d1Schema.objectIncarnation.reservationOwner
-			})
-			.from(d1Schema.objectIncarnation)
-			.where(identityFilter);
-
-		if (
-			reservationOwner !== undefined &&
-			current?.state === 'pending' &&
-			current.reservationOwner !== reservationOwner
-		) {
-			const replace = database
-				.update(d1Schema.objectIncarnation)
-				.set({
-					incarnation: sql`${d1Schema.objectIncarnation.incarnation} + 1`,
-					reservationOwner,
-					updatedAt
-				})
-				.where(
-					and(
-						identityFilter,
-						eq(d1Schema.objectIncarnation.incarnation, current.incarnation),
-						eq(d1Schema.objectIncarnation.state, 'pending'),
-						current.reservationOwner === null
-							? sql`${d1Schema.objectIncarnation.reservationOwner} is null`
-							: eq(
-									d1Schema.objectIncarnation.reservationOwner,
-									current.reservationOwner
-								)
-					)
-				)
-				.returning({
-					incarnation: d1Schema.objectIncarnation.incarnation,
-					state: d1Schema.objectIncarnation.state
-				});
-			const replacementFilter = and(
-				identityFilter,
-				eq(d1Schema.objectIncarnation.incarnation, current.incarnation + 1),
-				eq(d1Schema.objectIncarnation.reservationOwner, reservationOwner)
-			);
-			const superseded = database
-				.select({
-					kind: sql<SharedObjectKind>`${kind}`.as('kind'),
-					objectId: sql<string>`${objectId}`.as('object_id'),
-					incarnation: sql<number>`${current.incarnation}`.as('incarnation'),
-					removeAfter: sql<
-						typeof replacementRemoveAfter
-					>`${replacementRemoveAfter}`.as('remove_after')
-				})
-				.from(d1Schema.objectIncarnation)
-				.where(replacementFilter);
-			const queueSuperseded = database
-				.insert(d1Schema.objectDeletion)
-				.select(superseded)
-				.onConflictDoUpdate({
-					target: [
-						d1Schema.objectDeletion.kind,
-						d1Schema.objectDeletion.objectId,
-						d1Schema.objectDeletion.incarnation
-					],
-					set: {
-						removeAfter: sql`max(${d1Schema.objectDeletion.removeAfter}, excluded.remove_after)`
-					}
-				});
-			const [replacedRows] = await database.batch([replace, queueSuperseded]);
-			const replaced = replacedRows.at(0);
-
-			if (replaced !== undefined) {
-				return { incarnation: replaced.incarnation, state: 'pending' };
-			}
-
-			continue;
-		}
-
-		if (current === undefined || current.state === 'absent') {
-			continue;
-		}
-
-		const [refreshed] = await database
-			.update(d1Schema.objectIncarnation)
-			.set({
-				updatedAt,
-				...(current.state === 'pending' && { reservationOwner })
-			})
-			.where(
-				and(
-					identityFilter,
-					eq(d1Schema.objectIncarnation.incarnation, current.incarnation),
-					eq(d1Schema.objectIncarnation.state, current.state)
-				)
-			)
-			.returning({
-				incarnation: d1Schema.objectIncarnation.incarnation,
-				state: d1Schema.objectIncarnation.state
-			});
-
-		if (refreshed !== undefined && refreshed.state !== 'absent') {
-			return {
-				incarnation: refreshed.incarnation,
-				state: refreshed.state
-			};
-		}
+		throw new ObjectIncarnationReservationContendedError();
 	}
+
+	if (current === undefined || current.state === 'absent') {
+		throw new ObjectIncarnationReservationContendedError();
+	}
+
+	const [refreshed] = await database
+		.update(d1Schema.objectIncarnation)
+		.set({
+			updatedAt,
+			...(current.state === 'pending' && { reservationOwner })
+		})
+		.where(
+			and(
+				identityFilter,
+				eq(d1Schema.objectIncarnation.incarnation, current.incarnation),
+				eq(d1Schema.objectIncarnation.state, current.state)
+			)
+		)
+		.returning({
+			incarnation: d1Schema.objectIncarnation.incarnation,
+			state: d1Schema.objectIncarnation.state
+		});
+
+	if (refreshed !== undefined && refreshed.state !== 'absent') {
+		return {
+			incarnation: refreshed.incarnation,
+			state: refreshed.state
+		};
+	}
+
+	throw new ObjectIncarnationReservationContendedError();
 }
 
 export async function activateObjectIncarnation(

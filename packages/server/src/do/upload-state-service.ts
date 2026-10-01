@@ -39,6 +39,8 @@ type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 // still missing records the hash again.
 const missingCanonicalNarPrefix = 'uploads:missing-canonical-nar:';
 const pendingNarRefreshPrefix = 'uploads:pending-nar-refresh:';
+const pendingNarRefreshMigrationCursorKey =
+	'uploads:pending-nar-refresh-migration-cursor';
 const missingCanonicalNarTtlMs = 60 * 60 * 1000;
 // Durable Object storage reads at most this many keys in one call.
 const maxStorageKeysPerGet = 128;
@@ -49,6 +51,16 @@ function missingCanonicalNarKey(narHash: NixSha256HashString): string {
 
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
+
+	private setPendingNarRefresh(uploadId: UploadId): boolean {
+		const rows = this.context.db
+			.update(schema.pendingUploads)
+			.set({ narRefreshPending: true })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.returning({ id: schema.pendingUploads.id })
+			.all();
+		return rows.length === 1;
+	}
 
 	// Reuse visibility is tenant-scoped. Joining through `tenant_blob` exposes a
 	// canonical blob only after this tenant has established its own presence edge,
@@ -170,12 +182,15 @@ export class UploadStateService {
 		await this.context.ctx.storage.delete(missingCanonicalNarKey(narHash));
 	}
 
-	markPendingNarRefresh(uploadId: UploadId): void {
-		this.context.db
-			.update(schema.pendingUploads)
-			.set({ narRefreshPending: true })
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.run();
+	async markPendingNarRefresh(uploadId: UploadId): Promise<void> {
+		if (!this.setPendingNarRefresh(uploadId)) {
+			return;
+		}
+		// Older builds read this key after canonical activation.
+		await this.context.ctx.storage.put(
+			`${pendingNarRefreshPrefix}${uploadId}`,
+			true
+		);
 	}
 
 	hasPendingNarRefresh(uploadId: UploadId): boolean {
@@ -196,29 +211,59 @@ export class UploadStateService {
 			.run();
 	}
 
+	async clearDeliveredNarRefresh(uploadId: UploadId): Promise<void> {
+		await this.context.ctx.storage.delete(
+			`${pendingNarRefreshPrefix}${uploadId}`
+		);
+		this.clearPendingNarRefresh(uploadId);
+	}
+
 	async migratePendingNarRefreshMarkers(uploadId?: UploadId): Promise<void> {
 		const key = `${pendingNarRefreshPrefix}${uploadId ?? ''}`;
+		const cursor =
+			uploadId === undefined
+				? await this.context.ctx.storage.get<string>(
+						pendingNarRefreshMigrationCursorKey
+					)
+				: undefined;
 		const records =
 			uploadId === undefined
 				? await this.context.ctx.storage.list({
 						prefix: pendingNarRefreshPrefix,
-						limit: maxStorageKeysPerGet
+						limit: maxStorageKeysPerGet,
+						...(cursor !== undefined && { startAfter: cursor })
 					})
 				: await this.context.ctx.storage.get([key]);
+		const obsolete: string[] = [];
 		for (const [key, pending] of records) {
 			const parsedUploadId = uploadIdSchema.safeParse(
 				key.slice(pendingNarRefreshPrefix.length)
 			);
-			if (pending === true && parsedUploadId.success) {
-				this.markPendingNarRefresh(parsedUploadId.data);
+			if (
+				pending === true &&
+				parsedUploadId.success &&
+				this.setPendingNarRefresh(parsedUploadId.data)
+			) {
+				continue;
 			}
+			obsolete.push(key);
 		}
-		if (records.size > 0) {
-			await this.context.ctx.storage.delete(records.keys().toArray());
+		if (obsolete.length > 0) {
+			await this.context.ctx.storage.delete(obsolete);
 		}
-		if (records.size === maxStorageKeysPerGet) {
+		if (uploadId !== undefined) {
+			return;
+		}
+		const last = records.keys().toArray().at(-1);
+		if (last !== undefined && records.size === maxStorageKeysPerGet) {
+			await this.context.ctx.storage.put(
+				pendingNarRefreshMigrationCursorKey,
+				last
+			);
 			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+			return;
 		}
+		await this.context.ctx.storage.delete(pendingNarRefreshMigrationCursorKey);
 	}
 
 	/**
@@ -338,6 +383,10 @@ export class UploadStateService {
 		if (!this.clearPendingUpload(uploadId, owner)) {
 			return false;
 		}
+
+		await this.context.ctx.storage.delete(
+			`${pendingNarRefreshPrefix}${uploadId}`
+		);
 
 		if (r2Key !== narObjectKey(narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);
