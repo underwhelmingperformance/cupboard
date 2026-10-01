@@ -227,7 +227,6 @@ async function renewBeforeExpiry(
 				throw lastFailure;
 			};
 			const due = deadline();
-			lastFailure = new ReadCredentialRenewalError();
 			const next = await Promise.race([issue(attempt.signal), due]);
 			throwIfAborted(controller.signal);
 			if (next.expiresAtMs - now() <= safetyMarginMs) {
