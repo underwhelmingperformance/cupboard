@@ -67,6 +67,7 @@ import {
 	AttestationBundleInvalidError,
 	AttestationBundleTooLargeError,
 	AttestationDigestMismatchError,
+	AttestationInheritanceSourceChangedError,
 	AttestationPathNotFoundError,
 	AttestationSubjectMismatchError,
 	AttestationUploadCacheMismatchError,
@@ -1635,20 +1636,9 @@ export class AttestationsService {
 					break;
 				}
 
-				if (
-					(await this.context.env.BLOBS.head(
-						casObjectKey(row.digest, row.incarnation)
-					)) === null
-				) {
-					logger.warn('attestation inheritance source missing', {
-						cache: cache.scope,
-						storePathHash,
-						digest: row.digest
-					});
-					advanceCursor(row);
-					hasProgressed = true;
-					continue;
-				}
+				const object = await this.context.env.BLOBS.head(
+					casObjectKey(row.digest, row.incarnation)
+				);
 
 				// Source access and reference generations can change during prefetch
 				// or the CAS head. Revalidate them inside the destination write gate.
@@ -1666,17 +1656,50 @@ export class AttestationsService {
 								row.predicateType
 							),
 							eq(d1Schema.attestationReference.digest, row.digest),
-							eq(d1Schema.casObject.incarnation, row.incarnation),
 							otherSource
 						) ?? sql`false`;
-					const [source] = await this.inheritanceSourceQuery(
+					const availableSource = this.inheritanceSourceQuery(
 						cache,
 						sourceFilter,
 						1
-					).all();
+					).as('available_inheritance_source');
+					const [source] = await this.context.d1
+						.select({
+							predicateType: availableSource.predicateType,
+							digest: availableSource.digest,
+							size: availableSource.size,
+							incarnation: availableSource.incarnation,
+							registryIncarnation: d1Schema.objectIncarnation.incarnation,
+							registryState: d1Schema.objectIncarnation.state
+						})
+						.from(availableSource)
+						.leftJoin(
+							d1Schema.objectIncarnation,
+							and(
+								eq(d1Schema.objectIncarnation.kind, 'cas'),
+								eq(d1Schema.objectIncarnation.objectId, availableSource.digest)
+							)
+						)
+						.all();
 
-					if (source === undefined) {
-						return;
+					if (source === undefined || source.registryState === 'absent') {
+						return 'unavailable' as const;
+					}
+					if (
+						source.incarnation !== row.incarnation ||
+						(source.registryIncarnation !== null &&
+							source.registryIncarnation !== row.incarnation) ||
+						source.registryState === 'pending'
+					) {
+						throw new AttestationInheritanceSourceChangedError(row.digest);
+					}
+					if (object === null) {
+						logger.warn('attestation inheritance source missing', {
+							cache: cache.scope,
+							storePathHash,
+							digest: row.digest
+						});
+						return 'unavailable' as const;
 					}
 
 					return this.attestationCas.reserveReferenceAndCharge(
@@ -1696,7 +1719,7 @@ export class AttestationsService {
 					break;
 				}
 
-				shouldWriteList ||= outcome !== undefined;
+				shouldWriteList ||= outcome !== 'unavailable';
 				advanceCursor(row);
 				hasProgressed = true;
 			}

@@ -3,6 +3,7 @@ import {
 	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
+	type Sha256HexDigest,
 	type SigningKeyId,
 	type StoreDirectory,
 	type StorePathHash,
@@ -1348,6 +1349,18 @@ export class AttestationPathNotFoundError extends ServerHttpError {
 	constructor(public readonly storePathHash: StorePathHash) {
 		super('Committed store path not found');
 		this.name = 'AttestationPathNotFoundError';
+	}
+}
+
+export class AttestationInheritanceSourceChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor(public readonly digest: Sha256HexDigest) {
+		super(
+			'The attestation object changed during inheritance. Retry inheritance.'
+		);
+		this.name = 'AttestationInheritanceSourceChangedError';
 	}
 }
 
