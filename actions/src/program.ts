@@ -17,6 +17,7 @@ import {
 	type AttestSignDependencies,
 	registerAttestSignCommand
 } from './commands/attest-sign.ts';
+import { registerAttestStatusCommand } from './commands/attest-status.ts';
 import { registerBuildCommand } from './commands/build.ts';
 import { registerBuildCohortCommand } from './commands/build-cohort.ts';
 import { registerPlanCommand } from './commands/plan.ts';
@@ -84,6 +85,7 @@ export function buildProgram(
 	registerAttestCommand(program, environment);
 	registerAttestSignCommand(program, dependencies.attestSign ?? {});
 	registerAttestAttachCommand(program, environment, signal);
+	registerAttestStatusCommand(program, environment, signal);
 	registerBuildCommand(program, environment, signal);
 	registerBuildCohortCommand(program, environment, signal);
 	registerPlanCommand(program, environment, signal);
@@ -106,6 +108,7 @@ export async function runAction(
 		'setup',
 		'setup-configure',
 		'attest-attach',
+		'attest-status',
 		'build',
 		'build-cohort',
 		'plan',

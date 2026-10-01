@@ -919,6 +919,26 @@ jobs:
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
 
+      - name: Report stored attestation coverage
+        uses: $/actions/attest-status
+        if:
+          ${{ needs.configure.outputs.publish != 'none' &&
+          steps.build-cohort.outputs.receipt-file != '' }}
+        with:
+          url: ${{ inputs.url }}
+          cache: ${{ needs.configure.outputs.cache }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
+          bundles-file: ${{ steps.attest.outputs.bundles-file }}
+          read-user:
+            ${{ secrets.destination_read_user || secrets.read_user ||
+            secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.destination_read_password || secrets.read_password ||
+            secrets.fallback_read_password }}
+
       # At this point, every retention root has been set on the destination and
       # attestation has read the committed narinfos. Remove this build's
       # out-links before collection so a later cohort can substitute these

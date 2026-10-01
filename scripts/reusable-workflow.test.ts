@@ -816,6 +816,7 @@ describe('cohort planning and publication', () => {
 				cupboardAction('build-cohort'),
 				cupboardAction('attest'),
 				cupboardAction('attest-attach'),
+				cupboardAction('attest-status'),
 				cupboardAction('prepare'),
 				cupboardAction('setup')
 			],
@@ -1096,6 +1097,65 @@ describe('attestation', () => {
 					.map(({ step }) => ({ uses: step.uses, if: step.if })),
 				attach: inputsOf(workflow, cupboardAction('attest-attach'))
 			}).toStrictEqual({ gated, attach });
+		}
+	);
+});
+
+describe('publication attestation coverage', () => {
+	it.each([
+		{
+			file: publishWorkflow,
+			name: 'simple',
+			receipt: '${{ steps.push.outputs.receipt-file }}',
+			condition:
+				"${{ inputs.publish != 'none' && steps.push.outputs.receipt-file != '' }}",
+			cache: '${{ inputs.cache }}',
+			credentials: {}
+		},
+		{
+			file: flakeWorkflow,
+			name: 'flake',
+			receipt: '${{ steps.build-cohort.outputs.receipt-file }}',
+			condition:
+				"${{ needs.configure.outputs.publish != 'none' && steps.build-cohort.outputs.receipt-file != '' }}",
+			cache: '${{ needs.configure.outputs.cache }}',
+			credentials: {
+				'read-user':
+					'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
+				'read-password':
+					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}'
+			}
+		}
+	])(
+		'reports coverage after attachment even without fresh signing in $name',
+		async ({ file, receipt, condition, cache, credentials }) => {
+			const steps = allSteps(await loadWorkflow(file)).map(({ step }) => step);
+			const index = steps.findIndex(
+				(step) => step.uses === cupboardAction('attest-status')
+			);
+			const step = steps[index];
+			const attach = steps.findIndex(
+				(item) => item.uses === cupboardAction('attest-attach')
+			);
+			expect({ step, afterAttach: index > attach }).toStrictEqual({
+				step: {
+					name: 'Report stored attestation coverage',
+					uses: cupboardAction('attest-status'),
+					if: condition,
+					with: {
+						url: '${{ inputs.url }}',
+						cache,
+						'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+						'read-session-target':
+							'${{ steps.setup.outputs.read-session-target }}',
+						'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+						'receipt-file': receipt,
+						'bundles-file': '${{ steps.attest.outputs.bundles-file }}',
+						...credentials
+					}
+				},
+				afterAttach: true
+			});
 		}
 	);
 });

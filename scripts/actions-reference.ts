@@ -39,6 +39,7 @@ const publicActions = [
 const internalActions = [
 	'plan',
 	'build-cohort',
+	'attest-status',
 	'prepare',
 	'resolve-cupboard'
 ] as const;

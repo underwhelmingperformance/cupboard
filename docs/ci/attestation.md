@@ -53,6 +53,15 @@ Current servers support pages of up to 32 paths. The client uses bounded
 individual list reads when an older server does not advertise batch discovery.
 Authentication and storage failures fail the status check.
 
+Both publication workflows report coverage after publication and attachment,
+including when signing is disabled or produces no bundles. The report compares
+stored bundle digests with the manifest from the signing step. It lists paths
+with fresh bundles separately from paths with other stored evidence. A path can
+appear in both groups when the cache contains both kinds of evidence. All paths
+in the receipt are checked, including older receipts with build subjects for
+only some paths. The report compares the current NAR hash with the receipt's
+expected hash wherever a subject records that hash.
+
 Discovery reports stored descriptors. Use `attest verify` to check the bundle's
 signature, signer, issuer, predicate and NAR subject. Stored evidence does not
 change build selection or suppress provenance for a fresh local rebuild.
