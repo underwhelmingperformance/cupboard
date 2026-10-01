@@ -12,6 +12,7 @@ import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
+import { cliExitCode } from '../cli.ts';
 import { CupboardHttpError } from '../errors.ts';
 
 import {
@@ -173,6 +174,77 @@ describe('attestation discovery client', () => {
 			);
 		}
 	);
+
+	it.each([
+		{ status: 401, expected: 77 },
+		{ status: 403, expected: 77 },
+		{ status: 503, expected: 75 },
+		{ status: 409, expected: 69 }
+	])(
+		'preserves HTTP $status classification when the error body is oversized',
+		async ({ status, expected }) => {
+			capability(attestationInfoCapability);
+			server.use(
+				http.post(
+					`${url.href}/api/v1/attestation-info`,
+					() => new HttpResponse('x'.repeat(8193), { status })
+				)
+			);
+			let failure: unknown;
+			try {
+				await readAttestationInfo(options, fetch);
+			} catch (error) {
+				failure = error;
+			}
+			expect(cliExitCode(failure, 130)).toBe(expected);
+		}
+	);
+
+	it.each([
+		{ status: 413, code: 'list-too-large', expected: 75 },
+		{ status: 502, code: 'list-invalid', expected: 75 },
+		{ status: 413, code: 'request-too-large', expected: 2 }
+	])(
+		'classifies discovery $code as exit $expected',
+		async ({ status, code, expected }) => {
+			capability(attestationInfoCapability);
+			server.use(
+				http.post(`${url.href}/api/v1/attestation-info`, () =>
+					HttpResponse.json(
+						{ code, message: 'Discovery limit exceeded.', storePathHash: hash },
+						{ status }
+					)
+				)
+			);
+			let failure: unknown;
+			try {
+				await readAttestationInfo(options, fetch);
+			} catch (error) {
+				failure = error;
+			}
+			expect(cliExitCode(failure, 130)).toBe(expected);
+		}
+	);
+
+	it('classifies an oversized fallback narinfo as invalid service metadata', async () => {
+		capability('path-info-v1');
+		server.use(
+			http.get(
+				`${url.href}/${hash}.narinfo`,
+				() => new HttpResponse('x'.repeat(1024 * 1024 + 1))
+			)
+		);
+		let failure: unknown;
+		try {
+			await readAttestationInfo(options, fetch);
+		} catch (error) {
+			failure = error;
+		}
+		expect({
+			name: failure instanceof Error ? failure.name : undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({ name: 'InvalidAttestationDiscoveryError', status: 75 });
+	});
 
 	it('pages at the advertised limit and reuses the scope version', async () => {
 		capability(attestationInfoCapability);
