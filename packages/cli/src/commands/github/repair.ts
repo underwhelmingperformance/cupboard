@@ -139,7 +139,7 @@ function shadowReason(
 			return `a planned rule would be selected in place of ${existing} for ${trigger ?? 'the'} runs of ${job}, and the planned rule does not grant what that job requests.`;
 		}
 		case 'ambiguous': {
-			return `a planned rule and ${existing} would both match ${trigger ?? 'the'} runs of ${job} with as many claims and permit the same request, so the server would have no single rule to select.`;
+			return `a planned rule and ${existing} would both match ${trigger ?? 'the'} runs of ${job} with as many claims, so an exchange without explicit grants would be ambiguous.`;
 		}
 		case 'unmodelled': {
 			return `the check cannot model ${job}, and a planned rule could match its runs with at least as many claims as ${existing}, which may authorise those runs now.`;
@@ -693,7 +693,9 @@ function checkModelledCase(
 	const selected = requests.flatMap((request) => {
 		const selection = selectModelledOidcTrust(existing, claims, request);
 
-		return selection.outcome === 'selected' ? [selection.rule.id] : [];
+		return selection.outcome === 'selected' && selection.rule !== undefined
+			? [selection.rule.id]
+			: [];
 	});
 
 	throw new GithubRepairShadowsRuleError(

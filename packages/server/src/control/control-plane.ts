@@ -100,7 +100,6 @@ import {
 	addControlTrust,
 	controlTrustRuleSnapshots,
 	getControlTrust,
-	isControlTrustSnapshotCurrent,
 	listControlTrust,
 	removeControlTrust
 } from './control-trust.ts';
@@ -272,12 +271,6 @@ export async function controlTokenExchange(
 		}
 	}
 
-	const { rule } = selection;
-	const snapshot = snapshots.find(({ rule: candidate }) => candidate === rule);
-
-	if (snapshot === undefined) {
-		throw new ControlSubjectTokenUntrustedError();
-	}
 	const verifiedSubject =
 		typeof verified.sub === 'string' && verified.sub !== ''
 			? verified.sub
@@ -291,7 +284,14 @@ export async function controlTokenExchange(
 
 	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 	const active = await activeControlKey(database, wrappingSecret);
-	const grants = resolveRequestedGrants(rule, verified, requested);
+	if (selection.grants === undefined && selection.rule === undefined) {
+		throw new ControlSubjectTokenUntrustedError();
+	}
+	const grants =
+		selection.grants ??
+		(selection.rule === undefined
+			? []
+			: resolveRequestedGrants(selection.rule, verified, requested));
 	const accessToken = await issueAccessJwt(
 		active.privateJwk,
 		{
@@ -300,12 +300,24 @@ export async function controlTokenExchange(
 			subject,
 			grants,
 			kid: active.kid,
-			ttlSeconds: adminJwtTtlSeconds
+			ttlSeconds: adminJwtTtlSeconds,
+			auditClaims:
+				selection.rule === undefined ? {} : { cb_rule: selection.rule.id }
 		},
 		now
 	);
 
-	if (!(await isControlTrustSnapshotCurrent(database, snapshot))) {
+	const current = await controlTrustRuleSnapshots(
+		database,
+		canUseLoopbackHttp(env)
+	);
+	if (
+		selectOidcTrust(
+			current.map(({ rule }) => rule),
+			verified,
+			grants
+		).outcome !== 'selected'
+	) {
 		throw new ControlSubjectTokenUntrustedError();
 	}
 

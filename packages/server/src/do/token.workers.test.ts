@@ -20,7 +20,9 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	readAccessGrantType,
-	readAccessResponseSchema
+	readAccessResponseSchema,
+	type ReadResource,
+	readResourcesSchema
 } from '@cupboard/protocol/read-access';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
@@ -37,12 +39,15 @@ import {
 } from '../auth/auth.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
+	cacheIdentities,
 	oidcTrust,
 	refreshTokenFamilies,
 	refreshTokenMembers
 } from '../db/schema.ts';
 import {
+	OAuthError,
 	OwnerConfigurationInvalidError,
+	ReadResourcesNotPermittedError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
 	StoredOidcTrustInvalidError,
@@ -648,6 +653,86 @@ describe('POST /token', () => {
 	});
 });
 
+async function installComposedReadRules(isOverlapping = false): Promise<{
+	readonly subject: string;
+	readonly resources: readonly ReadResource[];
+}> {
+	await installTrustedIdp('write');
+	const subject = await installTrustedIdp('read');
+	const administrator = await issueServerSignedToken(adminGrants());
+	for (const name of ['a', 'b']) {
+		await putTestCache(
+			administrator,
+			{ kind: 'named', name: cacheNameSchema.parse(name) },
+			'private'
+		);
+	}
+	const view = await authorisedFetch('/reuse-views/sources', administrator, {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			access: 'private',
+			priority: 80,
+			selectors: [{ kind: 'all' }]
+		})
+	});
+	expect(view.status).toBe(200);
+	await view.text();
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const database = drizzle(state.storage, { schema: { oidcTrust } });
+		for (const rule of [
+			{ id: 'write-rule', caches: ['a'], view: false },
+			{
+				id: 'read-rule',
+				caches: isOverlapping ? ['a', 'b'] : ['b'],
+				view: true
+			}
+		]) {
+			const grants = [
+				...rule.caches.map((name) => ({
+					type: 'cupboard_cache',
+					actions: ['cache:content-read'],
+					resources: {
+						cache: { kind: 'named', exact: name, validate: 'cacheName' }
+					}
+				})),
+				...(rule.view
+					? [
+							{
+								type: 'cupboard_view',
+								actions: ['view:content-read'],
+								resources: {
+									view: { exact: 'sources', validate: 'reuseViewName' }
+								}
+							}
+						]
+					: [])
+			];
+			database
+				.update(oidcTrust)
+				.set({ permittedGrantsJson: JSON.stringify(grants) })
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse(rule.id)))
+				.run();
+		}
+	});
+	return {
+		subject,
+		resources: readResourcesSchema.parse([
+			{
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: 'a' },
+				mode: 'content'
+			},
+			{
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: 'b' },
+				mode: 'content'
+			},
+			{ type: 'cupboard_view', view: 'sources' }
+		])
+	};
+}
+
 describe('server-resolved read acquisition', () => {
 	beforeEach(resetTestServer);
 
@@ -729,11 +814,11 @@ describe('server-resolved read acquisition', () => {
 				body: {
 					error: 'invalid_authorization_details',
 					error_description:
-						"The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources. Add cache:content-read for cache 'ci'.",
+						"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'ci'.",
 					problem: 'read-resources-not-permitted',
 					detail: {
 						read_resources: JSON.stringify([
-							{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }
+							{ type: 'cupboard_cache', actions: ['cache:content-read'], cache }
 						])
 					}
 				}
@@ -757,14 +842,14 @@ describe('server-resolved read acquisition', () => {
 			body: {
 				error: 'invalid_authorization_details',
 				error_description:
-					"The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources. Add view:content-read for reuse view 'prior'.",
+					"The matching trust rules do not permit the requested read_resources. Add view:content-read for reuse view 'prior'.",
 				problem: 'read-resources-not-permitted',
 				detail: {
 					read_resources: JSON.stringify([
 						{
 							type: 'cupboard_view',
-							view: 'prior',
-							actions: ['view:content-read']
+							actions: ['view:content-read'],
+							view: 'prior'
 						}
 					])
 				}
@@ -772,34 +857,464 @@ describe('server-resolved read acquisition', () => {
 		});
 	});
 
-	it('requires one matching trust rule for the complete read request', async () => {
+	it.each([false, true])(
+		'composes private cache reads with view included=%s',
+		async (includeView) => {
+			const { subject, resources } = await installComposedReadRules();
+			const requested = resources.filter(
+				(resource) => includeView || resource.type === 'cupboard_cache'
+			);
+			const response = await postToken({
+				grant_type: readAccessGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify(requested)
+			});
+			expect(response.status).toBe(200);
+			const result = readAccessResponseSchema.parse(await response.json());
+			const decoded = decodeJwt(result.access_token);
+			const grants = requested.map((resource) =>
+				resource.type === 'cupboard_cache'
+					? {
+							type: resource.type,
+							cache: resource.cache,
+							actions: ['cache:content-read']
+						}
+					: {
+							type: resource.type,
+							view: resource.view,
+							actions: ['view:content-read']
+						}
+			);
+			expect({
+				expires: result.expires_in,
+				refresh: result.refresh_token,
+				grants: result.authorization_details,
+				jwtGrants: decoded.authorization_details,
+				rule: decoded.cb_rule,
+				rules: decoded.cb_rules,
+				facts: result.read_resources
+			}).toStrictEqual({
+				expires: 900,
+				refresh: undefined,
+				grants,
+				jwtGrants: grants,
+				rule: undefined,
+				rules: undefined,
+				facts: requested.map((resource) => ({
+					...resource,
+					state: {
+						kind: 'existing',
+						access: 'private',
+						priority: resource.type === 'cupboard_cache' ? 40 : 80
+					}
+				}))
+			});
+		}
+	);
+
+	it('selects one identity witness for public-only zero-authority read acquisition', async () => {
 		await installTrustedIdp('write');
 		const subject = await installTrustedIdp('read');
+		const cache: CacheScope = {
+			kind: 'named',
+			name: cacheNameSchema.parse('public-outside-grants')
+		};
+		await putTestCache(
+			await issueServerSignedToken(adminGrants()),
+			cache,
+			'public'
+		);
 		const response = await postToken({
 			grant_type: readAccessGrantType,
 			subject_token: subject,
 			subject_token_type: subjectTokenTypeIdToken,
-			read_resources: JSON.stringify([
-				{ type: 'cupboard_cache', cache: { kind: 'named', name: 'ci' } },
-				{ type: 'cupboard_view', view: 'sources' }
-			])
+			read_resources: JSON.stringify([{ type: 'cupboard_cache', cache }])
+		});
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = readAccessResponseSchema.parse(await response.json());
+		const claims = decodeJwt(result.access_token);
+		expect({
+			grants: result.authorization_details,
+			tokenGrants: claims.authorization_details,
+			refresh: result.refresh_token,
+			rule: claims.cb_rule,
+			rules: claims.cb_rules
+		}).toStrictEqual({
+			grants: [],
+			tokenGrants: [],
+			refresh: undefined,
+			rule: 'read-rule',
+			rules: undefined
+		});
+	});
+
+	it('refuses private authority from a lower-precedence matching read rule', async () => {
+		const { subject, resources } = await installComposedReadRules();
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { oidcTrust } })
+				.update(oidcTrust)
+				.set({ claimsJson: '{}' })
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('read-rule')))
+				.run();
+		});
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(resources.slice(0, 2))
 		});
 		expect({
 			status: response.status,
 			body: await response.json()
 		}).toStrictEqual({
-			status: 400,
+			status: StatusCodes.BAD_REQUEST,
 			body: {
 				error: 'invalid_authorization_details',
 				error_description:
-					'The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources.',
+					"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'b'.",
 				problem: 'read-resources-not-permitted',
-				detail: { read_resources: '[]' }
+				detail: {
+					read_resources: JSON.stringify([
+						{
+							type: 'cupboard_cache',
+							actions: ['cache:content-read'],
+							cache: { kind: 'named', name: 'b' }
+						}
+					])
+				}
 			}
 		});
 	});
 
-	it('explains single-rule coverage even when one requested grant is missing', async () => {
+	it('deduplicates overlapping read grants and preserves single-rule audit compatibility', async () => {
+		const { subject, resources } = await installComposedReadRules(true);
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(resources)
+		});
+		expect(response.status).toBe(200);
+		const result = readAccessResponseSchema.parse(await response.json());
+		const decoded = decodeJwt(result.access_token);
+		expect({
+			grants: result.authorization_details,
+			rule: decoded.cb_rule,
+			rules: decoded.cb_rules
+		}).toStrictEqual({
+			grants: [
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'a' },
+					actions: ['cache:content-read']
+				},
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'b' },
+					actions: ['cache:content-read']
+				},
+				{
+					type: 'cupboard_view',
+					view: 'sources',
+					actions: ['view:content-read']
+				}
+			],
+			rule: 'read-rule',
+			rules: undefined
+		});
+	});
+
+	it.each([
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'write-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'read-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'write-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: true,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: true,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: false,
+			priorNarrow: true
+		}
+	])(
+		'rechecks $kind current policy after $removed removal (replacement: $replace, higher tier: $restrictive)',
+		async ({ kind, removed, replace, restrictive, priorNarrow }) => {
+			const { subject, resources } =
+				await installComposedReadRules(priorNarrow);
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const identity = new TenantIdentityService(instance.context);
+					const authKeys = new AuthKeysService(instance.context, identity);
+					const trust = new OidcTrustService(instance.context, identity);
+					if (priorNarrow) {
+						const original = trust.getRule(trustRuleIdSchema.parse(removed));
+						instance.context.db
+							.update(oidcTrust)
+							.set({
+								claimsJson: JSON.stringify({
+									...original.claims,
+									iss: original.issuer
+								})
+							})
+							.where(eq(oidcTrust.id, original.id))
+							.run();
+					}
+					const key = await authKeys.activeAuthKey();
+					const signingStarted = Promise.withResolvers<undefined>();
+					const releaseSigning = Promise.withResolvers<undefined>();
+					vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
+						signingStarted.resolve(undefined);
+						await releaseSigning.promise;
+						return key;
+					});
+					const service = new TokenExchangeService(
+						instance.context,
+						authKeys,
+						trust
+					);
+					const requested = resources.map((resource) =>
+						resource.type === 'cupboard_cache'
+							? {
+									type: resource.type,
+									cache: resource.cache,
+									actions: ['cache:content-read']
+								}
+							: {
+									type: resource.type,
+									view: resource.view,
+									actions: ['view:content-read']
+								}
+					);
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type:
+								kind === 'read' ? readAccessGrantType : tokenExchangeGrantType,
+							subject_token: subject,
+							subject_token_type: subjectTokenTypeIdToken,
+							...(kind === 'read'
+								? { read_resources: JSON.stringify(resources) }
+								: {
+										authorization_details: JSON.stringify(requested)
+									})
+						}).toString()
+					});
+					const issuing = service.handleToken(rootLogger(), request);
+					await signingStarted.promise;
+					try {
+						const rule = trust.getRule(trustRuleIdSchema.parse(removed));
+						trust.removeRule(rule.id);
+						if (replace) {
+							await trust.addRule({
+								issuer: rule.issuer,
+								audience: rule.audience,
+								claims: restrictive
+									? { ...rule.claims, iss: rule.issuer }
+									: priorNarrow
+										? { sub: 'alice' }
+										: rule.claims,
+								permittedGrants: restrictive
+									? []
+									: [
+											...rule.permittedGrants,
+											{
+												type: 'cupboard_cache',
+												actions: ['cache:content-read'],
+												resources: {
+													cache: {
+														kind: 'named',
+														exact: 'extra',
+														validate: 'cacheName'
+													}
+												}
+											}
+										]
+							});
+						}
+					} finally {
+						releaseSigning.resolve(undefined);
+					}
+					try {
+						const response = await issuing;
+						const result = (
+							kind === 'read' ? readAccessResponseSchema : tokenResponseSchema
+						).parse(await response.json());
+						expect({
+							grants: result.authorization_details,
+							tokenGrants: decodeJwt(result.access_token).authorization_details
+						}).toStrictEqual({ grants: requested, tokenGrants: requested });
+						return 'issued';
+					} catch (error) {
+						expect(error).toBeInstanceOf(
+							kind === 'read'
+								? ReadResourcesNotPermittedError
+								: TenantSubjectTokenUntrustedError
+						);
+						return 'refused';
+					}
+				}
+			);
+			expect(result).toBe(replace && !restrictive ? 'issued' : 'refused');
+		}
+	);
+
+	it.each(['cache becomes private', 'content grant is removed'])(
+		'reports requested authority when %s during signing',
+		async (change) => {
+			const { subject, resources } = await installComposedReadRules();
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const identity = new TenantIdentityService(instance.context);
+					const authKeys = new AuthKeysService(instance.context, identity);
+					const trust = new OidcTrustService(instance.context, identity);
+					instance.context.db
+						.update(cacheIdentities)
+						.set({ access: 'public' })
+						.run();
+					if (change === 'cache becomes private') {
+						instance.context.db
+							.update(oidcTrust)
+							.set({ permittedGrantsJson: '[]' })
+							.run();
+					}
+					const key = await authKeys.activeAuthKey();
+					const signingStarted = Promise.withResolvers<undefined>();
+					const releaseSigning = Promise.withResolvers<undefined>();
+					vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
+						signingStarted.resolve(undefined);
+						await releaseSigning.promise;
+						return key;
+					});
+					const service = new TokenExchangeService(
+						instance.context,
+						authKeys,
+						trust
+					);
+					const readResources = JSON.stringify(resources.slice(0, 1));
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: readAccessGrantType,
+							subject_token: subject,
+							subject_token_type: subjectTokenTypeIdToken,
+							read_resources: readResources
+						})
+					});
+					const issuing = service.handleToken(rootLogger(), request);
+					await signingStarted.promise;
+					try {
+						if (change === 'cache becomes private') {
+							instance.context.db
+								.update(cacheIdentities)
+								.set({ access: 'private' })
+								.run();
+						} else if (change === 'content grant is removed') {
+							instance.context.db
+								.update(oidcTrust)
+								.set({ permittedGrantsJson: '[]' })
+								.run();
+						}
+					} finally {
+						releaseSigning.resolve(undefined);
+					}
+					try {
+						await issuing;
+						return 'issued';
+					} catch (error) {
+						if (!(error instanceof OAuthError)) {
+							throw error;
+						}
+						return {
+							status: error.status,
+							body: {
+								error: error.error,
+								error_description: error.message,
+								problem: error.problem,
+								detail: error.detail
+							}
+						};
+					}
+				}
+			);
+			expect(result).toStrictEqual({
+				status: 400,
+				body: {
+					error: 'invalid_authorization_details',
+					error_description:
+						"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'a'.",
+					problem: 'read-resources-not-permitted',
+					detail: {
+						read_resources: JSON.stringify([
+							{
+								type: 'cupboard_cache',
+								actions: ['cache:content-read'],
+								cache: { kind: 'named', name: 'a' }
+							}
+						])
+					}
+				}
+			});
+		}
+	);
+
+	it('identifies genuinely uncovered grants after composing matching rules', async () => {
 		await installTrustedIdp('write');
 		const subject = await installTrustedIdp('read');
 		const caches = ['a', 'b', 'c'].map((name) => ({
@@ -857,14 +1372,14 @@ describe('server-resolved read acquisition', () => {
 			body: {
 				error: 'invalid_authorization_details',
 				error_description:
-					"The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources. Add cache:content-read for cache 'c'.",
+					"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'c'.",
 				problem: 'read-resources-not-permitted',
 				detail: {
 					read_resources: JSON.stringify([
 						{
 							type: 'cupboard_cache',
-							cache: { kind: 'named', name: 'c' },
-							actions: ['cache:content-read']
+							actions: ['cache:content-read'],
+							cache: { kind: 'named', name: 'c' }
 						}
 					])
 				}
@@ -926,6 +1441,36 @@ describe('server-resolved read acquisition', () => {
 			jwtGrants: grants
 		});
 	});
+
+	it.each([undefined, 'legacy-rule'])(
+		'accepts an existing read token with legacy audit rule %s without reacquisition',
+		async (auditRule) => {
+			const cache: CacheScope = {
+				kind: 'named',
+				name: cacheNameSchema.parse('legacy-private')
+			};
+			await putTestCache(
+				await issueServerSignedToken(adminGrants()),
+				cache,
+				'private'
+			);
+			const token = await issueServerSignedToken(
+				[{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }],
+				'legacy-session',
+				auditRule === undefined ? undefined : { cb_rule: auditRule }
+			);
+			const claims = decodeJwt(token);
+			const isAuthorised = await currentServer().authoriseCacheContentRead(
+				token,
+				cache
+			);
+			expect({
+				authorised: isAuthorised,
+				rule: claims.cb_rule,
+				rules: claims.cb_rules
+			}).toStrictEqual({ authorised: true, rule: auditRule, rules: undefined });
+		}
+	);
 
 	it.each(['content', 'metadata'] as const)(
 		'keeps interactive read acquisition short-lived and read-only for %s intent',
@@ -3436,7 +3981,7 @@ describe('requested grants', () => {
 		});
 	});
 
-	it('refuses tied rules that both permit the requested authority', async () => {
+	it('deterministically composes overlapping explicit authority', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const overlappingGrant: PermittedGrant = {
 			type: 'cupboard_cache',
@@ -3453,20 +3998,87 @@ describe('requested grants', () => {
 			subject_token_type: subjectTokenTypeIdToken,
 			authorization_details: JSON.stringify(ciRequest)
 		});
-		const body = oauthErrorShape(await response.json());
-
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = tokenResponseSchema.parse(await response.json());
+		const claims = decodeJwt(result.access_token);
 		expect({
-			status: response.status,
-			problem: body.problem,
-			detail: body.detail
+			grants: result.authorization_details,
+			tokenGrants: claims.authorization_details,
+			refresh: result.refresh_token,
+			rule: claims.cb_rule,
+			rules: claims.cb_rules
 		}).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			problem: 'subject-token-untrusted',
-			detail: undefined
+			grants: ciRequest,
+			tokenGrants: ciRequest,
+			refresh: undefined,
+			rule: 'overlapping-rule',
+			rules: undefined
 		});
 	});
 
-	it('does not combine requested authority from separate rules', async () => {
+	it.each(['run/1', 'other/1'])(
+		'composes actions for the same cache without extending root authority to %s',
+		async (root) => {
+			const subject = await installTrustedIdp('write');
+			await installAdditionalTrustRule('retain-rule', [
+				{
+					type: 'cupboard_cache',
+					actions: ['root:set'],
+					resources: {
+						cache: { kind: 'named', exact: 'ci', validate: 'cacheName' },
+						root: { exact: 'run/', validate: 'rootName' }
+					}
+				}
+			]);
+			const requested = [
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('ci'),
+					actions: ['upload:commit', 'root:set'],
+					root
+				}
+			];
+			const response = await postToken({
+				grant_type: tokenExchangeGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				authorization_details: JSON.stringify(requested)
+			});
+			if (root === 'other/1') {
+				expect({
+					status: response.status,
+					body: await response.json()
+				}).toStrictEqual({
+					status: StatusCodes.BAD_REQUEST,
+					body: {
+						error: 'invalid_authorization_details',
+						error_description:
+							'The requested authorization_details are not permitted',
+						problem: 'not-permitted'
+					}
+				});
+				return;
+			}
+			expect(response.status).toBe(StatusCodes.OK);
+			const result = tokenResponseSchema.parse(await response.json());
+			const claims = decodeJwt(result.access_token);
+			expect({
+				grants: result.authorization_details,
+				tokenGrants: claims.authorization_details,
+				refresh: result.refresh_token,
+				rule: claims.cb_rule,
+				rules: claims.cb_rules
+			}).toStrictEqual({
+				grants: requested,
+				tokenGrants: requested,
+				refresh: undefined,
+				rule: undefined,
+				rules: undefined
+			});
+		}
+	);
+
+	it('composes exact explicit authority from separate rules without refresh', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const privateGrant: PermittedGrant = {
 			type: 'cupboard_cache',
@@ -3491,16 +4103,21 @@ describe('requested grants', () => {
 			subject_token_type: subjectTokenTypeIdToken,
 			authorization_details: JSON.stringify(requested)
 		});
-		const body = oauthErrorShape(await response.json());
-
-		expect({ status: response.status, body }).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			body: {
-				error: 'invalid_authorization_details',
-				error_description:
-					'The requested authorization_details are not permitted',
-				problem: 'not-permitted'
-			}
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = tokenResponseSchema.parse(await response.json());
+		const claims = decodeJwt(result.access_token);
+		expect({
+			grants: result.authorization_details,
+			tokenGrants: claims.authorization_details,
+			refresh: result.refresh_token,
+			rule: claims.cb_rule,
+			rules: claims.cb_rules
+		}).toStrictEqual({
+			grants: requested,
+			tokenGrants: requested,
+			refresh: undefined,
+			rule: undefined,
+			rules: undefined
 		});
 	});
 

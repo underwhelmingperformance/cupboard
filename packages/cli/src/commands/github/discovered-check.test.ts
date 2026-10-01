@@ -1032,6 +1032,95 @@ jobs:
 	]);
 });
 
+it.each([true, false])(
+	'checks prefix coverage across the preferred identity tier (same tier: %s)',
+	async (isSameTier) => {
+		const reference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+		const body = buildAddBody({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenant.href,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				ref: 'refs/heads/main',
+				job_workflow_ref: reference
+			},
+			permittedGrants: [
+				buildCacheGrant({
+					cache: 'packages',
+					root: 'github:iainlane/dotfiles/main/x86_64-linux',
+					allow: ['push', 'attest', 'root']
+				})
+			]
+		});
+		const rule = oidcTrustSummarySchema.parse({
+			...body,
+			id: 'a-exact',
+			disabled: false
+		});
+		const prefixRule = oidcTrustSummarySchema.parse({
+			...body,
+			id: 'z-prefix',
+			disabled: false,
+			claims: isSameTier ? body.claims : { repository_id: '1234' },
+			permittedGrants: [
+				buildCacheGrant({
+					cache: 'packages',
+					root: 'github:iainlane/dotfiles/main/',
+					allow: ['push', 'attest', 'root']
+				})
+			]
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			fixture({ rules: [rule, prefixRule] }).client,
+			defaultDependencies({
+				source: {
+					resolveBranch: () => Promise.resolve('a'.repeat(40)),
+					list: () => Promise.resolve([path]),
+					read: () =>
+						Promise.resolve(`
+on:
+  push:
+    branches: [main]
+jobs:
+  packages:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: packages
+      root: github:iainlane/dotfiles/main
+`)
+				}
+			})
+		);
+
+		expect(result.jobs).toStrictEqual([
+			{
+				caller: path,
+				job: 'packages',
+				workflowRef: reference,
+				status: isSameTier ? 'ready' : 'unverified',
+				findings: [
+					{ trigger: 'push', finding: new PassedCheckFinding('trust rule') },
+					{
+						trigger: 'push',
+						finding: isSameTier
+							? new PassedCheckFinding('root grant')
+							: new RootGrantPrefixUnverifiedFinding(
+									'root grant',
+									'github:iainlane/dotfiles/main/x86_64-linux'
+								)
+					}
+				]
+			}
+		]);
+	}
+);
+
 it('does not decide wildcard tag coverage from one fabricated tag', async () => {
 	const reference =
 		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';

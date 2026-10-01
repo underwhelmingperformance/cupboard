@@ -3,7 +3,8 @@ import {
 	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
-	tokenResponseSchema
+	tokenResponseSchema,
+	type TrustRuleId
 } from '@cupboard/protocol/oidc';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -132,6 +133,7 @@ async function signedToken(options: {
 
 interface TrustedControlIdentity {
 	readonly token: string;
+	readonly rule: TrustRuleId;
 	readonly issuer: string;
 	readonly audience: string;
 }
@@ -147,7 +149,7 @@ async function trustedControlIdentity(
 	});
 	const publicJwk = await exportJWK(publicKey);
 
-	await seedControlTrust({
+	const rule = await seedControlTrust({
 		issuer,
 		audience,
 		claims: { sub: 'global-admin' },
@@ -188,7 +190,7 @@ async function trustedControlIdentity(
 		.setExpirationTime('5m')
 		.sign(privateKey);
 
-	return { token, issuer, audience };
+	return { token, rule, issuer, audience };
 }
 
 describe('control plane POST /token', () => {
@@ -585,6 +587,63 @@ describe('control plane POST /token', () => {
 		});
 	});
 
+	it('composes control actions and resources without implicit authority expansion', async () => {
+		const identity = await trustedControlIdentity('JWT', [
+			{
+				type: 'cupboard_tenant',
+				actions: ['tenant:suspend'],
+				resources: { tenant: { exact: 'acme', validate: 'tenant' } }
+			}
+		]);
+		await seedControlTrust({
+			issuer: identity.issuer,
+			audience: identity.audience,
+			claims: { sub: 'global-admin' },
+			permittedGrants: [
+				{
+					type: 'cupboard_tenant',
+					actions: ['tenant:resume'],
+					resources: { tenant: { exact: 'acme', validate: 'tenant' } }
+				},
+				{
+					type: 'cupboard_tenant',
+					actions: ['tenant:suspend'],
+					resources: { tenant: { exact: 'beta', validate: 'tenant' } }
+				}
+			]
+		});
+		const requested = [
+			{
+				type: 'cupboard_tenant',
+				actions: ['tenant:suspend', 'tenant:resume'],
+				tenant: 'acme'
+			},
+			{ type: 'cupboard_tenant', actions: ['tenant:suspend'], tenant: 'beta' }
+		];
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: identity.token,
+			subject_token_type: subjectTokenTypeIdToken,
+			authorization_details: JSON.stringify(requested)
+		});
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = tokenResponseSchema.parse(await response.json());
+		const claims = decodeJwt(result.access_token);
+		expect({
+			grants: result.authorization_details,
+			tokenGrants: claims.authorization_details,
+			refresh: result.refresh_token,
+			rule: claims.cb_rule,
+			rules: claims.cb_rules
+		}).toStrictEqual({
+			grants: requested,
+			tokenGrants: requested,
+			refresh: undefined,
+			rule: undefined,
+			rules: undefined
+		});
+	});
+
 	it('retries one issuer fetch failure and completes the exchange', async () => {
 		const { token: subjectToken } = await trustedControlIdentity('JWT');
 		const served = fetch;
@@ -635,6 +694,72 @@ describe('control plane POST /token', () => {
 
 		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
 	});
+
+	it.each(['first', 'second'] as const)(
+		'refuses composed control authority after %s rule removal',
+		async (removed) => {
+			const identity = await trustedControlIdentity('JWT', [
+				{
+					type: 'cupboard_tenant',
+					actions: ['tenant:suspend'],
+					resources: { tenant: { exact: 'acme', validate: 'tenant' } }
+				}
+			]);
+			const additional = await seedControlTrust({
+				issuer: identity.issuer,
+				audience: identity.audience,
+				claims: { sub: 'global-admin' },
+				permittedGrants: [
+					{
+						type: 'cupboard_tenant',
+						actions: ['tenant:suspend'],
+						resources: { tenant: { exact: 'beta', validate: 'tenant' } }
+					}
+				]
+			});
+			const served = fetch;
+			const started = Promise.withResolvers<undefined>();
+			const release = Promise.withResolvers<undefined>();
+			vi.stubGlobal(
+				'fetch',
+				async (input: RequestInfo | URL, init?: RequestInit) => {
+					const url = input instanceof Request ? input.url : String(input);
+					if (url === `${identity.issuer}/.well-known/openid-configuration`) {
+						started.resolve(undefined);
+						await release.promise;
+					}
+					return served(input, init);
+				}
+			);
+			const exchange = tokenExchangeError({
+				grant_type: tokenExchangeGrantType,
+				subject_token: identity.token,
+				subject_token_type: subjectTokenTypeIdToken,
+				authorization_details: JSON.stringify([
+					{
+						type: 'cupboard_tenant',
+						actions: ['tenant:suspend'],
+						tenant: 'acme'
+					},
+					{
+						type: 'cupboard_tenant',
+						actions: ['tenant:suspend'],
+						tenant: 'beta'
+					}
+				])
+			});
+			await started.promise;
+			try {
+				await controlOidcTrustRemove(
+					Object.assign({}, env, testControlEnv),
+					removed === 'first' ? identity.rule : additional
+				);
+			} finally {
+				release.resolve(undefined);
+			}
+			expect(await exchange).toBeInstanceOf(ControlSubjectTokenUntrustedError);
+		}
+	);
 
 	it('refuses an exchange when its control trust rule is removed during verification', async () => {
 		const issuer = `https://idp-${crypto.randomUUID()}.example.test`;

@@ -133,15 +133,17 @@ cupboard can't choose between them. Check that a rule:
 If a rule matches the token's exact repository IDs, the error message identifies
 that rule and the first claim that didn't match.
 
-If two rules are equally specific and both allow the request, cupboard refuses
-it. Remove one of the rules.
+An exchange without explicit grants requires one matching rule. If equally
+specific rules match, request explicit grants or distinguish the rules' identity
+constraints.
 
 ### "The requested authorization_details are not permitted"
 
-A trust rule matched the token, but it doesn't allow everything that the job
-asked for. For example, the job might need `root` for its root, `attach` for a
-run root, or `attest`. cupboard never combines rules, so a single rule must
-allow everything. See
+The preferred matching trust rules do not permit every action that the job
+requested. For example, the job might need `root:set` for its target root,
+`root:attach` for its run root, or `attestation:attach`. Add the missing grant
+to an eligible rule. Grants can compose within the preferred identity group, but
+a less preferred rule cannot supply missing authority. See
 [When several rules match](./ci/trust-rules.md#when-several-rules-match).
 
 ### The preset fails the run

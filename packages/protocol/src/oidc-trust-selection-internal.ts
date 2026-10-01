@@ -1,21 +1,11 @@
-import { isGrantPermittedByRule } from './grant-match.ts';
 import { type AuthorizationDetails } from './grants.ts';
+import { composeOidcGrants } from './oidc-grant-composition.ts';
 import {
 	type OidcClaims,
 	type OidcTrustRule,
 	preferredModelledOidcTrustRules
 } from './oidc-trust-match.ts';
 import { type OidcTrustSelection } from './oidc-trust-selection.ts';
-
-function isEveryRequestedGrantPermittedByRule(
-	rule: OidcTrustRule,
-	claims: OidcClaims,
-	requested: AuthorizationDetails
-): boolean {
-	return requested.every((detail) =>
-		isGrantPermittedByRule(rule.permittedGrants, detail, claims)
-	);
-}
 
 function hasExactlyOne<T>(values: readonly T[]): values is readonly [T] {
 	return values.length === 1;
@@ -44,23 +34,9 @@ export function evaluateOidcTrust(
 		return { outcome: 'ambiguous', rules: preferred };
 	}
 
-	const permitted = preferred.filter((rule) =>
-		isEveryRequestedGrantPermittedByRule(rule, claims, requested)
+	return composeOidcGrants(
+		rules,
+		claims,
+		requested.map((detail) => ({ alternatives: [detail] }))
 	);
-
-	if (!isNonEmpty(permitted)) {
-		const uncovered = requested.filter((detail) =>
-			preferred.every(
-				(rule) => !isGrantPermittedByRule(rule.permittedGrants, detail, claims)
-			)
-		);
-
-		return { outcome: 'authority-unmatched', rules: preferred, uncovered };
-	}
-
-	if (hasExactlyOne(permitted)) {
-		return { outcome: 'selected', rule: permitted[0] };
-	}
-
-	return { outcome: 'ambiguous', rules: permitted };
 }

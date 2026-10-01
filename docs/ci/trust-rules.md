@@ -33,8 +33,9 @@ others.
 ## Why a job gets either everything that it asks for or nothing
 
 When a job exchanges its token, it asks for the specific grants that it needs.
-The exchange succeeds only if a single rule accepts the token and allows
-everything that the job asked for.
+The exchange succeeds only if eligible matching rules collectively allow
+everything that the job asked for. Separate rules can permit separate resources
+or actions. The response contains exactly the requested grants.
 
 cupboard never gives a job less than it asked for. Suppose a push asks to
 publish, to set a root and to attach attestations, and the rule doesn't allow
@@ -186,12 +187,13 @@ Trust rules can grant a CI job `cache:content-read` for one cache or
 identity token for a short-lived Cupboard read token. A static [read
 credential][static-credential] remains an option.
 
-Read acquisition resolves the configured cache and view together against one
-matching rule. Public resources require no content-read grant; acquisition
-includes a permitted content-read grant and omits an unpermitted public grant.
-An absent publication destination can receive scoped metadata-read authority.
-That token authorises an absence response but cannot read private content after
-creation. Existing private resources require their exact content-read grants.
+Read acquisition composes authority for the configured cache and view from the
+preferred matching rules. Public resources require no content-read grant;
+acquisition includes a permitted content-read grant and omits an unpermitted
+public grant. An absent publication destination can receive scoped metadata-read
+authority. That token authorises an absence response but cannot read private
+content after creation. Existing private resources require their exact
+content-read grants.
 
 [static-credential]: ../use/private-caches.md#read-credentials
 
@@ -258,17 +260,17 @@ out the most preferred group of matching rules:
 2. Otherwise, rules that pin more claims come first. The issuer and audience
    don't count. A pattern counts the same as an exact value.
 
-Within that group, exactly one rule must allow the whole request, or the
-exchange is refused.
+Within that group, cupboard composes the requested authority from the rules.
+Every requested action must be permitted for its exact resource and root.
+Overlapping grants do not make an explicit request ambiguous. cupboard never
+falls back to a less preferred group and never returns a partial subset of the
+requested grants. After signing, cupboard re-evaluates the exact authority
+against current policy. Removing a rule changes the policy; an equivalent
+matching rule can still permit the request.
 
-- cupboard never falls back to a less preferred rule.
-- cupboard never combines rules. If a push needs a grant for its target root and
-  another for its run root, one rule must give both.
-- If two rules in the group both allow the request, the exchange is refused as
-  ambiguous.
-
-Rules in the same group can still cover different things, such as different
-caches. That works because each request is then allowed by exactly one of them.
+An exchange that omits explicit grants still requires a single matching rule.
+Only an interactive rule can issue implicit wildcard authority. CI composition
+does not create refresh tokens.
 
 ## Writing a rule by hand
 

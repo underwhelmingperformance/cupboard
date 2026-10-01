@@ -10,7 +10,6 @@ import {
 	AmbiguousTrustRulesFinding,
 	describeAuthorizationDetail,
 	InteractiveTrustRuleFinding,
-	SplitTrustAuthorityFinding,
 	TrustRuleGrantMissingFinding,
 	trustSelectionFinding
 } from './trust-selection.ts';
@@ -102,25 +101,7 @@ describe('trustSelectionFinding', () => {
 				refused
 			),
 			rendered:
-				'failed: rules branch, other match the modelled claims and permit ' +
-				'upload:commit on cache private; make their grants disjoint or disable one rule'
-		},
-		{
-			name: 'authority split across rules',
-			request: refused,
-			selection: {
-				outcome: 'authority-unmatched',
-				rules: [rule, otherRule],
-				uncovered: []
-			},
-			expected: new SplitTrustAuthorityFinding('main trust rule', [
-				rule,
-				otherRule
-			]),
-			rendered:
-				'failed: rules branch, other match the modelled claims, but no single rule ' +
-				'permits the complete request; grant the request to one rule instead of ' +
-				'splitting it across rules'
+				'failed: rules branch, other match the modelled claims but implicit authority requires one rule; request explicit grants or distinguish their claims'
 		},
 		{
 			name: 'missing grant on the sole matching rule',
@@ -128,7 +109,7 @@ describe('trustSelectionFinding', () => {
 			selection: {
 				outcome: 'authority-unmatched',
 				rules: [rule],
-				uncovered: refused
+				uncovered: [refusedDetail]
 			},
 			expected: new TrustRuleGrantMissingFinding(
 				'main trust rule',
@@ -145,7 +126,7 @@ describe('trustSelectionFinding', () => {
 			selection: {
 				outcome: 'authority-unmatched',
 				rules: [rule, otherRule],
-				uncovered: refused
+				uncovered: [refusedDetail]
 			},
 			expected: new TrustRuleGrantMissingFinding(
 				'main trust rule',
@@ -171,7 +152,7 @@ describe('trustSelectionFinding', () => {
 		{
 			name: 'permitted selection',
 			request: permitted,
-			selection: { outcome: 'selected', rule },
+			selection: { outcome: 'selected', rule: rule },
 			expected: undefined,
 			rendered: undefined
 		}

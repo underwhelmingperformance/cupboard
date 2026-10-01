@@ -4,6 +4,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
+import { type AuthorizationDetails } from './grants.ts';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
@@ -165,7 +166,7 @@ describe('read authority', () => {
 		expect(resolveReadAuthority(rule, claims, [resource])).toBeUndefined();
 	});
 
-	it('rejects ambiguous public rules even when only one permits optional content access', () => {
+	it('selects permitted optional content authority from the preferred public rules', () => {
 		const publicCache: ReadResourceState = {
 			type: 'cupboard_cache',
 			cache,
@@ -191,11 +192,17 @@ describe('read authority', () => {
 		};
 
 		expect(selectReadTrust([rule, other], claims, [publicCache])).toStrictEqual(
-			{ outcome: 'ambiguous', rules: [rule, other] }
+			{
+				outcome: 'selected',
+				rule: other,
+				grants: [
+					{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }
+				]
+			}
 		);
 	});
 
-	it('does not combine cache and view authority from different rules', () => {
+	it('composes cache metadata and private view authority from matching rules', () => {
 		const view = reuseViewNameSchema.parse('prior');
 		const viewRule: OidcTrustRule = {
 			...rule,
@@ -227,11 +234,131 @@ describe('read authority', () => {
 		];
 
 		expect(selectReadTrust([rule, viewRule], claims, resources)).toStrictEqual({
-			outcome: 'authority-unmatched',
-			rules: [rule, viewRule],
-			uncovered: []
+			outcome: 'selected',
+			grants: [
+				{ type: 'cupboard_cache', cache, actions: ['cache:read'] },
+				{ type: 'cupboard_view', view, actions: ['view:content-read'] }
+			]
 		});
 	});
+
+	it.each(['forward', 'reverse'] as const)(
+		'deduplicates overlapping grants in deterministic rule order: %s',
+		(order) => {
+			const readable: OidcTrustRule = {
+				...rule,
+				permittedGrants: [
+					{
+						type: 'cupboard_cache',
+						actions: ['cache:content-read'],
+						resources: {
+							cache: { kind: 'named', exact: 'builds', validate: 'cacheName' }
+						}
+					}
+				]
+			};
+			const other: OidcTrustRule = {
+				...readable,
+				id: trustRuleIdSchema.parse('other')
+			};
+			const resource: ReadResourceState = {
+				type: 'cupboard_cache',
+				cache,
+				mode: 'content',
+				state: {
+					kind: 'existing',
+					access: 'private',
+					priority: cachePrioritySchema.parse(40)
+				}
+			};
+			expect(
+				selectReadTrust(
+					order === 'forward' ? [readable, other] : [other, readable],
+					claims,
+					[resource]
+				)
+			).toStrictEqual({
+				outcome: 'selected',
+				rule: readable,
+				grants: [
+					{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }
+				]
+			});
+		}
+	);
+
+	it('uses one preferred identity witness for public resources without authority', () => {
+		const other: OidcTrustRule = {
+			...rule,
+			id: trustRuleIdSchema.parse('other')
+		};
+		const resource: ReadResourceState = {
+			type: 'cupboard_cache',
+			cache,
+			mode: 'content',
+			state: {
+				kind: 'existing',
+				access: 'public',
+				priority: cachePrioritySchema.parse(40)
+			}
+		};
+		expect(selectReadTrust([other, rule], claims, [resource])).toStrictEqual({
+			outcome: 'selected',
+			rule: rule,
+			grants: []
+		});
+	});
+
+	it.each(['absent', 'private'] as const)(
+		'rechecks %s resource facts without expanding the previous read ceiling',
+		(state) => {
+			const broader: OidcTrustRule = {
+				...rule,
+				permittedGrants: [
+					{
+						type: 'cupboard_cache',
+						actions: ['cache:content-read', 'cache:read'],
+						resources: {
+							cache: { kind: 'named', exact: 'builds', validate: 'cacheName' }
+						}
+					}
+				]
+			};
+			const maximum: AuthorizationDetails = [
+				{ type: 'cupboard_cache', cache, actions: ['cache:read'] }
+			];
+			const resource: ReadResourceState = {
+				type: 'cupboard_cache',
+				cache,
+				mode: 'content',
+				state:
+					state === 'absent'
+						? { kind: 'absent' }
+						: {
+								kind: 'existing',
+								access: 'private',
+								priority: cachePrioritySchema.parse(40)
+							}
+			};
+			expect(
+				selectReadTrust([broader], claims, [resource], maximum)
+			).toStrictEqual(
+				state === 'absent'
+					? { outcome: 'selected', rule: broader, grants: maximum }
+					: {
+							outcome: 'authority-unmatched',
+							rules: [broader],
+							uncovered: [
+								{
+									type: 'cupboard_cache',
+									cache,
+									actions: ['cache:content-read']
+								}
+							]
+						}
+			);
+		}
+	);
 
 	it('preserves identity precedence when a narrower rule lacks private read authority', () => {
 		const broader: OidcTrustRule = {

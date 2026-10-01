@@ -6,7 +6,6 @@ import {
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { z } from 'zod';
 
-import { isGrantPermittedByRule } from './grant-match.ts';
 import {
 	type AuthorizationDetail,
 	type AuthorizationDetails
@@ -14,11 +13,11 @@ import {
 import { authorizationDetailsSchema } from './grants.ts';
 import { subjectTokenTypeIdToken, tokenResponseSchema } from './oidc.ts';
 import {
-	type OidcClaims,
-	type OidcTrustRule,
-	preferredModelledOidcTrustRules
-} from './oidc-trust-match.ts';
-import { type OidcTrustSelection } from './oidc-trust-selection.ts';
+	composeOidcGrants,
+	type GrantComposition,
+	type GrantRequirement
+} from './oidc-grant-composition.ts';
+import { type OidcClaims, type OidcTrustRule } from './oidc-trust-match.ts';
 import { reuseViewNameSchema } from './reuse-views.ts';
 
 export const readTokenBasicUser = readUserInputSchema.parse('cupboard-oidc');
@@ -134,143 +133,68 @@ export type ReadAccessGrantRequest = z.output<
 	typeof readAccessGrantRequestSchema
 >;
 
+function readRequirement(resource: ReadResourceState): GrantRequirement {
+	const isOptional =
+		resource.state.kind === 'existing' && resource.state.access === 'public';
+	if (resource.type === 'cupboard_view') {
+		return {
+			alternatives: [
+				{
+					type: resource.type,
+					view: resource.view,
+					actions: ['view:content-read']
+				}
+			],
+			optional: isOptional
+		};
+	}
+
+	const content: AuthorizationDetail = {
+		type: resource.type,
+		cache: resource.cache,
+		actions: ['cache:content-read']
+	};
+	const metadata: AuthorizationDetail = {
+		type: resource.type,
+		cache: resource.cache,
+		actions: ['cache:read']
+	};
+	const alternatives: [AuthorizationDetail, ...AuthorizationDetail[]] = [
+		resource.mode === 'metadata' ? metadata : content
+	];
+	if (resource.mode === 'content' && resource.state.kind === 'absent') {
+		alternatives.push(metadata);
+	}
+	return { alternatives, optional: isOptional };
+}
+
 /**
-Resolves exact read grants without granting private content through metadata authority.
+Resolves read requirements against one rule without extending authority.
 */
 export function resolveReadAuthority(
 	rule: OidcTrustRule,
 	claims: OidcClaims,
 	resources: readonly ReadResourceState[]
 ): AuthorizationDetails | undefined {
-	const grants: AuthorizationDetails = [];
-
-	for (const resource of resources) {
-		const content: AuthorizationDetail =
-			resource.type === 'cupboard_cache'
-				? {
-						type: resource.type,
-						cache: resource.cache,
-						actions: ['cache:content-read']
-					}
-				: {
-						type: resource.type,
-						view: resource.view,
-						actions: ['view:content-read']
-					};
-
-		if (
-			(resource.type !== 'cupboard_cache' || resource.mode === 'content') &&
-			isGrantPermittedByRule(rule.permittedGrants, content, claims)
-		) {
-			grants.push(content);
-
-			continue;
-		}
-
-		if (
-			resource.type === 'cupboard_cache' &&
-			(resource.mode === 'metadata' || resource.state.kind === 'absent')
-		) {
-			const metadata: AuthorizationDetail = {
-				type: resource.type,
-				cache: resource.cache,
-				actions: ['cache:read']
-			};
-
-			if (isGrantPermittedByRule(rule.permittedGrants, metadata, claims)) {
-				grants.push(metadata);
-
-				continue;
-			}
-		}
-
-		if (
-			resource.state.kind === 'existing' &&
-			resource.state.access === 'public'
-		) {
-			continue;
-		}
-
-		return undefined;
-	}
-
-	return grants;
+	const selection = selectReadTrust([rule], claims, resources);
+	return selection.outcome === 'selected' ? selection.grants : undefined;
 }
 
-export type ReadTrustSelection =
-	| Exclude<OidcTrustSelection, { readonly outcome: 'selected' }>
-	| {
-			readonly outcome: 'selected';
-			readonly rule: OidcTrustRule;
-			readonly grants: AuthorizationDetails;
-	  };
+export type ReadTrustSelection = GrantComposition;
 
 /**
-Applies identity precedence before checking the configured resources' read requirements.
+Maps current resource state into requirements for the shared grant composer.
 */
 export function selectReadTrust(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims,
-	resources: readonly ReadResourceState[]
+	resources: readonly ReadResourceState[],
+	maximum?: AuthorizationDetails
 ): ReadTrustSelection {
-	const preferred = preferredModelledOidcTrustRules(rules, claims);
-
-	const first = preferred[0];
-
-	if (first === undefined) {
-		return { outcome: 'identity-unmatched' };
-	}
-
-	const eligible = preferred.flatMap((rule) => {
-		const grants = resolveReadAuthority(rule, claims, resources);
-
-		return grants === undefined ? [] : [{ rule, grants }];
-	});
-	const [selected, ...others] = eligible;
-
-	if (selected === undefined) {
-		const uncovered = resources.flatMap((resource) => {
-			if (
-				preferred.some(
-					(rule) => resolveReadAuthority(rule, claims, [resource]) !== undefined
-				)
-			) {
-				return [];
-			}
-
-			const detail: AuthorizationDetail =
-				resource.type === 'cupboard_cache'
-					? {
-							type: resource.type,
-							cache: resource.cache,
-							actions: [
-								resource.mode === 'metadata'
-									? 'cache:read'
-									: 'cache:content-read'
-							]
-						}
-					: {
-							type: resource.type,
-							view: resource.view,
-							actions: ['view:content-read']
-						};
-
-			return [detail];
-		});
-
-		return {
-			outcome: 'authority-unmatched',
-			rules: [first, ...preferred.slice(1)],
-			uncovered
-		};
-	}
-
-	if (others.length > 0) {
-		return {
-			outcome: 'ambiguous',
-			rules: [selected.rule, ...others.map(({ rule }) => rule)]
-		};
-	}
-
-	return { outcome: 'selected', ...selected };
+	return composeOidcGrants(
+		rules,
+		claims,
+		resources.map((resource) => readRequirement(resource)),
+		maximum
+	);
 }
