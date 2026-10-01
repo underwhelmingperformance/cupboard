@@ -15,6 +15,7 @@ import {
 	type CacheMetadataError,
 	cacheMetadataErrorCodes
 } from '@cupboard/protocol/cache-metadata';
+import { type AuthorizationDetail } from '@cupboard/protocol/grants';
 import {
 	type OidcIssuer,
 	type SubjectTokenProblem,
@@ -189,6 +190,16 @@ export class CacheCatalogueMigrationPendingError extends ServerHttpError {
 	constructor() {
 		super('The cache catalogue migration is still in progress; retry shortly');
 		this.name = 'CacheCatalogueMigrationPendingError';
+	}
+}
+
+export class TenantMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super('Tenant migration is still in progress; retry shortly');
+		this.name = 'TenantMigrationPendingError';
 	}
 }
 
@@ -913,6 +924,47 @@ export class InvalidAuthorizationDetailsError extends OAuthError {
 		super('The requested authorization_details are not permitted');
 		this.problem = problem;
 		this.name = 'InvalidAuthorizationDetailsError';
+	}
+}
+
+export class InvalidReadResourcesError extends InvalidRequestError {
+	readonly problem = 'invalid-read-resources';
+
+	constructor() {
+		super(
+			'read_resources must contain one to sixteen distinct cache or view resources, including at most one reuse view.'
+		);
+		this.name = 'InvalidReadResourcesError';
+	}
+}
+
+export class ReadResourcesNotPermittedError extends OAuthError {
+	readonly status = StatusCodes.BAD_REQUEST;
+	readonly error = 'invalid_authorization_details';
+	readonly problem = 'read-resources-not-permitted';
+	override readonly detail: Readonly<Record<string, string>>;
+
+	constructor(uncovered: readonly AuthorizationDetail[]) {
+		const advice = uncovered.flatMap((resource) => {
+			if (resource.type === 'cupboard_cache') {
+				const cache =
+					resource.cache.kind === 'default'
+						? 'the default cache'
+						: `cache '${resource.cache.name}'`;
+				return [`Add ${resource.actions.join(', ')} for ${cache}.`];
+			}
+			if (resource.type === 'cupboard_view') {
+				return [
+					`Add ${resource.actions.join(', ')} for reuse view '${resource.view}'.`
+				];
+			}
+			return [];
+		});
+		super(
+			`The matching trust rule does not permit the requested read_resources. ${advice.length === 0 ? 'One trust rule must cover all requested resources.' : advice.join(' ')}`
+		);
+		this.name = 'ReadResourcesNotPermittedError';
+		this.detail = { read_resources: JSON.stringify(uncovered) };
 	}
 }
 

@@ -13,6 +13,7 @@ import {
 	OAuthError,
 	ServerHttpError,
 	TenantDispatchInterruptedError,
+	TenantMigrationPendingError,
 	UnauthenticatedError,
 	uploadPageSplitHeader,
 	UploadPageSplitRequiredError
@@ -39,6 +40,15 @@ function errorResponse(error: unknown): Response | undefined {
 
 	if (error instanceof ServerHttpError) {
 		return serverHttpErrorResponse(error);
+	}
+
+	// RPC preserves an error's name but does not preserve its custom prototype.
+	if (
+		error instanceof Error &&
+		(error.name === 'LocalSchemaMigrationPendingError' ||
+			error.name === 'CacheCatalogueMigrationPendingError')
+	) {
+		return serverHttpErrorResponse(new TenantMigrationPendingError());
 	}
 
 	return undefined;

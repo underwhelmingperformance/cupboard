@@ -244,7 +244,7 @@ export function selectReadTrust(
 							type: resource.type,
 							cache: resource.cache,
 							actions: [
-								resource.mode === 'metadata' || resource.state.kind === 'absent'
+								resource.mode === 'metadata'
 									? 'cache:read'
 									: 'cache:content-read'
 							]
