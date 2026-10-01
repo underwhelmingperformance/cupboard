@@ -961,7 +961,11 @@ export class ReadResourcesNotPermittedError extends OAuthError {
 			return [];
 		});
 		super(
-			`The matching trust rule does not permit the requested read_resources. ${advice.length === 0 ? 'One trust rule must cover all requested resources.' : advice.join(' ')}`
+			[
+				'The matching trust rule does not permit the requested read_resources.',
+				'One trust rule must cover all requested resources.',
+				...advice
+			].join(' ')
 		);
 		this.name = 'ReadResourcesNotPermittedError';
 		this.detail = { read_resources: JSON.stringify(uncovered) };
