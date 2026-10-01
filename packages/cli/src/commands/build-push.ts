@@ -90,7 +90,7 @@ interface BuildPushOptions {
 	readonly permanent?: boolean;
 	readonly retain?: boolean;
 	readonly closure?: boolean;
-	readonly publicationScope?: 'outputs' | 'closure';
+	readonly publicationScope?: 'outputs' | 'built' | 'closure';
 	readonly substituter?: 'leave' | 'copy';
 	readonly intermediatePathsFile?: string;
 	readonly runRoot?: RootName;
@@ -466,9 +466,9 @@ export function registerBuildPushCommand(
 		.addOption(
 			new Option(
 				'--publication-scope <scope>',
-				'Control which paths build-push publishes for installable cohorts. `outputs` publishes the selected outputs; `closure` also publishes their runtime references. Publication starts after the build.'
+				'Control which paths build-push publishes for installable cohorts. `outputs` publishes the selected outputs; `built` also publishes observed build intermediates; `closure` also publishes their runtime references. Publication starts after the build.'
 			)
-				.choices(['outputs', 'closure'])
+				.choices(['outputs', 'built', 'closure'])
 				.conflicts(['closure', 'intermediatePathsFile'])
 		)
 		.addOption(

@@ -1011,7 +1011,7 @@ describe('plan cohort command', () => {
 		{
 			flag: '--publish',
 			value: 'all',
-			allowed: 'none, outputs or closure'
+			allowed: 'none, outputs, built or closure'
 		}
 	])('rejects invalid $flag choice', async ({ flag, value, allowed }) => {
 		await expect(

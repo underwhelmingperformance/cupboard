@@ -519,6 +519,23 @@ describe('resolveBuildCohortInputs', () => {
 		expect(inputs.build).toBe('rebuild');
 	});
 
+	it('rejects built publication for a remote store before starting work', async () => {
+		const runCupboard = vi.fn();
+
+		await expect(
+			buildCohortAction(
+				{
+					...baseOptions(),
+					publish: 'built',
+					store: 'ssh-ng://build@example.test'
+				},
+				{ RUNNER_TEMP: '/tmp' },
+				{ runCupboard }
+			)
+		).rejects.toThrow('cannot observe all build intermediates');
+		expect(runCupboard.mock.calls).toStrictEqual([]);
+	});
+
 	it('passes the remote store through', () => {
 		const inputs = resolveBuildCohortInputs(
 			{ ...baseOptions(), store: 'ssh-ng://build@example.test' },

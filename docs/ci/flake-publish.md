@@ -330,12 +330,12 @@ workflow][simpler-workflow].
 
 [simpler-workflow]: ./custom-jobs.md#the-simpler-workflow-cupboard-publishyml
 
-| Input         | Values                       | Default here | Decision                                                                                                                                                                                                                                                                                                                                                            |
-| ------------- | ---------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `build`       | `missing`, `rebuild`         | `missing`    | `missing` uses an available output and builds it otherwise. `rebuild` builds each requested output again in the selected Nix store, even if it is already available. Dependencies may still be substituted.                                                                                                                                                         |
-| `substituter` | `leave`, `copy`              | `leave`      | `copy` selects outputs available from external substituters for publication. `leave` keeps an output upstream only if external consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Outputs built in this run remain selected. A reuse view belongs to this tenant and can publish by reference. |
-| `publish`     | `none`, `outputs`, `closure` | `outputs`    | `none` publishes no paths; `outputs` publishes selected output paths; `closure` also publishes all their runtime references.                                                                                                                                                                                                                                        |
-| `attest`      | `true`, `false`              | `true`       | Sign build provenance for builds observed on the runner and attach the bundles to published paths. Reused and substituted outputs receive no new build claim.                                                                                                                                                                                                       |
+| Input         | Values                                | Default here | Decision                                                                                                                                                                                                                                                                                                                                                            |
+| ------------- | ------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `build`       | `missing`, `rebuild`                  | `missing`    | `missing` uses an available output and builds it otherwise. `rebuild` builds each requested output again in the selected Nix store, even if it is already available. Dependencies may still be substituted.                                                                                                                                                         |
+| `substituter` | `leave`, `copy`                       | `leave`      | `copy` selects outputs available from external substituters for publication. `leave` keeps an output upstream only if external consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Outputs built in this run remain selected. A reuse view belongs to this tenant and can publish by reference. |
+| `publish`     | `none`, `outputs`, `built`, `closure` | `built`      | `none` publishes no paths; `outputs` publishes selected output paths; `built` also publishes observed build intermediates; `closure` also publishes all their runtime references.                                                                                                                                                                                   |
+| `attest`      | `true`, `false`                       | `true`       | Sign build provenance for builds observed on the runner and attach the bundles to published paths. Reused and substituted outputs receive no new build claim.                                                                                                                                                                                                       |
 
 `push: false` is a compatibility alias that disables publication, even when
 `publish` selects outputs or a closure. It also disables signing.
@@ -366,8 +366,16 @@ they differ. A fresh output is built once. Reusing an available output without
 building it creates no new build provenance, even when this run publishes it to
 the destination.
 
-The default settings reuse available outputs and publish only selected outputs.
-To build each requested output again and publish its runtime closure, set:
+The default settings reuse available requested outputs and publish selected
+outputs plus intermediates built during this run.
+
+The flake workflow defaults to `publish: built`. It publishes selected requested
+outputs and intermediates reported by the post-build hook. Substituted
+intermediates are excluded. The run root protects the published intermediates;
+only requested outputs enter target roots. A remote store or an untrusted local
+daemon cannot report and protect every intermediate, so select
+`publish: outputs` or `publish: closure` for those stores. To build each
+requested output again and publish its runtime closure, set:
 
 ```yaml
 with:

@@ -168,7 +168,7 @@ export type PlannedSubstitutionPolicy =
 
 export type BuildPolicy = 'missing' | 'rebuild';
 export type SubstituterPolicy = 'leave' | 'copy';
-export type PublishScope = 'none' | 'outputs' | 'closure';
+export type PublishScope = 'none' | 'outputs' | 'built' | 'closure';
 
 export interface AvailabilityPartitionOptions {
 	readonly targets: readonly AvailabilityTarget[];

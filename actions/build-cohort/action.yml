@@ -71,8 +71,8 @@ inputs:
   publish:
     description: >-
       Control which paths are published. `none` publishes no paths. `outputs`
-      publishes requested outputs. `closure` also publishes their runtime
-      references.
+      publishes requested outputs. `built` includes observed build
+      intermediates. `closure` also publishes their runtime references.
     required: false
     default: none
   build:

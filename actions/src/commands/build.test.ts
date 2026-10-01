@@ -230,6 +230,14 @@ afterEach(async () => {
 });
 
 describe('buildAction', () => {
+	it('rejects built publication before starting an unobserved build', async () => {
+		const runNix = vi.fn();
+		await expect(
+			buildAction({ installables: ['.#app'], publish: 'built' }, {}, { runNix })
+		).rejects.toThrow('cannot observe all build intermediates');
+		expect(runNix.mock.calls).toStrictEqual([]);
+	});
+
 	it.each([
 		{ selection: 'NIX_REMOTE', warm: false },
 		{ selection: 'NIX_REMOTE', warm: true },

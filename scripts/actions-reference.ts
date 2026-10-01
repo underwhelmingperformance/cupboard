@@ -21,7 +21,7 @@ const publicWorkflows: readonly PublicWorkflow[] = [
 	{
 		file: 'cupboard-flake-publish',
 		summary:
-			'Realises the targets in a flake manifest. The defaults are `build: missing`, `substituter: leave`, `publish: outputs` and `attest: true`. Each input can be set independently.'
+			'Realises the targets in a flake manifest. The defaults are `build: missing`, `substituter: leave`, `publish: built` and `attest: true`. Each input can be set independently.'
 	},
 	{
 		file: 'cupboard-publish',
