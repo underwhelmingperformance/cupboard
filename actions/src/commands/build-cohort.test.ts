@@ -3961,6 +3961,74 @@ describe('buildCohortAction', () => {
 		}
 	);
 
+	it.each([
+		{
+			name: 'command failure',
+			status: 76,
+			paths: [],
+			expected: {
+				name: 'CommandFailedError',
+				message: 'nix build failed with status 76'
+			}
+		},
+		{
+			name: 'empty result',
+			status: 0,
+			paths: [],
+			expected: { name: 'LocalBuildOutputsMissingError' }
+		},
+		{
+			name: 'unrelated output',
+			status: 0,
+			paths: [referencePath],
+			expected: { name: 'LocalBuildOutputsOutsideCohortError' }
+		}
+	])(
+		'refuses a survivor resolution $name after excluding failed targets',
+		async ({ status, paths, expected }) => {
+			const failure = new CupboardReportedError(1, [], undefined, true);
+			const runCupboardMock = vi.fn<typeof runCupboard>(
+				async (binaryPath, arguments_, passedEnvironment) => {
+					if (arguments_[1] !== 'build-push') {
+						return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+					}
+					await writeFile(
+						argumentValue(arguments_, '--receipt-file') ?? '',
+						JSON.stringify({
+							version: 3,
+							paths: [floatingBuiltPath],
+							subjects: [],
+							childExitStatus: 1,
+							terminalFailure: {
+								kind: 'target-build',
+								failedTargets: [libraryQueryInstallable]
+							}
+						})
+					);
+					throw failure;
+				}
+			);
+			const runNixBuildMock = vi.fn<typeof runNixBuild>(() =>
+				Promise.resolve({ paths, status, copiedFrom: new Map() })
+			);
+
+			await expect(
+				buildCohortAction(
+					{ ...baseOptions(), publish: 'outputs', bestEffort: 'true' },
+					environment,
+					{ runCupboard: runCupboardMock, runNixBuild: runNixBuildMock }
+				)
+			).rejects.toMatchObject(expected);
+			expect({
+				commands: runCupboardMock.mock.calls.map((call) => call[1][1]),
+				resolved: runNixBuildMock.mock.calls.map((call) => call[0])
+			}).toStrictEqual({
+				commands: ['plan', 'build-push'],
+				resolved: [['.#packages.x86_64-linux.floating^out']]
+			});
+		}
+	);
+
 	it('reports a typed error when a local build omits its expected output', async () => {
 		const plan = planCohortSuccess(measuredCapacity, [appQueryInstallable]);
 		const reprobe = planReprobeSuccess([], [appQueryInstallable]);

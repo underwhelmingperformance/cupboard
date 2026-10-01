@@ -713,8 +713,10 @@ Options:
                                     there is no collection after the last
                                     cohort)
   --keep-going-cohorts              run the remaining cohorts after one fails.
-                                    The exit status is still that of the first
-                                    cohort to fail.
+                                    The first failure without validated
+                                    target-build evidence determines the exit
+                                    status; otherwise the first target build
+                                    failure does.
   -h, --help                        display help for command
 
 The build command must use the same Nix store as build-push. Do not

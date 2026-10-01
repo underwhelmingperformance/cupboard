@@ -230,6 +230,13 @@ several builds in order. Each one is either a list of installables or a command.
 See the [CLI reference](../reference/cli.md#cupboard-build-push) for the file's
 format.
 
+With `--keep-going-cohorts`, later cohorts still run after a failure. The first
+failure without validated target-build evidence determines the exit status. If
+every failure has that evidence, the first target build failure determines the
+status. The combined receipt records command failures even when a failed cohort
+could not write its own receipt, so a later successful cohort cannot hide an
+authentication or publication failure.
+
 ## Checking that store paths are published
 
 `cupboard confirm` checks that store paths are already in a cache, without

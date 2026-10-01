@@ -25,15 +25,42 @@ export interface CohortSequenceOptions {
 export interface CohortFailure {
 	readonly cohort: number;
 	readonly error: unknown;
+	readonly kind: 'target-build' | 'command';
 }
 
 export interface CohortSequenceResult {
 	readonly receipts: readonly BuildReceipt[];
 	/**
-	 * Failed cohorts remain in run order. The run exits with the first failure,
-	 * so its child status becomes the run status.
+	 * Failed cohorts remain in run order. A fatal failure takes precedence over
+	 * target build failures when the caller chooses the run status.
 	 */
 	readonly failures: readonly CohortFailure[];
+}
+
+/**
+ * Returns the first fatal failure, or the first target failure if all failures
+ * are target builds.
+ */
+export function cohortSequenceFailure(
+	failures: readonly CohortFailure[]
+): CohortFailure | undefined {
+	return failures.find((failure) => failure.kind === 'command') ?? failures[0];
+}
+
+function failureKind(
+	error: unknown,
+	receipt: BuildReceipt | undefined
+): CohortFailure['kind'] {
+	return error instanceof BuildCommandFailedError &&
+		error.signal === undefined &&
+		error.status !== undefined &&
+		error.status !== 0 &&
+		receipt?.version === 3 &&
+		receipt.childExitStatus === error.status &&
+		receipt.terminalFailure?.kind === 'target-build' &&
+		(receipt.failed?.length ?? 0) === 0
+		? 'target-build'
+		: 'command';
 }
 
 export interface CohortSequenceDependencies {
@@ -66,8 +93,8 @@ function shouldStopSequence(error: unknown): boolean {
  * additionally configured, and never when the setting is off. An ordinary
  * cohort failure stops the sequence unless the keep-going option is set;
  * cancellation stops it either way. The result reports the failures alongside
- * the receipts the run did produce, and the caller exits with the first
- * failure's error.
+ * the receipts produced during the run. Failures without validated target build
+ * evidence also contribute a command failure to receipt aggregation.
  */
 export async function runCohortSequence(
 	options: CohortSequenceOptions,
@@ -90,7 +117,21 @@ export async function runCohortSequence(
 				receipts.push(receipt);
 			}
 
-			failures.push({ cohort, error });
+			const kind = failureKind(error, receipt);
+
+			if (
+				kind === 'command' &&
+				!(receipt?.version === 3 && receipt.terminalFailure?.kind === 'command')
+			) {
+				receipts.push({
+					version: 3,
+					paths: [],
+					subjects: [],
+					terminalFailure: { kind: 'command' }
+				});
+			}
+
+			failures.push({ cohort, error, kind });
 
 			if (options.keepGoingCohorts !== true || shouldStopSequence(error)) {
 				return { receipts, failures };
