@@ -1,5 +1,3 @@
-import { setTimeout as delay } from 'node:timers/promises';
-
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
 	TokenResponse,
@@ -240,12 +238,6 @@ async function outcomeOf<T>(promise: Promise<T>): Promise<Outcome<T>> {
 	} catch (error) {
 		return { kind: 'rejected', error };
 	}
-}
-
-async function pendingAfter(ms: number): Promise<{ readonly kind: 'pending' }> {
-	await delay(ms);
-
-	return { kind: 'pending' };
 }
 
 function heldResponseFetch(): {
@@ -563,6 +555,7 @@ describe('cachedOwnerProvider', () => {
 				jwt({ sub: 'cf-user', exp: farFuture })
 			);
 			const refresh = Promise.withResolvers<CloudflareGrant | undefined>();
+			const refreshStarted = Promise.withResolvers<undefined>();
 			const refreshedWith: CloudflareGrant[] = [];
 			const sessions = new Map<string, CachedSession>();
 			const { harness } = sessionHarness();
@@ -572,6 +565,7 @@ describe('cachedOwnerProvider', () => {
 				withGrantLock: withCachedGrantLock,
 				refreshGrant: (previous: CloudflareGrant) => {
 					refreshedWith.push(previous);
+					refreshStarted.resolve(undefined);
 
 					return refresh.promise;
 				},
@@ -596,9 +590,7 @@ describe('cachedOwnerProvider', () => {
 			await writeCachedGrant(staleGrant);
 			const first = cachedOwnerProvider(target, dependencies).get();
 			const second = cachedOwnerProvider(otherTarget, dependencies).get();
-			await vi.waitFor(() => {
-				expect(refreshedWith).toStrictEqual([staleGrant]);
-			});
+			await refreshStarted.promise;
 			refresh.resolve(renewedGrant);
 
 			expect({
@@ -685,10 +677,7 @@ describe('cachedOwnerProvider', () => {
 			const requestSignal = await exchange.started;
 			compromise.abort(reason);
 
-			const outcome = await Promise.race([
-				outcomeOf(renewing),
-				pendingAfter(50)
-			]);
+			const outcome = await outcomeOf(renewing);
 
 			expect(outcome).toStrictEqual({ kind: 'rejected', error: reason });
 			expect(requestSignal).toMatchObject({ aborted: true });
@@ -726,10 +715,7 @@ describe('cachedOwnerProvider', () => {
 				const requestSignal = await refresh.started;
 				controller.abort(reason);
 
-				const outcome = await Promise.race([
-					outcomeOf(renewing),
-					pendingAfter(50)
-				]);
+				const outcome = await outcomeOf(renewing);
 
 				expect(outcome).toStrictEqual({ kind: 'rejected', error: reason });
 				expect(requestSignal).toMatchObject({ aborted: true });

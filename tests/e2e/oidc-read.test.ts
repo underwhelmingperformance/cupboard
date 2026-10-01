@@ -39,6 +39,7 @@ import { runWithReadAccess } from '../../packages/cli/src/commands/run.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/store-config.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
+import { ManualClock } from '../support/manual-clock.ts';
 import { isolatedEnvironment, NixStore } from '../support/nix.ts';
 import { pushStorePaths } from '../support/push.ts';
 
@@ -275,7 +276,7 @@ async function substitute(
 }
 
 describe('OIDC read acquisition and real Nix substitution', () => {
-	it('repeats genuine OIDC exchange, then stops the child and removes files when its rule is revoked', () =>
+	it('renews through OIDC, then cancels pending acquisition and cleans up after revocation', () =>
 		withReadFixture(
 			{ access: 'private', content: true, absent: false, scope: named },
 			async (context) => {
@@ -290,15 +291,23 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 				}
 
 				let identities = 0;
+				const clock = new ManualClock();
+				const pendingIdentity = Promise.withResolvers<undefined>();
 				const job = createServer((_request, response) => {
 					identities++;
+
+					if (identities === 4) {
+						pendingIdentity.resolve(undefined);
+						return;
+					}
+
 					response.writeHead(200, { 'content-type': 'application/json' });
 					response.end(JSON.stringify({ value: context.subject }));
 				});
 				job.listen(0, '127.0.0.1');
 				await once(job, 'listening');
 				const address = job.address() as AddressInfo;
-				const exchanges: number[] = [];
+				const exchanges: { identity: number; status: number }[] = [];
 				let netrcPath: string | undefined;
 				let factsPath: string | undefined;
 				const target = parseTenantCacheUrl(
@@ -309,73 +318,87 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 				);
 
 				try {
-					await expect(
-						runWithReadAccess(
-							target,
-							[process.execPath, '-e', 'setInterval(() => {}, 1000)'],
-							{ githubOidc: true, audience: audienceSchema.parse(audience) },
-							{
-								environment: {
-									...environment,
-									ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${String(address.port)}/token`,
-									ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'job'
-								},
-								storeConfig: discoverNixStoreConfig(),
-								readFile: () => Promise.resolve(''),
-								renewal: {
-									renewalMarginMs: 899_500,
-									safetyMarginMs: 898_000,
-									retryDelayMs: 100
-								},
-								fetcher: async (input, init) => {
-									const response = await fetch(input, init);
-									const url =
-										input instanceof Request ? input.url : String(input);
+					const session = runWithReadAccess(
+						target,
+						[process.execPath, '-e', 'setInterval(() => {}, 1000)'],
+						{ githubOidc: true, audience: audienceSchema.parse(audience) },
+						{
+							environment: {
+								...environment,
+								ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${String(address.port)}/token`,
+								ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'job'
+							},
+							storeConfig: discoverNixStoreConfig(),
+							readFile: () => Promise.resolve(''),
+							renewal: {
+								now: clock.now,
+								wait: clock.wait
+							},
+							fetcher: async (input, init) => {
+								const response = await fetch(input, init);
+								const url =
+									input instanceof Request ? input.url : String(input);
 
-									if (
-										url.endsWith('/token') &&
-										!url.includes(`:${String(address.port)}/`)
-									) {
-										exchanges.push(response.status);
+								if (
+									url.endsWith('/token') &&
+									!url.includes(`:${String(address.port)}/`)
+								) {
+									exchanges.push({
+										identity: identities,
+										status: response.status
+									});
 
-										if (exchanges.length === 2) {
-											await rpc.oidcTrust.remove({ id: rule.id });
-											await rpc.oidcTrust.add({
-												issuer: context.server.issuer.issuer,
-												audience,
-												claims: { sub: 'other-job' },
-												permittedGrants: rule.permittedGrants
-											});
-										}
+									if (exchanges.length === 2) {
+										await rpc.oidcTrust.remove({ id: rule.id });
+										await rpc.oidcTrust.add({
+											issuer: context.server.issuer.issuer,
+											audience,
+											claims: { sub: 'other-job' },
+											permittedGrants: rule.permittedGrants
+										});
 									}
-
-									return response;
-								},
-								runChild: (input) => {
-									netrcPath = /netrc-file = ([^\n]+)/u.exec(
-										input.environment.NIX_CONFIG ?? ''
-									)?.[1];
-									factsPath = input.environment.CUPBOARD_READ_ACCESS_FILE;
-
-									return runChild(input);
 								}
+
+								return response;
+							},
+							runChild: (input) => {
+								netrcPath = /netrc-file = ([^\n]+)/u.exec(
+									input.environment.NIX_CONFIG ?? ''
+								)?.[1];
+								factsPath = input.environment.CUPBOARD_READ_ACCESS_FILE;
+
+								return runChild(input);
 							}
-						)
-					).rejects.toBeInstanceOf(ReadCredentialRenewalError);
+						}
+					);
+
+					await Promise.race([
+						(async () => {
+							await clock.advanceThroughDelay(600_000);
+							await clock.advanceThroughDelay(600_000);
+							await clock.advanceThroughDelay(30_000);
+							await pendingIdentity.promise;
+						})(),
+						session
+					]);
+					clock.advanceTo(1_470_000);
+					await expect(session).rejects.toBeInstanceOf(
+						ReadCredentialRenewalError
+					);
 
 					expect({
-						first: exchanges.slice(0, 2),
-						refusals: exchanges.slice(2).every((status) => status !== 200),
-						retried: exchanges.length > 2,
-						identitiesMatch: identities === exchanges.length,
+						exchanges,
+						identities,
 						filesRemoved: [netrcPath, factsPath].every(
 							(file) => file !== undefined && !existsSync(file)
 						)
 					}).toStrictEqual({
-						first: [200, 200],
-						refusals: true,
-						retried: true,
-						identitiesMatch: true,
+						exchanges: [
+							{ identity: 1, status: 200 },
+							{ identity: 2, status: 200 },
+							{ identity: 3, status: 400 }
+						],
+						identities: 4,
 						filesRemoved: true
 					});
 				} finally {

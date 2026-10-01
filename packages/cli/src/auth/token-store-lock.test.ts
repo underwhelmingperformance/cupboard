@@ -1,4 +1,4 @@
-import { setTimeout as delay } from 'node:timers/promises';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 
 import type { LockOptions } from 'proper-lockfile';
 import { beforeEach, describe, expect, vi } from 'vitest';
@@ -30,8 +30,8 @@ async function outcomeOf<T>(promise: Promise<T>): Promise<Outcome<T>> {
 	}
 }
 
-async function pendingAfter(ms: number): Promise<{ readonly kind: 'pending' }> {
-	await delay(ms);
+async function pendingAfterTurn(): Promise<{ readonly kind: 'pending' }> {
+	await nextTurn();
 
 	return { kind: 'pending' };
 }
@@ -45,32 +45,45 @@ describe('cached session lock', () => {
 		'stops waiting promptly when the caller aborts',
 		async () => {
 			const acquisition = Promise.withResolvers<() => Promise<void>>();
-			const release = vi.fn<() => Promise<void>>(() => Promise.resolve());
+			const acquisitionStarted = Promise.withResolvers<undefined>();
+			const released = Promise.withResolvers<undefined>();
+			const release = vi.fn<() => Promise<void>>(() => {
+				released.resolve(undefined);
+
+				return Promise.resolve();
+			});
 			const action = vi.fn<() => Promise<string>>(() =>
 				Promise.resolve('unexpected')
 			);
 			const controller = new AbortController();
 			const reason = new Error('stop waiting');
 
-			mocks.lock.mockReturnValue(acquisition.promise);
+			mocks.lock.mockImplementation(() => {
+				acquisitionStarted.resolve(undefined);
+
+				return acquisition.promise;
+			});
 
 			const locked = withCachedSessionLock(target, action, controller.signal);
-			await vi.waitFor(() => {
-				expect(mocks.lock).toHaveBeenCalledOnce();
-			});
+			await acquisitionStarted.promise;
 
 			controller.abort(reason);
 
-			const outcome = await Promise.race([outcomeOf(locked), pendingAfter(50)]);
+			const outcome = await outcomeOf(locked);
 
 			acquisition.resolve(release);
-			await vi.waitFor(() => {
-				expect(release).toHaveBeenCalledOnce();
-			});
+			await released.promise;
 
-			expect({ outcome, actionCalls: action.mock.calls.length }).toStrictEqual({
+			expect({
+				outcome,
+				actionCalls: action.mock.calls.length,
+				acquisitionCalls: mocks.lock.mock.calls.length,
+				releaseCalls: release.mock.calls.length
+			}).toStrictEqual({
 				outcome: { kind: 'rejected', error: reason },
-				actionCalls: 0
+				actionCalls: 0,
+				acquisitionCalls: 1,
+				releaseCalls: 1
 			});
 		}
 	);
@@ -108,6 +121,7 @@ describe('cached session lock', () => {
 			);
 			let onCompromised: LockOptions['onCompromised'];
 			let actionSignal: AbortSignal | undefined;
+			const actionStarted = Promise.withResolvers<undefined>();
 
 			mocks.lock.mockImplementation((_file, options) => {
 				onCompromised = options?.onCompromised;
@@ -117,18 +131,17 @@ describe('cached session lock', () => {
 
 			const locked = withCachedSessionLock(target, (signal) => {
 				actionSignal = signal;
+				actionStarted.resolve(undefined);
 
 				return action.promise;
 			});
-			await vi.waitFor(() => {
-				expect(onCompromised).toBeTypeOf('function');
-			});
+			await actionStarted.promise;
 
 			onCompromised?.(compromised);
 
 			const beforeActionSettles = await Promise.race([
 				outcomeOf(locked),
-				pendingAfter(50)
+				pendingAfterTurn()
 			]);
 			expect({
 				beforeActionSettles,

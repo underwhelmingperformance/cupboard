@@ -2,12 +2,13 @@ import {
 	narInfoGenerationSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { bestEffort } from '@cupboard/shared/cleanup';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SubrequestTimeoutError } from '../errors.ts';
-import { attestationListObjectKey } from '../http/http.ts';
+import { attestationListObjectKey, type R2ObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
@@ -41,10 +42,6 @@ const listKey = attestationListObjectKey(
 	defaultCache()
 );
 
-// Leave enough time for the D1 reads before publication. The deadline must
-// expire while the R2 put is waiting.
-const gateBudgetMs = 200;
-
 async function settled(pending: Promise<unknown>): Promise<void> {
 	await pending;
 }
@@ -57,13 +54,29 @@ async function settled(pending: Promise<unknown>): Promise<void> {
 function stallingBucket(
 	target: R2Bucket,
 	stalledKey: string
-): { bucket: R2Bucket; release: () => void; landed: Promise<void> } {
+): {
+	bucket: R2Bucket;
+	release: () => void;
+	landed: Promise<void>;
+	heads: () => number;
+} {
 	const released = Promise.withResolvers<string>();
 	const landed = Promise.withResolvers<string>();
+	let heads = 0;
 	let hasStalled = false;
 
 	const bucket = new Proxy(target, {
 		get(bucketTarget, property) {
+			if (property === 'head') {
+				return (key: string) => {
+					if (key === stalledKey) {
+						heads++;
+					}
+
+					return bucketTarget.head(key);
+				};
+			}
+
 			if (property === 'put') {
 				return async (
 					key: string,
@@ -77,9 +90,16 @@ function stallingBucket(
 					}
 
 					hasStalled = true;
-					await released.promise;
-					await bucketTarget.put(key, value, options);
-					landed.resolve('landed');
+					const abandoned = (async () => {
+						await released.promise;
+						await bucketTarget.put(key, value, options);
+						landed.resolve('landed');
+					})();
+
+					throw new SubrequestTimeoutError(
+						'r2.put',
+						bestEffort(() => abandoned)
+					);
 				};
 			}
 
@@ -100,7 +120,8 @@ function stallingBucket(
 		release: () => {
 			released.resolve('released');
 		},
-		landed: settled(landed.promise)
+		landed: settled(landed.promise),
+		heads: () => heads
 	};
 }
 
@@ -114,6 +135,9 @@ async function publishedListGeneration(): Promise<string | undefined> {
 // retirement must inspect the object after the pending publication finishes.
 describe('attestation list write ordering', () => {
 	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
 
 	it('preserves a deferred newer list while retiring an earlier generation', async () => {
 		await useTestServer('attestation-list-order');
@@ -148,13 +172,12 @@ describe('attestation list write ordering', () => {
 			currentServer(),
 			async (instance) => {
 				const context = instance.context;
-				const { bucket, release, landed } = stallingBucket(
+				const { bucket, release, landed, heads } = stallingBucket(
 					context.env.BLOBS,
 					listKey
 				);
 
 				context.env = { ...context.env, BLOBS: boundedBlobs(bucket) };
-				context.gateBudgetMs = gateBudgetMs;
 
 				const attestations = new AttestationsService(
 					context,
@@ -164,51 +187,52 @@ describe('attestation list write ordering', () => {
 				);
 				const cache = resolvedCache(context);
 
-				let publishError: unknown;
-
-				try {
-					await context.criticalSection(() =>
+				const publication = expect(
+					context.criticalSection(() =>
 						attestations.materialiseList(
 							cache,
 							storePathHash,
 							currentGeneration
 						)
-					);
-				} catch (error) {
-					publishError = error;
-				}
+					)
+				).rejects.toBeInstanceOf(SubrequestTimeoutError);
+				await publication;
 
-				expect(publishError).toBeInstanceOf(SubrequestTimeoutError);
+				const writeStarted = Promise.withResolvers<undefined>();
+				const write = context.objectWrites.write.bind(context.objectWrites);
+				vi.spyOn(context.objectWrites, 'write').mockImplementation(
+					<T>(
+						keys: readonly R2ObjectKey[],
+						mutate: () => Promise<T>
+					): Promise<T> => {
+						const pending = write(keys, mutate);
+						writeStarted.resolve(undefined);
 
-				let hasRetired = false;
-				const retirement = (async () => {
-					await attestations.discardListOfGeneration(
-						cache,
-						storePathHash,
-						retiredGeneration
-					);
-					hasRetired = true;
-				})();
+						return pending;
+					}
+				);
+				const retirement = attestations.discardListOfGeneration(
+					cache,
+					storePathHash,
+					retiredGeneration
+				);
 
-				await new Promise((resolve) => {
-					setTimeout(resolve, 25);
-				});
-
-				const hasWaitedForPublication = !hasRetired;
+				await writeStarted.promise;
+				const prematureHeads = heads();
 
 				release();
 				await landed;
 				await retirement;
 
 				return {
-					hasWaitedForPublication,
+					prematureHeads,
 					generation: await publishedListGeneration()
 				};
 			}
 		);
 
 		expect(survived).toStrictEqual({
-			hasWaitedForPublication: true,
+			prematureHeads: 0,
 			generation: String(currentGeneration)
 		});
 	});

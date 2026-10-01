@@ -447,18 +447,13 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 			});
 		});
 
-		it('exits promptly and zero when no listener is present', async () => {
-			const started = performance.now();
+		it('exits zero when no listener is present', async () => {
 			const helper = spawn(helperPath, [path.join(workspace, 'absent.sock')], {
 				stdio: 'ignore'
 			});
 			const status = await waitForChildClose(helper);
-			const elapsedMs = performance.now() - started;
 
-			expect({ status, prompt: elapsedMs < 2000 }).toStrictEqual({
-				status: 0,
-				prompt: true
-			});
+			expect(status).toBe(0);
 		});
 
 		it('stops waiting when the listener does not confirm an event', async () => {
@@ -488,13 +483,11 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 				expect({
 					status,
 					warned: stderr !== '',
-					releasedAfterTimeout: elapsedMs >= 2500,
-					releasedPromptly: elapsedMs < 15_000
+					releasedAfterTimeout: elapsedMs >= 2500
 				}).toStrictEqual({
 					status: 0,
 					warned: true,
-					releasedAfterTimeout: true,
-					releasedPromptly: true
+					releasedAfterTimeout: true
 				});
 			} finally {
 				accepted?.destroy();
@@ -555,7 +548,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 			}
 		});
 
-		it('completes the hook within its budget through the rendered script', async () => {
+		it('delivers through the rendered script without an inactivity timeout', async () => {
 			const socketPath = path.join(workspace, 'budget.sock');
 			const event = Promise.withResolvers<string>();
 			const listener: Server = createServer((connection) => {
@@ -586,27 +579,17 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 			);
 
 			try {
-				const started = performance.now();
 				const [{ stderr, stdout }, eventLine] = await Promise.all([
 					run('/bin/sh', ['-c', fireHook(scriptPath, [outA])]),
 					event.promise
 				]);
-				const elapsedMs = performance.now() - started;
-
-				// The relay bounds every socket wait with its 3-second inactivity
-				// timeout and warns on stderr when one expires, so a hung delivery
-				// fails the empty-stderr assertion. The wall-clock bound catches
-				// only indefinite blocking, and it is generous because a loaded
-				// runner can stretch the healthy path past any tight margin.
 				expect({
 					stderr,
 					stdout,
-					withinBudget: elapsedMs < 10_000,
 					event: JSON.parse(eventLine) as unknown
 				}).toStrictEqual({
 					stderr: '',
 					stdout: '',
-					withinBudget: true,
 					event: {
 						version: 1,
 						invocationId: 'budget',

@@ -85,6 +85,7 @@ export interface CommitSessionObservations {
 }
 
 interface CommitSessionCounters {
+	readonly onAbandonedUpgrade: (() => void) | undefined;
 	upgrades: number;
 	creditFrames: number;
 	queuedFrames: number;
@@ -123,6 +124,7 @@ export class CupboardTestServer {
 			readonly bindings?: Readonly<Record<string, string>>;
 			readonly provision?: false | TenantProvisionSpec;
 			readonly completedTransitions?: readonly TransitionId[];
+			readonly onAbandonedUpgrade?: () => void;
 		} = {}
 	): Promise<CupboardTestServer> {
 		const bundle = await bundleWorker(directory);
@@ -233,6 +235,7 @@ export class CupboardTestServer {
 		const upgrades = new WebSocketServer({ noServer: true });
 		upgrades.on('headers', forwardWorkerUpgradeHeaders);
 		const commitCounters: CommitSessionCounters = {
+			onAbandonedUpgrade: options.onAbandonedUpgrade,
 			upgrades: 0,
 			creditFrames: 0,
 			queuedFrames: 0,
@@ -321,7 +324,12 @@ export class CupboardTestServer {
 	 * and outlive any one run.
 	 */
 	get commitSessions(): CommitSessionObservations {
-		return { ...this.commitCounters };
+		return {
+			upgrades: this.commitCounters.upgrades,
+			creditFrames: this.commitCounters.creditFrames,
+			queuedFrames: this.commitCounters.queuedFrames,
+			abandonedUpgrades: this.commitCounters.abandonedUpgrades
+		};
 	}
 
 	/**
@@ -784,6 +792,7 @@ async function forwardUpgradeToWorker(
 
 		counters.abandonedUpgrades += 1;
 		workerSocket.close();
+		counters.onAbandonedUpgrade?.();
 	} catch (error) {
 		socket.destroy(error instanceof Error ? error : new Error(String(error)));
 	}
