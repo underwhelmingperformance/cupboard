@@ -150,7 +150,7 @@ export interface BuildPushRunOptions {
 	readonly retention?: RootRetentionRequest;
 	readonly runRoot?: UploadAttachRootInput;
 	readonly closure?: boolean;
-	readonly publicationScope?: 'outputs' | 'closure';
+	readonly publicationScope?: 'outputs' | 'built' | 'closure';
 	readonly substituter?: 'leave' | 'copy';
 	readonly tenantUrl?: URL;
 	readonly intermediatePaths?: readonly StorePathString[];
@@ -212,6 +212,15 @@ function childFailure(exit: ChildExit): BuildCommandFailedError {
 	);
 }
 
+class BuiltPublicationObservationUnsupportedError extends CliUsageError {
+	constructor() {
+		super(
+			'Publication scope built cannot observe all build intermediates without a supported post-build hook. Use a trusted local daemon or select outputs or closure.'
+		);
+		this.name = 'BuiltPublicationObservationUnsupportedError';
+	}
+}
+
 class PublicationScopeInvalidError extends CliUsageError {
 	constructor() {
 		super(
@@ -246,6 +255,10 @@ export async function runBuildPush(
 	reporter.info(buildPushModeDescription(mode));
 
 	if (mode.kind === 'reconciled-local') {
+		if (options.publicationScope === 'built') {
+			throw new BuiltPublicationObservationUnsupportedError();
+		}
+
 		return runReconciledLocalBuildPush(
 			options,
 			reporter,
@@ -1482,7 +1495,8 @@ async function settleRun(
 		const targetSet = new Set(targetPaths);
 		const intermediates = new Set([
 			...declaredIntermediates,
-			...(options.publicationScope === undefined
+			...(options.publicationScope === undefined ||
+			options.publicationScope === 'built'
 				? facts.eventPaths.filter((eventPath) => !targetSet.has(eventPath))
 				: [])
 		]);

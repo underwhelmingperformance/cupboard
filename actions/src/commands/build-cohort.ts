@@ -71,6 +71,7 @@ import {
 import {
 	BuildObservationMissingError,
 	BuildRebuildRemoteDispatchError,
+	BuiltPublicationObservationUnsupportedError,
 	CohortEvaluationDriftError,
 	CohortJsonInvalidError,
 	CohortJsonSchemaError,
@@ -427,7 +428,7 @@ export interface BuildCohortInputs {
 	readonly readPassword: string;
 	readonly maxJobs: string;
 	readonly store: string;
-	readonly publish: 'none' | 'outputs' | 'closure';
+	readonly publish: 'none' | 'outputs' | 'built' | 'closure';
 	readonly push: boolean;
 	readonly build: 'missing' | 'rebuild';
 	readonly substituter: 'leave' | 'copy';
@@ -559,7 +560,7 @@ export function resolveBuildCohortInputs(
 	const publish = providedChoice(
 		'publish',
 		options.publish,
-		['none', 'outputs', 'closure'],
+		['none', 'outputs', 'built', 'closure'],
 		'none'
 	);
 	const isPushEnabled = publish !== 'none';
@@ -677,7 +678,7 @@ export function registerBuildCohortCommand(
 		)
 		.option(
 			'--publish <scope>',
-			'control published paths: none, outputs, or closure'
+			'control published paths: none, outputs, built, or closure'
 		)
 		.option(
 			'--build <mode>',
@@ -821,6 +822,10 @@ export async function buildCohortAction(
 	dependencies.signal?.throwIfAborted();
 
 	const inputs = resolveBuildCohortInputs(options, environment);
+	if (inputs.publish === 'built' && inputs.store !== '') {
+		throw new BuiltPublicationObservationUnsupportedError();
+	}
+
 	if (
 		inputs.build === 'rebuild' &&
 		inputs.store === '' &&
@@ -1749,7 +1754,7 @@ async function settleCohortBuild(
 		);
 	}
 	const selectedPublicationPaths =
-		isStreamed && inputs.publish === 'closure'
+		isStreamed && (inputs.publish === 'closure' || inputs.publish === 'built')
 			? [
 					...new Set([
 						...(streamedReceipt?.paths ?? []),

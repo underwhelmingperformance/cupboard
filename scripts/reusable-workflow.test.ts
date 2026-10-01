@@ -556,6 +556,7 @@ describe('cupboard acquisition', () => {
 				'inline-paths': false,
 				'publication-url': '${{ inputs.url }}',
 				build: '${{ inputs.build }}',
+				publish: '${{ inputs.publish }}',
 				substituter: '${{ inputs.substituter }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
@@ -574,7 +575,7 @@ describe('cupboard acquisition', () => {
 
 		expect(validation).toContain('missing|rebuild)');
 		expect(validation).toContain('leave|copy)');
-		expect(validation).toContain('none|outputs|closure)');
+		expect(validation).toContain('none|outputs|built|closure)');
 		expect(validation).toContain('true|false)');
 	});
 
@@ -897,6 +898,11 @@ describe('attestation', () => {
 			});
 		}
 	);
+
+	it('publishes observed builds by default in the flake workflow', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		expect(workflow.on.workflow_call?.inputs.publish?.default).toBe('built');
+	});
 
 	it('publishes selected outputs by default in the simple workflow', async () => {
 		const workflow = await loadWorkflow(publishWorkflow);

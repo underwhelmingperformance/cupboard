@@ -144,8 +144,8 @@ jobs:
             *) echo '::error::substituter must be leave or copy'; exit 1 ;;
           esac
           case "${PUBLISH}" in
-            none|outputs|closure) ;;
-            *) echo '::error::publish must be none, outputs, or closure'; exit 1 ;;
+            none|outputs|built|closure) ;;
+            *) echo '::error::publish must be none, outputs, built, or closure'; exit 1 ;;
           esac
           case "${ATTEST}" in
             true|false) ;;
@@ -215,6 +215,7 @@ jobs:
           inline-paths: false
           publication-url: ${{ inputs.url }}
           build: ${{ inputs.build }}
+          publish: ${{ inputs.publish }}
           substituter: ${{ inputs.substituter }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}

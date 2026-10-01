@@ -53,6 +53,13 @@ inputs:
       is already available. Nix may still fetch dependencies from substituters.
     required: false
     default: missing
+  publish:
+    description: >-
+      Publication scope: none, outputs, built, or closure. This action cannot
+      observe every build intermediate and refuses built before starting work.
+      Use the flake publishing workflow for built publication.
+    required: false
+    default: outputs
   substituter:
     description: >-
       Control whether to publish outputs available from external substituters.
@@ -145,6 +152,7 @@ runs:
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
         BUILD: ${{ inputs.build }}
+        PUBLISH: ${{ inputs.publish }}
         SUBSTITUTER: ${{ inputs.substituter }}
         PUBLICATION_URL: ${{ inputs.publication-url }}
       run: |
@@ -161,5 +169,6 @@ runs:
             --max-jobs "$MAX_JOBS" \
             --allow-failure "$ALLOW_FAILURE" \
             --build "$BUILD" \
+            --publish "$PUBLISH" \
             --substituter "$SUBSTITUTER" \
             --publication-url "$PUBLICATION_URL"

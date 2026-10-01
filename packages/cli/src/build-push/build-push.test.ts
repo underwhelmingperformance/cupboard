@@ -1915,7 +1915,27 @@ describe('runBuildPush', () => {
 		});
 	});
 
+	it('rejects built publication before an untrusted-daemon build starts', async () => {
+		const run = await runFlow({
+			constructed: { succeedOn: 1, installables: [`${drvA}^out`] },
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			options: { publicationScope: 'built' }
+		});
+
+		expect(run.error).toBeInstanceOf(Error);
+		expect(
+			run.error instanceof Error ? run.error.message : undefined
+		).toContain('cannot observe all build intermediates');
+		expect(run.attemptIdsIssued).toBe(0);
+	});
+
 	it.each([
+		{
+			scope: 'built' as const,
+			published: [pathA, pathB],
+			closure: [pathA, pathC],
+			built: [pathA, pathB]
+		},
 		{
 			scope: 'outputs' as const,
 			published: [pathA],

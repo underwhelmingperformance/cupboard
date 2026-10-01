@@ -88,7 +88,8 @@ Each cohort job goes through these steps:
    log. `build: rebuild` puts each requested output in the build work even if
    the output was already available.
 5. It builds the requested outputs that the selected build mode requires. With
-   `publish: outputs`, it publishes the selected outputs. With
+   `publish: outputs`, it publishes the selected outputs. With `publish: built`,
+   it also publishes intermediates built during the run. With
    `publish: closure`, it also publishes their runtime references. With
    `publish: none`, it publishes nothing.
 6. After publication succeeds, it sets each published target's retention root.
