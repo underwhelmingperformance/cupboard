@@ -6,6 +6,7 @@ import { IneffectiveCtlogThresholdError } from '@cupboard/shared/sigstore';
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
+import { cliExitCode } from '../cli.ts';
 import {
 	AttestAttachBundleRequiredError,
 	ReadCredentialPairError
@@ -172,6 +173,65 @@ describe('attest attach command', () => {
 				{ from: 'user' }
 			)
 		).rejects.toBeInstanceOf(ReadCredentialPairError);
+	});
+});
+
+describe('attest status command', () => {
+	it('classifies an unreadable path file as an argument error before authentication', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-status-'));
+		try {
+			let failure: unknown;
+			try {
+				await silentProgram().parseAsync(
+					[
+						'attest',
+						'status',
+						'https://cache.example.workers.dev/t/acme',
+						'--paths-file',
+						path.join(directory, 'missing'),
+						'--github-oidc'
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				failure = error;
+			}
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				status: cliExitCode(failure, 130)
+			}).toStrictEqual({ name: 'StatusOptionsError', status: 2 });
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('validates paths before read authentication', async () => {
+		const program = silentProgram();
+		let failure: unknown;
+		try {
+			await program.parseAsync(
+				[
+					'attest',
+					'status',
+					'https://cache.example.workers.dev/t/acme',
+					'invalid-path',
+					'--read-user',
+					'alice'
+				],
+				{ from: 'user' }
+			);
+		} catch (error) {
+			failure = error;
+		}
+		expect({
+			name: failure instanceof Error ? failure.name : undefined,
+			message: failure instanceof Error ? failure.message : undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({
+			name: 'StatusOptionsError',
+			message: 'Invalid store path: invalid-path',
+			status: 2
+		});
 	});
 });
 

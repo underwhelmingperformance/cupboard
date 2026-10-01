@@ -328,7 +328,7 @@ export async function readTenantReadVerifier(
 // Tier 3 reads the authoritative tenant row and the addressed cache's
 // credential and lifecycle rows. It reads D1 directly, so suspension, deletion
 // and credential changes take effect as soon as the control API commits them.
-async function readTenantEntry(
+export async function readTenantEntry(
 	env: Env,
 	slug: TenantId,
 	cache: CacheScope

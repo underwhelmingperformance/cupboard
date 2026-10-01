@@ -1,8 +1,4 @@
 import {
-	attestationStatusRequestSchema,
-	type AttestationStatusResponse
-} from '@cupboard/protocol/attestations';
-import {
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse
 } from '@cupboard/protocol/cache-availability';
@@ -25,6 +21,7 @@ import {
 	serveNarInfo
 } from '../read/read.ts';
 
+import { answerAttestationInfo } from './attestation-info.ts';
 import { answerCacheMetadata } from './cache-metadata.ts';
 import {
 	answerAvailabilityInChunks,
@@ -150,31 +147,9 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		return tenantUncachedRead(context, true);
 	});
 
-	app.post('/api/v1/attested-paths', async (context) => {
+	app.post('/api/v1/attestation-info', async (context) => {
 		const denied = await guardRead(context);
-
-		if (denied !== undefined) {
-			return denied;
-		}
-
-		// Parse before the deleted-cache response, so an invalid request receives
-		// the same 400 whether or not the cache exists.
-		await parseRequestBody(
-			attestationStatusRequestSchema,
-			context.req.raw.clone()
-		);
-
-		if (context.get('isCacheDeleted')) {
-			const response: AttestationStatusResponse = {
-				attestedStorePathHashes: []
-			};
-
-			return context.json(response, StatusCodes.OK, {
-				'cache-control': 'no-store'
-			});
-		}
-
-		return tenantUncachedRead(context);
+		return denied ?? answerAttestationInfo(context);
 	});
 
 	app.post('/api/v1/missing-paths', async (context) => {

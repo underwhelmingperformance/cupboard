@@ -4,7 +4,6 @@ import {
 	type CacheScope,
 	isSameCacheScope,
 	type NarInfoGeneration,
-	narInfoGenerationSchema,
 	type NixSha256HashString,
 	type PredicateType,
 	predicateTypeSchema,
@@ -26,8 +25,7 @@ import {
 	type AttestationDescriptorInput,
 	type AttestationListInput,
 	type AttestationNegotiateRequest,
-	type AttestationNegotiateResponseInput,
-	type AttestationStatusResponse
+	type AttestationNegotiateResponseInput
 } from '@cupboard/protocol/attestations';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
@@ -90,6 +88,11 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import {
+	isListOfCommittedGeneration,
+	listGenerationMetadataKey,
+	recordedListGeneration
+} from '../read/attestation-generation.ts';
 import { authorisedNarInfoVersions } from '../read/read.ts';
 
 import { armAlarmNoLaterThan, type MaintenanceProgress } from './alarm.ts';
@@ -112,6 +115,8 @@ import {
 	hasSubrequestsFor,
 	requireSubrequestsFor
 } from './subrequest-slice.ts';
+
+export { listGenerationMetadataKey } from '../read/attestation-generation.ts';
 
 interface AttestationBundle {
 	readonly predicateType: PredicateType;
@@ -1965,47 +1970,6 @@ export class AttestationsService {
 		throw finalised.error;
 	}
 
-	async attestedPathHashes(
-		cacheScope: CacheScope,
-		storePathHashes: readonly StorePathHash[]
-	): Promise<AttestationStatusResponse> {
-		const cache = this.context.cacheRepository.require(cacheScope);
-		const versions = await authorisedNarInfoVersions(
-			this.context.d1,
-			this.context.requireTenant(),
-			cacheScope,
-			storePathHashes
-		);
-		const candidates = [...new Set(storePathHashes)].flatMap((hash) => {
-			const version = versions.get(hash);
-
-			return version === undefined
-				? []
-				: [{ hash, generation: version.generation }];
-		});
-		requireSubrequestsFor(candidates.length, 'attestation status probe');
-		const checked = await mapWithConcurrency(
-			candidates,
-			maxOutgoingConnections,
-			async ({ hash, generation }) => {
-				const object = await this.context.env.BLOBS.head(
-					this.listKey(cache, hash)
-				);
-
-				return object !== null &&
-					isListOfCommittedGeneration(object, cache, generation)
-					? hash
-					: undefined;
-			}
-		);
-
-		return {
-			attestedStorePathHashes: checked.filter(
-				(hash): hash is StorePathHash => hash !== undefined
-			)
-		};
-	}
-
 	async handleServeList(
 		request: Request,
 		cacheScope: CacheScope,
@@ -2265,49 +2229,6 @@ export class AttestationsService {
 			}
 		}
 	}
-}
-
-// The R2 metadata entry naming the narinfo generation a list object describes.
-export const listGenerationMetadataKey = 'narinfo-generation';
-
-function recordedListGeneration(
-	object: R2Object
-): NarInfoGeneration | undefined {
-	const recorded = object.customMetadata?.[listGenerationMetadataKey];
-
-	if (recorded === undefined) {
-		return undefined;
-	}
-
-	const parsed = narInfoGenerationSchema.safeParse(Number(recorded));
-
-	return parsed.success ? parsed.data : undefined;
-}
-
-/**
- * Whether a list object describes the narinfo generation the path currently
- * has committed.
- *
- * A path keeps one list object across all of its commits. A commit without an
- * attestation leaves the object from the previous generation in place. The
- * generation in the object metadata identifies which commit produced the list,
- * including after another cache reuses the stored name.
- *
- * Generation metadata was introduced after public-cache list objects. A
- * private cache therefore cannot accept an object without it.
- */
-function isListOfCommittedGeneration(
-	object: R2Object,
-	cache: ResolvedCache,
-	committed: NarInfoGeneration
-): boolean {
-	const recorded = recordedListGeneration(object);
-
-	if (recorded === undefined) {
-		return cache.access === 'public';
-	}
-
-	return recorded === committed;
 }
 
 const attestationSubjectSchema = z.object({
