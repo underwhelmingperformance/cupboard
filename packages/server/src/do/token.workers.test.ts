@@ -658,6 +658,12 @@ describe('server-resolved read acquisition', () => {
 	it.each([
 		'[]',
 		'{',
+		JSON.stringify(
+			Array.from({ length: 17 }, (_, index) => ({
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: `cache-${String(index)}` }
+			}))
+		),
 		JSON.stringify([
 			{
 				type: 'cupboard_cache',
@@ -684,10 +690,111 @@ describe('server-resolved read acquisition', () => {
 		}).toStrictEqual({
 			status: 400,
 			body: {
+				error: 'invalid_request',
+				error_description:
+					'read_resources must contain one to sixteen distinct cache or view resources, including at most one reuse view.',
+				problem: 'invalid-read-resources'
+			}
+		});
+	});
+
+	it.each(['absent', 'private'] as const)(
+		'limits missing read authority advice to the requested %s cache',
+		async (state) => {
+			const subject = await installTrustedIdp('release-write');
+			const cache = {
+				kind: 'named' as const,
+				name: cacheNameSchema.parse('ci')
+			};
+			if (state === 'private') {
+				await putTestCache(
+					await issueServerSignedToken(adminGrants()),
+					cache,
+					'private'
+				);
+			}
+			const response = await postToken({
+				grant_type: readAccessGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify([
+					{ type: 'cupboard_cache', cache, mode: 'content' }
+				])
+			});
+			expect({
+				status: response.status,
+				body: await response.json()
+			}).toStrictEqual({
+				status: 400,
+				body: {
+					error: 'invalid_authorization_details',
+					error_description:
+						"The matching trust rule does not permit the requested read_resources. Add cache:content-read for cache 'ci'.",
+					problem: 'read-resources-not-permitted',
+					detail: {
+						read_resources: JSON.stringify([
+							{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }
+						])
+					}
+				}
+			});
+		}
+	);
+
+	it('explains missing view authority without listing unrelated resources', async () => {
+		const subject = await installTrustedIdp('release-write');
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify([{ type: 'cupboard_view', view: 'prior' }])
+		});
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: 400,
+			body: {
 				error: 'invalid_authorization_details',
 				error_description:
-					'The requested authorization_details are not permitted',
-				problem: 'not-permitted'
+					"The matching trust rule does not permit the requested read_resources. Add view:content-read for reuse view 'prior'.",
+				problem: 'read-resources-not-permitted',
+				detail: {
+					read_resources: JSON.stringify([
+						{
+							type: 'cupboard_view',
+							view: 'prior',
+							actions: ['view:content-read']
+						}
+					])
+				}
+			}
+		});
+	});
+
+	it('requires one matching trust rule for the complete read request', async () => {
+		await installTrustedIdp('write');
+		const subject = await installTrustedIdp('read');
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify([
+				{ type: 'cupboard_cache', cache: { kind: 'named', name: 'ci' } },
+				{ type: 'cupboard_view', view: 'sources' }
+			])
+		});
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: 400,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description:
+					'The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources.',
+				problem: 'read-resources-not-permitted',
+				detail: { read_resources: '[]' }
 			}
 		});
 	});

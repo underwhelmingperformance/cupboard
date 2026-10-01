@@ -18,6 +18,13 @@ import {
 
 import { serverErrorHandler } from './error-response.ts';
 
+class SerializedRpcError extends Error {
+	constructor(name: string) {
+		super('provider-private-detail');
+		this.name = name;
+	}
+}
+
 function appThatThrows(error: unknown): Hono {
 	const app = new Hono();
 	app.onError(serverErrorHandler);
@@ -80,6 +87,30 @@ describe('serverErrorHandler', () => {
 				challenge,
 				cacheControl,
 				body,
+				logged: []
+			});
+		}
+	);
+
+	it.each([
+		'LocalSchemaMigrationPendingError',
+		'CacheCatalogueMigrationPendingError'
+	])(
+		'translates a serialized %s without exposing its message',
+		async (name) => {
+			const error = new SerializedRpcError(name);
+			const response = await appThatThrows(error).request('/');
+			expect({
+				status: response.status,
+				retryAfter: response.headers.get('retry-after'),
+				cacheControl: response.headers.get('cache-control'),
+				body: await response.text(),
+				logged: capture.logs
+			}).toStrictEqual({
+				status: 503,
+				retryAfter: '1',
+				cacheControl: 'no-store',
+				body: 'Tenant migration is still in progress; retry shortly\n',
 				logged: []
 			});
 		}
