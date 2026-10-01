@@ -65,7 +65,7 @@ export type AttestationInfoRequest = z.output<
 	typeof attestationInfoRequestSchema
 >;
 
-const attestationInfoEntrySchema = z.discriminatedUnion('status', [
+export const attestationInfoEntrySchema = z.discriminatedUnion('status', [
 	z.strictObject({
 		storePathHash: storePathHashSchema,
 		status: z.literal('missing')

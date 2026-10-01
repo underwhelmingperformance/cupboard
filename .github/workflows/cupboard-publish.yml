@@ -275,3 +275,17 @@ jobs:
           receipt-file: ${{ steps.push.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
+
+      - name: Report stored attestation coverage
+        uses: $/actions/attest-status
+        if:
+          ${{ !cancelled() && inputs.publish != 'none' &&
+          steps.push.outputs.receipt-file != '' }}
+        with:
+          url: ${{ inputs.url }}
+          cache: ${{ inputs.cache }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          receipt-file: ${{ steps.push.outputs.receipt-file }}
+          bundles-file: ${{ steps.attest.outputs.bundles-file }}
