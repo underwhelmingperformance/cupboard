@@ -666,10 +666,11 @@ Options:
                                     outputs (by default, only the built outputs)
   --publication-scope <scope>       Control which paths build-push publishes for
                                     installable cohorts. `outputs` publishes the
-                                    selected outputs; `closure` also publishes
-                                    their runtime references. Publication starts
-                                    after the build. (choices: "outputs",
-                                    "closure")
+                                    selected outputs; `built` also publishes
+                                    observed build intermediates; `closure` also
+                                    publishes their runtime references.
+                                    Publication starts after the build.
+                                    (choices: "outputs", "built", "closure")
   --substituter <mode>              Control whether to publish outputs available
                                     from external substituters. `copy` selects
                                     them for publication. `leave` keeps them
@@ -2367,7 +2368,7 @@ Options:
   --store-path <path>                           directory whose free space to check (default: /nix/store)
   --build <mode>                                Control when to build the requested outputs (default: missing): missing uses an available output and builds it otherwise; rebuild builds each output again on the configured builder, even if it is already available. Nix may still fetch dependencies from substituters. (default: "missing")
   --substituter <mode>                          how to handle externally served target outputs: leave keeps them upstream; copy publishes them to the destination (default: leave) (default: "leave")
-  --publish <mode>                              which paths to publish: none skips publication; outputs selects target outputs; closure includes their runtime references (default: outputs) (default: "outputs")
+  --publish <mode>                              which paths to publish: none skips publication; outputs selects target outputs; built includes observed builds; closure includes their runtime references (default: outputs) (default: "outputs")
   --unknown-ceiling <count>                     maximum number of store paths whose availability is still unknown after the store checks them again (default: 0)
   --unknown-ceiling-untrusted-fallback <count>  the same maximum when the store refuses to check them again (default: 5)
   --headroom-absolute-minimum <bytes>           minimum free space to leave in the store, in bytes

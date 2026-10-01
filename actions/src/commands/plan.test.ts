@@ -315,6 +315,15 @@ describe('planAction', () => {
 describe('resolvePlanInputs', () => {
 	const environment = { RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' };
 
+	it('accepts publication of requested outputs and observed builds', () => {
+		const inputs = resolvePlanInputs(
+			{ ...baseOptions, publish: 'built' },
+			environment
+		);
+
+		expect(inputs.publish).toBe('built');
+	});
+
 	it('resolves explicit permanent retention', () => {
 		const inputs = resolvePlanInputs(
 			{ ...baseOptions, permanent: 'true' },

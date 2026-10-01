@@ -34,7 +34,8 @@ import {
 	BuildInstallablesMissingError,
 	BuildObservationMissingError,
 	BuildRebuildRemoteDispatchError,
-	CommandFailedError
+	CommandFailedError,
+	SimpleBuiltPublicationUnsupportedError
 } from '../errors.ts';
 import {
 	appendEnvironmentFile,
@@ -66,6 +67,7 @@ export interface BuildAttempt {
 export interface BuildOptions {
 	readonly inlinePaths?: string;
 	readonly publicationUrl?: string;
+	readonly publish?: string;
 	readonly installables?: readonly string[];
 	readonly installablesFile?: string;
 	readonly attempts?: string;
@@ -472,6 +474,10 @@ export function registerBuildCommand(
 			'false'
 		)
 		.option(
+			'--publish <scope>',
+			'publication scope: none, outputs, built, or closure'
+		)
+		.option(
 			'--build <mode>',
 			'build missing outputs or rebuild selected outputs',
 			'missing'
@@ -511,6 +517,15 @@ export async function buildAction(
 	dependencies: BuildDependencies = {}
 ): Promise<void> {
 	dependencies.signal?.throwIfAborted();
+	const publish = providedChoice(
+		'publish',
+		options.publish,
+		['none', 'outputs', 'built', 'closure'],
+		'outputs'
+	);
+	if (publish === 'built') {
+		throw new SimpleBuiltPublicationUnsupportedError();
+	}
 
 	const installables = [...(options.installables ?? [])];
 	const isInlinePaths = isEnabled('inline-paths', options.inlinePaths, true);
