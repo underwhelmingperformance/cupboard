@@ -1862,7 +1862,7 @@ describe('buildAndRootNixResults', () => {
 				failures: [
 					{
 						target: derivedPath(libraryQueryInstallable),
-						kind: 'target',
+						kind: 'verification',
 						outcome: 'not-built',
 						message:
 							'the rebuild did not prove execution in the selected store (result: already-valid; execution: unobserved)'
@@ -7674,6 +7674,168 @@ if (args.includes('--help')) {
 			],
 			copyCalls: [],
 			buildCalls: []
+		});
+	});
+
+	it.each([
+		'built',
+		'substituted',
+		'already-valid',
+		'delegated-rebuild',
+		'rebuild-mismatch'
+	] as const)(
+		'keeps remote %s result validation fatal under best-effort policy',
+		async (kind) => {
+			const isMismatch = kind === 'rebuild-mismatch';
+			const isVerification = kind === 'delegated-rebuild' || isMismatch;
+			const result: NixBuildResult = isMismatch
+				? {
+						...remoteFailure(),
+						outcome: {
+							kind: 'not-deterministic',
+							message: 'rebuild output differs'
+						}
+					}
+				: kind === 'delegated-rebuild'
+					? { ...remoteResult('built'), execution: 'remote' }
+					: { ...remoteResult(kind), outcome: { kind, outputs: {} } };
+			const [outcome] = await Promise.allSettled([
+				runPublicationFlow(
+					{
+						...baseOptions(),
+						cohortJson: remotelyQueryableCohortJson(),
+						publish: 'outputs',
+						bestEffort: 'true',
+						store: 'ssh-ng://build@example.test',
+						...(isVerification && { build: 'rebuild' })
+					},
+					[],
+					[result],
+					[libraryQueryInstallable]
+				)
+			] as const);
+			const error: unknown =
+				outcome.status === 'rejected' ? outcome.reason : undefined;
+			const receipt: unknown = JSON.parse(
+				await readFile(
+					path.join(directory, 'cupboard-cohort-receipt.json'),
+					'utf8'
+				)
+			);
+
+			expect({
+				fatal:
+					error instanceof
+					(isVerification
+						? RemoteCohortBuildFailedError
+						: RemoteCohortProtocolError),
+				failures:
+					error instanceof RemoteCohortBuildFailedError ||
+					error instanceof RemoteCohortProtocolError
+						? error.failures
+						: undefined,
+				receipt
+			}).toStrictEqual({
+				fatal: true,
+				failures: [
+					{
+						target: libraryQueryInstallable,
+						kind: isVerification ? 'verification' : 'protocol',
+						outcome: isMismatch
+							? 'not-deterministic'
+							: isVerification
+								? 'not-built'
+								: 'invalid-outputs',
+						message: isMismatch
+							? 'rebuild output differs'
+							: isVerification
+								? 'the rebuild did not prove execution in the selected store (result: built; execution: remote)'
+								: `the daemon reported no outputs; expected out=${libraryBuiltPath}`
+					}
+				],
+				receipt: {
+					version: 3,
+					paths: [],
+					subjects: [],
+					terminalFailure: { kind: 'command' }
+				}
+			});
+		}
+	);
+
+	it('keeps dependency reproducibility failures fatal after an identified target failure', async () => {
+		const [outcome] = await Promise.allSettled([
+			runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					publish: 'outputs',
+					bestEffort: 'true',
+					store: 'ssh-ng://build@example.test'
+				},
+				[],
+				[
+					{
+						...remoteFailure(appQueryInstallable),
+						outcome: {
+							kind: 'not-deterministic',
+							message: 'dependency output differs'
+						}
+					},
+					remoteFailure(libraryQueryInstallable)
+				],
+				[libraryQueryInstallable],
+				undefined,
+				new Map(),
+				{
+					dependencyBuilds: [
+						{
+							path: storePathSchema.parse(appPath),
+							installables: [derivedPath(appQueryInstallable)],
+							requiredBy: [derivedPath(libraryQueryInstallable)]
+						}
+					]
+				}
+			)
+		] as const);
+		const error: unknown =
+			outcome.status === 'rejected' ? outcome.reason : undefined;
+		const receipt: unknown = JSON.parse(
+			await readFile(
+				path.join(directory, 'cupboard-cohort-receipt.json'),
+				'utf8'
+			)
+		);
+
+		expect({
+			fatal: error instanceof RemoteCohortBuildFailedError,
+			failures:
+				error instanceof RemoteCohortBuildFailedError
+					? error.failures
+					: undefined,
+			receipt
+		}).toStrictEqual({
+			fatal: true,
+			failures: [
+				{
+					target: appQueryInstallable,
+					kind: 'verification',
+					outcome: 'not-deterministic',
+					message: 'dependency output differs'
+				},
+				{
+					target: libraryQueryInstallable,
+					kind: 'target',
+					outcome: 'permanent-failure',
+					message: `could not build ${libraryQueryInstallable}`
+				}
+			],
+			receipt: {
+				version: 3,
+				paths: [],
+				subjects: [],
+				terminalFailure: { kind: 'command' }
+			}
 		});
 	});
 
