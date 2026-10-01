@@ -199,8 +199,8 @@ export interface InheritanceSourceRow {
 	readonly narHash: NixSha256HashString;
 	readonly predicateType: PredicateType;
 	readonly digest: Sha256HexDigest;
-	readonly size: number;
-	readonly incarnation: number;
+	readonly size: number | null;
+	readonly incarnation: number | null;
 }
 
 export interface ExistingInheritanceRow {
@@ -808,7 +808,7 @@ export class AttestationsService {
 			})
 			.from(d1Schema.attestationReference)
 			.innerJoin(d1Schema.blobReference, sameSourceReference)
-			.innerJoin(
+			.leftJoin(
 				d1Schema.casObject,
 				eq(d1Schema.casObject.digest, d1Schema.attestationReference.digest)
 			)
@@ -1636,9 +1636,12 @@ export class AttestationsService {
 					break;
 				}
 
-				const object = await this.context.env.BLOBS.head(
-					casObjectKey(row.digest, row.incarnation)
-				);
+				const object =
+					row.incarnation === null
+						? undefined
+						: await this.context.env.BLOBS.head(
+								casObjectKey(row.digest, row.incarnation)
+							);
 
 				// Source access and reference generations can change during prefetch
 				// or the CAS head. Revalidate them inside the destination write gate.
@@ -1693,7 +1696,7 @@ export class AttestationsService {
 					) {
 						throw new AttestationInheritanceSourceChangedError(row.digest);
 					}
-					if (object === null) {
+					if (object == undefined || source.size === null) {
 						logger.warn('attestation inheritance source missing', {
 							cache: cache.scope,
 							storePathHash,
