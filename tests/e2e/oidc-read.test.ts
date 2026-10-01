@@ -236,7 +236,7 @@ async function substitute(
 			{
 				githubOidc: !isAnonymous,
 				...(!isViewOnly && reuse !== undefined && { reuseView: reuse }),
-				audience: audienceSchema.parse(audience)
+				...(!isAnonymous && { audience: audienceSchema.parse(audience) })
 			},
 			{
 				environment: {

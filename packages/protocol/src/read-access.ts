@@ -46,16 +46,33 @@ export const readResourceSchema = z.discriminatedUnion('type', [
 
 export type ReadResource = z.output<typeof readResourceSchema>;
 
+export const maxReadResources = 16;
+
 export const readResourcesSchema = z
 	.array(readResourceSchema)
 	.min(1)
-	.max(2)
+	.max(maxReadResources)
 	.refine(
 		(resources) =>
-			new Set(resources.map((resource) => resource.type)).size ===
+			resources.filter((resource) => resource.type === 'cupboard_view')
+				.length <= 1,
+		'Choose at most one reuse view'
+	)
+	.refine(
+		(resources) =>
+			new Set(resources.map((resource) => readResourceKey(resource))).size ===
 			resources.length,
-		'Choose at most one cache and one reuse view'
+		'Choose each cache or reuse view once'
 	);
+
+function readResourceKey(resource: ReadResource): string {
+	if (resource.type === 'cupboard_view') {
+		return `view:${resource.view}`;
+	}
+	return resource.cache.kind === 'default'
+		? 'cache:default'
+		: `cache:named:${resource.cache.name}`;
+}
 
 const existingStateSchema = z.strictObject({
 	kind: z.literal('existing'),
@@ -94,7 +111,7 @@ export type ReadResourceState = z.output<typeof readResourceStateSchema>;
 export const readAccessFactsSchema = z
 	.array(readResourceStateSchema)
 	.min(1)
-	.max(2);
+	.max(maxReadResources);
 export const readAccessResponseSchema = tokenResponseSchema.extend({
 	authorization_details:
 		tokenResponseSchema.shape.authorization_details.unwrap(),
