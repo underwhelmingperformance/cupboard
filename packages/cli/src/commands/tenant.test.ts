@@ -21,6 +21,8 @@ import type { ResultRow } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
+import { cliExitCode } from '../cli.ts';
+
 import {
 	InvalidQuotaBytesError,
 	parseQuotaBytes,
@@ -104,6 +106,41 @@ describe('parseQuotaBytes', () => {
 			expect(() => parseQuotaBytes(value)).toThrow(InvalidQuotaBytesError);
 		}
 	);
+});
+
+describe('tenant argument error statuses', () => {
+	it.each(['', '-1', '1.5', '1e3', String(Number.MAX_SAFE_INTEGER + 1)])(
+		'explains the quota format and exits two for %j',
+		(value) => {
+			let failure: unknown;
+			try {
+				parseQuotaBytes(value);
+			} catch (error) {
+				failure = error;
+			}
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				message: failure instanceof Error ? failure.message : undefined,
+				status: cliExitCode(failure, 130)
+			}).toStrictEqual({
+				name: 'InvalidQuotaBytesError',
+				message: `Invalid quota bytes: ${value}. Pass a non-negative integer in bytes, such as 1048576 (at most ${String(Number.MAX_SAFE_INTEGER)}).`,
+				status: 2
+			});
+		}
+	);
+	it('classifies a username without a credential as a usage error', () => {
+		let failure: unknown;
+		try {
+			readCredentialFromOptions({ readUser: alice, readPassword: false });
+		} catch (error) {
+			failure = error;
+		}
+		expect({
+			name: failure instanceof Error ? failure.name : undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({ name: 'ReadUserWithoutCredentialError', status: 2 });
+	});
 });
 
 describe('readCredentialFromOptions', () => {

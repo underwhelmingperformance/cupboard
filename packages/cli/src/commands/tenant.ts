@@ -29,6 +29,7 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { cacheLabel } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { CliUsageError } from '../errors.ts';
 import { generateReadPassword, parseReadUser } from '../read-user.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
@@ -86,16 +87,18 @@ interface CreateOptions {
 	readonly quotaBytes?: number;
 }
 
-export class ReadUserWithoutCredentialError extends Error {
+export class ReadUserWithoutCredentialError extends CliUsageError {
 	constructor(public readonly readUser: string) {
 		super('--read-user cannot be combined with --no-read-password');
 		this.name = 'ReadUserWithoutCredentialError';
 	}
 }
 
-export class InvalidQuotaBytesError extends Error {
+export class InvalidQuotaBytesError extends CliUsageError {
 	constructor(public readonly value: string) {
-		super(`Invalid quota bytes: ${value}`);
+		super(
+			`Invalid quota bytes: ${value}. Pass a non-negative integer in bytes, such as 1048576 (at most ${String(Number.MAX_SAFE_INTEGER)}).`
+		);
 		this.name = 'InvalidQuotaBytesError';
 	}
 }

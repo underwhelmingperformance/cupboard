@@ -7,7 +7,12 @@ import makeFetchHappen from 'make-fetch-happen';
 
 import { abortReason } from '../../abort.ts';
 import { cacheDirectory } from '../../auth/secret-file.ts';
-import { authExitCode, CliError, transientExitCode } from '../../errors.ts';
+import {
+	authExitCode,
+	CliError,
+	CliUsageError,
+	transientExitCode
+} from '../../errors.ts';
 
 const forbiddenStatus: number = StatusCodes.FORBIDDEN;
 
@@ -21,7 +26,7 @@ export interface RepositoryIdentity {
 	readonly defaultBranch: string;
 }
 
-export class InvalidRepositoryError extends Error {
+export class InvalidRepositoryError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`--repo must be <owner>/<name>, got '${value}'.`);
 		this.name = 'InvalidRepositoryError';
@@ -178,7 +183,7 @@ export async function lookupRepository(
 ): Promise<RepositoryIdentity> {
 	const slash = repository.indexOf('/');
 
-	if (slash <= 0 || slash === repository.length - 1) {
+	if (!/^[^\s/]+\/[^\s/]+$/u.test(repository)) {
 		throw new InvalidRepositoryError(repository);
 	}
 
