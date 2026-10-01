@@ -7,7 +7,6 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import { attestationListSchema } from '@cupboard/protocol/attestations';
 import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema,
@@ -18,15 +17,12 @@ import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { readResponseJson } from '@cupboard/shared/response-body';
-import { isSlsaProvenanceType } from '@cupboard/shared/slsa';
-import { StatusCodes } from 'http-status-codes';
 
 import type { DestinationProbes } from './availability-partition.ts';
 import { DestinationProbeResponseError } from './destination-probe-errors.ts';
 
 const maximumConcurrentProbes = 4;
 const maximumProbeResponseBytes = 16 * 1024 * 1024;
-const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 export interface DestinationProbeOptions {
 	readonly paths: readonly StorePathString[];
@@ -74,29 +70,6 @@ export function viewServedPaths(
 	);
 }
 
-/**
- * The cache serves one attestation list per store-path hash, so this probe
- * requests each distinct hash once. A 404 means that the path has no
- * attestation.
- *
- * A cupboard build-origin statement is not sufficient evidence. It covers all
- * paths published by a run, including paths copied into the run's store, and
- * therefore does not prove that the workflow built a path.
- */
-export function attestedServedPaths(
-	options: DestinationProbeOptions & {
-		readonly baseUrl: URL;
-		readonly cache: CacheScope;
-	}
-): Promise<ReadonlySet<StorePathString>> {
-	return attestedPathsAt(cacheUrl(options.baseUrl, options.cache), {
-		...options,
-		fetcher: withReadAuthentication(options.fetcher ?? fetch, {
-			tenantUrl: options.baseUrl
-		})
-	});
-}
-
 export interface TenantProbeOptions {
 	readonly baseUrl: URL;
 	readonly cache: CacheScope;
@@ -109,13 +82,9 @@ export interface TenantProbeOptions {
 	readonly fetcher?: typeof fetch;
 }
 
-export interface TenantProbes extends DestinationProbes {
-	readonly attestedServed: (
-		paths: readonly StorePathString[]
-	) => Promise<ReadonlySet<StorePathString>>;
-}
-
-export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
+export function tenantProbesFor(
+	options: TenantProbeOptions
+): DestinationProbes {
 	const shared = {
 		baseUrl: options.baseUrl,
 		...(options.credentials !== undefined && {
@@ -139,9 +108,7 @@ export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
 						...(options.viewCredentials !== undefined && {
 							credentials: options.viewCredentials
 						})
-					}),
-		attestedServed: (paths) =>
-			attestedServedPaths({ ...shared, paths, cache: options.cache })
+					})
 	};
 }
 
@@ -200,94 +167,6 @@ async function availablePathsAt(
 	}
 
 	return available;
-}
-
-async function attestedPathsAt(
-	probeUrl: URL,
-	options: DestinationProbeOptions
-): Promise<Set<StorePathString>> {
-	const pathsByHash = pathsByStorePathHash(options.paths);
-
-	if (pathsByHash.size === 0) {
-		return new Set();
-	}
-
-	const fetcher = options.fetcher ?? fetch;
-	const headers = {
-		...(options.credentials !== undefined &&
-			basicAuthHeader(options.credentials))
-	};
-	const answers = await mapWithConcurrency(
-		pathsByHash.keys().toArray(),
-		maximumConcurrentProbes,
-		async (hash) =>
-			[hash, await hasAttestation(fetcher, probeUrl, hash, headers)] as const
-	);
-	const attested = new Set<StorePathString>();
-
-	for (const [hash, isAttested] of answers) {
-		if (!isAttested) {
-			continue;
-		}
-
-		const matchingPaths = pathsByHash.get(hash) ?? [];
-
-		for (const storePath of matchingPaths) {
-			attested.add(storePath);
-		}
-	}
-
-	return attested;
-}
-
-async function hasAttestation(
-	fetcher: typeof fetch,
-	probeUrl: URL,
-	storePathHash: StorePathHash,
-	headers: Readonly<Record<string, string>>
-): Promise<boolean> {
-	const target = `${canonicalHref(probeUrl)}/attestations/${storePathHash}`;
-	const response = await fetcher(target, { headers });
-
-	if (response.status === notFoundStatus) {
-		await discardResponseBody(response);
-
-		return false;
-	}
-
-	if (!response.ok) {
-		await discardResponseBody(response);
-		throw new DestinationProbeResponseError(target, response.status);
-	}
-
-	let value: unknown;
-
-	try {
-		value = await readResponseJson(response, {
-			description: `Destination attestation response from ${target}`,
-			maximumBytes: maximumProbeResponseBytes
-		});
-	} catch (error) {
-		throw new DestinationProbeResponseError(
-			target,
-			response.status,
-			error instanceof Error ? error : new Error(String(error))
-		);
-	}
-
-	const parsed = attestationListSchema.safeParse(value);
-
-	if (!parsed.success) {
-		throw new DestinationProbeResponseError(
-			target,
-			response.status,
-			parsed.error
-		);
-	}
-
-	return parsed.data.attestations.some((descriptor) =>
-		isSlsaProvenanceType(descriptor.predicateType)
-	);
 }
 
 async function queryMissingStorePathHashes(
