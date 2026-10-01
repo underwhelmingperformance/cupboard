@@ -1095,6 +1095,7 @@ export async function buildCohortAction(
 					...dependencyCopies
 				])
 			];
+			let settledTerminalFailure: TerminalBuildFailure | undefined;
 			const publishRemoteResults: RemoteBuildPublisher = async (
 				results,
 				failures,
@@ -1177,6 +1178,7 @@ export async function buildCohortAction(
 						...(terminalFailure !== undefined && { terminalFailure })
 					}
 				);
+				settledTerminalFailure = terminalFailure;
 			};
 			const installablesByTarget = new Map(
 				remoteBindings.map((binding) => [
@@ -1185,69 +1187,79 @@ export async function buildCohortAction(
 				])
 			);
 
-			await reporter.progress(
-				'Building remote targets',
-				{ total: remoteBindings.length },
-				(bar) =>
-					runNixWithResults(
-						remoteBindings.map((binding) => binding.target),
-						inputs.maxJobs,
-						inputs.store,
-						publishRemoteResults,
-						dependencies.signal,
-						{
-							copyPaths: copiedPaths,
-							...(dependencyBuilds.length > 0 && { dependencyBuilds }),
-							...(inputs.build === 'rebuild' && {
-								rebuild: true
-							}),
-							...(closureSources.length > 0 && {
-								materialiseClosure: (
-									session: Pick<
-										NixDaemonSession,
-										'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
-									>
-								) =>
-									withLocalStoreSession(async (localNix, localStore) => {
-										await mkdir(path.dirname(inputs.receiptFile), {
-											recursive: true
-										});
+			try {
+				await reporter.progress(
+					'Building remote targets',
+					{ total: remoteBindings.length },
+					(bar) =>
+						runNixWithResults(
+							remoteBindings.map((binding) => binding.target),
+							inputs.maxJobs,
+							inputs.store,
+							publishRemoteResults,
+							dependencies.signal,
+							{
+								copyPaths: copiedPaths,
+								...(dependencyBuilds.length > 0 && { dependencyBuilds }),
+								...(inputs.build === 'rebuild' && {
+									rebuild: true
+								}),
+								...(closureSources.length > 0 && {
+									materialiseClosure: (
+										session: Pick<
+											NixDaemonSession,
+											'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
+										>
+									) =>
+										withLocalStoreSession(async (localNix, localStore) => {
+											await mkdir(path.dirname(inputs.receiptFile), {
+												recursive: true
+											});
 
-										return materialiseClosure({
-											sources: closureSources,
-											store: inputs.store,
-											localStore,
-											nix: session,
-											localNix,
-											onReferenced: recordClosureReferences,
-											...(dependencies.fetcher !== undefined && {
-												fetch: dependencies.fetcher
-											}),
-											...(dependencies.signal && {
-												signal: dependencies.signal
-											})
-										});
-									})
-							}),
-							publishClosure: inputs.publish === 'closure',
-							onTargetStarted: (target) => {
-								reporter.info(
-									`Building remote target ${installablesByTarget.get(target) ?? target}`
-								);
-							},
-							onDependencyStarted: (dependency) => {
-								reporter.info(`Building remote dependency ${dependency}`);
-							},
-							onTargetCompleted: () => {
-								bar.advance();
-							},
-							copy: () =>
-								copiedPaths.length === 0
-									? Promise.resolve()
-									: runCopy(copiedPaths, inputs.store, dependencies.signal)
-						}
-					)
-			);
+											return materialiseClosure({
+												sources: closureSources,
+												store: inputs.store,
+												localStore,
+												nix: session,
+												localNix,
+												onReferenced: recordClosureReferences,
+												...(dependencies.fetcher !== undefined && {
+													fetch: dependencies.fetcher
+												}),
+												...(dependencies.signal && {
+													signal: dependencies.signal
+												})
+											});
+										})
+								}),
+								publishClosure: inputs.publish === 'closure',
+								onTargetStarted: (target) => {
+									reporter.info(
+										`Building remote target ${installablesByTarget.get(target) ?? target}`
+									);
+								},
+								onDependencyStarted: (dependency) => {
+									reporter.info(`Building remote dependency ${dependency}`);
+								},
+								onTargetCompleted: () => {
+									bar.advance();
+								},
+								copy: () =>
+									copiedPaths.length === 0
+										? Promise.resolve()
+										: runCopy(copiedPaths, inputs.store, dependencies.signal)
+							}
+						)
+				);
+			} catch (error) {
+				if (!(
+					inputs.allBestEffort &&
+					error instanceof RemoteCohortBuildFailedError &&
+					settledTerminalFailure?.kind === 'target-build'
+				)) {
+					throw error;
+				}
+			}
 			return;
 		}
 
@@ -1352,12 +1364,8 @@ export async function buildCohortAction(
 			});
 		}
 
-		if (build.status === 0) {
+		if (streamedFailure !== undefined || build.status === 0) {
 			return;
-		}
-
-		if (streamedFailure !== undefined) {
-			throw streamedFailure.error;
 		}
 
 		throw new CommandFailedError('nix build', build.status);

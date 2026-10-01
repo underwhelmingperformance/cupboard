@@ -204,8 +204,11 @@ Targets in the same cohort must have the same `system`, `os`, `remote` and
 
 ### Letting a target fail without failing the run
 
-Set `bestEffort = true` on a target whose build is allowed to fail. If it fails,
-the rest of the run still succeeds.
+Set `bestEffort = true` on a target whose build is allowed to fail. The workflow
+publishes successful outputs, updates their roots and signs eligible build
+provenance even when another target fails to build. The receipt records the
+failed targets. Authentication, command, publication, verification and retention
+failures still fail the run.
 
 `bestEffort` doesn't cover evaluation. The manifest is evaluated as a whole, so
 if evaluating a best-effort target's `rootDrvPath` fails, the whole manifest

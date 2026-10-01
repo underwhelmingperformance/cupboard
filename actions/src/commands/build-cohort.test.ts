@@ -74,6 +74,7 @@ import {
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
 
+import { provenancedSubjects } from './attest.ts';
 import {
 	buildAndRootNixResults,
 	buildCohortAction as productionBuildCohortAction,
@@ -3791,7 +3792,7 @@ describe('buildCohortAction', () => {
 		{ name: 'ordinary publication', requireProvenance: false },
 		{ name: 'provenance publication', requireProvenance: true }
 	])(
-		'resolves a streamed multi-output survivor before reporting a sibling failure during $name',
+		'allows attestation after settling a streamed multi-output survivor during $name',
 		async ({ requireProvenance }) => {
 			const dependencyPath = storePathSchema.parse(
 				'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-dependency'
@@ -3905,7 +3906,7 @@ describe('buildCohortAction', () => {
 						reporter: recordingReporter([], progress)
 					}
 				)
-			).rejects.toBe(failure);
+			).resolves.toBeUndefined();
 			const inputs = resolveBuildCohortInputs(baseOptions(), environment);
 			const targetPaths = await readFile(inputs.targetPathsFile, 'utf8');
 
@@ -3925,6 +3926,38 @@ describe('buildCohortAction', () => {
 				targetPaths: [appPath, floatingBuiltPath, floatingDevelopmentPath]
 			});
 			expect(progress).toStrictEqual([{ total: 1, completed: 1 }]);
+
+			if (!requireProvenance) {
+				return;
+			}
+
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
+			);
+			const held = new Map(
+				receipt.subjects.map((subject) => [
+					subject.storePath,
+					{
+						storePath: subject.storePath,
+						narHash: NixSha256Hash.fromDigest(
+							Buffer.from(subject.narHash, 'hex')
+						),
+						...(subject.derivation !== undefined && {
+							deriver: subject.derivation
+						})
+					}
+				])
+			);
+			const survivors = [floatingBuiltPath, floatingDevelopmentPath].map(
+				(storePath) => ({ storePath, sha256: 'aa'.repeat(32) })
+			);
+
+			expect(provenancedSubjects(receipt, held)).toStrictEqual({
+				subjects: survivors,
+				built: survivors,
+				reproduced: [],
+				skipped: [dependencyPath]
+			});
 		}
 	);
 
@@ -3994,43 +4027,53 @@ describe('buildCohortAction', () => {
 		}
 	);
 
-	it('keeps a combined streamed build and publication failure fatal', async () => {
-		const failure = new CupboardReportedError(1, [], undefined, true);
-		const runCupboardMock = vi.fn<typeof runCupboard>(
-			async (binaryPath, arguments_, passedEnvironment) => {
-				if (arguments_[1] !== 'build-push') {
-					return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+	it.each([
+		{ name: 'publication', status: 1, failed: [libraryBuiltPath] },
+		{ name: 'authentication', status: 77, failed: [] },
+		{ name: 'verification', status: 75, failed: [] }
+	])(
+		'keeps a streamed $name failure fatal after a target build failure',
+		async ({ status, failed }) => {
+			const failure = new CupboardReportedError(status, [], undefined, true);
+			const runCupboardMock = vi.fn<typeof runCupboard>(
+				async (binaryPath, arguments_, passedEnvironment) => {
+					if (arguments_[1] !== 'build-push') {
+						return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+					}
+
+					const receiptFile =
+						arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '';
+					await writeFile(
+						receiptFile,
+						`${JSON.stringify({
+							version: 3,
+							paths: [],
+							subjects: [],
+							childExitStatus: 1,
+							failed,
+							terminalFailure: {
+								kind: 'target-build',
+								failedTargets: [libraryQueryInstallable]
+							}
+						})}\n`
+					);
+
+					throw failure;
 				}
+			);
 
-				const receiptFile =
-					arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '';
-				await writeFile(
-					receiptFile,
-					`${JSON.stringify({
-						version: 3,
-						paths: [],
-						subjects: [],
-						childExitStatus: 1,
-						failed: [libraryBuiltPath]
-					})}\n`
-				);
-
-				throw failure;
-			}
-		);
-
-		await expect(
-			buildCohortAction(
-				{ ...baseOptions(), publish: 'outputs', bestEffort: 'true' },
-				environment,
-				{ runCupboard: runCupboardMock }
-			)
-		).rejects.toBe(failure);
-		expect(runCupboardMock.mock.calls.map((call) => call[1][1])).toStrictEqual([
-			'plan',
-			'build-push'
-		]);
-	});
+			await expect(
+				buildCohortAction(
+					{ ...baseOptions(), publish: 'outputs', bestEffort: 'true' },
+					environment,
+					{ runCupboard: runCupboardMock }
+				)
+			).rejects.toBe(failure);
+			expect(
+				runCupboardMock.mock.calls.map((call) => call[1][1])
+			).toStrictEqual(['plan', 'build-push']);
+		}
+	);
 
 	it.each(['outputs', 'built'] as const)(
 		'keeps a streamed command failure fatal for best-effort %s publication',
@@ -7747,7 +7790,7 @@ if (args.includes('--help')) {
 		});
 	});
 
-	it('writes an empty receipt before reporting an all-failed remote cohort', async () => {
+	it('succeeds with an empty receipt after an all-failed best-effort remote cohort', async () => {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
 
 		await expect(
@@ -7762,7 +7805,7 @@ if (args.includes('--help')) {
 				[],
 				[remoteFailure()]
 			)
-		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+		).resolves.toBeDefined();
 
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
@@ -7775,7 +7818,7 @@ if (args.includes('--help')) {
 		});
 	});
 
-	it('keeps a published dependency in the receipt when every target fails', async () => {
+	it('succeeds with a published dependency when every best-effort target fails', async () => {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
 
 		await expect(
@@ -7802,7 +7845,7 @@ if (args.includes('--help')) {
 					]
 				}
 			)
-		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+		).resolves.toBeDefined();
 
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
@@ -7822,7 +7865,7 @@ if (args.includes('--help')) {
 		});
 	});
 
-	it('attributes a dependency failure to its failed target', async () => {
+	it('tolerates a dependency failure attributed to a best-effort target', async () => {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
 
 		await expect(
@@ -7853,7 +7896,7 @@ if (args.includes('--help')) {
 					]
 				}
 			)
-		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+		).resolves.toBeDefined();
 
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
@@ -7882,6 +7925,7 @@ if (args.includes('--help')) {
 					...baseOptions(),
 					cohortJson: remotelyQueryableCohortJson(),
 					publish: 'outputs',
+					bestEffort: 'true',
 					store: 'ssh-ng://build@example.test'
 				},
 				[],
@@ -7973,7 +8017,7 @@ if (args.includes('--help')) {
 		});
 	});
 
-	it('records exact failed targets alongside surviving remote outputs', async () => {
+	it('succeeds with exact failed targets alongside surviving best-effort remote outputs', async () => {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
 
 		await expect(
@@ -7989,7 +8033,7 @@ if (args.includes('--help')) {
 				[remoteFailure(floatingQueryInstallable), remoteResult('substituted')],
 				[libraryQueryInstallable, floatingQueryInstallable]
 			)
-		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+		).resolves.toBeDefined();
 
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
