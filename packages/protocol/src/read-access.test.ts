@@ -11,6 +11,8 @@ import {
 } from './oidc.ts';
 import { type OidcClaims, type OidcTrustRule } from './oidc-trust-match.ts';
 import {
+	readAccessFactsSchema,
+	readResourcesSchema,
 	type ReadResourceState,
 	resolveReadAuthority,
 	selectReadTrust
@@ -293,4 +295,52 @@ describe('read authority', () => {
 			);
 		}
 	);
+});
+
+describe('read resource batches', () => {
+	const cacheResource = {
+		type: 'cupboard_cache' as const,
+		cache,
+		mode: 'content' as const
+	};
+	const extraResource = {
+		...cacheResource,
+		cache: { kind: 'named' as const, name: cacheNameSchema.parse('falcon') }
+	};
+	const viewResource = {
+		type: 'cupboard_view' as const,
+		view: reuseViewNameSchema.parse('prior')
+	};
+
+	it('accepts several caches and one view in a single bounded read session', () => {
+		const resources = [cacheResource, extraResource, viewResource];
+		const facts = resources.map((resource) => ({
+			...resource,
+			state: { kind: 'absent' as const }
+		}));
+		expect({
+			resources: readResourcesSchema.parse(resources),
+			facts: readAccessFactsSchema.parse(facts)
+		}).toStrictEqual({ resources, facts });
+	});
+
+	it.each([
+		{
+			description: 'duplicate caches with conflicting modes',
+			resources: [cacheResource, { ...cacheResource, mode: 'metadata' }]
+		},
+		{
+			description: 'multiple views',
+			resources: [viewResource, { ...viewResource, view: 'other' }]
+		},
+		{
+			description: 'more than sixteen resources',
+			resources: Array.from({ length: 17 }, (_, index) => ({
+				...cacheResource,
+				cache: { kind: 'named', name: `cache-${String(index)}` }
+			}))
+		}
+	])('rejects $description', ({ resources }) => {
+		expect(() => readResourcesSchema.parse(resources)).toThrow();
+	});
 });

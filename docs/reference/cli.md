@@ -750,18 +750,21 @@ Usage: cupboard run <cache-or-view-url> [options] -- <command...>
 Run a command with renewable cache read access in CI.
 
 Arguments:
-  cache-or-view-url      cache or reuse view URL
-  command                command to run after --
+  cache-or-view-url         cache or reuse view URL
+  command                   command to run after --
 
 Options:
-  --github-oidc          acquire server-resolved read access through GitHub
-                         Actions OIDC
-  --audience <audience>  OIDC audience (default: the tenant URL)
-  --cache-metadata       acquire only cache metadata for setup when content uses
-                         a static credential
-  --reuse-view <name>    reuse view whose private cache content the command will
-                         read
-  -h, --help             display help for command
+  --github-oidc             acquire read access even for public resources;
+                            requires id-token: write and overrides incidental
+                            netrc credentials
+  --audience <audience>     OIDC audience (default: the tenant URL)
+  --cache-metadata          acquire only cache metadata for setup when content
+                            uses a static credential
+  --read-cache <cache-url>  additional cache in this tenant to include in the
+                            OIDC read session (repeatable) (default: [])
+  --reuse-view <name>       reuse view whose private cache content the command
+                            will read
+  -h, --help                display help for command
 ```
 
 ### cupboard config
