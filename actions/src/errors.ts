@@ -1536,7 +1536,12 @@ export class CommandFailedError extends CodedError {
 
 export interface RemoteCohortBuildFailure {
 	readonly target: string;
-	readonly kind: 'dependency' | 'dependency-protocol' | 'target' | 'protocol';
+	readonly kind:
+		| 'dependency'
+		| 'dependency-protocol'
+		| 'target'
+		| 'protocol'
+		| 'verification';
 	readonly outcome: string;
 	readonly message: string;
 }

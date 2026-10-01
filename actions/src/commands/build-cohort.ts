@@ -4155,7 +4155,7 @@ export async function buildAndRootNixResults(
 					outputs: buildResultOutputPaths(built),
 					failures: notBuilt.map((result) => ({
 						target: result.target,
-						kind: 'target',
+						kind: 'verification',
 						outcome: 'not-built',
 						message: `the rebuild did not prove execution in the selected store (result: ${result.outcome.kind}; execution: ${result.execution ?? 'unobserved'})`
 					}))
@@ -4514,14 +4514,19 @@ function recordRemoteDependencyResults(
 
 		state.lastFailure = {
 			...failure,
-			kind: failure.kind === 'protocol' ? 'dependency-protocol' : 'dependency'
+			kind:
+				failure.kind === 'protocol'
+					? 'dependency-protocol'
+					: failure.kind === 'verification'
+						? 'verification'
+						: 'dependency'
 		};
 
-		if (failure.kind !== 'protocol') {
+		if (failure.kind === 'target') {
 			continue;
 		}
 
-		state.hasProtocolFailure = true;
+		state.hasProtocolFailure = failure.kind === 'protocol';
 		state.isExhausted = true;
 	}
 }
@@ -4591,7 +4596,9 @@ function incompleteRootsFor(
 ): ReadonlySet<string> {
 	const failedTargets = new Set(
 		failures
-			.filter((failure) => ['protocol', 'target'].includes(failure.kind))
+			.filter((failure) =>
+				['protocol', 'target', 'verification'].includes(failure.kind)
+			)
 			.map((failure) =>
 				canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target))
 			)
@@ -4659,21 +4666,19 @@ function reconcileBuildResults(
 			continue;
 		}
 
-		if (
-			'outputs' in result.outcome &&
-			Object.values(result.outcome.outputs).length > 0
-		) {
+		if ('outputs' in result.outcome) {
 			const expectedOutputs = expectedOutputsByTarget.get(target);
 
 			if (
 				expectedOutputs === undefined ||
+				Object.values(result.outcome.outputs).length === 0 ||
 				!hasMatchingRemoteOutputs(result.outcome.outputs, expectedOutputs)
 			) {
 				failures.push({
 					target,
 					kind: 'protocol',
 					outcome: 'invalid-outputs',
-					message: `the daemon reported ${formatRemoteOutputEntries(Object.entries(result.outcome.outputs))}; expected ${formatRemoteOutputEntries(expectedOutputs?.entries().toArray() ?? [])}`
+					message: `the daemon reported ${Object.values(result.outcome.outputs).length === 0 ? 'no outputs' : formatRemoteOutputEntries(Object.entries(result.outcome.outputs))}; expected ${formatRemoteOutputEntries(expectedOutputs?.entries().toArray() ?? [])}`
 				});
 				continue;
 			}
@@ -4684,12 +4689,10 @@ function reconcileBuildResults(
 
 		failures.push({
 			target,
-			kind: 'target',
+			kind:
+				result.outcome.kind === 'not-deterministic' ? 'verification' : 'target',
 			outcome: result.outcome.kind,
-			message:
-				'message' in result.outcome
-					? result.outcome.message
-					: 'the daemon reported no outputs for this settled target'
+			message: result.outcome.message
 		});
 	}
 
