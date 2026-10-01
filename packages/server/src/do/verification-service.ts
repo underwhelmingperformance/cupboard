@@ -966,7 +966,7 @@ export class VerificationService {
 		);
 
 		if (result === 'applied') {
-			await this.inheritAfterCommit(pending, metadata, generation);
+			await this.deleteStagingObjectBestEffort(pending, signal);
 		}
 
 		return result;
@@ -1026,17 +1026,20 @@ export class VerificationService {
 			metadata.storePath
 		);
 
+		await this.inheritAfterCommit(pending, metadata, generation);
 		const verdict = await this.publicationVerdict(
 			pending,
 			metadata,
 			generation
 		);
-		if (!this.uploadState.clearPendingUpload(pending.id, owner)) {
+		if (
+			!this.ownsActiveClaim(owner, pending.id, signal) ||
+			!this.uploadState.clearPendingUpload(pending.id, owner)
+		) {
 			return 'ignored';
 		}
 
 		this.notifyWaiters(pending, verdict);
-		await this.deleteStagingObject(pending);
 
 		return 'applied';
 	}
@@ -1386,7 +1389,7 @@ export class VerificationService {
 
 			if (wasCleared) {
 				this.notifyWaiters(pending, verdict);
-				await this.deleteStagingObject(pending);
+				await this.deleteStagingObjectBestEffort(pending, signal);
 			}
 
 			return wasCleared;
@@ -3174,11 +3177,15 @@ export class VerificationService {
 				// path's root, and report whether this upload published the generation.
 				if (reclaim === 'committed-current') {
 					signal?.throwIfAborted();
+					await this.inheritAfterCommit(pending, metadata, reserved.generation);
 					const verdict = await this.publicationVerdict(
 						pending,
 						metadata,
 						reserved.generation
 					);
+					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+						return false;
+					}
 					const didApply = this.uploadState.clearPendingUpload(
 						pending.id,
 						owner

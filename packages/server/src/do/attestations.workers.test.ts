@@ -677,9 +677,16 @@ describe('attestation attach and reads', () => {
 	});
 
 	it('counts only the sources that the destination lacks against its subrequests', async () => {
-		const { token, metadata } = await committedPathBundle();
+		const { token, metadata, nar } = await committedPathBundle();
 		const destination = namedCache('partly-inherited');
 		await putWorkerTestCache(token, destination);
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			nar,
+			destination
+		);
 		const digests = [1, 2, 3].map((index) =>
 			sha256HexDigestSchema.parse(index.toString(16).padStart(64, '0'))
 		);
@@ -1573,6 +1580,108 @@ describe('attestation attach and reads', () => {
 			generations: [narInfoGenerationSchema.parse(0)]
 		});
 	});
+
+	it.each(['before-head', 'after-head', 'registry-only'] as const)(
+		'preserves inheritance progress when a CAS incarnation changes %s',
+		async (phase) => {
+			const { token, destination, metadata, digest } =
+				await reusedPathWithSourceBundle(`incarnation-${phase}`);
+			const earlierBundle = sigstoreBundleBytes(
+				narDigestHex(metadata.narHash),
+				buildOriginPredicateType
+			);
+			const earlierDigest = sha256HexDigestSchema.parse(
+				await sha256HexBytes(earlierBundle)
+			);
+			await attachBundle(token, metadata.storePathHash, earlierBundle);
+			const key = await currentCasObjectKey(digest);
+			const oldObject = await env.BLOBS.get(key);
+			if (oldObject === null) {
+				throw new Error('The inheritance fixture needs its source bundle.');
+			}
+			const bytes = await oldObject.arrayBuffer();
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const originalHead = env.BLOBS.head.bind(env.BLOBS);
+			let wasReplaced = false;
+			const head = vi
+				.spyOn(env.BLOBS, 'head')
+				.mockImplementation(async (keyToRead) => {
+					if (keyToRead !== key || wasReplaced) {
+						return originalHead(keyToRead);
+					}
+					wasReplaced = true;
+					const captured =
+						phase === 'after-head' ? await originalHead(key) : undefined;
+					await env.BLOBS.put(casObjectKey(digest, 3), bytes);
+					if (phase !== 'registry-only') {
+						await database
+							.update(d1Schema.casObject)
+							.set({ incarnation: 3 })
+							.where(eq(d1Schema.casObject.digest, digest));
+					}
+					await database
+						.update(d1Schema.objectIncarnation)
+						.set({ incarnation: 3 })
+						.where(
+							and(
+								eq(d1Schema.objectIncarnation.kind, 'cas'),
+								eq(d1Schema.objectIncarnation.objectId, digest)
+							)
+						);
+					await env.BLOBS.delete(key);
+					return captured ?? originalHead(key);
+				});
+			try {
+				await drainInheritance();
+			} finally {
+				head.mockRestore();
+			}
+			const afterChange = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					instance.context.db
+						.select({
+							storePathHash: schema.attestationInheritances.storePathHash,
+							attempts: schema.attestationInheritances.attempts,
+							sourcePredicateType:
+								schema.attestationInheritances.sourcePredicateType,
+							sourceDigest: schema.attestationInheritances.sourceDigest
+						})
+						.from(schema.attestationInheritances)
+						.all()
+			);
+			await database
+				.update(d1Schema.casObject)
+				.set({ incarnation: 3 })
+				.where(eq(d1Schema.casObject.digest, digest));
+			await makeQueuedInheritancesDue();
+			await drainInheritance();
+			const list = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+			);
+			expect({
+				afterChange,
+				queued: await queuedInheritances(),
+				listed: list.ok
+					? attestationListSchema
+							.parse(await list.json())
+							.attestations.map((row) => row.digest)
+							.toSorted(byCodeUnit)
+					: []
+			}).toStrictEqual({
+				afterChange: [
+					{
+						storePathHash: metadata.storePathHash,
+						attempts: 1,
+						sourcePredicateType: buildOriginPredicateType,
+						sourceDigest: earlierDigest
+					}
+				],
+				queued: [],
+				listed: [earlierDigest, digest].toSorted(byCodeUnit)
+			});
+		}
+	);
 
 	it('lists the bundles that an attempt inherited before it failed', async () => {
 		const destination = namedCache('partial-inheritance');
