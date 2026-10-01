@@ -729,7 +729,7 @@ describe('server-resolved read acquisition', () => {
 				body: {
 					error: 'invalid_authorization_details',
 					error_description:
-						"The matching trust rule does not permit the requested read_resources. Add cache:content-read for cache 'ci'.",
+						"The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources. Add cache:content-read for cache 'ci'.",
 					problem: 'read-resources-not-permitted',
 					detail: {
 						read_resources: JSON.stringify([
@@ -757,7 +757,7 @@ describe('server-resolved read acquisition', () => {
 			body: {
 				error: 'invalid_authorization_details',
 				error_description:
-					"The matching trust rule does not permit the requested read_resources. Add view:content-read for reuse view 'prior'.",
+					"The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources. Add view:content-read for reuse view 'prior'.",
 				problem: 'read-resources-not-permitted',
 				detail: {
 					read_resources: JSON.stringify([
@@ -795,6 +795,79 @@ describe('server-resolved read acquisition', () => {
 					'The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources.',
 				problem: 'read-resources-not-permitted',
 				detail: { read_resources: '[]' }
+			}
+		});
+	});
+
+	it('explains single-rule coverage even when one requested grant is missing', async () => {
+		await installTrustedIdp('write');
+		const subject = await installTrustedIdp('read');
+		const caches = ['a', 'b', 'c'].map((name) => ({
+			kind: 'named' as const,
+			name: cacheNameSchema.parse(name)
+		}));
+		const administrator = await issueServerSignedToken(adminGrants());
+		for (const cache of caches) {
+			await putTestCache(administrator, cache, 'private');
+		}
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			const database = drizzle(state.storage, { schema: { oidcTrust } });
+			for (const rule of [
+				{ id: 'write-rule', cache: 'a' },
+				{ id: 'read-rule', cache: 'b' }
+			]) {
+				database
+					.update(oidcTrust)
+					.set({
+						permittedGrantsJson: JSON.stringify([
+							{
+								type: 'cupboard_cache',
+								actions: ['cache:content-read'],
+								resources: {
+									cache: {
+										kind: 'named',
+										exact: rule.cache,
+										validate: 'cacheName'
+									}
+								}
+							}
+						])
+					})
+					.where(eq(oidcTrust.id, trustRuleIdSchema.parse(rule.id)))
+					.run();
+			}
+		});
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(
+				caches.map((cache) => ({
+					type: 'cupboard_cache',
+					cache,
+					mode: 'content'
+				}))
+			)
+		});
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: 400,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description:
+					"The matching trust rule does not permit the requested read_resources. One trust rule must cover all requested resources. Add cache:content-read for cache 'c'.",
+				problem: 'read-resources-not-permitted',
+				detail: {
+					read_resources: JSON.stringify([
+						{
+							type: 'cupboard_cache',
+							cache: { kind: 'named', name: 'c' },
+							actions: ['cache:content-read']
+						}
+					])
+				}
 			}
 		});
 	});
