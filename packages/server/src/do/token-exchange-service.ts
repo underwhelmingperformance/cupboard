@@ -68,6 +68,8 @@ import { isConstantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
 	InvalidAuthorizationDetailsError,
+	InvalidReadResourcesError,
+	ReadResourcesNotPermittedError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
 	SubjectTokenRequiredError,
@@ -319,7 +321,7 @@ export class TokenExchangeService {
 		try {
 			resources = readResourcesSchema.parse(JSON.parse(body.read_resources));
 		} catch {
-			throw new InvalidAuthorizationDetailsError('not-permitted');
+			throw new InvalidReadResourcesError();
 		}
 
 		const facts = resources.map((resource) => this.resourceState(resource));
@@ -330,7 +332,7 @@ export class TokenExchangeService {
 		);
 
 		if (selection.outcome === 'authority-unmatched') {
-			throw new InvalidAuthorizationDetailsError('not-permitted');
+			throw new ReadResourcesNotPermittedError(selection.uncovered);
 		}
 
 		if (selection.outcome !== 'selected') {

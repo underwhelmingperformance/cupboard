@@ -496,6 +496,14 @@ imply. The read response includes access and priority facts for setup
 validation. Acquisition never creates a cache. Ordinary token exchange keeps its
 strict requested-grant semantics.
 
+Malformed `read_resources` returns `invalid_request`. A valid request without
+matching authority returns `invalid_authorization_details` and identifies the
+requested resources and missing read actions. The refusal does not list other
+private resources. All requested resources must be covered by one trust rule.
+Cold content-read and negotiation-hint authentication initialise the tenant
+before accessing local state. While a local migration is pending, the Worker
+returns a retryable 503 with `Retry-After: 1` and `Cache-Control: no-store`.
+
 Read acquisition always issues a 15-minute token without a refresh token,
 including metadata-only and zero-authority results. Request-time checks still
 apply after visibility or lifecycle changes. Metadata authority authorises an

@@ -2938,6 +2938,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		authorization: string,
 		cache: CacheScope
 	): Promise<boolean> {
+		await this.initialise();
 		const request = new Request('https://cupboard.invalid/uploads', {
 			headers: { authorization }
 		});
@@ -2964,6 +2965,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: CacheScope,
 		isAbsent = false
 	): Promise<boolean> {
+		await this.initialise();
 		return this.isReadTokenAuthorised(
 			token,
 			isAbsent ? ['cache:content-read', 'cache:read'] : 'cache:content-read',
