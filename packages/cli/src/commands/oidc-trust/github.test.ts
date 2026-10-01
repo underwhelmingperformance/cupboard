@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { cliExitCode } from '../../cli.ts';
+
 import {
 	GithubPermissionError,
 	GithubRateLimitError,
@@ -126,6 +128,40 @@ describe('lookupRepository', () => {
 			lookupRepository('no-slash', { fetch })
 		).rejects.toBeInstanceOf(InvalidRepositoryError);
 	});
+
+	it.each([
+		'no-slash',
+		'/repo',
+		'owner/',
+		'owner/repo/extra',
+		'owner name/repo',
+		'owner/repo name'
+	])(
+		'rejects malformed repository %j as an argument error without a request',
+		async (repository) => {
+			const requests: string[] = [];
+			let failure: unknown;
+			try {
+				await lookupRepository(repository, {
+					fetch: (input) => {
+						requests.push(requestUrl(input));
+						return Promise.resolve(new Response(undefined, { status: 404 }));
+					}
+				});
+			} catch (error) {
+				failure = error;
+			}
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				status: cliExitCode(failure, 130),
+				requests
+			}).toStrictEqual({
+				name: 'InvalidRepositoryError',
+				status: 2,
+				requests: []
+			});
+		}
+	);
 
 	it('throws RepositoryNotFoundError for a 404 response', async () => {
 		const fetch = stubFetch(repoUrl, new Response(undefined, { status: 404 }));
