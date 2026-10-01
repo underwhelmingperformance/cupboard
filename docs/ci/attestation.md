@@ -41,7 +41,8 @@ evidence, and missing published paths. Omit `--predicate-type` to include every
 type, or repeat the option to match any of the exact predicate URIs. Use
 `--output-mode json` for structured results. Private caches accept the read
 credential options, a configured Nix netrc, or `--github-oidc` in GitHub
-Actions.
+Actions. OIDC credentials renew while discovery runs, and the temporary
+credential files are removed when the check ends.
 
 A successful status check exits zero even when some paths have no evidence. Pass
 `--require-all` to exit one when any requested path lacks matching evidence.

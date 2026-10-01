@@ -5,20 +5,19 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import {
-	readTokenBasicUser,
-	readTokenPasswordPrefix
-} from '@cupboard/protocol/read-access';
 import { formatCount } from '@cupboard/reporter';
-import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
+import { type ReadUser } from '@cupboard/shared/http';
 import { type Command } from 'commander';
 
 import { readAttestationInfo } from '../attest/status.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
-import { fetchGithubOidcToken } from '../auth/github-oidc.ts';
+import { issueGithubReadCredential } from '../auth/github-read-credential.ts';
+import {
+	type ReadCredentialSessionOptions,
+	withRenewingReadCredential
+} from '../auth/read-credential-session.ts';
 import { cacheTargetFromUrl } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { CliError, CliUsageError } from '../errors.ts';
 import { parseReadUser } from '../read-user.ts';
@@ -60,7 +59,8 @@ class AttestationCoverageIncompleteError extends CliError {
 export function registerAttestStatusCommand(
 	attest: Command,
 	program: Command,
-	programOptions: ProgramOptions
+	programOptions: ProgramOptions,
+	renewal: Pick<ReadCredentialSessionOptions, 'now' | 'wait'> = {}
 ): void {
 	attest
 		.command('status')
@@ -132,7 +132,7 @@ export function registerAttestStatusCommand(
 							return parsed.data;
 						});
 			const target = cacheTargetFromUrl(url);
-			let credential = readCredentials({
+			const credential = readCredentials({
 				readUser: options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER),
 				readPassword: options.readPassword ?? env.CUPBOARD_READ_PASSWORD
 			});
@@ -144,42 +144,51 @@ export function registerAttestStatusCommand(
 			if (options.audience !== undefined && options.githubOidc !== true) {
 				throw new StatusOptionsError('--audience requires --github-oidc.');
 			}
-			if (options.githubOidc === true) {
-				const client = CupboardClient.fromUrl(target.tenantUrl, {
-					cache: target.cache,
-					signal: programOptions.signal
-				});
-				const subject = await fetchGithubOidcToken({
-					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
-					signal: programOptions.signal,
-					fetcher: client.fetcher,
-					environment: {
-						requestUrl: env.ACTIONS_ID_TOKEN_REQUEST_URL,
-						requestToken: env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
-					}
-				});
-				const access = await client.acquireReadAccess(subject, [
-					{ type: 'cupboard_cache', cache: target.cache, mode: 'content' }
-				]);
-				credential = {
-					user: readUserSchema.parse(readTokenBasicUser),
-					password: `${readTokenPasswordPrefix}${access.access_token}`
-				};
-			}
 			const reporter = commandUi(program, programOptions).reporter();
+			const discovery = {
+				url: target.tenantUrl,
+				cache: target.cache,
+				storePathHashes: hashes,
+				predicateTypes,
+				signal: programOptions.signal
+			};
 			const entries = await reporter.phase(
 				'Reading stored attestation coverage',
 				() =>
-					readAttestationInfo({
-						url: target.tenantUrl,
-						cache: target.cache,
-						storePathHashes: hashes,
-						predicateTypes,
-						readUser: credential?.user,
-						readPassword: credential?.password,
-						signal: programOptions.signal
-					})
+					options.githubOidc === true
+						? withRenewingReadCredential(
+								{
+									url: target.tenantUrl,
+									...renewal,
+									signal: programOptions.signal,
+									issue: (signal) =>
+										issueGithubReadCredential({
+											tenantUrl: target.tenantUrl,
+											cache: target.cache,
+											audience:
+												options.audience ??
+												audienceSchema.parse(target.tenantUrl),
+											resources: [
+												{
+													type: 'cupboard_cache',
+													cache: target.cache,
+													mode: 'content'
+												}
+											],
+											now: renewal.now,
+											signal
+										})
+								},
+								({ netrcFile, signal }) =>
+									readAttestationInfo({ ...discovery, netrcFile, signal })
+							)
+						: readAttestationInfo({
+								...discovery,
+								readUser: credential?.user,
+								readPassword: credential?.password
+							})
 			);
+
 			const covered = entries.filter(
 				(entry) => entry.status === 'found' && entry.attestations.length > 0
 			);
