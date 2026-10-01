@@ -1,5 +1,6 @@
 import {
 	graceSecondsSchema,
+	nixSha256HashSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { cacheSummarySchema } from '@cupboard/protocol/caches';
@@ -15,7 +16,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
 import migrations from '../../drizzle/migrations.js';
-import { cacheScopeFromRow } from '../db/cache.ts';
+import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	oidcTrust,
@@ -26,6 +27,7 @@ import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts'
 import {
 	beforeCacheIdentityContract,
 	bootstrap,
+	currentServer,
 	migrateThrough,
 	migrateThroughConvertedCatalogue,
 	testServerFor,
@@ -59,6 +61,193 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('indexes narinfo refresh by NAR hash after upgrading', async () => {
+		const plan = await runInDurableObject(
+			testServerFor('migration-narinfo-refresh-index'),
+			async (_instance, state) => {
+				await migrateThrough(state, 65);
+				await migrateThroughConvertedCatalogue(state);
+				return Array.from(
+					state.storage.sql.exec<{ detail: string }>(
+						'EXPLAIN QUERY PLAN SELECT cache_id, store_path_hash FROM narinfo WHERE nar_hash = ? ORDER BY cache_id, store_path_hash LIMIT 100',
+						'sha256:missing'
+					),
+					(row) => row.detail
+				);
+			}
+		);
+		expect(plan).toStrictEqual([
+			'SEARCH narinfo USING COVERING INDEX narinfo_nar_hash_cache_id_store_path_hash_idx (nar_hash=?)'
+		]);
+	});
+
+	it('preserves narinfo rows, rowids and triggers during a bounded index upgrade', async () => {
+		const records = Array.from({ length: 1001 }, (_, index) => ({
+			rowid: index * 2 + 1,
+			cache_id: 1,
+			store_path_hash: String(index).padStart(32, '0'),
+			store_path: `/nix/store/${String(index).padStart(32, '0')}-upgrade`,
+			nar_hash: 'sha256:upgrade',
+			nar_size: 10,
+			references_json: '[]',
+			deriver: `/nix/store/${String(index).padStart(32, '0')}-deriver`,
+			ca: 'fixed:r:sha256:upgrade',
+			sigs_json: '["cupboard:signature"]',
+			generation: index + 1,
+			signature_generation: index + 2,
+			pending_signature_generation: index + 3,
+			created_at: '2026-09-27T12:00:00.000Z'
+		}));
+		const result = await runInDurableObject(
+			testServerFor('migration-bounded-narinfo-index'),
+			async (_instance, state) => {
+				await migrateThrough(state, 65);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo (rowid, cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, deriver, ca, sigs_json, generation, signature_generation, pending_signature_generation, created_at) SELECT json_extract(value, '$.rowid'), json_extract(value, '$.cache_id'), json_extract(value, '$.store_path_hash'), json_extract(value, '$.store_path'), json_extract(value, '$.nar_hash'), json_extract(value, '$.nar_size'), json_extract(value, '$.references_json'), json_extract(value, '$.deriver'), json_extract(value, '$.ca'), json_extract(value, '$.sigs_json'), json_extract(value, '$.generation'), json_extract(value, '$.signature_generation'), json_extract(value, '$.pending_signature_generation'), json_extract(value, '$.created_at') FROM json_each(?)",
+					JSON.stringify(records)
+				);
+				const triggers = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'narinfo' ORDER BY name"
+						)
+						.toArray();
+				const beforeTriggers = triggers();
+				const counts = () =>
+					state.storage.sql.exec('SELECT * FROM cache_narinfo_count').toArray();
+				const beforeCounts = counts();
+				const first = await applyMigrations(drizzle(state.storage), migrations);
+				await migrateThroughConvertedCatalogue(state);
+				return {
+					first,
+					rows: state.storage.sql
+						.exec('SELECT rowid, * FROM narinfo ORDER BY rowid')
+						.toArray(),
+					beforeTriggers,
+					afterTriggers: triggers(),
+					beforeCounts,
+					afterCounts: counts()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			first: {
+				kind: 'pending',
+				migration: '0066_publication_recovery',
+				stage: 'copy-narinfo',
+				cursor: 1999,
+				sourceRows: 1000,
+				declaredSourceWrites: 1000,
+				hasCommitted: true
+			},
+			rows: records,
+			beforeTriggers: result.beforeTriggers,
+			afterTriggers: result.beforeTriggers,
+			beforeCounts: result.beforeCounts,
+			afterCounts: result.beforeCounts
+		});
+	});
+
+	it.each(['copy-narinfo', 'copy-canonical-narinfo'])(
+		'preserves rollback writes during %s',
+		async (stage) => {
+			const result = await runInDurableObject(
+				testServerFor(`migration-publication-rollback-${stage}`),
+				async (_instance, state) => {
+					await migrateThrough(state, 65);
+					state.storage.sql.exec(
+						"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) SELECT 1, printf('%032d', value), '/nix/store/rollback', 'sha256:rollback', 10, '[]', '2026-01-01T00:00:00.000Z' FROM json_each(?)",
+						JSON.stringify(Array.from({ length: 1001 }, (_, index) => index))
+					);
+					let page = await applyMigrations(drizzle(state.storage), migrations);
+					while (page.kind === 'pending' && page.stage !== stage) {
+						page = await applyMigrations(drizzle(state.storage), migrations);
+					}
+					if (page.kind !== 'pending') {
+						throw new Error(`The migration did not pause during ${stage}.`);
+					}
+					const rollback = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 65)
+					);
+					state.storage.sql.exec(
+						'UPDATE narinfo SET sigs_json = \'["rollback:signature"]\' WHERE rowid = 1'
+					);
+					state.storage.sql.exec('DELETE FROM narinfo WHERE rowid = 2');
+					state.storage.sql.exec(
+						"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (1, 'rollback-added', '/nix/store/added', 'sha256:added', 10, '[]', '2026-01-01T00:00:00.000Z')"
+					);
+					const rows = () =>
+						state.storage.sql
+							.exec('SELECT rowid, * FROM narinfo ORDER BY rowid')
+							.toArray();
+					const before = rows();
+					await migrateThroughConvertedCatalogue(state);
+					return { rollback, before, after: rows() };
+				}
+			);
+			expect(result).toStrictEqual({
+				rollback: { kind: 'complete', hasCommitted: false },
+				before: result.before,
+				after: result.before
+			});
+		}
+	);
+
+	it('seeks directly after the narinfo refresh cursor', async () => {
+		const plan = await runInDurableObject(
+			testServerFor('migration-narinfo-refresh-cursor'),
+			async (_instance, state) => {
+				await migrateThroughConvertedCatalogue(state);
+				return Array.from(
+					state.storage.sql.exec<{ detail: string }>(
+						'EXPLAIN QUERY PLAN SELECT cache_id, store_path_hash FROM narinfo WHERE nar_hash = ? AND (cache_id, store_path_hash) > (?, ?) ORDER BY cache_id, store_path_hash LIMIT 101',
+						'sha256:missing',
+						1,
+						'a'.repeat(32)
+					),
+					(row) => row.detail
+				);
+			}
+		);
+		expect(plan).toStrictEqual([
+			'SEARCH narinfo USING COVERING INDEX narinfo_nar_hash_cache_id_store_path_hash_idx (nar_hash=? AND (cache_id,store_path_hash)>(?,?))'
+		]);
+	});
+
+	it('bounds rows read after a late narinfo refresh cursor', async () => {
+		await useTestServer('migration-refresh-cursor-cost');
+		await bootstrap();
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const narHash = nixSha256HashSchema.parse(`sha256:${'a'.repeat(52)}`);
+				const paths = Array.from({ length: 1001 }, (_, index) =>
+					String(index).padStart(32, '0')
+				);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) SELECT 1, value, '/nix/store/' || value || '-refresh', ?, 10, '[]', '2026-09-27T12:00:00.000Z' FROM json_each(?)",
+					narHash,
+					JSON.stringify(paths)
+				);
+				instance.context.dbCost.recordOutstanding();
+				const before = instance.context.dbCost.rowsRead;
+				const cursor = await instance.enqueueNarInfoReconciliation(narHash, {
+					cacheId: cacheIdSchema.parse(1),
+					storePathHash: storePathHashSchema.parse(
+						String(900).padStart(32, '0')
+					)
+				});
+				instance.context.dbCost.recordOutstanding();
+				return {
+					cursor,
+					bounded: instance.context.dbCost.rowsRead - before <= 120
+				};
+			}
+		);
+		expect(result).toStrictEqual({ cursor: undefined, bounded: true });
+	});
+
 	it('preserves pending uploads and committed narinfo rows through attestation migrations', async () => {
 		const server = testServerFor('migration-attestation-preservation');
 		const migrated = await runInDurableObject(

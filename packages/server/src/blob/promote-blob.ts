@@ -144,6 +144,7 @@ export interface StagedBlobPromotion {
 	readonly incarnation: number;
 	readonly reservationOwner?: string;
 	readonly requiresActivation: boolean;
+	readonly requiresNarInfoRefresh: boolean;
 }
 
 export type BlobStateUpsert = BatchItem<'sqlite'> & {
@@ -260,6 +261,15 @@ export async function stagePromotedBlob(
 	if (canonical === undefined) {
 		return undefined;
 	}
+	const requiresActivation = claimed === undefined;
+	const referenced = requiresActivation
+		? await d1
+				.select({ narHash: d1Schema.blobReference.narHash })
+				.from(d1Schema.blobReference)
+				.where(eq(d1Schema.blobReference.narHash, target.narHash))
+				.limit(1)
+				.get()
+		: undefined;
 
 	return {
 		canonical,
@@ -267,7 +277,8 @@ export async function stagePromotedBlob(
 		narHash: target.narHash,
 		incarnation: reserved.incarnation,
 		reservationOwner,
-		requiresActivation: claimed === undefined
+		requiresActivation,
+		requiresNarInfoRefresh: referenced !== undefined
 	};
 }
 

@@ -305,6 +305,11 @@ export const narInfos = sqliteTable(
 			table.storePathHash,
 			table.cacheId
 		),
+		index('narinfo_nar_hash_cache_id_store_path_hash_idx').on(
+			table.narHash,
+			table.cacheId,
+			table.storePathHash
+		),
 		index('narinfo_pending_signature_generation_idx').on(
 			table.pendingSignatureGeneration,
 			table.signatureGeneration,
@@ -366,6 +371,9 @@ export const pendingUploads = sqliteTable(
 		settleFailures: integer('settle_failures').notNull().default(0),
 		settleRetryAfter: text('settle_retry_after').$type<IsoTimestamp>(),
 		lastSettleError: text('last_settle_error'),
+		narRefreshPending: integer('nar_refresh_pending', { mode: 'boolean' })
+			.notNull()
+			.default(false),
 		// Verification re-reads the subscribed session before sending a terminal
 		// verdict, so a reconnect can replace this value while verification is running.
 		sessionId: text('session_id').$type<SessionId>(),

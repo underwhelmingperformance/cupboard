@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,8 +27,11 @@ import {
 	testBase,
 	uploadMetadata,
 	verifiableNar,
-	verifiablePath
+	verifiablePath,
+	withoutAlarmArming
 } from '../test-support.ts';
+
+import { UploadStateService } from './upload-state-service.ts';
 
 // An older consumer can report `promoted` after it has written the canonical
 // object and `blob_state` row. The current Durable Object must still record that
@@ -37,6 +41,65 @@ describe('recording an older promoted verdict', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
+	});
+
+	it('removes the pending refresh marker when its upload is cleared', async () => {
+		const token = await initialise();
+		const { metadata } = await verifiablePath('cleared-refresh-marker', {
+			storePathHash: 'a'.repeat(32),
+			name: 'cleared-refresh-marker'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const result = await runInDurableObject(currentServer(), (instance) => {
+			const uploads = new UploadStateService(instance.context);
+			uploads.markPendingNarRefresh(upload.uploadId);
+			const wasCleared = uploads.clearPendingUpload(upload.uploadId);
+			return Promise.resolve({
+				wasCleared,
+				refreshPending: uploads.hasPendingNarRefresh(upload.uploadId)
+			});
+		});
+		expect(result).toStrictEqual({ wasCleared: true, refreshPending: false });
+	});
+
+	it('imports a live legacy refresh beyond the first migration page before recovery', async () => {
+		const token = await initialise();
+		const { metadata } = await verifiablePath('legacy-refresh-page', {
+			storePathHash: 'a'.repeat(32),
+			name: 'legacy-refresh-page'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const result = await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
+				const uploads = new UploadStateService(instance.context);
+				const keys = Array.from(
+					{ length: 128 },
+					(_, index) => `uploads:pending-nar-refresh:!orphan-${String(index)}`
+				);
+				await state.storage.put(
+					Object.fromEntries(
+						[...keys, `uploads:pending-nar-refresh:${upload.uploadId}`].map(
+							(key) => [key, true]
+						)
+					)
+				);
+				await uploads.migratePendingNarRefreshMarkers(upload.uploadId);
+				const isPending = uploads.hasPendingNarRefresh(upload.uploadId);
+				await uploads.migratePendingNarRefreshMarkers();
+				const legacy = await state.storage.list({
+					prefix: 'uploads:pending-nar-refresh:'
+				});
+				await state.storage.deleteAlarm();
+				return { isPending, legacy: [...legacy] };
+			})
+		);
+		expect(result).toStrictEqual({ isPending: true, legacy: [] });
 	});
 
 	it('settles the upload without re-promoting', async () => {
