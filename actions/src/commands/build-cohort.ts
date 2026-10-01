@@ -976,7 +976,7 @@ export async function buildCohortAction(
 				? retainedDependencyBuilds(partition, buildInstallables)
 				: [];
 
-		if (localDependencyBuilds.length > 0) {
+		if (localDependencyBuilds.length > 0 && inputs.publish !== 'built') {
 			await realiseLocalDependencies(
 				localDependencyBuilds,
 				inputs,
@@ -1000,7 +1000,8 @@ export async function buildCohortAction(
 					provenanceRebuilds,
 					environment,
 					runCupboard,
-					cupboardRunDependencies
+					cupboardRunDependencies,
+					inputs.publish === 'built' ? localDependencyBuilds : []
 				);
 			} catch (error) {
 				if (!inputs.allBestEffort) {
@@ -2007,13 +2008,41 @@ export function cohortBuildPushArguments(
 	];
 }
 
+function supervisedCohortsFile(
+	dependencyBuilds: readonly RemoteDependencyBuild[],
+	buildInstallables: readonly string[],
+	maxJobs: string,
+	shouldSeparateTargets: boolean,
+	provenanceRebuilds: ReadonlySet<string>
+): { readonly cohorts: readonly Record<string, unknown>[] } {
+	const { cohorts } = buildPushCohortsFile(
+		buildInstallables,
+		maxJobs,
+		shouldSeparateTargets,
+		provenanceRebuilds
+	);
+	return {
+		cohorts: cohorts.map((cohort, index) => ({
+			...cohort,
+			...(index === 0 &&
+				dependencyBuilds.length > 0 && {
+					dependencyBuilds: dependencyBuilds.map(({ path, installables }) => ({
+						path,
+						installables
+					}))
+				})
+		}))
+	};
+}
+
 async function runBuildPushCohort(
 	inputs: BuildCohortInputs,
 	buildInstallables: readonly string[],
 	provenanceRebuilds: ReadonlySet<string>,
 	environment: Environment,
 	runCupboard: typeof defaultRunCupboard,
-	cupboardRunDependencies: CupboardRunDependencies | undefined
+	cupboardRunDependencies: CupboardRunDependencies | undefined,
+	dependencyBuilds: readonly RemoteDependencyBuild[] = []
 ): Promise<void> {
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const cohortsFile = path.join(
@@ -2024,7 +2053,8 @@ async function runBuildPushCohort(
 	await writeFile(
 		cohortsFile,
 		`${JSON.stringify(
-			buildPushCohortsFile(
+			supervisedCohortsFile(
+				dependencyBuilds,
 				buildInstallables,
 				inputs.maxJobs,
 				inputs.allBestEffort,
