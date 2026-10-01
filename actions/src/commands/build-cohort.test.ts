@@ -4032,39 +4032,50 @@ describe('buildCohortAction', () => {
 		]);
 	});
 
-	it('keeps an explicitly unclassified streamed command failure fatal', async () => {
-		const failure = new CupboardReportedError(1, [], undefined, true);
-		const runCupboardMock = vi.fn<typeof runCupboard>(
-			async (binaryPath, arguments_, passedEnvironment) => {
-				if (arguments_[1] !== 'build-push') {
-					return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+	it.each(['outputs', 'built'] as const)(
+		'keeps a streamed command failure fatal for best-effort %s publication',
+		async (publish) => {
+			const runNixBuildMock = vi.fn<typeof runNixBuild>();
+			const failure = new CupboardReportedError(1, [], undefined, true);
+			const runCupboardMock = vi.fn<typeof runCupboard>(
+				async (binaryPath, arguments_, passedEnvironment) => {
+					if (arguments_[1] !== 'build-push') {
+						return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+					}
+
+					const receiptFile =
+						arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '';
+					await writeFile(
+						receiptFile,
+						`${JSON.stringify({
+							version: 3,
+							paths: publish === 'built' ? [referencePath] : [],
+							subjects: [],
+							childExitStatus: 1,
+							terminalFailure: { kind: 'command' }
+						})}\n`
+					);
+
+					throw failure;
 				}
+			);
 
-				const receiptFile =
-					arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '';
-				await writeFile(
-					receiptFile,
-					`${JSON.stringify({
-						version: 3,
-						paths: [],
-						subjects: [],
-						childExitStatus: 1,
-						terminalFailure: { kind: 'command' }
-					})}\n`
-				);
-
-				throw failure;
-			}
-		);
-
-		await expect(
-			buildCohortAction(
-				{ ...baseOptions(), publish: 'outputs', bestEffort: 'true' },
-				environment,
-				{ runCupboard: runCupboardMock }
-			)
-		).rejects.toBe(failure);
-	});
+			await expect(
+				buildCohortAction(
+					{ ...baseOptions(), publish, bestEffort: 'true' },
+					environment,
+					{ runCupboard: runCupboardMock, runNixBuild: runNixBuildMock }
+				)
+			).rejects.toBe(failure);
+			expect({
+				cupboardCommands: runCupboardMock.mock.calls.map((call) => call[1][1]),
+				nixCalls: runNixBuildMock.mock.calls
+			}).toStrictEqual({
+				cupboardCommands: ['plan', 'build-push'],
+				nixCalls: []
+			});
+		}
+	);
 
 	it('records successful local outputs before rejecting a mixed non-publishing build', async () => {
 		const inputs = resolveBuildCohortInputs(baseOptions(), environment);

@@ -348,6 +348,7 @@ interface RebuildTargetFixture {
 	readonly derivation: string;
 	readonly paths: readonly StorePathString[];
 	readonly origin: 'built' | 'substituted' | 'existing';
+	readonly failure?: 'command' | 'build';
 	readonly machine?: string;
 }
 
@@ -454,14 +455,14 @@ const stubNixScript = [
 	"const logFile = args[args.indexOf('json-log-path') + 1];",
 	"const builtTargets = targets.filter((target) => rebuild || target.origin === 'built');",
 	String.raw`const activity = rebuild && process.env.STUB_CHECK_DERIVATIONS ? JSON.parse(process.env.STUB_CHECK_DERIVATIONS).map((derivation) => JSON.stringify({ action: 'start', type: 105, fields: [derivation, ''] })).join('\n') : targets.length === 0 ? process.env.STUB_LOG_LINE : builtTargets.map((target) => JSON.stringify({ action: 'start', type: 105, fields: [target.derivation, target.machine || ''] })).join('\n');`,
-	String.raw`fs.writeFileSync(logFile, activity + '\n');`,
+	String.raw`fs.writeFileSync(logFile, (targets.some((target) => target.failure === 'command') ? '' : activity) + '\n');`,
 	'let runs = 0;',
 	'try {',
 	"\truns = Number(fs.readFileSync(process.env.STUB_COUNT_FILE, 'utf8'));",
 	'} catch {}',
 	'runs += 1;',
 	'fs.writeFileSync(process.env.STUB_COUNT_FILE, String(runs));',
-	'if (runs < Number(process.env.STUB_SUCCEED_ON)) process.exit(1);',
+	'if (runs < Number(process.env.STUB_SUCCEED_ON) || targets.some((target) => target.failure)) process.exit(1);',
 	"if (rebuild && process.env.STUB_FAIL_CHECK === '1') process.exit(1);",
 	"const outLinkIndex = args.indexOf('--out-link');",
 	'if (outLinkIndex !== -1) {',
@@ -1997,6 +1998,85 @@ describe('runBuildPush', () => {
 				published: [pathA, pathB, pathC],
 				settledTargets: [pathA],
 				built: [pathA, pathB, pathC]
+			});
+		}
+	);
+
+	it.each(['command', 'build'] as const)(
+		'classifies a target %s failure independently of producer activity',
+		async (failure) => {
+			const run = await runFlow({
+				constructed: {
+					succeedOn: 1,
+					attempts: 1,
+					installables: [`${drvA}^out`],
+					dependencyBuilds: [{ path: pathB, installables: [`${drvB}^out`] }],
+					targets: [
+						{
+							installable: `${drvB}^out`,
+							derivation: drvB,
+							paths: [pathB],
+							origin: 'built'
+						},
+						{
+							installable: `${drvA}^out`,
+							derivation: drvA,
+							paths: [pathA],
+							origin: 'built',
+							failure
+						}
+					]
+				},
+				valid: [pathB],
+				declaredOutputs: [pathA],
+				ultimatePaths: [pathB],
+				options: { publicationScope: 'built' }
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				error:
+					run.error instanceof BuildCommandFailedError
+						? {
+								status: run.error.status,
+								signal: run.error.signal,
+								exitCode: run.error.exitCode
+							}
+						: run.error,
+				commands: run.commands,
+				receipt
+			}).toStrictEqual({
+				error: { status: 1, signal: undefined, exitCode: 1 },
+				commands: [
+					{ rebuild: false, installables: [`${drvB}^out`] },
+					{ rebuild: false, installables: [`${drvA}^out`] }
+				],
+				receipt: {
+					version: 3,
+					paths: [pathB],
+					subjects: [
+						{
+							origin: 'built',
+							storePath: pathB,
+							narHash: narHash.digestHex(),
+							derivation: drvB,
+							attempt: 1,
+							attemptId: 'attempt-1',
+							buildStore: 'auto',
+							verification: 'local'
+						}
+					],
+					outcomes: [],
+					childExitStatus: 1,
+					uploaded: [],
+					failed: [],
+					collected: [],
+					terminalFailure:
+						failure === 'command'
+							? { kind: 'command' }
+							: { kind: 'target-build', failedTargets: [`${drvA}^out`] }
+				}
 			});
 		}
 	);
