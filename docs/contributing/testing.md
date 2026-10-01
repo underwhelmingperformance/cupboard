@@ -14,7 +14,7 @@ This page explains what each kind covers, how to run it, and what it needs.
 | End-to-end tests             | `pnpm check:e2e`                      | Yes                 | Nix. Some tests also need Linux, the Nix daemon or a C compiler. |
 | Remote store end-to-end test | `pnpm check:e2e-remote-store`         | Yes                 | Nix and Docker                                                   |
 | Nix conformance tests        | `pnpm check:conformance`              | Yes                 | Nix, and network access to fetch the reference Nix               |
-| Publishing pipeline test     | `pnpm e2e:pipeline`                   | No                  | Nix. Some parts also need Docker or a release archive.           |
+| Publishing pipeline test     | `pnpm e2e:pipeline`                   | No                  | Nix and a C compiler. Some parts also need Docker.               |
 | Benchmarks                   | `pnpm bench:push`                     | No                  | Nix                                                              |
 
 `pnpm check:test` runs the first four rows together.
@@ -203,12 +203,14 @@ evaluates and builds for real, runs the composite action, and pushes to a Worker
 running in `workerd`, signing in with OIDC. Each test can take up to 30 minutes.
 `pnpm check` doesn't run it, but CI runs it as a separate job.
 
-The whole test is skipped if Nix isn't installed. Two parts of it are optional:
+The whole test is skipped if Nix isn't installed. The remote store part needs a
+container engine, and is skipped without one.
 
-- The remote store part needs a container engine, and is skipped without one.
-- The release archive part publishes using a built release instead of the
-  checked-out code. It only runs if `CUPBOARD_RELEASE_ARCHIVE` is set to the
-  path of an archive. `pnpm build:binary` builds one.
+The packaged-executable part builds a release archive automatically with the
+release build script, then publishes using that installation. It needs a C
+compiler. The archive is built in the test's temporary workspace and removed
+with the fixture. Filtered runs that exclude this part do not build an archive.
+To test an existing archive, set `CUPBOARD_RELEASE_ARCHIVE` to its path.
 
 ## Benchmarks
 

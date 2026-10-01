@@ -37,6 +37,7 @@ import { temporaryRoot } from '../support/filesystem.ts';
 import { isolatedEnvironment } from '../support/nix.ts';
 import { runCommand } from '../support/process.ts';
 import {
+	buildReleaseArchive,
 	type ReleaseInstallation,
 	unpackReleaseArchive
 } from '../support/release-archive.ts';
@@ -54,11 +55,6 @@ const isNixPresent =
 const isContainerEnginePresent =
 	spawnSync('docker', ['info'], { stdio: 'ignore' }).status === 0;
 
-// The release archive the packaged-installation leg publishes from, named by
-// `pnpm build:binary --out-dir`. Building one takes minutes and needs a C
-// compiler, so the leg never builds its own: without this variable it skips,
-// and a developer who wants it runs `pnpm build:binary` first. CI's pipeline
-// job builds the archive before it runs the tier.
 const releaseArchive =
 	env.CUPBOARD_RELEASE_ARCHIVE === undefined ||
 	env.CUPBOARD_RELEASE_ARCHIVE === ''
@@ -123,14 +119,6 @@ function fixture(): Fixture {
 	}
 
 	return prepared;
-}
-
-function namedReleaseArchive(): string {
-	if (releaseArchive === undefined) {
-		throw new Error('No release archive was named');
-	}
-
-	return releaseArchive;
 }
 
 function replaceProcessEnvironment(environment: NodeJS.ProcessEnv): void {
@@ -1386,144 +1374,145 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 	// for the shim is a copied Node binary. This leg publishes from the
 	// packaged installation, so a defect in the release asset fails a test
 	// rather than a consumer's job.
-	describe.skipIf(releaseArchive === undefined)(
-		'installed from a release archive',
-		() => {
-			const installed: { installation?: ReleaseInstallation } = {};
+	describe('installed from a release archive', () => {
+		const installed: { installation?: ReleaseInstallation } = {};
 
-			beforeAll(async () => {
-				installed.installation = await unpackReleaseArchive({
-					archivePath: namedReleaseArchive(),
-					directory: path.join(fixture().workspace, 'release')
-				});
-			}, 120_000);
+		beforeAll(async () => {
+			const prepared = fixture();
+			const archivePath =
+				releaseArchive ??
+				(await buildReleaseArchive({
+					directory: path.join(prepared.workspace, 'release-build'),
+					env: state.hostEnvironment
+				}));
+			installed.installation = await unpackReleaseArchive({
+				archivePath,
+				directory: path.join(prepared.workspace, 'release')
+			});
+		}, 600_000);
 
-			it('publishes a cohort the packaged executable builds and pushes', async () => {
-				const installation = installed.installation;
+		it('publishes a cohort the packaged executable builds and pushes', async () => {
+			const installation = installed.installation;
 
-				if (installation === undefined) {
-					throw new Error('The release archive was not unpacked');
-				}
+			if (installation === undefined) {
+				throw new Error('The release archive was not unpacked');
+			}
 
-				const prepared = fixture();
-				const seed = randomUUID();
-				const seedDirectory = path.join(
-					prepared.workspace,
-					'release-seed-consumer'
-				);
-				const flakeDirectory = path.join(
-					prepared.workspace,
-					'release-consumer'
-				);
-				await mkdir(seedDirectory, { recursive: true });
-				await mkdir(flakeDirectory, { recursive: true });
-				await writeFile(
-					path.join(seedDirectory, 'flake.nix'),
-					consumerFlake({
-						directory: seedDirectory,
-						system: prepared.system,
-						seed
-					})
-				);
-				await writeFile(
-					path.join(flakeDirectory, 'flake.nix'),
-					consumerFlake({
-						directory: flakeDirectory,
-						system: prepared.system,
-						seed,
-						variant: 'release'
-					})
-				);
+			const prepared = fixture();
+			const seed = randomUUID();
+			const seedDirectory = path.join(
+				prepared.workspace,
+				'release-seed-consumer'
+			);
+			const flakeDirectory = path.join(prepared.workspace, 'release-consumer');
+			await mkdir(seedDirectory, { recursive: true });
+			await mkdir(flakeDirectory, { recursive: true });
+			await writeFile(
+				path.join(seedDirectory, 'flake.nix'),
+				consumerFlake({
+					directory: seedDirectory,
+					system: prepared.system,
+					seed
+				})
+			);
+			await writeFile(
+				path.join(flakeDirectory, 'flake.nix'),
+				consumerFlake({
+					directory: flakeDirectory,
+					system: prepared.system,
+					seed,
+					variant: 'release'
+				})
+			);
 
-				// A push signs its blob uploads for Cloudflare's S3 endpoint,
-				// which no part of this harness serves. The shim replaces the
-				// uploader through a module hook, but a single-file executable
-				// has no module to replace, so this leg publishes only paths
-				// whose bytes the destination already holds. The seed run
-				// publishes the same file contents from derivations of its own.
-				// The packaged run's store paths are new and their NARs are
-				// identical to the seed's, so every negotiation commits against
-				// a blob the destination holds and the packaged executable
-				// attempts no upload.
-				const seeded = await runPublication('release-seed', {
-					flakeDirectory: seedDirectory,
-					store: '',
-					rebuild: false,
-					rootPrefix: releaseSeedRootPrefix
-				});
-				const packaged = await runPublication('release', {
-					flakeDirectory,
-					store: '',
-					rebuild: false,
-					rootPrefix: releaseRootPrefix,
-					cupboardPath: installation.commandPath
-				});
+			// A push signs its blob uploads for Cloudflare's S3 endpoint,
+			// which no part of this harness serves. The shim replaces the
+			// uploader through a module hook, but a single-file executable
+			// has no module to replace, so this leg publishes only paths
+			// whose bytes the destination already holds. The seed run
+			// publishes the same file contents from derivations of its own.
+			// The packaged run's store paths are new and their NARs are
+			// identical to the seed's, so every negotiation commits against
+			// a blob the destination holds and the packaged executable
+			// attempts no upload.
+			const seeded = await runPublication('release-seed', {
+				flakeDirectory: seedDirectory,
+				store: '',
+				rebuild: false,
+				rootPrefix: releaseSeedRootPrefix
+			});
+			const packaged = await runPublication('release', {
+				flakeDirectory,
+				store: '',
+				rebuild: false,
+				rootPrefix: releaseRootPrefix,
+				cupboardPath: installation.commandPath
+			});
 
-				const seedBuilt = await builtPaths(seedDirectory);
-				const built = await builtPaths(flakeDirectory);
-				const attribution = localAttribution();
-				const paths = built
-					.toSorted(byStorePath)
-					.map(({ storePath }) => storePath);
+			const seedBuilt = await builtPaths(seedDirectory);
+			const built = await builtPaths(flakeDirectory);
+			const attribution = localAttribution();
+			const paths = built
+				.toSorted(byStorePath)
+				.map(({ storePath }) => storePath);
 
-				expect({
-					archive: installation.entries,
-					seeded: {
-						planStatus: seeded.planStatus,
-						cohortStatuses: seeded.cohorts.map((cohort) => cohort.status)
-					},
-					narHashes: built.map(({ narHash }) => narHash),
-					packaged,
-					served: await servedStatuses(built),
-					roots: await retentionRoots(
-						(name) =>
-							name.startsWith(`${releaseRootPrefix}/`) &&
-							!name.includes(runRootMarker)
-					)
-				}).toStrictEqual({
-					// The helper has to unpack beside the executable, because
-					// that is where the CLI looks for it.
-					archive: ['cupboard', 'cupboard-hook-relay'],
-					seeded: { planStatus: 0, cohortStatuses: [0] },
-					narHashes: seedBuilt.map(({ narHash }) => narHash),
-					packaged: {
-						planStatus: 0,
-						retainedCount: '0',
-						targetCount: '2',
-						cohortCount: '1',
-						cohorts: [
-							{
-								status: 0,
-								targetPaths: paths,
-								attribution,
-								receipt: expectedReceipt({
-									built,
-									targets: built,
-									store: '',
-									attribution
-								}),
-								attestation: {
-									subjectCount: String(built.length),
-									checksums: expectedChecksums(built)
-								}
+			expect({
+				archive: installation.entries,
+				seeded: {
+					planStatus: seeded.planStatus,
+					cohortStatuses: seeded.cohorts.map((cohort) => cohort.status)
+				},
+				narHashes: built.map(({ narHash }) => narHash),
+				packaged,
+				served: await servedStatuses(built),
+				roots: await retentionRoots(
+					(name) =>
+						name.startsWith(`${releaseRootPrefix}/`) &&
+						!name.includes(runRootMarker)
+				)
+			}).toStrictEqual({
+				// The helper has to unpack beside the executable, because
+				// that is where the CLI looks for it.
+				archive: ['cupboard', 'cupboard-hook-relay'],
+				seeded: { planStatus: 0, cohortStatuses: [0] },
+				narHashes: seedBuilt.map(({ narHash }) => narHash),
+				packaged: {
+					planStatus: 0,
+					retainedCount: '0',
+					targetCount: '2',
+					cohortCount: '1',
+					cohorts: [
+						{
+							status: 0,
+							targetPaths: paths,
+							attribution,
+							receipt: expectedReceipt({
+								built,
+								targets: built,
+								store: '',
+								attribution
+							}),
+							attestation: {
+								subjectCount: String(built.length),
+								checksums: expectedChecksums(built)
 							}
-						]
-					},
-					served: [200, 200],
-					roots: [
-						{
-							name: `${releaseRootPrefix}/${prepared.system}/alpha`,
-							targets: [built[0]?.storePath]
-						},
-						{
-							name: `${releaseRootPrefix}/${prepared.system}/beta`,
-							targets: [built[1]?.storePath]
 						}
 					]
-				});
+				},
+				served: [200, 200],
+				roots: [
+					{
+						name: `${releaseRootPrefix}/${prepared.system}/alpha`,
+						targets: [built[0]?.storePath]
+					},
+					{
+						name: `${releaseRootPrefix}/${prepared.system}/beta`,
+						targets: [built[1]?.storePath]
+					}
+				]
 			});
-		}
-	);
+		});
+	});
 
 	describe.skipIf(!isContainerEnginePresent)(
 		'against an ssh-ng remote store',
