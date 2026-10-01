@@ -174,20 +174,6 @@ export async function runWithReadAccess(
 		}
 	}
 
-	if (
-		targetUrl !== undefined &&
-		options.cacheMetadata !== true &&
-		staticCredentialFor(
-			targetUrl,
-			storeConfig.substitution.substituters,
-			undefined
-		) !== undefined
-	) {
-		throw new RunReadAccessOptionsError(
-			'Remove the explicit substituter URL credential before requesting OIDC content access, or use --cache-metadata to keep static content access.'
-		);
-	}
-
 	if (isNetrcUnreadable) {
 		throw new UnreadableReadCredentialFileError(
 			storeConfig.fileTransfer.netrcFile
@@ -258,6 +244,28 @@ export async function runWithReadAccess(
 		throw new RunReadAccessOptionsError(
 			'A read session accepts up to sixteen distinct resources, including at most one reuse view.'
 		);
+	}
+
+	for (const resource of resources) {
+		if (resource.type === 'cupboard_cache' && resource.mode === 'metadata') {
+			continue;
+		}
+
+		const resourceUrl =
+			resource.type === 'cupboard_cache'
+				? cacheUrl(target.tenantUrl, resource.cache)
+				: reuseViewUrl(target.tenantUrl, resource.view);
+		if (
+			staticCredentialFor(
+				resourceUrl,
+				storeConfig.substitution.substituters,
+				undefined
+			) !== undefined
+		) {
+			throw new RunReadAccessOptionsError(
+				'Remove explicit substituter URL credentials for every resource requested with OIDC content access.'
+			);
+		}
 	}
 
 	await withRenewingReadCredential(
