@@ -119,6 +119,13 @@ export const defaultBuildAttempts = 5;
  * logs associate each built path with the attempt that produced it.
  */
 export interface ConstructedBuild {
+	/**
+	Realise each required path from its candidate producers before targets.
+	*/
+	readonly dependencyBuilds?: readonly {
+		readonly path: StorePathString;
+		readonly installables: readonly string[];
+	}[];
 	readonly installables: readonly string[];
 	/**
 	Maximum build attempts; defaults to {@link defaultBuildAttempts}.
@@ -480,7 +487,8 @@ async function runProtectedStreamedBuildPush(
 		const {
 			exit,
 			attempts,
-			preExisting = []
+			preExisting = [],
+			terminalFailure: dependencyFailure
 		} = await reporter.phase(buildPushPhases.build, () =>
 			runInvocation(
 				options.invocation,
@@ -517,11 +525,9 @@ async function runProtectedStreamedBuildPush(
 			preExisting,
 			true
 		);
-		const terminalFailure = terminalFailureFor(
-			options.invocation,
-			attempts,
-			exit
-		);
+		const terminalFailure =
+			dependencyFailure ??
+			terminalFailureFor(options.invocation, attempts, exit);
 
 		return settleRun(options, reporter, dependencies, {
 			observedDerivations: new Set(
@@ -584,23 +590,56 @@ async function runInvocation(
 		return { exit, attempts: [] };
 	}
 
-	if (invocation.build.rebuild === true) {
-		return runRebuild(
+	if (
+		invocation.build.rebuild === true &&
+		discoverNixStoreConfig({ ...defaultNixConfigEnvironment, env: environment })
+			.building.builders !== undefined
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
+
+	const dependencyAttempts: BuildExecutionAttempt[] = [];
+	const requiredDependencies = invocation.build.dependencyBuilds ?? [];
+	for (const [dependencyIndex, dependency] of requiredDependencies.entries()) {
+		const candidate = await runDependencyBuild(
+			dependency,
 			invocation.build,
 			environment,
 			runtimeDirectory,
 			dependencies,
-			targetLinkDirectory
+			path.join(
+				path.dirname(runtimeDirectory),
+				'dependency-out-links',
+				String(dependencyIndex)
+			)
 		);
+		appendBuildAttempts(dependencyAttempts, candidate.attempts);
+		if (!candidate.isRealised) {
+			return {
+				exit: candidate.exit,
+				attempts: dependencyAttempts,
+				terminalFailure: { kind: 'command' }
+			};
+		}
 	}
-
-	return runConstructedBuild(
-		invocation.build,
-		environment,
-		runtimeDirectory,
-		dependencies,
-		path.join(targetLinkDirectory, outLinkName)
-	);
+	const target =
+		invocation.build.rebuild === true
+			? await runRebuild(
+					invocation.build,
+					environment,
+					runtimeDirectory,
+					dependencies,
+					targetLinkDirectory
+				)
+			: await runConstructedBuild(
+					invocation.build,
+					environment,
+					runtimeDirectory,
+					dependencies,
+					path.join(targetLinkDirectory, outLinkName)
+				);
+	appendBuildAttempts(dependencyAttempts, target.attempts);
+	return { ...target, attempts: dependencyAttempts };
 }
 
 interface BuildExecutionAttempt extends SupervisedAttempt {
@@ -608,9 +647,62 @@ interface BuildExecutionAttempt extends SupervisedAttempt {
 }
 
 interface BuildExecution {
+	readonly terminalFailure?: TerminalBuildFailureInput;
 	readonly preExisting?: readonly string[];
 	readonly exit: ChildExit;
 	readonly attempts: readonly BuildExecutionAttempt[];
+}
+
+interface DependencyBuildExecution extends BuildExecution {
+	readonly isRealised: boolean;
+}
+
+async function runDependencyBuild(
+	dependency: NonNullable<ConstructedBuild['dependencyBuilds']>[number],
+	build: ConstructedBuild,
+	environment: ChildEnvironment,
+	runtimeDirectory: string,
+	dependencies: BuildPushDependencies,
+	linkDirectory: string
+): Promise<DependencyBuildExecution> {
+	const attempts: BuildExecutionAttempt[] = [];
+	let lastExit: ChildExit = { status: 1, signal: undefined };
+	for (const [
+		candidateIndex,
+		installable
+	] of dependency.installables.entries()) {
+		const candidateLinks = path.join(linkDirectory, String(candidateIndex));
+		await createRuntimeDirectory(candidateLinks);
+		const candidate = await runConstructedBuild(
+			{
+				installables: [installable],
+				...(build.attempts !== undefined && { attempts: build.attempts }),
+				...(build.maxJobs !== undefined && { maxJobs: build.maxJobs })
+			},
+			environment,
+			runtimeDirectory,
+			dependencies,
+			path.join(candidateLinks, outLinkName)
+		);
+		appendBuildAttempts(attempts, candidate.attempts);
+		lastExit = candidate.exit;
+		if (
+			candidate.exit.signal !== undefined ||
+			candidate.exit.status === 127 ||
+			candidate.exit.status === undefined
+		) {
+			return { exit: candidate.exit, attempts, isRealised: false };
+		}
+		const valid = await dependencies.store.queryValidPaths([dependency.path]);
+		if (valid.includes(dependency.path)) {
+			return { exit: candidate.exit, attempts, isRealised: true };
+		}
+	}
+	return {
+		exit: { ...lastExit, status: lastExit.status === 0 ? 1 : lastExit.status },
+		attempts,
+		isRealised: false
+	};
 }
 
 async function runConstructedBuild(
@@ -648,12 +740,6 @@ async function runRebuild(
 	dependencies: BuildPushDependencies,
 	targetLinkDirectory: string
 ): Promise<BuildExecution> {
-	if (
-		discoverNixStoreConfig({ ...defaultNixConfigEnvironment, env: environment })
-			.building.builders !== undefined
-	) {
-		throw new BuildRebuildRemoteDispatchError();
-	}
 	const declaredByTarget = new Map<string, readonly string[]>();
 	for (const installable of build.installables) {
 		declaredByTarget.set(
@@ -1034,7 +1120,11 @@ async function runReconciledLocalBuildPush(
 
 		const declared = await declaredOutputs(build, dependencies.store);
 		const initiallyValid = await dependencies.store.queryValidPaths(declared);
-		const { exit, attempts } = await reporter.phase(buildPushPhases.build, () =>
+		const {
+			exit,
+			attempts,
+			terminalFailure: dependencyFailure
+		} = await reporter.phase(buildPushPhases.build, () =>
 			runInvocation(
 				invocation,
 				dependencies.environment ?? process.env,
@@ -1060,7 +1150,8 @@ async function runReconciledLocalBuildPush(
 			build.rebuild === true && exit.status === 0 ? [] : initiallyValid,
 			build.rebuild === true && exit.status === 0
 		);
-		const terminalFailure = terminalFailureFor(invocation, attempts, exit);
+		const terminalFailure =
+			dependencyFailure ?? terminalFailureFor(invocation, attempts, exit);
 		if (exit.status === 0) {
 			requireCompleteProvenance(invocation, realised, subjects);
 		}
