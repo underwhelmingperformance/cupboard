@@ -338,17 +338,18 @@ workflow][simpler-workflow].
 | `attest`      | `true`, `false`                       | `true`       | Sign build provenance for builds observed on the runner and attach the bundles to published paths. Reused and substituted outputs receive no new build claim.                                                                                                                                                                                                       |
 
 `push: false` is a compatibility alias that disables publication, even when
-`publish` selects outputs or a closure. It also disables signing.
+`publish` selects outputs, built intermediates or a closure. It also disables
+signing.
 
-| Build     | Substituter | Publish                | Attest  | Result                                                                                                                                                                                                                                        |
-| --------- | ----------- | ---------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `missing` | `leave`     | `outputs`              | `true`  | The defaults reuse available outputs, publish selected outputs and sign build provenance for builds observed on the runner. Eligible outputs from external substituters stay upstream. Paths from a reuse view can be published by reference. |
-| `missing` | `copy`      | `closure`              | `true`  | The published path set includes substituted outputs and runtime references. Only builds observed on the runner receive new build provenance.                                                                                                  |
-| `rebuild` | `leave`     | `outputs`              | `true`  | Each requested output is built again in the selected Nix store. The workflow publishes selected outputs and signs build provenance for builds observed on the runner. Dependencies may still be substituted.                                  |
-| `rebuild` | `copy`      | `closure`              | `true`  | Each requested output is built again and its runtime closure is published. Builds observed on the runner receive build provenance. Dependencies may still be substituted.                                                                     |
-| Any       | Any         | `outputs` or `closure` | `false` | The workflow publishes the selected paths without signing new build provenance.                                                                                                                                                               |
-| `missing` | Any         | `none`                 | Any     | The workflow publishes no paths or attestations. Available requested outputs can be reused.                                                                                                                                                   |
-| `rebuild` | Any         | `none`                 | Any     | The workflow builds each requested output again but publishes no paths or attestations.                                                                                                                                                       |
+| Build     | Substituter | Publish                         | Attest  | Result                                                                                                                                                                                                                                                                          |
+| --------- | ----------- | ------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `missing` | `leave`     | `built`                         | `true`  | The defaults reuse available outputs, publish selected outputs plus observed build intermediates and sign build provenance for builds observed on the runner. Eligible outputs from external substituters stay upstream. Paths from a reuse view can be published by reference. |
+| `missing` | `copy`      | `closure`                       | `true`  | The published path set includes substituted outputs and runtime references. Only builds observed on the runner receive new build provenance.                                                                                                                                    |
+| `rebuild` | `leave`     | `outputs`                       | `true`  | Each requested output is built again in the selected Nix store. The workflow publishes selected outputs and signs build provenance for builds observed on the runner. Dependencies may still be substituted.                                                                    |
+| `rebuild` | `copy`      | `closure`                       | `true`  | Each requested output is built again and its runtime closure is published. Builds observed on the runner receive build provenance. Dependencies may still be substituted.                                                                                                       |
+| Any       | Any         | `outputs`, `built` or `closure` | `false` | The workflow publishes the selected paths without signing new build provenance.                                                                                                                                                                                                 |
+| `missing` | Any         | `none`                          | Any     | The workflow publishes no paths or attestations. Available requested outputs can be reused.                                                                                                                                                                                     |
+| `rebuild` | Any         | `none`                          | Any     | The workflow builds each requested output again but publishes no paths or attestations.                                                                                                                                                                                         |
 
 For outputs already in the destination cache or a reuse view, `publish: closure`
 reads narinfos to discover their runtime references. It publishes cached
@@ -365,9 +366,6 @@ check mode and compares the result with the existing output. The run fails if
 they differ. A fresh output is built once. Reusing an available output without
 building it creates no new build provenance, even when this run publishes it to
 the destination.
-
-The default settings reuse available requested outputs and publish selected
-outputs plus intermediates built during this run.
 
 The flake workflow defaults to `publish: built`. It publishes selected requested
 outputs and intermediates reported by the post-build hook. Substituted

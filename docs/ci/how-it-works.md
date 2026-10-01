@@ -62,12 +62,13 @@ before grouping the targets:
   `bestEffort` settings.
 - No target may go over the limits on retention roots.
 
-With `build: missing` and `publish: outputs`, the plan can skip a target whose
-root already retains the outputs that the destination cache serves. It can also
-skip a cohort when each target already has its required path in the destination.
-An attestation's presence does not decide whether to build. With
-`build: rebuild`, each requested output is built again on the configured
-builder, even if it is already available. Nix may still substitute dependencies.
+With `build: missing`, the plan can skip a target when its root already retains
+the outputs that the destination cache serves and `publish` is `outputs` or
+`built`. It can also skip a cohort when each target already has its required
+path in the destination. An attestation's presence does not decide whether to
+build. With `build: rebuild`, each requested output is built again on the
+configured builder, even if it is already available. Nix may still substitute
+dependencies.
 
 If you turn on `enable-packing`, the plan works differently. It measures the
 size of each target's closure, and packs small unlabelled cohorts into as few

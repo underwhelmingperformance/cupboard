@@ -203,10 +203,10 @@ Then fill in your own values:
 The `preset: pull-request-and-branch` line tells the workflow to decide where to
 publish based on what triggered the run. Without it, you'd have to set the cache
 and root names yourself. The other defaults use available outputs, leave outputs
-from external substituters upstream, publish selected outputs, and sign build
-provenance for builds observed on the runner. Reused or substituted outputs
-receive no new build claim. You can change each decision with `build`,
-`substituter`, `publish` and `attest`; see
+from external substituters upstream, publish selected outputs plus observed
+build intermediates, and sign build provenance for builds observed on the
+runner. Reused or substituted outputs receive no new build claim. You can change
+each decision with `build`, `substituter`, `publish` and `attest`; see
 [Choosing publication behaviour](./flake-publish.md#choosing-publication-behaviour).
 For pull request `#42` and for `main`, the preset does this:
 

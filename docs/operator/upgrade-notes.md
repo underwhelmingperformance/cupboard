@@ -158,16 +158,18 @@ Custom jobs that use `actions/setup` can continue to pass
 The reusable workflows use four separate inputs: `build` chooses whether to
 rebuild requested outputs, `substituter` chooses whether externally substituted
 outputs are selected for publication, `publish` chooses the published path set,
-and `attest` enables build provenance. The defaults are `build: missing`,
-`publish: outputs` and `attest: true`. The flake workflow defaults to
-`substituter: leave`; the simpler workflow defaults to `substituter: copy`.
+and `attest` enables build provenance. Both workflows default to
+`build: missing` and `attest: true`. The flake workflow defaults to
+`substituter: leave` and `publish: built`, which publishes selected outputs plus
+observed build intermediates. The simpler workflow defaults to
+`substituter: copy` and `publish: outputs`.
 
-| v0.0.35 caller                                                                                                   | Change for this release                                                                                                                                                                                 |
-| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Flake workflow with `push: false`                                                                                | No input change is required. `push: false` disables publication and signing. `publish: none` also disables them. Add `build: rebuild` if the run must build every requested output again.               |
-| Flake workflow with `push: true` or no `push` input                                                              | The defaults publish selected outputs, but an available output is no longer rebuilt just because its attestation is missing. Add `build: rebuild` if the job must execute every requested output again. |
-| Simple workflow with `attest: false`                                                                             | No change is required. The input remains a boolean.                                                                                                                                                     |
-| Simple workflow with `attest: true` or no `attest` input, when every output needs build provenance from this run | Add `build: rebuild`. Dependencies may still be substituted.                                                                                                                                            |
+| v0.0.35 caller                                                                                                   | Change for this release                                                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Flake workflow with `push: false`                                                                                | No input change is required. `push: false` disables publication and signing. `publish: none` also disables them. Add `build: rebuild` if the run must build every requested output again.                                             |
+| Flake workflow with `push: true` or no `push` input                                                              | The defaults publish selected outputs plus observed build intermediates. An available output is no longer rebuilt just because its attestation is missing. Add `build: rebuild` if the job must execute every requested output again. |
+| Simple workflow with `attest: false`                                                                             | No change is required. The input remains a boolean.                                                                                                                                                                                   |
+| Simple workflow with `attest: true` or no `attest` input, when every output needs build provenance from this run | Add `build: rebuild`. Dependencies may still be substituted.                                                                                                                                                                          |
 
 The new flake-workflow `attest` input is also a boolean and defaults to `true`.
 Both workflows sign build provenance only for builds observed on the runner.
