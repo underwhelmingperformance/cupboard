@@ -41,7 +41,10 @@ import {
 	childExitCode,
 	runBuildPush
 } from '../build-push/build-push.ts';
-import { runCohortSequence } from '../build-push/cohorts.ts';
+import {
+	cohortSequenceFailure,
+	runCohortSequence
+} from '../build-push/cohorts.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
 import {
 	type ChildCommand,
@@ -534,7 +537,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--keep-going-cohorts',
-			'run the remaining cohorts after one fails. The exit status is still that of the first cohort to fail.'
+			'run the remaining cohorts after one fails. The first failure without validated target-build evidence determines the exit status; otherwise the first target build failure does.'
 		)
 		.addHelpText(
 			'after',
@@ -782,7 +785,7 @@ export function registerBuildPushCommand(
 							})
 						}
 					);
-					const [firstFailure] = result.failures;
+					const failure = cohortSequenceFailure(result.failures);
 
 					if (cohorts.length > 1 && options.receiptFile !== undefined) {
 						const receipt = multiCohortReceiptDocument(
@@ -799,7 +802,7 @@ export function registerBuildPushCommand(
 						await updateAggregateCohortRoot(
 							{
 								cohortCount: cohorts.length,
-								failed: firstFailure !== undefined,
+								failed: failure !== undefined,
 								root: targetRoot,
 								settledTargets,
 								retention: rootRetentionChoice(options.ttl, options.permanent)
@@ -811,8 +814,8 @@ export function registerBuildPushCommand(
 						);
 					}
 
-					if (firstFailure !== undefined) {
-						throw firstFailure.error;
+					if (failure !== undefined) {
+						throw failure.error;
 					}
 				} finally {
 					if (sequenceDirectory !== undefined) {
