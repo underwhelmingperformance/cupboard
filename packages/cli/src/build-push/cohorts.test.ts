@@ -14,6 +14,13 @@ const pathA = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
 );
 
+const commandFailureReceipt: BuildReceipt = {
+	version: 3,
+	paths: [],
+	subjects: [],
+	terminalFailure: { kind: 'command' }
+};
+
 function cohortInvocation(ordinal: number): BuildInvocation {
 	return { kind: 'command', command: ['sh', '-c', `exit ${String(ordinal)}`] };
 }
@@ -145,7 +152,7 @@ describe('runCohortSequence', () => {
 			isTypedError: failure?.error instanceof BuildCommandFailedError
 		}).toStrictEqual({
 			events: ['cohort:1', 'collect', 'cohort:2'],
-			receipts: [receiptFor(1)],
+			receipts: [receiptFor(1), commandFailureReceipt],
 			failures: [2],
 			isTypedError: true
 		});
@@ -165,7 +172,7 @@ describe('runCohortSequence', () => {
 			failures: run.result.failures.map(({ cohort }) => cohort)
 		}).toStrictEqual({
 			events: ['cohort:1', 'collect', 'cohort:2', 'collect', 'cohort:3'],
-			receipts: [receiptFor(1), receiptFor(3)],
+			receipts: [receiptFor(1), commandFailureReceipt, receiptFor(3)],
 			failures: [2]
 		});
 	});
@@ -204,8 +211,8 @@ describe('runCohortSequence', () => {
 		expect({ events, result }).toStrictEqual({
 			events: ['cohort:1'],
 			result: {
-				receipts: [],
-				failures: [{ cohort: 1, error }]
+				receipts: [commandFailureReceipt],
+				failures: [{ cohort: 1, error, kind: 'command' }]
 			}
 		});
 	});
@@ -328,7 +335,12 @@ describe('runCohortSequence', () => {
 			receipts: run.result.receipts,
 			failures: run.result.failures.map(({ cohort }) => cohort)
 		}).toStrictEqual({
-			receipts: [receiptFor(1), receiptFor(2), receiptFor(3)],
+			receipts: [
+				receiptFor(1),
+				receiptFor(2),
+				commandFailureReceipt,
+				receiptFor(3)
+			],
 			failures: [2]
 		});
 	});

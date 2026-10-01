@@ -1513,7 +1513,7 @@ async function resolveStreamedBuildOwners(options: {
 			],
 			inputs: options.inputs,
 			runNix: options.runNix,
-			allowIncomplete: true,
+			allowIncomplete: false,
 			...(onResolved !== undefined && { onResolved }),
 			...(options.signal !== undefined && { signal: options.signal })
 		});
