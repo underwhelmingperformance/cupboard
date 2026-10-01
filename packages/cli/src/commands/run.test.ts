@@ -14,6 +14,7 @@ import { abortable } from '../abort.ts';
 
 import {
 	RunCommandFailedError,
+	RunReadAccessOptionsError,
 	runWithReadAccess,
 	UnreadableReadCredentialFileError
 } from './run.ts';
@@ -320,37 +321,72 @@ describe('cupboard run', () => {
 		]);
 	});
 
-	it('rejects explicit URL credentials with OIDC content acquisition', async () => {
-		await expect(
-			runWithReadAccess(
-				target,
-				['nix', 'build'],
-				{ githubOidc: true },
-				{
+	it.each([
+		{
+			label: 'the primary cache',
+			selected: target,
+			options: { githubOidc: true },
+			path: 'cache/builds'
+		},
+		{
+			label: 'an additional cache',
+			selected: target,
+			options: {
+				githubOidc: true,
+				readCaches: [
+					parseTenantCacheUrl(new URL(`${tenantUrl.href}/cache/falcon`))
+				]
+			},
+			path: 'cache/falcon'
+		},
+		{
+			label: 'an additional reuse view',
+			selected: target,
+			options: {
+				githubOidc: true,
+				reuseView: reuseViewNameSchema.parse('prior')
+			},
+			path: 'reuse/prior'
+		},
+		{
+			label: 'the primary reuse view',
+			selected: { tenantUrl, view: reuseViewNameSchema.parse('prior') },
+			options: { githubOidc: true },
+			path: 'reuse/prior'
+		}
+	])(
+		'rejects explicit URL credentials for $label before OIDC exchange or child launch',
+		async ({ selected, options, path }) => {
+			const calls = { exchange: 0, child: 0 };
+			await expect(
+				runWithReadAccess(selected, ['nix', 'build'], options, {
 					storeConfig: {
 						...configuration,
 						substitution: {
 							...configuration.substitution,
 							substituters: [
-								'https://ci:secret@cupboard.example.workers.dev/t/acme/cache/builds/'
+								`https://ci:secret@cupboard.example.workers.dev/t/acme/${path}/`
 							]
 						}
 					},
 					readFile: () => Promise.resolve(''),
 					issue: () => {
-						throw new Error(
-							'Conflicting credentials must fail before exchange'
-						);
+						calls.exchange += 1;
+						return Promise.resolve(lease);
 					},
 					runChild: () => {
-						throw new Error(
-							'Conflicting credentials must fail before child launch'
-						);
+						calls.child += 1;
+						return Promise.resolve({ status: 0, signal: undefined });
 					}
-				}
-			)
-		).rejects.toMatchObject({ exitCode: 2 });
-	});
+				})
+			).rejects.toStrictEqual(
+				new RunReadAccessOptionsError(
+					'Remove explicit substituter URL credentials for every resource requested with OIDC content access.'
+				)
+			);
+			expect(calls).toStrictEqual({ exchange: 0, child: 0 });
+		}
+	);
 
 	it('acquires one session for a deduplicated union of caches and a view', async () => {
 		const extra = parseTenantCacheUrl(
