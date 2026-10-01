@@ -316,6 +316,57 @@ describe('withRenewingReadCredential', () => {
 		});
 	});
 
+	it('keeps the last refusal when a subsequent renewal stalls until expiry', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const fixture = file();
+		const entered = Promise.withResolvers<undefined>();
+		const pending = Promise.withResolvers<ReadCredentialLease>();
+		const temporaryError = new CupboardHttpError(
+			'POST',
+			'/oauth/token',
+			503,
+			'temporary exchange failure'
+		);
+		let requests = 0;
+		const session = withRenewingReadCredential(
+			options(() => {
+				requests += 1;
+				if (requests === 1) {
+					return Promise.resolve(lease('first', 10_000));
+				}
+				if (requests === 2) {
+					return Promise.reject(temporaryError);
+				}
+				return pending.promise;
+			}, fixture.credentialFile),
+			async ({ signal }) => {
+				entered.resolve(undefined);
+				await abortable(Promise.withResolvers<undefined>().promise, signal);
+			}
+		);
+		await entered.promise;
+		const outcome = failureOf(session);
+		await vi.advanceTimersByTimeAsync(9000);
+		const error = await outcome;
+		if (!(error instanceof ReadCredentialRenewalError)) {
+			throw new Error('Expected a read renewal error');
+		}
+		expect({
+			cause: error.cause,
+			exitCode: error.exitCode,
+			requests,
+			writes: fixture.writes,
+			removed: fixture.isRemoved()
+		}).toStrictEqual({
+			cause: temporaryError,
+			exitCode: 75,
+			requests: 3,
+			writes: ['first'],
+			removed: true
+		});
+	});
+
 	it('waits for a cancelled renewal before removing its file', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
