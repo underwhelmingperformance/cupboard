@@ -638,8 +638,15 @@ async function runInvocation(
 					dependencies,
 					path.join(targetLinkDirectory, outLinkName)
 				);
+	const terminalFailure =
+		target.terminalFailure ??
+		terminalFailureFor(invocation, target.attempts, target.exit);
 	appendBuildAttempts(dependencyAttempts, target.attempts);
-	return { ...target, attempts: dependencyAttempts };
+	return {
+		...target,
+		attempts: dependencyAttempts,
+		...(terminalFailure !== undefined && { terminalFailure })
+	};
 }
 
 interface BuildExecutionAttempt extends SupervisedAttempt {
