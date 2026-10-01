@@ -113,7 +113,8 @@ interface RefreshEnvelopeContext {
 type IssuanceAuthority =
 	| {
 			readonly kind: 'external';
-			readonly claims: VerifiedOidcClaims;
+			readonly rule?: OidcTrustRule;
+			readonly grants: AuthorizationDetails;
 	  }
 	| {
 			readonly kind: 'refresh';
@@ -232,14 +233,6 @@ export class TokenExchangeService {
 			}
 		}
 
-		const { rule } = selection;
-
-		const snapshot = snapshots.find((candidate) => candidate.rule === rule);
-
-		if (snapshot === undefined) {
-			throw new TenantSubjectTokenUntrustedError();
-		}
-
 		const verifiedSubject =
 			typeof verified.sub === 'string' && verified.sub !== ''
 				? verified.sub
@@ -251,9 +244,30 @@ export class TokenExchangeService {
 
 		const subject = oidcSubjectSchema.parse(verifiedSubject);
 
-		return this.issuedResponse(snapshot, subject, verified, requested, {
-			issued_token_type: issuedAccessTokenType
-		});
+		const grants =
+			selection.grants ??
+			this.implicitGrants(selection.rule, verified, requested);
+		return this.issuedResponse(
+			logger,
+			verified,
+			selection.rule,
+			subject,
+			grants,
+			{
+				issued_token_type: issuedAccessTokenType
+			}
+		);
+	}
+
+	private implicitGrants(
+		rule: OidcTrustRule | undefined,
+		verified: VerifiedOidcClaims,
+		requested: AuthorizationDetails | undefined
+	): AuthorizationDetails {
+		if (rule === undefined) {
+			throw new TenantSubjectTokenUntrustedError();
+		}
+		return resolveRequestedGrants(rule, verified, requested);
 	}
 
 	private resourceState(resource: ReadResource): ReadResourceState {
@@ -339,13 +353,7 @@ export class TokenExchangeService {
 			throw new TenantSubjectTokenUntrustedError();
 		}
 
-		const snapshot = snapshots.find(({ rule }) => rule === selection.rule);
-
-		if (
-			snapshot === undefined ||
-			typeof verified.sub !== 'string' ||
-			verified.sub === ''
-		) {
+		if (typeof verified.sub !== 'string' || verified.sub === '') {
 			throw new TenantSubjectTokenUntrustedError();
 		}
 
@@ -356,7 +364,32 @@ export class TokenExchangeService {
 			writeJwtTtlSeconds
 		);
 
-		if (!this.oidcTrust.isEnabledSnapshotCurrent(snapshot, this.context.db)) {
+		const currentRules = this.oidcTrust
+			.enabledOidcTrustRuleSnapshots(logger)
+			.map(({ rule }) => rule);
+		const currentFacts = resources.map((resource) =>
+			this.resourceState(resource)
+		);
+		const current = selectReadTrust(
+			currentRules,
+			verified,
+			currentFacts,
+			selection.grants
+		);
+		if (current.outcome === 'authority-unmatched') {
+			throw new ReadResourcesNotPermittedError(current.uncovered);
+		}
+		if (current.outcome !== 'selected') {
+			throw new TenantSubjectTokenUntrustedError();
+		}
+		const exact = selectOidcTrust(currentRules, verified, selection.grants);
+		if (
+			selection.grants.length > 0 &&
+			exact.outcome === 'authority-unmatched'
+		) {
+			throw new ReadResourcesNotPermittedError(exact.uncovered);
+		}
+		if (selection.grants.length > 0 && exact.outcome !== 'selected') {
 			throw new TenantSubjectTokenUntrustedError();
 		}
 
@@ -368,7 +401,7 @@ export class TokenExchangeService {
 			issued_token_type: issuedAccessTokenType,
 			expires_in: writeJwtTtlSeconds,
 			authorization_details: selection.grants,
-			read_resources: facts
+			read_resources: currentFacts
 		} satisfies ReadAccessResponse);
 	}
 
@@ -762,22 +795,28 @@ export class TokenExchangeService {
 	}
 
 	private async issuedResponse(
-		snapshot: OidcTrustRuleSnapshot,
+		logger: Logger,
+		verified: VerifiedOidcClaims,
+		rule: OidcTrustRule | undefined,
 		subject: OidcSubject,
-		claims: VerifiedOidcClaims,
-		requested: AuthorizationDetails | undefined,
+		grants: AuthorizationDetails,
 		extra: Pick<TokenResponse, 'issued_token_type'>
 	): Promise<Response> {
 		const prepared = await this.prepareIssuedResponse(
-			snapshot.rule,
+			rule,
 			subject,
-			{ kind: 'external', claims },
-			requested,
+			{ kind: 'external', rule, grants },
+			undefined,
 			extra
 		);
 
 		this.context.db.transaction((transaction) => {
-			if (!this.oidcTrust.isEnabledSnapshotCurrent(snapshot, transaction)) {
+			const currentRules = this.oidcTrust
+				.enabledOidcTrustRuleSnapshots(logger)
+				.map(({ rule }) => rule);
+			if (
+				selectOidcTrust(currentRules, verified, grants).outcome !== 'selected'
+			) {
 				throw new TenantSubjectTokenUntrustedError();
 			}
 
@@ -806,7 +845,7 @@ export class TokenExchangeService {
 	}
 
 	private async prepareIssuedResponse(
-		rule: OidcTrustRule,
+		rule: OidcTrustRule | undefined,
 		subject: OidcSubject,
 		authority: IssuanceAuthority,
 		requested: AuthorizationDetails | undefined,
@@ -815,7 +854,7 @@ export class TokenExchangeService {
 	): Promise<PreparedIssuedResponse> {
 		const granted =
 			authority.kind === 'external'
-				? resolveRequestedGrants(rule, authority.claims, requested)
+				? authority.grants
 				: attenuatedGrants(authority.grants, requested);
 		const isContentReadOnly =
 			granted.length > 0 &&
@@ -827,7 +866,8 @@ export class TokenExchangeService {
 						)) ||
 					detail.type === 'cupboard_view'
 			);
-		const isInteractive = isRuleInteractive(rule) && !isContentReadOnly;
+		const isInteractive =
+			rule !== undefined && isRuleInteractive(rule) && !isContentReadOnly;
 		const ttlSeconds = isInteractive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
 		const accessToken = await this.issueRuleToken(
 			rule,
@@ -1006,7 +1046,7 @@ export class TokenExchangeService {
 	}
 
 	private async issueRuleToken(
-		rule: OidcTrustRule,
+		rule: OidcTrustRule | undefined,
 		subject: OidcSubject,
 		grants: AuthorizationDetails,
 		ttlSeconds: TtlSeconds
@@ -1022,7 +1062,7 @@ export class TokenExchangeService {
 				grants,
 				kid: key.kid,
 				ttlSeconds,
-				auditClaims: { cb_rule: rule.id }
+				auditClaims: rule === undefined ? {} : { cb_rule: rule.id }
 			},
 			new Date()
 		);

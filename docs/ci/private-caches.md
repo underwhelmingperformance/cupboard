@@ -103,9 +103,14 @@ elsewhere][building-elsewhere].
 
 `cupboard run` can include additional caches from the same tenant in one read
 session. Repeat `--read-cache` for each cache. The combined request accepts up
-to sixteen distinct resources, including at most one reuse view. Every resource
-must be authorised by the same trust rule. Configure the additional substituter
-URLs and trusted public keys in Nix separately:
+to sixteen distinct resources, including at most one reuse view. Matching trust
+rules in the current preferred identity tier can authorise different resources
+or actions in the request. Every required action must be permitted; a refused
+request receives no partial credential. See [Matching trust
+rules][matching-rules]. Configure the additional substituter URLs and trusted
+public keys in Nix separately:
+
+[matching-rules]: ./trust-rules.md#when-several-rules-match
 
 ```sh
 cupboard run https://cupboard.example.workers.dev/t/acme/cache/builds \

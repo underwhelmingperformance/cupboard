@@ -482,15 +482,28 @@ How long a token lasts depends on the rule that matched:
 - A rule for CI, or an OIDC exchange that requests only content-read grants,
   gives a token that lasts 15 minutes, and no refresh token.
 
+Explicit external exchanges can combine grants from eligible rules, including
+separate actions for the same resource. The response grants only the requested
+actions and resources. After signing, the server re-evaluates the exact
+authority against current policy and its current preferred identity tier. A
+replacement matching rule can permit the request; a rule in a less preferred
+tier cannot supply authority while a more preferred tier matches. When a single
+rule covers the response, `cb_rule` remains an audit claim. Request
+authorisation uses the issued grants and does not depend on that audit claim.
+
+Implicit interactive exchanges keep their existing single-rule selection.
+Composition does not create refresh sessions for CI or read acquisition.
+
 A client can also exchange a cupboard access token for one with fewer grants.
 
 CI read acquisition uses the extension grant
 `urn:cupboard:params:oauth:grant-type:read-access` at the tenant token endpoint.
 The request contains an external ID token and a bounded `read_resources` array
 with up to sixteen distinct resources, including at most one reuse view. The
-server selects one trust rule using the existing identity precedence, then
-resolves exact read grants against current resource state. Public resources need
-no content-read grant. Existing private resources require content-read; an
+server converts current resource state into exact read requirements and uses the
+same grant composer as ordinary external OIDC exchange. The composer combines
+authority across matching rules in the preferred identity tier. Public resources
+need no content-read grant. Existing private resources require content-read; an
 absent cache accepts scoped metadata authority, which publication grants already
 imply. The read response includes access and priority facts for setup
 validation. Acquisition never creates a cache. Ordinary token exchange keeps its
@@ -499,10 +512,11 @@ strict requested-grant semantics.
 Malformed `read_resources` returns `invalid_request`. A valid request without
 matching authority returns `invalid_authorization_details` and identifies the
 requested resources and missing read actions. The refusal does not list other
-private resources. All requested resources must be covered by one trust rule.
-Cold content-read and negotiation-hint authentication initialise the tenant
-before accessing local state. While a local migration is pending, the Worker
-returns a retryable 503 with `Retry-After: 1` and `Cache-Control: no-store`.
+private resources. Every required action must be covered by an eligible trust
+rule. The composer cannot fall back to a less specific identity tier. Cold
+content-read and negotiation-hint authentication initialise the tenant before
+accessing local state. While a local migration is pending, the Worker returns a
+retryable 503 with `Retry-After: 1` and `Cache-Control: no-store`.
 
 Read acquisition always issues a 15-minute token without a refresh token,
 including metadata-only and zero-authority results. Request-time checks still

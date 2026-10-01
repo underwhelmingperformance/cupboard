@@ -48,10 +48,7 @@ import {
 	type GithubCheckOptions,
 	runGithubCheck
 } from './check.ts';
-import {
-	AmbiguousTrustRulesFinding,
-	SplitTrustAuthorityFinding
-} from './trust-selection.ts';
+import { PassedCheckFinding } from './finding.ts';
 
 describe('read-acquisition diagnostics', () => {
 	const cache = {
@@ -88,7 +85,7 @@ describe('read-acquisition diagnostics', () => {
 		]
 	});
 
-	it('rejects private read authority split across two matching rules', () => {
+	it('accepts private read authority composed from matching rules', () => {
 		const resources: ReadResourceState[] = [
 			{
 				type: 'cupboard_cache',
@@ -119,12 +116,10 @@ describe('read-acquisition diagnostics', () => {
 				[],
 				resources
 			)
-		).toStrictEqual(
-			new SplitTrustAuthorityFinding('read access', [cacheRule, viewRule])
-		);
+		).toStrictEqual(new PassedCheckFinding('read access'));
 	});
 
-	it('reports ambiguity for public read acquisition without preferring optional content authority', () => {
+	it('accepts public read acquisition with deterministic optional authority', () => {
 		const resources: ReadResourceState[] = [
 			{
 				type: 'cupboard_cache',
@@ -146,9 +141,7 @@ describe('read-acquisition diagnostics', () => {
 				[],
 				resources
 			)
-		).toStrictEqual(
-			new AmbiguousTrustRulesFinding('read access', [cacheRule, viewRule], [])
-		);
+		).toStrictEqual(new PassedCheckFinding('read access'));
 	});
 });
 
@@ -904,8 +897,7 @@ describe('runGithubCheck', () => {
 				label: 'main trust rule',
 				value:
 					'failed: rule branch matches the modelled claims but does not permit ' +
-					'upload:negotiate, upload:status, upload:commit, ' +
-					'attestation:negotiate, attestation:attach, root:set on cache ' +
+					'root:set on cache ' +
 					'(default) with root github:acme/app/main/target; add a rule ' +
 					'with the required grant, or add a corrected rule and remove this one'
 			}
