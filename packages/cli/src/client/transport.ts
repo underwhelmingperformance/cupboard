@@ -28,9 +28,13 @@ export function resilientFetcher(
 
 export function cacheReadFetcher(
 	tenantUrl: URL,
-	fetcher?: typeof fetch
+	fetcher?: typeof fetch,
+	netrcFile?: string
 ): typeof fetch {
-	const authenticated = withReadAuthentication(fetcher ?? fetch, { tenantUrl });
+	const authenticated = withReadAuthentication(fetcher ?? fetch, {
+		tenantUrl,
+		netrcFile
+	});
 
 	return fetcher === undefined
 		? resilientFetcher('replay-safe', authenticated)

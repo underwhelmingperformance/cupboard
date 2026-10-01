@@ -13,11 +13,10 @@ import {
 	attestationAttachResponseSchema,
 	type AttestationDecision,
 	attestationDecisionSchema,
+	attestationInfoResponseSchema,
 	attestationListSchema,
 	attestationNegotiateMaxBundles,
 	attestationNegotiateResponseSchema,
-	attestationStatusMaxPaths,
-	attestationStatusResponseSchema,
 	attestationUploadDecisionSchema
 } from '@cupboard/protocol/attestations';
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
@@ -43,10 +42,7 @@ import { z } from 'zod';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import {
-	AttestationPathNotFoundError,
-	SubrequestSliceExceededError
-} from '../errors.ts';
+import { AttestationPathNotFoundError } from '../errors.ts';
 import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
@@ -223,29 +219,6 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('checks several attestation lists in one read request', async () => {
-		const { token, metadata, bundle } = await committedPathBundle();
-		await attachBundle(token, metadata.storePathHash, bundle);
-		const absent = uniqueStorePathHash();
-		const response = await readFetch('/api/v1/attested-paths', {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({
-				storePathHashes: [metadata.storePathHash, absent]
-			})
-		});
-
-		expect({
-			status: response.status,
-			cacheControl: response.headers.get('cache-control'),
-			body: attestationStatusResponseSchema.parse(await response.json())
-		}).toStrictEqual({
-			status: StatusCodes.OK,
-			cacheControl: 'no-store',
-			body: { attestedStorePathHashes: [metadata.storePathHash] }
-		});
-	});
-
 	it('requires read credentials for the attestation probe of a private named cache', async () => {
 		const cache = namedCache('private-probe');
 		const token = await initialiseViaWorker();
@@ -259,17 +232,14 @@ describe('attestation attach and reads', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 		await pushPathThroughTenant(fixtureTenant, token, metadata, nar, cache);
-		await attachBundle(
-			token,
-			metadata.storePathHash,
-			sigstoreBundleBytes(narDigestHex(nar.narHash)),
-			cache
-		);
+		const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+		await attachBundle(token, metadata.storePathHash, bundle, cache);
 		await provisionFixtureTenant({
 			read: { user: 'alice', password: 'secret' }
 		});
 		const probe = (headers: Record<string, string>) =>
-			readFetch(`/cache/${cache.name}/api/v1/attested-paths`, {
+			readFetch(`/cache/${cache.name}/api/v1/attestation-info`, {
 				method: 'POST',
 				headers: { 'content-type': 'application/json', ...headers },
 				body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
@@ -282,11 +252,27 @@ describe('attestation attach and reads', () => {
 		expect({
 			unauthorised: unauthorised.status,
 			authorised: authorised.status,
-			body: attestationStatusResponseSchema.parse(await authorised.json())
+			body: attestationInfoResponseSchema.parse(await authorised.json())
 		}).toStrictEqual({
 			unauthorised: StatusCodes.UNAUTHORIZED,
 			authorised: StatusCodes.OK,
-			body: { attestedStorePathHashes: [metadata.storePathHash] }
+			body: {
+				scopeVersion: 'cache:1:1:private:false',
+				entries: [
+					{
+						storePathHash: metadata.storePathHash,
+						status: 'found',
+						narHash: metadata.narHash,
+						attestations: [
+							{
+								digest,
+								predicateType,
+								size: bundle.byteLength
+							}
+						]
+					}
+				]
+			}
 		});
 	});
 
@@ -295,97 +281,39 @@ describe('attestation attach and reads', () => {
 		await provisionFixtureTenant({
 			read: { user: 'alice', password: 'secret' }
 		});
+		const storePathHash = uniqueStorePathHash();
 		const unauthorised = await readFetch(
-			'/cache/absent/api/v1/attested-paths',
+			'/cache/absent/api/v1/attestation-info',
 			{
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ storePathHashes: [uniqueStorePathHash()] })
+				body: JSON.stringify({ storePathHashes: [storePathHash] })
 			}
 		);
-		const authorised = await readFetch('/cache/absent/api/v1/attested-paths', {
-			method: 'POST',
-			headers: {
-				'content-type': 'application/json',
-				authorization: `Basic ${btoa('alice:secret')}`
-			},
-			body: JSON.stringify({ storePathHashes: [uniqueStorePathHash()] })
-		});
+		const authorised = await readFetch(
+			'/cache/absent/api/v1/attestation-info',
+			{
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					authorization: `Basic ${btoa('alice:secret')}`
+				},
+				body: JSON.stringify({ storePathHashes: [storePathHash] })
+			}
+		);
 
 		expect({
 			unauthorised: unauthorised.status,
 			authorised: authorised.status,
-			body: attestationStatusResponseSchema.parse(await authorised.json())
+			body: attestationInfoResponseSchema.parse(await authorised.json())
 		}).toStrictEqual({
 			unauthorised: StatusCodes.UNAUTHORIZED,
 			authorised: StatusCodes.OK,
-			body: { attestedStorePathHashes: [] }
+			body: {
+				scopeVersion: 'cache:1:1:private:true',
+				entries: [{ storePathHash, status: 'missing' }]
+			}
 		});
-	});
-
-	it.each([
-		{
-			cache: 'the default cache',
-			path: '/api/v1/attested-paths',
-			authorization: undefined
-		},
-		{
-			cache: 'a cache that does not exist',
-			path: '/cache/absent/api/v1/attested-paths',
-			authorization: `Basic ${btoa('alice:secret')}`
-		}
-	])(
-		'refuses an attestation probe for more than the maximum number of paths in $cache',
-		async ({ path, authorization }) => {
-			await initialiseViaWorker();
-			await provisionFixtureTenant({
-				read: { user: 'alice', password: 'secret' }
-			});
-			const response = await readFetch(path, {
-				method: 'POST',
-				headers: {
-					'content-type': 'application/json',
-					...(authorization !== undefined && { authorization })
-				},
-				body: JSON.stringify({
-					storePathHashes: Array.from(
-						{ length: attestationStatusMaxPaths + 1 },
-						() => uniqueStorePathHash()
-					)
-				})
-			});
-
-			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
-		}
-	);
-
-	it('refuses an attestation probe before R2 heads exceed its subrequest slice', async () => {
-		const { metadata } = await committedPathBundle();
-		const heads = vi.spyOn(env.BLOBS, 'head');
-
-		try {
-			await expect(
-				runInDurableObject(fixtureWorkerServer(), (instance) => {
-					const service = new AttestationsService(
-						instance.context,
-						new CacheRegistrationService(instance.context),
-						new AttestationCasService(instance.context),
-						new NarInfoObjectsService(instance.context)
-					);
-
-					return withSubrequestSlice(
-						() =>
-							service.attestedPathHashes(defaultCacheScope, [
-								metadata.storePathHash
-							]),
-						{ subrequests: 1, reserve: 0 }
-					);
-				})
-			).rejects.toBeInstanceOf(SubrequestSliceExceededError);
-			expect(heads.mock.calls).toStrictEqual([]);
-		} finally {
-			heads.mockRestore();
-		}
 	});
 
 	it.each([2, 100])(

@@ -13,6 +13,7 @@ under [docs/](../README.md) explain when to use each one.
 - [`cupboard logout`](#cupboard-logout)
 - [`cupboard whoami`](#cupboard-whoami)
 - [`cupboard attest`](#cupboard-attest)
+  - [`cupboard attest status`](#cupboard-attest-status)
   - [`cupboard attest attach`](#cupboard-attest-attach)
   - [`cupboard attest verify`](#cupboard-attest-verify)
 - [`cupboard push`](#cupboard-push)
@@ -359,12 +360,45 @@ Options:
   -h, --help                         display help for command
 
 Commands:
+  status [options] <url> [paths...]  Discover stored attestation metadata for
+                                     published paths. Use attest verify to
+                                     verify bundles.
   attach [options] <url> [paths...]  Attach Sigstore attestation bundles to
                                      store paths that are already published to
                                      the cache.
   verify [options] [bundles...]      Verify Sigstore attestation bundles, either
                                      from local files or from a cache.
   help [command]                     display help for command
+```
+
+#### cupboard attest status
+
+```text
+Usage: cupboard attest status [options] <url> [paths...]
+
+Discover stored attestation metadata for published paths. Use attest verify to
+verify bundles.
+
+Arguments:
+  url                         tenant URL (e.g.
+                              https://cupboard.example.workers.dev/t/<slug>)
+  paths                       published store paths to inspect
+
+Options:
+  --paths-file <path>         read additional store paths from this file, one
+                              per line
+  --predicate-type <uri>      match this exact predicate type (repeatable;
+                              omitted means all types) (default: [])
+  --require-all               exit one when any requested path has no matching
+                              evidence
+  --read-user <user>          private cache read user (default:
+                              $CUPBOARD_READ_USER)
+  --read-password <password>  private cache read password (default:
+                              $CUPBOARD_READ_PASSWORD)
+  --github-oidc               acquire private cache read access with GitHub
+                              Actions OIDC
+  --audience <audience>       OIDC audience (default: the tenant URL)
+  -h, --help                  display help for command
 ```
 
 #### cupboard attest attach

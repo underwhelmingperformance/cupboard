@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { isD1Overload } from '../db/transient.ts';
 import {
+	AttestationInfoHttpError,
 	DatabaseOverloadedError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
@@ -48,6 +49,21 @@ export function serverHttpErrorResponse(error: ServerHttpError): Response {
 	// stored this response would keep retrying against a cache instead of the
 	// origin, well past whatever made it transient.
 	const headers = serverHttpErrorHeaders(error);
+	if (error instanceof AttestationInfoHttpError) {
+		return Response.json(
+			{
+				code: error.code,
+				message: error.message,
+				...(error.storePathHash !== undefined && {
+					storePathHash: error.storePathHash
+				})
+			},
+			{
+				status: error.status,
+				headers: { ...Object.fromEntries(headers), 'cache-control': 'no-store' }
+			}
+		);
+	}
 	if (error instanceof MetadataHttpError) {
 		headers.set('content-type', 'application/json');
 		headers.set('cache-control', 'no-store');

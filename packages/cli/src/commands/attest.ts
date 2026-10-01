@@ -41,6 +41,7 @@ import { pushClientFor } from '../push/push-client.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import { registerAttestStatusCommand } from './attest-status.ts';
 import { parsePathFile, resolvePushPath } from './push.ts';
 
 interface VerifyOptions {
@@ -133,6 +134,8 @@ export function registerAttestCommands(
 		.description(
 			'Attach Sigstore attestations to published store paths, and verify them.'
 		);
+
+	registerAttestStatusCommand(attest, program, programOptions);
 
 	attest
 		.command('attach')

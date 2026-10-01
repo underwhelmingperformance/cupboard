@@ -41,6 +41,7 @@
 		"@types/ws": "catalog:",
 		"esbuild": "catalog:",
 		"miniflare": "catalog:",
+		"msw": "^3.0.1",
 		"typescript": "catalog:",
 		"vitest": "catalog:"
 	},

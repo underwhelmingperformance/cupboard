@@ -9,6 +9,18 @@ procedure is enough.
 
 These notes apply to the first release after v0.0.35.
 
+### Attestation discovery
+
+The legacy `POST /api/v1/attested-paths` endpoint is removed from default and
+named caches. Use `POST /api/v1/attestation-info` for batched discovery of
+stored attestation metadata. The CLI uses this interface for
+`cupboard attest status` and the publication coverage report.
+
+Clients can use bounded individual attestation-list reads when the server does
+not advertise `attestation-info-v1`. Authentication and storage failures remain
+errors and do not permit fallback. Discovery does not verify attestation
+signatures; use `cupboard attest verify` for verification.
+
 ### CI read acquisition
 
 Upgrade the deployed Worker before using this release's

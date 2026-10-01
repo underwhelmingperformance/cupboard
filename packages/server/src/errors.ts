@@ -9,6 +9,7 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type AttestationInfoError } from '@cupboard/protocol/attestations';
 import {
 	type CacheMetadataError,
 	cacheMetadataErrorCodes
@@ -37,6 +38,25 @@ export abstract class ServerHttpError extends Error {
 
 export abstract class InvalidRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
+}
+
+export class AttestationInfoHttpError extends ServerHttpError {
+	readonly status: number;
+	constructor(
+		readonly code: AttestationInfoError['code'],
+		message: string,
+		readonly storePathHash?: StorePathHash,
+		override readonly cause?: unknown
+	) {
+		super(message);
+		this.name = 'AttestationInfoHttpError';
+		this.status =
+			code === 'scope-changed'
+				? StatusCodes.CONFLICT
+				: code === 'list-invalid'
+					? StatusCodes.BAD_GATEWAY
+					: StatusCodes.REQUEST_TOO_LONG;
+	}
 }
 
 export abstract class MetadataHttpError extends ServerHttpError {
