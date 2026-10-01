@@ -371,6 +371,16 @@ const liveSubscriptionSchema = z.object({
 	rate_plan: z.object({ id: z.string().optional() }).loose().optional()
 });
 
+const liveDeployedVersionSchema = z.object({
+	version_id: z.string(),
+	percentage: z.number()
+});
+
+const liveDeploymentSchema = z.object({
+	created_on: z.string(),
+	versions: z.array(liveDeployedVersionSchema)
+});
+
 /**
  * Whether Cloudflare rejected the request with an authentication or
  * authorisation error.
@@ -846,12 +856,15 @@ export function createCloudflareApi(
 
 		async listDeployedVersions(scriptName) {
 			try {
-				const { deployments } = await client.workers.scripts.deployments.list(
+				const page = await client.workers.scripts.deployments.list(
 					scriptName,
 					account
 				);
-				// The API does not promise an order, so pick the newest deployment by
-				// its creation time.
+				// The API uses result.deployments; the SDK's pagination expects
+				// result.items.
+				const { deployments } = z
+					.object({ deployments: z.array(liveDeploymentSchema) })
+					.parse(page.result);
 				const newest = deployments.toSorted((left, right) =>
 					right.created_on.localeCompare(left.created_on)
 				)[0];
@@ -1079,10 +1092,7 @@ export function createCloudflareApi(
 		},
 
 		rollApiTokenSecret: async (tokenId) =>
-			client.accounts.tokens.value.update(tokenId, {
-				...account,
-				body: {}
-			}),
+			client.accounts.tokens.value.update(tokenId, account),
 
 		async getWorkersDevSubdomain() {
 			try {
