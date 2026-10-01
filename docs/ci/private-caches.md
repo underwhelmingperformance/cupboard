@@ -3,7 +3,7 @@
 The [quickstart][quickstart] uses public caches. A GitHub Actions job can also
 read a private destination cache and reuse view without a stored read password.
 The job exchanges its GitHub OIDC identity token for a short-lived Cupboard read
-token for each private resource. Trust rules authorise these reads separately
+token for the required resources. Trust rules authorise these reads separately
 from publication.
 
 [quickstart]: ./quickstart.md
@@ -79,7 +79,12 @@ The wrapper repeats OIDC acquisition and exchange while the command runs. It
 writes the credential to a private netrc file for Nix. Direct HTTP readers use
 the current credential for each request. The file is removed when the command
 finishes. Without `--github-oidc`, the wrapper runs the child with its existing
-configuration; read failures are reported by the child.
+configuration; read failures are reported by the child. The audience, resource
+and metadata options require `--github-oidc`. Explicit OIDC acquisition replaces
+an incidental netrc credential for the same deployment host. An explicit
+credential in a selected substituter URL conflicts with OIDC content access.
+Explicit OIDC acquisition requires `id-token: write` and a matching trust rule,
+including when the requested resources are public.
 
 Setup validates `cache-access-mode` against authenticated configuration facts.
 For an absent destination, the facts describe the tenant's current first-write
@@ -96,6 +101,22 @@ elsewhere][building-elsewhere].
 
 [building-elsewhere]: ./building-elsewhere.md
 
+`cupboard run` can include additional caches from the same tenant in one read
+session. Repeat `--read-cache` for each cache. The combined request accepts up
+to sixteen distinct resources, including at most one reuse view. Every resource
+must be authorised by the same trust rule. Configure the additional substituter
+URLs and trusted public keys in Nix separately:
+
+```sh
+cupboard run https://cupboard.example.workers.dev/t/acme/cache/builds \
+  --github-oidc --reuse-view prior \
+  --read-cache https://cupboard.example.workers.dev/t/acme/cache/falcon \
+  -- nix build .#app
+```
+
+Additional resources must belong to the selected tenant. Use separate commands
+for other tenants because netrc credentials apply to a whole host.
+
 ## Optional static read credentials
 
 You can continue to pass an operator-issued username and password. A supplied
@@ -108,19 +129,19 @@ credentials][static-reads] for issuing and protecting static credentials.
 
 The flake workflow accepts these optional secrets:
 
-| Secrets                                              | Use                                                                                      |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `read_user`, `read_password`                         | Default static pair for the selected cache and reuse view. It may be cache-specific.     |
-| `destination_read_user`, `destination_read_password` | Override for the selected destination cache when it needs a different static credential. |
-| `fallback_read_user`, `fallback_read_password`       | Deprecated aliases for the default pair.                                                 |
+| Secrets                                              | Use                                                                                                            |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `read_user`, `read_password`                         | Default static pair for the selected cache and reuse view. A private view requires the tenant read credential. |
+| `destination_read_user`, `destination_read_password` | Override for the selected destination cache when it needs a different static credential.                       |
+| `fallback_read_user`, `fallback_read_password`       | Deprecated aliases for the default pair.                                                                       |
 
 Supply both values in each pair that you use. If both the default pair and its
 deprecated alias are supplied, they must match. The destination override applies
 to the cache that the run selects. For a read-only pull-request run, that is the
 default cache.
 
-For example, one static credential can read both the default cache and the reuse
-view:
+For example, the tenant read credential can read both the default cache and a
+private reuse view:
 
 ```yaml
 secrets:

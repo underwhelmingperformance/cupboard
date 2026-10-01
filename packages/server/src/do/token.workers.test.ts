@@ -667,7 +667,7 @@ describe('server-resolved read acquisition', () => {
 		]),
 		JSON.stringify([
 			{ type: 'cupboard_cache', cache: { kind: 'default' } },
-			{ type: 'cupboard_cache', cache: { kind: 'named', name: 'ci' } }
+			{ type: 'cupboard_cache', cache: { kind: 'default' } }
 		])
 	])('rejects malformed or excessive read intent %s', async (intent) => {
 		const subject = await installTrustedIdp('write');
@@ -689,6 +689,61 @@ describe('server-resolved read acquisition', () => {
 					'The requested authorization_details are not permitted',
 				problem: 'not-permitted'
 			}
+		});
+	});
+
+	it('acquires exact content grants for several private caches in one session', async () => {
+		const subject = await installTrustedIdp('admin');
+		const ciCache = {
+			kind: 'named' as const,
+			name: cacheNameSchema.parse('ci')
+		};
+		const falconCache = {
+			kind: 'named' as const,
+			name: cacheNameSchema.parse('falcon')
+		};
+		const scopes: CacheScope[] = [{ kind: 'default' }, ciCache, falconCache];
+		const administrator = await issueServerSignedToken(adminGrants());
+		await putTestCache(administrator, ciCache, 'private');
+		await putTestCache(administrator, falconCache, 'private');
+		const resources = scopes.map((cache) => ({
+			type: 'cupboard_cache' as const,
+			cache,
+			mode: 'content' as const
+		}));
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(resources)
+		});
+		const result = readAccessResponseSchema.parse(await response.json());
+		const grants = scopes.map((cache) => ({
+			type: 'cupboard_cache',
+			cache,
+			actions: ['cache:content-read']
+		}));
+		expect({
+			status: response.status,
+			expires: result.expires_in,
+			refresh: result.refresh_token,
+			grants: result.authorization_details,
+			facts: result.read_resources,
+			jwtGrants: decodeJwt(result.access_token).authorization_details
+		}).toStrictEqual({
+			status: 200,
+			expires: 900,
+			refresh: undefined,
+			grants,
+			facts: resources.map((resource) => ({
+				...resource,
+				state: {
+					kind: 'existing',
+					access: resource.cache.kind === 'default' ? 'public' : 'private',
+					priority: 40
+				}
+			})),
+			jwtGrants: grants
 		});
 	});
 

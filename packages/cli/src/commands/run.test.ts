@@ -129,6 +129,9 @@ describe('cupboard run', () => {
 	});
 
 	it('acquires exact configured intent without visibility probes and delivers protected facts', async () => {
+		const extra = parseTenantCacheUrl(
+			new URL(`${tenantUrl.href}/cache/falcon`)
+		);
 		const requests: { url: string; form: string | undefined }[] = [];
 		let factsPath: string | undefined;
 		let netrcPath: string | undefined;
@@ -144,6 +147,12 @@ describe('cupboard run', () => {
 				}
 			},
 			{
+				type: 'cupboard_cache',
+				cache: extra.cache,
+				mode: 'content',
+				state: { kind: 'existing', access: 'private', priority: 40 }
+			},
+			{
 				type: 'cupboard_view',
 				view: 'prior',
 				state: { kind: 'existing', access: 'public', priority: 50 }
@@ -153,7 +162,11 @@ describe('cupboard run', () => {
 		await runWithReadAccess(
 			target,
 			['nix', 'build'],
-			{ githubOidc: true, reuseView: reuseViewNameSchema.parse('prior') },
+			{
+				githubOidc: true,
+				reuseView: reuseViewNameSchema.parse('prior'),
+				readCaches: [extra]
+			},
 			{
 				environment: {
 					ACTIONS_ID_TOKEN_REQUEST_URL: 'https://job.example/token',
@@ -231,6 +244,7 @@ describe('cupboard run', () => {
 						subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
 						read_resources: JSON.stringify([
 							{ type: 'cupboard_cache', cache: target.cache, mode: 'content' },
+							{ type: 'cupboard_cache', cache: extra.cache, mode: 'content' },
 							{ type: 'cupboard_view', view: 'prior' }
 						])
 					}).toString()
@@ -279,12 +293,36 @@ describe('cupboard run', () => {
 		expect(childEnvironment).toStrictEqual({ NIX_CONFIG: 'fallback = false' });
 	});
 
-	it.each(['url', 'netrc'] as const)(
-		'preserves explicit %s credentials without exchanging or testing them',
-		async (kind) => {
-			let runs = 0;
+	it('acquires OIDC despite an incidental credential for the same host', async () => {
+		const intents: unknown[] = [];
+		await runWithReadAccess(
+			target,
+			['nix', 'build'],
+			{ githubOidc: true, reuseView: reuseViewNameSchema.parse('prior') },
+			{
+				storeConfig: configuration,
+				readFile: () =>
+					Promise.resolve(
+						'machine cupboard.example.workers.dev login other-tenant password secret\n'
+					),
+				issue: (input) => {
+					intents.push(input.resources);
+					return Promise.resolve(lease);
+				},
+				runChild: () => Promise.resolve({ status: 0, signal: undefined })
+			}
+		);
+		expect(intents).toStrictEqual([
+			[
+				{ type: 'cupboard_cache', cache: target.cache, mode: 'content' },
+				{ type: 'cupboard_view', view: 'prior' }
+			]
+		]);
+	});
 
-			await runWithReadAccess(
+	it('rejects explicit URL credentials with OIDC content acquisition', async () => {
+		await expect(
+			runWithReadAccess(
 				target,
 				['nix', 'build'],
 				{ githubOidc: true },
@@ -293,33 +331,99 @@ describe('cupboard run', () => {
 						...configuration,
 						substitution: {
 							...configuration.substitution,
-							substituters:
-								kind === 'url'
-									? [
-											'https://ci:secret@cupboard.example.workers.dev/t/acme/cache/builds/'
-										]
-									: []
+							substituters: [
+								'https://ci:secret@cupboard.example.workers.dev/t/acme/cache/builds/'
+							]
 						}
 					},
-					readFile: () =>
-						Promise.resolve(
-							kind === 'netrc'
-								? 'machine cupboard.example.workers.dev login ci password secret\n'
-								: ''
-						),
-					fetcher: () => {
-						throw new Error('Static credentials must not be replaced');
+					readFile: () => Promise.resolve(''),
+					issue: () => {
+						throw new Error(
+							'Conflicting credentials must fail before exchange'
+						);
 					},
 					runChild: () => {
-						runs++;
-						return Promise.resolve({ status: 0, signal: undefined });
+						throw new Error(
+							'Conflicting credentials must fail before child launch'
+						);
 					}
 				}
-			);
+			)
+		).rejects.toMatchObject({ exitCode: 2 });
+	});
 
-			expect(runs).toBe(1);
-		}
-	);
+	it('acquires one session for a deduplicated union of caches and a view', async () => {
+		const extra = parseTenantCacheUrl(
+			new URL(`${tenantUrl.href}/cache/falcon`)
+		);
+		const intents: unknown[] = [];
+		await runWithReadAccess(
+			target,
+			['nix', 'build'],
+			{
+				githubOidc: true,
+				readCaches: [extra, extra, target],
+				reuseView: reuseViewNameSchema.parse('prior')
+			},
+			{
+				storeConfig: configuration,
+				readFile: () => Promise.resolve(''),
+				issue: (input) => {
+					intents.push(input.resources);
+					return Promise.resolve(lease);
+				},
+				runChild: () => Promise.resolve({ status: 0, signal: undefined })
+			}
+		);
+		expect(intents).toStrictEqual([
+			[
+				{ type: 'cupboard_cache', cache: target.cache, mode: 'content' },
+				{ type: 'cupboard_cache', cache: extra.cache, mode: 'content' },
+				{ type: 'cupboard_view', view: 'prior' }
+			]
+		]);
+	});
+
+	it('rejects additional read caches from a different tenant before exchange', async () => {
+		const other = parseTenantCacheUrl(
+			new URL('https://cupboard.example.workers.dev/t/other/cache/falcon')
+		);
+		await expect(
+			runWithReadAccess(
+				target,
+				['nix', 'build'],
+				{
+					githubOidc: true,
+					readCaches: [other]
+				},
+				{
+					issue: () => {
+						throw new Error('Cross-tenant resources must fail before exchange');
+					},
+					runChild: () => {
+						throw new Error(
+							'Cross-tenant resources must fail before child launch'
+						);
+					}
+				}
+			)
+		).rejects.toMatchObject({ exitCode: 2 });
+	});
+
+	it('rejects read-session options without OIDC before launching the child', async () => {
+		await expect(
+			runWithReadAccess(
+				target,
+				['nix', 'build'],
+				{ reuseView: reuseViewNameSchema.parse('prior') },
+				{
+					runChild: () => {
+						throw new Error('Missing OIDC must fail before child launch');
+					}
+				}
+			)
+		).rejects.toMatchObject({ exitCode: 2 });
+	});
 
 	it('refuses to overwrite an unreadable netrc before exchange', async () => {
 		await expect(

@@ -487,13 +487,14 @@ A client can also exchange a cupboard access token for one with fewer grants.
 CI read acquisition uses the extension grant
 `urn:cupboard:params:oauth:grant-type:read-access` at the tenant token endpoint.
 The request contains an external ID token and a bounded `read_resources` array
-with at most one cache and one reuse view. The server selects one trust rule
-using the existing identity precedence, then resolves exact read grants against
-current resource state. Public resources need no content-read grant. Existing
-private resources require content-read; an absent cache accepts scoped metadata
-authority, which publication grants already imply. The read response includes
-access and priority facts for setup validation. Acquisition never creates a
-cache. Ordinary token exchange keeps its strict requested-grant semantics.
+with up to sixteen distinct resources, including at most one reuse view. The
+server selects one trust rule using the existing identity precedence, then
+resolves exact read grants against current resource state. Public resources need
+no content-read grant. Existing private resources require content-read; an
+absent cache accepts scoped metadata authority, which publication grants already
+imply. The read response includes access and priority facts for setup
+validation. Acquisition never creates a cache. Ordinary token exchange keeps its
+strict requested-grant semantics.
 
 Read acquisition always issues a 15-minute token without a refresh token,
 including metadata-only and zero-authority results. Request-time checks still
