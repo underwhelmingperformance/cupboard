@@ -2,6 +2,7 @@ import { ProgressiveCollectionLimitError } from '@cupboard/shared/collections';
 import Cloudflare, { NotFoundError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
+import { ZodError } from 'zod';
 
 import {
 	createCloudflareApi,
@@ -280,6 +281,96 @@ describe('uploadScript', () => {
 					value: 'export default { fetch: () => new Response("ok") };'
 				}
 			]
+		});
+	});
+});
+
+describe('listDeployedVersions', () => {
+	it.each([
+		{
+			label: 'the newest deployment with split traffic',
+			deployments: [
+				{
+					created_on: '2026-09-01T00:00:00Z',
+					versions: [{ version_id: 'old-version', percentage: 100 }]
+				},
+				{
+					created_on: '2026-10-01T00:00:00Z',
+					versions: [
+						{ version_id: 'new-version', percentage: 75 },
+						{ version_id: 'old-version', percentage: 25 }
+					]
+				}
+			],
+			expected: [
+				{ versionId: 'new-version', percentage: 75 },
+				{ versionId: 'old-version', percentage: 25 }
+			]
+		},
+		{ label: 'an empty deployment list', deployments: [], expected: [] }
+	])('reads $label from the API result', async ({ deployments, expected }) => {
+		const path = '/accounts/acc-1/workers/scripts/cupboard/deployments';
+		const { client, requests } = fakeCloudflare({
+			[`GET ${path}`]: { deployments }
+		});
+
+		const versions = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).listDeployedVersions(scriptName('cupboard'));
+
+		expect({ versions, requests }).toStrictEqual({
+			versions: expected,
+			requests: [{ method: 'GET', path }]
+		});
+	});
+
+	it('returns no versions when the Worker does not exist', async () => {
+		const { client } = fakeCloudflare({});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).listDeployedVersions(
+				scriptName('cupboard')
+			)
+		).resolves.toStrictEqual([]);
+	});
+
+	it('rejects a malformed deployment result', async () => {
+		const { client } = fakeCloudflare({
+			'GET /accounts/acc-1/workers/scripts/cupboard/deployments': {
+				deployments: [
+					{
+						created_on: '2026-10-01T00:00:00Z',
+						versions: [{ version_id: 'version', percentage: '100' }]
+					}
+				]
+			}
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).listDeployedVersions(
+				scriptName('cupboard')
+			)
+		).rejects.toBeInstanceOf(ZodError);
+	});
+});
+
+describe('rollApiTokenSecret', () => {
+	it('rotates the token without a request body and returns its secret', async () => {
+		const path = '/accounts/acc-1/tokens/token-1/value';
+		const { client, requests, bodies } = fakeCloudflare({
+			[`PUT ${path}`]: 'rotated-secret'
+		});
+
+		const value = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).rollApiTokenSecret('token-1');
+
+		expect({ value, requests, bodies }).toStrictEqual({
+			value: 'rotated-secret',
+			requests: [{ method: 'PUT', path }],
+			bodies: [undefined]
 		});
 	});
 });
