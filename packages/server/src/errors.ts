@@ -152,6 +152,18 @@ export class UploadRequestBudgetExceededError extends ServerHttpError {
 	}
 }
 
+export class ObjectIncarnationReservationContendedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super(
+			'The object incarnation changed during reservation. Retry the publication.'
+		);
+		this.name = 'ObjectIncarnationReservationContendedError';
+	}
+}
+
 export class MalformedRequestBodyError extends InvalidRequestBodyError {
 	constructor(public override readonly cause: SyntaxError) {
 		super('Malformed JSON request body');

@@ -1094,7 +1094,7 @@ export class VerificationService {
 			}
 
 			if (staged.requiresNarInfoRefresh) {
-				this.uploadState.markPendingNarRefresh(pending.id);
+				await this.uploadState.markPendingNarRefresh(pending.id);
 			}
 
 			const activation = await this.context.criticalSection(async () => {
@@ -1130,7 +1130,11 @@ export class VerificationService {
 						kind: 'narinfo-refresh',
 						narHash: metadata.narHash
 					});
-					this.uploadState.clearPendingNarRefresh(pending.id);
+					await this.context.criticalSection(async () => {
+						if (this.ownsActiveClaim(owner, pending.id, signal)) {
+							await this.uploadState.clearDeliveredNarRefresh(pending.id);
+						}
+					});
 				}
 			}
 
