@@ -17,7 +17,7 @@ You need these to install dependencies and run the unit tests:
   at least version 24. `.npmrc` sets `engine-strict=true`, so pnpm won't install
   anything on an older Node. There's no build step for the CLI. Node runs its
   TypeScript directly, using `--experimental-transform-types`.
-- pnpm 12.6.0. The `packageManager` field in `package.json` pins this version.
+- pnpm 12.8.0. The `packageManager` field in `package.json` pins this version.
   If you run `corepack enable`, Corepack installs the pinned version the first
   time you use pnpm.
 
