@@ -40,7 +40,8 @@ import {
 	uploadCapabilitiesValue,
 	uploadGraceFactsCapability,
 	type UploadId,
-	uploadIdSchema
+	uploadIdSchema,
+	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
@@ -110,6 +111,7 @@ import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
+import { directUploadPageSize } from '../policy/upload-pages.ts';
 import {
 	cacheMetadataPageResponse,
 	parseCacheMetadataRequest
@@ -679,6 +681,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				const isUploadGraceEndpoint =
 					context.req.method === 'POST' &&
 					uploadGracePathPattern.test(pathname);
+
+				if (isUploadGraceEndpoint && !pathname.endsWith('/confirm')) {
+					response.headers.set(
+						uploadRequestMaxPathsHeader,
+						String(directUploadPageSize)
+					);
+				}
 
 				if (
 					isUploadGraceEndpoint &&

@@ -6,9 +6,18 @@ import {
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
-import { UploadRequestBudgetExceededError } from '../errors.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from '../do/subrequest-slice.ts';
+import { UploadRequestLimitExceededError } from '../errors.ts';
 
-import { answerUploadsInChunks, uploadPageSize } from './chunked-uploads.ts';
+import {
+	answerUploadsInChunks,
+	directUploadPageSize,
+	uploadPageSize,
+	uploadRequestMaxPathsFor
+} from './chunked-uploads.ts';
 
 const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const pushId = pushIdSchema.parse('test-push');
@@ -135,26 +144,144 @@ describe('chunked upload requests', () => {
 		});
 	});
 
-	it('refuses before the Worker exceeds its remaining subrequest allowance', async () => {
-		const input = paths(uploadPageSize + 1);
-		let sent = 0;
-		const request = new Request('https://cache.example/uploads/preview', {
-			method: 'POST',
-			body: JSON.stringify({ paths: input })
+	it.each(['negotiate', 'preview'] as const)(
+		'rejects an oversized %s before the first send, including adaptive splits',
+		async (mode) => {
+			const input = paths(uploadPageSize + 1);
+			let sent = 0;
+			const request = new Request('https://cache.example/uploads', {
+				method: 'POST',
+				body: JSON.stringify({
+					paths: input,
+					...(mode === 'negotiate' && { pushId })
+				})
+			});
+			await expect(
+				answerUploadsInChunks(
+					request,
+					mode,
+					() => {
+						sent += 1;
+						return Promise.resolve(Response.json({ uploads: [] }));
+					},
+					2
+				)
+			).rejects.toBeInstanceOf(UploadRequestLimitExceededError);
+			expect(sent).toBe(0);
+		}
+	);
+	it('counts every possible split and every actual send at the admission boundary', async () => {
+		const input = paths(uploadPageSize);
+		const pages: number[] = [];
+		const result = await withSubrequestSlice(
+			async () => {
+				const response = await answerUploadsInChunks(
+					new Request('https://cache.example/uploads', {
+						method: 'POST',
+						body: JSON.stringify({ pushId, paths: input })
+					}),
+					'negotiate',
+					(body) => {
+						pages.push(body.paths.length);
+						if (body.paths.length > directUploadPageSize) {
+							return Promise.resolve(
+								new Response(undefined, {
+									status: 413,
+									headers: { 'x-cupboard-upload-page-split': '1' }
+								})
+							);
+						}
+						return Promise.resolve(
+							Response.json({
+								uploads: body.paths.map((path) => ({
+									action: 'skip',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash
+								}))
+							})
+						);
+					},
+					subrequestsAvailable()
+				);
+				return {
+					status: response?.status,
+					remaining: subrequestsAvailable(),
+					pages
+				};
+			},
+			{ subrequests: 7, reserve: 0 }
+		);
+		expect(result).toStrictEqual({
+			status: 200,
+			remaining: 0,
+			pages: [400, 200, 100, 100, 200, 100, 100]
 		});
+	});
 
-		await expect(
-			answerUploadsInChunks(
-				request,
-				'preview',
-				() => {
-					sent += 1;
-
-					return Promise.resolve(Response.json({ uploads: [] }));
+	it.each([413, 503])(
+		'preserves a real %s refusal at the direct page bound',
+		async (status) => {
+			const refusal = new Response('service refusal', {
+				status,
+				headers:
+					status === 413
+						? { 'x-cupboard-upload-page-split': '1' }
+						: { 'retry-after': '1' }
+			});
+			const pages: number[] = [];
+			const input = paths(101);
+			const response = await answerUploadsInChunks(
+				new Request('https://cache.example/uploads', {
+					method: 'POST',
+					body: JSON.stringify({ pushId, paths: input })
+				}),
+				'negotiate',
+				(body) => {
+					pages.push(body.paths.length);
+					if (body.paths.length > directUploadPageSize) {
+						return Promise.resolve(
+							new Response(undefined, {
+								status: 413,
+								headers: { 'x-cupboard-upload-page-split': '1' }
+							})
+						);
+					}
+					return Promise.resolve(refusal);
 				},
-				1
+				3
+			);
+			expect({ response, pages }).toStrictEqual({
+				response: refusal,
+				pages: [101, 51]
+			});
+		}
+	);
+
+	it('keeps large requests within a reserved split budget', async () => {
+		let sent = 0;
+		const input = paths(40_000);
+		const response = await answerUploadsInChunks(
+			new Request('https://cache.example/uploads', {
+				method: 'POST',
+				body: JSON.stringify({ pushId, paths: input })
+			}),
+			'negotiate',
+			() => {
+				sent += 1;
+				return Promise.resolve(Response.json({ uploads: [] }));
+			},
+			700
+		);
+		expect({
+			status: response?.status,
+			sent,
+			limits: [0, 1, 2, 3, 7, 900].map((available) =>
+				uploadRequestMaxPathsFor(available)
 			)
-		).rejects.toBeInstanceOf(UploadRequestBudgetExceededError);
-		expect(sent).toBe(1);
+		}).toStrictEqual({
+			status: 200,
+			sent: 100,
+			limits: [0, 100, 100, 200, 400, 51_400]
+		});
 	});
 });
