@@ -16,6 +16,9 @@ This page is for maintainers who publish cupboard releases.
    All of the cache's public keys go on one `extra-trusted-public-keys` line, so
    the lines still work while the cache's signing key is being rotated.
 
+   Each platform job first checks the flake's reproducibility as described
+   below. All four checks must pass before the workflow can assemble the draft.
+
 3. Review the draft and publish it. Publishing creates the tag. That starts the
    `release cache` workflow, which builds the tagged flake on every supported
    system, pushes the results to the release cache, and publishes the flake to
@@ -52,6 +55,33 @@ builds it in three steps:
 2. It injects that file into the pinned Node binary with postject.
 3. It checks the result by running `cupboard --version`, `cupboard push --help`
    and `cupboard config`.
+
+Before building release archives, the `release` workflow verifies the unchanged
+`.#cupboard` flake output on `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`
+and `aarch64-darwin`. Each runner obtains a candidate output with `nix build`,
+then uses [`nix build --rebuild`][nix-rebuild] to build the same derivation
+locally and compare the result with the candidate. The candidate and
+dependencies may come from trusted substituters. The verification rebuild always
+runs locally.
+
+The comparison covers the installed CLI and `cupboard-hook-relay` helper in the
+Nix store output. It does not compare the bytes of the release archives, which
+are packaged separately with the requested release version.
+
+A mismatch fails the platform job before archive attestation or upload and
+blocks draft assembly. Correct the packaging cause before rerunning the release
+workflow. To reproduce the check locally on the affected system, run:
+
+```sh
+nix build .#cupboard --no-link --option builders ''
+nix build .#cupboard --no-link --rebuild --keep-failed --option builders ''
+```
+
+`--keep-failed` preserves the differing rebuild output for inspection. Nix
+reports a reproducibility mismatch with exit status 104.
+
+[nix-rebuild]:
+  https://nix.dev/manual/nix/2.34/command-ref/new-cli/nix3-build.html
 
 CI builds and smoke-tests the executable for every change. The publishing
 pipeline suite also builds its own release archive and publishes with that
