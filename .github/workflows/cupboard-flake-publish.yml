@@ -40,11 +40,12 @@ on:
         type: string
       cache-access-mode:
         description:
-          Access for a pull-request cache that the preset creates, public or
-          private. When omitted, a new cache inherits the tenant's default cache
-          access. An existing cache keeps its access, and an explicit mode must
-          match it. Set an explicit mode when the new cache must differ from the
-          default cache.
+          Required access for the selected cache, public or private. Without a
+          preset, setup checks this on every event. With the preset, it selects
+          access only for a publishing pull-request cache; branch and read-only
+          runs use the default cache's access. When omitted, a new cache
+          inherits the tenant's default cache access. An existing cache keeps
+          its access, and an explicit mode must match it.
         required: false
         default: ''
         type: string
@@ -326,11 +327,13 @@ on:
         required: false
       fallback_read_user:
         description:
-          Deprecated alias of read_user. Supply both aliases or neither.
+          Deprecated alias of read_user. Supply it with fallback_read_password.
+          The workflow warns when this secret is supplied.
         required: false
       fallback_read_password:
         description:
-          Deprecated alias of read_password. Supply both aliases or neither.
+          Deprecated alias of read_password. Supply it with fallback_read_user.
+          The workflow warns when this secret is supplied.
         required: false
       private_substituters:
         description:
@@ -354,6 +357,7 @@ jobs:
       cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
       publish: ${{ steps.resolve.outputs.publish }}
       cache: ${{ steps.resolve.outputs.cache }}
+      cache-access-mode: ${{ steps.resolve.outputs.cache-access-mode }}
       root-prefix: ${{ steps.resolve.outputs.root-prefix }}
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
@@ -457,6 +461,12 @@ jobs:
                [ "${READ_PASSWORD}" != "${FALLBACK_READ_PASSWORD}" ]; }; then
             echo '::error::read_user/read_password and fallback_read_user/fallback_read_password must match when both are supplied'
             exit 1
+          fi
+          if [ -n "${FALLBACK_READ_USER}" ]; then
+            echo '::warning::fallback_read_user is deprecated. Use read_user.'
+          fi
+          if [ -n "${FALLBACK_READ_PASSWORD}" ]; then
+            echo '::warning::fallback_read_password is deprecated. Use read_password.'
           fi
           for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do
             if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
@@ -586,9 +596,15 @@ jobs:
               exit 1
               ;;
           esac
+          DESTINATION_ACCESS_MODE="${CACHE_ACCESS_MODE}"
+          if [ -n "${PRESET}" ] &&
+             { [ "${EVENT_NAME}" != pull_request ] || [ "${PUBLISH}" = none ]; }; then
+            DESTINATION_ACCESS_MODE=''
+          fi
           {
             echo "publish=${PUBLISH}"
             echo "cache=${CACHE}"
+            echo "cache-access-mode=${DESTINATION_ACCESS_MODE}"
             echo "root-prefix=${ROOT_PREFIX}"
             echo "ttl=${TTL}"
             echo "permanent=${PERMANENT}"
@@ -674,10 +690,7 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           provision-cache: ${{ needs.configure.outputs.provision-cache }}
-          cache-access-mode:
-            ${{ github.event_name == 'pull_request' &&
-            needs.configure.outputs.publish != 'none' &&
-            inputs.cache-access-mode || '' }}
+          cache-access-mode: ${{ needs.configure.outputs.cache-access-mode }}
           provision-cache-ttl:
             ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
@@ -840,10 +853,7 @@ jobs:
           audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
-          cache-access-mode:
-            ${{ github.event_name == 'pull_request' &&
-            needs.configure.outputs.publish != 'none' &&
-            inputs.cache-access-mode || '' }}
+          cache-access-mode: ${{ needs.configure.outputs.cache-access-mode }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           destination-read-user: ${{ secrets.destination_read_user }}
           destination-read-password: ${{ secrets.destination_read_password }}

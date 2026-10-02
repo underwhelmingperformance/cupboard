@@ -518,6 +518,20 @@ describe('cupboard acquisition', () => {
 		const policy = workflow.on.workflow_call?.inputs['cache-access-mode'];
 
 		expect({
+			configuredAccessMode:
+				workflow.jobs.configure?.outputs?.['cache-access-mode'],
+			accessBeforeWork: ['plan', 'cohort'].map((job) => {
+				const steps = workflow.jobs[job]?.steps ?? [];
+				const setup = steps.findIndex(
+					(step) => step.uses === cupboardAction('setup')
+				);
+				const work = steps.findIndex(
+					(step) =>
+						step.name === 'Evaluate target manifest' ||
+						step.uses === cupboardAction('build-cohort')
+				);
+				return { job, beforeWork: setup !== -1 && work > setup };
+			}),
 			policy: {
 				required: policy?.required,
 				default: policy?.default,
@@ -527,6 +541,11 @@ describe('cupboard acquisition', () => {
 			provisioning,
 			accessModes
 		}).toStrictEqual({
+			configuredAccessMode: '${{ steps.resolve.outputs.cache-access-mode }}',
+			accessBeforeWork: [
+				{ job: 'plan', beforeWork: true },
+				{ job: 'cohort', beforeWork: true }
+			],
 			policy: {
 				required: false,
 				default: '',
@@ -537,14 +556,14 @@ describe('cupboard acquisition', () => {
 				{
 					'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
 					'cache-access-mode':
-						"${{ github.event_name == 'pull_request' && needs.configure.outputs.publish != 'none' && inputs.cache-access-mode || '' }}",
+						'${{ needs.configure.outputs.cache-access-mode }}',
 					'provision-cache-ttl':
 						'${{ needs.configure.outputs.provision-cache-ttl }}'
 				}
 			],
 			accessModes: [
-				"${{ github.event_name == 'pull_request' && needs.configure.outputs.publish != 'none' && inputs.cache-access-mode || '' }}",
-				"${{ github.event_name == 'pull_request' && needs.configure.outputs.publish != 'none' && inputs.cache-access-mode || '' }}"
+				'${{ needs.configure.outputs.cache-access-mode }}',
+				'${{ needs.configure.outputs.cache-access-mode }}'
 			]
 		});
 	});
@@ -1678,9 +1697,14 @@ const execFileAsync = promisify(execFile);
 async function resolvePublicationEvent(event: {
 	readonly action: string;
 	readonly merged: boolean;
+	readonly eventName?: string;
+	readonly preset?: string;
+	readonly cache?: string;
+	readonly cacheAccessMode?: string;
 	readonly publish?: 'none' | 'outputs' | 'closure';
 	readonly push?: boolean;
 	readonly credentials?: Readonly<Record<string, string | undefined>>;
+	readonly onOutput?: (stdout: string) => void;
 }): Promise<Record<string, string>> {
 	const workflow = await loadWorkflow(flakeWorkflow);
 	const step = workflow.jobs.configure?.steps.find(
@@ -1696,31 +1720,39 @@ async function resolvePublicationEvent(event: {
 	const output = path.join(directory, 'output');
 
 	try {
-		await execFileAsync('bash', ['-c', step.run], {
+		const { stdout } = await execFileAsync('bash', ['-c', step.run], {
 			env: {
 				...Object.fromEntries(
 					Object.keys(step.env ?? {}).map((key) => [key, ''])
 				),
-				PRESET: 'pull-request-and-branch',
+				PRESET: event.preset ?? 'pull-request-and-branch',
+				CACHE: event.cache ?? '',
+				CACHE_ACCESS_MODE: event.cacheAccessMode ?? '',
+				ROOT_PREFIX: event.preset === '' ? 'release' : '',
 				BUILD: 'missing',
 				SUBSTITUTER: 'copy',
 				PUBLISH: event.publish ?? 'outputs',
 				PUSH: String(event.push ?? true),
 				ATTEST: 'true',
 				PERMANENT: 'false',
-				EVENT_NAME: 'pull_request',
+				EVENT_NAME: event.eventName ?? 'pull_request',
 				EVENT_ACTION: event.action,
 				MERGED: String(event.merged),
 				PR_NUMBER: '7',
 				REPOSITORY: 'acme/infra',
 				REPOSITORY_ID: '1234',
 				HEAD_REPOSITORY_ID: '1234',
-				REF: event.merged ? 'refs/heads/main' : 'refs/pull/7/merge',
+				REF:
+					event.merged ||
+					(event.eventName !== undefined && event.eventName !== 'pull_request')
+						? 'refs/heads/main'
+						: 'refs/pull/7/merge',
 				BRANCH: 'main',
 				...event.credentials,
 				GITHUB_OUTPUT: output
 			}
 		});
+		event.onOutput?.(stdout);
 		const written = await readFile(output, 'utf8');
 
 		return Object.fromEntries(
@@ -1739,6 +1771,153 @@ async function resolvePublicationEvent(event: {
 }
 
 describe('pull-request cache lifecycle', () => {
+	it.each(
+		['pull_request', 'push', 'workflow_dispatch', 'schedule'].flatMap(
+			(eventName) =>
+				['public', 'private'].map((cacheAccessMode) => ({
+					eventName,
+					cacheAccessMode
+				}))
+		)
+	)(
+		'checks explicit cache access on $eventName: $cacheAccessMode',
+		async ({ eventName, cacheAccessMode }) => {
+			expect(
+				await resolvePublicationEvent({
+					action: 'opened',
+					merged: false,
+					eventName,
+					preset: '',
+					cache: 'release',
+					cacheAccessMode
+				})
+			).toStrictEqual({
+				publish: 'outputs',
+				cache: 'release',
+				'cache-access-mode': cacheAccessMode,
+				'root-prefix': 'release',
+				ttl: '',
+				permanent: 'false',
+				'reuse-view': '',
+				'provision-cache': '',
+				'provision-cache-ttl': '',
+				'remove-cache': ''
+			});
+		}
+	);
+
+	it.each([
+		{
+			eventName: 'pull_request',
+			publish: 'outputs',
+			access: 'private',
+			cache: 'gh-1234-pr-7',
+			root: 'github:acme/infra/pr-7',
+			ttl: '14d',
+			permanent: 'false',
+			view: ''
+		},
+		{
+			eventName: 'pull_request',
+			publish: 'none',
+			access: '',
+			cache: '',
+			root: 'github:acme/infra/pr-7',
+			ttl: '14d',
+			permanent: 'false',
+			view: ''
+		},
+		...['push', 'workflow_dispatch', 'schedule'].flatMap((eventName) =>
+			(['outputs', 'none'] as const).map((publish) => ({
+				eventName,
+				publish,
+				access: '',
+				cache: '',
+				root: 'github:acme/infra/main',
+				ttl: '',
+				permanent: 'true',
+				view: 'pull-requests-1234'
+			}))
+		)
+	] as const)(
+		'keeps preset access selection scoped to the PR cache: %j',
+		async (selection) => {
+			expect(
+				await resolvePublicationEvent({
+					action: 'opened',
+					merged: false,
+					eventName: selection.eventName,
+					publish: selection.publish,
+					cacheAccessMode: 'private'
+				})
+			).toStrictEqual({
+				publish: selection.publish,
+				cache: selection.cache,
+				'cache-access-mode': selection.access,
+				'root-prefix': selection.root,
+				ttl: selection.ttl,
+				permanent: selection.permanent,
+				'reuse-view': selection.view,
+				'provision-cache': selection.cache,
+				'provision-cache-ttl': selection.ttl,
+				'remove-cache': ''
+			});
+		}
+	);
+
+	it.each([
+		{ credentials: {}, warned: false },
+		{
+			credentials: { READ_USER: 'reader', READ_PASSWORD: 'secret' },
+			warned: false
+		},
+		{
+			credentials: {
+				FALLBACK_READ_USER: 'reader',
+				FALLBACK_READ_PASSWORD: 'secret'
+			},
+			warned: true
+		},
+		{
+			credentials: {
+				READ_USER: 'reader',
+				READ_PASSWORD: 'secret',
+				FALLBACK_READ_USER: 'reader',
+				FALLBACK_READ_PASSWORD: 'secret'
+			},
+			warned: true
+		}
+	])(
+		'warns for deprecated static read aliases without revealing values: %j',
+		async ({ credentials, warned }) => {
+			let diagnostics = '';
+			const outputs = await resolvePublicationEvent({
+				action: 'opened',
+				merged: false,
+				credentials,
+				onOutput: (stdout) => {
+					diagnostics = stdout;
+				}
+			});
+			expect({ outputs, diagnostics }).toStrictEqual({
+				outputs: {
+					publish: 'outputs',
+					cache: 'gh-1234-pr-7',
+					'cache-access-mode': '',
+					'root-prefix': 'github:acme/infra/pr-7',
+					ttl: '14d',
+					permanent: 'false',
+					'reuse-view': '',
+					'provision-cache': 'gh-1234-pr-7',
+					'provision-cache-ttl': '14d',
+					'remove-cache': ''
+				},
+				diagnostics: warned
+					? '::warning::fallback_read_user is deprecated. Use read_user.\n::warning::fallback_read_password is deprecated. Use read_password.\n'
+					: ''
+			});
+		}
+	);
 	it.each([
 		{
 			credentials: { READ_USER: 'reader' },
@@ -1790,6 +1969,7 @@ describe('pull-request cache lifecycle', () => {
 			).toStrictEqual({
 				publish: 'none',
 				cache: '',
+				'cache-access-mode': '',
 				'root-prefix': 'github:acme/infra/pr-7',
 				ttl: '14d',
 				permanent: 'false',
@@ -1811,6 +1991,7 @@ describe('pull-request cache lifecycle', () => {
 			expect(await resolvePublicationEvent({ action, merged })).toStrictEqual({
 				publish: 'outputs',
 				cache: 'gh-1234-pr-7',
+				'cache-access-mode': '',
 				'root-prefix': 'github:acme/infra/pr-7',
 				ttl: '14d',
 				permanent: 'false',
