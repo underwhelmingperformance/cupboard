@@ -559,7 +559,7 @@ export const legacyRefreshTokens = sqliteTable(
 // the family. The stored grants start with the authority granted by the external
 // exchange and narrow when a refresh requests less authority. Every later
 // rotation is bounded by the stored grants.
-export const refreshTokenFamilies = sqliteTable(
+export const legacyRefreshTokenFamilies = sqliteTable(
 	'refresh_token_family',
 	{
 		id: text('id').primaryKey(),
@@ -582,7 +582,7 @@ export const refreshTokenFamilies = sqliteTable(
 
 // Every member remains until its family expires or is revoked. A spent member
 // may also store an encrypted successor secret for retry recovery.
-export const refreshTokenMembers = sqliteTable(
+export const legacyRefreshTokenMembers = sqliteTable(
 	'refresh_token_member',
 	{
 		id: text('id').primaryKey(),
@@ -598,6 +598,46 @@ export const refreshTokenMembers = sqliteTable(
 			table.generation
 		),
 		index('refresh_token_member_family_idx').on(table.familyId)
+	]
+);
+
+export const refreshTokenFamilies = sqliteTable(
+	'refresh_session_family',
+	{
+		id: text('id').primaryKey(),
+		activeMemberId: text('active_member_id').notNull(),
+		generation: integer('generation').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		unique('refresh_session_family_active_member_unique').on(
+			table.activeMemberId
+		),
+		index('refresh_session_family_expires_at_idx').on(table.expiresAt, table.id)
+	]
+);
+
+export const refreshTokenMembers = sqliteTable(
+	'refresh_session_member',
+	{
+		id: text('id').primaryKey(),
+		familyId: text('family_id').notNull(),
+		generation: integer('generation').notNull(),
+		credentialHash: text('credential_hash').notNull(),
+		successorEnvelope: text('successor_envelope'),
+		successorExpiresAt: text('successor_expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		unique('refresh_session_member_family_generation_unique').on(
+			table.familyId,
+			table.generation
+		),
+		index('refresh_session_member_family_idx').on(table.familyId),
+		index('refresh_session_member_successor_expiry_idx')
+			.on(table.successorExpiresAt, table.id)
+			.where(sql`${table.successorExpiresAt} IS NOT NULL`)
 	]
 );
 

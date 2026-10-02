@@ -21,6 +21,34 @@ not advertise `attestation-info-v1`. Authentication and storage failures remain
 errors and do not permit fallback. Discovery does not verify attestation
 signatures; use `cupboard attest verify` for verification.
 
+### Refresh credentials
+
+Deploy the server before adopting the new CLI or workflow behaviour. Local
+migration `0067_refresh_session_authority` creates the minimal rotation and
+replay tables without copying old session authority. Existing access JWTs remain
+valid until their normal expiry. Legacy refresh credentials require a new login;
+the CLI can use a saved Cloudflare sign-in when that sign-in remains valid.
+
+New refresh credentials include their verified policy identity, authority
+ceiling and absolute expiry. Renewal evaluates current trust policy and does not
+depend on an originating rule. The server stores the complete credential's hash,
+family and generation metadata, and temporarily an encrypted successor
+credential for lost-response recovery. [Session renewal] explains the grace
+window and policy changes.
+
+Old refresh tables temporarily retain legacy authority for rollback
+compatibility. Bounded tenant maintenance removes at most 128 rows from each
+legacy refresh table per pass, regardless of expiry. No new session authority is
+written to those tables. An expired successor envelope is also cleared in pages
+of at most 128 records. Physical removal can take several maintenance passes;
+expired credentials and envelopes cannot renew a session during that interval.
+
+A rollback keeps the additive schema, but the preceding server cannot redeem
+new-format refresh credentials. Sign in again after a rollback. There is no
+session migration or rule-to-session dependency to restore.
+
+[Session renewal]: ../admin/signing-in.md#how-long-a-session-lasts
+
 ### CI read acquisition
 
 Upgrade the deployed Worker before using this release's

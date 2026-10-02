@@ -515,6 +515,21 @@ authorisation uses the issued grants and does not depend on that audit claim.
 Implicit interactive exchanges keep their existing single-rule selection.
 Composition does not create refresh sessions for CI or read acquisition.
 
+Interactive refresh credentials contain a versioned, tenant-bound identity and
+maximum grant set. Their complete opaque value is authenticated against the
+member's stored hash before any claims enter policy selection. Each refresh
+re-evaluates current trust policy and its current preferred identity tier. The
+response preserves or narrows the credential's authority and its original 30-day
+deadline. Rule IDs are not session dependencies.
+
+`refresh_session_family` records the active member, generation and timestamps.
+`refresh_session_member` records credential hashes and replay metadata. A spent
+member briefly includes an encrypted successor credential so a retry can recover
+an explicitly narrowed successor, even when the retry omits the grant field. The
+grace window remains one minute. Indexed bounded maintenance clears expired
+envelopes; physical ciphertext removal occurs when maintenance runs. Existing
+legacy refresh tables receive no new sessions and are retired in bounded pages.
+
 A client can also exchange a cupboard access token for one with fewer grants.
 
 CI read acquisition uses the extension grant
@@ -911,16 +926,17 @@ A stored cache grant identifies its cache in one of two formats. A **selector
 grant** uses `_default` for the default cache, the cache's name for a public
 cache, and `_private-<name>` for a private cache. A **scope grant** identifies
 the default cache or a named cache whatever its access. A trust rule's grant can
-contain a template. A refresh-token family contains the concrete caches that
-were granted. This build reads both formats.
+contain a template. Legacy refresh-token families contain the concrete caches
+that were granted. This build reads both stored formats while retiring those
+legacy records. New refresh authority is client-contained and uses scope grants.
 
-Until the `cache-identity` transition is complete, new grants use the selector
-format, so that the previous release can read them. A grant for a named cache
-whose access is known uses the selector for that access. A template, or a name
-whose access isn't known yet, gets both the public and the private selector, and
-current readers combine them into one grant. cupboard refuses to change a
-cache's access until `cache-identity` is complete, so an existing selector keeps
-its meaning for the whole transition.
+Until the `cache-identity` transition is complete, new stored trust grants use
+the selector format, so that the previous release can read them. A grant for a
+named cache whose access is known uses the selector for that access. A template,
+or a name whose access isn't known yet, gets both the public and the private
+selector, and current readers combine them into one grant. cupboard refuses to
+change a cache's access until `cache-identity` is complete, so an existing
+selector keeps its meaning for the whole transition.
 
 The control plane can't look up a tenant cache's access, so it stores every
 named-cache grant with both selectors. When a template is too long to take the

@@ -99,9 +99,11 @@ cupboard oidc-trust remove https://cupboard.example.workers.dev/t/acme <rule-id>
 Removing a rule disables it rather than deleting it, so it still appears in the
 list, marked as disabled.
 
-The person loses access within ten minutes. Their session can't be renewed, and
-their current access token expires within that time. If the rule was for a CI
-job, any tokens that the job has already received expire within 15 minutes.
+If no remaining matching rules permit the person's session authority, their
+session cannot be renewed. Their current access token expires within ten
+minutes. Another matching rule can continue to permit renewal under current
+policy. If the rule was for a CI job, any tokens that the job has already
+received expire within 15 minutes.
 
 ## Letting CI publish
 

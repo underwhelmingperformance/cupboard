@@ -19,9 +19,9 @@ import migrations from '../../drizzle/migrations.js';
 import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
-	oidcTrust,
-	refreshTokenFamilies,
-	refreshTokenMembers
+	legacyRefreshTokenFamilies,
+	legacyRefreshTokenMembers,
+	oidcTrust
 } from '../db/schema.ts';
 import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts';
 import {
@@ -34,6 +34,7 @@ import {
 	useTestServer
 } from '../test-support.ts';
 
+import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
 import { barrierTriggers } from './garbage-collection-service.ts';
 import { applyMigrations, migrationsThrough } from './migrate.ts';
 
@@ -61,6 +62,53 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it.each([1, 2000])(
+		'creates minimal refresh metadata without rewriting %i legacy sessions',
+		async (count) => {
+			const result = await runInDurableObject(
+				testServerFor(`refresh-authority-migration-${String(count)}`),
+				async (_instance, state) => {
+					await migrateThrough(state, 66);
+					state.storage.sql.exec(
+						"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) SELECT value, value, 0, 'owner', 'alice', '[{\"type\":\"cupboard_wildcard\"}]', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z' FROM json_each(?)",
+						JSON.stringify(
+							Array.from({ length: count }, (_, index) => String(index))
+						)
+					);
+					const meter = new DatabaseCostMeter();
+					const migrated = await applyMigrations(
+						drizzle(meteredStorage(state.storage, meter)),
+						migrations
+					);
+					meter.recordOutstanding();
+					return {
+						migrated,
+						bounded: meter.rowsRead + meter.rowsWritten <= 500,
+						legacyRows: state.storage.sql
+							.exec<{ count: number }>(
+								'SELECT count(*) AS count FROM refresh_token_family'
+							)
+							.one().count,
+						queryPlan: Array.from(
+							state.storage.sql.exec<{ detail: string }>(
+								"EXPLAIN QUERY PLAN SELECT id FROM refresh_session_member INDEXED BY refresh_session_member_successor_expiry_idx WHERE successor_expires_at IS NOT NULL AND successor_expires_at < '2026-01-01T00:00:00.000Z' ORDER BY successor_expires_at, id LIMIT 128"
+							),
+							({ detail }) => detail
+						)
+					};
+				}
+			);
+			expect(result).toStrictEqual({
+				migrated: { kind: 'complete', hasCommitted: true },
+				bounded: true,
+				legacyRows: count,
+				queryPlan: [
+					'SEARCH refresh_session_member USING COVERING INDEX refresh_session_member_successor_expiry_idx (successor_expires_at>? AND successor_expires_at<?)'
+				]
+			});
+		}
+	);
+
 	it('indexes narinfo refresh by NAR hash after upgrading', async () => {
 		const plan = await runInDurableObject(
 			testServerFor('migration-narinfo-refresh-index'),
@@ -550,7 +598,7 @@ describe('migrations', () => {
 				await migrateThroughConvertedCatalogue(state);
 
 				const database = drizzle(state.storage, {
-					schema: { refreshTokenFamilies, refreshTokenMembers }
+					schema: { legacyRefreshTokenFamilies, legacyRefreshTokenMembers }
 				});
 				const clearedLegacyRows = state.storage.sql
 					.exec('SELECT id FROM refresh_token ORDER BY id')
@@ -590,7 +638,7 @@ describe('migrations', () => {
 				);
 				database.transaction((transaction) => {
 					transaction
-						.insert(refreshTokenFamilies)
+						.insert(legacyRefreshTokenFamilies)
 						.values({
 							id: 'new-family',
 							activeMemberId: 'new-member',
@@ -603,7 +651,7 @@ describe('migrations', () => {
 						})
 						.run();
 					transaction
-						.insert(refreshTokenMembers)
+						.insert(legacyRefreshTokenMembers)
 						.values({
 							id: 'new-member',
 							familyId: 'new-family',
@@ -615,7 +663,7 @@ describe('migrations', () => {
 				});
 				const members = database
 					.select()
-					.from(refreshTokenMembers)
+					.from(legacyRefreshTokenMembers)
 					.all()
 					.map((member) => ({
 						...member,
@@ -627,7 +675,7 @@ describe('migrations', () => {
 					newTables,
 					legacySchema,
 					precedingWorkerLookup,
-					families: database.select().from(refreshTokenFamilies).all(),
+					families: database.select().from(legacyRefreshTokenFamilies).all(),
 					members,
 					legacyRows: {
 						live: state.storage.sql

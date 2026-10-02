@@ -877,6 +877,15 @@ export class UnsupportedSubjectTokenTypeError extends InvalidRequestError {
 	}
 }
 
+export class RefreshCredentialSizeLimitError extends InvalidRequestError {
+	readonly problem = 'refresh-credential-size-limit';
+
+	constructor() {
+		super('Refresh credential exceeds the 65536-byte limit');
+		this.name = 'RefreshCredentialSizeLimitError';
+	}
+}
+
 export class RefreshTokenRequiredError extends InvalidRequestError {
 	readonly problem = 'refresh-token-required';
 
