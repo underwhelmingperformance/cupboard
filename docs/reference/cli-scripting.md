@@ -40,7 +40,7 @@ The CLI formats what it writes to standard error in one of three modes:
 The CLI picks the first of these that applies:
 
 1. The mode that you pass with `--output-mode`.
-2. `terminal`, if `FORCE_COLOR` is set to anything other than `0`.
+2. `terminal`, if `FORCE_COLOR` is non-empty and is not `0`.
 3. `json`, if `PRE_COMMIT=1`. pre-commit sets this for its hooks.
 4. `github`, if `GITHUB_ACTIONS=true`.
 5. `terminal`, if standard error is a terminal.
@@ -86,7 +86,7 @@ Without `--yes`, a command only asks when all of these are true:
 
 - it's in `terminal` mode;
 - standard input and standard error are both terminals;
-- it isn't running in CI.
+- `CI` is not `true`.
 
 Otherwise, it exits with status 2 without doing anything.
 
@@ -151,10 +151,9 @@ When some paths in a push fail, `push` chooses its status from the failures:
 
 1. 77, if any path failed a sign-in or permission check.
 2. Otherwise 75, if any path failed temporarily.
-3. Otherwise 69, if something that a path needed was unavailable.
-4. Otherwise 2, if the server rejected an upload request because it exceeded the
+3. Otherwise 2, if the server rejected an upload request because it exceeded the
    invocation budget. Split the request at the returned path limit.
-5. Otherwise 1.
+4. Otherwise 1.
 
 `build-push` uses the same order while it publishes, but exits 74 in place of 1.
 A quota refusal counts as a permanent failure. Because 75 ranks above 1, a push

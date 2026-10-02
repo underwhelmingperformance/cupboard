@@ -194,7 +194,8 @@ describe('runConfig', () => {
 			],
 			infos: [
 				[
-					'# Add this line to your Nix netrc-file (for example, ~/.config/nix/netrc):',
+					"# Add this line to the file configured by Nix's netrc-file setting:",
+					'# Check its path with: nix config show netrc-file',
 					`machine cupboard.example.workers.dev login alice password ${correctHorse}`
 				].join('\n')
 			]
