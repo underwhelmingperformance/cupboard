@@ -106,6 +106,11 @@ jobs:
       - id: build
         uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
         with:
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           installables: .#package
           inline-paths: false
           publication-url: https://cupboard.example.workers.dev/t/acme
@@ -114,8 +119,12 @@ jobs:
       - id: push
         uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
         with:
-          url: https://cupboard.example.workers.dev/t/acme
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
+          url: https://cupboard.example.workers.dev/t/acme
           paths-file: ${{ steps.build.outputs.publish-paths-file }}
           build-receipt-file: ${{ steps.build.outputs.receipt-file }}
           root:
@@ -124,14 +133,23 @@ jobs:
       - id: attest
         uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
         with:
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           url: https://cupboard.example.workers.dev/t/acme
           inline-bundles: false
           receipt-file: ${{ steps.push.outputs.receipt-file }}
       - if: ${{ steps.attest.outputs.bundles-file != '' }}
         uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
         with:
-          url: https://cupboard.example.workers.dev/t/acme
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
+          url: https://cupboard.example.workers.dev/t/acme
           receipt-file: ${{ steps.push.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
@@ -169,7 +187,8 @@ Every action also installs a pinned version of Node.js and pnpm. They stay on
 ### Permissions and trust rules
 
 Each action needs certain job permissions, and some need grants in the trust
-rule that accepts the job:
+rule that accepts the job. The table lists publication requirements. Private
+OIDC reads additionally need `id-token: write` and content-read grants:
 
 | Action          | Job permissions                                                                                      | Trust rule grants                                         |
 | --------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
@@ -192,8 +211,19 @@ cupboard, grant `attestations: read` and `contents: read` as well. The flake
 publish workflow grants `attestations: read` to its plan and cache-removal jobs,
 which verify the cupboard release that they install.
 
-For a private cache, `attest` and `attest-attach` also need `read-user` and
-`read-password`.
+For private OIDC reads, pass the setup outputs to every later action that reads
+the configured resources, as the example does. `read-session-target` selects the
+primary cache or view, `read-session-view` adds the view, and
+`read-session-caches` adds the other caches. Pass `read-session-audience` as
+`audience` so read acquisition and publication use the same audience. Each step
+obtains one read token for all required resources and renews that token while
+its command runs. These reads require `id-token: write` and content-read grants
+in the trust rules that match the job. Set setup's `audience` input when the
+trust rules use a custom audience.
+
+A tenant read credential can also read a private view. A cache read credential
+only reads its cache; use the destination credential inputs for that pair and
+OIDC for the view.
 
 ### Trust rules for these jobs
 
@@ -212,7 +242,7 @@ rule that pins cupboard's workflow:
 
 ```sh
 cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
-  --repo acme/app --branch main \
+  --repo acme/app --branch main --read-cache \
   --job-workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v*'
 ```
 
@@ -224,7 +254,7 @@ accepts the job's runs on `main`:
 
 ```sh
 cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
-  --repo acme/app --branch main
+  --repo acme/app --branch main --read-cache
 ```
 
 That rule accepts every workflow in the repository that runs on `main`. To
@@ -240,7 +270,7 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --claim repository_id=123456 --claim repository_owner_id=654321 \
   --claim ref=refs/heads/main \
   --claim workflow_ref=acme/app/.github/workflows/publish.yml@refs/heads/main \
-  --allow push --allow root --allow attach --allow attest \
+  --allow read --allow push --allow root --allow attach --allow attest \
   --root github:acme/app/main/
 ```
 
@@ -278,8 +308,10 @@ There are three ways to give `setup` credentials, depending on what you're
 reading:
 
 - To use the tenant read credential, pass it as `read-user` and `read-password`.
-  `setup` writes it to a netrc file. Nix uses it for every cache on the same
-  host that doesn't have its own credential.
+  `setup` writes it to a netrc file. Nix uses it for authorised caches that
+  don't have their own credential and for private views in the tenant. Because
+  netrc uses the hostname as its machine key, other tenants on that host need
+  their own complete URL credentials or separate jobs.
 - To use cache read credentials, pass a single cache's credential as
   `destination-read-user` and `destination-read-password`. For several caches,
   pass `cache-credentials`, a JSON array with one entry per cache:

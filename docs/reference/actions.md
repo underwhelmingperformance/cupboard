@@ -28,6 +28,7 @@ The calling job must grant:
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
+| `audience` | string |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
 | `url` | string | **required** | Tenant URL to publish to. |
 | `targets` | string | `.#cupboardOutputs` | Flake attribute that evaluates to the target manifest. |
 | `preset` | string |  | Choose the cache, root prefix and TTL from the event that triggered the run. The only preset is pull-request-and-branch. A pull_request run publishes to the cache gh-&lt;repository-id>-pr-&lt;number>, with roots under github:&lt;repository>/pr-&lt;number>/ that expire after 14 days. When publication is enabled, the workflow creates that cache if it does not exist. With `publish: none`, it reads from the tenant's default cache without creating or removing a pull-request cache. The preset refuses a pull request from a fork. When an unmerged pull request is closed and publication is enabled, the run removes that pull request's cache. A run on the branch in the branch input publishes to the default cache, with permanent roots under github:&lt;repository>/&lt;branch>/. The preset fails any other run. Cannot be combined with cache, root-prefix, ttl or permanent. Leave empty to set those inputs yourself. |
@@ -97,6 +98,7 @@ The calling job must grant:
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
+| `audience` | string |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
 | `url` | string | **required** | Tenant URL or cache URL to publish to. |
 | `installable` | string | `.` | Flake installable to realise and, when enabled, publish. |
 | `cache` | string |  | Named cache to publish to. Leave empty to publish to the default cache. |
@@ -133,6 +135,7 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `expected-source-commit` |  | Full commit ID that the release's provenance must record. Requires an exact cupboard-version. |
 | `install-dir` |  | Directory to install cupboard into. Defaults to cupboard-bin under RUNNER_TEMP. |
 | `add-to-path` | `true` | Add the directory that contains the cupboard binary to PATH. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
 | `cache-url` |  | Tenant URL whose caches setup adds to Nix's substituters. |
 | `cache` |  | Named caches to use, one per line or separated by commas. Leave empty to use the tenant's default cache. |
 | `include-default-cache` |  | When true, use the tenant's default cache as well as the named caches in cache. The cache input cannot refer to the default cache, because a named cache can be called default. |
@@ -161,6 +164,8 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `nix-config-file` | Path to the Nix configuration file that setup wrote under RUNNER_TEMP. |
 | `read-session-target` | Cache or reuse-view URL that later steps must read through cupboard run. Includes configured public targets when an absent or private target needs OIDC. Empty for anonymous public reads or accepted static credentials. |
 | `read-session-view` | Configured reuse view to add to cupboard run alongside the destination. Empty for view-only sessions or when a static credential covers the view. |
+| `read-session-caches` | JSON array of additional cache URLs for the same read session. |
+| `read-session-audience` | Audience to pass to later actions for the read session and publication. |
 
 ### actions/build-paths
 
@@ -177,8 +182,10 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | `inline-paths` | `true` | Control how path lists are returned. `true` writes inline path outputs as well as files. `false` returns files and counts without inline path outputs. Use `false` for large path lists. |
 | `publication-url` |  | Destination tenant or cache URL. Required with `substituter: leave` so paths from the destination and its tenant reuse views remain selected for publication. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `installables` |  | Nix installables to build, one per line. |
 | `installables-file` |  | File that lists the Nix installables to build, one per line. Use it for a long generated list, because action inputs have a size limit. |
 | `keep-going` | `false` | Keep building the other installables after one of them fails. |
@@ -220,8 +227,9 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 | `paths` |  | Store paths to publish, one per line. A path that resolves to a store path, such as a `result` symlink, also works. Build flake outputs before you publish them. Required unless paths-file, root-groups or an explicit root is set. An explicit root with no paths replaces that root with an empty path list. |
 | `paths-file` |  | File containing store paths to publish, one per line. Use this input for large path lists. The installed Cupboard CLI must support push --paths-file. An empty file with an explicit root replaces that root with an empty path list. |
 | `cupboard-path` |  | Path to a cupboard executable that an earlier actions/setup step installed. When it is set, the action does not install a release. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `cupboard-version` |  | cupboard release to install, either latest or an exact release tag. Defaults to latest. |
 | `include-prereleases` |  | Whether latest can resolve to a prerelease. Defaults to true. |
 | `github-token` |  | GitHub token for release API requests. Defaults to the job's token. |
@@ -281,8 +289,10 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 | `url` | **required** | Tenant URL of the destination. Before signing, the action checks every path against the narinfo in this tenant's cache. |
 | `cache` |  | Named destination cache. Leave empty to use the default cache. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `read-user` |  | User name of a read credential for a private destination cache. |
 | `read-password` |  | Password of a read credential for a private destination cache. |
 | `github-token` |  | GitHub token that the action uses to upload bundles to the repository's attestation store when upload-to-github is true. |
@@ -317,8 +327,9 @@ uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
 | --- | --- | --- |
 | `url` | **required** | Tenant URL of the destination. |
 | `cupboard-path` | **required** | Path to the cupboard executable that actions/setup installed. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `cache` |  | Named cache that the paths were published to. Leave empty for the default cache. |
 | `audience` |  | Audience of the GitHub OIDC token. Defaults to url without a trailing slash. |
 | `read-user` |  | User name of a read credential for a private destination cache. |

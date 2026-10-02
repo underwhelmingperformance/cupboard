@@ -82,7 +82,6 @@ import {
 	ProvisionCacheResultError,
 	ProvisionCacheUrlRequiredError,
 	ReadConfigurationFailedError,
-	ReadConfigurationScopeError,
 	ReadConfigurationUnavailableError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
@@ -138,6 +137,7 @@ export interface SetupOptions {
 	readonly destinationReadUser?: string;
 	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
+	readonly audience?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
@@ -169,6 +169,7 @@ export interface SetupInputs {
 	readonly provisionCache: ProvisionCache | undefined;
 	readonly cacheAccessMode: 'public' | 'private' | undefined;
 	readonly reuseView: string;
+	readonly audience: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
@@ -197,6 +198,7 @@ interface ConfigureNixInputs extends Pick<
 	| 'caches'
 	| 'privateSubstituters'
 	| 'reuseView'
+	| 'audience'
 	| 'trustedPublicKey'
 	| 'readUser'
 	| 'readPassword'
@@ -269,6 +271,7 @@ export function registerSetupCommand(
 			'--cache <name>',
 			'Add named caches at the tenant URL, one per line or comma-separated.'
 		)
+		.option('--audience <audience>', 'audience of the GitHub OIDC token')
 		.option(
 			'--cache-credentials <json>',
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
@@ -438,6 +441,7 @@ export function resolveSetupInputs(
 			provisionCache !== undefined
 		),
 		reuseView: provided(options.reuseView) ?? '',
+		audience: provided(options.audience) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
 		readPassword,
@@ -651,6 +655,8 @@ export async function setupAction(
 		acquired.cupboard.kind === 'release' ? acquired.cupboard.tag : ''
 	);
 
+	await setOutput(environment, 'read-session-audience', inputs.audience);
+
 	if (inputs.cacheUrl === undefined) {
 		return;
 	}
@@ -725,29 +731,32 @@ export async function setupAction(
 		oidcDestinations.length > 0 || viewState === 'challenge';
 
 	if (metadataDestination !== undefined || isNeedsSession) {
-		if (
-			oidcDestinations.length +
-				metadataDestinations.filter((selection) => selection !== undefined)
-					.length >
-			1
-		) {
-			throw new ReadConfigurationScopeError();
-		}
-
-		const destination = oidcDestinations[0] ?? metadataDestination;
-		const readResources: ReadResource[] = [
-			...(destination === undefined
+		const destination =
+			metadataDestination ?? oidcDestinations[0] ?? readDestinations[0];
+		const sessionDestinations =
+			destination === undefined
 				? []
 				: [
-						{
-							type: 'cupboard_cache' as const,
-							cache: destination.cache,
-							mode:
-								metadataDestination === undefined
-									? ('content' as const)
-									: ('metadata' as const)
-						}
-					]),
+						destination,
+						...inputs.caches.filter(
+							(selection) =>
+								!isSameCacheScope(selection.cache, destination.cache) &&
+								(readDestinations.includes(selection) ||
+									metadataDestinations.includes(selection))
+						)
+					];
+		const readResources: ReadResource[] = readResourcesSchema.parse([
+			...sessionDestinations.map((selection) => ({
+				type: 'cupboard_cache' as const,
+				cache: selection.cache,
+				mode: metadataDestinations.some(
+					(metadata) =>
+						metadata !== undefined &&
+						isSameCacheScope(metadata.cache, selection.cache)
+				)
+					? 'metadata'
+					: 'content'
+			})),
 			...(isOidcView
 				? [
 						{
@@ -756,7 +765,7 @@ export async function setupAction(
 						}
 					]
 				: [])
-		];
+		]);
 		const target =
 			destination === undefined
 				? reuseViewUrlFor(cacheUrl, inputs.reuseView)
@@ -764,11 +773,48 @@ export async function setupAction(
 		const readSessionView =
 			destination === undefined || !isOidcView ? '' : inputs.reuseView;
 
-		await setOutput(environment, 'read-session-target', canonicalHref(target));
-		await setOutput(environment, 'read-session-view', readSessionView);
+		const contentDestinations = readResources.flatMap((resource) =>
+			resource.type === 'cupboard_cache' && resource.mode === 'content'
+				? [resource]
+				: []
+		);
+		const downstreamDestination = contentDestinations[0];
+		const downstreamTarget =
+			downstreamDestination === undefined
+				? isOidcView
+					? reuseViewUrlFor(cacheUrl, inputs.reuseView)
+					: undefined
+				: cacheUrlFor(cacheUrl, downstreamDestination.cache);
+		await setOutput(
+			environment,
+			'read-session-target',
+			downstreamTarget === undefined ? '' : canonicalHref(downstreamTarget)
+		);
+		await setOutput(
+			environment,
+			'read-session-view',
+			downstreamDestination === undefined || !isOidcView ? '' : inputs.reuseView
+		);
+		await setOutput(
+			environment,
+			'read-session-caches',
+			JSON.stringify(
+				contentDestinations
+					.slice(1)
+					.map((selection) =>
+						canonicalHref(cacheUrlFor(cacheUrl, selection.cache))
+					)
+			)
+		);
 		await (dependencies.configureWithReadAccess ?? configureWithReadAccess)(
 			acquired.binaryPath,
-			{ ...configureInputs, readResources },
+			{
+				...configureInputs,
+				readResources,
+				cacheMetadata:
+					readResources[0]?.type === 'cupboard_cache' &&
+					readResources[0].mode === 'metadata'
+			},
 			target,
 			readSessionView,
 			dependencies.signal
@@ -779,6 +825,7 @@ export async function setupAction(
 
 	await setOutput(environment, 'read-session-target', '');
 	await setOutput(environment, 'read-session-view', '');
+	await setOutput(environment, 'read-session-caches', '[]');
 	await performSetupConfiguration(configureInputs, reporter, dependencies);
 }
 
@@ -801,12 +848,19 @@ async function performSetupConfiguration(
 				).read_resources;
 
 	if (inputs.readResources !== undefined) {
-		const expected = readResourcesSchema.parse(inputs.readResources);
+		const expected = new Set(
+			readResourcesSchema
+				.parse(inputs.readResources)
+				.map((resource) => JSON.stringify(resource))
+		);
 		const actual = readResourcesSchema.parse(
 			facts.map(({ state: _state, ...resource }) => resource)
 		);
 
-		if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+		if (
+			actual.length !== expected.size ||
+			actual.some((resource) => !expected.has(JSON.stringify(resource)))
+		) {
 			throw new ProvisionCacheResultError(
 				'The read session does not describe exactly the configured resources.'
 			);
@@ -924,7 +978,12 @@ async function performSetupConfiguration(
 		}
 		const results = await (dependencies.run ?? runCupboard)(
 			acquired.binaryPath,
-			provisionCacheArguments(cacheUrl, inputs.provisionCache, requestedAccess),
+			provisionCacheArguments(
+				cacheUrl,
+				inputs.provisionCache,
+				requestedAccess,
+				inputs.audience
+			),
 			environment,
 			{
 				...(dependencies.signal !== undefined && {
@@ -1035,6 +1094,7 @@ const configureNixPayloadSchema = z.object({
 		.optional(),
 	binaryPath: z.string(),
 	inheritedNixConfig: z.string().default(''),
+	audience: z.string().default(''),
 	readResources: readResourcesSchema.optional()
 });
 
@@ -1069,8 +1129,23 @@ async function configureWithReadAccess(
 	let isSupported: boolean;
 	try {
 		const options = await inspectCommandOptions(binaryPath, ['run'], signal);
+		const additionalCaches = (inputs.readResources ?? []).flatMap((resource) =>
+			resource.type === 'cupboard_cache' &&
+			canonicalHref(cacheUrlFor(inputs.cacheUrl, resource.cache)) !==
+				canonicalHref(target)
+				? [resource]
+				: []
+		);
 		isSupported =
-			options.has('--github-oidc') && options.has('--cache-metadata');
+			options.has('--github-oidc') &&
+			options.has('--cache-metadata') &&
+			additionalCaches.every((resource) =>
+				options.has(
+					resource.mode === 'metadata'
+						? '--read-cache-metadata'
+						: '--read-cache'
+				)
+			);
 	} catch (error) {
 		signal?.throwIfAborted();
 		if (!(error instanceof CommandFailedError)) {
@@ -1103,6 +1178,7 @@ async function configureWithReadAccess(
 			provisionCache: inputs.provisionCache,
 			binaryPath: inputs.binaryPath,
 			inheritedNixConfig: inputs.inheritedNixConfig,
+			audience: inputs.audience,
 			readResources: inputs.readResources
 		}),
 		{ flag: 'wx', mode: 0o600 }
@@ -1115,6 +1191,19 @@ async function configureWithReadAccess(
 				'run',
 				canonicalHref(target),
 				'--github-oidc',
+				...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+				...(inputs.readResources ?? []).flatMap((resource) =>
+					resource.type === 'cupboard_cache' &&
+					canonicalHref(cacheUrlFor(inputs.cacheUrl, resource.cache)) !==
+						canonicalHref(target)
+						? [
+								resource.mode === 'metadata'
+									? '--read-cache-metadata'
+									: '--read-cache',
+								canonicalHref(cacheUrlFor(inputs.cacheUrl, resource.cache))
+							]
+						: []
+				),
 				...(inputs.cacheMetadata === true ? ['--cache-metadata'] : []),
 				...(reuseView === '' ? [] : ['--reuse-view', reuseView]),
 				'--',
@@ -1328,7 +1417,8 @@ function parsedNamedCacheTenant(url: URL): URL | undefined {
 function provisionCacheArguments(
 	cacheUrl: URL,
 	provision: ProvisionCache,
-	access: 'public' | 'private'
+	access: 'public' | 'private',
+	audience: string
 ): readonly string[] {
 	return [
 		'cache',
@@ -1336,6 +1426,7 @@ function provisionCacheArguments(
 		canonicalHref(cacheUrl),
 		provision.name,
 		'--github-oidc',
+		...(audience === '' ? [] : ['--audience', audience]),
 		'--if-absent',
 		'--access',
 		access,

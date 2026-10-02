@@ -645,26 +645,26 @@ function triggerReferences(
 }
 
 function claimsForReference(
-	tenant: URL,
+	audience: string | URL,
 	identity: RepositoryIdentity,
 	job: DiscoveredPublishingJob,
 	entry: TriggerReference
 ): GithubActionsClaims {
 	if (entry.trigger === 'pull_request') {
-		return githubPullRequestClaims(tenant, identity, {
+		return githubPullRequestClaims(audience, identity, {
 			pullRequestNumber: 1,
 			workflowReference: job.workflowRef
 		});
 	}
 
 	if (entry.ref.kind === 'tag') {
-		return githubTagPushClaims(tenant, identity, {
+		return githubTagPushClaims(audience, identity, {
 			tag: entry.ref.pattern.example(),
 			workflowReference: job.workflowRef
 		});
 	}
 
-	return githubBranchClaims(tenant, identity, {
+	return githubBranchClaims(audience, identity, {
 		branch: entry.ref.name,
 		eventName: entry.trigger,
 		workflowReference: job.workflowRef
@@ -690,6 +690,11 @@ export function modelPublishingJob(
 
 	if (mode === undefined) {
 		return unmodelled('preset must be a literal string');
+	}
+
+	const audience = scalar(job, 'audience')?.trim();
+	if (audience === undefined) {
+		return unmodelled('audience must be a literal string');
 	}
 
 	const cache = jobCache(job);
@@ -791,7 +796,12 @@ export function modelPublishingJob(
 			}
 
 			const isPullRequest = entry.trigger === 'pull_request';
-			const claims = claimsForReference(tenant, identity, job, entry);
+			const claims = claimsForReference(
+				audience === '' ? tenant : audience,
+				identity,
+				job,
+				entry
+			);
 
 			if (job.kind === 'installable') {
 				const requests = isReadOnly

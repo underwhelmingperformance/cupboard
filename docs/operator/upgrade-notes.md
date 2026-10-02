@@ -58,6 +58,21 @@ also needs this release's CLI for OIDC-backed configuration. Public read-only
 jobs continue to run anonymously without a matching CI trust rule or
 `id-token: write`.
 
+Custom jobs that read private caches through GitHub OIDC must pass the setup
+outputs `read-session-target`, `read-session-view` and `read-session-caches` to
+later actions. Pass `read-session-audience` as their `audience` input. Setup now
+acquires one read session for all configured caches without static credentials
+and the reuse view. Different tenants that need their own netrc pairs on one
+deployment host require separate jobs because Nix netrc credentials use the
+hostname as the machine key. Complete static credentials in each substituter URL
+take precedence over netrc and can coexist with the OIDC session.
+
+Use `oidc-trust add --allow read` to grant cache content reads without
+publication or root authority. The GitHub publishing presets accept
+`--read-cache`, including `add-github-tag`. A refused private-view probe now
+exits 77 and explains how to supply the tenant read credential or OIDC view
+authority. Temporary probe failures still exit 75.
+
 ### Updating a deployment needs an admin token
 
 - `cupboard init` now needs an admin token to update a deployment that has an
