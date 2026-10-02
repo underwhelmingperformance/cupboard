@@ -1,9 +1,9 @@
 # Retention
 
-cupboard doesn't keep store paths forever by default. It keeps a store path only
-while something keeps it, and deletes the rest. This page explains what can keep
-a store path, how long it's kept for, and how to choose settings for your
-caches.
+With the default cache settings, retention roots and pins are permanent. A store
+path stays in the cache while a root, pin or grace period keeps it. This page
+explains how to choose retention settings and when garbage collection deletes
+store paths.
 
 ## How retention works
 
@@ -136,7 +136,11 @@ cupboard push https://cupboard.example.workers.dev/t/acme \
 
 A CI token needs the `attach` grant to add to a run root. See
 [Trust rules](../ci/trust-rules.md#what-a-rule-can-grant). The flake publish
-workflow uses a run root automatically.
+workflow uses a run root automatically, with a 24-hour TTL by default.
+
+Run roots use `--run-root-ttl` or `--run-root-permanent` for their lifetime,
+independently of the ordinary root or pins in the same push. If neither option
+is supplied, the run root inherits the cache's root retention settings.
 
 ## How long a root lasts
 

@@ -287,7 +287,10 @@ An operator can't set a tenant's quota below the amount that the tenant already
 stores. Choose a larger quota, or ask the tenant's administrators to free some
 space first.
 
-### "Tenant … is being removed, so its status and quota can no longer be changed"
+### "Tenant '…' is being removed; its status and quota can no longer be changed"
+
+The CLI reports this as "Tenant … is being removed, so its status and quota can
+no longer be changed."
 
 Once an operator starts removing a tenant, the removal can't be undone.
 `cupboard tenant list` shows how far the removal has got.
