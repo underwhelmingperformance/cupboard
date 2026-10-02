@@ -1,11 +1,12 @@
 import path from 'node:path';
 
 import { createOctokitClient } from '@cupboard/shared/octokit';
+import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import type { RequestError } from '@octokit/request-error';
 import { StatusCodes } from 'http-status-codes';
 import makeFetchHappen from 'make-fetch-happen';
 
-import { abortReason } from '../../abort.ts';
+import { abortReason, isAbortError } from '../../abort.ts';
 import { cacheDirectory } from '../../auth/secret-file.ts';
 import {
 	authExitCode,
@@ -15,6 +16,7 @@ import {
 } from '../../errors.ts';
 
 const forbiddenStatus: number = StatusCodes.FORBIDDEN;
+const requestTimeoutStatus: number = StatusCodes.REQUEST_TIMEOUT;
 
 // The numeric ids remain stable when a repository is renamed. `fullName`
 // supplies name-based claims and root names, so setup must still rewrite the
@@ -35,7 +37,10 @@ export class InvalidRepositoryError extends CliUsageError {
 
 export class RepositoryNotFoundError extends Error {
 	constructor(public readonly repository: string) {
-		super(`GitHub repository '${repository}' was not found.`);
+		super(
+			`GitHub repository '${repository}' was not found or is not accessible. ` +
+				'Check --repo, and set GH_TOKEN or GITHUB_TOKEN to a token with permission to read a private repository.'
+		);
 		this.name = 'RepositoryNotFoundError';
 	}
 }
@@ -65,6 +70,98 @@ export class GithubPermissionError extends CliError {
 	}
 }
 
+class GithubCacheError extends CliError {
+	constructor(cachePath: string, options: ErrorOptions) {
+		super(
+			`Could not read the local GitHub cache at '${cachePath}'. Check its permissions and remove damaged cache data, then try again.`,
+			options
+		);
+		this.name = 'GithubCacheError';
+	}
+}
+
+const filesystemErrorCodes = new Set([
+	'EACCES',
+	'EPERM',
+	'EISDIR',
+	'ENOTDIR',
+	'ENOENT',
+	'ENOSPC',
+	'EROFS',
+	'EIO',
+	'EMFILE',
+	'ENFILE'
+]);
+
+function cacheReadError(error: unknown, cachePath: string): unknown {
+	if (
+		error instanceof Error &&
+		'code' in error &&
+		typeof error.code === 'string' &&
+		filesystemErrorCodes.has(error.code)
+	) {
+		return new GithubCacheError(cachePath, { cause: error });
+	}
+
+	return error;
+}
+
+export class GithubTemporaryError extends CliError {
+	constructor(
+		public readonly resource: string,
+		public readonly status: number | undefined,
+		options: ErrorOptions
+	) {
+		super(
+			status === undefined
+				? `GitHub could not be reached while reading ${resource}. Check your network connection and https://www.githubstatus.com/, then try again.`
+				: `GitHub temporarily failed while reading ${resource} (HTTP ${String(status)}). Check https://www.githubstatus.com/ and try again.`,
+			options
+		);
+		this.name = 'GithubTemporaryError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
+export function throwIfGithubTemporaryError(
+	error: unknown,
+	resource: string
+): void {
+	if (
+		typeof error !== 'object' ||
+		error === null ||
+		!('status' in error) ||
+		typeof error.status !== 'number' ||
+		isAbortError(error)
+	) {
+		return;
+	}
+
+	if (
+		error.status !== requestTimeoutStatus &&
+		(error.status < 500 || error.status >= 600)
+	) {
+		return;
+	}
+
+	if ('cause' in error && error.cause instanceof GithubCacheError) {
+		throw error.cause;
+	}
+
+	if ('cause' in error && error.cause instanceof RemoteBodyTooLargeError) {
+		return;
+	}
+
+	const status =
+		'response' in error && error.response !== undefined
+			? error.status
+			: undefined;
+	throw new GithubTemporaryError(resource, status, { cause: error });
+}
+
 export interface LookupRepositoryOptions {
 	readonly fetch?: typeof fetch;
 	readonly signal?: AbortSignal;
@@ -81,13 +178,19 @@ function isAsyncByteIterable(
 }
 
 function webStream(
-	body: AsyncIterable<Uint8Array>
+	body: AsyncIterable<Uint8Array>,
+	cachePath: string
 ): ReadableStream<Uint8Array> {
 	const iterator = body[Symbol.asyncIterator]();
 
 	return new ReadableStream<Uint8Array>({
 		async pull(controller) {
-			const result = await iterator.next();
+			let result: IteratorResult<Uint8Array>;
+			try {
+				result = await iterator.next();
+			} catch (error) {
+				throw cacheReadError(error, cachePath);
+			}
 
 			if (result.done) {
 				controller.close();
@@ -119,7 +222,12 @@ function cachedGithubFetch(cachePath: string): typeof fetch {
 			method: request.method,
 			signal: request.signal
 		};
-		const response = await fetcher(request.url, requestOptions);
+		let response: Awaited<ReturnType<typeof fetcher>>;
+		try {
+			response = await fetcher(request.url, requestOptions);
+		} catch (error) {
+			throw cacheReadError(error, cachePath);
+		}
 		const responseHeaders = new Headers();
 		response.headers.forEach((value, name) => {
 			responseHeaders.append(name, value);
@@ -138,7 +246,7 @@ function cachedGithubFetch(cachePath: string): typeof fetch {
 				throw new TypeError('The cached GitHub response body is not readable.');
 			}
 
-			body = webStream(responseBody);
+			body = webStream(responseBody, cachePath);
 		}
 
 		return new Response(body, {
@@ -182,7 +290,8 @@ export function parseRepository(value: string): string {
  * token, GitHub only returns public repositories. Conditional requests reuse a
  * local HTTP cache. A 404 throws {@link RepositoryNotFoundError}; rate limits
  * throw {@link GithubRateLimitError}; and authentication or permission failures
- * throw {@link GithubPermissionError}.
+ * throw {@link GithubPermissionError}. Temporary request failures throw
+ * {@link GithubTemporaryError}.
  */
 export async function lookupRepository(
 	repository: string,
@@ -225,6 +334,7 @@ export async function lookupRepository(
 			throw new GithubPermissionError(`repository '${repository}'`);
 		}
 
+		throwIfGithubTemporaryError(error, `repository '${repository}'`);
 		throw error;
 	}
 }
