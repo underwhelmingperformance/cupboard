@@ -254,7 +254,10 @@ caches and views are not changed automatically. Resolve any access mismatch
 before running setup again. See [Private caches in CI][private-caches-ci].
 
 Custom jobs that use `actions/setup` can continue to pass
-`provision-cache-access`; it is a deprecated alias for `cache-access-mode`.
+`provision-cache-access`; it is a deprecated alias applied only when
+`provision-cache` is set. Setup warns when this alias is supplied. Use
+`cache-access-mode` to require access for an existing cache without
+provisioning.
 
 [private-caches-ci]: ../ci/private-caches.md#choose-the-cache-access
 

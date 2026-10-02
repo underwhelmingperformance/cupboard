@@ -98,7 +98,10 @@ inputs:
       have the same access as the cache.
     required: false
   provision-cache-access:
-    description: Deprecated alias for cache-access-mode.
+    description:
+      Deprecated alias for cache-access-mode, applied only when provision-cache
+      is set. Use cache-access-mode to check an existing cache without
+      provisioning. Setup warns when this alias is supplied.
     required: false
   provision-cache-ttl:
     description:

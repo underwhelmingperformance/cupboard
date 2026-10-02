@@ -160,6 +160,11 @@ Your users then need only one substituter,
 release has its own root, publishing a new release never stops the cache keeping
 an old release's paths.
 
+Without a preset, `cache-access-mode` requires the selected cache to have that
+access on every event, including pushes, manual runs and scheduled runs. With
+the `pull-request-and-branch` preset, the input selects access for publishing
+pull-request caches. Branch and read-only runs use the default cache's access.
+
 ## The target manifest
 
 The manifest lists the requested outputs. Each target specifies an output that

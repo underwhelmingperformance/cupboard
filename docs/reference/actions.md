@@ -32,7 +32,7 @@ The calling job must grant:
 | `url` | string | **required** | Tenant URL to publish to. |
 | `targets` | string | `.#cupboardOutputs` | Flake attribute that evaluates to the target manifest. |
 | `preset` | string |  | Choose the cache, root prefix and TTL from the event that triggered the run. The only preset is pull-request-and-branch. A pull_request run publishes to the cache gh-&lt;repository-id>-pr-&lt;number>, with roots under github:&lt;repository>/pr-&lt;number>/ that expire after 14 days. When publication is enabled, the workflow creates that cache if it does not exist. With `publish: none`, it reads from the tenant's default cache without creating or removing a pull-request cache. The preset refuses a pull request from a fork. When an unmerged pull request is closed and publication is enabled, the run removes that pull request's cache. A run on the branch in the branch input publishes to the default cache, with permanent roots under github:&lt;repository>/&lt;branch>/. The preset fails any other run. Cannot be combined with cache, root-prefix, ttl or permanent. Leave empty to set those inputs yourself. |
-| `cache-access-mode` | string |  | Access for a pull-request cache that the preset creates, public or private. When omitted, a new cache inherits the tenant's default cache access. An existing cache keeps its access, and an explicit mode must match it. Set an explicit mode when the new cache must differ from the default cache. |
+| `cache-access-mode` | string |  | Required access for the selected cache, public or private. Without a preset, setup checks this on every event. With the preset, it selects access only for a publishing pull-request cache; branch and read-only runs use the default cache's access. When omitted, a new cache inherits the tenant's default cache access. An existing cache keeps its access, and an explicit mode must match it. |
 | `branch` | string | `main` | Branch whose runs publish to the default cache under the pull-request-and-branch preset. Must match the --branch option of cupboard github setup. |
 | `cache` | string |  | Named cache to publish to. Leave empty to publish to the default cache. If this cache needs a different static read credential from read_user and read_password, supply destination_read_user and destination_read_password. |
 | `root-prefix` | string |  | Start of every target's root name. The target's rootSuffix follows it. Required unless preset is set. |
@@ -74,8 +74,8 @@ The calling job must grant:
 | `destination_read_password` | no | Password of the destination cache's distinct read credential. |
 | `read_user` | no | User name of the default static read credential for the selected cache and reuse view. |
 | `read_password` | no | Password of the default static read credential. |
-| `fallback_read_user` | no | Deprecated alias of read_user. Supply both aliases or neither. |
-| `fallback_read_password` | no | Deprecated alias of read_password. Supply both aliases or neither. |
+| `fallback_read_user` | no | Deprecated alias of read_user. Supply it with fallback_read_password. The workflow warns when this secret is supplied. |
+| `fallback_read_password` | no | Deprecated alias of read_password. Supply it with fallback_read_user. The workflow warns when this secret is supplied. |
 | `private_substituters` | no | URLs of other private caches to read from, one per line, with the credential in each URL. |
 
 ### cupboard-publish.yml
@@ -145,7 +145,7 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `destination-read-password` |  | Password of the cache read credential for the selected cache. |
 | `provision-cache` |  | Named cache to create with the job's OIDC token before Nix is configured. cache-access-mode and provision-cache-ttl set its access and default root TTL. If the cache already exists, setup keeps its settings. An explicit public or private access requirement must match that cache. |
 | `cache-access-mode` |  | Access for the created cache, public or private. If omitted, new caches inherit the tenant's default cache access. An existing cache keeps its access, and an explicit mode must match it. A configured reuse view must have the same access as the cache. |
-| `provision-cache-access` |  | Deprecated alias for cache-access-mode. |
+| `provision-cache-access` |  | Deprecated alias for cache-access-mode, applied only when provision-cache is set. Use cache-access-mode to check an existing cache without provisioning. Setup warns when this alias is supplied. |
 | `provision-cache-ttl` |  | Default root TTL for the created cache, such as 14d. When a root expires, garbage collection can remove the paths that no other root keeps. Leave empty for roots that never expire. |
 | `trusted-public-key` |  | Nix public key to trust for reads from the cache. If empty, setup downloads the cache's current keys from /pubkey, trusts them, and prints a warning. |
 | `read-user` |  | User name of the tenant read credential. setup writes the credential to a netrc file, and Nix uses it for every cache on the tenant's host that does not have its own credential. |
