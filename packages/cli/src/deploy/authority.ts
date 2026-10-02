@@ -21,6 +21,7 @@ import { type CachedSession, readCachedSession } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
+	authExitCode,
 	CliError,
 	CupboardHttpError,
 	OwnerLoginRequiredError,
@@ -166,8 +167,7 @@ export class AdminTokenRequiredError extends CliError {
 		public readonly admin: OwnerBinding,
 		options: { readonly cause: unknown; readonly isAfterLogin?: boolean }
 	) {
-		const advice =
-			options.isAfterLogin === true &&
+		const afterLoginAdvice =
 			options.cause instanceof AdminGrantMissingError
 				? 'The login as the admin succeeded, but the token still lacks the ' +
 					"wildcard grant: the admin's control trust rule no longer gives " +
@@ -176,6 +176,14 @@ export class AdminTokenRequiredError extends CliError {
 					'principal whose token may add control ' +
 					'trust rules adds it, or, if no principal may, you restore it ' +
 					'in the control database. Then re-run `cupboard init`'
+				: 'The login as the admin succeeded, but the deployment refused the ' +
+					"token exchange. Check the reported refusal and correct the admin's " +
+					'control trust rule so it accepts this identity and gives the wildcard ' +
+					'grant (see "Restoring the admin\'s wildcard grant" in ' +
+					'docs/operator/operators.md). Then re-run `cupboard init`';
+		const advice =
+			options.isAfterLogin === true
+				? afterLoginAdvice
 				: `Log in as the admin with \`${adminLoginCommand(url, admin)}\` ` +
 					`and re-run \`cupboard init\`, ${ciUpdateAdvice}`;
 
@@ -188,6 +196,10 @@ export class AdminTokenRequiredError extends CliError {
 		);
 		this.name = 'AdminTokenRequiredError';
 		this.isAfterLogin = options.isAfterLogin === true;
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
 	}
 }
 
@@ -376,10 +388,7 @@ type AdminCheckError =
 	| { readonly kind: 'check'; readonly failure: AdminCheckFailure }
 	| { readonly kind: 'other' };
 
-// A missing session, a token without the wildcard grant, a 401 or 403, and an
-// OAuth error from the token exchange mean that the token cannot be used. An
-// unreachable host and any other HTTP status mean that the check could not
-// run. A 404 is returned as `unsupported`, which the caller confirms with a
+// A 404 is returned as `unsupported`, which the caller confirms with a
 // `/_version` request.
 function classifyAdminCheckError(error: unknown): AdminCheckError {
 	if (
@@ -396,7 +405,7 @@ function classifyAdminCheckError(error: unknown): AdminCheckError {
 	if (error instanceof CupboardHttpError) {
 		if (
 			isRefusedStatus(error.status) ||
-			(error.status === badRequestStatus && error.oauthError !== undefined)
+			(error.status === badRequestStatus && error.exitCode === authExitCode)
 		) {
 			return { kind: 'token' };
 		}
@@ -509,6 +518,12 @@ export class AdminCheckFailedError extends CliError {
 		);
 		this.name = 'AdminCheckFailedError';
 	}
+
+	override get exitCode(): number {
+		return this.cause instanceof CliError
+			? this.cause.exitCode
+			: super.exitCode;
+	}
 }
 
 /**
@@ -572,10 +587,25 @@ export function adminLogin(dependencies: {
 			throw new AdminLoginMismatchError(admin, presented);
 		}
 
-		await dependencies.cacheSession(
-			await dependencies.exchange(url, idToken),
-			url
-		);
+		let session: TokenResponse;
+
+		try {
+			session = await dependencies.exchange(url, idToken);
+		} catch (error) {
+			if (
+				isAbortError(error) ||
+				classifyAdminCheckError(error).kind !== 'token'
+			) {
+				throw error;
+			}
+
+			throw new AdminTokenRequiredError(url, admin, {
+				cause: error,
+				isAfterLogin: true
+			});
+		}
+
+		await dependencies.cacheSession(session, url);
 	};
 }
 
