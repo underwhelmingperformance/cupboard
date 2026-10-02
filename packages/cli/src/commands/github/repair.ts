@@ -893,6 +893,14 @@ export async function runDiscoveredGithubRepair(
 	}
 
 	if (!isRepairOffered(result)) {
+		if (result.jobs.every((job) => job.status !== 'failed')) {
+			throw new GithubCheckIncompleteError(
+				result.jobs
+					.filter((job) => job.status === 'unverified')
+					.map((job) => jobLabel(job))
+			);
+		}
+
 		throw new GithubRepairUnavailableError(
 			'no-repairable-job',
 			'every failed or unverified publishing job needs manual review'

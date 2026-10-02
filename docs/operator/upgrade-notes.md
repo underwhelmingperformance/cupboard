@@ -109,6 +109,11 @@ statuses.
   acquisition exits 77 for unavailable or refused authority and 75 for temporary
   failures or malformed token responses. These failures used to exit 1. The
   child's own status and output remain unchanged.
+- Non-interactive deployment without `--yes`, or without `--account` when
+  several accounts are available, exits 2. These missing options used to exit 1.
+- `github check --fix` exits 69 when all unresolved jobs are unverified and no
+  automatic repair is available. It used to exit 1. A failed check still
+  exits 1.
 - OAuth token exchanges that refuse an identity, refresh token or requested
   authority exit 77 even when the endpoint responds with HTTP 400. Malformed
   token requests or grant details exit 2. These failures used to exit 1.
