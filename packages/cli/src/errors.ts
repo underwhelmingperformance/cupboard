@@ -928,6 +928,10 @@ export class UploadVerificationFailedError extends CliError {
 		super(uploadVerificationMessage(status));
 		this.name = 'UploadVerificationFailedError';
 	}
+
+	override get exitCode(): number {
+		return this.status === 'absent' ? transientExitCode : genericExitCode;
+	}
 }
 
 function uploadVerificationMessage(status: UploadVerificationStatus): string {

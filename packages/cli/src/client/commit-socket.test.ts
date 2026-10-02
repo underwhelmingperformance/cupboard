@@ -12,6 +12,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { cliExitCode } from '../cli.ts';
 import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
@@ -328,9 +329,13 @@ describe('runCommitSession', () => {
 		await expect(settledOf(settled)).resolves.toBeUndefined();
 	});
 
-	it.each(['mismatch', 'over-quota', 'absent'] as const)(
-		'rejects a parked upload on a %s verdict',
-		async (status) => {
+	it.each([
+		{ status: 'mismatch', exitCode: 1 },
+		{ status: 'over-quota', exitCode: 1 },
+		{ status: 'absent', exitCode: 75 }
+	] as const)(
+		'rejects a parked upload on a $status verdict with exit $exitCode',
+		async ({ status, exitCode }) => {
 			const socket = new FakeCommitSocket();
 			const session = openSession(socket);
 			const settled = session.commit(target);
@@ -355,11 +360,13 @@ describe('runCommitSession', () => {
 			expect({
 				name: error.name,
 				uploadId: error.uploadId,
-				status: error.status
+				status: error.status,
+				exitCode: cliExitCode(error, 130)
 			}).toStrictEqual({
 				name: 'UploadVerificationFailedError',
 				uploadId,
-				status
+				status,
+				exitCode
 			});
 		}
 	);
