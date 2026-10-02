@@ -51,12 +51,14 @@ session migration or rule-to-session dependency to restore.
 
 ### CI read acquisition
 
-Upgrade the deployed Worker before using this release's
-`cupboard run --github-oidc`. Read acquisition uses a new extension grant at the
-tenant token endpoint; an older Worker returns `unsupported_grant_type`. Setup
-also needs this release's CLI for OIDC-backed configuration. Public read-only
-jobs continue to run anonymously without a matching CI trust rule or
-`id-token: write`.
+Deploy this release's Workers before switching callers to this release's
+reusable publishing workflows or `actions/setup`, or using
+`cupboard run --github-oidc`. Setup requests OIDC read access for a new cache or
+a private cache or reuse view without a static credential. Read acquisition uses
+a new extension grant at the tenant token endpoint; an older Worker returns
+`unsupported_grant_type`. Setup also needs this release's CLI for OIDC-backed
+configuration. Existing public read-only jobs continue to run anonymously
+without a matching CI trust rule or `id-token: write`.
 
 Custom jobs that read private caches through GitHub OIDC must pass the setup
 outputs `read-session-target`, `read-session-view` and `read-session-caches` to
@@ -81,6 +83,11 @@ authority. Temporary probe failures still exit 75.
   `id-token: write` permission, and a control trust rule that gives the workflow
   the wildcard grant. See [Updating from CI](./upgrading.md#updating-from-ci).
   In a terminal, `init` signs you in as the admin when it needs to.
+- Without an interactive terminal, `init` requires `--cache` and `--access`
+  together or neither, even when updating a deployment that already has tenants.
+  An update job that supplied only `--access` now exits 2 before deploying.
+  Remove both options when the job does not create the first tenant, or supply
+  both. See [The first tenant][first-tenant].
 - Moving a deployment to a new URL, including adding a first custom domain,
   needs an admin token for the new URL. After a move, runs with `--github-oidc`
   request the new URL as their audience, so pass `--audience` with the old URL
@@ -92,6 +99,8 @@ authority. Temporary probe failures still exit 75.
 - If the control Worker of a claimed deployment was deleted, `init` can't update
   the deployment until you redeploy the control Worker with Wrangler. See
   [If the control Worker was deleted](./deploying.md#if-the-control-worker-was-deleted).
+
+[first-tenant]: ./deploying.md#the-first-tenant
 
 ### Claiming a new deployment
 
@@ -120,8 +129,12 @@ authority. Temporary probe failures still exit 75.
   Use `cupboard deployment status` and `cupboard deployment resume` from the
   same release as the deployed control Worker. The `--output-mode json` output
   of both commands changes: the `deployment-status` result has `transitions`,
-  `unrecognised` and `required` in place of `phase`, and both results contain
-  the new status fields below.
+  `unrecognised` and `required` in place of `phase`. Both `deployment-status`
+  and `deployment-readiness` include the new status fields below. Their
+  `current` field now reports the server build's final local step; `required`
+  specifies the step used for the readiness counts. Previously, `current`
+  reported the step requested by the CLI. Counts still include both active and
+  suspended tenants, as they did in v0.0.35.
 - Tenants now finish their migration work on their own after one wake. The
   deploy and `cupboard deployment resume` wake them once and wait while any of
   them is making progress, and the hourly cron job wakes the stalled ones again.
@@ -148,6 +161,15 @@ These changes affect scripts that check the CLI's exit status or parse its text
 output. [Scripting the CLI](../reference/cli-scripting.md) lists the exit
 statuses.
 
+- Terminal output and GitHub log groups, annotations and result rows now go to
+  standard error. Scripts that parse results should use `--output-mode json` and
+  read standard error, or use `--result-file`. `pubkey` and `config` still write
+  their data to standard output, as do `--help` and `--version`. `run` still
+  forwards its child's streams directly.
+- Prompts require terminal mode and terminals on both standard input and
+  standard error. Capturing standard output still permits prompts; redirecting
+  standard error disables them. `CI=true` also disables prompts. See
+  [Confirmation prompts][confirmation-prompts].
 - `cupboard run` exits 127 for a missing child executable. GitHub OIDC
   acquisition exits 77 for unavailable or refused authority and 75 for temporary
   failures or malformed token responses. These failures used to exit 1. The
@@ -180,6 +202,25 @@ statuses.
   rule with a pinned subject as `<grants> <issuer> · <subject> aud=<audience>`.
   Read `--output-mode json` if a script parses the list.
 
+[confirmation-prompts]: ../reference/cli-scripting.md#confirmation-prompts
+
+### JSON result compatibility
+
+`control-oidc-trust list` can include unreadable entries in its
+`oidc-trust-rules` result. Each has only `id`, `disabled` and
+`unreadable: true`; it has no `issuer`, `claims` or `permittedGrants`. Check
+`unreadable` before reading those fields.
+
+The `attestation-verification` result from `attest verify` adds
+`trust.acceptingRoot` to each verified bundle. The `github-setup` result can
+include a `pull-request cache access` step when existing pull-request caches
+have a different access mode from the selected mode.
+
+Grant objects also support the `cupboard_view` type and the
+`cache:content-read`, `view:content-read`, `tenant:read-quota` and
+`tenant:set-quota` actions. Update consumers that validate grant types, actions
+or result fields against a fixed list.
+
 ### Adding trust rules from a file
 
 - `cupboard control-oidc-trust add` takes the whole rule from `--from-file`,
@@ -198,15 +239,41 @@ specifies `public` or `private`. Existing caches keep their access, and an
 explicit mode that disagrees with an existing cache fails.
 
 The earlier flake workflow created private pull-request caches when
-`fallback_read_user` was supplied. If the tenant's default cache is public and
-your caller relied on that behaviour, set `cache-access-mode: private` in the
-reusable workflow. The reuse view must use the same access as those caches. See
-[Private caches in CI][private-caches-ci] for configuring access and OIDC reads.
+`fallback_read_user` was supplied, and public caches otherwise:
+
+- With a public default cache, set `cache-access-mode: private` if the caller
+  previously used the read credential to select private pull-request caches.
+- With a private default cache, set `cache-access-mode: public` if the caller
+  previously omitted the credential to select public pull-request caches.
+
+`github setup --read-user` no longer selects private access for the reuse view.
+Pass `--cache-access-mode public` or `--cache-access-mode private` to select
+access for new pull-request caches and the view; without it, setup uses the
+default cache's access. Use the same mode in the reusable workflow. Existing
+caches and views are not changed automatically. Resolve any access mismatch
+before running setup again. See [Private caches in CI][private-caches-ci].
 
 Custom jobs that use `actions/setup` can continue to pass
 `provision-cache-access`; it is a deprecated alias for `cache-access-mode`.
 
 [private-caches-ci]: ../ci/private-caches.md#choose-the-cache-access
+
+### Static read secrets in the flake workflow
+
+The flake workflow accepts `read_user` and `read_password` as its default static
+read credential pair, and `private_substituters` as a list of additional private
+cache URLs with complete URL credentials. A private reuse view needs the tenant
+read credential. `destination_read_user` and `destination_read_password` still
+override the pair for the destination cache.
+
+`fallback_read_user` and `fallback_read_password` remain deprecated aliases for
+`read_user` and `read_password`. Supply both members of each pair or neither.
+When both pairs are supplied, their usernames and passwords must match or the
+workflow fails during input validation. Migrate callers to the `read_*` pair.
+See [Optional static read credentials][static-read-secrets] for the current
+inputs and examples.
+
+[static-read-secrets]: ../ci/private-caches.md#optional-static-read-credentials
 
 ### Choosing what CI builds and publishes
 

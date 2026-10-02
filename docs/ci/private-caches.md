@@ -12,10 +12,12 @@ from publication.
 
 For the `pull-request-and-branch` preset, a new pull-request cache inherits the
 tenant's default cache access. Set `cache-access-mode: private` when the default
-cache is public but pull-request caches should be private. An existing cache
-keeps its access; an explicit mode that disagrees with it fails. The reuse view
-must have the same access as the pull-request caches. Adding or removing a
-secret does not change these access modes.
+cache is public but pull-request caches should be private, or
+`cache-access-mode: public` when the default is private but pull-request caches
+should be public. An existing cache keeps its access; an explicit mode that
+disagrees with it fails. The reuse view must have the same access as the
+pull-request caches. Adding or removing a secret does not change these access
+modes.
 
 ```yaml
 jobs:
@@ -38,10 +40,13 @@ cupboard github setup https://cupboard.example.workers.dev/t/acme \
 ```
 
 `github setup` configures the reuse view and trust rules for the selected
-access. If a view or pull-request cache already exists with different access,
-the command reports the mismatch instead of changing it. To change a cache, use
-`cupboard cache set-access`. To replace a view, pass its full definition to
-`cupboard reuse-view set`, including its selector and current priority:
+access. Without `--cache-access-mode`, it uses the default cache's access.
+`--read-user` and `--read-password` authenticate metadata queries and do not
+select access. If a view or pull-request cache already exists with different
+access, the command reports the mismatch instead of changing it. To change a
+cache, use `cupboard cache set-access`. To replace a view, pass its full
+definition to `cupboard reuse-view set`, including its selector and current
+priority:
 
 ```sh
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \

@@ -411,7 +411,9 @@ only for the admin.
   default cache. `--cache` and `--access` answer these questions in advance.
 - Without a terminal, `init` creates the first tenant only from `--cache` and
   `--access`, on a deployment that already has an admin. It refuses either
-  option without the other. If the slug is taken, it exits with an error.
+  option without the other before deploying, including on update runs when a
+  tenant already exists. Pass both options or omit both. If the slug is taken,
+  it exits with an error.
 - A first deploy without a terminal has no admin, so it ignores both options,
   and warns about them before it changes anything.
 
