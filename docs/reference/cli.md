@@ -453,21 +453,23 @@ Options:
   --tlog-threshold <count>                 Require this many Rekor transparency-log entries. Defaults to the Sigstore verifier policy, which requires one. A value of 0 requires no Rekor entry for any trusted root, but the verifier still checks every Rekor entry that the bundle contains. Pass 0 for a bundle without a Rekor entry, such as a bundle that `actions/attest` signed with the `tsa-only` profile, or a bundle from GitHub's Sigstore instance. A bundle from GitHub's instance also needs `--ctlog-threshold 0`. A verified signed timestamp is still required.
   --ctlog-threshold <count>                Require this many signed certificate timestamps from certificate-transparency logs. Defaults to the Sigstore verifier policy, which requires one. A value of 0 requires no signed certificate timestamp, but only for a trusted root that lists no certificate-transparency log, such as the root for GitHub's Sigstore instance. A root that lists a certificate-transparency log still requires a signed certificate timestamp, so 0 is rejected when every root lists such a log. The verifier still checks every signed certificate timestamp that the signing certificate contains. A bundle from GitHub's instance also needs `--tlog-threshold 0`.
   --timestamp-threshold <count>            Require this many verified signed timestamps. Defaults to the Sigstore verifier policy.
-  --certificate-identity <identity>        identity that the signing certificate must have exactly (cannot be used with --certificate-identity-regex)
-  --certificate-identity-regex <regex>     regular expression that the signing certificate's identity must match (cannot be used with --certificate-identity)
-  --certificate-oidc-issuer <issuer>       OIDC issuer that the signing certificate must have exactly (cannot be used with --certificate-oidc-issuer-regex)
-  --certificate-oidc-issuer-regex <regex>  regular expression that the signing certificate's OIDC issuer must match (cannot be used with --certificate-oidc-issuer)
+  --certificate-identity <identity>        identity that the signing certificate must have exactly (required unless --certificate-identity-regex is supplied; the two options conflict)
+  --certificate-identity-regex <regex>     regular expression that the signing certificate's identity must match (required unless --certificate-identity is supplied; the two options conflict)
+  --certificate-oidc-issuer <issuer>       OIDC issuer that the signing certificate must have exactly (required unless --certificate-oidc-issuer-regex is supplied; the two options conflict)
+  --certificate-oidc-issuer-regex <regex>  regular expression that the signing certificate's OIDC issuer must match (required unless --certificate-oidc-issuer is supplied; the two options conflict)
   -h, --help                               display help for command
 
 Examples:
   # Verify local bundle files against an expected NAR hash
   cupboard attest verify ./app.sigstore.json \
-    --nar-hash sha256:... --predicate-type https://slsa.dev/provenance/v1
+    --nar-hash sha256:... --predicate-type https://slsa.dev/provenance/v1 \
+    --certificate-identity "$identity" --certificate-oidc-issuer "$issuer"
 
   # Verify the bundles that a cache has for a store path
   cupboard attest verify --url https://cupboard.example.workers.dev/t/acme \
     --store-path-hash <hash> --trust-cache-pubkey \
-    --predicate-type https://slsa.dev/provenance/v1
+    --predicate-type https://slsa.dev/provenance/v1 \
+    --certificate-identity "$identity" --certificate-oidc-issuer "$issuer"
 
   # GitHub's Sigstore instance creates no Rekor entry, and its trusted
   # root lists no certificate-transparency log. Verify a bundle from that
@@ -476,6 +478,7 @@ Examples:
   gh attestation trusted-root > github-trusted-roots.jsonl
   cupboard attest verify ./app.sigstore.json --nar-hash sha256:... \
     --predicate-type https://slsa.dev/provenance/v1 \
+    --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" \
     --trusted-root github-trusted-roots.jsonl \
     --tlog-threshold 0 --ctlog-threshold 0
 ```

@@ -19,6 +19,8 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { cliExitCode } from '../cli.ts';
+
 import {
 	RemoteAttestationBundleDigestMismatchError,
 	RemoteAttestationBundleSizeMismatchError,
@@ -44,6 +46,52 @@ const verifierThresholds = {
 	ctlogThreshold: 3,
 	timestampThreshold: 4
 };
+
+describe('remote verification trust options', () => {
+	it.each([
+		{
+			options: {},
+			message:
+				'Remote verification requires --trusted-public-key or --trust-cache-pubkey'
+		},
+		{
+			options: { trustedPublicKey: 'example:invalid', trustCachePubkey: true },
+			message: 'Pass only one of --trusted-public-key or --trust-cache-pubkey'
+		}
+	])('rejects $options before fetching cache content', async (scenario) => {
+		const requests: string[] = [];
+		let failure: unknown;
+		try {
+			await verifyRemoteAttestations(
+				{
+					url: new URL('https://cupboard.example.workers.dev/t/acme'),
+					cache: { kind: 'default' },
+					storePathHash,
+					predicateType,
+					certificateIdentity: 'alice@example.test',
+					certificateOidcIssuer: 'https://issuer.test',
+					...scenario.options
+				},
+				{
+					fetch: (input) => {
+						requests.push(
+							input instanceof Request ? input.url : input.toString()
+						);
+						return Promise.resolve(new Response(undefined, { status: 404 }));
+					}
+				}
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect({
+			status: cliExitCode(failure, 130),
+			message: failure instanceof Error ? failure.message : undefined,
+			requests
+		}).toStrictEqual({ status: 2, message: scenario.message, requests: [] });
+	});
+});
 
 interface Ed25519KeyPair {
 	readonly privateKey: CryptoKey;
