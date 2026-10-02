@@ -195,10 +195,14 @@ export function substituterClientOver(
 	substitution: NixSubstitutionSettings,
 	transfer: NixFileTransferSettings,
 	dependencies: NixConfigEnvironment,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	shouldRequirePublicNar?: boolean
 ): SubstituterClient {
 	const proxied = proxiedFetch(dependencies.env);
 	const reach = {
+		...(shouldRequirePublicNar !== undefined && {
+			requirePublicNar: shouldRequirePublicNar
+		}),
 		storeDirectory: directories.storeDirectory,
 		stateDirectory: directories.stateDirectory,
 		openStore: openLocalStoreDatabase,
@@ -261,6 +265,10 @@ function localStoreOver(
  * Controls a daemon-backed store opened for one operation.
  */
 export interface NixDaemonClientOptions {
+	/**
+	 * Require anonymous narinfo and NAR access for direct substitution evidence.
+	 */
+	readonly requirePublicNar?: boolean;
 	/**
 	 * Execute builds in this store without using configured remote builders.
 	 */
@@ -397,7 +405,8 @@ export function createAvailabilityStoreClient(
 		substitution,
 		config.fileTransfer,
 		dependencies,
-		options.signal
+		options.signal,
+		options.requirePublicNar
 	);
 
 	if (backend.backend === 'ssh-ng') {

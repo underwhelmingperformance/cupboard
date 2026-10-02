@@ -15,6 +15,7 @@ import { translateRpcError } from './client/rpc-errors.ts';
 import { GithubRateLimitError } from './commands/oidc-trust/github.ts';
 import {
 	authExitCode,
+	BuildCommandFailedError,
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
 	CheckDiscrepanciesError,
@@ -40,6 +41,11 @@ function expectCommanderError(value: unknown): asserts value is CommanderError {
 describe('cliExitCode', () => {
 	it.each([
 		{ name: 'an abort', error: new CliAbortError(), expected: abortExitCode },
+		{
+			name: 'an ordinary Nix build child exit',
+			error: new BuildCommandFailedError(23, undefined, 23),
+			expected: 23
+		},
 		{
 			name: 'a usage error',
 			error: new InvalidCacheNameError('Bad/Name'),

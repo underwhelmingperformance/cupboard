@@ -84,6 +84,15 @@ export class BuildInstallablesMissingError extends UsageError {
 	}
 }
 
+export class BuildPublicationUrlMissingError extends UsageError {
+	constructor() {
+		super(
+			'Set publication-url when substituter is leave so the destination cache is excluded from external availability'
+		);
+		this.name = 'BuildPublicationUrlMissingError';
+	}
+}
+
 export class BuildInstallableInvalidError extends UsageError {
 	constructor(public readonly installables: readonly string[]) {
 		super(

@@ -519,6 +519,9 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
+      undici:
+        specifier: ^8.11.2
+        version: 8.11.2
       vitest:
         specifier: 'catalog:'
         version: 4.1.11(@types/node@25.9.8)(msw@3.0.1(@types/node@25.9.8)(supports-color@10.2.2)(typescript@6.0.3)(vite@8.3.0(@types/node@25.9.8)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.1)))(vite@8.3.0(@types/node@25.9.8)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.1))

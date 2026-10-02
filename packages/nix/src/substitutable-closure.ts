@@ -88,9 +88,11 @@ export interface SubstitutableClosureQueries {
  * failure stops the walk. A `served` result counts every accepted offer once
  * and sums its download and NAR sizes.
  *
- * The walk reads metadata only and never fetches a NAR. It observes aborts
- * between pages; in-flight queries finish before the current page stops.
- * The caller selects both the substituters and the offer-acceptance policy.
+ * The walk reads local metadata and asks the supplied offer query for each
+ * path. That query may also verify access to NAR bytes. The walk observes
+ * aborts between pages; in-flight queries finish before the current page
+ * stops. The caller selects both the substituters and the offer-acceptance
+ * policy.
  */
 export async function resolveSubstitutableClosure(
 	root: StorePathString,

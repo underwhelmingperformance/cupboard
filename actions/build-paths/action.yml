@@ -11,9 +11,9 @@ inputs:
     default: 'true'
   publication-url:
     description: >-
-      Destination tenant or cache URL. With `substituter: leave`, this keeps
-      paths from the destination and its tenant reuse views selected for
-      publication. Supply this when the destination is a configured substituter.
+      Destination tenant or cache URL. Required with `substituter: leave` so
+      paths from the destination and its tenant reuse views remain selected for
+      publication.
     required: false
   cupboard-path:
     description: Path to the cupboard executable when OIDC read access is used.

@@ -43,6 +43,7 @@
 		"miniflare": "catalog:",
 		"msw": "^3.0.1",
 		"typescript": "catalog:",
+		"undici": "^8.11.2",
 		"vitest": "catalog:"
 	},
 	"engines": {
