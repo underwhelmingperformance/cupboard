@@ -7,12 +7,11 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
@@ -78,8 +77,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 22,
-			largeBacklogCost: 22
+			emptyBacklogCost: 27,
+			largeBacklogCost: 27
 		});
 	});
 
@@ -95,8 +94,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 10,
-			largeBacklogCost: 10
+			smallBacklogCost: 15,
+			largeBacklogCost: 15
 		});
 	});
 
@@ -156,8 +155,8 @@ describe('upload negotiation cost', () => {
 		const sparseDue = await reconcileCost();
 
 		expect({ smallDeferred, largeDeferred, sparseDue }).toStrictEqual({
-			smallDeferred: 10,
-			largeDeferred: 10,
+			smallDeferred: 15,
+			largeDeferred: 15,
 			sparseDue: 2
 		});
 	});
@@ -188,6 +187,91 @@ async function seedNarInfoDeletions(
 // These entrypoints bypass `fetch`; each must retain its explicit cost meter.
 describe('maintenance pass cost', () => {
 	beforeEach(resetTestServer);
+
+	it.each([200, 2000])(
+		'retires %i legacy authorities and expired successor envelopes in bounded pages',
+		async (count) => {
+			await initialise();
+			await runInDurableObject(currentServer(), (instance, state) => {
+				for (let index = 0; index < count; index += 1) {
+					const id = `legacy-${String(index).padStart(3, '0')}`;
+					state.storage.sql.exec(
+						"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) VALUES (?, ?, 0, 'owner', 'alice', '[{\"type\":\"cupboard_wildcard\"}]', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+						id,
+						id
+					);
+					state.storage.sql.exec(
+						"INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at) VALUES (?, ?, 0, 'hash', '2026-01-01T00:00:00.000Z')",
+						id,
+						id
+					);
+					instance.context.db
+						.insert(schema.refreshTokenMembers)
+						.values({
+							id,
+							familyId: 'live',
+							generation: index,
+							credentialHash: 'hash',
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+							successorEnvelope: 'encrypted-authority',
+							successorExpiresAt: isoTimestampSchema.parse(
+								'1970-01-01T00:01:00.000Z'
+							)
+						})
+						.run();
+				}
+			});
+			const { cost, remaining } = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const setAlarm = vi
+						.spyOn(state.storage, 'setAlarm')
+						.mockResolvedValue();
+
+					try {
+						const cost = await maintenancePassCost('garbage-collection', () =>
+							underOneUnitOfWork(() => instance.runGarbageCollection())
+						);
+						return {
+							cost,
+							remaining: {
+								families: state.storage.sql
+									.exec<{ count: number }>(
+										'SELECT count(*) AS count FROM refresh_token_family'
+									)
+									.one().count,
+								members: state.storage.sql
+									.exec<{ count: number }>(
+										'SELECT count(*) AS count FROM refresh_token_member'
+									)
+									.one().count,
+								envelopes: state.storage.sql
+									.exec<{ count: number }>(
+										'SELECT count(*) AS count FROM refresh_session_member WHERE successor_envelope IS NOT NULL'
+									)
+									.one().count
+							}
+						};
+					} finally {
+						setAlarm.mockRestore();
+					}
+				}
+			);
+			expect({
+				remaining,
+				isLogged: cost.isLogged,
+				withinBudget: cost.rowsRead + cost.rowsWritten <= 25_000
+			}).toStrictEqual({
+				remaining: {
+					families: count - 128,
+					members: count - 128,
+					envelopes: count - 128
+				},
+				isLogged: true,
+				withinBudget: true
+			});
+		}
+	);
 
 	const passes = [
 		{
@@ -249,8 +333,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 187,
-			largeBacklogCost: 187
+			smallBacklogCost: 214,
+			largeBacklogCost: 214
 		});
 	});
 
@@ -260,12 +344,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 183,
+				rowsRead: 205,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 183,
+				rowsRead: 205,
 				usesIndex: true,
 				sorts: false
 			}
@@ -302,8 +386,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 179,
-			largeBacklogCost: 179
+			smallBacklogCost: 206,
+			largeBacklogCost: 206
 		});
 	});
 
@@ -334,8 +418,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 811, rowsWritten: 131 },
-			largeBacklog: { rowsRead: 811, rowsWritten: 131 }
+			smallBacklog: { rowsRead: 838, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 838, rowsWritten: 131 }
 		});
 	});
 
@@ -358,8 +442,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 195,
-			largeBacklogCost: 195
+			smallBacklogCost: 222,
+			largeBacklogCost: 222
 		});
 	});
 });
@@ -461,9 +545,6 @@ async function seedRefreshTokenFamilies(
 						id,
 						activeMemberId,
 						generation: 0,
-						ruleId: trustRuleIdSchema.parse('rule'),
-						subject: oidcSubjectSchema.parse('subject'),
-						grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
 						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 						expiresAt: isoTimestampSchema.parse(expiresAt)
 					})
@@ -474,7 +555,7 @@ async function seedRefreshTokenFamilies(
 						id: activeMemberId,
 						familyId: id,
 						generation: 0,
-						secretHash: 'hash',
+						credentialHash: 'hash',
 						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 					})
 					.run();
@@ -497,9 +578,6 @@ async function seedExpiredRefreshFamily(
 				id: label,
 				activeMemberId,
 				generation: activeGeneration,
-				ruleId: trustRuleIdSchema.parse('rule'),
-				subject: oidcSubjectSchema.parse('subject'),
-				grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
 				createdAt: isoTimestampSchema.parse('2019-01-01T00:00:00.000Z'),
 				expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
 			})
@@ -513,7 +591,7 @@ async function seedExpiredRefreshFamily(
 			   CROSS JOIN digits AS hundreds
 			   CROSS JOIN digits AS thousands
 			 )
-			 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+			 INSERT INTO refresh_session_member (id, family_id, generation, credential_hash, created_at)
 			 SELECT printf('%s-%d', ?, value), ?, value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
 			 FROM generations
 			 WHERE value < ?`,

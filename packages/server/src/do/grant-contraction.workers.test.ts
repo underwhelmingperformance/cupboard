@@ -2,10 +2,7 @@ import {
 	currentLocalStep,
 	expansionLocalStep
 } from '@cupboard/protocol/deployment';
-import {
-	authorizationDetailsSchema,
-	storedPermittedGrantsSchema
-} from '@cupboard/protocol/grants';
+import { storedPermittedGrantsSchema } from '@cupboard/protocol/grants';
 import { runInDurableObject } from 'cloudflare:test';
 import { sql } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -84,7 +81,7 @@ describe('local grant contraction', () => {
 
 describe('writes across local grant contraction', () => {
 	beforeEach(resetTestServer);
-	it('canonicalises a prepared rule and refresh family at the write after contraction', async () => {
+	it('canonicalises a prepared rule at the write after contraction', async () => {
 		await recordTransition('cache-identity', 'expanded');
 		await bootstrap();
 		const result = await runInDurableObject(
@@ -94,34 +91,16 @@ describe('writes across local grant contraction', () => {
 				const rule = await spelling.permittedGrantsJson(
 					storedPermittedGrantsSchema.parse(JSON.parse(selectorGrant))
 				);
-				const grants = authorizationDetailsSchema.parse([
-					{
-						type: 'cupboard_cache',
-						actions: ['upload:commit'],
-						cache: { kind: 'named', name: 'ci' }
-					}
-				]);
-				const family = await spelling.authorizationDetailsJson(grants);
 				await recordTransition('cache-identity', 'complete');
 				await instance.reportLocalStep(currentLocalStep);
 				const writtenRule: unknown = JSON.parse(
 					spelling.permittedGrantsForWrite(rule)
 				);
-				const writtenFamily: unknown = JSON.parse(
-					spelling.authorizationDetailsForWrite(family)
-				);
-				return { rule: writtenRule, family: writtenFamily };
+				return { rule: writtenRule };
 			}
 		);
 		expect(result).toStrictEqual({
-			rule: storedPermittedGrantsSchema.parse(JSON.parse(scopeGrant)),
-			family: [
-				{
-					type: 'cupboard_cache',
-					actions: ['upload:commit'],
-					cache: { kind: 'named', name: 'ci' }
-				}
-			]
+			rule: storedPermittedGrantsSchema.parse(JSON.parse(scopeGrant))
 		});
 	});
 	it.each(['insert', 'update'] as const)(

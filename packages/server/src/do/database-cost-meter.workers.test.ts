@@ -163,7 +163,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 22,
+			rowsRead: 27,
 			rowsWritten: 7
 		});
 	});
@@ -197,7 +197,7 @@ describe('db cost meter', () => {
 			status: negotiate?.status,
 			rowsRead: negotiate?.rowsRead,
 			rowsWritten: negotiate?.rowsWritten
-		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 22, rowsWritten: 9 });
+		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 27, rowsWritten: 9 });
 	});
 
 	it('logs the cost line with a 500 status when the request fails', async () => {
@@ -236,7 +236,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 22,
+			rowsRead: 27,
 			rowsWritten: 0
 		});
 	});

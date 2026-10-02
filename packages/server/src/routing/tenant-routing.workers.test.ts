@@ -1,7 +1,6 @@
 import {
 	issuedAccessTokenType,
 	oidcIssuerSchema,
-	oidcSubjectSchema,
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
@@ -15,7 +14,6 @@ import { z } from 'zod';
 
 import { sha256Hex } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
-import { ownerRuleId } from '../do/context.ts';
 import { decodeInboundClaims } from '../oidc/oidc.ts';
 import {
 	adminGrants,
@@ -76,9 +74,6 @@ async function seedRefreshFamily(): Promise<RefreshFixture> {
 		id: familyId,
 		activeMemberId: memberId,
 		generation: 0,
-		ruleId: ownerRuleId,
-		subject: oidcSubjectSchema.parse('route-test'),
-		grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
 		createdAt,
 		expiresAt
 	} as const satisfies typeof schema.refreshTokenFamilies.$inferInsert;
@@ -86,7 +81,7 @@ async function seedRefreshFamily(): Promise<RefreshFixture> {
 		id: memberId,
 		familyId,
 		generation: 0,
-		secretHash: await sha256Hex(secret),
+		credentialHash: await sha256Hex(secret),
 		createdAt
 	} as const satisfies typeof schema.refreshTokenMembers.$inferInsert;
 

@@ -1,11 +1,16 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
+import { base64ToBytes } from '@cupboard/nix-store/encoding';
 import {
 	cacheNameSchema,
 	type CacheScope,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import { type PermittedGrant } from '@cupboard/protocol/grants';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import {
+	type PermittedGrant,
+	storedPermittedGrantsSchema
+} from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	oidcAudienceSchema,
@@ -37,6 +42,11 @@ import {
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds
 } from '../auth/auth.ts';
+import {
+	RefreshCredential,
+	refreshCredentialMaxBytes,
+	refreshPolicyIdentity
+} from '../auth/refresh-credential.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
 	cacheIdentities,
@@ -69,7 +79,6 @@ import {
 	provisionNamedTenant,
 	putTestCache,
 	readFetch,
-	recordTransition,
 	resetTestServer,
 	testPushId,
 	underOneUnitOfWork,
@@ -1875,6 +1884,161 @@ async function staleRefreshOutcome(refreshToken: string): Promise<{
 describe('refresh grant', () => {
 	beforeEach(resetTestServer);
 
+	it('issues client-contained refresh authority with only replay metadata in active storage', async () => {
+		const subject = await installTrustedIdp('admin');
+		const response = await exchange(subject);
+		const parts = response.refresh_token?.split('.') ?? [];
+		expect(parts).toEqual([
+			expect.any(String),
+			expect.any(String),
+			expect.any(String)
+		]);
+		const encodedPayload = (parts[2] ?? '')
+			.replaceAll('-', '+')
+			.replaceAll('_', '/');
+		const payloadJson = new TextDecoder().decode(base64ToBytes(encodedPayload));
+		const payload: unknown = JSON.parse(payloadJson);
+		const stored = await runInDurableObject(currentServer(), (instance) => ({
+			tenant: instance.context.requireTenant(),
+			families: instance.context.db.select().from(refreshTokenFamilies).all(),
+			members: instance.context.db.select().from(refreshTokenMembers).all()
+		}));
+		const family = stored.families[0];
+		if (family === undefined) {
+			throw new Error('Expected a refresh family');
+		}
+		const identity = Object.fromEntries(
+			Object.entries(decodeJwt(subject)).filter(
+				([key, value]) => typeof value === 'string' || key === 'aud'
+			)
+		);
+		expect({
+			payload,
+			familyFields: Object.keys(family).toSorted(byCodeUnit),
+			memberFields: Object.keys(stored.members[0] ?? {}).toSorted(byCodeUnit)
+		}).toStrictEqual({
+			payload: {
+				purpose: 'cupboard-refresh',
+				version: 1,
+				tenant: stored.tenant,
+				familyId: family.id,
+				memberId: family.activeMemberId,
+				generation: 0,
+				expiresAt: family.expiresAt,
+				identity,
+				grants: [{ type: 'cupboard_wildcard' }]
+			},
+			familyFields: [
+				'activeMemberId',
+				'createdAt',
+				'expiresAt',
+				'generation',
+				'id'
+			],
+			memberFields: [
+				'createdAt',
+				'credentialHash',
+				'familyId',
+				'generation',
+				'id',
+				'successorEnvelope',
+				'successorExpiresAt'
+			]
+		});
+	});
+
+	it.each(['rotation', 'retry'] as const)(
+		'renews %s under equivalent current policy after the original rule is removed',
+		async (mode) => {
+			const original = await exchange(await installTrustedIdp('admin'));
+			if (mode === 'retry') {
+				const first = await refresh(original.refresh_token ?? '');
+				expect(first.status).toBe(200);
+				await first.text();
+			}
+			await runInDurableObject(currentServer(), async (instance) => {
+				const trust = new OidcTrustService(
+					instance.context,
+					new TenantIdentityService(instance.context)
+				);
+				const existing = trust.getRule(trustRuleIdSchema.parse('admin-rule'));
+				trust.removeRule(existing.id);
+				await trust.addRule({
+					issuer: existing.issuer,
+					audience: existing.audience,
+					claims: existing.claims,
+					permittedGrants: existing.permittedGrants
+				});
+			});
+			const renewed = await refresh(original.refresh_token ?? '');
+			expect({
+				status: renewed.status,
+				grants: tokenResponseSchema.safeParse(await renewed.json()).data
+					?.authorization_details
+			}).toStrictEqual({
+				status: 200,
+				grants: [{ type: 'cupboard_wildcard' }]
+			});
+		}
+	);
+
+	it('redeems and rotates an issued credential near the request size limit', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const large = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const credential = RefreshCredential.parse(
+					exchanged.refresh_token ?? ''
+				);
+				if (credential === undefined) {
+					throw new Error('Expected refresh credential');
+				}
+				const member = instance.context.db
+					.select()
+					.from(refreshTokenMembers)
+					.where(eq(refreshTokenMembers.id, credential.id))
+					.get();
+				if (member === undefined) {
+					throw new Error('Expected refresh member');
+				}
+				const authority = await credential.authenticate(
+					member.credentialHash,
+					instance.context.requireTenant()
+				);
+				if (authority === undefined) {
+					throw new Error('Expected authenticated authority');
+				}
+				const large = RefreshCredential.issue({
+					...authority,
+					identity: {
+						...refreshPolicyIdentity(authority.identity),
+						extraClaim: 'x'.repeat(48_000)
+					}
+				});
+				instance.context.db
+					.update(refreshTokenMembers)
+					.set({ credentialHash: await sha256Hex(large.value) })
+					.where(eq(refreshTokenMembers.id, member.id))
+					.run();
+				return large.value;
+			}
+		);
+		const response = await refresh(large);
+		const result = tokenResponseSchema.parse(await response.json());
+		expect({
+			status: response.status,
+			nearLimit: large.length > refreshCredentialMaxBytes - 1500,
+			withinLimit:
+				(result.refresh_token?.length ?? Infinity) <= refreshCredentialMaxBytes,
+			grants: result.authorization_details
+		}).toStrictEqual({
+			status: 200,
+			nearLimit: true,
+			withinLimit: true,
+			grants: [{ type: 'cupboard_wildcard' }]
+		});
+	});
+
 	it('rotates an admin refresh token and rejects its replay', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
@@ -1908,19 +2072,14 @@ describe('refresh grant', () => {
 		});
 	});
 
-	// The cache-scope migration discards every refresh-token family, because a
-	// stored family carries the grants it was issued with and those name their
-	// cache in the retired grammar. A client presenting a token from before the
-	// cutover must therefore be told its grant is invalid, which is the signal
-	// that sends it back to the identity-token exchange.
-	it('refuses a refresh token whose family the cutover discarded', async () => {
+	it('refuses a refresh token whose replay state was removed', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
-			state.storage.sql.exec('DELETE FROM refresh_token_member');
-			state.storage.sql.exec('DELETE FROM refresh_token_family');
+			state.storage.sql.exec('DELETE FROM refresh_session_member');
+			state.storage.sql.exec('DELETE FROM refresh_session_family');
 		});
 
 		expect(await staleRefreshOutcome(refreshToken)).toStrictEqual({
@@ -2093,7 +2252,7 @@ describe('refresh grant', () => {
 		const firstResponse = await refresh(original);
 		const first = tokenResponseSchema.parse(await firstResponse.json());
 		const [originalId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -2132,7 +2291,7 @@ describe('refresh grant', () => {
 		const firstResponse = await refresh(original);
 		const first = tokenResponseSchema.parse(await firstResponse.json());
 		const [originalId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -2350,12 +2509,20 @@ describe('refresh grant', () => {
 			authorization_details: JSON.stringify(narrowed)
 		});
 		const matched = tokenResponseSchema.parse(await matchedResponse.json());
+		const implicitResponse = await refresh(original);
+		const implicitRetry = tokenResponseSchema.parse(
+			await implicitResponse.json()
+		);
 		const families = await refreshTokenRows();
 
 		expect({
 			mismatched: {
 				status: mismatched.status,
 				problem: oauthErrorShape(await mismatched.json()).problem
+			},
+			implicitRetry: {
+				refreshToken: implicitRetry.refresh_token,
+				grants: implicitRetry.authorization_details
 			},
 			matched: {
 				refreshToken: matched.refresh_token,
@@ -2369,6 +2536,7 @@ describe('refresh grant', () => {
 				status: StatusCodes.BAD_REQUEST,
 				problem: 'stale-refresh-token'
 			},
+			implicitRetry: { refreshToken: first.refresh_token, grants: narrowed },
 			matched: {
 				refreshToken: first.refresh_token,
 				grants: narrowed
@@ -2428,7 +2596,7 @@ describe('refresh grant', () => {
 		const second = tokenResponseSchema.parse(await secondResponse.json());
 		const active = second.refresh_token ?? '';
 		const [activeMemberId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(active.split('.'));
 		const beforeReplay = {
 			families: await refreshTokenRows(),
@@ -2485,7 +2653,7 @@ describe('refresh grant', () => {
 			(_instance, state) =>
 				state.storage.sql
 					.exec(
-						'SELECT generation, successor_envelope FROM refresh_token_member ORDER BY generation'
+						'SELECT generation, successor_envelope FROM refresh_session_member ORDER BY generation'
 					)
 					.toArray()
 		);
@@ -2568,10 +2736,10 @@ describe('refresh grant', () => {
 			);
 			const successor = refreshed.refresh_token ?? '';
 			const [originalId, originalSecret] = z
-				.tuple([z.uuid(), z.string().min(1)])
+				.tuple([z.uuid(), z.string().min(1), z.string()])
 				.parse(original.split('.'));
 			const [successorId, successorSecret] = z
-				.tuple([z.uuid(), z.string().min(1)])
+				.tuple([z.uuid(), z.string().min(1), z.string()])
 				.parse(successor.split('.'));
 			const hash = async (secret: string): Promise<string> =>
 				[
@@ -2585,19 +2753,19 @@ describe('refresh grant', () => {
 					.map((byte) => byte.toString(16).padStart(2, '0'))
 					.join('');
 			const [originalHash, successorHash] = await Promise.all([
-				hash(originalSecret),
-				hash(successorSecret)
+				hash(original),
+				hash(successor)
 			]);
 			const persisted = await runInDurableObject(
 				currentServer(),
 				(_instance, state) => ({
 					families: state.storage.sql
 						.exec(
-							'SELECT id, active_member_id, generation, rule_id, subject, created_at, expires_at FROM refresh_token_family'
+							'SELECT id, active_member_id, generation, created_at, expires_at FROM refresh_session_family'
 						)
 						.toArray(),
 					members: state.storage.sql
-						.exec('SELECT * FROM refresh_token_member ORDER BY generation')
+						.exec('SELECT * FROM refresh_session_member ORDER BY generation')
 						.toArray(),
 					legacy: {
 						live: state.storage.sql
@@ -2612,6 +2780,7 @@ describe('refresh grant', () => {
 				...persisted,
 				members: persisted.members.map((member) => ({
 					...member,
+					successor_expires_at: member.successor_expires_at ?? undefined,
 					successor_envelope: typeof member.successor_envelope
 				}))
 			};
@@ -2622,7 +2791,7 @@ describe('refresh grant', () => {
 				containsSuccessorSecret: serialised.includes(successorSecret),
 				envelopeFormat:
 					typeof envelope === 'string' &&
-					/^[\da-f]{24}\.[\da-f]{160}$/u.test(envelope)
+					/^[\da-f]{24}\.(?:[\da-f]{2}){17,}$/u.test(envelope)
 			}).toStrictEqual({
 				persisted: {
 					families: [
@@ -2630,8 +2799,6 @@ describe('refresh grant', () => {
 							id: persisted.families[0]?.id,
 							active_member_id: successorId,
 							generation: 1,
-							rule_id: 'admin-rule',
-							subject: 'alice',
 							created_at: '2026-01-01T00:00:00.000Z',
 							expires_at: '2026-01-31T00:00:00.000Z'
 						}
@@ -2641,16 +2808,18 @@ describe('refresh grant', () => {
 							id: originalId,
 							family_id: persisted.families[0]?.id,
 							generation: 0,
-							secret_hash: originalHash,
+							credential_hash: originalHash,
 							successor_envelope: 'string',
+							successor_expires_at: '2026-01-01T00:01:00.000Z',
 							created_at: '2026-01-01T00:00:00.000Z'
 						},
 						{
 							id: successorId,
 							family_id: persisted.families[0]?.id,
 							generation: 1,
-							secret_hash: successorHash,
+							credential_hash: successorHash,
 							successor_envelope: 'object',
+							successor_expires_at: undefined,
 							created_at: '2026-01-01T00:00:00.000Z'
 						}
 					],
@@ -2720,9 +2889,9 @@ describe('refresh grant', () => {
 	it('revokes a rapidly rotated family at its member bound', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
-		const original = exchanged.refresh_token ?? '';
+		let original = exchanged.refresh_token ?? '';
 		const [originalMemberId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -2737,12 +2906,12 @@ describe('refresh grant', () => {
 			const activeGeneration = maxRefreshTokenFamilyMembers - 2;
 
 			state.storage.sql.exec(
-				'UPDATE refresh_token_family SET generation = ? WHERE id = ?',
+				'UPDATE refresh_session_family SET generation = ? WHERE id = ?',
 				activeGeneration,
 				family.id
 			);
 			state.storage.sql.exec(
-				'UPDATE refresh_token_member SET generation = ? WHERE id = ?',
+				'UPDATE refresh_session_member SET generation = ? WHERE id = ?',
 				activeGeneration,
 				originalMemberId
 			);
@@ -2755,7 +2924,7 @@ describe('refresh grant', () => {
 				   CROSS JOIN digits AS hundreds
 				   CROSS JOIN digits AS thousands
 				 )
-				 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+				 INSERT INTO refresh_session_member (id, family_id, generation, credential_hash, created_at)
 				 SELECT printf('spent-%d', value), ?, value, lower(hex(randomblob(32))), ?
 				 FROM generations
 				 WHERE value < ?`,
@@ -2765,6 +2934,35 @@ describe('refresh grant', () => {
 			);
 		});
 
+		original = await runInDurableObject(currentServer(), async (instance) => {
+			const credential = RefreshCredential.parse(original);
+			const member = instance.context.db
+				.select()
+				.from(refreshTokenMembers)
+				.where(eq(refreshTokenMembers.id, originalMemberId))
+				.get();
+			if (credential === undefined || member === undefined) {
+				throw new Error('Expected refresh member');
+			}
+			const authority = await credential.authenticate(
+				member.credentialHash,
+				instance.context.requireTenant()
+			);
+			if (authority === undefined) {
+				throw new Error('Expected authenticated refresh authority');
+			}
+			const updated = RefreshCredential.issue({
+				...authority,
+				identity: refreshPolicyIdentity(authority.identity),
+				generation: maxRefreshTokenFamilyMembers - 2
+			});
+			instance.context.db
+				.update(refreshTokenMembers)
+				.set({ credentialHash: await sha256Hex(updated.value) })
+				.where(eq(refreshTokenMembers.id, originalMemberId))
+				.run();
+			return updated.value;
+		});
 		const lastAllowedResponse = await refresh(original);
 		const lastAllowed = tokenResponseSchema.parse(
 			await lastAllowedResponse.json()
@@ -2863,7 +3061,7 @@ describe('refresh grant', () => {
 			])
 			.parse(outcomes);
 		const [firstId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(first.refreshToken.split('.'));
 		const families = await refreshTokenRows();
 		const members = await refreshTokenMemberRows();
@@ -3078,81 +3276,199 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('refuses a refresh completed after its trust rule is removed', async () => {
-		const subjectToken = await installTrustedIdp('admin');
-		const exchanged = await exchange(subjectToken);
-		const ruleId = trustRuleIdSchema.parse('admin-rule');
+	it.each([
+		'removed',
+		'equivalent replacement',
+		'broader current tier',
+		'narrower current tier'
+	] as const)(
+		'checks current policy when %s during signing',
+		async (change) => {
+			const subjectToken = await installTrustedIdp('admin', {
+				claims: { team: 'engineering' }
+			});
+			const exchanged = await exchange(subjectToken, ciRequest);
+			const ruleId = trustRuleIdSchema.parse('admin-rule');
 
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const signingStarted = Promise.withResolvers<undefined>();
+					const releaseSigning = Promise.withResolvers<undefined>();
+					const tenantIdentity = new TenantIdentityService(instance.context);
+					const authKeys = new AuthKeysService(
+						instance.context,
+						tenantIdentity
+					);
+					const oidcTrustService = new OidcTrustService(
+						instance.context,
+						tenantIdentity
+					);
+					const key = await authKeys.activeAuthKey();
+
+					vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
+						signingStarted.resolve(undefined);
+						await releaseSigning.promise;
+
+						return key;
+					});
+
+					const service = new TokenExchangeService(
+						instance.context,
+						authKeys,
+						oidcTrustService
+					);
+					const parameters = new URLSearchParams({
+						grant_type: refreshTokenGrantType,
+						refresh_token: exchanged.refresh_token ?? ''
+					});
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: parameters.toString()
+					});
+					const refreshing = service.handleToken(rootLogger(), request);
+
+					await signingStarted.promise;
+
+					try {
+						const existing = oidcTrustService.getRule(ruleId);
+						oidcTrustService.removeRule(ruleId);
+						if (change !== 'removed') {
+							await oidcTrustService.addRule({
+								issuer: existing.issuer,
+								audience: existing.audience,
+								claims:
+									change === 'broader current tier'
+										? {}
+										: change === 'narrower current tier'
+											? { ...existing.claims, team: 'engineering' }
+											: existing.claims,
+								permittedGrants:
+									change === 'narrower current tier'
+										? storedPermittedGrantsSchema.parse(
+												trustClassGrants['release-write']
+											)
+										: existing.permittedGrants
+							});
+						}
+						if (change === 'narrower current tier') {
+							await oidcTrustService.addRule({
+								issuer: existing.issuer,
+								audience: existing.audience,
+								claims: {},
+								permittedGrants: storedPermittedGrantsSchema.parse(
+									trustClassGrants.write
+								)
+							});
+						}
+					} finally {
+						releaseSigning.resolve(undefined);
+					}
+
+					let result: { readonly kind: 'refused' | 'issued' };
+
+					try {
+						await refreshing;
+						result = { kind: 'issued' };
+					} catch (error) {
+						expect(error).toBeInstanceOf(StaleRefreshTokenError);
+						result = { kind: 'refused' };
+					}
+
+					const database = drizzle(state.storage, {
+						schema: { refreshTokenFamilies, refreshTokenMembers }
+					});
+
+					return {
+						result,
+						familyGenerations: database
+							.select()
+							.from(refreshTokenFamilies)
+							.all()
+							.map((family) => family.generation),
+						memberGenerations: database
+							.select()
+							.from(refreshTokenMembers)
+							.all()
+							.map((member) => member.generation)
+					};
+				}
+			);
+
+			const isPermitted =
+				change === 'equivalent replacement' ||
+				change === 'broader current tier';
+			expect(outcome).toStrictEqual({
+				result: { kind: isPermitted ? 'issued' : 'refused' },
+				familyGenerations: isPermitted ? [1] : [],
+				memberGenerations: isPermitted ? [0, 1] : []
+			});
+		}
+	);
+
+	it('does not create a fresh refresh session when current policy permits only CI authority', async () => {
+		const subject = await installTrustedIdp('admin');
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				const signingStarted = Promise.withResolvers<undefined>();
-				const releaseSigning = Promise.withResolvers<undefined>();
-				const tenantIdentity = new TenantIdentityService(instance.context);
-				const authKeys = new AuthKeysService(instance.context, tenantIdentity);
-				const oidcTrustService = new OidcTrustService(
-					instance.context,
-					tenantIdentity
-				);
-				const key = await authKeys.activeAuthKey();
-
-				vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
-					signingStarted.resolve(undefined);
-					await releaseSigning.promise;
-
-					return key;
-				});
-
-				const service = new TokenExchangeService(
-					instance.context,
-					authKeys,
-					oidcTrustService
-				);
-				const parameters = new URLSearchParams({
-					grant_type: refreshTokenGrantType,
-					refresh_token: exchanged.refresh_token ?? ''
-				});
-				const request = new Request(new URL('/token', currentOrigin()), {
-					method: 'POST',
-					headers: { 'content-type': 'application/x-www-form-urlencoded' },
-					body: parameters.toString()
-				});
-				const refreshing = service.handleToken(rootLogger(), request);
-
-				await signingStarted.promise;
-
+				const identity = new TenantIdentityService(instance.context);
+				const keys = new AuthKeysService(instance.context, identity);
+				const trust = new OidcTrustService(instance.context, identity);
+				const service = new TokenExchangeService(instance.context, keys, trust);
+				const activeAuthKey = keys.activeAuthKey.bind(keys);
+				const spy = vi
+					.spyOn(keys, 'activeAuthKey')
+					.mockImplementation(async () => {
+						const existing = trust.getRule(
+							trustRuleIdSchema.parse('admin-rule')
+						);
+						trust.removeRule(existing.id);
+						await trust.addRule({
+							issuer: existing.issuer,
+							audience: existing.audience,
+							claims: existing.claims,
+							permittedGrants: storedPermittedGrantsSchema.parse(
+								trustClassGrants.write
+							)
+						});
+						return activeAuthKey();
+					});
 				try {
-					oidcTrustService.removeRule(ruleId);
+					const endpoint = new URL('/token', currentOrigin());
+					const request = new Request(endpoint, {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: tokenExchangeGrantType,
+							subject_token: subject,
+							subject_token_type: subjectTokenTypeIdToken,
+							authorization_details: JSON.stringify(ciRequest)
+						}).toString()
+					});
+					const response = await service.handleToken(rootLogger(), request);
+					const result = tokenResponseSchema.parse(await response.json());
+					return {
+						status: response.status,
+						refresh: result.refresh_token,
+						grants: result.authorization_details,
+						families: drizzle(state.storage, {
+							schema: { refreshTokenFamilies }
+						})
+							.select()
+							.from(refreshTokenFamilies)
+							.all()
+					};
 				} finally {
-					releaseSigning.resolve(undefined);
+					spy.mockRestore();
 				}
-
-				let result: { readonly kind: 'refused' | 'issued' };
-
-				try {
-					await refreshing;
-					result = { kind: 'issued' };
-				} catch (error) {
-					expect(error).toBeInstanceOf(StaleRefreshTokenError);
-					result = { kind: 'refused' };
-				}
-
-				const database = drizzle(state.storage, {
-					schema: { refreshTokenFamilies, refreshTokenMembers }
-				});
-
-				return {
-					result,
-					families: database.select().from(refreshTokenFamilies).all(),
-					members: database.select().from(refreshTokenMembers).all()
-				};
 			}
 		);
-
 		expect(outcome).toStrictEqual({
-			result: { kind: 'refused' },
-			families: [],
-			members: []
+			status: 200,
+			refresh: undefined,
+			grants: ciRequest,
+			families: []
 		});
 	});
 
@@ -3214,7 +3530,7 @@ describe('refresh grant', () => {
 				.insert(refreshTokenMembers)
 				.values({
 					...blocking,
-					secretHash: '0'.repeat(64),
+					credentialHash: '0'.repeat(64),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
@@ -3419,7 +3735,7 @@ describe('refresh grant', () => {
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
 		const [memberId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(refreshToken.split('.'));
 		const forged = await staleRefreshOutcome(`${memberId}.deadbeef`);
 		const valid = await refresh(refreshToken);
@@ -3578,17 +3894,17 @@ describe('refresh grant', () => {
 					])
 					.parse(database.select().from(refreshTokenFamilies).all());
 				state.storage.sql.exec(
-					"UPDATE refresh_token_family SET expires_at = '2019-01-01T00:00:00.000Z', generation = ? WHERE id = ?",
+					"UPDATE refresh_session_family SET expires_at = '2019-01-01T00:00:00.000Z', generation = ? WHERE id = ?",
 					spentMembers,
 					largeFamily.id
 				);
 				state.storage.sql.exec(
-					'UPDATE refresh_token_member SET generation = ? WHERE id = ?',
+					'UPDATE refresh_session_member SET generation = ? WHERE id = ?',
 					spentMembers,
 					largeFamily.activeMemberId
 				);
 				state.storage.sql.exec(
-					"UPDATE refresh_token_family SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+					"UPDATE refresh_session_family SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
 					smallFamily.id
 				);
 				state.storage.sql.exec(
@@ -3600,7 +3916,7 @@ describe('refresh grant', () => {
 					   CROSS JOIN digits AS hundreds
 					   CROSS JOIN digits AS thousands
 					 )
-					 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+					 INSERT INTO refresh_session_member (id, family_id, generation, credential_hash, created_at)
 					 SELECT printf('gc-spent-%d', value), ?, value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
 					 FROM generations
 					 WHERE value < ?`,
@@ -3690,104 +4006,6 @@ describe('refresh grant', () => {
 			families: [],
 			members: [],
 			continuation: undefined
-		});
-	});
-});
-
-function registerCaches(): Promise<void> {
-	return runInDurableObject(currentServer(), (instance) => {
-		instance.context.cacheRepository.resolveOrCreate(
-			{ kind: 'named', name: cacheNameSchema.parse('ci') },
-			'private'
-		);
-		instance.context.cacheRepository.resolveOrCreate(
-			{ kind: 'named', name: cacheNameSchema.parse('docs') },
-			'public'
-		);
-	});
-}
-
-// The grants of every refresh-token family as the object stores them.
-function familyGrants(): Promise<unknown[]> {
-	return runInDurableObject(currentServer(), (_instance, state) => {
-		const rows = state.storage.sql
-			.exec<{ grants_json: string }>(
-				'SELECT grants_json FROM refresh_token_family'
-			)
-			.toArray();
-
-		return rows.map((row) => {
-			const stored: unknown = JSON.parse(row.grants_json);
-
-			return stored;
-		});
-	});
-}
-
-describe('stored spelling of a refresh-token family', () => {
-	beforeEach(resetTestServer);
-	afterEach(() => {
-		vi.unstubAllGlobals();
-	});
-
-	const grants = [
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: { kind: 'default' }
-		},
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: namedCache('ci'),
-			root: 'pr-1'
-		},
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: namedCache('docs')
-		}
-	];
-	const selectorSpelling = [
-		{ type: 'cupboard_cache', actions: ['upload:commit'], cache: '_default' },
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: '_private-ci',
-			root: 'pr-1'
-		},
-		{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'docs' }
-	];
-
-	it.each([
-		{
-			name: 'the selector spelling until `cache-identity` is complete',
-			state: 'expanded' as const,
-			stored: selectorSpelling
-		},
-		{
-			name: 'the scope spelling once `cache-identity` is complete',
-			state: 'complete' as const,
-			stored: grants
-		}
-	])("records a family's grants in $name", async ({ state, stored }) => {
-		await recordTransition('cache-identity', state);
-		const subjectToken = await installTrustedIdp('admin');
-		await registerCaches();
-
-		const exchanged = await exchange(subjectToken, grants);
-		const atIssue = await familyGrants();
-		const refreshed = await refresh(exchanged.refresh_token ?? '');
-		const refreshedBody = tokenResponseSchema.parse(await refreshed.json());
-
-		expect({
-			atIssue,
-			afterRefresh: await familyGrants(),
-			issued: refreshedBody.authorization_details
-		}).toStrictEqual({
-			atIssue: [stored],
-			afterRefresh: [stored],
-			issued: grants
 		});
 	});
 });
