@@ -64,6 +64,14 @@ and uses the routed URL.
    belongs to someone else. `--headless` uses the device flow. If the sign-in
    returns another identity, `init` stops before it changes anything.
 
+After a successful admin sign-in, a refused token exchange or a token without
+the wildcard grant stops the update. `init` prints the deployment's refusal or
+the missing grant and directs you to correct the admin's control trust rule. See
+[Restoring the admin's wildcard grant][restore-admin-grant]. Temporary exchange
+failures retain their server details and do not prompt another sign-in.
+
+[restore-admin-grant]: ./operators.md#restoring-the-admins-wildcard-grant
+
 Any operator whose control trust rule gives the wildcard grant can upgrade the
 deployment this way, not only the admin. See [Operators](./operators.md).
 
