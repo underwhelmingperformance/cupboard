@@ -259,8 +259,6 @@ export async function runBuildPush(
 	}
 	const mode = await selectBuildPushMode(dependencies.preflight);
 
-	reporter.info(buildPushModeDescription(mode));
-
 	if (mode.kind === 'reconciled-local') {
 		if (options.publicationScope === 'built') {
 			throw new BuiltPublicationObservationUnsupportedError();
@@ -273,6 +271,8 @@ export async function runBuildPush(
 			mode.reason
 		);
 	}
+
+	reporter.info(buildPushModeDescription(mode));
 
 	return runStreamedBuildPush(options, reporter, dependencies, mode.preflight);
 }
@@ -1110,6 +1110,8 @@ async function runReconciledLocalBuildPush(
 	if (invocation.kind !== 'constructed') {
 		throw reason;
 	}
+
+	reporter.info(buildPushModeDescription({ kind: 'reconciled-local', reason }));
 
 	const { build } = invocation;
 	const directory = planInvocationDirectory({
