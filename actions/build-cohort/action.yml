@@ -175,9 +175,8 @@ outputs:
     description:
       Build receipt for actions/attest. On the runner, the action writes it from
       the build that it ran. With a remote store, the receipt lists the paths
-      published from the store, and records build provenance only for the
-      outputs that Nix reports this build produced. Empty when push is false or
-      the cohort has no paths to publish.
+      published from that store without runner-local build provenance. Empty
+      when push is false or the cohort has no paths to publish.
     value: ${{ steps.build-cohort.outputs.receipt-file }}
   out-link-directory:
     description:
