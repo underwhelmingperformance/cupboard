@@ -22,10 +22,10 @@ isn't visible through another.
 ### Nix gets a 404 for a NAR that the narinfo lists
 
 The cache still has a narinfo that records a NAR URL whose file has gone
-missing. Push the path again. The first push can skip the path while the cache
-removes the old narinfo in the background, so push a second time if the path is
-still missing. Other caches that share the NAR keep the old URL until they next
-check the path. See
+missing. Push the path again. Upload negotiation detects the missing NAR and
+requests a replacement in that push. Maintenance rewrites the narinfos in other
+caches that shared the old NAR URL. Those caches can return a NAR 404 until the
+rewrite completes. See
 [When a cache has lost a NAR](./ci/how-it-works.md#when-a-cache-has-lost-a-nar).
 
 ### "lacks a signature by a trusted key"
@@ -238,9 +238,8 @@ Each of these must be true. Check them in order:
 The plan job checks the target manifest before anything is built. These are the
 usual problems:
 
-- One root would keep too many paths. A root can keep at most 149 paths, and all
-  of an aggregate target's components share one root. Split the aggregate into
-  smaller ones.
+- An aggregate has more than 149 components. The planner limits each aggregate
+  to 149 components. Split the aggregate into smaller ones.
 - A target has no `rootDrvPath`. Every target needs one unless it's best-effort,
   and that includes each component of an aggregate. With a remote store,
   best-effort targets need one too.
