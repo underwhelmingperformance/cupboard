@@ -33,8 +33,10 @@ import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
+import { cliExitCode } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
+	AdminApiTransientError,
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
 	CacheInfoTimeoutError,
@@ -46,6 +48,8 @@ import {
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
 	ReadCredentialPairError,
+	ScopeForbiddenError,
+	SessionRejectedError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
 
@@ -1340,79 +1344,139 @@ describe('runGithubSetup', () => {
 		});
 	});
 
-	it('reports the applied configuration when a superseded removal fails', async () => {
-		const results: ResultRow[][] = [];
-		const removalFailure = new Error('remove failed');
-		const { ui } = fakeCliUi({
-			interactive: true,
-			multiSelects: [['previous-branch', 'previous-pr']]
-		});
-		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
-			rules: [
-				storedRule('previous-pr', previousPrBody),
-				storedRule('previous-branch', previousBranchBody)
-			]
-		});
-		const failingClient: GithubSetupClient = {
-			...client,
-			oidcTrust: {
-				...client.oidcTrust,
-				remove: (input) =>
-					input.id === 'previous-pr'
-						? Promise.reject(removalFailure)
-						: client.oidcTrust.remove(input)
-			}
-		};
-
-		let failure: unknown;
-		try {
-			await runGithubSetup(
-				url,
-				options,
-				{ ...ui, reporter: () => capturingReporter(results) },
-				failingClient,
-				dependencies
-			);
-		} catch (error) {
-			failure = error;
+	it.each([
+		{
+			kind: 'generic',
+			removalFailure: new Error('remove failed'),
+			earlierFailure: undefined,
+			exitCode: 1
+		},
+		{
+			kind: 'temporary',
+			removalFailure: new AdminApiTransientError(503, 'SERVICE_UNAVAILABLE'),
+			earlierFailure: undefined,
+			exitCode: 75
+		},
+		{
+			kind: 'session',
+			removalFailure: new SessionRejectedError(),
+			earlierFailure: undefined,
+			exitCode: 77
+		},
+		{
+			kind: 'scope',
+			removalFailure: new ScopeForbiddenError(),
+			earlierFailure: undefined,
+			exitCode: 77
+		},
+		{
+			kind: 'temporary after generic',
+			removalFailure: new AdminApiTransientError(503, 'SERVICE_UNAVAILABLE'),
+			earlierFailure: new Error('earlier removal failed'),
+			exitCode: 75
+		},
+		{
+			kind: 'scope after generic',
+			removalFailure: new ScopeForbiddenError(),
+			earlierFailure: new Error('earlier removal failed'),
+			exitCode: 77
+		},
+		{
+			kind: 'session after temporary',
+			removalFailure: new SessionRejectedError(),
+			earlierFailure: new AdminApiTransientError(503, 'SERVICE_UNAVAILABLE'),
+			exitCode: 77
 		}
-
-		expectRemovalError(failure);
-		expect({
-			ruleIds: failure.ruleIds,
-			recorded,
-			outcomes: results[0]
-		}).toStrictEqual({
-			ruleIds: ['previous-pr'],
-			recorded: {
-				graceAdds: [],
-				viewSets: [],
-				ruleAdds: [prBody, branchBody],
-				ruleRemoves: ['previous-branch']
-			},
-			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated },
-				{
-					label: 'superseded trust rule previous-branch',
-					value: `removed: main pushes; ${previousWorkflowReference}`
-				},
-				{
-					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}; the removal failed`
+	])(
+		'reports applied configuration and preserves a $kind removal failure',
+		async ({ removalFailure, earlierFailure, exitCode }) => {
+			const results: ResultRow[][] = [];
+			const { ui } = fakeCliUi({
+				interactive: true,
+				multiSelects: [['previous-branch', 'previous-pr']]
+			});
+			const { client, recorded } = setupClient({
+				gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+				views: [
+					{
+						name: 'pull-requests-1234',
+						priority: 50,
+						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
+					}
+				],
+				rules: [
+					storedRule('previous-pr', previousPrBody),
+					storedRule('previous-branch', previousBranchBody)
+				]
+			});
+			const failingClient: GithubSetupClient = {
+				...client,
+				oidcTrust: {
+					...client.oidcTrust,
+					remove: (input) => {
+						if (input.id === 'previous-pr') {
+							return Promise.reject(removalFailure);
+						}
+						if (earlierFailure !== undefined) {
+							return Promise.reject(earlierFailure);
+						}
+						return client.oidcTrust.remove(input);
+					}
 				}
-			]
-		});
-	});
+			};
+
+			let failure: unknown;
+			try {
+				await runGithubSetup(
+					url,
+					options,
+					{ ...ui, reporter: () => capturingReporter(results) },
+					failingClient,
+					dependencies
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expectRemovalError(failure);
+			expect({
+				ruleIds: failure.ruleIds,
+				cause: failure.cause,
+				exitCode: cliExitCode(failure, 130),
+				recorded,
+				outcomes: results[0]
+			}).toStrictEqual({
+				ruleIds:
+					earlierFailure === undefined
+						? ['previous-pr']
+						: ['previous-branch', 'previous-pr'],
+				cause: removalFailure,
+				exitCode,
+				recorded: {
+					graceAdds: [],
+					viewSets: [],
+					ruleAdds: [prBody, branchBody],
+					ruleRemoves: earlierFailure === undefined ? ['previous-branch'] : []
+				},
+				outcomes: [
+					{ label: 'reuse view', value: 'unchanged' },
+					{ label: 'pull-request trust rule', value: ruleCreated },
+					{ label: 'main trust rule', value: ruleCreated },
+					{
+						label: 'superseded trust rule previous-branch',
+						value:
+							earlierFailure === undefined
+								? `removed: main pushes; ${previousWorkflowReference}`
+								: `retained: main pushes; ${previousWorkflowReference}; the removal failed`
+					},
+					{
+						label: 'superseded trust rule previous-pr',
+						value: `retained: pull requests and main pushes; ${previousWorkflowReference}; the removal failed`
+					}
+				]
+			});
+		}
+	);
 
 	it('reports configuration setup would create alongside drift', async () => {
 		const results: ResultRow[][] = [];

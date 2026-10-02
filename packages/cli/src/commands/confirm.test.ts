@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -14,18 +16,22 @@ import {
 	uploadConfirmResponseSchema
 } from '@cupboard/protocol/upload';
 import type { ResultRow } from '@cupboard/reporter';
+import { maxTransientRetries } from '@cupboard/shared/retry';
 import { Command } from 'commander';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
 import { recordingCacheScopedClient } from '../client/cache-scoped.test-support.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
+	AdminApiTransientError,
 	CliAbortError,
 	ConfirmIncompleteError,
-	PathsNotConfirmedError
+	PathsNotConfirmedError,
+	ScopeForbiddenError,
+	SessionRejectedError
 } from '../errors.ts';
 
 import {
@@ -201,55 +207,91 @@ describe('runConfirm', () => {
 		).resolves.toBeUndefined();
 	});
 
-	it('reports the batches that answered when a later batch fails', async () => {
-		const { ui, captured } = fakeCliUi();
-		const storePaths = Array.from(
-			{ length: uploadConfirmMaxPaths + 2 },
-			(_, index) =>
-				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
-		);
-		const rejection = new Error('the second request failed');
-		let requests = 0;
+	it.each([
+		{
+			kind: 'generic',
+			rejection: new Error('the second request failed'),
+			exitCode: 1
+		},
+		{
+			kind: 'temporary',
+			rejection: new AdminApiTransientError(503, 'SERVICE_UNAVAILABLE'),
+			exitCode: 75
+		},
+		{ kind: 'session', rejection: new SessionRejectedError(), exitCode: 77 },
+		{ kind: 'scope', rejection: new ScopeForbiddenError(), exitCode: 77 }
+	])(
+		'reports completed batches and preserves a $kind failure status',
+		async ({ rejection, exitCode }) => {
+			const { ui, captured } = fakeCliUi();
+			const storePaths = Array.from(
+				{ length: uploadConfirmMaxPaths + 2 },
+				(_, index) =>
+					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+			);
+			let requests = 0;
 
-		let error: unknown;
+			let error: unknown;
 
-		try {
-			await runConfirm(defaultCache, storePaths, ui.reporter(), {
-				confirm: recordingCacheScopedClient((input) => {
-					requests += 1;
+			try {
+				await runConfirm(defaultCache, storePaths, ui.reporter(), {
+					confirm: recordingCacheScopedClient((input) => {
+						requests += 1;
 
-					if (requests > 1) {
-						return Promise.reject(rejection);
-					}
+						if (requests > 1) {
+							return Promise.reject(rejection);
+						}
 
-					return Promise.resolve(
-						uploadConfirmResponseSchema.parse({
-							paths: input.storePathHashes.map((storePathHash) => ({
-								storePathHash,
-								confirmed: true,
-								grace: {}
+						return Promise.resolve(
+							uploadConfirmResponseSchema.parse({
+								paths: input.storePathHashes.map((storePathHash) => ({
+									storePathHash,
+									confirmed: true,
+									grace: {}
+								}))
+							})
+						);
+					})
+				});
+			} catch (error_: unknown) {
+				error = error_;
+			}
+
+			expectConfirmIncomplete(error);
+			expect({
+				confirmedBatches: error.confirmedBatches,
+				totalBatches: error.totalBatches,
+				cause: error.cause,
+				exitCode: cliExitCode(error, 130),
+				results: captured.results
+			}).toStrictEqual({
+				confirmedBatches: 1,
+				totalBatches: 2,
+				cause: rejection,
+				exitCode,
+				results: [
+					{
+						kind: 'confirm-paths',
+						data: {
+							paths: storePaths
+								.slice(0, uploadConfirmMaxPaths)
+								.map((storePath) => ({
+									storePathHash: StorePath.hash(storePath),
+									confirmed: true,
+									grace: {}
+								}))
+						},
+						rows: storePaths
+							.slice(0, uploadConfirmMaxPaths)
+							.map((storePath) => ({
+								label: StorePath.hash(storePath),
+								value: 'no cache retention grace configured'
 							}))
-						})
-					);
-				})
+					}
+				]
 			});
-		} catch (error_: unknown) {
-			error = error_;
 		}
-
-		expectConfirmIncomplete(error);
-		expect({
-			confirmedBatches: error.confirmedBatches,
-			totalBatches: error.totalBatches,
-			cause: error.cause,
-			reportedRows: captured.results[0]?.rows.length
-		}).toStrictEqual({
-			confirmedBatches: 1,
-			totalBatches: 2,
-			cause: rejection,
-			reportedRows: uploadConfirmMaxPaths
-		});
-	});
+	);
 
 	it('preserves an abort after reporting batches that already answered', async () => {
 		const { ui, captured } = fakeCliUi();
@@ -328,6 +370,162 @@ describe('runConfirm', () => {
 });
 
 describe('confirm command', () => {
+	it.each([
+		{ status: 403, code: 'FORBIDDEN', exitCode: 77, failedRequests: 1 },
+		{
+			status: 503,
+			code: 'SERVICE_UNAVAILABLE',
+			exitCode: 75,
+			failedRequests: maxTransientRetries + 1
+		}
+	])(
+		'preserves status $exitCode in the real CLI after a later HTTP $status batch fails',
+		async ({ status, code, exitCode, failedRequests }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-confirm-partial-')
+			);
+			const storePaths = Array.from(
+				{ length: uploadConfirmMaxPaths + 1 },
+				(_, index) =>
+					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+			);
+			const confirmed = storePaths
+				.slice(0, uploadConfirmMaxPaths)
+				.map((storePath) => ({
+					storePathHash: StorePath.hash(storePath),
+					confirmed: true,
+					grace: {}
+				}));
+			const calls: { method: string | undefined; url: string | undefined }[] =
+				[];
+			const server = createServer((request, response) => {
+				calls.push({ method: request.method, url: request.url });
+				request.resume();
+				response.writeHead(calls.length === 1 ? 200 : status, {
+					'content-type': 'application/json',
+					'retry-after': '0'
+				});
+				response.end(
+					JSON.stringify(
+						calls.length === 1
+							? { paths: confirmed }
+							: { defined: true, code, status, message: 'later batch refused' }
+					)
+				);
+			});
+			try {
+				await new Promise<void>((resolve) => {
+					server.listen(0, '127.0.0.1', resolve);
+				});
+				const address = server.address();
+				if (address === null || typeof address === 'string') {
+					throw new Error('The fixture did not obtain a TCP port');
+				}
+				const target = `http://127.0.0.1:${String(address.port)}/t/acme`;
+				const payload = Buffer.from(
+					JSON.stringify({ iss: target, aud: target, exp: 4_000_000_000 })
+				).toString('base64url');
+				const tokenDirectory = path.join(directory, 'cupboard', 'tokens');
+				await mkdir(tokenDirectory, { recursive: true });
+				await writeFile(
+					path.join(
+						tokenDirectory,
+						createHash('sha256').update(target).digest('hex')
+					),
+					JSON.stringify({ accessToken: `e30.${payload}.signature` }),
+					{ mode: 0o600 }
+				);
+				const resultFile = path.join(directory, 'result.jsonl');
+				const child = spawn(
+					process.execPath,
+					[
+						'--experimental-transform-types',
+						'--disable-warning=ExperimentalWarning',
+						path.resolve(import.meta.dirname, '../main.ts'),
+						'--output-mode',
+						'json',
+						'--result-file',
+						resultFile,
+						'confirm',
+						target,
+						...storePaths
+					],
+					{
+						env: { ...process.env, CI: 'true', XDG_CONFIG_HOME: directory },
+						detached: true,
+						stdio: ['ignore', 'pipe', 'pipe']
+					}
+				);
+				let isChildClosed = false;
+				const closed = new Promise<void>((resolve) => {
+					child.once('close', () => {
+						isChildClosed = true;
+						resolve();
+					});
+				});
+				onTestFinished(async () => {
+					if (!isChildClosed && child.pid !== undefined) {
+						try {
+							process.kill(-child.pid, 'SIGKILL');
+						} catch (error) {
+							if (
+								!(error instanceof Error) ||
+								!('code' in error) ||
+								error.code !== 'ESRCH'
+							) {
+								throw error;
+							}
+						}
+					}
+					await closed;
+				});
+				let stdout = '';
+				let stderr = '';
+				child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+					stdout += chunk;
+				});
+				child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+					stderr += chunk;
+				});
+				const actualStatus = await new Promise<number | null>(
+					(resolve, reject) => {
+						child.once('error', reject);
+						child.once('close', resolve);
+					}
+				);
+				expect(
+					{
+						status: actualStatus,
+						stdout,
+						result: await readFile(resultFile, 'utf8'),
+						calls
+					},
+					stderr
+				).toStrictEqual({
+					status: exitCode,
+					stdout: '',
+					result: `${JSON.stringify({ kind: 'confirm-paths', data: { paths: confirmed } })}\n`,
+					calls: Array.from({ length: failedRequests + 1 }, () => ({
+						method: 'POST',
+						url: '/t/acme/uploads/confirm'
+					}))
+				});
+			} finally {
+				server.closeAllConnections();
+				await new Promise<void>((resolve, reject) => {
+					server.close((error) => {
+						if (error !== undefined) {
+							reject(error);
+							return;
+						}
+						resolve();
+					});
+				});
+				await rm(directory, { recursive: true, force: true });
+			}
+		},
+		30_000
+	);
 	it.each(['argument', 'file'] as const)(
 		'exits with usage status for an invalid %s store path before requesting OIDC authority',
 		async (source) => {
@@ -359,10 +557,33 @@ describe('confirm command', () => {
 							ACTIONS_ID_TOKEN_REQUEST_URL: '',
 							ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
 						},
-						timeout: 20_000,
+						detached: true,
 						stdio: ['ignore', 'pipe', 'pipe']
 					}
 				);
+				let isChildClosed = false;
+				const closed = new Promise<void>((resolve) => {
+					child.once('close', () => {
+						isChildClosed = true;
+						resolve();
+					});
+				});
+				onTestFinished(async () => {
+					if (!isChildClosed && child.pid !== undefined) {
+						try {
+							process.kill(-child.pid, 'SIGKILL');
+						} catch (error) {
+							if (
+								!(error instanceof Error) ||
+								!('code' in error) ||
+								error.code !== 'ESRCH'
+							) {
+								throw error;
+							}
+						}
+					}
+					await closed;
+				});
 				let stdout = '';
 				let stderr = '';
 				child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
