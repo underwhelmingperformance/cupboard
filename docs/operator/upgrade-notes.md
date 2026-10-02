@@ -48,6 +48,30 @@ refuse retryably while the contract step runs.
 [blocks version rollback]:
   https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/
 
+### Grace defaults for new caches
+
+Deploy the server before using `cupboard cache set-default-grace`,
+`clear-default-grace` or `defaults`. Local migration
+`0070_cache_creation_defaults` adds a tenant-local creation setting. The initial
+setting is no grace, and existing caches keep their current settings.
+
+New caches inherit the setting when creation does not specify grace. This also
+applies to implicit creation by publication, root writes or attestation writes.
+`cache create --grace` overrides the setting for that cache. Older clients that
+explicitly send no grace continue to override the creation default; adopt this
+release's CLI and actions when the default should apply to those callers.
+
+Complete any outstanding legacy retention import before creating caches or
+changing creation defaults. Creation waits for that import even when the
+requested grace is omitted or explicitly disabled, so the import cannot
+overwrite a new cache's selected settings.
+
+Delegated tenant administration needs `cache:defaults-read` to inspect the
+setting and `cache:defaults-update` to change it. Individual cache grants do not
+permit either operation. [Cache creation defaults] describes the commands.
+
+[Cache creation defaults]: ../admin/caches.md#defaults-for-new-caches
+
 ### Refresh credentials
 
 Deploy the server before adopting the new CLI or workflow behaviour. Local

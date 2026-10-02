@@ -2,6 +2,7 @@ import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
+	cacheCreationDefaultsSchema,
 	cacheListInputSchema,
 	cacheListResponseSchema,
 	cachePutBodySchema,
@@ -34,6 +35,18 @@ const namedCacheUpdateSchema = z.intersection(
 );
 
 export const cachesContract = {
+	defaults: {
+		get: baseProcedure
+			.meta({ requires: 'cache:defaults-read', replaySafety: 'replay-safe' })
+			.route({ method: 'GET', path: '/cache-defaults' })
+			.output(cacheCreationDefaultsSchema),
+		set: baseProcedure
+			.meta({ requires: 'cache:defaults-update', replaySafety: 'replay-safe' })
+			.route({ method: 'PUT', path: '/cache-defaults' })
+			.input(cacheCreationDefaultsSchema)
+			.errors(retentionMigrationPendingError)
+			.output(cacheCreationDefaultsSchema)
+	},
 	list: baseProcedure
 		.meta({ requires: 'cache:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/caches' })

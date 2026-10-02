@@ -112,6 +112,11 @@ export const cacheIdentities = sqliteTable(
 
 const initialManagedRetirementCheckAt = isoTimestamp(new Date(0));
 
+export const cacheCreationDefaults = sqliteTable('cache_creation_defaults', {
+	id: integer('id').primaryKey(),
+	graceSeconds: integer('grace_seconds').$type<GraceSeconds>()
+});
+
 export const managedCacheRetirements = sqliteTable(
 	'managed_cache_retirement',
 	{

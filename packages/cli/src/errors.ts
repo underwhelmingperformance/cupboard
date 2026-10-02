@@ -380,6 +380,15 @@ export class CacheTargetConflictError extends CliUsageError {
 	}
 }
 
+export class CacheDefaultsTenantUrlRequiredError extends CliUsageError {
+	constructor() {
+		super(
+			'Cache creation defaults require a tenant URL without a /cache/<name> segment.'
+		);
+		this.name = 'CacheDefaultsTenantUrlRequiredError';
+	}
+}
+
 export class CacheTargetPayloadRequiredError extends CliUsageError {
 	constructor(
 		public readonly target: {

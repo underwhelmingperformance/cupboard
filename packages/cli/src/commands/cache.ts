@@ -11,6 +11,7 @@ import {
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type {
+	CacheCreationDefaults,
 	CacheListEntry,
 	CacheListInput,
 	CacheListResponse,
@@ -47,6 +48,7 @@ import {
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
 import {
+	CacheDefaultsTenantUrlRequiredError,
 	InvalidCachePriorityError,
 	InvalidCacheRetirementChoiceError,
 	NamedCacheTargetRequiredError,
@@ -159,6 +161,56 @@ export function registerCacheCommands(
 			const rpc = cacheRpc(tenantUrl, programOptions);
 
 			await runCacheList(reporter, rpc.caches);
+		});
+
+	cache
+		.command('defaults')
+		.description('Inspect the tenant defaults for newly created caches.')
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
+			const tenantUrl = cacheDefaultsTarget(url);
+			const reporter = commandUi(program, programOptions).reporter();
+			await runCacheCreationDefaults(
+				reporter,
+				cacheRpc(tenantUrl, programOptions).caches.defaults
+			);
+		});
+
+	cache
+		.command('set-default-grace')
+		.description('Set the grace period inherited by newly created caches.')
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.requiredOption(
+			'--grace <duration>',
+			'grace period (e.g. 24h, 0s)',
+			parseGrace
+		)
+		.action(async (url: URL, options: CacheSetGraceOptions) => {
+			const tenantUrl = cacheDefaultsTarget(url);
+			const reporter = commandUi(program, programOptions).reporter();
+			await runCacheCreationDefaults(
+				reporter,
+				cacheRpc(tenantUrl, programOptions).caches.defaults,
+				{
+					grace: { kind: 'duration', graceSeconds: options.grace }
+				}
+			);
+		});
+
+	cache
+		.command('clear-default-grace')
+		.description('Remove the grace default for newly created caches.')
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
+			const tenantUrl = cacheDefaultsTarget(url);
+			const reporter = commandUi(program, programOptions).reporter();
+			await runCacheCreationDefaults(
+				reporter,
+				cacheRpc(tenantUrl, programOptions).caches.defaults,
+				{
+					grace: { kind: 'none' }
+				}
+			);
 		});
 
 	cache
@@ -578,10 +630,9 @@ export async function runCacheCreate(
 					request.rootTtl === undefined
 						? { kind: 'permanent' }
 						: { kind: 'duration', seconds: request.rootTtl },
-				grace:
-					request.grace === undefined
-						? { kind: 'none' }
-						: { kind: 'duration', graceSeconds: request.grace }
+				...(request.grace !== undefined && {
+					grace: { kind: 'duration', graceSeconds: request.grace }
+				})
 			});
 		} catch (error) {
 			if (request.ifAbsent !== true || !isRpcCacheAlreadyExistsError(error)) {
@@ -593,6 +644,30 @@ export async function runCacheCreate(
 	});
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export interface CacheCreationDefaultsClient {
+	get(): Promise<CacheCreationDefaults>;
+	set(configuration: CacheCreationDefaults): Promise<CacheCreationDefaults>;
+}
+
+export async function runCacheCreationDefaults(
+	reporter: Reporter,
+	client: CacheCreationDefaultsClient,
+	configuration?: CacheCreationDefaults
+): Promise<void> {
+	const defaults = await reporter.phase(
+		configuration === undefined
+			? 'Inspecting cache creation defaults'
+			: 'Setting cache creation defaults',
+		() =>
+			configuration === undefined ? client.get() : client.set(configuration)
+	);
+	reporter.result({
+		kind: 'cache-defaults',
+		data: defaults,
+		rows: [{ label: 'New cache grace', value: graceLabel(defaults.grace) }]
+	});
 }
 
 export async function runCacheSetAccess(
@@ -912,6 +987,14 @@ function cacheCommandTarget(url: URL, name: string | undefined) {
 	const urlTarget = cacheTargetFromUrl(url);
 
 	return name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
+}
+
+function cacheDefaultsTarget(url: URL): URL {
+	const target = cacheTargetFromUrl(url);
+	if (target.cache.kind !== 'default') {
+		throw new CacheDefaultsTenantUrlRequiredError();
+	}
+	return target.tenantUrl;
 }
 
 function cacheRpc(tenantUrl: URL, programOptions: ProgramOptions) {

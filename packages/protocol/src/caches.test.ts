@@ -139,8 +139,7 @@ describe('cache schemas', () => {
 			put: {
 				access: 'public',
 				priority: 30,
-				defaultRootRetention: { kind: 'permanent' },
-				grace: { kind: 'none' }
+				defaultRootRetention: { kind: 'permanent' }
 			},
 			updates,
 			remove

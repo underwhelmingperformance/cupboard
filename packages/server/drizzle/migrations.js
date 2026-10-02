@@ -69,6 +69,7 @@ import m0066 from './0066_publication_recovery.sql';
 import m0067 from './0067_refresh_session_authority.sql';
 import m0068 from './0068_protected_inheritance.sql';
 import m0069 from './0069_retry_limits.sql';
+import m0070 from './0070_cache_creation_defaults.sql';
 
 export default {
 	journal,
@@ -142,6 +143,7 @@ export default {
 		m0066,
 		m0067,
 		m0068,
-		m0069
+		m0069,
+		m0070
 	}
 };

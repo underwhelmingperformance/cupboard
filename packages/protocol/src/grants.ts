@@ -55,6 +55,8 @@ export type ViewOperation = z.infer<typeof viewOperationSchema>;
 // issuer. They have no separate resource selector.
 const domainOperationSchema = z.enum([
 	'cache:list',
+	'cache:defaults-read',
+	'cache:defaults-update',
 	'stats:read',
 	'check:run',
 	'verification:run',
@@ -134,6 +136,8 @@ export const operationSchema = z.enum([
 	'cache:retire',
 	'cache:delete',
 	'cache:list',
+	'cache:defaults-read',
+	'cache:defaults-update',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read',

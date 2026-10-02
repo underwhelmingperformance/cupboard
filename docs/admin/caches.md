@@ -40,8 +40,8 @@ These options are optional:
 - `--root-ttl` sets the default TTL of the cache's retention roots: how long a
   root keeps its store paths after it was last set, unless the push that sets it
   chooses its own TTL. `--grace` sets a grace period. See
-  [Retention](./retention.md). If you leave both out, roots never expire and
-  there's no grace period, so store paths are kept until you remove them.
+  [Retention](./retention.md). If you leave both out, roots never expire and the
+  cache inherits the tenant's default grace period for new caches.
 - `--if-absent` makes the command succeed without changing anything if the cache
   already exists. This is useful in scripts.
 
@@ -50,8 +50,38 @@ digits, `.`, `_` and `-`, and must start with a letter or a digit.
 
 You don't have to create a named cache before pushing to it. The first push to a
 cache URL that doesn't exist yet creates the cache, with default settings: the
-same access as the default cache, priority 40, and store paths kept until you
-remove them. Create the cache yourself first if you want different settings.
+same access as the default cache, priority 40, permanent roots, and the tenant's
+default grace period for new caches. Create the cache yourself first if you want
+different settings.
+
+## Defaults for new caches
+
+Set the grace period for caches created from now on, including caches created
+implicitly by PR publication:
+
+```sh
+cupboard cache set-default-grace https://cupboard.example.workers.dev/t/acme \
+  --grace 24h
+cupboard cache defaults https://cupboard.example.workers.dev/t/acme
+```
+
+The initial default is no grace. An explicit `cache create --grace` overrides
+the creation default for that cache. `--grace 0s` gives the cache no additional
+delay before collection. Creation defaults do not change existing caches,
+including the tenant's default cache. Use [the cache's retention settings] to
+change an existing cache.
+
+To remove the creation default:
+
+```sh
+cupboard cache clear-default-grace https://cupboard.example.workers.dev/t/acme
+```
+
+These commands require tenant-domain `cache:defaults-read` or
+`cache:defaults-update` authority, respectively. A grant for an individual cache
+cannot change creation defaults for the tenant.
+
+[the cache's retention settings]: ./retention.md#grace-periods
 
 ## Changing a cache's settings
 

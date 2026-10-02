@@ -21,6 +21,13 @@ export const cacheGraceSchema = z.discriminatedUnion('kind', [
 ]);
 export type CacheGrace = z.output<typeof cacheGraceSchema>;
 
+export const cacheCreationDefaultsSchema = z.strictObject({
+	grace: cacheGraceSchema
+});
+export type CacheCreationDefaults = z.output<
+	typeof cacheCreationDefaultsSchema
+>;
+
 export const rootRetentionOverrideSchema = z.strictObject({
 	rootPrefix: rootNameSchema,
 	retention: cacheRootRetentionSchema
@@ -97,7 +104,7 @@ export const cachePutBodySchema = z.strictObject({
 	access: cacheAccessModeSchema,
 	priority: cachePrioritySchema,
 	defaultRootRetention: cacheRootRetentionSchema.default({ kind: 'permanent' }),
-	grace: cacheGraceSchema.default({ kind: 'none' })
+	grace: cacheGraceSchema.optional()
 });
 export type CachePutBody = z.output<typeof cachePutBodySchema>;
 
