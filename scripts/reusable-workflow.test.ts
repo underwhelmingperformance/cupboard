@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -866,6 +866,83 @@ describe('cohort planning and publication', () => {
 });
 
 describe('attestation', () => {
+	it.each([false, true])(
+		'preserves successive step manifests with shared input directory %s',
+		async (sharedDirectory) => {
+			const source: unknown = parse(
+				await readFile(
+					new URL('../actions/attest/action.yml', import.meta.url),
+					'utf8'
+				)
+			);
+			const action = z
+				.object({ runs: z.object({ steps: stepsSchema }) })
+				.parse(source);
+			const sign = action.runs.steps.find((step) => step.id === 'attest');
+			if (sign?.run === undefined) {
+				throw new Error('The attestation action has no signing script');
+			}
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-manifests-')
+			);
+			const manifests: string[] = [];
+
+			try {
+				for (const step of ['first step', 'second step']) {
+					const subjectsDirectory = path.join(
+						directory,
+						sharedDirectory ? 'inputs' : step
+					);
+					await mkdir(subjectsDirectory, { recursive: true });
+					const result = await execFileAsync(
+						'bash',
+						[
+							'-c',
+							String.raw`
+node() {
+  while (( $# )); do
+    if [[ "$1" == --bundles-file ]]; then
+      mkdir -p "$(dirname "$2")"
+      printf '%s\n' "$MARKER" > "$2"
+      printf '%s\n' "$2"
+      break
+    fi
+    shift
+  done
+}
+${sign.run}`
+						],
+						{
+							env: {
+								...process.env,
+								...Object.fromEntries(
+									Object.keys(sign.env ?? {}).map((key) => [key, ''])
+								),
+								GITHUB_ACTION_PATH: directory,
+								RUNNER_TEMP: directory,
+								CHECKSUMS_FILE: path.join(subjectsDirectory, `${step}.txt`),
+								MARKER: step
+							}
+						}
+					);
+					manifests.push(result.stdout.trim());
+				}
+				const contents = await Promise.all(
+					manifests.map((manifest) => readFile(manifest, 'utf8'))
+				);
+				expect({
+					distinctManifests: new Set(manifests).size,
+					contents
+				}).toStrictEqual({
+					distinctManifests: 2,
+					contents: ['first step\n', 'second step\n']
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
 	it('passes the resolver build checksums to the signer', async () => {
 		const source: unknown = parse(
 			await readFile(

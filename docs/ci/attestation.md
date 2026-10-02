@@ -276,12 +276,14 @@ where it may publish records. For `tsa-only` and `rekor-and-tsa` bundles, it
 then checks each bundle's timestamp or log entry, signature, predicate type and
 subjects before writing the bundle.
 
-By default, the action writes bundles beside the checksums file under
-`$RUNNER_TEMP/cupboard-attestations/`. The manifest is
-`$RUNNER_TEMP/cupboard-attest/bundles.txt`; `bundles-file` returns its path and
-lists all bundle files, one per line. Pass `bundles-file` to
-`actions/attest-attach`, and run that step only when `bundles-file` is not
-empty. [Writing your own publishing job][custom-jobs] shows the steps.
+By default, each action invocation writes subject files in a unique directory
+under `$RUNNER_TEMP/cupboard-attestations/`. Each signing step writes its
+bundles, signed checksums and `bundles.txt` manifest in a separate unique
+directory under `$RUNNER_TEMP/`, including when explicit subject files share a
+directory. `bundles-file` returns the manifest path and lists all bundle files,
+one per line. Pass `bundles-file` to `actions/attest-attach`, and run that step
+only when `bundles-file` is not empty. [Writing your own publishing
+job][custom-jobs] shows the steps.
 
 [custom-jobs]: ./custom-jobs.md
 

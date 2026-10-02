@@ -315,6 +315,32 @@ describe('resolveAttestSignInputs', () => {
 		).toThrow(new PredicateSourceConflictError());
 	});
 
+	it('writes default signing outputs in the selected output directory', () => {
+		expect(
+			resolveAttestSignInputs({
+				checksumsFile: '/runner/temp/inputs/subjects.txt',
+				builtChecksumsFile: '/runner/temp/inputs/built-subjects.txt',
+				outputDirectory: '/runner/temp/signing/first',
+				inlineBundles: 'false',
+				githubToken: 'token',
+				destinationAccess: 'public'
+			})
+		).toStrictEqual({
+			receiptFile: '',
+			shouldEmitInlineBundles: false,
+			checksumsFile: '/runner/temp/inputs/subjects.txt',
+			builtChecksumsFile: '/runner/temp/inputs/built-subjects.txt',
+			signedChecksumsFile: '/runner/temp/signing/first/signed-subjects.txt',
+			predicateFile: '',
+			predicateType: '',
+			githubToken: 'token',
+			policy: publicPolicy,
+			bundleFile: '/runner/temp/signing/first/provenance.sigstore.json',
+			originBundleFile: '/runner/temp/signing/first/build-origin.sigstore.json',
+			bundlesFile: '/runner/temp/signing/first/bundles.txt'
+		});
+	});
+
 	it('defaults both bundle paths to the checksums file directory', () => {
 		expect(
 			resolveAttestSignInputs({
