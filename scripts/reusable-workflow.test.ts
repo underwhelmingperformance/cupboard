@@ -1780,8 +1780,7 @@ describe('release cache publication', () => {
 				cache: 'releases',
 				'trusted-public-key':
 					'cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU=',
-				root: 'github:${{ github.repository }}/${{ github.event.release.tag_name }}',
-				'cupboard-version': '${{ github.event.release.tag_name }}'
+				root: 'github:${{ github.repository }}/${{ github.event.release.tag_name }}'
 			},
 			failFast: false,
 			tolerance: undefined,
@@ -1791,6 +1790,31 @@ describe('release cache publication', () => {
 });
 
 describe('binary release', () => {
+	it('checks the entered version before any platform builds begin', async () => {
+		const workflow = await loadWorkflow(releaseWorkflow);
+		const validate = workflow.jobs.validate;
+		const steps = validate?.steps ?? [];
+		const guardIndex = steps.findIndex(
+			(step) => step.name === 'Check release preparation'
+		);
+		const installIndex = steps.findIndex(
+			(step) => step.run === 'pnpm install --frozen-lockfile'
+		);
+		expect({
+			check: steps[guardIndex],
+			bootstrapBeforeCheck: installIndex !== -1 && installIndex < guardIndex,
+			buildNeeds: jobNeeds(workflow, 'build')
+		}).toStrictEqual({
+			check: {
+				name: 'Check release preparation',
+				env: { INPUT_VERSION: '${{ steps.version.outputs.version }}' },
+				run: 'node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/release.ts check-preparation\n'
+			},
+			bootstrapBeforeCheck: true,
+			buildNeeds: ['validate']
+		});
+	});
+
 	it('builds a release binary on the runner for every supported Nix system', async () => {
 		const workflow = await loadWorkflow(releaseWorkflow);
 		const build = workflow.jobs.build;
