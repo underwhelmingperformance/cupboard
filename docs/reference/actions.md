@@ -275,7 +275,7 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 | --- | --- | --- |
 | `inline-bundles` | `true` | Control how bundle lists are returned. `true` writes inline bundle outputs as well as files. `false` returns files without inline bundle outputs. Use `false` for large bundle lists. |
 | `receipt-file` | **required** | Receipt written earlier in the job by actions/build-paths or by a cohort build in the flake publish workflow. |
-| `checksums-file` |  | Where to write the checksums of every accepted receipt path. Defaults to a file under RUNNER_TEMP. |
+| `checksums-file` |  | Where to write the checksums of every accepted receipt path. Defaults to a file in a unique directory under RUNNER_TEMP. |
 | `built-checksums-file` |  | Where to write the checksums of the paths that the job built. The build-provenance attestations cover these paths. Defaults to a file next to the checksums file. |
 | `predicate-file` |  | Where to write the SCAI reproduction report. Empty when no local verification rebuild succeeded. Defaults to a file next to the checksums file. |
 | `url` | **required** | Tenant URL of the destination. Before signing, the action checks every path against the narinfo in this tenant's cache. |
