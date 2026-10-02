@@ -1100,29 +1100,42 @@ export class AttestationsService {
 		}
 	}
 
-	private async prepareBundleLocked(
+	private async groupedUploadLocked(
 		cacheScope: CacheScope,
 		uploadId: UploadId,
-		storePathHashes: readonly StorePathHash[]
-	): Promise<PreparedAttestationBundle> {
-		const { cache: pendingCache, row: pending } = await this.pendingUpload(
-			cacheScope,
-			uploadId
-		);
+		expected?: PendingAttestationUpload
+	): Promise<PendingAttestationUpload> {
+		const upload = await this.pendingUpload(cacheScope, uploadId);
 		const cache = this.context.cacheRepository.require(cacheScope);
-		if (cache.id !== pendingCache.id || pending.storePathHash !== null) {
+		if (
+			cache.id !== upload.cache.id ||
+			upload.row.storePathHash !== null ||
+			(expected !== undefined &&
+				(cache.id !== expected.cache.id ||
+					cache.generation !== expected.cache.generation ||
+					upload.row.digest !== expected.row.digest ||
+					upload.row.r2Key !== expected.row.r2Key ||
+					upload.row.createdAt !== expected.row.createdAt))
+		) {
 			throw new AttestationUploadNotFoundError(uploadId);
 		}
+		return { cache, row: upload.row };
+	}
+
+	private async eligibleBundlePaths(
+		cache: ResolvedCache,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<readonly (typeof schema.narInfos.$inferSelect)[]> {
 		const rows = this.narInfoObjects.narInfoRowsFor(cache, [
 			...new Set(storePathHashes)
 		]);
 		const versions = await authorisedNarInfoVersions(
 			this.context.d1,
 			this.context.requireTenant(),
-			cacheScope,
+			cache.scope,
 			storePathHashes
 		);
-		const eligible = rows.filter((row) => {
+		return rows.filter((row) => {
 			const version = versions.get(row.storePathHash);
 			return (
 				version?.generation === row.generation &&
@@ -1130,45 +1143,52 @@ export class AttestationsService {
 				version.cacheGeneration === cache.generation
 			);
 		});
+	}
+
+	private async reusableBundleLocked(
+		upload: PendingAttestationUpload,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<PreparedAttestationBundle | undefined> {
+		const { cache, row: pending } = upload;
+		const uploadId = pending.id;
 		const known =
 			pending.validatedBundleJson === null
 				? undefined
 				: validatedAttestationBundleSchema.parse(
 						JSON.parse(pending.validatedBundleJson)
 					);
-		if (known !== undefined) {
-			for (const row of eligible) {
-				this.requirePendingSubject(uploadId, row);
-			}
-			if (eligible.length > 0) {
-				await this.checkBundleCharge(pending.digest, known.size);
-			}
-			const incarnation = await this.availableBundleIncarnation(pending.digest);
-			if (
-				incarnation !== undefined &&
-				(await this.attestationCas.reuseBundleIncarnation(
-					pending.digest,
-					incarnation
-				))
-			) {
-				return { cache, validated: known, isPromoted: true };
-			}
+		if (known === undefined) {
+			return undefined;
 		}
-		let measured: MeasuredAttestationBundle;
-		try {
-			measured = await this.attestationCas.measureStagedBundle(pending.r2Key);
-		} catch (error) {
-			if (error instanceof UploadedObjectNotFoundError) {
-				await this.clearPendingUploadAndStaging(pending);
-				throw new AttestationUploadNotFoundError(uploadId);
-			}
-			throw error;
+		const eligible = await this.eligibleBundlePaths(cache, storePathHashes);
+		for (const row of eligible) {
+			this.requirePendingSubject(uploadId, row);
 		}
-		if (measured.digest !== pending.digest) {
-			await this.clearPendingUploadAndStaging(pending);
-			throw new AttestationDigestMismatchError(pending.digest, measured.digest);
+		if (eligible.length > 0) {
+			await this.checkBundleCharge(pending.digest, known.size);
 		}
-		const parsed = parseAttestationBundle(measured.bytes);
+		const incarnation = await this.availableBundleIncarnation(pending.digest);
+		if (
+			incarnation !== undefined &&
+			(await this.attestationCas.reuseBundleIncarnation(
+				pending.digest,
+				incarnation
+			))
+		) {
+			return { cache, validated: known, isPromoted: true };
+		}
+		return undefined;
+	}
+
+	private async prepareMeasuredBundleLocked(
+		upload: PendingAttestationUpload,
+		storePathHashes: readonly StorePathHash[],
+		measured: MeasuredAttestationBundle,
+		parsed: AttestationBundle
+	): Promise<PreparedAttestationBundle> {
+		const { cache, row: pending } = upload;
+		const eligible = await this.eligibleBundlePaths(cache, storePathHashes);
+		const uploadId = pending.id;
 		const subjects = new Set(parsed.subjects.map((subject) => subject.digest));
 		for (const row of eligible) {
 			if (!subjects.has(narHashDigestHex(row.narHash))) {
@@ -1214,6 +1234,68 @@ export class AttestationsService {
 				.run();
 		});
 		return { cache, validated, isPromoted: true };
+	}
+
+	private async prepareBundle(
+		cacheScope: CacheScope,
+		uploadId: UploadId,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<PreparedAttestationBundle> {
+		const preparation = await this.context.criticalSection(async () => {
+			const upload = await this.groupedUploadLocked(cacheScope, uploadId);
+			const bundle = await this.reusableBundleLocked(upload, storePathHashes);
+			return { upload, bundle };
+		});
+		if (preparation.bundle !== undefined) {
+			return preparation.bundle;
+		}
+		let measured: MeasuredAttestationBundle;
+		try {
+			measured = await this.attestationCas.measureStagedBundle(
+				preparation.upload.row.r2Key
+			);
+		} catch (error) {
+			if (!(error instanceof UploadedObjectNotFoundError)) {
+				throw error;
+			}
+			return this.context.criticalSection(async () => {
+				const upload = await this.groupedUploadLocked(
+					cacheScope,
+					uploadId,
+					preparation.upload
+				);
+				await this.clearPendingUploadAndStaging(upload.row);
+				throw new AttestationUploadNotFoundError(uploadId);
+			});
+		}
+		if (measured.digest !== preparation.upload.row.digest) {
+			return this.context.criticalSection(async () => {
+				const upload = await this.groupedUploadLocked(
+					cacheScope,
+					uploadId,
+					preparation.upload
+				);
+				await this.clearPendingUploadAndStaging(upload.row);
+				throw new AttestationDigestMismatchError(
+					upload.row.digest,
+					measured.digest
+				);
+			});
+		}
+		const parsed = parseAttestationBundle(measured.bytes);
+		return this.context.criticalSection(async () => {
+			const upload = await this.groupedUploadLocked(
+				cacheScope,
+				uploadId,
+				preparation.upload
+			);
+			return this.prepareMeasuredBundleLocked(
+				upload,
+				storePathHashes,
+				measured,
+				parsed
+			);
+		});
 	}
 
 	private requirePendingSubject(
@@ -1816,8 +1898,10 @@ export class AttestationsService {
 				storePathHashes.length * attestationAttachPathSubrequests,
 			'attestation attachment'
 		);
-		const bundle = await this.context.criticalSection(() =>
-			this.prepareBundleLocked(cacheScope, uploadId, storePathHashes)
+		const bundle = await this.prepareBundle(
+			cacheScope,
+			uploadId,
+			storePathHashes
 		);
 		const paths = await Array.fromAsync(storePathHashes, (storePathHash) =>
 			this.context.criticalSection(() =>
