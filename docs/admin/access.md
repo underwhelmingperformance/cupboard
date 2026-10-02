@@ -121,3 +121,12 @@ the deployment's operator can issue these read credentials. See
 
 You can make a cache public or private yourself, with
 `cupboard cache set-access`. The change takes effect immediately.
+
+Setting access to public removes any cache read credential. If you make the
+cache private again, the old cache credential no longer works. Static reads fall
+back to the tenant read credential, if one is configured. Ask the [operator to
+issue a new cache read credential][cache-read-credentials] if the cache needs
+its own credential again. Content-read tokens remain an independent way to
+authorise private reads.
+
+[cache-read-credentials]: ../operator/tenants.md#read-credentials
