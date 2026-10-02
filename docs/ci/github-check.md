@@ -258,12 +258,16 @@ terminal. Review such a repair at a terminal, or run it after the change is
 merged into the default branch.
 
 The repair can create the preset's `pull-requests-<repository-id>` reuse view.
-It creates a private view when you pass `--read-user`, and a public view
-otherwise. A view includes only caches with the same access, so a public view
+The repair selects the view's access from the discovered jobs. A publishing job
+uses its literal `cache-access-mode` input, or the tenant's default cache access
+when the input is omitted. A read-only job uses the default cache's access. Jobs
+that use the same view must select the same access. `--read-user` and
+`--read-password` authenticate metadata queries and do not select the view's
+access. A view includes only caches with the same access, so a public view
 cannot reuse the outputs of private pull-request caches. The repair stops with
 an error when an existing pull-request cache of the repository has the other
-access. Pass `--read-user` and `--read-password` when the tenant's reads are
-private.
+access. Supply the tenant read credential with `--read-user` and
+`--read-password` when private metadata queries require it.
 
 When a job uses a custom reuse view that passes the reuse-view check, the repair
 leaves that view unchanged. The repair does not create or change a custom view,
