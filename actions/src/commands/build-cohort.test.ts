@@ -7699,23 +7699,23 @@ if (args.includes('--help')) {
 				: kind === 'delegated-rebuild'
 					? { ...remoteResult('built'), execution: 'remote' }
 					: { ...remoteResult(kind), outcome: { kind, outputs: {} } };
-			const [outcome] = await Promise.allSettled([
-				runPublicationFlow(
-					{
-						...baseOptions(),
-						cohortJson: remotelyQueryableCohortJson(),
-						publish: 'outputs',
-						bestEffort: 'true',
-						store: 'ssh-ng://build@example.test',
-						...(isVerification && { build: 'rebuild' })
-					},
-					[],
-					[result],
-					[libraryQueryInstallable]
-				)
-			] as const);
-			const error: unknown =
-				outcome.status === 'rejected' ? outcome.reason : undefined;
+			const run = await runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					publish: 'outputs',
+					bestEffort: 'true',
+					store: 'ssh-ng://build@example.test',
+					...(isVerification && { build: 'rebuild' })
+				},
+				[],
+				[result],
+				[libraryQueryInstallable],
+				undefined,
+				new Map(),
+				{ captureBuildError: true, attachOnly: [] }
+			);
+			const error = run.buildError;
 			const receipt: unknown = JSON.parse(
 				await readFile(
 					path.join(directory, 'cupboard-cohort-receipt.json'),
@@ -7734,9 +7734,11 @@ if (args.includes('--help')) {
 					error instanceof RemoteCohortProtocolError
 						? error.failures
 						: undefined,
-				receipt
+				receipt,
+				pushes: run.calls.filter((call) => call[1] === 'push')
 			}).toStrictEqual({
 				fatal: true,
+				pushes: [],
 				failures: [
 					{
 						target: libraryQueryInstallable,

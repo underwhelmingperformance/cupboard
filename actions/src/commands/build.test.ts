@@ -221,6 +221,7 @@ beforeEach(() => {
 
 afterEach(async () => {
 	vi.unstubAllEnvs();
+	vi.useRealTimers();
 	const directories = [...temporaryDirectories];
 	temporaryDirectories.length = 0;
 	await Promise.all(
@@ -1011,12 +1012,13 @@ process.stdin.on('end', () => {
 	});
 
 	it.each([
-		{ machine: '', changedHash: false },
-		{ machine: 'ssh-ng://builder', changedHash: false },
-		{ machine: '', changedHash: true }
+		{ machine: '', changedHash: false, changedDeriver: false },
+		{ machine: 'ssh-ng://builder', changedHash: false, changedDeriver: false },
+		{ machine: '', changedHash: true, changedDeriver: false },
+		{ machine: '', changedHash: false, changedDeriver: true }
 	])(
-		'preserves matching earlier execution for publication without attributing retry provenance ($machine, $changedHash)',
-		async ({ machine, changedHash }) => {
+		'preserves matching local evidence across retries ($machine, $changedHash, $changedDeriver)',
+		async ({ machine, changedHash, changedDeriver }) => {
 			const directory = await mkdtemp(
 				path.join(tmpdir(), 'cupboard-build-test-')
 			);
@@ -1065,7 +1067,12 @@ process.stdin.on('end', () => {
 							}
 
 							return Promise.resolve({
-								...pathInfo(app, derivation),
+								...pathInfo(
+									app,
+									changedDeriver && attempt === 2
+										? `${app}-changed.drv`
+										: derivation
+								),
 								ultimate: true,
 								narHash: NixSha256Hash.fromDigest(
 									Buffer.alloc(32, changedHash && attempt === 2 ? 0xbb : 0xaa)
@@ -1116,6 +1123,25 @@ process.stdin.on('end', () => {
 			const builtReceipt = buildReceiptV3Schema.parse(
 				JSON.parse(builtReceiptText)
 			);
+			const appSubject =
+				machine === '' && !changedHash && !changedDeriver
+					? {
+							origin: 'built',
+							storePath: app,
+							narHash: 'aa'.repeat(32),
+							derivation,
+							attempt: 1,
+							attemptId: 'attempt-1',
+							buildStore: 'auto',
+							verification: 'local'
+						}
+					: {
+							origin: 'store-held',
+							storePath: app,
+							narHash: (changedHash ? 'bb' : 'aa').repeat(32),
+							derivation: changedDeriver ? `${app}-changed.drv` : derivation,
+							buildStore: 'auto'
+						};
 			const librarySubject = {
 				origin: 'built',
 				storePath: library,
@@ -1138,24 +1164,176 @@ process.stdin.on('end', () => {
 				receipt: {
 					version: 3,
 					paths: [app, library],
-					subjects: [
-						{
-							origin: 'store-held',
-							storePath: app,
-							narHash: (changedHash ? 'bb' : 'aa').repeat(32),
-							derivation,
-							buildStore: 'auto'
-						},
-						librarySubject
-					]
+					subjects: [appSubject, librarySubject]
 				},
 				builtReceipt: {
 					version: 3,
-					paths: [library],
-					subjects: [librarySubject]
+					paths:
+						machine === '' && !changedHash && !changedDeriver
+							? [app, library]
+							: [library],
+					subjects:
+						machine === '' && !changedHash && !changedDeriver
+							? [appSubject, librarySubject]
+							: [librarySubject]
 				},
-				published: changedHash ? `${library}\n` : `${app}\n${library}\n`
+				published:
+					changedHash || changedDeriver
+						? `${library}\n`
+						: `${app}\n${library}\n`
 			});
+		}
+	);
+
+	it.each([true, false])(
+		'uses the dry-run derivation when the recorded deriver is absent (warm: %s)',
+		async (warm) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const derivation = `${app}.drv`;
+			let builds = 0;
+			await buildAction(
+				{ installables: ['.#app'], build: 'rebuild', attempts: '1' },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				{
+					nextAttemptId: () => 'missing-deriver',
+					nix: {
+						queryPathInfo: () =>
+							builds === 0 && !warm
+								? Promise.reject(new NixStorePathNotFoundError(app))
+								: Promise.resolve({ ...pathInfo(app), ultimate: true })
+					},
+					runNix: async (invocation) => {
+						if (invocation.arguments.includes('--dry-run')) {
+							return {
+								status: 0,
+								stdout: JSON.stringify([
+									{ drvPath: derivation, outputs: { out: app } }
+								])
+							};
+						}
+						builds += 1;
+						const log =
+							invocation.arguments[
+								invocation.arguments.indexOf('json-log-path') + 1
+							];
+						if (log === undefined) {
+							throw new Error('missing log');
+						}
+						await writeFile(log, `${buildStart(derivation)}\n`);
+						return { status: 0, stdout: `${app}\n` };
+					}
+				}
+			);
+			const receiptText = await readFile(
+				path.join(directory, 'cupboard-built-receipt.json'),
+				'utf8'
+			);
+			const receipt = buildReceiptV3Schema.parse(JSON.parse(receiptText));
+			expect({ builds, receipt }).toStrictEqual({
+				builds: warm ? 2 : 1,
+				receipt: {
+					version: 3,
+					paths: [app],
+					subjects: [
+						{
+							origin: 'built',
+							storePath: app,
+							narHash: 'aa'.repeat(32),
+							derivation,
+							attempt: 1,
+							attemptId: 'missing-deriver',
+							buildStore: 'auto',
+							verification: 'local',
+							...(warm && { reproduced: true })
+						}
+					]
+				}
+			});
+		}
+	);
+
+	it.each(['true', 'false'])(
+		'fails missing successful-build observation without retrying (allow-failure: %s)',
+		async (allowFailure) => {
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(0);
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const sleep = vi.fn((delayMs: number) => {
+				vi.setSystemTime(Date.now() + delayMs);
+				return Promise.resolve();
+			});
+			const runNix = vi.fn((invocation: { arguments: readonly string[] }) =>
+				Promise.resolve({
+					status: 0,
+					stdout: invocation.arguments.includes('--dry-run')
+						? JSON.stringify([{ drvPath: `${app}.drv`, outputs: { out: app } }])
+						: `${app}\n`
+				})
+			);
+			await expect(
+				buildAction(
+					{ installables: ['.#app'], build: 'rebuild', allowFailure },
+					{ RUNNER_TEMP: directory },
+					{
+						sleep,
+						runNix,
+						nix: {
+							queryPathInfo: () => Promise.resolve(pathInfo(app, `${app}.drv`))
+						}
+					}
+				)
+			).rejects.toBeInstanceOf(BuildObservationMissingError);
+			expect({
+				runs: runNix.mock.calls.length,
+				sleeps: sleep.mock.calls,
+				elapsed: Date.now()
+			}).toStrictEqual({ runs: 3, sleeps: [], elapsed: 0 });
+		}
+	);
+
+	it.each([
+		{ legacy: 'true', build: undefined, fails: false },
+		{ legacy: 'true', build: 'missing', fails: true }
+	])(
+		'retains deprecated provenance guarantee ($build)',
+		async ({ legacy, build, fails }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-build-test-')
+			);
+			temporaryDirectories.push(directory);
+			const runNix = vi.fn(() => Promise.resolve({ status: 1, stdout: '' }));
+			const result = buildAction(
+				{
+					installables: ['.#app'],
+					requireProvenance: legacy,
+					build,
+					attempts: '1'
+				},
+				{ RUNNER_TEMP: directory },
+				{
+					runNix,
+					buildSettings: {
+						systems: ['x86_64-linux'],
+						features: [],
+						builders: 'ssh://builder'
+					}
+				}
+			);
+			await expect(result).rejects.toMatchObject({
+				name: fails
+					? 'BuildProvenanceConflictError'
+					: 'BuildRebuildRemoteDispatchError'
+			});
+			expect(runNix.mock.calls).toStrictEqual([]);
 		}
 	);
 

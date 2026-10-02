@@ -136,6 +136,15 @@ export class BuiltPublicationObservationUnsupportedError extends UsageError {
 	}
 }
 
+export class BuildProvenanceConflictError extends UsageError {
+	constructor() {
+		super(
+			'require-provenance: true conflicts with build: missing. Remove require-provenance and set build: rebuild to preserve the execution guarantee.'
+		);
+		this.name = 'BuildProvenanceConflictError';
+	}
+}
+
 export class BuildRebuildRemoteDispatchError extends UsageError {
 	constructor() {
 		super(

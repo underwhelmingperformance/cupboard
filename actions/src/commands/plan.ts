@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
-import { discoverNixStoreConfig } from '@cupboard/nix';
+import { discoverNixStoreConfig, type NixBuildSettings } from '@cupboard/nix';
 import {
 	type CacheScope,
 	rootNameMaxLength,
@@ -37,6 +37,7 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	BuildRebuildRemoteDispatchError,
 	BuiltPublicationObservationUnsupportedError,
 	CommandFailedError,
 	ComponentRootTargetLimitError,
@@ -266,6 +267,7 @@ export interface PlanInputs {
  * or Cupboard processes or making network requests.
  */
 export interface PlanDependencies {
+	readonly buildSettings?: NixBuildSettings;
 	readonly evaluator?: NixEvaluator;
 	/**
 	 * When omitted, planning reads the store directory from the runner's Nix
@@ -566,6 +568,15 @@ export async function planAction(
 	dependencies.signal?.throwIfAborted();
 
 	const inputs = resolvePlanInputs(options, environment);
+	if (
+		inputs.build === 'rebuild' &&
+		inputs.store === '' &&
+		(inputs.targets.some((target) => target.remote) ||
+			(dependencies.buildSettings ?? discoverNixStoreConfig().building)
+				.builders !== undefined)
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
 	if (inputs.publish === 'built' && inputs.store !== '') {
 		throw new BuiltPublicationObservationUnsupportedError();
 	}

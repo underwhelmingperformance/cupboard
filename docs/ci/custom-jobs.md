@@ -323,12 +323,19 @@ writes files and counts. By default, the action also writes inline path lists to
 the step outputs.
 
 If the build fails, the action tries again, up to five attempts in total, and
-waits longer after each failure. If every attempt fails, the step fails. Set
-`allow-failure` to let the job continue anyway.
+waits longer after each failure. A successful rebuild that reports no build
+activity fails immediately, because another attempt cannot recover the missing
+observation. If every attempt fails, the step fails. Set `allow-failure` to let
+the job continue anyway.
 
 The receipt records how the requested outputs became available. Set
 `build: rebuild` to build every requested output again in the selected Nix
 store, even if it is already available. Nix may still substitute dependencies.
+
+The deprecated `require-provenance: true` input also selects `build: rebuild`
+when `build` is omitted. An explicit `build: missing` conflicts with that input
+and fails before building. Replace `require-provenance: true` with
+`build: rebuild`.
 
 With `substituter: leave`, `publication-url` is required and must specify the
 destination tenant or cache URL. The build action keeps paths from that tenant
@@ -342,15 +349,21 @@ each narinfo and its advertised NAR. Runner-only netrc or URL credentials do not
 establish access for consumers. If anonymous access cannot be confirmed, the
 action keeps the output selected for publication. `substituter: copy` includes
 those outputs. Outputs built in this run remain selected, including builds
-dispatched to a configured remote builder. When a requested output has no
-recorded derivation, the action passes its installable to Nix for the rebuild.
+dispatched to a configured remote builder.
+
+When a requested output has no recorded derivation, the action uses its
+derivation from the dry-run plan when the plan reports a matching output path.
+If the plan cannot identify that derivation, the action passes the original
+installable to Nix for the rebuild.
 
 The action writes the receipt and the list of paths to fixed locations in
 `$RUNNER_TEMP`. A second `build-paths` step in the same job overwrites them.
 
 The receipt can support SLSA build provenance for outputs built on the runner in
-this run when the Nix activity log records the build. Outputs reused from the
-selected store or obtained from a substituter receive no new build claim.
+this run when the Nix activity log records the build. If another installable
+fails and the action retries, the receipt preserves earlier local build evidence
+only when the output's NAR hash and derivation still match. Outputs reused from
+the selected store or obtained from a substituter receive no new build claim.
 
 ### `push`
 
