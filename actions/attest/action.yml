@@ -19,7 +19,7 @@ inputs:
   checksums-file:
     description:
       Where to write the checksums of every accepted receipt path. Defaults to a
-      file under RUNNER_TEMP.
+      file in a unique directory under RUNNER_TEMP.
     required: false
   built-checksums-file:
     description:
@@ -219,6 +219,7 @@ runs:
         INLINE_BUNDLES: ${{ inputs.inline-bundles }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
       run: |
+        output_directory="$(mktemp -d "$RUNNER_TEMP/cupboard-attest.XXXXXX")"
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" attest-sign \
@@ -230,5 +231,6 @@ runs:
           --upload-to-github "$UPLOAD_TO_GITHUB" \
           --subject-grouping "$SUBJECT_GROUPING" \
           --inline-bundles "$INLINE_BUNDLES" \
-          --bundles-file "$RUNNER_TEMP/cupboard-attest/bundles.txt" \
+          --output-directory "$output_directory" \
+          --bundles-file "$output_directory/bundles.txt" \
           --github-token "$GH_TOKEN"

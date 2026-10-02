@@ -235,6 +235,11 @@ The manifest includes every bundle. The `bundles` and `bundle-path` outputs
 remain complete when `inline-bundles` is `true`, which is the default. File mode
 omits these inline outputs explicitly.
 
+Each `actions/attest` invocation now uses unique directories for default subject
+files and signing outputs. Use the `checksums-file` and `bundles-file` outputs
+to find the resulting files. Replace references to the former fixed
+`$RUNNER_TEMP/cupboard-attest/bundles.txt` manifest path with `bundles-file`.
+
 `actions/attest` signs SLSA build provenance for observed local builds and SCAI
 `REPRODUCIBLE` assertions for successful local verification rebuilds. Its
 `predicate-file` input chooses where to write that reproduction report. The

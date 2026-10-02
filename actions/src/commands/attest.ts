@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
@@ -268,7 +269,7 @@ export function registerAttestCommand(
 		)
 		.option(
 			'--checksums-file <path>',
-			'Write the checksums for all accepted receipt subjects here. Defaults to a path under RUNNER_TEMP.'
+			'Write the checksums for all accepted receipt subjects here. Defaults to a unique directory under RUNNER_TEMP.'
 		)
 		.option(
 			'--built-checksums-file <path>',
@@ -327,6 +328,7 @@ export function resolveAttestInputs(
 		path.join(
 			requireEnvironment(environment, 'RUNNER_TEMP'),
 			'cupboard-attestations',
+			randomUUID(),
 			'subjects.txt'
 		);
 

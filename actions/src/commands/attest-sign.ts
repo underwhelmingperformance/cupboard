@@ -75,6 +75,7 @@ export interface AttestSignOptions {
 	readonly bundleFile?: string;
 	readonly originBundleFile?: string;
 	readonly bundlesFile?: string;
+	readonly outputDirectory?: string;
 	readonly githubToken?: string;
 	readonly destinationAccess?: string;
 	readonly signingProfile?: string;
@@ -163,12 +164,16 @@ export function registerAttestSignCommand(
 			'In-toto predicate type of the custom predicate. Required with --predicate-file.'
 		)
 		.option(
+			'--output-directory <path>',
+			'Write default signing output files in this directory. Defaults to the directory of the checksums file.'
+		)
+		.option(
 			'--bundle-file <path>',
-			'Write the SLSA build-provenance bundles under this base path. Defaults to a file beside the checksums file.'
+			'Write the SLSA build-provenance bundles under this base path. Defaults to a file in the output directory.'
 		)
 		.option(
 			'--origin-bundle-file <path>',
-			'Write custom predicate bundles under this base path. Defaults to a file beside the checksums file.'
+			'Write custom predicate bundles under this base path. Defaults to a file in the output directory.'
 		)
 		.option(
 			'--bundles-file <path>',
@@ -236,7 +241,9 @@ export function resolveAttestSignInputs(
 		throw new PredicateTypeRequiredError();
 	}
 
-	const bundleDirectory = path.dirname(path.resolve(checksumsFile));
+	const bundleDirectory =
+		provided(options.outputDirectory) ??
+		path.dirname(path.resolve(checksumsFile));
 	const shouldEmitInlineBundles = isEnabled(
 		'inline-bundles',
 		options.inlineBundles,
