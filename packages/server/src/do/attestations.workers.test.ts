@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	type CacheAccessMode,
 	type CacheScope,
@@ -31,7 +32,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
@@ -103,7 +104,6 @@ import {
 	AttestationsService,
 	inheritanceListSubrequests,
 	inheritanceLookupSubrequests,
-	inheritanceSourceKey,
 	inheritedBundleSubrequests
 } from './attestations-service.ts';
 import { fencedCasObjectDeletion } from './blob-reaper-service.ts';
@@ -401,6 +401,7 @@ describe('attestation attach and reads', () => {
 			}
 
 			const reads: number[] = [];
+			const found: string[] = [];
 			const statements: { query: string; values: unknown[] }[] = [];
 			const binding: D1Database = {
 				prepare: (query) => {
@@ -418,6 +419,21 @@ describe('attestation attach and reads', () => {
 				async batch<T>(statements: D1PreparedStatement[]) {
 					const results = await env.CUPBOARD_DB.batch<T>(statements);
 					reads.push(...results.map((result) => result.meta.rows_read));
+					for (const result of results) {
+						for (const row of result.results) {
+							const parsed = z
+								.object({
+									digest: z.string(),
+									available: z
+										.union([z.boolean(), z.number()])
+										.transform(Boolean)
+								})
+								.safeParse(row);
+							if (parsed.success && parsed.data.available) {
+								found.push(parsed.data.digest);
+							}
+						}
+					}
 					return results;
 				},
 				exec: (query) => env.CUPBOARD_DB.exec(query),
@@ -433,14 +449,48 @@ describe('attestation attach and reads', () => {
 						CUPBOARD_DB: binding
 					});
 					const cache = resolvedCache(context, destination);
-					const prefetched = await attestationsFor(
-						context
-					).prefetchInheritanceSources(cache, [
-						{ storePathHash: metadata.storePathHash, narHash: nar.narHash }
-					]);
-					return prefetched.sources
-						.get(inheritanceSourceKey(metadata.storePathHash, nar.narHash))
-						?.map((row) => row.digest);
+					const source = context.db
+						.select()
+						.from(schema.narInfos)
+						.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+						.get();
+					if (source === undefined) {
+						throw new Error('The scale fixture requires its committed source.');
+					}
+					context.db
+						.insert(schema.narInfos)
+						.values({ ...source, cacheId: cache.id })
+						.onConflictDoNothing()
+						.run();
+					await attestationsFor(context).queueInheritance(
+						cache,
+						metadata.storePathHash,
+						source.generation,
+						nar.narHash
+					);
+					await withSubrequestSlice(
+						() =>
+							attestationsFor(context).inheritFromTenant(rootLogger(), {
+								cache,
+								storePathHash: metadata.storePathHash,
+								narHash: nar.narHash,
+								generation: narInfoGenerationSchema.parse(0)
+							}),
+						{
+							subrequests:
+								inheritanceLookupSubrequests + inheritanceListSubrequests,
+							reserve: 0
+						}
+					);
+					context.db
+						.delete(schema.attestationInheritances)
+						.where(eq(schema.attestationInheritances.cacheId, cache.id))
+						.run();
+					context.db
+						.delete(schema.narInfos)
+						.where(eq(schema.narInfos.cacheId, cache.id))
+						.run();
+					return [...new Set(found)];
 				}
 			);
 			if (shape === 'replaced') {
@@ -466,7 +516,7 @@ describe('attestation attach and reads', () => {
 			);
 
 			expect({
-				digests: result ?? [],
+				digests: result,
 				reads,
 				plans
 			}).toStrictEqual({
@@ -477,7 +527,7 @@ describe('attestation attach and reads', () => {
 							(index + 1).toString(16).padStart(64, '0')
 						)
 				),
-				reads: [shape === 'caches' ? 6 : 260],
+				reads: [shape === 'caches' ? 6 : 260, 0],
 				plans: [
 					[
 						'CO-ROUTINE inheritance_source_reference',
@@ -491,6 +541,8 @@ describe('attestation attach and reads', () => {
 						'SEARCH cas_object USING INDEX sqlite_autoindex_cas_object_1 (digest=?) LEFT-JOIN',
 						'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=?) LEFT-JOIN',
 						'CORRELATED SCALAR SUBQUERY 1',
+						'SEARCH destination_inheritance_reference USING COVERING INDEX attestation_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation=? AND predicate_type=? AND digest=?)',
+						'CORRELATED SCALAR SUBQUERY 2',
 						'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)'
 					]
 				]
@@ -501,6 +553,14 @@ describe('attestation attach and reads', () => {
 			await runInDurableObject(fixtureWorkerServer(), async (instance) => {
 				const context = instance.context;
 				const cache = resolvedCache(context, destination);
+				context.db
+					.delete(schema.attestationInheritances)
+					.where(eq(schema.attestationInheritances.cacheId, cache.id))
+					.run();
+				context.db
+					.delete(schema.narInfos)
+					.where(eq(schema.narInfos.cacheId, cache.id))
+					.run();
 				context.db
 					.insert(schema.narInfos)
 					.values({
@@ -578,140 +638,6 @@ describe('attestation attach and reads', () => {
 				],
 				bounded: true
 			});
-		}
-	);
-
-	it.each([2, 100])(
-		'prefetches exact pairs for %i candidates within the D1 parameter limit',
-		async (candidateCount) => {
-			const first = await committedPathBundle();
-			const secondNar = await verifiableNar('second-prefetch-source');
-			const second = uploadMetadata({
-				storePathHash: uniqueStorePathHash(),
-				narHash: secondNar.narHash,
-				narSize: secondNar.narSize,
-				fileHash: secondNar.fileHash,
-				fileSize: secondNar.narBytes.byteLength
-			});
-			await pushPathThroughTenant(
-				fixtureTenant,
-				first.token,
-				second,
-				secondNar
-			);
-			const destination = namedCache('prefetch-destination');
-			await putWorkerTestCache(first.token, destination);
-			const digests = Array.from({ length: 131 }, (_, index) =>
-				sha256HexDigestSchema.parse((index + 1).toString(16).padStart(64, '0'))
-			);
-			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-			const lastDigest = digests.at(-1);
-
-			if (lastDigest === undefined) {
-				throw new Error('the test needs a last digest');
-			}
-
-			for (const page of chunk(digests, 25)) {
-				await database.insert(d1Schema.casObject).values(
-					page.map((digest) => ({
-						digest,
-						size: 1,
-						storedAt: isoTimestamp(new Date())
-					}))
-				);
-			}
-
-			const firstPathDigests = digests.slice(0, 130);
-			for (const page of chunk(firstPathDigests, 10)) {
-				await database.insert(d1Schema.attestationReference).values(
-					page.map((digest) => ({
-						tenant: fixtureTenant,
-						cacheKind: 'default' as const,
-						storePathHash: first.metadata.storePathHash,
-						generation: narInfoGenerationSchema.parse(0),
-						predicateType: predicateTypeSchema.parse(predicateType),
-						digest
-					}))
-				);
-			}
-
-			await database.insert(d1Schema.attestationReference).values({
-				tenant: fixtureTenant,
-				cacheKind: 'default',
-				storePathHash: second.storePathHash,
-				generation: narInfoGenerationSchema.parse(0),
-				predicateType: predicateTypeSchema.parse(predicateType),
-				digest: lastDigest
-			});
-
-			const candidates = [
-				first.metadata,
-				second,
-				...Array.from({ length: candidateCount - 2 }, () => ({
-					storePathHash: storePathHashSchema.parse(uniqueStorePathHash()),
-					narHash: first.nar.narHash
-				}))
-			];
-			const parameterCounts: number[] = [];
-			const originalPrepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
-			const prepare = vi
-				.spyOn(env.CUPBOARD_DB, 'prepare')
-				.mockImplementation((query) => {
-					const statement = originalPrepare(query);
-					if (query.includes('inheritance_source_reference')) {
-						const originalBind = statement.bind.bind(statement);
-						statement.bind = (...values: unknown[]) => {
-							parameterCounts.push(values.length);
-							return originalBind(...values);
-						};
-					}
-					return statement;
-				});
-
-			try {
-				const result = await runInDurableObject(
-					fixtureWorkerServer(),
-					async (instance) => {
-						const service = attestationsFor(instance.context);
-						const cache = resolvedCache(instance.context, destination);
-						const prefetched = await service.prefetchInheritanceSources(
-							cache,
-							candidates
-						);
-						const mismatched = await service.prefetchInheritanceSources(cache, [
-							{
-								storePathHash: first.metadata.storePathHash,
-								narHash: second.narHash
-							},
-							{
-								storePathHash: second.storePathHash,
-								narHash: first.nar.narHash
-							}
-						]);
-						return {
-							first: prefetched.sources.get(
-								inheritanceSourceKey(
-									first.metadata.storePathHash,
-									first.nar.narHash
-								)
-							)?.length,
-							second: prefetched.sources
-								.get(inheritanceSourceKey(second.storePathHash, second.narHash))
-								?.map((row) => row.digest),
-							mismatched: [...mismatched.sources]
-						};
-					}
-				);
-				expect({
-					result,
-					withinLimit: parameterCounts.map((count) => count <= 100)
-				}).toStrictEqual({
-					result: { first: 65, second: [lastDigest], mismatched: [] },
-					withinLimit: [true, true]
-				});
-			} finally {
-				prepare.mockRestore();
-			}
 		}
 	);
 
@@ -907,7 +833,6 @@ describe('attestation attach and reads', () => {
 				const service = attestationsFor(instance.context);
 				const cache = resolvedCache(instance.context, destination);
 
-				await service.prefetchInheritanceSources(cache, [metadata]);
 				await service.inheritFromTenant(rootLogger(), {
 					cache,
 					storePathHash: metadata.storePathHash,
@@ -944,10 +869,7 @@ describe('attestation attach and reads', () => {
 			})
 		);
 
-		expect(plans).toStrictEqual([
-			{ searchesPathIndex: true, scans: 0 },
-			{ searchesPathIndex: true, scans: 0 }
-		]);
+		expect(plans).toStrictEqual([{ searchesPathIndex: true, scans: 0 }]);
 	});
 
 	it('counts only the sources that the destination lacks against its subrequests', async () => {
@@ -1087,9 +1009,9 @@ describe('attestation attach and reads', () => {
 	});
 
 	it.each([
-		{ pauseAfter: 'prefetch', revocation: 'private' },
+		{ pauseAfter: 'lookup', revocation: 'private' },
 		{ pauseAfter: 'head', revocation: 'private' },
-		{ pauseAfter: 'prefetch', revocation: 'recreation' }
+		{ pauseAfter: 'lookup', revocation: 'recreation' }
 	] as const)(
 		'does not inherit a bundle after source $revocation following $pauseAfter',
 		async ({ pauseAfter, revocation }) => {
@@ -1118,14 +1040,6 @@ describe('attestation attach and reads', () => {
 				nar,
 				destination
 			);
-			const prefetch = await runInDurableObject(
-				fixtureWorkerServer(),
-				(instance) =>
-					attestationsFor(instance.context).prefetchInheritanceSources(
-						resolvedCache(instance.context, destination),
-						[metadata]
-					)
-			);
 			const revokeSource = async (): Promise<void> => {
 				if (revocation === 'private') {
 					await putWorkerTestCache(token, source, 'private');
@@ -1141,7 +1055,7 @@ describe('attestation attach and reads', () => {
 				await putWorkerTestCache(token, source);
 			};
 
-			if (pauseAfter === 'prefetch') {
+			if (pauseAfter === 'lookup') {
 				await revokeSource();
 			} else {
 				const head = env.BLOBS.head.bind(env.BLOBS);
@@ -1174,15 +1088,11 @@ describe('attestation attach and reads', () => {
 			);
 
 			expect({
-				prefetchedDigests: prefetch.sources
-					.get(inheritanceSourceKey(metadata.storePathHash, metadata.narHash))
-					?.map((row) => row.digest),
 				result,
 				sourceStatus: sourceRead.status,
 				destinationStatus: destinationRead.status,
 				listStatus: destinationList.status
 			}).toStrictEqual({
-				prefetchedDigests: [digest],
 				result: 'complete',
 				sourceStatus:
 					revocation === 'private'
@@ -1349,6 +1259,356 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
+	it.each(['suspended', 'offboarding'] as const)(
+		'does not attempt inheritance while the tenant is %s',
+		async (status) => {
+			const { metadata } = await reusedPathWithSourceBundle(`paused-${status}`);
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const tenant = eq(d1Schema.tenant.id, fixtureTenant);
+			const work = vi.spyOn(AttestationsService.prototype, 'inheritFromTenant');
+			try {
+				await database.update(d1Schema.tenant).set({ status }).where(tenant);
+				expect({
+					drained: await drainInheritance(),
+					workCalls: work.mock.calls.length,
+					queued: await queuedInheritances()
+				}).toStrictEqual({
+					drained: 'progressed',
+					workCalls: 0,
+					queued: [{ storePathHash: metadata.storePathHash, attempts: 0 }]
+				});
+			} finally {
+				work.mockRestore();
+				await database
+					.update(d1Schema.tenant)
+					.set({ status: 'active' })
+					.where(tenant);
+				await drainInheritance();
+			}
+		}
+	);
+
+	it('does not duplicate an inheritance attempt during an overlapping claimed attempt', async () => {
+		const { metadata } = await reusedPathWithSourceBundle('overlapping-retry');
+		const entered = Promise.withResolvers<undefined>();
+		const resume = Promise.withResolvers<undefined>();
+		const work = vi
+			.spyOn(AttestationsService.prototype, 'inheritFromTenant')
+			.mockImplementationOnce(async () => {
+				entered.resolve(undefined);
+				await resume.promise;
+				throw new Error('provider request failed');
+			});
+		try {
+			const results = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance) => {
+					const service = attestationsFor(instance.context);
+					const first = service.drainInheritanceQueue(rootLogger());
+					await entered.promise;
+					const second = await service.drainInheritanceQueue(rootLogger());
+					resume.resolve(undefined);
+					return { first: await first, second };
+				}
+			);
+			expect({
+				results,
+				workCalls: work.mock.calls.length,
+				queued: await queuedInheritances()
+			}).toStrictEqual({
+				results: {
+					first: { progress: 'progressed', dequeued: [] },
+					second: { progress: 'stalled', dequeued: [] }
+				},
+				workCalls: 1,
+				queued: [{ storePathHash: metadata.storePathHash, attempts: 1 }]
+			});
+		} finally {
+			resume.resolve(undefined);
+			work.mockRestore();
+			await makeQueuedInheritancesDue();
+			await drainInheritance();
+		}
+	});
+
+	it.each(['source lookup', 'list write'] as const)(
+		'does not overwrite a replacement claim while %s awaits D1',
+		async (boundary) => {
+			const { destination, metadata } = await reusedPathWithSourceBundle(
+				`claim-owner-${boundary.replaceAll(' ', '-')}`
+			);
+			const result = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance, state) => {
+					const table = schema.attestationInheritances;
+					const cache = resolvedCache(instance.context, destination);
+					const filter = and(
+						eq(table.cacheId, cache.id),
+						eq(table.storePathHash, metadata.storePathHash)
+					);
+					instance.context.db
+						.update(table)
+						.set({ claimOwner: 'previous-owner' })
+						.where(filter)
+						.run();
+					let replacement: typeof table.$inferSelect | undefined;
+					const queryPrefix =
+						boundary === 'source lookup'
+							? 'select "generation"'
+							: 'select "attestation_ref_storage"."digest"';
+					const wrap = (
+						statement: D1PreparedStatement,
+						query: string
+					): D1PreparedStatement =>
+						new Proxy(statement, {
+							get(source, field) {
+								if (field === 'bind') {
+									return (...values: unknown[]) =>
+										wrap(source.bind(...values), query);
+								}
+								if (field === 'raw' && query.startsWith(queryPrefix)) {
+									return async () => {
+										instance.context.db
+											.update(table)
+											.set({ claimOwner: 'replacement-owner' })
+											.where(filter)
+											.run();
+										replacement = instance.context.db
+											.select()
+											.from(table)
+											.where(filter)
+											.get();
+										return source.raw();
+									};
+								}
+								const value: unknown = Reflect.get(source, field, source);
+								return typeof value === 'function'
+									? (...arguments_: unknown[]): unknown =>
+											Reflect.apply(value, source, arguments_)
+									: value;
+							}
+						});
+					const binding = new Proxy(env.CUPBOARD_DB, {
+						get(target, field) {
+							if (field === 'prepare') {
+								return (query: string) => wrap(target.prepare(query), query);
+							}
+							const value: unknown = Reflect.get(target, field, target);
+							return typeof value === 'function'
+								? (...arguments_: unknown[]): unknown =>
+										Reflect.apply(value, target, arguments_)
+								: value;
+						}
+					});
+					const context = new ServerContext(state, {
+						...instance.context.env,
+						CUPBOARD_DB: binding
+					});
+					const inherited = await attestationsFor(context).inheritFromTenant(
+						rootLogger(),
+						{
+							cache,
+							storePathHash: metadata.storePathHash,
+							generation: narInfoGenerationSchema.parse(0),
+							narHash: metadata.narHash,
+							claimOwner: 'previous-owner'
+						}
+					);
+					const queue = instance.context.db
+						.select()
+						.from(table)
+						.where(filter)
+						.get();
+					instance.context.db
+						.update(table)
+						.set({ claimOwner: sql`null` })
+						.where(filter)
+						.run();
+					return {
+						replaced: replacement !== undefined,
+						inherited,
+						queue,
+						replacement
+					};
+				}
+			);
+			expect(result).toStrictEqual({
+				replaced: true,
+				inherited: 'superseded',
+				queue: result.replacement,
+				replacement: result.replacement
+			});
+			await drainInheritance();
+		}
+	);
+
+	it.each(['attempt-limit', 'eligible-age-limit'] as const)(
+		'exhausts inheritance after %s with safe seven-day diagnostics and no client reset',
+		async (bound) => {
+			const { destination, metadata } = await reusedPathWithSourceBundle(
+				`bounded-${bound}`
+			);
+			const now = new Date();
+			vi.useFakeTimers();
+			vi.setSystemTime(now);
+			const row = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) => {
+					const cacheId =
+						instance.context.cacheRepository.require(destination).id;
+					const filter = and(
+						eq(schema.attestationInheritances.cacheId, cacheId),
+						eq(
+							schema.attestationInheritances.storePathHash,
+							metadata.storePathHash
+						)
+					);
+					return instance.context.db
+						.update(schema.attestationInheritances)
+						.set({
+							attempts: bound === 'attempt-limit' ? 11 : 0,
+							retryStartedActiveMs: 0
+						})
+						.where(filter)
+						.returning()
+						.all()
+						.at(0);
+				}
+			);
+
+			if (row === undefined) {
+				throw new Error('The fixture needs its queued inheritance row.');
+			}
+			await drizzleD1(env.CUPBOARD_DB)
+				.update(d1Schema.tenant)
+				.set({
+					retryActiveElapsedMs: bound === 'eligible-age-limit' ? 86_400_000 : 0,
+					retryActiveSinceMs: sql`null`
+				})
+				.run();
+			const failure = vi
+				.spyOn(AttestationsService.prototype, 'inheritFromTenant')
+				.mockRejectedValue(
+					new Error('https://provider.invalid/private?token=sensitive')
+				);
+			const capture = startCapture();
+			try {
+				await drainInheritance();
+				await runInDurableObject(fixtureWorkerServer(), (instance) =>
+					attestationsFor(instance.context).queueInheritance(
+						instance.context.cacheRepository.require(destination),
+						row.storePathHash,
+						row.generation,
+						row.narHash
+					)
+				);
+			} finally {
+				capture.stop();
+			}
+			const diagnostics = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					instance.context.db
+						.select()
+						.from(schema.attestationInheritanceFailures)
+						.where(
+							and(
+								eq(schema.attestationInheritanceFailures.cacheId, row.cacheId),
+								eq(
+									schema.attestationInheritanceFailures.storePathHash,
+									row.storePathHash
+								)
+							)
+						)
+						.all()
+			);
+			const queued = await queuedInheritances();
+			const expiresAt = isoTimestamp(
+				new Date(now.getTime() + 7 * 24 * 60 * 60_000)
+			);
+			expect({
+				queued: queued.filter(
+					(queued) => queued.storePathHash === metadata.storePathHash
+				),
+				diagnostics,
+				attempts: failure.mock.calls.length,
+				warnings: capture.logs
+					.filter((entry) => entry.level === 'warning')
+					.map((entry) => ({
+						message: entry.message,
+						properties: entry.properties
+					}))
+			}).toStrictEqual({
+				queued: [],
+				diagnostics: [
+					{
+						cacheId: row.cacheId,
+						storePathHash: row.storePathHash,
+						generation: row.generation,
+						category: 'inheritance-failed',
+						exhaustion: bound,
+						failures: bound === 'attempt-limit' ? 12 : 0,
+						exhaustedAt: isoTimestamp(now),
+						expiresAt
+					}
+				],
+				attempts: bound === 'attempt-limit' ? 1 : 0,
+				warnings: [
+					{
+						message: 'attestation inheritance exhausted',
+						properties: {
+							cacheId: row.cacheId,
+							storePathHash: row.storePathHash,
+							generation: row.generation,
+							category: 'inheritance-failed',
+							exhaustion: bound,
+							failures: bound === 'attempt-limit' ? 12 : 0
+						}
+					}
+				]
+			});
+			vi.setSystemTime(new Date(now.getTime() + 7 * 24 * 60 * 60_000));
+			await drainInheritance();
+			await runInDurableObject(fixtureWorkerServer(), (instance) =>
+				attestationsFor(instance.context).queueInheritance(
+					instance.context.cacheRepository.require(destination),
+					row.storePathHash,
+					row.generation,
+					row.narHash
+				)
+			);
+			const expired = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) => {
+					const filter = and(
+						eq(schema.attestationInheritanceFailures.cacheId, row.cacheId),
+						eq(
+							schema.attestationInheritanceFailures.storePathHash,
+							row.storePathHash
+						)
+					);
+					return instance.context.db
+						.select()
+						.from(schema.attestationInheritanceFailures)
+						.where(filter)
+						.all();
+				}
+			);
+			const afterExpiry = await queuedInheritances();
+			expect({
+				diagnostics: expired,
+				queued: afterExpiry.filter(
+					(queued) => queued.storePathHash === metadata.storePathHash
+				),
+				attempts: failure.mock.calls.length
+			}).toStrictEqual({
+				diagnostics: [],
+				queued: [],
+				attempts: bound === 'attempt-limit' ? 1 : 0
+			});
+		}
+	);
+
 	it('retries inheritance after a failed attempt and after running out of subrequests', async () => {
 		const destination = namedCache('reuse-after-attestation-error');
 		const token = await initialiseViaWorker();
@@ -1432,7 +1692,7 @@ describe('attestation attach and reads', () => {
 				narInfoStatus: StatusCodes.OK,
 				failed: 'progressed',
 				afterFailure: [{ storePathHash: metadata.storePathHash, attempts: 1 }],
-				exhausted: { progress: 'stalled', dequeued: [] },
+				exhausted: { progress: 'progressed', dequeued: [] },
 				afterExhaustion: [
 					{ storePathHash: metadata.storePathHash, attempts: 1 }
 				],
@@ -2861,6 +3121,45 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
+	it('defers a pending source incarnation without counting a failed inheritance attempt', async () => {
+		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
+			'pending-incarnation'
+		);
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const filter = and(
+			eq(d1Schema.objectIncarnation.kind, 'cas'),
+			eq(d1Schema.objectIncarnation.objectId, digest)
+		);
+		await database
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'pending' })
+			.where(filter);
+		const deferred = await drainInheritance();
+		const queued = await queuedInheritances();
+		await database
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'live' })
+			.where(filter);
+		await makeQueuedInheritancesDue();
+		const completed = await drainInheritance();
+		const list = await readFetch(
+			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+		);
+		expect({
+			deferred,
+			queued,
+			completed,
+			remaining: await queuedInheritances(),
+			listStatus: list.status
+		}).toStrictEqual({
+			deferred: 'progressed',
+			queued: [{ storePathHash: metadata.storePathHash, attempts: 0 }],
+			completed: 'progressed',
+			remaining: [],
+			listStatus: StatusCodes.OK
+		});
+	});
+
 	it.each(['before-head', 'after-head', 'registry-only'] as const)(
 		'preserves inheritance progress when a CAS incarnation changes %s',
 		async (phase) => {
@@ -3093,7 +3392,7 @@ describe('attestation attach and reads', () => {
 							);
 							return before - subrequestsAvailable();
 						},
-						{ subrequests: 9, reserve: 0 }
+						{ subrequests: 10, reserve: 0 }
 					)
 			);
 			const list = await readFetch(
@@ -3114,13 +3413,13 @@ describe('attestation attach and reads', () => {
 				afterGap: [
 					{
 						storePathHash: metadata.storePathHash,
-						attempts: 1,
+						attempts: state === 'pending' ? 0 : 1,
 						sourcePredicateType: buildOriginPredicateType,
 						sourceDigest: earlierDigest
 					}
 				],
 				sourceReferences: [{ digest }],
-				retryCalls: 9,
+				retryCalls: 10,
 				queued: [],
 				listed: [earlierDigest, digest].toSorted(byCodeUnit)
 			});

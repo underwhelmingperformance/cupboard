@@ -9,7 +9,11 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type VerifyReportInput } from '@cupboard/protocol/reports';
-import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
 import {
 	type SessionId,
 	type UploadGraceFact,
@@ -24,6 +28,7 @@ import {
 	asc,
 	eq,
 	exists,
+	getTableColumns,
 	gt,
 	inArray,
 	isNotNull,
@@ -31,6 +36,7 @@ import {
 	lte,
 	ne,
 	or,
+	type SQL,
 	sql
 } from 'drizzle-orm';
 import { z } from 'zod';
@@ -44,7 +50,12 @@ import {
 } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { UploadedObjectNotFoundError } from '../errors.ts';
+import {
+	ObjectIncarnationReservationContendedError,
+	SubrequestSliceExceededError,
+	TenantWritesStoppedError,
+	UploadedObjectNotFoundError
+} from '../errors.ts';
 import {
 	maxVerificationRpcRows,
 	narInfoObjectKey,
@@ -53,10 +64,13 @@ import {
 	narObjectKeyPrefix,
 	narObjectKeySuffix,
 	type R2ObjectKey,
-	type RequestOrigin,
-	verifyClaimLeaseMs
+	type RequestOrigin
 } from '../http/http.ts';
-import { pendingSettleRetryDelayMs } from '../policy/verification.ts';
+import {
+	type EligibleRetryClock,
+	type RetryFailureCategory,
+	RetryPolicy
+} from '../policy/retry.ts';
 
 import { type AttestationsService } from './attestations-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
@@ -75,6 +89,7 @@ import {
 import { type JsonValueList, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
+	ReconcileQueueService,
 	type ReconcileTarget,
 	subrequestsPerReconcileEdgeQuery,
 	subrequestsPerReconcileProbe,
@@ -82,6 +97,7 @@ import {
 	subrequestsPerReconcileRestore
 } from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import { RetryClockService } from './retry-clock-service.ts';
 import {
 	affordableSubrequestOperations,
 	subrequestsAvailable
@@ -174,10 +190,8 @@ export const subrequestsPerRecordedVerdict =
 const pendingDecodeFreeCursorKey =
 	'maintenance:verification-decode-free-cursor';
 
-// The rotating cursor for the verdict drain. Each pass stores the upload ID of
-// the last valid verdict in its page. The drain wraps to the lowest upload ID
-// when no row follows the cursor. A pass with no verdict to apply deletes the
-// cursor, so the next pass starts from the beginning.
+// The rotating cursor uses readiness and upload ID, in the query's order.
+// Rescheduling or removing a row must not change the saved position.
 export const recordedVerdictCursorKey = 'maintenance:verdict-drain-cursor';
 
 /**
@@ -191,18 +205,35 @@ export interface RecordedVerdictPage {
 	readonly resolved: number;
 }
 
-function parseUploadIdCursor(value: unknown): UploadId | undefined {
-	const parsed = uploadIdSchema.safeParse(value);
+function parseReadinessCursor(value: unknown): ReadinessCursor | undefined {
+	const parsed = readinessCursorSchema.safeParse(value);
 
 	return parsed.success ? parsed.data : undefined;
 }
 
 type DecodeFreeCandidateKind = 'reuse' | 'recovery';
 
+const readinessCursorSchema = z.strictObject({
+	id: uploadIdSchema,
+	readyAt: z.union([z.literal(''), isoTimestampSchema])
+});
+
+type ReadinessCursor = z.infer<typeof readinessCursorSchema>;
+type ReadyPendingUploadRow = PendingUploadRow & {
+	readonly readyAt: string;
+};
+
+interface ClaimablePage {
+	readonly now: Date;
+	readonly limit: number;
+	readonly filter?: SQL;
+	readonly after?: ReadinessCursor;
+}
+
 interface DecodeFreeCursorState {
 	readonly next: DecodeFreeCandidateKind;
-	readonly reuse?: UploadId;
-	readonly recovery?: UploadId;
+	readonly reuse?: ReadinessCursor;
+	readonly recovery?: ReadinessCursor;
 }
 
 function parseDecodeFreeCursorState(value: unknown): DecodeFreeCursorState {
@@ -211,8 +242,8 @@ function parseDecodeFreeCursorState(value: unknown): DecodeFreeCursorState {
 	}
 
 	const stored = value as Record<string, unknown>;
-	const reuse = uploadIdSchema.safeParse(stored.reuse);
-	const recovery = uploadIdSchema.safeParse(stored.recovery);
+	const reuse = readinessCursorSchema.safeParse(stored.reuse);
+	const recovery = readinessCursorSchema.safeParse(stored.recovery);
 	const next = stored.next === 'recovery' ? 'recovery' : 'reuse';
 
 	return {
@@ -432,7 +463,7 @@ function parseRecordedVerdict(
 }
 
 interface HeldVerdictRow extends RecordedVerdict {
-	readonly pending: PendingUploadRow;
+	readonly pending: ReadyPendingUploadRow;
 }
 
 /**
@@ -494,6 +525,10 @@ function isAwaitingVerdict(
 	return row.verdict === 'pending' || row.verdict === 'committing';
 }
 
+function claimableReadyAt() {
+	return sql<string>`MAX(COALESCE(${schema.pendingUploads.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${schema.pendingUploads.claimedAt}, '+360 seconds'), ''))`;
+}
+
 // A lease older than `verifyClaimLeaseMs` belongs to a pass presumed dead, so
 // another pass can claim the row again.
 //
@@ -502,28 +537,11 @@ function isAwaitingVerdict(
 // decode. A client re-drive revokes the claim, which invalidates the recorded
 // verdict and makes the row claimable again.
 function claimableFilter(now: Date) {
-	const leasedBefore = isoTimestamp(
-		new Date(now.getTime() - verifyClaimLeaseMs)
-	);
 	const nowIso = isoTimestamp(now);
 
 	return and(
-		or(
-			eq(schema.pendingUploads.verdict, 'pending'),
-			eq(schema.pendingUploads.verdict, 'committing')
-		),
-		or(
-			isNull(schema.pendingUploads.recordedVerdictJson),
-			isNull(schema.pendingUploads.claimOwner)
-		),
-		or(
-			isNull(schema.pendingUploads.claimedAt),
-			lte(schema.pendingUploads.claimedAt, leasedBefore)
-		),
-		or(
-			isNull(schema.pendingUploads.settleRetryAfter),
-			lte(schema.pendingUploads.settleRetryAfter, nowIso)
-		)
+		sql`(${schema.pendingUploads.verdict} = 'pending' OR ${schema.pendingUploads.verdict} = 'committing') AND (${schema.pendingUploads.recordedVerdictJson} IS NULL OR ${schema.pendingUploads.claimOwner} IS NULL) AND ${schema.pendingUploads.settleExhaustion} IS NULL`,
+		lte(claimableReadyAt(), nowIso)
 	);
 }
 
@@ -596,6 +614,8 @@ function chunkClaims(
 }
 
 export class VerificationService {
+	private readonly retryPolicy = new RetryPolicy('verification');
+	private readonly applyingRecordedVerdicts = new Set<string>();
 	constructor(
 		private readonly context: ServerContext,
 		private readonly commitPipeline: CommitPipelineService,
@@ -612,8 +632,146 @@ export class VerificationService {
 		) => void
 	) {}
 
+	private async finishExhaustedUpload(
+		pending: PendingUploadRow,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<boolean> {
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+		const resolution = await this.context.criticalSection(async () => {
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
+				return;
+			}
+			const row = this.narInfoRow(pending.cacheId, metadata.storePathHash);
+			if (row?.narHash !== metadata.narHash) {
+				return { verdict: 'absent' as const };
+			}
+			const result = await this.commitPipeline.reclaimReservedRow(
+				this.cache(pending.cacheId),
+				metadata.storePathHash,
+				row.generation,
+				metadata.narHash,
+				() => this.ownsActiveClaim(owner, pending, signal)
+			);
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
+				return;
+			}
+			if (result !== 'committed-current') {
+				if (result === 'reclaimed') {
+					this.pruneRetentionTargets(
+						this.cache(pending.cacheId),
+						metadata.storePathHash
+					);
+				}
+				return { verdict: 'absent' as const };
+			}
+			const grace = parseStoredGraceDecision(pending.graceDecisionJson);
+			const confirmed = confirmGrace(
+				this.context,
+				this.retention,
+				this.cache(pending.cacheId),
+				metadata.storePathHash,
+				row.generation,
+				metadata.narHash,
+				grace?.graceSeconds
+			);
+			if (!confirmed.matched) {
+				return;
+			}
+			this.commitPipeline.attachRootTarget(
+				this.cache(pending.cacheId),
+				pending.attachRootName,
+				metadata.storePathHash,
+				metadata.storePath
+			);
+			await this.inheritAfterCommit(pending, metadata, row.generation);
+			await new ReconcileQueueService(this.context).enqueue(undefined, [
+				{ cacheId: pending.cacheId, storePathHash: metadata.storePathHash }
+			]);
+			return {
+				verdict: await this.publicationVerdict(
+					pending,
+					metadata,
+					row.generation
+				)
+			};
+		});
+		if (
+			resolution === undefined ||
+			!this.ownsActiveClaim(owner, pending, signal)
+		) {
+			return false;
+		}
+		await this.deleteStagingObject(pending);
+		signal?.throwIfAborted();
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
+			return false;
+		}
+		await this.uploadState.clearDeliveredNarRefresh(pending.id);
+		if (
+			!this.ownsActiveClaim(owner, pending, signal) ||
+			!this.uploadState.clearPendingUpload(pending.id, owner)
+		) {
+			return false;
+		}
+		this.notifyWaiters(pending, resolution.verdict);
+		return true;
+	}
+
 	private cache(cacheId: CacheId): ResolvedCache {
 		return this.context.cacheRepository.resolvedForId(cacheId);
+	}
+
+	private beginRetryRows(
+		owner: string,
+		rows: readonly PendingUploadRow[],
+		clock: EligibleRetryClock
+	): PendingUploadRow[] {
+		const now = Date.now();
+		const eligible: PendingUploadRow[] = [];
+		const awaitingFilter = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+
+		for (const pending of rows) {
+			const startedAt = pending.retryStartedActiveMs ?? clock.elapsedAt(now);
+			const exhaustion = this.retryPolicy.exhaustion({
+				failures: pending.settleFailures,
+				eligibleAgeMs: clock.ageAt(startedAt, now)
+			});
+			const updated = this.context.db
+				.update(schema.pendingUploads)
+				.set({
+					retryStartedActiveMs: startedAt,
+					...(exhaustion !== undefined && {
+						settleExhaustion: exhaustion,
+						settleRetryAfter: isoTimestamp(new Date(now)),
+						recordedVerdictJson: sql`null`,
+						claimedAt: sql`null`,
+						claimOwner: sql`null`
+					})
+				})
+				.where(
+					and(
+						eq(schema.pendingUploads.id, pending.id),
+						eq(schema.pendingUploads.claimOwner, owner),
+						this.recordedVerdictFilter(pending),
+						awaitingFilter
+					)
+				)
+				.returning()
+				.all();
+
+			if (exhaustion === undefined) {
+				eligible.push(...updated);
+			}
+		}
+
+		return eligible;
 	}
 
 	private async inheritAfterCommit(
@@ -708,12 +866,13 @@ export class VerificationService {
 	}
 
 	private async prepareRecordedVerdict(
-		uploadId: UploadId,
+		captured: PendingUploadRow,
 		verification: NarVerification,
 		promotion: PromotionState,
 		owner: string,
 		signal?: AbortSignal
 	): Promise<PreparedVerdict> {
+		const uploadId = captured.id;
 		await this.uploadState.migratePendingNarRefreshMarkers(uploadId);
 		signal?.throwIfAborted();
 		const pending = this.context.db
@@ -722,7 +881,8 @@ export class VerificationService {
 			.where(
 				and(
 					eq(schema.pendingUploads.id, uploadId),
-					eq(schema.pendingUploads.claimOwner, owner)
+					eq(schema.pendingUploads.claimOwner, owner),
+					this.recordedVerdictFilter(captured)
 				)
 			)
 			.get();
@@ -791,7 +951,7 @@ export class VerificationService {
 		await this.uploadState.migratePendingNarRefreshMarkers(pending.id);
 		signal?.throwIfAborted();
 
-		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return { kind: 'ignored' };
 		}
 
@@ -814,7 +974,7 @@ export class VerificationService {
 				reserved.generation
 			);
 
-			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return { kind: 'ignored' };
 			}
 
@@ -880,7 +1040,7 @@ export class VerificationService {
 
 	private collectPreparedWithoutDecode(
 		prepared: PreparedWithoutDecode,
-		uploadId: UploadId,
+		pending: PendingUploadRow,
 		owner: string,
 		ready: PreparedSettle[]
 	): number {
@@ -894,7 +1054,7 @@ export class VerificationService {
 				return 0;
 			}
 			case 'requires-decode': {
-				this.releaseLease(uploadId, owner);
+				this.releaseLease(pending.id, owner, pending);
 
 				return 0;
 			}
@@ -910,19 +1070,19 @@ export class VerificationService {
 		owner: string,
 		signal?: AbortSignal
 	): Promise<PendingReservation> {
-		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return { kind: 'ignored' };
 		}
 
 		const reserved = await this.commitPipeline.reserveNarInfoRow(
 			this.cache(pending.cacheId),
 			metadata,
-			() => this.ownsActiveClaim(owner, pending.id, signal)
+			() => this.ownsActiveClaim(owner, pending, signal)
 		);
 
 		if (
 			reserved === undefined ||
-			!this.ownsActiveClaim(owner, pending.id, signal)
+			!this.ownsActiveClaim(owner, pending, signal)
 		) {
 			return { kind: 'ignored' };
 		}
@@ -986,7 +1146,7 @@ export class VerificationService {
 			generation
 		);
 
-		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return 'ignored';
 		}
 
@@ -1034,7 +1194,7 @@ export class VerificationService {
 			generation
 		);
 		if (
-			!this.ownsActiveClaim(owner, pending.id, signal) ||
+			!this.ownsActiveClaim(owner, pending, signal) ||
 			!this.uploadState.clearPendingUpload(pending.id, owner)
 		) {
 			return 'ignored';
@@ -1073,7 +1233,7 @@ export class VerificationService {
 		// Re-enter the gate to check ownership before activating the object and
 		// writing `blob_state`.
 		if (promotion === 'promote') {
-			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'ignored';
 			}
 
@@ -1087,12 +1247,12 @@ export class VerificationService {
 				metadata,
 				blob,
 				owner,
-				() => this.ownsActiveClaim(owner, pending.id, signal)
+				() => this.ownsActiveClaim(owner, pending, signal)
 			);
 
 			if (
 				staged === undefined ||
-				!this.ownsActiveClaim(owner, pending.id, signal)
+				!this.ownsActiveClaim(owner, pending, signal)
 			) {
 				return 'ignored';
 			}
@@ -1102,24 +1262,24 @@ export class VerificationService {
 			}
 
 			const activation = await this.context.criticalSection(async () => {
-				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return { result: 'ignored' as const, wasActivated: false };
 				}
 
 				const activation = await this.uploadState.commitStagingBlob(
 					staged,
-					() => this.ownsActiveClaim(owner, pending.id, signal)
+					() => this.ownsActiveClaim(owner, pending, signal)
 				);
 
 				if (activation === 'retired') {
-					if (this.ownsActiveClaim(owner, pending.id, signal)) {
+					if (this.ownsActiveClaim(owner, pending, signal)) {
 						this.uploadState.clearPendingNarRefresh(pending.id);
 					}
 					return { result: 'ignored' as const, wasActivated: false };
 				}
 
 				return {
-					result: this.ownsActiveClaim(owner, pending.id, signal)
+					result: this.ownsActiveClaim(owner, pending, signal)
 						? ('ready' as const)
 						: ('ignored' as const),
 					wasActivated: true
@@ -1135,7 +1295,7 @@ export class VerificationService {
 						narHash: metadata.narHash
 					});
 					await this.context.criticalSection(async () => {
-						if (this.ownsActiveClaim(owner, pending.id, signal)) {
+						if (this.ownsActiveClaim(owner, pending, signal)) {
 							await this.uploadState.clearDeliveredNarRefresh(pending.id);
 						}
 					});
@@ -1196,7 +1356,7 @@ export class VerificationService {
 		);
 		signal?.throwIfAborted();
 
-		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return false;
 		}
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
@@ -1216,7 +1376,7 @@ export class VerificationService {
 			mustOwnBlob: false,
 			// Check the claim again inside the charge gate. A competing pass might have
 			// removed the row or recorded a terminal verdict during the earlier awaits.
-			isStillSettleable: () => this.ownsActiveClaim(owner, pending.id, signal)
+			isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
 		});
 
 		if (outcome.kind === 'gone' || outcome.kind === 'deferred') {
@@ -1233,7 +1393,7 @@ export class VerificationService {
 				await this.commitPipeline.probeMaterialisation(metadata);
 			signal?.throwIfAborted();
 
-			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return false;
 			}
 
@@ -1246,7 +1406,7 @@ export class VerificationService {
 				mustOwnBlob: false,
 				graceDecision,
 				attachRootName: pending.attachRootName ?? undefined,
-				isStillSettleable: () => this.ownsActiveClaim(owner, pending.id, signal)
+				isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
 			});
 
 			if (retried.kind === 'gone' || retried.kind === 'deferred') {
@@ -1278,7 +1438,7 @@ export class VerificationService {
 			// completes, so a confirmation outside it could race a delete or
 			// recommit queued behind the gate.
 			const reclaim = await this.context.criticalSection(async () => {
-				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return 'superseded' as const;
 				}
 
@@ -1287,10 +1447,10 @@ export class VerificationService {
 					metadata.storePathHash,
 					generation,
 					metadata.narHash,
-					() => this.ownsActiveClaim(owner, pending.id, signal)
+					() => this.ownsActiveClaim(owner, pending, signal)
 				);
 
-				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return 'superseded' as const;
 				}
 
@@ -1325,6 +1485,9 @@ export class VerificationService {
 					metadata,
 					generation
 				);
+				if (!this.ownsActiveClaim(owner, pending, signal)) {
+					return false;
+				}
 				const didApply = this.uploadState.clearPendingUpload(pending.id, owner);
 
 				if (didApply) {
@@ -1335,6 +1498,9 @@ export class VerificationService {
 			}
 
 			signal?.throwIfAborted();
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
+				return false;
+			}
 			const didApply = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
@@ -1370,7 +1536,7 @@ export class VerificationService {
 				generation,
 				metadata.narHash,
 				outcome.narInfo,
-				() => this.ownsActiveClaim(owner, pending.id, signal)
+				() => this.ownsActiveClaim(owner, pending, signal)
 			);
 
 			if (!wasPublished) {
@@ -1386,6 +1552,9 @@ export class VerificationService {
 				metadata,
 				generation
 			);
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
+				return false;
+			}
 			const wasCleared = this.uploadState.clearPendingUpload(pending.id, owner);
 
 			if (wasCleared) {
@@ -1399,7 +1568,10 @@ export class VerificationService {
 		// A concurrent commit took the path or the blob disappeared. Remove this
 		// upload row; the reaper collects any unreferenced object it promoted.
 		signal?.throwIfAborted();
-		if (!this.uploadState.clearPendingUpload(pending.id, owner)) {
+		if (
+			!this.ownsActiveClaim(owner, pending, signal) ||
+			!this.uploadState.clearPendingUpload(pending.id, owner)
+		) {
 			return false;
 		}
 
@@ -1453,7 +1625,7 @@ export class VerificationService {
 	): Promise<boolean> {
 		signal?.throwIfAborted();
 		const reclaim = await this.context.criticalSection(async () => {
-			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'superseded' as const;
 			}
 
@@ -1462,15 +1634,18 @@ export class VerificationService {
 				metadata.storePathHash,
 				generation,
 				metadata.narHash,
-				() => this.ownsActiveClaim(owner, pending.id, signal)
+				() => this.ownsActiveClaim(owner, pending, signal)
 			);
 
-			return this.ownsActiveClaim(owner, pending.id, signal)
+			return this.ownsActiveClaim(owner, pending, signal)
 				? result
 				: ('superseded' as const);
 		});
 
-		if (reclaim === 'committed-current') {
+		if (
+			reclaim === 'committed-current' ||
+			!this.ownsActiveClaim(owner, pending, signal)
+		) {
 			return false;
 		}
 
@@ -1886,12 +2061,24 @@ export class VerificationService {
 		}
 	}
 
+	private claimableIds(page: ClaimablePage): SQL {
+		const filter = and(
+			claimableFilter(page.now),
+			page.filter,
+			page.after === undefined
+				? undefined
+				: sql`(${claimableReadyAt()}, ${schema.pendingUploads.id}) > (${page.after.readyAt}, ${page.after.id})`
+		);
+		return sql`(SELECT ${schema.pendingUploads.id} FROM ${schema.pendingUploads} INDEXED BY pending_upload_fresh_ready_idx
+			WHERE ${filter} ORDER BY ${claimableReadyAt()}, ${schema.pendingUploads.id} LIMIT ${page.limit})`;
+	}
+
 	private decodeFreeCandidatePage(
 		now: Date,
 		kind: DecodeFreeCandidateKind,
-		after: UploadId | undefined,
+		after: ReadinessCursor | undefined,
 		limit: number
-	): PendingUploadRow[] {
+	): ReadyPendingUploadRow[] {
 		const pendingStorePathHash = sql<StorePathHash>`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
 		const matchingNarInfo = and(
 			eq(schema.narInfos.cacheId, schema.pendingUploads.cacheId),
@@ -1909,24 +2096,30 @@ export class VerificationService {
 		);
 		const decodeFreeCandidate =
 			kind === 'reuse' ? reuseCandidate : recoveryCandidate;
-		const afterCandidate =
-			after === undefined ? undefined : gt(schema.pendingUploads.id, after);
+		const ids = this.claimableIds({
+			now,
+			filter: decodeFreeCandidate,
+			after,
+			limit
+		});
 
 		return this.context.db
-			.select()
+			.select({
+				...getTableColumns(schema.pendingUploads),
+				readyAt: claimableReadyAt()
+			})
 			.from(schema.pendingUploads)
-			.where(and(claimableFilter(now), decodeFreeCandidate, afterCandidate))
-			.orderBy(asc(schema.pendingUploads.id))
-			.limit(limit)
+			.where(inArray(schema.pendingUploads.id, ids))
+			.orderBy(asc(claimableReadyAt()), asc(schema.pendingUploads.id))
 			.all();
 	}
 
 	private decodeFreeCandidatePageFromCursor(
 		now: Date,
 		kind: DecodeFreeCandidateKind,
-		cursor: UploadId | undefined,
+		cursor: ReadinessCursor | undefined,
 		limit: number
-	): PendingUploadRow[] {
+	): ReadyPendingUploadRow[] {
 		const afterCursor = this.decodeFreeCandidatePage(now, kind, cursor, limit);
 
 		if (cursor === undefined || afterCursor.length > 0) {
@@ -2019,7 +2212,10 @@ export class VerificationService {
 					? undefined
 					: ({
 							...cursor,
-							[kind]: lastCandidate.id,
+							[kind]: readinessCursorSchema.parse({
+								id: lastCandidate.id,
+								readyAt: lastCandidate.readyAt
+							}),
 							next: otherDecodeFreeCandidateKind(kind)
 						} satisfies DecodeFreeCursorState),
 				signal
@@ -2033,6 +2229,7 @@ export class VerificationService {
 		logger: Logger,
 		owner: string,
 		candidates: readonly PendingUploadRow[],
+		clock: EligibleRetryClock,
 		signal?: AbortSignal
 	): Promise<PendingUploadRow[]> {
 		const classified = await mapWithConcurrency(
@@ -2051,7 +2248,7 @@ export class VerificationService {
 					);
 
 					if (reserved === undefined) {
-						this.releaseLease(pending.id, owner);
+						this.releaseLease(pending.id, owner, pending);
 						return undefined;
 					}
 
@@ -2064,12 +2261,12 @@ export class VerificationService {
 						signal
 					);
 
-					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return undefined;
 					}
 
 					if (!isCommitted) {
-						this.releaseLease(pending.id, owner);
+						this.releaseLease(pending.id, owner, pending);
 						return undefined;
 					}
 
@@ -2081,7 +2278,8 @@ export class VerificationService {
 						pending,
 						owner,
 						error,
-						'commit-state-probe-failed'
+						'commit-state-probe-failed',
+						clock
 					);
 					return undefined;
 				}
@@ -2096,14 +2294,26 @@ export class VerificationService {
 	// Release a claim after a transient fault so the next pass need not wait for
 	// the lease to expire. A crashed pass never reaches this method; its claims
 	// become available when their leases expire.
-	private releaseLease(uploadId: UploadId, owner: string): void {
+	private releaseLease(
+		uploadId: UploadId,
+		owner: string,
+		pending?: PendingUploadRow
+	): void {
+		const awaitingFilter = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({ claimedAt: sql`null`, claimOwner: sql`null` })
 			.where(
 				and(
 					eq(schema.pendingUploads.id, uploadId),
-					eq(schema.pendingUploads.claimOwner, owner)
+					eq(schema.pendingUploads.claimOwner, owner),
+					pending === undefined
+						? isNull(schema.pendingUploads.recordedVerdictJson)
+						: this.recordedVerdictFilter(pending),
+					awaitingFilter
 				)
 			)
 			.run();
@@ -2114,31 +2324,95 @@ export class VerificationService {
 		pending: PendingUploadRow,
 		owner: string,
 		error: unknown,
-		reason: string
+		reason: RetryFailureCategory,
+		clock: EligibleRetryClock
 	): void {
-		const now = new Date();
-		const failures = pending.settleFailures + 1;
-		const retryDate = new Date(
-			now.getTime() + pendingSettleRetryDelayMs(failures)
-		);
-		const lastError = error instanceof Error ? error.message : String(error);
 		const awaitingFilter = or(
 			eq(schema.pendingUploads.verdict, 'pending'),
 			eq(schema.pendingUploads.verdict, 'committing')
 		);
+		if (error instanceof ObjectIncarnationReservationContendedError) {
+			const retryAt = isoTimestamp(
+				new Date(Date.now() + error.retryAfterSeconds * 1000)
+			);
+			const owned = and(
+				eq(schema.pendingUploads.id, pending.id),
+				eq(schema.pendingUploads.claimOwner, owner),
+				this.recordedVerdictFilter(pending),
+				awaitingFilter
+			);
+			this.context.db
+				.update(schema.pendingUploads)
+				.set({ settleRetryAfter: retryAt })
+				.where(owned)
+				.run();
+			return;
+		}
+
+		if (
+			error instanceof TenantWritesStoppedError ||
+			error instanceof SubrequestSliceExceededError
+		) {
+			if (pending.recordedVerdictJson === null) {
+				this.releaseLease(pending.id, owner, pending);
+			}
+			return;
+		}
+
+		const now = new Date();
+		const current = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					eq(schema.pendingUploads.id, pending.id),
+					eq(schema.pendingUploads.claimOwner, owner),
+					this.recordedVerdictFilter(pending),
+					awaitingFilter
+				)
+			)
+			.get();
+
+		if (current === undefined) {
+			return;
+		}
+
+		const startedAt =
+			current.retryStartedActiveMs ?? clock.elapsedAt(now.getTime());
+		const decision = this.retryPolicy.afterFailure({
+			failures: current.settleFailures,
+			eligibleAgeMs: clock.ageAt(startedAt, now.getTime())
+		});
+		const retryDate = new Date(
+			now.getTime() + (decision.kind === 'retry' ? decision.delayMs : 0)
+		);
 		const ownedRow = and(
 			eq(schema.pendingUploads.id, pending.id),
 			eq(schema.pendingUploads.claimOwner, owner),
+			this.recordedVerdictFilter(pending),
 			awaitingFilter
 		);
 		const [failure] = this.context.db
 			.update(schema.pendingUploads)
 			.set({
-				settleFailures: sql`${schema.pendingUploads.settleFailures} + 1`,
+				settleFailures: decision.failures,
 				settleRetryAfter: isoTimestamp(retryDate),
-				lastSettleError: lastError.slice(0, 512),
-				claimedAt: sql`null`,
-				claimOwner: sql`null`
+				retryStartedActiveMs: startedAt,
+				settleExhaustion:
+					decision.kind === 'exhausted' ? decision.reason : sql`null`,
+				recordedVerdictJson:
+					decision.kind === 'exhausted'
+						? sql`null`
+						: pending.recordedVerdictJson,
+				lastSettleError: reason,
+				claimedAt:
+					pending.recordedVerdictJson === null || decision.kind === 'exhausted'
+						? sql`null`
+						: pending.claimedAt,
+				claimOwner:
+					pending.recordedVerdictJson === null || decision.kind === 'exhausted'
+						? sql`null`
+						: owner
 			})
 			.where(ownedRow)
 			.returning({
@@ -2153,12 +2427,13 @@ export class VerificationService {
 		const properties = {
 			uploadId: pending.id,
 			kind:
-				pending.r2Key === narObjectKey(pending.narHash)
-					? 'reuse'
-					: 'committed-recovery',
+				reason === 'verification-failed' || pending.recordedVerdictJson !== null
+					? 'fresh'
+					: pending.r2Key === narObjectKey(pending.narHash)
+						? 'reuse'
+						: 'committed-recovery',
 			reason,
-			failures: failure.failures,
-			lastError
+			failures: failure.failures
 		};
 		logger.warn('pending upload verification failed', properties);
 	}
@@ -2191,13 +2466,29 @@ export class VerificationService {
 
 	private ownsActiveClaim(
 		owner: string,
-		uploadId: UploadId,
+		pending: PendingUploadRow,
 		signal?: AbortSignal
 	): boolean {
-		return signal?.aborted !== true && this.ownsClaimFor(owner, uploadId);
+		return (
+			signal?.aborted !== true &&
+			this.ownsClaimFor(owner, pending.id, this.recordedVerdictFilter(pending))
+		);
 	}
 
-	private ownsClaimFor(owner: string, uploadId: UploadId): boolean {
+	private recordedVerdictFilter(pending: PendingUploadRow): SQL {
+		return pending.recordedVerdictJson === null
+			? isNull(schema.pendingUploads.recordedVerdictJson)
+			: eq(
+					schema.pendingUploads.recordedVerdictJson,
+					pending.recordedVerdictJson
+				);
+	}
+
+	private ownsClaimFor(
+		owner: string,
+		uploadId: UploadId,
+		verdictFilter?: SQL
+	): boolean {
 		const awaitingFilter = or(
 			eq(schema.pendingUploads.verdict, 'pending'),
 			eq(schema.pendingUploads.verdict, 'committing')
@@ -2210,7 +2501,8 @@ export class VerificationService {
 					and(
 						eq(schema.pendingUploads.id, uploadId),
 						eq(schema.pendingUploads.claimOwner, owner),
-						awaitingFilter
+						awaitingFilter,
+						verdictFilter
 					)
 				)
 				.get() !== undefined
@@ -2218,23 +2510,29 @@ export class VerificationService {
 	}
 
 	/**
-	 * Stores each accepted verdict on its upload row. An `abandoned` result
-	 * releases the lease so another pass can claim the row.
-	 *
-	 * Every statement here runs against the Durable Object's own database, and
-	 * the writes are synchronous, so the batch is durable before this returns.
+	 * Stores each accepted verdict and captures abandoned rows before any await.
+	 * The synchronous database writes preserve the batch's decoded results.
 	 */
 	private holdVerdicts(
 		owner: string,
 		results: readonly VerificationResult[]
-	): void {
+	): PendingUploadRow[] {
+		const abandoned: PendingUploadRow[] = [];
 		for (const { uploadId, verdict } of results) {
 			if (!this.ownsClaim(owner, uploadId)) {
 				continue;
 			}
 
 			if (verdict.kind === 'abandoned') {
-				this.releaseLease(uploadId, owner);
+				const pending = this.context.db
+					.select()
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, uploadId))
+					.get();
+
+				if (pending?.recordedVerdictJson === null) {
+					abandoned.push(pending);
+				}
 				continue;
 			}
 
@@ -2254,22 +2552,79 @@ export class VerificationService {
 				)
 				.run();
 		}
+
+		return abandoned;
+	}
+
+	private recordedVerdictKey(pending: PendingUploadRow): string {
+		return JSON.stringify([
+			pending.id,
+			pending.claimOwner,
+			pending.recordedVerdictJson
+		]);
+	}
+
+	private claimRecordedVerdict(
+		held: HeldVerdictRow
+	): PendingUploadRow | undefined {
+		const { pending, owner } = held;
+		if (
+			pending.recordedVerdictJson === null ||
+			this.applyingRecordedVerdicts.has(this.recordedVerdictKey(pending))
+		) {
+			return;
+		}
+
+		const now = isoTimestamp(new Date());
+		const readyAt = sql`COALESCE(${schema.pendingUploads.settleRetryAfter}, '')`;
+		const awaitingFilter = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+		const filter = and(
+			eq(schema.pendingUploads.id, pending.id),
+			eq(schema.pendingUploads.claimOwner, owner),
+			eq(
+				schema.pendingUploads.recordedVerdictJson,
+				pending.recordedVerdictJson
+			),
+			isNull(schema.pendingUploads.settleExhaustion),
+			lte(readyAt, now),
+			awaitingFilter
+		);
+		const current = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(filter)
+			.get();
+
+		if (current === undefined) {
+			return;
+		}
+
+		this.applyingRecordedVerdicts.add(this.recordedVerdictKey(current));
+		return current;
 	}
 
 	private heldVerdictPage(
-		after: UploadId | undefined,
+		after: ReadinessCursor | undefined,
 		limit: number
-	): PendingUploadRow[] {
+	): ReadyPendingUploadRow[] {
+		const now = isoTimestamp(new Date());
+		const readyAt = sql<string>`COALESCE(${schema.pendingUploads.settleRetryAfter}, '')`;
+		const filter = and(
+			isNotNull(schema.pendingUploads.recordedVerdictJson),
+			isNull(schema.pendingUploads.settleExhaustion),
+			lte(readyAt, now),
+			after === undefined
+				? undefined
+				: sql`(${readyAt}, ${schema.pendingUploads.id}) > (${after.readyAt}, ${after.id})`
+		);
 		return this.context.db
-			.select()
+			.select({ ...getTableColumns(schema.pendingUploads), readyAt })
 			.from(schema.pendingUploads)
-			.where(
-				and(
-					isNotNull(schema.pendingUploads.recordedVerdictJson),
-					after === undefined ? undefined : gt(schema.pendingUploads.id, after)
-				)
-			)
-			.orderBy(asc(schema.pendingUploads.id))
+			.where(filter)
+			.orderBy(asc(readyAt), asc(schema.pendingUploads.id))
 			.limit(limit)
 			.all();
 	}
@@ -2286,7 +2641,7 @@ export class VerificationService {
 	 * new claim. The caller applies the remaining verdicts.
 	 */
 	private heldVerdicts(
-		after: UploadId | undefined,
+		after: ReadinessCursor | undefined,
 		limit: number
 	): HeldVerdictPage {
 		const page = this.heldVerdictPage(after, limit);
@@ -2322,14 +2677,14 @@ export class VerificationService {
 	 * replacement and leaving its row leased without a verdict. `heldVerdicts`
 	 * uses the same comparison when it clears an unreadable or stale verdict.
 	 */
-	private clearRecordedVerdict(pending: PendingUploadRow): void {
+	private clearRecordedVerdict(pending: PendingUploadRow): boolean {
 		const { claimOwner, recordedVerdictJson } = pending;
 
 		if (recordedVerdictJson === null) {
-			return;
+			return false;
 		}
 
-		this.context.db
+		const cleared = this.context.db
 			.update(schema.pendingUploads)
 			.set({ recordedVerdictJson: sql`null` })
 			.where(
@@ -2341,7 +2696,10 @@ export class VerificationService {
 					eq(schema.pendingUploads.recordedVerdictJson, recordedVerdictJson)
 				)
 			)
-			.run();
+			.returning({ id: schema.pendingUploads.id })
+			.all();
+
+		return cleared.length > 0;
 	}
 
 	/**
@@ -2700,6 +3058,53 @@ export class VerificationService {
 	// decode outside the Durable Object. The single writer selects and leases the
 	// rows without yielding, which prevents an overlapping alarm or cron pass from
 	// claiming the same uploads.
+
+	async beginVerificationBatch(
+		batch: PendingVerificationBatch,
+		signal?: AbortSignal
+	): Promise<PendingVerificationBatch> {
+		if (batch.claims.length === 0) {
+			return batch;
+		}
+
+		const clock = await raceVerificationOperation(
+			new RetryClockService(this.context).read(),
+			signal
+		);
+		signal?.throwIfAborted();
+
+		if (!clock?.isActive) {
+			this.releaseClaimLeases(
+				batch.owner,
+				batch.claims.map((claim) => claim.uploadId)
+			);
+			return { ...batch, claims: [], truncated: false };
+		}
+
+		const ids = new Set<UploadId>();
+		for (const claim of batch.claims) {
+			const pending = this.context.db
+				.select()
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, claim.uploadId))
+				.get();
+			if (pending !== undefined) {
+				for (const eligible of this.beginRetryRows(
+					batch.owner,
+					[pending],
+					clock
+				)) {
+					ids.add(eligible.id);
+				}
+			}
+		}
+
+		return {
+			...batch,
+			claims: batch.claims.filter((claim) => ids.has(claim.uploadId))
+		};
+	}
+
 	listPendingForVerify(
 		limit: number,
 		maxNarBytes: number,
@@ -2707,20 +3112,19 @@ export class VerificationService {
 	): PendingVerificationBatch {
 		signal?.throwIfAborted();
 		const now = new Date();
+		const ids = this.claimableIds({
+			now,
+			limit: limit + 1,
+			filter: ne(
+				schema.pendingUploads.r2Key,
+				sql`${narObjectKeyPrefix} || ${schema.pendingUploads.narHash} || ${narObjectKeySuffix}`
+			)
+		});
 		const pendings = this.context.db
 			.select()
 			.from(schema.pendingUploads)
-			.where(
-				and(
-					claimableFilter(now),
-					ne(
-						schema.pendingUploads.r2Key,
-						sql`${narObjectKeyPrefix} || ${schema.pendingUploads.narHash} || ${narObjectKeySuffix}`
-					)
-				)
-			)
-			.orderBy(asc(schema.pendingUploads.id))
-			.limit(limit + 1)
+			.where(inArray(schema.pendingUploads.id, ids))
+			.orderBy(asc(claimableReadyAt()), asc(schema.pendingUploads.id))
 			.all();
 		const batch = chunkClaims(pendings, limit, maxNarBytes);
 		const owner = crypto.randomUUID();
@@ -2736,12 +3140,12 @@ export class VerificationService {
 	}
 
 	hasPendingUploads(): boolean {
+		const ids = this.claimableIds({ now: new Date(), limit: 1 });
 		return (
 			this.context.db
 				.select({ id: schema.pendingUploads.id })
 				.from(schema.pendingUploads)
-				.where(claimableFilter(new Date()))
-				.limit(1)
+				.where(inArray(schema.pendingUploads.id, ids))
 				.get() !== undefined
 		);
 	}
@@ -2765,7 +3169,7 @@ export class VerificationService {
 			limit,
 			affordableSubrequestOperations(
 				subrequestsPerPendingSettleRow,
-				pendingSettlePrefetchSubrequests
+				pendingSettlePrefetchSubrequests + 1
 			)
 		);
 
@@ -2775,17 +3179,41 @@ export class VerificationService {
 
 		const { owner, reuse, recoveryCandidates } =
 			await this.claimPendingWithoutDecode(affordable, signal);
-		const claimedIds = [...reuse, ...recoveryCandidates].map((row) => row.id);
+		if (reuse.length === 0 && recoveryCandidates.length === 0) {
+			return 0;
+		}
+
+		const clock = await raceVerificationOperation(
+			new RetryClockService(this.context).read(),
+			signal
+		);
+		signal?.throwIfAborted();
+		if (!clock?.isActive) {
+			for (const pending of [...reuse, ...recoveryCandidates]) {
+				this.releaseLease(pending.id, owner, pending);
+			}
+			return 0;
+		}
+
+		const eligibleIds = new Set(
+			this.beginRetryRows(owner, [...reuse, ...recoveryCandidates], clock).map(
+				(row) => row.id
+			)
+		);
 
 		try {
 			const committedRecovery = await this.committedRecoveryCandidates(
 				logger,
 				owner,
-				recoveryCandidates,
+				recoveryCandidates.filter((row) => eligibleIds.has(row.id)),
+				clock,
 				signal
 			);
 			signal?.throwIfAborted();
-			const pendings = [...reuse, ...committedRecovery];
+			const pendings = [
+				...reuse.filter((row) => eligibleIds.has(row.id)),
+				...committedRecovery
+			];
 
 			let settled = 0;
 			const ready: PreparedSettle[] = [];
@@ -2806,7 +3234,7 @@ export class VerificationService {
 
 					settled += this.collectPreparedWithoutDecode(
 						prepared,
-						pending.id,
+						pending,
 						owner,
 						ready
 					);
@@ -2814,7 +3242,7 @@ export class VerificationService {
 					signal?.throwIfAborted();
 					if (error instanceof UploadedObjectNotFoundError) {
 						// A missing canonical object is terminal for this reuse attempt.
-						if (await this.recordMissingObject(pending.id, owner, signal)) {
+						if (await this.recordMissingObject(pending, owner, signal)) {
 							settled += 1;
 						}
 						continue;
@@ -2825,7 +3253,8 @@ export class VerificationService {
 						pending,
 						owner,
 						error,
-						'prepare-failed'
+						'prepare-failed',
+						clock
 					);
 				}
 			}
@@ -2868,14 +3297,17 @@ export class VerificationService {
 						item.pending,
 						item.owner,
 						error,
-						'materialisation-failed'
+						'materialisation-failed',
+						clock
 					);
 				}
 			}
 
 			return settled;
 		} finally {
-			this.releaseClaimLeases(owner, claimedIds);
+			for (const pending of [...reuse, ...recoveryCandidates]) {
+				this.releaseLease(pending.id, owner, pending);
+			}
 		}
 	}
 
@@ -2899,12 +3331,122 @@ export class VerificationService {
 		signal?: AbortSignal
 	): Promise<number> {
 		signal?.throwIfAborted();
-		this.holdVerdicts(owner, results);
+		const abandoned = this.holdVerdicts(owner, results);
+		const clock = await raceVerificationOperation(
+			new RetryClockService(this.context).read(),
+			signal
+		);
+		signal?.throwIfAborted();
+		for (const pending of abandoned) {
+			if (!clock?.isActive) {
+				this.releaseLease(pending.id, owner, pending);
+				continue;
+			}
+
+			this.recordFallbackFailure(
+				logger,
+				pending,
+				owner,
+				undefined,
+				'verification-failed',
+				clock
+			);
+		}
+		if (!clock?.isActive) {
+			return 0;
+		}
 		signal?.throwIfAborted();
 
-		const page = await this.applyRecordedVerdicts(logger, signal);
+		await this.processExhaustedUploads(logger, signal, clock);
+		const page = await this.applyRecordedVerdicts(logger, signal, clock);
 
 		return page.applied;
+	}
+
+	async processExhaustedUploads(
+		logger: Logger,
+		signal?: AbortSignal,
+		clockSnapshot?: EligibleRetryClock
+	): Promise<number> {
+		const now = Date.now();
+		const awaitingFilter = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+		const limit = Math.min(
+			maxVerificationRpcRows,
+			affordableSubrequestOperations(subrequestsPerRecordedVerdict, 1)
+		);
+		if (limit <= 0) {
+			return 0;
+		}
+		const claimedAt = isoTimestamp(new Date(now));
+		const exhausted = isNotNull(schema.pendingUploads.settleExhaustion);
+		const readyAt = sql`MAX(COALESCE(${schema.pendingUploads.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${schema.pendingUploads.claimedAt}, '+360 seconds'), ''))`;
+		const eligible = and(exhausted, lte(readyAt, claimedAt));
+		const rows = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eligible)
+
+			.orderBy(asc(readyAt), asc(schema.pendingUploads.id))
+			.limit(limit)
+			.all();
+		if (rows.length === 0) {
+			return 0;
+		}
+		const clock =
+			clockSnapshot ?? (await new RetryClockService(this.context).read());
+		if (!clock?.isActive) {
+			return 0;
+		}
+		const owner = crypto.randomUUID();
+		let completed = 0;
+		for (const row of rows) {
+			signal?.throwIfAborted();
+			const filter = and(eq(schema.pendingUploads.id, row.id), eligible);
+			const pending = this.context.db
+				.update(schema.pendingUploads)
+				.set({ claimOwner: owner, claimedAt })
+				.where(filter)
+				.returning()
+				.all()
+				.at(0);
+
+			if (pending === undefined) {
+				continue;
+			}
+			try {
+				if (await this.finishExhaustedUpload(pending, owner, signal)) {
+					completed += 1;
+				}
+			} catch {
+				signal?.throwIfAborted();
+				const retryAfter = isoTimestamp(new Date(Date.now() + 10 * 60_000));
+				this.context.db
+					.update(schema.pendingUploads)
+					.set({
+						settleRetryAfter: retryAfter,
+						lastSettleError: 'cleanup-failed'
+					})
+					.where(
+						and(
+							eq(schema.pendingUploads.id, pending.id),
+							eq(schema.pendingUploads.claimOwner, owner),
+							this.recordedVerdictFilter(pending),
+							awaitingFilter
+						)
+					)
+					.run();
+				logger.warn('exhausted upload cleanup deferred', {
+					uploadId: pending.id,
+					reason: 'cleanup-failed'
+				});
+			} finally {
+				this.releaseLease(pending.id, owner, pending);
+			}
+		}
+		return completed;
 	}
 
 	/**
@@ -2936,14 +3478,15 @@ export class VerificationService {
 	 */
 	async applyRecordedVerdicts(
 		logger: Logger,
-		signal?: AbortSignal
+		signal?: AbortSignal,
+		clockSnapshot?: EligibleRetryClock
 	): Promise<RecordedVerdictPage> {
 		signal?.throwIfAborted();
 		const affordable = Math.min(
 			maxVerificationRpcRows,
 			affordableSubrequestOperations(
 				subrequestsPerRecordedVerdict,
-				pendingSettlePrefetchSubrequests
+				pendingSettlePrefetchSubrequests + (clockSnapshot === undefined ? 1 : 0)
 			)
 		);
 
@@ -2951,7 +3494,7 @@ export class VerificationService {
 			return { applied: 0, resolved: 0 };
 		}
 
-		const after = parseUploadIdCursor(
+		const after = parseReadinessCursor(
 			await this.context.ctx.storage.get(recordedVerdictCursorKey)
 		);
 		const { held, discarded } = this.heldVerdicts(after, affordable);
@@ -2962,14 +3505,26 @@ export class VerificationService {
 			return { applied: 0, resolved: discarded };
 		}
 
-		// Save the final upload ID in this page. The next pass starts after that ID
-		// and eventually wraps to any earlier verdicts that still need application.
+		const clock =
+			clockSnapshot ??
+			(await raceVerificationOperation(
+				new RetryClockService(this.context).read(),
+				signal
+			));
+		signal?.throwIfAborted();
+		if (!clock?.isActive) {
+			return { applied: 0, resolved: discarded };
+		}
+
 		const last = held.at(-1);
 
 		if (last !== undefined) {
 			await this.context.ctx.storage.put(
 				recordedVerdictCursorKey,
-				last.pending.id
+				readinessCursorSchema.parse({
+					id: last.pending.id,
+					readyAt: last.pending.readyAt
+				})
 			);
 		}
 
@@ -2977,19 +3532,38 @@ export class VerificationService {
 		// A verdict this page leaves in place is the only one it did not resolve.
 		let unresolved = 0;
 		const ready: ReadyRecordedVerdict[] = [];
+		const claimedKeys: string[] = [];
 
-		await mapWithConcurrency(
-			held,
-			maxOutgoingConnections,
-			async ({ pending, owner, verdict }) => {
+		try {
+			await mapWithConcurrency(held, maxOutgoingConnections, async (held) => {
+				signal?.throwIfAborted();
+				const current = this.claimRecordedVerdict(held);
+				if (current === undefined) {
+					unresolved += 1;
+					return;
+				}
+				claimedKeys.push(this.recordedVerdictKey(current));
+				const { owner, verdict } = held;
+				const [pending] = this.beginRetryRows(owner, [current], clock);
+				if (pending === undefined) {
+					return;
+				}
 				try {
 					signal?.throwIfAborted();
 
 					if (verdict.kind === 'missing') {
-						if (await this.recordMissingObject(pending.id, owner, signal)) {
+						const didApply = await this.recordMissingObject(
+							pending,
+							owner,
+							signal
+						);
+						if (didApply) {
 							applied += 1;
 						}
-						this.clearRecordedVerdict(pending);
+						const isCleared = this.clearRecordedVerdict(pending);
+						if (!didApply && !isCleared) {
+							unresolved += 1;
+						}
 						return;
 					}
 
@@ -2998,7 +3572,7 @@ export class VerificationService {
 					const promotion: PromotionState =
 						verdict.kind === 'promoted' ? 'already-promoted' : 'promote';
 					const prepared = await this.prepareRecordedVerdict(
-						pending.id,
+						pending,
 						verification,
 						promotion,
 						owner,
@@ -3012,7 +3586,9 @@ export class VerificationService {
 					}
 
 					if (prepared.kind === 'ignored') {
-						this.clearRecordedVerdict(pending);
+						if (!this.clearRecordedVerdict(pending)) {
+							unresolved += 1;
+						}
 						return;
 					}
 
@@ -3020,89 +3596,101 @@ export class VerificationService {
 				} catch (error) {
 					signal?.throwIfAborted();
 					if (error instanceof UploadedObjectNotFoundError) {
-						if (await this.recordMissingObject(pending.id, owner, signal)) {
+						const didApply = await this.recordMissingObject(
+							pending,
+							owner,
+							signal
+						);
+						if (didApply) {
 							applied += 1;
 						}
-						this.clearRecordedVerdict(pending);
+						const isCleared = this.clearRecordedVerdict(pending);
+						if (!didApply && !isCleared) {
+							unresolved += 1;
+						}
 						return;
 					}
 
 					unresolved += 1;
-					logger.warn('verification verdict not applied', {
-						kind: 'fresh',
-						reason: 'prepare-failed'
-					});
+					this.recordFallbackFailure(
+						logger,
+						pending,
+						owner,
+						error,
+						'prepare-failed',
+						clock
+					);
 				}
-			}
-		);
-		signal?.throwIfAborted();
+			});
+			signal?.throwIfAborted();
 
-		if (ready.length === 0) {
+			if (ready.length === 0) {
+				return { applied, resolved: discarded + held.length - unresolved };
+			}
+
+			// Read the shared blob rows once, then materialise each surviving upload
+			// from that snapshot.
+			const prefetched = await this.prefetchedFactsFor(
+				logger,
+				ready.map((entry) => entry.settle),
+				signal
+			);
+
+			await mapWithConcurrency(ready, maxOutgoingConnections, async (entry) => {
+				const item = entry.settle;
+				try {
+					signal?.throwIfAborted();
+					const didApply = await this.materialiseVerified(
+						logger,
+						item.pending,
+						item.metadata,
+						item.generation,
+						prefetched?.get(item.metadata.narHash),
+						item.owner,
+						signal
+					);
+
+					if (didApply) {
+						applied += 1;
+					}
+
+					const isCleared = this.clearRecordedVerdict(entry.held);
+					if (!didApply && !isCleared) {
+						unresolved += 1;
+					}
+				} catch (error) {
+					signal?.throwIfAborted();
+					unresolved += 1;
+					this.recordFallbackFailure(
+						logger,
+						entry.held,
+						item.owner,
+						error,
+						'materialisation-failed',
+						clock
+					);
+				}
+			});
+			signal?.throwIfAborted();
+
 			return { applied, resolved: discarded + held.length - unresolved };
-		}
-
-		// Read the shared blob rows once, then materialise each surviving upload
-		// from that snapshot.
-		const prefetched = await this.prefetchedFactsFor(
-			logger,
-			ready.map((entry) => entry.settle),
-			signal
-		);
-
-		await mapWithConcurrency(ready, maxOutgoingConnections, async (entry) => {
-			const item = entry.settle;
-			try {
-				signal?.throwIfAborted();
-				const didApply = await this.materialiseVerified(
-					logger,
-					item.pending,
-					item.metadata,
-					item.generation,
-					prefetched?.get(item.metadata.narHash),
-					item.owner,
-					signal
-				);
-
-				if (didApply) {
-					applied += 1;
-				}
-
-				this.clearRecordedVerdict(entry.held);
-			} catch {
-				signal?.throwIfAborted();
-				unresolved += 1;
-				logger.warn('verification verdict not applied', {
-					kind: 'fresh',
-					reason: 'materialisation-failed'
-				});
+		} finally {
+			for (const key of claimedKeys) {
+				this.applyingRecordedVerdicts.delete(key);
 			}
-		});
-		signal?.throwIfAborted();
-
-		return { applied, resolved: discarded + held.length - unresolved };
+		}
 	}
 
 	// A missing private staging object is a terminal mismatch because those bytes
 	// cannot reappear. A missing shared object does not invalidate the client's NAR,
 	// so remove the reuse row and report `absent` to trigger a new upload.
 	async recordMissingObject(
-		uploadId: UploadId,
+		pending: PendingUploadRow,
 		owner: string,
 		signal?: AbortSignal
 	): Promise<boolean> {
 		signal?.throwIfAborted();
-		const pending = this.context.db
-			.select()
-			.from(schema.pendingUploads)
-			.where(
-				and(
-					eq(schema.pendingUploads.id, uploadId),
-					eq(schema.pendingUploads.claimOwner, owner)
-				)
-			)
-			.get();
-
-		if (pending === undefined || !isAwaitingVerdict(pending)) {
+		if (!this.ownsActiveClaim(owner, pending, signal)) {
 			return false;
 		}
 
@@ -3127,7 +3715,7 @@ export class VerificationService {
 				// callback completes, so a confirmation outside it could race a
 				// delete or recommit queued behind the gate.
 				reclaim = await this.context.criticalSection(async () => {
-					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return 'superseded' as const;
 					}
 
@@ -3136,10 +3724,10 @@ export class VerificationService {
 						metadata.storePathHash,
 						reserved.generation,
 						metadata.narHash,
-						() => this.ownsActiveClaim(owner, pending.id, signal)
+						() => this.ownsActiveClaim(owner, pending, signal)
 					);
 
-					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return 'superseded' as const;
 					}
 
@@ -3169,7 +3757,7 @@ export class VerificationService {
 					return result;
 				});
 
-				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return false;
 				}
 
@@ -3184,7 +3772,7 @@ export class VerificationService {
 						metadata,
 						reserved.generation
 					);
-					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return false;
 					}
 					const didApply = this.uploadState.clearPendingUpload(

@@ -396,8 +396,8 @@ export class UploadStateService {
 		return true;
 	}
 
-	// A new verification drive supersedes any existing claim lease. Clearing
-	// `claimedAt` makes the row immediately eligible for the next pass.
+	// A new verification drive supersedes the claim lease. The retry deadline
+	// and failure budget remain unchanged.
 	markUploadPending(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)

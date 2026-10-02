@@ -43,6 +43,7 @@ import {
 } from '../test-support.ts';
 
 import { runBoundedLocalMigration } from './bounded-migration.ts';
+import { chunk } from './bulk.ts';
 import {
 	projectLocalCacheLifecycles,
 	resetCacheLifecycleProjection
@@ -77,6 +78,302 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('bounds retry index construction over a preserved pending backlog', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-retry-row-budget'),
+			async (_instance, state) => {
+				await migrateThrough(state, 68);
+				state.storage.sql.exec(
+					"WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<5000) INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict,last_settle_error) SELECT 'pending-'||i, 1,'sha256:nar','staging/key','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','pending','old-error' FROM seq"
+				);
+				const meter = new DatabaseCostMeter();
+				const migrated = await applyMigrations(
+					drizzle(meteredStorage(state.storage, meter)),
+					migrations,
+					{
+						budget: {
+							sourceRowsRemaining: 1,
+							structuralOperationsRemaining: 365,
+							freshStore: false
+						}
+					}
+				);
+				meter.recordOutstanding();
+				return {
+					migrated,
+					bounded: meter.rowsRead + meter.rowsWritten <= 25_000,
+					recorded: state.storage.sql
+						.exec(
+							"SELECT hash FROM __drizzle_migrations WHERE hash = '0069_retry_limits'"
+						)
+						.toArray()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: {
+				kind: 'pending',
+				migration: '0069_retry_limits',
+				stage: 'copy-pending_upload',
+				cursor: 1,
+				sourceRows: 1,
+				declaredSourceWrites: 1,
+				hasCommitted: true
+			},
+			bounded: true,
+			recorded: []
+		});
+	});
+
+	it('preserves retry reservations and resets inheritance in bounded restartable pages', async () => {
+		const uploads = Array.from({ length: 5000 }, (_, index) => ({
+			rowid: index * 2 + 1,
+			id: `upload-${String(index)}`,
+			cache_id: 1,
+			nar_hash: 'sha256:nar',
+			r2_key: `staging/${String(index)}`,
+			metadata_json: JSON.stringify({
+				storePathHash: String(index).padStart(32, '0')
+			}),
+			created_at: '2026-01-01T00:00:00.000Z',
+			expires_at: '2099-01-01T00:00:00.000Z',
+			verdict: index % 2 === 0 ? 'pending' : 'committing',
+			session_id: `session-${String(index)}`,
+			claimed_at: '2026-01-01T00:00:00.000Z',
+			claim_owner: index % 3 === 0 ? undefined : 'previous-owner',
+			grace_decision_json: '{}',
+			attach_root_name: 'build',
+			recorded_verdict_json: index % 3 === 0 ? '{}' : undefined,
+			settle_failures: index % 5,
+			settle_retry_after:
+				index % 2 === 0 ? undefined : '2026-01-02T00:00:00.000Z',
+			last_settle_error:
+				index % 2 === 0 ? undefined : 'https://secret.invalid/token',
+			nar_refresh_pending: index % 2,
+			accepted_sequence: index + 100,
+			accepted_expires_at: '2098-01-01T00:00:00.000Z',
+			commit_started_sequence: index + 200
+		}));
+		const inheritance = Array.from({ length: 5000 }, (_, index) => ({
+			rowid: index * 2 + 1,
+			cache_id: 1,
+			store_path_hash: String(index).padStart(32, '0'),
+			generation: index + 1,
+			nar_hash: 'sha256:nar',
+			attempts: 15,
+			not_before: '2026-01-02T00:00:00.000Z',
+			source_digest: String(index).padStart(64, 'a'),
+			source_predicate_type: 'https://predicate.invalid/type',
+			accepted_upload_id: `admitted-${String(index)}`,
+			accepted_sequence: index + 100,
+			accepted_expires_at: '2098-01-01T00:00:00.000Z',
+			commit_started_sequence: index + 200,
+			queued_sequence: index + 300,
+			source_end_cache_id: index + 400,
+			source_end_generation: index + 500,
+			source_cache_id: index + 600,
+			source_generation: index + 700,
+			source_reference_generation: index + 800,
+			source_reference_complete: index % 2,
+			source_reference_cache_id: index + 900,
+			source_reference_end_generation: index + 1000
+		}));
+		const result = await runInDurableObject(
+			testServerFor('migration-retry-preservation'),
+			async (_instance, state) => {
+				await migrateThrough(state, 68);
+				const insert = (table: string, rows: readonly object[]): void => {
+					const row = rows[0];
+					if (row === undefined) {
+						throw new Error('The retry migration fixture has no rows');
+					}
+					const columns = Object.keys(row);
+					for (const page of chunk(rows, 500)) {
+						state.storage.sql.exec(
+							`INSERT INTO \`${table}\` (${columns.map((column) => `\`${column}\``).join(', ')}) SELECT ${columns.map((column) => `json_extract(value, '$.${column}')`).join(', ')} FROM json_each(?)`,
+							JSON.stringify(page)
+						);
+					}
+				};
+				insert('pending_upload', uploads);
+				insert('attestation_inheritance', inheritance);
+				const triggers = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'pending_upload' ORDER BY name"
+						)
+						.toArray();
+				const beforeTriggers = triggers();
+				const inheritedIndexes = () =>
+					Array.from(
+						state.storage.sql.exec<{ name: string; sql: string }>(
+							"SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN ('pending_upload_inheritance_cutoff_idx', 'pending_upload_inheritance_path_idx') ORDER BY name"
+						),
+						(row) => ({
+							...row,
+							sql: row.sql.replaceAll('"pending_upload"', '`pending_upload`')
+						})
+					);
+				const beforeIndexes = inheritedIndexes();
+				let pages = 0;
+				let isBounded = true;
+				const rows = (table: string) =>
+					Array.from(
+						state.storage.sql.exec(
+							`SELECT rowid, * FROM \`${table}\` ORDER BY rowid`
+						),
+						(row) =>
+							Object.fromEntries(
+								Object.entries(row).map(([column, value]) => [
+									column,
+									value ?? undefined
+								])
+							)
+					);
+				for (;;) {
+					const meter = new DatabaseCostMeter();
+					const migrated = await applyMigrations(
+						drizzle(meteredStorage(state.storage, meter)),
+						migrations,
+						{
+							budget: {
+								sourceRowsRemaining: 1000,
+								structuralOperationsRemaining: 365,
+								freshStore: false
+							}
+						}
+					);
+					meter.recordOutstanding();
+					isBounded &&= meter.rowsRead + meter.rowsWritten <= 25_000;
+					if (migrated.kind === 'complete') {
+						return {
+							migrated,
+							bounded: isBounded,
+							paged: pages > 1,
+							uploads: rows('pending_upload'),
+							inheritance: rows('attestation_inheritance'),
+							beforeIndexes,
+							afterIndexes: inheritedIndexes(),
+							beforeTriggers,
+							afterTriggers: triggers(),
+							temporary: state.storage.sql
+								.exec(
+									"SELECT name FROM sqlite_master WHERE name LIKE '__bounded_%' OR name LIKE '__new_%' ORDER BY name"
+								)
+								.toArray(),
+							indexPlans: [
+								'pending_upload_fresh_ready_idx',
+								'pending_upload_recorded_ready_idx',
+								'pending_upload_exhausted_ready_idx'
+							].map((index) =>
+								Array.from(
+									state.storage.sql.exec<{ detail: string }>(
+										`EXPLAIN QUERY PLAN SELECT id FROM pending_upload INDEXED BY ${index} WHERE ${index === 'pending_upload_fresh_ready_idx' ? "(verdict = 'pending' OR verdict = 'committing') AND (recorded_verdict_json IS NULL OR claim_owner IS NULL) AND settle_exhaustion IS NULL" : index === 'pending_upload_recorded_ready_idx' ? 'recorded_verdict_json IS NOT NULL OR settle_exhaustion IS NOT NULL' : 'settle_exhaustion IS NOT NULL'} LIMIT 1`
+									),
+									({ detail }) => detail
+								)
+							)
+						};
+					}
+					pages += 1;
+				}
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: { kind: 'complete', hasCommitted: true },
+			bounded: true,
+			paged: true,
+			uploads: uploads.map((upload) => ({
+				...upload,
+				last_settle_error:
+					upload.last_settle_error === undefined
+						? undefined
+						: 'verification-failed',
+				retry_started_active_ms: undefined,
+				settle_exhaustion: undefined
+			})),
+			inheritance: inheritance.map((entry) => ({
+				...entry,
+				attempts: 0,
+				retry_started_active_ms: undefined,
+				claim_owner: undefined
+			})),
+			beforeIndexes: result.beforeIndexes,
+			afterIndexes: result.beforeIndexes,
+			beforeTriggers: result.beforeTriggers,
+			afterTriggers: result.beforeTriggers,
+			temporary: [],
+			indexPlans: [
+				['SCAN pending_upload USING INDEX pending_upload_fresh_ready_idx'],
+				['SCAN pending_upload USING INDEX pending_upload_recorded_ready_idx'],
+				['SCAN pending_upload USING INDEX pending_upload_exhausted_ready_idx']
+			]
+		});
+	});
+
+	it.each(['copy-pending_upload', 'copy-canonical-pending_upload'])(
+		'preserves upload rollback writes during %s',
+		async (stage) => {
+			const result = await runInDurableObject(
+				testServerFor(`migration-retry-rollback-${stage}`),
+				async (_instance, state) => {
+					await migrateThrough(state, 68);
+					state.storage.sql.exec(
+						"WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<1001) INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict) SELECT 'pending-'||i, 1,'sha256:nar','staging/key','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','pending' FROM seq"
+					);
+					let page = await applyMigrations(drizzle(state.storage), migrations);
+					while (page.kind === 'pending' && page.stage !== stage) {
+						page = await applyMigrations(drizzle(state.storage), migrations);
+					}
+					if (page.kind !== 'pending') {
+						throw new Error(
+							`The retry migration did not pause during ${stage}.`
+						);
+					}
+					const rollback = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 68)
+					);
+					state.storage.sql.exec(
+						"UPDATE pending_upload SET accepted_sequence = 101, accepted_expires_at = '2098-01-01T00:00:00.000Z', commit_started_sequence = 102, settle_failures = 7, last_settle_error = 'https://secret.invalid/token', claim_owner = NULL, recorded_verdict_json = '{}' WHERE rowid = 1"
+					);
+					state.storage.sql.exec('DELETE FROM pending_upload WHERE rowid = 2');
+					state.storage.sql.exec(
+						"INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict,accepted_sequence,accepted_expires_at,commit_started_sequence) VALUES ('rollback-added',1,'sha256:added','staging/added','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','pending',201,'2098-01-01T00:00:00.000Z',202)"
+					);
+					const rows = () =>
+						state.storage.sql
+							.exec('SELECT rowid, * FROM pending_upload ORDER BY rowid')
+							.toArray();
+					const before = rows();
+					let migrated = await applyMigrations(
+						drizzle(state.storage),
+						migrations
+					);
+					while (migrated.kind === 'pending') {
+						migrated = await applyMigrations(
+							drizzle(state.storage),
+							migrations
+						);
+					}
+					return { rollback, migrated, before, after: rows() };
+				}
+			);
+			expect(result).toStrictEqual({
+				rollback: { kind: 'complete', hasCommitted: false },
+				migrated: { kind: 'complete', hasCommitted: true },
+				before: result.before,
+				after: result.before.map((row) => ({
+					...row,
+					last_settle_error:
+						row.last_settle_error === 'https://secret.invalid/token'
+							? 'verification-failed'
+							: row.last_settle_error
+				}))
+			});
+		}
+	);
+
 	it('projects bounded lifecycle pages before contraction', async () => {
 		await useTestServer('expanded-lifecycle-projection');
 		await bootstrap();
@@ -241,7 +538,10 @@ describe('migrations', () => {
 						rowsRead: meter.rowsRead,
 						rowsWritten: meter.rowsWritten
 					};
-					const result = await applyMigrations(instance.context.db, migrations);
+					const result = await applyMigrations(
+						instance.context.db,
+						migrationsThrough(migrations, 68)
+					);
 					meter.recordOutstanding();
 					maxRead = Math.max(maxRead, meter.rowsRead - before.rowsRead);
 					maxWrite = Math.max(maxWrite, meter.rowsWritten - before.rowsWritten);
@@ -601,6 +901,10 @@ describe('migrations', () => {
 			{ status: 503, retryAfter: '1' },
 			{ status: 503, retryAfter: '1' },
 			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
 			{ status: 200, retryAfter: undefined }
 		]);
 	});
@@ -707,8 +1011,11 @@ describe('migrations', () => {
 				const counts = () =>
 					state.storage.sql.exec('SELECT * FROM cache_narinfo_count').toArray();
 				const beforeCounts = counts();
-				const first = await applyMigrations(drizzle(state.storage), migrations);
-				await migrateThroughConvertedCatalogue(state);
+				const first = await applyMigrations(
+					drizzle(state.storage),
+					migrationsThrough(migrations, 66)
+				);
+				await migrateThrough(state, 66);
 				return {
 					first,
 					rows: state.storage.sql
@@ -750,9 +1057,15 @@ describe('migrations', () => {
 						"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) SELECT 1, printf('%032d', value), '/nix/store/rollback', 'sha256:rollback', 10, '[]', '2026-01-01T00:00:00.000Z' FROM json_each(?)",
 						JSON.stringify(Array.from({ length: 1001 }, (_, index) => index))
 					);
-					let page = await applyMigrations(drizzle(state.storage), migrations);
+					let page = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 66)
+					);
 					while (page.kind === 'pending' && page.stage !== stage) {
-						page = await applyMigrations(drizzle(state.storage), migrations);
+						page = await applyMigrations(
+							drizzle(state.storage),
+							migrationsThrough(migrations, 66)
+						);
 					}
 					if (page.kind !== 'pending') {
 						throw new Error(`The migration did not pause during ${stage}.`);
@@ -773,7 +1086,7 @@ describe('migrations', () => {
 							.exec('SELECT rowid, * FROM narinfo ORDER BY rowid')
 							.toArray();
 					const before = rows();
-					await migrateThroughConvertedCatalogue(state);
+					await migrateThrough(state, 66);
 					return { rollback, before, after: rows() };
 				}
 			);

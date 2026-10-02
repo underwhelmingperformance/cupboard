@@ -55,6 +55,7 @@ import {
 	singleDecision,
 	syntheticNarHash,
 	syntheticStorePathHash,
+	takeStalledMaintenancePasses,
 	testBase,
 	testServerFor,
 	uploadMetadata,
@@ -536,35 +537,141 @@ describe('narinfo deletion queue', () => {
 		{ name: 'without a deferral', isDeferred: false }
 	])(
 		'runs garbage collection once across repeated alarms $name',
-		async ({ isDeferred }) => {
+		async ({ isDeferred }) =>
+			withoutAlarmArming(async () => {
+				const token = await initialise();
+				const nar = await verifiableNar('alarm-deferred-deletion');
+				const metadata = uploadMetadata({
+					storePathHash: 'd'.repeat(32),
+					narHash: nar.narHash,
+					narSize: nar.narSize,
+					fileHash: nar.fileHash,
+					fileSize: nar.narBytes.byteLength
+				});
+				const first = singleDecision(await negotiateUploads(token, [metadata]));
+
+				if (isDeferred) {
+					// A second upload of the same path and NAR stays pending.
+					await negotiateUploads(token, [metadata]);
+				}
+
+				if (first.action !== 'upload') {
+					throw new Error('the first negotiation must plan an upload');
+				}
+
+				await putNarBytes(first.r2Key, nar);
+				await commitUpload(token, first.uploadId);
+				await runInDurableObject(currentServer(), async (instance, state) => {
+					await buildAttestations(instance.context).drainInheritanceQueue(
+						rootLogger()
+					);
+					const cache = resolvedCache(instance.context);
+
+					instance.context.db
+						.delete(narInfos)
+						.where(
+							and(
+								eq(narInfos.cacheId, cache.id),
+								eq(narInfos.storePathHash, metadata.storePathHash)
+							)
+						)
+						.run();
+					instance.context.db
+						.insert(narInfoDeletions)
+						.values({
+							cacheId: cache.id,
+							storePathHash: metadata.storePathHash,
+							narHash: metadata.narHash,
+							generation: narInfoGenerationSchema.parse(0),
+							createdAt: isoTimestamp(new Date())
+						})
+						.run();
+					await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
+				});
+				const collections = vi.spyOn(
+					GarbageCollectionService.prototype,
+					'collectGarbage'
+				);
+				const objectDeletions = vi.spyOn(
+					NarInfoObjectsService.prototype,
+					'deleteNarInfoObjects'
+				);
+
+				const driven = await (async () => {
+					try {
+						for (let alarm = 0; alarm < 6; alarm += 1) {
+							await runInDurableObject(
+								currentServer(),
+								async (instance, state) => {
+									// Start each rotation at the first pass.
+									await state.storage.delete(maintenancePassCursorKey);
+									await instance.alarm();
+								}
+							);
+						}
+
+						return {
+							collections: collections.mock.calls.length,
+							objectDeletions: objectDeletions.mock.calls.length
+						};
+					} finally {
+						collections.mockRestore();
+						objectDeletions.mockRestore();
+					}
+				})();
+				const continuation = await runInDurableObject(
+					currentServer(),
+					(_instance, state) => state.storage.get(gcContinuationKey)
+				);
+
+				const queued = await narInfoDeletionRows();
+
+				expect({
+					...driven,
+					continuation,
+					queued,
+					stalled: await takeStalledMaintenancePasses()
+				}).toStrictEqual({
+					collections: 1,
+					objectDeletions: 1,
+					continuation: undefined,
+					queued: isDeferred
+						? [
+								{
+									cache: defaultCache(),
+									storePathHash: metadata.storePathHash,
+									narHash: metadata.narHash,
+									generation: 0
+								}
+							]
+						: [],
+					stalled: []
+				});
+			})
+	);
+
+	it('resumes collection when the inheritance drain releases a deferred deletion', async () =>
+		withoutAlarmArming(async () => {
 			const token = await initialise();
-			const nar = await verifiableNar('alarm-deferred-deletion');
+			const nar = await verifiableNar('drain-released-deletion');
 			const metadata = uploadMetadata({
-				storePathHash: 'd'.repeat(32),
+				storePathHash: 'f'.repeat(32),
 				narHash: nar.narHash,
 				narSize: nar.narSize,
 				fileHash: nar.fileHash,
 				fileSize: nar.narBytes.byteLength
 			});
-			const first = singleDecision(await negotiateUploads(token, [metadata]));
-
-			if (isDeferred) {
-				// A second upload of the same path and NAR stays pending.
-				await negotiateUploads(token, [metadata]);
-			}
-
-			if (first.action !== 'upload') {
-				throw new Error('the first negotiation must plan an upload');
-			}
-
-			await putNarBytes(first.r2Key, nar);
-			await commitUpload(token, first.uploadId);
+			await commitPath(token, metadata, nar);
 			await runInDurableObject(currentServer(), async (instance, state) => {
 				await buildAttestations(instance.context).drainInheritanceQueue(
 					rootLogger()
 				);
+				await state.storage.deleteAlarm();
 				const cache = resolvedCache(instance.context);
+				const now = isoTimestamp(new Date());
 
+				// A newer generation with the same NAR is queued for inheritance, so a
+				// flush has already withdrawn the deletion of generation 0.
 				instance.context.db
 					.delete(narInfos)
 					.where(
@@ -575,131 +682,38 @@ describe('narinfo deletion queue', () => {
 					)
 					.run();
 				instance.context.db
+					.insert(attestationInheritances)
+					.values({
+						cacheId: cache.id,
+						storePathHash: metadata.storePathHash,
+						generation: narInfoGenerationSchema.parse(1),
+						narHash: metadata.narHash,
+						notBefore: now
+					})
+					.run();
+				instance.context.db
 					.insert(narInfoDeletions)
 					.values({
 						cacheId: cache.id,
 						storePathHash: metadata.storePathHash,
 						narHash: metadata.narHash,
 						generation: narInfoGenerationSchema.parse(0),
-						createdAt: isoTimestamp(new Date())
+						createdAt: now,
+						explicit: false,
+						protectionCutoff: undefined,
+						protectionCapturedAt: undefined,
+						withdrawn: true
 					})
 					.run();
-				await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
 			});
-			const collections = vi.spyOn(
-				GarbageCollectionService.prototype,
-				'collectGarbage'
-			);
-			const objectDeletions = vi.spyOn(
-				NarInfoObjectsService.prototype,
-				'deleteNarInfoObjects'
-			);
 
-			const driven = await (async () => {
-				try {
-					for (let alarm = 0; alarm < 6; alarm += 1) {
-						await runInDurableObject(
-							currentServer(),
-							async (instance, state) => {
-								// Start each rotation at the first pass.
-								await state.storage.delete(maintenancePassCursorKey);
-								await instance.alarm();
-							}
-						);
-					}
-
-					return {
-						collections: collections.mock.calls.length,
-						objectDeletions: objectDeletions.mock.calls.length
-					};
-				} finally {
-					collections.mockRestore();
-					objectDeletions.mockRestore();
-				}
-			})();
-			const continuation = await runInDurableObject(
-				currentServer(),
-				(_instance, state) => state.storage.get(gcContinuationKey)
-			);
-
-			const queued = await narInfoDeletionRows();
+			await runMaintenanceAlarms(6);
 
 			expect({
-				...driven,
-				continuation,
-				queued: queued.length
-			}).toStrictEqual({
-				collections: 1,
-				objectDeletions: 1,
-				continuation: undefined,
-				queued: isDeferred ? 1 : 0
-			});
-		}
-	);
-
-	it('resumes collection when the inheritance drain releases a deferred deletion', async () => {
-		const token = await initialise();
-		const nar = await verifiableNar('drain-released-deletion');
-		const metadata = uploadMetadata({
-			storePathHash: 'f'.repeat(32),
-			narHash: nar.narHash,
-			narSize: nar.narSize,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength
-		});
-		await commitPath(token, metadata, nar);
-		await runInDurableObject(currentServer(), async (instance, state) => {
-			await buildAttestations(instance.context).drainInheritanceQueue(
-				rootLogger()
-			);
-			await state.storage.deleteAlarm();
-			const cache = resolvedCache(instance.context);
-			const now = isoTimestamp(new Date());
-
-			// A newer generation with the same NAR is queued for inheritance, so a
-			// flush has already withdrawn the deletion of generation 0.
-			instance.context.db
-				.delete(narInfos)
-				.where(
-					and(
-						eq(narInfos.cacheId, cache.id),
-						eq(narInfos.storePathHash, metadata.storePathHash)
-					)
-				)
-				.run();
-			instance.context.db
-				.insert(attestationInheritances)
-				.values({
-					cacheId: cache.id,
-					storePathHash: metadata.storePathHash,
-					generation: narInfoGenerationSchema.parse(1),
-					narHash: metadata.narHash,
-					notBefore: now
-				})
-				.run();
-			instance.context.db
-				.insert(narInfoDeletions)
-				.values({
-					cacheId: cache.id,
-					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash,
-					generation: narInfoGenerationSchema.parse(0),
-					createdAt: now,
-					explicit: false,
-					protectionCutoff: undefined,
-					protectionCapturedAt: undefined,
-					withdrawn: true
-				})
-				.run();
-		});
-
-		await runMaintenanceAlarms(6);
-
-		expect({
-			queued: await narInfoDeletionRows(),
-			edges: await blobReferenceRows()
-		}).toStrictEqual({ queued: [], edges: [] });
-	});
+				queued: await narInfoDeletionRows(),
+				edges: await blobReferenceRows()
+			}).toStrictEqual({ queued: [], edges: [] });
+		}));
 
 	it.each([1, 2])(
 		'resumes public source retirement after %i destinations finish inheritance',
@@ -976,11 +990,119 @@ describe('narinfo deletion queue', () => {
 		{ name: 'a direct retirement', withdrawnBy: 'retirement' }
 	] as const)(
 		'retires a deletion that $name withdrew when the deferring upload expires',
-		async ({ withdrawnBy }) => {
+		async ({ withdrawnBy }) =>
+			withoutAlarmArming(async () => {
+				const token = await initialise();
+				const nar = await verifiableNar(`expired-deferral-${withdrawnBy}`);
+				const metadata = uploadMetadata({
+					storePathHash: 'g'.repeat(32),
+					narHash: nar.narHash,
+					narSize: nar.narSize,
+					fileHash: nar.fileHash,
+					fileSize: nar.narBytes.byteLength
+				});
+				const first = singleDecision(await negotiateUploads(token, [metadata]));
+				const second = singleDecision(
+					await negotiateUploads(token, [metadata])
+				);
+
+				if (first.action !== 'upload' || second.action !== 'upload') {
+					throw new Error('both negotiations must plan an upload');
+				}
+
+				await putNarBytes(first.r2Key, nar);
+				await commitUpload(token, first.uploadId);
+				await runInDurableObject(currentServer(), async (instance, state) => {
+					await buildAttestations(instance.context).drainInheritanceQueue(
+						rootLogger()
+					);
+					const cache = resolvedCache(instance.context);
+
+					instance.context.db
+						.delete(narInfos)
+						.where(
+							and(
+								eq(narInfos.cacheId, cache.id),
+								eq(narInfos.storePathHash, metadata.storePathHash)
+							)
+						)
+						.run();
+					instance.context.db
+						.insert(narInfoDeletions)
+						.values({
+							cacheId: cache.id,
+							storePathHash: metadata.storePathHash,
+							narHash: metadata.narHash,
+							generation: narInfoGenerationSchema.parse(0),
+							createdAt: isoTimestamp(new Date())
+						})
+						.run();
+
+					if (withdrawnBy === 'collection') {
+						await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
+						return;
+					}
+
+					await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							buildDeletionQueue(instance.context).retireQueuedNarInfoEdge(
+								cache,
+								metadata.storePathHash,
+								narInfoGenerationSchema.parse(0)
+							)
+						)
+					);
+				});
+
+				if (withdrawnBy === 'collection') {
+					await runMaintenanceAlarms(6);
+				}
+
+				const beforeExpiry = await narInfoDeletionRows();
+				const expiresAt = await runInDurableObject(
+					currentServer(),
+					(instance) =>
+						instance.context.db
+							.select({ expiresAt: pendingUploads.expiresAt })
+							.from(pendingUploads)
+							.where(eq(pendingUploads.id, second.uploadId))
+							.get()?.expiresAt
+				);
+
+				if (expiresAt === undefined) {
+					throw new Error('the second upload must still be pending');
+				}
+
+				vi.setSystemTime(Date.parse(expiresAt) + 1);
+				await runMaintenanceAlarms(6);
+
+				expect({
+					beforeExpiry,
+					queued: await narInfoDeletionRows(),
+					edges: await blobReferenceRows(),
+					stalled: await takeStalledMaintenancePasses()
+				}).toStrictEqual({
+					beforeExpiry: [
+						{
+							cache: defaultCache(),
+							storePathHash: metadata.storePathHash,
+							narHash: metadata.narHash,
+							generation: 0
+						}
+					],
+					queued: [],
+					edges: [],
+					stalled: []
+				});
+			})
+	);
+
+	it('resumes collection when the deferring upload expires while collection settles', async () =>
+		withoutAlarmArming(async () => {
 			const token = await initialise();
-			const nar = await verifiableNar(`expired-deferral-${withdrawnBy}`);
+			const nar = await verifiableNar('expired-during-settlement');
 			const metadata = uploadMetadata({
-				storePathHash: 'g'.repeat(32),
+				storePathHash: 'h'.repeat(32),
 				narHash: nar.narHash,
 				narSize: nar.narSize,
 				fileHash: nar.fileHash,
@@ -995,296 +1117,204 @@ describe('narinfo deletion queue', () => {
 
 			await putNarBytes(first.r2Key, nar);
 			await commitUpload(token, first.uploadId);
-			await runInDurableObject(currentServer(), async (instance, state) => {
-				await buildAttestations(instance.context).drainInheritanceQueue(
-					rootLogger()
-				);
-				await state.storage.deleteAlarm();
-				const cache = resolvedCache(instance.context);
-
-				instance.context.db
-					.delete(narInfos)
-					.where(
-						and(
-							eq(narInfos.cacheId, cache.id),
-							eq(narInfos.storePathHash, metadata.storePathHash)
-						)
-					)
-					.run();
-				instance.context.db
-					.insert(narInfoDeletions)
-					.values({
-						cacheId: cache.id,
-						storePathHash: metadata.storePathHash,
-						narHash: metadata.narHash,
-						generation: narInfoGenerationSchema.parse(0),
-						createdAt: isoTimestamp(new Date())
-					})
-					.run();
-
-				if (withdrawnBy === 'collection') {
-					await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
-					return;
-				}
-
-				await asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						buildDeletionQueue(instance.context).retireQueuedNarInfoEdge(
-							cache,
-							metadata.storePathHash,
-							narInfoGenerationSchema.parse(0)
-						)
-					)
-				);
-			});
-
-			if (withdrawnBy === 'collection') {
-				await runMaintenanceAlarms(6);
-			}
-
-			const beforeExpiry = await narInfoDeletionRows();
-			const expiresAt = await runInDurableObject(
+			const clearWake = await runInDurableObject(
 				currentServer(),
-				(instance) =>
-					instance.context.db
+				async (instance, state) => {
+					await buildAttestations(instance.context).drainInheritanceQueue(
+						rootLogger()
+					);
+					const cache = resolvedCache(instance.context);
+					const queue = buildDeletionQueue(instance.context);
+					const expiresAt = instance.context.db
 						.select({ expiresAt: pendingUploads.expiresAt })
 						.from(pendingUploads)
 						.where(eq(pendingUploads.id, second.uploadId))
-						.get()?.expiresAt
+						.get()?.expiresAt;
+
+					if (expiresAt === undefined) {
+						throw new Error('the second upload must still be pending');
+					}
+
+					instance.context.db
+						.delete(narInfos)
+						.where(
+							and(
+								eq(narInfos.cacheId, cache.id),
+								eq(narInfos.storePathHash, metadata.storePathHash)
+							)
+						)
+						.run();
+					instance.context.db
+						.insert(narInfoDeletions)
+						.values({
+							cacheId: cache.id,
+							storePathHash: metadata.storePathHash,
+							narHash: metadata.narHash,
+							generation: narInfoGenerationSchema.parse(0),
+							createdAt: isoTimestamp(new Date())
+						})
+						.run();
+
+					const spy = vi
+						.spyOn(DeletionQueueService.prototype, 'clearDeferralWake')
+						.mockImplementationOnce(async () => {
+							await queue.clearDeferralWake();
+							vi.setSystemTime(Date.parse(expiresAt) + 1);
+						});
+					await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
+
+					return spy;
+				}
 			);
+			const hasExpiredDuringSettlement = await (async () => {
+				try {
+					await runMaintenanceAlarms(6);
 
-			if (expiresAt === undefined) {
-				throw new Error('the second upload must still be pending');
-			}
-
-			vi.setSystemTime(Date.parse(expiresAt) + 1);
-			await runMaintenanceAlarms(6);
+					return clearWake.mock.calls.length > 0;
+				} finally {
+					clearWake.mockRestore();
+				}
+			})();
 
 			expect({
-				beforeExpiry: beforeExpiry.length,
+				hasExpiredDuringSettlement,
 				queued: await narInfoDeletionRows(),
-				edges: await blobReferenceRows()
-			}).toStrictEqual({ beforeExpiry: 1, queued: [], edges: [] });
-		}
-	);
+				edges: await blobReferenceRows(),
+				stalled: await takeStalledMaintenancePasses()
+			}).toStrictEqual({
+				hasExpiredDuringSettlement: true,
+				queued: [],
+				edges: [],
+				stalled: []
+			});
+		}));
 
-	it('resumes collection when the deferring upload expires while collection settles', async () => {
-		const token = await initialise();
-		const nar = await verifiableNar('expired-during-settlement');
-		const metadata = uploadMetadata({
-			storePathHash: 'h'.repeat(32),
-			narHash: nar.narHash,
-			narSize: nar.narSize,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength
-		});
-		const first = singleDecision(await negotiateUploads(token, [metadata]));
-		const second = singleDecision(await negotiateUploads(token, [metadata]));
+	it('withdraws a deferred narinfo and retires the rest of the queue in a flush', async () =>
+		withoutAlarmArming(async () => {
+			const token = await initialise();
+			const [deferredNar, retiredNar] = await Promise.all([
+				verifiableNar('flush-deferred'),
+				verifiableNar('flush-retired')
+			]);
+			const deferred = uploadMetadata({
+				storePathHash: 'a'.repeat(32),
+				narHash: deferredNar.narHash,
+				narSize: deferredNar.narSize,
+				fileHash: deferredNar.fileHash,
+				fileSize: deferredNar.narBytes.byteLength
+			});
+			const retired = uploadMetadata({
+				storePathHash: 'b'.repeat(32),
+				narHash: retiredNar.narHash,
+				narSize: retiredNar.narSize,
+				fileHash: retiredNar.fileHash,
+				fileSize: retiredNar.narBytes.byteLength
+			});
+			// A second upload of the deferred path and NAR stays pending, so its
+			// commit will inherit attestations from generation 0.
+			const first = singleDecision(await negotiateUploads(token, [deferred]));
+			const second = singleDecision(await negotiateUploads(token, [deferred]));
 
-		if (first.action !== 'upload' || second.action !== 'upload') {
-			throw new Error('both negotiations must plan an upload');
-		}
+			if (first.action !== 'upload' || second.action !== 'upload') {
+				throw new Error('both negotiations must plan an upload');
+			}
 
-		await putNarBytes(first.r2Key, nar);
-		await commitUpload(token, first.uploadId);
-		const clearWake = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
+			await putNarBytes(first.r2Key, deferredNar);
+			await commitUpload(token, first.uploadId);
+			await commitPath(token, retired, retiredNar);
+			await runInDurableObject(currentServer(), async (instance) => {
 				await buildAttestations(instance.context).drainInheritanceQueue(
 					rootLogger()
 				);
-				await state.storage.deleteAlarm();
+			});
+			const flush = (limit: number) =>
+				runInDurableObject(currentServer(), (instance) =>
+					asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions(
+								undefined,
+								limit
+							)
+						)
+					)
+				);
+
+			await runInDurableObject(currentServer(), (instance) => {
 				const cache = resolvedCache(instance.context);
-				const queue = buildDeletionQueue(instance.context);
-				const expiresAt = instance.context.db
-					.select({ expiresAt: pendingUploads.expiresAt })
-					.from(pendingUploads)
-					.where(eq(pendingUploads.id, second.uploadId))
-					.get()?.expiresAt;
+				const createdAt = isoTimestamp(new Date());
 
-				if (expiresAt === undefined) {
-					throw new Error('the second upload must still be pending');
+				for (const metadata of [deferred, retired]) {
+					instance.context.db
+						.delete(narInfos)
+						.where(
+							and(
+								eq(narInfos.cacheId, cache.id),
+								eq(narInfos.storePathHash, metadata.storePathHash)
+							)
+						)
+						.run();
+					instance.context.db
+						.insert(narInfoDeletions)
+						.values({
+							cacheId: cache.id,
+							storePathHash: metadata.storePathHash,
+							narHash: metadata.narHash,
+							generation: narInfoGenerationSchema.parse(0),
+							createdAt
+						})
+						.run();
 				}
+			});
 
-				instance.context.db
-					.delete(narInfos)
-					.where(
-						and(
-							eq(narInfos.cacheId, cache.id),
-							eq(narInfos.storePathHash, metadata.storePathHash)
-						)
-					)
-					.run();
-				instance.context.db
-					.insert(narInfoDeletions)
-					.values({
-						cacheId: cache.id,
-						storePathHash: metadata.storePathHash,
-						narHash: metadata.narHash,
-						generation: narInfoGenerationSchema.parse(0),
-						createdAt: isoTimestamp(new Date())
-					})
-					.run();
+			await flush(1);
+			const afterFirst = {
+				queued: await narInfoDeletionRows(),
+				deferredObject:
+					(await env.BLOBS.head(objectKey(deferred.storePathHash))) !== null,
+				retiredObject:
+					(await env.BLOBS.head(objectKey(retired.storePathHash))) !== null
+			};
+			await flush(2);
+			const afterSecond = {
+				queued: await narInfoDeletionRows(),
+				deferredObject:
+					(await env.BLOBS.head(objectKey(deferred.storePathHash))) !== null
+			};
+			const edges = await blobReferenceRows();
 
-				// The upload expires while settlement clears the stored wake. Install
-				// the spy before collection can run, including from an alarm that the
-				// runtime delivers on its own.
-				const spy = vi
-					.spyOn(DeletionQueueService.prototype, 'clearDeferralWake')
-					.mockImplementationOnce(async () => {
-						await queue.clearDeferralWake();
-						vi.setSystemTime(Date.parse(expiresAt) + 1);
-					});
-				await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
-
-				return spy;
-			}
-		);
-		const hasExpiredDuringSettlement = await (async () => {
-			try {
-				await runMaintenanceAlarms(6);
-
-				return clearWake.mock.calls.length > 0;
-			} finally {
-				clearWake.mockRestore();
-			}
-		})();
-
-		expect({
-			hasExpiredDuringSettlement,
-			queued: await narInfoDeletionRows(),
-			edges: await blobReferenceRows()
-		}).toStrictEqual({
-			hasExpiredDuringSettlement: true,
-			queued: [],
-			edges: []
-		});
-	});
-
-	it('withdraws a deferred narinfo and retires the rest of the queue in a flush', async () => {
-		const token = await initialise();
-		const [deferredNar, retiredNar] = await Promise.all([
-			verifiableNar('flush-deferred'),
-			verifiableNar('flush-retired')
-		]);
-		const deferred = uploadMetadata({
-			storePathHash: 'a'.repeat(32),
-			narHash: deferredNar.narHash,
-			narSize: deferredNar.narSize,
-			fileHash: deferredNar.fileHash,
-			fileSize: deferredNar.narBytes.byteLength
-		});
-		const retired = uploadMetadata({
-			storePathHash: 'b'.repeat(32),
-			narHash: retiredNar.narHash,
-			narSize: retiredNar.narSize,
-			fileHash: retiredNar.fileHash,
-			fileSize: retiredNar.narBytes.byteLength
-		});
-		// A second upload of the deferred path and NAR stays pending, so its
-		// commit will inherit attestations from generation 0.
-		const first = singleDecision(await negotiateUploads(token, [deferred]));
-		const second = singleDecision(await negotiateUploads(token, [deferred]));
-
-		if (first.action !== 'upload' || second.action !== 'upload') {
-			throw new Error('both negotiations must plan an upload');
-		}
-
-		await putNarBytes(first.r2Key, deferredNar);
-		await commitUpload(token, first.uploadId);
-		await commitPath(token, retired, retiredNar);
-		await runInDurableObject(currentServer(), async (instance, state) => {
-			await buildAttestations(instance.context).drainInheritanceQueue(
-				rootLogger()
-			);
-			await state.storage.deleteAlarm();
-		});
-		const flush = (limit: number) =>
-			runInDurableObject(currentServer(), (instance) =>
-				asOneInvocation(() =>
-					instance.context.criticalSection(() =>
-						buildDeletionQueue(instance.context).flushQueuedNarInfoDeletions(
-							undefined,
-							limit
-						)
-					)
-				)
-			);
-
-		await runInDurableObject(currentServer(), (instance) => {
-			const cache = resolvedCache(instance.context);
-			const createdAt = isoTimestamp(new Date());
-
-			for (const metadata of [deferred, retired]) {
-				instance.context.db
-					.delete(narInfos)
-					.where(
-						and(
-							eq(narInfos.cacheId, cache.id),
-							eq(narInfos.storePathHash, metadata.storePathHash)
-						)
-					)
-					.run();
-				instance.context.db
-					.insert(narInfoDeletions)
-					.values({
-						cacheId: cache.id,
-						storePathHash: metadata.storePathHash,
-						narHash: metadata.narHash,
-						generation: narInfoGenerationSchema.parse(0),
-						createdAt
-					})
-					.run();
-			}
-		});
-
-		await flush(1);
-		const afterFirst = {
-			queued: await narInfoDeletionRows(),
-			deferredObject:
-				(await env.BLOBS.head(objectKey(deferred.storePathHash))) !== null,
-			retiredObject:
-				(await env.BLOBS.head(objectKey(retired.storePathHash))) !== null
-		};
-		await flush(2);
-		const afterSecond = {
-			queued: await narInfoDeletionRows(),
-			deferredObject:
-				(await env.BLOBS.head(objectKey(deferred.storePathHash))) !== null
-		};
-		const edges = await blobReferenceRows();
-
-		expect({
-			afterFirst,
-			afterSecond,
-			edges: edges.map((edge) => edge.storePathHash)
-		}).toStrictEqual({
-			afterFirst: {
-				queued: [
-					{
-						cache: defaultCache(),
-						storePathHash: deferred.storePathHash,
-						narHash: deferred.narHash,
-						generation: 0
-					}
-				],
-				deferredObject: true,
-				retiredObject: false
-			},
-			afterSecond: {
-				queued: [
-					{
-						cache: defaultCache(),
-						storePathHash: deferred.storePathHash,
-						narHash: deferred.narHash,
-						generation: 0
-					}
-				],
-				deferredObject: false
-			},
-			edges: [deferred.storePathHash]
-		});
-	});
+			expect({
+				afterFirst,
+				afterSecond,
+				edges: edges.map((edge) => edge.storePathHash),
+				stalled: await takeStalledMaintenancePasses()
+			}).toStrictEqual({
+				afterFirst: {
+					queued: [
+						{
+							cache: defaultCache(),
+							storePathHash: deferred.storePathHash,
+							narHash: deferred.narHash,
+							generation: 0
+						}
+					],
+					deferredObject: true,
+					retiredObject: false
+				},
+				afterSecond: {
+					queued: [
+						{
+							cache: defaultCache(),
+							storePathHash: deferred.storePathHash,
+							narHash: deferred.narHash,
+							generation: 0
+						}
+					],
+					deferredObject: false
+				},
+				edges: [deferred.storePathHash],
+				stalled: []
+			});
+		}));
 
 	it('retires a queued edge whose own generation is in the inheritance queue', async () => {
 		const token = await initialise();
@@ -1459,14 +1489,14 @@ describe('narinfo deletion queue', () => {
 				written: result.meta.rows_written
 			}))
 		).toStrictEqual([
-			{ rows: [], read: 80, written: 0 },
-			{ rows: [], read: 79, written: 0 },
-			{ rows: [], read: 327, written: 44 },
-			{ rows: [], read: 323, written: 42 },
+			{ rows: [], read: 82, written: 0 },
+			{ rows: [], read: 81, written: 0 },
+			{ rows: [], read: 337, written: 46 },
+			{ rows: [], read: 333, written: 44 },
 			{ rows: [], read: 1, written: 2 },
 			{ rows: [], read: 1, written: 2 },
-			{ rows: [], read: 80, written: 0 },
-			{ rows: [], read: 316, written: 37 },
+			{ rows: [], read: 82, written: 0 },
+			{ rows: [], read: 326, written: 39 },
 			{ rows: [], read: 1, written: 2 }
 		]);
 
@@ -1860,7 +1890,7 @@ describe('narinfo deletion queue', () => {
 				maxRead: 15,
 				maxWrite: 3,
 				capture: { rowsRead: 2, rowsWritten: 3 },
-				transfer: { rowsRead: 3, rowsWritten: 6 },
+				transfer: { rowsRead: 5, rowsWritten: 6 },
 				release: { rowsRead: 1, rowsWritten: 1 },
 				retire: { rowsRead: 4, rowsWritten: 1 }
 			});

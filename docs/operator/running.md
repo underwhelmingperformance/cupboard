@@ -83,14 +83,38 @@ wrangler d1 execute cupboard --remote \
 If a tenant keeps failing, the last error and the Worker logs from around that
 time are the place to start.
 
-The tenant Worker records exceptional failures to settle an upload in
-`pending_upload.settle_failures` and `last_settle_error`. It delays each retry
-by 30 seconds initially, doubling the delay up to ten minutes. The
-`pending upload verification failed` log includes the upload ID, failure count,
-phase and last error. The row remains eligible for recovery after the retry
-deadline, including when a commit has already changed shared storage. Check the
-last error and the storage service if a client repeatedly times out while
-waiting for verification. A normal deferral does not increase the count.
+The tenant Worker records failed upload verification and publication attempts in
+`pending_upload.settle_failures`. `last_settle_error` contains a controlled
+failure category. Retries start after 30 seconds and double up to ten minutes.
+The `pending upload verification failed` log includes the upload ID, category,
+phase and failure count. Provider messages and URLs are not recorded. A stored
+decode verdict remains available while publication retries, so the next attempt
+does not decode the NAR again.
+
+Upload verification and attestation inheritance stop after twelve failed
+attempts or 24 hours of eligible time. Eligible time starts with the first
+attempt and includes active backoff time. Suspension stops this clock. Budget
+continuations and active claim leases do not increase the failure count, and a
+client retry does not reset either limit. Alarms use the earliest retry or lease
+deadline.
+
+An exhausted upload that has no committed reference releases its reservation and
+staging object, then reports `absent`. The CLI returns temporary failure status
+75 so the client can negotiate a new upload. A committed upload keeps its
+reference, charge and retention decision. Durable cleanup queues publication
+repair and inheritance before removing its pending marker. Failed cleanup
+retries after ten minutes without another verification attempt.
+
+Inheritance retries start after one minute and double up to one hour. Exhausted
+inheritance releases the queued source-deletion deferral and retains safe
+category, cache, path and generation diagnostics in
+`attestation_inheritance_failure` for seven days. The same narinfo generation
+cannot restart inheritance after those diagnostics expire. A new generation gets
+a new retry budget. To restore evidence after exhaustion, attach existing
+bundles explicitly with [cupboard attest attach], or publish a new generation.
+Explicit attachment remains available for the exhausted generation.
+
+[cupboard attest attach]: ../reference/cli.md#cupboard-attest-attach
 
 ### Upgrade progress
 

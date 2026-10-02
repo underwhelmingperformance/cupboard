@@ -295,7 +295,10 @@ export const narInfos = sqliteTable(
 		pendingSignatureGeneration: integer(
 			'pending_signature_generation'
 		).$type<SigningKeyGeneration>(),
-		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		inheritanceExhausted: integer('inheritance_exhausted', { mode: 'boolean' })
+			.notNull()
+			.default(false)
 	},
 	(table) => [
 		primaryKey({ columns: [table.cacheId, table.storePathHash] }),
@@ -385,6 +388,10 @@ export const pendingUploads = sqliteTable(
 		settleFailures: integer('settle_failures').notNull().default(0),
 		settleRetryAfter: text('settle_retry_after').$type<IsoTimestamp>(),
 		lastSettleError: text('last_settle_error'),
+		retryStartedActiveMs: integer('retry_started_active_ms'),
+		settleExhaustion: text('settle_exhaustion', {
+			enum: ['attempt-limit', 'eligible-age-limit']
+		}),
 		narRefreshPending: integer('nar_refresh_pending', { mode: 'boolean' })
 			.notNull()
 			.default(false),
@@ -394,7 +401,7 @@ export const pendingUploads = sqliteTable(
 		// `claimed_at` records the lease time, and `claim_owner` identifies the
 		// verification pass. Owner checks prevent an expired pass from changing a row
 		// after another pass claims it. Both columns are null while unclaimed; a client
-		// re-drive clears them to request an immediate retry.
+		// re-drive clears them without changing the retry deadline.
 		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
 		claimOwner: text('claim_owner'),
 		// Capture the retention decision during negotiation so a later cache update
@@ -414,6 +421,29 @@ export const pendingUploads = sqliteTable(
 	// verification, and checks listed staging keys for pending owners. Without
 	// these indexes each pass scans the whole in-flight set.
 	(table) => [
+		index('pending_upload_fresh_ready_idx')
+			.on(
+				sql`MAX(COALESCE(${table.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${table.claimedAt}, '+360 seconds'), ''))`,
+				table.id
+			)
+			.where(
+				sql`(${table.verdict} = 'pending' OR ${table.verdict} = 'committing') AND (${table.recordedVerdictJson} IS NULL OR ${table.claimOwner} IS NULL) AND ${table.settleExhaustion} IS NULL`
+			),
+		index('pending_upload_recorded_ready_idx')
+			.on(
+				sql`CASE WHEN ${table.recordedVerdictJson} IS NOT NULL THEN COALESCE(${table.settleRetryAfter}, '') ELSE MAX(COALESCE(${table.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${table.claimedAt}, '+360 seconds'), '')) END`,
+				table.id
+			)
+			.where(
+				sql`${table.recordedVerdictJson} IS NOT NULL OR ${table.settleExhaustion} IS NOT NULL`
+			),
+
+		index('pending_upload_exhausted_ready_idx')
+			.on(
+				sql`MAX(COALESCE(${table.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${table.claimedAt}, '+360 seconds'), ''))`,
+				table.id
+			)
+			.where(sql`${table.settleExhaustion} IS NOT NULL`),
 		index('pending_upload_expires_at_idx').on(table.expiresAt),
 		index('pending_upload_terminal_expires_at_idx')
 			.on(table.expiresAt, table.id)
@@ -429,9 +459,19 @@ export const pendingUploads = sqliteTable(
 		index('pending_upload_r2_key_idx').on(table.r2Key),
 		index('pending_upload_recorded_verdict_idx')
 			.on(table.id)
-			.where(sql`${table.recordedVerdictJson} IS NOT NULL`)
+			.where(sql`${table.recordedVerdictJson} IS NOT NULL`),
+		index('pending_upload_recorded_retry_idx')
+			.on(sql`COALESCE(${table.settleRetryAfter}, '')`, table.id)
+			.where(
+				sql`${table.recordedVerdictJson} IS NOT NULL AND ${table.settleExhaustion} IS NULL`
+			)
 	]
 );
+
+export const retryEligibility = sqliteTable('retry_eligibility', {
+	id: text('id').primaryKey(),
+	isEligible: integer('is_eligible', { mode: 'boolean' }).notNull()
+});
 
 export const pendingAttestations = sqliteTable(
 	'pending_attestation',
@@ -557,6 +597,8 @@ export const attestationInheritances = sqliteTable(
 		sourcePredicateType: text('source_predicate_type').$type<PredicateType>(),
 		sourceDigest: text('source_digest').$type<Sha256HexDigest>(),
 		attempts: integer('attempts').notNull().default(0),
+		retryStartedActiveMs: integer('retry_started_active_ms'),
+		claimOwner: text('claim_owner'),
 		notBefore: text('not_before').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
@@ -580,6 +622,28 @@ export const attestationInheritances = sqliteTable(
 			table.cacheId,
 			table.generation
 		)
+	]
+);
+
+export const attestationInheritanceFailures = sqliteTable(
+	'attestation_inheritance_failure',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		category: text('category', { enum: ['inheritance-failed'] }).notNull(),
+		exhaustion: text('exhaustion', {
+			enum: ['attempt-limit', 'eligible-age-limit']
+		}).notNull(),
+		failures: integer('failures').notNull(),
+		exhaustedAt: text('exhausted_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.storePathHash, table.generation]
+		}),
+		index('attestation_inheritance_failure_expiry_idx').on(table.expiresAt)
 	]
 );
 

@@ -1,8 +1,11 @@
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narInfoObjectKey } from '../http/http.ts';
+import * as schema from '../db/schema.ts';
+import { narInfoObjectKey, verifyClaimLeaseMs } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	collectVerificationPasses,
@@ -54,6 +57,69 @@ describe('verify alarm backstop', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(base);
 		await resetTestServer();
+	});
+
+	it.each(['backoff', 'lease'] as const)(
+		'waits until the earliest eligible fresh row after %s instead of requesting every minute',
+		async (kind) => {
+			const token = await initialise();
+			const upload = await deferFreshUpload(
+				token,
+				'delayed-backstop',
+				'f'.repeat(32)
+			);
+			const sent = await collectVerificationPasses();
+			const dueAt =
+				base.getTime() + (kind === 'backoff' ? 9 * 60_000 : verifyClaimLeaseMs);
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set(
+						kind === 'backoff'
+							? { settleRetryAfter: isoTimestamp(new Date(dueAt)) }
+							: { claimedAt: isoTimestamp(base), claimOwner: 'active-consumer' }
+					)
+					.where(eq(schema.pendingUploads.id, upload.uploadId))
+					.run();
+			});
+			await currentServer().requestVerificationPass();
+			vi.setSystemTime(new Date(base.getTime() + verifyBackstopDelayMs));
+			await runInDurableObject(currentServer(), (_instance, state) =>
+				state.storage.deleteAlarm()
+			);
+			await fireAlarm();
+			expect({
+				sent,
+				...(await backstopState()),
+				verdict: await pendingUploadVerdict(upload.uploadId)
+			}).toStrictEqual({
+				sent: [request],
+				marker: dueAt,
+				alarm: dueAt,
+				verdict: 'pending'
+			});
+		}
+	);
+
+	it('arms the first fresh failure retry before the lost-message backstop', async () => {
+		const token = await initialise();
+		const upload = await deferFreshUpload(
+			token,
+			'fresh-failure-alarm',
+			'a'.repeat(32)
+		);
+		await currentServer().requestVerificationPass();
+		const claim = await currentServer().claimVerificationBatch(
+			1,
+			Number.MAX_SAFE_INTEGER
+		);
+		await currentServer().recordVerifications(claim.owner, [
+			{ uploadId: upload.uploadId, verdict: { kind: 'abandoned' } }
+		]);
+		expect(await backstopState()).toStrictEqual({
+			marker: base.getTime() + 30_000,
+			alarm: base.getTime() + 30_000
+		});
 	});
 
 	it('arms a durable marker and the alarm on a verify request', async () => {
