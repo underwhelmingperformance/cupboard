@@ -219,11 +219,14 @@ signatures. Signing and attachment still happen after publication. If either
 fails, the workflow fails, but the paths remain in the cache. A rerun that
 reuses those paths does not recreate build evidence for the earlier attempt.
 
-Custom jobs must remove `require-provenance` from `actions/build-paths`. The
-replacement `build` input defaults to `missing`, which can reuse an available
-output. Set `build: rebuild` when the job must execute each requested derivation
-again. Dependencies can still be substituted, and execution on a remote builder
-does not establish runner-local provenance.
+Custom jobs should replace `require-provenance: true` on `actions/build-paths`
+with `build: rebuild`. The deprecated input still selects `rebuild` when `build`
+is omitted. An explicit `build: missing` conflicts with
+`require-provenance: true` and fails before building. Remove the deprecated
+input and set `build: rebuild` to preserve the execution guarantee.
+`require-provenance: false` uses the selected build mode, which defaults to
+`missing`. Dependencies can still be substituted, and execution on a remote
+builder does not establish runner-local provenance.
 
 Custom jobs should set `inline-bundles: false` on `actions/attest`, pass
 `steps.attest.outputs.bundles-file` to the `bundles-file` input of
@@ -266,11 +269,11 @@ do not depend on command-line or environment-variable limits.
 For remote rebuilds, use `store: ssh-ng://...` to select the machine. Delegated
 builders cannot guarantee execution because Nix can reuse an output already on
 the builder. A cohort with `remote: true` and no `store` cannot use
-`build: rebuild`; use `build: missing` to keep delegated reuse, or select the
-remote store directly. The selected store must have local build slots and
-support the target's system and required features. Cupboard disables onward
-dispatch for rebuilds and checks observed execution independently of attestation
-signing.
+`build: rebuild`; planning rejects this combination before any cohort builds or
+publishes. Use `build: missing` to keep delegated reuse, or select the remote
+store directly. The selected store must have local build slots and support the
+target's system and required features. Cupboard disables onward dispatch for
+rebuilds and checks observed execution independently of attestation signing.
 
 `build: rebuild` builds each requested output again in the selected Nix store,
 even if the output is already available. Nix may still substitute dependencies.
