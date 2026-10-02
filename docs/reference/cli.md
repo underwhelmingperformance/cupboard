@@ -603,11 +603,12 @@ has already set the root or pins, unless --no-retain was given.
 
 When a path fails, the command exits 77 if any failure was a sign-in or
 permission failure, otherwise 75 if any was temporary, otherwise 69 if
-a service that the push needs was unavailable, and otherwise 1. A
-failure caused by the storage quota exits 1, because running the push
-again fails in the same way until space is freed or the quota is
-raised. For exit status 75, run the push again to publish the paths
-that failed.
+a service that the push needs was unavailable, otherwise 2 if an
+argument was invalid or an upload request exceeded its limit, and
+otherwise 1. A failure caused by the storage quota exits 1, because
+running the push again fails in the same way until space is freed or
+the quota is raised. For exit status 75, run the push again to publish
+the paths that failed.
 
 Examples:
   # Push a build result to a tenant and keep it under a root
@@ -727,7 +728,8 @@ The build command's output is passed through unchanged. If the build
 fails, build-push exits with the build's own status. If the build
 succeeds but publishing or updating the root fails, build-push exits
 with 77 for a sign-in or permission failure, 75 for a temporary
-failure, 69 when something that publishing needs is unavailable, or
+failure, 69 when something that publishing needs is unavailable, 2 for
+an invalid argument or an upload request that exceeds its limit, or
 74 for any other publishing failure.
 
 Examples:

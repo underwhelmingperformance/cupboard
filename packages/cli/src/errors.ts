@@ -38,7 +38,10 @@ export const publicationExitCode = 74;
  * The exit statuses that `classifyFailures` checks for before its fallback.
  */
 export type RankedExitStatus =
-	typeof authExitCode | typeof transientExitCode | typeof unavailableExitCode;
+	| typeof authExitCode
+	| typeof transientExitCode
+	| typeof unavailableExitCode
+	| typeof usageExitCode;
 
 const badRequestStatusCode: number = StatusCodes.BAD_REQUEST;
 const unauthorisedStatusCode: number = StatusCodes.UNAUTHORIZED;
@@ -56,6 +59,19 @@ A misuse of the CLI: a bad flag value or an unsupported combination.
 export abstract class CliUsageError extends CliError {
 	override get exitCode(): number {
 		return usageExitCode;
+	}
+}
+
+export class UploadRequestLimitExceededError extends CliUsageError {
+	constructor(
+		readonly maxPaths: number,
+		options?: ErrorOptions
+	) {
+		super(
+			`The upload request is too large. Send at most ${String(maxPaths)} paths per request.`,
+			options
+		);
+		this.name = 'UploadRequestLimitExceededError';
 	}
 }
 

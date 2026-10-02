@@ -2,6 +2,10 @@ import {
 	tenantOffboardingErrorDataSchema,
 	tenantQuotaBelowUsageErrorDataSchema
 } from '@cupboard/protocol/tenants';
+import {
+	uploadRequestLimitErrorCode,
+	uploadRequestLimitErrorDataSchema
+} from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
@@ -13,7 +17,8 @@ import {
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError,
-	TenantOffboardingError
+	TenantOffboardingError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
@@ -82,10 +87,11 @@ export interface TranslateRpcErrorOptions {
 
 /**
  * Converts authentication and scope failures, `TENANT_OFFBOARDING`,
- * `TENANT_QUOTA_BELOW_USAGE`, and any oRPC error with status 408, 429, 503 or
- * 507, into CLI errors. Every other oRPC error and every non-oRPC error passes
- * through unchanged. A caller that needs the oRPC code or data of a 408, 429,
- * 503 or 507 must inspect the error before calling this function.
+ * `TENANT_QUOTA_BELOW_USAGE`, `UPLOAD_REQUEST_LIMIT_EXCEEDED`, and any oRPC
+ * error with status 408, 429, 503 or 507, into CLI errors. Every other oRPC
+ * error and every non-oRPC error passes through unchanged. A caller that
+ * needs the oRPC code or data of a 408, 429, 503 or 507 must inspect the error
+ * before calling this function.
  */
 export function translateRpcError(
 	error: unknown,
@@ -98,6 +104,15 @@ export function translateRpcError(
 	const causeOptions = options.keepAuthCause === true ? { cause: error } : {};
 
 	switch (error.code) {
+		case uploadRequestLimitErrorCode: {
+			const data = uploadRequestLimitErrorDataSchema.safeParse(error.data);
+			return data.success
+				? new UploadRequestLimitExceededError(data.data.maxPaths, {
+						cause: error
+					})
+				: error;
+		}
+
 		case 'UNAUTHORIZED': {
 			return new SessionRejectedError(causeOptions);
 		}

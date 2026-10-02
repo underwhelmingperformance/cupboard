@@ -8,7 +8,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { pushIdSchema } from '@cupboard/protocol/upload';
-import { genericExitCode } from '@cupboard/shared/errors';
+import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
 import { ValidationError } from '@orpc/contract';
@@ -28,6 +28,7 @@ import { byteStream } from '../io/byte-stream.ts';
 
 import type { TokenProvider } from './credentials.ts';
 import { controlRpc, tenantRpc } from './orpc.ts';
+import { translateRpcError } from './rpc-errors.ts';
 import { parseWorkerUrl } from './transport.ts';
 
 interface CapturedRequest {
@@ -243,6 +244,46 @@ const nonIdempotentNegotiations = [
 ] as const;
 
 describe('tenantRpc', () => {
+	it('decodes an upload request limit once and keeps its nonretryable CLI classification', async () => {
+		const envelope = {
+			defined: true,
+			code: 'UPLOAD_REQUEST_LIMIT_EXCEEDED',
+			status: 413,
+			message: 'Split the upload request.',
+			data: { maxPaths: 100 }
+		};
+		const { fetcher, captured } = capturingFetcher([
+			() =>
+				Response.json(envelope, {
+					status: 413,
+					headers: { 'x-cupboard-upload-max-paths': '100' }
+				})
+		]);
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+			credential: 'admin-token',
+			fetcher
+		});
+		const rejected = await rejectedBy(() =>
+			rpc.uploads.preview.inDefaultCache({ paths: [] })
+		);
+		expectORPCError(rejected);
+		const converted = translateRpcError(rejected);
+		expect({
+			error: rejected.toJSON(),
+			exitCode: errorExitCode(converted),
+			captured
+		}).toStrictEqual({
+			error: envelope,
+			exitCode: usageExitCode,
+			captured: [
+				{
+					url: 'https://cupboard.test/t/acme/uploads/preview',
+					authorization: 'Bearer admin-token'
+				}
+			]
+		});
+	});
+
 	it('requests a tenant procedure under the existing path prefix with the configured credential', async () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ caches: [] })

@@ -11,6 +11,7 @@ import {
 	cacheMetadataCapabilityHeader
 } from '@cupboard/protocol/cache-metadata';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
+import { uploadRequestMaxPathsHeader } from '@cupboard/protocol/upload';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -42,6 +43,7 @@ import {
 import { parseRequestBody } from '../http/parse.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
+import { uploadRequestSubrequestsFor } from '../policy/upload-pages.ts';
 import { parseCacheMetadataRequest } from '../read/metadata-page.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
@@ -49,7 +51,10 @@ import {
 	answerAvailabilityInChunks,
 	reuseViewAvailabilityChunkSizeFor
 } from './chunked-availability.ts';
-import { answerUploadsInChunks } from './chunked-uploads.ts';
+import {
+	answerUploadsInChunks,
+	uploadRequestMaxPathsFor
+} from './chunked-uploads.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
@@ -352,6 +357,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				throw new TenantWritesStoppedError(tenant, confirmedStatus);
 			}
 
+			const availableSubrequests = uploadRequestSubrequestsFor(
+				subrequestsPerInvocation(context.env),
+				subrequestsAvailable()
+			);
+			const maxPaths = uploadRequestMaxPathsFor(availableSubrequests);
 			let pageTemplate: Request | undefined;
 			const chunked = await answerUploadsInChunks(
 				context.req.raw,
@@ -366,11 +376,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 						confirmedStatus
 					);
 				},
-				subrequestsAvailable()
+				availableSubrequests
 			);
 
 			if (chunked !== undefined) {
-				return chunked;
+				return withUploadRequestLimit(chunked, maxPaths);
 			}
 
 			// Compute hints before constructing the forwarded request because reading
@@ -395,7 +405,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				}
 			}
 
-			return dispatchTenant(inner, context.env, tenant, confirmedStatus);
+			return withUploadRequestLimit(
+				await dispatchTenant(inner, context.env, tenant, confirmedStatus),
+				maxPaths
+			);
 		}
 	);
 
@@ -406,6 +419,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			'/t/:tenant/cache/:cacheName/uploads/preview'
 		],
 		async (context) => {
+			const availableSubrequests = uploadRequestSubrequestsFor(
+				subrequestsPerInvocation(context.env),
+				subrequestsAvailable()
+			);
+			const maxPaths = uploadRequestMaxPathsFor(availableSubrequests);
 			let pageTemplate: Request | undefined;
 			const chunked = await answerUploadsInChunks(
 				context.req.raw,
@@ -417,14 +435,15 @@ function buildApp(): Hono<WorkerHonoEnv> {
 						uploadPageRequest(pageTemplate, body)
 					);
 				},
-				subrequestsAvailable()
+				availableSubrequests
 			);
 
-			return (
+			return withUploadRequestLimit(
 				chunked ??
-				(await tenantServer(context.env, context.get('tenant')).fetch(
-					innerRequest(context)
-				))
+					(await tenantServer(context.env, context.get('tenant')).fetch(
+						innerRequest(context)
+					)),
+				maxPaths
 			);
 		}
 	);
@@ -446,6 +465,19 @@ function buildApp(): Hono<WorkerHonoEnv> {
 }
 
 const app = buildApp();
+
+function withUploadRequestLimit(
+	response: Response,
+	maxPaths: number
+): Response {
+	const headers = new Headers(response.headers);
+	headers.set(uploadRequestMaxPathsHeader, String(maxPaths));
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers
+	});
+}
 
 function uploadPageRequest(inner: Request, body: unknown): Request {
 	const headers = new Headers(inner.headers);
