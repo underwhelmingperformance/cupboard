@@ -82,6 +82,7 @@ export async function selectPublicationPaths(
 		store =
 			options.store ??
 			Nix.openForAvailability(undefined, {
+				requirePublicNar: true,
 				...(options.storeUri !== undefined && { storeUri: options.storeUri }),
 				...(options.signal !== undefined && { signal: options.signal }),
 				overrides: {

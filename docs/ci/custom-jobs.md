@@ -330,17 +330,20 @@ The receipt records how the requested outputs became available. Set
 `build: rebuild` to build every requested output again in the selected Nix
 store, even if it is already available. Nix may still substitute dependencies.
 
-With `substituter: leave`, supply `publication-url` with the destination tenant
-or cache URL. The build action keeps paths from that tenant selected for
-publication, including public cache and reuse-view results. Without this URL,
-the action cannot distinguish public tenant caches from external substituters.
+With `substituter: leave`, `publication-url` is required and must specify the
+destination tenant or cache URL. The build action keeps paths from that tenant
+selected for publication, including public cache and reuse-view results. The
+action rejects a missing URL before planning or building.
 
 `substituter: leave` excludes an output from publication only when external
-consumers can obtain matching NARs for the output and all its runtime
-references. `substituter: copy` includes those outputs. Outputs built in this
-run remain selected, including builds dispatched to a configured remote builder.
-When a requested output has no recorded derivation, the action passes its
-installable to Nix for the rebuild.
+consumers can obtain matching NARs for the output and all its runtime references
+under the configured signature policy. The action checks anonymous access to
+each narinfo and its advertised NAR. Runner-only netrc or URL credentials do not
+establish access for consumers. If anonymous access cannot be confirmed, the
+action keeps the output selected for publication. `substituter: copy` includes
+those outputs. Outputs built in this run remain selected, including builds
+dispatched to a configured remote builder. When a requested output has no
+recorded derivation, the action passes its installable to Nix for the rebuild.
 
 The action writes the receipt and the list of paths to fixed locations in
 `$RUNNER_TEMP`. A second `build-paths` step in the same job overwrites them.

@@ -24,6 +24,22 @@ export interface NarInfoOffer {
 	readonly narSize: number;
 }
 
+export interface NarInfoSubstitution {
+	readonly offer: NarInfoOffer;
+	readonly url: string;
+}
+
+/**
+ * Reads the substitution metadata and the advertised archive location.
+ */
+export function readNarInfoSubstitution(
+	source: string,
+	storePath: StorePathString,
+	storeDirectory: StoreDirectory
+): NarInfoSubstitution {
+	return new NarInfoReader(source, storePath, storeDirectory).substitution();
+}
+
 /**
  * Parses substitution evidence from a narinfo. Deriver and reference basenames
  * are resolved in `storeDirectory`. The parser validates every recognised
@@ -35,9 +51,7 @@ export function offerFromNarInfo(
 	storePath: StorePathString,
 	storeDirectory: StoreDirectory
 ): NarInfoOffer {
-	const read = new NarInfoReader(source, storePath, storeDirectory);
-
-	return read.offer();
+	return readNarInfoSubstitution(source, storePath, storeDirectory).offer;
 }
 
 /**
@@ -245,7 +259,7 @@ class NarInfoReader {
 		return named.data;
 	}
 
-	offer(): NarInfoOffer {
+	substitution(): NarInfoSubstitution {
 		this.readLines();
 
 		const narHash = this.narHash;
@@ -262,13 +276,16 @@ class NarInfoReader {
 		}
 
 		return {
-			source: 'substituter',
-			references: this.references ?? [],
-			...(this.deriver !== undefined && { deriver: this.deriver }),
-			narHash,
-			signatures: [...this.signatures],
-			downloadSize: this.downloadSize,
-			narSize: this.narSize
+			url: this.url,
+			offer: {
+				source: 'substituter',
+				references: this.references ?? [],
+				...(this.deriver !== undefined && { deriver: this.deriver }),
+				narHash,
+				signatures: [...this.signatures],
+				downloadSize: this.downloadSize,
+				narSize: this.narSize
+			}
 		};
 	}
 }

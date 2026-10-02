@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { MismatchedNarInfoPathError } from '@cupboard/nix-store/errors';
 import {
 	type NarInfoOffer,
-	offerFromNarInfo
+	readNarInfoSubstitution
 } from '@cupboard/nix-store/narinfo-reader';
 import {
 	type StoreDirectory,
@@ -50,6 +50,11 @@ import {
 	type NixSubstituterOffer,
 	type UnreachableSubstituter
 } from './nix-store.ts';
+import {
+	fetchPublicObject,
+	PublicNarAccessError,
+	verifyPublicNarAccess
+} from './public-nar-access.ts';
 import { nixIntegerOfWidth } from './setting-types.ts';
 import {
 	defaultFileTransferSettings,
@@ -119,21 +124,52 @@ function requestConcurrency(dependencies: SubstituterEnvironment): number {
 	return httpConnections === 0 ? maxSubstituterConcurrency : httpConnections;
 }
 
+interface SubstituterErrorOptions extends ErrorOptions {
+	readonly isConsumerProof?: boolean;
+}
+
+function consumerProofAdvice(
+	options: SubstituterErrorOptions | undefined
+): string {
+	return options?.isConsumerProof === true
+		? ". Anonymous consumer access could not be confirmed. Use substituter: copy (--substituter copy in the CLI) to publish selected paths using the runner's credentials."
+		: '';
+}
+
+function consumerProofUri(
+	uri: string,
+	options: SubstituterErrorOptions | undefined
+): string {
+	if (!options?.isConsumerProof) {
+		return uri;
+	}
+	const parsed = URL.parse(uri);
+	if (parsed === null || (parsed.username === '' && parsed.password === '')) {
+		return uri;
+	}
+	parsed.username = '';
+	parsed.password = '';
+	return canonicalHref(parsed);
+}
+
 export class SubstituterUnreachableError extends NixStoreError {
 	readonly retryAfterMs?: number;
 
 	constructor(
 		public readonly substituter: string,
 		public readonly status?: number,
-		options?: ErrorOptions & { readonly retryAfterMs?: number }
+		options?: SubstituterErrorOptions & { readonly retryAfterMs?: number }
 	) {
+		const shown = consumerProofUri(substituter, options);
 		super(
-			status === undefined
-				? `Could not query substituter: ${substituter}`
-				: `Substituter returned HTTP status ${String(status)}: ${substituter}`,
+			(status === undefined
+				? `Could not query substituter: ${shown}`
+				: `Substituter returned HTTP status ${String(status)}: ${shown}`) +
+				consumerProofAdvice(options),
 			options
 		);
 		this.name = 'SubstituterUnreachableError';
+		this.substituter = shown;
 
 		if (options?.retryAfterMs !== undefined) {
 			this.retryAfterMs = options.retryAfterMs;
@@ -144,10 +180,16 @@ export class SubstituterUnreachableError extends NixStoreError {
 export class SubstituterAnswerUnreadableError extends NixStoreError {
 	constructor(
 		public readonly substituter: string,
-		options?: ErrorOptions
+		options?: SubstituterErrorOptions
 	) {
-		super(`Could not read substituter metadata: ${substituter}`, options);
+		const shown = consumerProofUri(substituter, options);
+		super(
+			`Could not read substituter metadata: ${shown}` +
+				consumerProofAdvice(options),
+			options
+		);
 		this.name = 'SubstituterAnswerUnreadableError';
+		this.substituter = shown;
 	}
 }
 
@@ -194,6 +236,10 @@ export interface Substituter extends SubstituterDescription {
 }
 
 export interface SubstituterEnvironment {
+	/**
+	 * Verify anonymous narinfo and NAR access before reporting an offer.
+	 */
+	readonly requirePublicNar?: boolean;
 	readonly fetch?: typeof undiciFetch;
 	readonly signal?: AbortSignal;
 	readonly transfer?: NixFileTransferSettings;
@@ -364,13 +410,13 @@ export class SubstituterClient {
 		return substituters;
 	}
 
-	// After a failure, a later absence proves the path unavailable and a later
-	// offer supplies it. With fallback disabled, the query rejects only when the
-	// final applicable substituter fails.
+	// Nix permits a later absence to replace a failure, but public access
+	// confirmation must preserve incomplete results unless a later cache
+	// supplies the path.
 	private async firstOffer(
 		storePath: StorePathString
 	): Promise<NixSubstituterOffer | undefined> {
-		let failure: SubstituterUnreachableError | undefined;
+		let failure: SubstituterFailure | undefined;
 		const substituters = await this.opened();
 
 		for (const substituter of substituters) {
@@ -378,7 +424,9 @@ export class SubstituterClient {
 				continue;
 			}
 
-			failure = undefined;
+			if (!this.options.requirePublicNar) {
+				failure = undefined;
+			}
 
 			const outcome = await this.offerFor(substituter, storePath);
 
@@ -397,7 +445,10 @@ export class SubstituterClient {
 	}
 
 	private raiseIfLastFailed(failure: SubstituterFailure | undefined): void {
-		if (failure !== undefined && !this.options.fallback) {
+		if (
+			failure !== undefined &&
+			(!this.options.fallback || this.options.requirePublicNar)
+		) {
 			throw failure;
 		}
 	}
@@ -430,19 +481,51 @@ export class SubstituterClient {
 		}
 
 		try {
+			const substitution = readNarInfoSubstitution(
+				asked.document,
+				storePath,
+				this.options.storeDirectory
+			);
+			if (this.options.requirePublicNar) {
+				if (substituter.location.kind !== 'http') {
+					throw new PublicNarAccessError();
+				}
+				await verifyPublicNarAccess(
+					new URL(
+						substitution.url,
+						`${canonicalHref(substituter.location.baseUrl)}/`
+					),
+					substitution.offer.downloadSize,
+					{
+						...(this.options.fetch !== undefined && {
+							fetch: this.options.fetch
+						}),
+						signal: requestSignal(
+							transferSettings(this.options).stalledTransferTimeoutMs,
+							this.options.signal
+						)
+					}
+				);
+			}
 			return {
 				kind: 'held',
 				offer: {
-					...offerFromNarInfo(
-						asked.document,
-						storePath,
-						this.options.storeDirectory
-					),
+					...substitution.offer,
 					fromTrustedSubstituter: substituter.isTrusted
 				}
 			};
 		} catch (error) {
 			this.raiseIfAbandoned();
+			if (error instanceof PublicNarAccessError) {
+				return {
+					kind: 'failed',
+					error: new SubstituterUnreachableError(
+						substituter.uri,
+						error.status,
+						{ cause: error, isConsumerProof: true }
+					)
+				};
+			}
 
 			// A narinfo for a different path does not satisfy this query.
 			if (error instanceof MismatchedNarInfoPathError) {
@@ -452,6 +535,7 @@ export class SubstituterClient {
 			return {
 				kind: 'failed',
 				error: new SubstituterAnswerUnreadableError(substituter.uri, {
+					isConsumerProof: this.options.requirePublicNar,
 					cause: error
 				})
 			};
@@ -674,24 +758,36 @@ async function fetchDocument(
 		const credential = credentialForRequest();
 
 		try {
-			response = await fetcher(url, {
-				signal: requestSignal(
-					settings.stalledTransferTimeoutMs,
-					dependencies.signal
-				),
-				...(credential !== undefined && {
-					headers: basicAuthHeader(credential)
-				})
-			});
+			response = dependencies.requirePublicNar
+				? await fetchPublicObject(url, {
+						fetch: fetcher,
+						signal: requestSignal(
+							settings.stalledTransferTimeoutMs,
+							dependencies.signal
+						)
+					})
+				: await fetcher(url, {
+						signal: requestSignal(
+							settings.stalledTransferTimeoutMs,
+							dependencies.signal
+						),
+						...(credential !== undefined && {
+							headers: basicAuthHeader(credential)
+						})
+					});
 		} catch (error) {
 			dependencies.signal?.throwIfAborted();
 			failure = new SubstituterUnreachableError(uri, undefined, {
+				isConsumerProof: dependencies.requirePublicNar,
 				cause: error
 			});
 			continue;
 		}
 
-		if (absentStatuses.has(response.status)) {
+		if (
+			absentStatuses.has(response.status) &&
+			!(dependencies.requirePublicNar && response.status === 403)
+		) {
 			await discard(response);
 
 			return { kind: 'absent' };
@@ -713,11 +809,15 @@ async function fetchDocument(
 				if (error instanceof OversizedSubstituterDocumentError) {
 					return {
 						kind: 'failed',
-						error: new SubstituterAnswerUnreadableError(uri, { cause: error })
+						error: new SubstituterAnswerUnreadableError(uri, {
+							isConsumerProof: dependencies.requirePublicNar,
+							cause: error
+						})
 					};
 				}
 
 				failure = new SubstituterUnreachableError(uri, undefined, {
+					isConsumerProof: dependencies.requirePublicNar,
 					cause: error
 				});
 				continue;
@@ -726,6 +826,7 @@ async function fetchDocument(
 
 		await discard(response);
 		failure = new SubstituterUnreachableError(uri, response.status, {
+			isConsumerProof: dependencies.requirePublicNar,
 			retryAfterMs: retryAfterMilliseconds(response)
 		});
 
@@ -736,7 +837,11 @@ async function fetchDocument(
 
 	return {
 		kind: 'failed',
-		error: failure ?? new SubstituterUnreachableError(uri)
+		error:
+			failure ??
+			new SubstituterUnreachableError(uri, undefined, {
+				isConsumerProof: dependencies.requirePublicNar
+			})
 	};
 }
 
@@ -1075,6 +1180,10 @@ function substituterLocation(
 		return;
 	}
 
+	if (dependencies.requirePublicNar) {
+		return { kind: 'http', baseUrl: withoutParameters(parsed) };
+	}
+
 	const netrc = dependencies.netrc;
 	const credential = substituterCredential(
 		parsed,
@@ -1187,7 +1296,8 @@ function errorCodeOf(error: unknown): string {
  * Reads a substituter's `nix-cache-info`. HTTP requests use the normal retry
  * policy so a transient failure at startup does not exclude the cache.
  *
- * Malformed or oversized metadata makes the substituter unreachable.
+ * Public access confirmation rejects unreadable metadata. Ordinary store
+ * queries record the substituter as unreachable.
  */
 async function describeSubstituter(
 	location: SubstituterLocation,
@@ -1217,6 +1327,9 @@ async function describeSubstituter(
 	}
 
 	if (asked.kind === 'failed') {
+		if (dependencies.requirePublicNar) {
+			throw asked.error;
+		}
 		return { kind: 'unreachable', reason: reasonFor(asked.error) };
 	}
 
@@ -1225,7 +1338,13 @@ async function describeSubstituter(
 			kind: 'described',
 			description: parseCacheInfo(asked.document, servedBy)
 		};
-	} catch {
+	} catch (error) {
+		if (dependencies.requirePublicNar) {
+			throw new SubstituterAnswerUnreadableError(uri, {
+				cause: error,
+				isConsumerProof: true
+			});
+		}
 		return { kind: 'unreachable', reason: 'no-cache-info' };
 	}
 }

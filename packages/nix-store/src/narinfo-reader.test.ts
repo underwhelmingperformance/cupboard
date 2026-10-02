@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { bytesToBase64, bytesToHex } from './encoding.ts';
 import { CorruptNarInfoError, MismatchedNarInfoPathError } from './errors.ts';
 import { NixSha256Hash, toNixBase32 } from './hash.ts';
-import { offerFromNarInfo } from './narinfo-reader.ts';
+import { offerFromNarInfo, readNarInfoSubstitution } from './narinfo-reader.ts';
 import {
 	storeDirectorySchema,
 	storePathSchema,
@@ -79,6 +79,23 @@ describe('offerFromNarInfo', () => {
 			signatures: [signature],
 			downloadSize: 400,
 			narSize: 1000
+		});
+	});
+
+	it('returns the archive URL with the same validated offer', () => {
+		expect(
+			readNarInfoSubstitution(narInfoDocument({}), appPath, storeDirectory)
+		).toStrictEqual({
+			url: 'nar/example.nar.xz',
+			offer: {
+				source: 'substituter',
+				references: [libraryPath],
+				deriver: deriverPath,
+				narHash,
+				signatures: [signature],
+				downloadSize: 400,
+				narSize: 1000
+			}
 		});
 	});
 

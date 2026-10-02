@@ -1,4 +1,8 @@
 import {
+	SubstituterAnswerUnreadableError,
+	SubstituterUnreachableError
+} from '@cupboard/nix';
+import {
 	CodedError,
 	genericExitCode,
 	usageExitCode
@@ -14,11 +18,34 @@ import {
 } from './errors.ts';
 
 /**
- * Returns the exit status for a failure: a `CodedError`'s own exit status, or 1
- * for anything else. `cliExitCode` handles cancellation and Commander errors.
+ * Returns the failure's exit status. Typed substituter failures use the CLI's
+ * authority and service-failure categories; other errors use a `CodedError`'s
+ * status or 1. `cliExitCode` handles cancellation and Commander errors.
  */
 export function errorExitCode(error: unknown): number {
-	return error instanceof CodedError ? error.exitCode : genericExitCode;
+	if (error instanceof CodedError) {
+		return error.exitCode;
+	}
+	if (error instanceof SubstituterAnswerUnreadableError) {
+		return transientExitCode;
+	}
+	if (!(error instanceof SubstituterUnreachableError)) {
+		return genericExitCode;
+	}
+	const status = error.status;
+	if (status === undefined) {
+		return transientExitCode;
+	}
+	if ([401, 403, 407].includes(status)) {
+		return authExitCode;
+	}
+	if (status === 507) {
+		return genericExitCode;
+	}
+	if ([200, 206, 408, 429].includes(status) || status >= 500) {
+		return transientExitCode;
+	}
+	return genericExitCode;
 }
 
 /**

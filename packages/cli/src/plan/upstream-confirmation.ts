@@ -51,6 +51,7 @@ export interface UpstreamConfirmationOptions {
  * connection, substitution eligibility, and a complete matching closure from
  * permitted substituters. It reads each narinfo, verifies that its NAR hash
  * matches the local store, and checks that the signature policy accepts it.
+ * The confirmation store also verifies anonymous access to the advertised NAR.
  */
 export function confirmUpstreamAvailabilityWith(
 	options: UpstreamConfirmationOptions

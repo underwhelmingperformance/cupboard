@@ -175,7 +175,7 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | Input | Default | Description |
 | --- | --- | --- |
 | `inline-paths` | `true` | Control how path lists are returned. `true` writes inline path outputs as well as files. `false` returns files and counts without inline path outputs. Use `false` for large path lists. |
-| `publication-url` |  | Destination tenant or cache URL. With `substituter: leave`, this keeps paths from the destination and its tenant reuse views selected for publication. Supply this when the destination is a configured substituter. |
+| `publication-url` |  | Destination tenant or cache URL. Required with `substituter: leave` so paths from the destination and its tenant reuse views remain selected for publication. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
 | `read-session-target` |  | Internal setup output for OIDC read access. |
 | `read-session-view` |  | Internal setup output for an additional reuse view. |

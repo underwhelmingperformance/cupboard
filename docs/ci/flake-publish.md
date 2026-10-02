@@ -361,6 +361,14 @@ references without copying NARs into the runner or remote builder. If a
 reference is absent from both caches, the workflow uses the selected Nix store
 or configured substituters to obtain the missing path before publication.
 
+With `substituter: leave`, confirmation checks anonymous access to each narinfo
+and its advertised NAR. Runner-only netrc or URL credentials do not establish
+access for consumers. An anonymous authentication refusal stops cohort planning
+before the build with exit status 77. Temporary failures and malformed provider
+responses stop planning with exit status 75. To publish selected paths from a
+cache that requires runner credentials, set `substituter: copy`. Nix can still
+use those credentials to obtain build inputs.
+
 With `substituter: leave`, an output left upstream does not select its closure
 for publication. If another published output references that path,
 `publish: closure` still includes it. With `build: rebuild`, the substituter
