@@ -278,10 +278,11 @@ Two more things stay behind after a rollback:
   deploy of the newer release doesn't necessarily move that object again,
   because the tenant has already recorded the step that moves objects. Recover
   such objects yourself before you rely on the new keys.
-- A release can accept a D1 migration history that is longer than its own, when
-  the extra migrations have verified digests. That only means the deploy can
-  continue. It doesn't mean that the older release can use the schema that those
-  extra migrations produced.
+- A release can accept a D1 migration history that is longer than its own.
+  Digest verification checks only migration files included in that release; it
+  does not verify extra recorded migrations. Acceptance only means that
+  deployment can continue. It does not establish that the older release can use
+  the schema produced by those extra migrations.
 
 ### Deploying an older release over a newer one
 
