@@ -191,6 +191,14 @@ produced by `actions/attest`. The existing `--attestation` and
 order. The manifest options accept one path; supplying different paths fails
 with usage status 2 before authentication.
 
+`cupboard attest attach` also accepts `--paths-file` with one store path or
+local link per line. File entries are always path payload, so they cannot select
+a cache. Invalid path entries report the file and line number. Before acquiring
+credentials, the command validates file entries and unambiguous positional
+paths, and reads and parses bundle files. The first positional argument can also
+select a named cache. Resolving an ambiguous cache argument requires
+authentication. Invalid or unreadable input files exit with usage status 2.
+
 A rerun that reuses an output does not recreate build provenance for the earlier
 attempt. Set `build: rebuild` when the new run must execute each requested
 builder again and produce fresh build evidence. Nix may still substitute
@@ -331,6 +339,12 @@ The command needs three things to check against:
   `--certificate-identity-regex`;
 - the issuer of that identity, with `--certificate-oidc-issuer` or
   `--certificate-oidc-issuer-regex`.
+
+Pass exactly one identity option and one issuer option. Missing or conflicting
+options and invalid regular expressions exit with usage status 2 before the
+command reads a bundle or cache content. Remote verification also requires
+exactly one of `--trusted-public-key` or `--trust-cache-pubkey`; a missing or
+conflicting narinfo trust source exits with status 2 before any cache request.
 
 For bundles signed in GitHub Actions, the issuer is
 `https://token.actions.githubusercontent.com`. The identity is the workflow that

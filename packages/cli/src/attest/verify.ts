@@ -33,6 +33,7 @@ import {
 } from '@cupboard/shared/sigstore';
 
 import { cacheReadFetcher, resilientFetcher } from '../client/transport.ts';
+import { CliUsageError } from '../errors.ts';
 
 export interface LocalAttestationVerifyOptions extends AttestationPolicyOptions {
 	readonly bundles: readonly string[];
@@ -69,6 +70,29 @@ export class RemoteNarInfoStorePathMismatchError extends Error {
 	) {
 		super('Remote narinfo store path does not match the requested hash');
 		this.name = 'RemoteNarInfoStorePathMismatchError';
+	}
+}
+
+export class RemoteAttestationTrustModeError extends CliUsageError {
+	constructor(detail: string) {
+		super(detail);
+		this.name = 'RemoteAttestationTrustModeError';
+	}
+}
+
+function validateRemoteTrustOptions(
+	options: RemoteAttestationVerifyOptions
+): void {
+	if (options.trustedPublicKey !== undefined && options.trustCachePubkey) {
+		throw new RemoteAttestationTrustModeError(
+			'Pass only one of --trusted-public-key or --trust-cache-pubkey'
+		);
+	}
+
+	if (options.trustedPublicKey === undefined && !options.trustCachePubkey) {
+		throw new RemoteAttestationTrustModeError(
+			'Remote verification requires --trusted-public-key or --trust-cache-pubkey'
+		);
 	}
 }
 
@@ -127,6 +151,7 @@ export async function verifyRemoteAttestations(
 	dependencies: AttestationVerifyDependencies = {}
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
+	validateRemoteTrustOptions(options);
 	const fetcher = dependencies.fetch ?? resilientFetcher('replay-safe');
 	const readFetcher = cacheReadFetcher(options.url, dependencies.fetch);
 	const base = canonicalHref(cacheUrl(options.url, options.cache));
@@ -289,18 +314,8 @@ async function remoteTrustKeys(
 	options: RemoteAttestationVerifyOptions,
 	fetcher: typeof fetch
 ): Promise<readonly string[]> {
-	if (options.trustedPublicKey !== undefined && options.trustCachePubkey) {
-		throw new Error('Pass only one narinfo trust source');
-	}
-
 	if (options.trustedPublicKey !== undefined) {
 		return trustedPublicKeys(options.trustedPublicKey);
-	}
-
-	if (!options.trustCachePubkey) {
-		throw new Error(
-			'Remote verification requires --trusted-public-key or --trust-cache-pubkey'
-		);
 	}
 
 	const response = await fetcher(publicKeyUrl(options.url), {
