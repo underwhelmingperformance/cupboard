@@ -39,6 +39,7 @@ import {
 import { trustRuleSummaryRows } from './oidc-trust/format.ts';
 import {
 	lookupRepository,
+	parseRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
 import {
@@ -493,7 +494,11 @@ function buildOidcTrustCommands(
 				'Add a trust rule that lets each pull request in a GitHub repository publish to a cache of its own.'
 			)
 			.argument('<url>', plane.urlArgument, parseWorkerUrl)
-			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
 			.option(
 				'--audience <audience>',
 				'audience that the token must have (default: the tenant URL)',
@@ -545,7 +550,11 @@ function buildOidcTrustCommands(
 				"Add a trust rule that lets a GitHub repository's tag runs publish to a cache named after the tag."
 			)
 			.argument('<url>', plane.urlArgument, parseWorkerUrl)
-			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
 			.option(
 				'--audience <audience>',
 				'audience that the token must have (default: the tenant URL)',
@@ -597,7 +606,11 @@ function buildOidcTrustCommands(
 				"Add a trust rule that lets runs on one branch of a GitHub repository publish to the tenant's default cache."
 			)
 			.argument('<url>', plane.urlArgument, parseWorkerUrl)
-			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
 			.requiredOption(
 				'--branch <name>',
 				'the branch whose runs may publish (e.g. main)'

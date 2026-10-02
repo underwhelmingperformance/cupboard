@@ -12,6 +12,18 @@ const targets = Array.from(
 const tenantUrl = 'http://127.0.0.1:1/t/acme';
 
 it.each([
+	...['setup', 'check'].map((command) => ({
+		arguments: [
+			'github',
+			command,
+			tenantUrl,
+			'--repo',
+			'owner/repo/extra',
+			'--workflow-ref',
+			`acme/app/.github/workflows/publish.yml@${'a'.repeat(40)}`
+		],
+		advice: '--repo must be <owner>/<name>'
+	})),
 	{
 		arguments: ['tenant', 'set-quota', 'http://127.0.0.1:1', 'acme', '1e3'],
 		advice: 'Pass a non-negative integer in bytes'
