@@ -413,9 +413,13 @@ describe('chooseDeployAccount', () => {
 
 		if (rejection instanceof AccountOptionRequiredError) {
 			expect({
-				error: { name: rejection.name, accounts: rejection.accounts }
+				error: {
+					name: rejection.name,
+					accounts: rejection.accounts,
+					exitCode: rejection.exitCode
+				}
 			}).toStrictEqual({
-				error: { name: AccountOptionRequiredError.name, accounts }
+				error: { name: AccountOptionRequiredError.name, accounts, exitCode: 2 }
 			});
 		}
 	});

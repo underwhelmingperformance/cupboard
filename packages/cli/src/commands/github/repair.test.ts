@@ -810,10 +810,18 @@ it('returns an error for --fix when every discovered failure needs manual review
 	);
 
 	expect({
-		problem:
-			error instanceof GithubRepairUnavailableError ? error.problem : error,
+		error:
+			error instanceof GithubCheckIncompleteError
+				? { checks: error.checks, exitCode: error.exitCode }
+				: error,
 		added
-	}).toStrictEqual({ problem: 'no-repairable-job', added: [] });
+	}).toStrictEqual({
+		error: {
+			checks: jobs.map((job) => `${job.caller}, ${job.job}`),
+			exitCode: 69
+		},
+		added: []
+	});
 });
 
 it('keeps a failed check unsuccessful when the repair is declined', async () => {
@@ -1048,12 +1056,19 @@ jobs:
 
 		expect({
 			status: check.jobs.map((job) => job.status),
-			problem:
-				error instanceof GithubRepairUnavailableError ? error.problem : error,
+			error:
+				error instanceof GithubRepairUnavailableError
+					? { problem: error.problem, exitCode: error.exitCode }
+					: error instanceof GithubCheckIncompleteError
+						? { checks: error.checks, exitCode: error.exitCode }
+						: error,
 			added
 		}).toStrictEqual({
 			status: [status],
-			problem: 'no-repairable-job',
+			error:
+				status === 'failed'
+					? { problem: 'no-repairable-job', exitCode: 1 }
+					: { checks: [`${path}, publish`], exitCode: 69 },
 			added: []
 		});
 	}
