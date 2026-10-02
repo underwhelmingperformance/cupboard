@@ -73,9 +73,17 @@ cupboard cache set-access https://cupboard.example.workers.dev/t/acme \
 
 Changes take effect immediately. The cache keeps its URL and its contents.
 
-When you make a cache private, Nix can read it with the tenant read credential.
-If the operator has given the cache a read credential of its own, only that
-credential works.
+For static reads of a private cache, the cache's own read credential takes
+precedence over the tenant read credential. Content-read tokens can also
+authorise private reads.
+
+Setting access to public removes the cache's own read credential. Making the
+cache private again does not restore that credential. Static reads then fall
+back to the tenant read credential, if one is configured. Ask the [operator to
+issue a new cache read credential][read-credentials] if the cache needs its own
+credential again.
+
+[read-credentials]: ../operator/tenants.md#read-credentials
 
 ## Removing a cache
 

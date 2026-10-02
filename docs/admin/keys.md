@@ -73,7 +73,10 @@ the outgoing key and the new one the incoming key.
    ```
 
    The incoming key's row shows `backfill running` while the re-signing is in
-   progress, and `backfill complete` when it has finished.
+   progress, and `backfill complete` when it has finished. If re-signing or
+   cache purging fails, it shows `backfill retrying`, the failed operation,
+   progress counts and the error message. The tenant retries automatically. Wait
+   for `backfill complete` before retiring the outgoing key.
 
 4. Retire the outgoing key. Identify it by the ID that `cupboard key list`
    shows. The tenant's first key has the ID `active`. Later keys have UUIDs.
