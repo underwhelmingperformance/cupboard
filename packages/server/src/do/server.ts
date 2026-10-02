@@ -202,6 +202,7 @@ import {
 import { type ObjectFamily } from './object-move.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import {
@@ -295,6 +296,7 @@ export const gcContinuationKey = 'maintenance:gc-pending';
 export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 
 type MaintenancePassKey =
+	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
@@ -2363,6 +2365,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				}
 			},
 			{
+				key: 'read-authority-demotion',
+				workAt: readyWhen(() =>
+					new PathReadAuthorityService(this.context).hasPending()
+				),
+				run: () =>
+					this.metered('read-authority-demotion', () =>
+						this.withMaintenanceEligibility(() =>
+							this.context.criticalSection(() =>
+								new PathReadAuthorityService(this.context).drain()
+							)
+						)
+					)
+			},
+			{
 				key: 'attestation-inheritance',
 				workAt: () => Promise.resolve(this.attestations.nextInheritanceAt()),
 				run: () => this.drainAttestationInheritance()
@@ -3638,6 +3654,7 @@ function logRequestFinished(
 }
 
 type MeteredMethod =
+	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'auth-key-retirement'
 	| 'cache-teardown'

@@ -122,7 +122,6 @@ async function withReadFixture(
 		'cupboard-oidc-read-',
 		async (directory) => {
 			const server = await CupboardTestServer.start(directory, {
-				completedTransitions: ['cache-identity'],
 				provision: { defaultCacheAccess: testCase.access }
 			});
 

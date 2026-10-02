@@ -167,6 +167,7 @@ export class ServerContext {
 	// transitions.
 	readonly transitions: TransitionGate;
 	grantsContracted = false;
+	referenceStorageContracted = false;
 	readonly cacheRepository: CacheRepository;
 	readonly subrequestsPerInvocation: number;
 	gateBudgetMs = criticalSectionBudgetMs;

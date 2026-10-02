@@ -242,6 +242,18 @@ export class CacheAccessMigrationPendingError extends ServerHttpError {
 	}
 }
 
+export class PathReadAuthorityMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor(public override readonly cause?: unknown) {
+		super(
+			'Reference changes are unavailable until both Workers use path read revocation. Complete cupboard deploy, then retry the request.'
+		);
+		this.name = 'PathReadAuthorityMigrationPendingError';
+	}
+}
+
 export class CacheCatalogueMigrationError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

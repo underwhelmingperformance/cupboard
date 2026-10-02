@@ -18,20 +18,24 @@ import {
 	type CacheLifecycleVersion,
 	firstCacheReadRevision
 } from '../db/cache-generation.ts';
+import {
+	type CacheLifecycleWriteTable,
+	writeCacheLifecycle
+} from '../db/cache-lifecycle-write.ts';
 import { type CacheCreation } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { CacheAlreadyExistsError, CacheNotFoundError } from '../errors.ts';
 
 import { type ServerContext } from './context.ts';
 
-export function cacheLifecycleFilter(tenant: TenantId, scope: CacheScope) {
+export function cacheLifecycleFilter(
+	tenant: TenantId,
+	scope: CacheScope,
+	table: CacheLifecycleWriteTable = d1Schema.cacheLifecycle
+) {
 	return and(
-		eq(d1Schema.cacheLifecycle.tenant, tenant),
-		cacheIdentityCondition(
-			d1Schema.cacheLifecycle.cacheKind,
-			d1Schema.cacheLifecycle.cacheName,
-			scope
-		)
+		eq(table.tenant, tenant),
+		cacheIdentityCondition(table.cacheKind, table.cacheName, scope)
 	);
 }
 
@@ -65,44 +69,46 @@ export class CacheRegistrationService {
 	async recordLifecycle(
 		cache: Pick<ResolvedCache, 'scope' | 'access'>
 	): Promise<CacheLifecycleVersion> {
-		const tenant = this.context.requireTenant();
-		const { scope, access } = cache;
-		const now = isoTimestamp(new Date());
-		const version = {
-			generation: d1Schema.cacheLifecycle.generation,
-			readRevision: d1Schema.cacheLifecycle.readRevision
-		};
-		const updated = await this.context.d1
-			.update(d1Schema.cacheLifecycle)
-			.set({
-				access,
-				readRevision: sql<CacheReadRevision>`case when ${d1Schema.cacheLifecycle.access} is ${access} then ${d1Schema.cacheLifecycle.readRevision} else ${d1Schema.cacheLifecycle.readRevision} + 1 end`,
-				deletedAt: sql`null`,
-				updatedAt: now
-			})
-			.where(cacheLifecycleFilter(tenant, scope))
-			.returning(version)
-			// `get` is typed as always returning a row, but an update that matched
-			// nothing returns none. Read the first of `all` so the miss is visible.
-			.all();
-		const updatedVersion = updated.at(0);
+		return writeCacheLifecycle(this.context.d1, async (table) => {
+			const tenant = this.context.requireTenant();
+			const { scope, access } = cache;
+			const now = isoTimestamp(new Date());
+			const version = {
+				generation: table.generation,
+				readRevision: table.readRevision
+			};
+			const updated = await this.context.d1
+				.update(table)
+				.set({
+					access,
+					readRevision: sql<CacheReadRevision>`case when ${table.access} is ${access} then ${table.readRevision} else ${table.readRevision} + 1 end`,
+					deletedAt: sql`null`,
+					updatedAt: now
+				})
+				.where(cacheLifecycleFilter(tenant, scope, table))
+				.returning(version)
+				// `get` is typed as always returning a row, but an update that matched
+				// nothing returns none. Read the first of `all` so the miss is visible.
+				.all();
+			const updatedVersion = updated.at(0);
 
-		if (updatedVersion !== undefined) {
-			return updatedVersion;
-		}
+			if (updatedVersion !== undefined) {
+				return updatedVersion;
+			}
 
-		return this.context.d1
-			.insert(d1Schema.cacheLifecycle)
-			.values({
-				tenant,
-				...cacheIdentityColumns(scope),
-				access,
-				generation: firstCacheGeneration,
-				readRevision: firstCacheReadRevision,
-				updatedAt: now
-			})
-			.returning(version)
-			.get();
+			return this.context.d1
+				.insert(table)
+				.values({
+					tenant,
+					...cacheIdentityColumns(scope),
+					access,
+					generation: firstCacheGeneration,
+					readRevision: firstCacheReadRevision,
+					updatedAt: now
+				})
+				.returning(version)
+				.get();
+		});
 	}
 
 	async clearReadCredential(scope: CacheScope): Promise<void> {

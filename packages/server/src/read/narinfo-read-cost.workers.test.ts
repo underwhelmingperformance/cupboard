@@ -72,11 +72,7 @@ function roundTripCountingD1(inner: D1Database): {
 describe('public narinfo read cost', () => {
 	beforeEach(resetTestServer);
 
-	// The object key carries the cache's incarnation, and no object outlives the
-	// reference edge that authorises it, so the object the read finds needs no
-	// further check against D1. Counting the round trips states that as a number
-	// a later change has to revise deliberately.
-	it('spends only the admission read on a hit', async () => {
+	it('checks admission and path authority on a hit', async () => {
 		const token = await initialiseViaWorker();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPathToTenant(fixtureTenant, token, metadata);
@@ -91,6 +87,20 @@ describe('public narinfo read cost', () => {
 		expect({
 			status: response.status,
 			roundTrips: counting.roundTrips()
-		}).toStrictEqual({ status: StatusCodes.OK, roundTrips: 1 });
+		}).toStrictEqual({ status: StatusCodes.OK, roundTrips: 2 });
 	});
+});
+
+it('refuses a retained public narinfo after its path fence is persisted', async () => {
+	await resetTestServer();
+	const token = await initialiseViaWorker();
+	const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+	await pushPathToTenant(fixtureTenant, token, metadata);
+	await env.CUPBOARD_DB.prepare(
+		'INSERT INTO path_read_revocation(tenant,cache_kind,store_path_hash,cache_generation,generation) SELECT tenant, cache_kind, store_path_hash, cache_generation, max(generation) FROM blob_ref_storage WHERE tenant = ? AND cache_kind = ? AND store_path_hash = ? GROUP BY tenant, cache_kind, store_path_hash, cache_generation'
+	)
+		.bind(fixtureTenant, 'default', metadata.storePathHash)
+		.run();
+	const response = await readFetch(`/${metadata.storePathHash}.narinfo`);
+	expect(response.status).toBe(StatusCodes.NOT_FOUND);
 });

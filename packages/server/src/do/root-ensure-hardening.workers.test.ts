@@ -395,7 +395,7 @@ describe('root ensure hardening', () => {
 						.run();
 				}
 
-				for (const references of chunk(targets, 16)) {
+				for (const references of chunk(targets, 14)) {
 					await database
 						.insert(d1Schema.blobReference)
 						.values(

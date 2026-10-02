@@ -93,6 +93,12 @@
 		"CUPBOARD_LOCAL_DEV": "",
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},
+	"exports": {
+		"PathReadAuthorityRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		}
+	},
 	"limits": {
 		"cpu_ms": 300000
 	},

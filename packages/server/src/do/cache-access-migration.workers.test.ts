@@ -454,7 +454,7 @@ describe('cache access migration', () => {
 					...instance.context.env,
 					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
 						failures: 0,
-						matches: (query) => query.includes('cache_lifecycle'),
+						matches: (query) => query.includes('cache_lifecycle_storage'),
 						onMatch: () => {
 							catalogueReadsAfterCompletion += 1;
 						}

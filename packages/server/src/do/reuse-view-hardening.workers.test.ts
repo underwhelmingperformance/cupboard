@@ -71,7 +71,7 @@ async function lookupWithPlan(
 	});
 }
 
-// A between-gates seam: the blob_ref edge read is the first shared-fact query
+// A between-gates seam: the blob_ref_storage edge read is the first shared-fact query
 // the lookup issues after leaving the first gate, so a mutation fired on its
 // first match lands after the snapshot and before the revalidation.
 function betweenGates(mutate: () => void): FlakyD1Plan {
@@ -79,7 +79,7 @@ function betweenGates(mutate: () => void): FlakyD1Plan {
 
 	return {
 		failures: 0,
-		matches: (query) => query.includes('blob_ref'),
+		matches: (query) => query.includes('blob_ref_storage'),
 		onMatch: () => {
 			if (isFired) {
 				return;
@@ -133,7 +133,7 @@ function generatedHash(index: number): string {
 // statements that read reference edges are counted below, because a stale
 // backlog can inflate those alone.
 function hasEdgeRead(statement: D1PreparedStatement): boolean {
-	return JSON.stringify(statement).includes('blob_ref');
+	return JSON.stringify(statement).includes('blob_ref_storage');
 }
 
 describe('reuse-view lookup hardening', () => {
@@ -244,7 +244,7 @@ describe('reuse-view lookup hardening', () => {
 
 		const served = await lookupWithPlan(path.storePathHash, () => ({
 			failures: 1,
-			matches: (query) => query.includes('blob_ref')
+			matches: (query) => query.includes('blob_ref_storage')
 		}));
 
 		expect({
@@ -266,7 +266,7 @@ describe('reuse-view lookup hardening', () => {
 		await expect(
 			lookupWithPlan(path.storePathHash, () => ({
 				failures: 4,
-				matches: (query) => query.includes('blob_ref')
+				matches: (query) => query.includes('blob_ref_storage')
 			}))
 		).rejects.toBeInstanceOf(SharedFactsUnavailableError);
 	});
@@ -334,7 +334,7 @@ describe('reuse-view lookup hardening', () => {
 		});
 	});
 
-	// A stale-generation `blob_ref` edge outlives its narinfo row until the
+	// A stale-generation `blob_ref_storage` edge outlives its narinfo row until the
 	// async deletion drains it, so a recommit-heavy path can leave a backlog of
 	// them behind for the same (tenant, cache, store_path_hash). The edge query
 	// must key on the exact candidate generation, not just the candidate cache,

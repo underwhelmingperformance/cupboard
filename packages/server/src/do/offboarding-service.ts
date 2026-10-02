@@ -14,6 +14,7 @@ import {
 	type JsonValueList,
 	jsonValueLists
 } from './json-list.ts';
+import { PathReadAuthorityService } from './path-read-authority-service.ts';
 
 type BlobReferenceIdentity = Pick<
 	typeof d1Schema.blobReference.$inferSelect,
@@ -279,10 +280,24 @@ export class OffboardingService {
 		await batchNonEmpty(this.context.d1, deletes);
 	}
 
+	private async deletePathFenceBatch(
+		tenant: TenantId,
+		limit: number
+	): Promise<void> {
+		const fence = d1Schema.pathReadRevocation;
+		const rows = this.context.d1
+			.select({ rowid: sql`rowid` })
+			.from(fence)
+			.where(eq(fence.tenant, tenant))
+			.orderBy(fence.cacheKind, fence.cacheName, fence.storePathHash)
+			.limit(limit);
+		await this.context.d1.delete(fence).where(inArray(sql`rowid`, rows));
+	}
+
 	private async hasResidue(tenant: TenantId): Promise<boolean> {
-		// The terminal (fully-drained) pass checks all four tables anyway, so read
+		// The terminal (fully-drained) pass checks all five tables anyway, so read
 		// them in one batch.
-		const [edge, presence, attestation, casPresence] =
+		const [edge, presence, attestation, casPresence, fences] =
 			await this.context.d1.batch([
 				this.context.d1
 					.select({ tenant: d1Schema.blobReference.tenant })
@@ -303,6 +318,11 @@ export class OffboardingService {
 					.select({ tenant: d1Schema.tenantCasBlob.tenant })
 					.from(d1Schema.tenantCasBlob)
 					.where(eq(d1Schema.tenantCasBlob.tenant, tenant))
+					.limit(1),
+				this.context.d1
+					.select({ tenant: d1Schema.pathReadRevocation.tenant })
+					.from(d1Schema.pathReadRevocation)
+					.where(eq(d1Schema.pathReadRevocation.tenant, tenant))
 					.limit(1)
 			]);
 
@@ -310,7 +330,8 @@ export class OffboardingService {
 			edge.length > 0 ||
 			presence.length > 0 ||
 			attestation.length > 0 ||
-			casPresence.length > 0
+			casPresence.length > 0 ||
+			fences.length > 0
 		);
 	}
 
@@ -322,18 +343,20 @@ export class OffboardingService {
 	// A missing identity means an earlier finalisation already purged local state.
 	// Report it as drained so the Worker can repeat the remaining D1 finalisation.
 	async drain(limit: number): Promise<{ drained: boolean }> {
-		this.begin();
-
 		const tenant = this.tenantSlug();
 
 		if (tenant === undefined) {
 			return { drained: true };
 		}
 
+		await new PathReadAuthorityService(this.context).requireWritable();
+		this.begin();
+
 		await this.deleteReferenceBatch(tenant, limit);
 		await this.deleteAttestationReferenceBatch(tenant, limit);
 		await this.deletePresenceBatch(tenant, limit);
 		await this.deleteCasPresenceBatch(tenant, limit);
+		await this.deletePathFenceBatch(tenant, limit);
 
 		return { drained: !(await this.hasResidue(tenant)) };
 	}

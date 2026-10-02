@@ -35,7 +35,12 @@ const expanded: ParsedDeploymentTransitionsResponse = {
 		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
 		{ id: 'attestation-path-index', state: 'expanded', updatedAt: recorded },
 		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded },
-		{ id: 'publication-identity', state: 'complete', updatedAt: recorded }
+		{ id: 'publication-identity', state: 'complete', updatedAt: recorded },
+		{
+			id: 'blob-reference-read-authority',
+			state: 'expanded',
+			updatedAt: recorded
+		}
 	],
 	unrecognised: []
 };
@@ -45,7 +50,12 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'deployment-transitions', state: 'complete', updatedAt: recorded },
 		{ id: 'attestation-path-index', state: 'complete', updatedAt: recorded },
 		{ id: 'local-step-attempts', state: 'complete', updatedAt: recorded },
-		{ id: 'publication-identity', state: 'complete', updatedAt: recorded }
+		{ id: 'publication-identity', state: 'complete', updatedAt: recorded },
+		{
+			id: 'blob-reference-read-authority',
+			state: 'complete',
+			updatedAt: recorded
+		}
 	],
 	unrecognised: []
 };
@@ -217,6 +227,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition publication-identity',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition blob-reference-read-authority',
+							value: `expanded ${since}`
+						},
 						{ label: 'Required local step', value: '4' },
 						{ label: 'Ready tenants', value: '1' },
 						{
@@ -270,6 +284,10 @@ describe('runDeploymentStatus', () => {
 					},
 					{
 						label: 'Transition publication-identity',
+						value: `complete ${since}`
+					},
+					{
+						label: 'Transition blob-reference-read-authority',
 						value: `complete ${since}`
 					},
 					{ label: `Transition ${row.id}`, value },
@@ -352,6 +370,10 @@ describe('runDeploymentStatus', () => {
 					label: 'Transition publication-identity',
 					value: `complete ${since}`
 				},
+				{
+					label: 'Transition blob-reference-read-authority',
+					value: `expanded ${since}`
+				},
 				{ label: 'Required local step', value: '4' },
 				{ label: 'Ready tenants', value: '4' },
 				{
@@ -385,7 +407,7 @@ describe('runDeploymentResume', () => {
 			name: 'cache-identity is still expanded',
 			transitions: expanded,
 			step: expansionLocalStep,
-			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index.'
+			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index, blob-reference-read-authority.'
 		}
 	])(
 		'wakes tenants to the required local step and reports the next action when $name',

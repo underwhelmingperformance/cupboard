@@ -14,6 +14,7 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -436,4 +437,23 @@ describe('offboarding drain', () => {
 			narObject: false
 		});
 	});
+});
+
+it('drains path revocation fences before tenant finalisation', async () => {
+	const { id } = await provisionedWritingTenant();
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	await database.insert(d1Schema.pathReadRevocation).values({
+		tenant: id,
+		...cacheIdentityColumns(defaultCache()),
+		storePathHash: storePathHashSchema.parse('0'.repeat(32)),
+		cacheGeneration: firstCacheGeneration,
+		generation: narInfoGenerationSchema.parse(0)
+	});
+	await offboardTenant(id);
+	await runOffboardBatch(rootLogger(), env);
+	const rows = await database
+		.select()
+		.from(d1Schema.pathReadRevocation)
+		.where(sql`${d1Schema.pathReadRevocation.tenant} = ${id}`);
+	expect(rows).toStrictEqual([]);
 });

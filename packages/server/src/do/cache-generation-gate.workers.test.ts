@@ -1652,7 +1652,7 @@ describe('cache generation gate', () => {
 		const small = await deletionStatements('gen-allowance-small', 1);
 		const large = await deletionStatements('gen-allowance-large', 120);
 
-		expect({ small, large }).toStrictEqual({ small: 4, large: 4 });
+		expect({ small, large }).toStrictEqual({ small: 5, large: 5 });
 	}, 240_000);
 
 	it('measures fixed and per-chunk teardown D1 statements', async () => {
@@ -1677,11 +1677,11 @@ describe('cache generation gate', () => {
 					maxFencedRetireRows) *
 					perChunk
 		}).toStrictEqual({
-			oneChunk: 10,
-			twoChunks: 17,
-			perChunk: 7,
+			oneChunk: 11,
+			twoChunks: 19,
+			perChunk: 8,
 			perPass: 3,
-			worstCase: 31
+			worstCase: 35
 		});
 	}, 240_000);
 

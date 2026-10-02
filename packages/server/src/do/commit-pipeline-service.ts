@@ -41,7 +41,10 @@ import {
 	cacheIdentityCondition,
 	type ResolvedCache
 } from '../db/cache.ts';
-import { currentCacheGeneration } from '../db/cache-generation.ts';
+import {
+	currentCacheGeneration,
+	pathReferenceReadability
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -80,6 +83,7 @@ import {
 } from './grace-decision.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
@@ -410,7 +414,8 @@ export class CommitPipelineService {
 				cache,
 				metadata.storePathHash,
 				generation,
-				metadata.narHash
+				metadata.narHash,
+				uploadId
 			);
 
 			const status = await this.publicationStatus(
@@ -507,7 +512,8 @@ export class CommitPipelineService {
 				cache,
 				metadata.storePathHash,
 				generation,
-				metadata.narHash
+				metadata.narHash,
+				uploadId
 			);
 			const status = await this.publicationStatus(
 				cache,
@@ -744,6 +750,12 @@ export class CommitPipelineService {
 							narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
 								'nar_hash'
 							),
+							readable: pathReferenceReadability(
+								tenant,
+								cache.scope,
+								metadata.storePathHash,
+								generation
+							).as('readable'),
 							cacheGeneration: currentCacheGeneration(tenant, cache.scope).as(
 								'cache_generation'
 							)
@@ -810,6 +822,8 @@ export class CommitPipelineService {
 		tenant: TenantId,
 		charge: MaterialisationCharge
 	): Promise<ChargeOutcome> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const { metadata, blob } = charge;
 		const now = isoTimestamp(new Date());
 
@@ -856,6 +870,8 @@ export class CommitPipelineService {
 		tenant: TenantId,
 		charges: readonly MaterialisationCharge[]
 	): Promise<BatchChargeOutcome> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const now = isoTimestamp(new Date());
 		const statements = charges.flatMap((charge) =>
 			this.chargeStatements(tenant, charge, now)
@@ -1502,7 +1518,10 @@ export class CommitPipelineService {
 
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ expiresAt: isoTimestamp(renewedExpiry) })
+			.set({
+				acceptedExpiresAt: sql`coalesce(${schema.pendingUploads.acceptedExpiresAt}, ${schema.pendingUploads.expiresAt})`,
+				expiresAt: isoTimestamp(renewedExpiry)
+			})
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 

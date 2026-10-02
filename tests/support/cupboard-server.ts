@@ -15,7 +15,10 @@ import {
 	type CacheAccessMode,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
-import { type TransitionId } from '@cupboard/protocol/deployment';
+import {
+	type TransitionId,
+	transitionIds
+} from '@cupboard/protocol/deployment';
 import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
@@ -206,18 +209,17 @@ export class CupboardTestServer {
 			await worker.getD1Database('CUPBOARD_DB', 'cupboard')
 		);
 
-		if (options.completedTransitions !== undefined) {
-			const database = await worker.getD1Database('CUPBOARD_DB', 'cupboard');
-			const timestamp = new Date().toISOString();
+		const database = await worker.getD1Database('CUPBOARD_DB', 'cupboard');
+		const timestamp = new Date().toISOString();
+		const completedTransitions = options.completedTransitions ?? transitionIds;
 
-			for (const transition of options.completedTransitions) {
-				await database
-					.prepare(
-						'INSERT OR REPLACE INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (?, ?, ?, ?)'
-					)
-					.bind(transition, 'complete', timestamp, timestamp)
-					.run();
-			}
+		for (const transition of completedTransitions) {
+			await database
+				.prepare(
+					'INSERT OR REPLACE INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (?, ?, ?, ?)'
+				)
+				.bind(transition, 'complete', timestamp, timestamp)
+				.run();
 		}
 		const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
 		const requests: { method: string; path: string; status: number }[] = [];
