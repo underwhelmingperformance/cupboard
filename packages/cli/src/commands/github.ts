@@ -1165,8 +1165,8 @@ export function registerGithubCommands(
 			'main'
 		)
 		.requiredOption(
-			'--workflow-ref <owner/repo/path@ref>',
-			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later.'
+			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
+			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.'
 		)
 		.option(
 			'-y, --yes',
@@ -1179,8 +1179,8 @@ export function registerGithubCommands(
 		)
 		.option('--read-password <password>', 'password of the read credential')
 		.option(
-			'--cache-access-mode <mode>',
-			'public or private for new pull-request caches (default: the tenant default cache access)',
+			'--access, --cache-access-mode <mode>',
+			'read access for new pull-request caches and their reuse view: public or private (default: the tenant default cache access); does not change the default cache',
 			parseCacheAccess
 		)
 		.action(async (url: URL, options: GithubSetupOptions) => {
@@ -1233,7 +1233,7 @@ export function registerGithubCommands(
 			"branch to read the workflow files from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main)."
 		)
 		.option(
-			'--workflow-ref <owner/repo/path@ref>',
+			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
 			'check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref must be a full commit ID or the tag of a release that GitHub reports as immutable.'
 		)
 		.option(
@@ -1249,7 +1249,7 @@ export function registerGithubCommands(
 		)
 		.option(
 			'--tag-pattern <glob>',
-			'release tag pattern that new trust rules accept, such as v*'
+			'release tag pattern that new trust rules accept, such as v* (without refs/tags/); github setup instead includes refs/tags/v* in --workflow-ref'
 		)
 		.option(
 			'--root-prefix <value>',

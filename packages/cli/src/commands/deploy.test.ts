@@ -12,6 +12,39 @@ import { OwnerLoginRequiredError } from '../errors.ts';
 vi.mock('../deploy/command.ts', () => ({ executeDeploy: vi.fn() }));
 
 describe('init result file', () => {
+	it.each(
+		['init', 'deploy'].flatMap((command) =>
+			['--cache', '--tenant'].map((flag) => ({ command, flag }))
+		)
+	)(
+		'parses the first tenant through $command $flag',
+		async ({ command, flag }) => {
+			vi.mocked(executeDeploy).mockReset();
+			vi.mocked(executeDeploy).mockResolvedValue();
+			await buildProgram().parseAsync(
+				[command, flag, 'acme', '--access', 'private', '--yes'],
+				{ from: 'user' }
+			);
+			expect(vi.mocked(executeDeploy).mock.calls).toStrictEqual([
+				[
+					{
+						cache: 'acme',
+						access: 'private',
+						yes: true,
+						oidcIssuer: 'https://dash.cloudflare.com',
+						clientId: '6c915db1f16ece47255821ee6ca1d538',
+						wrangler: true
+					},
+					{
+						signal: undefined,
+						colour: undefined,
+						resultFile: undefined
+					}
+				]
+			]);
+		}
+	);
+
 	it.each(['init', 'deploy'])(
 		'keeps the completed deployment result when %s onboarding fails',
 		async (command) => {
