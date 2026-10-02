@@ -12,6 +12,10 @@ const targets = Array.from(
 const tenantUrl = 'http://127.0.0.1:1/t/acme';
 
 it.each([
+	{
+		arguments: ['init'],
+		advice: 'pass --yes to deploy without prompts'
+	},
 	...['setup', 'check'].map((command) => ({
 		arguments: [
 			'github',

@@ -137,14 +137,14 @@ export class DeployCancelledError extends CliError {
 	}
 }
 
-export class ConfirmationRequiredError extends CliError {
+export class ConfirmationRequiredError extends CliUsageError {
 	constructor() {
 		super('Not running in a terminal: pass --yes to deploy without prompts.');
 		this.name = 'ConfirmationRequiredError';
 	}
 }
 
-export class AccountOptionRequiredError extends CliError {
+export class AccountOptionRequiredError extends CliUsageError {
 	constructor(public readonly accounts: readonly AccountSummary[]) {
 		super(
 			'Several Cloudflare accounts are available; pass --account <id>:\n' +
