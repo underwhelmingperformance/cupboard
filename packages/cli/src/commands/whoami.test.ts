@@ -1,11 +1,22 @@
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import { formatTimestamp } from '@cupboard/reporter';
 import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { CachedSession } from '../auth/token-store.ts';
+import {
+	type CachedSession,
+	listCachedSessions,
+	tokensDirectory,
+	writeCachedSession
+} from '../auth/token-store.ts';
+import { cliExitCode } from '../cli.ts';
 import type { CloudflareGrant } from '../deploy/cloudflare-oauth.ts';
 import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
+import { OwnerLoginRequiredError, UploadWaitTimeoutError } from '../errors.ts';
+import { testWithConfigHome } from '../test-support.ts';
 
 import { type IdentityLoginOptions, identityLoginOptions } from './login.ts';
 import {
@@ -163,6 +174,155 @@ describe('identityLoginOptions', () => {
 });
 
 describe('runWhoami', () => {
+	testWithConfigHome.for(['grant-readable', 'grant-unreadable'] as const)(
+		'reports readable sessions when another session file cannot be read: %s',
+		async (grantState) => {
+			await writeCachedSession(tenantSession, new URL(tenant));
+			const unreadableFiles = ['0'.repeat(64), '1'.repeat(64)].map((file) =>
+				path.join(tokensDirectory(), file)
+			);
+			for (const file of unreadableFiles) {
+				await mkdir(file);
+			}
+			const { ui, captured } = fakeCliUi();
+			const pending = runWhoami(
+				{ kind: 'sessions' },
+				ui.reporter(),
+				dependencies({
+					listSessions: listCachedSessions,
+					readGrant: () =>
+						grantState === 'grant-unreadable'
+							? Promise.reject(new Error('grant is unreadable'))
+							: Promise.resolve(grant)
+				})
+			);
+
+			await expect(pending).rejects.toMatchObject({ code: 'EISDIR' });
+			expect(captured.warnings).toStrictEqual([
+				...unreadableFiles.map(
+					(file) =>
+						`Could not read cached Cupboard session file ${file}: EISDIR: illegal operation on a directory, read. Check that the file is readable and retry.`
+				),
+				...(grantState === 'grant-unreadable'
+					? [
+							"Could not read the cached Cloudflare sign-in. Check access to the CLI's configuration directory and retry."
+						]
+					: [])
+			]);
+			expect(captured.results).toStrictEqual([
+				{
+					kind: 'whoami',
+					data: {
+						sessions: [tenantIdentity],
+						...(grantState === 'grant-readable' && {
+							cloudflareSignIn: { subject: 'user-1' }
+						})
+					},
+					rows: [
+						tenantRow,
+						...(grantState === 'grant-readable'
+							? [{ label: 'Cloudflare sign-in', value: 'user-1' }]
+							: [])
+					],
+					empty: 'Some cached identity files could not be read.'
+				}
+			]);
+		}
+	);
+
+	it.each([
+		{ failure: new OwnerLoginRequiredError(), status: 77 },
+		{ failure: new UploadWaitTimeoutError(1, 600), status: 75 }
+	])(
+		'preserves the original status $status after reporting each unreadable file',
+		async ({ failure, status }) => {
+			const { ui, captured } = fakeCliUi();
+			const secondFailure = new Error('permission denied');
+			let error: unknown;
+			try {
+				await runWhoami(
+					{ kind: 'sessions' },
+					ui.reporter(),
+					dependencies({
+						listSessions: (onReadFailure) => {
+							onReadFailure?.({ file: '/tmp/session-a', cause: failure });
+							onReadFailure?.({ file: '/tmp/session-b', cause: secondFailure });
+							return Promise.resolve([tenantSession]);
+						}
+					})
+				);
+			} catch (error_) {
+				error = error_;
+			}
+			expect({
+				error,
+				status: cliExitCode(error, 130),
+				warnings: captured.warnings,
+				results: captured.results
+			}).toStrictEqual({
+				error: failure,
+				status,
+				warnings: [
+					`Could not read cached Cupboard session file /tmp/session-a: ${failure.message}. Check that the file is readable and retry.`,
+					'Could not read cached Cupboard session file /tmp/session-b: permission denied. Check that the file is readable and retry.'
+				],
+				results: [
+					{
+						kind: 'whoami',
+						data: {
+							sessions: [tenantIdentity],
+							cloudflareSignIn: { subject: 'user-1' }
+						},
+						rows: [tenantRow, { label: 'Cloudflare sign-in', value: 'user-1' }],
+						empty: 'Some cached identity files could not be read.'
+					}
+				]
+			});
+		}
+	);
+
+	it.each(['grant', 'sessions'] as const)(
+		'reports independently readable identity fields when %s cannot be read',
+		async (unreadable) => {
+			const { ui, captured } = fakeCliUi();
+			const failure = new Error('EACCES: permission denied');
+			const pending = runWhoami(
+				{ kind: 'sessions' },
+				ui.reporter(),
+				dependencies({
+					listSessions: () =>
+						unreadable === 'sessions'
+							? Promise.reject(failure)
+							: Promise.resolve([tenantSession]),
+					readGrant: () =>
+						unreadable === 'grant'
+							? Promise.reject(failure)
+							: Promise.resolve(grant)
+				})
+			);
+
+			await expect(pending).rejects.toBe(failure);
+			expect(captured.results).toStrictEqual([
+				{
+					kind: 'whoami',
+					data:
+						unreadable === 'grant'
+							? { sessions: [tenantIdentity] }
+							: { cloudflareSignIn: { subject: 'user-1' } },
+					rows: [
+						unreadable === 'grant'
+							? tenantRow
+							: { label: 'Cloudflare sign-in', value: 'user-1' }
+					],
+					empty: 'Some cached identity files could not be read.'
+				}
+			]);
+			expect(captured.warnings).toStrictEqual([
+				`Could not read the cached ${unreadable === 'grant' ? 'Cloudflare sign-in' : 'Cupboard sessions'}. Check access to the CLI's configuration directory and retry.`
+			]);
+		}
+	);
+
 	it('describes every cached session and the Cloudflare sign-in', async () => {
 		const { ui, captured } = fakeCliUi();
 

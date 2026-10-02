@@ -11,7 +11,7 @@ import {
 	type VerifyTrust
 } from '@cupboard/shared/sigstore';
 import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
-import type { Command } from 'commander';
+import { type Command, InvalidArgumentError } from 'commander';
 
 import {
 	readCommittedAttestationPathInfos,
@@ -167,14 +167,23 @@ export function registerAttestCommands(
 			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
 		)
 		.option(
-			'--attestation <bundle>',
-			'a Sigstore bundle file to attach (repeatable). Every in-toto subject in the bundle must match one of the given store paths.',
+			'--bundle, --attestation <bundle>',
+			'a Sigstore bundle file to attach (repeatable; both option names are equivalent). Every in-toto subject in the bundle must match one of the given store paths.',
 			collect,
 			[]
 		)
 		.option(
-			'--attestations-file <path>',
-			'read additional Sigstore bundle paths from this file, one per line'
+			'--bundles-file, --attestations-file <path>',
+			'read additional Sigstore bundle paths from this file, one per line (one manifest; both option names are equivalent)',
+			(value: string, previous: string | undefined) => {
+				if (previous !== undefined && previous !== value) {
+					throw new InvalidArgumentError(
+						'Pass one bundle manifest with --bundles-file or --attestations-file; conflicting paths were supplied.'
+					);
+				}
+
+				return value;
+			}
 		)
 		.addHelpText(
 			'after',

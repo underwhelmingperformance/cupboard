@@ -6,7 +6,7 @@ import { IneffectiveCtlogThresholdError } from '@cupboard/shared/sigstore';
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
-import { cliExitCode } from '../cli.ts';
+import { buildProgram, cliExitCode } from '../cli.ts';
 import {
 	AttestAttachBundleRequiredError,
 	ReadCredentialPairError
@@ -83,6 +83,103 @@ function thresholdFailure(error: unknown): unknown {
 			}
 		: error;
 }
+
+describe('bundle option aliases', () => {
+	it.each([
+		{ command: 'push', flags: ['--bundle', 'a.json'], expected: ['a.json'] },
+		{
+			command: 'push',
+			flags: ['--attestation', 'a.json', '--bundle', 'b.json'],
+			expected: ['a.json', 'b.json']
+		},
+		{ command: 'attach', flags: ['--bundle', 'a.json'], expected: ['a.json'] },
+		{
+			command: 'attach',
+			flags: ['--attestation', 'a.json', '--bundle', 'b.json'],
+			expected: ['a.json', 'b.json']
+		},
+		{
+			command: 'attach',
+			flags: ['--bundles-file', 'bundles.txt'],
+			expected: []
+		},
+		{
+			command: 'attach',
+			flags: [
+				'--attestations-file',
+				'bundles.txt',
+				'--bundles-file',
+				'bundles.txt'
+			],
+			expected: []
+		}
+	])(
+		'maps $command $flags to the existing parsed fields',
+		async ({ command, flags, expected }) => {
+			const program = buildProgram().configureOutput({
+				writeErr() {
+					return;
+				}
+			});
+			const action =
+				command === 'push'
+					? program.commands.find((entry) => entry.name() === 'push')
+					: program.commands
+							.find((entry) => entry.name() === 'attest')
+							?.commands.find((entry) => entry.name() === 'attach');
+			if (action === undefined) {
+				throw new Error('command is not registered');
+			}
+			const defaults = { ...action.opts() };
+			action.action(() => Promise.resolve());
+			await program.parseAsync(
+				[
+					...(command === 'push' ? ['push'] : ['attest', 'attach']),
+					'https://cupboard.example.workers.dev/t/acme',
+					...flags
+				],
+				{ from: 'user' }
+			);
+			expect(action.opts()).toStrictEqual({
+				...defaults,
+				...(command === 'push' && { attest: true, retain: true, wait: true }),
+				attestation: expected,
+				...(flags.includes('--bundles-file') && {
+					attestationsFile: 'bundles.txt'
+				})
+			});
+		}
+	);
+
+	it.each([
+		['--attestations-file', 'a.txt', '--bundles-file', 'b.txt'],
+		['--bundles-file', 'a.txt', '--attestations-file', 'b.txt']
+	])('rejects conflicting manifests: %s', async (...flags) => {
+		const program = silentProgram();
+		let error: unknown;
+		try {
+			await program.parseAsync(
+				[
+					'attest',
+					'attach',
+					'https://cupboard.example.workers.dev/t/acme',
+					...flags
+				],
+				{ from: 'user' }
+			);
+		} catch (error_) {
+			error = error_;
+		}
+		expect({
+			message: error instanceof Error ? error.message : undefined,
+			exitCode: cliExitCode(error, 130)
+		}).toStrictEqual({
+			message:
+				"error: option '--bundles-file, --attestations-file <path>' argument 'b.txt' is invalid. Pass one bundle manifest with --bundles-file or --attestations-file; conflicting paths were supplied.",
+			exitCode: 2
+		});
+	});
+});
 
 describe('parseVerifierThreshold', () => {
 	it.each([

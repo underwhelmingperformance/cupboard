@@ -66,7 +66,11 @@ streams would go to `/dev/null`.
 
 You can also write results to a file with `--result-file <path>`, in any mode.
 The CLI adds one line to the file for each result, in the form
-`{"kind": …, "data": …}`. It doesn't write failures to this file.
+`{"kind": …, "data": …}`. Error events are not written to this file. A command
+can report useful partial results before failing, so the file can contain
+results even when the command exits non-zero. For example, `confirm` reports
+completed batches before a later request fails, and `init` reports deployed
+resources before onboarding finishes.
 
 ### Colour
 

@@ -234,6 +234,7 @@ export interface DeployCliOptions {
 }
 
 export interface DeployRuntimeOptions {
+	readonly resultFile?: string;
 	readonly signal?: AbortSignal;
 	readonly colour?: boolean;
 }
@@ -962,7 +963,8 @@ export async function executeDeploy(
 
 	const ui = createDeployUi({
 		signal: runtimeOptions.signal,
-		colour: runtimeOptions.colour
+		colour: runtimeOptions.colour,
+		resultFile: runtimeOptions.resultFile
 	});
 	const isInteractive = ui.interactive;
 

@@ -127,7 +127,8 @@ export function registerDeployCommand(
 
 			await executeDeploy(cliOptions, {
 				signal: programOptions.signal,
-				colour: colourFromGlobals(program)
+				colour: colourFromGlobals(program),
+				resultFile: program.opts<{ resultFile?: string }>().resultFile
 			});
 		});
 }

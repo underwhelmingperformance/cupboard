@@ -173,7 +173,10 @@ This lists the sessions kept on this machine. For each one, it shows:
 - whether a refresh token is saved with the session
 
 It also shows the saved Cloudflare sign-in, if there is one, even when there are
-no sessions.
+no sessions. If a cached session or the Cloudflare sign-in cannot be read, the
+command reports the readable identity fields and each unreadable session file,
+then fails. Check access to the CLI's configuration directory before retrying. A
+partial JSON result omits fields that could not be read.
 
 To see only one session, give its URL:
 

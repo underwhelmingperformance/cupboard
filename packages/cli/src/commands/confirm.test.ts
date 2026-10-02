@@ -1,3 +1,8 @@
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
@@ -10,8 +15,11 @@ import {
 } from '@cupboard/protocol/upload';
 import type { ResultRow } from '@cupboard/reporter';
 import { Command } from 'commander';
+import { http, HttpResponse } from 'msw';
+import { setupServer } from 'msw/node';
 import { describe, expect, it } from 'vitest';
 
+import { cliExitCode } from '../cli.ts';
 import { recordingCacheScopedClient } from '../client/cache-scoped.test-support.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
@@ -25,6 +33,18 @@ import {
 	registerConfirmCommand,
 	runConfirm
 } from './confirm.ts';
+
+function inputFailure(error: unknown): unknown {
+	if (!(error instanceof Error)) {
+		return error;
+	}
+	return {
+		name: error.name,
+		message: error.message,
+		cause: error.cause,
+		exitCode: cliExitCode(error, 130)
+	};
+}
 
 function expectConfirmIncomplete(
 	error: unknown
@@ -308,6 +328,214 @@ describe('runConfirm', () => {
 });
 
 describe('confirm command', () => {
+	it.each(['argument', 'file'] as const)(
+		'exits with usage status for an invalid %s store path before requesting OIDC authority',
+		async (source) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-confirm-status-')
+			);
+			const manifest = path.join(directory, 'paths.txt');
+			const value = source === 'file' ? 'pr-1' : '/nix/store/invalid';
+			try {
+				await writeFile(manifest, `${appPath}\n${value}\n`);
+				const child = spawn(
+					process.execPath,
+					[
+						'--experimental-transform-types',
+						'--disable-warning=ExperimentalWarning',
+						path.resolve(import.meta.dirname, '../main.ts'),
+						'--output-mode',
+						'json',
+						'confirm',
+						'http://127.0.0.1:1/t/acme',
+						'--github-oidc',
+						...(source === 'file' ? ['--paths-file', manifest] : [value])
+					],
+					{
+						env: {
+							...process.env,
+							CI: 'true',
+							XDG_CONFIG_HOME: directory,
+							ACTIONS_ID_TOKEN_REQUEST_URL: '',
+							ACTIONS_ID_TOKEN_REQUEST_TOKEN: ''
+						},
+						timeout: 20_000,
+						stdio: ['ignore', 'pipe', 'pipe']
+					}
+				);
+				let stdout = '';
+				let stderr = '';
+				child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+					stdout += chunk;
+				});
+				child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+					stderr += chunk;
+				});
+				const status = await new Promise<number | null>((resolve, reject) => {
+					child.once('error', reject);
+					child.once('close', resolve);
+				});
+				expect({
+					status,
+					stdout,
+					events: stderr
+						.trim()
+						.split('\n')
+						.map((line): unknown => JSON.parse(line))
+				}).toStrictEqual({
+					status: 2,
+					stdout: '',
+					events: [
+						{
+							event: 'error',
+							name: 'ConfirmPathInputError',
+							causes: [`InvalidStorePathError: Invalid store path: ${value}`],
+							message: `Invalid store path '${value}' in ${source === 'file' ? `--paths-file ${manifest}, line 2` : 'the command arguments'}. Pass an absolute store path with a 32-character Nix hash and a name.`
+						}
+					]
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		},
+		30_000
+	);
+
+	it.each([
+		{ name: 'file-only default cache', suffix: '', positionals: [] },
+		{
+			name: 'file-only named cache URL',
+			suffix: '/cache/pr-1',
+			positionals: []
+		},
+		{ name: 'direct and file paths', suffix: '', positionals: [appPath] }
+	])('confirms $name', async ({ suffix, positionals }) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-confirm-paths-')
+		);
+		const manifest = path.join(directory, 'paths.txt');
+		const calls: { url: string; body: unknown }[] = [];
+		const authenticated: CacheScope[] = [];
+		const token: TokenProvider = {
+			get: () => Promise.resolve('test-token'),
+			refresh: () => Promise.resolve('test-token')
+		};
+		const server = setupServer(
+			http.post('*', async ({ request }) => {
+				calls.push({ url: request.url, body: await request.json() });
+				return HttpResponse.json({
+					paths: [...positionals, runtimePath].map((entry) => ({
+						storePathHash: StorePath.hash(entry),
+						confirmed: true,
+						grace: {}
+					}))
+				});
+			})
+		);
+		const resultFile = path.join(directory, 'results.jsonl');
+		const program = new Command().exitOverride().option('--result-file <path>');
+		registerConfirmCommand(
+			program,
+			{},
+			{
+				authenticate: (client) => {
+					authenticated.push(client.cache);
+					return Promise.resolve(token);
+				}
+			}
+		);
+		server.listen({ onUnhandledFrame: 'error' });
+		try {
+			await writeFile(manifest, `\n ${runtimePath} \r\n\n`);
+			await program.parseAsync(
+				[
+					'--result-file',
+					resultFile,
+					'confirm',
+					`https://cupboard.example.workers.dev/t/acme${suffix}`,
+					...positionals,
+					'--paths-file',
+					manifest
+				],
+				{ from: 'user' }
+			);
+			const hashes = [...positionals, runtimePath].map((entry) =>
+				StorePath.hash(entry)
+			);
+			expect({
+				authenticated,
+				calls,
+				results: await readFile(resultFile, 'utf8')
+			}).toStrictEqual({
+				authenticated: [suffix === '' ? defaultCache : namedCache],
+				calls: [
+					{
+						url: `https://cupboard.example.workers.dev/t/acme${suffix}/uploads/confirm`,
+						body: { storePathHashes: hashes }
+					}
+				],
+				results: `${JSON.stringify({ kind: 'confirm-paths', data: { paths: hashes.map((storePathHash) => ({ storePathHash, confirmed: true, grace: {} })) } })}\n`
+			});
+		} finally {
+			server.close();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it.each(['pr-1', `${runtimePath}\npr-1`, `\n${runtimePath}\r\npr-1`])(
+		'rejects invalid manifest content before authentication: %s',
+		async (contents) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-confirm-invalid-')
+			);
+			const manifest = path.join(directory, 'paths.txt');
+			const authenticated: CacheScope[] = [];
+			const program = new Command().exitOverride().configureOutput({
+				writeErr() {
+					return;
+				}
+			});
+			registerConfirmCommand(
+				program,
+				{},
+				{
+					authenticate: (client) => {
+						authenticated.push(client.cache);
+						return Promise.reject(new Error('authentication must not start'));
+					}
+				}
+			);
+			try {
+				await writeFile(manifest, contents);
+				const pending = program.parseAsync(
+					[
+						'confirm',
+						'https://cupboard.example.workers.dev/t/acme',
+						appPath,
+						'--paths-file',
+						manifest
+					],
+					{ from: 'user' }
+				);
+				let error: unknown;
+				try {
+					await pending;
+				} catch (error_) {
+					error = error_;
+				}
+				expect(inputFailure(error)).toStrictEqual({
+					name: 'ConfirmPathInputError',
+					message: `Invalid store path 'pr-1' in --paths-file ${manifest}, line ${String(contents.split('\n').length)}. Pass an absolute store path with a 32-character Nix hash and a name.`,
+					cause: new InvalidStorePathError('pr-1'),
+					exitCode: 2
+				});
+				expect(authenticated).toStrictEqual([]);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
 	it('rejects a path that is not a store path before authenticating', async () => {
 		const tokenProviderRequests: CacheScope[] = [];
 		const fixedToken: TokenProvider = {
@@ -351,8 +579,17 @@ describe('confirm command', () => {
 			result = error;
 		}
 
-		expect({ result, tokenProviderRequests }).toStrictEqual({
-			result: new InvalidStorePathError('./result'),
+		expect({
+			result: inputFailure(result),
+			tokenProviderRequests
+		}).toStrictEqual({
+			result: {
+				name: 'ConfirmPathInputError',
+				message:
+					"Invalid store path './result' in the command arguments. Pass an absolute store path with a 32-character Nix hash and a name.",
+				cause: new InvalidStorePathError('./result'),
+				exitCode: 2
+			},
 			tokenProviderRequests: []
 		});
 	});
