@@ -1477,6 +1477,7 @@ describe('release cache publication', () => {
 			with: {
 				'runs-on': '${{ matrix.runner }}',
 				url: 'https://cupboard.supply/t/cupboard',
+				build: 'rebuild',
 				cache: 'releases',
 				'trusted-public-key':
 					'cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU=',
@@ -1509,6 +1510,19 @@ describe('binary release', () => {
 });
 
 describe('repository cache publishing', () => {
+	it.each([
+		{ workflow: cachePublishWorkflow, jobs: ['publish-pr', 'publish-main'] },
+		{ workflow: releaseCacheWorkflow, jobs: ['publish'] }
+	])(
+		'requests fresh build evidence from $workflow',
+		async ({ workflow, jobs }) => {
+			const definition = await loadWorkflow(workflow);
+			expect(
+				jobs.map((job) => ({ job, build: definition.jobs[job]?.with?.build }))
+			).toStrictEqual(jobs.map((job) => ({ job, build: 'rebuild' })));
+		}
+	);
+
 	it('resolves the CLI from the called workflow revision and pins the public key', async () => {
 		const workflow = await loadWorkflow(cachePublishWorkflow);
 		const jobs = Object.values(workflow.jobs);
