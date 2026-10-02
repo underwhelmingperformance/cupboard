@@ -27,6 +27,7 @@ const draftOne = {
 	draft: true,
 	uploadUrl: 'https://uploads.example.test/1',
 	htmlUrl: 'https://example.test/releases/1',
+	body: '',
 	assets: []
 };
 
@@ -36,6 +37,7 @@ const draftTwo = {
 	draft: true,
 	uploadUrl: 'https://uploads.example.test/2',
 	htmlUrl: 'https://example.test/releases/2',
+	body: '',
 	assets: []
 };
 
@@ -45,6 +47,7 @@ const publishedRelease = {
 	draft: false,
 	uploadUrl: 'https://uploads.example.test/3',
 	htmlUrl: 'https://example.test/releases/3',
+	body: '',
 	assets: []
 };
 
@@ -54,6 +57,7 @@ const otherDraft = {
 	draft: true,
 	uploadUrl: 'https://uploads.example.test/4',
 	htmlUrl: 'https://example.test/releases/4',
+	body: '',
 	assets: []
 };
 
@@ -107,19 +111,25 @@ describe('selectDraftRelease', () => {
 });
 
 describe('createDraftBody', () => {
-	it('requests a draft with generated notes pinned to the build commit', () => {
+	it.each([
+		{ owner: 'acme', repo: 'app', version: 'v1.2.3' },
+		{ owner: 'acme', repo: 'other', version: 'v2.0.0' }
+	])('links the $version upgrade notes for $repo in a new draft', (input) => {
 		expect(
 			createDraftBody({
-				version: 'v1.2.3',
+				version: input.version,
+				repository: { owner: input.owner, repo: input.repo },
 				commitish: 'abc123',
-				name: 'v1.2.3',
+				name: input.version,
 				body: 'substituters...'
 			})
 		).toStrictEqual({
-			tag_name: 'v1.2.3',
+			tag_name: input.version,
 			target_commitish: 'abc123',
-			name: 'v1.2.3',
-			body: 'substituters...',
+			name: input.version,
+			body:
+				`substituters...\n\nBefore upgrading an existing deployment, read the [${input.version} upgrade notes][cupboard-upgrade-notes-${input.version}].\n\n` +
+				`[cupboard-upgrade-notes-${input.version}]: https://github.com/${input.owner}/${input.repo}/blob/${input.version}/docs/operator/upgrade-notes.md`,
 			draft: true,
 			generate_release_notes: true
 		});
@@ -218,15 +228,29 @@ describe('substituterSection', () => {
 });
 
 describe('updateDraftBody', () => {
-	it('re-pins the draft without regenerating notes', () => {
-		expect(
-			updateDraftBody({ commitish: 'def456', name: 'v1.2.3' })
-		).toStrictEqual({
-			target_commitish: 'def456',
-			name: 'v1.2.3',
-			draft: true
-		});
-	});
+	const linkedNotes =
+		'Maintainer notes.\n\nBefore upgrading an existing deployment, read the [v1.2.3 upgrade notes][cupboard-upgrade-notes-v1.2.3].\n\n' +
+		'[cupboard-upgrade-notes-v1.2.3]: https://github.com/acme/app/blob/v1.2.3/docs/operator/upgrade-notes.md';
+
+	it.each(['Maintainer notes.', linkedNotes])(
+		'preserves existing notes and includes one upgrade link',
+		(body) => {
+			expect(
+				updateDraftBody({
+					commitish: 'def456',
+					name: 'v1.2.3',
+					version: 'v1.2.3',
+					repository: { owner: 'acme', repo: 'app' },
+					body
+				})
+			).toStrictEqual({
+				target_commitish: 'def456',
+				name: 'v1.2.3',
+				body: linkedNotes,
+				draft: true
+			});
+		}
+	);
 });
 
 describe('assetContentType', () => {
