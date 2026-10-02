@@ -1,5 +1,9 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import { storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	storeDirectorySchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
+import { fetch as undiciFetch, Response } from 'undici';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -10,6 +14,8 @@ import {
 	defaultSignatureSettings,
 	type NixSubstitutionSettings
 } from './store-config.ts';
+import { resolveSubstitutableClosure } from './substitutable-closure.ts';
+import { SubstituterClient } from './substituter.ts';
 
 const app = storePathSchema.parse(
 	'/nix/store/11111111111111111111111111111111-app'
@@ -98,6 +104,138 @@ describe('selectPublicationPaths', () => {
 			expect({ selection, queries }).toStrictEqual({
 				selection: { published: selected, leftUpstream: upstream },
 				queries: expectedQueries
+			});
+		}
+	);
+
+	it.each([
+		{
+			description: 'a matching anonymous closure',
+			narStatus: 206,
+			signatureRequired: false,
+			divergent: false,
+			published: []
+		},
+		{
+			description: 'a runtime NAR requiring credentials',
+			narStatus: 403,
+			signatureRequired: false,
+			divergent: false,
+			published: [app]
+		},
+		{
+			description: 'an unsigned closure under signature policy',
+			narStatus: 206,
+			signatureRequired: true,
+			divergent: false,
+			published: [app]
+		},
+		{
+			description: 'a different NAR under the same store path',
+			narStatus: 206,
+			signatureRequired: false,
+			divergent: true,
+			published: [app]
+		}
+	])(
+		'selects publication for $description',
+		async ({ narStatus, signatureRequired, divergent, published }) => {
+			const directory = storeDirectorySchema.parse('/nix/store');
+			const dependency = storePathSchema.parse(
+				'/nix/store/22222222222222222222222222222222-lib'
+			);
+			const hash = NixSha256Hash.parsePrefixed(`sha256:${'22'.repeat(32)}`);
+			const fetcher: typeof undiciFetch = (input) => {
+				const url = new URL(
+					typeof input === 'string' || input instanceof URL ? input : input.url
+				);
+				if (url.pathname.endsWith('.narinfo')) {
+					const path = url.pathname.includes('111111') ? app : dependency;
+					return Promise.resolve(
+						new Response(
+							[
+								`StorePath: ${path}`,
+								`URL: nar/${path === app ? 'app' : 'lib'}`,
+								'Compression: none',
+								`NarHash: sha256:${'22'.repeat(32)}`,
+								'NarSize: 1000',
+								'FileSize: 400',
+								'References: '
+							].join('\n') + '\n'
+						)
+					);
+				}
+				const status = url.pathname.endsWith('/app') ? 206 : narStatus;
+				return Promise.resolve(
+					new Response(new Uint8Array([1]), {
+						status,
+						headers: { 'content-range': 'bytes 0-0/400' }
+					})
+				);
+			};
+			const client = new SubstituterClient(
+				[
+					{
+						uri: 'https://upstream.example',
+						location: {
+							kind: 'http',
+							baseUrl: new URL('https://upstream.example')
+						},
+						storeDirectory: directory,
+						hasMassQuery: true,
+						isTrusted: false,
+						priority: 0
+					}
+				],
+				{
+					storeDirectory: directory,
+					substitute: true,
+					fallback: true,
+					requirePublicNar: true,
+					fetch: fetcher
+				}
+			);
+			const selection = await selectPublicationPaths(
+				[{ storePath: app, origin: 'copied' }],
+				{
+					substituter: 'leave',
+					tenantUrl,
+					settings: {
+						...settings(),
+						signatures: {
+							...defaultSignatureSettings,
+							requireSignatures: signatureRequired
+						}
+					},
+					store: {
+						...store([]),
+						resolveSubstitutableClosure: (path, options) =>
+							resolveSubstitutableClosure(
+								storePathSchema.parse(path),
+								{
+									heldLocally: (paths) =>
+										Promise.resolve(
+											paths.map((storePath) => ({
+												storePath,
+												narHash: divergent
+													? NixSha256Hash.fromDigest(new Uint8Array(32))
+													: hash,
+												narSize: 1000,
+												references: storePath === app ? [dependency] : [],
+												signatures: [],
+												ultimate: false
+											}))
+										),
+									offered: (paths) => client.querySubstitutablePathInfos(paths)
+								},
+								options
+							)
+					}
+				}
+			);
+			expect(selection).toStrictEqual({
+				published,
+				leftUpstream: published.length === 0 ? [app] : []
 			});
 		}
 	);

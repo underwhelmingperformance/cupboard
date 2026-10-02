@@ -33,6 +33,7 @@ import {
 	BuildAttemptsInvalidError,
 	BuildInstallableInvalidError,
 	BuildObservationMissingError,
+	BuildPublicationUrlMissingError,
 	BuildRebuildRemoteDispatchError,
 	CommandFailedError
 } from '../errors.ts';
@@ -380,7 +381,12 @@ describe('buildAction', () => {
 			const paths: readonly StorePathString[] = [app, library];
 
 			await buildAction(
-				{ installables: ['.#app'], attempts: '1', substituter },
+				{
+					installables: ['.#app'],
+					attempts: '1',
+					substituter,
+					publicationUrl: 'https://cupboard.example/t/acme'
+				},
 				{
 					RUNNER_TEMP: directory,
 					GITHUB_OUTPUT: path.join(directory, 'github-output')
@@ -534,7 +540,12 @@ describe('buildAction', () => {
 						: 'https://upstream.example';
 
 			await buildAction(
-				{ installables: ['.#app'], attempts: '1', substituter: 'leave' },
+				{
+					installables: ['.#app'],
+					attempts: '1',
+					substituter: 'leave',
+					publicationUrl: 'https://cupboard.example/t/acme'
+				},
 				{
 					RUNNER_TEMP: directory,
 					GITHUB_OUTPUT: path.join(directory, 'github-output')
@@ -736,6 +747,21 @@ describe('buildAction', () => {
 			buildAction({ installables: ['.#app'], attempts: '0' }, {})
 		).rejects.toBeInstanceOf(BuildAttemptsInvalidError);
 	});
+
+	it.each([undefined, '', ' '.repeat(3)])(
+		'requires the publication destination before planning with leave (%j)',
+		async (publicationUrl) => {
+			const runNix = vi.fn();
+			await expect(
+				buildAction(
+					{ installables: ['.#app'], substituter: 'leave', publicationUrl },
+					{},
+					{ runNix }
+				)
+			).rejects.toThrow(BuildPublicationUrlMissingError);
+			expect(runNix.mock.calls).toStrictEqual([]);
+		}
+	);
 
 	it('makes five build attempts by default', async () => {
 		const directory = await mkdtemp(
@@ -1003,6 +1029,7 @@ process.stdin.on('end', () => {
 					installables: ['.#app', '.#lib'],
 					attempts: '2',
 					substituter: 'leave',
+					publicationUrl: 'https://cupboard.example/t/acme',
 					keepGoing: 'true'
 				},
 				{
@@ -1697,7 +1724,8 @@ process.stdin.on('end', () => {
 				installables: ['.#app'],
 				attempts: '1',
 				build: 'missing',
-				substituter: 'leave'
+				substituter: 'leave',
+				publicationUrl: 'https://cupboard.example/t/acme'
 			},
 			{
 				RUNNER_TEMP: directory,

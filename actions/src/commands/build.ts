@@ -33,6 +33,7 @@ import {
 	BuildInstallableInvalidError,
 	BuildInstallablesMissingError,
 	BuildObservationMissingError,
+	BuildPublicationUrlMissingError,
 	BuildRebuildRemoteDispatchError,
 	CommandFailedError,
 	SimpleBuiltPublicationUnsupportedError
@@ -489,7 +490,7 @@ export function registerBuildCommand(
 		)
 		.option(
 			'--publication-url <url>',
-			'destination tenant or cache URL for publication selection'
+			'destination tenant or cache URL, required when substituter is leave'
 		)
 		.option('--paths-file <path>', 'write realised output paths to this file')
 		.option(
@@ -578,6 +579,9 @@ export async function buildAction(
 		['leave', 'copy'],
 		'copy'
 	);
+	if (substituter === 'leave' && tenantUrl === undefined) {
+		throw new BuildPublicationUrlMissingError();
+	}
 
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const pathsFile = path.resolve(

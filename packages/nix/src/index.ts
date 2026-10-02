@@ -77,5 +77,9 @@ export type {
 	SubstitutableClosureOptions,
 	SubstitutableClosureVerdict
 } from './substitutable-closure.ts';
+export {
+	SubstituterAnswerUnreadableError,
+	SubstituterUnreachableError
+} from './substituter.ts';
 export type { SubstituterReach } from './substituter-reach.ts';
 export { isReachableElsewhere } from './substituter-reach.ts';

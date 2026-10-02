@@ -479,6 +479,7 @@ export function registerPlanCommands(
 				// positive narinfo caching, so each check uses their current offer.
 				const permittedStore = Nix.openForAvailability(undefined, {
 					...storeSelection,
+					requirePublicNar: true,
 					overrides: upstreamConfirmationOverrides(
 						substitution,
 						target.tenantUrl

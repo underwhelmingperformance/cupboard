@@ -206,7 +206,12 @@ const askingForAMinute = askingToWait('55');
 const silent: typeof undiciFetch = (_input, init) =>
 	new Promise((_resolve, reject) => {
 		init?.signal?.addEventListener('abort', () => {
-			reject(new Error('the deadline passed'));
+			const reason: unknown = init.signal?.reason;
+			reject(
+				reason instanceof Error
+					? reason
+					: new Error('The deadline passed', { cause: reason })
+			);
 		});
 	});
 
@@ -264,6 +269,220 @@ function clientOverFiles(uris: readonly string[]): SubstituterClient {
 		fetch: never
 	});
 }
+
+describe('public NAR availability', () => {
+	it.each([
+		{
+			uri: 'https://cache.example',
+			netrc: 'machine cache.example login runner password secret'
+		},
+		{ uri: 'https://runner:secret@cache.example', netrc: undefined }
+	])('queries $uri without runner credentials', async ({ uri, netrc }) => {
+		const fake = caches({
+			'https://cache.example': { cacheInfo: 'StoreDir: /nix/store\n' }
+		});
+		const opened = await openSubstituters([uri], {
+			fetch: fake.fetch,
+			netrc,
+			requirePublicNar: true
+		});
+		expect({
+			credentials: fake.credentials,
+			opened: opened.substituters.length
+		}).toStrictEqual({ credentials: [undefined], opened: 1 });
+	});
+
+	it.each([401, 403, 404, 500])(
+		'refuses an advertised NAR returning %i',
+		async (status) => {
+			const client = new SubstituterClient(
+				[substituter('https://cache.example')],
+				{
+					storeDirectory,
+					substitute: true,
+					fallback: true,
+					requirePublicNar: true,
+					transfer: { ...defaultFileTransferSettings, attempts: 1 },
+					fetch: (input) => {
+						const isNarInfo = requestUrl(input).pathname.endsWith('.narinfo');
+						const response = new Response(
+							isNarInfo ? rendered(narInfo()) : '',
+							{ status: isNarInfo ? 200 : status }
+						);
+						return Promise.resolve(response);
+					}
+				}
+			);
+			await expect(
+				client.querySubstitutablePathInfos([appPath])
+			).rejects.toThrow(SubstituterUnreachableError);
+		}
+	);
+
+	it.each(['http://127.0.0.1/nar/app', 'http://10.0.0.1/nar/app'])(
+		'applies the consumer reach policy to advertised %s without changing ordinary access',
+		async (url) => {
+			const requests: string[] = [];
+			const document = rendered(narInfo({ URL: url }));
+			const fetcher: typeof undiciFetch = (input) => {
+				requests.push(requestUrl(input).href);
+				return Promise.resolve(new Response(document));
+			};
+			const ordinary = clientOver(
+				[substituter('https://cache.example')],
+				fetcher
+			);
+			const offers = await ordinary.querySubstitutablePathInfos([appPath]);
+			const publicClient = new SubstituterClient(
+				[substituter('https://cache.example')],
+				{
+					storeDirectory,
+					substitute: true,
+					fallback: true,
+					requirePublicNar: true,
+					fetch: fetcher
+				}
+			);
+			await expect(
+				publicClient.querySubstitutablePathInfos([appPath])
+			).rejects.toThrow(SubstituterUnreachableError);
+			expect({
+				offered: offers.map((offer) => offer.storePath),
+				requests
+			}).toStrictEqual({
+				offered: [appPath],
+				requests: Array.from(
+					{ length: 2 },
+					() => `https://cache.example/${'a'.repeat(32)}.narinfo`
+				)
+			});
+		}
+	);
+
+	it.each([401, 403, 500])(
+		'preserves cache metadata HTTP %i as a failure',
+		async (status) => {
+			await expect(
+				openSubstituters(['https://cache.example'], {
+					requirePublicNar: true,
+					transfer: { ...defaultFileTransferSettings, attempts: 1 },
+					fetch: () => Promise.resolve(new Response('', { status }))
+				})
+			).rejects.toMatchObject({ name: 'SubstituterUnreachableError', status });
+		}
+	);
+
+	it('preserves malformed cache metadata as a failure', async () => {
+		await expect(
+			openSubstituters(['https://cache.example'], {
+				requirePublicNar: true,
+				fetch: () => Promise.resolve(new Response('Priority: invalid\n'))
+			})
+		).rejects.toThrow(SubstituterAnswerUnreadableError);
+	});
+
+	it.each([403, 500])(
+		'does not replace HTTP %i with a later absence under fallback',
+		async (status) => {
+			const client = new SubstituterClient(
+				[
+					substituter('https://broken.example'),
+					substituter('https://missing.example')
+				],
+				{
+					storeDirectory,
+					substitute: true,
+					fallback: true,
+					requirePublicNar: true,
+					transfer: { ...defaultFileTransferSettings, attempts: 1 },
+					fetch: (input) =>
+						Promise.resolve(
+							new Response('', {
+								status:
+									requestUrl(input).hostname === 'broken.example' ? status : 404
+							})
+						)
+				}
+			);
+			await expect(
+				client.querySubstitutablePathInfos([appPath])
+			).rejects.toMatchObject({
+				name: 'SubstituterUnreachableError',
+				status,
+				substituter: 'https://broken.example'
+			});
+		}
+	);
+
+	it('proves byte access and cancels an unbounded response when Range is ignored', async () => {
+		const requests: {
+			url: string;
+			range: string | undefined;
+			authorization: string | undefined;
+		}[] = [];
+		let isCancelled = false;
+		const readSizes: number[] = [];
+		const client = new SubstituterClient(
+			[substituter('https://cache.example')],
+			{
+				storeDirectory,
+				substitute: true,
+				fallback: false,
+				requirePublicNar: true,
+				fetch: (input, init) => {
+					const url = requestUrl(input);
+					requests.push({
+						url: url.href,
+						range: new Headers(init?.headers).get('range') ?? undefined,
+						authorization:
+							new Headers(init?.headers).get('authorization') ?? undefined
+					});
+					if (url.pathname.endsWith('.narinfo')) {
+						const response = new Response(rendered(narInfo()));
+						return Promise.resolve(response);
+					}
+					return Promise.resolve(
+						new Response(
+							new ReadableStream({
+								type: 'bytes',
+								pull(controller) {
+									readSizes.push(controller.byobRequest?.view?.byteLength ?? 0);
+									controller.enqueue(new Uint8Array(64 * 1024));
+								},
+								cancel() {
+									isCancelled = true;
+								}
+							})
+						)
+					);
+				}
+			}
+		);
+		const offers = await client.querySubstitutablePathInfos([appPath]);
+		expect({
+			offered: offers.map((offer) => offer.storePath),
+			requests,
+			cancelled: isCancelled,
+			readSizes
+		}).toStrictEqual({
+			offered: [appPath],
+			cancelled: true,
+			readSizes: [1],
+			requests: [
+				{
+					url: `https://cache.example/${'a'.repeat(32)}.narinfo`,
+					range: undefined,
+					authorization: undefined
+				},
+				{
+					url: 'https://cache.example/nar/aaaa.nar.xz',
+					range: 'bytes=0-0',
+					authorization: undefined
+				}
+			]
+		});
+	});
+});
 
 describe('a directory-backed substituter', () => {
 	const directories: string[] = [];
@@ -1847,15 +2066,81 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	});
 
 	it('times out an unresponsive substituter', async () => {
-		await expect(
-			new SubstituterClient([substituter('https://silent.example')], {
-				storeDirectory,
-				substitute: true,
-				fallback: false,
-				fetch: silent,
-				transfer: transferring({ stalledTransferTimeoutMs: 20 })
-			}).querySubstitutablePathInfos([appPath])
-		).rejects.toThrow(SubstituterUnreachableError);
+		vi.useFakeTimers();
+		const reason = new DOMException('Timed out', 'TimeoutError');
+		const timeout = vi
+			.spyOn(AbortSignal, 'timeout')
+			.mockImplementation((milliseconds) => {
+				const controller = new AbortController();
+				setTimeout(() => {
+					controller.abort(reason);
+				}, milliseconds);
+				return controller.signal;
+			});
+
+		try {
+			let hasFinished = false;
+			const client = new SubstituterClient(
+				[substituter('https://silent.example')],
+				{
+					storeDirectory,
+					substitute: true,
+					fallback: false,
+					fetch: silent,
+					transfer: transferring({
+						attempts: 1,
+						stalledTransferTimeoutMs: 20
+					})
+				}
+			);
+			const result = (async (): Promise<unknown> => {
+				try {
+					await client.querySubstitutablePathInfos([appPath]);
+				} catch (error) {
+					return error;
+				} finally {
+					hasFinished = true;
+				}
+			})();
+
+			await vi.advanceTimersByTimeAsync(19);
+			expect({
+				timeouts: timeout.mock.calls,
+				pendingTimers: vi.getTimerCount(),
+				hasFinished
+			}).toStrictEqual({
+				timeouts: [[20]],
+				pendingTimers: 1,
+				hasFinished: false
+			});
+
+			await vi.advanceTimersByTimeAsync(1);
+			const failure = await result;
+			if (!(failure instanceof SubstituterUnreachableError)) {
+				throw new Error('Expected an unreachable substituter', {
+					cause: failure
+				});
+			}
+			expect({
+				name: failure.name,
+				substituter: failure.substituter,
+				status: failure.status,
+				cause: failure.cause,
+				pendingTimers: vi.getTimerCount(),
+				hasFinished
+			}).toStrictEqual({
+				name: 'SubstituterUnreachableError',
+				substituter: 'https://silent.example',
+				status: undefined,
+				cause: reason,
+				pendingTimers: 0,
+				hasFinished: true
+			});
+		} finally {
+			vi.clearAllTimers();
+			vi.restoreAllMocks();
+			vi.useRealTimers();
+		}
 	});
 
 	it('rejects a narinfo that exceeds the reference limit', async () => {
