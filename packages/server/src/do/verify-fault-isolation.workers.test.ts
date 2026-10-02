@@ -423,6 +423,17 @@ describe('batched verify fault isolation', () => {
 				level: 'warning',
 				message: 'pending upload verification failed',
 				properties: { kind: 'fresh', reason: 'verification-failed' }
+			},
+			{
+				level: 'warning',
+				message: 'pending upload verification failed',
+				properties: {
+					method: 'record-verifications',
+					uploadId: upload.uploadId,
+					kind: 'fresh',
+					reason: 'verification-failed',
+					failures: 1
+				}
 			}
 		]);
 	});
@@ -487,7 +498,7 @@ describe('batched verify fault isolation', () => {
 						expect(row).toStrictEqual({
 							verdict: 'pending',
 							failures: attempt,
-							lastError: 'persistent canonical probe failure',
+							lastError: 'prepare-failed',
 							retryAfter: isoTimestamp(retryDate)
 						});
 						await asOneInvocation(() =>
@@ -525,8 +536,7 @@ describe('batched verify fault isolation', () => {
 				uploadId: upload.uploadId,
 				kind: 'reuse',
 				reason: 'prepare-failed',
-				failures: index + 1,
-				lastError: 'persistent canonical probe failure'
+				failures: index + 1
 			}))
 		);
 	});
@@ -585,7 +595,7 @@ describe('batched verify fault isolation', () => {
 			expect(pending).toStrictEqual({
 				verdict: 'pending',
 				failures: 1,
-				lastError: 'publication unavailable'
+				lastError: 'materialisation-failed'
 			});
 
 			instance.context.db

@@ -55,7 +55,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			id: 'blob-reference-read-authority',
 			state: 'complete',
 			updatedAt: recorded
-		}
+		},
+		{ id: 'tenant-retry-clock', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -290,6 +291,10 @@ describe('runDeploymentStatus', () => {
 						label: 'Transition blob-reference-read-authority',
 						value: `complete ${since}`
 					},
+					{
+						label: 'Transition tenant-retry-clock',
+						value: `complete ${since}`
+					},
 					{ label: `Transition ${row.id}`, value },
 					{ label: 'Required local step', value: '5' },
 					{ label: 'Ready tenants', value: '1' },
@@ -407,7 +412,7 @@ describe('runDeploymentResume', () => {
 			name: 'cache-identity is still expanded',
 			transitions: expanded,
 			step: expansionLocalStep,
-			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index, blob-reference-read-authority.'
+			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index, blob-reference-read-authority, tenant-retry-clock.'
 		}
 	])(
 		'wakes tenants to the required local step and reports the next action when $name',

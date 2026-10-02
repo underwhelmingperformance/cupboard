@@ -238,6 +238,29 @@ finishes, both commands return HTTP 410. See [Removing a tenant].
 
 [Removing a tenant]: ./tenants.md#removing-a-tenant
 
+### Background retry limits
+
+Upload verification, publication recovery and attestation inheritance now stop
+after twelve failed attempts or 24 eligible hours. The eligible clock starts
+with the first attempt after the required migrations finish, includes active
+backoff time and excludes suspension. Client retries preserve the budget.
+
+D1 migration `0037_tenant_retry_clock` adds the clock fields and status triggers
+before the Workers are uploaded. Existing active tenants start their clock on
+the first retry-clock read. Suspended tenants start when resumed. The migration
+does not rewrite existing tenant rows, so it can expand while path read
+authority is waiting for contraction.
+
+The retry migration resets the old inheritance attempt counter once. Earlier
+servers incremented that counter before work, including attempts that made
+progress or ran out of subrequests, so its value did not count failures. Upload
+failure counts remain unchanged. Stored provider error text is replaced with a
+controlled category. Exhausted inheritance diagnostics expire after seven days,
+while the current narinfo generation retains its exhausted state. See
+[Background failures] for retry delays and cleanup behaviour.
+
+[Background failures]: ./running.md#maintenance-failures
+
 ### Exit statuses and output
 
 These changes affect scripts that check the CLI's exit status or parse its text

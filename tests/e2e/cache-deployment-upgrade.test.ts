@@ -266,7 +266,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'attestation-path-index', independent: true },
 		{ id: 'local-step-attempts', independent: true },
 		{ id: 'publication-identity', independent: true },
-		{ id: 'blob-reference-read-authority', independent: false }
+		{ id: 'blob-reference-read-authority', independent: false },
+		{ id: 'tenant-retry-clock', independent: true }
 	]);
 });
 

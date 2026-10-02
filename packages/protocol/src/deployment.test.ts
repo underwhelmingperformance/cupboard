@@ -145,6 +145,32 @@ describe('schemaTransitions', () => {
 	});
 });
 
+describe('tenant retry clock rollout', () => {
+	it('expands the retry clock while path authority awaits contraction', () => {
+		const authority = schemaTransitions.find(
+			(transition) => transition.id === 'blob-reference-read-authority'
+		);
+		const retry = schemaTransitions.find(
+			(transition) => transition.id === 'tenant-retry-clock'
+		);
+		expect(retry).toStrictEqual({
+			id: 'tenant-retry-clock',
+			expand: ['0037_tenant_retry_clock.sql'],
+			contract: [],
+			independent: true
+		});
+		if (authority === undefined || retry === undefined) {
+			throw new Error('Both transitions must be declared');
+		}
+		expect(
+			deferredTransition(
+				[authority, retry],
+				new Map([[authority.id, 'expanded']])
+			)
+		).toBeUndefined();
+	});
+});
+
 describe('deferredTransition', () => {
 	const first: SchemaTransition<string> = {
 		id: 'first',

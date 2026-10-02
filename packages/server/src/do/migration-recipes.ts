@@ -1561,10 +1561,125 @@ function protectedInheritanceRecipe(
 	};
 }
 
+function retryUploadMirror(copy: string, target: string): readonly string[] {
+	const insert = copy
+		.replaceAll('__new_pending_upload', () => target)
+		.replace(
+			'FROM `pending_upload`;',
+			'FROM `pending_upload` WHERE rowid = NEW.rowid;'
+		);
+	const remove = `DELETE FROM \`${target}\` WHERE rowid = OLD.rowid;`;
+
+	return [
+		`CREATE TRIGGER \`__bounded_retry_upload_insert\` AFTER INSERT ON \`pending_upload\` BEGIN ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_retry_upload_update\` AFTER UPDATE ON \`pending_upload\` BEGIN ${remove} ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_retry_upload_delete\` AFTER DELETE ON \`pending_upload\` BEGIN ${remove} END;`
+	];
+}
+
+const retryUploadMirrorDrops = ['insert', 'update', 'delete'].map(
+	(event) => `DROP TRIGGER \`__bounded_retry_upload_${event}\`;`
+);
+
+function retryLimitsRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const table: RebuildTable = {
+		table: 'pending_upload',
+		create: 9,
+		copy: 10,
+		indexes: statements.flatMap((statement, index) =>
+			statement.startsWith('CREATE INDEX `pending_upload_') ? [index] : []
+		)
+	};
+	const dropTrigger = statementAt(statements, 11);
+	const trigger = statementAt(statements, 27);
+	const copy = statementAt(statements, table.copy);
+
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-retry-upload-shadow',
+				statements: [
+					...[0, 1, 2, 3, 5, 6, 7, 8, table.create].map((index) =>
+						statementAt(statements, index)
+					),
+					...table.indexes.map((index) =>
+						shadowIndex(statementAt(statements, index), table.table)
+					),
+					...retryUploadMirror(copy, '__new_pending_upload')
+				]
+			},
+			copyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-retry-upload-shadow',
+				statements: [
+					...retryUploadMirrorDrops,
+					dropTrigger,
+					'ALTER TABLE `pending_upload` RENAME TO `__bounded_old_pending_upload`;',
+					'ALTER TABLE `__new_pending_upload` RENAME TO `pending_upload`;',
+					trigger
+				]
+			},
+			drainStage(table.table),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-retry-upload-shadow',
+				statements: [
+					'DROP TABLE `__bounded_old_pending_upload`;',
+					canonicalTable(statementAt(statements, table.create), table.table),
+					...table.indexes.map((index) =>
+						canonicalIndex(statementAt(statements, index), table.table)
+					),
+					...retryUploadMirror(copy, '__bounded_canonical_pending_upload')
+				]
+			},
+			canonicalCopyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-retry-upload-shadow',
+				statements: [
+					...retryUploadMirrorDrops,
+					dropTrigger,
+					'ALTER TABLE `pending_upload` RENAME TO `__bounded_noncanonical_pending_upload`;',
+					'ALTER TABLE `__bounded_canonical_pending_upload` RENAME TO `pending_upload`;',
+					trigger
+				]
+			},
+			drainNoncanonicalStage(table.table),
+			{
+				kind: 'page',
+				name: 'reset-inheritance-attempts',
+				source: 'attestation_inheritance',
+				writesPerSourceRow: 1,
+				statements: (cursor, last) => [
+					`UPDATE \`attestation_inheritance\` SET \`attempts\` = 0 WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+				]
+			},
+			{
+				kind: 'batch',
+				name: 'finish-retry-upload-shadow',
+				statements: ['DROP TABLE `__bounded_noncanonical_pending_upload`;']
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
+	if (tag === '0069_retry_limits') {
+		return retryLimitsRecipe(tag, statements);
+	}
+
 	if (tag === '0068_protected_inheritance') {
 		return protectedInheritanceRecipe(tag, statements);
 	}

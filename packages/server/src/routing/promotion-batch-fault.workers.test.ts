@@ -7,8 +7,10 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pendingUploads } from '../db/schema.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import {
 	armBlobReaperTimer,
@@ -246,71 +248,115 @@ describe('promotion after a transient D1 batch failure', () => {
 describe('promotion followed by a persistent D1 fault', () => {
 	beforeEach(resetTestServer);
 
-	it('leaves the recorded verdict for the drain when all batch attempts reject', async () => {
-		const token = await initialise();
-
-		const fresh = await deferFreshUpload(
-			token,
-			'batch-fallback-fresh',
-			'1'.repeat(32)
-		);
-
-		// Recording a verdict the pass could not apply arms an immediate alarm, and
-		// its drain would settle the row while this test is still reading the state
-		// the faulted pass left. Observe with arming suspended, then run the drain
-		// where the assertions expect it.
-		const observed = await withoutAlarmArming(async () => {
-			// The promotion reserves its incarnation and then reads the stored blob
-			// metadata. Let the reservation through and reject everything after it,
-			// including the per-row reads attempted after the prefetch fails.
+	it('retains the recorded verdict until the drain deadline after all batch attempts reject', async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const fresh = await deferFreshUpload(
+				token,
+				'batch-fallback-fresh',
+				'1'.repeat(32)
+			);
+			const now = Date.now();
+			const pendingState = () =>
+				runInDurableObject(currentServer(), (instance) =>
+					instance.context.db
+						.select({
+							verdict: pendingUploads.verdict,
+							failures: pendingUploads.settleFailures,
+							retryAfter: pendingUploads.settleRetryAfter,
+							startedAt: pendingUploads.retryStartedActiveMs,
+							category: pendingUploads.lastSettleError,
+							owner: pendingUploads.claimOwner,
+							recorded: pendingUploads.recordedVerdictJson
+						})
+						.from(pendingUploads)
+						.where(eq(pendingUploads.id, fresh.uploadId))
+						.get()
+				);
 			const fault = failBatchesFor({
 				narHashes: new Set([fresh.metadata.narHash]),
 				matches: (sql) => !sql.includes(promotionReservation)
 			});
-
 			try {
 				await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 			} finally {
 				fault.restore();
 			}
-
-			const afterFaultedPass = {
-				rejectedBatches: fault.rejected(),
-				verdictAfterFaultedPass: await pendingUploadVerdict(fresh.uploadId),
-				blobStateAfterFaultedPass: await blobStateNarHashes(),
-				edgesAfterFaultedPass: await referenceEdgesFor(fresh.metadata.narHash)
+			const pendingAfterFault = await pendingState();
+			if (
+				pendingAfterFault?.owner == undefined ||
+				pendingAfterFault.retryAfter == undefined
+			) {
+				throw new Error(
+					'The interrupted promotion did not retain its owner and retry deadline.'
+				);
+			}
+			const afterFault = {
+				pending: pendingAfterFault,
+				blobState: await blobStateNarHashes(),
+				edges: await referenceEdgesFor(fresh.metadata.narHash)
 			};
-
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
-
-			return {
-				...afterFaultedPass,
-				verdictAfterConsumerPass: await pendingUploadVerdict(fresh.uploadId)
+			const afterConsumer = {
+				pending: await pendingState(),
+				edges: await referenceEdgesFor(fresh.metadata.narHash)
 			};
-		});
-
-		await runInDurableObject(currentServer(), (instance) => instance.alarm());
-
-		expect({
-			...observed,
-			verdictAfterDrain: await pendingUploadVerdict(fresh.uploadId),
-			edgesAfterDrain: await referenceEdgesFor(fresh.metadata.narHash)
-		}).toStrictEqual({
-			// The prefetch of the stored blob metadata, the presence prefetch, and
-			// the batch that would have charged the upload during settlement.
-			rejectedBatches: 3,
-			verdictAfterFaultedPass: 'pending',
-			blobStateAfterFaultedPass: [{ narHash: fresh.metadata.narHash }],
-			edgesAfterFaultedPass: [],
-			verdictAfterConsumerPass: 'pending',
-			verdictAfterDrain: undefined,
-			edgesAfterDrain: [
-				{
-					storePathHash: fresh.metadata.storePathHash,
-					generation: 0,
-					narHash: fresh.metadata.narHash
+			await runInDurableObject(currentServer(), (instance) => instance.alarm());
+			const beforeDeadline = {
+				pending: await pendingState(),
+				edges: await referenceEdgesFor(fresh.metadata.narHash)
+			};
+			vi.setSystemTime(new Date(pendingAfterFault.retryAfter));
+			await runInDurableObject(currentServer(), (instance) => instance.alarm());
+			const afterDeadline = {
+				pending: await pendingState(),
+				edges: await referenceEdgesFor(fresh.metadata.narHash)
+			};
+			const waiting = {
+				verdict: 'pending',
+				failures: 1,
+				retryAfter: new Date(now + 30_000).toISOString(),
+				startedAt: 0,
+				category: 'materialisation-failed',
+				owner: pendingAfterFault.owner,
+				recorded: JSON.stringify({
+					owner: pendingAfterFault.owner,
+					verdict: {
+						kind: 'verified',
+						verification: {
+							ok: true,
+							fileHash: fresh.metadata.fileHash,
+							fileSize: fresh.metadata.fileSize
+						}
+					}
+				})
+			};
+			expect({
+				rejectedBatches: fault.rejected(),
+				afterFault,
+				afterConsumer,
+				beforeDeadline,
+				afterDeadline
+			}).toStrictEqual({
+				rejectedBatches: 3,
+				afterFault: {
+					pending: waiting,
+					blobState: [{ narHash: fresh.metadata.narHash }],
+					edges: []
+				},
+				afterConsumer: { pending: waiting, edges: [] },
+				beforeDeadline: { pending: waiting, edges: [] },
+				afterDeadline: {
+					pending: undefined,
+					edges: [
+						{
+							storePathHash: fresh.metadata.storePathHash,
+							generation: 0,
+							narHash: fresh.metadata.narHash
+						}
+					]
 				}
-			]
+			});
 		});
 	});
 });
