@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig } from '@cupboard/nix-store/nix-config';
@@ -23,6 +23,7 @@ import {
 	filterGithubReleases
 } from '@cupboard/shared/octokit';
 import { readResponseText } from '@cupboard/shared/response-body';
+import { type Document, isMap, parseDocument } from 'yaml';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -143,7 +144,9 @@ class MalformedCacheUrlError extends UsageError {
 
 class UnknownCommandError extends UsageError {
 	constructor(public readonly command: string) {
-		super(`expected 'checksums' or 'publish', got '${command}'`);
+		super(
+			`expected 'prepare', 'check-preparation', 'checksums' or 'publish', got '${command}'`
+		);
 		this.name = 'UnknownCommandError';
 	}
 }
@@ -180,6 +183,170 @@ export function assertCanonicalVersion(version: string): string {
 	}
 
 	return version;
+}
+
+export interface ReleaseSources {
+	readonly workflow: string;
+	readonly upgradeNotes: string;
+}
+
+export class ReleasePreparationError extends UsageError {
+	constructor(detail: string) {
+		super(`Release preparation failed: ${detail}`);
+		this.name = 'ReleasePreparationError';
+	}
+}
+
+const releaseWorkflow =
+	'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml';
+const releaseUsesPath = ['jobs', 'publish', 'uses'];
+const releaseOverridePath = ['jobs', 'publish', 'with', 'cupboard-version'];
+const pendingReleaseHeading = /^## Next release(?=[\t ]*\r?$)/gmu;
+
+/**
+Prepares and checks the source references for one canonical release tag.
+*/
+export class ReleasePreparation {
+	readonly version: string;
+	readonly workflowReference: string;
+	readonly trustWorkflowReference: string;
+
+	constructor(version: string) {
+		this.version = assertCanonicalVersion(version);
+		this.workflowReference = `${releaseWorkflow}@${this.version}`;
+		this.trustWorkflowReference = `${releaseWorkflow}@refs/tags/${this.version}`;
+	}
+
+	prepare(sources: ReleaseSources): ReleaseSources {
+		const document = releaseWorkflowDocument(sources.workflow);
+		const pending = sources.upgradeNotes
+			.matchAll(pendingReleaseHeading)
+			.toArray();
+		if (pending.length > 1) {
+			throw new ReleasePreparationError(
+				'upgrade notes contain several Next release headings'
+			);
+		}
+		if (
+			pending.length > 0 &&
+			sources.upgradeNotes
+				.split(/\r?\n/u)
+				.some((line) => line.trimEnd() === `## ${this.version}`)
+		) {
+			throw new ReleasePreparationError(
+				`upgrade notes already contain ${this.version}`
+			);
+		}
+		document.setIn(releaseUsesPath, this.workflowReference);
+		document.deleteIn(releaseOverridePath);
+		const prepared = {
+			workflow: document.toString({
+				lineWidth: 0,
+				flowCollectionPadding: false
+			}),
+			upgradeNotes: sources.upgradeNotes.replaceAll(
+				pendingReleaseHeading,
+				() => `## ${this.version}`
+			)
+		};
+		this.check(prepared);
+		return prepared;
+	}
+
+	check(sources: ReleaseSources): void {
+		const document = releaseWorkflowDocument(sources.workflow);
+		if (document.getIn(releaseUsesPath) !== this.workflowReference) {
+			throw new ReleasePreparationError(
+				`release-cache.yml must call ${this.workflowReference}; run release.ts prepare with VERSION=${this.version} and commit the preparation`
+			);
+		}
+		if (document.hasIn(releaseOverridePath)) {
+			throw new ReleasePreparationError(
+				'release-cache.yml must omit cupboard-version so the CLI uses the called workflow revision'
+			);
+		}
+		if (!sources.upgradeNotes.matchAll(pendingReleaseHeading).next().done) {
+			throw new ReleasePreparationError(
+				'version the Next release upgrade notes before releasing'
+			);
+		}
+	}
+}
+
+function releaseWorkflowDocument(workflow: string): Document {
+	const document = parseDocument(workflow, { uniqueKeys: true });
+	const reference = document.getIn(releaseUsesPath);
+	if (
+		typeof reference !== 'string' ||
+		document.errors.length > 0 ||
+		!isMap(document.getIn(['jobs', 'publish', 'with'])) ||
+		!reference.startsWith(`${releaseWorkflow}@`)
+	) {
+		throw new ReleasePreparationError(
+			'release-cache.yml must contain the Cupboard publish job and its inputs in valid YAML'
+		);
+	}
+	return document;
+}
+
+interface ReleaseFiles {
+	readonly workflowPath: string;
+	readonly upgradeNotesPath: string;
+	readonly sources: ReleaseSources;
+}
+
+async function readReleaseFiles(
+	environment: Environment
+): Promise<ReleaseFiles> {
+	const scriptDirectory = fileURLToPath(new URL('..', import.meta.url));
+	const directory = path.resolve(
+		input(environment, 'REPOSITORY_DIRECTORY', scriptDirectory)
+	);
+	const workflowPath = path.join(
+		directory,
+		'.github/workflows/release-cache.yml'
+	);
+	const upgradeNotesPath = path.join(
+		directory,
+		'docs/operator/upgrade-notes.md'
+	);
+	const [workflow, upgradeNotes] = await Promise.all([
+		readFile(workflowPath, 'utf8'),
+		readFile(upgradeNotesPath, 'utf8')
+	]);
+	return {
+		workflowPath,
+		upgradeNotesPath,
+		sources: { workflow, upgradeNotes }
+	};
+}
+
+export async function prepareAction(
+	environment: Environment = env
+): Promise<void> {
+	const preparation = new ReleasePreparation(input(environment, 'VERSION'));
+	const files = await readReleaseFiles(environment);
+	const sources = preparation.prepare(files.sources);
+	await writeFile(files.workflowPath, sources.workflow);
+	await writeFile(files.upgradeNotesPath, sources.upgradeNotes);
+	log(
+		`Prepared ${preparation.version}. Commit the release workflow and upgrade notes before dispatching the release.`
+	);
+	log(
+		`Release trust rule job_workflow_ref: ${preparation.trustWorkflowReference}`
+	);
+	log(
+		'Add a reviewed replacement release trust rule with this selector before disabling the preceding release rule. Preserve its other claims and grants.'
+	);
+}
+
+export async function checkPreparationAction(
+	environment: Environment = env
+): Promise<void> {
+	const preparation = new ReleasePreparation(input(environment, 'VERSION'));
+	const files = await readReleaseFiles(environment);
+	preparation.check(files.sources);
+	log(`Release preparation matches ${preparation.version}.`);
 }
 
 export function selectDraftRelease(
@@ -353,6 +520,8 @@ export async function publishAction(
 	environment: Environment = env
 ): Promise<void> {
 	const inputs = publishInputs(environment);
+	const files = await readReleaseFiles(environment);
+	new ReleasePreparation(inputs.version).check(files.sources);
 	const octokit = createOctokitClient(
 		inputs.githubToken === '' ? {} : { auth: inputs.githubToken }
 	);
@@ -576,6 +745,16 @@ function log(message: string): void {
 
 async function main(): Promise<void> {
 	const command = process.argv[2];
+
+	if (command === 'prepare') {
+		await prepareAction();
+		return;
+	}
+
+	if (command === 'check-preparation') {
+		await checkPreparationAction();
+		return;
+	}
 
 	if (command === 'checksums') {
 		await checksumsAction();

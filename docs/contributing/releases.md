@@ -4,12 +4,64 @@ This page is for maintainers who publish cupboard releases.
 
 ## Publishing a release
 
-1. If upgrading to this release needs anything beyond running `cupboard deploy`,
-   add a section to [the upgrade notes][upgrade-notes] first. Before running the
-   release workflow, replace the `Next release` heading with the selected
-   `v<major>.<minor>.<patch>` version and commit the notes with the release
-   preparation changes.
-2. Run the `release` workflow from the Actions tab, and give it the version
+1. Select the actual canonical release tag, `v<major>.<minor>.<patch>`. If
+   upgrading needs anything beyond running `cupboard deploy`, add the
+   instructions under `Next release` in [the upgrade notes][upgrade-notes].
+   Replace `vX.Y.Z` below with the selected tag, then run:
+
+   ```sh
+   VERSION=vX.Y.Z node --experimental-transform-types \
+     --disable-warning=ExperimentalWarning scripts/release.ts prepare
+   ```
+
+   Preparation pins the release-cache reusable workflow to that exact tag,
+   removes its separate CLI version override, and versions pending upgrade
+   notes. Commit both preparation files before dispatching the release workflow
+   with the same version. The release workflow checks this preparation before
+   any platform build begins; draft publication checks it again before making
+   GitHub API requests. The checked-in `@main` reference is an unprepared state,
+   not a release pin. The main-branch dogfood workflow continues to use `@main`.
+
+   Preparation changes the current checkout. Older tags retain their original
+   workflows and trust requirements; the command does not rewrite them.
+
+2. Prepare the matching release trust rule before publishing the draft. The
+   preparation command prints the exact `job_workflow_ref` selector:
+   `underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/vX.Y.Z`.
+   Set `RELEASE_TENANT_URL` to the tenant URL in `release-cache.yml`, and obtain
+   `PRECEDING_RELEASE_RULE_ID` from the rule list:
+
+   ```sh
+   cupboard oidc-trust list "$RELEASE_TENANT_URL"
+   cupboard oidc-trust show "$RELEASE_TENANT_URL" "$PRECEDING_RELEASE_RULE_ID"
+   ```
+
+   Prepare `release-trust-rule.json` from that rule's `issuer`, `audience`,
+   `claims`, `permittedGrants` and optional `display`. Change only
+   `claims.job_workflow_ref` to the exact selector printed for the selected tag.
+   Preserve the repository IDs, `event_name=release`, `ref_type=tag`, other
+   claims, actions, release-cache binding and retention-root binding. Do not
+   copy server-generated fields such as the rule ID or timestamps into the add
+   body. Review the complete replacement before adding it:
+
+   ```sh
+   cupboard oidc-trust add "$RELEASE_TENANT_URL" --from-file release-trust-rule.json
+   ```
+
+   Use the returned ID as `REPLACEMENT_RELEASE_RULE_ID`, inspect the added rule,
+   then disable the preceding release rule:
+
+   ```sh
+   cupboard oidc-trust show "$RELEASE_TENANT_URL" "$REPLACEMENT_RELEASE_RULE_ID"
+   cupboard oidc-trust remove "$RELEASE_TENANT_URL" "$PRECEDING_RELEASE_RULE_ID"
+   ```
+
+   Disabling the preceding rule stops authorisation through its old selector.
+   Reruns of older releases need a reviewed rule for their original workflow
+   reference. Leave the main-branch dogfood rule unchanged. The preparation
+   command does not add, disable or otherwise change trust rules.
+
+3. Run the `release` workflow from the Actions tab, and give it the version
    number, such as `1.4.0`. The workflow builds the CLI for every platform and
    signs attestations for the archives. It then creates a draft GitHub release,
    or updates the existing draft, with the archives, a `checksums.txt` file and
@@ -26,7 +78,7 @@ This page is for maintainers who publish cupboard releases.
    Each platform job first checks the flake's reproducibility as described
    below. All four checks must pass before the workflow can assemble the draft.
 
-3. Review the draft and publish it. Publishing creates the tag. That starts the
+4. Review the draft and publish it. Publishing creates the tag. That starts the
    `release cache` workflow, which builds the tagged flake on every supported
    system, pushes the results to the release cache, and publishes the flake to
    FlakeHub.
