@@ -7,13 +7,15 @@ cupboard is a [Nix] binary cache that you run on your own Cloudflare account.
 - One deployment hosts many tenants. Each tenant has its own caches, signing
   key, credentials and retention settings, so one deployment can serve every
   team in an organisation, and no tenant can see another's data.
-- A tenant can have as many caches as it needs, public or private. A private
-  cache needs a username and password, and each cache can have its own.
+- A tenant can have as many caches as it needs, public or private. Private reads
+  need authorised credentials. Each cache can have its own static read
+  credential.
 - CI publishes without a stored push credential. A GitHub Actions job signs in
-  with the OIDC token that GitHub already gives it. A job that reads a private
-  cache still needs that cache's read credential as a secret. A trust rule on
-  your tenant says which repository, branch or pull request to accept, and what
-  that job may do. The signing key never leaves the server.
+  with the OIDC token that GitHub already gives it. A job can also use OIDC for
+  private reads when its trust rules permit content reads. Static read
+  credentials remain available. See [Private reads in CI][private-ci-reads]. A
+  trust rule on your tenant says which repository, branch or pull request to
+  accept, and what that job may do. The signing key never leaves the server.
 - Store paths are kept by named retention roots, which can expire, and a cache
   can also keep paths for a grace period. Garbage collection deletes every path
   that no root or grace period keeps, so a cache that CI fills every day doesn't
@@ -24,6 +26,8 @@ cupboard is a [Nix] binary cache that you run on your own Cloudflare account.
 - It's a standard Nix binary cache. Any Nix that can decompress zstd can
   substitute from it, with nothing extra installed.
 
+[private-ci-reads]: ./docs/ci/private-caches.md
+
 [Why cupboard](./docs/why-cupboard.md) compares it with Cachix, Attic and a
 plain bucket, and lists what it can't do yet.
 
@@ -32,10 +36,11 @@ plain bucket, and lists what it can't do yet.
 1. Install the CLI:
 
    ```sh
-   nix profile add github:underwhelmingperformance/cupboard
+   nix profile install github:underwhelmingperformance/cupboard/vX.Y.Z
    ```
 
-   There are also prebuilt archives on the
+   Replace `vX.Y.Z` with a published release tag, and use that same tag for the
+   reusable workflow below. There are also prebuilt archives on the
    [releases page](https://github.com/underwhelmingperformance/cupboard/releases).
    [Installing the CLI](./docs/installing.md) covers both, including how to
    verify a release.
@@ -47,6 +52,13 @@ plain bucket, and lists what it can't do yet.
    ```sh
    cupboard init --instance-name cupboard
    ```
+
+   This walkthrough uses browser sign-in and an existing R2 key. With a
+   Cloudflare API token that can manage account tokens, `init` can create the
+   bucket and a key scoped to writes in that bucket. See [R2
+   credentials][r2-credentials] for that alternative.
+
+   [r2-credentials]: ./docs/operator/deploying.md#r2-credentials
 
    `init` signs you in to Cloudflare through your browser, creates the Workers
    and their storage, and creates your first tenant. The first `init` from a

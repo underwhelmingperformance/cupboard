@@ -7,8 +7,12 @@ controlled differently:
   administrators. You allow this by adding a trust rule for the person.
 - Publish to it from CI, which means pushing store paths from a GitHub Actions
   job. You allow this by adding a trust rule for the job.
-- Read a private cache, which means downloading store paths with Nix. This needs
-  a read credential. Only the deployment's operator can issue one.
+- Read a private cache, which means downloading store paths with Nix. A trust
+  rule can permit OIDC content reads, or a caller can use a static tenant or
+  cache read credential. Only the deployment's operator can issue static read
+  credentials. See [Private reads in CI][private-ci-reads].
+
+[private-ci-reads]: ../ci/private-caches.md
 
 Anyone can read a public cache. They don't need anything.
 
