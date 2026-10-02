@@ -17,10 +17,18 @@ import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { readResponseJson } from '@cupboard/shared/response-body';
+import { StatusCodes } from 'http-status-codes';
 
 import type { DestinationProbes } from './availability-partition.ts';
-import { DestinationProbeResponseError } from './destination-probe-errors.ts';
+import {
+	DestinationProbeResponseError,
+	PrivateViewReadRefusedError
+} from './destination-probe-errors.ts';
 
+const readRefusalStatuses: ReadonlySet<number> = new Set([
+	StatusCodes.UNAUTHORIZED,
+	StatusCodes.FORBIDDEN
+]);
 const maximumConcurrentProbes = 4;
 const maximumProbeResponseBytes = 16 * 1024 * 1024;
 
@@ -52,22 +60,32 @@ export function destinationServedPaths(
  * Reuse-view results permit publication by reference; they do not show that the
  * destination cache serves or retains a path.
  */
-export function viewServedPaths(
+export async function viewServedPaths(
 	options: DestinationProbeOptions & {
 		readonly baseUrl: URL;
 		readonly view: string;
 	}
 ): Promise<ReadonlySet<StorePathString>> {
-	return availablePathsAt(
-		reuseViewUrl(options.baseUrl, options.view.trim()),
-		{
-			...options,
-			fetcher: withReadAuthentication(options.fetcher ?? fetch, {
-				tenantUrl: options.baseUrl
-			})
-		},
-		reuseViewAvailabilityMaxPaths
-	);
+	try {
+		return await availablePathsAt(
+			reuseViewUrl(options.baseUrl, options.view.trim()),
+			{
+				...options,
+				fetcher: withReadAuthentication(options.fetcher ?? fetch, {
+					tenantUrl: options.baseUrl
+				})
+			},
+			reuseViewAvailabilityMaxPaths
+		);
+	} catch (error) {
+		if (
+			error instanceof DestinationProbeResponseError &&
+			readRefusalStatuses.has(error.status)
+		) {
+			throw new PrivateViewReadRefusedError(error.url, error.status);
+		}
+		throw error;
+	}
 }
 
 export interface TenantProbeOptions {

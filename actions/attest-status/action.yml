@@ -23,6 +23,14 @@ inputs:
   read-session-target:
     description: Setup output for OIDC read access.
     required: false
+  audience:
+    description: Audience of the GitHub OIDC token. Defaults to the tenant URL.
+    required: false
+  read-session-caches:
+    description:
+      Pass the read-session-caches output from actions/setup, a JSON array of
+      additional cache URLs.
+    required: false
   read-session-view:
     description: Setup output for an additional reuse view.
     required: false
@@ -87,6 +95,8 @@ runs:
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         BUNDLES_FILE: ${{ inputs.bundles-file }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_AUDIENCE: ${{ inputs.audience }}
+        READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}

@@ -1170,7 +1170,9 @@ export class CacheAccessProbeError extends CodedError {
 
 export class StaticReadCredentialRejectedError extends CodedError {
 	constructor(public readonly url: URL) {
-		super(`The configured read credential was rejected by ${url.href}`);
+		super(
+			`The configured read credential was rejected by ${url.href}. For a private reuse view, supply the tenant read credential or remove the static pair and use OIDC with view:content-read authority.`
+		);
 		this.name = 'StaticReadCredentialRejectedError';
 	}
 }
@@ -1905,14 +1907,5 @@ export class ReadConfigurationFailedError extends CodedError {
 			`Could not configure Nix read access: cupboard run exited with status ${String(status)}`
 		);
 		this.name = 'ReadConfigurationFailedError';
-	}
-}
-
-export class ReadConfigurationScopeError extends CodedError {
-	constructor() {
-		super(
-			'Automatic OIDC read access in setup supports one destination cache and an optional reuse view. Supply static read credentials when configuring several caches.'
-		);
-		this.name = 'ReadConfigurationScopeError';
 	}
 }

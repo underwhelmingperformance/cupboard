@@ -43,6 +43,7 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 //
 // Keep cache creation and deletion separate from upload permissions.
 const allowExpansions = {
+	read: ['cache:content-read'],
 	push: [
 		'upload:negotiate',
 		'upload:status',
@@ -133,6 +134,15 @@ export class RootBindingRequiredError extends CliUsageError {
 			'The selected operations can manage roots. Specify which root they may manage with --root or --root-template.'
 		);
 		this.name = 'RootBindingRequiredError';
+	}
+}
+
+class ContentReadRootSelectionError extends CliUsageError {
+	constructor() {
+		super(
+			'Content reads cannot be restricted to a root. Remove --root and --root-template from a read-only rule, or include publication permissions for the selected root.'
+		);
+		this.name = 'ContentReadRootSelectionError';
 	}
 }
 
@@ -244,6 +254,29 @@ export interface CacheGrantOptions {
 	readonly root?: string;
 	readonly rootTemplate?: string;
 	readonly substitutions?: Record<string, Substitution>;
+}
+
+export function buildCacheGrants(options: CacheGrantOptions): PermittedGrant[] {
+	if (!options.allow.includes('read')) {
+		return [buildCacheGrant(options)];
+	}
+
+	const allow = options.allow.filter((value) => value !== 'read');
+	if (
+		allow.length === 0 &&
+		(options.root !== undefined || options.rootTemplate !== undefined)
+	) {
+		throw new ContentReadRootSelectionError();
+	}
+
+	if (allow.length === 0) {
+		return [buildCacheContentReadGrant(options)];
+	}
+
+	return [
+		buildCacheGrant({ ...options, allow }),
+		buildCacheContentReadGrant(options)
+	];
 }
 
 export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {

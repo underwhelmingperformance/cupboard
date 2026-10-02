@@ -255,7 +255,10 @@ describe('canonical acquisition composition', () => {
 			'cupboard-version': '${{ steps.setup.outputs.cupboard-version }}',
 			'nix-config-file': '${{ steps.setup.outputs.nix-config-file }}',
 			'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
-			'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
+			'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+			'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
+			'read-session-audience':
+				'${{ steps.setup.outputs.read-session-audience }}'
 		});
 	});
 

@@ -63,8 +63,9 @@ existing baseline without a cache-creation grant.
 
 Public resources remain readable without a content-read grant or a matching CI
 trust rule. Setup keeps public read-only operations anonymous. When a
-destination challenges, setup acquires access for the configured destination and
-reuse view before validating their access modes and priorities.
+destination challenges, setup acquires one session for all configured caches
+without static credentials and the configured reuse view before validating their
+access modes and priorities.
 
 With `--github-oidc`, `cupboard run` sends the exact configured targets to the
 tenant's token endpoint. The server requires content-read authority for existing
@@ -75,16 +76,22 @@ the absence response without creating a cache or granting private content
 access. The first push still creates a named destination implicitly.
 
 Every read-acquisition token expires after 15 minutes and has no refresh token.
-The wrapper repeats OIDC acquisition and exchange while the command runs. It
-writes the credential to a private netrc file for Nix. Direct HTTP readers use
-the current credential for each request. The file is removed when the command
-finishes. Without `--github-oidc`, the wrapper runs the child with its existing
-configuration; read failures are reported by the child. The audience, resource
-and metadata options require `--github-oidc`. Explicit OIDC acquisition replaces
-an incidental netrc credential for the same deployment host. An explicit
-credential in a selected substituter URL conflicts with OIDC content access.
-Explicit OIDC acquisition requires `id-token: write` and a matching trust rule,
-including when the requested resources are public.
+The wrapper repeats OIDC acquisition and exchange for the same resource union
+while the command runs. Add other caches in the tenant with repeatable
+`--read-cache <cache-url>` options. Setup uses
+`--read-cache-metadata <cache-url>` for additional caches whose content uses
+static credentials. These metadata resources do not become content resources in
+downstream action sessions. A session accepts up to sixteen distinct resources,
+including at most one reuse view. It writes the credential to a private netrc
+file for Nix. Direct HTTP readers use the current credential for each request.
+The file is removed when the command finishes. Without `--github-oidc`, the
+wrapper runs the child with its existing configuration; read failures are
+reported by the child. The audience, resource and metadata options require
+`--github-oidc`. Explicit OIDC acquisition replaces an incidental netrc
+credential for the same deployment host. An explicit credential in a selected
+substituter URL conflicts with OIDC content access. Explicit OIDC acquisition
+requires `id-token: write` and a matching trust rule, including when the
+requested resources are public.
 
 `cupboard run` forwards the child's input and output and returns the child's
 exit status. A missing executable exits 127. OIDC acquisition or renewal exits
@@ -126,8 +133,10 @@ cupboard run https://cupboard.example.workers.dev/t/acme/cache/builds \
   -- nix build .#app
 ```
 
-Additional resources must belong to the selected tenant. Use separate commands
-for other tenants because netrc credentials apply to a whole host.
+Resources in the OIDC session must belong to the selected tenant. Other tenants
+on the same host need complete static credentials in their substituter URLs, or
+separate commands and Nix configurations. The session netrc credential applies
+to the whole host.
 
 ## Optional static read credentials
 
@@ -182,6 +191,17 @@ secrets:
 Percent-encode reserved characters in the username and password. Supply each
 cache's trusted public key through `trusted-public-key` or `nix-config`. A
 remote store needs independent access to these substituters.
+
+Nix [uses optional netrc authentication][nix-filetransfer], which [prefers a
+complete credential pair in the URL][curl-netrc]. An explicit URL pair can
+therefore read another tenant on the same deployment hostname without using the
+publication tenant's read-session credential. These static substituters remain
+outside the OIDC resource request. A second tenant that needs a different netrc
+pair on that hostname requires a separate job and Nix configuration.
+
+[nix-filetransfer]:
+  https://github.com/NixOS/nix/blob/2.34.7/src/libstore/filetransfer.cc#L516
+[curl-netrc]: https://curl.se/libcurl/c/CURLOPT_NETRC.html
 
 ## Attestations for private caches
 

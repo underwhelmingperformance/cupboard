@@ -50,7 +50,8 @@ interface RunOptions {
 	readonly audience?: Audience;
 	readonly reuseView?: ReuseViewName;
 	readonly cacheMetadata?: boolean;
-	readonly readCaches?: readonly CacheTarget[];
+	readonly readCache?: readonly CacheTarget[];
+	readonly readCacheMetadata?: readonly CacheTarget[];
 }
 
 interface ViewTarget {
@@ -143,10 +144,11 @@ export async function runWithReadAccess(
 			options.audience !== undefined ||
 			options.reuseView !== undefined ||
 			options.cacheMetadata === true ||
-			(options.readCaches?.length ?? 0) > 0
+			(options.readCache?.length ?? 0) > 0 ||
+			(options.readCacheMetadata?.length ?? 0) > 0
 		) {
 			throw new RunReadAccessOptionsError(
-				'--audience, --reuse-view, --cache-metadata and --read-cache require --github-oidc.'
+				'--audience, --reuse-view, --cache-metadata, --read-cache and --read-cache-metadata require --github-oidc.'
 			);
 		}
 		await runOwnedChild(command, environment, dependencies);
@@ -154,8 +156,17 @@ export async function runWithReadAccess(
 		return;
 	}
 
-	const additionalCaches = options.readCaches ?? [];
-	for (const additional of additionalCaches) {
+	const additionalCaches = [
+		...(options.readCache ?? []).map((target) => ({
+			target,
+			mode: 'content' as const
+		})),
+		...(options.readCacheMetadata ?? []).map((target) => ({
+			target,
+			mode: 'metadata' as const
+		}))
+	];
+	for (const { target: additional } of additionalCaches) {
 		if (additional.tenantUrl.href !== target.tenantUrl.href) {
 			throw new RunReadAccessOptionsError(
 				'Additional read caches must belong to the same tenant as the selected cache or view. Run separate commands for other tenants.'
@@ -164,6 +175,27 @@ export async function runWithReadAccess(
 	}
 
 	const storeConfig = dependencies.storeConfig ?? discoverNixStoreConfig();
+	for (const configured of storeConfig.substitution.substituters) {
+		if (!URL.canParse(configured)) {
+			continue;
+		}
+		const url = new URL(configured);
+		if (
+			url.hostname !== target.tenantUrl.hostname ||
+			(url.username !== '' && url.password !== '')
+		) {
+			continue;
+		}
+		const tenantPath = /^(.*\/t\/[^/]+)(?:\/|$)/u.exec(url.pathname)?.[1];
+		if (
+			tenantPath !== undefined &&
+			tenantPath !== target.tenantUrl.pathname.replace(/\/$/u, '')
+		) {
+			throw new RunReadAccessOptionsError(
+				'A configured substituter belongs to a different tenant on the same host. Nix netrc credentials apply to a whole host. Supply complete URL credentials for the substituter of the other tenant, or use separate commands and Nix configurations.'
+			);
+		}
+	}
 	const fetcher = resilientFetcher('replay-safe', dependencies.fetcher);
 	const cache = 'cache' in target ? target.cache : undefined;
 	const targetUrl =
@@ -209,16 +241,6 @@ export async function runWithReadAccess(
 	const requiresCacheOidc = targetUrl !== undefined;
 	const requiresViewOidc = viewUrl !== undefined;
 
-	if (
-		cacheCredential !== undefined &&
-		options.cacheMetadata === true &&
-		(requiresViewOidc || (options.readCaches?.length ?? 0) > 0)
-	) {
-		throw new RunReadAccessOptionsError(
-			'A static content credential cannot be combined with OIDC reads for other caches or a view on the same host. Use one OIDC content session for all required resources.'
-		);
-	}
-
 	const issue = dependencies.issue ?? issueGithubReadCredential;
 	const resources: ReadResource[] = [
 		...(requiresCacheOidc && cache !== undefined
@@ -233,13 +255,13 @@ export async function runWithReadAccess(
 					}
 				]
 			: []),
-		...additionalCaches.flatMap((additional, index, all) => {
+		...additionalCaches.flatMap(({ target: additional, mode }, index, all) => {
 			if (
 				(cache !== undefined && isSameCacheScope(additional.cache, cache)) ||
 				all
 					.slice(0, index)
 					.some((previous) =>
-						isSameCacheScope(previous.cache, additional.cache)
+						isSameCacheScope(previous.target.cache, additional.cache)
 					)
 			) {
 				return [];
@@ -248,7 +270,7 @@ export async function runWithReadAccess(
 				{
 					type: 'cupboard_cache' as const,
 					cache: additional.cache,
-					mode: 'content' as const
+					mode
 				}
 			];
 		}),
@@ -307,9 +329,11 @@ export async function runWithReadAccess(
 				});
 
 				if (
-					!requiresViewOidc &&
 					cacheCredential !== undefined &&
-					options.cacheMetadata === true
+					resources.every(
+						(resource) =>
+							resource.type === 'cupboard_cache' && resource.mode === 'metadata'
+					)
 				) {
 					return {
 						...credential,
@@ -494,6 +518,12 @@ export function registerRunCommand(
 		.option(
 			'--read-cache <cache-url>',
 			'additional cache in this tenant to include in the OIDC read session (repeatable)',
+			collectReadCache,
+			[]
+		)
+		.option(
+			'--read-cache-metadata <cache-url>',
+			'additional cache in this tenant whose metadata setup requires (repeatable)',
 			collectReadCache,
 			[]
 		)

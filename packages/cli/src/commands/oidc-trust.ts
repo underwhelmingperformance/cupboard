@@ -46,6 +46,7 @@ import {
 	buildAddBody,
 	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildCacheGrants,
 	buildViewContentReadGrant,
 	collectSubstitutions,
 	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
@@ -72,6 +73,7 @@ interface GithubTagOptions {
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
 	readonly attest?: boolean;
+	readonly readCache?: boolean;
 }
 
 interface GithubBranchOptions {
@@ -150,16 +152,14 @@ async function addBodyFor(
 		issuer,
 		audience,
 		claims: claimsForAdd(options.claim, options.jobWorkflowRef),
-		permittedGrants: [
-			buildCacheGrant({
-				cache: options.cache,
-				cacheTemplate: options.cacheTemplate,
-				allow: options.allow,
-				root: options.root,
-				rootTemplate: options.rootTemplate,
-				substitutions
-			})
-		]
+		permittedGrants: buildCacheGrants({
+			cache: options.cache,
+			cacheTemplate: options.cacheTemplate,
+			allow: options.allow,
+			root: options.root,
+			rootTemplate: options.rootTemplate,
+			substitutions
+		})
 	});
 }
 
@@ -391,7 +391,18 @@ export function githubTagAddBody(
 					templateSource: 'github-tag',
 					captures: []
 				})
-			})
+			}),
+			...(options.readCache === true
+				? [
+						buildCacheContentReadGrant({
+							cacheTemplate,
+							substitutions: collectSubstitutions({
+								templateSource: 'github-tag',
+								captures: []
+							})
+						})
+					]
+				: [])
 		],
 		display: { provider: 'github', repository: identity.fullName }
 	});
@@ -517,6 +528,10 @@ function buildOidcTrustCommands(
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
 			)
 			.option(
+				'--read-cache',
+				'also permit content reads from the selected cache'
+			)
+			.option(
 				'--no-attest',
 				'leave out the attest grant, so that runs cannot attach attestations'
 			)
@@ -573,6 +588,10 @@ function buildOidcTrustCommands(
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
 			)
 			.option(
+				'--read-cache',
+				'also permit content reads from the selected cache'
+			)
+			.option(
 				'--no-attest',
 				'leave out the attest grant, so that runs cannot attach attestations'
 			)
@@ -625,6 +644,10 @@ function buildOidcTrustCommands(
 				parseAudience
 			)
 			.option(
+				'--read-cache',
+				'also permit content reads from the selected cache'
+			)
+			.option(
 				'--no-attest',
 				'leave out the attest grant, so that runs cannot attach attestations'
 			)
@@ -674,8 +697,8 @@ function buildOidcTrustCommands(
 }
 
 /**
- * `oidc-trust add`: a tenant rule built from options, whose grant is scoped to a
- * cache and optionally a root, or read whole from `--from-file`.
+ * `oidc-trust add`: a tenant rule built from options or read whole from
+ * `--from-file`.
  */
 function registerTenantRuleAdd(
 	oidcTrust: Command,
@@ -710,7 +733,7 @@ function registerTenantRuleAdd(
 		)
 		.option(
 			'--allow <action>',
-			'a grant to give (repeatable): push, attest, root, attach, create or remove',
+			'a grant to give (repeatable): read, push, attest, root, attach, create or remove',
 			collect,
 			[]
 		)
@@ -724,11 +747,11 @@ function registerTenantRuleAdd(
 		)
 		.option(
 			'--root <name>',
-			'the root that the grants cover, or a root prefix ending in /'
+			'the root that publication grants cover, or a root prefix ending in /'
 		)
 		.option(
 			'--root-template <template>',
-			'make the root name from values in the token (see --template-source and --capture)'
+			'make the publication root name from values in the token (see --template-source and --capture)'
 		)
 		.option(
 			'--capture <claim=pattern>',

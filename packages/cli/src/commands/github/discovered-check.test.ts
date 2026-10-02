@@ -23,6 +23,8 @@ import type { ResultPayload, ResultRow } from '@cupboard/reporter';
 import { expect, it } from 'vitest';
 
 import {
+	GithubCheckFailedError,
+	GithubCheckIncompleteError,
 	WorkflowReferenceMutableError,
 	WorkflowReferenceNotFoundError
 } from '../../errors.ts';
@@ -38,6 +40,7 @@ import { type GithubCheckClient } from './check.ts';
 import {
 	type DiscoveredGithubCheckDependencies,
 	DiscoveryUnverifiedFinding,
+	finishDiscoveredGithubCheck,
 	inspectDiscoveredGithubCheck,
 	isRepairOffered,
 	SharedPullRequestCacheFinding,
@@ -1994,3 +1997,192 @@ it('offers a repair for the quickstart workflow on an empty tenant', async () =>
 		repairable: ['publish']
 	});
 });
+
+it.each(
+	['cupboard-publish', 'cupboard-flake-publish'].flatMap((workflow) =>
+		[
+			{
+				label: 'omitted',
+				input: undefined,
+				presented: tenant.href,
+				audience: tenant.href
+			},
+			{
+				label: 'empty',
+				input: "''",
+				presented: tenant.href,
+				audience: tenant.href
+			},
+			{
+				label: 'padded custom',
+				input: JSON.stringify('  custom-audience  '),
+				presented: 'custom-audience',
+				audience: 'custom-audience'
+			},
+			{
+				label: 'padded Unicode',
+				input: JSON.stringify('\u{A0}custom-audience\u{A0}'),
+				presented: 'custom-audience',
+				audience: 'custom-audience'
+			},
+			{
+				label: 'blank',
+				input: JSON.stringify(' '.repeat(3)),
+				presented: tenant.href,
+				audience: tenant.href
+			},
+			{
+				label: 'custom matching',
+				input: 'custom-audience',
+				presented: 'custom-audience',
+				audience: 'custom-audience'
+			},
+			{
+				label: 'custom mismatched',
+				input: 'custom-audience',
+				presented: 'custom-audience',
+				audience: tenant.href
+			},
+			{
+				label: 'literal URL',
+				input: 'https://audience.example.test/',
+				presented: 'https://audience.example.test/',
+				audience: 'https://audience.example.test/'
+			},
+			{
+				label: 'expression',
+				input: "'${{ inputs.audience }}'",
+				presented: undefined,
+				audience: tenant.href
+			},
+			{
+				label: 'number',
+				input: '42',
+				presented: undefined,
+				audience: tenant.href
+			},
+			{
+				label: 'boolean',
+				input: 'false',
+				presented: undefined,
+				audience: tenant.href
+			}
+		].map((scenario) => ({ ...scenario, workflow }))
+	)
+)(
+	'checks the $label audience through $workflow discovery',
+	async ({ workflow, input, presented, audience }) => {
+		const reference = `underwhelmingperformance/cupboard/.github/workflows/${workflow}.yml@refs/tags/v0.0.35`;
+		const rule = oidcTrustSummarySchema.parse({
+			id: 'configured-audience',
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience,
+			claims: {
+				repository_id: '1234',
+				ref: 'refs/heads/main',
+				job_workflow_ref: reference
+			},
+			permittedGrants: [
+				buildCacheGrant({
+					root: 'ci/',
+					allow: ['push', 'attest', 'root', 'attach']
+				})
+			],
+			disabled: false
+		});
+		const { client, dependencies } = fixture({
+			rules: [rule],
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/${workflow}.yml@v0.0.35
+    with:
+      url: ${tenant.href}
+      ${workflow === 'cupboard-flake-publish' ? 'root-prefix: ci/' : 'root: ci/'}
+${input === undefined ? '' : `      audience: ${input}`}
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		let completion: unknown;
+		try {
+			finishDiscoveredGithubCheck(result);
+		} catch (error) {
+			completion =
+				error instanceof GithubCheckFailedError ||
+				error instanceof GithubCheckIncompleteError
+					? { exitCode: error.exitCode, checks: error.checks }
+					: error;
+		}
+		const isUnverified = presented === undefined;
+		const isMatched = presented === audience;
+		expect({
+			jobs: result.jobs.map((job) => ({
+				...job,
+				findings: job.findings.map((entry) => ({
+					...entry,
+					finding: entry.finding.toJSON()
+				}))
+			})),
+			completion
+		}).toStrictEqual({
+			jobs: [
+				{
+					caller: path,
+					job: 'publish',
+					workflowRef: reference,
+					status: isUnverified ? 'unverified' : isMatched ? 'ready' : 'failed',
+					findings: isUnverified
+						? [
+								{
+									finding: {
+										check: 'publication model',
+										status: 'unverified',
+										detail: 'audience must be a literal string'
+									}
+								}
+							]
+						: isMatched
+							? [
+									{
+										trigger: 'push',
+										finding: { check: 'trust rule', status: 'ok' }
+									},
+									{
+										trigger: 'push',
+										finding: { check: 'root grant', status: 'ok' }
+									}
+								]
+							: [
+									{
+										trigger: 'push',
+										finding: {
+											check: 'trust rule',
+											status: 'failed',
+											detail: `rule configured-audience expects audience ${audience}; the modelled run uses ${presented}`
+										}
+									}
+								]
+				}
+			],
+			completion:
+				isMatched && !isUnverified
+					? undefined
+					: { exitCode: isUnverified ? 69 : 1, checks: [`${path}, publish`] }
+		});
+	}
+);

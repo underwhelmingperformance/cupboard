@@ -21,6 +21,44 @@ function requestUrl(input: RequestInfo | URL): string {
 }
 
 describe('tenantProbesFor read credentials', () => {
+	it.each([401, 403])(
+		'refuses a cache-specific credential at a private view with advice: %s',
+		async (status) => {
+			const requests: string[] = [];
+			const probes = tenantProbesFor({
+				baseUrl,
+				cache: { kind: 'default' },
+				view: 'reuse',
+				credentials: {
+					user: readUserSchema.parse('reader'),
+					password: 'cache-only'
+				},
+				fetcher: (input) => {
+					requests.push(requestUrl(input));
+					return Promise.resolve(new Response(undefined, { status }));
+				}
+			});
+			let error: unknown;
+			try {
+				await probes.viewServed([appPath]);
+			} catch (error_) {
+				error = error_;
+			}
+			expect({
+				exitCode:
+					typeof error === 'object' && error !== null && 'exitCode' in error
+						? error.exitCode
+						: undefined,
+				message: error instanceof Error ? error.message : undefined
+			}).toStrictEqual({
+				exitCode: 77,
+				message: `Could not read private reuse view at ${baseUrl.href}/reuse/reuse/api/v1/missing-paths: HTTP ${String(status)}. Supply the tenant read credential with --view-read-user and --view-read-password, or use an OIDC read session with view:content-read authority.`
+			});
+			expect(requests).toStrictEqual([
+				`${baseUrl.href}/reuse/reuse/api/v1/missing-paths`
+			]);
+		}
+	);
 	it.each([
 		{ name: 'separate view credentials', viewPassword: 'view-secret' },
 		{ name: 'the shared credential fallback', viewPassword: undefined }
