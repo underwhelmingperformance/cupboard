@@ -33,6 +33,12 @@ workflow file exists and, for a tag pin, that the release is immutable. It then
 works out the OIDC claims and requested operations of each run and checks them
 against the tenant's trust rules and reuse view.
 
+For both reusable publishing workflows, the check uses the literal `audience`
+input when it is supplied, after trimming surrounding whitespace. A blank or
+omitted audience uses the tenant URL. An unresolved audience expression needs
+manual review. A repair uses the modelled audience for every new trust rule and
+checks that audience again after writing.
+
 The check works out the requests that the cupboard workflows of the current
 release make. A job that pins another release can request other operations.
 

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -448,6 +448,7 @@ describe('cupboard acquisition', () => {
 			configureOutput: 'resolve-cupboard',
 			setupInputs: setupInputs.map(() => ({
 				'cache-url': '${{ inputs.url }}',
+				audience: '${{ inputs.audience }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				cupboard: '${{ needs.configure.outputs.cupboard }}',
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
@@ -472,7 +473,8 @@ describe('cupboard acquisition', () => {
 		expect(removalSetup.map((step) => step.with)).toStrictEqual([
 			{
 				cupboard: '${{ needs.configure.outputs.cupboard }}',
-				'checkout-dir': sourceCheckoutDirectory
+				'checkout-dir': sourceCheckoutDirectory,
+				audience: '${{ inputs.audience }}'
 			}
 		]);
 	});
@@ -560,7 +562,9 @@ describe('cupboard acquisition', () => {
 				substituter: '${{ inputs.substituter }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
-				'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
+				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+				'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
+				audience: '${{ steps.setup.outputs.read-session-audience }}'
 			}
 		]);
 	});
@@ -591,6 +595,7 @@ describe('cupboard acquisition', () => {
 			setup: [
 				{
 					'cache-url': '${{ inputs.url }}',
+					audience: '${{ inputs.audience }}',
 					cache: '${{ inputs.cache }}',
 					'trusted-public-key': '${{ inputs.trusted-public-key }}',
 					cupboard: '${{ steps.resolve-cupboard.outputs.cupboard }}',
@@ -762,6 +767,8 @@ describe('cohort planning and publication', () => {
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
 				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+				'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
+				audience: '${{ steps.setup.outputs.read-session-audience }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
@@ -835,6 +842,8 @@ describe('cohort planning and publication', () => {
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				'read-session-target': '${{ steps.setup.outputs.read-session-target }}',
 				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+				'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
+				audience: '${{ steps.setup.outputs.read-session-audience }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
@@ -1078,6 +1087,9 @@ ${sign.run}`
 					'read-session-target':
 						'${{ steps.setup.outputs.read-session-target }}',
 					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+					'read-session-caches':
+						'${{ steps.setup.outputs.read-session-caches }}',
+					audience: '${{ steps.setup.outputs.read-session-audience }}',
 					'read-user':
 						'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
 					'read-password':
@@ -1093,7 +1105,10 @@ ${sign.run}`
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 					'read-session-target':
 						'${{ steps.setup.outputs.read-session-target }}',
-					'read-session-view': '${{ steps.setup.outputs.read-session-view }}'
+					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+					'read-session-caches':
+						'${{ steps.setup.outputs.read-session-caches }}',
+					audience: '${{ steps.setup.outputs.read-session-audience }}'
 				}
 			]
 		});
@@ -1120,6 +1135,9 @@ ${sign.run}`
 					'read-session-target':
 						'${{ steps.setup.outputs.read-session-target }}',
 					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+					'read-session-caches':
+						'${{ steps.setup.outputs.read-session-caches }}',
+					audience: '${{ steps.setup.outputs.read-session-audience }}',
 					cache: '${{ needs.configure.outputs.cache }}',
 					'read-user':
 						'${{ secrets.destination_read_user || secrets.read_user || secrets.fallback_read_user }}',
@@ -1151,6 +1169,9 @@ ${sign.run}`
 					'read-session-target':
 						'${{ steps.setup.outputs.read-session-target }}',
 					'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+					'read-session-caches':
+						'${{ steps.setup.outputs.read-session-caches }}',
+					audience: '${{ steps.setup.outputs.read-session-audience }}',
 					cache: '${{ inputs.cache }}',
 					'receipt-file': '${{ steps.push.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
@@ -1226,6 +1247,9 @@ describe('publication attestation coverage', () => {
 						'read-session-target':
 							'${{ steps.setup.outputs.read-session-target }}',
 						'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
+						'read-session-caches':
+							'${{ steps.setup.outputs.read-session-caches }}',
+						audience: '${{ steps.setup.outputs.read-session-audience }}',
 						'receipt-file': receipt,
 						'bundles-file': '${{ steps.attest.outputs.bundles-file }}',
 						...credentials
@@ -1677,3 +1701,145 @@ describe('pull-request cache lifecycle', () => {
 		});
 	});
 });
+
+it.each([
+	{ audience: '', expected: '' },
+	{ audience: ' '.repeat(3), expected: '' },
+	{ audience: '  custom-audience  ', expected: 'custom-audience' },
+	{ audience: ' custom-audience ', expected: 'custom-audience' }
+])(
+	'uses the normalised audience in extracted workflow scripts: $audience',
+	async ({ audience, expected }) => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const evaluate = workflow.jobs.plan?.steps.find(
+			(step) => step.name === 'Evaluate target manifest'
+		);
+		const remove = workflow.jobs['remove-cache']?.steps.find(
+			(step) => step.name === 'Remove the cache'
+		);
+		if (evaluate?.run === undefined || remove?.run === undefined) {
+			throw new Error(
+				'The flake workflow must have evaluation and removal scripts'
+			);
+		}
+		const setup = workflow.jobs['remove-cache']?.steps.find(
+			(step) => step.id === 'setup'
+		);
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-workflow-audience-')
+		);
+		const binary = path.join(directory, 'cupboard');
+		const capture = path.join(directory, 'arguments.json');
+		try {
+			await writeFile(
+				binary,
+				`#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARGUMENTS_FILE, JSON.stringify(process.argv.slice(2))); process.stdout.write('[]');\n`,
+				{ mode: 0o700 }
+			);
+			const argumentsByStep: unknown[] = [];
+			for (const step of [evaluate, remove]) {
+				if (step.run === undefined) {
+					throw new Error('The workflow step must have a shell script');
+				}
+				const environment = Object.fromEntries(
+					Object.entries(step.env ?? {}).map(([key, value]) => [
+						key,
+						value === '${{ inputs.audience }}'
+							? audience
+							: value === '${{ steps.setup.outputs.read-session-audience }}'
+								? expected
+								: ''
+					])
+				);
+				await execFileAsync('bash', ['-c', step.run], {
+					env: {
+						...process.env,
+						...environment,
+						ARGUMENTS_FILE: capture,
+						CUPBOARD_PATH: binary,
+						TARGETS: '.#targets',
+						PUBLISH: 'outputs',
+						READ_SESSION_TARGET:
+							'https://cache.example.test/t/acme/cache/builds',
+						READ_SESSION_CACHES:
+							'["https://cache.example.test/t/acme/cache/extra"]',
+						READ_SESSION_VIEW: 'prior',
+						URL: 'https://cache.example.test/t/acme',
+						CACHE: 'pr-7',
+						GITHUB_OUTPUT: path.join(directory, 'output')
+					}
+				});
+				argumentsByStep.push(JSON.parse(await readFile(capture, 'utf8')));
+			}
+			expect({
+				setupAudience: setup?.with?.audience,
+				argumentsByStep
+			}).toStrictEqual({
+				setupAudience: '${{ inputs.audience }}',
+				argumentsByStep: [
+					[
+						'run',
+						'https://cache.example.test/t/acme/cache/builds',
+						'--github-oidc',
+						...(expected === '' ? [] : ['--audience', expected]),
+						'--read-cache',
+						'https://cache.example.test/t/acme/cache/extra',
+						'--reuse-view',
+						'prior',
+						'--',
+						'nix',
+						'eval',
+						'--json',
+						'.#targets'
+					],
+					[
+						'cache',
+						'remove',
+						'https://cache.example.test/t/acme',
+						'pr-7',
+						'--github-oidc',
+						'--force',
+						'--yes',
+						...(expected === '' ? [] : ['--audience', expected])
+					]
+				]
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	}
+);
+
+it.each([flakeWorkflow, publishWorkflow])(
+	'passes setup audience output to all downstream calls in %s',
+	async (file) => {
+		const workflow = await loadWorkflow(file);
+		const bindings = Object.entries(workflow.jobs).flatMap(
+			([job, definition]) =>
+				definition.steps
+					.filter(
+						(step) =>
+							step.uses?.startsWith(cupboardActionPrefix) === true &&
+							step.with?.audience !== undefined
+					)
+					.map((step) => ({
+						job,
+						action: step.uses,
+						audience: step.with?.audience,
+						setup: definition.steps.find(
+							(candidate) => candidate.id === 'setup'
+						)?.uses
+					}))
+		);
+		expect(bindings).toStrictEqual(
+			bindings.map((binding) => ({
+				...binding,
+				audience:
+					binding.action === cupboardAction('setup')
+						? '${{ inputs.audience }}'
+						: '${{ steps.setup.outputs.read-session-audience }}',
+				setup: cupboardAction('setup')
+			}))
+		);
+	}
+);

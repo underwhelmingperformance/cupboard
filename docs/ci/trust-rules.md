@@ -128,6 +128,10 @@ In `add-github-pr`, the root doesn't follow the cache template.
 
 `add-github-branch` has no templates.
 
+All three presets accept `--read-cache` to permit content reads from the cache
+that the preset selects. Add this flag when the job reads that private cache
+through OIDC. The flag does not grant access to other caches or a reuse view.
+
 ## Matching a token
 
 A rule specifies an issuer and an audience, and both must exactly match the
@@ -165,12 +169,18 @@ A rule for GitHub should pin:
 
 | Grant    | Lets the job                                                          |
 | -------- | --------------------------------------------------------------------- |
+| `read`   | Read private cache content.                                           |
 | `push`   | Upload and publish store paths.                                       |
 | `root`   | Set and list retention roots.                                         |
 | `attach` | Add published paths to a [run root](../admin/retention.md#run-roots). |
 | `attest` | Attach attestation bundles.                                           |
 | `create` | Create the cache.                                                     |
 | `remove` | Remove the cache.                                                     |
+
+When `read` is combined with other permissions, the CLI creates a separate
+content-read grant with the same cache selector. Content reads apply to the
+whole cache and cannot select a root. `--root` and `--root-template` apply to
+the publication grant. A read-only rule cannot use either root option.
 
 ### Which cache a grant applies to
 

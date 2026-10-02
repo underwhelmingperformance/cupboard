@@ -24,6 +24,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { expect, it } from 'vitest';
 
+import { audienceSchema } from '../../audience.ts';
 import {
 	CliAbortError,
 	GithubCheckFailedError,
@@ -1902,4 +1903,288 @@ jobs:
 		},
 		added: []
 	});
+});
+
+const customAudience = 'cupboard-ci-client';
+const customAudienceIdentity = {
+	repositoryId: 1234,
+	repositoryOwnerId: 5678,
+	fullName: repository,
+	defaultBranch: 'main'
+};
+const flakeAudienceReference =
+	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
+const audienceView = reuseViewSummarySchema.parse({
+	name: 'pull-requests-1234',
+	access: 'public',
+	selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+	priority: 50,
+	revision: 1,
+	createdAt: '2026-01-01T00:00:00.000Z',
+	updatedAt: '2026-01-01T00:00:00.000Z'
+});
+const audienceRepairCases = [
+	{
+		label: 'installable branch',
+		workflow: 'cupboard-publish',
+		trigger: 'on:\n  push:\n    branches: [main]',
+		inputs: '      cache: packages',
+		access: 'public' as const,
+		body: { ...mainBranchRule('packages'), audience: customAudience }
+	},
+	{
+		label: 'installable tag',
+		workflow: 'cupboard-publish',
+		trigger: "on:\n  push:\n    tags: ['v1.2.3']",
+		inputs: '      cache: packages',
+		access: 'public' as const,
+		body: {
+			...mainBranchRule('packages'),
+			audience: customAudience,
+			claims: { ...mainBranchRule('packages').claims, ref: 'refs/tags/v1.2.3' }
+		}
+	},
+	{
+		label: 'flake custom branch',
+		workflow: 'cupboard-flake-publish',
+		trigger: 'on:\n  push:\n    branches: [main]',
+		inputs: '      cache: packages\n      root-prefix: ci/',
+		access: 'public' as const,
+		body: {
+			...mainBranchRule('packages'),
+			audience: customAudience,
+			claims: {
+				...mainBranchRule('packages').claims,
+				job_workflow_ref: flakeAudienceReference
+			},
+			permittedGrants: [
+				buildCacheGrant({
+					cache: 'packages',
+					root: 'ci/',
+					allow: ['push', 'attest', 'root', 'attach']
+				})
+			]
+		}
+	},
+	{
+		label: 'flake preset branch',
+		workflow: 'cupboard-flake-publish',
+		trigger: 'on:\n  push:\n    branches: [main]',
+		inputs: '      preset: pull-request-and-branch',
+		access: 'public' as const,
+		body: githubBranchAddBody(url, customAudienceIdentity, {
+			repo: repository,
+			branch: 'main',
+			jobWorkflowRef: flakeAudienceReference,
+			audience: audienceSchema.parse(customAudience)
+		})
+	},
+	{
+		label: 'flake preset pull request',
+		workflow: 'cupboard-flake-publish',
+		trigger: 'on: pull_request',
+		inputs: '      preset: pull-request-and-branch',
+		access: 'public' as const,
+		body: githubPrAddBody(url, customAudienceIdentity, {
+			repo: repository,
+			jobWorkflowRef: flakeAudienceReference,
+			audience: audienceSchema.parse(customAudience)
+		})
+	},
+	{
+		label: 'installable private read',
+		workflow: 'cupboard-publish',
+		trigger: 'on:\n  push:\n    branches: [main]',
+		inputs: '      cache: packages\n      publish: none',
+		access: 'private' as const,
+		body: {
+			...mainBranchRule('packages'),
+			audience: customAudience,
+			permittedGrants: [buildCacheContentReadGrant({ cache: 'packages' })]
+		}
+	},
+	{
+		label: 'flake private read',
+		workflow: 'cupboard-flake-publish',
+		trigger: 'on: pull_request',
+		inputs: '      preset: pull-request-and-branch\n      publish: none',
+		access: 'private' as const,
+		body: {
+			...mainBranchRule(),
+			audience: customAudience,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				event_name: 'pull_request',
+				job_workflow_ref: flakeAudienceReference
+			},
+			permittedGrants: [buildCacheContentReadGrant({})]
+		}
+	}
+];
+
+it.each(audienceRepairCases)(
+	'repairs and verifies the configured audience for $label',
+	async ({ workflow, trigger, inputs, access, body }) => {
+		const { ui, added, client, dependencies, check, captured } = await fixture(
+			undefined,
+			`${trigger}
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/${workflow}.yml@v0.0.35
+    with:
+      url: ${url.href}
+      audience: ${customAudience}
+${inputs}
+`,
+			{ cacheAccess: access, views: [audienceView] }
+		);
+		await runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		);
+		expect({
+			initial: check.jobs.map((job) => job.status),
+			added,
+			results: captured.results.map((result) => result.kind)
+		}).toStrictEqual({
+			initial: ['failed'],
+			added: [body],
+			results: ['github-check-discovered', 'github-check-verified']
+		});
+	}
+);
+
+it.each(['cupboard-publish', 'cupboard-flake-publish'])(
+	'refuses repair for an unresolved audience in %s',
+	async (workflow) => {
+		const { ui, added, client, dependencies, check } = await fixture(
+			undefined,
+			`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/${workflow}.yml@v0.0.35
+    with:
+      url: ${url.href}
+      audience: \${{ inputs.audience }}
+      ${workflow === 'cupboard-flake-publish' ? 'root-prefix: ci/' : 'root: ci/'}
+`
+		);
+		const error = await rejection(
+			runDiscoveredGithubRepair(
+				url,
+				{ trustScope: 'exact' },
+				ui,
+				client,
+				dependencies,
+				check
+			)
+		);
+		expect({
+			initial: check.jobs.map((job) => job.status),
+			error:
+				error instanceof GithubCheckIncompleteError
+					? { exitCode: error.exitCode, checks: error.checks }
+					: error,
+			added
+		}).toStrictEqual({
+			initial: ['unverified'],
+			error: { exitCode: 69, checks: [`${path}, publish`] },
+			added: []
+		});
+	}
+);
+
+it.each(
+	audienceRepairCases.filter(
+		(scenario) =>
+			scenario.label === 'installable branch' ||
+			scenario.label === 'flake custom branch'
+	)
+)(
+	'detects a wrong stored audience during $label repair verification',
+	async ({ workflow, trigger, inputs, body }) => {
+		const { ui, added, client, dependencies, check } = await fixture(
+			undefined,
+			`${trigger}
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/${workflow}.yml@v0.0.35
+    with:
+      url: ${url.href}
+      audience: ${customAudience}
+${inputs}
+`
+		);
+		const attempted: OidcTrustAddBodyInput[] = [];
+		const incorrectClient = {
+			...client,
+			oidcTrust: {
+				...client.oidcTrust,
+				add: (input: OidcTrustAddBodyInput) => {
+					attempted.push(input);
+					return client.oidcTrust.add({ ...input, audience: url.href });
+				}
+			}
+		};
+		const error = await rejection(
+			runDiscoveredGithubRepair(
+				url,
+				{ trustScope: 'exact' },
+				ui,
+				incorrectClient,
+				dependencies,
+				check
+			)
+		);
+		expect({
+			attempted,
+			added,
+			error:
+				error instanceof GithubRepairPartialError
+					? {
+							step: error.step,
+							applied: error.applied,
+							failed: error.cause instanceof GithubCheckFailedError
+						}
+					: error
+		}).toStrictEqual({
+			attempted: [body],
+			added: [{ ...body, audience: url.href }],
+			error: {
+				step: 'verify the tenant after writing',
+				applied: ['trust rule new-rule'],
+				failed: true
+			}
+		});
+	}
+);
+
+it('keeps different caller audiences separate when repairing identical claims', async () => {
+	const { ui, added, client, dependencies, check } = await fixture(
+		undefined,
+		content.replace(
+			'cache: packages',
+			() => `cache: packages\n      audience: ${customAudience}`
+		)
+	);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+	expect(added).toStrictEqual([
+		{ ...mainBranchRule('packages'), audience: customAudience },
+		mainBranchRule('systems')
+	]);
 });

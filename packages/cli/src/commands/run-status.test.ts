@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import process from 'node:process';
 
+import { readResourcesSchema } from '@cupboard/protocol/read-access';
 import { expect, it, onTestFinished } from 'vitest';
 
 it.each([
@@ -271,6 +272,165 @@ it.each([
 						return;
 					}
 					resolve();
+				});
+			});
+		}
+	},
+	30_000
+);
+
+it.each([
+	{ mode: 'content', external: false, audience: 'custom-audience' },
+	{ mode: 'metadata', external: false, audience: 'custom-audience' },
+	{ mode: 'content', external: true, audience: 'custom-audience' },
+	{ mode: 'metadata', external: true, audience: 'custom-audience' },
+	{ mode: 'content', external: false, audience: '  custom-audience  ' },
+	{ mode: 'content', external: false, audience: ' '.repeat(3) },
+	{ mode: 'content', external: false, audience: '\u{A0}custom-audience\u{A0}' }
+] as const)(
+	'passes $mode caches through the real CLI without including an explicit external tenant: $external, with exact audience $audience',
+	async ({ mode, external, audience }) => {
+		const acquisitions: unknown[] = [];
+		const audiences: string[] = [];
+		const server = createServer((request, response) => {
+			const url = new URL(request.url ?? '/', 'http://localhost');
+			response.setHeader('content-type', 'application/json');
+			if (url.pathname === '/identity') {
+				audiences.push(url.searchParams.get('audience') ?? '');
+				response.end(JSON.stringify({ value: 'identity' }));
+				return;
+			}
+			let body = '';
+			request.setEncoding('utf8').on('data', (chunk: string) => {
+				body += chunk;
+			});
+			request.on('end', () => {
+				const resources: unknown = JSON.parse(
+					new URLSearchParams(body).get('read_resources') ?? '[]'
+				);
+				acquisitions.push(resources);
+				response.end(
+					JSON.stringify({
+						access_token: 'access',
+						token_type: 'Bearer',
+						expires_in: 900,
+						authorization_details: [],
+						read_resources: readResourcesSchema
+							.parse(resources)
+							.map((resource) => ({
+								...resource,
+								state: { kind: 'existing', access: 'public', priority: 40 }
+							}))
+					})
+				);
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once('error', reject);
+			server.listen(0, '127.0.0.1', resolve);
+		});
+		try {
+			const address = server.address();
+			if (address === null || typeof address === 'string') {
+				throw new Error('Expected a TCP address');
+			}
+			const tenant = `http://127.0.0.1:${String(address.port)}/t/acme`;
+			const flag =
+				mode === 'content' ? '--read-cache' : '--read-cache-metadata';
+			const child = spawn(
+				process.execPath,
+				[
+					'--experimental-transform-types',
+					'--disable-warning=ExperimentalWarning',
+					path.resolve(import.meta.dirname, '../main.ts'),
+					'--output-mode',
+					'json',
+					'run',
+					`${tenant}/cache/builds`,
+					'--github-oidc',
+					'--audience',
+					audience,
+					...(mode === 'metadata' ? ['--cache-metadata'] : []),
+					flag,
+					`${tenant}/cache/falcon`,
+					flag,
+					tenant,
+					'--',
+					process.execPath,
+					'-e',
+					"process.stdout.write('child')"
+				],
+				{
+					env: {
+						...process.env,
+						NIX_CONFIG: `substituters =\nextra-substituters = ${external ? `http://cupboard:partner%2Fsecret@127.0.0.1:${String(address.port)}/t/partner/cache/deps` : ''}\nnetrc-file = /cupboard-test-missing-netrc`,
+						ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${String(address.port)}/identity`,
+						ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'secret'
+					},
+					detached: true,
+					stdio: ['ignore', 'pipe', 'pipe']
+				}
+			);
+			let isChildClosed = false;
+			const closed = new Promise<void>((resolve) => {
+				child.once('close', () => {
+					isChildClosed = true;
+					resolve();
+				});
+			});
+			onTestFinished(async () => {
+				if (!isChildClosed && child.pid !== undefined) {
+					try {
+						process.kill(-child.pid, 'SIGKILL');
+					} catch (error) {
+						if (
+							!(error instanceof Error) ||
+							!('code' in error) ||
+							error.code !== 'ESRCH'
+						) {
+							throw error;
+						}
+					}
+				}
+				await closed;
+			});
+			let stdout = '';
+			child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+				stdout += chunk;
+			});
+			child.stderr.resume();
+			const status = await new Promise<number | null>((resolve, reject) => {
+				child.once('error', reject);
+				child.once('close', resolve);
+			});
+			expect({ status, stdout, acquisitions, audiences }).toStrictEqual({
+				status: 0,
+				stdout: 'child',
+				acquisitions: [
+					[
+						{
+							type: 'cupboard_cache',
+							cache: { kind: 'named', name: 'builds' },
+							mode
+						},
+						{
+							type: 'cupboard_cache',
+							cache: { kind: 'named', name: 'falcon' },
+							mode
+						},
+						{ type: 'cupboard_cache', cache: { kind: 'default' }, mode }
+					]
+				],
+				audiences: [audience]
+			});
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				server.close((error) => {
+					if (error === undefined) {
+						resolve();
+						return;
+					}
+					reject(error);
 				});
 			});
 		}

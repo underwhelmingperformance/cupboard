@@ -11,10 +11,17 @@ inputs:
     description: Path to the cupboard executable that actions/setup installed.
     required: true
   read-session-target:
-    description: Internal setup output for OIDC read access.
+    description:
+      Pass the read-session-target output from actions/setup for private OIDC
+      reads.
+    required: false
+  read-session-caches:
+    description:
+      Pass the read-session-caches output from actions/setup, a JSON array of
+      additional cache URLs.
     required: false
   read-session-view:
-    description: Internal setup output for an additional reuse view.
+    description: Pass the read-session-view output from actions/setup.
     required: false
   cache:
     description:
@@ -100,6 +107,8 @@ runs:
         URL: ${{ inputs.url }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_AUDIENCE: ${{ inputs.audience }}
+        READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         CACHE: ${{ inputs.cache }}
         AUDIENCE: ${{ inputs.audience }}

@@ -21,7 +21,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildProgram } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { InvalidClaimError } from '../errors.ts';
+import { CliUsageError, InvalidClaimError } from '../errors.ts';
 
 import {
 	claimsForAdd,
@@ -38,7 +38,8 @@ import {
 import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
 const mocks = vi.hoisted(() => ({
-	add: vi.fn<OidcTrustClient['add']>()
+	add: vi.fn<OidcTrustClient['add']>(),
+	lookup: vi.fn<(repo: string) => Promise<RepositoryIdentity>>()
 }));
 
 // The commands build their oRPC clients from these functions, so a command
@@ -47,6 +48,11 @@ vi.mock('../client/orpc.ts', async (importOriginal) => ({
 	...(await importOriginal<typeof import('../client/orpc.ts')>()),
 	tenantRpc: () => ({ oidcTrust: { add: mocks.add } }),
 	controlRpc: () => ({ oidcTrust: { add: mocks.add } })
+}));
+
+vi.mock('./oidc-trust/github.ts', async (importOriginal) => ({
+	...(await importOriginal<typeof import('./oidc-trust/github.ts')>()),
+	lookupRepository: mocks.lookup
 }));
 
 const identity: RepositoryIdentity = {
@@ -627,6 +633,35 @@ describe('githubPrAddBody', () => {
 });
 
 describe('githubTagAddBody', () => {
+	it('includes an exact content-read grant for the per-tag cache when requested', () => {
+		expect(
+			githubTagAddBody(tenantBase, identity, {
+				repo: 'acme/infra',
+				readCache: true
+			})
+		).toStrictEqual({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenantUrl,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				ref_type: 'tag'
+			},
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: [...uploadActions, ...attestActions, ...rootActions],
+					resources: { cache: tagCacheBinding, root: tagRootBinding }
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['cache:content-read'],
+					resources: { cache: tagCacheBinding }
+				}
+			],
+			display: { provider: 'github', repository: 'acme/infra' }
+		});
+	});
 	it('grants the upload, retention and attestation operations a publication performs, scoped to the per-tag cache and root', () => {
 		expect(
 			githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' })
@@ -903,4 +938,298 @@ describe('pull-request cache naming across repositories', () => {
 			second: ['gh-4321-pr-1']
 		});
 	});
+});
+
+describe('parsed generic read rules', () => {
+	beforeEach(() => {
+		mocks.add.mockReset();
+		mocks.add.mockImplementation((body) =>
+			Promise.resolve(summary({ ...body, id: 'rule-1' }))
+		);
+	});
+
+	const claims = {
+		repository_id: '1234',
+		repository_owner_id: '5678',
+		ref: 'refs/heads/main',
+		workflow_ref: 'acme/infra/.github/workflows/publish.yml@refs/heads/main'
+	};
+	const baseArguments = [
+		'node',
+		'cupboard',
+		'--output-mode',
+		'json',
+		'oidc-trust',
+		'add',
+		tenantUrl,
+		'--issuer',
+		'https://token.actions.githubusercontent.com',
+		'--audience',
+		tenantUrl
+	];
+	const claimArguments = Object.entries(claims).flatMap(([key, value]) => [
+		'--claim',
+		`${key}=${value}`
+	]);
+	const selectors = [
+		{
+			label: 'default',
+			ref: 'refs/heads/main',
+			args: [],
+			cache: { kind: 'default' },
+			rootArgs: ['--root', 'github:acme/infra/main/'],
+			root: { exact: 'github:acme/infra/main/', validate: 'rootName' }
+		},
+		{
+			label: 'named',
+			ref: 'refs/heads/main',
+			args: ['--cache', 'ci'],
+			cache: { kind: 'named', exact: 'ci', validate: 'cacheName' },
+			rootArgs: ['--root', 'github:acme/infra/main/'],
+			root: { exact: 'github:acme/infra/main/', validate: 'rootName' }
+		},
+		{
+			label: 'template',
+			ref: 'refs/pull/37/merge',
+			args: [
+				'--cache-template',
+				'gh-{repository_id}-pr-{pr}',
+				'--template-source',
+				'github-pr'
+			],
+			cache: prCacheBinding,
+			rootArgs: ['--root-template', 'github:acme/infra/pr-{pr}/'],
+			root: prRootBinding
+		}
+	];
+	const permissions = [
+		{
+			permission: 'read',
+			allow: ['read'],
+			read: true,
+			actions: [],
+			root: false
+		},
+		{
+			permission: 'root',
+			allow: ['root'],
+			read: false,
+			actions: ['root:set', 'root:list'],
+			root: true
+		},
+		{
+			permission: 'read and push',
+			allow: ['read', 'push'],
+			read: true,
+			actions: uploadActions,
+			root: false
+		},
+		{
+			permission: 'read and publication',
+			allow: ['read', 'push', 'root', 'attach', 'attest'],
+			read: true,
+			actions: [...uploadActions, ...attestActions, ...rootActions],
+			root: true
+		}
+	];
+
+	it.each(
+		selectors.flatMap((selector) =>
+			permissions.map((permission) => ({
+				...selector,
+				...permission,
+				selector
+			}))
+		)
+	)(
+		'preserves the $label selector for $permission permissions',
+		async ({ selector, allow, read, actions, root }) => {
+			const ruleClaims = { ...claims, ref: selector.ref };
+			await buildProgram().parseAsync([
+				...baseArguments,
+				...Object.entries(ruleClaims).flatMap(([key, value]) => [
+					'--claim',
+					`${key}=${value}`
+				]),
+				...selector.args,
+				...allow.flatMap((value) => ['--allow', value]),
+				...(root ? selector.rootArgs : [])
+			]);
+			expect(mocks.add.mock.calls).toStrictEqual([
+				[
+					{
+						issuer: 'https://token.actions.githubusercontent.com',
+						audience: tenantUrl,
+						claims: ruleClaims,
+						permittedGrants: [
+							...(actions.length > 0
+								? [
+										{
+											type: 'cupboard_cache',
+											actions,
+											resources: {
+												cache: selector.cache,
+												...(root && { root: selector.root })
+											}
+										}
+									]
+								: []),
+							...(read
+								? [
+										{
+											type: 'cupboard_cache',
+											actions: ['cache:content-read'],
+											resources: { cache: selector.cache }
+										}
+									]
+								: [])
+						]
+					}
+				]
+			]);
+		}
+	);
+
+	it.each([
+		{ args: ['--root', 'github:acme/infra/main'] },
+		{ args: ['--root', 'github:acme/infra/main/'] },
+		{ args: ['--root-template', 'pr-{pr}', '--template-source', 'github-pr'] }
+	])(
+		'refuses a read-only root selector $args before sending',
+		async ({ args }) => {
+			let outcome: unknown;
+			try {
+				await buildProgram().parseAsync([
+					...baseArguments,
+					...claimArguments,
+					'--allow',
+					'read',
+					...args
+				]);
+			} catch (error) {
+				outcome =
+					error instanceof Error
+						? { usage: error instanceof CliUsageError, message: error.message }
+						: error;
+			}
+			expect({ outcome, calls: mocks.add.mock.calls }).toStrictEqual({
+				outcome: {
+					usage: true,
+					message:
+						'Content reads cannot be restricted to a root. Remove --root and --root-template from a read-only rule, or include publication permissions for the selected root.'
+				},
+				calls: []
+			});
+		}
+	);
+
+	it.each([
+		{ allow: ['read', 'attach'], error: 'Specify which root' },
+		{ allow: ['read', 'unknown'], error: 'Unknown --allow value' }
+	])('keeps validation for $allow', async ({ allow, error: expectedError }) => {
+		let outcome: unknown;
+		try {
+			await buildProgram().parseAsync([
+				...baseArguments,
+				...claimArguments,
+				...allow.flatMap((value) => ['--allow', value])
+			]);
+		} catch (error) {
+			outcome = error instanceof Error && error.message.includes(expectedError);
+		}
+		expect({ refused: outcome, calls: mocks.add.mock.calls }).toStrictEqual({
+			refused: true,
+			calls: []
+		});
+	});
+
+	it.each([
+		{ root: { exact: 'github:acme/infra/main/', validate: 'rootName' } },
+		{ extra: 'unexpected' }
+	])('keeps strict JSON read constraints for %j', async (resources) => {
+		const outcome = await addFromFile('oidc-trust', tenantUrl, {
+			...tenantRule,
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: ['cache:content-read'],
+					resources: { cache: { kind: 'default' }, ...resources }
+				}
+			]
+		});
+		expect({
+			refused: outcome instanceof InvalidClaimError,
+			calls: mocks.add.mock.calls
+		}).toStrictEqual({ refused: true, calls: [] });
+	});
+});
+
+describe('parsed GitHub read presets', () => {
+	const presets = [
+		{
+			command: 'add-github-pr',
+			args: [],
+			body: githubPrAddBody(tenantBase, identity, {
+				repo: identity.fullName,
+				readCache: true
+			})
+		},
+		{
+			command: 'add-github-branch',
+			args: ['--branch', 'main'],
+			body: githubBranchAddBody(tenantBase, identity, {
+				repo: identity.fullName,
+				branch: 'main',
+				readCache: true
+			})
+		},
+		{
+			command: 'add-github-tag',
+			args: [],
+			body: githubTagAddBody(tenantBase, identity, {
+				repo: identity.fullName,
+				readCache: true
+			})
+		}
+	];
+	it.each(
+		presets.flatMap((preset) => [
+			{ ...preset, audience: undefined },
+			{
+				...preset,
+				audience: 'cupboard-ci-client',
+				body: { ...preset.body, audience: 'cupboard-ci-client' }
+			}
+		])
+	)(
+		'parses --read-cache and audience $audience for $command',
+		async ({ command, args, body, audience }) => {
+			mocks.add.mockReset();
+			mocks.add.mockImplementation((input) =>
+				Promise.resolve(summary({ ...input, id: 'rule-1' }))
+			);
+			mocks.lookup.mockReset();
+			mocks.lookup.mockResolvedValue(identity);
+			await buildProgram()
+				.exitOverride()
+				.parseAsync([
+					'node',
+					'cupboard',
+					'--output-mode',
+					'json',
+					'oidc-trust',
+					command,
+					tenantUrl,
+					'--repo',
+					identity.fullName,
+					'--read-cache',
+					...(audience === undefined ? [] : ['--audience', audience]),
+					...args
+				]);
+			expect({
+				lookup: mocks.lookup.mock.calls,
+				add: mocks.add.mock.calls
+			}).toStrictEqual({ lookup: [[identity.fullName]], add: [[body]] });
+		}
+	);
 });

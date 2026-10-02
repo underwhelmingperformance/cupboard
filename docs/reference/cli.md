@@ -749,21 +749,25 @@ Usage: cupboard run <cache-or-view-url> [options] -- <command...>
 Run a command with renewable cache read access in CI.
 
 Arguments:
-  cache-or-view-url         cache or reuse view URL
-  command                   command to run after --
+  cache-or-view-url                  cache or reuse view URL
+  command                            command to run after --
 
 Options:
-  --github-oidc             acquire read access even for public resources;
-                            requires id-token: write and overrides incidental
-                            netrc credentials
-  --audience <audience>     OIDC audience (default: the tenant URL)
-  --cache-metadata          acquire only cache metadata for setup when content
-                            uses a static credential
-  --read-cache <cache-url>  additional cache in this tenant to include in the
-                            OIDC read session (repeatable) (default: [])
-  --reuse-view <name>       reuse view whose private cache content the command
-                            will read
-  -h, --help                display help for command
+  --github-oidc                      acquire read access even for public
+                                     resources; requires id-token: write and
+                                     overrides incidental netrc credentials
+  --audience <audience>              OIDC audience (default: the tenant URL)
+  --cache-metadata                   acquire only cache metadata for setup when
+                                     content uses a static credential
+  --read-cache <cache-url>           additional cache in this tenant to include
+                                     in the OIDC read session (repeatable)
+                                     (default: [])
+  --read-cache-metadata <cache-url>  additional cache in this tenant whose
+                                     metadata setup requires (repeatable)
+                                     (default: [])
+  --reuse-view <name>                reuse view whose private cache content the
+                                     command will read
+  -h, --help                         display help for command
 
 The child inherits stdin, stdout and stderr. The command returns the child's exit status, or 128 plus the signal number when a signal terminates the child. A missing executable exits 127. OIDC acquisition or renewal failures use Cupboard's own exit statuses, including 77 for refused authority and 75 for temporary failures.
 ```
@@ -2041,17 +2045,17 @@ Options:
   --job-workflow-ref <ref>     require the job_workflow_ref claim, which
                                identifies the workflow file and ref that the job
                                runs
-  --allow <action>             a grant to give (repeatable): push, attest, root,
-                               attach, create or remove (default: [])
+  --allow <action>             a grant to give (repeatable): read, push, attest,
+                               root, attach, create or remove (default: [])
   --cache <name>               the cache that the grants apply to (default: the
                                tenant's default cache)
   --cache-template <template>  make the cache name from values in the token,
                                such as "pr-{pr}" (see --template-source and
                                --capture)
-  --root <name>                the root that the grants cover, or a root prefix
-                               ending in /
-  --root-template <template>   make the root name from values in the token (see
-                               --template-source and --capture)
+  --root <name>                the root that publication grants cover, or a root
+                               prefix ending in /
+  --root-template <template>   make the publication root name from values in the
+                               token (see --template-source and --capture)
   --capture <claim=pattern>    claim=regex, where each named group in the
                                regular expression becomes a template variable
                                (repeatable) (default: [])
@@ -2097,6 +2101,7 @@ Options:
   --job-workflow-ref <value>   also require the job_workflow_ref claim, given as
                                owner/repo/path@ref. Without @ref, it matches the
                                workflow file at any ref.
+  --read-cache                 also permit content reads from the selected cache
   --no-attest                  leave out the attest grant, so that runs cannot
                                attach attestations
   -h, --help                   display help for command
@@ -2130,6 +2135,7 @@ Options:
   --job-workflow-ref <value>   also require the job_workflow_ref claim, given as
                                owner/repo/path@ref. Without @ref, it matches the
                                workflow file at any ref.
+  --read-cache                 also permit content reads from the selected cache
   --no-attest                  leave out the attest grant, so that runs cannot
                                attach attestations
   -h, --help                   display help for command
@@ -2161,6 +2167,7 @@ Options:
                               workflow file at any ref.
   --audience <audience>       audience that the token must have (default: the
                               tenant URL)
+  --read-cache                also permit content reads from the selected cache
   --no-attest                 leave out the attest grant, so that runs cannot
                               attach attestations
   -h, --help                  display help for command

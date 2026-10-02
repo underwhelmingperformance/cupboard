@@ -1,4 +1,4 @@
-import { CliError, transientExitCode } from '../errors.ts';
+import { authExitCode, CliError, transientExitCode } from '../errors.ts';
 
 /**
  * The destination or reuse-view availability probe returned a non-2xx status
@@ -20,5 +20,18 @@ export class DestinationProbeResponseError extends CliError {
 
 	override get exitCode(): number {
 		return transientExitCode;
+	}
+}
+
+export class PrivateViewReadRefusedError extends CliError {
+	constructor(url: string, status: number) {
+		super(
+			`Could not read private reuse view at ${url}: HTTP ${String(status)}. Supply the tenant read credential with --view-read-user and --view-read-password, or use an OIDC read session with view:content-read authority.`
+		);
+		this.name = 'PrivateViewReadRefusedError';
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
 	}
 }

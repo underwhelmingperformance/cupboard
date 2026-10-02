@@ -27,10 +27,17 @@ inputs:
       installed. When it is set, the action does not install a release.
     required: false
   read-session-target:
-    description: Internal setup output for OIDC read access.
+    description:
+      Pass the read-session-target output from actions/setup for private OIDC
+      reads.
+    required: false
+  read-session-caches:
+    description:
+      Pass the read-session-caches output from actions/setup, a JSON array of
+      additional cache URLs.
     required: false
   read-session-view:
-    description: Internal setup output for an additional reuse view.
+    description: Pass the read-session-view output from actions/setup.
     required: false
   cupboard-version:
     description:
@@ -251,6 +258,8 @@ runs:
         PATHS_FILE: ${{ inputs.paths-file }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_AUDIENCE: ${{ inputs.audience }}
+        READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
         INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}

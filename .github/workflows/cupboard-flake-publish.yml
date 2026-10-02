@@ -5,6 +5,11 @@ name: cupboard flake publish
 on:
   workflow_call:
     inputs:
+      audience:
+        description:
+          Audience of the GitHub OIDC token. Defaults to the tenant URL.
+        required: false
+        type: string
       url:
         description: Tenant URL to publish to.
         required: true
@@ -665,6 +670,7 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
+          audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           provision-cache: ${{ needs.configure.outputs.provision-cache }}
@@ -691,6 +697,9 @@ jobs:
           PUBLISH: ${{ needs.configure.outputs.publish }}
           CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
           READ_SESSION_TARGET: ${{ steps.setup.outputs.read-session-target }}
+          READ_SESSION_AUDIENCE:
+            ${{ steps.setup.outputs.read-session-audience }}
+          READ_SESSION_CACHES: ${{ steps.setup.outputs.read-session-caches }}
           READ_SESSION_VIEW: ${{ steps.setup.outputs.read-session-view }}
         run: |
           set -euo pipefail
@@ -700,6 +709,13 @@ jobs:
           fi
           if [[ -n "${READ_SESSION_TARGET}" ]]; then
             wrapper=("${CUPBOARD_PATH}" run "${READ_SESSION_TARGET}" --github-oidc)
+            if [[ -n "${READ_SESSION_AUDIENCE}" ]]; then
+              wrapper+=(--audience "${READ_SESSION_AUDIENCE}")
+            fi
+            cache_lines=$(node -e 'for (const url of JSON.parse(process.env.READ_SESSION_CACHES || "[]")) console.log(url)')
+            while IFS= read -r cache_url; do
+              if [[ -n "$cache_url" ]]; then wrapper+=(--read-cache "$cache_url"); fi
+            done <<< "$cache_lines"
             if [[ -n "${READ_SESSION_VIEW}" ]]; then
               wrapper+=(--reuse-view "${READ_SESSION_VIEW}")
             fi
@@ -717,6 +733,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ needs.configure.outputs.cache }}
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
@@ -819,6 +837,7 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
+          audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           cache-access-mode:
@@ -848,6 +867,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ needs.configure.outputs.cache }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
@@ -891,6 +912,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           read-user:
             ${{ secrets.destination_read_user || secrets.read_user ||
             secrets.fallback_read_user }}
@@ -908,6 +931,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ needs.configure.outputs.cache }}
           read-user:
             ${{ secrets.destination_read_user || secrets.read_user ||
@@ -930,6 +955,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
           read-user:
@@ -1012,13 +1039,16 @@ jobs:
         with:
           cupboard: ${{ needs.configure.outputs.cupboard }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
+          audience: ${{ inputs.audience }}
 
       - name: Remove the cache
         env:
+          AUDIENCE: ${{ steps.setup.outputs.read-session-audience }}
           CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
           URL: ${{ inputs.url }}
           CACHE: ${{ needs.configure.outputs.remove-cache }}
         run: |
           set -euo pipefail
-          "${CUPBOARD_PATH}" cache remove "${URL}" "${CACHE}" \
-            --github-oidc --force --yes
+          args=(cache remove "$URL" "$CACHE" --github-oidc --force --yes)
+          if [[ -n "$AUDIENCE" ]]; then args+=(--audience "$AUDIENCE"); fi
+          "${CUPBOARD_PATH}" "${args[@]}"

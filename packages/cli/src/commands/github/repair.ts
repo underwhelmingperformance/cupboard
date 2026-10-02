@@ -352,11 +352,12 @@ function bodyForCase(
 	reference: string
 ): OidcTrustAddBodyInput {
 	const isPreset = isPresetJob(job);
+	const audience = audienceSchema.parse(publication.claims.aud);
 
 	if (publication.requests.length === 0) {
 		return buildAddBody({
 			issuer: githubActionsIssuer,
-			audience: audienceSchema.parse(url),
+			audience,
 			claims: {
 				repository_id: String(result.identity.repositoryId),
 				repository_owner_id: String(result.identity.repositoryOwnerId),
@@ -371,6 +372,7 @@ function bodyForCase(
 	if (isPreset && publication.trigger === 'pull_request') {
 		return githubPrAddBody(url, result.identity, {
 			repo: result.identity.fullName,
+			audience,
 			jobWorkflowRef: reference,
 			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none'
 		});
@@ -386,6 +388,7 @@ function bodyForCase(
 
 		return githubBranchAddBody(url, result.identity, {
 			repo: result.identity.fullName,
+			audience,
 			branch: publication.ref.name,
 			jobWorkflowRef: reference,
 			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none',
@@ -399,7 +402,7 @@ function bodyForCase(
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
-		audience: audienceSchema.parse(url),
+		audience,
 		claims: {
 			repository_id: String(result.identity.repositoryId),
 			repository_owner_id: String(result.identity.repositoryOwnerId),
@@ -429,7 +432,11 @@ function mergeBodies(
 	const merged = new Map<string, OidcTrustAddBodyInput>();
 
 	for (const body of bodies) {
-		const key = JSON.stringify(body.claims);
+		const key = JSON.stringify({
+			issuer: body.issuer,
+			audience: body.audience,
+			claims: body.claims
+		});
 		const previous = merged.get(key);
 
 		if (previous === undefined) {

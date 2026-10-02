@@ -7,6 +7,11 @@ name: cupboard publish
 on:
   workflow_call:
     inputs:
+      audience:
+        description:
+          Audience of the GitHub OIDC token. Defaults to the tenant URL.
+        required: false
+        type: string
       url:
         description: Tenant URL or cache URL to publish to.
         required: true
@@ -203,6 +208,7 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
+          audience: ${{ inputs.audience }}
           cache: ${{ inputs.cache }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
@@ -220,6 +226,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
 
       # A retention root holds one set of paths, and each push replaces that
       # set completely, so builds for different systems must retain under
@@ -250,6 +258,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
 
       - name: Attest built paths
         id: attest
@@ -263,6 +273,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
 
       - uses: $/actions/attest-attach
         if: ${{ inputs.attest && steps.attest.outputs.bundles-file != '' }}
@@ -271,6 +283,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ inputs.cache }}
           receipt-file: ${{ steps.push.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
@@ -287,5 +301,7 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           receipt-file: ${{ steps.push.outputs.receipt-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
