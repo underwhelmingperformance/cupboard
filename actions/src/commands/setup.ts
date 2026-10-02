@@ -299,7 +299,7 @@ export function registerSetupCommand(
 		.option('--cache-access-mode <mode>', 'Cache access: public or private.')
 		.option(
 			'--provision-cache-access <mode>',
-			'Deprecated alias for --cache-access-mode.'
+			'Deprecated alias for --cache-access-mode, applied only with --provision-cache.'
 		)
 		.option(
 			'--provision-cache-ttl <duration>',
@@ -598,6 +598,12 @@ export async function setupAction(
 	dependencies.signal?.throwIfAborted();
 
 	const inputs = resolveSetupInputs(options, environment);
+
+	if (provided(options.provisionCacheAccess) !== undefined) {
+		reporter.warn(
+			'provision-cache-access is deprecated and only applies with provision-cache. Use cache-access-mode to require access for an existing cache.'
+		);
+	}
 
 	maskCacheCredentials(
 		inputs,

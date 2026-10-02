@@ -2727,6 +2727,58 @@ describe('destination read credentials', () => {
 });
 
 describe('setupAction cache provisioning', () => {
+	it.each([
+		{ alias: undefined, provisioning: false, modern: 'public', warned: false },
+		{ alias: '', provisioning: false, modern: undefined, warned: false },
+		{ alias: 'public', provisioning: false, modern: undefined, warned: true },
+		{ alias: 'public', provisioning: true, modern: undefined, warned: true },
+		{ alias: 'public', provisioning: true, modern: 'public', warned: true }
+	])('warns for the provisioning alias: %j', async (selection) => {
+		const warnings: string[] = [];
+		const stream = vi
+			.spyOn(process.stderr, 'write')
+			.mockImplementation((value) => {
+				warnings.push(String(value));
+				return true;
+			});
+
+		try {
+			const result = await runSetup({
+				provisionCacheAccess: selection.alias,
+				cacheAccessMode: selection.modern,
+				existingAccess: 'public',
+				...(selection.provisioning && { provisionCache: 'pr-1' })
+			});
+
+			expect({ result, warnings }).toStrictEqual({
+				result: {
+					invocations: selection.provisioning
+						? [
+								[
+									'cache',
+									'create',
+									'https://cache.example.test/t/acme',
+									'pr-1',
+									'--github-oidc',
+									'--if-absent',
+									'--access',
+									'public'
+								]
+							]
+						: [],
+					wroteNixConfigFirst: selection.provisioning ? [false] : []
+				},
+				warnings: selection.warned
+					? [
+							'::warning::provision-cache-access is deprecated and only applies with provision-cache. Use cache-access-mode to require access for an existing cache.\n'
+						]
+					: []
+			});
+		} finally {
+			stream.mockRestore();
+		}
+	});
+
 	it.each(['destination-read', 'cache-credentials'] as const)(
 		'uses %s ahead of a distinct tenant credential during provisioning',
 		async (kind) => {
@@ -2854,14 +2906,21 @@ describe('setupAction cache provisioning', () => {
 		}
 	);
 
-	it('validates an explicit access mode for an existing cache without provisioning', async () => {
-		await expect(
-			runSetup({
-				cacheAccessMode: 'private',
-				existingAccess: 'public'
-			})
-		).rejects.toThrow('has public access; private access is required');
-	});
+	it.each([
+		{ cacheAccessMode: 'private', existingAccess: 'public' },
+		{ cacheAccessMode: 'public', existingAccess: 'private' }
+	] as const)(
+		'checks required $cacheAccessMode access for an existing $existingAccess cache without provisioning',
+		async (selection) => {
+			const provision = vi.fn();
+			await expect(
+				runSetup({ ...selection, onProvision: provision })
+			).rejects.toThrow(
+				`Cache at https://cache.example.test/t/acme/cache/pr-1 has ${selection.existingAccess} access; ${selection.cacheAccessMode} access is required.`
+			);
+			expect(provision.mock.calls).toStrictEqual([]);
+		}
+	);
 	it('keeps the deprecated provisioning alias scoped to provisioning', async () => {
 		expect(
 			await runSetup({
