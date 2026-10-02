@@ -207,6 +207,17 @@ describe('session listing and removal', () => {
 	const hostSession = { accessToken: jwt({ iss: host, aud: 'control' }) };
 
 	testWithConfigHome(
+		'keeps read failures fatal when partial enumeration is not requested',
+		async ({ configHome }) => {
+			await writeCachedSession(tenantSession, tenantTarget);
+			await mkdir(path.join(tokensDirectory(configHome), '0'.repeat(64)));
+			await expect(listCachedSessions()).rejects.toMatchObject({
+				code: 'EISDIR'
+			});
+		}
+	);
+
+	testWithConfigHome(
 		'lists every cached session, ignoring files that are not sessions',
 		async ({ configHome }) => {
 			await writeCachedSession(tenantSession, tenantTarget);

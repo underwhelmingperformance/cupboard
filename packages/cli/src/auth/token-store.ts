@@ -134,16 +134,37 @@ async function sessionFiles(): Promise<readonly string[]> {
 		.map((name) => path.join(tokensDirectory(), name));
 }
 
+export interface SessionReadFailure {
+	readonly file: string;
+	readonly cause: unknown;
+}
+
 /**
  * Every cached session that parses, whatever its target. The target is not
  * recoverable from the file name, so callers read it from the access token.
+ * With `onReadFailure`, enumeration continues after reporting each unreadable
+ * file to the caller. Without it, read failures propagate.
  */
-export async function listCachedSessions(): Promise<readonly CachedSession[]> {
+export async function listCachedSessions(
+	onReadFailure?: (failure: SessionReadFailure) => void
+): Promise<readonly CachedSession[]> {
 	const sessions: CachedSession[] = [];
 	const files = await sessionFiles();
 
 	for (const file of files) {
-		const contents = await readSecretFile(file);
+		let contents: string | undefined;
+
+		try {
+			contents = await readSecretFile(file);
+		} catch (error) {
+			if (onReadFailure === undefined) {
+				throw error;
+			}
+
+			onReadFailure({ file, cause: error });
+			continue;
+		}
+
 		const session = contents === undefined ? undefined : parseSession(contents);
 
 		if (session !== undefined) {

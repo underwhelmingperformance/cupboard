@@ -183,11 +183,19 @@ job's OIDC token, when Fulcio refuses to issue a certificate, or when the signed
 bundle fails the action's own check.
 
 If attachment fails, retained bundle files can be passed to
-`actions/attest-attach` again. A rerun that reuses an output does not recreate
-build provenance for the earlier attempt. Set `build: rebuild` when the new run
-must execute each requested builder again and produce fresh build evidence. Nix
-may still substitute dependencies, and delegated builders or selected remote
-stores do not produce runner-local SLSA provenance.
+`actions/attest-attach` again. For a manual retry, `cupboard attest attach`
+accepts `--bundle` for each bundle file or `--bundles-file` for the manifest
+produced by `actions/attest`. The existing `--attestation` and
+`--attestations-file` options are equivalent. `cupboard push` also accepts
+`--bundle` and `--attestation`. Repeated bundle options append files in argument
+order. The manifest options accept one path; supplying different paths fails
+with usage status 2 before authentication.
+
+A rerun that reuses an output does not recreate build provenance for the earlier
+attempt. Set `build: rebuild` when the new run must execute each requested
+builder again and produce fresh build evidence. Nix may still substitute
+dependencies, and delegated builders or selected remote stores do not produce
+runner-local SLSA provenance.
 
 ## Attestations of reused paths
 

@@ -132,7 +132,7 @@ Commands:
   usage <url>                                     Show how much storage the tenant is charged for, across all its caches.
   delete [options] <url> <arguments...>           Delete one store path from a cache immediately, even if a root keeps it.
   root                                            Manage retention roots, which keep named sets of store paths in a cache.
-  confirm [options] <url> <arguments...>          Check that store paths are already in a cache and refresh their grace period, without uploading anything.
+  confirm [options] <url> [arguments...]          Check that store paths are already in a cache and refresh their grace period, without uploading anything.
   key                                             Manage and rotate the keys that sign the tenant's narinfos.
   auth-key                                        Manage and rotate the keys that sign the tenant's access tokens.
   control-key                                     Manage and rotate the keys that sign operator tokens (operator only).
@@ -410,27 +410,18 @@ Attach Sigstore attestation bundles to store paths that are already published to
 the cache.
 
 Arguments:
-  url                         tenant URL (e.g.
-                              https://cupboard.example.workers.dev/t/<slug>)
-  paths                       published store paths to attach the bundles to
+  url                                         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+  paths                                       published store paths to attach the bundles to
 
 Options:
-  --paths-file <path>         read additional published store paths from this
-                              file, one per line
-  --github-oidc               sign in with the job's GitHub Actions OIDC token
-                              instead of your saved `cupboard login` session
-  --audience <audience>       OIDC audience to request with --github-oidc
-                              (default: the tenant URL)
-  --read-user <user>          user name of the read credential for a private
-                              cache (default: $CUPBOARD_READ_USER)
-  --read-password <password>  password of the read credential for a private
-                              cache (default: $CUPBOARD_READ_PASSWORD)
-  --attestation <bundle>      a Sigstore bundle file to attach (repeatable).
-                              Every in-toto subject in the bundle must match one
-                              of the given store paths. (default: [])
-  --attestations-file <path>  read additional Sigstore bundle paths from this
-                              file, one per line
-  -h, --help                  display help for command
+  --paths-file <path>                         read additional published store paths from this file, one per line
+  --github-oidc                               sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session
+  --audience <audience>                       OIDC audience to request with --github-oidc (default: the tenant URL)
+  --read-user <user>                          user name of the read credential for a private cache (default: $CUPBOARD_READ_USER)
+  --read-password <password>                  password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)
+  --bundle, --attestation <bundle>            a Sigstore bundle file to attach (repeatable; both option names are equivalent). Every in-toto subject in the bundle must match one of the given store paths. (default: [])
+  --bundles-file, --attestations-file <path>  read additional Sigstore bundle paths from this file, one per line (one manifest; both option names are equivalent)
+  -h, --help                                  display help for command
 
 Examples:
   # Attach a provenance bundle signed after the paths were published
@@ -575,9 +566,10 @@ Options:
                                     build claims
   --copied-from-file <path>         JSON file, written by the build, that lists
                                     the stores each path was copied from
-  --attestation <bundle>            a Sigstore bundle file to attach to the
-                                    pushed paths that it covers (repeatable)
-                                    (default: [])
+  --bundle, --attestation <bundle>  a Sigstore bundle file to attach to the
+                                    pushed paths that it covers (repeatable;
+                                    both option names are equivalent) (default:
+                                    [])
   --no-attest                       do not attach any attestations
   --no-wait                         return once the cache has accepted the paths
                                     and set the roots or pins, without waiting
@@ -991,7 +983,7 @@ Options:
 ### cupboard confirm
 
 ```text
-Usage: cupboard confirm [options] <url> <arguments...>
+Usage: cupboard confirm [options] <url> [arguments...]
 
 Check that store paths are already in a cache and refresh their grace period,
 without uploading anything.
@@ -1002,6 +994,8 @@ Arguments:
   arguments              an optional cache name, then the store paths to check
 
 Options:
+  --paths-file <path>    read additional store paths from this file, one per
+                         line
   --github-oidc          sign in with the job's GitHub Actions OIDC token
                          instead of your saved `cupboard login` session
   --audience <audience>  OIDC audience to request with --github-oidc (default:
