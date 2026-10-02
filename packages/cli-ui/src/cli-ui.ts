@@ -32,6 +32,7 @@ import {
 	formatDuration,
 	type Reporter,
 	type ReporterMode,
+	type ReporterOptions,
 	type ResultRow
 } from '@cupboard/reporter';
 import { errorCauses } from '@cupboard/shared/errors';
@@ -263,6 +264,10 @@ export interface CliUi {
 export interface CliUiOptions {
 	readonly mode: ReporterMode;
 	/**
+	 * Formats GitHub error annotations without changing the thrown error.
+	 */
+	readonly formatError?: ReporterOptions['formatError'];
+	/**
 	 * Whether to emit ANSI colour (the `--colour`/`--no-colour` flag). Defaults to
 	 * picocolors' own detection over `NO_COLOR`, `FORCE_COLOR` and the TTY.
 	 */
@@ -314,6 +319,7 @@ function reporterFor(
 
 	if (mode === 'github') {
 		return createGithubReporter({
+			formatError: options.formatError,
 			stream: options.stream,
 			out: options.out,
 			resultFile: options.resultFile

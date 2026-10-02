@@ -17,12 +17,13 @@ import {
 	type ReporterMode,
 	wasErrorReported
 } from '@cupboard/reporter';
-import { usageExitCode } from '@cupboard/shared/errors';
+import { formatErrorWithCauses, usageExitCode } from '@cupboard/shared/errors';
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import pc from 'picocolors';
 import { z } from 'zod';
 
 import { isAbortError } from './abort.ts';
+import { translateRpcError } from './client/rpc-errors.ts';
 import { registerAttestCommands } from './commands/attest.ts';
 import { registerAuthKeyCommands } from './commands/auth-key.ts';
 import { registerBuildPushCommand } from './commands/build-push.ts';
@@ -218,6 +219,8 @@ export function commandUi(
 	extra: { readonly assumeYes?: boolean } = {}
 ): CliUi {
 	return createCliUi({
+		formatError: (error) =>
+			formatErrorWithCauses(translateRpcError(error, { keepAuthCause: true })),
 		mode: reporterModeFromGlobals(program),
 		colour: colourFromGlobals(program),
 		resultFile: resultFileFromGlobals(program),
