@@ -39,6 +39,7 @@ interface ReleaseSummary {
 	readonly draft: boolean;
 	readonly uploadUrl: string;
 	readonly htmlUrl: string;
+	readonly body: string;
 	readonly assets: readonly AssetSummary[];
 }
 
@@ -65,11 +66,13 @@ interface CreateDraftBody {
 interface UpdateDraftBody {
 	readonly target_commitish: string;
 	readonly name: string;
+	readonly body: string;
 	readonly draft: true;
 }
 
 interface CreateDraftOptions {
 	readonly version: string;
+	readonly repository: Repository;
 	readonly commitish: string;
 	readonly name: string;
 	readonly body: string;
@@ -78,6 +81,9 @@ interface CreateDraftOptions {
 interface UpdateDraftOptions {
 	readonly commitish: string;
 	readonly name: string;
+	readonly version: string;
+	readonly repository: Repository;
+	readonly body: string;
 }
 
 interface Repository {
@@ -198,7 +204,7 @@ export function createDraftBody(options: CreateDraftOptions): CreateDraftBody {
 		tag_name: options.version,
 		target_commitish: options.commitish,
 		name: options.name,
-		body: options.body,
+		body: withUpgradeNotes(options),
 		draft: true,
 		generate_release_notes: true
 	};
@@ -259,8 +265,31 @@ export function updateDraftBody(options: UpdateDraftOptions): UpdateDraftBody {
 	return {
 		target_commitish: options.commitish,
 		name: options.name,
+		body: withUpgradeNotes(options),
 		draft: true
 	};
+}
+
+function withUpgradeNotes(options: {
+	readonly body: string;
+	readonly version: string;
+	readonly repository: Repository;
+}): string {
+	const { owner, repo } = options.repository;
+	const url = `https://github.com/${owner}/${repo}/blob/${options.version}/docs/operator/upgrade-notes.md`;
+
+	if (options.body.includes(url)) {
+		return options.body;
+	}
+
+	const reference = `cupboard-upgrade-notes-${options.version}`;
+	const separator = options.body === '' ? '' : '\n\n';
+
+	return (
+		`${options.body}${separator}` +
+		`Before upgrading an existing deployment, read the [${options.version} upgrade notes][${reference}].\n\n` +
+		`[${reference}]: ${url}`
+	);
 }
 
 export function assetContentType(assetName: string): string {
@@ -394,6 +423,7 @@ async function upsertDraft(
 			...inputs.repository,
 			...createDraftBody({
 				version: inputs.version,
+				repository: inputs.repository,
 				commitish: inputs.commitish,
 				name: inputs.name,
 				body
@@ -407,7 +437,13 @@ async function upsertDraft(
 	const { data } = await octokit.rest.repos.updateRelease({
 		...inputs.repository,
 		release_id: existing.id,
-		...updateDraftBody({ commitish: inputs.commitish, name: inputs.name })
+		...updateDraftBody({
+			commitish: inputs.commitish,
+			name: inputs.name,
+			version: inputs.version,
+			repository: inputs.repository,
+			body: existing.body
+		})
 	});
 
 	return toReleaseSummary(data);
@@ -449,6 +485,7 @@ function toReleaseSummary(release: {
 	readonly draft: boolean;
 	readonly upload_url: string;
 	readonly html_url: string;
+	readonly body?: string | null;
 	readonly assets: readonly { readonly id: number; readonly name: string }[];
 }): ReleaseSummary {
 	return {
@@ -457,6 +494,7 @@ function toReleaseSummary(release: {
 		draft: release.draft,
 		uploadUrl: release.upload_url,
 		htmlUrl: release.html_url,
+		body: release.body ?? '',
 		assets: release.assets.map((asset) => ({ id: asset.id, name: asset.name }))
 	};
 }
