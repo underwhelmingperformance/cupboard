@@ -109,6 +109,11 @@ The sysexits names come from [`sysexits(3)`][sysexits]. Some commands give a
 status a more specific meaning, which their `--help` describes.
 `cupboard root ensure` exits with status 0 whether or not it changed the root.
 
+When a later `confirm` batch fails, the CLI reports completed batches and keeps
+the failure's status. `github setup` also reports the applied configuration
+before a trust-rule removal failure. If several removals fail, authority
+refusals have priority over temporary failures, followed by other failures.
+
 OAuth token endpoints also use HTTP 400 for refused authority. The CLI uses exit
 77 for rejected identities, expired refresh tokens and refused grants. Malformed
 token requests or grant details use exit 2. Temporary HTTP failures retain exit

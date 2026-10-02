@@ -53,6 +53,14 @@ const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 export abstract class CliError extends CodedError {}
 
+abstract class CliCausedError extends CliError {
+	override get exitCode(): number {
+		return this.cause instanceof CodedError
+			? this.cause.exitCode
+			: genericExitCode;
+	}
+}
+
 /**
 A misuse of the CLI: a bad flag value or an unsupported combination.
 */
@@ -1107,7 +1115,7 @@ export class PathsNotConfirmedError extends CliError {
  * the retention deadlines of its paths on the server. The counts show how many
  * batches completed.
  */
-export class ConfirmIncompleteError extends CliError {
+export class ConfirmIncompleteError extends CliCausedError {
 	constructor(
 		public readonly confirmedBatches: number,
 		public readonly totalBatches: number,
@@ -1682,7 +1690,7 @@ export class GithubCheckOptionError extends CliUsageError {
  * applied. The result report names each rule that stayed behind; the non-zero
  * exit tells scripts the cleanup is incomplete.
  */
-export class GithubSetupRemovalError extends CliError {
+export class GithubSetupRemovalError extends CliCausedError {
 	constructor(
 		public readonly ruleIds: readonly string[],
 		options: { readonly cause: unknown }
