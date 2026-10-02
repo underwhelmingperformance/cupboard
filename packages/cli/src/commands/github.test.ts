@@ -60,7 +60,10 @@ import {
 import { type DiscoveredGithubCheckResult } from './github/discovered-check.ts';
 import { RepositoryTrustRuleMissingFinding } from './github/trust-selection.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
-import { type RepositoryIdentity } from './oidc-trust/github.ts';
+import {
+	InvalidRepositoryError,
+	type RepositoryIdentity
+} from './oidc-trust/github.ts';
 
 const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
 const alice = readUserInputSchema.parse('alice');
@@ -1765,6 +1768,51 @@ describe('runGithubSetup', () => {
 });
 
 describe('registerGithubCommands', () => {
+	it.each(['setup', 'check'])(
+		'validates repository syntax before the %s handler',
+		async (commandName) => {
+			const program = new Command();
+			registerGithubCommands(program);
+			const command = program.commands
+				.find((entry) => entry.name() === 'github')
+				?.commands.find((entry) => entry.name() === commandName);
+			if (command === undefined) {
+				throw new Error(`Missing github ${commandName} command`);
+			}
+			const handlers: string[] = [];
+			command.action(() => {
+				handlers.push(commandName);
+			});
+			let result: { exitCode: number; message: string } | undefined;
+			try {
+				await program.parseAsync(
+					[
+						'github',
+						commandName,
+						url.href,
+						'--repo',
+						'owner/repo/extra',
+						'--workflow-ref',
+						`acme/app/.github/workflows/publish.yml@${'a'.repeat(40)}`
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				if (!(error instanceof InvalidRepositoryError)) {
+					throw error;
+				}
+				result = { exitCode: error.exitCode, message: error.message };
+			}
+			expect({ handlers, result }).toStrictEqual({
+				handlers: [],
+				result: {
+					exitCode: 2,
+					message: "--repo must be <owner>/<name>, got 'owner/repo/extra'."
+				}
+			});
+		}
+	);
+
 	it('offers generic conflict confirmation without a retirement flag', () => {
 		const program = new Command();
 		registerGithubCommands(program);

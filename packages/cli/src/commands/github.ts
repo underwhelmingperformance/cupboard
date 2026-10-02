@@ -73,6 +73,7 @@ import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import {
 	lookupRepository,
+	parseRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
@@ -1152,7 +1153,8 @@ export function registerGithubCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
 			'--repo <owner/name>',
-			'the GitHub repository that will publish'
+			'the GitHub repository that will publish',
+			parseRepository
 		)
 		.option(
 			'--branch <name>',
@@ -1218,7 +1220,11 @@ export function registerGithubCommands(
 			"Check that the tenant will accept the publishing jobs in a GitHub repository's workflow files, and offer to repair the tenant's settings."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.requiredOption('--repo <owner/name>', 'the GitHub repository to check')
+		.requiredOption(
+			'--repo <owner/name>',
+			'the GitHub repository to check',
+			parseRepository
+		)
 		.option(
 			'--branch <name>',
 			"branch to read the workflow files from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main)."
