@@ -10,7 +10,8 @@ import {
 	GithubPermissionError,
 	GithubRateLimitError,
 	isGithubRateLimitResponse,
-	type LookupRepositoryOptions
+	type LookupRepositoryOptions,
+	throwIfGithubTemporaryError
 } from '../oidc-trust/github.ts';
 
 import { type ExactWorkflowReference } from './convention.ts';
@@ -80,6 +81,10 @@ export async function verifyWorkflowReference(
 			);
 		}
 
+		throwIfGithubTemporaryError(
+			error,
+			`workflow reference '${parsed.reference}'`
+		);
 		throw error;
 	}
 }

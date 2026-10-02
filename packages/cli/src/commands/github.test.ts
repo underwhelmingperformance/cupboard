@@ -31,7 +31,7 @@ import type { ResultRow } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -2141,6 +2141,21 @@ it('does not classify an HTML login response as a public cache', async () => {
 });
 
 describe('cacheInfoFetcher', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
+			const controller = new AbortController();
+			setTimeout(() => {
+				controller.abort(new DOMException('Timed out', 'TimeoutError'));
+			}, milliseconds);
+			return controller.signal;
+		});
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+	});
+
 	const info = new CacheInfo(
 		servedStoreDirectory,
 		true,
@@ -2270,15 +2285,17 @@ describe('cacheInfoFetcher', () => {
 						Promise.resolve(
 							new Response(undefined, {
 								status,
-								headers: { 'retry-after': '0.001' }
+								headers: { 'retry-after': '1' }
 							})
 						)
 				}
 			);
 
-			await expect(
+			const rejection = expect(
 				fetch(new URL('https://cupboard.example/t/acme'))
 			).rejects.toBeInstanceOf(error);
+			await vi.advanceTimersByTimeAsync(5000);
+			await rejection;
 		}
 	);
 
@@ -2300,7 +2317,7 @@ describe('cacheInfoFetcher', () => {
 						attempts === 1
 							? new Response(undefined, {
 									status: StatusCodes.SERVICE_UNAVAILABLE,
-									headers: { 'retry-after': '0.001' }
+									headers: { 'retry-after': '1' }
 								})
 							: new Response(info)
 					);
@@ -2308,7 +2325,11 @@ describe('cacheInfoFetcher', () => {
 			}
 		);
 
-		const fetched = await fetch(new URL('https://cupboard.example/t/acme'));
+		const pending = fetch(new URL('https://cupboard.example/t/acme'));
+		await vi.advanceTimersByTimeAsync(999);
+		expect(attempts).toBe(1);
+		await vi.advanceTimersByTimeAsync(1);
+		const fetched = await pending;
 
 		expect({ attempts, priority: fetched.priority }).toStrictEqual({
 			attempts: 2,
@@ -2330,13 +2351,15 @@ describe('cacheInfoFetcher', () => {
 							{ once: true }
 						);
 					}),
-				timeoutMs: 1
+				timeoutMs: 1000
 			}
 		);
 
-		await expect(
+		const rejection = expect(
 			fetch(new URL('https://cupboard.example/t/acme'))
 		).rejects.toBeInstanceOf(CacheInfoTimeoutError);
+		await vi.advanceTimersByTimeAsync(1000);
+		await rejection;
 	});
 
 	it('translates a stalled cache-info body into a timeout', async () => {
@@ -2366,13 +2389,15 @@ describe('cacheInfoFetcher', () => {
 
 					return Promise.resolve(new Response(body));
 				},
-				timeoutMs: 1
+				timeoutMs: 1000
 			}
 		);
 
-		await expect(
+		const rejection = expect(
 			fetch(new URL('https://cupboard.example/t/acme'))
 		).rejects.toBeInstanceOf(CacheInfoTimeoutError);
+		await vi.advanceTimersByTimeAsync(1000);
+		await rejection;
 		expect(signals.map(({ aborted }) => aborted)).toStrictEqual([true]);
 	});
 
