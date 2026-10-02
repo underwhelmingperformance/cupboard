@@ -71,6 +71,10 @@
 		"VersionedR2ObjectRollbackGuard": {
 			"type": "durable-object",
 			"storage": "sqlite"
+		},
+		"PathReadAuthorityRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
 		}
 	},
 	"limits": {

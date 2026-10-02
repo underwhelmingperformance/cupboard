@@ -217,10 +217,12 @@ the tenant, it can inherit attestations for the same store path and NAR:
 Bundles in another private cache stay in that cache, even if the destination
 later becomes public. Inheritance runs after publication. While a destination
 publication or inheritance is pending, cupboard keeps eligible source
-attestation references so the destination can inherit them. If the source bundle
-was already unavailable when publication began, the destination cannot inherit
-it. A transient failure leaves inheritance queued for another attempt. A quota
-refusal removes the pending item.
+attestation references so the destination can inherit them. An explicit path
+deletion revokes reads from the source immediately. Only destination work that
+was eligible when deletion began can inherit those protected references. If the
+source bundle was already unavailable when publication began, the destination
+cannot inherit it. A transient failure leaves inheritance queued for another
+attempt. A quota refusal removes the pending item.
 
 The destination creates its own CAS reference and attestation list for the
 committed path. Both refer to the original bundle bytes and signature. The

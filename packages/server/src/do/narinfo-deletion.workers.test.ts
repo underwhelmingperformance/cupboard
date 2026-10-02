@@ -5,11 +5,14 @@ import {
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
+	predicateTypeSchema,
+	sha256HexDigestSchema,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
@@ -17,6 +20,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -25,7 +29,7 @@ import {
 	narInfos,
 	pendingUploads
 } from '../db/schema.ts';
-import { SubrequestTimeoutError } from '../errors.ts';
+import { ServerHttpError, SubrequestTimeoutError } from '../errors.ts';
 import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -45,6 +49,7 @@ import {
 	negotiateUploads,
 	putNarBytes,
 	putTestCache,
+	recordTransition,
 	resetTestServer,
 	resolvedCache,
 	singleDecision,
@@ -64,12 +69,20 @@ import { chunk } from './bulk.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import { ServerContext } from './context.ts';
 import {
+	deferredDeletionCondition,
 	DeletionQueueService,
 	maxFencedRetireRows,
 	type TornDownNarInfo
 } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
+import { jsonRowList } from './json-list.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { OffboardingService } from './offboarding-service.ts';
+import {
+	PathReadAuthorityService,
+	reclaimPathReadFence
+} from './path-read-authority-service.ts';
+import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
 import { gcContinuationKey, maintenancePassCursorKey } from './server.ts';
 
 const selectDeletions =
@@ -124,8 +137,8 @@ async function seedQueuedDeletions(
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 		const cache = resolvedCache(instance.context);
 
-		// Each row binds five parameters; sixteen rows stay below maxBoundParameters.
-		for (const batch of chunk(entries, 16)) {
+		// Each row binds seven parameters; fourteen rows stay below maxBoundParameters.
+		for (const batch of chunk(entries, 14)) {
 			database
 				.insert(narInfoDeletions)
 				.values(
@@ -152,6 +165,18 @@ async function runMaintenanceAlarms(count: number): Promise<void> {
 	}
 }
 
+function deletionSnapshots(context: ServerContext) {
+	return context.db
+		.select()
+		.from(narInfoDeletions)
+		.all()
+		.map((row) => ({
+			...row,
+			protectionCutoff: row.protectionCutoff ?? undefined,
+			protectionCapturedAt: row.protectionCapturedAt ?? undefined
+		}));
+}
+
 function expectedQueueRows(entries: readonly TornDownNarInfo[]): {
 	cache: CacheScope;
 	storePathHash: StorePathHash;
@@ -172,6 +197,139 @@ function expectedQueueRows(entries: readonly TornDownNarInfo[]): {
 
 describe('narinfo deletion queue', () => {
 	beforeEach(resetTestServer);
+
+	it.each([
+		{ stage: 'only the tenant Worker uploaded', contractedAt: undefined },
+		{ stage: 'both Workers uploaded before contract', contractedAt: undefined },
+		{
+			stage: 'contract started but not completed',
+			contractedAt: isoTimestamp(testBase)
+		}
+	])(
+		'refuses explicit deletion before authority activation when $stage',
+		async ({ contractedAt }) => {
+			const token = await initialise();
+			const nar = await verifiableNar('authority-activation');
+			const metadata = uploadMetadata({
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			await commitPath(token, metadata, nar);
+			await recordTransition('blob-reference-read-authority', 'expanded');
+			if (contractedAt !== undefined) {
+				await drizzleD1(env.CUPBOARD_DB)
+					.update(d1Schema.deploymentTransition)
+					.set({ contractedAt })
+					.where(
+						eq(
+							d1Schema.deploymentTransition.id,
+							'blob-reference-read-authority'
+						)
+					);
+			}
+			const objectBefore = await env.BLOBS.head(
+				objectKey(metadata.storePathHash)
+			);
+			const before = {
+				edges: await blobReferenceRows(),
+				queue: await narInfoDeletionRows(),
+				object: objectBefore?.etag
+			};
+			const failure = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					try {
+						await buildDeletionQueue(instance.context).deleteStorePath(
+							defaultCache(),
+							metadata.storePathHash,
+							internalOrigin
+						);
+					} catch (error) {
+						return error instanceof ServerHttpError
+							? {
+									name: error.name,
+									status: error.status,
+									retryAfterSeconds: error.retryAfterSeconds
+								}
+							: error;
+					}
+				}
+			);
+
+			const objectAfter = await env.BLOBS.head(
+				objectKey(metadata.storePathHash)
+			);
+			expect({
+				failure,
+				after: {
+					edges: await blobReferenceRows(),
+					queue: await narInfoDeletionRows(),
+					object: objectAfter?.etag
+				}
+			}).toStrictEqual({
+				failure: {
+					name: 'PathReadAuthorityMigrationPendingError',
+					status: 503,
+					retryAfterSeconds: 1
+				},
+				after: before
+			});
+		}
+	);
+
+	it.each(['reserve', 'remove', 'offboard'] as const)(
+		'refuses %s before reference storage contraction without changing shared facts',
+		async (operation) => {
+			await initialise();
+			await recordTransition('blob-reference-read-authority', 'expanded');
+			const before = await blobReferenceRows();
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const context = new ServerContext(state, instance.context.env);
+					const service = new AttestationCasService(context);
+					const reference = {
+						cache: defaultCache(),
+						storePathHash: syntheticStorePathHash(91),
+						generation: narInfoGenerationSchema.parse(1),
+						predicateType: predicateTypeSchema.parse(
+							'https://example.com/predicate'
+						),
+						digest: sha256HexDigestSchema.parse('0'.repeat(64))
+					};
+					try {
+						if (operation === 'reserve') {
+							await service.reserveReferenceAndCharge(reference, 1);
+						} else if (operation === 'remove') {
+							await service.removeCapturedReference(reference);
+						} else {
+							await new OffboardingService(context).drain(100);
+						}
+					} catch (error) {
+						return error instanceof ServerHttpError
+							? {
+									name: error.name,
+									status: error.status,
+									retryAfterSeconds: error.retryAfterSeconds,
+									offboarding: context.offboarding
+								}
+							: error;
+					}
+				}
+			);
+			expect({ result, after: await blobReferenceRows() }).toStrictEqual({
+				result: {
+					name: 'PathReadAuthorityMigrationPendingError',
+					status: 503,
+					retryAfterSeconds: 1,
+					offboarding: false
+				},
+				after: before
+			});
+		}
+	);
 
 	it('flushes independent pending deletions for one hash across caches', async () => {
 		await useTestServer('narinfo-deletion-caches');
@@ -275,7 +433,7 @@ describe('narinfo deletion queue', () => {
 				second
 			);
 
-			return instance.context.db.select().from(narInfoDeletions).all();
+			return deletionSnapshots(instance.context);
 		});
 
 		expect(rows).toStrictEqual([
@@ -285,6 +443,9 @@ describe('narinfo deletion queue', () => {
 				narHash: replacement,
 				generation: entry.generation,
 				createdAt: first,
+				explicit: false,
+				protectionCutoff: undefined,
+				protectionCapturedAt: undefined,
 				withdrawn: false
 			}
 		]);
@@ -524,6 +685,9 @@ describe('narinfo deletion queue', () => {
 					narHash: metadata.narHash,
 					generation: narInfoGenerationSchema.parse(0),
 					createdAt: now,
+					explicit: false,
+					protectionCutoff: undefined,
+					protectionCapturedAt: undefined,
 					withdrawn: true
 				})
 				.run();
@@ -614,7 +778,7 @@ describe('narinfo deletion queue', () => {
 								.where(eq(attestationInheritances.cacheId, later.id))
 								.run();
 						}
-						return instance.context.db.select().from(narInfoDeletions).all();
+						return deletionSnapshots(instance.context);
 					}
 				);
 				const drainAlarm = () =>
@@ -650,8 +814,41 @@ describe('narinfo deletion queue', () => {
 							.run();
 					});
 				}
-				const continuation =
+				let continuation =
 					destinationCount === 2 ? await drainAlarm() : firstContinuation;
+				for (let pass = 0; pass < 6; pass += 1) {
+					const remaining = await runInDurableObject(
+						currentServer(),
+						(instance) =>
+							instance.context.db
+								.select({ cacheId: attestationInheritances.cacheId })
+								.from(attestationInheritances)
+								.where(
+									eq(
+										attestationInheritances.storePathHash,
+										metadata.storePathHash
+									)
+								)
+								.all()
+					);
+					if (remaining.length === 0) {
+						break;
+					}
+					await runInDurableObject(currentServer(), (instance) => {
+						instance.context.db
+							.update(attestationInheritances)
+							.set({ notBefore: isoTimestamp(new Date()) })
+							.where(
+								eq(
+									attestationInheritances.storePathHash,
+									metadata.storePathHash
+								)
+							)
+							.run();
+					});
+					continuation = await drainAlarm();
+				}
+
 				const predicateType = 'https://slsa.dev/provenance/v1';
 				const expectedReferences = [defaultCache(), ...destinations].map(
 					(cache) => ({
@@ -676,7 +873,7 @@ describe('narinfo deletion queue', () => {
 				expect({
 					continuation,
 					queued: await runInDurableObject(currentServer(), (instance) =>
-						instance.context.db.select().from(narInfoDeletions).all()
+						deletionSnapshots(instance.context)
 					),
 					references
 				}).toStrictEqual({
@@ -733,6 +930,9 @@ describe('narinfo deletion queue', () => {
 						narHash: queuedNar,
 						generation: narInfoGenerationSchema.parse(generation),
 						createdAt,
+						explicit: false,
+						protectionCutoff: undefined,
+						protectionCapturedAt: undefined,
 						withdrawn: true
 					})
 					.run();
@@ -746,7 +946,7 @@ describe('narinfo deletion queue', () => {
 						narInfoGenerationSchema.parse(1),
 						narHash
 					),
-					queued: instance.context.db.select().from(narInfoDeletions).all(),
+					queued: deletionSnapshots(instance.context),
 					sourceId: sourceCache.id
 				};
 			});
@@ -760,6 +960,9 @@ describe('narinfo deletion queue', () => {
 						narHash: queuedNar,
 						generation,
 						createdAt,
+						explicit: false,
+						protectionCutoff: undefined,
+						protectionCapturedAt: undefined,
 						withdrawn: true
 					}
 				],
@@ -1192,6 +1395,576 @@ describe('narinfo deletion queue', () => {
 		});
 	});
 
+	it('bounds authority revocation across 25,000 retained generations', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('revocation-generations-scale');
+		const metadata = uploadMetadata({
+			storePathHash: syntheticStorePathHash(79),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await commitPath(token, metadata, nar);
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 24999)
+			INSERT INTO blob_ref_storage(tenant, cache_kind, store_path_hash, generation, nar_hash, cache_generation)
+			SELECT ?, 'default', ?, n, ?, 1 FROM source`
+		)
+			.bind(fixtureTenant, metadata.storePathHash, nar.narHash)
+			.run();
+
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM source WHERE n < 25000)
+   INSERT INTO attestation_ref_storage(tenant,cache_kind,store_path_hash,generation,predicate_type,digest)
+   SELECT ?, 'default', ?, 0, 'https://example.com/predicate', printf('%064x',n) FROM source`
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.run();
+
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 25000)
+			INSERT INTO cache_lifecycle_storage(tenant,cache_kind,cache_name,access,generation,updated_at)
+			SELECT ?, 'named', printf('migration-cache-%08d',n), 'public', 1, '2026-01-01T00:00:00.000Z' FROM source`
+		)
+			.bind(fixtureTenant)
+			.run();
+
+		await env.CUPBOARD_DB.batch(
+			[
+				'DROP VIEW attestation_ref',
+				'DROP VIEW blob_ref',
+				'ALTER TABLE blob_ref_storage RENAME TO blob_ref',
+				'ALTER TABLE attestation_ref_storage RENAME TO attestation_ref',
+				'CREATE VIEW blob_ref_storage AS SELECT * FROM blob_ref',
+				'CREATE VIEW attestation_ref_storage AS SELECT * FROM attestation_ref',
+				'DROP VIEW cache_lifecycle',
+				'ALTER TABLE cache_lifecycle_storage RENAME TO cache_lifecycle',
+				'CREATE VIEW cache_lifecycle_storage AS SELECT * FROM cache_lifecycle'
+			].map((query) => env.CUPBOARD_DB.prepare(query))
+		);
+		const contract = env.TEST_MIGRATIONS.find(
+			(migration) => migration.name === '0036_path_read_authority_contract.sql'
+		);
+		if (contract === undefined) {
+			throw new Error('The path read authority contract migration is missing.');
+		}
+		const contractResults = await env.CUPBOARD_DB.batch(
+			contract.queries.map((query) => env.CUPBOARD_DB.prepare(query))
+		);
+		expect(
+			contractResults.map((result) => ({
+				rows: result.results,
+				read: result.meta.rows_read,
+				written: result.meta.rows_written
+			}))
+		).toStrictEqual([
+			{ rows: [], read: 80, written: 0 },
+			{ rows: [], read: 79, written: 0 },
+			{ rows: [], read: 327, written: 44 },
+			{ rows: [], read: 323, written: 42 },
+			{ rows: [], read: 1, written: 2 },
+			{ rows: [], read: 1, written: 2 },
+			{ rows: [], read: 80, written: 0 },
+			{ rows: [], read: 316, written: 37 },
+			{ rows: [], read: 1, written: 2 }
+		]);
+
+		const precedingAdmission = await env.CUPBOARD_DB.prepare(
+			'SELECT count(*) AS admitted FROM cache_lifecycle WHERE tenant = ?'
+		)
+			.bind(fixtureTenant)
+			.all();
+		expect({
+			rows: precedingAdmission.results,
+			read: precedingAdmission.meta.rows_read,
+			written: precedingAdmission.meta.rows_written
+		}).toStrictEqual({ rows: [{ admitted: 0 }], read: 0, written: 0 });
+
+		const costs: { read: number; written: number }[] = [];
+		const binding: D1Database = {
+			prepare: (query) => env.CUPBOARD_DB.prepare(query),
+			async batch<T>(statements: D1PreparedStatement[]) {
+				const results = await env.CUPBOARD_DB.batch<T>(statements);
+				costs.push(
+					...results.map((result) => ({
+						read: result.meta.rows_read,
+						written: result.meta.rows_written
+					}))
+				);
+				return results;
+			},
+			exec: (query) => env.CUPBOARD_DB.exec(query),
+			withSession: (constraint) => env.CUPBOARD_DB.withSession(constraint),
+			dump: () =>
+				Promise.reject(new Error('The scale fixture does not dump D1.'))
+		};
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			const context = new ServerContext(state, {
+				...instance.context.env,
+				CUPBOARD_DB: binding
+			});
+			const cache = resolvedCache(context);
+			context.db
+				.update(narInfos)
+				.set({ generation: narInfoGenerationSchema.parse(24_999) })
+				.where(eq(narInfos.storePathHash, metadata.storePathHash))
+				.run();
+			context.db
+				.insert(attestationInheritances)
+				.values({
+					cacheId: cache.id,
+					storePathHash: metadata.storePathHash,
+					generation: narInfoGenerationSchema.parse(25_000),
+					narHash: nar.narHash,
+					notBefore: isoTimestamp(new Date())
+				})
+				.run();
+			await buildDeletionQueue(context).deleteStorePath(
+				defaultCache(),
+				metadata.storePathHash,
+				internalOrigin
+			);
+		});
+		const revocationCosts = [...costs];
+		costs.length = 0;
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			const context = new ServerContext(state, {
+				...instance.context.env,
+				CUPBOARD_DB: binding
+			});
+			const service = new PathReadAuthorityService(context);
+			for (let page = 0; page < 250; page++) {
+				await service.drain();
+			}
+			await service.drain();
+			expect(await service.hasPending()).toBe(false);
+		});
+		const retained = await env.CUPBOARD_DB.prepare(
+			'SELECT count(*) AS total, sum(readable) AS readable FROM blob_ref_storage WHERE tenant = ? AND store_path_hash = ?'
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.first();
+		const bundles = await env.CUPBOARD_DB.prepare(
+			'SELECT count(*) AS total, sum(readable) AS readable FROM attestation_ref_storage WHERE tenant = ? AND store_path_hash = ?'
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.first();
+		expect({
+			revocationCosts,
+			maxRead: Math.max(...costs.map((row) => row.read)),
+			maxWritten: Math.max(...costs.map((row) => row.written)),
+			retained,
+			bundles
+		}).toStrictEqual({
+			revocationCosts: [{ read: 0, written: 4 }],
+			maxRead: 600,
+			maxWritten: 100,
+			retained: { total: 25_000, readable: 0 },
+			bundles: { total: 25_000, readable: 0 }
+		});
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const reclaim = reclaimPathReadFence(
+			database,
+			fixtureTenant,
+			defaultCache(),
+			jsonRowList([{ storePathHash: metadata.storePathHash }])
+		).toSQL();
+		const kept = await env.CUPBOARD_DB.prepare(reclaim.sql)
+			.bind(...reclaim.params)
+			.run();
+		await env.CUPBOARD_DB.prepare(
+			'DELETE FROM blob_ref_storage WHERE tenant = ? AND store_path_hash = ?'
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.run();
+		await env.CUPBOARD_DB.prepare(
+			'DELETE FROM attestation_ref_storage WHERE tenant = ? AND store_path_hash = ?'
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.run();
+		await database.insert(d1Schema.blobReference).values({
+			tenant: fixtureTenant,
+			cacheKind: 'default',
+			storePathHash: metadata.storePathHash,
+			generation: narInfoGenerationSchema.parse(25_000),
+			narHash: metadata.narHash,
+			cacheGeneration: firstCacheGeneration
+		});
+		const reclaimed = await env.CUPBOARD_DB.prepare(reclaim.sql)
+			.bind(...reclaim.params)
+			.run();
+		const fences = await database
+			.select()
+			.from(d1Schema.pathReadRevocation)
+			.where(eq(d1Schema.pathReadRevocation.tenant, fixtureTenant));
+		expect({
+			kept: { read: kept.meta.rows_read, written: kept.meta.rows_written },
+			reclaimed: {
+				read: reclaimed.meta.rows_read,
+				written: reclaimed.meta.rows_written
+			},
+			fences
+		}).toStrictEqual({
+			kept: { read: 4, written: 0 },
+			reclaimed: { read: 6, written: 1 },
+			fences: []
+		});
+	});
+
+	it('continues to later caches when a lower cache publishes a new generation', async () => {
+		await initialise();
+		const result = await runInDurableObject(
+			currentServer(),
+			(instance, state) => {
+				const context = instance.context;
+				const cache = resolvedCache(context);
+				const path = syntheticStorePathHash(95);
+				const narHash = syntheticNarHash(95);
+				const generation = narInfoGenerationSchema.parse(1);
+				state.storage.sql.exec(
+					"INSERT INTO cache_identity(id, kind, name, access, priority, created_at) VALUES (10, 'named', 'first-source', 'public', 40, ?), (11, 'named', 'later-source', 'public', 40, ?)",
+					isoTimestamp(testBase),
+					isoTimestamp(testBase)
+				);
+				state.storage.sql.exec(
+					'INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at) VALUES (10, ?, ?, 0, ?), (11, ?, ?, 0, ?)',
+					path,
+					narHash,
+					isoTimestamp(testBase),
+					path,
+					narHash,
+					isoTimestamp(testBase)
+				);
+				context.db
+					.insert(attestationInheritances)
+					.values({
+						cacheId: cache.id,
+						storePathHash: path,
+						generation,
+						narHash,
+						notBefore: isoTimestamp(testBase)
+					})
+					.run();
+				const service = new ProtectedInheritanceService(context);
+				const first = service.nextSource(cache, path, narHash, generation);
+				if (first === undefined) {
+					throw new Error('The first source must exist.');
+				}
+				service.advanceSource(cache, path, generation, first);
+				state.storage.sql.exec(
+					'INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at) VALUES (10, ?, ?, 1, ?)',
+					path,
+					narHash,
+					isoTimestamp(testBase)
+				);
+				const next = service.nextSource(cache, path, narHash, generation);
+				return {
+					first: { cacheId: first.cacheId, generation: first.generation },
+					next:
+						next === undefined
+							? undefined
+							: { cacheId: next.cacheId, generation: next.generation }
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			first: { cacheId: 10, generation: 0 },
+			next: { cacheId: 11, generation: 0 }
+		});
+	});
+
+	it(
+		'bounds source lookup and mutation costs with 25,000 source and destination generations',
+		{ timeout: 120_000 },
+		async () => {
+			await initialise();
+			const result = await withoutAlarmArming(() =>
+				runInDurableObject(currentServer(), async (instance, state) => {
+					const context = instance.context;
+					const cache = resolvedCache(context);
+					const path = storePathHashSchema.parse('a'.repeat(32));
+					const narHash = syntheticNarHash(1);
+					const generation = narInfoGenerationSchema.parse(1);
+					const now = isoTimestamp(testBase);
+					state.storage.sql.exec(
+						`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
+			INSERT INTO cache_identity(id, kind, name, access, priority, created_at) SELECT value, 'named', printf('source-%08d', value), 'public', 40, ? FROM rows`,
+						now
+					);
+					state.storage.sql.exec(
+						`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
+			INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at, explicit, protection_cutoff, protection_captured_at) SELECT value, ?, ?, 0, ?, 1, 10, ? FROM rows`,
+						path,
+						narHash,
+						now,
+						now
+					);
+					state.storage.sql.exec(
+						`WITH RECURSIVE rows(value) AS (VALUES(100) UNION ALL SELECT value + 1 FROM rows WHERE value < 25_099)
+			INSERT INTO attestation_inheritance(cache_id, store_path_hash, nar_hash, generation, not_before) SELECT value, ?, ?, 1, ? FROM rows`,
+						path,
+						narHash,
+						now
+					);
+					state.storage.sql.exec(
+						'INSERT INTO attestation_inheritance(cache_id, store_path_hash, nar_hash, generation, not_before) VALUES (?, ?, ?, 1, ?)',
+						cache.id,
+						path,
+						narHash,
+						now
+					);
+					state.storage.sql.exec(
+						'INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at) VALUES (?, ?, ?, 0, ?)',
+						cache.id,
+						path,
+						narHash,
+						now
+					);
+					state.storage.sql.exec(
+						'UPDATE work_sequence SET value = 10 WHERE id = 1'
+					);
+					const service = new ProtectedInheritanceService(context);
+					const meter = context.dbCost;
+					const measure = <T>(body: () => T) => {
+						meter.recordOutstanding();
+						const before = {
+							rowsRead: meter.rowsRead,
+							rowsWritten: meter.rowsWritten
+						};
+						const value = body();
+						meter.recordOutstanding();
+						return {
+							value,
+							cost: {
+								rowsRead: meter.rowsRead - before.rowsRead,
+								rowsWritten: meter.rowsWritten - before.rowsWritten
+							}
+						};
+					};
+					const capture = measure(() => {
+						service.capture(
+							context.db,
+							cache,
+							{
+								storePathHash: path,
+								generation: narInfoGenerationSchema.parse(0)
+							},
+							now
+						);
+					});
+					const names: string[] = [];
+					let pages = 0;
+					let maxRead = 0;
+					let maxWrite = 0;
+					for (let visited = 0; visited <= 25_001; visited += 1) {
+						const { cost, value: source } = measure(() => {
+							const source = service.nextSource(
+								cache,
+								path,
+								narHash,
+								generation
+							);
+							if (source === undefined) {
+								return;
+							}
+							if (
+								source.scope !== undefined &&
+								service.isReferenceProtected(
+									cache,
+									path,
+									generation,
+									source.cacheId,
+									source.generation
+								)
+							) {
+								names.push(source.cache?.name ?? '');
+							}
+							service.advanceSource(cache, path, generation, source);
+							return source;
+						});
+						if (source === undefined) {
+							break;
+						}
+						pages += 1;
+						maxRead = Math.max(maxRead, cost.rowsRead);
+						maxWrite = Math.max(maxWrite, cost.rowsWritten);
+					}
+
+					const expiresAt = isoTimestamp(new Date(testBase.getTime() + 60_000));
+					const uploadId = uploadIdSchema.parse(
+						'00000000-0000-4000-8000-000000000001'
+					);
+					state.storage.sql.exec(
+						'INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, accepted_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, 10)',
+						uploadId,
+						cache.id,
+						narHash,
+						'staging/test',
+						JSON.stringify({ storePathHash: path }),
+						now,
+						expiresAt
+					);
+					meter.recordOutstanding();
+					const beforeTransfer = {
+						rowsRead: meter.rowsRead,
+						rowsWritten: meter.rowsWritten
+					};
+					await buildAttestations(context).queueInheritance(
+						cache,
+						path,
+						narInfoGenerationSchema.parse(2),
+						narHash,
+						uploadId
+					);
+					meter.recordOutstanding();
+					const transfer = {
+						rowsRead: meter.rowsRead - beforeTransfer.rowsRead,
+						rowsWritten: meter.rowsWritten - beforeTransfer.rowsWritten
+					};
+					const release = measure(() => {
+						service.releaseDestination(cache.id, path, generation);
+					});
+					const retire = measure(() =>
+						context.db
+							.delete(narInfoDeletions)
+							.where(
+								and(
+									eq(narInfoDeletions.cacheId, cache.id),
+									eq(narInfoDeletions.storePathHash, path)
+								)
+							)
+							.run()
+					);
+					return {
+						names,
+						pages,
+						maxRead,
+						maxWrite,
+						capture: capture.cost,
+						transfer,
+						release: release.cost,
+						retire: retire.cost
+					};
+				})
+			);
+			expect(result).toStrictEqual({
+				names: [
+					'',
+					...Array.from(
+						{ length: 25_000 },
+						(_unused, index) => `source-${String(index + 100).padStart(8, '0')}`
+					)
+				],
+				pages: 25_001,
+				maxRead: 15,
+				maxWrite: 3,
+				capture: { rowsRead: 2, rowsWritten: 3 },
+				transfer: { rowsRead: 3, rowsWritten: 6 },
+				release: { rowsRead: 1, rowsWritten: 1 },
+				retire: { rowsRead: 4, rowsWritten: 1 }
+			});
+		}
+	);
+
+	it('excludes 25,000 destinations accepted after deletion from indexed deferral probes', async () => {
+		await initialise();
+		const costs = await runInDurableObject(
+			currentServer(),
+			(instance, state) => {
+				const context = instance.context;
+				const cache = resolvedCache(context);
+				const path = syntheticStorePathHash(99);
+				const narHash = syntheticNarHash(99);
+				const now = isoTimestamp(testBase);
+				state.storage.sql.exec(
+					'INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at, explicit, protection_cutoff, protection_captured_at) VALUES (?, ?, ?, 0, ?, 1, 1, ?)',
+					cache.id,
+					path,
+					narHash,
+					now,
+					now
+				);
+				const measure = () => {
+					context.dbCost.recordOutstanding();
+					const before = context.dbCost.rowsRead;
+					const row = context.db
+						.select({ isDeferred: deferredDeletionCondition(now) })
+						.from(narInfoDeletions)
+						.where(eq(narInfoDeletions.storePathHash, path))
+						.get();
+					context.dbCost.recordOutstanding();
+					return { row, rowsRead: context.dbCost.rowsRead - before };
+				};
+				const baseline = measure();
+				const expiresAt = isoTimestamp(new Date(testBase.getTime() + 60_000));
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 25000)
+			INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, accepted_sequence) SELECT printf('future-%d', value), ?, ?, 'staging/future', ?, ?, ?, value + 1 FROM rows`,
+					cache.id,
+					narHash,
+					JSON.stringify({ storePathHash: path }),
+					now,
+					expiresAt
+				);
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 25000)
+			INSERT INTO attestation_inheritance(cache_id, store_path_hash, nar_hash, generation, not_before, accepted_sequence, queued_sequence) SELECT ?, ?, ?, value, ?, value + 1, value + 2 FROM rows`,
+					cache.id,
+					path,
+					narHash,
+					now
+				);
+				return [baseline, measure()];
+			}
+		);
+		expect(costs).toStrictEqual([
+			{ row: { isDeferred: false }, rowsRead: 3 },
+			{ row: { isDeferred: false }, rowsRead: 3 }
+		]);
+	});
+
+	it('seeks pending inheritance by path and NAR without scanning cache history', async () => {
+		await initialise();
+		const details = await runInDurableObject(
+			currentServer(),
+			(instance, state) => {
+				const statement = instance.context.db
+					.select({
+						isDeferred: deferredDeletionCondition(isoTimestamp(testBase))
+					})
+					.from(narInfoDeletions)
+					.toSQL();
+				const parameters = z
+					.array(z.union([z.string(), z.number(), z.null()]))
+					.parse(statement.params);
+				return Array.from(
+					state.storage.sql.exec<{ detail: string }>(
+						`EXPLAIN QUERY PLAN ${statement.sql}`,
+						...parameters
+					),
+					(row) => row.detail
+				).filter(
+					(detail) =>
+						detail.includes('pending_upload') ||
+						detail.includes('attestation_inheritance') ||
+						detail.includes('cache_identity')
+				);
+			}
+		);
+		expect(details).toStrictEqual([
+			'SEARCH pending_upload USING INDEX pending_upload_inheritance_cutoff_idx (<expr>=? AND nar_hash=? AND accepted_sequence<?)',
+			'SEARCH cache_identity USING INTEGER PRIMARY KEY (rowid=?)',
+			'SEARCH attestation_inheritance USING COVERING INDEX attestation_inheritance_cutoff_idx (store_path_hash=? AND nar_hash=? AND accepted_sequence<?)',
+			'SEARCH cache_identity USING INTEGER PRIMARY KEY (rowid=?)',
+			'SEARCH cache_identity USING INTEGER PRIMARY KEY (rowid=?)',
+			'SEARCH pending_upload USING INDEX pending_upload_inheritance_path_idx (<expr>=? AND nar_hash=?)',
+			'SEARCH attestation_inheritance USING COVERING INDEX attestation_inheritance_path_nar_idx (store_path_hash=? AND nar_hash=?)',
+			'SEARCH pending_upload USING INDEX pending_upload_inheritance_path_idx (<expr>=? AND nar_hash=? AND cache_id=?)',
+			'SEARCH attestation_inheritance USING COVERING INDEX attestation_inheritance_path_nar_idx (store_path_hash=? AND nar_hash=? AND cache_id=? AND generation>?)'
+		]);
+	});
+
 	it('reads the same rows in a flush however many uploads are pending in the cache', async () => {
 		await initialise();
 		const entries = syntheticEntries(8);
@@ -1234,11 +2007,19 @@ describe('narinfo deletion queue', () => {
 				syntheticNarHash(0)
 			);
 		});
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				`WITH RECURSIVE rows(value) AS (VALUES (1) UNION ALL SELECT value + 1 FROM rows WHERE value < 1000)
+				 INSERT INTO cache_identity (kind, name, access, priority, created_at, deleted_at)
+				 SELECT 'named', printf('historic-%d', value), 'public', 40,
+				 '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z' FROM rows`
+			);
+		});
 		const withUploads = await flushRowsRead(entries.slice(4));
 
 		expect({ withoutUploads, withUploads }).toStrictEqual({
-			withoutUploads: 94,
-			withUploads: 94
+			withoutUploads: 82,
+			withUploads: 82
 		});
 	});
 
@@ -1291,9 +2072,6 @@ describe('narinfo deletion queue', () => {
 		});
 	});
 
-	// A failed edge retirement leaves the object absent and the edge intact.
-	// Reversing the operations would let a public read serve an unreferenced
-	// object because public narinfo reads do not consult D1.
 	it('removes the published object before it retires the reference edge', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('retirement-order');
@@ -1320,7 +2098,8 @@ describe('narinfo deletion queue', () => {
 					...instance.context.env,
 					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
 						failures: 1,
-						matches: (query) => query.startsWith('delete from "blob_ref"')
+						matches: (query) =>
+							query.startsWith('delete from "blob_ref_storage"')
 					})
 				});
 

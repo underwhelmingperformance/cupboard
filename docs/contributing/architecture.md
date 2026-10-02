@@ -150,6 +150,31 @@ refuses to deploy an earlier Worker version across a change to a Worker's
 Durable Object classes, so this class stops a rollback of the tenant Worker to a
 version from before the change to versioned R2 object keys.
 
+The `blob-reference-read-authority` expansion provides read-only aliases for
+shared reference and cache-lifecycle storage. Current Workers query those
+aliases and defer reference changes until contraction completes. Lifecycle
+writes use the preceding physical table before contraction and refuse retryably
+while the contract step runs, so the mandatory local projection can finish.
+After both serving builds are verified, one D1 batch renames the physical tables
+to the alias identifiers. The preceding reference identifiers become authority
+views that exclude revoked paths and demoted references. The preceding
+cache-admission identifier becomes an empty view, so a preceding request whose
+first admission query runs after contraction is refused before it can serve R2
+content. A request admitted before contraction may finish its response. Current
+Workers use the physical lifecycle table and retain the cache's access mode.
+Preceding writes fail against the read-only views; D1 rolls back their entire
+charge batch.
+
+Both Workers also export `PathReadAuthorityRollbackGuard`, an unbound SQLite
+Durable Object class. [Cloudflare's class lifecycle checks] prevent version
+rollback across its introduction. The contract marker makes preceding CLIs
+reject a fresh deployment against this database. Interrupted uploads or
+contraction return retryable errors for reference changes until the transition
+completes.
+
+[Cloudflare's class lifecycle checks]:
+  https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/
+
 It has no `workers.dev` route and no preview URLs. Its default `fetch`
 entrypoint answers every request with 404. The control Worker reaches it in two
 ways only:
@@ -215,12 +240,13 @@ migrations are in `packages/server/drizzle-d1`.
 | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `tenant`                                                       | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
 | `tenant_cache_read_credential`                                 | The verifier for each cache that has its own read credential.                                                                |
-| `cache_lifecycle`                                              | Each cache's access mode, generation, read revision and deletion time.                                                       |
+| `cache_lifecycle_storage`                                      | Each cache's access mode, generation, read revision and deletion time.                                                       |
+| `path_read_revocation`                                         | Per-path revocation fences and pending demotion of readable references.                                                      |
 | `blob_state`                                                   | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
-| `blob_ref`                                                     | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
+| `blob_ref_storage`                                             | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
 | `tenant_blob`, `tenant_cas_blob`                               | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
 | `tenant_usage`                                                 | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
-| `cas_object`, `attestation_ref`                                | Stored attestation bundles and their references.                                                                             |
+| `cas_object`, `attestation_ref_storage`                        | Stored attestation bundles and their references.                                                                             |
 | `object_incarnation`, `object_deletion`                        | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
 | `control_auth_key`, `control_trust`, `global_admin`            | The control plane's signing keys (with the private part wrapped), its trust rules, and the first operator.                   |
 | `deployment_transition`                                        | The state of each schema transition that the deploy has started.                                                             |
@@ -390,9 +416,10 @@ steps:
    cache generation and read revision that admission found. `CachedTenantReads`
    serves the read through the Workers Cache, and tags each narinfo so that
    exactly that narinfo can be purged later.
-5. A narinfo is the R2 object at the tenant's narinfo key. A public read needs
-   no further D1 query. An authenticated read also checks the `blob_ref`
-   reference in D1, so it can't serve an object from a different commit.
+5. A narinfo is the R2 object at the tenant's narinfo key. An origin read checks
+   the committed reference in D1 for both public and authenticated caches before
+   fetching the object from R2. The check excludes references revoked by path
+   deletion and objects from a different commit.
 6. For a NAR, the Worker checks that there's a `blob_ref` reference from the
    addressed cache to that hash, at the cache's current generation and access
    mode. It then streams `nar/<hash>.nar.zst` from R2. If the cache doesn't

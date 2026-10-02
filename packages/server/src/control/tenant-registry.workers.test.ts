@@ -504,15 +504,15 @@ describe('tenant registry', () => {
 			digest: 'a'.repeat(64)
 		},
 		{
-			table: 'blob_ref',
+			table: 'blob_ref_storage',
 			insert:
-				"INSERT INTO blob_ref (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 1)",
+				"INSERT INTO blob_ref_storage (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 1)",
 			digest: `sha256:${'0'.repeat(52)}`
 		},
 		{
-			table: 'attestation_ref',
+			table: 'attestation_ref_storage',
 			insert:
-				"INSERT INTO attestation_ref (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 'https://slsa.dev/provenance/v1')",
+				"INSERT INTO attestation_ref_storage (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 'https://slsa.dev/provenance/v1')",
 			digest: 'a'.repeat(64)
 		}
 	])(
@@ -1259,11 +1259,13 @@ describe('private cache read credentials', () => {
 			now
 		);
 
+		const error = rejectionFields(() => rotation);
+
 		await setTenantStatus(database(), acme, 'offboarding');
 		await finaliseOffboardedTenant(database(), acme);
 
 		expect({
-			error: await rejectionFields(() => rotation),
+			error: await error,
 			stored: await storedCacheCredentials(acme)
 		}).toStrictEqual({
 			error: {

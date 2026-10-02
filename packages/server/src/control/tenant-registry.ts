@@ -33,6 +33,10 @@ import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
+import {
+	type CacheLifecycleWriteTable,
+	writeCacheLifecycle
+} from '../db/cache-lifecycle-write.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
@@ -171,7 +175,6 @@ export async function ensureTenant(
 	now: IsoTimestamp
 ): Promise<TenantSummary> {
 	const verifier = await readVerifierColumnsForInsert(body.read);
-	const provisioning = provisioningStatements(database, body, verifier, now);
 
 	// The usage row carries the quota and the CHECK that enforces it, so a tenant
 	// row without one accepts writes that nothing counts or limits. Write the
@@ -182,11 +185,20 @@ export async function ensureTenant(
 	const isClaimed = (await loadTenant(database, body.id)) !== undefined;
 
 	if (!isClaimed) {
-		await database.batch([
-			provisioning.tenant,
-			provisioning.cache,
-			provisioning.usage
-		]);
+		await writeCacheLifecycle(database, async (table) => {
+			const provisioning = provisioningStatements(
+				database,
+				body,
+				verifier,
+				now,
+				table
+			);
+			await database.batch([
+				provisioning.tenant,
+				provisioning.cache,
+				provisioning.usage
+			]);
+		});
 	}
 
 	// Either the slug was already claimed, or a concurrent create claimed it
@@ -214,7 +226,16 @@ export async function ensureTenant(
 	// tenant row without the cache and usage rows. Write them now that the stored
 	// configuration is known to match. Only an empty tenant can start at zero.
 	if (isClaimed) {
-		await database.batch([provisioning.cache, provisioning.usage]);
+		await writeCacheLifecycle(database, async (table) => {
+			const provisioning = provisioningStatements(
+				database,
+				body,
+				verifier,
+				now,
+				table
+			);
+			await database.batch([provisioning.cache, provisioning.usage]);
+		});
 	}
 
 	const usage = await loadUsage(database, body.id);
@@ -242,7 +263,8 @@ function provisioningStatements(
 	database: Database,
 	body: TenantCreateBody,
 	verifier: ReadVerifierColumns,
-	now: IsoTimestamp
+	now: IsoTimestamp,
+	table: CacheLifecycleWriteTable
 ) {
 	const identity = cacheIdentityColumns({ kind: 'default' });
 	const tenantFilter = liveTenantFilter(body.id);
@@ -328,10 +350,7 @@ function provisioningStatements(
 				readPasswordSalt: verifier.readPasswordSalt
 			})
 			.onConflictDoNothing(),
-		cache: database
-			.insert(d1Schema.cacheLifecycle)
-			.select(cacheRow)
-			.onConflictDoNothing(),
+		cache: database.insert(table).select(cacheRow).onConflictDoNothing(),
 		usage: database
 			.insert(d1Schema.tenantUsage)
 			.select(usageRow)
@@ -782,33 +801,33 @@ export async function finaliseOffboardedTenant(
 	database: Database,
 	id: TenantId
 ): Promise<void> {
-	await database.batch([
-		database
-			.update(d1Schema.tenant)
-			.set({
-				status: 'offboarded',
-				readUser: sql`null`,
-				readPasswordHash: sql`null`,
-				readPasswordSalt: sql`null`,
-				ownerIssuer: '',
-				ownerSubject: '',
-				ownerAudience: ''
-			})
-			.where(eq(d1Schema.tenant.id, id)),
-		database
-			.delete(d1Schema.tenantUsage)
-			.where(eq(d1Schema.tenantUsage.tenant, id)),
-		database
-			.delete(d1Schema.tenantMaintenanceEligibility)
-			.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id)),
-		database
-			.delete(d1Schema.tenantCacheReadCredential)
-			.where(eq(d1Schema.tenantCacheReadCredential.tenant, id)),
-		// An absent lifecycle row means generation one. Finalisation deletes these
-		// rows only after the tenant drain has removed every reference edge, so
-		// the deletion cannot reauthorise a first-generation edge.
-		database
-			.delete(d1Schema.cacheLifecycle)
-			.where(eq(d1Schema.cacheLifecycle.tenant, id))
-	]);
+	await writeCacheLifecycle(database, async (table) => {
+		await database.batch([
+			database
+				.update(d1Schema.tenant)
+				.set({
+					status: 'offboarded',
+					readUser: sql`null`,
+					readPasswordHash: sql`null`,
+					readPasswordSalt: sql`null`,
+					ownerIssuer: '',
+					ownerSubject: '',
+					ownerAudience: ''
+				})
+				.where(eq(d1Schema.tenant.id, id)),
+			database
+				.delete(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, id)),
+			database
+				.delete(d1Schema.tenantMaintenanceEligibility)
+				.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id)),
+			database
+				.delete(d1Schema.tenantCacheReadCredential)
+				.where(eq(d1Schema.tenantCacheReadCredential.tenant, id)),
+			// An absent lifecycle row means generation one. Finalisation deletes these
+			// rows only after the tenant drain has removed every reference edge, so
+			// the deletion cannot reauthorise a first-generation edge.
+			database.delete(table).where(eq(table.tenant, id))
+		]);
+	});
 }

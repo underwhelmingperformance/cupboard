@@ -477,6 +477,13 @@
 			"when": 1790899062261,
 			"tag": "0067_refresh_session_authority",
 			"breakpoints": true
+		},
+		{
+			"idx": 68,
+			"version": "6",
+			"when": 1790906178614,
+			"tag": "0068_protected_inheritance",
+			"breakpoints": true
 		}
 	]
 }

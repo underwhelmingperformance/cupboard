@@ -60,7 +60,8 @@ export const transitionIdSchema = z.enum([
 	'deployment-transitions',
 	'attestation-path-index',
 	'local-step-attempts',
-	'publication-identity'
+	'publication-identity',
+	'blob-reference-read-authority'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -294,6 +295,11 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0034_publication_identity.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'blob-reference-read-authority',
+		expand: ['0035_blob_reference_read_authority.sql'],
+		contract: ['0036_path_read_authority_contract.sql']
 	}
 ];
 

@@ -203,7 +203,7 @@ describe('commit publication ownership', () => {
 			const prepareSpy = vi
 				.spyOn(env.CUPBOARD_DB, 'prepare')
 				.mockImplementation((query) => {
-					isCharge ||= query.startsWith('insert into "blob_ref"');
+					isCharge ||= query.startsWith('insert into "blob_ref_storage"');
 					return prepare(query);
 				});
 			const batchSpy = vi

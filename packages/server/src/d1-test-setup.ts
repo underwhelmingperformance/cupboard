@@ -1,3 +1,4 @@
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/d1';
@@ -18,6 +19,7 @@ import {
 	manifestState,
 	objectDeletion,
 	objectIncarnation,
+	pathReadRevocation,
 	publication,
 	tenant,
 	tenantBlob,
@@ -51,6 +53,7 @@ beforeEach(async () => {
 	const database = drizzle(env.CUPBOARD_DB);
 	await database.delete(attestationReference).run();
 	await database.delete(blobReference).run();
+	await database.delete(pathReadRevocation).run();
 	await database.delete(publication).run();
 	await database.delete(cacheLifecycle).run();
 	await database.delete(tenantCacheReadCredential).run();
@@ -67,6 +70,14 @@ beforeEach(async () => {
 	await database.delete(controlTrust).run();
 	await database.delete(deploymentPhase).run();
 	await database.delete(deploymentTransition).run();
+	await database
+		.insert(deploymentTransition)
+		.values({
+			id: 'blob-reference-read-authority',
+			state: 'complete',
+			updatedAt: isoTimestamp(new Date())
+		})
+		.run();
 	await database.delete(globalAdmin).run();
 	await database.delete(tenant).run();
 	await database.delete(manifestState).run();

@@ -3,6 +3,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type CacheAccessMode,
+	type CacheName,
 	type CacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
@@ -33,10 +34,7 @@ import {
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { cacheSelectorsCondition, type ResolvedCache } from '../db/cache.ts';
-import {
-	authorisedByCacheGeneration,
-	referencedCacheLifecycle
-} from '../db/cache-generation.ts';
+import { authorisedByPathGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
@@ -242,29 +240,51 @@ export function reuseEdgeSelect(
 	access: CacheAccessMode,
 	versions: JsonRowList<CandidateVersion>
 ) {
+	const blob = d1Schema.blobReference;
+	const lifecycle = d1Schema.cacheLifecycle;
+	const candidateRows = versions.insertSource([
+		sql`${versions.column('cacheKind')} as cache_kind`,
+		sql`${versions.column('cacheName')} as cache_name`,
+		sql`${versions.column('storePathHash')} as store_path_hash`,
+		sql`${versions.column('generation')} as generation`
+	]);
+	const candidateIdentity = and(
+		eq(lifecycle.tenant, tenant),
+		eq(lifecycle.cacheKind, sql`requested_versions.cache_kind`),
+		sql`${lifecycle.cacheName} is nullif(requested_versions.cache_name, '')`,
+		eq(lifecycle.access, access)
+	);
+	const edgeIdentity = and(
+		eq(blob.tenant, tenant),
+		eq(blob.cacheKind, lifecycle.cacheKind),
+		sql`${blob.cacheName} is ${lifecycle.cacheName}`,
+		eq(blob.cacheGeneration, lifecycle.generation),
+		eq(blob.storePathHash, sql`requested_versions.store_path_hash`),
+		eq(blob.generation, sql`requested_versions.generation`),
+		authorisedByPathGeneration()
+	);
 	return database
 		.select({
-			cacheKind: d1Schema.blobReference.cacheKind,
-			cacheName: d1Schema.blobReference.cacheName,
-			storePathHash: d1Schema.blobReference.storePathHash,
-			generation: d1Schema.blobReference.generation,
-			narHash: d1Schema.blobReference.narHash
-		})
-		.from(d1Schema.blobReference)
-		.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
-		.where(
-			and(
-				eq(d1Schema.blobReference.tenant, tenant),
-				versions.matches({
-					cacheKind: d1Schema.blobReference.cacheKind,
-					cacheName: sql`coalesce(${d1Schema.blobReference.cacheName}, '')`,
-					storePathHash: d1Schema.blobReference.storePathHash,
-					generation: d1Schema.blobReference.generation
-				}),
-				eq(d1Schema.cacheLifecycle.access, access),
-				authorisedByCacheGeneration()
+			cacheKind: sql<CacheScope['kind']>`blob_ref_storage.cache_kind`.as(
+				'cache_kind'
+			),
+			cacheName: sql<CacheName | null>`blob_ref_storage.cache_name`.as(
+				'cache_name'
+			),
+			storePathHash: sql<StorePathHash>`blob_ref_storage.store_path_hash`.as(
+				'store_path_hash'
+			),
+			generation: sql<NarInfoGeneration>`blob_ref_storage.generation`.as(
+				'generation'
+			),
+			narHash: sql<NixSha256HashString>`blob_ref_storage.nar_hash`.as(
+				'nar_hash'
 			)
-		);
+		})
+		.from(
+			sql`(${candidateRows}) requested_versions cross join ${lifecycle} cross join ${blob}`
+		)
+		.where(and(candidateIdentity, edgeIdentity));
 }
 
 /**

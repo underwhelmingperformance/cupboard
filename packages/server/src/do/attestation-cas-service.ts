@@ -22,6 +22,7 @@ import {
 } from '../blob/object-incarnation.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
+import { pathReferenceReadability } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
@@ -32,6 +33,11 @@ import {
 import { casObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 import { type ServerContext } from './context.ts';
+import { jsonRowList } from './json-list.ts';
+import {
+	PathReadAuthorityService,
+	reclaimPathReadFence
+} from './path-read-authority-service.ts';
 
 export interface MeasuredAttestationBundle {
 	readonly digest: Sha256HexDigest;
@@ -388,6 +394,8 @@ export class AttestationCasService {
 		reference: AttestationReference,
 		size: number
 	): Promise<AttestationReferenceOutcome> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const tenant = this.context.requireTenant();
 
 		if (await this.hasReference(tenant, reference)) {
@@ -476,7 +484,13 @@ export class AttestationCasService {
 							predicateType: sql<PredicateType>`${reference.predicateType}`.as(
 								'predicate_type'
 							),
-							digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest')
+							digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest'),
+							readable: pathReferenceReadability(
+								tenant,
+								reference.cache,
+								reference.storePathHash,
+								reference.generation
+							).as('readable')
 						})
 						.from(d1Schema.tenant)
 						.where(chargeableTenantFilter)
@@ -540,6 +554,8 @@ export class AttestationCasService {
 		reference: AttestationReference,
 		fenceIncarnation?: number
 	): Promise<void> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
 
@@ -602,7 +618,13 @@ export class AttestationCasService {
 			this.context.d1
 				.select({ size: d1Schema.tenantCasBlob.size })
 				.from(d1Schema.tenantCasBlob)
-				.where(presenceFilter)
+				.where(presenceFilter),
+			reclaimPathReadFence(
+				this.context.d1,
+				tenant,
+				reference.cache,
+				jsonRowList([{ storePathHash: reference.storePathHash }])
+			)
 		]);
 
 		if (stillReferencedRows[0] !== undefined) {

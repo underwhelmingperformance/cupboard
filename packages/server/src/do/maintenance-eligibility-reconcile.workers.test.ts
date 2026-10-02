@@ -9,7 +9,7 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -32,6 +32,8 @@ import {
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
+
+import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 
 const wakeImmediately = isoTimestamp(new Date(0));
 
@@ -79,9 +81,9 @@ describe('maintenance reconcile', () => {
 		const status = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				Object.defineProperty(instance.context.db, 'insert', {
+				Object.defineProperty(instance.context.db, 'transaction', {
 					value: () => {
-						throw new Error('insert failed mid-body');
+						throw new Error('transaction failed mid-body');
 					},
 					configurable: true
 				});
@@ -253,17 +255,31 @@ describe('coalesced maintenance reconcile', () => {
 			})
 			.run();
 
+		const reconcile = vi.spyOn(
+			MaintenanceEligibilityService.prototype,
+			'reconcile'
+		);
+		onTestFinished(() => {
+			reconcile.mockRestore();
+		});
 		const response = await commitUpload(token, uploadId);
-
-		expect(response.status).toBe('committed');
-
-		await vi.waitFor(async () => {
-			const row = await eligibilityRow();
-
-			expect({
-				nextWakeAt: row?.nextWakeAt ?? undefined,
-				advancedOffStale: row?.reconciledAt !== staleReconciledAt
-			}).toStrictEqual({ nextWakeAt: undefined, advancedOffStale: true });
+		await Promise.all(
+			reconcile.mock.results.map((result) => {
+				if (result.type !== 'return') {
+					throw result.value;
+				}
+				return result.value;
+			})
+		);
+		const row = await eligibilityRow();
+		expect({
+			status: response.status,
+			nextWakeAt: row?.nextWakeAt ?? undefined,
+			advancedOffStale: row?.reconciledAt !== staleReconciledAt
+		}).toStrictEqual({
+			status: 'committed',
+			nextWakeAt: undefined,
+			advancedOffStale: true
 		});
 	});
 

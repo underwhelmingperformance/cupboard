@@ -65,7 +65,7 @@ export const cacheIdentities = sqliteTable(
 		name: text('name'),
 		access: text('access', { enum: ['public', 'private'] }).notNull(),
 		priority: integer('priority').notNull(),
-		// The generation from `cache_lifecycle` in D1, copied when registration
+		// The generation from `cache_lifecycle_storage` in D1, copied when registration
 		// returns. D1 remains authoritative.
 		generation: integer('generation')
 			.$type<CacheGeneration>()
@@ -301,6 +301,12 @@ export const narInfos = sqliteTable(
 		primaryKey({ columns: [table.cacheId, table.storePathHash] }),
 		// Reuse-view lookup starts with a store-path hash and then narrows to the
 		// caches the view selects. Keep `store_path_hash` first in this index.
+		index('narinfo_inheritance_source_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.cacheId,
+			table.generation
+		),
 		index('narinfo_store_path_hash_cache_idx').on(
 			table.storePathHash,
 			table.cacheId
@@ -353,10 +359,18 @@ export const generationSeq = sqliteTable(
 	]
 );
 
+export const workSequence = sqliteTable('work_sequence', {
+	id: integer('id').primaryKey(),
+	value: integer('value').notNull().default(0)
+});
+
 export const pendingUploads = sqliteTable(
 	'pending_upload',
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
+		acceptedSequence: integer('accepted_sequence').notNull().default(0),
+		acceptedExpiresAt: text('accepted_expires_at').$type<IsoTimestamp>(),
+		commitStartedSequence: integer('commit_started_sequence'),
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
@@ -470,6 +484,9 @@ export const narInfoDeletions = sqliteTable(
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		explicit: integer('explicit', { mode: 'boolean' }).notNull().default(false),
+		protectionCutoff: integer('protection_cutoff'),
+		protectionCapturedAt: text('protection_captured_at').$type<IsoTimestamp>(),
 		// Whether a deletion deferred for attestation inheritance has already
 		// deleted its narinfo object. Garbage collection does not treat such an
 		// entry as work until the deferral ends.
@@ -480,7 +497,26 @@ export const narInfoDeletions = sqliteTable(
 	(table) => [
 		primaryKey({
 			columns: [table.cacheId, table.storePathHash, table.generation]
-		})
+		}),
+		index('narinfo_deletion_reference_cutoff_idx').on(
+			table.storePathHash,
+			table.cacheId,
+			table.explicit,
+			table.generation
+		),
+		index('narinfo_deletion_inheritance_source_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.cacheId,
+			table.generation
+		),
+		index('narinfo_deletion_path_nar_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.explicit,
+			table.cacheId,
+			table.generation
+		)
 	]
 );
 
@@ -497,6 +533,27 @@ export const attestationInheritances = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		acceptedUploadId: text('accepted_upload_id').$type<UploadId>(),
+		acceptedSequence: integer('accepted_sequence').notNull().default(0),
+		acceptedExpiresAt: text('accepted_expires_at').$type<IsoTimestamp>(),
+		commitStartedSequence: integer('commit_started_sequence'),
+		queuedSequence: integer('queued_sequence').notNull().default(0),
+		sourceEndCacheId: integer('source_end_cache_id'),
+		sourceEndGeneration: integer('source_end_generation'),
+		sourceCacheId: integer('source_cache_id').notNull().default(0),
+		sourceGeneration: integer('source_generation').notNull().default(-1),
+		sourceReferenceCacheId: integer('source_reference_cache_id')
+			.notNull()
+			.default(0),
+		sourceReferenceEndGeneration: integer('source_reference_end_generation'),
+		sourceReferenceGeneration: integer('source_reference_generation')
+			.notNull()
+			.default(-1),
+		sourceReferenceComplete: integer('source_reference_complete', {
+			mode: 'boolean'
+		})
+			.notNull()
+			.default(false),
 		sourcePredicateType: text('source_predicate_type').$type<PredicateType>(),
 		sourceDigest: text('source_digest').$type<Sha256HexDigest>(),
 		attempts: integer('attempts').notNull().default(0),
@@ -506,7 +563,23 @@ export const attestationInheritances = sqliteTable(
 		primaryKey({
 			columns: [table.cacheId, table.storePathHash, table.generation]
 		}),
-		index('attestation_inheritance_not_before_idx').on(table.notBefore)
+		index('attestation_inheritance_not_before_idx').on(table.notBefore),
+		index('attestation_inheritance_cutoff_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.acceptedSequence,
+			table.cacheId,
+			table.generation,
+			table.queuedSequence,
+			table.acceptedExpiresAt,
+			table.commitStartedSequence
+		),
+		index('attestation_inheritance_path_nar_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.cacheId,
+			table.generation
+		)
 	]
 );
 

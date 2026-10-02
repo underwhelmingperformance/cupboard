@@ -28,6 +28,7 @@ import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 import { requireSubrequestsFor } from './subrequest-slice.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
+import { WorkSequenceService } from './work-sequence-service.ts';
 
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 
@@ -444,15 +445,17 @@ export class UploadStateService {
 	// re-drives `committing`; a null verdict still means that commit work has not
 	// begun.
 	markUploadCommitting(uploadId: UploadId): void {
-		this.context.db
-			.update(schema.pendingUploads)
-			.set({
-				verdict: 'committing',
-				claimedAt: sql`null`,
-				claimOwner: sql`null`
-			})
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.run();
+		this.context.db.transaction((tx) => {
+			tx.update(schema.pendingUploads)
+				.set({
+					verdict: 'committing',
+					commitStartedSequence: sql`coalesce(${schema.pendingUploads.commitStartedSequence}, ${new WorkSequenceService(tx).allocate()})`,
+					claimedAt: sql`null`,
+					claimOwner: sql`null`
+				})
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.run();
+		});
 	}
 
 	// Keep a deferred upload's terminal verdict so `push --wait` and the status
@@ -477,7 +480,11 @@ export class UploadStateService {
 
 		const updated = this.context.db
 			.update(schema.pendingUploads)
-			.set({ verdict, expiresAt: isoTimestamp(expiresAt) })
+			.set({
+				verdict,
+				acceptedExpiresAt: sql`coalesce(${schema.pendingUploads.acceptedExpiresAt}, ${schema.pendingUploads.expiresAt})`,
+				expiresAt: isoTimestamp(expiresAt)
+			})
 			.where(
 				and(eq(schema.pendingUploads.id, uploadId), awaitingFilter, ownerFilter)
 			)

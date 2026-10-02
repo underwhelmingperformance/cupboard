@@ -47,6 +47,10 @@ import {
 	predecessorVersionTag
 } from '../fixtures/cache-deployment-predecessor/constants.ts';
 
+import {
+	intermediateArtifact,
+	intermediateTransitions
+} from './intermediate-deployment.ts';
 import { StubOidcIssuer } from './oidc-issuer.ts';
 
 const controlScript = 'cupboard';
@@ -236,7 +240,11 @@ export interface DeploymentClient {
 // working tree, keeping D1, R2 and Durable Object storage across the swap.
 type PersistedRuntime =
 	| { readonly kind: 'predecessor'; readonly bundles: FixtureBundles }
-	| { readonly kind: 'release' };
+	| {
+			readonly kind: 'release';
+			readonly stage: 'intermediate' | 'current';
+			readonly artifact: DeploymentArtifact;
+	  };
 
 function d1Api(
 	database: Awaited<ReturnType<Miniflare['getD1Database']>>
@@ -432,12 +440,11 @@ function currentOptions(
 
 function runtimeOptions(
 	paths: StagedDeploymentPaths,
-	artifact: DeploymentArtifact,
 	runtime: PersistedRuntime
 ): MiniflareOptions {
 	return runtime.kind === 'predecessor'
 		? predecessorOptions(paths, runtime.bundles)
-		: currentOptions(paths, artifact);
+		: currentOptions(paths, runtime.artifact);
 }
 
 async function persistencePaths(): Promise<StagedDeploymentPaths> {
@@ -482,6 +489,32 @@ export class StagedDeploymentServer {
 		private miniflare: Miniflare,
 		private persistedRuntime: PersistedRuntime
 	) {}
+
+	private async deployArtifact(
+		artifact: DeploymentArtifact,
+		stage: 'intermediate' | 'current'
+	): Promise<void> {
+		await this.miniflare.setOptions(currentOptions(this.paths, artifact));
+		this.persistedRuntime = { kind: 'release', stage, artifact };
+		const health = await this.workerFetch('/_health');
+
+		if (!health.ok) {
+			throw new RuntimeHealthError('control', { control: health.status });
+		}
+
+		// Miniflare replaces both scripts in the `setOptions` call above, and the
+		// tenant Worker serves no route of its own, so the control Worker's build
+		// version is the evidence that the swap took effect.
+		const control = await this.controlServingVersion();
+
+		if (control !== artifact.buildVersion) {
+			throw new RuntimeVersionMismatchError(
+				'control',
+				artifact.buildVersion,
+				control
+			);
+		}
+	}
 
 	private async operatorCredential(tokenPath = '/token'): Promise<string> {
 		const externalToken = this.issuer.sign({
@@ -751,20 +784,33 @@ export class StagedDeploymentServer {
 		return this.artifact.buildVersion;
 	}
 
+	get deploymentStage(): 'predecessor' | 'intermediate' | 'current' {
+		return this.persistedRuntime.kind === 'predecessor'
+			? 'predecessor'
+			: this.persistedRuntime.stage;
+	}
+
 	/**
 	 * Every D1 migration in the order that an upgrade from the predecessor
-	 * applies them: the expand migrations of every transition, in list order,
-	 * and then the contract migrations. The independent `0031` therefore comes
-	 * before `0028` to `0030`.
+	 * applies them across the intermediate release and the current release.
 	 */
 	get upgradeMigrationOrder(): readonly string[] {
 		if (this.artifact.d1Migrations.length === 0) {
 			throw new ArtifactD1MigrationMissingError();
 		}
 
+		const completedIds = new Set(
+			intermediateTransitions.map((transition) => transition.id)
+		);
+		const later = schemaTransitions.filter(
+			(transition) => !completedIds.has(transition.id)
+		);
+
 		return [
-			...schemaTransitions.flatMap((transition) => transition.expand),
-			...schemaTransitions.flatMap((transition) => transition.contract)
+			...intermediateTransitions.flatMap((transition) => transition.expand),
+			...intermediateTransitions.flatMap((transition) => transition.contract),
+			...later.flatMap((transition) => transition.expand),
+			...later.flatMap((transition) => transition.contract)
 		];
 	}
 
@@ -777,35 +823,45 @@ export class StagedDeploymentServer {
 	 * `wakeTenants`; without `wakeTenants` the walk only checks that the tenants
 	 * have recorded the contract step.
 	 */
-	transitionWalk(hooks: Partial<TransitionHooks> = {}): TransitionWalk {
+	transitionWalk(
+		hooks: Partial<TransitionHooks> = {},
+		stage: 'intermediate' | 'current' = 'current'
+	): TransitionWalk {
+		const artifact = stage === 'current' ? this.artifact : intermediateArtifact;
+		const transitions =
+			stage === 'current' ? schemaTransitions : intermediateTransitions;
+
 		return {
 			api: {
 				queryBatch: (id, statements) => this.api.d1QueryBatch(id, statements),
 				queryRows: (id, sql) => this.api.d1QueryRows(id, sql)
 			},
 			database: { id: databaseId, name: databaseName },
-			transitions: planTransitions(
-				this.artifact.d1Migrations,
-				schemaTransitions
-			),
+			transitions: planTransitions(artifact.d1Migrations, transitions),
 			hooks: {
 				now: () => new Date(),
 				checkServing: async () => {
 					const control = await this.controlServingVersion();
 
-					if (control !== this.artifact.buildVersion) {
+					if (control !== artifact.buildVersion) {
 						throw new RuntimeVersionMismatchError(
 							'control',
-							this.artifact.buildVersion,
+							artifact.buildVersion,
 							control
 						);
 					}
 
-					if (this.persistedRuntime.kind !== 'release') {
+					if (
+						this.persistedRuntime.kind !== 'release' ||
+						this.persistedRuntime.artifact.buildVersion !==
+							artifact.buildVersion
+					) {
 						throw new RuntimeVersionMismatchError(
 							'tenant',
-							this.artifact.buildVersion,
-							'the predecessor fixture'
+							artifact.buildVersion,
+							this.persistedRuntime.kind === 'release'
+								? this.persistedRuntime.artifact.buildVersion
+								: 'the predecessor fixture'
 						);
 					}
 				},
@@ -934,37 +990,25 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * Replaces the predecessor Workers with the ones built from the working
+	 * Replaces the deployed Workers with the ones built from the working
 	 * tree, keeping the persisted D1, R2 and Durable Object storage, and returns
 	 * once both scripts serve this build.
 	 */
 	async deployCurrent(): Promise<void> {
-		await this.miniflare.setOptions(currentOptions(this.paths, this.artifact));
-		this.persistedRuntime = { kind: 'release' };
-		const health = await this.workerFetch('/_health');
+		await this.deployArtifact(this.artifact, 'current');
+	}
 
-		if (!health.ok) {
-			throw new RuntimeHealthError('control', { control: health.status });
-		}
-
-		// Miniflare replaces both scripts in the `setOptions` call above, and the
-		// tenant Worker serves no route of its own, so the control Worker's build
-		// version is the evidence that the swap took effect.
-		const control = await this.controlServingVersion();
-
-		if (control !== this.artifact.buildVersion) {
-			throw new RuntimeVersionMismatchError(
-				'control',
-				this.artifact.buildVersion,
-				control
-			);
-		}
+	/**
+	Deploys the pinned intermediate Workers over the persisted storage.
+	*/
+	async deployIntermediate(): Promise<void> {
+		await this.deployArtifact(intermediateArtifact, 'intermediate');
 	}
 
 	async restart(): Promise<void> {
 		await this.miniflare.dispose();
 		this.miniflare = new Miniflare(
-			runtimeOptions(this.paths, this.artifact, this.persistedRuntime)
+			runtimeOptions(this.paths, this.persistedRuntime)
 		);
 	}
 

@@ -364,24 +364,24 @@ describe('retention grace deadlines in garbage collection', () => {
 
 		await currentServer().runGarbageCollection();
 
-		const remaining = async (): Promise<number> => {
-			const generations = await Promise.all([
+		const continuation = () =>
+			runInDurableObject(currentServer(), (_instance, state) =>
+				state.storage.get(gcContinuationKey)
+			);
+		let progress = await continuation();
+		while (progress !== undefined) {
+			await runInDurableObject(currentServer(), (instance) => instance.alarm());
+			progress = await continuation();
+		}
+		expect({
+			generations: await Promise.all([
 				narInfoGeneration(first.storePathHash),
 				narInfoGeneration(second.storePathHash)
-			]);
-
-			return generations.filter((generation) => generation !== undefined)
-				.length;
-		};
-
-		await vi.waitFor(async () => {
-			await runInDurableObject(currentServer(), (instance) => instance.alarm());
-			expect(await remaining()).toBe(0);
-			expect(
-				await runInDurableObject(currentServer(), (_instance, state) =>
-					state.storage.get(gcContinuationKey)
-				)
-			).toBeUndefined();
+			]),
+			continuation: progress
+		}).toStrictEqual({
+			generations: [undefined, undefined],
+			continuation: undefined
 		});
 	});
 
@@ -2002,7 +2002,7 @@ describe('retention grace at publication', () => {
 					...instance.context.env,
 					CUPBOARD_DB: prepareTappingD1(
 						instance.context.env.CUPBOARD_DB,
-						(query) => query.includes('blob_ref'),
+						(query) => query.includes('blob_ref_storage'),
 						() => {
 							if (hasMoved) {
 								return;
@@ -2494,7 +2494,8 @@ describe('retention grace facts reported to clients', () => {
 					CUPBOARD_DB: prepareTappingD1(
 						instance.context.env.CUPBOARD_DB,
 						(query) =>
-							query.includes('blob_ref') || query.includes('blob_state'),
+							query.includes('blob_ref_storage') ||
+							query.includes('blob_state'),
 						() => {
 							if (hasMoved) {
 								return;
@@ -2642,7 +2643,7 @@ describe('retention grace facts reported to clients', () => {
 					...instance.context.env,
 					CUPBOARD_DB: prepareTappingD1(
 						instance.context.env.CUPBOARD_DB,
-						(query) => query.includes('blob_ref'),
+						(query) => query.includes('blob_ref_storage'),
 						() => {
 							if (hasAttached) {
 								return;
@@ -3431,7 +3432,7 @@ describe('confirming an unretained publication', () => {
 		// clock advances so a wrongful extension by the confirm would show.
 		vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
 
-		// The blob_ref edge read is the first shared-fact query the confirm
+		// The blob_ref_storage edge read is the first shared-fact query the confirm
 		// issues, so a recommit fired on its preparation lands after the
 		// snapshot and before the grace application.
 		const hash = storePathHashSchema.parse(path.storePathHash);
@@ -3455,7 +3456,7 @@ describe('confirming an unretained publication', () => {
 					...instance.context.env,
 					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
 						failures: 0,
-						matches: (query) => query.includes('blob_ref'),
+						matches: (query) => query.includes('blob_ref_storage'),
 						onMatch: moveRow
 					})
 				});

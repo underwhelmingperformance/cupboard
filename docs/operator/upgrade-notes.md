@@ -21,6 +21,33 @@ not advertise `attestation-info-v1`. Authentication and storage failures remain
 errors and do not permit fallback. Discovery does not verify attestation
 signatures; use `cupboard attest verify` for verification.
 
+### Path deletion and rollback
+
+Complete `cupboard deploy` before deleting a store path. The deployment uploads
+both Workers, verifies that both serve the new build, then activates path read
+revocation through `0036_path_read_authority_contract.sql`. Changes to shared
+NAR and attestation references return a retryable error until the contract step
+completes. Resume an interrupted deployment with the same CLI and source.
+
+Both Workers introduce the unbound `PathReadAuthorityRollbackGuard` Durable
+Object class. Cloudflare [blocks version rollback] across this class lifecycle
+change. After the contract step starts, preceding CLIs also refuse to deploy
+against the recorded transition. Recover by completing this deployment. The
+contract replaces the preceding reference tables with read-only authority views
+and replaces the preceding cache-admission table with an empty view. A preceding
+request that has not yet read cache authority is refused before it can serve an
+R2 object. A request admitted before contraction may finish under the existing
+streaming contract.
+
+After contraction, both Workers must use this release or a compatible successor
+that reads the physical storage tables. Preceding Workers cannot admit cache
+reads or change cache lifecycle rows. Current public and private cache access is
+unchanged. Lifecycle projection can finish before contraction; lifecycle writes
+refuse retryably while the contract step runs.
+
+[blocks version rollback]:
+  https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/
+
 ### Refresh credentials
 
 Deploy the server before adopting the new CLI or workflow behaviour. Local
