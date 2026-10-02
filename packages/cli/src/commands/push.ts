@@ -451,8 +451,8 @@ export function registerPushCommand(
 			'JSON file, written by the build, that lists the stores each path was copied from'
 		)
 		.option(
-			'--attestation <bundle>',
-			'a Sigstore bundle file to attach to the pushed paths that it covers (repeatable)',
+			'--bundle, --attestation <bundle>',
+			'a Sigstore bundle file to attach to the pushed paths that it covers (repeatable; both option names are equivalent)',
 			collect,
 			[]
 		)

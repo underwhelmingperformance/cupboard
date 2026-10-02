@@ -16,7 +16,8 @@ import {
 import {
 	type CachedSession,
 	listCachedSessions,
-	readCachedSession
+	readCachedSession,
+	type SessionReadFailure
 } from '../auth/token-store.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -62,7 +63,7 @@ export class WhoamiProviderWithUrlError extends CliUsageError {
  * browser.
  */
 export interface WhoamiDependencies {
-	readonly listSessions: () => Promise<readonly CachedSession[]>;
+	readonly listSessions: typeof listCachedSessions;
 	readonly readSession: (target: URL) => Promise<CachedSession | undefined>;
 	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
 	readonly signIn: (options: IdentityLoginOptions) => Promise<string>;
@@ -78,7 +79,7 @@ export type WhoamiInput =
  * can start new sessions silently.
  */
 interface WhoamiSessions {
-	readonly sessions: readonly SessionIdentity[];
+	readonly sessions?: readonly SessionIdentity[];
 	/**
 	Present when a Cloudflare sign-in is cached; its subject when recorded.
 	*/
@@ -110,26 +111,59 @@ async function reportSessions(
 	reporter: Reporter,
 	dependencies: WhoamiDependencies
 ): Promise<void> {
-	const cached =
-		url === undefined
-			? await dependencies.listSessions()
-			: [await dependencies.readSession(url)].filter(
-					(session) => session !== undefined
-				);
+	const sessionFailures: SessionReadFailure[] = [];
+	const readSessions = async (): Promise<readonly CachedSession[]> => {
+		if (url === undefined) {
+			return dependencies.listSessions((failure) => {
+				sessionFailures.push(failure);
+			});
+		}
 
-	if (url !== undefined && cached.length === 0) {
+		const session = await dependencies.readSession(url);
+
+		return session === undefined ? [] : [session];
+	};
+	const [sessionRead, grantRead] = await Promise.allSettled([
+		readSessions(),
+		dependencies.readGrant()
+	]);
+	const cached =
+		sessionRead.status === 'fulfilled' ? sessionRead.value : undefined;
+
+	if (url !== undefined && cached?.length === 0) {
 		throw new NoCachedSessionError(canonicalHref(url));
 	}
 
 	const sessions = cached
-		.map((session) => sessionIdentity(session))
+		?.map((session) => sessionIdentity(session))
 		.filter((session) => session !== undefined);
-	const grant = await dependencies.readGrant();
+	const grant = grantRead.status === 'fulfilled' ? grantRead.value : undefined;
 	const now = dependencies.now();
-	const rows: ResultRow[] = sessions.map((session) => ({
+	const rows: ResultRow[] = (sessions ?? []).map((session) => ({
 		label: session.url,
 		value: sessionSummary(session, now)
 	}));
+
+	for (const failure of sessionFailures) {
+		const detail =
+			failure.cause instanceof Error
+				? failure.cause.message
+				: String(failure.cause);
+		reporter.warn(
+			`Could not read cached Cupboard session file ${failure.file}: ${detail}. Check that the file is readable and retry.`
+		);
+	}
+
+	for (const [read, description] of [
+		[sessionRead, 'the cached Cupboard sessions'],
+		[grantRead, 'the cached Cloudflare sign-in']
+	] as const) {
+		if (read.status === 'rejected') {
+			reporter.warn(
+				`Could not read ${description}. Check access to the CLI's configuration directory and retry.`
+			);
+		}
+	}
 
 	if (grant !== undefined) {
 		rows.push({
@@ -139,7 +173,7 @@ async function reportSessions(
 	}
 
 	const data: WhoamiSessions = {
-		sessions,
+		...(sessions !== undefined && { sessions }),
 		...(grant !== undefined && {
 			cloudflareSignIn: {
 				...(grant.subject !== undefined && { subject: grant.subject })
@@ -152,9 +186,27 @@ async function reportSessions(
 		data,
 		rows,
 		empty:
-			'No sessions are cached. Sign in with `cupboard login <url>`, or run ' +
-			'`cupboard whoami --provider` to see the identity you would sign in as.'
+			sessionFailures.length > 0 ||
+			sessionRead.status === 'rejected' ||
+			grantRead.status === 'rejected'
+				? 'Some cached identity files could not be read.'
+				: 'No sessions are cached. Sign in with `cupboard login <url>`, or run ' +
+					'`cupboard whoami --provider` to see the identity you would sign in as.'
 	});
+
+	const firstSessionFailure = sessionFailures[0];
+
+	if (firstSessionFailure !== undefined) {
+		throw firstSessionFailure.cause;
+	}
+
+	if (sessionRead.status === 'rejected') {
+		throw sessionRead.reason;
+	}
+
+	if (grantRead.status === 'rejected') {
+		throw grantRead.reason;
+	}
 }
 
 // The issuer, audience and subject are the values of a matching trust rule.

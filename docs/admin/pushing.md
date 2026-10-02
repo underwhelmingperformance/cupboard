@@ -248,6 +248,13 @@ cupboard confirm https://cupboard.example.workers.dev/t/acme \
   /nix/store/<hash>-app /nix/store/<hash>-runtime
 ```
 
+For a large set, pass `--paths-file paths.txt` to read store paths one per line.
+Blank lines are ignored. File entries are additional store paths, so specify a
+named cache in the URL or as a positional argument. Every file entry must be a
+store path. The CLI validates the file before requesting credentials. An invalid
+store path in an argument or file exits with usage status 2. For a file entry,
+the error identifies the file and line number.
+
 It also refreshes each store path's grace period, as a new push would. It
 doesn't add the store paths to a root. It fails if any store path is missing, or
 is still being verified.
