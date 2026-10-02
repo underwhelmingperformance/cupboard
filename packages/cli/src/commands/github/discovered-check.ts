@@ -62,6 +62,7 @@ import {
 } from './finding.ts';
 import {
 	isPresetJob,
+	isReadOnlyJob,
 	modelPublishingJob,
 	type PublicationCase,
 	type PublishingJobFinding,
@@ -150,7 +151,7 @@ export class PublishingJobMissingFinding extends CheckFinding {
 	}
 
 	detail(): string {
-		return `no Cupboard publishing job targeting ${this.tenant.href} was found on ${this.branch}`;
+		return `no Cupboard publishing job targeting ${this.tenant.href} was found on ${this.branch}. If the workflow exists on another branch, pass --branch <branch>.`;
 	}
 }
 
@@ -500,6 +501,11 @@ async function inspectPublication(
 	dependencies: DiscoveredGithubCheckDependencies
 ): Promise<CheckFinding[]> {
 	const isPreset = isPresetJob(job);
+	const cacheMode = job.inputs['cache-access-mode'];
+	const accessSource: ReuseViewAccessModeMismatchFinding['source'] =
+		!isReadOnlyJob(job) && (cacheMode === 'public' || cacheMode === 'private')
+			? 'workflow-input'
+			: 'tenant-default';
 	const read = await publicationReadAuthority(
 		job,
 		publication,
@@ -540,7 +546,8 @@ async function inspectPublication(
 				'reuse view access',
 				publication.reuseView.name,
 				read.viewAccess,
-				read.selectedViewAccess
+				read.selectedViewAccess,
+				accessSource
 			)
 		);
 	}
@@ -566,7 +573,8 @@ async function inspectPublication(
 			await checkPullRequestCacheAccess(
 				identity,
 				client,
-				read.selectedViewAccess
+				read.selectedViewAccess,
+				accessSource
 			)
 		);
 	}

@@ -163,13 +163,19 @@ export class ReuseViewAccessModeMismatchFinding extends FailedCheckFinding {
 		check: string,
 		public readonly viewName: string,
 		public readonly viewAccess: string,
-		public readonly requestedAccess: string
+		public readonly requestedAccess: string,
+		public readonly source:
+			'workflow-input' | 'tenant-default' = 'workflow-input'
 	) {
 		super(check);
 	}
 
 	detail(): string {
-		return `reuse view ${this.viewName} is ${this.viewAccess}; the workflow selects ${this.requestedAccess} for pull-request caches`;
+		const selection =
+			this.source === 'workflow-input'
+				? `the workflow's cache-access-mode input selects ${this.requestedAccess}. Use a view with ${this.requestedAccess} access, or set cache-access-mode to ${this.viewAccess}`
+				: `the tenant's default cache is ${this.requestedAccess}, so the workflow expects a ${this.requestedAccess} reuse view. Use a view with ${this.requestedAccess} access, or change the tenant's default cache access`;
+		return `reuse view ${this.viewName} is ${this.viewAccess}; ${selection}.`;
 	}
 }
 
