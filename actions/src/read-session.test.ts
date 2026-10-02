@@ -21,14 +21,14 @@ class CommandExitError extends Error {
 }
 
 function execute(
-	file: string,
+	script: string,
 	arguments_: readonly string[],
 	options: SpawnOptionsWithoutStdio
 ): Promise<{ stdout: string; stderr: string }> {
-	const child = spawn(file, arguments_, {
+	const child = spawn('bash', ['-s', '--', ...arguments_], {
 		...options,
 		detached: true,
-		stdio: ['ignore', 'pipe', 'pipe']
+		stdio: ['pipe', 'pipe', 'pipe']
 	});
 	let isChildClosed = false;
 	const closed = new Promise<void>((resolve) => {
@@ -63,6 +63,7 @@ function execute(
 	});
 	return new Promise((resolve, reject) => {
 		child.once('error', reject);
+		child.stdin.once('error', reject);
 		child.once('close', (code, signal) => {
 			if (code !== 0) {
 				reject(new CommandExitError(code, signal, stdout, stderr));
@@ -70,63 +71,86 @@ function execute(
 			}
 			resolve({ stdout, stderr });
 		});
+		child.stdin.end(script);
 	});
 }
 
 describe('action read session', () => {
-	it('passes the audience and all extra caches to one wrapper invocation', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-wrapper-'));
-		const binary = path.join(directory, 'cupboard');
-		const argumentsFile = path.join(directory, 'arguments.json');
-		try {
-			await writeFile(
-				binary,
-				`#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARGUMENTS_FILE, JSON.stringify(process.argv.slice(2)));\n`,
-				{ mode: 0o700 }
-			);
-			await execute(
-				'bash',
-				[
-					'-c',
-					'source "$1"; run_with_read_session "$2" "$3" "$4" -- printf result',
-					'test',
-					path.resolve('actions/read-session.sh'),
-					binary,
-					'https://cache.example.test/t/acme/cache/builds',
-					'prior'
-				],
-				{
-					env: {
-						...process.env,
-						ARGUMENTS_FILE: argumentsFile,
-						READ_SESSION_AUDIENCE: 'custom audience',
-						READ_SESSION_CACHES: JSON.stringify([
-							'https://cache.example.test/t/acme/cache/releases',
-							'https://cache.example.test/t/acme'
-						])
-					}
-				}
-			);
-			expect(JSON.parse(await readFile(argumentsFile, 'utf8'))).toStrictEqual([
-				'run',
-				'https://cache.example.test/t/acme/cache/builds',
-				'--github-oidc',
-				'--audience',
-				'custom audience',
-				'--read-cache',
-				'https://cache.example.test/t/acme/cache/releases',
-				'--read-cache',
-				'https://cache.example.test/t/acme',
-				'--reuse-view',
-				'prior',
-				'--',
-				'printf',
-				'result'
-			]);
-		} finally {
-			await rm(directory, { recursive: true, force: true });
+	it.each([
+		{
+			label: 'ordinary arguments',
+			suffix: '',
+			audience: 'custom audience',
+			view: 'prior'
+		},
+		{
+			label: 'shell metacharacters',
+			suffix: " space '$();[x]",
+			audience: "custom '$HOME;$(printf expanded)'\"",
+			view: "prior '$HOME;$(printf expanded)'\""
 		}
-	});
+	])(
+		'passes $label to one wrapper invocation',
+		async ({ suffix, audience, view }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), `cupboard-wrapper${suffix}-`)
+			);
+			const binary = path.join(directory, 'cupboard');
+			const argumentsFile = path.join(directory, 'arguments.json');
+			const readSession = path.join(directory, `read session${suffix}.sh`);
+			try {
+				await writeFile(
+					readSession,
+					await readFile(path.resolve('actions/read-session.sh'))
+				);
+				await writeFile(
+					binary,
+					`#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARGUMENTS_FILE, JSON.stringify(process.argv.slice(2)));\n`,
+					{ mode: 0o700 }
+				);
+				await execute(
+					'source "$1"; run_with_read_session "$2" "$3" "$4" -- printf result',
+					[
+						readSession,
+						binary,
+						'https://cache.example.test/t/acme/cache/builds',
+						view
+					],
+					{
+						env: {
+							...process.env,
+							ARGUMENTS_FILE: argumentsFile,
+							READ_SESSION_AUDIENCE: audience,
+							READ_SESSION_CACHES: JSON.stringify([
+								'https://cache.example.test/t/acme/cache/releases',
+								'https://cache.example.test/t/acme'
+							])
+						}
+					}
+				);
+				expect(JSON.parse(await readFile(argumentsFile, 'utf8'))).toStrictEqual(
+					[
+						'run',
+						'https://cache.example.test/t/acme/cache/builds',
+						'--github-oidc',
+						'--audience',
+						audience,
+						'--read-cache',
+						'https://cache.example.test/t/acme/cache/releases',
+						'--read-cache',
+						'https://cache.example.test/t/acme',
+						'--reuse-view',
+						view,
+						'--',
+						'printf',
+						'result'
+					]
+				);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
 });
 
 const wrapperStepSchema = z.looseObject({
@@ -246,7 +270,7 @@ it.each(
 			let stdout = '';
 			let status = 0;
 			try {
-				({ stdout } = await execute('bash', ['-c', step.run], {
+				({ stdout } = await execute(step.run, [], {
 					env: {
 						...process.env,
 						...environment,
@@ -358,7 +382,7 @@ it('forwards additional cache URLs through the actual setup shell', async () => 
 				value === '${{ inputs.read-caches }}' ? cache : ''
 			])
 		);
-		await execute('bash', ['-c', step.run], {
+		await execute(step.run, [], {
 			env: {
 				...process.env,
 				...environment,

@@ -17,6 +17,7 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type { ResultPayload, ResultRow } from '@cupboard/reporter';
+import { Command } from 'commander';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildProgram } from '../cli.ts';
@@ -30,6 +31,8 @@ import {
 	githubPrCloseAddBody,
 	githubTagAddBody,
 	type OidcTrustClient,
+	registerControlOidcTrustCommands,
+	registerOidcTrustCommands,
 	ruleOptionsGiven,
 	runOidcTrustAdd,
 	runOidcTrustList,
@@ -941,6 +944,15 @@ describe('pull-request cache naming across repositories', () => {
 	});
 });
 
+function oidcTrustProgram(): Command {
+	const program = new Command().option('--output-mode <mode>');
+
+	registerOidcTrustCommands(program);
+	registerControlOidcTrustCommands(program);
+
+	return program;
+}
+
 describe('parsed generic read rules', () => {
 	beforeEach(() => {
 		mocks.add.mockReset();
@@ -1046,7 +1058,7 @@ describe('parsed generic read rules', () => {
 		'preserves the $label selector for $permission permissions',
 		async ({ selector, allow, read, actions, root }) => {
 			const ruleClaims = { ...claims, ref: selector.ref };
-			await buildProgram().parseAsync([
+			await oidcTrustProgram().parseAsync([
 				...baseArguments,
 				...Object.entries(ruleClaims).flatMap(([key, value]) => [
 					'--claim',
@@ -1100,7 +1112,7 @@ describe('parsed generic read rules', () => {
 		async ({ args }) => {
 			let outcome: unknown;
 			try {
-				await buildProgram().parseAsync([
+				await oidcTrustProgram().parseAsync([
 					...baseArguments,
 					...claimArguments,
 					'--allow',
@@ -1130,7 +1142,7 @@ describe('parsed generic read rules', () => {
 	])('keeps validation for $allow', async ({ allow, error: expectedError }) => {
 		let outcome: unknown;
 		try {
-			await buildProgram().parseAsync([
+			await oidcTrustProgram().parseAsync([
 				...baseArguments,
 				...claimArguments,
 				...allow.flatMap((value) => ['--allow', value])
@@ -1166,9 +1178,17 @@ describe('parsed generic read rules', () => {
 });
 
 describe('parsed GitHub read presets', () => {
-	it.each(['--job-workflow-ref', '--workflow-ref'])(
-		'parses %s on a manual rule',
-		async (flag) => {
+	it.each(
+		['--job-workflow-ref', '--workflow-ref'].flatMap((flag) =>
+			[
+				'https://token.actions.githubusercontent.com',
+				'https://tokenXactionsXgithubusercontentXcom',
+				'https://token.actions.githubusercontent.com.evil.example'
+			].map((issuer) => ({ flag, issuer }))
+		)
+	)(
+		'parses $flag with the exact issuer $issuer on a manual rule',
+		async ({ flag, issuer }) => {
 			mocks.add.mockReset();
 			mocks.lookup.mockClear();
 			mocks.add.mockImplementation((body) =>
@@ -1176,7 +1196,7 @@ describe('parsed GitHub read presets', () => {
 			);
 			const workflowReference =
 				'acme/ci/.github/workflows/publish.yml@refs/heads/main';
-			await buildProgram()
+			await oidcTrustProgram()
 				.exitOverride()
 				.parseAsync([
 					'node',
@@ -1187,7 +1207,7 @@ describe('parsed GitHub read presets', () => {
 					'add',
 					tenantUrl,
 					'--issuer',
-					'https://token.actions.githubusercontent.com',
+					issuer,
 					'--audience',
 					tenantUrl,
 					'--allow',
@@ -1203,7 +1223,7 @@ describe('parsed GitHub read presets', () => {
 				add: [
 					[
 						{
-							issuer: 'https://token.actions.githubusercontent.com',
+							issuer,
 							audience: tenantUrl,
 							claims: { job_workflow_ref: workflowReference },
 							permittedGrants: [
@@ -1231,7 +1251,7 @@ describe('parsed GitHub read presets', () => {
 			);
 			mocks.lookup.mockReset();
 			mocks.lookup.mockResolvedValue(identity);
-			await buildProgram()
+			await oidcTrustProgram()
 				.exitOverride()
 				.parseAsync([
 					'node',
@@ -1318,7 +1338,7 @@ describe('parsed GitHub read presets', () => {
 			);
 			mocks.lookup.mockReset();
 			mocks.lookup.mockResolvedValue(identity);
-			await buildProgram()
+			await oidcTrustProgram()
 				.exitOverride()
 				.parseAsync([
 					'node',
