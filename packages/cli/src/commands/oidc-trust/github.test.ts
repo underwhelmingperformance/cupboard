@@ -622,9 +622,10 @@ describe('GitHub request failure diagnostics', () => {
 			networkAttempts += 1;
 			throw new Error('Unexpected network request after cache preparation');
 		};
-		server.listen({ onUnhandledFrame: 'error' });
+		server.listen({ onUnhandledRequest: 'error' });
 		try {
 			const response = await makeFetchHappen(url, {
+				agent: new nodeHttps.Agent(),
 				cachePath,
 				headers: { accept: 'application/vnd.github.v3+json' }
 			});
