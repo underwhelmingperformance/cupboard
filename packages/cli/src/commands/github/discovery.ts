@@ -21,7 +21,8 @@ import {
 	GithubRateLimitError,
 	isGithubRateLimitResponse,
 	isGithubResponseStatus,
-	type LookupRepositoryOptions
+	type LookupRepositoryOptions,
+	throwIfGithubTemporaryError
 } from '../oidc-trust/github.ts';
 
 import { parseExactWorkflowReference } from './convention.ts';
@@ -1004,6 +1005,7 @@ export function githubWorkflowSource(
 				throw error;
 			}
 
+			throwIfGithubTemporaryError(error, resource);
 			throw new WorkflowDiscoveryError(`Cannot read ${resource} from GitHub`, {
 				cause: error
 			});

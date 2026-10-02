@@ -78,12 +78,20 @@ A few things to know about `github setup`:
 
 - It looks up the repository on GitHub to find its numeric ID. The rules use the
   ID because it doesn't change if the repository is renamed. For a private
-  repository, set `GH_TOKEN` or `GITHUB_TOKEN` so the command can see it.
+  repository, set `GH_TOKEN` or `GITHUB_TOKEN` to a token with permission to
+  read it. A non-empty `GH_TOKEN` takes precedence over `GITHUB_TOKEN`. GitHub
+  also returns 404 when a private repository is inaccessible, so check the
+  repository name and the token's access if the command reports that it was not
+  found.
+- Temporary GitHub failures exit with status 75. Check [GitHub Status] and try
+  again. For a connection failure, also check your network connection.
 - The root names include the repository's name, so if you rename the repository,
   run `github setup` again.
 - It's safe to run again. It reports what's already in place. The exception is a
   reuse view with the same name but a different definition: the command shows
   you the difference, makes no changes, and exits with an error.
+
+[GitHub Status]: https://www.githubstatus.com/
 
 ### Why the workflow reference ends in `v*`
 
@@ -264,15 +272,13 @@ the tenant and ask it for, and checks that against your trust rules and reuse
 view. After `cupboard github setup`, the job in the workflow file from step 4
 passes.
 
-If a job fails, the command lists it and exits with status 1. For example, if
-two jobs publish to the tenant and no trust rule accepts them, the result looks
-like this:
+If a job fails, the command lists it and exits with status 1. For example, if no
+trust rule accepts the publishing job from step 4, this excerpt shows the failed
+job and repair hint. The context rows are omitted:
 
 ```text
-Workflow revision: acme/app@<commit>
-.github/workflows/publish.yml, packages: failed: push: no rule pins this repository
-.github/workflows/publish.yml, systems: failed: push: no rule pins this repository
-Review a repair: cupboard github check https://cupboard.example.workers.dev/t/acme --repo acme/app --branch main --fix
+.github/workflows/cupboard.yml, publish: failed: pull_request: the job condition limits the job to pull requests from this repository; the check does not model pull requests from forks; pull_request: no rule pins this repository; push: no rule pins this repository
+Review a repair: cupboard github check https://cupboard.example.workers.dev/t/acme --repo acme/app --branch add-cupboard --fix
 ```
 
 To see the tenant changes that would fix failures like these, and apply them
