@@ -292,7 +292,8 @@ export async function checkReuseViewCacheInfo(
 export async function checkPullRequestCacheAccess(
 	identity: RepositoryIdentity,
 	client: GithubCheckClient,
-	expectedAccess?: CacheAccessMode
+	expectedAccess?: CacheAccessMode,
+	source: ReuseViewAccessModeMismatchFinding['source'] = 'workflow-input'
 ): Promise<CheckFinding> {
 	const check = 'pull-request cache access';
 	const viewName = pullRequestViewName(identity.repositoryId);
@@ -309,7 +310,8 @@ export async function checkPullRequestCacheAccess(
 			check,
 			viewName,
 			definition.access,
-			expectedAccess
+			expectedAccess,
+			source
 		);
 	}
 

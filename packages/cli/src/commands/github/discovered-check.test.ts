@@ -235,6 +235,26 @@ it.each([
 	{
 		selected: 'public' as const,
 		input: '',
+		details: [
+			"reuse view pull-requests-1234 is private; the tenant's default cache is public, so the workflow expects a public reuse view. Use a view with public access, or change the tenant's default cache access."
+		],
+		status: 'failed',
+		mismatches: [
+			new ReuseViewAccessModeMismatchFinding(
+				'pull-request cache access',
+				'pull-requests-1234',
+				'private',
+				'public',
+				'tenant-default'
+			)
+		]
+	},
+	{
+		selected: 'explicit public' as const,
+		input: '      cache-access-mode: public\n',
+		details: [
+			"reuse view pull-requests-1234 is private; the workflow's cache-access-mode input selects public. Use a view with public access, or set cache-access-mode to private."
+		],
 		status: 'failed',
 		mismatches: [
 			new ReuseViewAccessModeMismatchFinding(
@@ -248,6 +268,7 @@ it.each([
 	{
 		selected: 'private' as const,
 		input: '      cache-access-mode: private\n',
+		details: [],
 		status: 'ready',
 		mismatches: []
 	}
@@ -324,10 +345,18 @@ ${scenario.input}`;
 					(finding) => finding instanceof ReuseViewAccessModeMismatchFinding
 				)
 		),
+		details: result.jobs.flatMap((job) =>
+			job.findings
+				.filter(
+					({ finding }) => finding instanceof ReuseViewAccessModeMismatchFinding
+				)
+				.map(({ finding }) => finding.detail())
+		),
 		repairOffered: isRepairOffered(result)
 	}).toStrictEqual({
 		status: [scenario.status],
 		mismatches: scenario.mismatches,
+		details: scenario.details,
 		repairOffered: false
 	});
 });
@@ -2186,3 +2215,37 @@ ${input === undefined ? '' : `      audience: ${input}`}
 		});
 	}
 );
+
+it('suggests another branch when discovery finds no publishing job', async () => {
+	const { client, dependencies } = fixture({
+		dependencies: { source: { ...source, list: () => Promise.resolve([]) } }
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main' },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+	expect(
+		result.jobs.map((job) => ({
+			caller: job.caller,
+			job: job.job,
+			status: job.status,
+			findings: job.findings.map(({ finding }) => finding.toJSON())
+		}))
+	).toStrictEqual([
+		{
+			caller: repository,
+			job: 'publication',
+			status: 'unverified',
+			findings: [
+				{
+					check: 'workflow discovery',
+					status: 'unverified',
+					detail: `no Cupboard publishing job targeting ${tenant.href} was found on main. If the workflow exists on another branch, pass --branch <branch>.`
+				}
+			]
+		}
+	]);
+});
