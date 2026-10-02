@@ -21,6 +21,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { type Command, Option } from 'commander';
@@ -46,6 +47,7 @@ import {
 	GithubSetupRemovalError,
 	ReadCredentialPairError
 } from '../errors.ts';
+import { classifyFailures } from '../exit-code.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -1120,7 +1122,8 @@ export async function runGithubSetup(
 		.toSorted((left, right) => left.localeCompare(right));
 
 	throw new GithubSetupRemovalError(failedIds, {
-		cause: removalFailures.values().next().value
+		cause: classifyFailures(removalFailures.values().toArray(), genericExitCode)
+			.cause
 	});
 }
 

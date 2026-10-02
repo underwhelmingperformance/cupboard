@@ -27,6 +27,7 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { translateRpcError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	CliUsageError,
@@ -239,7 +240,11 @@ export async function runConfirm(
 			throw error;
 		}
 
-		throw new ConfirmIncompleteError(confirmedBatches, totalBatches, error);
+		throw new ConfirmIncompleteError(
+			confirmedBatches,
+			totalBatches,
+			translateRpcError(error, { keepAuthCause: true })
+		);
 	}
 
 	reportConfirmedPaths(reporter, paths);
