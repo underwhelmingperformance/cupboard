@@ -169,6 +169,13 @@ export function githubApi(
 	});
 }
 
+export function parseRepository(value: string): string {
+	if (!/^[^\s/]+\/[^\s/]+$/u.test(value)) {
+		throw new InvalidRepositoryError(value);
+	}
+	return value;
+}
+
 /**
  * Reads a repository's numeric ids and current full name from GitHub. The
  * lookup uses `GH_TOKEN`, then `GITHUB_TOKEN`, when either is set. Without a
@@ -181,11 +188,8 @@ export async function lookupRepository(
 	repository: string,
 	options: LookupRepositoryOptions = {}
 ): Promise<RepositoryIdentity> {
+	parseRepository(repository);
 	const slash = repository.indexOf('/');
-
-	if (!/^[^\s/]+\/[^\s/]+$/u.test(repository)) {
-		throw new InvalidRepositoryError(repository);
-	}
 
 	const owner = repository.slice(0, slash);
 	const repo = repository.slice(slash + 1);
