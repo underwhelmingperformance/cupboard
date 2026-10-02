@@ -1,4 +1,5 @@
 import { configureClackUi, createCliUi } from '@cupboard/cli-ui';
+import { markErrorReported, wasErrorReported } from '@cupboard/reporter';
 
 import {
 	buildProgram,
@@ -42,6 +43,11 @@ export async function runCli(argv?: readonly string[]): Promise<number> {
 		return 0;
 	} catch (error: unknown) {
 		const failure = translateRpcError(error);
+
+		if (wasErrorReported(error)) {
+			markErrorReported(failure);
+		}
+
 		const reporter = createCliUi({
 			mode: failureReporterMode(program),
 			colour: failureColour(program)

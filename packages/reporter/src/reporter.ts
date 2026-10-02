@@ -170,6 +170,11 @@ export interface ReporterOptions {
 	 * {@link Reporter.result}. Read it with {@link parseReporterResults}.
 	 */
 	readonly resultFile?: string;
+	/**
+	 * Formats GitHub error annotations without changing the thrown error.
+	 * Defaults to the error message and its causes.
+	 */
+	readonly formatError?: (error: unknown) => string;
 }
 
 export const reporterResultEventSchema = z.strictObject({
@@ -286,12 +291,7 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
  * use `label: value` lines in either environment.
  */
 export function createGithubReporter(options: ReporterOptions = {}): Reporter {
-	return buildGithubReporter(
-		options.stream ?? stderr,
-		options.out ?? stdout,
-		options.now ?? (() => Date.now()),
-		resultAppender(options.resultFile)
-	);
+	return buildGithubReporter(options);
 }
 
 interface StepGroupRecord {
@@ -532,12 +532,13 @@ function describeError(error: unknown): {
 	};
 }
 
-function buildGithubReporter(
-	stream: NodeJS.WritableStream,
-	out: NodeJS.WritableStream,
-	now: () => number,
-	recordResult: (payload: ResultPayload) => void
-): Reporter {
+function buildGithubReporter(options: ReporterOptions): Reporter {
+	const stream = options.stream ?? stderr;
+	const out = options.out ?? stdout;
+	const now = options.now ?? (() => Date.now());
+	const recordResult = resultAppender(options.resultFile);
+	const formatError = options.formatError ?? formatErrorWithCauses;
+
 	const commands = workflowCommands({
 		stdout: stream,
 		stderr: stream,
@@ -581,7 +582,7 @@ function buildGithubReporter(
 
 		// commands.error escapes newlines, so the multi-line text stays one
 		// annotation.
-		commands.error(formatErrorWithCauses(reportedError));
+		commands.error(formatError(reportedError));
 		markErrorReported(reportedError);
 
 		return reportedError;
