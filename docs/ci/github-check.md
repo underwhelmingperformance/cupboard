@@ -170,8 +170,8 @@ branch and tag, but the check simulates only the checked branch. It reports the
 job as unverified because other pushes can use different trust-rule claims. Add
 branch or tag filters for the refs that should publish. A flake preset run fails
 on a push to any branch other than its `branch` input, so the check reports an
-unfiltered preset job as unverified and suggests adding that branch as a
-`branches` filter.
+unfiltered preset job as failed and suggests adding that branch as a `branches`
+filter.
 
 The installable workflow appends the builder's Nix system to its `root` input.
 The check works out the root for the workflow's default `x86_64-linux` runner,
@@ -201,8 +201,8 @@ branches, review the trust rules for each branch or give each branch its own
 workflow with an exact filter.
 
 The check evaluates literal names with `*` and `**` wildcards. It reports other
-patterns and `tags-ignore` filters for manual review. It also reports a flake
-preset job with a tag filter, because a preset run fails on a tag push. The
+patterns and `tags-ignore` filters for manual review. A flake preset job with an
+explicit tag filter is failed, because a preset run fails on a tag push. The
 check does not evaluate `paths` or `paths-ignore` filters. It notes them on the
 job and checks the run as if the filter allows it to start. For the pattern
 rules, see GitHub's [filter syntax][github-filters].
