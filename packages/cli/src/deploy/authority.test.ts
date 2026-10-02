@@ -10,8 +10,12 @@ import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
 import type { CachedSession } from '../auth/token-store.ts';
+import { CupboardClient } from '../client/client.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
+	authExitCode,
+	CliAbortError,
+	CliError,
 	CupboardHttpError,
 	OwnerLoginRequiredError,
 	UnreachableHostError
@@ -1379,6 +1383,287 @@ describe('adminLoginCommand', () => {
 
 describe('adminLogin', () => {
 	const url = new URL('https://cache.example.com');
+
+	it.each([
+		{
+			status: 400,
+			body: {
+				error: 'invalid_grant',
+				error_description: 'No trust rule matches the token'
+			}
+		},
+		{
+			status: 400,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description: 'The wildcard grant is not permitted',
+				problem: 'not-permitted'
+			}
+		},
+		{
+			status: 401,
+			body: {
+				error: 'invalid_grant',
+				error_description: 'The identity token was refused'
+			}
+		},
+		{
+			status: 403,
+			body: {
+				error: 'invalid_grant',
+				error_description: 'The control trust rule refuses this identity'
+			}
+		}
+	])(
+		'corrects trust-rule advice after admin sign-in and an HTTP $status exchange refusal: $body.error_description',
+		async ({ status, body }) => {
+			const calls: unknown[] = [];
+			let exchangeError: unknown;
+			const client = new CupboardClient(
+				deploymentUrl,
+				(input, init) => {
+					if (typeof init?.body !== 'string') {
+						throw new TypeError('The token exchange must send an encoded form');
+					}
+
+					const requestUrl =
+						input instanceof Request ? input.url : input.toString();
+					const form = Object.fromEntries(new URLSearchParams(init.body));
+
+					calls.push({
+						url: requestUrl,
+						method: init.method,
+						form
+					});
+					return Promise.resolve(
+						Response.json(body, {
+							status,
+							headers: { 'cf-ray': 'ray-exchange' }
+						})
+					);
+				},
+				{ kind: 'default' }
+			);
+			const login = adminLogin({
+				info: () => {
+					calls.push('info');
+				},
+				login: (issuer, clientId) => {
+					calls.push({ issuer, clientId });
+					return Promise.resolve(claimToken);
+				},
+				exchange: async (_url, idToken) => {
+					try {
+						return await client.tokenExchange(
+							idToken,
+							'urn:ietf:params:oauth:token-type:id_token'
+						);
+					} catch (error) {
+						exchangeError = error;
+						throw error;
+					}
+				},
+				cacheSession: () => {
+					calls.push('cacheSession');
+					return Promise.resolve();
+				},
+				defaultClientId: 'default-client'
+			});
+			const { deployment, effects } = harness({
+				database: claimedDatabase,
+				credential: {
+					get: () => Promise.reject(new OwnerLoginRequiredError()),
+					refresh: () => Promise.resolve('')
+				},
+				logInAsAdmin: () => login(deploymentUrl, admin)
+			});
+
+			const refusal = await rejectionOf(decideAuthority(deployment, effects));
+
+			expect({
+				refusal:
+					refusal instanceof AdminTokenRequiredError
+						? {
+								url: refusal.url.href,
+								admin: refusal.admin,
+								isAfterLogin: refusal.isAfterLogin,
+								exitCode: refusal.exitCode,
+								isOriginalCause: refusal.cause === exchangeError,
+								message: refusal.message
+							}
+						: refusal,
+				calls
+			}).toStrictEqual({
+				refusal: {
+					url: deploymentUrl.href,
+					admin,
+					isAfterLogin: true,
+					exitCode: authExitCode,
+					isOriginalCause: true,
+					message: `This deployment is administered by https://dash.cloudflare.com · cf-user-1. Updating it needs an admin token, and the token exchange was refused: ${body.error_description}. The login as the admin succeeded, but the deployment refused the token exchange. Check the reported refusal and correct the admin's control trust rule so it accepts this identity and gives the wildcard grant (see "Restoring the admin's wildcard grant" in docs/operator/operators.md). Then re-run \`cupboard init\`. Nothing was changed.`
+				},
+				calls: [
+					'info',
+					{ issuer: admin.issuer, clientId: admin.audience },
+					{
+						url: `${deploymentUrl.origin}/token`,
+						method: 'POST',
+						form: {
+							grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+							subject_token: claimToken,
+							subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'
+						}
+					}
+				]
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'temporary OAuth refusal at HTTP400',
+			stage: 'exchange',
+			error: new CupboardHttpError(
+				'POST',
+				'/token',
+				400,
+				JSON.stringify({
+					error: 'temporarily_unavailable',
+					error_description: 'The issuer is unavailable'
+				}),
+				'ray-1'
+			),
+			failure: {
+				kind: 'error-status',
+				status: 400,
+				ray: 'ray-1',
+				oauthDescription: 'The issuer is unavailable'
+			}
+		},
+		{
+			name: 'temporary OAuth refusal at HTTP503',
+			stage: 'exchange',
+			error: new CupboardHttpError(
+				'POST',
+				'/token',
+				503,
+				JSON.stringify({
+					error: 'temporarily_unavailable',
+					error_description: 'The issuer is unavailable'
+				}),
+				'ray-1'
+			),
+			failure: {
+				kind: 'error-status',
+				status: 503,
+				ray: 'ray-1',
+				oauthDescription: 'The issuer is unavailable'
+			}
+		},
+		{
+			name: 'server failure',
+			stage: 'exchange',
+			error: new CupboardHttpError(
+				'POST',
+				'/token',
+				500,
+				'server failed',
+				'ray-1'
+			),
+			failure: { kind: 'error-status', status: 500, ray: 'ray-1' }
+		},
+		{
+			name: 'rate limit',
+			stage: 'exchange',
+			error: new CupboardHttpError('POST', '/token', 429, 'retry later'),
+			failure: { kind: 'error-status', status: 429 }
+		},
+		{
+			name: 'unreachable exchange',
+			stage: 'exchange',
+			error: new UnreachableHostError(
+				deploymentUrl.host,
+				new TypeError('fetch failed')
+			),
+			failure: { kind: 'unreachable' }
+		},
+		{
+			name: 'cancelled identity login',
+			stage: 'login',
+			error: new CliAbortError(),
+			failure: undefined
+		},
+		{
+			name: 'cancelled exchange',
+			stage: 'exchange',
+			error: new CliAbortError(),
+			failure: undefined
+		},
+		{
+			name: 'identity provider failure',
+			stage: 'login',
+			error: new Error('identity provider failed'),
+			failure: undefined
+		}
+	])(
+		'preserves $name after requesting an admin sign-in',
+		async ({ stage, error, failure }) => {
+			const calls: string[] = [];
+			const login = adminLogin({
+				info: () => {
+					calls.push('info');
+				},
+				login: () => {
+					calls.push('login');
+					return stage === 'login'
+						? Promise.reject(error)
+						: Promise.resolve(claimToken);
+				},
+				exchange: () => {
+					calls.push('exchange');
+					return Promise.reject(error);
+				},
+				cacheSession: () => {
+					calls.push('cacheSession');
+					return Promise.resolve();
+				},
+				defaultClientId: 'default-client'
+			});
+			const { deployment, effects } = harness({
+				database: claimedDatabase,
+				credential: {
+					get: () => Promise.reject(new OwnerLoginRequiredError()),
+					refresh: () => Promise.resolve('')
+				},
+				logInAsAdmin: () => login(deploymentUrl, admin)
+			});
+
+			const refusal = await rejectionOf(decideAuthority(deployment, effects));
+
+			expect({
+				refusal:
+					refusal instanceof AdminCheckFailedError
+						? {
+								failure: refusal.failure,
+								isOriginalCause: refusal.cause === error,
+								exitCode: refusal.exitCode
+							}
+						: { isOriginalError: refusal === error },
+				calls
+			}).toStrictEqual({
+				refusal:
+					failure === undefined
+						? { isOriginalError: true }
+						: {
+								failure,
+								isOriginalCause: true,
+								exitCode: error instanceof CliError ? error.exitCode : 1
+							},
+				calls:
+					stage === 'login' ? ['info', 'login'] : ['info', 'login', 'exchange']
+			});
+		}
+	);
 
 	it.each([
 		{
