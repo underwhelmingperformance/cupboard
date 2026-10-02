@@ -67,6 +67,7 @@ import m0064 from './0064_attestation-bundle-pages.sql';
 import m0065 from './0065_attestation-inheritance-cursor.sql';
 import m0066 from './0066_publication_recovery.sql';
 import m0067 from './0067_refresh_session_authority.sql';
+import m0068 from './0068_protected_inheritance.sql';
 
 export default {
 	journal,
@@ -138,6 +139,7 @@ export default {
 		m0064,
 		m0065,
 		m0066,
-		m0067
+		m0067,
+		m0068
 	}
 };

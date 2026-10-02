@@ -554,7 +554,7 @@ describe('negotiate hints', () => {
 					([query]) =>
 						query.includes('"blob_state"') ||
 						query.includes('"tenant_blob"') ||
-						query.includes('"blob_ref"')
+						query.includes('"blob_ref_storage"')
 				)
 			}).toStrictEqual({ status: StatusCodes.UNAUTHORIZED, hintReads: [] });
 		} finally {

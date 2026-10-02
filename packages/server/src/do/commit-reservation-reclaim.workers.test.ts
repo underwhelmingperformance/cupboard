@@ -65,7 +65,7 @@ describe('while checking whether a narinfo is committed', () => {
 					...instance.context.env,
 					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
 						failures: 0,
-						matches: (query) => query.includes('blob_ref'),
+						matches: (query) => query.includes('blob_ref_storage'),
 						onMatch: () => {
 							if (hasMoved) {
 								return;

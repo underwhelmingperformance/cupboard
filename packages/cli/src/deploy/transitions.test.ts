@@ -4,7 +4,8 @@ import {
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
-	type SchemaTransition
+	type SchemaTransition,
+	schemaTransitions
 } from '@cupboard/protocol/deployment';
 import { describe, expect, it } from 'vitest';
 
@@ -408,6 +409,51 @@ describe('planTransitions', () => {
 });
 
 describe('transition walk', () => {
+	it.each(['contract-started', 'complete'])(
+		'refuses the preceding deployment after path authority is %s',
+		async (stage) => {
+			const authority = schemaTransitions.find(
+				(transition) => transition.id === 'blob-reference-read-authority'
+			);
+			if (authority === undefined) {
+				throw new Error('The path authority transition must be declared');
+			}
+			const later: SchemaTransition = { ...authority, expand: [] };
+			const contractMigrations = later.contract.map((name): D1Migration => ({
+				name,
+				sha256: '6'.repeat(64),
+				statements: ['SELECT 1;']
+			}));
+			const world = fixture();
+			await prepareTransitions(world.walk([cacheIdentity, independent]), true);
+			await completeTransitions(world.walk([cacheIdentity, independent]));
+			const laterWalk = world.walk([cacheIdentity, independent, later], {
+				migrations: [...migrations, ...contractMigrations]
+			});
+			await prepareTransitions(laterWalk, false);
+			if (stage === 'contract-started') {
+				world.interruptAt((statement) => statement === 'SELECT 1;');
+			}
+			try {
+				await completeTransitions(laterWalk);
+			} catch (error) {
+				if (!(error instanceof InterruptedWriteError)) {
+					throw error;
+				}
+			}
+			world.writes.length = 0;
+
+			await expect(
+				prepareTransitions(world.walk([cacheIdentity, independent]), false)
+			).rejects.toStrictEqual(
+				new UnrecognisedTransitionContractedError(
+					'blob-reference-read-authority',
+					'cupboard'
+				)
+			);
+			expect(world.writes).toStrictEqual([]);
+		}
+	);
 	it('applies every transition, contracts included, before the upload on a fresh database', async () => {
 		const world = fixture();
 

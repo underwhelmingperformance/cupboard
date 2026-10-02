@@ -74,6 +74,8 @@ type ReusableBlob = Pick<
 	'fileHash' | 'fileSize' | 'compression' | 'narSize'
 >;
 
+import { WorkSequenceService } from './work-sequence-service.ts';
+
 const uploadTtlMs = 15 * 60 * 1000;
 
 interface ClosureClassification {
@@ -177,22 +179,25 @@ export class UploadsService {
 				? stagingObjectKey(pushId, uploadId)
 				: narObjectKey(metadata.narHash);
 
-		this.context.db
-			.insert(schema.pendingUploads)
-			.values({
-				id: uploadId,
-				// Commit accepts only the upload identifier, so the cache recorded
-				// here is what prevents cross-cache redirection.
-				cacheId: cache.id,
-				narHash: metadata.narHash,
-				r2Key,
-				metadataJson: JSON.stringify(pendingMetadata),
-				createdAt: isoTimestamp(now),
-				expiresAt: isoTimestamp(expiresAt),
-				graceDecisionJson: serialiseGraceDecision(graceDecision),
-				attachRootName
-			})
-			.run();
+		this.context.db.transaction((tx) => {
+			tx.insert(schema.pendingUploads)
+				.values({
+					id: uploadId,
+					acceptedSequence: new WorkSequenceService(tx).allocate(),
+					acceptedExpiresAt: isoTimestamp(expiresAt),
+					// Commit accepts only the upload identifier, so the cache recorded
+					// here is what prevents cross-cache redirection.
+					cacheId: cache.id,
+					narHash: metadata.narHash,
+					r2Key,
+					metadataJson: JSON.stringify(pendingMetadata),
+					createdAt: isoTimestamp(now),
+					expiresAt: isoTimestamp(expiresAt),
+					graceDecisionJson: serialiseGraceDecision(graceDecision),
+					attachRootName
+				})
+				.run();
+		});
 
 		if (existingBlob !== undefined) {
 			return {

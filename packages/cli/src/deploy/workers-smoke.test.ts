@@ -5,7 +5,9 @@ import { z } from 'zod';
 import { buildArtifactFromTree } from './artifact.ts';
 import { createEsbuildBundler } from './bundle.ts';
 import { type DurableObjectExport } from './config.ts';
+import { databaseIdSchema, kvNamespaceIdSchema } from './identifiers.ts';
 import { findCheckoutRoot } from './source.ts';
+import { buildScriptMetadata, type ResolvedResources } from './upload.ts';
 
 // Bundling both real Workers and booting them in workerd is the integration
 // proof that the esbuild config produces deployable bytes: the heavy server
@@ -14,6 +16,8 @@ import { findCheckoutRoot } from './source.ts';
 const state: {
 	miniflare?: Miniflare;
 	tenantExports?: Readonly<Record<string, DurableObjectExport>>;
+	controlExports?: Readonly<Record<string, DurableObjectExport>>;
+	pathAuthorityGuards?: { readonly control: boolean; readonly tenant: boolean };
 	hasVersionedR2ObjectRollbackGuardExport?: boolean;
 } = {};
 
@@ -32,7 +36,37 @@ beforeAll(async () => {
 		checkoutRoot,
 		createEsbuildBundler()
 	);
-	state.tenantExports = artifact.config.tenant.exports;
+	const resources: ResolvedResources = {
+		d1: new Map(
+			artifact.config.control.d1Databases.map(({ databaseName }) => [
+				databaseName,
+				databaseIdSchema.parse('fixture-database')
+			])
+		),
+		kv: new Map(
+			artifact.config.control.kvNamespaces.map(({ title }) => [
+				title,
+				kvNamespaceIdSchema.parse('fixture-namespace')
+			])
+		)
+	};
+	state.tenantExports = buildScriptMetadata(
+		artifact.config.tenant,
+		resources
+	).exports;
+	state.controlExports = buildScriptMetadata(
+		artifact.config.control,
+		resources
+	).exports;
+	state.pathAuthorityGuards = {
+		control:
+			/export \{[\s\S]*\bPathReadAuthorityRollbackGuard\b[\s\S]*\};/.test(
+				artifact.controlBundle.code
+			),
+		tenant: /export \{[\s\S]*\bPathReadAuthorityRollbackGuard\b[\s\S]*\};/.test(
+			artifact.tenantBundle.code
+		)
+	};
 	state.hasVersionedR2ObjectRollbackGuardExport =
 		/export \{[\s\S]*\bVersionedR2ObjectRollbackGuard\b[\s\S]*\};/.test(
 			artifact.tenantBundle.code
@@ -101,8 +135,39 @@ it('couples versioned R2 object keys to declarative class lifecycle', () => {
 			VersionedR2ObjectRollbackGuard: {
 				type: 'durable-object',
 				storage: 'sqlite'
+			},
+			PathReadAuthorityRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
 			}
 		},
 		hasRollbackGuardExport: true
+	});
+});
+
+it('protects path read authority with both Worker class lifecycles', () => {
+	expect({
+		control: state.controlExports,
+		tenant: state.tenantExports,
+		exported: state.pathAuthorityGuards
+	}).toStrictEqual({
+		control: {
+			PathReadAuthorityRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			}
+		},
+		tenant: {
+			CupboardServer: { type: 'durable-object', storage: 'sqlite' },
+			VersionedR2ObjectRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			},
+			PathReadAuthorityRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			}
+		},
+		exported: { control: true, tenant: true }
 	});
 });

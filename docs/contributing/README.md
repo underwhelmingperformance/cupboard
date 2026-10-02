@@ -136,12 +136,34 @@ You can run the whole server on your own machine:
    plain HTTP. To claim the local deployment, also set `CUPBOARD_SIGNUP_SECRET`.
    The claim is refused without it, even with `CUPBOARD_LOCAL_DEV` set.
 
-2. Apply the D1 migrations to your local database. `pnpm dev` doesn't do this
-   for you:
+2. Stop any local Workers and initialise the local database:
 
    ```sh
-   pnpm --filter @cupboard/server exec wrangler d1 migrations apply CUPBOARD_DB --local
+   pnpm dev:setup
    ```
+
+   This command applies all local D1 migrations and records the completed
+   deployment transitions. Applying only the SQL migrations leaves lifecycle
+   writes unavailable. `pnpm dev` does not run setup automatically.
+
+   Setup and `pnpm dev` both use `packages/server/.wrangler/state`. Setup is
+   local only. Repeating setup preserves data when all transitions are already
+   complete. Setup refuses unfinished transitions or existing application data
+   whose transitions are incomplete, including a deployment claimed before any
+   tenants were created.
+
+   To start a fresh local deployment after a refusal, stop the local Workers and
+   preserve the state directory before running setup again. Choose an unused
+   backup path:
+
+   ```sh
+   mv packages/server/.wrangler/state packages/server/.wrangler/state.backup
+   pnpm dev:setup
+   ```
+
+   The backup includes the previous local D1, R2, KV and Durable Object data.
+   Setup does not reset existing data or perform the staged deployment
+   transitions that a deployed server requires.
 
 3. Start the server:
 

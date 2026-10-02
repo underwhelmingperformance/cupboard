@@ -1,7 +1,9 @@
 import { env } from 'cloudflare:workers';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -14,6 +16,7 @@ import {
 	deleteBlobReferenceEdge,
 	deleteNarInfoRow,
 	deletePath,
+	drainAttestationInheritance,
 	initialise,
 	narInfoDeletionRows,
 	narInfoGeneration,
@@ -182,6 +185,7 @@ describe('delete marker replay', () => {
 			generation: 0
 		});
 
+		await drainAttestationInheritance();
 		await reapBlobsPastGrace();
 
 		expect({
@@ -227,6 +231,8 @@ describe('delete marker replay', () => {
 
 describe('explicit deletion', () => {
 	beforeEach(async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		await resetTestServer();
 		await clearBlobStorage();
 	});
@@ -257,15 +263,59 @@ describe('explicit deletion', () => {
 		expect({
 			deletion,
 			narInfoStatus: narInfo.status,
-			edges: await blobReferenceRows()
+			edges: await blobReferenceRows(),
+			authority: await drizzleD1(env.CUPBOARD_DB)
+				.select({ generation: d1Schema.readableBlobReference.generation })
+				.from(d1Schema.readableBlobReference)
 		}).toStrictEqual({
 			deletion: {
 				storePathHash: metadata.storePathHash,
 				deleted: true,
-				narScheduledForDeletion: true
+				narScheduledForDeletion: false
 			},
 			narInfoStatus: StatusCodes.NOT_FOUND,
-			edges: []
+			edges: [
+				{
+					tenant: 'v1',
+					cache: { kind: 'default' },
+					storePathHash: metadata.storePathHash,
+					generation: 0,
+					narHash: nar.narHash,
+					cacheGeneration: 1
+				}
+			],
+			authority: []
+		});
+
+		await putNarBytes(second.r2Key, nar);
+		await commitUpload(token, second.uploadId);
+		await drainAttestationInheritance();
+		await reapBlobsPastGrace();
+
+		const recommittedNarInfo = await readFetch(
+			`/${metadata.storePathHash}.narinfo`
+		);
+		expect({
+			markers: await narInfoDeletionRows(),
+			edges: await blobReferenceRows(),
+			authority: await drizzleD1(env.CUPBOARD_DB)
+				.select({ generation: d1Schema.readableBlobReference.generation })
+				.from(d1Schema.readableBlobReference),
+			narInfoStatus: recommittedNarInfo.status
+		}).toStrictEqual({
+			markers: [],
+			edges: [
+				{
+					tenant: 'v1',
+					cache: { kind: 'default' },
+					storePathHash: metadata.storePathHash,
+					generation: 1,
+					narHash: nar.narHash,
+					cacheGeneration: 1
+				}
+			],
+			authority: [{ generation: 1 }],
+			narInfoStatus: StatusCodes.OK
 		});
 	});
 });

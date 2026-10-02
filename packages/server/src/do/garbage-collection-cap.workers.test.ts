@@ -81,9 +81,7 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 		}));
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 
-		// Each row binds six parameters; sixteen rows stay below the driver's
-		// bound-parameter limit.
-		for (const batch of chunk(rows, 16)) {
+		for (const batch of chunk(rows, 14)) {
 			database.insert(narInfoDeletions).values(batch).run();
 		}
 	});

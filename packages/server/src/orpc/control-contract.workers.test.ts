@@ -928,7 +928,16 @@ describe('control contract round trip', () => {
 		const complete = await client.deployment.transitions();
 
 		expect({ before, expanded, complete }).toStrictEqual({
-			before: { transitions: [], unrecognised: [] },
+			before: {
+				transitions: [
+					{
+						id: 'blob-reference-read-authority',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				unrecognised: []
+			},
 			expanded: {
 				transitions: [
 					{
@@ -938,6 +947,11 @@ describe('control contract round trip', () => {
 					},
 					{
 						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					},
+					{
+						id: 'blob-reference-read-authority',
 						state: 'complete',
 						updatedAt: '2026-01-01T00:00:00.000Z'
 					}
@@ -953,6 +967,11 @@ describe('control contract round trip', () => {
 					},
 					{
 						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					},
+					{
+						id: 'blob-reference-read-authority',
 						state: 'complete',
 						updatedAt: '2026-01-01T00:00:00.000Z'
 					}
@@ -997,6 +1016,11 @@ describe('control contract round trip', () => {
 				transitions: [
 					{
 						id: 'deployment-transitions',
+						state: 'complete',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					},
+					{
+						id: 'blob-reference-read-authority',
 						state: 'complete',
 						updatedAt: '2026-01-01T00:00:00.000Z'
 					}

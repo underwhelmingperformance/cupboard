@@ -27,7 +27,6 @@ import {
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	uploadDecisionSchema,
-	uploadIdSchema,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -40,9 +39,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import { authorisedByPathGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { AttestationPathNotFoundError } from '../errors.ts';
+import {
+	AttestationPathNotFoundError,
+	SharedFactsUnavailableError
+} from '../errors.ts';
 import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
@@ -64,6 +67,7 @@ import {
 	currentCasObjectKey,
 	currentNarObjectKey,
 	fixtureWorkerServer,
+	flakyD1,
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
@@ -81,6 +85,7 @@ import {
 	resolvedCache,
 	restartTestServers,
 	sigstoreBundleBytes,
+	tenantBlobRows,
 	tenantCasBlobRows,
 	tenantUsageRow,
 	testPushId,
@@ -88,7 +93,8 @@ import {
 	testServerFor,
 	uploadMetadata,
 	uploadPathNegotiation,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { type MaintenanceProgress } from './alarm.ts';
@@ -103,16 +109,23 @@ import {
 import { fencedCasObjectDeletion } from './blob-reaper-service.ts';
 import { chunk, maxBoundParameters } from './bulk.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
-import { type ServerContext } from './context.ts';
+import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { jsonRowList } from './json-list.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import {
+	PathReadAuthorityService,
+	pathReadDemotionPendingKey
+} from './path-read-authority-service.ts';
+import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
 import { CupboardServer, maintenancePassCursorKey } from './server.ts';
 import {
 	subrequestsAvailable,
 	subrequestSliceReserve,
 	withSubrequestSlice
 } from './subrequest-slice.ts';
+import { UploadStateService } from './upload-state-service.ts';
+import { WorkSequenceService } from './work-sequence-service.ts';
 
 const predicateType = 'https://slsa.dev/provenance/v1';
 const defaultCacheScope: CacheScope = { kind: 'default' };
@@ -318,6 +331,256 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
+	it.each(['bundles', 'caches', 'revoked', 'replaced'] as const)(
+		'bounds readable inheritance lookup with 25,000 %s',
+		async (shape) => {
+			const { token, metadata, nar } = await committedPathBundle();
+			const destination = namedCache('readable-source-scale');
+			await putWorkerTestCache(token, destination);
+			switch (shape) {
+				case 'bundles':
+				case 'revoked':
+				case 'replaced': {
+					await env.CUPBOARD_DB.prepare(
+						`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 25000) INSERT INTO attestation_ref_storage (tenant, cache_kind, store_path_hash, generation, predicate_type, digest) SELECT ?, 'default', ?, 0, ?, printf('%064x', n) FROM source`
+					)
+						.bind(fixtureTenant, metadata.storePathHash, predicateType)
+						.run();
+					if (shape === 'revoked') {
+						await env.CUPBOARD_DB.prepare(
+							'UPDATE blob_ref_storage SET readable = false WHERE tenant = ? AND store_path_hash = ?'
+						)
+							.bind(fixtureTenant, metadata.storePathHash)
+							.run();
+					} else if (shape === 'replaced') {
+						await env.CUPBOARD_DB.prepare(
+							'UPDATE cache_lifecycle_storage SET generation = generation + 1 WHERE tenant = ? AND cache_kind = ?'
+						)
+							.bind(fixtureTenant, 'default')
+							.run();
+					}
+					break;
+				}
+				case 'caches': {
+					const recursive =
+						'WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM source WHERE n < 25000)';
+					await env.CUPBOARD_DB.prepare(
+						`${recursive} INSERT INTO cache_lifecycle_storage(tenant, cache_kind, cache_name, access, generation, updated_at) SELECT ?, 'named', printf('scale-cache-%08d', n), 'public', 1, ? FROM source`
+					)
+						.bind(fixtureTenant, isoTimestamp(new Date()))
+						.run();
+					await env.CUPBOARD_DB.prepare(
+						`${recursive} INSERT INTO blob_ref_storage(tenant, cache_kind, cache_name, store_path_hash, generation, nar_hash, cache_generation) SELECT ?, 'named', printf('scale-cache-%08d', n), ?, 0, ?, 1 FROM source`
+					)
+						.bind(fixtureTenant, metadata.storePathHash, nar.narHash)
+						.run();
+					await env.CUPBOARD_DB.prepare(
+						`${recursive} INSERT INTO attestation_ref_storage(tenant, cache_kind, cache_name, store_path_hash, generation, predicate_type, digest) SELECT ?, 'named', printf('scale-cache-%08d', n), ?, 0, ?, printf('%064x', 1) FROM source`
+					)
+						.bind(fixtureTenant, metadata.storePathHash, predicateType)
+						.run();
+					await runInDurableObject(fixtureWorkerServer(), (instance, state) => {
+						state.storage.sql.exec(
+							'DELETE FROM narinfo WHERE cache_id = ?',
+							resolvedCache(instance.context).id
+						);
+						state.storage.sql.exec(
+							`${recursive} INSERT INTO cache_identity(kind, name, access, priority, created_at) SELECT 'named', printf('scale-cache-%08d', n), 'public', 40, ? FROM source`,
+							isoTimestamp(new Date())
+						);
+						state.storage.sql.exec(
+							`INSERT INTO narinfo(cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) SELECT id, ?, ?, ?, 1, '[]', ? FROM cache_identity WHERE name LIKE 'scale-cache-%'`,
+							metadata.storePathHash,
+							metadata.storePath,
+							metadata.narHash,
+							isoTimestamp(new Date())
+						);
+					});
+					break;
+				}
+			}
+
+			const reads: number[] = [];
+			const statements: { query: string; values: unknown[] }[] = [];
+			const binding: D1Database = {
+				prepare: (query) => {
+					const statement = env.CUPBOARD_DB.prepare(query);
+					if (!query.includes('inheritance_source_reference')) {
+						return statement;
+					}
+					const bind = statement.bind.bind(statement);
+					statement.bind = (...values: unknown[]) => {
+						statements.push({ query, values });
+						return bind(...values);
+					};
+					return statement;
+				},
+				async batch<T>(statements: D1PreparedStatement[]) {
+					const results = await env.CUPBOARD_DB.batch<T>(statements);
+					reads.push(...results.map((result) => result.meta.rows_read));
+					return results;
+				},
+				exec: (query) => env.CUPBOARD_DB.exec(query),
+				withSession: (constraint) => env.CUPBOARD_DB.withSession(constraint),
+				dump: () =>
+					Promise.reject(new Error('The scale fixture does not dump D1.'))
+			};
+			const result = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance, state) => {
+					const context = new ServerContext(state, {
+						...instance.context.env,
+						CUPBOARD_DB: binding
+					});
+					const cache = resolvedCache(context, destination);
+					const prefetched = await attestationsFor(
+						context
+					).prefetchInheritanceSources(cache, [
+						{ storePathHash: metadata.storePathHash, narHash: nar.narHash }
+					]);
+					return prefetched.sources
+						.get(inheritanceSourceKey(metadata.storePathHash, nar.narHash))
+						?.map((row) => row.digest);
+				}
+			);
+			if (shape === 'replaced') {
+				await env.CUPBOARD_DB.prepare(
+					'UPDATE cache_lifecycle_storage SET generation = generation - 1 WHERE tenant = ? AND cache_kind = ?'
+				)
+					.bind(fixtureTenant, 'default')
+					.run();
+			}
+
+			const plans = await Promise.all(
+				statements.map(async ({ query, values }) => {
+					const explained = await env.CUPBOARD_DB.prepare(
+						`EXPLAIN QUERY PLAN ${query}`
+					)
+						.bind(...values)
+						.all();
+					return z
+						.array(z.object({ detail: z.string() }))
+						.parse(explained.results)
+						.map((row) => row.detail);
+				})
+			);
+
+			expect({
+				digests: result ?? [],
+				reads,
+				plans
+			}).toStrictEqual({
+				digests: Array.from(
+					{ length: shape === 'caches' ? 1 : shape === 'bundles' ? 65 : 0 },
+					(_, index) =>
+						sha256HexDigestSchema.parse(
+							(index + 1).toString(16).padStart(64, '0')
+						)
+				),
+				reads: [shape === 'caches' ? 6 : 260],
+				plans: [
+					[
+						'CO-ROUTINE inheritance_source_reference',
+						shape === 'caches'
+							? 'SEARCH attestation_ref_storage USING INDEX attestation_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation=?)'
+							: 'SEARCH attestation_ref_storage USING INDEX attestation_ref_default_identity_idx (tenant=? AND store_path_hash=? AND generation=?)',
+						'SCAN inheritance_source_reference',
+						shape === 'caches'
+							? 'SEARCH blob_ref_storage USING INDEX blob_ref_named_identity_idx (tenant=? AND cache_name=? AND store_path_hash=? AND generation=?) LEFT-JOIN'
+							: 'SEARCH blob_ref_storage USING INDEX blob_ref_default_identity_idx (tenant=? AND store_path_hash=? AND generation=?) LEFT-JOIN',
+						'SEARCH cas_object USING INDEX sqlite_autoindex_cas_object_1 (digest=?) LEFT-JOIN',
+						'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=?) LEFT-JOIN',
+						'CORRELATED SCALAR SUBQUERY 1',
+						'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)'
+					]
+				]
+			});
+			if (shape !== 'revoked') {
+				return;
+			}
+			await runInDurableObject(fixtureWorkerServer(), async (instance) => {
+				const context = instance.context;
+				const cache = resolvedCache(context, destination);
+				context.db
+					.insert(schema.narInfos)
+					.values({
+						cacheId: cache.id,
+						storePathHash: metadata.storePathHash,
+						storePath: metadata.storePath,
+						narHash: nar.narHash,
+						narSize: nar.narSize,
+						referencesJson: '[]',
+						createdAt: isoTimestamp(new Date())
+					})
+					.run();
+				await attestationsFor(context).queueInheritance(
+					cache,
+					metadata.storePathHash,
+					narInfoGenerationSchema.parse(0),
+					nar.narHash
+				);
+			});
+			const cursors: { result: string; digest: Sha256HexDigest | undefined }[] =
+				[];
+			for (let pass = 0; pass < 391; pass += 1) {
+				const cursor = await runInDurableObject(
+					fixtureWorkerServer(),
+					async (instance, state) => {
+						const context = new ServerContext(state, {
+							...instance.context.env,
+							CUPBOARD_DB: binding
+						});
+						const cache = resolvedCache(context, destination);
+						const result = await attestationsFor(context).inheritFromTenant(
+							rootLogger(),
+							{
+								cache,
+								storePathHash: metadata.storePathHash,
+								generation: narInfoGenerationSchema.parse(0),
+								narHash: nar.narHash
+							}
+						);
+						const queue = context.db
+							.select()
+							.from(schema.attestationInheritances)
+							.where(
+								and(
+									eq(schema.attestationInheritances.cacheId, cache.id),
+									eq(
+										schema.attestationInheritances.storePathHash,
+										metadata.storePathHash
+									)
+								)
+							)
+							.get();
+						if (queue === undefined) {
+							throw new Error(
+								'The scale fixture must preserve its queued traversal.'
+							);
+						}
+						return { result, digest: queue.sourceDigest ?? undefined };
+					}
+				);
+				cursors.push(cursor);
+			}
+			expect({
+				cursors,
+				bounded: reads.every((read) => read <= 1000)
+			}).toStrictEqual({
+				cursors: [
+					...Array.from({ length: 390 }, (_, index) => ({
+						result: 'budget-exhausted-after-progress',
+						digest: sha256HexDigestSchema.parse(
+							((index + 1) * 64).toString(16).padStart(64, '0')
+						)
+					})),
+					{ result: 'complete', digest: undefined }
+				],
+				bounded: true
+			});
+		}
+	);
+
 	it.each([2, 100])(
 		'prefetches exact pairs for %i candidates within the D1 parameter limit',
 		async (candidateCount) => {
@@ -395,7 +658,7 @@ describe('attestation attach and reads', () => {
 				.spyOn(env.CUPBOARD_DB, 'prepare')
 				.mockImplementation((query) => {
 					const statement = originalPrepare(query);
-					if (query.includes('distinct_inheritance_sources')) {
+					if (query.includes('inheritance_source_reference')) {
 						const originalBind = statement.bind.bind(statement);
 						statement.bind = (...values: unknown[]) => {
 							parameterCounts.push(values.length);
@@ -609,6 +872,15 @@ describe('attestation attach and reads', () => {
 			fileHash: nar.fileHash,
 			fileSize: nar.narBytes.byteLength
 		});
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			nar,
+			destination
+		);
+
 		const statements: { query: string; values: unknown[] }[] = [];
 		const originalPrepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
 		const prepare = vi
@@ -616,7 +888,7 @@ describe('attestation attach and reads', () => {
 			.mockImplementation((query) => {
 				const statement = originalPrepare(query);
 
-				if (!query.includes('distinct_inheritance_sources')) {
+				if (!query.includes('inheritance_source_reference')) {
 					return statement;
 				}
 
@@ -662,11 +934,11 @@ describe('attestation attach and reads', () => {
 				return {
 					searchesPathIndex: details.some((detail) =>
 						detail.startsWith(
-							'SEARCH attestation_ref USING INDEX attestation_ref_tenant_path_idx'
+							'SEARCH attestation_ref_storage USING INDEX attestation_ref_default_identity_idx'
 						)
 					),
 					scans: details.filter((detail) =>
-						detail.startsWith('SCAN attestation_ref')
+						detail.startsWith('SCAN attestation_ref_storage')
 					).length
 				};
 			})
@@ -796,16 +1068,11 @@ describe('attestation attach and reads', () => {
 				async (instance) => {
 					const service = attestationsFor(instance.context);
 					const cache = resolvedCache(instance.context, destination);
-					const prefetch = await service.prefetchInheritanceSources(cache, [
-						metadata
-					]);
-
 					return service.inheritFromTenant(rootLogger(), {
 						cache,
 						storePathHash: metadata.storePathHash,
 						generation: narInfoGenerationSchema.parse(0),
-						narHash: metadata.narHash,
-						prefetch
+						narHash: metadata.narHash
 					});
 				}
 			);
@@ -893,8 +1160,7 @@ describe('attestation attach and reads', () => {
 						cache: resolvedCache(instance.context, destination),
 						storePathHash: metadata.storePathHash,
 						generation: narInfoGenerationSchema.parse(0),
-						narHash: metadata.narHash,
-						...(pauseAfter === 'prefetch' && { prefetch })
+						narHash: metadata.narHash
 					})
 			);
 			const sourceRead = await readFetch(
@@ -1485,53 +1751,1065 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('inherits a public source bundle after its path is explicitly deleted', async () => {
-		const { destination, metadata, digest } = await reusedPathWithSourceBundle(
-			'source-explicitly-deleted'
+	it.each(['pending', 'committed'] as const)(
+		'inherits from an explicitly deleted public source for a $0 destination',
+		async (phase) => {
+			let deleted:
+				| Awaited<ReturnType<DeletionQueueService['deleteStorePath']>>
+				| undefined;
+			const { token, destination, metadata, digest } =
+				await reusedPathWithSourceBundle(
+					'source-explicitly-deleted',
+					'private',
+					phase === 'pending'
+						? async (storePathHash) => {
+								deleted = await deleteFixtureSource(storePathHash);
+							}
+						: undefined
+				);
+			if (phase === 'committed') {
+				deleted = await deleteFixtureSource(metadata.storePathHash);
+			}
+
+			const sourcePaths = [
+				`/${metadata.storePathHash}.narinfo`,
+				`/${await currentNarObjectKey(metadata.narHash)}`,
+				`/attestations/${metadata.storePathHash}`,
+				`/attestation-bundles/${digest}`
+			];
+			for (const method of ['GET', 'HEAD']) {
+				for (const authentication of ['anonymous', 'authenticated']) {
+					const headers: HeadersInit =
+						authentication === 'authenticated'
+							? { authorization: `Bearer ${token}` }
+							: {};
+					const responses = await Promise.all(
+						sourcePaths.map((path) => readFetch(path, { method, headers }))
+					);
+					expect(responses.map((response) => response.status)).toStrictEqual([
+						404, 404, 404, 404
+					]);
+				}
+			}
+
+			const later = namedCache('accepted-after-deletion');
+			await putWorkerTestCache(token, later);
+			await pushPathThroughTenant(
+				fixtureTenant,
+				token,
+				metadata,
+				await verifiableNar('source-explicitly-deleted'),
+				later
+			);
+			await drainInheritance();
+			await drainInheritance();
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const references = await database
+				.select({
+					cacheKind: d1Schema.attestationReference.cacheKind,
+					digest: d1Schema.attestationReference.digest
+				})
+				.from(d1Schema.attestationReference)
+				.where(eq(d1Schema.attestationReference.digest, digest));
+			const list = await readFetch(
+				`/cache/${destination.name}/attestations/${metadata.storePathHash}`,
+				{ headers: { authorization: `Bearer ${token}` } }
+			);
+			const bundle = await readFetch(
+				`/cache/${destination.name}/attestation-bundles/${digest}`,
+				{ headers: { authorization: `Bearer ${token}` } }
+			);
+			expect(new Uint8Array(await bundle.arrayBuffer())).toStrictEqual(
+				sigstoreBundleBytes(narDigestHex(metadata.narHash))
+			);
+			expect({
+				deleted,
+				references,
+				listStatus: list.status,
+				protections: await runInDurableObject(
+					fixtureWorkerServer(),
+					(instance) =>
+						instance.context.db
+							.select()
+							.from(schema.attestationInheritances)
+							.all()
+				)
+			}).toStrictEqual({
+				deleted: {
+					storePathHash: metadata.storePathHash,
+					deleted: true,
+					narScheduledForDeletion: false
+				},
+				references: [
+					{ cacheKind: 'default', digest },
+					{ cacheKind: 'named', digest }
+				],
+				listStatus: StatusCodes.OK,
+				protections: []
+			});
+		}
+	);
+
+	it.each(['before', 'after'] as const)(
+		'recovers protected inheritance after a $0 pending-clear storage fault',
+		async (boundary) => {
+			await withoutAlarmArming(async () => {
+				const { token, metadata, bundle, digest } = await committedPathBundle();
+				await attachBundle(token, metadata.storePathHash, bundle);
+				await drainInheritance();
+				const destination = namedCache('pending-clear-recovery');
+				await putWorkerTestCache(token, destination, 'private');
+				const negotiated = await authorisedWorkerFetch(
+					`/cache/${destination.name}/uploads`,
+					token,
+					{
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify({
+							pushId: await testPushIdFor(fixtureTenant),
+							paths: [uploadPathNegotiation(metadata)]
+						})
+					}
+				);
+				const decision = z
+					.tuple([uploadDecisionSchema])
+					.parse(
+						uploadNegotiateResponseSchema.parse(await negotiated.json()).uploads
+					)[0];
+				if (decision.action !== 'commit') {
+					throw new Error('The destination must reuse the canonical NAR.');
+				}
+				await deleteFixtureSource(metadata.storePathHash);
+				await runInDurableObject(fixtureWorkerServer(), (_instance, state) => {
+					state.storage.sql.exec(
+						`CREATE TRIGGER pending_clear_fault ${boundary} DELETE ON pending_upload BEGIN SELECT RAISE(ABORT, 'pending clear fault'); END`
+					);
+				});
+				await expect(
+					commitUploadViaWorker(token, decision.uploadId, {
+						tenant: fixtureTenant,
+						cache: destination
+					})
+				).rejects.toThrow();
+				const persisted = await runInDurableObject(
+					fixtureWorkerServer(),
+					(instance, state) => {
+						const cache = resolvedCache(instance.context, destination);
+						const pending = instance.context.db
+							.select()
+							.from(schema.pendingUploads)
+							.where(eq(schema.pendingUploads.id, decision.uploadId))
+							.get();
+						const queue = instance.context.db
+							.select()
+							.from(schema.attestationInheritances)
+							.where(eq(schema.attestationInheritances.cacheId, cache.id))
+							.get();
+						if (pending === undefined || queue === undefined) {
+							throw new Error(
+								'Pending work and inheritance must both be durable before clearing.'
+							);
+						}
+						state.storage.sql.exec('DROP TRIGGER pending_clear_fault');
+						return { pending, queue };
+					}
+				);
+				expect({
+					uploadId: persisted.queue.acceptedUploadId,
+					acceptedSequence: persisted.queue.acceptedSequence,
+					acceptedExpiresAt: persisted.queue.acceptedExpiresAt,
+					commitStartedSequence: persisted.queue.commitStartedSequence
+				}).toStrictEqual({
+					uploadId: decision.uploadId,
+					acceptedSequence: persisted.pending.acceptedSequence,
+					acceptedExpiresAt: persisted.pending.acceptedExpiresAt,
+					commitStartedSequence: persisted.pending.commitStartedSequence
+				});
+				await commitUploadViaWorker(token, decision.uploadId, {
+					tenant: fixtureTenant,
+					cache: destination
+				});
+				const recovered = await runInDurableObject(
+					fixtureWorkerServer(),
+					(instance) => ({
+						pending: instance.context.db
+							.select()
+							.from(schema.pendingUploads)
+							.where(eq(schema.pendingUploads.id, decision.uploadId))
+							.all(),
+						queue: instance.context.db
+							.select()
+							.from(schema.attestationInheritances)
+							.where(
+								eq(
+									schema.attestationInheritances.cacheId,
+									resolvedCache(instance.context, destination).id
+								)
+							)
+							.get()
+					})
+				);
+				expect(recovered).toStrictEqual({
+					pending: [],
+					queue: persisted.queue
+				});
+				await drainInheritance();
+				const response = await readFetch(
+					`/cache/${destination.name}/attestation-bundles/${digest}`,
+					{ headers: { authorization: `Bearer ${token}` } }
+				);
+				expect({
+					status: response.status,
+					bytes: new Uint8Array(await response.arrayBuffer())
+				}).toStrictEqual({ status: 200, bytes: bundle });
+			}, fixtureWorkerServer());
+		}
+	);
+
+	it('keeps transferred source protection after queue persistence fails to arm an alarm', async () => {
+		const { metadata, destination, digest, token } =
+			await reusedPathWithSourceBundle(
+				'protection-transfer',
+				'private',
+				async (storePathHash) => {
+					await deleteFixtureSource(storePathHash);
+					await runInDurableObject(
+						fixtureWorkerServer(),
+						async (instance, state) => {
+							const cache = resolvedCache(
+								instance.context,
+								namedCache('protection-transfer')
+							);
+							const pending = instance.context.db
+								.select()
+								.from(schema.pendingUploads)
+								.where(eq(schema.pendingUploads.cacheId, cache.id))
+								.get();
+							if (pending === undefined) {
+								throw new Error(
+									'The destination upload must still be pending.'
+								);
+							}
+							const injected = new Error(
+								'alarm unavailable after inheritance persistence'
+							);
+							await state.storage.deleteAlarm();
+							const alarm = vi
+								.spyOn(state.storage, 'setAlarm')
+								.mockRejectedValueOnce(injected);
+							try {
+								await expect(
+									attestationsFor(instance.context).queueInheritance(
+										cache,
+										storePathHash,
+										narInfoGenerationSchema.parse(0),
+										pending.narHash,
+										pending.id
+									)
+								).rejects.toBe(injected);
+							} finally {
+								alarm.mockRestore();
+							}
+							await attestationsFor(instance.context).queueInheritance(
+								cache,
+								storePathHash,
+								narInfoGenerationSchema.parse(0),
+								pending.narHash,
+								pending.id
+							);
+							const actual = {
+								pending:
+									instance.context.db
+										.select({ id: schema.pendingUploads.id })
+										.from(schema.pendingUploads)
+										.where(eq(schema.pendingUploads.id, pending.id))
+										.get() !== undefined,
+								queue: instance.context.db
+									.select({
+										storePathHash: schema.attestationInheritances.storePathHash,
+										generation: schema.attestationInheritances.generation
+									})
+									.from(schema.attestationInheritances)
+									.where(eq(schema.attestationInheritances.cacheId, cache.id))
+									.all(),
+								protection: instance.context.db
+									.select({
+										storePathHash: schema.attestationInheritances.storePathHash,
+										acceptedSequence:
+											schema.attestationInheritances.acceptedSequence,
+										queuedSequence:
+											schema.attestationInheritances.queuedSequence,
+										acceptedUploadId:
+											schema.attestationInheritances.acceptedUploadId
+									})
+									.from(schema.attestationInheritances)
+									.all()
+							};
+							expect(actual).toStrictEqual({
+								pending: true,
+								queue: [{ storePathHash, generation: 0 }],
+								protection: [
+									{
+										storePathHash,
+										acceptedSequence: pending.acceptedSequence,
+										queuedSequence: pending.acceptedSequence + 1,
+										acceptedUploadId: pending.id
+									}
+								]
+							});
+						}
+					);
+				}
+			);
+		await drainInheritance();
+		const bundle = await readFetch(
+			`/cache/${destination.name}/attestation-bundles/${digest}`,
+			{ headers: { authorization: `Bearer ${token}` } }
 		);
-		const deleted = await runInDurableObject(
+		expect(new Uint8Array(await bundle.arrayBuffer())).toStrictEqual(
+			sigstoreBundleBytes(narDigestHex(metadata.narHash))
+		);
+	});
+
+	it('inherits a lower-sorting bundle from a later protected source page', async () => {
+		const { token, destination, metadata, digest } =
+			await reusedPathWithSourceBundle('source-pages', 'private');
+		const destinationCacheId = await runInDurableObject(
 			fixtureWorkerServer(),
-			(instance) => {
-				const narInfoObjects = new NarInfoObjectsService(instance.context);
-				const attestationCas = new AttestationCasService(instance.context);
-				const queue = new DeletionQueueService(
-					instance.context,
-					attestationCas,
-					attestationsFor(instance.context),
-					narInfoObjects
+			(instance, state) => {
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 99)
+			INSERT INTO cache_identity(kind, name, access, priority, created_at) SELECT 'named', printf('source-page-padding-%d', value), 'public', 40, ? FROM rows`,
+					isoTimestamp(new Date())
 				);
-				return queue.deleteStorePath(
-					defaultCacheScope,
+				const sequence = new WorkSequenceService(instance.context.db).current();
+				state.storage.sql.exec(
+					`INSERT INTO narinfo_deletion(cache_id, store_path_hash, nar_hash, generation, created_at, explicit, protection_cutoff, protection_captured_at)
+			SELECT id, ?, ?, 0, ?, 1, ?, ? FROM cache_identity WHERE name LIKE 'source-page-padding-%'`,
 					metadata.storePathHash,
-					internalOrigin
+					metadata.narHash,
+					isoTimestamp(new Date()),
+					sequence,
+					isoTimestamp(new Date())
 				);
+				return resolvedCache(instance.context, destination).id;
 			}
 		);
+		const laterSource = namedCache('later-page-source');
+		await putWorkerTestCache(token, laterSource);
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			await verifiableNar('source-pages'),
+			laterSource
+		);
+		const laterBundle = sigstoreBundleBytes(
+			narDigestHex(metadata.narHash),
+			buildOriginPredicateType
+		);
+		const laterDigest = sha256HexDigestSchema.parse(
+			await sha256HexBytes(laterBundle)
+		);
+		await attachBundle(token, metadata.storePathHash, laterBundle, laterSource);
+		await deleteFixtureSource(metadata.storePathHash);
+		await runInDurableObject(fixtureWorkerServer(), (instance) =>
+			deletionQueueFor(instance.context).deleteStorePath(
+				laterSource,
+				metadata.storePathHash,
+				internalOrigin
+			)
+		);
+		await drainInheritance();
+		const firstPage = await runInDurableObject(
+			fixtureWorkerServer(),
+			(instance) => {
+				const cache = resolvedCache(instance.context, destination);
+				return instance.context.db
+					.select({
+						cacheId: schema.attestationInheritances.sourceCacheId,
+						generation: schema.attestationInheritances.sourceGeneration,
+						predicateType: schema.attestationInheritances.sourcePredicateType,
+						digest: schema.attestationInheritances.sourceDigest
+					})
+					.from(schema.attestationInheritances)
+					.where(eq(schema.attestationInheritances.cacheId, cache.id))
+					.all()
+					.map((row) => ({
+						...row,
+						predicateType: row.predicateType ?? undefined,
+						digest: row.digest ?? undefined
+					}));
+			}
+		);
+		const firstReferences = await attestationReferenceRows();
+		await drainInheritance();
+		const allReferences = await attestationReferenceRows();
+		const references = allReferences
+			.filter(
+				(row) =>
+					row.cache.kind === 'named' && row.cache.name === destination.name
+			)
+			.map((row) => ({ predicateType: row.predicateType, digest: row.digest }))
+			.toSorted((left, right) =>
+				byCodeUnit(left.predicateType, right.predicateType)
+			);
+		expect({
+			firstPage,
+			firstDigests: firstReferences
+				.filter(
+					(row) =>
+						row.cache.kind === 'named' && row.cache.name === destination.name
+				)
+				.map((row) => row.digest),
+			references
+		}).toStrictEqual({
+			firstPage: [
+				{
+					cacheId: destinationCacheId,
+					generation: 0,
+					predicateType: undefined,
+					digest: undefined
+				}
+			],
+			firstDigests: [digest],
+			references: [
+				{ predicateType: buildOriginPredicateType, digest: laterDigest },
+				{ predicateType, digest }
+			]
+		});
+		const bundle = await readFetch(
+			`/cache/${destination.name}/attestation-bundles/${laterDigest}`,
+			{ headers: { authorization: `Bearer ${token}` } }
+		);
+		expect(new Uint8Array(await bundle.arrayBuffer())).toStrictEqual(
+			laterBundle
+		);
+	});
+
+	it.each([
+		'before-deletion',
+		'after-deletion',
+		'never-started',
+		'renewed-after-deletion'
+	] as const)(
+		'uses the first commit sequence to decide expired work eligibility %s',
+		async (phase) => {
+			await withoutAlarmArming(async () => {
+				const { token, metadata } = await reusedPathWithSourceBundle(
+					'expiry-cutoff',
+					'private'
+				);
+				const expired = namedCache('expired-work');
+				await putWorkerTestCache(token, expired, 'private');
+				const negotiated = await authorisedWorkerFetch(
+					`/cache/${expired.name}/uploads`,
+					token,
+					{
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify({
+							pushId: await testPushIdFor(fixtureTenant),
+							paths: [uploadPathNegotiation(metadata)]
+						})
+					}
+				);
+				const decision = z
+					.tuple([uploadDecisionSchema])
+					.parse(
+						uploadNegotiateResponseSchema.parse(await negotiated.json()).uploads
+					)[0];
+				if (decision.action === 'skip') {
+					throw new Error(
+						'The expired destination must receive an upload identity.'
+					);
+				}
+				const expiry = isoTimestamp(new Date(Date.now() - 60_000));
+				await runInDurableObject(fixtureWorkerServer(), (instance) => {
+					instance.context.db
+						.update(schema.pendingUploads)
+						.set({ expiresAt: expiry, acceptedExpiresAt: expiry })
+						.where(eq(schema.pendingUploads.id, decision.uploadId))
+						.run();
+					if (phase === 'before-deletion') {
+						new UploadStateService(instance.context).markUploadCommitting(
+							decision.uploadId
+						);
+					}
+				});
+				await deleteFixtureSource(metadata.storePathHash);
+				const result = await runInDurableObject(
+					fixtureWorkerServer(),
+					async (instance) => {
+						const cache = resolvedCache(instance.context, expired);
+						const pending = schema.pendingUploads;
+
+						switch (phase) {
+							case 'after-deletion': {
+								new UploadStateService(instance.context).markUploadCommitting(
+									decision.uploadId
+								);
+								break;
+							}
+							case 'renewed-after-deletion': {
+								const state = new UploadStateService(instance.context);
+								state.markUploadPending(decision.uploadId);
+								state.markUploadTerminal(decision.uploadId, 'servable');
+								break;
+							}
+							default: {
+								break;
+							}
+						}
+
+						const first = instance.context.db
+							.select()
+							.from(pending)
+							.where(eq(pending.id, decision.uploadId))
+							.get();
+						if (first === undefined) {
+							throw new Error(
+								'The pending destination identity must remain available.'
+							);
+						}
+						if (phase === 'before-deletion' || phase === 'after-deletion') {
+							new UploadStateService(instance.context).markUploadCommitting(
+								decision.uploadId
+							);
+						}
+						await attestationsFor(instance.context).queueInheritance(
+							cache,
+							metadata.storePathHash,
+							narInfoGenerationSchema.parse(0),
+							metadata.narHash,
+							decision.uploadId
+						);
+						const queue = instance.context.db
+							.select({
+								uploadId: schema.attestationInheritances.acceptedUploadId,
+								expiry: schema.attestationInheritances.acceptedExpiresAt,
+								firstCommit:
+									schema.attestationInheritances.commitStartedSequence
+							})
+							.from(schema.attestationInheritances)
+							.where(eq(schema.attestationInheritances.cacheId, cache.id))
+							.get();
+						const source = resolvedCache(instance.context);
+						const isEligible = new ProtectedInheritanceService(
+							instance.context
+						).isReferenceProtected(
+							cache,
+							metadata.storePathHash,
+							narInfoGenerationSchema.parse(0),
+							source.id,
+							narInfoGenerationSchema.parse(0)
+						);
+
+						return {
+							queue,
+							firstCommit: first.commitStartedSequence,
+							isEligible
+						};
+					}
+				);
+				expect(result).toStrictEqual({
+					queue: {
+						uploadId: decision.uploadId,
+						expiry,
+						firstCommit: result.firstCommit
+					},
+					firstCommit: result.firstCommit,
+					isEligible: phase === 'before-deletion'
+				});
+			}, fixtureWorkerServer());
+		}
+	);
+
+	it('keeps NAR presence accounted while an unreadable source remains protected', async () => {
+		const { metadata, destination } = await reusedPathWithSourceBundle(
+			'protected-accounting',
+			'private'
+		);
+		await deleteFixtureSource(metadata.storePathHash);
+		const before = await tenantUsageRow();
+		if (before === undefined) {
+			throw new Error('The published path must have tenant usage.');
+		}
+		await runInDurableObject(fixtureWorkerServer(), (instance) =>
+			deletionQueueFor(instance.context).deleteStorePath(
+				destination,
+				metadata.storePathHash,
+				internalOrigin
+			)
+		);
+		expect({
+			presence: await tenantBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			presence: [
+				{
+					tenant: fixtureTenant,
+					narHash: metadata.narHash,
+					fileSize: metadata.fileSize
+				}
+			],
+			usage: { ...before, narinfos: before.narinfos - 1 }
+		});
+	});
+
+	it('does not grant an old revoked generation through a later deletion cutoff', async () => {
+		const {
+			token,
+			destination: earlier,
+			metadata,
+			digest
+		} = await reusedPathWithSourceBundle(
+			'successive-deletion-cutoffs',
+			'private'
+		);
+		await deleteFixtureSource(metadata.storePathHash);
+		const nar = await verifiableNar('successive-deletion-cutoffs');
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+		const later = namedCache('successive-deletion-later');
+		await putWorkerTestCache(token, later);
+		await pushPathThroughTenant(fixtureTenant, token, metadata, nar, later);
+		await deleteFixtureSource(metadata.storePathHash);
+		await drainInheritance();
+		await makeQueuedInheritancesDue();
 		await drainInheritance();
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const references = await database
+		const rows = await database
 			.select({
-				cacheKind: d1Schema.attestationReference.cacheKind,
+				cache: d1Schema.attestationReference.cacheName,
+				generation: d1Schema.attestationReference.generation,
 				digest: d1Schema.attestationReference.digest
 			})
 			.from(d1Schema.attestationReference)
-			.where(eq(d1Schema.attestationReference.digest, digest));
-		const list = await readFetch(
-			`/cache/${destination.name}/attestations/${metadata.storePathHash}`
+			.where(
+				and(
+					eq(
+						d1Schema.attestationReference.storePathHash,
+						metadata.storePathHash
+					),
+					eq(d1Schema.attestationReference.cacheKind, 'named')
+				)
+			)
+			.orderBy(d1Schema.attestationReference.cacheName);
+		expect(rows).toStrictEqual([
+			{
+				cache: earlier.name,
+				generation: narInfoGenerationSchema.parse(0),
+				digest
+			}
+		]);
+	});
+
+	it('replays revoked-source cleanup without revoking a replacement publication', async () => {
+		const { token, metadata, digest, destination } =
+			await reusedPathWithSourceBundle('replaced-deleted-source', 'private');
+		await runInDurableObject(fixtureWorkerServer(), async (instance, state) => {
+			const context = new ServerContext(state, {
+				...instance.context.env,
+				CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
+					failures: 1,
+					matches: (query) =>
+						query.startsWith('insert into "path_read_revocation"')
+				})
+			});
+			await expect(
+				deletionQueueFor(context).deleteStorePath(
+					defaultCacheScope,
+					metadata.storePathHash,
+					internalOrigin
+				)
+			).rejects.toThrow('transient D1 fault');
+		});
+		await pushPathThroughTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			await verifiableNar('replaced-deleted-source')
 		);
-		expect({ deleted, references, listStatus: list.status }).toStrictEqual({
-			deleted: {
-				storePathHash: metadata.storePathHash,
-				deleted: true,
-				narScheduledForDeletion: false
-			},
+		await runInDurableObject(fixtureWorkerServer(), (instance) =>
+			instance.context.criticalSection(() =>
+				deletionQueueFor(instance.context).retireQueuedNarInfoEdge(
+					resolvedCache(instance.context),
+					metadata.storePathHash,
+					narInfoGenerationSchema.parse(0)
+				)
+			)
+		);
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const references = await database
+			.select({
+				generation: d1Schema.blobReference.generation,
+				readable: authorisedByPathGeneration().mapWith(Boolean)
+			})
+			.from(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, fixtureTenant),
+					eq(d1Schema.blobReference.cacheKind, 'default'),
+					eq(d1Schema.blobReference.storePathHash, metadata.storePathHash)
+				)
+			)
+			.orderBy(d1Schema.blobReference.generation);
+		const narinfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
+		await drainInheritance();
+		const inherited = await readFetch(
+			`/cache/${destination.name}/attestation-bundles/${digest}`,
+			{ headers: { authorization: `Bearer ${token}` } }
+		);
+		expect({
+			references,
+			narinfo: narinfo.status,
+			inherited: inherited.status
+		}).toStrictEqual({
 			references: [
-				{ cacheKind: 'default', digest },
-				{ cacheKind: 'named', digest }
+				{ generation: 0, readable: false },
+				{ generation: 1, readable: true }
 			],
-			listStatus: StatusCodes.OK
+			narinfo: StatusCodes.OK,
+			inherited: StatusCodes.OK
 		});
 	});
+
+	it('bounds bundle authority while 25,000 revoked reference generations await demotion', async () => {
+		const { metadata, digest } = await reusedPathWithSourceBundle(
+			'bundle-read-fence-scale',
+			'private'
+		);
+		const source =
+			'WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM source WHERE n < 24999)';
+		await env.CUPBOARD_DB.prepare(
+			`${source} INSERT INTO blob_ref_storage(tenant,cache_kind,store_path_hash,generation,nar_hash,cache_generation) SELECT original.tenant, original.cache_kind, original.store_path_hash, n, original.nar_hash, original.cache_generation FROM source CROSS JOIN (SELECT * FROM blob_ref_storage WHERE tenant = ? AND cache_kind = 'default' AND store_path_hash = ? AND generation = 0) original`
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.run();
+		await env.CUPBOARD_DB.prepare(
+			`${source} INSERT INTO attestation_ref_storage(tenant,cache_kind,store_path_hash,generation,predicate_type,digest) SELECT original.tenant, original.cache_kind, original.store_path_hash, n, original.predicate_type, original.digest FROM source CROSS JOIN (SELECT * FROM attestation_ref_storage WHERE tenant = ? AND cache_kind = 'default' AND store_path_hash = ? AND generation = 0) original`
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.run();
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM source WHERE n < 25000) INSERT INTO attestation_ref_storage(tenant,cache_kind,store_path_hash,generation,predicate_type,digest) SELECT original.tenant, original.cache_kind, original.store_path_hash, 0, original.predicate_type, printf('%064x',n) FROM source CROSS JOIN (SELECT * FROM attestation_ref_storage WHERE tenant = ? AND cache_kind = 'default' AND store_path_hash = ? AND generation = 0 LIMIT 1) original`
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.run();
+		const statements: { query: string; values: unknown[] }[] = [];
+		const binding: D1Database = {
+			prepare(query) {
+				const statement = env.CUPBOARD_DB.prepare(query);
+				if (
+					query.includes('path_read_revocation') &&
+					query.includes('from "attestation_ref_storage"')
+				) {
+					const bind = statement.bind.bind(statement);
+					statement.bind = (...values: unknown[]) => {
+						statements.push({ query, values });
+						return bind(...values);
+					};
+				}
+				return statement;
+			},
+			batch: (statements) => env.CUPBOARD_DB.batch(statements),
+			exec: (query) => env.CUPBOARD_DB.exec(query),
+			withSession: (constraint) => env.CUPBOARD_DB.withSession(constraint),
+			dump: () =>
+				Promise.reject(new Error('The bundle scale fixture does not dump D1.'))
+		};
+		await runInDurableObject(fixtureWorkerServer(), async (instance, state) => {
+			const context = new ServerContext(state, {
+				...instance.context.env,
+				CUPBOARD_DB: binding
+			});
+			const authority = new PathReadAuthorityService(context);
+			await authority.revoke(resolvedCache(context), [
+				{
+					storePathHash: metadata.storePathHash,
+					generation: narInfoGenerationSchema.parse(24_999)
+				}
+			]);
+			await expect(
+				attestationsFor(context).handleServeBundle(
+					new Request('https://example.com/bundle'),
+					defaultCacheScope,
+					digest
+				)
+			).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+		});
+		const [query] = statements;
+		if (query === undefined) {
+			throw new Error('The bundle read did not prepare an authority query.');
+		}
+		const measured = await env.CUPBOARD_DB.prepare(query.query)
+			.bind(...query.values)
+			.all();
+		const plan = await env.CUPBOARD_DB.prepare(
+			`EXPLAIN QUERY PLAN ${query.query}`
+		)
+			.bind(...query.values)
+			.all();
+		expect({
+			queries: statements.length,
+			candidates: measured.results.length,
+			read: measured.meta.rows_read,
+			plan: plan.results.map((row) => row.detail)
+		}).toStrictEqual({
+			queries: 1,
+			candidates: 65,
+			read: 324,
+			plan: [
+				'SEARCH attestation_ref_storage USING COVERING INDEX attestation_ref_readable_digest_idx (tenant=? AND cache_kind=? AND cache_name=? AND digest=?)',
+				'SEARCH blob_ref_storage USING INDEX blob_ref_default_identity_idx (tenant=? AND store_path_hash=? AND generation=?)',
+				'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=?)',
+				'CORRELATED SCALAR SUBQUERY 1',
+				'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)'
+			]
+		});
+		await runInDurableObject(fixtureWorkerServer(), async (instance) => {
+			const authority = new PathReadAuthorityService(instance.context);
+			for (let page = 0; page < 500; page++) {
+				await authority.drain();
+			}
+			await authority.drain();
+			expect(await authority.hasPending()).toBe(false);
+		});
+		const demoted = await env.CUPBOARD_DB.prepare(query.query)
+			.bind(...query.values)
+			.all();
+		await env.CUPBOARD_DB.prepare(
+			`INSERT INTO blob_ref_storage(tenant,cache_kind,store_path_hash,generation,nar_hash,cache_generation) SELECT tenant, cache_kind, store_path_hash, 25000, nar_hash, cache_generation FROM blob_ref_storage WHERE tenant = ? AND cache_kind = 'default' AND store_path_hash = ? AND generation = 0`
+		)
+			.bind(fixtureTenant, metadata.storePathHash)
+			.run();
+		await env.CUPBOARD_DB.prepare(
+			`INSERT INTO attestation_ref_storage(tenant,cache_kind,store_path_hash,generation,predicate_type,digest) SELECT tenant, cache_kind, store_path_hash, 25000, predicate_type, digest FROM attestation_ref_storage WHERE tenant = ? AND cache_kind = 'default' AND store_path_hash = ? AND generation = 0 AND digest = ?`
+		)
+			.bind(fixtureTenant, metadata.storePathHash, digest)
+			.run();
+		const later = await env.CUPBOARD_DB.prepare(query.query)
+			.bind(...query.values)
+			.all();
+		const status = await runInDurableObject(
+			fixtureWorkerServer(),
+			async (instance) => {
+				const response = await attestationsFor(
+					instance.context
+				).handleServeBundle(
+					new Request('https://example.com/bundle'),
+					defaultCacheScope,
+					digest
+				);
+				return response.status;
+			}
+		);
+		expect({
+			demoted: { rows: demoted.results, read: demoted.meta.rows_read },
+			later: { rows: later.results, read: later.meta.rows_read },
+			status
+		}).toStrictEqual({
+			demoted: { rows: [], read: 0 },
+			later: { rows: [{ digest, available: 1 }], read: 5 },
+			status: StatusCodes.OK
+		});
+	});
+	it.each(['current', 'preceding'] as const)(
+		'refuses recovered source reads from the %s writer after demotion',
+		async (writer) => {
+			const { metadata, digest, destination, token } =
+				await reusedPathWithSourceBundle('demoted-source-recovery', 'private');
+			await deleteFixtureSource(metadata.storePathHash);
+			const recovered = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance) => {
+					const context = instance.context;
+					await new PathReadAuthorityService(context).drain();
+					await context.d1
+						.delete(d1Schema.attestationReference)
+						.where(
+							and(
+								eq(d1Schema.attestationReference.tenant, fixtureTenant),
+								eq(d1Schema.attestationReference.cacheKind, 'default'),
+								eq(
+									d1Schema.attestationReference.storePathHash,
+									metadata.storePathHash
+								)
+							)
+						);
+					const result = await new AttestationCasService(
+						context
+					).reserveReferenceAndCharge(
+						{
+							cache: defaultCacheScope,
+							storePathHash: metadata.storePathHash,
+							generation: narInfoGenerationSchema.parse(0),
+							predicateType: predicateTypeSchema.parse(
+								buildOriginPredicateType
+							),
+							digest
+						},
+						1
+					);
+					if (writer === 'preceding') {
+						await expect(
+							env.CUPBOARD_DB.batch([
+								env.CUPBOARD_DB.prepare(
+									"DELETE FROM attestation_ref WHERE tenant = ? AND cache_kind = 'default' AND store_path_hash = ?"
+								).bind(fixtureTenant, metadata.storePathHash),
+								env.CUPBOARD_DB.prepare(
+									"INSERT INTO attestation_ref(tenant, cache_kind, store_path_hash, generation, predicate_type, digest) SELECT id, 'default', ?, 0, ?, ? FROM tenant WHERE id = ? AND status = 'active' ON CONFLICT DO NOTHING"
+								).bind(
+									metadata.storePathHash,
+									buildOriginPredicateType,
+									digest,
+									fixtureTenant
+								)
+							])
+						).rejects.toThrow(
+							'cannot modify attestation_ref because it is a view'
+						);
+					}
+					const row = await context.d1
+						.select({ readable: d1Schema.attestationReference.readable })
+						.from(d1Schema.attestationReference)
+						.where(
+							and(
+								eq(d1Schema.attestationReference.tenant, fixtureTenant),
+								eq(d1Schema.attestationReference.cacheKind, 'default'),
+								eq(
+									d1Schema.attestationReference.storePathHash,
+									metadata.storePathHash
+								)
+							)
+						)
+						.get();
+					return { result, row };
+				}
+			);
+			await drainInheritance();
+			const response = await readFetch(
+				`/cache/${destination.name}/attestation-bundles/${digest}`,
+				{ headers: { authorization: `Bearer ${token}` } }
+			);
+			const source = await readFetch(`/attestation-bundles/${digest}`, {
+				headers: { authorization: `Bearer ${token}` }
+			});
+			expect({
+				recovered,
+				inherited: response.status,
+				source: source.status
+			}).toStrictEqual({
+				recovered: {
+					result: 'referenced',
+					row: { readable: false }
+				},
+				inherited: StatusCodes.OK,
+				source: StatusCodes.NOT_FOUND
+			});
+		}
+	);
+	it.each(['before-revocation', 'after-revocation'] as const)(
+		'redrives explicit deletion after a failure $0',
+		async (boundary) => {
+			const { metadata } = await reusedPathWithSourceBundle(
+				`deletion-${boundary}`,
+				'private'
+			);
+			const interruption = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance, state) => {
+					const injected = new Error('interrupted explicit deletion');
+
+					const inner = instance.context.env.CUPBOARD_DB;
+					let isRevocation = false;
+					const binding: D1Database = {
+						prepare(query) {
+							if (query.startsWith('insert into "path_read_revocation"')) {
+								isRevocation = true;
+							}
+							return inner.prepare(query);
+						},
+						async batch<T>(statements: D1PreparedStatement[]) {
+							if (isRevocation) {
+								isRevocation = false;
+								if (boundary === 'before-revocation') {
+									throw injected;
+								}
+								await inner.batch<T>(statements);
+								throw injected;
+							}
+							return inner.batch<T>(statements);
+						},
+						exec: (query) => inner.exec(query),
+						withSession: (constraint) => inner.withSession(constraint),
+						dump: () =>
+							Promise.reject(new Error('The fault fixture does not dump D1.'))
+					};
+					const context = new ServerContext(state, {
+						...instance.context.env,
+						CUPBOARD_DB: binding
+					});
+					try {
+						await deletionQueueFor(context).deleteStorePath(
+							defaultCacheScope,
+							metadata.storePathHash,
+							internalOrigin
+						);
+						return false;
+					} catch (error) {
+						const fence = await inner
+							.prepare(
+								'SELECT generation FROM path_read_revocation WHERE tenant = ? AND cache_kind = ? AND store_path_hash = ?'
+							)
+							.bind(fixtureTenant, 'default', metadata.storePathHash)
+							.first();
+						return {
+							interrupted: error === injected,
+							fence: fence ?? undefined,
+							pending: await state.storage.get(pathReadDemotionPendingKey)
+						};
+					}
+				}
+			);
+			const retried = await deleteFixtureSource(metadata.storePathHash);
+			const protectedRows = await runInDurableObject(
+				fixtureWorkerServer(),
+				(instance) =>
+					instance.context.db
+						.select({
+							storePathHash: schema.attestationInheritances.storePathHash,
+							generation: schema.attestationInheritances.generation
+						})
+						.from(schema.attestationInheritances)
+						.all()
+			);
+			expect({
+				interruption,
+				retried,
+				protections: protectedRows
+			}).toStrictEqual({
+				interruption: {
+					interrupted: true,
+					fence:
+						boundary === 'after-revocation' ? { generation: 0 } : undefined,
+					pending: true
+				},
+				retried: {
+					storePathHash: metadata.storePathHash,
+					deleted: true,
+					narScheduledForDeletion: false
+				},
+				protections: [
+					{
+						storePathHash: metadata.storePathHash,
+						generation: 0
+					}
+				]
+			});
+			await drainInheritance();
+		}
+	);
 
 	it('does not reference or list bundles for a generation that the path no longer has', async () => {
 		const { destination, metadata, token } = await reusedPathWithSourceBundle(
@@ -2634,20 +3912,6 @@ describe('attestation attach and reads', () => {
 			storePathHash: first.metadata.storePathHash,
 			digest
 		}));
-		const uploadIds = Array.from({ length: digests.length * 2 }, () =>
-			uploadIdSchema.parse(crypto.randomUUID())
-		);
-		let nextUploadId = 0;
-		const randomUUID = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
-			const uploadId = uploadIds[nextUploadId];
-			nextUploadId += 1;
-
-			if (uploadId === undefined) {
-				throw new Error('negotiation generated more upload IDs than bundles');
-			}
-
-			return uploadId;
-		});
 		const now = new Date();
 		vi.useFakeTimers();
 		vi.setSystemTime(now);
@@ -2697,20 +3961,45 @@ describe('attestation attach and reads', () => {
 							}
 						);
 
-					return {
-						cold: await negotiate(),
-						warm: await negotiate()
+					const previousIds = new Set(
+						restarted.context.db
+							.select({ id: schema.pendingAttestations.id })
+							.from(schema.pendingAttestations)
+							.all()
+							.map((row) => row.id)
+					);
+					const newUploadIds = () => {
+						const rows = restarted.context.db
+							.select({
+								id: schema.pendingAttestations.id,
+								digest: schema.pendingAttestations.digest
+							})
+							.from(schema.pendingAttestations)
+							.all()
+							.filter((row) => !previousIds.has(row.id));
+						for (const row of rows) {
+							previousIds.add(row.id);
+						}
+						const ids = new Map(rows.map((row) => [row.digest, row.id]));
+						expect(
+							rows.map((row) => row.digest).toSorted(byCodeUnit)
+						).toStrictEqual([...digests].toSorted(byCodeUnit));
+						return bundles.map((bundle) => ids.get(bundle.digest));
 					};
+					const cold = await negotiate();
+					const coldUploadIds = newUploadIds();
+					const warm = await negotiate();
+					const warmUploadIds = newUploadIds();
+					return { cold, warm, coldUploadIds, warmUploadIds };
 				}
 			);
 		} finally {
-			randomUUID.mockRestore();
 			vi.useRealTimers();
 		}
 
-		const decisions = (offset: number) =>
+		const decisions = (uploadIds: typeof result.coldUploadIds) =>
 			bundles.map((bundle, index) => {
-				const uploadId = uploadIds[offset + index];
+				const uploadId = uploadIds[index];
 
 				if (uploadId === undefined) {
 					throw new Error('missing expected upload ID');
@@ -2725,19 +4014,19 @@ describe('attestation attach and reads', () => {
 				};
 			});
 
-		expect(result).toStrictEqual({
+		expect({ cold: result.cold, warm: result.warm }).toStrictEqual({
 			cold: {
 				calls: 855,
 				httpStatus: StatusCodes.OK,
 				body: {
-					bundles: decisions(0)
+					bundles: decisions(result.coldUploadIds)
 				}
 			},
 			warm: {
 				calls: 854,
 				httpStatus: StatusCodes.OK,
 				body: {
-					bundles: decisions(bundles.length)
+					bundles: decisions(result.warmUploadIds)
 				}
 			}
 		});
@@ -2810,9 +4099,38 @@ async function drainInheritance(): Promise<MaintenanceProgress> {
 	return outcome.progress;
 }
 
+function deletionQueueFor(context: ServerContext): DeletionQueueService {
+	const narInfoObjects = new NarInfoObjectsService(context);
+	const attestationCas = new AttestationCasService(context);
+	return new DeletionQueueService(
+		context,
+		attestationCas,
+		attestationsFor(context),
+		narInfoObjects
+	);
+}
+
+async function deleteFixtureSource(
+	storePathHash: ReturnType<typeof storePathHashSchema.parse>
+) {
+	return runInDurableObject(fixtureWorkerServer(), (instance) =>
+		deletionQueueFor(instance.context).deleteStorePath(
+			defaultCacheScope,
+			storePathHash,
+			internalOrigin
+		)
+	);
+}
+
 // Publishes a path to the default cache with one bundle, then publishes it to a
 // named destination cache. The destination's inheritance row stays queued.
-async function reusedPathWithSourceBundle(name: string): Promise<{
+async function reusedPathWithSourceBundle(
+	name: string,
+	access: CacheAccessMode = 'public',
+	beforeDestinationCommit?: (
+		storePathHash: ReturnType<typeof storePathHashSchema.parse>
+	) => Promise<void>
+): Promise<{
 	readonly token: string;
 	readonly destination: Extract<CacheScope, { kind: 'named' }>;
 	readonly metadata: ReturnType<typeof uploadMetadata>;
@@ -2820,7 +4138,7 @@ async function reusedPathWithSourceBundle(name: string): Promise<{
 }> {
 	const destination = namedCache(name);
 	const token = await initialiseViaWorker();
-	await putWorkerTestCache(token, destination);
+	await putWorkerTestCache(token, destination, access);
 	const nar = await verifiableNar(name);
 	const metadata = uploadMetadata({
 		storePathHash: uniqueStorePathHash(),
@@ -2834,7 +4152,16 @@ async function reusedPathWithSourceBundle(name: string): Promise<{
 	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
 	await attachBundle(token, metadata.storePathHash, bundle);
 	await drainInheritance();
-	await pushPathThroughTenant(fixtureTenant, token, metadata, nar, destination);
+	await pushPathThroughTenant(
+		fixtureTenant,
+		token,
+		metadata,
+		nar,
+		destination,
+		beforeDestinationCommit === undefined
+			? undefined
+			: () => beforeDestinationCommit(metadata.storePathHash)
+	);
 
 	return { token, destination, metadata, digest };
 }

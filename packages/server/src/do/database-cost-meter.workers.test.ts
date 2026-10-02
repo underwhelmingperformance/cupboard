@@ -79,11 +79,8 @@ describe('db cost meter', () => {
 			return dbCost.rowsWritten - before;
 		});
 
-		// Writes are folded on their own accumulation, so pin a positive count: each
-		// insert writes the table row plus its primary-key, `expires_at`, `verdict`,
-		// terminal-expiry, garbage-collection path and `r2_key` index entries. That
-		// is seven writes per row across three rows.
-		expect(measured).toBe(21);
+		// Each insert writes the table row and eight index entries.
+		expect(measured).toBe(27);
 	});
 
 	it('attributes rows to the request that read them, not a concurrent one', async () => {
@@ -163,8 +160,8 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 27,
-			rowsWritten: 7
+			rowsRead: 29,
+			rowsWritten: 10
 		});
 	});
 
@@ -197,7 +194,7 @@ describe('db cost meter', () => {
 			status: negotiate?.status,
 			rowsRead: negotiate?.rowsRead,
 			rowsWritten: negotiate?.rowsWritten
-		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 27, rowsWritten: 9 });
+		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 29, rowsWritten: 12 });
 	});
 
 	it('logs the cost line with a 500 status when the request fails', async () => {
@@ -206,17 +203,15 @@ describe('db cost meter', () => {
 		const capture = startCapture();
 
 		try {
-			await runInDurableObject(currentServer(), async (instance) => {
-				// Fail the negotiate's slot write after its reads, so the request returns a
-				// 500 once the meter has already accumulated rows.
-				Object.defineProperty(instance.context.db, 'insert', {
-					value: () => {
-						throw new Error('forced negotiate failure');
-					},
-					configurable: true
-				});
-
-				return negotiateViaInstance(instance, token, 'a'.repeat(32));
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				state.storage.sql.exec(
+					"CREATE TRIGGER forced_upload_write_failure BEFORE INSERT ON pending_upload BEGIN SELECT RAISE(ABORT, 'forced negotiate failure'); END"
+				);
+				try {
+					return await negotiateViaInstance(instance, token, 'a'.repeat(32));
+				} finally {
+					state.storage.sql.exec('DROP TRIGGER forced_upload_write_failure');
+				}
 			});
 		} finally {
 			capture.stop();
@@ -236,8 +231,8 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 27,
-			rowsWritten: 0
+			rowsRead: 29,
+			rowsWritten: 1
 		});
 	});
 });

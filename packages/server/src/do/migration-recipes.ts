@@ -1375,10 +1375,200 @@ function publicationRecoveryRecipe(
 	};
 }
 
+function protectedInheritanceMirror(
+	table: RebuildTable,
+	copy: string
+): readonly string[] {
+	const prefix = `__bounded_protection_${table.table}`;
+	const projection = copy.slice(
+		copy.indexOf(' SELECT ') + 8,
+		copy.indexOf(' FROM ')
+	);
+	const insertion = copy.slice(0, copy.indexOf(' SELECT '));
+	const target = insertion.slice(
+		'INSERT OR REPLACE INTO '.length,
+		insertion.indexOf(' (')
+	);
+	const values = projection.replaceAll(/`([a-z0-9_]+)`/gu, 'NEW.`$1`');
+	return [
+		`CREATE TRIGGER \`${prefix}_insert\` AFTER INSERT ON \`${table.table}\` BEGIN ${insertion} VALUES (${values}); END;`,
+		`CREATE TRIGGER \`${prefix}_update\` AFTER UPDATE ON \`${table.table}\` BEGIN ${insertion} VALUES (${values}); END;`,
+		`CREATE TRIGGER \`${prefix}_delete\` AFTER DELETE ON \`${table.table}\` BEGIN DELETE FROM ${target} WHERE rowid = OLD.rowid; END;`
+	];
+}
+
+function protectedInheritanceRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const tables = [
+		'pending_upload',
+		'attestation_inheritance',
+		'narinfo_deletion',
+		'narinfo'
+	].map((table) => {
+		const create = statements.findIndex((statement) =>
+			statement.startsWith(`CREATE TABLE \`__new_${table}\``)
+		);
+		const copy = create + 1;
+		const indexes = statements.flatMap((statement, index) =>
+			statement.startsWith('CREATE INDEX ') &&
+			statement.includes(`ON \`${table}\``)
+				? [index]
+				: []
+		);
+		const triggers = statements.filter(
+			(statement) =>
+				statement.startsWith('CREATE TRIGGER ') &&
+				statement.includes(`\`${table}\``)
+		);
+		return { table, create, copy, indexes, triggers };
+	});
+	const copies = statements.map((statement) =>
+		statement.replace('INSERT INTO `__new_', 'INSERT OR REPLACE INTO `__new_')
+	);
+	const fullCopy = (table: RebuildTable) => {
+		const copy = statementAt(copies, table.copy);
+		const columns = copy.slice(copy.indexOf('(') + 1, copy.indexOf(') SELECT'));
+		const projection = columns
+			.split(', ')
+			.map((column) => {
+				if (table.table !== 'pending_upload') {
+					return column;
+				}
+				if (column === '`accepted_expires_at`') {
+					return 'coalesce(`accepted_expires_at`, `expires_at`)';
+				}
+				if (column === '`commit_started_sequence`') {
+					return "coalesce(`commit_started_sequence`, CASE WHEN `verdict` = 'committing' THEN 0 ELSE NULL END)";
+				}
+				return column;
+			})
+			.join(', ');
+		return `INSERT OR REPLACE INTO \`__new_${table.table}\` (${columns}) SELECT ${projection} FROM \`${table.table}\`;`;
+	};
+	const drops = tables.flatMap(({ table }) =>
+		['insert', 'update', 'delete'].map(
+			(event) =>
+				`DROP TRIGGER IF EXISTS \`__bounded_protection_${table}_${event}\`;`
+		)
+	);
+	const triggerDrops = tables.flatMap(({ triggers }) =>
+		triggers.map((statement) => {
+			const [trigger] = statement
+				.slice('CREATE TRIGGER '.length)
+				.split(/\s/u, 1);
+			if (trigger === undefined) {
+				throw new Error('The migration trigger must have an identifier.');
+			}
+			return `DROP TRIGGER ${trigger};`;
+		})
+	);
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-protected-inheritance-shadows',
+				statements: [
+					statementAt(statements, 0),
+					statementAt(statements, 1),
+					...tables.flatMap((table) => [
+						statementAt(statements, table.create),
+						...table.indexes.map((index) =>
+							shadowIndex(statementAt(statements, index), table.table)
+						),
+						...protectedInheritanceMirror(
+							table,
+							statementAt(copies, table.copy)
+						)
+					])
+				]
+			},
+			...tables.map((table) => copyStage(table, copies)),
+			{
+				kind: 'batch',
+				name: 'switch-protected-inheritance-shadows',
+				statements: [
+					...drops,
+					...triggerDrops,
+					...tables.flatMap(({ table }) => [
+						`ALTER TABLE \`${table}\` RENAME TO \`__bounded_old_${table}\`;`,
+						`ALTER TABLE \`__new_${table}\` RENAME TO \`${table}\`;`
+					]),
+					...tables.flatMap(({ triggers }) => triggers)
+				]
+			},
+			...tables.map(({ table }) => drainStage(table)),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-protected-inheritance-shadows',
+				statements: [
+					...tables.map(
+						({ table }) => `DROP TABLE \`__bounded_old_${table}\`;`
+					),
+					...tables.flatMap((table) => [
+						canonicalTable(statementAt(statements, table.create), table.table),
+						...table.indexes.map((index) =>
+							canonicalIndex(statementAt(statements, index), table.table)
+						),
+						...protectedInheritanceMirror(
+							table,
+							canonicalTable(fullCopy(table), table.table)
+						)
+					])
+				]
+			},
+			...tables.map((table) => ({
+				kind: 'page' as const,
+				name: `copy-canonical-${table.table}`,
+				source: table.table,
+				writesPerSourceRow: 1,
+				statements: (cursor: number, last: number) => [
+					boundedCopy(
+						canonicalTable(fullCopy(table), table.table),
+						table.table,
+						cursor,
+						last
+					)
+				]
+			})),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-protected-inheritance-shadows',
+				statements: [
+					...drops,
+					...triggerDrops,
+					...tables.flatMap(({ table }) => [
+						`ALTER TABLE \`${table}\` RENAME TO \`__bounded_noncanonical_${table}\`;`,
+						`ALTER TABLE \`__bounded_canonical_${table}\` RENAME TO \`${table}\`;`
+					]),
+					...tables.flatMap(({ triggers }) => triggers)
+				]
+			},
+			...tables.map(({ table }) => drainNoncanonicalStage(table)),
+			{
+				kind: 'batch',
+				name: 'finish-protected-inheritance-shadows',
+				statements: tables.map(
+					({ table }) => `DROP TABLE \`__bounded_noncanonical_${table}\`;`
+				)
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
+	if (tag === '0068_protected_inheritance') {
+		return protectedInheritanceRecipe(tag, statements);
+	}
+
 	if (tag === '0066_publication_recovery') {
 		return publicationRecoveryRecipe(tag, statements);
 	}

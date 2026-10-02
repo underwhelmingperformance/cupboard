@@ -246,6 +246,20 @@
 			"when": 1790538558412,
 			"tag": "0034_publication_identity",
 			"breakpoints": true
+		},
+		{
+			"idx": 35,
+			"version": "6",
+			"when": 1790902103202,
+			"tag": "0035_blob_reference_read_authority",
+			"breakpoints": true
+		},
+		{
+			"idx": 36,
+			"version": "6",
+			"when": 1790920824494,
+			"tag": "0036_path_read_authority_contract",
+			"breakpoints": true
 		}
 	]
 }

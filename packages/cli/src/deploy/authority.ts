@@ -460,8 +460,6 @@ function adminCheckFailureText(
 			const ray =
 				failure.ray === undefined ? '' : ` (Cloudflare ray ${failure.ray})`;
 
-			// The Worker answered, and the token exchange reports why it failed,
-			// so a rollback of the Worker would not help.
 			if (failure.oauthDescription !== undefined) {
 				return (
 					`the token exchange at ${url.origin} failed with HTTP ` +
@@ -471,11 +469,11 @@ function adminCheckFailureText(
 			}
 
 			return (
-				`${url.origin} returned HTTP ${String(failure.status)}${ray}. Run ` +
-				`\`wrangler tail ${controlScriptName}\` in another terminal and ` +
-				're-run `cupboard init` to see the error, or restore a working version with ' +
-				`\`wrangler rollback --name ${controlScriptName}\` and re-run ` +
-				'`cupboard init`'
+				`${url.origin} returned HTTP ${String(failure.status)}${ray}. Read ` +
+				'the Worker logs with ' +
+				`\`wrangler tail ${controlScriptName} --format json\` in another ` +
+				'terminal and re-run `cupboard init` to reproduce the error. Fix ' +
+				'the cause, then re-run `cupboard init` with the same release and source'
 			);
 		}
 		case 'not-served': {

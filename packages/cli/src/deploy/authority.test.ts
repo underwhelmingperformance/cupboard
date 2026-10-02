@@ -24,6 +24,7 @@ import {
 import {
 	adminAccessFor,
 	AdminCheckFailedError,
+	type AdminCheckFailure,
 	AdminControlWorkerMissingError,
 	AdminDatabaseMismatchError,
 	AdminDeploymentUrlMissingError,
@@ -636,6 +637,88 @@ describe('decideAuthority', () => {
 			});
 		}
 	);
+
+	it.each<{
+		readonly failure: AdminCheckFailure;
+		readonly advice: string;
+	}>([
+		{
+			failure: { kind: 'error-status', status: 503 },
+			advice:
+				`${deploymentUrl.origin} returned HTTP 503. Read the Worker logs with ` +
+				'`wrangler tail cupboard --format json` in another terminal and ' +
+				're-run `cupboard init` to reproduce the error. Fix the cause, then ' +
+				're-run `cupboard init` with the same release and source'
+		},
+		{
+			failure: { kind: 'error-status', status: 500, ray: 'ray-1' },
+			advice:
+				`${deploymentUrl.origin} returned HTTP 500 (Cloudflare ray ray-1). ` +
+				'Read the Worker logs with `wrangler tail cupboard --format json` ' +
+				'in another terminal and re-run `cupboard init` to reproduce the ' +
+				'error. Fix the cause, then re-run `cupboard init` with the same ' +
+				'release and source'
+		},
+		{
+			failure: {
+				kind: 'error-status',
+				status: 503,
+				ray: 'ray-1',
+				oauthDescription: 'the issuer could not be reached'
+			},
+			advice:
+				`the token exchange at ${deploymentUrl.origin} failed with HTTP ` +
+				'503 (Cloudflare ray ray-1): the issuer could not be reached. ' +
+				'Fix the cause, then re-run `cupboard init`'
+		},
+		{
+			failure: { kind: 'unreachable' },
+			advice:
+				`${deploymentUrl.origin} could not be reached. Check that the ` +
+				'control Worker serves at that URL, then re-run `cupboard init`'
+		},
+		{
+			failure: { kind: 'not-served' },
+			advice:
+				`${deploymentUrl.origin} does not serve the control Worker. Check ` +
+				"the Worker's workers.dev route or custom domain in the " +
+				'Cloudflare dashboard, then re-run `cupboard init`'
+		},
+		{
+			failure: { kind: 'unsupported' },
+			advice:
+				`${deploymentUrl.origin} runs a build without the ` +
+				'`instance.get` procedure. First update the deployment with a ' +
+				'`cupboard` release that is newer than the deployed build and has ' +
+				'that procedure, then re-run `cupboard init` with this release'
+		}
+	])('reports recovery advice for $failure', ({ failure, advice }) => {
+		const cause = new Error('admin check failed');
+		const refusal = new AdminCheckFailedError(
+			deploymentUrl,
+			admin,
+			failure,
+			'cupboard',
+			{ cause }
+		);
+
+		expect({
+			message: refusal.message,
+			url: refusal.url.href,
+			admin: refusal.admin,
+			failure: refusal.failure,
+			cause: refusal.cause
+		}).toStrictEqual({
+			message:
+				'This deployment is administered by https://dash.cloudflare.com · ' +
+				'cf-user-1, and the deploy could not check the admin token against ' +
+				`it: ${advice}. Nothing was changed.`,
+			url: deploymentUrl.href,
+			admin,
+			failure,
+			cause
+		});
+	});
 
 	it('passes an error that is neither a token nor a check failure through unchanged', async () => {
 		const failure = new Error('response did not match the contract');

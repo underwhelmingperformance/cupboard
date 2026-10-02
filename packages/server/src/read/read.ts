@@ -8,8 +8,9 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, eq, inArray, type SQL } from 'drizzle-orm';
+import { and, eq, type SQL, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
+import { alias } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 
 import {
@@ -23,7 +24,9 @@ import {
 	cacheSelectorsCondition
 } from '../db/cache.ts';
 import {
-	authorisedByCacheGeneration,
+	authorisedByPathGeneration,
+	currentCacheGeneration,
+	currentCacheGenerationReference,
 	referencedCacheLifecycle
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -226,18 +229,11 @@ export async function serveNar(
 }
 
 /**
- * Builds the lookup that authorises one NAR read: one seek into `blob_ref` over
- * `(tenant, nar_hash, cache_kind, cache_name, cache_generation)`, joined to the
- * blob's verified state and to the lifecycle row of the referencing cache.
- *
- * Advancing the cache generation makes every edge from an earlier generation
- * stop authorising reads, so cache deletion does not need to retire those edges
- * synchronously to revoke read authority. Every cache reachable from `blob_ref`
- * has a lifecycle row, so the inner join drops no live edge, and it rejects an
- * edge whose cache has no lifecycle row at all.
- *
- * The index test builds this statement so that it inspects the query the read
- * path runs.
+ * Selects at most 65 readable references for one NAR. Cache selectors, access
+ * policy and cache lifecycle generation filter the candidates before the
+ * limit. Each candidate reports whether its path revocation fence permits
+ * the read. A full page without authority requires a retry while maintenance
+ * demotes revoked references.
  */
 export function narReferenceQuery(
 	database: DrizzleD1Database<typeof d1Schema>,
@@ -246,7 +242,10 @@ export function narReferenceQuery(
 	authority: NarAuthority
 ) {
 	return database
-		.select({ narHash: d1Schema.blobState.narHash })
+		.select({
+			narHash: d1Schema.blobState.narHash,
+			available: authorisedByPathGeneration().mapWith(Boolean).as('available')
+		})
 		.from(d1Schema.blobReference)
 		.innerJoin(
 			d1Schema.blobState,
@@ -258,9 +257,11 @@ export function narReferenceQuery(
 				eq(d1Schema.blobReference.tenant, tenant),
 				eq(d1Schema.blobReference.narHash, narHash),
 				referencingCaches(authority),
-				authorisedByCacheGeneration()
+				currentCacheGenerationReference(),
+				eq(d1Schema.blobReference.readable, true)
 			)
-		);
+		)
+		.limit(65);
 }
 
 // Retry the D1 reference query once. A persistent failure becomes a retryable
@@ -275,10 +276,18 @@ async function isNarReferenced(
 
 	try {
 		const referenced = await readWithOneRetry(() =>
-			narReferenceQuery(database, tenant, narHash, authority).get()
+			narReferenceQuery(database, tenant, narHash, authority).all()
 		);
 
-		return referenced !== undefined;
+		if (referenced.some((candidate) => candidate.available)) {
+			return true;
+		}
+		if (referenced.length > 64) {
+			throw new Error(
+				'Path read authority demotion is pending. Retry the read.'
+			);
+		}
+		return false;
 	} catch (error) {
 		throw new SharedFactsUnavailableError(error);
 	}
@@ -307,23 +316,10 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
 }
 
 /**
- * Builds the reference-edge lookup that authorises narinfo reads.
- *
- * A single narinfo GET or HEAD supplies one store-path hash and seeks
- * `blob_ref` through the partial unique index for the cache's kind
- * (`blob_ref_default_identity_idx` or `blob_ref_named_identity_idx`), joined
- * to the cache lifecycle row. Availability binds the hashes of each chunk
- * as one list parameter, so its lookup is one statement.
- *
- * A recommit publishes its object after its edge, so the object at a path's key
- * can still record an earlier commit of the same cache. Object presence
- * therefore does not establish which commit the cache holds. The query requires
- * an edge authorised by the current cache generation, and returns that edge's
- * narinfo generation and NAR hash so the read can reject an object from another
- * commit.
- *
- * The index test builds this statement so that it inspects the query the read
- * path runs.
+ * Finds the newest readable reference above each requested path's revocation
+ * fence in the current cache lifecycle generation. The query returns the
+ * narinfo generation and NAR hash so the read can reject an object from
+ * another publication.
  */
 export function narInfoReferenceQuery(
 	database: DrizzleD1Database<typeof d1Schema>,
@@ -331,25 +327,60 @@ export function narInfoReferenceQuery(
 	cache: CacheScope,
 	storePathHashes: JsonValueList<StorePathHash>
 ) {
-	return database
-		.select({
-			storePathHash: d1Schema.blobReference.storePathHash,
-			generation: d1Schema.blobReference.generation,
-			narHash: d1Schema.blobReference.narHash,
-			cacheGeneration: d1Schema.blobReference.cacheGeneration
-		})
-		.from(d1Schema.blobReference)
-		.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+	const edge = d1Schema.blobReference;
+	const candidate = alias(edge, 'requested_path_reference');
+	const fence = d1Schema.pathReadRevocation;
+	const path = sql`requested_paths.value`;
+	const lifecycleGeneration = currentCacheGeneration(tenant, cache);
+	const cutoff = database
+		.select({ generation: fence.generation })
+		.from(fence)
 		.where(
 			and(
-				eq(d1Schema.blobReference.tenant, tenant),
-				cacheIdentityCondition(
-					d1Schema.blobReference.cacheKind,
-					d1Schema.blobReference.cacheName,
-					cache
-				),
-				inArray(d1Schema.blobReference.storePathHash, storePathHashes),
-				authorisedByCacheGeneration()
+				eq(fence.tenant, tenant),
+				cacheIdentityCondition(fence.cacheKind, fence.cacheName, cache),
+				eq(fence.storePathHash, path),
+				eq(fence.cacheGeneration, lifecycleGeneration)
+			)
+		)
+		.limit(1);
+	const latest = database
+		.select({ generation: candidate.generation })
+		.from(candidate)
+		.where(
+			and(
+				eq(candidate.tenant, tenant),
+				cacheIdentityCondition(candidate.cacheKind, candidate.cacheName, cache),
+				eq(candidate.storePathHash, path),
+				eq(candidate.cacheGeneration, lifecycleGeneration),
+				eq(candidate.readable, true),
+				sql`${candidate.generation} > coalesce((${cutoff}), -1)`
+			)
+		)
+		.orderBy(sql`${candidate.generation} desc`)
+		.limit(1);
+
+	// Keep requested paths first: an INNER JOIN can choose blob_ref as the outer scan.
+	return database
+		.select({
+			storePathHash: sql<StorePathHash>`${edge.storePathHash}`.as(
+				'store_path_hash'
+			),
+			generation: sql<
+				NarInfoReferenceVersion['generation']
+			>`${edge.generation}`.as('generation'),
+			narHash: sql<NixSha256HashString>`${edge.narHash}`.as('nar_hash'),
+			cacheGeneration: sql<CacheGeneration>`${edge.cacheGeneration}`.as(
+				'cache_generation'
+			)
+		})
+		.from(sql`(${storePathHashes.getSQL()}) requested_paths cross join ${edge}`)
+		.where(
+			and(
+				eq(edge.tenant, tenant),
+				cacheIdentityCondition(edge.cacheKind, edge.cacheName, cache),
+				eq(edge.storePathHash, path),
+				eq(edge.generation, sql`(${latest})`)
 			)
 		);
 }
@@ -410,28 +441,8 @@ export async function authorisedNarInfoVersions(
 	}
 }
 
-// The request URL isolates cached narinfos by tenant and cache. The response uses
-// the same tenant, cache, and path identity in its cache tag so deletion and
-// re-signing purge only this narinfo.
-//
-// The object key carries the cache's generation, so an object published by an
-// earlier incarnation of the cache name is not at the key this read addresses.
-// Every site that retires a reference edge removes the object first, so an
-// object at this key cannot have outlived its edge. Deleted caches and inactive
-// tenants are refused at admission. A public read therefore
-// serves what R2 holds and spends no D1 statement beyond the admission read.
-//
-// Neither kind of read heads the NAR at the URL that the narinfo records. The
-// availability probe does. It reports the path as missing when that object is
-// gone, so the publisher pushes the path again.
-//
-// An authenticated read keeps the edge lookup. That read answers `no-store`,
-// so it has no staleness allowance to trade for the saved statement, and the
-// lookup applies a test the key alone cannot: the object must record the
-// narinfo generation and NAR hash of the commit the edge names.
-//
-// A private read must pass true for `isAuthenticatedRead`; false bypasses the
-// reference lookup.
+// The reference generation fences every narinfo read, including public objects
+// retained during destination inheritance. Object metadata must match the edge.
 export async function serveNarInfo(
 	request: Request,
 	env: ReadEnv,
@@ -449,10 +460,6 @@ export async function serveNarInfo(
 	const headersFor = (object: R2Object): Headers =>
 		narInfoHeaders(object, tenant, cache.scope, storePathHash);
 
-	if (!isAuthenticatedRead) {
-		return serveR2(request, env, key, headersFor, true);
-	}
-
 	const versions = await authorisedNarInfoVersions(
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 		tenant,
@@ -462,11 +469,18 @@ export async function serveNarInfo(
 	const current = versions.get(storePathHash);
 
 	if (current === undefined) {
-		return uncachedNotFoundResponse();
+		return isAuthenticatedRead
+			? uncachedNotFoundResponse()
+			: notFoundResponse();
 	}
 
-	return serveR2(request, env, key, headersFor, false, (object) =>
-		isNarInfoObjectOfCommit(object, current)
+	return serveR2(
+		request,
+		env,
+		key,
+		headersFor,
+		!isAuthenticatedRead,
+		(object) => isNarInfoObjectOfCommit(object, current)
 	);
 }
 

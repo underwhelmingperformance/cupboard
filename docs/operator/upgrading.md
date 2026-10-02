@@ -79,11 +79,12 @@ To check the token, `init` sends an `instance.get` request to the deployment. If
 the deployment can't be reached, returns an error status, doesn't serve the
 control Worker at its URL, or runs a build without `instance.get`, `init` stops
 before it changes anything and prints the reason. For an error status from the
-Worker, fix the control Worker or roll it back, for example with
-`wrangler rollback`, and deploy again. When the token exchange reports why it
-failed, for example because the admin's issuer can't be reached, `init` prints
-that reason instead. For a build without `instance.get`, first update the
-deployment with a release that has it.
+Worker, read the Worker logs with `wrangler tail cupboard --format json` in
+another terminal and re-run `cupboard init` to reproduce the error. Fix the
+cause, then re-run `cupboard init` with the same release and source. When the
+token exchange reports why it failed, for example because the admin's issuer
+can't be reached, `init` prints that reason instead. For a build without
+`instance.get`, first update the deployment with a release that has it.
 
 `init` uses the same token to initialise the deployment, rebuild the tenant
 list, check the Worker's R2 key and wake the tenants during a migration. It
@@ -277,10 +278,19 @@ tenant Worker is uploaded, tenants start converting their own storage to a form
 that older Workers can't read, even before D1 records the transition complete.
 
 If a deploy fails partway through, fix the cause and deploy the same release
-again. Don't go back to an older one. Once a transition's contract migrations
-have run, older Workers can't use the database. To really go back to an earlier
-release, you'd need the storage from before the upgrade as well as the older
-Workers. D1 has
+again from the same source. Don't go back to an older one. Both Workers include
+`PathReadAuthorityRollbackGuard`, an unbound Durable Object class. Cloudflare
+[blocks version rollback] across this class lifecycle change, so rollback cannot
+restore the preceding Workers. The path read-authority transition also prevents
+preceding Workers from admitting cache reads after contraction. Recover by
+completing the deployment with the same release and source.
+
+[blocks version rollback]:
+  https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/
+
+Once a transition's contract migrations have run, older Workers can't use the
+database. To really go back to an earlier release, you'd need the storage from
+before the upgrade as well as the older Workers. D1 has
 [Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/), but
 cupboard has no procedure to restore every tenant's Durable Object storage, and
 rolling back the Workers doesn't restore it.

@@ -625,7 +625,8 @@ export class VerificationService {
 			this.cache(pending.cacheId),
 			metadata.storePathHash,
 			generation,
-			metadata.narHash
+			metadata.narHash,
+			pending.id
 		);
 	}
 
