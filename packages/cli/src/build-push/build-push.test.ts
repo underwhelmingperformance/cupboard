@@ -1747,15 +1747,27 @@ describe('runBuildPush', () => {
 		}
 	);
 
-	it('refuses a user-supplied command with the condition that ruled streaming out', async () => {
-		const failure = new UntrustedDaemonError('not-trusted');
-		const run = await runFlow({ preflightFailure: failure });
+	it.each(['not-trusted', 'unknown'] as const)(
+		'refuses a user-supplied command without announcing publication when trust is %s',
+		async (trust) => {
+			const failure = new UntrustedDaemonError(trust);
+			const run = await runFlow({ preflightFailure: failure });
 
-		expect({ error: run.error, phases: run.phases }).toStrictEqual({
-			error: failure,
-			phases: []
-		});
-	});
+			expect({
+				error: run.error,
+				info: run.info,
+				phases: run.phases,
+				attemptIdsIssued: run.attemptIdsIssued,
+				commands: run.commands
+			}).toStrictEqual({
+				error: failure,
+				info: [],
+				phases: [],
+				attemptIdsIssued: 0,
+				commands: []
+			});
+		}
+	);
 
 	it('fails the run on a refusal no mode works around', async () => {
 		const failure = new PostBuildHookConflictError('/etc/nix/hook.sh');
@@ -2204,7 +2216,11 @@ describe('runBuildPush', () => {
 		expect(
 			run.error instanceof Error ? run.error.message : undefined
 		).toContain('cannot observe all build intermediates');
-		expect(run.attemptIdsIssued).toBe(0);
+		expect({
+			info: run.info,
+			attemptIdsIssued: run.attemptIdsIssued,
+			commands: run.commands
+		}).toStrictEqual({ info: [], attemptIdsIssued: 0, commands: [] });
 	});
 
 	it.each([
