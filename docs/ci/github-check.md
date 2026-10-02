@@ -89,12 +89,15 @@ The check reports these jobs as unverified, for manual review:
   cache.
 
 For `publish: none` and the flake workflow's older `push: false`, the check
-models the selected cache read without publication or cache-removal grants. A
+models the selected cache read without publication or cache lifecycle grants. A
 pull-request run with the flake preset reads from the tenant's default cache. A
 public read needs no trust grant. A private read needs the exact cache
 content-read grant unless the workflow supplies a static read pair. When
-publication is enabled, the flake preset can remove an unmerged pull request's
-cache on the `closed` event. The check does not cover that removal.
+publication is enabled, the check models cache creation, closure and reopening
+alongside publication for the flake preset's pull-request runs, and checks the
+corresponding grants. See [Closing and reopening caches][cache-closure].
+
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 The check can see that a workflow declares an explicit static username and
 password pair, but GitHub does not reveal the secret values. It reports the pair

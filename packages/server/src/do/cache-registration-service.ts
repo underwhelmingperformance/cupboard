@@ -27,6 +27,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { CacheAlreadyExistsError, CacheNotFoundError } from '../errors.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
+import { CacheClosureService } from './cache-closure-service.ts';
 import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
 import { type ServerContext } from './context.ts';
 
@@ -174,6 +175,7 @@ export class CacheRegistrationService {
 		const existing = this.context.cacheRepository.resolve(scope);
 
 		if (existing !== undefined) {
+			new CacheClosureService(this.context).assertWritable(existing);
 			return existing;
 		}
 
@@ -199,7 +201,9 @@ export class CacheRegistrationService {
 		} catch (error) {
 			// Another write created the cache while this one waited at the gate.
 			if (error instanceof CacheAlreadyExistsError) {
-				return this.context.cacheRepository.require(scope);
+				const current = this.context.cacheRepository.require(scope);
+				new CacheClosureService(this.context).assertWritable(current);
+				return current;
 			}
 
 			throw error;

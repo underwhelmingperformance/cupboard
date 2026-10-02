@@ -13,6 +13,7 @@ import { z } from 'zod';
 
 import {
 	CacheAlreadyExistsError,
+	CacheClosedError,
 	CacheNotEmptyError,
 	CacheRetentionRuleLimitExceededError,
 	CommitSessionLimitError,
@@ -27,6 +28,24 @@ import {
 import { bridgedError } from './error-bridge.ts';
 
 describe('bridgedError', () => {
+	it('maps a closed cache to its declared conflict', () => {
+		const error = new CacheClosedError({
+			kind: 'named',
+			name: cacheNameSchema.parse('pr-1')
+		});
+		const bridged = bridgedError(rootLogger(), error);
+		if (!(bridged instanceof ORPCError)) {
+			throw new TypeError('Expected an oRPC error');
+		}
+		expect(bridged.toJSON()).toStrictEqual({
+			defined: true,
+			code: 'CACHE_CLOSED',
+			status: StatusCodes.CONFLICT,
+			message: error.message,
+			data: { cache: { kind: 'named', name: 'pr-1' } }
+		});
+	});
+
 	it('maps upload request limits to the declared nonretryable error', () => {
 		const error = new UploadRequestLimitExceededError(100);
 		const headers = new Headers();

@@ -54,6 +54,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 import { type GithubCheckOptions, runGithubCheck } from './github/check.ts';
 import {
 	githubBranchClaims,
+	githubMergedPullRequestClaims,
 	githubPullRequestClaims
 } from './github/claims.ts';
 import {
@@ -72,7 +73,11 @@ import {
 	runDiscoveredGithubRepair
 } from './github/repair.ts';
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
-import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from './oidc-trust.ts';
 import {
 	lookupRepository,
 	parseRepository,
@@ -335,7 +340,7 @@ function isRuleMatchingBody(
 
 interface DesiredTrustRule {
 	readonly step: string;
-	readonly kind: 'pull-request' | 'branch';
+	readonly kind: 'pull-request' | 'branch' | 'merged-close';
 	readonly trigger: string;
 	readonly body: OidcTrustAddBodyInput;
 	readonly tokenClaims: Readonly<Record<string, string>>;
@@ -879,6 +884,21 @@ export async function runGithubSetup(
 			body: branchBody,
 			tokenClaims: githubBranchClaims(url, identity, {
 				branch: options.branch,
+				...(workflowReference.pin.kind !== 'tag-pattern' && {
+					workflowReference: workflowReference.reference
+				})
+			})
+		},
+		{
+			step: 'merged pull-request closure trust rule',
+			kind: 'merged-close',
+			trigger: 'merged pull requests',
+			body: githubPrCloseAddBody(url, identity, {
+				repo: options.repo,
+				jobWorkflowRef: options.workflowRef
+			}),
+			tokenClaims: githubMergedPullRequestClaims(url, identity, {
+				baseBranch: identity.defaultBranch,
 				...(workflowReference.pin.kind !== 'tag-pattern' && {
 					workflowReference: workflowReference.reference
 				})

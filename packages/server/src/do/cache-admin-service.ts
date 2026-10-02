@@ -9,6 +9,7 @@ import {
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import {
+	type CacheCloseResponse,
 	type CacheCreationDefaults,
 	type CacheListEntry,
 	type CacheListInput,
@@ -59,6 +60,7 @@ import {
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
 import { deleteObjects } from './bulk.ts';
+import { CacheClosureService } from './cache-closure-service.ts';
 import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
 import {
 	cacheLifecycleFilter,
@@ -223,6 +225,7 @@ export class CacheAdminService {
 					AND NOT EXISTS (SELECT 1 FROM retention_root WHERE cache_id = identity.id)
 					AND NOT EXISTS (SELECT 1 FROM retention_root_target WHERE cache_id = identity.id)
 					AND NOT EXISTS (SELECT 1 FROM retention_grace WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM cache_close_event WHERE cache_id = identity.id)
 					AND NOT EXISTS (SELECT 1 FROM pending_upload WHERE cache_id = identity.id)
 					AND NOT EXISTS (SELECT 1 FROM pending_attestation WHERE cache_id = identity.id)
 					AND NOT EXISTS (SELECT 1 FROM verification_cursor WHERE cache_id = identity.id)
@@ -230,7 +233,8 @@ export class CacheAdminService {
 					AND NOT EXISTS (SELECT 1 FROM garbage_collection_scan WHERE cache_id = identity.id)
 					AND NOT EXISTS (SELECT 1 FROM garbage_collection_frontier WHERE cache_id = identity.id)
 					AND NOT EXISTS (SELECT 1 FROM garbage_collection_mark WHERE cache_id = identity.id)
-					AND NOT EXISTS (SELECT 1 FROM garbage_collection_tenant_run WHERE cache_id = identity.id)
+					AND (managed.retirement_started_at IS NOT NULL
+						OR NOT EXISTS (SELECT 1 FROM garbage_collection_tenant_run WHERE cache_id = identity.id))
 				LIMIT 1
 			`
 			)
@@ -418,6 +422,9 @@ export class CacheAdminService {
 			tx.delete(schema.managedCacheRetirements)
 				.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
 				.run();
+			tx.delete(schema.garbageCollectionTenantRuns)
+				.where(eq(schema.garbageCollectionTenantRuns.cacheId, cache.id))
+				.run();
 		});
 
 		await this.context.ctx.storage.put(this.teardownKey(cache), origin ?? {});
@@ -526,13 +533,15 @@ export class CacheAdminService {
 					this.context.db
 						.select({
 							cacheId: schema.managedCacheRetirements.cacheId,
+							retirementStartedAt:
+								schema.managedCacheRetirements.retirementStartedAt,
 							eligibleAfter: schema.managedCacheRetirements.eligibleAfter
 						})
 						.from(schema.managedCacheRetirements)
 						.where(inArray(schema.managedCacheRetirements.cacheId, listedIds))
 						.all()
 				)
-				.map((row) => [row.cacheId, row.eligibleAfter])
+				.map((row) => [row.cacheId, row])
 		);
 		const now = isoTimestamp(new Date());
 		const earliestDeadlines = new Map<CacheId, IsoTimestamp>();
@@ -562,6 +571,8 @@ export class CacheAdminService {
 		}
 		const caches = registered.map((row): CacheListEntry => {
 			const earliestGraceDeadline = earliestDeadlines.get(row.id);
+			const retirementStartedAt =
+				managed.get(row.id)?.retirementStartedAt ?? undefined;
 
 			return {
 				scope: cacheScopeFromRow({ kind: row.kind, name: row.name }),
@@ -585,7 +596,8 @@ export class CacheAdminService {
 				graceManaged: row.graceManaged,
 				...(managed.has(row.id) && {
 					retireWhenEmpty: true,
-					retirementEligibleAfter: managed.get(row.id)
+					retirementEligibleAfter: managed.get(row.id)?.eligibleAfter,
+					...(retirementStartedAt !== undefined && { retirementStartedAt })
 				}),
 				...(earliestGraceDeadline !== undefined && {
 					earliestGraceDeadline
@@ -661,6 +673,10 @@ export class CacheAdminService {
 		const cache = this.context.cacheRepository.require(scope);
 
 		if (update.kind !== 'priority' && update.kind !== 'access') {
+			new CacheClosureService(this.context).assertWritable(cache);
+		}
+
+		if (update.kind !== 'priority' && update.kind !== 'access') {
 			assertRetentionMigrationSettled(this.context.db);
 		}
 
@@ -677,6 +693,7 @@ export class CacheAdminService {
 		if (update.kind === 'set-default-root-ttl') {
 			return this.context.criticalSection(() => {
 				const current = this.context.cacheRepository.require(scope);
+				new CacheClosureService(this.context).assertWritable(current);
 				this.context.db.transaction((tx) => {
 					tx.update(schema.cacheIdentities)
 						.set({
@@ -698,24 +715,25 @@ export class CacheAdminService {
 		}
 
 		if (update.kind === 'set-root-ttl-override') {
-			await this.context.criticalSection(() =>
-				this.retentionRules.setRule(
-					this.context.cacheRepository.require(scope),
+			await this.context.criticalSection(() => {
+				const current = this.context.cacheRepository.require(scope);
+				new CacheClosureService(this.context).assertWritable(current);
+				return this.retentionRules.setRule(
+					current,
 					update.rootPrefix,
 					update.retention
-				)
-			);
+				);
+			});
 
 			return this.cacheSummary(cache);
 		}
 
 		if (update.kind === 'clear-root-ttl-override') {
-			await this.context.criticalSection(() =>
-				this.retentionRules.removeRule(
-					this.context.cacheRepository.require(scope),
-					update.rootPrefix
-				)
-			);
+			await this.context.criticalSection(() => {
+				const current = this.context.cacheRepository.require(scope);
+				new CacheClosureService(this.context).assertWritable(current);
+				return this.retentionRules.removeRule(current, update.rootPrefix);
+			});
 
 			return this.cacheSummary(cache);
 		}
@@ -783,12 +801,110 @@ export class CacheAdminService {
 		});
 	}
 
+	async closeCache(
+		scope: Extract<CacheScope, { kind: 'named' }>
+	): Promise<CacheCloseResponse> {
+		return this.context.criticalSection<CacheCloseResponse>(() => {
+			const cache = this.context.cacheRepository.resolve(scope);
+			if (cache === undefined) {
+				return Promise.resolve({ scope, closed: false });
+			}
+			assertRetentionMigrationSettled(this.context.db);
+			const current = this.context.db
+				.select()
+				.from(schema.managedCacheRetirements)
+				.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+				.get();
+			if (
+				current?.retirementStartedAt !== null &&
+				current?.retirementStartedAt !== undefined
+			) {
+				return Promise.resolve({
+					scope,
+					closed: true,
+					retirementStartedAt: current.retirementStartedAt
+				});
+			}
+			const closedAt = isoTimestamp(new Date());
+			const graceSeconds =
+				this.context.db
+					.select({ graceSeconds: schema.cacheIdentities.graceSeconds })
+					.from(schema.cacheIdentities)
+					.where(eq(schema.cacheIdentities.id, cache.id))
+					.get()?.graceSeconds ?? 0;
+			const graceUntil = isoTimestamp(
+				new Date(Date.parse(closedAt) + graceSeconds * 1000)
+			);
+			this.context.db.transaction((tx) => {
+				const updated = tx
+					.update(schema.cacheIdentities)
+					.set({
+						retentionEpoch: sql`${schema.cacheIdentities.retentionEpoch} + 1`,
+						graceManaged: true
+					})
+					.where(eq(schema.cacheIdentities.id, cache.id))
+					.returning({ epoch: schema.cacheIdentities.retentionEpoch })
+					.get();
+				tx.insert(schema.cacheCloseEvents)
+					.values({
+						cacheId: cache.id,
+						epoch: updated.epoch,
+						closedAt,
+						graceUntil
+					})
+					.run();
+				tx.insert(schema.managedCacheRetirements)
+					.values({
+						cacheId: cache.id,
+						retirementStartedAt: closedAt,
+						eligibleAfter: closedAt,
+						nextCheckAt: closedAt,
+						incarnation: crypto.randomUUID()
+					})
+					.onConflictDoUpdate({
+						target: schema.managedCacheRetirements.cacheId,
+						set: {
+							retirementStartedAt: closedAt,
+							eligibleAfter: closedAt,
+							nextCheckAt: closedAt,
+							revision: sql`${schema.managedCacheRetirements.revision} + 1`
+						}
+					})
+					.run();
+			});
+			return Promise.resolve({
+				scope,
+				closed: true,
+				retirementStartedAt: closedAt
+			});
+		});
+	}
+
+	async reopenCache(
+		scope: Extract<CacheScope, { kind: 'named' }>
+	): Promise<CacheSummary> {
+		return this.context.criticalSection(() => {
+			const cache = this.context.cacheRepository.require(scope);
+			this.context.db
+				.delete(schema.managedCacheRetirements)
+				.where(
+					and(
+						eq(schema.managedCacheRetirements.cacheId, cache.id),
+						sql`${schema.managedCacheRetirements.retirementStartedAt} IS NOT NULL`
+					)
+				)
+				.run();
+			return Promise.resolve(this.cacheSummary(cache));
+		});
+	}
+
 	setRetireWhenEmpty(
 		scope: Extract<CacheScope, { kind: 'named' }>,
 		shouldRetireWhenEmpty: boolean
 	): Promise<CacheSummary> {
 		return this.context.criticalSection(() => {
 			const cache = this.context.cacheRepository.require(scope);
+			new CacheClosureService(this.context).assertWritable(cache);
 
 			if (shouldRetireWhenEmpty) {
 				const configuration = this.context.db
@@ -1037,7 +1153,10 @@ export class CacheAdminService {
 		];
 		const earliest = this.earliestLiveGraceDeadline(cache);
 		const retirement = this.context.db
-			.select({ eligibleAfter: schema.managedCacheRetirements.eligibleAfter })
+			.select({
+				eligibleAfter: schema.managedCacheRetirements.eligibleAfter,
+				retirementStartedAt: schema.managedCacheRetirements.retirementStartedAt
+			})
 			.from(schema.managedCacheRetirements)
 			.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
 			.get();
@@ -1059,7 +1178,10 @@ export class CacheAdminService {
 			graceManaged: row.graceManaged,
 			...(retirement !== undefined && {
 				retireWhenEmpty: true,
-				retirementEligibleAfter: retirement.eligibleAfter
+				retirementEligibleAfter: retirement.eligibleAfter,
+				...(retirement.retirementStartedAt !== null && {
+					retirementStartedAt: retirement.retirementStartedAt
+				})
 			}),
 			...(earliest !== undefined && { earliestGraceDeadline: earliest })
 		};
@@ -1176,7 +1298,11 @@ export class CacheAdminService {
 			// leaves it empty only once the sweep has also found no revoked edge to
 			// queue. A concurrent repeated deletion can safely enqueue the same
 			// generation again.
-			if (!this.hasQueuedDeletions(cache)) {
+			const hasMoreHistory = new CacheClosureService(this.context).cleanHistory(
+				cache,
+				limit
+			);
+			if (!hasMoreHistory && !this.hasQueuedDeletions(cache)) {
 				await this.context.ctx.storage.delete(this.teardownKey(cache));
 			}
 		});

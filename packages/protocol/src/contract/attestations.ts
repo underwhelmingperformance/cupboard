@@ -9,13 +9,16 @@ import {
 } from '../attestations.ts';
 import { uploadIdSchema } from '../upload.ts';
 
-import { cacheScopedProcedure } from './cache-scoped.ts';
+import {
+	cacheScopedProcedure,
+	writableCacheScopedProcedure
+} from './cache-scoped.ts';
 
 const retentionMigrationPendingError = {
 	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
 };
 
-const bundleNegotiation = cacheScopedProcedure(
+const bundleNegotiation = writableCacheScopedProcedure(
 	{
 		method: 'POST',
 		suffix: '/attestations/bundles',
@@ -26,7 +29,7 @@ const bundleNegotiation = cacheScopedProcedure(
 	attestationBundleNegotiateResponseSchema
 );
 
-const pathNegotiation = cacheScopedProcedure(
+const pathNegotiation = writableCacheScopedProcedure(
 	{
 		method: 'POST',
 		suffix: '/attestations',

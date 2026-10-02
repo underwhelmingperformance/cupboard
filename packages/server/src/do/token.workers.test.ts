@@ -1982,6 +1982,147 @@ describe('refresh grant', () => {
 		}
 	);
 
+	it.each([
+		{ operation: 'cache:close', explicitRead: false, permitted: true },
+		{ operation: 'cache:read', explicitRead: false, permitted: false },
+		{ operation: 'cache:content-read', explicitRead: false, permitted: false },
+		{ operation: 'cache:close', explicitRead: true, permitted: true },
+		{ operation: 'cache:read', explicitRead: true, permitted: true },
+		{ operation: 'cache:content-read', explicitRead: true, permitted: false }
+	])(
+		'checks close-only $operation during issuance, attenuation and refresh (explicit metadata read: $explicitRead)',
+		async ({ operation, explicitRead, permitted }) => {
+			const cache = namedCache('gh-1234-pr-7');
+			const actions = explicitRead
+				? ['cache:close', 'cache:read']
+				: ['cache:close'];
+			const ceiling = [{ type: 'cupboard_cache', cache, actions }];
+			const requested = [
+				{ type: 'cupboard_cache', cache, actions: [operation] }
+			];
+			const subject = await installTrustedIdp('admin');
+			const original = await exchange(subject, ceiling);
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.delete(oidcTrust)
+					.where(eq(oidcTrust.id, trustRuleIdSchema.parse('admin-rule')))
+					.run();
+			});
+			await installAdditionalTrustRule(
+				'close-pattern',
+				storedPermittedGrantsSchema.parse([
+					{
+						type: 'cupboard_cache',
+						actions,
+						resources: {
+							cache: {
+								kind: 'named',
+								pattern: '^gh-1234-pr-[0-9]+$',
+								validate: 'cacheName'
+							}
+						}
+					}
+				])
+			);
+			const issuance = await postToken({
+				grant_type: tokenExchangeGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				authorization_details: JSON.stringify(requested)
+			});
+			const attenuation = await attenuate(original.access_token, requested);
+			const refreshed = await postToken({
+				grant_type: refreshTokenGrantType,
+				refresh_token: original.refresh_token ?? '',
+				authorization_details: JSON.stringify(requested)
+			});
+			const outcomes = [];
+			for (const response of [issuance, attenuation, refreshed]) {
+				outcomes.push({
+					status: response.status,
+					grants: tokenResponseSchema.safeParse(await response.json()).data
+						?.authorization_details
+				});
+			}
+			const expected = {
+				status: permitted ? 200 : 400,
+				grants: permitted ? requested : undefined
+			};
+			expect(outcomes).toStrictEqual([expected, expected, expected]);
+		}
+	);
+
+	it('rechecks named-cache patterns when a refresh session rotates', async () => {
+		const requested = [
+			{
+				type: 'cupboard_cache',
+				cache: namedCache('gh-1234-pr-7'),
+				actions: ['cache:close']
+			}
+		];
+		const original = await exchange(
+			await installTrustedIdp('admin'),
+			requested
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.delete(oidcTrust)
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('admin-rule')))
+				.run();
+		});
+		await installAdditionalTrustRule('pattern-close', [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:close'],
+				resources: {
+					cache: {
+						kind: 'named',
+						pattern: '^gh-1234-pr-[0-9]+$',
+						validate: 'cacheName'
+					}
+				}
+			}
+		]);
+		const renewed = await refresh(original.refresh_token ?? '');
+		const body = tokenResponseSchema.parse(await renewed.json());
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(oidcTrust)
+				.set({
+					permittedGrantsJson: JSON.stringify([
+						{
+							type: 'cupboard_cache',
+							actions: ['cache:close'],
+							resources: {
+								cache: {
+									kind: 'named',
+									pattern: '^gh-9999-pr-[0-9]+$',
+									validate: 'cacheName'
+								}
+							}
+						}
+					])
+				})
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('pattern-close')))
+				.run();
+		});
+		expect({
+			originalStatus: original.status,
+			renewedStatus: renewed.status,
+			grants: body.authorization_details,
+			revoked: await staleRefreshOutcome(body.refresh_token ?? '')
+		}).toStrictEqual({
+			originalStatus: 200,
+			renewedStatus: 200,
+			grants: requested,
+			revoked: {
+				status: 400,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			}
+		});
+	});
+
 	it('redeems and rotates an issued credential near the request size limit', async () => {
 		const exchanged = await exchange(await installTrustedIdp('admin'));
 		const large = await runInDurableObject(

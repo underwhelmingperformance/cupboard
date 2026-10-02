@@ -66,7 +66,8 @@ import {
 	modelPublishingJob,
 	type PublicationCase,
 	type PublishingJobFinding,
-	type ReuseViewRequirement
+	type ReuseViewRequirement,
+	withMergedCloseCases
 } from './publication.ts';
 import { publicationReadAuthority } from './read-authority.ts';
 import {
@@ -450,7 +451,11 @@ function trustFindings(
 		return [];
 	}
 
-	if (!isPreset && publication.trigger === 'pull_request') {
+	if (
+		!isPreset &&
+		publication.trigger === 'pull_request' &&
+		publication.lifecycle === undefined
+	) {
 		return [new SharedPullRequestCacheFinding()];
 	}
 
@@ -462,7 +467,10 @@ function trustFindings(
 		readResources
 	);
 
-	if (publication.requests.length === 0) {
+	if (
+		publication.requests.length === 0 ||
+		publication.lifecycle !== undefined
+	) {
 		return [trust];
 	}
 
@@ -622,7 +630,7 @@ async function inspectJob(
 	const model = modelPublishingJob(job, identity, tenant, branch);
 	const findings = [...model.findings];
 
-	for (const publication of model.cases) {
+	for (const publication of withMergedCloseCases(model.cases, identity)) {
 		const checked = await inspectPublication(
 			job,
 			publication,
@@ -635,7 +643,7 @@ async function inspectJob(
 
 		findings.push(
 			...checked.map((finding) => ({
-				trigger: publication.trigger,
+				trigger: publication.lifecycle ?? publication.trigger,
 				finding
 			}))
 		);

@@ -54,7 +54,9 @@ const allowExpansions = {
 	root: ['root:set', 'root:list'],
 	attach: ['root:attach'],
 	create: ['cache:create'],
-	remove: ['cache:delete']
+	remove: ['cache:delete'],
+	close: ['cache:close'],
+	reopen: ['cache:reopen']
 } as const;
 
 export type AllowShorthand = keyof typeof allowExpansions;

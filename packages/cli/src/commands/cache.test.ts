@@ -34,6 +34,7 @@ import {
 	runCacheClearRootTtl,
 	runCacheCreate,
 	runCacheInspect,
+	runCacheLifecycle,
 	runCacheList,
 	runCacheRemove,
 	runCacheSetAccess,
@@ -112,6 +113,20 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 					})
 				)
 		},
+		close: ({ cacheName }) =>
+			Promise.resolve({
+				scope: { kind: 'named', name: cacheName },
+				closed: true
+			}),
+		reopen: ({ cacheName }) =>
+			Promise.resolve(
+				cacheSummary({
+					scope: { kind: 'named', name: cacheName },
+					access: 'public',
+					priority: 40,
+					storePaths: 0
+				})
+			),
 		retirement: ({ cacheName, retireWhenEmpty }) =>
 			Promise.resolve(
 				cacheSummary({
@@ -934,3 +949,49 @@ describe('runCacheInspect', () => {
 		});
 	});
 });
+
+it.each([
+	{ action: 'close', closed: true },
+	{ action: 'close', closed: false },
+	{ action: 'reopen', closed: false }
+] as const)(
+	'reports cache $action with closed:$closed',
+	async ({ action, closed }) => {
+		const results: ResultRow[][] = [];
+		const data: unknown[] = [];
+		const capture = reporter(results);
+		const calls: unknown[] = [];
+		const summary = cacheSummary({
+			scope: { kind: 'named', name: cacheName('pr-42') },
+			access: 'public',
+			priority: 40,
+			storePaths: 0
+		});
+		const operation = (input: { cacheName: CacheName }) => {
+			calls.push(input);
+			return Promise.resolve(summary);
+		};
+		await runCacheLifecycle(
+			cacheName('pr-42'),
+			action,
+			{
+				...capture,
+				result(payload) {
+					data.push(payload.data);
+					capture.result(payload);
+				}
+			},
+			{
+				close: (input) => {
+					calls.push(input);
+					return Promise.resolve({ scope: summary.scope, closed });
+				},
+				reopen: operation
+			}
+		);
+		expect({ calls, data }).toStrictEqual({
+			calls: [{ cacheName: 'pr-42' }],
+			data: [action === 'close' ? { scope: summary.scope, closed } : summary]
+		});
+	}
+);

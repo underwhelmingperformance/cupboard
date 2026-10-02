@@ -28,7 +28,11 @@ import {
 	WorkflowReferenceMutableError,
 	WorkflowReferenceNotFoundError
 } from '../../errors.ts';
-import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from '../oidc-trust.ts';
 import {
 	buildAddBody,
 	buildCacheContentReadGrant,
@@ -322,7 +326,27 @@ jobs:
       preset: pull-request-and-branch
 ${scenario.input}`;
 	const { client, dependencies } = fixture({
-		rules: [rule],
+		rules: [
+			rule,
+			oidcTrustSummarySchema.parse({
+				...githubPrCloseAddBody(
+					tenant,
+					{
+						repositoryId: 1234,
+						repositoryOwnerId: 5678,
+						fullName: repository,
+						defaultBranch: 'main'
+					},
+					{
+						repo: repository,
+						jobWorkflowRef:
+							'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+					}
+				),
+				id: 'pr-close',
+				disabled: false
+			})
+		],
 		views: [view],
 		caches: [cache],
 		dependencies: {
@@ -1853,6 +1877,14 @@ it("reports the guide's quickstart workflow as ready after github setup", async 
 		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
 	const rules = [
 		{
+			...githubPrCloseAddBody(quickstartTenant, identity, {
+				repo: identity.fullName,
+				jobWorkflowRef: workflowPattern
+			}),
+			id: 'pr-close',
+			disabled: false
+		},
+		{
 			...githubPrAddBody(quickstartTenant, identity, {
 				repo: identity.fullName,
 				jobWorkflowRef: workflowPattern
@@ -2698,5 +2730,69 @@ it.each([false, true])(
 				]
 			]
 		});
+	}
+);
+
+it.each([true, false])(
+	'checks the simple workflow merged-close rule independently (configured: %s)',
+	async (configured) => {
+		const workflowReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+		const closeRule = oidcTrustSummarySchema.parse({
+			...githubPrCloseAddBody(
+				tenant,
+				{
+					repositoryId: 1234,
+					repositoryOwnerId: 5678,
+					fullName: repository,
+					defaultBranch: 'main'
+				},
+				{
+					repo: repository,
+					jobWorkflowRef: workflowReference,
+					cacheTemplate: 'pr-cache'
+				}
+			),
+			id: 'simple-close',
+			disabled: false
+		});
+		const { client, dependencies } = fixture({
+			rules: configured ? [closeRule] : [],
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on: pull_request
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: pr-cache
+      manage-pr-cache: true
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.flatMap((job) =>
+				job.findings.filter(({ trigger }) => trigger === 'merged-close')
+			)
+		).toStrictEqual([
+			{
+				trigger: 'merged-close',
+				finding: configured
+					? new PassedCheckFinding('trust rule')
+					: new RepositoryTrustRuleMissingFinding('trust rule')
+			}
+		]);
 	}
 );

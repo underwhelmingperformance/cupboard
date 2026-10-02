@@ -76,6 +76,8 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard cache set-access`](#cupboard-cache-set-access)
   - [`cupboard cache set-priority`](#cupboard-cache-set-priority)
   - [`cupboard cache set-retirement`](#cupboard-cache-set-retirement)
+  - [`cupboard cache close`](#cupboard-cache-close)
+  - [`cupboard cache reopen`](#cupboard-cache-reopen)
   - [`cupboard cache remove`](#cupboard-cache-remove)
   - [`cupboard cache inspect`](#cupboard-cache-inspect)
 - [`cupboard policy`](#cupboard-policy)
@@ -91,6 +93,7 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard oidc-trust show`](#cupboard-oidc-trust-show)
   - [`cupboard oidc-trust add`](#cupboard-oidc-trust-add)
   - [`cupboard oidc-trust add-github-pr`](#cupboard-oidc-trust-add-github-pr)
+  - [`cupboard oidc-trust add-github-pr-close`](#cupboard-oidc-trust-add-github-pr-close)
   - [`cupboard oidc-trust add-github-tag`](#cupboard-oidc-trust-add-github-tag)
   - [`cupboard oidc-trust add-github-branch`](#cupboard-oidc-trust-add-github-branch)
   - [`cupboard oidc-trust remove`](#cupboard-oidc-trust-remove)
@@ -1623,6 +1626,8 @@ Commands:
   set-access [options] <url> [name]      Make a cache public or private.
   set-priority [options] <url> [name]    Set the substituter priority that a cache advertises to Nix.
   set-retirement [options] <url> [name]  Choose whether a named cache removes itself once it is empty.
+  close [options] <url> [name]           Stop publication and expire the roots of a named cache with its configured grace.
+  reopen [options] <url> [name]          Restore publication to a closed named cache.
   remove [options] <url> [name]          Remove a named cache.
   inspect <url> [name]                   Show one cache's settings and how many store paths it has.
   help [command]                         display help for command
@@ -1837,6 +1842,47 @@ Options:
   -h, --help             display help for command
 ```
 
+#### cupboard cache close
+
+```text
+Usage: cupboard cache close [options] <url> [name]
+
+Stop publication and expire the roots of a named cache with its configured
+grace.
+
+Arguments:
+  url                    tenant URL (e.g.
+                         https://cupboard.example.workers.dev/t/<slug>)
+  name                   cache name, if the URL is a tenant URL
+
+Options:
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
+  --audience <audience>  OIDC audience to request with --github-oidc (default:
+                         the tenant URL)
+  -h, --help             display help for command
+```
+
+#### cupboard cache reopen
+
+```text
+Usage: cupboard cache reopen [options] <url> [name]
+
+Restore publication to a closed named cache.
+
+Arguments:
+  url                    tenant URL (e.g.
+                         https://cupboard.example.workers.dev/t/<slug>)
+  name                   cache name, if the URL is a tenant URL
+
+Options:
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
+  --audience <audience>  OIDC audience to request with --github-oidc (default:
+                         the tenant URL)
+  -h, --help             display help for command
+```
+
 #### cupboard cache remove
 
 ```text
@@ -2031,31 +2077,34 @@ Manage the trust rules that let administrators and CI jobs sign in to the tenant
 with OIDC identity tokens.
 
 Options:
-  -h, --help                         display help for command
+  -h, --help                           display help for command
 
 Commands:
-  list <url>                         List the trust rules, including disabled
-                                     ones, with each rule's issuer, audience and
-                                     grants.
-  show <url> <id>                    Show one trust rule in full: the tokens
-                                     that it accepts and the grants that it
-                                     gives.
-  add [options] <url>                Add a trust rule by hand: the issuer,
-                                     audience and claims that a token must have,
-                                     and the grants that the rule gives.
-  add-github-pr [options] <url>      Add a trust rule that lets each pull
-                                     request in a GitHub repository publish to a
-                                     cache of its own.
-  add-github-tag [options] <url>     Add a trust rule that lets a GitHub
-                                     repository's tag runs publish to a cache
-                                     named after the tag.
-  add-github-branch [options] <url>  Add a trust rule that lets runs on one
-                                     branch of a GitHub repository publish to
-                                     the tenant's default cache.
-  remove [options] <url> <id>        Disable a trust rule, so that it no longer
-                                     accepts tokens. The rule stays in the list,
-                                     marked as disabled.
-  help [command]                     display help for command
+  list <url>                           List the trust rules, including disabled
+                                       ones, with each rule's issuer, audience
+                                       and grants.
+  show <url> <id>                      Show one trust rule in full: the tokens
+                                       that it accepts and the grants that it
+                                       gives.
+  add [options] <url>                  Add a trust rule by hand: the issuer,
+                                       audience and claims that a token must
+                                       have, and the grants that the rule gives.
+  add-github-pr [options] <url>        Add a trust rule that lets each pull
+                                       request in a GitHub repository publish to
+                                       a cache of its own.
+  add-github-pr-close [options] <url>  Permit merged pull-request runs to close
+                                       the selected PR cache family, without
+                                       publication or read authority.
+  add-github-tag [options] <url>       Add a trust rule that lets a GitHub
+                                       repository's tag runs publish to a cache
+                                       named after the tag.
+  add-github-branch [options] <url>    Add a trust rule that lets runs on one
+                                       branch of a GitHub repository publish to
+                                       the tenant's default cache.
+  remove [options] <url> <id>          Disable a trust rule, so that it no
+                                       longer accepts tokens. The rule stays in
+                                       the list, marked as disabled.
+  help [command]                       display help for command
 ```
 
 #### cupboard oidc-trust list
@@ -2105,7 +2154,7 @@ Options:
   --audience <audience>                     audience that the token must have (required unless you use --from-file)
   --claim <key=value>                       a claim that the token must have, with exactly this value (repeatable) (default: [])
   --workflow-ref, --job-workflow-ref <ref>  require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs; the same reference is --workflow-ref on github setup/check
-  --allow <action>                          a grant to give (repeatable): read, push, attest, root, attach, create or remove (default: [])
+  --allow <action>                          a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen or remove (default: [])
   --cache <name>                            the cache that the grants apply to (default: the tenant's default cache)
   --cache-template <template>               make the cache name from values in the token, such as "pr-{pr}" (see --template-source and --capture)
   --root <name>                             the root that publication grants cover, or a root prefix ending in /
@@ -2152,6 +2201,25 @@ Example:
   # gh-<repository-id>-pr-<number> cache
   cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \
     --repo acme/app
+```
+
+#### cupboard oidc-trust add-github-pr-close
+
+```text
+Usage: cupboard oidc-trust add-github-pr-close [options] <url>
+
+Permit merged pull-request runs to close the selected PR cache family, without
+publication or read authority.
+
+Arguments:
+  url                                         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  --repo <owner/name>                         the GitHub repository
+  --workflow-ref, --job-workflow-ref <value>  require this workflow pinned to a commit, release tag or tag pattern, as owner/repo/path@ref
+  --audience <audience>                       audience that the token must have (default: the tenant URL)
+  --cache-template <template>                 PR cache family, with at most one {pr} (default: gh-{repository_id}-pr-{pr})
+  -h, --help                                  display help for command
 ```
 
 #### cupboard oidc-trust add-github-tag

@@ -344,7 +344,7 @@ const cupboardAction =
 // through a variable, such as "${CUPBOARD_PATH}" cache remove, has no
 // `cupboard` word, so the check also looks for the flag itself.
 const publishingCommand =
-	/\bcupboard\s+(?:push|build-push|attest\s+attach|plan\s+cohort|cache\s+(?:create|remove)|root\s+ensure|confirm)\b|--github-oidc\b/u;
+	/\bcupboard\s+(?:push|build-push|attest\s+attach|plan\s+cohort|cache\s+(?:create|remove|close|reopen)|root\s+ensure|confirm)\b|--github-oidc\b/u;
 
 function publicationKind(
 	uses: string

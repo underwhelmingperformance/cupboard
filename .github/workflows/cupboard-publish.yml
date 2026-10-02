@@ -28,6 +28,15 @@ on:
         required: false
         type: string
         default: ''
+      manage-pr-cache:
+        description: >-
+          Create the named cache for pull requests from this repository, reopen
+          it when the pull request reopens, and close it through its configured
+          grace when the pull request closes. Requires cache. Closed pull
+          requests skip publication.
+        required: false
+        type: boolean
+        default: false
       root:
         description:
           Start of the retention root name. The workflow appends the runner's
@@ -77,10 +86,10 @@ on:
       publish:
         description: >-
           Control which paths are published. `none` skips publication and
-          retention updates. `outputs` publishes selected output paths.
-          `closure` also publishes all their runtime references. If no outputs
-          remain selected, `outputs` and `closure` replace the retention root
-          with an empty path list.
+          retention updates. `outputs` publishes selected output paths. `built`
+          also publishes observed build intermediates. `closure` publishes all
+          their runtime references. If no outputs remain selected, `outputs` and
+          `closure` replace the retention root with an empty path list.
         required: false
         type: string
         default: outputs
@@ -116,13 +125,14 @@ on:
 permissions: {}
 
 jobs:
-  publish:
-    name: build and push
+  configure:
+    name: select cache operation
     runs-on: ${{ inputs.runs-on }}
     permissions:
-      attestations: write # allow the attest action to upload bundles to the repository's attestation store
-      contents: read # check out the flake source
-      id-token: write # OIDC token for the cache push and Sigstore signing
+      contents: read
+    outputs:
+      cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
+      operation: ${{ steps.operation.outputs.operation }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -133,7 +143,43 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve cache operation
+        id: operation
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
+          MANAGE_PR_CACHE: ${{ inputs.manage-pr-cache }}
+          PUBLISH: ${{ inputs.publish }}
+          CACHE: ${{ inputs.cache }}
+        run: |
+          set -euo pipefail
+          case "$PUBLISH" in
+            none|outputs|built|closure) ;;
+            *) echo '::error::publish must be none, outputs, built, or closure' >&2; exit 2 ;;
+          esac
+          if [[ "$EVENT_NAME" == pull_request && "$HEAD_REPOSITORY_ID" != "$REPOSITORY_ID" ]]; then
+            echo 'operation=skip' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          operation=publish
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            if [[ "$MANAGE_PR_CACHE" == true && "$PUBLISH" != none && -z "$CACHE" ]]; then
+              echo '::error::manage-pr-cache requires a named cache input' >&2
+              exit 2
+            fi
+            if [[ "$EVENT_ACTION" == closed ]]; then
+              operation=skip
+              if [[ "$MANAGE_PR_CACHE" == true && "$PUBLISH" != none ]]; then
+                operation=close
+              fi
+            fi
+          fi
+          echo "operation=$operation" >> "$GITHUB_OUTPUT"
+
       - name: Validate publication options
+        if: steps.operation.outputs.operation == 'publish'
         env:
           BUILD: ${{ inputs.build }}
           SUBSTITUTER: ${{ inputs.substituter }}
@@ -148,25 +194,14 @@ jobs:
             leave|copy) ;;
             *) echo '::error::substituter must be leave or copy'; exit 1 ;;
           esac
-          case "${PUBLISH}" in
-            none|outputs|built|closure) ;;
-            *) echo '::error::publish must be none, outputs, built, or closure'; exit 1 ;;
-          esac
           case "${ATTEST}" in
             true|false) ;;
             *) echo '::error::attest must be true or false'; exit 1 ;;
           esac
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
-        with:
-          nix_version: 2.34.7
-
       - uses: $/actions/resolve-cupboard
         id: resolve-cupboard
+        if: steps.operation.outputs.operation != 'skip'
         with:
           cupboard-version: ${{ inputs.cupboard-version }}
           workflow-repository: ${{ job.workflow_repository }}
@@ -176,13 +211,29 @@ jobs:
           github-api-url: ${{ github.api_url }}
           github-graphql-url: ${{ github.graphql_url }}
 
+  publish:
+    needs: configure
+    if: needs.configure.outputs.operation == 'publish'
+    name: build and push
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      attestations: write # allow the attest action to upload bundles to the repository's attestation store
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
+
       # A source acquisition builds cupboard from a git checkout, so fetch the
       # workflow's own source for that case. Reserve the path first so
       # actions/checkout cannot replace caller-controlled content.
       - name: Reserve the cupboard workflow checkout
-        if:
-          ${{ fromJSON(steps.resolve-cupboard.outputs.cupboard).kind == 'source'
-          }}
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
         env:
           CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
         run: |
@@ -193,9 +244,7 @@ jobs:
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if:
-          ${{ fromJSON(steps.resolve-cupboard.outputs.cupboard).kind == 'source'
-          }}
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -210,9 +259,29 @@ jobs:
           cache-url: ${{ inputs.url }}
           audience: ${{ inputs.audience }}
           cache: ${{ inputs.cache }}
+          provision-cache:
+            ${{ inputs.manage-pr-cache && github.event_name == 'pull_request' &&
+            inputs.publish != 'none' && inputs.cache || '' }}
+          provision-cache-ttl: ${{ inputs.ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
+          cupboard: ${{ needs.configure.outputs.cupboard }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
+
+      - name: Reopen the cache
+        if:
+          ${{ inputs.manage-pr-cache && inputs.publish != 'none' &&
+          github.event_name == 'pull_request' && github.event.action ==
+          'reopened' }}
+        env:
+          AUDIENCE: ${{ steps.setup.outputs.read-session-audience }}
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ inputs.cache }}
+        run: |
+          set -euo pipefail
+          args=(cache reopen "$URL" "$CACHE" --github-oidc)
+          if [[ -n "$AUDIENCE" ]]; then args+=(--audience "$AUDIENCE"); fi
+          "$CUPBOARD_PATH" "${args[@]}"
 
       - uses: $/actions/build-paths
         id: build
@@ -305,3 +374,59 @@ jobs:
           audience: ${{ steps.setup.outputs.read-session-audience }}
           receipt-file: ${{ steps.push.outputs.receipt-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
+
+  close-cache:
+    name: close the pull request's cache
+    needs: configure
+    if: needs.configure.outputs.operation == 'close'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      attestations: read # verify release CLI attestations during acquisition
+      contents: read
+      id-token: write # authenticate cache closure through GitHub OIDC
+    steps:
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
+
+      # A source acquisition builds cupboard from a git checkout, so fetch the
+      # workflow's own source for that case. Reserve the path first so
+      # actions/checkout cannot replace caller-controlled content.
+      - name: Reserve the cupboard workflow checkout
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard-workflow
+          persist-credentials: false
+
+      - uses: $/actions/setup
+        id: setup
+        with:
+          cupboard: ${{ needs.configure.outputs.cupboard }}
+          checkout-dir: ${{ github.workspace }}/.cupboard-workflow
+          audience: ${{ inputs.audience }}
+
+      - name: Close the cache
+        env:
+          AUDIENCE: ${{ steps.setup.outputs.read-session-audience }}
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ inputs.cache }}
+        run: |
+          set -euo pipefail
+          args=(cache close "$URL" "$CACHE" --github-oidc)
+          if [[ -n "$AUDIENCE" ]]; then args+=(--audience "$AUDIENCE"); fi
+          "$CUPBOARD_PATH" "${args[@]}"

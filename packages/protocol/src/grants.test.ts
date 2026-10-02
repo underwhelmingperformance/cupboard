@@ -1239,3 +1239,59 @@ describe('content-read grants', () => {
 		).toBe(false);
 	});
 });
+
+it.each([
+	{ binding: { pattern: '^pr-[0-9]+$' }, accepted: true },
+	{ binding: { pattern: 'pr-[0-9]+' }, accepted: false },
+	{ binding: { pattern: '^pr-(?=7)[0-9]+$' }, accepted: false },
+	{ binding: { pattern: '^' + 'x'.repeat(512) + '$' }, accepted: false },
+	{ binding: { pattern: '^pr-[0-9]+$', exact: 'pr-7' }, accepted: false },
+	{
+		binding: { pattern: '^pr-[0-9]+$', equalsTemplate: 'pr-{n}' },
+		accepted: false
+	},
+	{ binding: { pattern: '^pr-[0-9]+$', substitutions: {} }, accepted: false }
+])('validates named-cache pattern $binding', ({ binding, accepted }) => {
+	expect(
+		permittedGrantSchema.safeParse({
+			type: 'cupboard_cache',
+			actions: ['cache:close'],
+			resources: { cache: { kind: 'named', ...binding, validate: 'cacheName' } }
+		}).success
+	).toBe(accepted);
+});
+
+it.each([
+	{ operation: 'cache:close', explicitRead: false, permitted: true },
+	{ operation: 'cache:read', explicitRead: false, permitted: false },
+	{ operation: 'cache:content-read', explicitRead: false, permitted: false },
+	{ operation: 'cache:close', explicitRead: true, permitted: true },
+	{ operation: 'cache:read', explicitRead: true, permitted: true },
+	{ operation: 'cache:content-read', explicitRead: true, permitted: false }
+] as const)(
+	'checks close-only $operation authority (explicit metadata read: $explicitRead)',
+	({ operation, explicitRead, permitted }) => {
+		const cache = namedCacheScope('pr-7');
+		const actions: Operation[] = explicitRead
+			? ['cache:close', 'cache:read']
+			: ['cache:close'];
+		const grant = authorizationDetailSchema.parse({
+			type: 'cupboard_cache',
+			cache,
+			actions
+		});
+		const requested = authorizationDetailSchema.parse({
+			...grant,
+			actions: [operation]
+		});
+		expect({
+			issuance: isOperationPermittedAtIssuance(actions, operation),
+			presented: isCoveredByToken([grant], operation, { cache }),
+			attenuation: isAuthorizationDetailCovered([grant], requested)
+		}).toStrictEqual({
+			issuance: permitted,
+			presented: permitted,
+			attenuation: permitted
+		});
+	}
+);

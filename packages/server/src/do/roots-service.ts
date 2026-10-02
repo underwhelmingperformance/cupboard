@@ -27,6 +27,7 @@ import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
+import { CacheClosureService } from './cache-closure-service.ts';
 import { type CacheRegistrationService } from './cache-registration-service.ts';
 import { type RootSetCommand, type ServerContext } from './context.ts';
 import { jsonRowLists } from './json-list.ts';
@@ -73,6 +74,9 @@ export class RootsService {
 	) {}
 
 	private writeRoot(cache: ResolvedCache, request: RootSetCommand): StoredRoot {
+		const closure = new CacheClosureService(this.context);
+		closure.assertWritable(cache);
+		const retentionEpoch = closure.epoch(cache);
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
 		const resolvedRetention =
@@ -126,6 +130,8 @@ export class RootsService {
 				.values({
 					cacheId: cache.id,
 					name: request.name,
+					retentionEpoch,
+					closeAppliedEpoch: retentionEpoch,
 					expiresAt,
 					createdAt: created,
 					updatedAt: nowIso
@@ -148,7 +154,23 @@ export class RootsService {
 			// Applied inside the same transaction as the delete above: a crash
 			// between the two could otherwise release these targets from the old
 			// root's retention with no deadline ever established.
-			this.retention.applyGraceTransition(cache, released, nowIso, tx);
+			const close =
+				existing === undefined
+					? undefined
+					: closure.firstClose(cache, existing.retentionEpoch);
+			if (close === undefined || existing === undefined) {
+				this.retention.applyGraceTransition(cache, released, nowIso, tx);
+			} else {
+				this.retention.extendClosedRootGraceDeadlines(
+					cache,
+					released,
+					{
+						retentionEpoch: existing.retentionEpoch,
+						retainUntil: close.graceUntil
+					},
+					tx
+				);
+			}
 
 			return created;
 		});
@@ -343,6 +365,9 @@ export class RootsService {
 		name: RootName,
 		retention: RootRetentionRequest
 	): void {
+		const closure = new CacheClosureService(this.context);
+		closure.assertWritable(cache);
+		const retentionEpoch = closure.epoch(cache);
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
 		const resolvedRetention =
@@ -356,6 +381,8 @@ export class RootsService {
 			.values({
 				cacheId: cache.id,
 				name,
+				retentionEpoch,
+				closeAppliedEpoch: retentionEpoch,
 				expiresAt,
 				createdAt: nowIso,
 				updatedAt: nowIso
@@ -366,7 +393,10 @@ export class RootsService {
 					// SQLite `max` returns NULL when either operand is NULL, so a
 					// permanent root stays permanent. ISO-8601 UTC strings compare in
 					// chronological order, so a shorter TTL cannot reduce the expiry.
-					expiresAt: sql`max(${schema.retentionRoots.expiresAt}, excluded.expires_at)`,
+					expiresAt: sql`CASE WHEN ${schema.retentionRoots.retentionEpoch} < ${retentionEpoch} THEN excluded.expires_at ELSE max(${schema.retentionRoots.expiresAt}, excluded.expires_at) END`,
+					retentionEpoch,
+					closeAppliedEpoch: retentionEpoch,
+					closeGraceUntil: sql`NULL`,
 					updatedAt: nowIso
 				}
 			})
@@ -482,7 +512,7 @@ export class RootsService {
 		const rows = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
-				expiresAt: schema.retentionRoots.expiresAt,
+				expiresAt: new CacheClosureService(this.context).effectiveRootExpiry(),
 				createdAt: schema.retentionRoots.createdAt,
 				updatedAt: schema.retentionRoots.updatedAt,
 				targetCount: sql<number>`(select count(*) from ${schema.retentionRootTargets} where ${schema.retentionRootTargets.cacheId} = ${schema.retentionRoots.cacheId} and ${schema.retentionRootTargets.rootName} = ${schema.retentionRoots.name})`
@@ -606,7 +636,26 @@ export class RootsService {
 			// Applied inside the same transaction as the delete above: a crash
 			// between the two could otherwise release these targets with no
 			// deadline ever established.
-			this.retention.applyGraceTransition(cache, released, nowIso, tx);
+			const close =
+				existing === undefined
+					? undefined
+					: new CacheClosureService(this.context).firstClose(
+							cache,
+							existing.retentionEpoch
+						);
+			if (close === undefined || existing === undefined) {
+				this.retention.applyGraceTransition(cache, released, nowIso, tx);
+			} else {
+				this.retention.extendClosedRootGraceDeadlines(
+					cache,
+					released,
+					{
+						retentionEpoch: existing.retentionEpoch,
+						retainUntil: close.graceUntil
+					},
+					tx
+				);
+			}
 
 			return { name, removed: existing !== undefined };
 		});

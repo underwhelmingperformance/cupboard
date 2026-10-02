@@ -100,3 +100,19 @@ export function githubTagPushClaims(
 		job_workflow_ref: options.workflowReference
 	};
 }
+
+/**
+The signed claim shape of a merged pull-request close run.
+*/
+export function githubMergedPullRequestClaims(
+	audience: string | URL,
+	identity: GithubRepositoryClaimsIdentity,
+	options: { readonly baseBranch: string; readonly workflowReference?: string }
+): GithubActionsClaims {
+	return {
+		...githubPullRequestClaims(audience, identity, {
+			workflowReference: options.workflowReference
+		}),
+		ref: `refs/heads/${options.baseBranch}`
+	};
+}

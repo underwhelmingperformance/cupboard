@@ -34,6 +34,7 @@ import {
 import {
 	githubBranchAddBody,
 	githubPrAddBody,
+	githubPrCloseAddBody,
 	type OidcTrustClient
 } from '../oidc-trust.ts';
 import {
@@ -869,6 +870,14 @@ it('repairs a missing preset view without asking for a trust scope or adding rul
 	const rules = oidcTrustListResponseSchema.parse({
 		rules: [
 			{ ...prBody, id: 'pr', disabled: false },
+			{
+				...githubPrCloseAddBody(url, identity, {
+					repo: repository,
+					jobWorkflowRef: workflowReference
+				}),
+				id: 'pr-close',
+				disabled: false
+			},
 			{ ...branchBody, id: 'branch', disabled: false }
 		]
 	}).rules;
@@ -2056,7 +2065,23 @@ ${inputs}
 			results: captured.results.map((result) => result.kind)
 		}).toStrictEqual({
 			initial: ['failed'],
-			added: [body],
+			added: [
+				body,
+				...(body.claims.event_name === 'pull_request' &&
+				body.permittedGrants.some(
+					(grant) =>
+						grant.type === 'cupboard_cache' &&
+						grant.actions.includes('cache:close')
+				)
+					? [
+							githubPrCloseAddBody(url, customAudienceIdentity, {
+								repo: repository,
+								jobWorkflowRef: flakeAudienceReference,
+								audience: audienceSchema.parse(customAudience)
+							})
+						]
+					: [])
+			],
 			results: ['github-check-discovered', 'github-check-verified']
 		});
 	}
@@ -2296,7 +2321,20 @@ ${inputs}
 						...body.permittedGrants,
 						buildCacheContentReadGrant({ cache: 'falcon' })
 					]
-				}
+				},
+				...(body.claims.event_name === 'pull_request' &&
+				body.permittedGrants.some(
+					(grant) =>
+						grant.type === 'cupboard_cache' &&
+						grant.actions.includes('cache:close')
+				)
+					? [
+							githubPrCloseAddBody(url, customAudienceIdentity, {
+								repo: repository,
+								jobWorkflowRef: flakeAudienceReference
+							})
+						]
+					: [])
 			],
 			results: ['github-check-discovered', 'github-check-verified']
 		});

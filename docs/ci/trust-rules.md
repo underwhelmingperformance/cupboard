@@ -60,24 +60,26 @@ cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acm
   --repo acme/app --branch main
 ```
 
-There is also `add-github-tag`, for release tags. Each command writes one rule:
+There is also `add-github-tag`, for release tags, and `add-github-pr-close`, for
+merged PR closure. Each command writes one rule:
 
-| Command             | Accepts runs with                    | Cache                        | Roots                             | Grants                                     |
-| ------------------- | ------------------------------------ | ---------------------------- | --------------------------------- | ------------------------------------------ |
-| `add-github-pr`     | `event_name=pull_request`            | `gh-{repository_id}-pr-{pr}` | `github:<owner>/<repo>/pr-{pr}/`  | push, root, attach, create, remove, attest |
-| `add-github-branch` | `ref=refs/heads/<branch>`, any event | the default cache            | `github:<owner>/<repo>/<branch>/` | push, root, attach, attest                 |
-| `add-github-tag`    | `ref_type=tag`, any event            | `{tag}`                      | `github:<owner>/<repo>/<cache>/`  | push, root, attach, attest                 |
+| Command               | Accepts runs with                               | Cache                                     | Roots                             | Grants                                            |
+| --------------------- | ----------------------------------------------- | ----------------------------------------- | --------------------------------- | ------------------------------------------------- |
+| `add-github-pr`       | `event_name=pull_request`                       | `gh-{repository_id}-pr-{pr}`              | `github:<owner>/<repo>/pr-{pr}/`  | push, root, attach, create, close, reopen, attest |
+| `add-github-pr-close` | `event_name=pull_request`, `ref=refs/heads/...` | the repository's selected PR cache family | none                              | close only                                        |
+| `add-github-branch`   | `ref=refs/heads/<branch>`, any event            | the default cache                         | `github:<owner>/<repo>/<branch>/` | push, root, attach, attest                        |
+| `add-github-tag`      | `ref_type=tag`, any event                       | `{tag}`                                   | `github:<owner>/<repo>/<cache>/`  | push, root, attach, attest                        |
 
 The grants are explained in [What a rule can grant](#what-a-rule-can-grant).
 Names in braces are filled in from each run's token.
 
-All three commands accept tokens from GitHub Actions only. They pin the
+All four commands accept tokens from GitHub Actions only. They pin the
 repository by its numeric IDs, and set the audience to the tenant URL unless you
 choose another. To look up the IDs, they call the GitHub API. For a private
 repository, set `GH_TOKEN` or `GITHUB_TOKEN` so they can. They use `GH_TOKEN` if
 both are set.
 
-You can add two options to any of them:
+The publication presets also accept these options:
 
 - `--job-workflow-ref` also requires the run to use a particular workflow file.
   `--workflow-ref` is an alias, as on `github setup` and `github check`. See
@@ -92,10 +94,46 @@ which GitHub signs. A token can therefore only ever reach its own pull request's
 cache. If the `ref` is missing or has another form, the rule can't work out a
 cache name, so the exchange is refused with status 400 and "The requested
 authorization_details are not permitted". For example, a run for pull request 7
-of repository 1234 can create, publish to and remove the cache `gh-1234-pr-7`,
-and nothing else.
+of repository 1234 can create, publish to, close and reopen the cache
+`gh-1234-pr-7`. The grant does not authorise another cache or destructive cache
+deletion.
 
 Runs triggered by `pull_request_target` don't match this rule.
+
+Merged close runs use `refs/heads/<base-branch>` in the signed `ref`. GitHub's
+OIDC issuer does not provide a signed PR number, so a merged close run cannot
+use the publication rule's `{pr}` substitution. `github setup` creates a
+separate rule for merged closure, and `github check` models the merged ref
+separately. To add that rule manually:
+
+```sh
+cupboard oidc-trust add-github-pr-close https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app \
+  --workflow-ref underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/vX.Y.Z
+```
+
+This rule requires a workflow pinned to a commit, tag or explicit tag pattern,
+the repository and owner IDs, `event_name=pull_request`, a base-branch `ref`,
+and the specified workflow. It permits only `cache:close` within the
+repository's PR cache family. The provider does not sign the event's `action` or
+PR number, so this authority covers the family, not a single PR. `cache:close`
+does not imply metadata or content reads. Add `cache:read` explicitly to an
+exact cache grant if a lifecycle caller needs metadata. Open PR tokens with
+`refs/pull/<n>/merge` cannot use this rule. Publication, content reads, roots
+and reopening still use the publication rule's exact PR binding. The default
+preset's closure family excludes the default and release caches. A custom
+template selects a different closure family.
+
+Deploy the server version that supports named-cache patterns before adding the
+merged-close rule. See [PR cache closure][pr-cache-closure-upgrade]. GitHub
+explains the ref change in [Pull request events][github-pr-events]; the [OIDC
+issuer metadata][github-oidc-metadata] lists the available signed claims.
+
+[pr-cache-closure-upgrade]: ../operator/upgrade-notes.md#pr-cache-closure
+[github-pr-events]:
+  https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+[github-oidc-metadata]:
+  https://token.actions.githubusercontent.com/.well-known/openid-configuration
 
 ### Branches
 
@@ -126,6 +164,16 @@ In `add-github-tag`, the default root follows the cache template. So
 tag's paths under its own root.
 
 In `add-github-pr`, the root doesn't follow the cache template.
+
+`add-github-pr-close` accepts `--cache-template` with `{repository_id}` and at
+most one `{pr}`. Static templates produce an exact grant. A single `{pr}`
+produces a bounded named-cache pattern with a numeric PR component; literal
+characters in the template match exactly. Supply the same cache template as the
+publication rule. Repeated `{pr}` remains supported for publication, but
+merged-close rule generation refuses that template because independent numeric
+matches would also permit mismatched PR numbers. Keep the publication rule and
+configure exact `cache:close` grants in a manual lifecycle rule for those
+caches.
 
 `add-github-branch` has no templates.
 
@@ -176,6 +224,8 @@ A rule for GitHub should pin:
 | `attach` | Add published paths to a [run root](../admin/retention.md#run-roots). |
 | `attest` | Attach attestation bundles.                                           |
 | `create` | Create the cache.                                                     |
+| `close`  | Close publication and expire roots with configured grace.             |
+| `reopen` | Restore publication to a closed cache.                                |
 | `remove` | Remove the cache.                                                     |
 
 When `read` is combined with other permissions, the CLI creates a separate
@@ -335,6 +385,14 @@ example.
 
 The file contains the whole rule, so the command refuses `--from-file` together
 with any other rule option, including `--issuer` and `--audience`.
+
+A named-cache binding may use `pattern` instead of `exact` or `equalsTemplate`.
+The expression must be anchored at both ends, valid RE2 and at most 512
+characters. It cannot be combined with template substitutions. cupboard checks
+the concrete requested cache against the cache-name grammar and the pattern;
+issued tokens contain the exact requested cache, not the pattern. Root, tenant
+and view bindings do not accept patterns. Current authorisation checks and
+refresh policy use the same matching rules.
 
 ## Listing, changing and removing rules
 

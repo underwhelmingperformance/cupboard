@@ -21,6 +21,22 @@ not advertise `attestation-info-v1`. Authentication and storage failures remain
 errors and do not permit fallback. Discovery does not verify attestation
 signatures; use `cupboard attest verify` for verification.
 
+### Simple workflow PR caches
+
+The simple `cupboard-publish.yml` workflow accepts `manage-pr-cache: true` with
+an explicit `cache` input. Add `closed` and `reopened` to the caller's
+`pull_request` event types, and grant `cache:create`, `cache:close` and
+`cache:reopen` for the selected cache. Closed runs skip builds and publication,
+including merged pull requests. Existing calls leave this input disabled.
+
+Newly created PR caches inherit the tenant's default creation grace. A close
+expires their roots at the close time, while reads and reuse remain available
+through grace. Reopening restores writes. See [Managing PR
+caches][simple-pr-caches].
+
+[simple-pr-caches]:
+  ../ci/custom-jobs.md#the-simpler-workflow-cupboard-publishyml
+
 ### Path deletion and rollback
 
 Complete `cupboard deploy` before deleting a store path. The deployment uploads
@@ -71,6 +87,40 @@ setting and `cache:defaults-update` to change it. Individual cache grants do not
 permit either operation. [Cache creation defaults] describes the commands.
 
 [Cache creation defaults]: ../admin/caches.md#defaults-for-new-caches
+
+### PR cache closure
+
+Deploy this release's server before adopting its CLI or reusable publishing
+workflows. Closing a PR now closes its cache on both merged and unmerged close
+events. Reads and reuse remain available during the configured grace period; GC
+removes expired content and deletes the empty cache after pending work ends.
+Reopening explicitly restores write access.
+
+Existing PR trust rules need `cache:close` and `cache:reopen`. Merged close runs
+also need a separate closure-only rule because GitHub's signed `ref` changes to
+the base branch. The new rule uses a bounded named-cache pattern over the
+repository's PR cache family and requires the repository and owner IDs,
+`event_name=pull_request`, a base-branch ref and the workflow pin. It does not
+grant publication, metadata or content reads, roots or reopening. The new
+`cache:close` operation does not imply `cache:read`; an exact lifecycle grant
+must include `cache:read` explicitly if its caller also inspects metadata.
+Deploy the server before adding this pattern binding.
+
+A `cache:delete` grant does not permit either operation. Run
+`cupboard github setup` again with the existing repository, branch and access
+choices, and the accepted workflow reference for this release. Confirm
+replacement of the PR rule, or use `--yes` for non-interactive setup. To update
+a rule manually, add both actions to the same-cache PR grant and preserve its
+read, publication, root and attestation grants. Add
+`oidc-trust add-github-pr-close` with the same cache template and workflow
+reference for merged closes. See [PR trust rules].
+
+If the calling workflow explicitly lists `pull_request.types`, include both
+`closed` and `reopened`. The closed event starts grace; the reopened event
+restores writes before publication. See [PR cache lifecycle].
+
+[PR trust rules]: ../ci/trust-rules.md#pull-requests
+[PR cache lifecycle]: ../ci/flake-publish.md#using-the-preset
 
 ### Refresh credentials
 

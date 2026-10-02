@@ -29,7 +29,11 @@ import {
 	GithubCheckOptionError,
 	WorkflowReferenceTagPatternError
 } from '../../errors.ts';
-import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from '../oidc-trust.ts';
 import { trustGrantRows } from '../oidc-trust/format.ts';
 import {
 	buildAddBody,
@@ -80,7 +84,8 @@ import {
 	jobCache,
 	modelPublishingJob,
 	type PublicationCase,
-	type ReuseViewRequirement
+	type ReuseViewRequirement,
+	withMergedCloseCases
 } from './publication.ts';
 import {
 	type PublicationReadAuthority,
@@ -376,6 +381,16 @@ function bodyForCase(
 ): OidcTrustAddBodyInput {
 	const isPreset = isPresetJob(job);
 	const audience = audienceSchema.parse(publication.claims.aud);
+
+	if (publication.lifecycle === 'merged-close') {
+		return githubPrCloseAddBody(url, result.identity, {
+			repo: result.identity.fullName,
+			audience,
+			jobWorkflowRef: reference,
+			...(!isPreset &&
+				read.cache.kind === 'named' && { cacheTemplate: read.cache.name })
+		});
+	}
 
 	if (publication.requests.length === 0) {
 		return buildAddBody({
@@ -786,7 +801,10 @@ async function checkPlannedRulesKeepOtherJobs(
 				continue;
 			}
 
-			for (const publication of model.cases) {
+			for (const publication of withMergedCloseCases(
+				model.cases,
+				result.identity
+			)) {
 				const read = await publicationReadAuthority(
 					job,
 					publication,
@@ -879,7 +897,10 @@ async function modelRepairableJobs(
 			);
 		}
 
-		for (const publication of model.cases) {
+		for (const publication of withMergedCloseCases(
+			model.cases,
+			result.identity
+		)) {
 			const read = await publicationReadAuthority(
 				job,
 				publication,
@@ -1272,7 +1293,9 @@ export async function runDiscoveredGithubRepair(
 			const number = index + 1;
 			const trigger =
 				body.claims.event_name === 'pull_request'
-					? 'any pull request'
+					? body.claims.ref === undefined
+						? 'any pull request'
+						: `pull request with ref ${claimSummary(body.claims.ref)}`
 					: `ref ${claimSummary(body.claims.ref)}`;
 			const workflow =
 				typeof body.claims.job_workflow_ref === 'string'

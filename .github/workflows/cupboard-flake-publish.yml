@@ -28,8 +28,9 @@ on:
           publication is enabled, the workflow creates that cache if it does not
           exist. With `publish: none`, it reads from the tenant's default cache
           without creating or removing a pull-request cache. The preset refuses
-          a pull request from a fork. When an unmerged pull request is closed
-          and publication is enabled, the run removes that pull request's cache.
+          a pull request from a fork. When a pull request is closed and
+          publication is enabled, the run closes that pull request's cache. Its
+          contents remain available through the cache's configured grace period.
           A run on the branch in the branch input publishes to the default
           cache, with permanent roots under github:<repository>/<branch>/. The
           preset fails any other run. Cannot be combined with cache,
@@ -374,7 +375,7 @@ jobs:
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
       provision-cache: ${{ steps.resolve.outputs.provision-cache }}
       provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
-      remove-cache: ${{ steps.resolve.outputs.remove-cache }}
+      close-cache: ${{ steps.resolve.outputs.close-cache }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -579,8 +580,8 @@ jobs:
                 if [ "${PUBLISH}" != none ]; then
                   CACHE="${pr_cache}"
                   PROVISION_CACHE="${CACHE}"
-                  if [ "${EVENT_ACTION}" = closed ] && [ "${MERGED}" != true ]; then
-                    REMOVE_CACHE="${CACHE}"
+                  if [ "${EVENT_ACTION}" = closed ]; then
+                    CLOSE_CACHE="${CACHE}"
                   fi
                 fi
                 if [ -n "${REUSE_VIEW}" ]; then
@@ -621,7 +622,7 @@ jobs:
             echo "reuse-view=${REUSE_VIEW}"
             echo "provision-cache=${PROVISION_CACHE:-}"
             echo "provision-cache-ttl=${TTL}"
-            echo "remove-cache=${REMOVE_CACHE:-}"
+            echo "close-cache=${CLOSE_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
@@ -713,6 +714,21 @@ jobs:
           private-substituters: ${{ secrets.private_substituters }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
+
+      - name: Reopen the pull request cache
+        if:
+          github.event_name == 'pull_request' && github.event.action ==
+          'reopened' && needs.configure.outputs.provision-cache != ''
+        env:
+          AUDIENCE: ${{ steps.setup.outputs.read-session-audience }}
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ needs.configure.outputs.provision-cache }}
+        run: |
+          set -euo pipefail
+          args=(cache reopen "$URL" "$CACHE" --github-oidc)
+          if [[ -n "$AUDIENCE" ]]; then args+=(--audience "$AUDIENCE"); fi
+          "${CUPBOARD_PATH}" "${args[@]}"
 
       - name: Evaluate target manifest
         id: targets
@@ -1023,16 +1039,16 @@ jobs:
             echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
 
-  remove-cache:
-    name: Remove the pull request's cache
+  close-cache:
+    name: Close the pull request's cache
     needs: configure
-    if: needs.configure.outputs.remove-cache != ''
+    if: needs.configure.outputs.close-cache != ''
     runs-on: ${{ inputs.plan-runner }}
     timeout-minutes: 10
     permissions:
       attestations: read # verify a selected cupboard release
       contents: read # check out the workflow code that installs cupboard
-      id-token: write # OIDC token for the cache removal
+      id-token: write # OIDC token for closing the cache
     steps:
       - uses: $/actions/prepare
         if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
@@ -1063,14 +1079,14 @@ jobs:
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
           audience: ${{ inputs.audience }}
 
-      - name: Remove the cache
+      - name: Close the cache
         env:
           AUDIENCE: ${{ steps.setup.outputs.read-session-audience }}
           CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
           URL: ${{ inputs.url }}
-          CACHE: ${{ needs.configure.outputs.remove-cache }}
+          CACHE: ${{ needs.configure.outputs.close-cache }}
         run: |
           set -euo pipefail
-          args=(cache remove "$URL" "$CACHE" --github-oidc --force --yes)
+          args=(cache close "$URL" "$CACHE" --github-oidc)
           if [[ -n "$AUDIENCE" ]]; then args+=(--audience "$AUDIENCE"); fi
           "${CUPBOARD_PATH}" "${args[@]}"

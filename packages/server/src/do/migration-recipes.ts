@@ -1672,10 +1672,192 @@ function retryLimitsRecipe(
 	};
 }
 
+interface CloseIndexedTable extends RebuildTable {
+	readonly columns: readonly string[];
+	readonly addedColumns: readonly string[];
+}
+
+const closeIndexedTables: readonly CloseIndexedTable[] = [
+	{
+		table: 'pending_upload',
+		create: 4,
+		copy: 5,
+		indexes: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+		columns: [
+			'id',
+			'cache_id',
+			'nar_hash',
+			'r2_key',
+			'metadata_json',
+			'created_at',
+			'expires_at',
+			'verdict',
+			'session_id',
+			'claimed_at',
+			'claim_owner',
+			'grace_decision_json',
+			'attach_root_name',
+			'recorded_verdict_json',
+			'settle_failures',
+			'settle_retry_after',
+			'last_settle_error',
+			'nar_refresh_pending',
+			'accepted_sequence',
+			'accepted_expires_at',
+			'commit_started_sequence',
+			'retry_started_active_ms',
+			'settle_exhaustion'
+		],
+		addedColumns: ['retention_epoch']
+	},
+	{
+		table: 'retention_root',
+		create: 24,
+		copy: 25,
+		indexes: [28, 29, 30, 31],
+		columns: ['cache_id', 'name', 'expires_at', 'created_at', 'updated_at'],
+		addedColumns: [
+			'retention_epoch',
+			'close_applied_epoch',
+			'close_grace_until'
+		]
+	}
+];
+
+function closeMirrorTriggers(
+	table: CloseIndexedTable,
+	isCanonical: boolean
+): readonly string[] {
+	const columns = [
+		'rowid',
+		...table.columns,
+		...(isCanonical ? table.addedColumns : [])
+	];
+	const target = isCanonical
+		? canonicalTableName(table.table)
+		: `__new_${table.table}`;
+	const insert = `INSERT OR REPLACE INTO \`${target}\` (${columns.map((column) => `\`${column}\``).join(', ')}) VALUES (${columns.map((column) => `NEW.\`${column}\``).join(', ')});`;
+	const remove = `DELETE FROM \`${target}\` WHERE rowid = OLD.rowid;`;
+	return [
+		`CREATE TRIGGER \`__bounded_close_${table.table}_insert\` AFTER INSERT ON \`${table.table}\` BEGIN ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_close_${table.table}_update\` AFTER UPDATE ON \`${table.table}\` BEGIN ${remove} ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_close_${table.table}_delete\` AFTER DELETE ON \`${table.table}\` BEGIN ${remove} END;`
+	];
+}
+
+function closeMirrorDrops(): readonly string[] {
+	return closeIndexedTables.flatMap((table) =>
+		['insert', 'update', 'delete'].map(
+			(event) => `DROP TRIGGER \`__bounded_close_${table.table}_${event}\`;`
+		)
+	);
+}
+
+function closeCanonicalCopyStage(
+	table: CloseIndexedTable
+): LocalMigrationStage {
+	const columns = ['rowid', ...table.columns, ...table.addedColumns]
+		.map((column) => `\`${column}\``)
+		.join(', ');
+	return {
+		kind: 'page',
+		name: `copy-canonical-${table.table}`,
+		source: table.table,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			`INSERT OR REPLACE INTO \`${canonicalTableName(table.table)}\` (${columns}) SELECT ${columns} FROM \`${table.table}\` WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+		]
+	};
+}
+
+function cacheCloseRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const dropOperational = [statementAt(statements, 6)];
+	const operationalTriggers = [statementAt(statements, 23)];
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-cache-close-shadows',
+				statements: [
+					...statements.slice(0, 4),
+					statementAt(statements, 32),
+					...closeIndexedTables.flatMap((table) => [
+						statementAt(statements, table.create),
+						...table.indexes.map((index) =>
+							shadowIndex(statementAt(statements, index), table.table)
+						),
+						...closeMirrorTriggers(table, false)
+					])
+				]
+			},
+			...closeIndexedTables.map((table) => copyStage(table, statements)),
+			{
+				kind: 'batch',
+				name: 'switch-cache-close-shadows',
+				statements: [
+					...closeMirrorDrops(),
+					...dropOperational,
+					...closeIndexedTables.flatMap((table) => [
+						`ALTER TABLE \`${table.table}\` RENAME TO \`__bounded_old_${table.table}\`;`,
+						`ALTER TABLE \`__new_${table.table}\` RENAME TO \`${table.table}\`;`
+					]),
+					...operationalTriggers
+				]
+			},
+			...closeIndexedTables.map((table) => drainStage(table.table)),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-cache-close-shadows',
+				statements: closeIndexedTables.flatMap((table) => [
+					`DROP TABLE \`__bounded_old_${table.table}\`;`,
+					canonicalTable(statementAt(statements, table.create), table.table),
+					...table.indexes.map((index) =>
+						canonicalIndex(statementAt(statements, index), table.table)
+					),
+					...closeMirrorTriggers(table, true)
+				])
+			},
+			...closeIndexedTables.map((table) => closeCanonicalCopyStage(table)),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-cache-close-shadows',
+				statements: [
+					...closeMirrorDrops(),
+					...dropOperational,
+					...closeIndexedTables.flatMap((table) => [
+						`ALTER TABLE \`${table.table}\` RENAME TO \`__bounded_noncanonical_${table.table}\`;`,
+						`ALTER TABLE \`${canonicalTableName(table.table)}\` RENAME TO \`${table.table}\`;`
+					]),
+					...operationalTriggers
+				]
+			},
+			...closeIndexedTables.map((table) => drainNoncanonicalStage(table.table)),
+			{
+				kind: 'batch',
+				name: 'finish-cache-close-shadows',
+				statements: closeIndexedTables.map(
+					(table) => `DROP TABLE \`__bounded_noncanonical_${table.table}\`;`
+				)
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
+	if (tag === '0071_cache_close') {
+		return cacheCloseRecipe(tag, statements);
+	}
+
 	if (tag === '0069_retry_limits') {
 		return retryLimitsRecipe(tag, statements);
 	}

@@ -12,7 +12,10 @@ import {
 	rootTargetsPageSchema
 } from '../retention.ts';
 
-import { cacheScopedProcedure } from './cache-scoped.ts';
+import {
+	cacheScopedProcedure,
+	writableCacheScopedProcedure
+} from './cache-scoped.ts';
 
 // Both listing routes accept the opaque cursor from the previous page and a
 // limit within the shared page bound. They are GET routes, so oRPC sends any
@@ -26,7 +29,7 @@ const retentionMigrationPendingError = {
 	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
 };
 
-const rootSet = cacheScopedProcedure(
+const rootSet = writableCacheScopedProcedure(
 	{
 		method: 'PUT',
 		suffix: '/roots/{name}',
@@ -38,7 +41,7 @@ const rootSet = cacheScopedProcedure(
 	rootSetResponseSchema
 );
 
-const rootEnsure = cacheScopedProcedure(
+const rootEnsure = writableCacheScopedProcedure(
 	{
 		method: 'POST',
 		suffix: '/roots/{name}/ensure',

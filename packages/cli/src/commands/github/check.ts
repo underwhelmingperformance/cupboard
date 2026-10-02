@@ -27,6 +27,7 @@ import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { type ReadUser } from '@cupboard/shared/http';
 
 import { isAbortError } from '../../abort.ts';
+import { cacheLifecycleAuthorizationDetails } from '../../auth/attenuate.ts';
 import { cacheLabel } from '../../client/client.ts';
 import {
 	GithubCheckFailedError,
@@ -40,7 +41,11 @@ import {
 } from '../oidc-trust/github.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
 
-import { githubBranchClaims, githubPullRequestClaims } from './claims.ts';
+import {
+	githubBranchClaims,
+	githubMergedPullRequestClaims,
+	githubPullRequestClaims
+} from './claims.ts';
 import {
 	parseExactWorkflowReference,
 	pullRequestCacheName,
@@ -437,6 +442,7 @@ export async function runGithubCheck(
 				}),
 				pullRequestRequests
 			),
+
 			checkTrustRule(
 				`${options.branch} trust rule`,
 				rules,
@@ -449,7 +455,21 @@ export async function runGithubCheck(
 			),
 			await checkReuseView(url, identity, client, dependencies.fetchCacheInfo),
 			await checkPullRequestCacheAccess(identity, client),
-			checkRootPrefix(options, identity)
+			checkRootPrefix(options, identity),
+			checkTrustRule(
+				'merged pull-request closure trust rule',
+				rules,
+				githubMergedPullRequestClaims(url, identity, {
+					baseBranch: identity.defaultBranch,
+					workflowReference: workflowReference.reference
+				}),
+				[
+					cacheLifecycleAuthorizationDetails({
+						cache: pullRequestCacheScope,
+						action: 'close'
+					})
+				]
+			)
 		]
 	);
 

@@ -7,6 +7,7 @@ name: cache publish
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   push:
     branches:
       - main
@@ -23,7 +24,9 @@ jobs:
   # resolves from that commit, which includes current protocol changes.
   publish-pr:
     name: publish (pr cache)
-    if: github.event_name == 'pull_request'
+    if:
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.id == github.repository_id
     permissions:
       attestations: write # allow the attest action to upload bundles to the repository's attestation store
       contents: read # check out the flake source
@@ -36,6 +39,7 @@ jobs:
       build: rebuild
       trusted-public-key: cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU=
       cache: pr-${{ github.event.pull_request.number }}
+      manage-pr-cache: true
       root:
         github:${{ github.repository }}/pr-${{ github.event.pull_request.number
         }}
