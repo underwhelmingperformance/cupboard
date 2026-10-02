@@ -93,14 +93,27 @@ authority. Temporary probe failures still exit 75.
   request the new URL as their audience, so pass `--audience` with the old URL
   or add a control trust rule for the new URL. See
   [Moving to a new URL](./deploying.md#moving-to-a-new-url).
+- Before routing a new custom domain to a deployment last updated by v0.0.35 or
+  earlier, run `cupboard init` once at its current URL. That update records the
+  current URL before the domain changes. Then route the new domain and run
+  `init --domain <host>`. Existing tenants keep their original issuer and
+  audience, so keep their original URLs routed and in caller workflows.
 - `init` refuses a plan that selects a D1 database other than the deployed
   Workers' database if either database records an admin. See
   [Changing the control database](./deploying.md#changing-the-control-database).
 - If the control Worker of a claimed deployment was deleted, `init` can't update
   the deployment until you redeploy the control Worker with Wrangler. See
   [If the control Worker was deleted](./deploying.md#if-the-control-worker-was-deleted).
+- Deployment plans now use the existing control Worker's resource names and cron
+  triggers. Older CLIs could select new, empty resources when release defaults
+  changed. If an earlier update did that, recover the original names in the plan
+  menu. When either database records an admin, first rebind the control Worker
+  to the original database, then run `init` as that database's admin. See
+  [Resource names][resource-names] and [Changing the control database].
 
 [first-tenant]: ./deploying.md#the-first-tenant
+[resource-names]: ./deploying.md#resource-names-and-cron-triggers
+[Changing the control database]: ./deploying.md#changing-the-control-database
 
 ### Claiming a new deployment
 
@@ -123,8 +136,15 @@ authority. Temporary probe failures still exit 75.
 ### Schema transitions
 
 - The deploy records its progress in the new `deployment_transition` table, and
-  keeps the `deployment_phase` row up to date for v0.0.34 and v0.0.35. See
+  keeps the `deployment_phase` row up to date for v0.0.34 and v0.0.35. The
+  independent `deployment-transitions` transition creates that table with
+  migration `0031`; it has no contract migration. See
   [What a deploy does](./upgrading.md#what-a-deploy-does).
+- The independent `attestation-path-index` transition applies migration `0032`
+  to index attestation references by tenant, store-path hash and generation. The
+  index is applied during contract, after the earlier cache identity transition
+  has rebuilt the reference table. Neither `0031` nor `0032` requires a separate
+  operator command; `init` records their progress.
 - The `deployment.transitions` control procedure replaces `deployment.phase`.
   Use `cupboard deployment status` and `cupboard deployment resume` from the
   same release as the deployed control Worker. The `--output-mode json` output
@@ -154,6 +174,39 @@ The independent `publication-identity` transition adds migration `0034`. It
 records which upload committed each NAR reference so the server can distinguish
 a completed upload from a competing or repeated commit. Existing reservations
 are not copied because they do not establish which upload completed publication.
+
+### NixOS and Home Manager modules
+
+The modules keep the same `nix.cupboard.caches` interface. Public cache URLs and
+all trusted keys are now appended through `nix.extraOptions`, after
+`nix.settings` and the user's own `nix.extraOptions`. They are no longer
+included in the evaluated `nix.settings.substituters` and
+`nix.settings.trusted-public-keys` options. Update configuration that reads
+those options if it needs to include Cupboard caches or keys. Nix still reads
+the appended values from `nix.conf`. See [NixOS module configuration].
+
+Private cache files now use `!include`, so a missing or unreadable file can
+silently remove the private cache from the substituter list. Check the cache
+after creating or moving the file, and keep every parent directory searchable by
+accounts that read the including `nix.conf`. If a parent directory cannot be
+searched, Nix can ignore the whole including file for that account. See [Private
+module credentials].
+
+[NixOS module configuration]: ../use/nix-clients.md#nixos-and-nix-darwin
+[Private module credentials]: ../use/private-caches.md#nixos-and-home-manager
+
+### Tenant lifecycle commands
+
+Retrying `tenant create` compares the owner's issuer exactly, including a
+trailing slash. A differently spelled issuer now returns HTTP 409 instead of
+matching the existing tenant. Reuse the original issuer on retries; this does
+not change an existing tenant's issuer.
+
+`tenant suspend` and `tenant resume` now return HTTP 409 when removal is already
+in progress. They cannot interrupt or reverse offboarding. Once removal
+finishes, both commands return HTTP 410. See [Removing a tenant].
+
+[Removing a tenant]: ./tenants.md#removing-a-tenant
 
 ### Exit statuses and output
 
