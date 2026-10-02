@@ -280,8 +280,8 @@ describe('cache teardown', () => {
 				const cache = instance.context.cacheRepository.require(buildsCache);
 				const now = isoTimestamp(new Date());
 				const generation = narInfoGenerationSchema.parse(0);
-				for (let offset = 0; offset < paths.length; offset += 10) {
-					const batch = paths.slice(offset, offset + 10);
+				for (let offset = 0; offset < paths.length; offset += 9) {
+					const batch = paths.slice(offset, offset + 9);
 					instance.context.db
 						.insert(schema.narInfos)
 						.values(

@@ -260,6 +260,13 @@
 			"when": 1790920824494,
 			"tag": "0036_path_read_authority_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 37,
+			"version": "6",
+			"when": 1790946562316,
+			"tag": "0037_tenant_retry_clock",
+			"breakpoints": true
 		}
 	]
 }

@@ -104,7 +104,7 @@ describe('checkD1Migrations', () => {
 				...transition.expand,
 				...transition.contract
 			]).length,
-			replayed: []
+			replayed: ['tenant-retry-clock']
 		});
 	});
 

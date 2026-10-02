@@ -132,6 +132,72 @@ describe('maintenance eligibility projection', () => {
 		});
 	});
 
+	it.each(['queue', 'diagnostic'] as const)(
+		'projects the earliest inheritance %s deadline even after a paused pass',
+		async (kind) => {
+			const deadline = isoTimestampSchema.parse('2026-01-01T00:05:00.000Z');
+			await runInDurableObject(currentServer(), async (instance) => {
+				const cache = resolvedCache(instance.context);
+				instance.context.db
+					.insert(schema.retryEligibility)
+					.values({ id: 'tenant', isEligible: false })
+					.run();
+				const identity = {
+					cacheId: cache.id,
+					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+					generation: narInfoGenerationSchema.parse(0)
+				};
+				switch (kind) {
+					case 'queue': {
+						instance.context.db
+							.insert(schema.attestationInheritances)
+							.values({
+								...identity,
+								narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
+								notBefore: deadline
+							})
+							.run();
+						break;
+					}
+					case 'diagnostic': {
+						instance.context.db
+							.insert(schema.attestationInheritanceFailures)
+							.values({
+								...identity,
+								category: 'inheritance-failed',
+								exhaustion: 'attempt-limit',
+								failures: 12,
+								exhaustedAt: isoTimestamp(now),
+								expiresAt: deadline
+							})
+							.run();
+						break;
+					}
+				}
+				await new MaintenanceEligibilityService(instance.context).reconcile(
+					now
+				);
+			});
+			const deferred = await eligibilityRow();
+			const later = new Date(now.getTime() + 6 * 60_000);
+			await runInDurableObject(currentServer(), (instance) =>
+				new MaintenanceEligibilityService(instance.context).reconcile(later)
+			);
+			expect({ deferred, due: await eligibilityRow() }).toStrictEqual({
+				deferred: {
+					tenant: fixtureTenant,
+					nextWakeAt: deadline,
+					reconciledAt: now.toISOString()
+				},
+				due: {
+					tenant: fixtureTenant,
+					nextWakeAt: wakeImmediately,
+					reconciledAt: later.toISOString()
+				}
+			});
+		}
+	);
+
 	it('can invalidate an idle projection before deferred work is created', async () => {
 		const projectionWriteFailure = new MaintenanceProjectionTestError('insert');
 

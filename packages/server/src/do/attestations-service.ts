@@ -35,7 +35,17 @@ import {
 	DsseDecodeError,
 	inTotoStatementSchema
 } from '@cupboard/shared/in-toto';
-import { and, eq, exists, inArray, lte, or, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	inArray,
+	isNull,
+	lte,
+	or,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import { alias } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
@@ -65,6 +75,7 @@ import {
 	InvalidPushIdError,
 	QuotaExceededError,
 	SharedFactsUnavailableError,
+	SubrequestSliceExceededError,
 	TenantUsageMissingError,
 	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
@@ -76,9 +87,15 @@ import {
 	isNotModified,
 	parseAttestationDigestName,
 	type R2ObjectKey,
-	uncachedNotFoundResponse
+	uncachedNotFoundResponse,
+	verifyClaimLeaseMs
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import {
+	type EligibleRetryClock,
+	type RetryExhaustion,
+	RetryPolicy
+} from '../policy/retry.ts';
 import {
 	isListOfCommittedGeneration,
 	listGenerationMetadataKey,
@@ -105,7 +122,9 @@ import {
 	ProtectedInheritanceService,
 	protectedSourcePageSize
 } from './protected-inheritance-service.ts';
+import { RetryClockService } from './retry-clock-service.ts';
 import {
+	affordableSubrequestOperations,
 	hasSubrequestsFor,
 	requireSubrequestsFor
 } from './subrequest-slice.ts';
@@ -151,7 +170,7 @@ export const maxInheritedBundlesPerPass = 64;
 export const inheritanceDrainPageSize = 100;
 
 export const inheritanceRetryDelayMs = 60 * 1000;
-const inheritanceMaxRetryDelayMs = 60 * 60 * 1000;
+const inheritanceDiagnosticTtlMs = 7 * 24 * 60 * 60_000;
 const inheritanceContinuationDelayMs = 1;
 
 /**
@@ -162,6 +181,7 @@ const inheritanceContinuationDelayMs = 1;
 type InheritanceResult =
 	| 'complete'
 	| 'over-quota'
+	| 'lease-contended'
 	| 'budget-exhausted'
 	| 'budget-exhausted-after-progress'
 	| 'superseded';
@@ -195,24 +215,6 @@ export interface InheritanceSourceRow {
 	readonly available: boolean;
 }
 
-export interface ExistingInheritanceRow {
-	readonly storePathHash: StorePathHash;
-	readonly generation: NarInfoGeneration;
-}
-
-/**
- * A bounded preview of source bundles for each path. Remaining source
- * generations require the durable traversal.
- */
-export interface InheritancePrefetch {
-	readonly candidates: ReadonlySet<string>;
-	readonly sources: ReadonlyMap<string, readonly InheritanceSourceRow[]>;
-	readonly existing: ReadonlyMap<
-		StorePathHash,
-		readonly ExistingInheritanceRow[]
-	>;
-}
-
 /**
  * One committed path that inherits attestations. The path and NAR hash come
  * from the committed narinfo row.
@@ -222,13 +224,7 @@ export interface InheritanceRequest {
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
-}
-
-export function inheritanceSourceKey(
-	storePathHash: StorePathHash,
-	narHash: NixSha256HashString
-): string {
-	return JSON.stringify([storePathHash, narHash]);
+	readonly claimOwner?: string;
 }
 
 export class AttestationsService {
@@ -860,15 +856,20 @@ export class AttestationsService {
 		logger: Logger,
 		cache: ResolvedCache,
 		rows: readonly (typeof schema.attestationInheritances.$inferSelect)[],
-		dequeued: DequeuedInheritance[]
+		state: {
+			readonly clock: EligibleRetryClock;
+			readonly dequeued: DequeuedInheritance[];
+		}
 	): Promise<{
 		readonly hasProgressed: boolean;
 		readonly isBudgetExhausted: boolean;
 	}> {
+		const { clock, dequeued } = state;
+		const policy = new RetryPolicy('inheritance');
 		const stale = rows.filter(
 			(row) => !this.isQueuedGenerationCurrent(cache, row)
 		);
-		const live = rows.filter((row) =>
+		const current = rows.filter((row) =>
 			this.isQueuedGenerationCurrent(cache, row)
 		);
 
@@ -876,17 +877,41 @@ export class AttestationsService {
 			this.dequeueInheritance(row, dequeued);
 		}
 
+		const live = current.map((row) => ({
+			...row,
+			retryStartedActiveMs:
+				row.retryStartedActiveMs ?? clock.elapsedAt(Date.now())
+		}));
+
 		let hasProgressed = stale.length > 0;
 
-		for (const row of live) {
-			const attempt = this.startInheritanceAttempt(row);
+		for (const candidate of live) {
+			const row = this.startInheritanceAttempt(candidate);
+			if (row === undefined) {
+				continue;
+			}
+			const reason = policy.exhaustion({
+				failures: row.attempts,
+				eligibleAgeMs: clock.ageAt(row.retryStartedActiveMs ?? 0, Date.now())
+			});
+			if (reason !== undefined) {
+				this.exhaustInheritance(
+					logger,
+					row,
+					{ reason, failures: row.attempts },
+					dequeued
+				);
+				hasProgressed = true;
+				continue;
+			}
 
 			try {
 				const result = await this.inheritFromTenant(logger, {
 					cache,
 					storePathHash: row.storePathHash,
 					generation: row.generation,
-					narHash: row.narHash
+					narHash: row.narHash,
+					claimOwner: row.claimOwner ?? undefined
 				});
 
 				if (
@@ -897,10 +922,21 @@ export class AttestationsService {
 					this.restoreInheritanceRow(row);
 
 					return {
-						hasProgressed:
-							hasProgressed || result === 'budget-exhausted-after-progress',
+						hasProgressed: true,
 						isBudgetExhausted: true
 					};
+				}
+
+				if (result === 'lease-contended') {
+					const retryAt = isoTimestamp(
+						new Date(Date.now() + inheritanceRetryDelayMs)
+					);
+					this.updateInheritanceRow(row, {
+						attempts: row.attempts,
+						notBefore: retryAt
+					});
+					hasProgressed = true;
+					continue;
 				}
 
 				if (result !== 'complete') {
@@ -913,7 +949,17 @@ export class AttestationsService {
 
 				this.dequeueInheritance(row, dequeued);
 			} catch (error) {
-				await this.recordInheritanceFailure(logger, cache, row, attempt, error);
+				if (
+					error instanceof SubrequestSliceExceededError ||
+					error instanceof TenantWritesStoppedError
+				) {
+					this.restoreInheritanceRow(row);
+					if (error instanceof TenantWritesStoppedError) {
+						await new RetryClockService(this.context).read();
+					}
+					return { hasProgressed, isBudgetExhausted: true };
+				}
+				await this.recordInheritanceFailure(logger, row, clock, dequeued);
 			}
 
 			hasProgressed = true;
@@ -939,36 +985,70 @@ export class AttestationsService {
 			readonly storePathHash: StorePathHash;
 			readonly generation: NarInfoGeneration;
 			readonly narHash: NixSha256HashString;
+			readonly claimOwner?: string | null;
 		}
 	): boolean {
 		const [narInfo] = this.narInfoObjects.narInfoRowsFor(cache, [
 			queued.storePathHash
 		]);
 
+		if (typeof queued.claimOwner === 'string') {
+			const queue = schema.attestationInheritances;
+			const owned = and(
+				eq(queue.cacheId, cache.id),
+				eq(queue.storePathHash, queued.storePathHash),
+				eq(queue.generation, queued.generation),
+				eq(queue.claimOwner, queued.claimOwner)
+			);
+			if (
+				this.context.db.select().from(queue).where(owned).get() === undefined
+			) {
+				return false;
+			}
+		}
 		return (
 			narInfo?.generation === queued.generation &&
 			narInfo.narHash === queued.narHash
 		);
 	}
 
-	// Record the attempt before work, so a runtime interruption also delays the
-	// next retry.
+	private inheritanceClaimFilter(
+		row: typeof schema.attestationInheritances.$inferSelect
+	): SQL | undefined {
+		const table = schema.attestationInheritances;
+		const owner =
+			row.claimOwner === null
+				? and(isNull(table.claimOwner), eq(table.notBefore, row.notBefore))
+				: eq(table.claimOwner, row.claimOwner);
+		return and(
+			eq(table.cacheId, row.cacheId),
+			eq(table.storePathHash, row.storePathHash),
+			eq(table.generation, row.generation),
+			owner
+		);
+	}
+
 	private startInheritanceAttempt(
 		row: typeof schema.attestationInheritances.$inferSelect
-	): number {
-		const attempt = row.attempts + 1;
-		const delay = Math.min(
-			inheritanceRetryDelayMs * 2 ** Math.min(row.attempts, 6),
-			inheritanceMaxRetryDelayMs
+	): typeof schema.attestationInheritances.$inferSelect | undefined {
+		const table = schema.attestationInheritances;
+		const now = isoTimestamp(new Date());
+		const notBefore = isoTimestamp(new Date(Date.now() + verifyClaimLeaseMs));
+		const due = and(
+			this.inheritanceClaimFilter(row),
+			lte(table.notBefore, now)
 		);
-		const retryAt = new Date(Date.now() + delay);
-
-		this.updateInheritanceRow(row, {
-			attempts: attempt,
-			notBefore: isoTimestamp(retryAt)
-		});
-
-		return attempt;
+		return this.context.db
+			.update(table)
+			.set({
+				claimOwner: crypto.randomUUID(),
+				retryStartedActiveMs: row.retryStartedActiveMs,
+				notBefore
+			})
+			.where(due)
+			.returning()
+			.all()
+			.at(0);
 	}
 
 	private restoreInheritanceRow(
@@ -983,20 +1063,18 @@ export class AttestationsService {
 
 	private updateInheritanceRow(
 		row: typeof schema.attestationInheritances.$inferSelect,
-		values: { readonly attempts: number; readonly notBefore: IsoTimestamp }
+		values: {
+			readonly attempts: number;
+			readonly notBefore: IsoTimestamp;
+			readonly retryStartedActiveMs?: number | null;
+		}
 	): void {
 		const table = schema.attestationInheritances;
 
 		this.context.db
 			.update(table)
-			.set(values)
-			.where(
-				and(
-					eq(table.cacheId, row.cacheId),
-					eq(table.storePathHash, row.storePathHash),
-					eq(table.generation, row.generation)
-				)
-			)
+			.set({ ...values, claimOwner: sql`null` })
+			.where(this.inheritanceClaimFilter(row))
 			.run();
 	}
 
@@ -1004,11 +1082,9 @@ export class AttestationsService {
 		row: typeof schema.attestationInheritances.$inferSelect,
 		dequeued: DequeuedInheritance[]
 	): void {
-		new ProtectedInheritanceService(this.context).releaseDestination(
-			row.cacheId,
-			row.storePathHash,
-			row.generation
-		);
+		const table = schema.attestationInheritances;
+
+		this.context.db.delete(table).where(this.inheritanceClaimFilter(row)).run();
 		dequeued.push({
 			cacheId: row.cacheId,
 			storePathHash: row.storePathHash,
@@ -1017,27 +1093,101 @@ export class AttestationsService {
 		});
 	}
 
+	private exhaustInheritance(
+		logger: Logger,
+		row: typeof schema.attestationInheritances.$inferSelect,
+		outcome: { readonly reason: RetryExhaustion; readonly failures: number },
+		dequeued: DequeuedInheritance[]
+	): void {
+		const exhaustedAt = isoTimestamp(new Date());
+		const expiresAt = isoTimestamp(
+			new Date(Date.now() + inheritanceDiagnosticTtlMs)
+		);
+		const current = and(
+			eq(schema.narInfos.cacheId, row.cacheId),
+			eq(schema.narInfos.storePathHash, row.storePathHash),
+			eq(schema.narInfos.generation, row.generation),
+			eq(schema.narInfos.narHash, row.narHash)
+		);
+		const ownsClaim = this.context.db
+			.select()
+			.from(schema.attestationInheritances)
+			.where(this.inheritanceClaimFilter(row))
+			.get();
+		if (ownsClaim === undefined) {
+			return;
+		}
+		this.context.db.transaction(() => {
+			this.context.db
+				.update(schema.narInfos)
+				.set({ inheritanceExhausted: true })
+				.where(current)
+				.run();
+
+			this.context.db
+				.insert(schema.attestationInheritanceFailures)
+				.values({
+					cacheId: row.cacheId,
+					storePathHash: row.storePathHash,
+					generation: row.generation,
+					category: 'inheritance-failed',
+					exhaustion: outcome.reason,
+					failures: outcome.failures,
+					exhaustedAt,
+					expiresAt
+				})
+				.onConflictDoNothing()
+				.run();
+			this.dequeueInheritance(row, dequeued);
+		});
+		logger.warn('attestation inheritance exhausted', {
+			cacheId: row.cacheId,
+			storePathHash: row.storePathHash,
+			generation: row.generation,
+			category: 'inheritance-failed',
+			exhaustion: outcome.reason,
+			failures: outcome.failures
+		});
+	}
+
 	private async recordInheritanceFailure(
 		logger: Logger,
-		cache: ResolvedCache,
 		row: typeof schema.attestationInheritances.$inferSelect,
-		attempt: number,
-		error: unknown
+		clock: EligibleRetryClock,
+		dequeued: DequeuedInheritance[]
 	): Promise<void> {
-		const details = {
-			cache: cache.scope,
+		const now = Date.now();
+		const startedAt = row.retryStartedActiveMs ?? clock.elapsedAt(now);
+		const decision = new RetryPolicy('inheritance').afterFailure({
+			failures: row.attempts,
+			eligibleAgeMs: clock.ageAt(startedAt, now)
+		});
+		if (decision.kind === 'exhausted') {
+			this.exhaustInheritance(
+				logger,
+				row,
+				{ reason: decision.reason, failures: decision.failures },
+				dequeued
+			);
+			return;
+		}
+		const notBefore = isoTimestamp(new Date(Date.now() + decision.delayMs));
+		this.updateInheritanceRow(row, {
+			attempts: decision.failures,
+			retryStartedActiveMs: row.retryStartedActiveMs,
+			notBefore
+		});
+		logger.warn('attestation inheritance failed', {
+			cacheId: row.cacheId,
 			storePathHash: row.storePathHash,
-			attempts: attempt,
-			errorName: error instanceof Error ? error.name : 'UnknownError',
-			errorMessage: error instanceof Error ? error.message : String(error)
-		};
-
-		logger.warn('attestation inheritance failed', details);
-		const delay = Math.min(
-			inheritanceRetryDelayMs * 2 ** Math.min(row.attempts, 6),
-			inheritanceMaxRetryDelayMs
+			generation: row.generation,
+			failures: decision.failures,
+			category: 'inheritance-failed'
+		});
+		await armAlarmNoLaterThan(
+			this.context.ctx.storage,
+			Date.now() + decision.delayMs
 		);
-		await armAlarmNoLaterThan(this.context.ctx.storage, Date.now() + delay);
 	}
 
 	private async checkBundleCharge(
@@ -1366,7 +1516,10 @@ export class AttestationsService {
 		const queueFilter = and(
 			eq(table.cacheId, cache.id),
 			eq(table.storePathHash, storePathHash),
-			eq(table.generation, generation)
+			eq(table.generation, generation),
+			request.claimOwner === undefined
+				? undefined
+				: eq(table.claimOwner, request.claimOwner)
 		);
 		const referenceTable = d1Schema.attestationReference;
 		const destinationIdentity = cacheIdentityCondition(
@@ -1421,6 +1574,9 @@ export class AttestationsService {
 				cohort.queue.sourceReferenceGeneration,
 				cohort.queue.sourceReferenceComplete
 			).all();
+			if (!this.isQueuedGenerationCurrent(cache, request)) {
+				return { kind: 'superseded' as const };
+			}
 			if (reference === undefined) {
 				service.advanceSource(cache, storePathHash, generation, cohort);
 				continue;
@@ -1464,6 +1620,9 @@ export class AttestationsService {
 				}),
 				existingQuery
 			]);
+			if (!this.isQueuedGenerationCurrent(cache, request)) {
+				return { kind: 'superseded' as const };
+			}
 			if (rows.length > 0) {
 				return {
 					kind: 'page' as const,
@@ -1506,6 +1665,13 @@ export class AttestationsService {
 		narHash: NixSha256HashString,
 		uploadId?: UploadId
 	): Promise<void> {
+		const current = this.narInfoObjects
+			.narInfoRowsFor(cache, [storePathHash])
+			.at(0);
+		if (current?.generation === generation && current.inheritanceExhausted) {
+			return;
+		}
+
 		this.context.db.transaction((tx) => {
 			tx.insert(schema.attestationInheritances)
 				.values({
@@ -1531,15 +1697,27 @@ export class AttestationsService {
 	 * time, so a scheduled retry is not lost when an earlier alarm runs first.
 	 */
 	nextInheritanceAt(): number | undefined {
-		const table = schema.attestationInheritances;
-		const row = this.context.db
-			.select({ notBefore: table.notBefore })
-			.from(table)
-			.orderBy(table.notBefore)
+		const diagnostic = this.context.db
+			.select({ expiresAt: schema.attestationInheritanceFailures.expiresAt })
+			.from(schema.attestationInheritanceFailures)
+			.orderBy(schema.attestationInheritanceFailures.expiresAt)
 			.limit(1)
 			.get();
-
-		return row === undefined ? undefined : Date.parse(row.notBefore);
+		const expiresAt =
+			diagnostic === undefined ? undefined : Date.parse(diagnostic.expiresAt);
+		if (new RetryClockService(this.context).isBlocked()) {
+			return expiresAt;
+		}
+		const row = this.context.db
+			.select({ notBefore: schema.attestationInheritances.notBefore })
+			.from(schema.attestationInheritances)
+			.orderBy(schema.attestationInheritances.notBefore)
+			.limit(1)
+			.get();
+		if (row === undefined) {
+			return expiresAt;
+		}
+		return Math.min(Date.parse(row.notBefore), expiresAt ?? Infinity);
 	}
 
 	/**
@@ -1553,6 +1731,29 @@ export class AttestationsService {
 	): Promise<InheritanceDrainOutcome> {
 		const table = schema.attestationInheritances;
 		const now = isoTimestamp(new Date());
+		const expired = this.context.db
+			.select()
+			.from(schema.attestationInheritanceFailures)
+			.where(lte(schema.attestationInheritanceFailures.expiresAt, now))
+			.orderBy(schema.attestationInheritanceFailures.expiresAt)
+			.limit(inheritanceDrainPageSize)
+			.all();
+		for (const row of expired) {
+			this.context.db
+				.delete(schema.attestationInheritanceFailures)
+				.where(
+					and(
+						eq(schema.attestationInheritanceFailures.cacheId, row.cacheId),
+						eq(
+							schema.attestationInheritanceFailures.storePathHash,
+							row.storePathHash
+						),
+						eq(schema.attestationInheritanceFailures.generation, row.generation)
+					)
+				)
+				.run();
+		}
+
 		const queued = this.context.db
 			.select()
 			.from(table)
@@ -1565,6 +1766,17 @@ export class AttestationsService {
 			)
 			.limit(inheritanceDrainPageSize)
 			.all();
+		if (queued.length === 0) {
+			return {
+				progress: expired.length > 0 ? 'progressed' : 'stalled',
+				dequeued: []
+			};
+		}
+		const clock = await new RetryClockService(this.context).read();
+		if (!clock?.isActive) {
+			return { progress: 'progressed', dequeued: [] };
+		}
+
 		const byCache = Map.groupBy(queued, (row) => row.cacheId);
 		const dequeued: DequeuedInheritance[] = [];
 		let hasProgressed = false;
@@ -1574,7 +1786,7 @@ export class AttestationsService {
 				logger,
 				this.context.cacheRepository.resolvedForId(cacheId),
 				rows,
-				dequeued
+				{ clock, dequeued }
 			);
 
 			hasProgressed ||= outcome.hasProgressed;
@@ -1585,72 +1797,6 @@ export class AttestationsService {
 		}
 
 		return { progress: hasProgressed ? 'progressed' : 'stalled', dequeued };
-	}
-
-	async prefetchInheritanceSources(
-		cache: ResolvedCache,
-		candidates: readonly {
-			readonly storePathHash: StorePathHash;
-			readonly narHash: NixSha256HashString;
-		}[]
-	): Promise<InheritancePrefetch> {
-		const sources = new Map<string, readonly InheritanceSourceRow[]>();
-		const lookedUp = new Set<string>();
-		for (const candidate of candidates) {
-			const key = inheritanceSourceKey(
-				candidate.storePathHash,
-				candidate.narHash
-			);
-			if (lookedUp.has(key)) {
-				continue;
-			}
-			if (!hasSubrequestsFor(2)) {
-				break;
-			}
-			const source = new ProtectedInheritanceService(
-				this.context
-			).firstReadableSource(candidate.storePathHash, candidate.narHash);
-			if (source === undefined) {
-				continue;
-			}
-			const [reference] = await this.sourceReferenceQuery(
-				source.scope,
-				candidate.storePathHash,
-				source.generation,
-				-1,
-				true
-			).all();
-			if (reference === undefined) {
-				continue;
-			}
-			const candidateFilter =
-				and(
-					eq(
-						d1Schema.attestationReference.storePathHash,
-						candidate.storePathHash
-					)
-				) ?? sql`false`;
-
-			const [rows] = await this.context.d1.batch([
-				this.inheritanceSourceQuery({
-					cache,
-					source: source.scope,
-					narHash: candidate.narHash,
-					referenceGeneration: reference.generation,
-					protected: false,
-					candidates: candidateFilter,
-					limit: maxInheritedBundlesPerPass + 1
-				})
-			]);
-			if (rows.length > 0) {
-				sources.set(
-					key,
-					rows.filter((row) => row.available)
-				);
-			}
-			lookedUp.add(key);
-		}
-		return { candidates: lookedUp, sources, existing: new Map() };
 	}
 
 	async inheritFromTenant(
@@ -1666,7 +1812,10 @@ export class AttestationsService {
 			eq(queue.cacheId, cache.id),
 			eq(queue.storePathHash, storePathHash),
 			eq(queue.generation, generation),
-			eq(queue.narHash, narHash)
+			eq(queue.narHash, narHash),
+			request.claimOwner === undefined
+				? undefined
+				: eq(queue.claimOwner, request.claimOwner)
 		);
 
 		const advanceCursor = (source: InheritanceSourceRow) => {
@@ -1686,6 +1835,13 @@ export class AttestationsService {
 			return 'budget-exhausted';
 		}
 
+		const maxRows = Math.min(
+			maxInheritedBundlesPerPass,
+			affordableSubrequestOperations(
+				inheritedBundleSubrequests,
+				lookup + listSubrequests
+			)
+		);
 		const destinationIdentity = cacheIdentityCondition(
 			d1Schema.attestationReference.cacheKind,
 			d1Schema.attestationReference.cacheName,
@@ -1694,6 +1850,9 @@ export class AttestationsService {
 		const otherSource = sql`not (${destinationIdentity} and ${eq(d1Schema.attestationReference.generation, generation)})`;
 		const sourceService = new ProtectedInheritanceService(this.context);
 		const page = await this.nextInheritancePage(request);
+		if (page.kind === 'superseded') {
+			return 'superseded';
+		}
 		if (page.kind !== 'page') {
 			return page.kind === 'complete'
 				? 'complete'
@@ -1711,12 +1870,17 @@ export class AttestationsService {
 		const missingRows = sourceRows.slice(0, maxInheritedBundlesPerPass);
 		let result: InheritanceResult = 'complete';
 
-		if (sourceRows.length > maxInheritedBundlesPerPass) {
+		if (
+			missingRows.filter((row) => row.available && !row.alreadyInherited)
+				.length > maxRows ||
+			sourceRows.length > maxInheritedBundlesPerPass
+		) {
 			result = 'budget-exhausted';
 		}
 
+		let attemptedRows = 0;
 		try {
-			for (const row of missingRows) {
+			inheritanceSources: for (const row of missingRows) {
 				if (!row.available) {
 					advanceCursor(row);
 					hasProgressed = true;
@@ -1728,11 +1892,15 @@ export class AttestationsService {
 					hasProgressed = true;
 					continue;
 				}
-				if (!hasSubrequestsFor(inheritedBundleSubrequests + listSubrequests)) {
+				if (
+					attemptedRows >= maxRows ||
+					!hasSubrequestsFor(inheritedBundleSubrequests + listSubrequests)
+				) {
 					result = 'budget-exhausted';
 					break;
 				}
 
+				attemptedRows += 1;
 				const object =
 					row.incarnation === null
 						? undefined
@@ -1812,11 +1980,13 @@ export class AttestationsService {
 					) {
 						return 'unavailable' as const;
 					}
+					if (source.registryState === 'pending') {
+						return 'lease-contended' as const;
+					}
 					if (
 						source.incarnation !== row.incarnation ||
 						(source.registryIncarnation !== null &&
-							source.registryIncarnation !== row.incarnation) ||
-						source.registryState === 'pending'
+							source.registryIncarnation !== row.incarnation)
 					) {
 						throw new AttestationInheritanceSourceChangedError(row.digest);
 					}
@@ -1841,9 +2011,13 @@ export class AttestationsService {
 					);
 				});
 
-				if (outcome === 'superseded' || outcome === 'over-quota') {
-					result = outcome;
-					break;
+				switch (outcome) {
+					case 'superseded':
+					case 'over-quota':
+					case 'lease-contended': {
+						result = outcome;
+						break inheritanceSources;
+					}
 				}
 
 				shouldWriteList ||= outcome !== 'unavailable';
@@ -1856,12 +2030,12 @@ export class AttestationsService {
 			if (shouldWriteList) {
 				try {
 					await this.writeInheritedList(request);
-				} catch (listError) {
+				} catch {
 					logger.warn('attestation inheritance list write failed', {
-						cache: cache.scope,
+						cacheId: cache.id,
 						storePathHash,
-						errorMessage:
-							listError instanceof Error ? listError.message : String(listError)
+						generation,
+						category: 'inheritance-list-write-failed'
 					});
 				}
 			}
@@ -1871,6 +2045,10 @@ export class AttestationsService {
 
 		if (shouldWriteList && result !== 'budget-exhausted') {
 			await this.writeInheritedList(request);
+		}
+
+		if (!this.isQueuedGenerationCurrent(cache, request)) {
+			return 'superseded';
 		}
 
 		if (result === 'complete') {
@@ -1899,6 +2077,9 @@ export class AttestationsService {
 					: 'budget-exhausted-after-progress';
 			}
 			const next = await this.nextInheritancePage(request);
+			if (next.kind === 'superseded') {
+				return 'superseded';
+			}
 			return next.kind === 'complete'
 				? 'complete'
 				: 'budget-exhausted-after-progress';

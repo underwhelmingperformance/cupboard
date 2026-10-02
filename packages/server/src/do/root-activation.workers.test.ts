@@ -2,10 +2,13 @@ import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { resumeTenant } from '../control/tenant-registry.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import { pendingUploads, retentionRootTargets } from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -18,6 +21,7 @@ import {
 	deferFreshUpload,
 	deleteBlobState,
 	expectSingleUploadDecision,
+	fetchNarInfo,
 	initialise,
 	listRoots,
 	listRootTargets,
@@ -25,6 +29,7 @@ import {
 	narBytes,
 	narInfoGeneration,
 	negotiateUploads,
+	pendingUploadVerdict,
 	pushPath,
 	putNarBytes,
 	recordClaimedVerification,
@@ -34,7 +39,8 @@ import {
 	testBase,
 	uploadMetadata,
 	verifiableNar,
-	verifyCurrentTenant
+	verifyCurrentTenant,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 type PendingRow = typeof pendingUploads.$inferSelect;
@@ -53,6 +59,15 @@ async function snapshotPendingRow(uploadId: UploadId): Promise<PendingRow> {
 	}
 
 	return row;
+}
+
+async function rootTargetRows() {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		drizzle(state.storage, { schema: { retentionRootTargets } })
+			.select({ storePathHash: retentionRootTargets.storePathHash })
+			.from(retentionRootTargets)
+			.all()
+	);
 }
 
 // Replant the pending row to reproduce a crash after publication and before the
@@ -227,32 +242,53 @@ describe('root activation gating', () => {
 		});
 	});
 
-	it('prunes a rooted pending path whose tenant goes inactive before verification', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({
-			fileSize: narBytes.byteLength,
-			storePathHash: 'd'.repeat(32)
+	it('preserves a rooted pending path during suspension and publishes after resume', async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const metadata = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: 'd'.repeat(32)
+			});
+			const upload = expectSingleUploadDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
+			await putNarBytes(upload.r2Key);
+			await commitUpload(token, upload.uploadId, defaultCache(), {
+				wait: false
+			});
+			await setRoot(token, { name: 'main', targets: [metadata.storePath] });
+
+			await suspendTenant(fixtureTenant);
+			await verifyCurrentTenant();
+
+			const pending = await snapshotPendingRow(upload.uploadId);
+			expect({
+				targets: await rootTargetRows(),
+				verdict: await pendingUploadVerdict(upload.uploadId),
+				failures: pending.settleFailures
+			}).toStrictEqual({
+				targets: [{ storePathHash: metadata.storePathHash }],
+				verdict: 'committing',
+				failures: 0
+			});
+
+			await resumeTenant(
+				drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+				fixtureTenant
+			);
+			await verifyCurrentTenant();
+			const narInfo = await fetchNarInfo(metadata.storePathHash);
+			expect({
+				targets: await rootTargetRows(),
+				verdict: await pendingUploadVerdict(upload.uploadId),
+				narHash: narInfo.narHash.toString()
+			}).toStrictEqual({
+				targets: [{ storePathHash: metadata.storePathHash }],
+				verdict: undefined,
+				narHash: metadata.narHash
+			});
 		});
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-		await putNarBytes(upload.r2Key);
-		await commitUpload(token, upload.uploadId, defaultCache(), { wait: false });
-		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
-
-		await suspendTenant(fixtureTenant);
-		await verifyCurrentTenant();
-
-		const targets = await runInDurableObject(
-			currentServer(),
-			(_instance, state) =>
-				drizzle(state.storage, { schema: { retentionRootTargets } })
-					.select({ storePathHash: retentionRootTargets.storePathHash })
-					.from(retentionRootTargets)
-					.all()
-		);
-		expect(targets).toStrictEqual([]);
 	});
 
 	it('accepts a root whose narinfo object is missing but repairable', async () => {

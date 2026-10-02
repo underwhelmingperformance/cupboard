@@ -290,9 +290,15 @@ describe('recording an older promoted verdict', () => {
 						predecessor: await state.storage.get(key),
 						queued: send.mock.calls.length
 					};
+					const beforeRetry = await instance.recordVerifications(
+						claim.owner,
+						[]
+					);
+					vi.setSystemTime(new Date(Date.now() + 1000));
 					const retried = await instance.recordVerifications(claim.owner, []);
 					return {
 						deferred,
+						beforeRetry,
 						retried,
 						usage: await usage(),
 						remaining: state.storage.sql
@@ -311,6 +317,7 @@ describe('recording an older promoted verdict', () => {
 			})
 		);
 		expect(result).toStrictEqual({
+			beforeRetry: 0,
 			deferred: {
 				applied: 0,
 				held: { verdict: 'pending', recorded: 1, refresh: 1, failures: 0 },
@@ -459,6 +466,7 @@ describe('consumer verify pass', () => {
 			second: await pendingUploadVerdict(second.uploadId)
 		}).toStrictEqual({ first: undefined, second: 'pending' });
 
+		vi.setSystemTime(new Date(Date.now() + 30_000));
 		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({

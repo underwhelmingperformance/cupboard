@@ -321,20 +321,6 @@ export class ProtectedInheritanceService {
 			.run();
 	}
 
-	firstReadableSource(
-		storePathHash: StorePathHash,
-		narHash: NixSha256HashString
-	) {
-		const row = this.cohortRows(storePathHash, narHash, {
-			cacheId: 0,
-			generation: -1
-		});
-		if (row === undefined || row.cache?.deletedAt !== null) {
-			return;
-		}
-		return { ...row, scope: cacheScopeFromRow(row.cache) };
-	}
-
 	capture(
 		handle: SchemaWriter,
 		source: ResolvedCache,

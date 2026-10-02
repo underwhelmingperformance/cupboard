@@ -45,7 +45,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
-import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -159,6 +159,7 @@ import {
 	CommitPipelineService,
 	type PrefetchedMaterialisationFacts,
 	type TenantAccount,
+	verifyBackstopDelayMs,
 	verifyBackstopKey
 } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
@@ -205,6 +206,7 @@ import { OidcTrustService } from './oidc-trust-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
+import { RetryClockService } from './retry-clock-service.ts';
 import {
 	type ResolvedReuseView,
 	ReuseViewAdminService
@@ -221,6 +223,7 @@ import {
 } from './tenant-identity-service.ts';
 import { TokenExchangeService } from './token-exchange-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
+import { UploadRetrySchedule } from './upload-retry-schedule.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
@@ -1937,6 +1940,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.runExclusiveMaintenance('verify', () =>
 			(async () => {
 				this.commitPipeline.onVerificationPassStarted();
+				const retryClock = new RetryClockService(this.context);
+				if (retryClock.isBlocked()) {
+					await retryClock.read();
+				}
 				await this.verification.processPendingWithoutDecode(logger, limit);
 
 				if (this.verification.hasPendingUploads()) {
@@ -2115,23 +2122,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// queue again. Fresh NAR decoding must stay off the Durable Object.
 	// {@link armVerifyBackstopAlarm} handles a deadline that has not arrived.
 	private async resumeVerifyBackstop(backstopLogger: Logger): Promise<void> {
-		// The verdict drain owns rows with a recorded verdict. Exclude them from the
-		// pending check used to maintain the verification backstop deadline.
-		const awaitingVerdict = or(
-			eq(schema.pendingUploads.verdict, 'pending'),
-			eq(schema.pendingUploads.verdict, 'committing')
-		);
-		const pending = this.context.db
-			.select({ id: schema.pendingUploads.id })
-			.from(schema.pendingUploads)
-			.where(
-				and(awaitingVerdict, isNull(schema.pendingUploads.recordedVerdictJson))
-			)
-			.limit(1)
-			.get();
-
-		if (pending === undefined) {
+		const dueAt = new UploadRetrySchedule(this.context).freshAt();
+		if (dueAt === undefined) {
 			await this.ctx.storage.delete(verifyBackstopKey);
+			return;
+		}
+		if (dueAt > Date.now()) {
+			await this.ctx.storage.put(verifyBackstopKey, dueAt);
+			await armAlarmNoLaterThan(this.ctx.storage, dueAt);
 			return;
 		}
 
@@ -2175,11 +2173,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 				signal?.throwIfAborted();
 
-				const batch = this.verification.listPendingForVerify(
-					limit,
-					maxNarBytes,
+				const batch = await this.verification.beginVerificationBatch(
+					this.verification.listPendingForVerify(limit, maxNarBytes, signal),
 					signal
 				);
+				await this.withMaintenanceEligibility(() =>
+					this.verification.processExhaustedUploads(logger, signal)
+				);
+				await this.armUploadRetries();
+
 				onClaimed?.(batch);
 
 				if (settled > 0 && this.verification.hasPendingUploads()) {
@@ -2204,6 +2206,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	private async armUploadRetries(): Promise<void> {
+		const schedule = new UploadRetrySchedule(this.context);
+		const freshAt = schedule.freshAt();
+		if (freshAt === undefined) {
+			await this.ctx.storage.delete(verifyBackstopKey);
+		}
+		if (freshAt !== undefined) {
+			const now = Date.now();
+			const dueAt = freshAt <= now ? now + verifyBackstopDelayMs : freshAt;
+			await this.ctx.storage.put(verifyBackstopKey, dueAt);
+			await armAlarmNoLaterThan(this.ctx.storage, dueAt);
+		}
+		const recordedAt = schedule.recordedAt();
+		if (recordedAt !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, recordedAt);
+		}
+	}
+
 	// The RPC stores every non-abandoned verdict on its upload row; an abandoned
 	// verdict releases the lease locally. It then applies as many stored verdicts
 	// as the allowance covers and arms the alarm when recorded verdicts remain.
@@ -2220,9 +2240,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 				signal?.throwIfAborted();
 
-				if (this.verification.hasRecordedVerdicts()) {
-					await this.ctx.storage.setAlarm(Date.now());
-				}
+				await this.armUploadRetries();
 
 				return applied;
 			})()
@@ -2235,11 +2253,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async drainRecordedVerdicts(): Promise<MaintenanceProgress> {
 		const page = await this.metered('verdict-drain', (logger) =>
 			this.withMaintenanceEligibility(() =>
-				this.verification.applyRecordedVerdicts(logger)
+				(async () => {
+					await this.verification.processExhaustedUploads(logger);
+					return this.verification.applyRecordedVerdicts(logger);
+				})()
 			)
 		);
 
-		if (!this.verification.hasRecordedVerdicts()) {
+		const dueAt = new UploadRetrySchedule(this.context).recordedAt();
+		if (dueAt === undefined || dueAt > Date.now()) {
 			return 'progressed';
 		}
 
@@ -2320,9 +2342,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'verdict-drain',
-				workAt: readyWhen(() =>
-					Promise.resolve(this.verification.hasRecordedVerdicts())
-				),
+				workAt: () =>
+					Promise.resolve(new UploadRetrySchedule(this.context).recordedAt()),
 				run: () => this.drainRecordedVerdicts()
 			},
 			{
@@ -2837,6 +2858,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.commitPipeline.onVerificationPassStarted();
 			await this.metered('verification', (logger) =>
 				this.withMaintenanceEligibility(async () => {
+					const retryClock = new RetryClockService(this.context);
+					if (retryClock.isBlocked()) {
+						await retryClock.read();
+					}
 					await this.verification.processPendingWithoutDecode(
 						logger,
 						verificationBatchSize

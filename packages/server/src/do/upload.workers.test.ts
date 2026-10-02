@@ -2431,34 +2431,86 @@ describe('upload flow', () => {
 		).resolves.toBeNull();
 	});
 
-	it('keeps a deferred upload pending on a transient verify error, then commits on retry', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
+	it('keeps a deferred upload pending on a transient verify error, then commits at its retry deadline', async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			const upload = expectSingleUploadDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
 
-		await putNarBytes(upload.r2Key);
-		await markUploadPendingVerification(upload.uploadId);
+			await putNarBytes(upload.r2Key);
+			await markUploadPendingVerification(upload.uploadId);
+			const now = Date.now();
+			const state = async () => {
+				const pending = await runInDurableObject(currentServer(), (instance) =>
+					instance.context.db
+						.select({
+							verdict: schema.pendingUploads.verdict,
+							failures: schema.pendingUploads.settleFailures,
+							retryAfter: schema.pendingUploads.settleRetryAfter,
+							startedAt: schema.pendingUploads.retryStartedActiveMs,
+							category: schema.pendingUploads.lastSettleError,
+							owner: schema.pendingUploads.claimOwner
+						})
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, upload.uploadId))
+						.get()
+				);
+				return {
+					pending:
+						pending === undefined
+							? undefined
+							: { ...pending, owner: pending.owner ?? undefined },
+					stagingExists: (await env.BLOBS.head(upload.r2Key)) !== null
+				};
+			};
+			const get = vi
+				.spyOn(env.BLOBS, 'get')
+				.mockRejectedValueOnce(new Error('transient R2 read'));
+			try {
+				await verifyCurrentTenant();
+			} finally {
+				get.mockRestore();
+			}
 
-		// A transient staging read failure must leave the upload pending and retain
-		// its bytes for retry.
-		const getSpy = vi
-			.spyOn(env.BLOBS, 'get')
-			.mockRejectedValueOnce(new Error('transient R2 read'));
-
-		await verifyCurrentTenant();
-		getSpy.mockRestore();
-
-		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
-		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
-
-		await verifyCurrentTenant();
-
-		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
-		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
+			const failed = await state();
+			await verifyCurrentTenant();
+			const immediate = await state();
+			const deadline = failed.pending?.retryAfter;
+			if (deadline == undefined) {
+				throw new Error(
+					'The transient verification failure did not record a retry deadline.'
+				);
+			}
+			vi.setSystemTime(new Date(deadline));
+			await verifyCurrentTenant();
+			const retried = await state();
+			const narInfo = await fetchNarInfo(metadata.storePathHash);
+			const waiting = {
+				pending: {
+					verdict: 'pending',
+					failures: 1,
+					retryAfter: new Date(now + 30_000).toISOString(),
+					startedAt: 0,
+					category: 'verification-failed',
+					owner: undefined
+				},
+				stagingExists: true
+			};
+			expect({
+				failed,
+				immediate,
+				retried,
+				publishedNarHash: narInfo.narHash.toString()
+			}).toStrictEqual({
+				failed: waiting,
+				immediate: waiting,
+				retried: { pending: undefined, stagingExists: false },
+				publishedNarHash: metadata.narHash
+			});
+		});
 	});
 
 	it('chains a verify pass that fills its batch and drains the rest, stopping on a short batch', async () => {

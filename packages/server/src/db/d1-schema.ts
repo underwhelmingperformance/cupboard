@@ -394,6 +394,10 @@ export const tenant = sqliteTable(
 		ownerSubject: text('owner_subject').notNull(),
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
+		retryActiveElapsedMs: integer('retry_active_elapsed_ms')
+			.notNull()
+			.default(0),
+		retryActiveSinceMs: integer('retry_active_since_ms'),
 		// Null until a later release's cache reconciliation records the version
 		// it reached for this tenant. Nothing in this build reads or writes it.
 		cacheCatalogueVersion: integer('cache_catalogue_version'),
