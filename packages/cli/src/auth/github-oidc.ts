@@ -2,15 +2,19 @@ import { env } from 'node:process';
 
 import {
 	readResponseJson,
-	readResponseText
+	readResponseText,
+	RemoteBodyTooLargeError
 } from '@cupboard/shared/response-body';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
-import { throwIfAborted } from '../abort.ts';
+import { isAbortError, throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
-import { CliError } from '../errors.ts';
+import { authExitCode, CliError, transientExitCode } from '../errors.ts';
 
 const maximumGithubOidcResponseBytes = 1024 * 1024;
+const unauthorisedStatus: number = StatusCodes.UNAUTHORIZED;
+const forbiddenStatus: number = StatusCodes.FORBIDDEN;
 
 // The OIDC token request endpoint, and the bearer token that GitHub Actions
 // injects when a workflow grants `id-token: write`. Both are required to issue
@@ -36,26 +40,62 @@ export class GithubOidcUnavailableError extends CliError {
 		);
 		this.name = 'GithubOidcUnavailableError';
 	}
+
+	override get exitCode(): number {
+		return authExitCode;
+	}
 }
 
 export class GithubOidcRequestError extends CliError {
 	constructor(
 		public readonly status: number,
-		public readonly body: string
+		public readonly body: string,
+		options?: ErrorOptions
 	) {
 		super(
-			`GitHub Actions OIDC token request failed with ${String(status)}: ${body}`
+			`GitHub Actions OIDC token request failed with ${String(status)}: ${body}`,
+			options
 		);
 		this.name = 'GithubOidcRequestError';
+	}
+
+	override get exitCode(): number {
+		return this.status === unauthorisedStatus || this.status === forbiddenStatus
+			? authExitCode
+			: transientExitCode;
 	}
 }
 
 // A 200 response without a token `value`. Keep this distinct from a failed
 // request so it is not reported as "failed with 200".
 export class GithubOidcResponseError extends CliError {
-	constructor(public readonly kind: 'missing-token' | 'non-json') {
-		super('GitHub Actions OIDC token response did not carry a token value');
+	constructor(
+		public readonly kind:
+			'missing-token' | 'non-json' | 'too-large' | 'unreadable',
+		options?: ErrorOptions
+	) {
+		super(
+			'GitHub Actions OIDC token response did not contain a token value',
+			options
+		);
 		this.name = 'GithubOidcResponseError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
+class GithubOidcTransportError extends CliError {
+	constructor(cause: unknown) {
+		super('The GitHub Actions OIDC token endpoint could not be reached.', {
+			cause
+		});
+		this.name = 'GithubOidcTransportError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
 	}
 }
 
@@ -90,24 +130,42 @@ export async function fetchGithubOidcToken(options: {
 	url.searchParams.set('audience', options.audience);
 
 	const fetcher = options.fetcher ?? resilientFetcher('replay-safe');
-	const response = await fetcher(url, {
-		headers: { authorization: `Bearer ${requestToken}` },
-		signal: options.signal
-	});
+	let response: Response;
+	try {
+		response = await fetcher(url, {
+			headers: { authorization: `Bearer ${requestToken}` },
+			signal: options.signal
+		});
+	} catch (error) {
+		throwIfAborted(options.signal);
+		if (isAbortError(error)) {
+			throw error;
+		}
+		throw new GithubOidcTransportError(error);
+	}
 
 	if (!response.ok) {
-		throw new GithubOidcRequestError(
-			response.status,
-			await readResponseText(response, {
+		let body: string;
+		try {
+			body = await readResponseText(response, {
 				description: 'GitHub Actions OIDC error response',
 				maximumBytes: maximumGithubOidcResponseBytes,
 				signal: options.signal
-			})
-		);
+			});
+		} catch (error) {
+			throwIfAborted(options.signal);
+			if (isAbortError(error)) {
+				throw error;
+			}
+			throw new GithubOidcRequestError(
+				response.status,
+				'The response body could not be read.',
+				{ cause: error }
+			);
+		}
+		throw new GithubOidcRequestError(response.status, body);
 	}
 
-	// A 200 with a non-JSON body (a proxy notice, an HTML page) would otherwise
-	// throw a raw SyntaxError; treat it as a malformed token response.
 	let body: unknown;
 
 	try {
@@ -117,11 +175,17 @@ export async function fetchGithubOidcToken(options: {
 			signal: options.signal
 		});
 	} catch (error) {
-		if (!(error instanceof SyntaxError)) {
+		throwIfAborted(options.signal);
+		if (isAbortError(error)) {
 			throw error;
 		}
-
-		throw new GithubOidcResponseError('non-json');
+		const kind =
+			error instanceof SyntaxError
+				? 'non-json'
+				: error instanceof RemoteBodyTooLargeError
+					? 'too-large'
+					: 'unreadable';
+		throw new GithubOidcResponseError(kind, { cause: error });
 	}
 
 	const parsed = githubOidcResponseSchema.safeParse(body);

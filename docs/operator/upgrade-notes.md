@@ -105,6 +105,13 @@ These changes affect scripts that check the CLI's exit status or parse its text
 output. [Scripting the CLI](../reference/cli-scripting.md) lists the exit
 statuses.
 
+- `cupboard run` exits 127 for a missing child executable. GitHub OIDC
+  acquisition exits 77 for unavailable or refused authority and 75 for temporary
+  failures or malformed token responses. These failures used to exit 1. The
+  child's own status and output remain unchanged.
+- OAuth token exchanges that refuse an identity, refresh token or requested
+  authority exit 77 even when the endpoint responds with HTTP 400. Malformed
+  token requests or grant details exit 2. These failures used to exit 1.
 - `cupboard check` exits 1 when it finds discrepancies. It used to exit 0.
 - An admin command exits 75 after a 408, 429 or 503 from the admin API, or after
   a 5xx other than 503 or 507 whose body is over 64 KiB. It used to exit 1. When
