@@ -1187,11 +1187,22 @@ describe('setupAction Nix configuration', () => {
 			const directory = await mkdtemp(
 				path.join(tmpdir(), 'cupboard-mixed-union-')
 			);
+			const environment = {
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: path.join(directory, 'env'),
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			};
+			const ambientOutput = path.join(directory, 'ambient-output');
+			const ambientEnvironment = path.join(directory, 'ambient-env');
 			const tenant = new URL('https://cache.example.test/t/acme');
 			const requests: unknown[] = [];
 			const priority = cachePrioritySchema.parse(40);
 			let outcome = 'configured';
 			try {
+				await writeFile(ambientOutput, 'ambient-output=unchanged\n');
+				await writeFile(ambientEnvironment, 'ambient-environment=unchanged\n');
+				vi.stubEnv('GITHUB_OUTPUT', ambientOutput);
+				vi.stubEnv('GITHUB_ENV', ambientEnvironment);
 				try {
 					await setupAction(
 						{
@@ -1207,10 +1218,7 @@ describe('setupAction Nix configuration', () => {
 							),
 							trustedPublicKey: 'acme:AAAA'
 						},
-						{
-							RUNNER_TEMP: directory,
-							GITHUB_OUTPUT: path.join(directory, 'output')
-						},
+						environment,
 						createGithubReporter(),
 						{
 							installRelease: () =>
@@ -1250,6 +1258,7 @@ describe('setupAction Nix configuration', () => {
 										]
 									},
 									{
+										environment: inputs.environment,
 										storeConfig: discoverNixStoreConfig(),
 										readFile: () => Promise.resolve(''),
 										issue: (input) => {
@@ -1329,7 +1338,14 @@ describe('setupAction Nix configuration', () => {
 					}
 					outcome = error.message;
 				}
-				expect({ outcome, requests }).toStrictEqual({
+				expect({
+					outcome,
+					requests,
+					ambientOutput: await readFile(ambientOutput, 'utf8'),
+					ambientEnvironment: await readFile(ambientEnvironment, 'utf8')
+				}).toStrictEqual({
+					ambientOutput: 'ambient-output=unchanged\n',
+					ambientEnvironment: 'ambient-environment=unchanged\n',
 					outcome:
 						mutation === 'exact'
 							? 'configured'
@@ -1355,6 +1371,7 @@ describe('setupAction Nix configuration', () => {
 					]
 				});
 			} finally {
+				vi.unstubAllEnvs();
 				await rm(directory, { recursive: true, force: true });
 			}
 		}
@@ -2208,6 +2225,8 @@ describe('additional runner read caches', () => {
 				GITHUB_ENV: path.join(directory, 'env'),
 				GITHUB_OUTPUT: path.join(directory, 'output')
 			};
+			const ambientOutput = path.join(directory, 'ambient-output');
+			const ambientEnvironment = path.join(directory, 'ambient-env');
 			const base = 'https://cache.example.test/t/acme';
 			const destination =
 				destinationName === '' ? defaultCache : namedCache(destinationName);
@@ -2225,6 +2244,10 @@ describe('additional runner read caches', () => {
 				{ type: 'cupboard_view', view: 'prior' }
 			];
 			try {
+				await writeFile(ambientOutput, 'ambient-output=unchanged\n');
+				await writeFile(ambientEnvironment, 'ambient-environment=unchanged\n');
+				vi.stubEnv('GITHUB_OUTPUT', ambientOutput);
+				vi.stubEnv('GITHUB_ENV', ambientEnvironment);
 				await setupAction(
 					{
 						installDir: path.join(directory, 'bin'),
@@ -2283,6 +2306,7 @@ describe('additional runner read caches', () => {
 									readCache: additional
 								},
 								{
+									environment,
 									storeConfig: discoverNixStoreConfig(),
 									readFile: () => Promise.resolve(''),
 									issue: (input) => {
@@ -2347,18 +2371,36 @@ describe('additional runner read caches', () => {
 				}
 				expect({
 					requests,
-					target: outputs['read-session-target'],
-					view: outputs['read-session-view'],
-					caches: outputs['read-session-caches'],
+					outputs,
+					ambientOutput: await readFile(ambientOutput, 'utf8'),
+					ambientEnvironment: await readFile(ambientEnvironment, 'utf8'),
 					config: await readFile(config, 'utf8')
 				}).toStrictEqual({
 					requests: [resources],
-					target: `${base}/cache/falcon`,
-					view: 'prior',
-					caches: JSON.stringify([destinationUrl, `${base}/cache/extra`]),
+					outputs: {
+						'cupboard-path': '/installed/cupboard',
+						cupboard: JSON.stringify({
+							kind: 'release',
+							repository: 'cupboard/cupboard',
+							tag: 'v1.2.3',
+							sourceCommit: 'd'.repeat(40)
+						}),
+						'cupboard-version': 'v1.2.3',
+						'read-session-audience': '',
+						'read-session-target': `${base}/cache/falcon`,
+						'read-session-view': 'prior',
+						'read-session-caches': JSON.stringify([
+							destinationUrl,
+							`${base}/cache/extra`
+						]),
+						'nix-config-file': config
+					},
+					ambientOutput: 'ambient-output=unchanged\n',
+					ambientEnvironment: 'ambient-environment=unchanged\n',
 					config: `extra-substituters = ${destinationUrl} ${base}/reuse/prior ${base}/cache/falcon ${base}/cache/extra\nextra-trusted-public-keys = acme:AAAA\n`
 				});
 			} finally {
+				vi.unstubAllEnvs();
 				await rm(directory, { recursive: true, force: true });
 			}
 		}
