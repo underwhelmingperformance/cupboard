@@ -10,12 +10,18 @@ import {
 } from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { Reporter, ResultPayload, ResultRow } from '@cupboard/reporter';
-import { describe, expect, it } from 'vitest';
+import { Command } from 'commander';
+import { http, HttpResponse } from 'msw';
+import { setupServer } from 'msw/node';
+import { describe, expect, it, vi } from 'vitest';
 
+import { writeCachedSession } from '../auth/token-store.ts';
 import { LocalStepUnreachedError } from '../errors.ts';
+import { testWithConfigHome } from '../test-support.ts';
 
 import {
 	type DeploymentClient,
+	registerDeploymentCommands,
 	runDeploymentResume,
 	runDeploymentStatus
 } from './deployment.ts';
@@ -486,4 +492,142 @@ describe('runDeploymentResume', () => {
 			new LocalStepUnreachedError({ kind: 'stalled', status: stalled })
 		);
 	});
+});
+
+describe('deployment command authentication', () => {
+	testWithConfigHome.each([
+		{ command: 'status', githubOidc: false, audience: undefined },
+		{ command: 'resume', githubOidc: false, audience: undefined },
+		{ command: 'status', githubOidc: true, audience: undefined },
+		{ command: 'status', githubOidc: true, audience: 'deployment-recovery' },
+		{ command: 'resume', githubOidc: true, audience: undefined },
+		{ command: 'resume', githubOidc: true, audience: 'deployment-recovery' }
+	])(
+		'authenticates $command with OIDC=$githubOidc and audience=$audience',
+		async ({ command, githubOidc, audience }) => {
+			const origin = 'https://cupboard.example.workers.dev';
+			const payload = JSON.stringify({
+				iss: origin,
+				aud: origin,
+				exp: Math.floor(Date.now() / 1000) + 3600
+			});
+			const claims = Buffer.from(payload).toString('base64url');
+			const cachedToken = `e30.${claims}.signature`;
+			await writeCachedSession({ accessToken: cachedToken }, new URL(origin));
+			const calls: unknown[] = [];
+			let pending = command === 'resume' ? 1 : 0;
+			const server = setupServer(
+				http.get('https://actions.example.com/token', ({ request }) => {
+					calls.push({
+						kind: 'identity',
+						audience: new URL(request.url).searchParams.get('audience'),
+						authorization: request.headers.get('authorization')
+					});
+					return HttpResponse.json({ value: 'signed-job-identity' });
+				}),
+				http.post(`${origin}/token`, async ({ request }) => {
+					const form = new URLSearchParams(await request.text());
+					calls.push({ kind: 'exchange', form: Object.fromEntries(form) });
+					return HttpResponse.json({
+						access_token: 'deployment-access',
+						token_type: 'Bearer',
+						expires_in: 900,
+						issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+					});
+				}),
+				http.all(`${origin}/control/*`, ({ request }) => {
+					const pathname = new URL(request.url).pathname;
+					calls.push({
+						kind: 'control',
+						method: request.method,
+						pathname,
+						authorization: request.headers.get('authorization')
+					});
+					if (pathname === '/control/deployment/transitions') {
+						return HttpResponse.json(complete);
+					}
+					if (pathname === '/control/local-step/wake') {
+						const enqueued = pending;
+						pending = 0;
+						return HttpResponse.json({
+							required: currentLocalStep,
+							enqueued,
+							pending: enqueued
+						});
+					}
+					return HttpResponse.json(statusFor(currentLocalStep, pending));
+				})
+			);
+			const program = new Command()
+				.exitOverride()
+				.configureOutput({ writeErr: vi.fn() });
+			registerDeploymentCommands(program);
+			vi.stubEnv(
+				'ACTIONS_ID_TOKEN_REQUEST_URL',
+				'https://actions.example.com/token'
+			);
+			vi.stubEnv('ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'request-bearer');
+			server.listen({ onUnhandledFrame: 'error' });
+			try {
+				await program.parseAsync(
+					[
+						'deployment',
+						command,
+						origin,
+						...(githubOidc ? ['--github-oidc'] : []),
+						...(audience === undefined ? [] : ['--audience', audience])
+					],
+					{ from: 'user' }
+				);
+			} finally {
+				server.close();
+				vi.unstubAllEnvs();
+			}
+			const actions = [
+				'deployment:read',
+				'local-step:read',
+				...(command === 'resume' ? ['local-step:wake'] : [])
+			];
+			const controlCall = (pathname: string, method = 'GET') => ({
+				kind: 'control',
+				method,
+				pathname,
+				authorization: `Bearer ${githubOidc ? 'deployment-access' : cachedToken}`
+			});
+			expect(calls).toStrictEqual([
+				...(githubOidc
+					? [
+							{
+								kind: 'identity',
+								audience: audience ?? origin,
+								authorization: 'Bearer request-bearer'
+							},
+							{
+								kind: 'exchange',
+								form: {
+									grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+									subject_token: 'signed-job-identity',
+									subject_token_type:
+										'urn:ietf:params:oauth:token-type:id_token',
+									authorization_details: JSON.stringify([
+										{ type: 'cupboard_control', actions }
+									])
+								}
+							}
+						]
+					: []),
+				...(command === 'status'
+					? [
+							controlCall('/control/deployment/transitions'),
+							controlCall('/control/local-step')
+						]
+					: [
+							controlCall('/control/local-step'),
+							controlCall('/control/local-step/wake', 'POST'),
+							controlCall('/control/local-step'),
+							controlCall('/control/deployment/transitions')
+						])
+			]);
+		}
+	);
 });

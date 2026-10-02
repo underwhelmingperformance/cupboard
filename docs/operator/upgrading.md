@@ -236,6 +236,13 @@ cupboard deployment resume https://cupboard.example.workers.dev
 as the deploy, and stops with the same error when no pending tenant is working
 ten minutes after the wake.
 
+In GitHub Actions, pass `--github-oidc` to either command. The job needs
+`id-token: write`, and its control trust rule must permit `deployment:read` and
+`local-step:read`. `resume` also requests `local-step:wake`. Use `--audience`
+when the rule specifies a custom audience; the default is the deployment URL.
+The commands renew their CI token during the run. Without `--github-oidc`, they
+use the session from `cupboard login`.
+
 If `status` reports a tenant configuration or migration error, repair it first.
 Once no tenants are pending, run `cupboard init` again to finish the upgrade.
 

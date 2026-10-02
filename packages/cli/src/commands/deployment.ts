@@ -5,6 +5,7 @@ import {
 	type StoredTransitionRow,
 	transitionIds
 } from '@cupboard/protocol/deployment';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	formatTimestamp,
 	type Reporter,
@@ -12,8 +13,10 @@ import {
 } from '@cupboard/reporter';
 import { type Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth/auth.ts';
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
+import { cachedOwnerProvider, githubOidcTokenProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { CupboardClient } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { readStoredTransition } from '../deploy/deployment-state.ts';
@@ -35,6 +38,11 @@ export interface DeploymentClient {
 }
 
 export type DeploymentResumeOptions = SettlementOptions;
+
+interface DeploymentAuthOptions {
+	readonly githubOidc?: boolean;
+	readonly audience?: Audience;
+}
 
 // What this build's `cupboard deploy` does with a row that the server lists
 // under `unrecognised`.
@@ -183,9 +191,24 @@ export function registerDeploymentCommands(
 	const deployment = program
 		.command('deployment')
 		.description('Inspect and resume tenant migration work.');
-	const client = (url: URL): DeploymentClient => {
+	const client = (
+		url: URL,
+		cliOptions: DeploymentAuthOptions,
+		authorizationDetails: AuthorizationDetails
+	): DeploymentClient => {
+		const credential =
+			cliOptions.githubOidc === true
+				? githubOidcTokenProvider(
+						CupboardClient.fromUrl(url, {
+							cache: { kind: 'default' },
+							signal: options.signal
+						}),
+						cliOptions.audience ?? audienceSchema.parse(url),
+						authorizationDetails
+					)
+				: cachedOwnerProvider(url, { signal: options.signal });
 		const rpc = controlRpc(url, {
-			credential: cachedOwnerProvider(url, { signal: options.signal }),
+			credential,
 			signal: options.signal
 		});
 
@@ -198,10 +221,24 @@ export function registerDeploymentCommands(
 		.command('status')
 		.description('Show the schema transitions and pending tenant work.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.action(async (url: URL) => {
+		.option(
+			'--github-oidc',
+			"authorise with the workflow's GitHub Actions OIDC token through a control trust rule"
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the deployment URL)',
+			parseAudience
+		)
+		.action(async (url: URL, cliOptions: DeploymentAuthOptions) => {
 			await runDeploymentStatus(
 				commandUi(program, options).reporter(),
-				client(url)
+				client(url, cliOptions, [
+					{
+						type: 'cupboard_control',
+						actions: ['deployment:read', 'local-step:read']
+					}
+				])
 			);
 		});
 	deployment
@@ -211,10 +248,24 @@ export function registerDeploymentCommands(
 				'report whether the deploy can finish.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.action(async (url: URL) => {
+		.option(
+			'--github-oidc',
+			"authorise with the workflow's GitHub Actions OIDC token through a control trust rule"
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the deployment URL)',
+			parseAudience
+		)
+		.action(async (url: URL, cliOptions: DeploymentAuthOptions) => {
 			await runDeploymentResume(
 				commandUi(program, options).reporter(),
-				client(url),
+				client(url, cliOptions, [
+					{
+						type: 'cupboard_control',
+						actions: ['deployment:read', 'local-step:read', 'local-step:wake']
+					}
+				]),
 				{
 					...(options.signal !== undefined && { signal: options.signal })
 				}
