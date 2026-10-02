@@ -8,6 +8,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -21,6 +22,12 @@ import {
 } from './status.ts';
 
 const server = setupServer();
+
+// MSW's observer clone keeps response-body cancellation pending.
+server.events.on('response:mocked', ({ response }) => {
+	void discardResponseBody(response);
+});
+
 const url = new URL('https://cache.example.test/t/acme');
 const hash = storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz');
 const narHash = nixSha256HashSchema.parse(
@@ -39,7 +46,7 @@ const options = {
 const narinfo = `StorePath: /nix/store/${hash}-app\nURL: nar/app.nar\nCompression: zstd\nFileHash: ${narHash}\nFileSize: 1\nNarHash: ${narHash}\nNarSize: 1\nReferences: \n`;
 
 beforeAll(() => {
-	server.listen({ onUnhandledFrame: 'error' });
+	server.listen({ onUnhandledRequest: 'error' });
 });
 afterEach(() => {
 	server.resetHandlers();
