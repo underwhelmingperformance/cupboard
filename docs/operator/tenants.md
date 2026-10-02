@@ -153,6 +153,10 @@ To set a quota of 50 GB on the `acme` tenant:
 cupboard tenant set-quota https://cupboard.example.workers.dev acme 50000000000
 ```
 
+You can also pass `--quota-bytes 50000000000`, as on `tenant create`, instead of
+the positional byte count. Pass the quota once, using either form. Both forms
+accept zero; use `clear-quota` to remove the limit.
+
 To remove the quota:
 
 ```sh

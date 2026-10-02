@@ -19,7 +19,8 @@ import {
 } from '@cupboard/protocol/tenants';
 import type { ResultRow } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
-import { describe, expect, it } from 'vitest';
+import { Command } from 'commander';
+import { describe, expect, it, vi } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
 
@@ -28,6 +29,7 @@ import {
 	parseQuotaBytes,
 	readCredentialFromOptions,
 	ReadUserWithoutCredentialError,
+	registerTenantCommands,
 	runTenantClearCacheCredential,
 	runTenantClearCredential,
 	runTenantCreate,
@@ -45,6 +47,91 @@ import {
 const acme = tenantIdSchema.parse('acme');
 const alice = readUserInputSchema.parse('alice');
 const password = 'A'.repeat(43);
+
+const quotaMocks = vi.hoisted(() => ({ client: vi.fn(), set: vi.fn() }));
+vi.mock('../client/orpc.ts', () => ({ controlRpc: quotaMocks.client }));
+
+describe('parsed quota selection', () => {
+	it.each([['0'], ['--quota-bytes', '0']])(
+		'sets zero bytes with %j',
+		async (...arguments_) => {
+			quotaMocks.set.mockReset();
+			quotaMocks.client.mockReset();
+			quotaMocks.set.mockResolvedValue({
+				id: acme,
+				quota: { kind: 'limited', bytes: 0 },
+				usedBytes: 0
+			});
+			quotaMocks.client.mockReturnValue({
+				tenants: { setQuota: quotaMocks.set }
+			});
+			const program = new Command().exitOverride();
+			registerTenantCommands(program);
+			await program.parseAsync(
+				[
+					'tenant',
+					'set-quota',
+					'https://cupboard.example.workers.dev',
+					'acme',
+					...arguments_
+				],
+				{ from: 'user' }
+			);
+			expect(quotaMocks.set.mock.calls).toStrictEqual([
+				[{ id: acme, quota: { kind: 'limited', bytes: 0 } }]
+			]);
+		}
+	);
+
+	it.each([
+		{
+			args: [],
+			message:
+				'Pass a quota in bytes as the positional argument or with --quota-bytes.'
+		},
+		{
+			args: ['1', '--quota-bytes', '2'],
+			message:
+				'Pass the quota once: use either the positional bytes argument or --quota-bytes.'
+		},
+		{
+			args: ['0', '--quota-bytes', '0'],
+			message:
+				'Pass the quota once: use either the positional bytes argument or --quota-bytes.'
+		}
+	])(
+		'refuses $args before creating an authenticated client',
+		async ({ args, message }) => {
+			quotaMocks.client.mockClear();
+			const program = new Command()
+				.exitOverride()
+				.configureOutput({ writeErr: vi.fn() });
+			registerTenantCommands(program);
+			let result: unknown;
+			try {
+				await program.parseAsync(
+					[
+						'tenant',
+						'set-quota',
+						'https://cupboard.example.workers.dev',
+						'acme',
+						...args
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				result = {
+					status: cliExitCode(error, 1),
+					message: error instanceof Error ? error.message : undefined
+				};
+			}
+			expect({
+				result,
+				clientCalls: quotaMocks.client.mock.calls
+			}).toStrictEqual({ result: { status: 2, message }, clientCalls: [] });
+		}
+	);
+});
 
 function summary(status: 'active' | 'suspended' = 'active') {
 	return tenantSummarySchema.parse({

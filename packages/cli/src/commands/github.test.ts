@@ -1877,6 +1877,60 @@ describe('registerGithubCommands', () => {
 		}
 	);
 
+	it.each([
+		{
+			command: 'setup',
+			workflowFlag: '--workflow-ref',
+			accessFlag: '--cache-access-mode'
+		},
+		{
+			command: 'setup',
+			workflowFlag: '--job-workflow-ref',
+			accessFlag: '--access'
+		},
+		{ command: 'check', workflowFlag: '--workflow-ref', accessFlag: undefined },
+		{
+			command: 'check',
+			workflowFlag: '--job-workflow-ref',
+			accessFlag: undefined
+		}
+	])(
+		'parses compatible vocabulary for $command with $workflowFlag',
+		async ({ command, workflowFlag, accessFlag }) => {
+			const program = new Command().exitOverride();
+			registerGithubCommands(program);
+			const selected = program.commands[0]?.commands.find(
+				(candidate) => candidate.name() === command
+			);
+			let parsed: unknown;
+			selected?.action((_url: URL, options: unknown) => {
+				parsed = options;
+			});
+			const workflowReference = `acme/app/.github/workflows/publish.yml@${'a'.repeat(40)}`;
+			await program.parseAsync(
+				[
+					'github',
+					command,
+					url.href,
+					'--repo',
+					'acme/app',
+					workflowFlag,
+					workflowReference,
+					...(accessFlag === undefined ? [] : [accessFlag, 'private'])
+				],
+				{ from: 'user' }
+			);
+			expect(parsed).toStrictEqual({
+				repo: 'acme/app',
+				workflowRef: workflowReference,
+				...(command === 'setup' && {
+					branch: 'main',
+					cacheAccessMode: 'private'
+				})
+			});
+		}
+	);
+
 	it('offers generic conflict confirmation without a retirement flag', () => {
 		const program = new Command();
 		registerGithubCommands(program);
@@ -1890,11 +1944,11 @@ describe('registerGithubCommands', () => {
 		expect(setup?.options.map((option) => option.flags)).toStrictEqual([
 			'--repo <owner/name>',
 			'--branch <name>',
-			'--workflow-ref <owner/repo/path@ref>',
+			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
 			'-y, --yes',
 			'--read-user <user>',
 			'--read-password <password>',
-			'--cache-access-mode <mode>'
+			'--access, --cache-access-mode <mode>'
 		]);
 	});
 
@@ -1937,7 +1991,10 @@ describe('registerGithubCommands', () => {
 		).toStrictEqual([
 			{ flags: '--repo <owner/name>', mandatory: true },
 			{ flags: '--branch <name>', mandatory: false },
-			{ flags: '--workflow-ref <owner/repo/path@ref>', mandatory: false },
+			{
+				flags: '--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
+				mandatory: false
+			},
 			{ flags: '--fix', mandatory: false },
 			{ flags: '-y, --yes', mandatory: false },
 			{ flags: '--trust-scope <scope>', mandatory: false },

@@ -524,7 +524,7 @@ function buildOidcTrustCommands(
 				'root prefix for each pull request (default: github:<owner>/<repo>/pr-{pr}/)'
 			)
 			.option(
-				'--job-workflow-ref <value>',
+				'--workflow-ref, --job-workflow-ref <value>',
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
 			)
 			.option(
@@ -584,7 +584,7 @@ function buildOidcTrustCommands(
 				'root prefix for each tag (default: github:<owner>/<repo>/<cache name>/)'
 			)
 			.option(
-				'--job-workflow-ref <value>',
+				'--workflow-ref, --job-workflow-ref <value>',
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
 			)
 			.option(
@@ -635,7 +635,7 @@ function buildOidcTrustCommands(
 				'the branch whose runs may publish (e.g. main)'
 			)
 			.option(
-				'--job-workflow-ref <value>',
+				'--workflow-ref, --job-workflow-ref <value>',
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
 			)
 			.option(
@@ -728,8 +728,8 @@ function registerTenantRuleAdd(
 			[]
 		)
 		.option(
-			'--job-workflow-ref <ref>',
-			'require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs'
+			'--workflow-ref, --job-workflow-ref <ref>',
+			'require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs; the same reference is --workflow-ref on github setup/check'
 		)
 		.option(
 			'--allow <action>',

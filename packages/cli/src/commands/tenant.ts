@@ -87,6 +87,21 @@ interface CreateOptions {
 	readonly quotaBytes?: number;
 }
 
+interface SetQuotaOptions {
+	readonly quotaBytes?: number;
+}
+
+class QuotaBytesSelectionError extends CliUsageError {
+	constructor(readonly selection: 'missing' | 'multiple') {
+		super(
+			selection === 'missing'
+				? 'Pass a quota in bytes as the positional argument or with --quota-bytes.'
+				: 'Pass the quota once: use either the positional bytes argument or --quota-bytes.'
+		);
+		this.name = 'QuotaBytesSelectionError';
+	}
+}
+
 export class ReadUserWithoutCredentialError extends CliUsageError {
 	constructor(public readonly readUser: string) {
 		super('--read-user cannot be combined with --no-read-password');
@@ -187,7 +202,7 @@ export function registerTenantCommands(
 		.option('--no-read-password', 'do not create a tenant read credential')
 		.option(
 			'--quota-bytes <bytes>',
-			'storage quota in bytes (unlimited by default)',
+			'storage quota in bytes (unlimited by default); tenant set-quota accepts the same option',
 			parseQuotaBytes
 		)
 		.action(async (url: URL, id: string, options: CreateOptions) => {
@@ -278,16 +293,42 @@ export function registerTenantCommands(
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
-		.argument('<bytes>', 'storage quota in bytes', parseQuotaBytes)
-		.action(async (url: URL, id: string, bytes: number) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			await runTenantSetQuota(
-				tenantIdSchema.parse(id),
-				{ kind: 'limited', bytes },
-				reporter,
-				tenantClient(url, programOptions)
-			);
-		});
+		.argument(
+			'[bytes]',
+			'storage quota in bytes; alternatively use --quota-bytes',
+			parseQuotaBytes
+		)
+		.option(
+			'--quota-bytes <bytes>',
+			'storage quota in bytes, as on tenant create; cannot be combined with positional bytes',
+			parseQuotaBytes
+		)
+		.action(
+			async (
+				url: URL,
+				id: string,
+				bytes: number | undefined,
+				options: SetQuotaOptions
+			) => {
+				if (bytes !== undefined && options.quotaBytes !== undefined) {
+					throw new QuotaBytesSelectionError('multiple');
+				}
+
+				const selectedBytes = bytes ?? options.quotaBytes;
+
+				if (selectedBytes === undefined) {
+					throw new QuotaBytesSelectionError('missing');
+				}
+
+				const reporter = commandUi(program, programOptions).reporter();
+				await runTenantSetQuota(
+					tenantIdSchema.parse(id),
+					{ kind: 'limited', bytes: selectedBytes },
+					reporter,
+					tenantClient(url, programOptions)
+				);
+			}
+		);
 
 	tenant
 		.command('clear-quota')

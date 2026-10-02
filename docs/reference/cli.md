@@ -158,45 +158,47 @@ Usage: cupboard init|deploy [options]
 Deploy cupboard to a Cloudflare account, or upgrade an existing deployment.
 
 Options:
-  --domain <host>         custom domain to serve the cache on
-  --instance-name <name>  the first part of every signing key's name, such as
-                          cupboard in cupboard-acme-1
-  --account <id>          Cloudflare account ID (by default, the only account
-                          you can access, or the one you choose)
-  --cache <slug>          slug of the first tenant on a new deployment (you are
-                          asked if you leave it out; without a terminal, no
-                          tenant is created)
-  --access <mode>         read access for the first tenant's default cache:
-                          public or private (you are asked if you leave it out)
-  --oidc-issuer <issuer>  OIDC issuer of the identity that claims a new
-                          deployment as its admin (default:
-                          "https://dash.cloudflare.com")
-  --client-id <id>        the public OAuth client ID to sign in as the admin
-                          with, on a first deploy, and on an update when the
-                          database does not record the admin's client (PKCE, no
-                          client secret) (default:
-                          "6c915db1f16ece47255821ee6ca1d538")
-  --headless              sign in as the admin with a code in a browser on
-                          another device, instead of opening one here, on a
-                          first deploy or when an update signs you in as the
-                          admin. Signing in to Cloudflare for the account can
-                          still open a browser.
-  --github-oidc           authorise an update with the workflow's GitHub Actions
-                          OIDC token, through a control trust rule, instead of a
-                          `cupboard login` session
-  --audience <audience>   OIDC audience to request with --github-oidc (default:
-                          the deployment URL)
-  --no-wrangler           sign in to Cloudflare in the browser instead of using
-                          wrangler's stored token
-  --workers-plan <plan>   your account's Workers plan, free or paid, which sets
-                          cupboard's limit on calls to other Cloudflare services
-                          (by default, looked up from the account)
-  --dry-run               show what would be deployed without changing anything
-  --from-tree             when the released binary runs inside a cupboard
-                          checkout, deploy Workers built from the working tree
-                          instead of the embedded ones
-  -y, --yes               skip the confirmation prompt
-  -h, --help              display help for command
+  --domain <host>           custom domain to serve the cache on
+  --instance-name <name>    the first part of every signing key's name, such as
+                            cupboard in cupboard-acme-1
+  --account <id>            Cloudflare account ID (by default, the only account
+                            you can access, or the one you choose)
+  --tenant, --cache <slug>  slug of the first tenant, not a named cache (only on
+                            a deployment without tenants; prompted in a
+                            terminal, and requires --access without a terminal)
+  --access <mode>           read access for the first tenant's default cache:
+                            public or private (you are asked if you leave it
+                            out)
+  --oidc-issuer <issuer>    OIDC issuer of the identity that claims a new
+                            deployment as its admin (default:
+                            "https://dash.cloudflare.com")
+  --client-id <id>          the public OAuth client ID to sign in as the admin
+                            with, on a first deploy, and on an update when the
+                            database does not record the admin's client (PKCE,
+                            no client secret) (default:
+                            "6c915db1f16ece47255821ee6ca1d538")
+  --headless                sign in as the admin with a code in a browser on
+                            another device, instead of opening one here, on a
+                            first deploy or when an update signs you in as the
+                            admin. Signing in to Cloudflare for the account can
+                            still open a browser.
+  --github-oidc             authorise an update with the workflow's GitHub
+                            Actions OIDC token, through a control trust rule,
+                            instead of a `cupboard login` session
+  --audience <audience>     OIDC audience to request with --github-oidc
+                            (default: the deployment URL)
+  --no-wrangler             sign in to Cloudflare in the browser instead of
+                            using wrangler's stored token
+  --workers-plan <plan>     your account's Workers plan, free or paid, which
+                            sets cupboard's limit on calls to other Cloudflare
+                            services (by default, looked up from the account)
+  --dry-run                 show what would be deployed without changing
+                            anything
+  --from-tree               when the released binary runs inside a cupboard
+                            checkout, deploy Workers built from the working tree
+                            instead of the embedded ones
+  -y, --yes                 skip the confirmation prompt
+  -h, --help                display help for command
 ```
 
 ### cupboard deployment
@@ -1381,7 +1383,7 @@ Commands:
   suspend [options] <url> <id>                          Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.
   resume <url> <id>                                     Resume a suspended tenant.
   quota <url> <id>                                      Show a tenant's storage quota and charged bytes.
-  set-quota <url> <id> <bytes>                          Set a tenant's storage quota. It can't be less than the tenant already stores.
+  set-quota [options] <url> <id> [bytes]                Set a tenant's storage quota. It can't be less than the tenant already stores.
   clear-quota <url> <id>                                Remove a tenant's storage quota, leaving it unlimited.
   rotate-credential [options] <url> <id>                Replace the tenant read credential, and print the new password.
   clear-credential <url> <id>                           Remove the tenant read credential.
@@ -1413,7 +1415,8 @@ Options:
   --read-user <user>           user name for the tenant read credential
                                (default: cupboard)
   --no-read-password           do not create a tenant read credential
-  --quota-bytes <bytes>        storage quota in bytes (unlimited by default)
+  --quota-bytes <bytes>        storage quota in bytes (unlimited by default);
+                               tenant set-quota accepts the same option
   -h, --help                   display help for command
 ```
 
@@ -1480,17 +1483,20 @@ Options:
 #### cupboard tenant set-quota
 
 ```text
-Usage: cupboard tenant set-quota [options] <url> <id> <bytes>
+Usage: cupboard tenant set-quota [options] <url> <id> [bytes]
 
 Set a tenant's storage quota. It can't be less than the tenant already stores.
 
 Arguments:
-  url         deployment URL (e.g. https://cupboard.example.workers.dev)
-  id          tenant slug
-  bytes       storage quota in bytes
+  url                    deployment URL (e.g.
+                         https://cupboard.example.workers.dev)
+  id                     tenant slug
+  bytes                  storage quota in bytes; alternatively use --quota-bytes
 
 Options:
-  -h, --help  display help for command
+  --quota-bytes <bytes>  storage quota in bytes, as on tenant create; cannot be
+                         combined with positional bytes
+  -h, --help             display help for command
 ```
 
 #### cupboard tenant clear-quota
@@ -2042,40 +2048,22 @@ Add a trust rule by hand: the issuer, audience and claims that a token must
 have, and the grants that the rule gives.
 
 Arguments:
-  url                          tenant URL (e.g.
-                               https://cupboard.example.workers.dev/t/<slug>)
+  url                                       tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --issuer <issuer>            OIDC issuer that must have signed the token
-                               (required unless you use --from-file)
-  --audience <audience>        audience that the token must have (required
-                               unless you use --from-file)
-  --claim <key=value>          a claim that the token must have, with exactly
-                               this value (repeatable) (default: [])
-  --job-workflow-ref <ref>     require the job_workflow_ref claim, which
-                               identifies the workflow file and ref that the job
-                               runs
-  --allow <action>             a grant to give (repeatable): read, push, attest,
-                               root, attach, create or remove (default: [])
-  --cache <name>               the cache that the grants apply to (default: the
-                               tenant's default cache)
-  --cache-template <template>  make the cache name from values in the token,
-                               such as "pr-{pr}" (see --template-source and
-                               --capture)
-  --root <name>                the root that publication grants cover, or a root
-                               prefix ending in /
-  --root-template <template>   make the publication root name from values in the
-                               token (see --template-source and --capture)
-  --capture <claim=pattern>    claim=regex, where each named group in the
-                               regular expression becomes a template variable
-                               (repeatable) (default: [])
-  --template-source <name>     take template variables from GitHub token claims:
-                               github-pr gives {repository_id} and {pr}, and
-                               github-tag gives {tag}
-  --from-file <path>           read the whole rule, including its issuer and
-                               audience, from a JSON file. Can't be combined
-                               with the other rule options.
-  -h, --help                   display help for command
+  --issuer <issuer>                         OIDC issuer that must have signed the token (required unless you use --from-file)
+  --audience <audience>                     audience that the token must have (required unless you use --from-file)
+  --claim <key=value>                       a claim that the token must have, with exactly this value (repeatable) (default: [])
+  --workflow-ref, --job-workflow-ref <ref>  require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs; the same reference is --workflow-ref on github setup/check
+  --allow <action>                          a grant to give (repeatable): read, push, attest, root, attach, create or remove (default: [])
+  --cache <name>                            the cache that the grants apply to (default: the tenant's default cache)
+  --cache-template <template>               make the cache name from values in the token, such as "pr-{pr}" (see --template-source and --capture)
+  --root <name>                             the root that publication grants cover, or a root prefix ending in /
+  --root-template <template>                make the publication root name from values in the token (see --template-source and --capture)
+  --capture <claim=pattern>                 claim=regex, where each named group in the regular expression becomes a template variable (repeatable) (default: [])
+  --template-source <name>                  take template variables from GitHub token claims: github-pr gives {repository_id} and {pr}, and github-tag gives {tag}
+  --from-file <path>                        read the whole rule, including its issuer and audience, from a JSON file. Can't be combined with the other rule options.
+  -h, --help                                display help for command
 
 Example:
   # Let a reusable workflow push to its pull request's own cache and
@@ -2097,24 +2085,17 @@ Add a trust rule that lets each pull request in a GitHub repository publish to a
 cache of its own.
 
 Arguments:
-  url                          tenant URL (e.g.
-                               https://cupboard.example.workers.dev/t/<slug>)
+  url                                         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --repo <owner/name>          the GitHub repository
-  --audience <audience>        audience that the token must have (default: the
-                               tenant URL)
-  --cache-template <template>  cache name for each pull request (default:
-                               gh-{repository_id}-pr-{pr})
-  --root-template <template>   root prefix for each pull request (default:
-                               github:<owner>/<repo>/pr-{pr}/)
-  --job-workflow-ref <value>   also require the job_workflow_ref claim, given as
-                               owner/repo/path@ref. Without @ref, it matches the
-                               workflow file at any ref.
-  --read-cache                 also permit content reads from the selected cache
-  --no-attest                  leave out the attest grant, so that runs cannot
-                               attach attestations
-  -h, --help                   display help for command
+  --repo <owner/name>                         the GitHub repository
+  --audience <audience>                       audience that the token must have (default: the tenant URL)
+  --cache-template <template>                 cache name for each pull request (default: gh-{repository_id}-pr-{pr})
+  --root-template <template>                  root prefix for each pull request (default: github:<owner>/<repo>/pr-{pr}/)
+  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.
+  --read-cache                                also permit content reads from the selected cache
+  --no-attest                                 leave out the attest grant, so that runs cannot attach attestations
+  -h, --help                                  display help for command
 
 Example:
   # Let each pull request in acme/app publish to its own
@@ -2132,23 +2113,17 @@ Add a trust rule that lets a GitHub repository's tag runs publish to a cache
 named after the tag.
 
 Arguments:
-  url                          tenant URL (e.g.
-                               https://cupboard.example.workers.dev/t/<slug>)
+  url                                         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --repo <owner/name>          the GitHub repository
-  --audience <audience>        audience that the token must have (default: the
-                               tenant URL)
-  --cache-template <template>  cache name for each tag (default: {tag})
-  --root-template <template>   root prefix for each tag (default:
-                               github:<owner>/<repo>/<cache name>/)
-  --job-workflow-ref <value>   also require the job_workflow_ref claim, given as
-                               owner/repo/path@ref. Without @ref, it matches the
-                               workflow file at any ref.
-  --read-cache                 also permit content reads from the selected cache
-  --no-attest                  leave out the attest grant, so that runs cannot
-                               attach attestations
-  -h, --help                   display help for command
+  --repo <owner/name>                         the GitHub repository
+  --audience <audience>                       audience that the token must have (default: the tenant URL)
+  --cache-template <template>                 cache name for each tag (default: {tag})
+  --root-template <template>                  root prefix for each tag (default: github:<owner>/<repo>/<cache name>/)
+  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.
+  --read-cache                                also permit content reads from the selected cache
+  --no-attest                                 leave out the attest grant, so that runs cannot attach attestations
+  -h, --help                                  display help for command
 
 Example:
   # Let tag runs in acme/app publish to a cache named after
@@ -2166,21 +2141,16 @@ Add a trust rule that lets runs on one branch of a GitHub repository publish to
 the tenant's default cache.
 
 Arguments:
-  url                         tenant URL (e.g.
-                              https://cupboard.example.workers.dev/t/<slug>)
+  url                                         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --repo <owner/name>         the GitHub repository
-  --branch <name>             the branch whose runs may publish (e.g. main)
-  --job-workflow-ref <value>  also require the job_workflow_ref claim, given as
-                              owner/repo/path@ref. Without @ref, it matches the
-                              workflow file at any ref.
-  --audience <audience>       audience that the token must have (default: the
-                              tenant URL)
-  --read-cache                also permit content reads from the selected cache
-  --no-attest                 leave out the attest grant, so that runs cannot
-                              attach attestations
-  -h, --help                  display help for command
+  --repo <owner/name>                         the GitHub repository
+  --branch <name>                             the branch whose runs may publish (e.g. main)
+  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.
+  --audience <audience>                       audience that the token must have (default: the tenant URL)
+  --read-cache                                also permit content reads from the selected cache
+  --no-attest                                 leave out the attest grant, so that runs cannot attach attestations
+  -h, --help                                  display help for command
 
 Example:
   # Let runs on main publish to the default cache, but only through
@@ -2235,31 +2205,17 @@ Add the trust rules and reuse view that cupboard's flake publish workflow needs
 for a GitHub repository.
 
 Arguments:
-  url                                   tenant URL (e.g.
-                                        https://cupboard.example.workers.dev/t/<slug>)
+  url                                                       tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --repo <owner/name>                   the GitHub repository that will publish
-  --branch <name>                       the branch whose runs publish to the
-                                        default cache (default: "main")
-  --workflow-ref <owner/repo/path@ref>  the workflow that the trust rules
-                                        accept, as owner/repo/path@ref. The ref
-                                        can be a full commit ID, the tag of a
-                                        release that GitHub reports as
-                                        immutable, or a tag pattern such as
-                                        refs/tags/v*. A pattern also matches
-                                        tags created later.
-  -y, --yes                             remove conflicting trust rules without
-                                        asking. Rules that only might conflict,
-                                        and rules for a different workflow
-                                        reference, are kept.
-  --read-user <user>                    user name of a read credential for
-                                        checking private cache information
-  --read-password <password>            password of the read credential
-  --cache-access-mode <mode>            public or private for new pull-request
-                                        caches (default: the tenant default
-                                        cache access)
-  -h, --help                            display help for command
+  --repo <owner/name>                                       the GitHub repository that will publish
+  --branch <name>                                           the branch whose runs publish to the default cache (default: "main")
+  --job-workflow-ref, --workflow-ref <owner/repo/path@ref>  the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.
+  -y, --yes                                                 remove conflicting trust rules without asking. Rules that only might conflict, and rules for a different workflow reference, are kept.
+  --read-user <user>                                        user name of a read credential for checking private cache information
+  --read-password <password>                                password of the read credential
+  --access, --cache-access-mode <mode>                      read access for new pull-request caches and their reuse view: public or private (default: the tenant default cache access); does not change the default cache
+  -h, --help                                                display help for command
 ```
 
 #### cupboard github check
@@ -2271,41 +2227,20 @@ Check that the tenant will accept the publishing jobs in a GitHub repository's
 workflow files, and offer to repair the tenant's settings.
 
 Arguments:
-  url                                   tenant URL (e.g.
-                                        https://cupboard.example.workers.dev/t/<slug>)
+  url                                                       tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --repo <owner/name>                   the GitHub repository to check
-  --branch <name>                       branch to read the workflow files from
-                                        (default: the repository's default
-                                        branch). With --workflow-ref, the branch
-                                        whose push runs publish (default: main).
-  --workflow-ref <owner/repo/path@ref>  check one workflow reference, as
-                                        owner/repo/path@ref, without reading the
-                                        workflow files. The ref must be a full
-                                        commit ID or the tag of a release that
-                                        GitHub reports as immutable.
-  --fix                                 show the tenant changes that would
-                                        repair the failing jobs, and apply them
-                                        after you confirm
-  -y, --yes                             apply the repair without the
-                                        confirmation prompt
-  --trust-scope <scope>                 which cupboard workflow references the
-                                        repair's new trust rules accept: exact
-                                        (the references that the workflows use
-                                        now) or tag-pattern (release tags that
-                                        match --tag-pattern) (choices: "exact",
-                                        "tag-pattern")
-  --tag-pattern <glob>                  release tag pattern that new trust rules
-                                        accept, such as v*
-  --root-prefix <value>                 the root-prefix value that the
-                                        repository's workflow passes
-  --read-user <user>                    user name of a read credential for
-                                        checking private cache and view
-                                        metadata; it does not select access mode
-                                        or workflow grants
-  --read-password <password>            password of the read credential
-  -h, --help                            display help for command
+  --repo <owner/name>                                       the GitHub repository to check
+  --branch <name>                                           branch to read the workflow files from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main).
+  --job-workflow-ref, --workflow-ref <owner/repo/path@ref>  check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref must be a full commit ID or the tag of a release that GitHub reports as immutable.
+  --fix                                                     show the tenant changes that would repair the failing jobs, and apply them after you confirm
+  -y, --yes                                                 apply the repair without the confirmation prompt
+  --trust-scope <scope>                                     which cupboard workflow references the repair's new trust rules accept: exact (the references that the workflows use now) or tag-pattern (release tags that match --tag-pattern) (choices: "exact", "tag-pattern")
+  --tag-pattern <glob>                                      release tag pattern that new trust rules accept, such as v* (without refs/tags/); github setup instead includes refs/tags/v* in --workflow-ref
+  --root-prefix <value>                                     the root-prefix value that the repository's workflow passes
+  --read-user <user>                                        user name of a read credential for checking private cache and view metadata; it does not select access mode or workflow grants
+  --read-password <password>                                password of the read credential
+  -h, --help                                                display help for command
 
 Exits 1 if any check failed, and 69 if no check failed but at least one
 could not be verified. With --fix, once the repair has written a change,

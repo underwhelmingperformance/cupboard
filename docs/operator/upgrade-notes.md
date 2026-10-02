@@ -257,6 +257,19 @@ statuses.
 
 [confirmation-prompts]: ../reference/cli-scripting.md#confirmation-prompts
 
+### CLI option spellings
+
+Existing flags and positional arguments remain accepted. `github setup` accepts
+`--access` as an alias for `--cache-access-mode`, and still applies that mode to
+pull-request caches and their reuse view. `--workflow-ref` and
+`--job-workflow-ref` are aliases on `github setup`, `github check` and the
+tenant trust-rule commands. `init --tenant` is an alias for `--cache`, which
+specifies the first tenant's slug, not a named cache.
+
+`tenant set-quota` also accepts `--quota-bytes`, as on `tenant create`. Use
+either the positional byte count or the option; supplying both exits 2 before
+authentication. Zero remains a zero-byte limit; `clear-quota` removes the limit.
+
 ### JSON result compatibility
 
 `control-oidc-trust list` can include unreadable entries in its
