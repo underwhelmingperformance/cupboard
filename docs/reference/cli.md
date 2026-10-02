@@ -597,9 +597,8 @@ may still publish the path. If the cache accepted every path, the push
 has already set the root or pins, unless --no-retain was given.
 
 When a path fails, the command exits 77 if any failure was a sign-in or
-permission failure, otherwise 75 if any was temporary, otherwise 69 if
-a service that the push needs was unavailable, otherwise 2 if an
-argument was invalid or an upload request exceeded its limit, and
+permission failure, otherwise 75 if any was temporary, otherwise 2 if
+an argument was invalid or an upload request exceeded its limit, and
 otherwise 1. A failure caused by the storage quota exits 1, because
 running the push again fails in the same way until space is freed or
 the quota is raised. For exit status 75, run the push again to publish
