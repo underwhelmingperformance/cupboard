@@ -35,6 +35,7 @@ import {
 import { childExitCode } from '../build-push/build-push.ts';
 import {
 	type ChildCommand,
+	type ChildExit,
 	type RunChild,
 	runChild
 } from '../build-push/supervisor.ts';
@@ -88,6 +89,23 @@ export class UnreadableReadCredentialFileError extends CliError {
 			`Cannot preserve credentials from the configured Nix netrc at ${file}. Make the file readable before requesting temporary read access.`
 		);
 		this.name = 'UnreadableReadCredentialFileError';
+	}
+}
+
+export class RunExecutableNotFoundError extends CliError {
+	constructor(
+		readonly executable: string,
+		options: ErrorOptions
+	) {
+		super(
+			`Command executable '${executable}' was not found. Install it or pass its full path.`,
+			options
+		);
+		this.name = 'RunExecutableNotFoundError';
+	}
+
+	override get exitCode(): number {
+		return 127;
 	}
 }
 
@@ -326,11 +344,20 @@ async function runOwnedChild(
 	environment: NodeJS.ProcessEnv,
 	dependencies: RunReadAccessDependencies
 ): Promise<void> {
-	const exit = await (dependencies.runChild ?? runChild)({
-		command,
-		environment,
-		...(dependencies.signal !== undefined && { signal: dependencies.signal })
-	});
+	let exit: ChildExit;
+	try {
+		exit = await (dependencies.runChild ?? runChild)({
+			command,
+			environment,
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		});
+	} catch (error) {
+		if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+			throw new RunExecutableNotFoundError(command[0], { cause: error });
+		}
+		throw error;
+	}
+
 	throwIfAborted(dependencies.signal);
 	if (childExitCode(exit) !== 0) {
 		throw new RunCommandFailedError(exit.status, exit.signal);
@@ -474,6 +501,10 @@ export function registerRunCommand(
 			'--reuse-view <name>',
 			'reuse view whose private cache content the command will read',
 			parseReuseView
+		)
+		.addHelpText(
+			'after',
+			"\nThe child inherits stdin, stdout and stderr. The command returns the child's exit status, or 128 plus the signal number when a signal terminates the child. A missing executable exits 127. OIDC acquisition or renewal failures use Cupboard's own exit statuses, including 77 for refused authority and 75 for temporary failures."
 		)
 		.action(async (url: URL, commandParts: string[], options: RunOptions) => {
 			const target = readTargetFromUrl(url);

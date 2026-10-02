@@ -17,6 +17,9 @@ The CLI keeps two kinds of output apart:
   `whoami --provider` produces in `json` mode is part of its result event, on
   standard error.
 
+`cupboard run` forwards its child's standard input, standard output and standard
+error directly. Cupboard's own progress and errors still go to standard error.
+
 This means you can capture a command's data, or redirect it to a file, without
 picking up anything else:
 
@@ -89,17 +92,30 @@ Otherwise, it exits with status 2 without doing anything.
 | ------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0      |                  | Success.                                                                                                                                                                                                                                                                                    |
 | 1      |                  | A failure that doesn't fit another status. For example, `confirm` found a path missing, `check` found a problem, or the tenant's storage quota refused an upload (`build-push` exits 74 for that).                                                                                          |
-| 2      |                  | A usage error. For example, an unknown option, an invalid value, more than 149 targets for one root, or a confirmation needed without `--yes`.                                                                                                                                              |
+| 2      |                  | A usage error. For example, an unknown option, an invalid value, more than 149 targets in one root update, or a confirmation needed without `--yes`.                                                                                                                                        |
 | 69     | `EX_UNAVAILABLE` | Something that the command needs isn't available. For example, `build-push` can't publish outputs from an `ssh-ng` store while the build runs, or `github check` couldn't complete one of its checks.                                                                                       |
 | 74     | `EX_IOERR`       | `build-push` only: publishing or setting the root failed, and no more specific status applies.                                                                                                                                                                                              |
 | 75     | `EX_TEMPFAIL`    | At least one failure was temporary. See [Retrying](#retrying).                                                                                                                                                                                                                              |
 | 77     | `EX_NOPERM`      | Signing in or a permission check failed. For example, you aren't signed in, your session has expired, the credential doesn't grant what the command needs, a GitHub token lacks a permission, or the Nix daemon doesn't list you in `trusted-users` when `build-push` runs a build command. |
+| 127    |                  | `run` could not find the child executable. Install the command or pass its full path.                                                                                                                                                                                                       |
 | 130    |                  | Interrupted with Ctrl-C (`SIGINT`).                                                                                                                                                                                                                                                         |
 | 143    |                  | Terminated with `SIGTERM`.                                                                                                                                                                                                                                                                  |
 
 The sysexits names come from [`sysexits(3)`][sysexits]. Some commands give a
 status a more specific meaning, which their `--help` describes.
 `cupboard root ensure` exits with status 0 whether or not it changed the root.
+
+OAuth token endpoints also use HTTP 400 for refused authority. The CLI uses exit
+77 for rejected identities, expired refresh tokens and refused grants. Malformed
+token requests or grant details use exit 2. Temporary HTTP failures retain exit
+75, including when the response contains an OAuth error.
+
+`cupboard run` returns the child's exit status, or 128 plus the signal number
+when a signal terminates the child. SIGINT and SIGTERM received by Cupboard are
+forwarded to the child. A child that does not stop within ten seconds is killed.
+An OIDC acquisition or renewal failure uses Cupboard's own status: 77 for
+refused authority and 75 for a temporary service or malformed token response. A
+renewal failure stops the child and removes temporary credentials.
 
 [sysexits]: https://man.freebsd.org/cgi/man.cgi?query=sysexits&sektion=3
 

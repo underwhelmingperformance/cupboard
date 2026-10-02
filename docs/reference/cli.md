@@ -768,6 +768,8 @@ Options:
   --reuse-view <name>       reuse view whose private cache content the command
                             will read
   -h, --help                display help for command
+
+The child inherits stdin, stdout and stderr. The command returns the child's exit status, or 128 plus the signal number when a signal terminates the child. A missing executable exits 127. OIDC acquisition or renewal failures use Cupboard's own exit statuses, including 77 for refused authority and 75 for temporary failures.
 ```
 
 ### cupboard config

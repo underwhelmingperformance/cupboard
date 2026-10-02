@@ -3,6 +3,7 @@ import {
 	localStepStallWindowMs,
 	type LocalStepStatus
 } from '@cupboard/protocol/deployment';
+import { subjectTokenProblemSchema } from '@cupboard/protocol/oidc';
 import { formatBytes } from '@cupboard/reporter';
 import {
 	CodedError,
@@ -39,6 +40,7 @@ export const publicationExitCode = 74;
 export type RankedExitStatus =
 	typeof authExitCode | typeof transientExitCode | typeof unavailableExitCode;
 
+const badRequestStatusCode: number = StatusCodes.BAD_REQUEST;
 const unauthorisedStatusCode: number = StatusCodes.UNAUTHORIZED;
 const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
 const requestTimeoutStatusCode: number = StatusCodes.REQUEST_TIMEOUT;
@@ -760,6 +762,26 @@ export class CupboardHttpError extends CliError {
 			this.status === forbiddenStatusCode
 		) {
 			return authExitCode;
+		}
+
+		if (this.status === badRequestStatusCode && this.oauthError !== undefined) {
+			const { error, problem } = this.oauthError;
+			if (error === 'invalid_grant') {
+				return authExitCode;
+			}
+			if (error === 'invalid_authorization_details') {
+				return problem === 'malformed' || problem === 'empty'
+					? usageExitCode
+					: authExitCode;
+			}
+			if (error === 'invalid_request') {
+				return subjectTokenProblemSchema.safeParse(problem).success
+					? authExitCode
+					: usageExitCode;
+			}
+			if (error === 'unsupported_grant_type') {
+				return usageExitCode;
+			}
 		}
 
 		// The server returns 507 when the cache is over its storage quota, and a

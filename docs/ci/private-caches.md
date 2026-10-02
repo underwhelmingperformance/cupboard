@@ -86,6 +86,13 @@ credential in a selected substituter URL conflicts with OIDC content access.
 Explicit OIDC acquisition requires `id-token: write` and a matching trust rule,
 including when the requested resources are public.
 
+`cupboard run` forwards the child's input and output and returns the child's
+exit status. A missing executable exits 127. OIDC acquisition or renewal exits
+77 for refused authority and 75 for temporary failures. Permanent renewal
+refusals stop the child immediately; temporary failures retry within the
+credential's remaining lifetime. The wrapper stops the child and removes its
+temporary credentials when renewal cannot continue.
+
 Setup validates `cache-access-mode` against authenticated configuration facts.
 For an absent destination, the facts describe the tenant's current first-write
 defaults. This is a configuration-time check. Another writer or a later change

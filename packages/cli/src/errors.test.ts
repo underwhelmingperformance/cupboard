@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
+	CupboardHttpError,
 	type IncompletePush,
 	overQuotaAdvice,
 	PushIncompleteError,
@@ -164,4 +165,97 @@ describe('PushIncompleteError', () => {
 			message
 		});
 	});
+});
+
+describe('CupboardHttpError OAuth classification', () => {
+	it.each([
+		{
+			error: 'invalid_grant',
+			problem: 'stale-refresh-token',
+			status: 400,
+			exitCode: 77
+		},
+		{
+			error: 'invalid_request',
+			problem: 'subject-token-invalid',
+			status: 400,
+			exitCode: 77
+		},
+		{
+			error: 'invalid_request',
+			problem: 'subject-token-untrusted',
+			status: 400,
+			exitCode: 77
+		},
+		{
+			error: 'invalid_request',
+			problem: 'subject-token-claim-mismatch',
+			status: 400,
+			exitCode: 77
+		},
+		{
+			error: 'invalid_authorization_details',
+			problem: 'read-resources-not-permitted',
+			status: 400,
+			exitCode: 77
+		},
+		{
+			error: 'invalid_authorization_details',
+			problem: 'not-permitted',
+			status: 400,
+			exitCode: 77
+		},
+		{
+			error: 'invalid_authorization_details',
+			problem: 'malformed',
+			status: 400,
+			exitCode: 2
+		},
+		{
+			error: 'invalid_authorization_details',
+			problem: 'empty',
+			status: 400,
+			exitCode: 2
+		},
+		{
+			error: 'invalid_request',
+			problem: 'invalid-read-resources',
+			status: 400,
+			exitCode: 2
+		},
+		{
+			error: 'unsupported_grant_type',
+			problem: undefined,
+			status: 400,
+			exitCode: 2
+		},
+		{
+			error: 'invalid_grant',
+			problem: 'stale-refresh-token',
+			status: 503,
+			exitCode: 75
+		},
+		{
+			error: 'unknown-provider-error',
+			problem: undefined,
+			status: 400,
+			exitCode: 1
+		}
+	])(
+		'classifies HTTP $status $error $problem',
+		({ error, problem, status, exitCode }) => {
+			const payload = { error, ...(problem !== undefined && { problem }) };
+			const failure = new CupboardHttpError(
+				'POST',
+				'/token',
+				status,
+				JSON.stringify(payload)
+			);
+			expect({
+				status: failure.status,
+				oauthError: failure.oauthError,
+				exitCode: failure.exitCode
+			}).toStrictEqual({ status, oauthError: payload, exitCode });
+		}
+	);
 });

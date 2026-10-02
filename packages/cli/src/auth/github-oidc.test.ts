@@ -1,3 +1,4 @@
+import { CodedError } from '@cupboard/shared/errors';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -22,6 +23,14 @@ function requestUrl(input: string | URL | Request): string {
 	}
 
 	return input.url;
+}
+
+async function failureOf(operation: Promise<unknown>): Promise<unknown> {
+	try {
+		return await operation;
+	} catch (error) {
+		return error;
+	}
 }
 
 describe('fetchGithubOidcToken', () => {
@@ -84,12 +93,12 @@ describe('fetchGithubOidcToken', () => {
 					return {};
 				}
 
-				return { error: { name: error_.name } };
+				return { error: { name: error_.name, exitCode: error_.exitCode } };
 			}
 		})();
 
 		expect({ outcome, requests }).toStrictEqual({
-			outcome: { error: { name: 'GithubOidcUnavailableError' } },
+			outcome: { error: { name: 'GithubOidcUnavailableError', exitCode: 77 } },
 			requests: []
 		});
 	});
@@ -110,12 +119,22 @@ describe('fetchGithubOidcToken', () => {
 					return {};
 				}
 
-				return { error: { name: error_.name, kind: error_.kind } };
+				return {
+					error: {
+						name: error_.name,
+						kind: error_.kind,
+						exitCode: error_.exitCode
+					}
+				};
 			}
 		})();
 
 		expect(outcome).toStrictEqual({
-			error: { name: 'GithubOidcResponseError', kind: 'missing-token' }
+			error: {
+				name: 'GithubOidcResponseError',
+				kind: 'missing-token',
+				exitCode: 75
+			}
 		});
 	});
 
@@ -135,46 +154,177 @@ describe('fetchGithubOidcToken', () => {
 					return {};
 				}
 
-				return { error: { name: error_.name, kind: error_.kind } };
-			}
-		})();
-
-		expect(outcome).toStrictEqual({
-			error: { name: 'GithubOidcResponseError', kind: 'non-json' }
-		});
-	});
-
-	it('throws when the token request fails', async () => {
-		const outcome = await (async () => {
-			try {
-				const token = await fetchGithubOidcToken({
-					audience: 'aud',
-					environment,
-					fetcher: () =>
-						Promise.resolve(new Response('forbidden', { status: 403 }))
-				});
-				return { token };
-			} catch (error_: unknown) {
-				expect(error_).toBeInstanceOf(GithubOidcRequestError);
-
-				if (!(error_ instanceof GithubOidcRequestError)) {
-					return {};
-				}
-
 				return {
 					error: {
 						name: error_.name,
-						status: error_.status
+						kind: error_.kind,
+						exitCode: error_.exitCode
 					}
 				};
 			}
 		})();
 
 		expect(outcome).toStrictEqual({
-			error: {
-				name: GithubOidcRequestError.name,
-				status: 403
-			}
+			error: { name: 'GithubOidcResponseError', kind: 'non-json', exitCode: 75 }
 		});
 	});
+
+	it.each([
+		{ status: 401, exitCode: 77 },
+		{ status: 403, exitCode: 77 },
+		{ status: 429, exitCode: 75 },
+		{ status: 503, exitCode: 75 }
+	])(
+		'classifies a token request failure with status $status',
+		async ({ status, exitCode }) => {
+			const outcome = await (async () => {
+				try {
+					const token = await fetchGithubOidcToken({
+						audience: 'aud',
+						environment,
+						fetcher: () =>
+							Promise.resolve(new Response('request failed', { status }))
+					});
+					return { token };
+				} catch (error_: unknown) {
+					expect(error_).toBeInstanceOf(GithubOidcRequestError);
+
+					if (!(error_ instanceof GithubOidcRequestError)) {
+						return {};
+					}
+
+					return {
+						error: {
+							name: error_.name,
+							status: error_.status,
+							exitCode: error_.exitCode
+						}
+					};
+				}
+			})();
+
+			expect(outcome).toStrictEqual({
+				error: {
+					name: GithubOidcRequestError.name,
+					status,
+					exitCode
+				}
+			});
+		}
+	);
 });
+
+it.each(
+	[200, 401, 503].flatMap((status) =>
+		['declared', 'received'].map((sizeSource) => ({ status, sizeSource }))
+	)
+)(
+	'classifies an oversized $status $sizeSource OIDC body',
+	async ({ status, sizeSource }) => {
+		const failure = await failureOf(
+			fetchGithubOidcToken({
+				audience: 'aud',
+				environment,
+				fetcher: () =>
+					Promise.resolve(
+						new Response(
+							sizeSource === 'declared' ? 'short body' : 'x'.repeat(1_048_577),
+							{
+								status,
+								...(sizeSource === 'declared' && {
+									headers: { 'content-length': '1048577' }
+								})
+							}
+						)
+					)
+			})
+		);
+		expect({
+			name: failure instanceof Error ? failure.name : undefined,
+			exitCode: failure instanceof CodedError ? failure.exitCode : undefined,
+			hasSizeCause:
+				failure instanceof Error &&
+				failure.cause instanceof Error &&
+				failure.cause.name === 'RemoteBodyTooLargeError'
+		}).toStrictEqual({
+			name:
+				status === 200 ? 'GithubOidcResponseError' : 'GithubOidcRequestError',
+			exitCode: status === 401 ? 77 : 75,
+			hasSizeCause: true
+		});
+	}
+);
+
+it.each([200, 401, 503])(
+	'preserves HTTP classification for an unreadable $status OIDC body',
+	async (status) => {
+		const cause = new TypeError('Fixture stream failed');
+		const failure = await failureOf(
+			fetchGithubOidcToken({
+				audience: 'aud',
+				environment,
+				fetcher: () =>
+					Promise.resolve(
+						new Response(
+							new ReadableStream({
+								start(controller) {
+									controller.error(cause);
+								}
+							}),
+							{ status }
+						)
+					)
+			})
+		);
+		expect({
+			name: failure instanceof Error ? failure.name : undefined,
+			exitCode: failure instanceof CodedError ? failure.exitCode : undefined,
+			hasCause: failure instanceof Error && failure.cause === cause
+		}).toStrictEqual({
+			name:
+				status === 200 ? 'GithubOidcResponseError' : 'GithubOidcRequestError',
+			exitCode: status === 401 ? 77 : 75,
+			hasCause: true
+		});
+	}
+);
+
+it('classifies an OIDC transport failure as temporary', async () => {
+	const cause = new TypeError('Fixture connection failed');
+	const failure = await failureOf(
+		fetchGithubOidcToken({
+			audience: 'aud',
+			environment,
+			fetcher: () => Promise.reject(cause)
+		})
+	);
+	expect({
+		name: failure instanceof Error ? failure.name : undefined,
+		exitCode: failure instanceof CodedError ? failure.exitCode : undefined,
+		hasCause: failure instanceof Error && failure.cause === cause
+	}).toStrictEqual({
+		name: 'GithubOidcTransportError',
+		exitCode: 75,
+		hasCause: true
+	});
+});
+
+it.each([200, 401])(
+	'preserves cancellation while reading HTTP %s',
+	async (status) => {
+		const controller = new AbortController();
+		const cause = new Error('Fixture cancelled');
+		const failure = await failureOf(
+			fetchGithubOidcToken({
+				audience: 'aud',
+				environment,
+				signal: controller.signal,
+				fetcher: () => {
+					controller.abort(cause);
+					return Promise.resolve(new Response('', { status }));
+				}
+			})
+		);
+		expect(failure).toBe(cause);
+	}
+);
