@@ -23,8 +23,12 @@ can make and the details of what `init` does.
 - A terminal, and a browser where you can sign in. The identity that you sign in
   with for the [claim](#claiming-the-deployment) becomes the deployment's admin.
   By default this is your Cloudflare identity.
-- An R2 bucket and an R2 API token. The first step below shows how to create
-  them.
+- An R2 bucket and an R2 API token for the browser-sign-in walkthrough below. If
+  your Cloudflare API token can manage account tokens, `init` can create the
+  bucket and a write-only key instead. See [Letting `init` create a
+  key][create-r2-key].
+
+[create-r2-key]: #letting-init-create-a-key
 
 If you're logged in to `wrangler` on this machine, `init` may use wrangler's
 stored token to make changes on the Cloudflare account. Pass `--no-wrangler` to
