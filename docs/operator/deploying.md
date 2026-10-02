@@ -556,8 +556,10 @@ that you're deploying:
      queue;
    - the `CUPBOARD_TENANT` service and the `CUPBOARD_DO` `script_name`: the
      tenant Worker's script name;
-   - under `vars`, `CUPBOARD_DEPLOYMENT_URL`: the deployment's URL, such as
-     `https://cache.example.com`.
+   - add `CUPBOARD_DEPLOYMENT_URL` under `vars`: the deployment's URL, such as
+     `https://cupboard.example.workers.dev`. The checkout's configuration does
+     not include this binding; `init` normally adds it when uploading the
+     Worker.
 3. If the tenant Worker was deleted too, deploy it first. Set `name` and the
    `CUPBOARD_DB`, `BLOBS` and `MAINTENANCE_QUEUE` bindings in
    `packages/server/wrangler.tenant.jsonc` in the same way, then run
