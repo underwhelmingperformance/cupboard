@@ -79,6 +79,8 @@ export const cacheIdentities = sqliteTable(
 			'default_root_ttl_seconds'
 		).$type<TtlSeconds>(),
 		graceSeconds: integer('grace_seconds').$type<GraceSeconds>(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
+		closeHistoryCursor: integer('close_history_cursor').notNull().default(0),
 		// Never cleared, even by clear-grace: collection must finish draining
 		// the cache after its last grace deadline expires.
 		graceManaged: integer('grace_managed', { mode: 'boolean' })
@@ -121,6 +123,7 @@ export const managedCacheRetirements = sqliteTable(
 	'managed_cache_retirement',
 	{
 		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+		retirementStartedAt: text('retirement_started_at').$type<IsoTimestamp>(),
 		eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull(),
 		incarnation: text('incarnation').notNull().default(''),
 		revision: integer('revision').notNull().default(0),
@@ -135,6 +138,17 @@ export const managedCacheRetirements = sqliteTable(
 		),
 		index('managed_cache_retirement_next_check_at_idx').on(table.nextCheckAt)
 	]
+);
+
+export const cacheCloseEvents = sqliteTable(
+	'cache_close_event',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		epoch: integer('epoch').notNull(),
+		closedAt: text('closed_at').$type<IsoTimestamp>().notNull(),
+		graceUntil: text('grace_until').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.cacheId, table.epoch] })]
 );
 
 export const cacheListingProjectionMigration = sqliteTable(
@@ -301,6 +315,7 @@ export const narInfos = sqliteTable(
 			'pending_signature_generation'
 		).$type<SigningKeyGeneration>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
 		inheritanceExhausted: integer('inheritance_exhausted', { mode: 'boolean' })
 			.notNull()
 			.default(false)
@@ -380,6 +395,7 @@ export const pendingUploads = sqliteTable(
 		acceptedExpiresAt: text('accepted_expires_at').$type<IsoTimestamp>(),
 		commitStartedSequence: integer('commit_started_sequence'),
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
@@ -449,6 +465,10 @@ export const pendingUploads = sqliteTable(
 				table.id
 			)
 			.where(sql`${table.settleExhaustion} IS NOT NULL`),
+		index('pending_upload_cache_retention_epoch_idx').on(
+			table.cacheId,
+			table.retentionEpoch
+		),
 		index('pending_upload_expires_at_idx').on(table.expiresAt),
 		index('pending_upload_terminal_expires_at_idx')
 			.on(table.expiresAt, table.id)
@@ -857,6 +877,9 @@ export const retentionRoots = sqliteTable(
 	{
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		name: text('name').$type<RootName>().notNull(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
+		closeAppliedEpoch: integer('close_applied_epoch').notNull().default(0),
+		closeGraceUntil: text('close_grace_until').$type<IsoTimestamp>(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
@@ -865,6 +888,16 @@ export const retentionRoots = sqliteTable(
 	// it a scan of every root.
 	(table) => [
 		primaryKey({ columns: [table.cacheId, table.name] }),
+		index('retention_root_cache_retention_epoch_idx').on(
+			table.cacheId,
+			table.retentionEpoch,
+			table.name
+		),
+		index('retention_root_close_applied_epoch_idx').on(
+			table.cacheId,
+			table.closeAppliedEpoch,
+			table.name
+		),
 		index('retention_root_expires_at_idx').on(table.expiresAt),
 		index('retention_root_cache_expires_at_name_idx').on(
 			table.cacheId,

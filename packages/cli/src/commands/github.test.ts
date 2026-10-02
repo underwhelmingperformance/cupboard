@@ -63,7 +63,11 @@ import {
 } from './github.ts';
 import { type DiscoveredGithubCheckResult } from './github/discovered-check.ts';
 import { RepositoryTrustRuleMissingFinding } from './github/trust-selection.ts';
-import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from './oidc-trust.ts';
 import {
 	InvalidRepositoryError,
 	type RepositoryIdentity
@@ -92,6 +96,10 @@ const options: GithubSetupOptions = {
 };
 
 const prBody = githubPrAddBody(url, identity, {
+	repo: options.repo,
+	jobWorkflowRef: options.workflowRef
+});
+const prCloseBody = githubPrCloseAddBody(url, identity, {
 	repo: options.repo,
 	jobWorkflowRef: options.workflowRef
 });
@@ -273,7 +281,11 @@ describe('runGithubSetup', () => {
 							selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 						}
 					],
-					rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+					rules: [
+						storedRule('pr', prBody),
+						storedRule('branch', branchBody),
+						storedRule('pr-close', prCloseBody)
+					]
 				});
 				let failure: unknown;
 
@@ -367,7 +379,14 @@ describe('runGithubSetup', () => {
 						priority: 50
 					}
 				],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [
+					prBody,
+					branchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: options.workflowRef
+					})
+				],
 				ruleRemoves: []
 			},
 			results: [
@@ -377,7 +396,11 @@ describe('runGithubSetup', () => {
 						value: 'created: public gh-1234-pr- caches at priority 50'
 					},
 					{ label: 'pull-request trust rule', value: ruleCreated },
-					{ label: 'main trust rule', value: ruleCreated }
+					{ label: 'main trust rule', value: ruleCreated },
+					{
+						label: 'merged pull-request closure trust rule',
+						value: ruleCreated
+					}
 				]
 			]
 		});
@@ -437,7 +460,8 @@ describe('runGithubSetup', () => {
 					jobWorkflowRef: options.workflowRef,
 					readCache: true,
 					readView: 'pull-requests-1234'
-				}).permittedGrants
+				}).permittedGrants,
+				prCloseBody.permittedGrants
 			]
 		});
 	});
@@ -526,20 +550,21 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `retained: main pushes; ${previousWorkflowReference}`
+					value: `retained: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -584,7 +609,11 @@ describe('runGithubSetup', () => {
 					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
-			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+			rules: [
+				storedRule('pr', prBody),
+				storedRule('branch', branchBody),
+				storedRule('pr-close', prCloseBody)
+			]
 		});
 
 		await runGithubSetup(url, options, reporter(results), client, dependencies);
@@ -599,7 +628,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
-				{ label: 'main trust rule', value: 'unchanged' }
+				{ label: 'main trust rule', value: 'unchanged' },
+				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
 			]
 		});
 	});
@@ -648,20 +678,21 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `retained: main pushes; ${previousWorkflowReference}`
+					value: `retained: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			],
 			verifiedReferences: [pinnedWorkflowReference, previousWorkflowReference]
@@ -733,7 +764,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: ['previous-branch', 'previous-pr']
 			},
 			prompts: [
@@ -742,12 +773,13 @@ describe('runGithubSetup', () => {
 					entries: [
 						{
 							value: 'previous-branch',
-							label: 'main pushes (previous-branch)',
+							label: 'main pushes and merged pull requests (previous-branch)',
 							hint: previousWorkflowReference
 						},
 						{
 							value: 'previous-pr',
-							label: 'pull requests and main pushes (previous-pr)',
+							label:
+								'pull requests and main pushes and merged pull requests (previous-pr)',
 							hint: previousWorkflowReference
 						}
 					],
@@ -758,13 +790,14 @@ describe('runGithubSetup', () => {
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `removed: main pushes; ${previousWorkflowReference}`
+					value: `removed: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `removed: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `removed: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -836,7 +869,7 @@ describe('runGithubSetup', () => {
 			confirms: [
 				{
 					message: 'Remove all conflicting trust rules to continue?',
-					detail: `main pushes (conflict): ${pinnedWorkflowReference}`
+					detail: `main pushes and merged pull requests (conflict): ${pinnedWorkflowReference}`
 				}
 			],
 			cancellations: ['GitHub setup was left unchanged.']
@@ -877,7 +910,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
@@ -887,7 +920,8 @@ describe('runGithubSetup', () => {
 					value: `retained: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated }
+				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -934,7 +968,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: ['dispatch']
 			},
 			prompts: [
@@ -957,7 +991,8 @@ describe('runGithubSetup', () => {
 					value: `removed: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated }
+				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -1003,7 +1038,7 @@ describe('runGithubSetup', () => {
 						priority: 50
 					}
 				],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
@@ -1012,7 +1047,8 @@ describe('runGithubSetup', () => {
 					value: 'created: public gh-1234-pr- caches at priority 50'
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated }
+				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -1036,7 +1072,12 @@ describe('runGithubSetup', () => {
 					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
-			rules: [owner, storedRule('pr', prBody), storedRule('branch', branchBody)]
+			rules: [
+				owner,
+				storedRule('pr', prBody),
+				storedRule('branch', branchBody),
+				storedRule('pr-close', prCloseBody)
+			]
 		});
 
 		await runGithubSetup(url, options, ui, client, dependencies);
@@ -1086,13 +1127,13 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody],
+				ruleAdds: [prBody, prCloseBody],
 				ruleRemoves: ['conflict']
 			},
 			confirms: [
 				{
 					message: 'Remove all conflicting trust rules to continue?',
-					detail: `pull requests and main pushes (conflict): ${pinnedWorkflowReference}`
+					detail: `pull requests and main pushes and merged pull requests (conflict): ${pinnedWorkflowReference}`
 				}
 			]
 		});
@@ -1179,24 +1220,25 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: ['conflict']
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule conflict',
-					value: `removed: pull requests and main pushes; ${pinnedWorkflowReference}`
+					value: `removed: pull requests and main pushes and merged pull requests; ${pinnedWorkflowReference}`
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `retained: main pushes; ${previousWorkflowReference}`
+					value: `retained: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -1254,7 +1296,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			prompts: [
@@ -1263,7 +1305,8 @@ describe('runGithubSetup', () => {
 					entries: [
 						{
 							value: 'legacy',
-							label: 'pull requests and main pushes (legacy)',
+							label:
+								'pull requests and main pushes and merged pull requests (legacy)',
 							hint: `${movableWorkflowReference} (trusts future edits to the workflow)`
 						}
 					],
@@ -1274,9 +1317,10 @@ describe('runGithubSetup', () => {
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule legacy',
-					value: `retained: pull requests and main pushes; ${movableWorkflowReference}; trusts future edits to the workflow`
+					value: `retained: pull requests and main pushes and merged pull requests; ${movableWorkflowReference}; trusts future edits to the workflow`
 				}
 			],
 			verifiedReferences: [pinnedWorkflowReference]
@@ -1327,17 +1371,18 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule legacy',
 					value:
-						'retained: pull requests and main pushes; workflow references matching ^other/.*$'
+						'retained: pull requests and main pushes and merged pull requests; workflow references matching ^other/.*$'
 				}
 			],
 			verifiedReferences: [pinnedWorkflowReference]
@@ -1455,7 +1500,7 @@ describe('runGithubSetup', () => {
 				recorded: {
 					graceAdds: [],
 					viewSets: [],
-					ruleAdds: [prBody, branchBody],
+					ruleAdds: [prBody, branchBody, prCloseBody],
 					ruleRemoves: earlierFailure === undefined ? ['previous-branch'] : []
 				},
 				outcomes: [
@@ -1463,15 +1508,19 @@ describe('runGithubSetup', () => {
 					{ label: 'pull-request trust rule', value: ruleCreated },
 					{ label: 'main trust rule', value: ruleCreated },
 					{
+						label: 'merged pull-request closure trust rule',
+						value: ruleCreated
+					},
+					{
 						label: 'superseded trust rule previous-branch',
 						value:
 							earlierFailure === undefined
-								? `removed: main pushes; ${previousWorkflowReference}`
-								: `retained: main pushes; ${previousWorkflowReference}; the removal failed`
+								? `removed: main pushes and merged pull requests; ${previousWorkflowReference}`
+								: `retained: main pushes and merged pull requests; ${previousWorkflowReference}; the removal failed`
 					},
 					{
 						label: 'superseded trust rule previous-pr',
-						value: `retained: pull requests and main pushes; ${previousWorkflowReference}; the removal failed`
+						value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}; the removal failed`
 					}
 				]
 			});
@@ -1488,7 +1537,11 @@ describe('runGithubSetup', () => {
 					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
-			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+			rules: [
+				storedRule('pr', prBody),
+				storedRule('branch', branchBody),
+				storedRule('pr-close', prCloseBody)
+			]
 		});
 
 		let failure: unknown;
@@ -1590,7 +1643,7 @@ describe('runGithubSetup', () => {
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -1642,20 +1695,31 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [patternPrBody, patternBranchBody],
+				ruleAdds: [
+					patternPrBody,
+					patternBranchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: patternReference
+					})
+				],
 				ruleRemoves: ['exact']
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule exact',
-					value: `removed: pull requests and main pushes; ${pinnedWorkflowReference}`
+					value: `removed: pull requests and main pushes and merged pull requests; ${pinnedWorkflowReference}`
 				},
 				{
 					label: 'pull-request trust rule',
 					value: `created: ${patternDetail}`
 				},
-				{ label: 'main trust rule', value: `created: ${patternDetail}` }
+				{ label: 'main trust rule', value: `created: ${patternDetail}` },
+				{
+					label: 'merged pull-request closure trust rule',
+					value: `created: ${patternDetail}`
+				}
 			]
 		});
 	});
@@ -1714,7 +1778,14 @@ describe('runGithubSetup', () => {
 			expect(recorded).toStrictEqual({
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [desiredPrBody, desiredBranchBody],
+				ruleAdds: [
+					desiredPrBody,
+					desiredBranchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: desiredReference
+					})
+				],
 				ruleRemoves: expectedRemovals
 			});
 		}
@@ -1761,7 +1832,14 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [patternPrBody, patternBranchBody],
+				ruleAdds: [
+					patternPrBody,
+					patternBranchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: patternReference
+					})
+				],
 				ruleRemoves: []
 			},
 			outcomes: [
@@ -1770,7 +1848,11 @@ describe('runGithubSetup', () => {
 					label: 'pull-request trust rule',
 					value: `created: ${patternDetail}`
 				},
-				{ label: 'main trust rule', value: `created: ${patternDetail}` }
+				{ label: 'main trust rule', value: `created: ${patternDetail}` },
+				{
+					label: 'merged pull-request closure trust rule',
+					value: `created: ${patternDetail}`
+				}
 			]
 		});
 	});
@@ -1799,7 +1881,14 @@ describe('runGithubSetup', () => {
 			],
 			rules: [
 				storedRule('pattern-pr', patternPrBody),
-				storedRule('pattern-branch', patternBranchBody)
+				storedRule('pattern-branch', patternBranchBody),
+				storedRule(
+					'pattern-close',
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: patternReference
+					})
+				)
 			]
 		});
 
@@ -1825,7 +1914,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
-				{ label: 'main trust rule', value: 'unchanged' }
+				{ label: 'main trust rule', value: 'unchanged' },
+				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
 			]
 		});
 	});

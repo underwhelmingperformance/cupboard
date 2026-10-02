@@ -5,7 +5,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { CacheRootRetention } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, lte, sql } from 'drizzle-orm';
 
 import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
@@ -13,6 +13,11 @@ import * as schema from '../db/schema.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
+
+interface ClosedRootGrace {
+	readonly retentionEpoch: number;
+	readonly retainUntil: IsoTimestamp;
+}
 
 interface GraceTransition {
 	readonly storePathHash: StorePathHash;
@@ -29,7 +34,8 @@ export class RetentionService {
 	private narinfoBackedHashes(
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[],
-		writer: SchemaWriter
+		writer: SchemaWriter,
+		retentionEpoch?: number
 	): StorePathHash[] {
 		const backed = new Set<StorePathHash>();
 
@@ -40,7 +46,10 @@ export class RetentionService {
 				.where(
 					and(
 						eq(schema.narInfos.cacheId, cache.id),
-						inArray(schema.narInfos.storePathHash, hashes)
+						inArray(schema.narInfos.storePathHash, hashes),
+						retentionEpoch === undefined
+							? undefined
+							: lte(schema.narInfos.retentionEpoch, retentionEpoch)
 					)
 				)
 				.all();
@@ -142,6 +151,25 @@ export class RetentionService {
 				storePathHash,
 				retainUntil
 			})),
+			writer
+		);
+	}
+
+	extendClosedRootGraceDeadlines(
+		cache: ResolvedCache,
+		storePathHashes: readonly StorePathHash[],
+		grace: ClosedRootGrace,
+		writer: SchemaWriter = this.context.db
+	): void {
+		this.extendGraceDeadlines(
+			cache,
+			this.narinfoBackedHashes(
+				cache,
+				storePathHashes,
+				writer,
+				grace.retentionEpoch
+			),
+			grace.retainUntil,
 			writer
 		);
 	}

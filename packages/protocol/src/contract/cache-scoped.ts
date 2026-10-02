@@ -1,4 +1,4 @@
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { type AuthzMeta, baseProcedure, type ResourceSpec } from './base.ts';
@@ -72,5 +72,26 @@ export function cacheScopedProcedure<
 			.input(z.strictObject({ ...shape }))
 			.output(output),
 		inNamedCache: namedCacheProcedure(route, shape, output)
+	};
+}
+
+export const cacheClosedError = {
+	CACHE_CLOSED: {
+		status: 409,
+		data: z.strictObject({ cache: cacheScopeSchema })
+	}
+};
+
+/**
+ * Declares a cache mutation that can reject an explicitly closed cache.
+ */
+export function writableCacheScopedProcedure<
+	Shape extends z.core.$ZodLooseShape,
+	Output extends z.ZodType
+>(route: CacheScopedRoute, shape: Shape, output: Output) {
+	const procedure = cacheScopedProcedure(route, shape, output);
+	return {
+		inDefaultCache: procedure.inDefaultCache.errors(cacheClosedError),
+		inNamedCache: procedure.inNamedCache.errors(cacheClosedError)
 	};
 }

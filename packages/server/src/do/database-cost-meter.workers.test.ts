@@ -79,8 +79,8 @@ describe('db cost meter', () => {
 			return dbCost.rowsWritten - before;
 		});
 
-		// Each insert writes the table row and eight index entries.
-		expect(measured).toBe(27);
+		// Each insert writes the table row and nine index entries.
+		expect(measured).toBe(30);
 	});
 
 	it('attributes rows to the request that read them, not a concurrent one', async () => {
@@ -160,8 +160,8 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 35,
-			rowsWritten: 10
+			rowsRead: 39,
+			rowsWritten: 11
 		});
 	});
 
@@ -194,7 +194,7 @@ describe('db cost meter', () => {
 			status: negotiate?.status,
 			rowsRead: negotiate?.rowsRead,
 			rowsWritten: negotiate?.rowsWritten
-		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 35, rowsWritten: 12 });
+		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 39, rowsWritten: 13 });
 	});
 
 	it('logs the cost line with a 500 status when the request fails', async () => {
@@ -231,7 +231,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 35,
+			rowsRead: 39,
 			rowsWritten: 1
 		});
 	});

@@ -26,7 +26,10 @@ import {
 } from '../oidc-trust/github.ts';
 
 import { parseExactWorkflowReference } from './convention.ts';
-import { jobConditionOutcome } from './job-condition.ts';
+import {
+	jobConditionOutcome,
+	type JobDependencyGate
+} from './job-condition.ts';
 
 type WorkflowInput = string | number | boolean;
 type WorkflowInputs = Readonly<Record<string, WorkflowInput>>;
@@ -49,6 +52,8 @@ export type ReferenceFilterKey = (typeof referenceFilterKeys)[number];
 
 export interface WorkflowTrigger {
 	readonly event: string;
+	readonly activityTypes?: readonly string[] | 'unknown';
+	readonly dependencyGates?: readonly JobDependencyGate[];
 	readonly filters: Readonly<
 		Partial<Record<ReferenceFilterKey, readonly string[]>>
 	>;
@@ -77,6 +82,7 @@ export interface DiscoveredPublishingJob {
 	};
 	readonly privateSubstitutersWiring?: 'configured' | 'unknown';
 	readonly triggers: readonly WorkflowTrigger[];
+	readonly excludedPullRequestTrigger?: WorkflowTrigger;
 }
 
 /**
@@ -148,6 +154,7 @@ const inputDeclarationsSchema = z
 	.catch(undefined);
 
 const eventSchema = z.looseObject({
+	types: z.unknown().optional(),
 	branches: patternsSchema.optional(),
 	'branches-ignore': patternsSchema.optional(),
 	tags: patternsSchema.optional(),
@@ -168,7 +175,8 @@ const stepSchema = z.looseObject({
 const stepsSchema = z.array(stepSchema.catch({})).optional().catch(undefined);
 
 const jobSchema = z.looseObject({
-	if: z.union([z.string(), z.boolean()]).optional().catch(undefined),
+	if: z.unknown().optional(),
+	needs: z.unknown().optional(),
 	uses: z.string().optional().catch(undefined),
 	with: mappingSchema.optional().catch(undefined),
 	secrets: z.unknown().optional(),
@@ -243,6 +251,10 @@ function workflowTriggers(on: Workflow['on']): WorkflowTrigger[] {
 
 	return Object.entries(on ?? {}).map(([event, configuration]) => ({
 		event,
+		...(event === 'pull_request' &&
+			configuration?.types !== undefined && {
+				activityTypes: activityTypes(configuration.types)
+			}),
 		filters: Object.fromEntries(
 			referenceFilterKeys.flatMap((key) => {
 				const patterns = configuration?.[key];
@@ -254,6 +266,75 @@ function workflowTriggers(on: Workflow['on']): WorkflowTrigger[] {
 			configuration?.paths !== undefined ||
 			configuration?.['paths-ignore'] !== undefined
 	}));
+}
+
+function activityTypes(value: unknown): readonly string[] | 'unknown' {
+	if (
+		!Array.isArray(value) ||
+		value.some(
+			(entry: unknown) => typeof entry !== 'string' || entry.includes('${{')
+		)
+	) {
+		return 'unknown';
+	}
+
+	return z.array(z.string()).parse(value);
+}
+
+function jobCondition(value: unknown): string | boolean {
+	if (value === undefined) {
+		return true;
+	}
+	return typeof value === 'string' || typeof value === 'boolean'
+		? value
+		: `unsupported condition (${JSON.stringify(value)})`;
+}
+
+interface DependencyTraversal {
+	readonly ancestors: ReadonlySet<string>;
+	readonly budget: { remaining: number };
+}
+
+function jobDependencyGate(
+	jobs: NonNullable<Workflow['jobs']>,
+	id: string,
+	traversal: DependencyTraversal
+): JobDependencyGate {
+	const job = jobs[id];
+	if (
+		job === undefined ||
+		!Object.hasOwn(jobs, id) ||
+		traversal.ancestors.has(id) ||
+		traversal.ancestors.size >= 32 ||
+		traversal.budget.remaining <= 0
+	) {
+		return { condition: true, dependencies: 'unknown' };
+	}
+	traversal.budget.remaining -= 1;
+	const condition = jobCondition(job.if);
+	if (job.needs === undefined) {
+		return { condition, dependencies: [] };
+	}
+	const names = typeof job.needs === 'string' ? [job.needs] : job.needs;
+	if (
+		!Array.isArray(names) ||
+		names.some(
+			(name: unknown) => typeof name !== 'string' || name.includes('${{')
+		)
+	) {
+		return { condition, dependencies: 'unknown' };
+	}
+	const visited: DependencyTraversal = {
+		ancestors: new Set([...traversal.ancestors, id]),
+		budget: traversal.budget
+	};
+	return {
+		condition,
+		dependencies: z
+			.array(z.string())
+			.parse(names)
+			.map((name) => jobDependencyGate(jobs, name, visited))
+	};
 }
 
 function inputDefaults(workflow: Workflow): WorkflowInputs {
@@ -344,7 +425,7 @@ const cupboardAction =
 // through a variable, such as "${CUPBOARD_PATH}" cache remove, has no
 // `cupboard` word, so the check also looks for the flag itself.
 const publishingCommand =
-	/\bcupboard\s+(?:push|build-push|attest\s+attach|plan\s+cohort|cache\s+(?:create|remove)|root\s+ensure|confirm)\b|--github-oidc\b/u;
+	/\bcupboard\s+(?:push|build-push|attest\s+attach|plan\s+cohort|cache\s+(?:create|remove|close|reopen)|root\s+ensure|confirm)\b|--github-oidc\b/u;
 
 function publicationKind(
 	uses: string
@@ -482,7 +563,8 @@ function isExternalPublication(inputs: WorkflowInputs, tenant: URL): boolean {
  */
 function conditionedTriggers(
 	triggers: readonly WorkflowTrigger[],
-	conditions: readonly (string | boolean)[]
+	conditions: readonly (string | boolean)[],
+	dependencyGates: readonly JobDependencyGate[]
 ): WorkflowTrigger[] {
 	return triggers.flatMap((trigger) => {
 		const outcomes = conditions.map((condition) =>
@@ -499,9 +581,11 @@ function conditionedTriggers(
 				(condition) =>
 					jobConditionOutcome(condition, trigger.event, 'fork') === false
 			);
-		const conditioned = isSameRepositoryOnly
-			? { ...trigger, isSameRepositoryOnly }
-			: trigger;
+		const conditioned = {
+			...trigger,
+			...(isSameRepositoryOnly && { isSameRepositoryOnly }),
+			...(dependencyGates.length > 0 && { dependencyGates })
+		};
 
 		if (outcomes.every((outcome) => outcome === true)) {
 			return [conditioned];
@@ -524,7 +608,9 @@ interface VisitContext {
 	readonly inputs: WorkflowInputs;
 	readonly secretKeys: ReadonlySet<string> | 'unknown';
 	readonly triggers: readonly WorkflowTrigger[];
+	readonly pullRequestTrigger?: WorkflowTrigger;
 	readonly conditions: readonly (string | boolean)[];
+	readonly dependencyGates: readonly JobDependencyGate[];
 	readonly ancestors: ReadonlySet<string>;
 }
 
@@ -767,16 +853,33 @@ export async function discoverPublishingJobs(
 			const conditions =
 				job.if === undefined
 					? context.conditions
-					: [...context.conditions, job.if];
-			const triggers = conditionedTriggers(context.triggers, conditions);
+					: [...context.conditions, jobCondition(job.if)];
+			const dependencyGates =
+				job.needs === undefined
+					? context.dependencyGates
+					: [
+							...context.dependencyGates,
+							jobDependencyGate(workflow.jobs ?? {}, jobId, {
+								ancestors: new Set(),
+								budget: { remaining: 128 }
+							})
+						];
+			const triggers = conditionedTriggers(
+				context.triggers,
+				conditions,
+				dependencyGates
+			);
 
-			if (triggers.length === 0) {
+			if (triggers.length === 0 && context.pullRequestTrigger === undefined) {
 				continue;
 			}
 
-			const direct = await directPublication(job.steps ?? [], reference, []);
+			const direct =
+				triggers.length === 0
+					? undefined
+					: await directPublication(job.steps ?? [], reference, []);
 
-			if (direct !== undefined) {
+			if (direct !== undefined && triggers.length > 0) {
 				unverified.push({
 					caller,
 					job: label,
@@ -807,7 +910,11 @@ export async function discoverPublishingJobs(
 					inputs: supplied,
 					secretKeys: secretKeys(job.secrets, context.secretKeys),
 					triggers,
+					...(context.pullRequestTrigger !== undefined && {
+						pullRequestTrigger: context.pullRequestTrigger
+					}),
 					conditions,
+					dependencyGates,
 					ancestors
 				});
 				continue;
@@ -815,6 +922,7 @@ export async function discoverPublishingJobs(
 
 			if (kind === undefined) {
 				if (
+					triggers.length > 0 &&
 					uses.includes('/.github/workflows/') &&
 					isExternalPublication(supplied, tenant)
 				) {
@@ -826,6 +934,22 @@ export async function discoverPublishingJobs(
 					});
 				}
 
+				continue;
+			}
+
+			const isPullRequestCacheManaged =
+				supplied.publish !== 'none' &&
+				(kind === 'flake'
+					? supplied.preset === 'pull-request-and-branch' &&
+						supplied.push !== false
+					: supplied['manage-pr-cache'] === true);
+			const excludedPullRequestTrigger =
+				isPullRequestCacheManaged &&
+				triggers.every((trigger) => trigger.event !== 'pull_request')
+					? context.pullRequestTrigger
+					: undefined;
+
+			if (excludedPullRequestTrigger === undefined && triggers.length === 0) {
 				continue;
 			}
 
@@ -914,7 +1038,14 @@ export async function discoverPublishingJobs(
 						? { privateSubstitutersWiring: 'configured' as const }
 						: {}),
 				...(readSecrets !== undefined && { readCredentialWiring: readSecrets }),
-				triggers
+				triggers,
+				...(excludedPullRequestTrigger !== undefined && {
+					excludedPullRequestTrigger: {
+						...excludedPullRequestTrigger,
+						undecidedConditions: conditions.map(String),
+						...(dependencyGates.length > 0 && { dependencyGates })
+					}
+				})
 			});
 		}
 	}
@@ -954,6 +1085,9 @@ export async function discoverPublishingJobs(
 			continue;
 		}
 
+		const pullRequestTrigger = triggers.find(
+			(trigger) => trigger.event === 'pull_request'
+		);
 		await visit({
 			caller: path,
 			path,
@@ -961,7 +1095,11 @@ export async function discoverPublishingJobs(
 			inputs: {},
 			secretKeys: new Set(),
 			triggers,
+			...(pullRequestTrigger !== undefined && {
+				pullRequestTrigger
+			}),
 			conditions: [],
+			dependencyGates: [],
 			ancestors: new Set()
 		});
 	}

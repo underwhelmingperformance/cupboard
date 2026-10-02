@@ -354,16 +354,9 @@ export async function reconcileCacheCatalogue(
 			: progressSchema.parse(saved);
 	if (progress.phase === 'local') {
 		context.db
-			.insert(schema.cacheIdentities)
-			.values({
-				kind: 'default',
-				name: sql`null`,
-				access: legacyAccess,
-				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: isoTimestamp(new Date())
-			})
-			.onConflictDoNothing()
-			.run();
+			.run(sql`INSERT INTO cache_identity(kind, name, access, priority, created_at)
+   VALUES ('default', NULL, ${legacyAccess}, ${cachePrioritySchema.parse(CacheInfo.default.priority)}, ${isoTimestamp(new Date())})
+   ON CONFLICT DO NOTHING`);
 		const local = await reconcileLocalPage(
 			context,
 			tenant,

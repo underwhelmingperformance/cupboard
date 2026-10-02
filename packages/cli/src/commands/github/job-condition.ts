@@ -1,7 +1,7 @@
 /**
  * `true` or `false` when the result of a job condition follows from the event
- * name. For `pull_request`, the result can also use the source of the modelled
- * pull request. Otherwise `undefined`.
+ * name. For `pull_request`, the result can also use the source and activity of
+ * the modelled pull request. Otherwise `undefined`.
  */
 export type ConditionOutcome = boolean | undefined;
 
@@ -10,6 +10,19 @@ export type ConditionOutcome = boolean | undefined;
  * or a fork.
  */
 export type PullRequestSource = 'repository' | 'fork';
+
+export interface PullRequestActivity {
+	readonly action: string;
+	readonly merged: boolean;
+	readonly ref?: string;
+	readonly dependencies?: ConditionOutcome;
+	readonly isCancelled?: boolean;
+}
+
+export interface JobDependencyGate {
+	readonly condition: string | boolean;
+	readonly dependencies: readonly JobDependencyGate[] | 'unknown';
+}
 
 type Token =
 	| { readonly kind: 'operator'; readonly value: string }
@@ -26,10 +39,15 @@ type Expression =
 			readonly right: Expression;
 	  }
 	| { readonly kind: 'event' }
+	| { readonly kind: 'activity'; readonly field: 'action' | 'merged' | 'ref' }
 	| { readonly kind: 'head-repository'; readonly field: RepositoryField }
 	| { readonly kind: 'repository'; readonly field: RepositoryField }
 	| { readonly kind: 'string'; readonly value: string }
 	| { readonly kind: 'boolean'; readonly value: boolean }
+	| {
+			readonly kind: 'status';
+			readonly value: 'success' | 'always' | 'cancelled';
+	  }
 	| { readonly kind: 'unknown' };
 
 type RepositoryField = 'id' | 'name';
@@ -58,7 +76,14 @@ const repositoryContexts: ReadonlyMap<
 
 // A job-level condition determines whether the job starts. `success()` and
 // `always()` are true at that point for a job without failed dependencies.
-const runningStatusFunctions = new Set(['success', 'always']);
+const statusFunctions: ReadonlyMap<
+	string,
+	Extract<Expression, { kind: 'status' }>['value']
+> = new Map([
+	['success', 'success'],
+	['always', 'always'],
+	['cancelled', 'cancelled']
+]);
 
 class ConditionSyntaxError extends Error {
 	constructor() {
@@ -238,10 +263,13 @@ class Parser {
 
 		if (this.accept('(')) {
 			const hasArguments = this.functionArguments();
+			const status = statusFunctions.get(token.value.toLowerCase());
 
-			return !hasArguments &&
-				runningStatusFunctions.has(token.value.toLowerCase())
-				? { kind: 'boolean', value: true }
+			return !hasArguments && status !== undefined
+				? {
+						kind: 'status',
+						value: status
+					}
 				: { kind: 'unknown' };
 		}
 
@@ -258,6 +286,18 @@ class Parser {
 
 		if (!isIndexed && name === 'github.event_name') {
 			return { kind: 'event' };
+		}
+
+		if (!isIndexed && name === 'github.event.action') {
+			return { kind: 'activity', field: 'action' };
+		}
+
+		if (!isIndexed && name === 'github.event.pull_request.merged') {
+			return { kind: 'activity', field: 'merged' };
+		}
+
+		if (!isIndexed && name === 'github.ref') {
+			return { kind: 'activity', field: 'ref' };
 		}
 
 		if (!isIndexed && repositoryContext !== undefined) {
@@ -315,7 +355,8 @@ function isSameRepositoryGuard(
 function compareEvent(
 	expression: Extract<Expression, { kind: 'compare' }>,
 	event: string,
-	source: PullRequestSource
+	source: PullRequestSource,
+	activity: PullRequestActivity | undefined
 ): ConditionOutcome {
 	const { left, right, operator } = expression;
 
@@ -329,6 +370,26 @@ function compareEvent(
 		const isSame = event === 'pull_request' && source === 'repository';
 
 		return operator === '==' ? isSame : !isSame;
+	}
+
+	const [context, value] =
+		left.kind === 'activity' ? [left, right] : [right, left];
+
+	if (context.kind === 'activity') {
+		const actual = activity?.[context.field];
+
+		if (typeof actual === 'string' && value.kind === 'string') {
+			const isEqual = actual.toLowerCase() === value.value.toLowerCase();
+			return operator === '==' ? isEqual : !isEqual;
+		}
+
+		if (typeof actual === 'boolean' && value.kind === 'boolean') {
+			return operator === '=='
+				? actual === value.value
+				: actual !== value.value;
+		}
+
+		return undefined;
 	}
 
 	const literal =
@@ -351,12 +412,13 @@ function compareEvent(
 function evaluate(
 	expression: Expression,
 	event: string,
-	source: PullRequestSource
+	source: PullRequestSource,
+	activity: PullRequestActivity | undefined
 ): ConditionOutcome {
 	switch (expression.kind) {
 		case 'or': {
 			const outcomes = expression.terms.map((term) =>
-				evaluate(term, event, source)
+				evaluate(term, event, source, activity)
 			);
 
 			if (outcomes.includes(true)) {
@@ -371,7 +433,7 @@ function evaluate(
 		}
 		case 'and': {
 			const outcomes = expression.terms.map((term) =>
-				evaluate(term, event, source)
+				evaluate(term, event, source, activity)
 			);
 
 			if (outcomes.includes(false)) {
@@ -385,12 +447,16 @@ function evaluate(
 			return undefined;
 		}
 		case 'not': {
-			const outcome = evaluate(expression.term, event, source);
+			const outcome = evaluate(expression.term, event, source, activity);
 
 			return outcome === undefined ? undefined : !outcome;
 		}
 		case 'compare': {
-			return compareEvent(expression, event, source);
+			return compareEvent(expression, event, source, activity);
+		}
+		case 'activity': {
+			const value = activity?.[expression.field];
+			return value === undefined ? undefined : Boolean(value);
 		}
 		case 'event': {
 			return event !== '';
@@ -401,12 +467,112 @@ function evaluate(
 		case 'boolean': {
 			return expression.value;
 		}
+		case 'status': {
+			if (expression.value === 'cancelled') {
+				return activity?.isCancelled;
+			}
+			if (
+				activity === undefined ||
+				expression.value === 'always' ||
+				!('dependencies' in activity)
+			) {
+				return true;
+			}
+			return activity.dependencies;
+		}
 		case 'head-repository':
 		case 'repository':
 		case 'unknown': {
 			return undefined;
 		}
 	}
+}
+
+function hasStatusFunction(condition: string | boolean): ConditionOutcome {
+	if (typeof condition === 'boolean') {
+		return false;
+	}
+	if (parseCondition(condition) === undefined) {
+		return undefined;
+	}
+	const input = tokens(expressionWrapper.exec(condition)?.[1] ?? condition);
+	return input.some(
+		(token, index) =>
+			token.kind === 'word' &&
+			['success', 'always', 'cancelled', 'failure'].includes(
+				token.value.toLowerCase()
+			) &&
+			input[index + 1]?.value === '('
+	);
+}
+
+interface DependencyState {
+	readonly outcome: ConditionOutcome;
+	readonly ancestorSuccess: ConditionOutcome;
+	readonly isGraphVerified: boolean;
+}
+
+function allSuccessful(
+	outcomes: readonly ConditionOutcome[]
+): ConditionOutcome {
+	if (outcomes.includes(false)) {
+		return false;
+	}
+	if (outcomes.includes(undefined)) {
+		return undefined;
+	}
+	return true;
+}
+
+function dependencyState(
+	gate: JobDependencyGate,
+	activity: PullRequestActivity
+): DependencyState {
+	const states =
+		gate.dependencies === 'unknown'
+			? []
+			: gate.dependencies.map((dependency) =>
+					dependencyState(dependency, activity)
+				);
+	const isGraphVerified =
+		gate.dependencies !== 'unknown' &&
+		states.every((state) => state.isGraphVerified);
+	const dependencies = allSuccessful([
+		...states.map((state) => state.ancestorSuccess),
+		...(isGraphVerified ? [] : [undefined])
+	]);
+	const explicitStatus = hasStatusFunction(gate.condition);
+	const condition = jobConditionOutcome(
+		gate.condition,
+		'pull_request',
+		'repository',
+		{ ...activity, dependencies }
+	);
+	if (
+		condition === false ||
+		(explicitStatus === false && dependencies === false)
+	) {
+		return { outcome: false, ancestorSuccess: false, isGraphVerified };
+	}
+	if (!isGraphVerified || (explicitStatus !== true && dependencies !== true)) {
+		return {
+			outcome: undefined,
+			ancestorSuccess: allSuccessful([undefined, dependencies]),
+			isGraphVerified
+		};
+	}
+	return {
+		outcome: condition,
+		ancestorSuccess: allSuccessful([condition, dependencies]),
+		isGraphVerified
+	};
+}
+
+export function jobDependencyOutcome(
+	gate: JobDependencyGate,
+	activity: PullRequestActivity
+): ConditionOutcome {
+	return dependencyState(gate, activity).outcome;
 }
 
 function parseCondition(condition: string): Expression | undefined {
@@ -436,11 +602,16 @@ function parseCondition(condition: string): Expression | undefined {
  * An `if` value may be written with or without the `${{ }}` wrapper, because
  * GitHub accepts both. For `pull_request`, the guard is true when `source` is
  * `repository` and false when it is `fork`.
+ * When `activity` is supplied, the evaluator also handles `github.event.action`,
+ * `github.event.pull_request.merged` and the supplied `github.ref` value.
+ * `cancelled()` uses `activity.isCancelled`, and remains unknown when the
+ * caller does not supply a cancellation state.
  */
 export function jobConditionOutcome(
 	condition: string | boolean,
 	event: string,
-	source: PullRequestSource = 'repository'
+	source: PullRequestSource = 'repository',
+	activity?: PullRequestActivity
 ): ConditionOutcome {
 	if (typeof condition === 'boolean') {
 		return condition;
@@ -450,5 +621,10 @@ export function jobConditionOutcome(
 
 	return expression === undefined
 		? undefined
-		: evaluate(expression, event, source);
+		: evaluate(
+				expression,
+				event,
+				source,
+				event === 'pull_request' ? activity : undefined
+			);
 }

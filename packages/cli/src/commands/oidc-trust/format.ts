@@ -51,7 +51,11 @@ function cacheBinding(
 		return '(default)';
 	}
 
-	return binding.exact ?? binding.equalsTemplate ?? '?';
+	return (
+		binding.exact ??
+		binding.equalsTemplate ??
+		(binding.pattern === undefined ? '?' : `pattern ${binding.pattern}`)
+	);
 }
 
 function grantSummary(grant: PermittedGrant): string {

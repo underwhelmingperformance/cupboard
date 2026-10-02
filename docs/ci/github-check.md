@@ -89,12 +89,46 @@ The check reports these jobs as unverified, for manual review:
   cache.
 
 For `publish: none` and the flake workflow's older `push: false`, the check
-models the selected cache read without publication or cache-removal grants. A
+models the selected cache read without publication or cache lifecycle grants. A
 pull-request run with the flake preset reads from the tenant's default cache. A
 public read needs no trust grant. A private read needs the exact cache
 content-read grant unless the workflow supplies a static read pair. When
-publication is enabled, the flake preset can remove an unmerged pull request's
-cache on the `closed` event. The check does not cover that removal.
+publication is enabled, the check models cache creation, closure and reopening
+alongside publication for the flake preset's pull-request runs, and checks the
+corresponding grants. See [Closing and reopening caches][cache-closure].
+
+For lifecycle-managed pull-request caches, the check also verifies that the
+caller can run closure and reopening. This applies to the flake preset and to an
+installable job with `manage-pr-cache: true`, while publication is enabled.
+GitHub's default `pull_request` activities include `reopened` but omit `closed`.
+Include `types: [opened, synchronize, reopened, closed]` to enable both
+operations. The check reports a missing activity or a job condition that blocks
+the activity as a failure. It checks merged closure separately because the
+merged run uses the base branch's ref.
+
+The check combines lifecycle coverage from jobs in the same caller when their
+cache inputs prove that they manage the same cache. Separate close and publish
+jobs can therefore provide coverage together, including jobs with different
+workflow pins. Dynamic activity lists, cache inputs, conditions or possible
+handlers require manual review. The check does not request lifecycle grants for
+activities that the caller provably excludes. `--fix` cannot change caller
+events or conditions, so a trust-rule repair cannot resolve a lifecycle failure.
+
+For lifecycle handling, the check follows literal `needs` dependencies and their
+job conditions. A skipped dependency blocks a dependent job's implicit or
+explicit `success()` condition, even if an intermediate job runs after the
+skipped ancestor. The check models a run that has not been cancelled, so
+`!cancelled()` can allow a dependent job to run. GitHub recommends that
+condition for this use; `always()` also runs after cancellation and is intended
+for work that must still run then. See [GitHub's status
+functions][github-status]. Dynamic dependencies, unsupported status conditions
+and dependency graphs beyond the analysis limit remain unverified. Review the
+dependency chain when a close job depends on a publication job that skips
+`closed` events.
+
+[github-status]:
+  https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#always
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 The check can see that a workflow declares an explicit static username and
 password pair, but GitHub does not reveal the secret values. It reports the pair
@@ -135,10 +169,10 @@ The check reads each job's `if` condition. It evaluates comparisons of
 `github.event_name` with a string, combined with `&&`, `||` and `!`, and it does
 not simulate a job's runs for an event that its condition excludes. For example,
 a job guarded by `github.event_name == 'push'` is not checked for
-`pull_request`. The status functions `success()` and `always()` count as true.
-When the condition also depends on another term, such as
-`github.ref == 'refs/heads/main'`, the check simulates the run and reports the
-job as unverified for that event.
+`pull_request`. The status functions `success()` and `always()` count as true
+for a job without skipped dependencies. When the condition also depends on
+another term, such as `github.ref == 'refs/heads/main'`, the check simulates the
+run and reports the job as unverified for that event.
 
 The check simulates a pull request from the repository itself. A guard that
 compares the head repository with the repository, such as

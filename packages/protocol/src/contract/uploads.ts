@@ -16,7 +16,10 @@ import {
 } from '../upload.ts';
 
 import { baseProcedure } from './base.ts';
-import { cacheScopedProcedure } from './cache-scoped.ts';
+import {
+	cacheScopedProcedure,
+	writableCacheScopedProcedure
+} from './cache-scoped.ts';
 
 const uploadRequestErrors = {
 	[uploadRequestLimitErrorCode]: {
@@ -30,7 +33,7 @@ const uploadNegotiateErrors = {
 	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
 };
 
-const negotiate = cacheScopedProcedure(
+const negotiate = writableCacheScopedProcedure(
 	{
 		method: 'POST',
 		suffix: '/uploads',
@@ -94,7 +97,7 @@ export const uploadsContract = {
 	// and `extendGraceDeadlines` keeps the later of the stored and the requested
 	// deadline, so a repeat can only move a deadline later. Negotiate creates a
 	// pending upload with a fresh id on every call and keeps the default.
-	confirm: cacheScopedProcedure(
+	confirm: writableCacheScopedProcedure(
 		{
 			method: 'POST',
 			suffix: '/uploads/confirm',

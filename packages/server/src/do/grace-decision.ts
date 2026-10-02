@@ -1,5 +1,4 @@
 import {
-	type GraceSeconds,
 	graceSecondsSchema,
 	type NarInfoGeneration,
 	type NixSha256HashString,
@@ -13,6 +12,7 @@ import { z } from 'zod';
 import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 
+import { CacheClosureService } from './cache-closure-service.ts';
 import { type ServerContext } from './context.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -23,7 +23,8 @@ import { type RetentionService } from './retention-service.ts';
 // grace-managed without granting a lasting deadline.
 export const graceDecisionSchema = z.strictObject({
 	reportsGrace: z.boolean(),
-	graceSeconds: graceSecondsSchema.optional()
+	graceSeconds: graceSecondsSchema.optional(),
+	retentionEpoch: z.number().int().nonnegative().optional()
 });
 
 export type GraceDecision = z.output<typeof graceDecisionSchema>;
@@ -108,14 +109,14 @@ export function confirmGrace(
 	storePathHash: StorePathHash,
 	generation: NarInfoGeneration,
 	narHash: NixSha256HashString,
-	graceSeconds: GraceSeconds | undefined
+	decision: GraceDecision | undefined
 ): ConfirmedGrace {
 	const facts = confirmGraceBatch(
 		context,
 		retention,
 		cache,
 		[{ storePathHash, generation, narHash }],
-		graceSeconds
+		decision
 	);
 	const fact = facts.get(storePathHash);
 
@@ -135,14 +136,20 @@ export function confirmGraceBatch(
 		readonly generation: NarInfoGeneration;
 		readonly narHash: NixSha256HashString;
 	}[],
-	graceSeconds: GraceSeconds | undefined
+	decision: GraceDecision | undefined
 ): Map<StorePathHash, UploadGraceFact> {
+	const graceSeconds = decision?.graceSeconds;
+	const close = new CacheClosureService(context).firstClose(
+		cache,
+		decision?.retentionEpoch ?? 0
+	);
 	// Compute one deadline before batching so every matched row receives the same
 	// extension.
 	const retainUntil =
-		graceSeconds === undefined || graceSeconds === 0
+		close?.graceUntil ??
+		(graceSeconds === undefined || graceSeconds === 0
 			? undefined
-			: isoTimestamp(new Date(Date.now() + graceSeconds * 1000));
+			: isoTimestamp(new Date(Date.now() + graceSeconds * 1000)));
 	const matched: StorePathHash[] = [];
 
 	// Check identity and apply each list's writes in one transaction. A row that
@@ -177,7 +184,10 @@ export function confirmGraceBatch(
 
 			matched.push(...matchedInList);
 
-			if (graceSeconds === undefined || matchedInList.length === 0) {
+			if (
+				(graceSeconds === undefined && close === undefined) ||
+				matchedInList.length === 0
+			) {
 				return;
 			}
 

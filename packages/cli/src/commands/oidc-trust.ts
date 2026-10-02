@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises';
 
 import type { CliUi } from '@cupboard/cli-ui';
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { quotePatternLiteral } from '@cupboard/protocol/capture';
+import { templateSchema, templateVariables } from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
 	controlOidcTrustAddBodySchema,
@@ -24,6 +27,7 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import {
+	CliUsageError,
 	InvalidClaimError,
 	TrustRuleFileConflictError,
 	TrustRuleOptionsRequiredError
@@ -32,6 +36,10 @@ import { principalLabel } from '../principal.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import { githubActionsIssuer } from './github/claims.ts';
+import {
+	parseWorkflowReference,
+	workflowReferenceClaim
+} from './github/convention.ts';
 import {
 	pullRequestCacheTemplate,
 	pullRequestRootTemplate
@@ -64,6 +72,13 @@ interface GithubPrOptions {
 	readonly jobWorkflowRef?: string;
 	readonly attest?: boolean;
 	readonly readCache?: boolean;
+}
+
+interface GithubPrCloseOptions {
+	readonly repo: string;
+	readonly audience?: Audience;
+	readonly cacheTemplate?: string;
+	readonly jobWorkflowRef: string;
 }
 
 interface GithubTagOptions {
@@ -332,7 +347,7 @@ export function githubPrAddBody(
 				rootTemplate:
 					options.rootTemplate ?? pullRequestRootTemplate(identity.fullName),
 				allow: withAttest(
-					['push', 'root', 'attach', 'create', 'remove'],
+					['push', 'root', 'attach', 'create', 'close', 'reopen'],
 					options.attest
 				),
 				substitutions: collectSubstitutions({
@@ -351,6 +366,78 @@ export function githubPrAddBody(
 						})
 					]
 				: [])
+		],
+		display: { provider: 'github', repository: identity.fullName }
+	});
+}
+
+class MergedCloseTemplateError extends CliUsageError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'MergedCloseTemplateError';
+	}
+}
+
+/**
+Permits merged pull-request runs to close the repository's selected PR caches.
+*/
+export function githubPrCloseAddBody(
+	url: URL,
+	identity: RepositoryIdentity,
+	options: GithubPrCloseOptions
+): OidcTrustAddBodyInput {
+	const template = templateSchema.parse(
+		options.cacheTemplate ?? pullRequestCacheTemplate()
+	);
+
+	if (
+		templateVariables(template).some(
+			(variable) => variable !== 'pr' && variable !== 'repository_id'
+		)
+	) {
+		throw new MergedCloseTemplateError(
+			'The merged-close cache template supports only {pr} and {repository_id}. Use an exact cache grant in a manual trust rule for other templates.'
+		);
+	}
+
+	const rendered = template.replaceAll('{repository_id}', () =>
+		String(identity.repositoryId)
+	);
+	const parts = rendered.split('{pr}');
+
+	if (parts.length > 2) {
+		throw new MergedCloseTemplateError(
+			'The merged-close cache template supports at most one {pr}. Keep the publication rule, and configure exact cache:close grants in a manual lifecycle rule for repeated {pr} templates.'
+		);
+	}
+
+	const binding =
+		parts.length === 1
+			? { exact: cacheNameSchema.parse(rendered) }
+			: {
+					pattern: `^${parts.map((part) => quotePatternLiteral(part)).join('[0-9]+')}$`
+				};
+
+	return buildAddBody({
+		issuer: githubActionsIssuer,
+		audience: options.audience ?? audienceSchema.parse(url),
+		claims: {
+			repository_id: String(identity.repositoryId),
+			repository_owner_id: String(identity.repositoryOwnerId),
+			event_name: 'pull_request',
+			ref: { pattern: '^refs/heads/.+$' },
+			job_workflow_ref: workflowReferenceClaim(
+				parseWorkflowReference(options.jobWorkflowRef)
+			)
+		},
+		permittedGrants: [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:close'],
+				resources: {
+					cache: { kind: 'named', ...binding, validate: 'cacheName' }
+				}
+			}
 		],
 		display: { provider: 'github', repository: identity.fullName }
 	});
@@ -560,6 +647,42 @@ function buildOidcTrustCommands(
 			});
 
 		oidcTrust
+			.command('add-github-pr-close')
+			.description(
+				'Permit merged pull-request runs to close the selected PR cache family, without publication or read authority.'
+			)
+			.argument('<url>', plane.urlArgument, parseWorkerUrl)
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
+			.requiredOption(
+				'--workflow-ref, --job-workflow-ref <value>',
+				'require this workflow pinned to a commit, release tag or tag pattern, as owner/repo/path@ref'
+			)
+			.option(
+				'--audience <audience>',
+				'audience that the token must have (default: the tenant URL)',
+				parseAudience
+			)
+			.option(
+				'--cache-template <template>',
+				'PR cache family, with at most one {pr} (default: gh-{repository_id}-pr-{pr})'
+			)
+			.action(async (url: URL, options: GithubPrCloseOptions) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const identity = await reporter.phase('Resolving repository', () =>
+					lookupRepository(options.repo)
+				);
+				await runOidcTrustAdd(
+					githubPrCloseAddBody(url, identity, options),
+					reporter,
+					plane.clientFor(url, programOptions)
+				);
+			});
+
+		oidcTrust
 			.command('add-github-tag')
 			.description(
 				"Add a trust rule that lets a GitHub repository's tag runs publish to a cache named after the tag."
@@ -733,7 +856,7 @@ function registerTenantRuleAdd(
 		)
 		.option(
 			'--allow <action>',
-			'a grant to give (repeatable): read, push, attest, root, attach, create or remove',
+			'a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen or remove',
 			collect,
 			[]
 		)

@@ -23,19 +23,24 @@ running side by side.
    `publish` and `attest` inputs decide what each job builds, publishes and
    signs.
 
-When an unmerged pull request is closed, the run is different. The configure job
-runs, then a remove-cache job removes the pull request's cache. There's no
-planning or building. When a merged pull request's `closed` event arrives, only
-the configure job runs.
+When publication is enabled under the preset, closing a pull request runs the
+configure job, then the close-cache job, whether the pull request was merged or
+not. There's no planning, building or publication. Closure brings root expiry
+forward to the close time and starts the cache's configured grace period. Reads
+and reuse remain available during grace. Garbage collection removes expired
+contents, then removes the empty cache once pending work has finished. See
+[Closing and reopening caches][cache-closure].
+
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 Each job has a time limit:
 
-| Job          | Runs on            | Time limit  |
-| ------------ | ------------------ | ----------- |
-| configure    | `plan-runner`      | 10 minutes  |
-| plan         | `plan-runner`      | 30 minutes  |
-| cohort       | each cohort's `os` | 180 minutes |
-| remove-cache | `plan-runner`      | 10 minutes  |
+| Job         | Runs on            | Time limit  |
+| ----------- | ------------------ | ----------- |
+| configure   | `plan-runner`      | 10 minutes  |
+| plan        | `plan-runner`      | 30 minutes  |
+| cohort      | each cohort's `os` | 180 minutes |
+| close-cache | `plan-runner`      | 10 minutes  |
 
 `plan-runner` is a workflow input, and defaults to `ubuntu-latest`.
 
@@ -170,10 +175,14 @@ they share the same run root as the original attempt.
 - If you cancel a run, whatever it has already published stays in the cache,
   kept by the run root. The roots of targets that it hadn't finished stay as
   they were.
-- If you rerun a pull request's run after the pull request was closed without
-  being merged, the run recreates the pull request's cache. The workflow doesn't
-  remove the cache a second time, so remove it yourself with
-  `cupboard cache remove`.
+- If you rerun an `opened` or `synchronize` publishing run after its pull
+  request has closed, an existing closed cache rejects publication. Use
+  `cupboard cache reopen` before rerunning if you want to publish to it. A rerun
+  of a `reopened` event explicitly reopens the cache again. If garbage
+  collection has already removed the cache, the rerun creates an empty
+  replacement. The pull request's earlier `closed` event does not close the
+  replacement, so close it yourself with `cupboard cache close` after
+  publication.
 
 ## Where to look when something goes wrong
 

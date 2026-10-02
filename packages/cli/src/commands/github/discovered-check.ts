@@ -66,8 +66,10 @@ import {
 	modelPublishingJob,
 	type PublicationCase,
 	type PublishingJobFinding,
-	type ReuseViewRequirement
+	type ReuseViewRequirement,
+	withMergedCloseCases
 } from './publication.ts';
+import { pullRequestLifecycleFindings } from './pull-request-lifecycle.ts';
 import { publicationReadAuthority } from './read-authority.ts';
 import {
 	RepositoryTrustRuleMissingFinding,
@@ -450,7 +452,11 @@ function trustFindings(
 		return [];
 	}
 
-	if (!isPreset && publication.trigger === 'pull_request') {
+	if (
+		!isPreset &&
+		publication.trigger === 'pull_request' &&
+		publication.lifecycle === undefined
+	) {
 		return [new SharedPullRequestCacheFinding()];
 	}
 
@@ -462,7 +468,10 @@ function trustFindings(
 		readResources
 	);
 
-	if (publication.requests.length === 0) {
+	if (
+		publication.requests.length === 0 ||
+		publication.lifecycle !== undefined
+	) {
 		return [trust];
 	}
 
@@ -552,7 +561,10 @@ async function inspectPublication(
 		);
 	}
 
-	if (publication.reuseView !== undefined) {
+	if (
+		publication.lifecycle === undefined &&
+		publication.reuseView !== undefined
+	) {
 		findings.push(
 			await checkView(
 				tenant,
@@ -567,6 +579,7 @@ async function inspectPublication(
 	if (
 		isPreset &&
 		publication.trigger === 'pull_request' &&
+		publication.lifecycle === undefined &&
 		publication.requests.length > 0
 	) {
 		findings.push(
@@ -584,6 +597,7 @@ async function inspectPublication(
 
 async function inspectJob(
 	job: DiscoveredPublishingJob,
+	discovery: WorkflowDiscovery,
 	identity: RepositoryIdentity,
 	tenant: URL,
 	branch: string,
@@ -620,9 +634,17 @@ async function inspectJob(
 	}
 
 	const model = modelPublishingJob(job, identity, tenant, branch);
-	const findings = [...model.findings];
+	const findings = [
+		...model.findings,
+		...pullRequestLifecycleFindings(
+			job,
+			identity,
+			discovery.jobs,
+			discovery.unverified
+		)
+	];
 
-	for (const publication of model.cases) {
+	for (const publication of withMergedCloseCases(model.cases, identity)) {
 		const checked = await inspectPublication(
 			job,
 			publication,
@@ -635,7 +657,7 @@ async function inspectJob(
 
 		findings.push(
 			...checked.map((finding) => ({
-				trigger: publication.trigger,
+				trigger: publication.lifecycle ?? publication.trigger,
 				finding
 			}))
 		);
@@ -746,6 +768,7 @@ export async function inspectDiscoveredGithubCheck(
 	for (const job of discovery.jobs) {
 		const result = await inspectJob(
 			job,
+			discovery,
 			identity,
 			tenant,
 			branch,

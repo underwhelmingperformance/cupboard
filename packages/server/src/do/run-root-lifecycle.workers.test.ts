@@ -104,7 +104,13 @@ async function rootTargetRows(): Promise<readonly unknown[]> {
 async function retentionRootRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
-			.select()
+			.select({
+				cacheId: schema.retentionRoots.cacheId,
+				name: schema.retentionRoots.name,
+				expiresAt: schema.retentionRoots.expiresAt,
+				createdAt: schema.retentionRoots.createdAt,
+				updatedAt: schema.retentionRoots.updatedAt
+			})
 			.from(schema.retentionRoots)
 			.all()
 			.map(({ cacheId, ...row }) => ({

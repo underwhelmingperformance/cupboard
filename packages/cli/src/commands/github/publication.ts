@@ -12,7 +12,7 @@ import { readResourcesSchema } from '@cupboard/protocol/read-access';
 import {
 	attestAttachAuthorizationDetails,
 	cacheCreateAuthorizationDetails,
-	cacheRemoveAuthorizationDetails,
+	cacheLifecycleAuthorizationDetails,
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
@@ -25,6 +25,7 @@ import { type RepositoryIdentity } from '../oidc-trust/github.ts';
 import {
 	type GithubActionsClaims,
 	githubBranchClaims,
+	githubMergedPullRequestClaims,
 	githubPullRequestClaims,
 	githubTagPushClaims
 } from './claims.ts';
@@ -35,6 +36,11 @@ import {
 	type WorkflowTrigger
 } from './discovery.ts';
 import { CheckFinding } from './finding.ts';
+import {
+	isPullRequestConditionUndecided,
+	pullRequestLifecycleOutcome,
+	pullRequestPublicationOutcome
+} from './pull-request-lifecycle.ts';
 import { ReferencePattern } from './reference-pattern.ts';
 
 type BranchTrigger = 'push' | 'workflow_dispatch' | 'schedule';
@@ -66,6 +72,9 @@ export interface ReuseViewRequirement {
 }
 
 export type PublicationCase = TriggerReference & {
+	readonly lifecycle?: 'closed' | 'merged-close';
+	readonly mergedCloseBlocked?: true;
+	readonly mergedCloseRequests?: readonly AuthorizationDetails[];
 	readonly claims: GithubActionsClaims;
 	readonly requests: readonly AuthorizationDetails[];
 	readonly reuseView?: ReuseViewRequirement;
@@ -406,7 +415,7 @@ function flakeRoots(rootPrefix: string): FlakeRoots | undefined {
 
 /**
  * The publication requests of one flake workflow run. The workflow creates
- * and removes the cache only for a pull request under the preset.
+ * and closes or reopens the cache only for a pull request under the preset.
  */
 export function flakeRequests(
 	cache: CacheScope,
@@ -417,7 +426,8 @@ export function flakeRequests(
 		...(shouldCreateCache
 			? [
 					cacheCreateAuthorizationDetails({ cache }),
-					cacheRemoveAuthorizationDetails({ cache })
+					cacheLifecycleAuthorizationDetails({ cache, action: 'close' }),
+					cacheLifecycleAuthorizationDetails({ cache, action: 'reopen' })
 				]
 			: []),
 		pushAuthorizationDetails({
@@ -792,6 +802,14 @@ export function modelPublishingJob(
 
 	const isPreset = isPresetJob(job);
 	const isReadOnly = isReadOnlyJob(job);
+	const managePrCache =
+		job.kind === 'installable' ? job.inputs['manage-pr-cache'] : undefined;
+	if (managePrCache !== undefined && typeof managePrCache !== 'boolean') {
+		return unmodelled('manage-pr-cache must be a literal boolean');
+	}
+	if (managePrCache === true && cache.scope.kind === 'default') {
+		return unmodelled('manage-pr-cache requires a named cache');
+	}
 	const cacheAccessMode = scalar(job, 'cache-access-mode');
 
 	if (
@@ -855,7 +873,11 @@ export function modelPublishingJob(
 	};
 
 	for (const trigger of job.triggers) {
-		if (trigger.undecidedConditions !== undefined) {
+		if (
+			trigger.undecidedConditions !== undefined &&
+			(trigger.event !== 'pull_request' ||
+				isPullRequestConditionUndecided(job, identity))
+		) {
 			findings.push({
 				trigger: trigger.event,
 				finding: new JobConditionUndecidedFinding(trigger.undecidedConditions)
@@ -899,7 +921,26 @@ export function modelPublishingJob(
 					return unmodelled(`root '${rootPrefix}' is invalid`);
 				}
 
-				cases.push({ ...entry, claims, requests });
+				cases.push({
+					...entry,
+					claims,
+					requests: [
+						...(managePrCache === true && isPullRequest && !isReadOnly
+							? [
+									cacheCreateAuthorizationDetails({ cache: cache.scope }),
+									cacheLifecycleAuthorizationDetails({
+										cache: cache.scope,
+										action: 'close'
+									}),
+									cacheLifecycleAuthorizationDetails({
+										cache: cache.scope,
+										action: 'reopen'
+									})
+								]
+							: []),
+						...requests
+					]
+				});
 				continue;
 			}
 
@@ -973,5 +1014,120 @@ export function modelPublishingJob(
 		}
 	}
 
-	return { cases, findings };
+	return {
+		cases: cases.map((publication) => {
+			if (publication.trigger !== 'pull_request') {
+				return publication;
+			}
+
+			const closed = pullRequestLifecycleOutcome(job, 'closed', identity);
+			const merged = pullRequestLifecycleOutcome(job, 'merged-close', identity);
+			const reopened = pullRequestLifecycleOutcome(job, 'reopened', identity);
+			const closeRequests = publication.requests.filter((request) =>
+				request.some(
+					(detail) =>
+						detail.type === 'cupboard_cache' &&
+						detail.actions.includes('cache:close')
+				)
+			);
+			const isCloseOnly =
+				pullRequestPublicationOutcome(job, identity) === false;
+			const selected: PublicationCase = isCloseOnly
+				? {
+						trigger: publication.trigger,
+						ref: publication.ref,
+						claims: publication.claims,
+						requests: publication.requests
+					}
+				: publication;
+			return {
+				...selected,
+				...(isCloseOnly && { lifecycle: 'closed' as const }),
+				...(closeRequests.length > 0 &&
+					merged === false && { mergedCloseBlocked: true as const }),
+				...(closeRequests.length > 0 &&
+					closed === false &&
+					merged !== false && { mergedCloseRequests: closeRequests }),
+				requests: publication.requests.filter(
+					(request) =>
+						(!isCloseOnly || closeRequests.includes(request)) &&
+						request.every(
+							(detail) =>
+								!(
+									detail.type === 'cupboard_cache' &&
+									((closed === false &&
+										detail.actions.includes('cache:close')) ||
+										(reopened === false &&
+											detail.actions.includes('cache:reopen')))
+								)
+						)
+				)
+			};
+		}),
+		findings:
+			job.triggers.every((trigger) => trigger.event === 'pull_request') &&
+			pullRequestPublicationOutcome(job, identity) === false
+				? findings.filter(
+						({ finding }) => !(finding instanceof CustomReuseViewFinding)
+					)
+				: findings
+	};
+}
+
+/**
+ * Includes the merged-close identity when a PR run manages its cache.
+ */
+export function withMergedCloseCases(
+	cases: readonly PublicationCase[],
+	identity: RepositoryIdentity
+): readonly PublicationCase[] {
+	const lifecycle: PublicationCase[] = [];
+
+	for (const publication of cases) {
+		if (
+			publication.trigger !== 'pull_request' ||
+			publication.mergedCloseBlocked === true
+		) {
+			continue;
+		}
+
+		const requests = (
+			publication.mergedCloseRequests ?? publication.requests
+		).filter(
+			(request) =>
+				request.length > 0 &&
+				request.every(
+					(detail) =>
+						detail.type === 'cupboard_cache' &&
+						detail.actions.length === 1 &&
+						detail.actions[0] === 'cache:close'
+				)
+		);
+
+		if (requests.length === 0) {
+			continue;
+		}
+
+		const audience = publication.claims.aud;
+		const workflowReference = publication.claims.job_workflow_ref;
+
+		if (audience === undefined || workflowReference === undefined) {
+			throw new Error(
+				'Modelled merged-close claims require an audience and workflow reference.'
+			);
+		}
+
+		lifecycle.push({
+			trigger: 'pull_request',
+			ref: { kind: 'pull-request' },
+			lifecycle: 'merged-close',
+			requests,
+			claims: githubMergedPullRequestClaims(audience, identity, {
+				baseBranch: identity.defaultBranch,
+				workflowReference
+			})
+		});
+	}
+
+	return [...cases, ...lifecycle];
 }

@@ -5,7 +5,7 @@ import {
 	rootNameSchema
 } from '@cupboard/nix-store/scalars';
 
-import { applyTransform } from './capture.ts';
+import { applyTransform, isPatternMatch } from './capture.ts';
 import {
 	type AuthorizationDetail,
 	isOperationPermittedAtIssuance,
@@ -217,9 +217,16 @@ function isGrantPermitted(
 				return false;
 			}
 
-			const cache = renderCache(permitted.resources.cache, claims);
+			const binding = permitted.resources.cache;
+			const cache = renderCache(binding, claims);
+			const isMatches =
+				binding.kind === 'named' && binding.pattern !== undefined
+					? requested.cache.kind === 'named' &&
+						cacheNameSchema.safeParse(requested.cache.name).success &&
+						isPatternMatch(binding.pattern, requested.cache.name)
+					: cache !== undefined && isSameCacheScope(requested.cache, cache);
 
-			if (cache === undefined || !isSameCacheScope(requested.cache, cache)) {
+			if (!isMatches) {
 				return false;
 			}
 

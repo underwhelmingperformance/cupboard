@@ -1234,7 +1234,11 @@ describe('retention grace at publication', () => {
 			beforeVerification,
 			afterVerification: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
-			pendingDecision: { reportsGrace: false, graceSeconds: dayGraceSeconds },
+			pendingDecision: {
+				reportsGrace: false,
+				graceSeconds: dayGraceSeconds,
+				retentionEpoch: 0
+			},
 			beforeVerification: [],
 			afterVerification: [
 				{ storePathHash: metadata.storePathHash, retainUntil: dayAfterStart }
@@ -3544,8 +3548,8 @@ describe('confirming an unretained publication', () => {
 
 		const result = await runInDurableObject(currentServer(), (instance) => {
 			const cache = resolvedCache(instance.context);
-			// Nine rows per statement stay below maxBoundParameters.
-			const seedChunk = 9;
+			// Each row binds twelve values, so eight rows fit the 100-parameter limit.
+			const seedChunk = 8;
 
 			for (let start = 0; start < hashes.length; start += seedChunk) {
 				instance.context.db
@@ -3577,7 +3581,7 @@ describe('confirming an unretained publication', () => {
 					generation: narInfoGenerationSchema.parse(1),
 					narHash
 				})),
-				graceSecondsSchema.parse(86_400)
+				{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(86_400) }
 			);
 			const transactionCount = transactions.mock.calls.length;
 

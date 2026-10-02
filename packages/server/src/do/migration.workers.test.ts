@@ -21,8 +21,10 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import journal from '../../drizzle/meta/_journal.json' with { type: 'json' };
 import retrySnapshot from '../../drizzle/meta/0069_snapshot.json' with { type: 'json' };
 import creationDefaultsSnapshot from '../../drizzle/meta/0070_snapshot.json' with { type: 'json' };
+import closeSnapshot from '../../drizzle/meta/0071_snapshot.json' with { type: 'json' };
 import migrations from '../../drizzle/migrations.js';
 import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -110,7 +112,7 @@ describe('migrations', () => {
 				const beforeData = data();
 				const migrated = await applyMigrations(
 					drizzle(state.storage),
-					migrations
+					migrationsThrough(migrations, 70)
 				);
 				return {
 					migrated,
@@ -155,7 +157,7 @@ describe('migrations', () => {
 				const meter = new DatabaseCostMeter();
 				const migrated = await applyMigrations(
 					drizzle(meteredStorage(state.storage, meter)),
-					migrations,
+					migrationsThrough(migrations, 69),
 					{
 						budget: {
 							sourceRowsRemaining: 1,
@@ -300,7 +302,7 @@ describe('migrations', () => {
 					const meter = new DatabaseCostMeter();
 					const migrated = await applyMigrations(
 						drizzle(meteredStorage(state.storage, meter)),
-						migrations,
+						migrationsThrough(migrations, 69),
 						{
 							budget: {
 								sourceRowsRemaining: 1000,
@@ -387,9 +389,15 @@ describe('migrations', () => {
 					state.storage.sql.exec(
 						"WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<1001) INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict) SELECT 'pending-'||i, 1,'sha256:nar','staging/key','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','pending' FROM seq"
 					);
-					let page = await applyMigrations(drizzle(state.storage), migrations);
+					let page = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 69)
+					);
 					while (page.kind === 'pending' && page.stage !== stage) {
-						page = await applyMigrations(drizzle(state.storage), migrations);
+						page = await applyMigrations(
+							drizzle(state.storage),
+							migrationsThrough(migrations, 69)
+						);
 					}
 					if (page.kind !== 'pending') {
 						throw new Error(
@@ -414,12 +422,12 @@ describe('migrations', () => {
 					const before = rows();
 					let migrated = await applyMigrations(
 						drizzle(state.storage),
-						migrations
+						migrationsThrough(migrations, 69)
 					);
 					while (migrated.kind === 'pending') {
 						migrated = await applyMigrations(
 							drizzle(state.storage),
-							migrations
+							migrationsThrough(migrations, 69)
 						);
 					}
 					return { rollback, migrated, before, after: rows() };
@@ -963,6 +971,10 @@ describe('migrations', () => {
 			server
 		);
 		expect(statuses).toStrictEqual([
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
 			{ status: 503, retryAfter: '1' },
 			{ status: 503, retryAfter: '1' },
 			{ status: 503, retryAfter: '1' },
@@ -2338,6 +2350,8 @@ describe('migrations', () => {
 			],
 			indexes: [
 				{ name: 'retention_root_cache_expires_at_name_idx' },
+				{ name: 'retention_root_cache_retention_epoch_idx' },
+				{ name: 'retention_root_close_applied_epoch_idx' },
 				{ name: 'retention_root_expires_at_idx' },
 				{ name: 'sqlite_autoindex_retention_root_1' }
 			]
@@ -2809,5 +2823,401 @@ describe('migrations', () => {
 			buildsId: migrated.buildsId,
 			retentionMigration: { status: 'complete', discardedRuleCount: 2 }
 		});
+	});
+});
+
+it('adds close metadata after creation defaults without replacing predecessor schema', () => {
+	const additions = new Map([
+		['narinfo', { columns: ['retention_epoch'], indexes: [] }],
+		[
+			'cache_identity',
+			{ columns: ['retention_epoch', 'close_history_cursor'], indexes: [] }
+		],
+		[
+			'managed_cache_retirement',
+			{ columns: ['retirement_started_at'], indexes: [] }
+		],
+		[
+			'pending_upload',
+			{
+				columns: ['retention_epoch'],
+				indexes: ['pending_upload_cache_retention_epoch_idx']
+			}
+		],
+		[
+			'retention_root',
+			{
+				columns: [
+					'retention_epoch',
+					'close_applied_epoch',
+					'close_grace_until'
+				],
+				indexes: [
+					'retention_root_cache_retention_epoch_idx',
+					'retention_root_close_applied_epoch_idx'
+				]
+			}
+		]
+	]);
+	const predecessorTables = Object.fromEntries(
+		Object.entries(closeSnapshot.tables)
+			.filter(([table]) => table !== 'cache_close_event')
+			.map(([table, definition]) => {
+				const added = additions.get(table);
+				return [
+					table,
+					{
+						...definition,
+						columns: Object.fromEntries(
+							Object.entries(definition.columns).filter(
+								([column]) => !added?.columns.includes(column)
+							)
+						),
+						indexes: Object.fromEntries(
+							Object.entries(definition.indexes).filter(
+								([index]) => !added?.indexes.includes(index)
+							)
+						)
+					}
+				];
+			})
+	);
+	expect({
+		...closeSnapshot,
+		id: creationDefaultsSnapshot.id,
+		prevId: creationDefaultsSnapshot.prevId,
+		tables: predecessorTables
+	}).toStrictEqual(creationDefaultsSnapshot);
+	expect(closeSnapshot.prevId).toBe(creationDefaultsSnapshot.id);
+	expect(journal.entries.slice(-2)).toStrictEqual([
+		{
+			idx: 70,
+			version: '6',
+			when: 1_790_931_592_556,
+			tag: '0070_cache_creation_defaults',
+			breakpoints: true
+		},
+		{
+			idx: 71,
+			version: '6',
+			when: 1_790_931_592_557,
+			tag: '0071_cache_close',
+			breakpoints: true
+		}
+	]);
+});
+
+it('adds admission epoch zero to existing narinfos without changing their publications', async () => {
+	const result = await runInDurableObject(
+		testServerFor('close-narinfo-admission'),
+		async (_instance, state) => {
+			await migrateThrough(state, 70);
+			for (const rowid of [1, 2]) {
+				const hash = String(rowid).repeat(32);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,generation,created_at) VALUES (?,1,?,?,'sha256:old',10,'[]',?,'2026-01-01T00:00:00.000Z')",
+					rowid,
+					hash,
+					`/nix/store/${hash}-existing`,
+					rowid + 4
+				);
+			}
+			const query =
+				'SELECT rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,generation,created_at FROM narinfo ORDER BY rowid';
+			const before = state.storage.sql.exec(query).toArray();
+			await migrateThrough(state, 71);
+			return {
+				before,
+				after: state.storage.sql.exec(query).toArray(),
+				epochs: state.storage.sql
+					.exec('SELECT rowid,retention_epoch FROM narinfo ORDER BY rowid')
+					.toArray()
+			};
+		}
+	);
+	expect(result.after).toStrictEqual(result.before);
+	expect(result.epochs).toStrictEqual([
+		{ rowid: 1, retention_epoch: 0 },
+		{ rowid: 2, retention_epoch: 0 }
+	]);
+});
+
+it('adds close metadata within a one-row allowance for 5,000 roots, uploads and narinfos', async () => {
+	const result = await runInDurableObject(
+		testServerFor('close-bounded-indexes'),
+		async (_instance, state) => {
+			await migrateThrough(state, 70);
+			const values = JSON.stringify(
+				Array.from({ length: 5000 }, (_, index) => index)
+			);
+			state.storage.sql.exec(
+				"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at) SELECT value+1, 'upload-' || value, 1, 'sha256:old', 'staging/' || value, '{}', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z' FROM json_each(?)",
+				values
+			);
+			state.storage.sql.exec(
+				"INSERT INTO retention_root(rowid,cache_id,name,expires_at,created_at,updated_at) SELECT value+1,1,'root-' || value,NULL,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z' FROM json_each(?)",
+				values
+			);
+			state.storage.sql.exec(
+				"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,created_at) SELECT value+1,1,'hash-' || value,'/nix/store/path-' || value,'sha256:old',10,'[]','2026-01-01T00:00:00.000Z' FROM json_each(?)",
+				values
+			);
+			const indexes = () =>
+				Array.from(
+					state.storage.sql.exec<{ name: string; sql: string }>(
+						"SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='pending_upload' AND sql IS NOT NULL AND name <> 'pending_upload_cache_retention_epoch_idx' ORDER BY name"
+					),
+					(row) => ({
+						...row,
+						sql: row.sql.replaceAll('"pending_upload"', '`pending_upload`')
+					})
+				);
+			const beforeIndexes = indexes();
+			const meter = new DatabaseCostMeter();
+			const first = await applyMigrations(
+				drizzle(meteredStorage(state.storage, meter)),
+				migrations,
+				{
+					budget: { sourceRowsRemaining: 1, structuralOperationsRemaining: 365 }
+				}
+			);
+			meter.recordOutstanding();
+			const firstCost = meter.rowsRead + meter.rowsWritten;
+			if (first.kind !== 'pending') {
+				return { firstKind: first.kind, firstCost };
+			}
+			let arePassesBounded = true;
+			for (;;) {
+				const pageMeter = new DatabaseCostMeter();
+				const page = await applyMigrations(
+					drizzle(meteredStorage(state.storage, pageMeter)),
+					migrations,
+					{
+						budget: {
+							sourceRowsRemaining: 1000,
+							structuralOperationsRemaining: 365,
+							freshStore: false
+						}
+					}
+				);
+				pageMeter.recordOutstanding();
+				arePassesBounded &&=
+					pageMeter.rowsRead + pageMeter.rowsWritten <= 25_000;
+				if (page.kind === 'complete') {
+					break;
+				}
+			}
+			return {
+				arePassesBounded,
+				firstKind: first.kind,
+				firstSourceRows: first.sourceRows,
+				bounded: firstCost <= 1000,
+				narinfos: state.storage.sql
+					.exec(
+						'SELECT count(*) AS count, min(rowid) AS first, max(rowid) AS last, min(retention_epoch) AS firstEpoch, max(retention_epoch) AS lastEpoch FROM narinfo'
+					)
+					.toArray(),
+				uploads: state.storage.sql
+					.exec(
+						'SELECT count(*) AS count, min(rowid) AS first, max(rowid) AS last, min(retention_epoch) AS epoch FROM pending_upload'
+					)
+					.toArray(),
+				roots: state.storage.sql
+					.exec(
+						'SELECT count(*) AS count, min(rowid) AS first, max(rowid) AS last, min(retention_epoch) AS epoch, min(close_applied_epoch) AS applied, max(close_grace_until IS NOT NULL) AS hasGrace FROM retention_root'
+					)
+					.toArray(),
+				plans: [
+					'SELECT id FROM pending_upload WHERE cache_id=1 AND retention_epoch=0',
+					'SELECT name FROM retention_root WHERE cache_id=1 AND retention_epoch=0',
+					'SELECT name FROM retention_root WHERE cache_id=1 AND close_applied_epoch=0'
+				].map((query) =>
+					Array.from(
+						state.storage.sql.exec<{ detail: string }>(
+							`EXPLAIN QUERY PLAN ${query}`
+						),
+						(row) => row.detail
+					)
+				),
+				beforeIndexes,
+				afterIndexes: indexes(),
+				shadows: state.storage.sql
+					.exec(
+						"SELECT name FROM sqlite_master WHERE name GLOB '__new_*' OR name GLOB '__bounded_*'"
+					)
+					.toArray()
+			};
+		}
+	);
+	expect(result).toStrictEqual({
+		arePassesBounded: true,
+		firstKind: 'pending',
+		firstSourceRows: 1,
+		bounded: true,
+		narinfos: [
+			{ count: 5000, first: 1, last: 5000, firstEpoch: 0, lastEpoch: 0 }
+		],
+		uploads: [{ count: 5000, first: 1, last: 5000, epoch: 0 }],
+		roots: [
+			{ count: 5000, first: 1, last: 5000, epoch: 0, applied: 0, hasGrace: 0 }
+		],
+		plans: [
+			[
+				'SEARCH pending_upload USING INDEX pending_upload_cache_retention_epoch_idx (cache_id=? AND retention_epoch=?)'
+			],
+			[
+				'SEARCH retention_root USING COVERING INDEX retention_root_cache_retention_epoch_idx (cache_id=? AND retention_epoch=?)'
+			],
+			[
+				'SEARCH retention_root USING COVERING INDEX retention_root_close_applied_epoch_idx (cache_id=? AND close_applied_epoch=?)'
+			]
+		],
+		beforeIndexes: result.beforeIndexes,
+		afterIndexes: result.beforeIndexes,
+		shadows: []
+	});
+});
+
+it.each([
+	'copy-pending_upload',
+	'copy-retention_root',
+	'copy-canonical-pending_upload',
+	'copy-canonical-retention_root'
+])('preserves rollback writes during close migration %s', async (stage) => {
+	const result = await runInDurableObject(
+		testServerFor(`close-rollback-${stage}`),
+		async (_instance, state) => {
+			await migrateThrough(state, 70);
+			const sourceQueries = () =>
+				['pending_upload', 'retention_root', 'narinfo'].map((table) => {
+					const columns = Array.from(
+						state.storage.sql.exec<{ name: string }>(
+							`PRAGMA table_info(${table})`
+						),
+						(row) => `\`${row.name}\``
+					);
+					return `SELECT rowid, ${columns.join(', ')} FROM ${table} ORDER BY rowid`;
+				});
+			for (const rowid of [1, 2, 3]) {
+				state.storage.sql.exec(
+					"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at) VALUES (?, ?, 1, 'sha256:old', 'staging/old', '{}', '2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z')",
+					rowid,
+					`upload-${String(rowid)}`
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_root(rowid,cache_id,name,created_at,updated_at) VALUES (?,1,?,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+					rowid,
+					`root-${String(rowid)}`
+				);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,created_at) VALUES (?,1,?,?,'sha256:old',10,'[]','2026-01-01T00:00:00.000Z')",
+					rowid,
+					String(rowid).repeat(32),
+					`/nix/store/${String(rowid).repeat(32)}-existing`
+				);
+			}
+			state.storage.sql.exec(
+				"UPDATE pending_upload SET verdict='committing', session_id='session', claimed_at='2026-01-01T00:00:00.000Z', claim_owner='owner', grace_decision_json='{}', attach_root_name='ci/run', recorded_verdict_json='{}', settle_failures=3, settle_retry_after='2026-01-02T00:00:00.000Z', last_settle_error='retry', nar_refresh_pending=1, accepted_sequence=101, accepted_expires_at='2098-01-01T00:00:00.000Z', commit_started_sequence=102, retry_started_active_ms=5000, settle_exhaustion='attempt-limit'"
+			);
+			for (let pass = 0; pass < 40; pass++) {
+				const progress = await applyMigrations(
+					drizzle(state.storage),
+					migrations,
+					{
+						budget: {
+							sourceRowsRemaining: 1,
+							structuralOperationsRemaining: 365
+						}
+					}
+				);
+				if (
+					progress.kind === 'pending' &&
+					progress.stage === stage &&
+					progress.cursor === 1
+				) {
+					break;
+				}
+				if (pass === 39 || progress.kind === 'complete') {
+					throw new Error(
+						'Expected migration to stop in the requested copy stage'
+					);
+				}
+			}
+			const rollback = await applyMigrations(
+				drizzle(state.storage),
+				migrationsThrough(migrations, 70)
+			);
+			state.storage.sql.exec(
+				"UPDATE pending_upload SET metadata_json=?, accepted_sequence=201, accepted_expires_at='2097-01-01T00:00:00.000Z', commit_started_sequence=202, retry_started_active_ms=6000, settle_exhaustion='eligible-age-limit' WHERE rowid=1",
+				JSON.stringify({ updated: true })
+			);
+			state.storage.sql.exec(
+				"UPDATE retention_root SET expires_at='2099-01-01T00:00:00.000Z' WHERE rowid=1"
+			);
+			state.storage.sql.exec('DELETE FROM pending_upload WHERE rowid=2');
+			state.storage.sql.exec('DELETE FROM retention_root WHERE rowid=2');
+			state.storage.sql.exec(
+				'UPDATE narinfo SET retention_epoch=19 WHERE rowid=1'
+			);
+			state.storage.sql.exec('DELETE FROM narinfo WHERE rowid=2');
+			state.storage.sql.exec(
+				"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,created_at) VALUES (88,1,?,'/nix/store/new','sha256:new',20,'[]','2026-01-01T00:00:00.000Z')",
+				'8'.repeat(32)
+			);
+			state.storage.sql.exec(
+				"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at) VALUES (88,'new',1,'sha256:new','staging/new',?,'2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z')",
+				JSON.stringify({ new: true })
+			);
+			state.storage.sql.exec(
+				"INSERT INTO retention_root(rowid,cache_id,name,created_at,updated_at) VALUES (88,1,'new','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')"
+			);
+			if (stage.startsWith('copy-canonical-')) {
+				state.storage.sql.exec(
+					'UPDATE pending_upload SET retention_epoch=19 WHERE rowid=1'
+				);
+				state.storage.sql.exec(
+					"UPDATE retention_root SET retention_epoch=19, close_applied_epoch=18, close_grace_until='2098-01-01T00:00:00.000Z' WHERE rowid=1"
+				);
+			}
+			const queries = sourceQueries();
+			const before = queries.map((query) =>
+				state.storage.sql.exec(query).toArray()
+			);
+			await migrateThrough(state, 71);
+			return {
+				before,
+				after: queries.map((query) => state.storage.sql.exec(query).toArray()),
+				rollback,
+				uploads: state.storage.sql
+					.exec(
+						'SELECT rowid,id,metadata_json FROM pending_upload ORDER BY rowid'
+					)
+					.toArray(),
+				roots: state.storage.sql
+					.exec(
+						"SELECT rowid,name,coalesce(expires_at, 'permanent') AS expires_at FROM retention_root ORDER BY rowid"
+					)
+					.toArray()
+			};
+		}
+	);
+	const { before, after, ...reported } = result;
+	expect(after).toStrictEqual(before);
+	expect(reported).toStrictEqual({
+		rollback: { kind: 'complete', hasCommitted: false },
+		uploads: [
+			{
+				rowid: 1,
+				id: 'upload-1',
+				metadata_json: JSON.stringify({ updated: true })
+			},
+			{ rowid: 3, id: 'upload-3', metadata_json: '{}' },
+			{ rowid: 88, id: 'new', metadata_json: JSON.stringify({ new: true }) }
+		],
+		roots: [
+			{ rowid: 1, name: 'root-1', expires_at: '2099-01-01T00:00:00.000Z' },
+			{ rowid: 3, name: 'root-3', expires_at: 'permanent' },
+			{ rowid: 88, name: 'new', expires_at: 'permanent' }
+		]
 	});
 });

@@ -70,9 +70,32 @@ Things to know before you use it:
 - The first push to a named cache that doesn't exist creates it, with the
   default cache's access and no default root TTL. Create the cache first with
   `cupboard cache create` if it needs other settings.
+- Set `manage-pr-cache: true` with an explicit `cache` input to manage a cache
+  for each pull request from the same repository. Setup creates a missing cache
+  before publication. A `reopened` event restores write access. Every `closed`
+  event, including a merge, closes the cache through its configured grace and
+  skips publication. Include `closed` and `reopened` in the caller's event
+  types. Use a shared concurrency group for every event of a pull request,
+  including a merged close, and let `closed` runs wait for active publication
+  before they close the cache. See [Concurrency ordering][concurrency-ordering].
+  The trust rule needs `cache:create`, `cache:close` and `cache:reopen` for the
+  selected cache. Setup acquires read authority before creating a missing cache.
+  Publication and creation grants already imply scoped `cache:read`, which
+  permits the absence response. Private content requires a `cache:content-read`
+  grant without a root selector. Merged closes also need a separate closure-only
+  rule. For an immutable workflow reference, use
+  `oidc-trust add-github-pr-close` with the same `--cache-template` and the
+  simple workflow's `--workflow-ref`. A caller that deliberately follows a
+  branch needs a manual close-only rule with that exact workflow selector. See
+  [Merged PR closure][merged-pr-closure]. Branch runs and `publish: none` do not
+  change the cache lifecycle. See [Cache closure][cache-closure].
 - The job needs a trust rule of its own. The rules that `cupboard github setup`
   adds accept only the flake publish workflow. See
   [Trust rules for these jobs](#trust-rules-for-these-jobs).
+
+[concurrency-ordering]: ./quickstart.md#how-the-concurrency-setting-behaves
+[merged-pr-closure]: ./trust-rules.md#pull-requests
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 The `attest` input remains a boolean. Set `attest: false` to publish without
 signing new build provenance. A missing attestation does not cause an available

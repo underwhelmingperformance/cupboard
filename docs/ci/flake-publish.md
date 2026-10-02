@@ -44,7 +44,8 @@ destination from the event. This is what [the quickstart](./quickstart.md) uses.
 
 - A pull request from the same repository publishes to a cache for that pull
   request, `gh-<repository-id>-pr-<number>`, when publication is enabled. The
-  workflow creates the cache if it doesn't exist. Roots are named under
+  workflow creates the cache if it doesn't exist and restores write access when
+  the pull request reopens. Roots are named under
   `github:<repository>/pr-<number>/` and expire 14 days after the latest run.
   With `publish: none`, the run reads from the tenant's default cache and does
   not create a pull-request cache. Pull-request runs don't read a reuse view.
@@ -54,9 +55,12 @@ destination from the event. This is what [the quickstart](./quickstart.md) uses.
   permanent. These runs read through the reuse view
   `pull-requests-<repository-id>`, or the view that `reuse-view` specifies if
   you set that input.
-- When an unmerged pull request is closed and publication is enabled, the run
-  removes that pull request's cache. With `publish: none`, it leaves the cache
-  unchanged. When a merged pull request is closed, the run does nothing.
+- When a pull request is closed and publication is enabled, the run closes its
+  cache, whether the pull request was merged or not. Closure rejects publication
+  and retention-extending writes and brings root expiry forward to the close
+  time. Reads and reuse remain available during the configured grace period.
+  Garbage collection removes expired contents, then deletes the empty cache
+  after pending work finishes. With `publish: none`, the cache stays unchanged.
 - Anything else fails. That includes pull requests from forks, other branches,
   and tags.
 
@@ -530,17 +534,25 @@ repository's `main` never picks up another repository's pull-request builds. If
 you want repositories to share builds, see
 [Sharing builds between repositories](./reuse-views.md#sharing-builds-between-repositories).
 
-### Removing merged pull-request caches once they're empty
+### Retaining closed pull-request outputs during grace
 
-When a pull request is merged, its cache is kept so that `main` can reuse its
-outputs. Its roots expire after 14 days, but the empty cache stays behind. To
-have a cache removed once it's empty:
+The preset closes caches for both merged and unmerged pull requests. Closure
+starts the cache's configured grace period, so `main` can reuse the outputs
+through the pull-request reuse view during grace. Publication to the main cache
+retains reused paths independently of the closed cache.
+
+Configure the tenant's default grace period before creating pull-request caches:
 
 ```sh
-cupboard cache set-retirement https://cupboard.example.workers.dev/t/acme \
-  gh-123456-pr-42 --when-empty true
+cupboard cache set-default-grace https://cupboard.example.workers.dev/t/acme \
+  --grace 24h
 ```
 
-Here `123456` is the repository ID and `42` is the pull request number. This is
-a setting on each cache, and the preset doesn't set it for you. See
-[Retiring empty caches](../admin/retention.md#retiring-empty-caches).
+Existing caches keep their grace settings. Use `cupboard cache set-grace` to
+change an existing cache's grace period. Repeated close events do not restart
+grace, and closure preserves existing later grace deadlines. Reopening restores
+write access before the next publication. See [Cache creation defaults] and
+[Closing and reopening caches].
+
+[Cache creation defaults]: ../admin/caches.md#defaults-for-new-caches
+[Closing and reopening caches]: ../admin/caches.md#closing-and-reopening-a-cache

@@ -7,6 +7,7 @@ import { StatusCodes } from 'http-status-codes';
 import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
+	CacheClosedError,
 	CacheListingProjectionPendingError,
 	CacheNotEmptyError,
 	CacheRetentionMigrationPendingError,
@@ -89,6 +90,15 @@ export function bridgedError(
 		return new ORPCError('CACHE_LISTING_PROJECTION_PENDING', {
 			status: error.status,
 			message: error.message
+		});
+	}
+
+	if (error instanceof CacheClosedError) {
+		return new ORPCError('CACHE_CLOSED', {
+			defined: true,
+			status: error.status,
+			message: error.message,
+			data: { cache: error.cache }
 		});
 	}
 

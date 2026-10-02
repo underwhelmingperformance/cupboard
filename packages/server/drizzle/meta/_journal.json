@@ -498,6 +498,13 @@
 			"when": 1790931592556,
 			"tag": "0070_cache_creation_defaults",
 			"breakpoints": true
+		},
+		{
+			"idx": 71,
+			"version": "6",
+			"when": 1790931592557,
+			"tag": "0071_cache_close",
+			"breakpoints": true
 		}
 	]
 }
