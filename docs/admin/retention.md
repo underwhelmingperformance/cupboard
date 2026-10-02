@@ -17,7 +17,10 @@ expires or you point it at something else.
 The second is the cache's **grace period**. This is a length of time, such as 24
 hours, set on the cache. When a store path is published, or a root stops keeping
 it, the grace period keeps it for that long even if no root refers to it. Caches
-have no grace period unless you set one.
+have no grace period unless you set one for the cache or configure [creation
+defaults] before creating the cache.
+
+[creation defaults]: ./caches.md#defaults-for-new-caches
 
 A garbage collection runs regularly and deletes every store path that neither of
 these is keeping.

@@ -474,13 +474,14 @@ describe('runCacheCreate', () => {
 		).rejects.toBeInstanceOf(ORPCError);
 	});
 
-	it('creates a permanent cache without grace when retention options are omitted', async () => {
+	it('inherits creation grace and keeps roots permanent when retention options are omitted', async () => {
 		const calls: unknown[] = [];
 		const summary = cacheSummary({
 			scope: { kind: 'named', name: 'builds' },
 			access: 'public',
 			priority: 40,
-			storePaths: 0
+			storePaths: 0,
+			grace: { kind: 'duration', graceSeconds: 3600 }
 		});
 
 		await runCacheCreate(
@@ -506,8 +507,7 @@ describe('runCacheCreate', () => {
 				cacheName: 'builds',
 				access: 'public',
 				priority: 40,
-				defaultRootRetention: { kind: 'permanent' },
-				grace: { kind: 'none' }
+				defaultRootRetention: { kind: 'permanent' }
 			}
 		]);
 	});

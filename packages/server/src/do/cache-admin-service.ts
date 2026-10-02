@@ -9,6 +9,7 @@ import {
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import {
+	type CacheCreationDefaults,
 	type CacheListEntry,
 	type CacheListInput,
 	cacheListPageSize,
@@ -58,6 +59,7 @@ import {
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
 import { deleteObjects } from './bulk.ts';
+import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
 import {
 	cacheLifecycleFilter,
 	type CacheRegistrationService
@@ -615,9 +617,10 @@ export class CacheAdminService {
 		configuration: CachePutBody
 	): Promise<CacheSummary> {
 		return this.context.criticalSection(async () => {
+			const grace = configuration.grace ?? this.creationDefaults().grace;
 			if (
 				configuration.defaultRootRetention.kind === 'duration' ||
-				configuration.grace.kind === 'duration'
+				grace.kind === 'duration'
 			) {
 				assertRetentionMigrationSettled(this.context.db);
 			}
@@ -632,13 +635,23 @@ export class CacheAdminService {
 				...(configuration.defaultRootRetention.kind === 'duration' && {
 					defaultRootTtlSeconds: configuration.defaultRootRetention.seconds
 				}),
-				...(configuration.grace.kind === 'duration' && {
-					graceSeconds: configuration.grace.graceSeconds
+				...(grace.kind === 'duration' && {
+					graceSeconds: grace.graceSeconds
 				})
 			});
 
 			return this.cacheSummary(cache);
 		});
+	}
+
+	creationDefaults(): CacheCreationDefaults {
+		return new CacheCreationDefaultsService(this.context).get();
+	}
+
+	setCreationDefaults(
+		configuration: CacheCreationDefaults
+	): Promise<CacheCreationDefaults> {
+		return new CacheCreationDefaultsService(this.context).set(configuration);
 	}
 
 	async updateCache(

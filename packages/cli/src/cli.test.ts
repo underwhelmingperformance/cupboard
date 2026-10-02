@@ -40,6 +40,38 @@ function expectCommanderError(value: unknown): asserts value is CommanderError {
 
 describe('cliExitCode', () => {
 	it.each([
+		{ arguments_: ['defaults'] },
+		{ arguments_: ['set-default-grace', '--grace', '1h'] },
+		{ arguments_: ['clear-default-grace'] }
+	])(
+		'rejects a named cache URL for creation defaults: $arguments_',
+		async ({ arguments_ }) => {
+			const [command, ...options] = arguments_;
+			let failure: unknown;
+			try {
+				await buildProgram().parseAsync([
+					'node',
+					'cupboard',
+					'cache',
+					command ?? '',
+					'https://cupboard.test/t/acme/cache/builds',
+					...options
+				]);
+			} catch (error) {
+				failure = error;
+			}
+			expect({
+				code: cliExitCode(failure, abortExitCode),
+				message: failure instanceof Error ? failure.message : undefined
+			}).toStrictEqual({
+				code: usageExitCode,
+				message:
+					'Cache creation defaults require a tenant URL without a /cache/<name> segment.'
+			});
+		}
+	);
+
+	it.each([
 		{ name: 'an abort', error: new CliAbortError(), expected: abortExitCode },
 		{
 			name: 'an ordinary Nix build child exit',
