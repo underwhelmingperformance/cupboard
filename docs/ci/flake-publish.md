@@ -321,8 +321,9 @@ different view, and pull-request runs never use a view.
 `build: rebuild` requires execution in the selected Nix store. For a remote
 machine, set `store: ssh-ng://...`. A cohort with `remote: true` and no `store`
 uses delegated builders, which can reuse outputs without executing their
-builders. Cupboard rejects that combination with `build: rebuild`. See [Building
-elsewhere][building-elsewhere] for the configuration.
+builders. Planning rejects that combination with `build: rebuild` before any
+cohort builds or publishes. See [Building elsewhere][building-elsewhere] for the
+configuration.
 
 [building-elsewhere]: ./building-elsewhere.md
 

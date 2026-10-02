@@ -1703,6 +1703,14 @@ async function settleCohortBuild(
 	);
 	const claimable = claimableOutputPaths(publicationBuilds, provenanceRebuilds);
 
+	if (inputs.build === 'rebuild' && inputs.store !== '' && inputs.push) {
+		const reportedBuilt = new Set(claimable);
+		const missing = built.filter((storePath) => !reportedBuilt.has(storePath));
+		if (missing.length > 0) {
+			throw new BuildObservationMissingError(missing);
+		}
+	}
+
 	const streamedReceipt = isStreamed
 		? buildReceiptV3Schema.parse(
 				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
@@ -1855,19 +1863,6 @@ async function settleCohortBuild(
 			environment,
 			cupboardRunDependencies
 		);
-
-		if (inputs.build === 'rebuild') {
-			const reportedBuilt = new Set(claimable);
-			const missing = built.filter(
-				(storePath) => !reportedBuilt.has(storePath)
-			);
-
-			if (missing.length > 0) {
-				throw new Error(
-					`The selected remote store did not report rebuilding: ${missing.join(', ')}`
-				);
-			}
-		}
 	}
 
 	if (terminalFailure !== undefined) {

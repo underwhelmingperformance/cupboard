@@ -184,7 +184,8 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | `keep-going` | `false` | Keep building the other installables after one of them fails. |
 | `max-jobs` |  | Maximum number of local build jobs. Leave empty to use the value from the Nix configuration. |
 | `allow-failure` | `false` | Let the step succeed even if all five build attempts fail. |
-| `build` | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
+| `build` |  | Control when to build the requested outputs. Defaults to `missing` when `require-provenance` is not enabled. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
+| `require-provenance` |  | Deprecated. `true` selects `build: rebuild`; `false` uses the build mode. `true` conflicts with an explicit `build: missing`. Remove this input and set `build: rebuild` to preserve the execution guarantee. |
 | `publish` | `outputs` | Publication scope: none, outputs, built, or closure. This action cannot observe every build intermediate and refuses built before starting work. Use the flake publishing workflow for built publication. |
 | `substituter` | `copy` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. |
 

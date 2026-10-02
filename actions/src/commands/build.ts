@@ -33,6 +33,7 @@ import {
 	BuildInstallableInvalidError,
 	BuildInstallablesMissingError,
 	BuildObservationMissingError,
+	BuildProvenanceConflictError,
 	BuildPublicationUrlMissingError,
 	BuildRebuildRemoteDispatchError,
 	CommandFailedError,
@@ -63,6 +64,7 @@ export interface BuildAttempt {
 	readonly attempt: number;
 	readonly attemptId: string;
 	readonly activities: readonly BuildActivity[];
+	readonly validatedOutputs?: readonly NixValidPathInfo[];
 }
 
 export interface BuildOptions {
@@ -76,6 +78,7 @@ export interface BuildOptions {
 	readonly maxJobs?: string;
 	readonly allowFailure?: string;
 	readonly build?: string;
+	readonly requireProvenance?: string;
 	readonly substituter?: string;
 	readonly pathsFile?: string;
 	readonly publishPathsFile?: string;
@@ -294,20 +297,6 @@ export function receiptSubjects(
 	preExisting: ReadonlySet<string>,
 	provenanceRebuilds: ReadonlySet<string> = new Set()
 ): BuildReceiptV2Input['subjects'] {
-	const firstBuild = new Map<string, Omit<BuildAttempt, 'activities'>>();
-
-	for (const attempt of attempts) {
-		for (const activity of attempt.activities) {
-			if (activity.machine !== '') {
-				continue;
-			}
-
-			if (!firstBuild.has(activity.derivation)) {
-				firstBuild.set(activity.derivation, attempt);
-			}
-		}
-	}
-
 	return finalInfos
 		.flatMap((info) => {
 			if (
@@ -319,7 +308,20 @@ export function receiptSubjects(
 				return [];
 			}
 
-			const built = firstBuild.get(info.deriver);
+			const built = attempts.find(
+				(attempt) =>
+					attempt.activities.some(
+						(activity) =>
+							activity.machine === '' && activity.derivation === info.deriver
+					) &&
+					(attempt.validatedOutputs === undefined ||
+						attempt.validatedOutputs.some(
+							(output) =>
+								output.storePath === info.storePath &&
+								output.deriver === info.deriver &&
+								output.narHash.digestHex() === info.narHash.digestHex()
+						))
+			);
 			if (built === undefined) {
 				return [];
 			}
@@ -480,8 +482,11 @@ export function registerBuildCommand(
 		)
 		.option(
 			'--build <mode>',
-			'build missing outputs or rebuild selected outputs',
-			'missing'
+			'build missing outputs or rebuild selected outputs'
+		)
+		.option(
+			'--require-provenance <boolean>',
+			'deprecated: use --build rebuild for true or --build missing for false'
 		)
 		.option(
 			'--substituter <mode>',
@@ -560,11 +565,19 @@ export async function buildAction(
 		options.allowFailure,
 		false
 	);
+	const requiresProvenance = isEnabled(
+		'require-provenance',
+		options.requireProvenance,
+		false
+	);
+	if (requiresProvenance && provided(options.build) === 'missing') {
+		throw new BuildProvenanceConflictError();
+	}
 	const build = providedChoice(
 		'build',
 		options.build,
 		['missing', 'rebuild'],
-		'missing'
+		requiresProvenance ? 'rebuild' : 'missing'
 	);
 	const storeConfig = discoverNixStoreConfig();
 	if (
@@ -600,7 +613,6 @@ export async function buildAction(
 	let finalPaths: string[] = [];
 	let status: number | undefined;
 	let failedCommand = 'nix build';
-	let unobservedPaths: string[] = [];
 	const checkedPaths = new Set<string>();
 	let remoteBuilderDerivations = new Set<string>();
 
@@ -623,6 +635,17 @@ export async function buildAction(
 	);
 	const plannedPaths = new Set<string>();
 	let plannedInstallables: ReadonlyMap<string, string> = new Map();
+	const queryOutputInfo = async (
+		storePath: string
+	): Promise<NixValidPathInfo> => {
+		const info = await nix.queryPathInfo(storePath);
+		if (info.deriver !== undefined) {
+			return info;
+		}
+		const installable = plannedInstallables.get(info.storePath);
+		const derivation = installable?.split('^', 1)[0];
+		return derivation === undefined ? info : { ...info, deriver: derivation };
+	};
 	const preExisting = new Set<string>();
 	const uncertainInitialPaths = new Set<string>();
 	const earlierExecution: {
@@ -683,7 +706,7 @@ export async function buildAction(
 		if (status !== 0 && buildAttempt.activities.length > 0) {
 			const states = await Promise.allSettled(
 				[...new Set([...plannedPaths, ...finalPaths])].map((storePath) =>
-					nix.queryPathInfo(storePath)
+					queryOutputInfo(storePath)
 				)
 			);
 			earlierExecution.push({
@@ -700,7 +723,7 @@ export async function buildAction(
 		}
 		if (status === 0) {
 			const attemptInfos = await Promise.all(
-				finalPaths.map((storePath) => nix.queryPathInfo(storePath))
+				finalPaths.map((storePath) => queryOutputInfo(storePath))
 			);
 			if (
 				build === 'rebuild' &&
@@ -835,13 +858,13 @@ export async function buildAction(
 						current.activities.map((activity) => activity.derivation)
 					)
 				]);
-				unobservedPaths = attemptInfos
+				const unobservedPaths = attemptInfos
 					.filter(
 						(info) => info.deriver === undefined || !observed.has(info.deriver)
 					)
 					.map((info) => info.storePath);
 				if (unobservedPaths.length > 0) {
-					status = -1;
+					throw new BuildObservationMissingError(unobservedPaths);
 				}
 			}
 		}
@@ -854,15 +877,19 @@ export async function buildAction(
 	}
 
 	if (status !== 0 && !isAllowFailure) {
-		if (status === -1 && unobservedPaths.length > 0) {
-			throw new BuildObservationMissingError(unobservedPaths);
-		}
 		throw new CommandFailedError(failedCommand, status ?? -1);
 	}
 
 	const finalInfos = await Promise.all(
-		finalPaths.map((storePath) => nix.queryPathInfo(storePath))
+		finalPaths.map((storePath) => queryOutputInfo(storePath))
 	);
+	attributed = [
+		...earlierExecution.map((execution) => ({
+			...execution.attempt,
+			validatedOutputs: execution.outputs
+		})),
+		...attributed
+	];
 	const subjects = receiptSubjects(
 		attributed,
 		finalInfos,

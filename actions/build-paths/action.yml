@@ -47,12 +47,18 @@ inputs:
     default: 'false'
   build:
     description:
-      Control when to build the requested outputs. `missing` uses an output from
-      the store or a substituter when one is available, and builds it otherwise.
+      Control when to build the requested outputs. Defaults to `missing` when
+      `require-provenance` is not enabled. `missing` uses an output from the
+      store or a substituter when one is available, and builds it otherwise.
       `rebuild` builds each output again in the selected Nix store, even if it
       is already available. Nix may still fetch dependencies from substituters.
     required: false
-    default: missing
+  require-provenance:
+    description: >-
+      Deprecated. `true` selects `build: rebuild`; `false` uses the build mode.
+      `true` conflicts with an explicit `build: missing`. Remove this input and
+      set `build: rebuild` to preserve the execution guarantee.
+    required: false
   publish:
     description: >-
       Publication scope: none, outputs, built, or closure. This action cannot
@@ -152,6 +158,7 @@ runs:
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
         BUILD: ${{ inputs.build }}
+        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
         PUBLISH: ${{ inputs.publish }}
         SUBSTITUTER: ${{ inputs.substituter }}
         PUBLICATION_URL: ${{ inputs.publication-url }}
@@ -169,6 +176,7 @@ runs:
             --max-jobs "$MAX_JOBS" \
             --allow-failure "$ALLOW_FAILURE" \
             --build "$BUILD" \
+            --require-provenance "$REQUIRE_PROVENANCE" \
             --publish "$PUBLISH" \
             --substituter "$SUBSTITUTER" \
             --publication-url "$PUBLICATION_URL"
