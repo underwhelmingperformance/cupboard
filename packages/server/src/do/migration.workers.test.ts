@@ -21,6 +21,8 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import retrySnapshot from '../../drizzle/meta/0069_snapshot.json' with { type: 'json' };
+import creationDefaultsSnapshot from '../../drizzle/meta/0070_snapshot.json' with { type: 'json' };
 import migrations from '../../drizzle/migrations.js';
 import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -78,6 +80,70 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('adds creation defaults after retry migration without changing predecessor state', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-creation-defaults-after-retries'),
+			async (_instance, state) => {
+				await migrateThrough(state, 69);
+				state.storage.sql.exec(
+					"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict,session_id,claimed_at,claim_owner,grace_decision_json,attach_root_name,recorded_verdict_json,settle_failures,settle_retry_after,last_settle_error,nar_refresh_pending,accepted_sequence,accepted_expires_at,commit_started_sequence,retry_started_active_ms,settle_exhaustion) VALUES (17,'admitted',1,'sha256:nar','staging/key','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','committing','session','2026-01-02T00:00:00.000Z','upload-owner','{}','build','{}',7,'2026-01-03T00:00:00.000Z','verification-failed',1,101,'2098-01-01T00:00:00.000Z',102,5000,'attempt-limit')"
+				);
+				state.storage.sql.exec(
+					"INSERT INTO attestation_inheritance(rowid,cache_id,store_path_hash,generation,nar_hash,source_predicate_type,source_digest,attempts,not_before,accepted_upload_id,accepted_sequence,accepted_expires_at,commit_started_sequence,queued_sequence,source_end_cache_id,source_end_generation,source_cache_id,source_generation,source_reference_generation,source_reference_complete,source_reference_cache_id,source_reference_end_generation,retry_started_active_ms,claim_owner) VALUES (19,1,'00000000000000000000000000000001',3,'sha256:nar','https://predicate.invalid/type','digest',7,'2026-01-03T00:00:00.000Z','admitted',101,'2098-01-01T00:00:00.000Z',102,103,104,105,106,107,108,1,109,110,5000,'inheritance-owner')"
+				);
+				const definitions = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name,type,tbl_name,sql FROM sqlite_master WHERE name <> 'cache_creation_defaults' ORDER BY name"
+						)
+						.toArray();
+				const data = () =>
+					['pending_upload', 'attestation_inheritance', 'cache_identity'].map(
+						(table) => ({
+							table,
+							rows: state.storage.sql
+								.exec(`SELECT rowid,* FROM ${table} ORDER BY rowid`)
+								.toArray()
+						})
+					);
+				const beforeDefinitions = definitions();
+				const beforeData = data();
+				const migrated = await applyMigrations(
+					drizzle(state.storage),
+					migrations
+				);
+				return {
+					migrated,
+					beforeDefinitions,
+					afterDefinitions: definitions(),
+					beforeData,
+					afterData: data(),
+					defaults: state.storage.sql
+						.exec('SELECT * FROM cache_creation_defaults')
+						.toArray()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: { kind: 'complete', hasCommitted: true },
+			beforeDefinitions: result.beforeDefinitions,
+			afterDefinitions: result.beforeDefinitions,
+			beforeData: result.beforeData,
+			afterData: result.beforeData,
+			defaults: []
+		});
+		expect(creationDefaultsSnapshot).toStrictEqual({
+			...retrySnapshot,
+			id: creationDefaultsSnapshot.id,
+			prevId: retrySnapshot.id,
+			tables: {
+				...retrySnapshot.tables,
+				cache_creation_defaults:
+					creationDefaultsSnapshot.tables.cache_creation_defaults
+			}
+		});
+	});
+
 	it('bounds retry index construction over a preserved pending backlog', async () => {
 		const result = await runInDurableObject(
 			testServerFor('migration-retry-row-budget'),

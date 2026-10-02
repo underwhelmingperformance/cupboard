@@ -65,6 +65,9 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard tenant remove`](#cupboard-tenant-remove)
 - [`cupboard cache`](#cupboard-cache)
   - [`cupboard cache list`](#cupboard-cache-list)
+  - [`cupboard cache defaults`](#cupboard-cache-defaults)
+  - [`cupboard cache set-default-grace`](#cupboard-cache-set-default-grace)
+  - [`cupboard cache clear-default-grace`](#cupboard-cache-clear-default-grace)
   - [`cupboard cache create`](#cupboard-cache-create)
   - [`cupboard cache set-root-ttl`](#cupboard-cache-set-root-ttl)
   - [`cupboard cache clear-root-ttl`](#cupboard-cache-clear-root-ttl)
@@ -1609,6 +1612,9 @@ Options:
 
 Commands:
   list <url>                             List the tenant's caches and their settings.
+  defaults <url>                         Inspect the tenant defaults for newly created caches.
+  set-default-grace [options] <url>      Set the grace period inherited by newly created caches.
+  clear-default-grace <url>              Remove the grace default for newly created caches.
   create [options] <url> [name]          Create a named cache.
   set-root-ttl [options] <url> [name]    Set a cache's default root TTL, or the TTL for roots whose names start with a prefix.
   clear-root-ttl [options] <url> [name]  Clear a cache's default root TTL, or the TTL for a root-name prefix.
@@ -1628,6 +1634,50 @@ Commands:
 Usage: cupboard cache list [options] <url>
 
 List the tenant's caches and their settings.
+
+Arguments:
+  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  -h, --help  display help for command
+```
+
+#### cupboard cache defaults
+
+```text
+Usage: cupboard cache defaults [options] <url>
+
+Inspect the tenant defaults for newly created caches.
+
+Arguments:
+  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  -h, --help  display help for command
+```
+
+#### cupboard cache set-default-grace
+
+```text
+Usage: cupboard cache set-default-grace [options] <url>
+
+Set the grace period inherited by newly created caches.
+
+Arguments:
+  url                 tenant URL (e.g.
+                      https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  --grace <duration>  grace period (e.g. 24h, 0s)
+  -h, --help          display help for command
+```
+
+#### cupboard cache clear-default-grace
+
+```text
+Usage: cupboard cache clear-default-grace [options] <url>
+
+Remove the grace default for newly created caches.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)

@@ -71,6 +71,14 @@ export const tenantRouter = os.router({
 		)
 	},
 	caches: {
+		defaults: {
+			get: os.caches.defaults.get.handler(({ context }) =>
+				context.services.cacheAdmin.creationDefaults()
+			),
+			set: os.caches.defaults.set.handler(({ input, context }) =>
+				context.services.cacheAdmin.setCreationDefaults(input)
+			)
+		},
 		list: os.caches.list.handler(({ input, context }) =>
 			context.services.cacheAdmin.listCaches(input)
 		),

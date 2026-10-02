@@ -28,7 +28,7 @@ import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { tenantReadCredentialSchema } from '@cupboard/protocol/tenants';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -39,6 +39,7 @@ import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
+import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts';
 import { canonicalCacheRequest } from '../routing/cache-request.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -65,8 +66,10 @@ import {
 	recordTransition,
 	resetTestServer,
 	resolvedCache,
+	testPushId,
 	testServerFor,
 	uploadMetadata,
+	uploadPathNegotiation,
 	useTestServer,
 	withoutAlarmArming
 } from '../test-support.ts';
@@ -380,6 +383,288 @@ function recordingPages(requested: LocalStep): Promise<unknown[]> {
 
 describe('cache registry admin', () => {
 	beforeEach(resetTestServer);
+
+	it.each([
+		{
+			mode: 'explicit-none',
+			path: '/caches/creation-pending',
+			body: { access: 'public', priority: 40, grace: { kind: 'none' } }
+		},
+		{
+			mode: 'omitted',
+			path: '/caches/creation-pending',
+			body: { access: 'public', priority: 40 }
+		},
+		{
+			mode: 'implicit-root',
+			path: '/cache/creation-pending/roots/run',
+			body: { targets: [], retention: { kind: 'permanent' } }
+		}
+	])(
+		'defers new $mode caches until legacy grace import finishes',
+		async ({ path, body }) => {
+			await withoutAlarmArming(async () => {
+				const { token } = await bootstrap();
+				await runInDurableObject(currentServer(), (instance) => {
+					instance.context.db.run(
+						sql`INSERT INTO retention_grace_policy (id, cache_prefix, grace_seconds, created_at) VALUES ('legacy-grace', '', 3600, '2026-01-01T00:00:00.000Z')`
+					);
+				});
+				const request = {
+					method: 'PUT',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify(body)
+				};
+				const refused = await authorisedFetch(path, token, request);
+				const cache = await runInDurableObject(currentServer(), (instance) =>
+					instance.context.cacheRepository.resolve(
+						namedCache('creation-pending')
+					)
+				);
+				expect({
+					status: refused.status,
+					body: await refused.json(),
+					cache
+				}).toStrictEqual({
+					status: StatusCodes.CONFLICT,
+					body: {
+						defined: true,
+						code: 'CACHE_RETENTION_MIGRATION_PENDING',
+						status: StatusCodes.CONFLICT,
+						message:
+							"The cache's retention is still being migrated; retry after the tenant has completed its local step"
+					},
+					cache: undefined
+				});
+				await runInDurableObject(currentServer(), (instance) =>
+					advanceCacheRetentionMigration(instance.context.db)
+				);
+				const retried = await authorisedFetch(path, token, request);
+				const after = await authorisedFetch('/caches/creation-pending', token);
+				expect({
+					status: retried.status,
+					grace: cacheSummarySchema.parse(await after.json()).grace
+				}).toStrictEqual({ status: StatusCodes.OK, grace: { kind: 'none' } });
+			});
+		}
+	);
+
+	it.each(['/uploads', '/attestations/bundles', '/attestations'])(
+		'declares the migration refusal for implicit cache creation through %s',
+		async (suffix) => {
+			await withoutAlarmArming(async () => {
+				const { token } = await bootstrap();
+				await runInDurableObject(currentServer(), (instance) => {
+					instance.context.db.run(
+						sql`INSERT INTO retention_grace_policy (id, cache_prefix, grace_seconds, created_at) VALUES ('legacy-grace', '', 3600, '2026-01-01T00:00:00.000Z')`
+					);
+				});
+				const metadata = uploadMetadata({ fileSize: 128 });
+				const digest = 'a'.repeat(64);
+				const body =
+					suffix === '/uploads'
+						? { pushId: testPushId, paths: [uploadPathNegotiation(metadata)] }
+						: {
+								pushId: testPushId,
+								bundles: [
+									suffix === '/attestations'
+										? { storePathHash: metadata.storePathHash, digest }
+										: { digest }
+								]
+							};
+				const scope = namedCache('creation-pending');
+				const response = await authorisedFetch(
+					`/cache/${scope.name}${suffix}`,
+					token,
+					{
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify(body)
+					}
+				);
+				const cache = await runInDurableObject(currentServer(), (instance) =>
+					instance.context.cacheRepository.resolve(scope)
+				);
+				const expected = {
+					status: StatusCodes.CONFLICT,
+					body: {
+						defined: true,
+						code: 'CACHE_RETENTION_MIGRATION_PENDING',
+						status: StatusCodes.CONFLICT,
+						message:
+							"The cache's retention is still being migrated; retry after the tenant has completed its local step"
+					},
+					cache: undefined
+				};
+				expect({
+					status: response.status,
+					body: await response.json(),
+					cache
+				}).toStrictEqual(expected);
+			});
+		}
+	);
+
+	it.each([0, 86_400])(
+		'applies creation grace %s to explicit and implicit new caches only',
+		async (graceSeconds) => {
+			await useTestServer(`cache-creation-default-${String(graceSeconds)}`);
+			const init = await bootstrap();
+			const existing = await putCache(init.token, 'existing', 30);
+			const updated = await authorisedFetch('/cache-defaults', init.token, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ grace: { kind: 'duration', graceSeconds } })
+			});
+			expect(updated.status).toBe(StatusCodes.OK);
+			const explicit = await putCache(init.token, 'explicit', 30);
+			const root = await authorisedFetch('/cache/pr-42/roots/run', init.token, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					targets: [],
+					retention: { kind: 'duration', seconds: 60 }
+				})
+			});
+			expect(root.status).toBe(StatusCodes.OK);
+			const implicit = await authorisedFetch('/caches/pr-42', init.token);
+			const unchanged = await authorisedFetch('/caches/existing', init.token);
+			const defaults = await authorisedFetch('/cache-defaults', init.token);
+			const caches = await listCaches(init.token);
+			expect({
+				defaults: await defaults.json(),
+				explicit: explicit.grace,
+				implicit: cacheSummarySchema.parse(await implicit.json()).grace,
+				unchanged: cacheSummarySchema.parse(await unchanged.json()),
+				defaultCache: caches.caches[0]?.grace
+			}).toStrictEqual({
+				defaults: { grace: { kind: 'duration', graceSeconds } },
+				explicit: { kind: 'duration', graceSeconds },
+				implicit: { kind: 'duration', graceSeconds },
+				unchanged: existing,
+				defaultCache: { kind: 'none' }
+			});
+		}
+	);
+
+	it.each([
+		{ kind: 'none' },
+		{ kind: 'duration', graceSeconds: 0 },
+		{ kind: 'duration', graceSeconds: 60 }
+	])('preserves an explicit creation grace override %j', async (grace) => {
+		await useTestServer(
+			`cache-creation-override-${grace.kind}-${'graceSeconds' in grace ? String(grace.graceSeconds) : 'none'}`
+		);
+		const init = await bootstrap();
+		const configured = await authorisedFetch('/cache-defaults', init.token, {
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				grace: { kind: 'duration', graceSeconds: 86_400 }
+			})
+		});
+		expect(configured.status).toBe(StatusCodes.OK);
+		const response = await authorisedFetch('/caches/overridden', init.token, {
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ access: 'public', priority: 40, grace })
+		});
+		expect({
+			status: response.status,
+			grace: cacheSummarySchema.parse(await response.json()).grace
+		}).toStrictEqual({ status: StatusCodes.OK, grace });
+	});
+
+	it('clears creation defaults without rewriting existing caches', async () => {
+		await useTestServer('cache-creation-default-clear');
+		const init = await bootstrap();
+		const set = (grace: object) =>
+			authorisedFetch('/cache-defaults', init.token, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ grace })
+			});
+		const configured = await set({ kind: 'duration', graceSeconds: 3600 });
+		expect(configured.status).toBe(StatusCodes.OK);
+		const previous = await putCache(init.token, 'previous', 30);
+		const cleared = await set({ kind: 'none' });
+		const next = await putCache(init.token, 'next', 30);
+		const unchanged = await authorisedFetch('/caches/previous', init.token);
+		expect({
+			cleared: { status: cleared.status, defaults: await cleared.json() },
+			next: next.grace,
+			previous: cacheSummarySchema.parse(await unchanged.json())
+		}).toStrictEqual({
+			cleared: {
+				status: StatusCodes.OK,
+				defaults: { grace: { kind: 'none' } }
+			},
+			next: { kind: 'none' },
+			previous
+		});
+	});
+
+	it('requires tenant-domain authority for cache creation defaults', async () => {
+		await useTestServer('cache-creation-default-authority');
+		const init = await bootstrap();
+		const scoped = await issueServerSignedToken([
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:read', 'cache:update'],
+				cache: namedCache('pr-42')
+			}
+		]);
+		const reader = await issueServerSignedToken([
+			{ type: 'cupboard_domain', actions: ['cache:defaults-read'] }
+		]);
+		const updater = await issueServerSignedToken([
+			{ type: 'cupboard_domain', actions: ['cache:defaults-update'] }
+		]);
+		const update = (token: string) =>
+			authorisedFetch('/cache-defaults', token, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					grace: { kind: 'duration', graceSeconds: 3600 }
+				})
+			});
+		const scopedRead = await authorisedFetch('/cache-defaults', scoped);
+		const scopedWrite = await update(scoped);
+		const allowedRead = await authorisedFetch('/cache-defaults', reader);
+		const refusedWrite = await update(reader);
+		const allowedWrite = await update(updater);
+		const refusedRead = await authorisedFetch('/cache-defaults', updater);
+		const final = await authorisedFetch('/cache-defaults', init.token);
+		expect({
+			scopedRead: scopedRead.status,
+			scopedWrite: scopedWrite.status,
+			allowedRead: {
+				status: allowedRead.status,
+				defaults: await allowedRead.json()
+			},
+			refusedWrite: refusedWrite.status,
+			allowedWrite: {
+				status: allowedWrite.status,
+				defaults: await allowedWrite.json()
+			},
+			refusedRead: refusedRead.status,
+			final: await final.json()
+		}).toStrictEqual({
+			scopedRead: StatusCodes.FORBIDDEN,
+			scopedWrite: StatusCodes.FORBIDDEN,
+			allowedRead: {
+				status: StatusCodes.OK,
+				defaults: { grace: { kind: 'none' } }
+			},
+			refusedWrite: StatusCodes.FORBIDDEN,
+			allowedWrite: {
+				status: StatusCodes.OK,
+				defaults: { grace: { kind: 'duration', graceSeconds: 3600 } }
+			},
+			refusedRead: StatusCodes.FORBIDDEN,
+			final: { grace: { kind: 'duration', graceSeconds: 3600 } }
+		});
+	});
 
 	it('checks the current cache after waiting to delete it', async () => {
 		await useTestServer('cache-admin-delete-incarnation');

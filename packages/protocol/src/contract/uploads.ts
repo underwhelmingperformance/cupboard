@@ -25,6 +25,11 @@ const uploadRequestErrors = {
 	}
 };
 
+const uploadNegotiateErrors = {
+	...uploadRequestErrors,
+	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
+};
+
 const negotiate = cacheScopedProcedure(
 	{
 		method: 'POST',
@@ -70,8 +75,8 @@ export const uploadsContract = {
 	),
 
 	negotiate: {
-		inDefaultCache: negotiate.inDefaultCache.errors(uploadRequestErrors),
-		inNamedCache: negotiate.inNamedCache.errors(uploadRequestErrors)
+		inDefaultCache: negotiate.inDefaultCache.errors(uploadNegotiateErrors),
+		inNamedCache: negotiate.inNamedCache.errors(uploadNegotiateErrors)
 	},
 	preview: {
 		inDefaultCache: preview.inDefaultCache.errors(uploadRequestErrors),

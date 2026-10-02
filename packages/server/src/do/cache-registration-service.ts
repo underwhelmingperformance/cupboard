@@ -25,7 +25,9 @@ import {
 import { type CacheCreation } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { CacheAlreadyExistsError, CacheNotFoundError } from '../errors.ts';
+import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
+import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
 import { type ServerContext } from './context.ts';
 
 export function cacheLifecycleFilter(
@@ -141,6 +143,8 @@ export class CacheRegistrationService {
 			throw new CacheAlreadyExistsError(scope);
 		}
 
+		assertRetentionMigrationSettled(this.context.db);
+
 		const version = await this.recordLifecycle({
 			scope,
 			access: configuration.access
@@ -182,12 +186,16 @@ export class CacheRegistrationService {
 		}).access;
 
 		try {
-			return await this.context.criticalSection(() =>
-				this.createInSection(scope, {
+			return await this.context.criticalSection(() => {
+				const defaults = new CacheCreationDefaultsService(this.context).get();
+				return this.createInSection(scope, {
 					access,
-					priority: cachePrioritySchema.parse(CacheInfo.default.priority)
-				})
-			);
+					priority: cachePrioritySchema.parse(CacheInfo.default.priority),
+					...(defaults.grace.kind === 'duration' && {
+						graceSeconds: defaults.grace.graceSeconds
+					})
+				});
+			});
 		} catch (error) {
 			// Another write created the cache while this one waited at the gate.
 			if (error instanceof CacheAlreadyExistsError) {
