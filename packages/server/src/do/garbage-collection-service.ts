@@ -1259,6 +1259,37 @@ export class GarbageCollectionService {
 		return true;
 	}
 
+	private collectRefreshCredentialMaintenance(now: IsoTimestamp): boolean {
+		for (const table of [
+			schema.legacyRefreshTokenMembers,
+			schema.legacyRefreshTokenFamilies,
+			schema.legacyRefreshTokens
+		]) {
+			this.context.db.run(
+				sql`DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} ORDER BY id LIMIT ${phaseStepSize})`
+			);
+		}
+		this.context.db
+			.run(sql`UPDATE refresh_session_member SET successor_envelope = NULL, successor_expires_at = NULL
+			WHERE id IN (SELECT id FROM refresh_session_member INDEXED BY refresh_session_member_successor_expiry_idx
+			WHERE successor_expires_at IS NOT NULL AND successor_expires_at < ${now}
+			ORDER BY successor_expires_at, id LIMIT ${phaseStepSize})`);
+		return (
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_token_member LIMIT 1`
+			).length > 0 ||
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_token_family LIMIT 1`
+			).length > 0 ||
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_token LIMIT 1`
+			).length > 0 ||
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_session_member INDEXED BY refresh_session_member_successor_expiry_idx WHERE successor_expires_at IS NOT NULL AND successor_expires_at < ${now} LIMIT 1`
+			).length > 0
+		);
+	}
+
 	/**
 	 * Deletes expired refresh-token families a step at a time until the budget is
 	 * spent or none is left. A family row is deleted only after its last member,
@@ -1375,6 +1406,8 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
 
+		const hasMoreRefreshCredentialMaintenance =
+			this.collectRefreshCredentialMaintenance(now);
 		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
 
 		if (expiredRefreshFamilies.hasMoreWork) {
@@ -1476,6 +1509,7 @@ export class GarbageCollectionService {
 				? this.advanceTenantCollection(collectionCache)
 				: collected.hasMoreWork;
 		const hasMoreWork =
+			hasMoreRefreshCredentialMaintenance ||
 			expiredRefreshFamilies.hasMoreWork ||
 			hasMorePendingRows ||
 			hasMoreCollectionWork;

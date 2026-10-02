@@ -165,7 +165,6 @@ import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type GarbageCollectionOutcome,
 	type GarbageCollectionTarget,
-	ownerRuleId,
 	type RuntimeEnv,
 	ServerContext
 } from './context.ts';
@@ -574,7 +573,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.tokenExchange = new TokenExchangeService(
 			this.context,
 			this.authKeys,
-			this.oidcTrust
+			this.oidcTrust,
+			() => this.reconcileMaintenanceEligibility()
 		);
 		this.roots = new RootsService(
 			this.context,
@@ -3301,7 +3301,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					return;
 				}
 
-				this.tokenExchange.revokeRuleFamilies(ownerRuleId, transaction);
 				this.oidcTrust.seedOwnerRule(transaction);
 			});
 

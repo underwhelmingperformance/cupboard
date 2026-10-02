@@ -145,9 +145,8 @@ async function seedExpiredRefreshFamily(memberCount: number): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		const activeGeneration = memberCount - 1;
 		state.storage.sql.exec(
-			"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) VALUES ('expired-family', 'expired-active', ?, 'admin-rule', 'alice', ?, '2019-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')",
-			activeGeneration,
-			JSON.stringify([{ type: 'cupboard_wildcard' }])
+			"INSERT INTO refresh_session_family (id, active_member_id, generation, created_at, expires_at) VALUES ('expired-family', 'expired-active', ?, '2019-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')",
+			activeGeneration
 		);
 		state.storage.sql.exec(
 			`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
@@ -158,7 +157,7 @@ async function seedExpiredRefreshFamily(memberCount: number): Promise<void> {
 			   CROSS JOIN digits AS hundreds
 			   CROSS JOIN digits AS thousands
 			 )
-			 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+			 INSERT INTO refresh_session_member (id, family_id, generation, credential_hash, created_at)
 			 SELECT CASE WHEN value = ? THEN 'expired-active' ELSE printf('expired-spent-%d', value) END,
 			        'expired-family', value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
 			 FROM generations
@@ -177,13 +176,13 @@ async function refreshFamilyCounts(): Promise<{
 		families:
 			state.storage.sql
 				.exec<{ count: number }>(
-					'SELECT count(*) AS count FROM refresh_token_family'
+					'SELECT count(*) AS count FROM refresh_session_family'
 				)
 				.toArray()[0]?.count ?? 0,
 		members:
 			state.storage.sql
 				.exec<{ count: number }>(
-					'SELECT count(*) AS count FROM refresh_token_member'
+					'SELECT count(*) AS count FROM refresh_session_member'
 				)
 				.toArray()[0]?.count ?? 0
 	}));
@@ -513,13 +512,13 @@ describe('garbage collection cap', () => {
 					families:
 						state.storage.sql
 							.exec<{ count: number }>(
-								'SELECT count(*) AS count FROM refresh_token_family'
+								'SELECT count(*) AS count FROM refresh_session_family'
 							)
 							.toArray()[0]?.count ?? 0,
 					members:
 						state.storage.sql
 							.exec<{ count: number }>(
-								'SELECT count(*) AS count FROM refresh_token_member'
+								'SELECT count(*) AS count FROM refresh_session_member'
 							)
 							.toArray()[0]?.count ?? 0
 				};

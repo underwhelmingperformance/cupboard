@@ -60,7 +60,21 @@ export class MaintenanceEligibilityService {
 			.limit(1)
 			.get();
 
-		return queuedDeletion !== undefined;
+		if (queuedDeletion !== undefined) {
+			return true;
+		}
+		return [
+			schema.legacyRefreshTokenMembers,
+			schema.legacyRefreshTokenFamilies,
+			schema.legacyRefreshTokens
+		].some(
+			(table) =>
+				this.context.db
+					.select({ present: sql`1` })
+					.from(table)
+					.limit(1)
+					.get() !== undefined
+		);
 	}
 
 	private earliestUploadExpiry(): IsoTimestamp | undefined {
@@ -141,8 +155,35 @@ export class MaintenanceEligibilityService {
 			this.earliestRootExpiry(),
 			this.earliestGraceExpiry(),
 			this.earliestAuthKeyRetirement(),
-			this.earliestManagedCacheRetirement()
+			this.earliestManagedCacheRetirement(),
+			this.earliestRefreshMaintenance()
 		]
+			.filter((value) => value !== undefined)
+			.toSorted(byCodeUnit)[0];
+	}
+
+	private earliestRefreshMaintenance(): IsoTimestamp | undefined {
+		const family = this.context.db
+			.select({ expiresAt: schema.refreshTokenFamilies.expiresAt })
+			.from(schema.refreshTokenFamilies)
+			.orderBy(
+				asc(schema.refreshTokenFamilies.expiresAt),
+				asc(schema.refreshTokenFamilies.id)
+			)
+			.limit(1)
+			.get()?.expiresAt;
+		const envelope =
+			this.context.db
+				.select({ expiresAt: schema.refreshTokenMembers.successorExpiresAt })
+				.from(schema.refreshTokenMembers)
+				.where(isNotNull(schema.refreshTokenMembers.successorExpiresAt))
+				.orderBy(
+					asc(schema.refreshTokenMembers.successorExpiresAt),
+					asc(schema.refreshTokenMembers.id)
+				)
+				.limit(1)
+				.get()?.expiresAt ?? undefined;
+		return [family, envelope]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
 	}
