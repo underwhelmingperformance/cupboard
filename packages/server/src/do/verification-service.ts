@@ -676,7 +676,7 @@ export class VerificationService {
 				metadata.storePathHash,
 				row.generation,
 				metadata.narHash,
-				grace?.graceSeconds
+				grace
 			);
 			if (!confirmed.matched) {
 				return;
@@ -685,7 +685,8 @@ export class VerificationService {
 				this.cache(pending.cacheId),
 				pending.attachRootName,
 				metadata.storePathHash,
-				metadata.storePath
+				metadata.storePath,
+				pending.retentionEpoch
 			);
 			await this.inheritAfterCommit(pending, metadata, row.generation);
 			await new ReconcileQueueService(this.context).enqueue(undefined, [
@@ -1077,6 +1078,7 @@ export class VerificationService {
 		const reserved = await this.commitPipeline.reserveNarInfoRow(
 			this.cache(pending.cacheId),
 			metadata,
+			pending.retentionEpoch,
 			() => this.ownsActiveClaim(owner, pending, signal)
 		);
 
@@ -1167,7 +1169,7 @@ export class VerificationService {
 			metadata.storePathHash,
 			generation,
 			metadata.narHash,
-			graceDecision?.graceSeconds
+			graceDecision
 		);
 
 		// The row moved during the committed-edge check, so the conclusion is
@@ -1184,7 +1186,8 @@ export class VerificationService {
 			this.cache(pending.cacheId),
 			pending.attachRootName,
 			metadata.storePathHash,
-			metadata.storePath
+			metadata.storePath,
+			pending.retentionEpoch
 		);
 
 		await this.inheritAfterCommit(pending, metadata, generation);
@@ -1461,7 +1464,8 @@ export class VerificationService {
 						this.cache(pending.cacheId),
 						pending.attachRootName,
 						metadata.storePathHash,
-						metadata.storePath
+						metadata.storePath,
+						pending.retentionEpoch
 					);
 					confirmGrace(
 						this.context,
@@ -1470,7 +1474,7 @@ export class VerificationService {
 						metadata.storePathHash,
 						generation,
 						metadata.narHash,
-						graceDecision?.graceSeconds
+						graceDecision
 					);
 				}
 
@@ -3741,7 +3745,8 @@ export class VerificationService {
 							this.cache(pending.cacheId),
 							pending.attachRootName,
 							metadata.storePathHash,
-							metadata.storePath
+							metadata.storePath,
+							pending.retentionEpoch
 						);
 						confirmGrace(
 							this.context,
@@ -3750,7 +3755,7 @@ export class VerificationService {
 							metadata.storePathHash,
 							reserved.generation,
 							metadata.narHash,
-							parseStoredGraceDecision(pending.graceDecisionJson)?.graceSeconds
+							parseStoredGraceDecision(pending.graceDecisionJson)
 						);
 					}
 

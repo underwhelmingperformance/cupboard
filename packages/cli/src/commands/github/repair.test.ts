@@ -34,12 +34,14 @@ import {
 import {
 	githubBranchAddBody,
 	githubPrAddBody,
+	githubPrCloseAddBody,
 	type OidcTrustClient
 } from '../oidc-trust.ts';
 import {
 	buildAddBody,
 	buildCacheContentReadGrant,
 	buildCacheGrant,
+	collectSubstitutions,
 	jobWorkflowReferenceClaim
 } from '../oidc-trust/rule-builder.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
@@ -869,6 +871,14 @@ it('repairs a missing preset view without asking for a trust scope or adding rul
 	const rules = oidcTrustListResponseSchema.parse({
 		rules: [
 			{ ...prBody, id: 'pr', disabled: false },
+			{
+				...githubPrCloseAddBody(url, identity, {
+					repo: repository,
+					jobWorkflowRef: workflowReference
+				}),
+				id: 'pr-close',
+				disabled: false
+			},
 			{ ...branchBody, id: 'branch', disabled: false }
 		]
 	}).rules;
@@ -883,6 +893,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, closed]
 jobs:
   publish:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
@@ -1926,6 +1937,194 @@ const audienceView = reuseViewSummarySchema.parse({
 	createdAt: '2026-01-01T00:00:00.000Z',
 	updatedAt: '2026-01-01T00:00:00.000Z'
 });
+
+it.each([
+	{ label: 'close', separatesReopen: false },
+	{ label: 'close and reopen', separatesReopen: true }
+])(
+	'limits split PR rules to their modelled $label authority',
+	async ({ separatesReopen }) => {
+		const workflowContent = `
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  publish:
+    if: github.event.action != 'closed'${separatesReopen ? " && github.event.action != 'reopened'" : ''}
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${url.href}
+      preset: pull-request-and-branch
+  close:
+    if: github.event.action == 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.36
+    with:
+      url: ${url.href}
+      preset: pull-request-and-branch
+${
+	separatesReopen
+		? `  reopen:
+    if: github.event.action == 'reopened'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.37
+    with:
+      url: ${url.href}
+      preset: pull-request-and-branch
+`
+		: ''
+}`;
+		const { ui, added, client, dependencies, check } = await fixture(
+			undefined,
+			workflowContent,
+			{ views: [audienceView] }
+		);
+		await runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		);
+		const publicationBody = githubPrAddBody(url, customAudienceIdentity, {
+			repo: repository,
+			jobWorkflowRef: flakeAudienceReference
+		});
+		const closeReference = flakeAudienceReference.replace('v0.0.35', 'v0.0.36');
+		const substitutions = collectSubstitutions({
+			templateSource: 'github-pr',
+			captures: []
+		});
+		const publisherGrant = buildCacheGrant({
+			cacheTemplate: 'gh-{repository_id}-pr-{pr}',
+			rootTemplate: 'github:iainlane/dotfiles/pr-{pr}/',
+			allow: [
+				'push',
+				'root',
+				'attach',
+				'create',
+				...(separatesReopen ? [] : ['reopen']),
+				'attest'
+			],
+			substitutions
+		});
+		expect(added).toStrictEqual([
+			{ ...publicationBody, permittedGrants: [publisherGrant] },
+			{
+				...publicationBody,
+				claims: { ...publicationBody.claims, job_workflow_ref: closeReference },
+				permittedGrants: [
+					buildCacheGrant({
+						cacheTemplate: 'gh-{repository_id}-pr-{pr}',
+						allow: ['close'],
+						substitutions
+					})
+				]
+			},
+			githubPrCloseAddBody(url, customAudienceIdentity, {
+				repo: repository,
+				jobWorkflowRef: closeReference
+			}),
+			...(separatesReopen
+				? [
+						{
+							...publicationBody,
+							claims: {
+								...publicationBody.claims,
+								job_workflow_ref: flakeAudienceReference.replace(
+									'v0.0.35',
+									'v0.0.37'
+								)
+							},
+							permittedGrants: [
+								buildCacheGrant({
+									cacheTemplate: 'gh-{repository_id}-pr-{pr}',
+									rootTemplate: 'github:iainlane/dotfiles/pr-{pr}/',
+									allow: [
+										'push',
+										'root',
+										'attach',
+										'create',
+										'reopen',
+										'attest'
+									],
+									substitutions
+								})
+							]
+						}
+					]
+				: [])
+		]);
+	}
+);
+
+it('repairs only closure for a split installable PR handler', async () => {
+	const { ui, added, client, dependencies, check } = await fixture(
+		undefined,
+		`
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  publish:
+    if: github.event.action != 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: ${url.href}
+      cache: pr-cache
+      manage-pr-cache: true
+  close:
+    if: github.event.action == 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.36
+    with:
+      url: ${url.href}
+      cache: pr-cache
+      manage-pr-cache: true
+`
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+	const closeReference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.36';
+	expect({
+		repairable: check.repairableJobs.map(({ job }) => job),
+		incomplete:
+			error instanceof GithubCheckIncompleteError ? error.checks : error,
+		added
+	}).toStrictEqual({
+		repairable: ['close'],
+		incomplete: [`${path}, publish`],
+		added: [
+			buildAddBody({
+				issuer: 'https://token.actions.githubusercontent.com',
+				audience: url.href,
+				claims: {
+					repository_id: '1234',
+					repository_owner_id: '5678',
+					event_name: 'pull_request',
+					job_workflow_ref: closeReference
+				},
+				permittedGrants: [
+					buildCacheGrant({ cache: 'pr-cache', allow: ['close'] })
+				],
+				display: { provider: 'github', repository }
+			}),
+			githubPrCloseAddBody(url, customAudienceIdentity, {
+				repo: repository,
+				jobWorkflowRef: closeReference,
+				cacheTemplate: 'pr-cache'
+			})
+		]
+	});
+});
+
 const audienceRepairCases = [
 	{
 		label: 'installable branch',
@@ -1985,7 +2184,8 @@ const audienceRepairCases = [
 	{
 		label: 'flake preset pull request',
 		workflow: 'cupboard-flake-publish',
-		trigger: 'on: pull_request',
+		trigger:
+			'on:\n  pull_request:\n    types: [opened, synchronize, reopened, closed]',
 		inputs: '      preset: pull-request-and-branch',
 		access: 'public' as const,
 		body: githubPrAddBody(url, customAudienceIdentity, {
@@ -2056,7 +2256,23 @@ ${inputs}
 			results: captured.results.map((result) => result.kind)
 		}).toStrictEqual({
 			initial: ['failed'],
-			added: [body],
+			added: [
+				body,
+				...(body.claims.event_name === 'pull_request' &&
+				body.permittedGrants.some(
+					(grant) =>
+						grant.type === 'cupboard_cache' &&
+						grant.actions.includes('cache:close')
+				)
+					? [
+							githubPrCloseAddBody(url, customAudienceIdentity, {
+								repo: repository,
+								jobWorkflowRef: flakeAudienceReference,
+								audience: audienceSchema.parse(customAudience)
+							})
+						]
+					: [])
+			],
 			results: ['github-check-discovered', 'github-check-verified']
 		});
 	}
@@ -2213,7 +2429,8 @@ const extraReadRepairCases = [
 	},
 	{
 		label: 'preset PR',
-		trigger: 'on: pull_request',
+		trigger:
+			'on:\n  pull_request:\n    types: [opened, synchronize, reopened, closed]',
 		inputs: '      preset: pull-request-and-branch',
 		body: githubPrAddBody(url, customAudienceIdentity, {
 			repo: repository,
@@ -2296,7 +2513,20 @@ ${inputs}
 						...body.permittedGrants,
 						buildCacheContentReadGrant({ cache: 'falcon' })
 					]
-				}
+				},
+				...(body.claims.event_name === 'pull_request' &&
+				body.permittedGrants.some(
+					(grant) =>
+						grant.type === 'cupboard_cache' &&
+						grant.actions.includes('cache:close')
+				)
+					? [
+							githubPrCloseAddBody(url, customAudienceIdentity, {
+								repo: repository,
+								jobWorkflowRef: flakeAudienceReference
+							})
+						]
+					: [])
 			],
 			results: ['github-check-discovered', 'github-check-verified']
 		});

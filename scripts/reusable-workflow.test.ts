@@ -117,7 +117,13 @@ const jobsSchema = z.record(z.string(), jobSchema);
 const workflowSchema = z.looseObject({
 	name: z.string(),
 	on: triggersSchema,
-	jobs: jobsSchema
+	jobs: jobsSchema,
+	concurrency: z
+		.strictObject({
+			group: z.string(),
+			'cancel-in-progress': scalarSchema.optional()
+		})
+		.optional()
 });
 
 type Workflow = z.output<typeof workflowSchema>;
@@ -202,7 +208,7 @@ function jobNeeds(workflow: Workflow, job: string): string[] {
 
 const reusableWorkflows = [
 	{ name: 'flake publish', file: flakeWorkflow, entryJob: 'configure' },
-	{ name: 'publish', file: publishWorkflow, entryJob: 'publish' }
+	{ name: 'publish', file: publishWorkflow, entryJob: 'configure' }
 ];
 
 it('passes additional runner cache reads to setup in every flake build job', async () => {
@@ -217,7 +223,7 @@ it('passes additional runner cache reads to setup in every flake build job', asy
 		setups: [
 			{ job: 'plan', readCaches: '${{ inputs.read-caches }}' },
 			{ job: 'cohort', readCaches: '${{ inputs.read-caches }}' },
-			{ job: 'remove-cache', readCaches: undefined }
+			{ job: 'close-cache', readCaches: undefined }
 		]
 	});
 });
@@ -484,7 +490,7 @@ describe('cupboard acquisition', () => {
 
 	it('installs cupboard without a cache substituter for the removal job', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const removalSetup = (workflow.jobs['remove-cache']?.steps ?? []).filter(
+		const removalSetup = (workflow.jobs['close-cache']?.steps ?? []).filter(
 			(step) => step.uses === cupboardAction('setup')
 		);
 
@@ -499,7 +505,7 @@ describe('cupboard acquisition', () => {
 
 	it('prepares Nix before acquiring cupboard from source for removal', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const steps = workflow.jobs['remove-cache']?.steps ?? [];
+		const steps = workflow.jobs['close-cache']?.steps ?? [];
 		const prepareIndex = steps.findIndex(
 			(step) => step.uses === cupboardAction('prepare')
 		);
@@ -608,11 +614,10 @@ describe('cupboard acquisition', () => {
 
 	it('validates the four simple workflow choices', async () => {
 		const workflow = await loadWorkflow(publishWorkflow);
-		const validation = shellOf(
-			workflow,
-			'publish',
-			'Validate publication options'
-		);
+		const validation = [
+			shellOf(workflow, 'configure', 'Resolve cache operation'),
+			shellOf(workflow, 'configure', 'Validate publication options')
+		].join('\n');
 
 		expect(validation).toContain('missing|rebuild)');
 		expect(validation).toContain('leave|copy)');
@@ -635,8 +640,16 @@ describe('cupboard acquisition', () => {
 					audience: '${{ inputs.audience }}',
 					cache: '${{ inputs.cache }}',
 					'trusted-public-key': '${{ inputs.trusted-public-key }}',
-					cupboard: '${{ steps.resolve-cupboard.outputs.cupboard }}',
-					'checkout-dir': sourceCheckoutDirectory
+					cupboard: '${{ needs.configure.outputs.cupboard }}',
+					'checkout-dir': sourceCheckoutDirectory,
+					'provision-cache':
+						"${{ inputs.manage-pr-cache && github.event_name == 'pull_request' && inputs.publish != 'none' && inputs.cache || '' }}",
+					'provision-cache-ttl': '${{ inputs.ttl }}'
+				},
+				{
+					cupboard: '${{ needs.configure.outputs.cupboard }}',
+					'checkout-dir': sourceCheckoutDirectory,
+					audience: '${{ inputs.audience }}'
 				}
 			],
 			pushBinary: ['${{ steps.setup.outputs.cupboard-path }}']
@@ -832,7 +845,7 @@ describe('cohort planning and publication', () => {
 			'configure',
 			'plan',
 			'cohort',
-			'remove-cache'
+			'close-cache'
 		]);
 	});
 
@@ -1232,6 +1245,128 @@ ${sign.run}`
 					.map(({ step }) => ({ uses: step.uses, if: step.if })),
 				attach: inputsOf(workflow, cupboardAction('attest-attach'))
 			}).toStrictEqual({ gated, attach });
+		}
+	);
+});
+
+describe('PR cache closure ordering', () => {
+	it.each([
+		{
+			event: 'opened',
+			number: '7',
+			ref: 'refs/pull/7/merge',
+			cancel: true,
+			group: 'cupboard-cache publish-7'
+		},
+		{
+			event: 'synchronize',
+			number: '7',
+			ref: 'refs/pull/7/merge',
+			cancel: true,
+			group: 'cupboard-cache publish-7'
+		},
+		{
+			event: 'reopened',
+			number: '7',
+			ref: 'refs/pull/7/merge',
+			cancel: true,
+			group: 'cupboard-cache publish-7'
+		},
+		{
+			event: 'closed',
+			number: '7',
+			ref: 'refs/pull/7/merge',
+			cancel: false,
+			group: 'cupboard-cache publish-7'
+		},
+		{
+			event: 'closed',
+			number: '7',
+			ref: 'refs/heads/main',
+			cancel: false,
+			group: 'cupboard-cache publish-7'
+		},
+		{
+			event: 'synchronize',
+			number: '8',
+			ref: 'refs/pull/8/merge',
+			cancel: true,
+			group: 'cupboard-cache publish-8'
+		},
+		{
+			event: 'push',
+			number: '',
+			ref: 'refs/heads/main',
+			cancel: false,
+			group: 'cupboard-cache publish-refs/heads/main'
+		}
+	])(
+		'queues $event with PR=$number and ref=$ref',
+		async ({ event, number, ref, cancel, group }) => {
+			const workflow = await loadWorkflow(cachePublishWorkflow);
+			const quickstart = await readFile(
+				new URL('../docs/ci/quickstart.md', import.meta.url),
+				'utf8'
+			);
+			const document = /```yaml\n(name: cupboard[\s\S]*?)\n```/.exec(
+				quickstart
+			);
+
+			if (document?.[1] === undefined) {
+				throw new Error('The quickstart must include its caller workflow');
+			}
+
+			const example = workflowSchema.parse(parse(document[1]));
+			const results = [];
+
+			for (const caller of [workflow, example]) {
+				const concurrency = caller.concurrency;
+
+				if (
+					concurrency === undefined ||
+					typeof concurrency['cancel-in-progress'] !== 'string'
+				) {
+					throw new Error('The caller must configure conditional concurrency');
+				}
+
+				const values: Record<string, string> = {
+					'github.workflow': caller.name,
+					'github.event.pull_request.number': number,
+					'github.ref': ref
+				};
+				const resolvedGroup = concurrency.group.replaceAll(
+					/\$\{\{(.*?)\}\}/g,
+					(_match, expression: string) =>
+						expression
+							.split('||')
+							.map((term) => values[term.trim()])
+							.find(Boolean) ?? ''
+				);
+				const condition = concurrency['cancel-in-progress']
+					.replaceAll(/^\$\{\{|\}\}$/g, '')
+					.replaceAll('github.event_name', '"$EVENT_NAME"')
+					.replaceAll('github.event.action', '"$EVENT_ACTION"');
+				const { stdout } = await execFileAsync(
+					'bash',
+					[
+						'-c',
+						`if [[ ${condition} ]]; then printf true; else printf false; fi`
+					],
+					{
+						env: {
+							...process.env,
+							EVENT_NAME: number === '' ? 'push' : 'pull_request',
+							EVENT_ACTION: event
+						}
+					}
+				);
+				results.push({ group: resolvedGroup, cancel: stdout === 'true' });
+			}
+
+			expect(results).toStrictEqual([
+				{ group, cancel },
+				{ group: group.replace('cache publish', 'cupboard'), cancel }
+			]);
 		}
 	);
 });
@@ -1712,6 +1847,322 @@ describe('repository cache publishing', () => {
 
 const execFileAsync = promisify(execFile);
 
+interface SimplePublicationEvent {
+	readonly eventName?: string;
+	readonly action?: string;
+	readonly merged?: boolean;
+	readonly headRepositoryId?: string;
+	readonly managed?: boolean;
+	readonly publish?: string;
+	readonly cache?: string;
+}
+
+async function resolveSimplePublicationEvent(
+	event: SimplePublicationEvent
+): Promise<Record<string, string>> {
+	const workflow = await loadWorkflow(publishWorkflow);
+	const script = workflow.jobs.configure?.steps.find(
+		(step) => step.name === 'Resolve cache operation'
+	)?.run;
+
+	if (script === undefined) {
+		throw new Error('The publishing workflow has no cache-operation script');
+	}
+
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-cache-operation-')
+	);
+	const output = path.join(directory, 'output');
+
+	try {
+		await execFileAsync('bash', ['-c', script], {
+			env: {
+				...process.env,
+				EVENT_NAME: event.eventName ?? 'pull_request',
+				EVENT_ACTION: event.action ?? 'opened',
+				MERGED: String(event.merged ?? false),
+				REPOSITORY_ID: '1234',
+				HEAD_REPOSITORY_ID: event.headRepositoryId ?? '1234',
+				MANAGE_PR_CACHE: String(event.managed ?? true),
+				PUBLISH: event.publish ?? 'outputs',
+				CACHE: event.cache ?? 'pr-7',
+				GITHUB_OUTPUT: output
+			}
+		});
+		const written = await readFile(output, 'utf8');
+
+		return Object.fromEntries(
+			written
+				.trimEnd()
+				.split('\n')
+				.map((line) => {
+					const separator = line.indexOf('=');
+					return [line.slice(0, separator), line.slice(separator + 1)];
+				})
+		);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+describe('simple publication cache lifecycle', () => {
+	it.each([
+		{ event: {}, operation: 'publish' },
+		{ event: { action: 'synchronize' }, operation: 'publish' },
+		{ event: { action: 'reopened' }, operation: 'publish' },
+		{ event: { publish: 'none', cache: '' }, operation: 'publish' },
+		{ event: { action: 'closed' }, operation: 'close' },
+		{ event: { action: 'closed', merged: true }, operation: 'close' },
+		{ event: { action: 'closed', managed: false }, operation: 'skip' },
+		{
+			event: { action: 'closed', publish: 'none' as const, cache: '' },
+			operation: 'skip'
+		},
+		{ event: { headRepositoryId: '5678' }, operation: 'skip' },
+		{
+			event: { action: 'closed', headRepositoryId: '5678' },
+			operation: 'skip'
+		},
+		{ event: { eventName: 'push' }, operation: 'publish' },
+		{ event: { eventName: 'release' }, operation: 'publish' }
+	])('selects $operation for $event', async ({ event, operation }) => {
+		expect(await resolveSimplePublicationEvent(event)).toStrictEqual({
+			operation
+		});
+	});
+
+	it.each(['nnoe', 'wrong', ''])(
+		'rejects publication mode %j before closed-request closure',
+		async (publish) => {
+			await expect(
+				resolveSimplePublicationEvent({ action: 'closed', publish })
+			).rejects.toMatchObject({
+				code: 2,
+				stderr: '::error::publish must be none, outputs, built, or closure\n'
+			});
+		}
+	);
+
+	it.each(['opened', 'reopened', 'closed'])(
+		'rejects managed-cache event %s without a named cache before setup',
+		async (action) => {
+			await expect(
+				resolveSimplePublicationEvent({ action, cache: '' })
+			).rejects.toMatchObject({
+				code: 2,
+				stderr: '::error::manage-pr-cache requires a named cache input\n'
+			});
+		}
+	);
+
+	it('validates publication choices before authenticated release lookup', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		expect({
+			configuration: workflow.jobs.configure?.steps.map(
+				(step) => step.name ?? step.uses
+			),
+			validationCondition: workflow.jobs.configure?.steps.find(
+				(step) => step.name === 'Validate publication options'
+			)?.if,
+			resolutionCondition: workflow.jobs.configure?.steps.find(
+				(step) => step.uses === cupboardAction('resolve-cupboard')
+			)?.if
+		}).toStrictEqual({
+			configuration: [
+				cloudGuardStep,
+				'Resolve cache operation',
+				'Validate publication options',
+				cupboardAction('resolve-cupboard')
+			],
+			validationCondition: "steps.operation.outputs.operation == 'publish'",
+			resolutionCondition: "steps.operation.outputs.operation != 'skip'"
+		});
+	});
+
+	it.each([
+		{ command: 'close', audience: '', status: 0, audienceArguments: [] },
+		{ command: 'reopen', audience: '', status: 0, audienceArguments: [] },
+		{
+			command: 'reopen',
+			audience: 'cupboard-ci-client',
+			status: 75,
+			audienceArguments: ['--audience', 'cupboard-ci-client']
+		},
+		{
+			command: 'close',
+			audience: 'cupboard-ci-client',
+			status: 75,
+			audienceArguments: ['--audience', 'cupboard-ci-client']
+		}
+	])(
+		'passes $command authority and preserves child status $status',
+		async ({ command, audience, status, audienceArguments }) => {
+			const workflow = await loadWorkflow(publishWorkflow);
+			const script = shellOf(
+				workflow,
+				command === 'close' ? 'close-cache' : 'publish',
+				command === 'close' ? 'Close the cache' : 'Reopen the cache'
+			);
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-cache-closure-')
+			);
+			const binary = path.join(directory, 'cupboard');
+			const argumentsFile = path.join(directory, 'arguments');
+
+			try {
+				await writeFile(
+					binary,
+					'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$ARGUMENT_FILE"\nexit "$CHILD_STATUS"\n',
+					{ mode: 0o700 }
+				);
+				let actualStatus = 0;
+				try {
+					await execFileAsync('bash', ['-c', script], {
+						env: {
+							...process.env,
+							AUDIENCE: audience,
+							CUPBOARD_PATH: binary,
+							URL: 'https://cupboard.example.workers.dev/t/acme',
+							CACHE: 'pr-7',
+							ARGUMENT_FILE: argumentsFile,
+							CHILD_STATUS: String(status)
+						}
+					});
+				} catch (error) {
+					if (
+						!(error instanceof Error) ||
+						!('code' in error) ||
+						typeof error.code !== 'number'
+					) {
+						throw error;
+					}
+					actualStatus = error.code;
+				}
+				const recordedArguments = await readFile(argumentsFile, 'utf8');
+
+				expect({
+					status: actualStatus,
+					arguments: recordedArguments.trimEnd().split('\n')
+				}).toStrictEqual({
+					status,
+					arguments: [
+						'cache',
+						command,
+						'https://cupboard.example.workers.dev/t/acme',
+						'pr-7',
+						'--github-oidc',
+						...audienceArguments
+					]
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it('provisions before reopening and building the PR cache', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		const steps = workflow.jobs.publish?.steps ?? [];
+		const lifecycleSteps = steps.filter(
+			(step) =>
+				step.uses === cupboardAction('setup') ||
+				step.name === 'Reopen the cache' ||
+				step.uses === cupboardAction('build-paths')
+		);
+		expect(
+			lifecycleSteps.map((step) => ({
+				step: step.name ?? step.uses,
+				condition: step.if,
+				provision: step.with?.['provision-cache'],
+				env: step.env
+			}))
+		).toStrictEqual([
+			{
+				step: cupboardAction('setup'),
+				condition: undefined,
+				provision:
+					"${{ inputs.manage-pr-cache && github.event_name == 'pull_request' && inputs.publish != 'none' && inputs.cache || '' }}",
+				env: undefined
+			},
+			{
+				step: 'Reopen the cache',
+				condition:
+					"${{ inputs.manage-pr-cache && inputs.publish != 'none' && github.event_name == 'pull_request' && github.event.action == 'reopened' }}",
+				provision: undefined,
+				env: {
+					AUDIENCE: '${{ steps.setup.outputs.read-session-audience }}',
+					CUPBOARD_PATH: '${{ steps.setup.outputs.cupboard-path }}',
+					URL: '${{ inputs.url }}',
+					CACHE: '${{ inputs.cache }}'
+				}
+			},
+			{
+				step: cupboardAction('build-paths'),
+				condition: undefined,
+				provision: undefined,
+				env: undefined
+			}
+		]);
+	});
+
+	it('separates publication from OIDC closure and enables the caller close event', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		const caller = await loadWorkflow(cachePublishWorkflow);
+		expect({
+			lifecycleInput: workflow.on.workflow_call?.inputs['manage-pr-cache'],
+			publication: {
+				needs: jobNeeds(workflow, 'publish'),
+				if: workflow.jobs.publish?.if
+			},
+			closure: {
+				needs: jobNeeds(workflow, 'close-cache'),
+				if: workflow.jobs['close-cache']?.if,
+				permissions: workflow.jobs['close-cache']?.permissions,
+				setup: workflow.jobs['close-cache']?.steps.find(
+					(step) => step.uses === cupboardAction('setup')
+				)?.with,
+				buildActions: workflow.jobs['close-cache']?.steps.filter(
+					(step) => step.uses === cupboardAction('build-paths')
+				)
+			},
+			callerLifecycle: caller.jobs['publish-pr']?.with?.['manage-pr-cache'],
+			callerEvents: caller.on.pull_request,
+			callerGuard: caller.jobs['publish-pr']?.if
+		}).toStrictEqual({
+			lifecycleInput: {
+				description:
+					'Create the named cache for pull requests from this repository, reopen it when the pull request reopens, and close it through its configured grace when the pull request closes. Requires cache. Closed pull requests skip publication.',
+				required: false,
+				type: 'boolean',
+				default: false
+			},
+			publication: {
+				needs: ['configure'],
+				if: "needs.configure.outputs.operation == 'publish'"
+			},
+			closure: {
+				needs: ['configure'],
+				if: "needs.configure.outputs.operation == 'close'",
+				permissions: {
+					attestations: 'read',
+					contents: 'read',
+					'id-token': 'write'
+				},
+				setup: {
+					cupboard: '${{ needs.configure.outputs.cupboard }}',
+					'checkout-dir': '${{ github.workspace }}/.cupboard-workflow',
+					audience: '${{ inputs.audience }}'
+				},
+				buildActions: []
+			},
+			callerLifecycle: true,
+			callerEvents: { types: ['opened', 'synchronize', 'reopened', 'closed'] },
+			callerGuard:
+				"github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id"
+		});
+	});
+});
+
 async function resolvePublicationEvent(event: {
 	readonly action: string;
 	readonly merged: boolean;
@@ -1819,7 +2270,7 @@ describe('pull-request cache lifecycle', () => {
 				'reuse-view': '',
 				'provision-cache': '',
 				'provision-cache-ttl': '',
-				'remove-cache': ''
+				'close-cache': ''
 			});
 		}
 	);
@@ -1878,7 +2329,7 @@ describe('pull-request cache lifecycle', () => {
 				'reuse-view': selection.view,
 				'provision-cache': selection.cache,
 				'provision-cache-ttl': selection.ttl,
-				'remove-cache': ''
+				'close-cache': ''
 			});
 		}
 	);
@@ -1928,7 +2379,7 @@ describe('pull-request cache lifecycle', () => {
 					'reuse-view': '',
 					'provision-cache': 'gh-1234-pr-7',
 					'provision-cache-ttl': '14d',
-					'remove-cache': ''
+					'close-cache': ''
 				},
 				diagnostics: warned
 					? '::warning::fallback_read_user is deprecated. Use read_user.\n::warning::fallback_read_password is deprecated. Use read_password.\n'
@@ -1994,7 +2445,7 @@ describe('pull-request cache lifecycle', () => {
 				'reuse-view': '',
 				'provision-cache': '',
 				'provision-cache-ttl': '14d',
-				'remove-cache': ''
+				'close-cache': ''
 			});
 		}
 	);
@@ -2002,7 +2453,7 @@ describe('pull-request cache lifecycle', () => {
 	it.each([
 		{ action: 'opened', merged: false, removed: '' },
 		{ action: 'closed', merged: false, removed: 'gh-1234-pr-7' },
-		{ action: 'closed', merged: true, removed: '' }
+		{ action: 'closed', merged: true, removed: 'gh-1234-pr-7' }
 	])(
 		'resolves a $action pull request with merged=$merged',
 		async ({ action, merged, removed }) => {
@@ -2016,7 +2467,7 @@ describe('pull-request cache lifecycle', () => {
 				'reuse-view': '',
 				'provision-cache': 'gh-1234-pr-7',
 				'provision-cache-ttl': '14d',
-				'remove-cache': removed
+				'close-cache': removed
 			});
 		}
 	);
@@ -2028,7 +2479,7 @@ describe('pull-request cache lifecycle', () => {
 				(step) => step.name === 'Resolve inputs'
 			)?.env?.MERGED,
 			planCondition: workflow.jobs.plan?.if,
-			removalPermissions: workflow.jobs['remove-cache']?.permissions
+			removalPermissions: workflow.jobs['close-cache']?.permissions
 		}).toStrictEqual({
 			merged: '${{ github.event.pull_request.merged }}',
 			planCondition:
@@ -2054,15 +2505,22 @@ it.each([
 		const evaluate = workflow.jobs.plan?.steps.find(
 			(step) => step.name === 'Evaluate target manifest'
 		);
-		const remove = workflow.jobs['remove-cache']?.steps.find(
-			(step) => step.name === 'Remove the cache'
+		const remove = workflow.jobs['close-cache']?.steps.find(
+			(step) => step.name === 'Close the cache'
 		);
-		if (evaluate?.run === undefined || remove?.run === undefined) {
+		const reopen = workflow.jobs.plan?.steps.find(
+			(step) => step.name === 'Reopen the pull request cache'
+		);
+		if (
+			evaluate?.run === undefined ||
+			remove?.run === undefined ||
+			reopen?.run === undefined
+		) {
 			throw new Error(
-				'The flake workflow must have evaluation and removal scripts'
+				'The flake workflow must have evaluation, close and reopen scripts'
 			);
 		}
-		const setup = workflow.jobs['remove-cache']?.steps.find(
+		const setup = workflow.jobs['close-cache']?.steps.find(
 			(step) => step.id === 'setup'
 		);
 		const directory = await mkdtemp(
@@ -2077,7 +2535,7 @@ it.each([
 				{ mode: 0o700 }
 			);
 			const argumentsByStep: unknown[] = [];
-			for (const step of [evaluate, remove]) {
+			for (const step of [evaluate, remove, reopen]) {
 				if (step.run === undefined) {
 					throw new Error('The workflow step must have a shell script');
 				}
@@ -2134,12 +2592,18 @@ it.each([
 					],
 					[
 						'cache',
-						'remove',
+						'close',
 						'https://cache.example.test/t/acme',
 						'pr-7',
 						'--github-oidc',
-						'--force',
-						'--yes',
+						...(expected === '' ? [] : ['--audience', expected])
+					],
+					[
+						'cache',
+						'reopen',
+						'https://cache.example.test/t/acme',
+						'pr-7',
+						'--github-oidc',
 						...(expected === '' ? [] : ['--audience', expected])
 					]
 				]

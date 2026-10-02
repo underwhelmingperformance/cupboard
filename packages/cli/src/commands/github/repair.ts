@@ -1,7 +1,11 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { type CacheListEntry } from '@cupboard/protocol/caches';
-import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import {
+	type AuthorizationDetails,
+	type CacheOperation,
+	isRootOperation
+} from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
 	type OidcTrustAddBodyInput,
@@ -29,7 +33,11 @@ import {
 	GithubCheckOptionError,
 	WorkflowReferenceTagPatternError
 } from '../../errors.ts';
-import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from '../oidc-trust.ts';
 import { trustGrantRows } from '../oidc-trust/format.ts';
 import {
 	buildAddBody,
@@ -80,7 +88,8 @@ import {
 	jobCache,
 	modelPublishingJob,
 	type PublicationCase,
-	type ReuseViewRequirement
+	type ReuseViewRequirement,
+	withMergedCloseCases
 } from './publication.ts';
 import {
 	type PublicationReadAuthority,
@@ -286,6 +295,50 @@ function withAdditionalReadGrants(
 	};
 }
 
+function withModelledPrPublicationGrants(
+	body: OidcTrustAddBodyInput,
+	publication: PublicationCase
+): OidcTrustAddBodyInput {
+	const requested = new Set<CacheOperation>(
+		publication.requests.flatMap((request) =>
+			request.flatMap((detail) =>
+				detail.type === 'cupboard_cache' ? detail.actions : []
+			)
+		)
+	);
+
+	return {
+		...body,
+		permittedGrants: body.permittedGrants.flatMap((grant) => {
+			if (
+				grant.type !== 'cupboard_cache' ||
+				grant.actions.includes('cache:content-read')
+			) {
+				return [grant];
+			}
+
+			const actions = grant.actions.filter((action) => requested.has(action));
+
+			if (actions.length === 0) {
+				return [];
+			}
+
+			return [
+				{
+					...grant,
+					actions,
+					resources: {
+						cache: grant.resources.cache,
+						...(actions.some((action) => isRootOperation(action)) && {
+							root: grant.resources.root
+						})
+					}
+				}
+			];
+		})
+	};
+}
+
 // See installableRequests for why every push requests the attestation
 // operations, including a push from a job that skips signing.
 function grantsForJob(
@@ -300,6 +353,15 @@ function grantsForJob(
 			'unresolved-input',
 			`${jobLabel(job)}: ${cache.reason}`
 		);
+	}
+
+	if (publication.lifecycle === 'closed') {
+		return [
+			buildCacheGrant({
+				...(cache.scope.kind === 'named' && { cache: cache.scope.name }),
+				allow: ['close']
+			})
+		];
 	}
 
 	const root = job.inputs[job.kind === 'flake' ? 'root-prefix' : 'root'];
@@ -349,7 +411,10 @@ function triggerClaim(
 	publication: PublicationCase
 ): OidcTrustAddBodyInput['claims'] {
 	if (publication.trigger === 'pull_request') {
-		if (publication.requests.length === 0) {
+		if (
+			publication.requests.length === 0 ||
+			publication.lifecycle === 'closed'
+		) {
 			return { event_name: 'pull_request' };
 		}
 
@@ -377,6 +442,16 @@ function bodyForCase(
 	const isPreset = isPresetJob(job);
 	const audience = audienceSchema.parse(publication.claims.aud);
 
+	if (publication.lifecycle === 'merged-close') {
+		return githubPrCloseAddBody(url, result.identity, {
+			repo: result.identity.fullName,
+			audience,
+			jobWorkflowRef: reference,
+			...(!isPreset &&
+				read.cache.kind === 'named' && { cacheTemplate: read.cache.name })
+		});
+	}
+
 	if (publication.requests.length === 0) {
 		return buildAddBody({
 			issuer: githubActionsIssuer,
@@ -394,12 +469,16 @@ function bodyForCase(
 
 	if (isPreset && publication.trigger === 'pull_request') {
 		return withAdditionalReadGrants(
-			githubPrAddBody(url, result.identity, {
-				repo: result.identity.fullName,
-				audience,
-				jobWorkflowRef: reference,
-				readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none'
-			}),
+			withModelledPrPublicationGrants(
+				githubPrAddBody(url, result.identity, {
+					repo: result.identity.fullName,
+					audience,
+					jobWorkflowRef: reference,
+					readCache:
+						read.cacheAccess === 'private' && read.cacheWiring === 'none'
+				}),
+				publication
+			),
 			read
 		);
 	}
@@ -786,7 +865,10 @@ async function checkPlannedRulesKeepOtherJobs(
 				continue;
 			}
 
-			for (const publication of model.cases) {
+			for (const publication of withMergedCloseCases(
+				model.cases,
+				result.identity
+			)) {
 				const read = await publicationReadAuthority(
 					job,
 					publication,
@@ -879,7 +961,10 @@ async function modelRepairableJobs(
 			);
 		}
 
-		for (const publication of model.cases) {
+		for (const publication of withMergedCloseCases(
+			model.cases,
+			result.identity
+		)) {
 			const read = await publicationReadAuthority(
 				job,
 				publication,
@@ -1272,7 +1357,9 @@ export async function runDiscoveredGithubRepair(
 			const number = index + 1;
 			const trigger =
 				body.claims.event_name === 'pull_request'
-					? 'any pull request'
+					? body.claims.ref === undefined
+						? 'any pull request'
+						: `pull request with ref ${claimSummary(body.claims.ref)}`
 					: `ref ${claimSummary(body.claims.ref)}`;
 			const workflow =
 				typeof body.claims.job_workflow_ref === 'string'

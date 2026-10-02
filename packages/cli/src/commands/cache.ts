@@ -11,6 +11,7 @@ import {
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type {
+	CacheCloseResponse,
 	CacheCreationDefaults,
 	CacheListEntry,
 	CacheListInput,
@@ -32,6 +33,7 @@ import type { Command } from 'commander';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	cacheCreateAuthorizationDetails,
+	cacheLifecycleAuthorizationDetails,
 	cacheRemoveAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
@@ -109,6 +111,8 @@ export interface CacheClient {
 		cacheName: CacheName;
 		retireWhenEmpty: boolean;
 	}): Promise<CacheSummary>;
+	close(input: { cacheName: CacheName }): Promise<CacheCloseResponse>;
+	reopen(input: { cacheName: CacheName }): Promise<CacheSummary>;
 	remove(input: {
 		params: { cacheName: string };
 		query?: { force?: boolean };
@@ -503,6 +507,65 @@ export function registerCacheCommands(
 			}
 		);
 
+	for (const action of ['close', 'reopen'] as const) {
+		cache
+			.command(action)
+			.description(
+				action === 'close'
+					? 'Stop publication and expire the roots of a named cache with its configured grace.'
+					: 'Restore publication to a closed named cache.'
+			)
+			.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+			.argument('[name]', 'cache name, if the URL is a tenant URL')
+			.option(
+				'--github-oidc',
+				"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
+			)
+			.option(
+				'--audience <audience>',
+				'OIDC audience to request with --github-oidc (default: the tenant URL)',
+				parseAudience
+			)
+			.action(
+				async (
+					url: URL,
+					name: string | undefined,
+					options: Pick<CacheRemoveOptions, 'githubOidc' | 'audience'>
+				) => {
+					const target = cacheCommandTarget(url, name);
+					if (target.cache.kind === 'default') {
+						throw new NamedCacheTargetRequiredError(`Cache ${action}`);
+					}
+					const reporter = commandUi(program, programOptions).reporter();
+					const credential = await authenticateForPush(
+						CupboardClient.fromUrl(target.tenantUrl, {
+							cache: target.cache,
+							signal: programOptions.signal
+						}),
+						{
+							githubOidc: options.githubOidc,
+							audience:
+								options.audience ?? audienceSchema.parse(target.tenantUrl),
+							authorizationDetails: cacheLifecycleAuthorizationDetails({
+								cache: target.cache,
+								action
+							})
+						}
+					);
+					const rpc = tenantRpc(target.tenantUrl, {
+						credential,
+						signal: programOptions.signal
+					});
+					await runCacheLifecycle(
+						target.cache.name,
+						action,
+						reporter,
+						rpc.caches
+					);
+				}
+			);
+	}
+
 	cache
 		.command('remove')
 		.description('Remove a named cache.')
@@ -694,6 +757,38 @@ export async function runCacheSetPriority(
 	);
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export async function runCacheLifecycle(
+	cacheName: CacheName,
+	action: 'close' | 'reopen',
+	reporter: Reporter,
+	client: Pick<CacheClient, 'close' | 'reopen'>
+): Promise<void> {
+	const result = await reporter.phase<CacheCloseResponse | CacheSummary>(
+		action === 'close' ? 'Closing cache' : 'Reopening cache',
+		() => client[action]({ cacheName })
+	);
+	if ('closed' in result) {
+		reporter.result({
+			kind: 'cache-close',
+			data: result,
+			rows: [
+				{ label: 'Cache', value: cacheLabel(result.scope) },
+				{ label: 'Closed', value: result.closed ? 'yes' : 'not present' },
+				...(result.retirementStartedAt === undefined
+					? []
+					: [
+							{
+								label: 'Closed at',
+								value: formatTimestamp(result.retirementStartedAt)
+							}
+						])
+			]
+		});
+		return;
+	}
+	reporter.result({ kind: 'cache', data: result, rows: summaryRows(result) });
 }
 
 export async function runCacheSetRetirement(

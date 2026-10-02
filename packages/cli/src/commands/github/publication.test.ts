@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	attestAttachAuthorizationDetails,
 	cacheCreateAuthorizationDetails,
-	cacheRemoveAuthorizationDetails,
+	cacheLifecycleAuthorizationDetails,
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
@@ -30,7 +30,8 @@ import {
 	ReferenceFilterExcludesFinding,
 	ReferenceFilterUnsupportedFinding,
 	TagPatternCoverageFinding,
-	TagsIgnoreUnmodelledFinding
+	TagsIgnoreUnmodelledFinding,
+	withMergedCloseCases
 } from './publication.ts';
 import { ReferencePattern } from './reference-pattern.ts';
 
@@ -47,7 +48,14 @@ const installableWorkflowReference =
 	'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
 
 function triggers(...events: string[]): WorkflowTrigger[] {
-	return events.map((event) => ({ event, filters: {}, hasPathFilter: false }));
+	return events.map((event) => ({
+		event,
+		filters: {},
+		hasPathFilter: false,
+		...(event === 'pull_request' && {
+			activityTypes: ['opened', 'synchronize', 'reopened', 'closed']
+		})
+	}));
 }
 
 const job: DiscoveredPublishingJob = {
@@ -120,6 +128,121 @@ describe('modelPublishingJob', () => {
 
 		expect(result.cases.map(({ requests }) => requests)).toStrictEqual([[]]);
 	});
+
+	it.each(['true', '${{ inputs.manage }}', 1])(
+		'rejects a non-literal lifecycle boolean %s',
+		(value) => {
+			expect(
+				modelPublishingJob(
+					{
+						...installableJob,
+						inputs: { ...installableJob.inputs, 'manage-pr-cache': value }
+					},
+					identity,
+					tenant,
+					'main'
+				)
+			).toStrictEqual({
+				cases: [],
+				findings: [
+					{
+						finding: new PublicationUnmodelledFinding(
+							'manage-pr-cache must be a literal boolean'
+						)
+					}
+				]
+			});
+		}
+	);
+
+	it('rejects management of the default cache before modelling publication', () => {
+		expect(
+			modelPublishingJob(
+				{
+					...installableJob,
+					inputs: { ...installableJob.inputs, 'manage-pr-cache': true }
+				},
+				identity,
+				tenant,
+				'main'
+			)
+		).toStrictEqual({
+			cases: [],
+			findings: [
+				{
+					finding: new PublicationUnmodelledFinding(
+						'manage-pr-cache requires a named cache'
+					)
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			trigger: 'pull_request',
+			enabled: true,
+			publish: 'outputs',
+			lifecycle: true
+		},
+		{
+			trigger: 'pull_request',
+			enabled: false,
+			publish: 'outputs',
+			lifecycle: false
+		},
+		{ trigger: 'push', enabled: true, publish: 'outputs', lifecycle: false },
+		{
+			trigger: 'pull_request',
+			enabled: true,
+			publish: 'none',
+			lifecycle: false
+		}
+	])(
+		'models lifecycle authority for $trigger with management $enabled and $publish publication',
+		({ trigger, enabled, publish, lifecycle }) => {
+			const cache = {
+				kind: 'named' as const,
+				name: cacheNameSchema.parse('pr-1')
+			};
+			const result = modelPublishingJob(
+				{
+					...installableJob,
+					inputs: {
+						...installableJob.inputs,
+						cache: 'pr-1',
+						'manage-pr-cache': enabled,
+						publish
+					},
+					triggers: triggers(trigger)
+				},
+				identity,
+				tenant,
+				'main'
+			);
+			expect(result.cases.map(({ requests }) => requests)).toStrictEqual([
+				publish === 'none'
+					? []
+					: [
+							...(lifecycle
+								? [
+										cacheCreateAuthorizationDetails({ cache }),
+										cacheLifecycleAuthorizationDetails({
+											cache,
+											action: 'close'
+										}),
+										cacheLifecycleAuthorizationDetails({
+											cache,
+											action: 'reopen'
+										})
+									]
+								: []),
+							pushAuthorizationDetails({ cache, attest: true }),
+							attestAttachAuthorizationDetails({ cache })
+						]
+			]);
+		}
+	);
 
 	it('does not apply the old flake push input to an installable workflow', () => {
 		const result = modelPublishingJob(
@@ -243,7 +366,14 @@ describe('modelPublishingJob', () => {
 					},
 					requests: [
 						cacheCreateAuthorizationDetails({ cache: prCache }),
-						cacheRemoveAuthorizationDetails({ cache: prCache }),
+						cacheLifecycleAuthorizationDetails({
+							cache: prCache,
+							action: 'close'
+						}),
+						cacheLifecycleAuthorizationDetails({
+							cache: prCache,
+							action: 'reopen'
+						}),
 						pushAuthorizationDetails({
 							cache: prCache,
 							attest: true,
@@ -940,3 +1070,147 @@ describe('modelPublishingJob push coverage', () => {
 		).toStrictEqual(findings);
 	});
 });
+
+it('models merged-close claims separately without publication or reads', () => {
+	const model = modelPublishingJob(job, identity, tenant, 'main');
+	const merged = withMergedCloseCases(model.cases, identity).filter(
+		(entry) => entry.lifecycle === 'merged-close'
+	);
+	expect(merged).toStrictEqual([
+		{
+			trigger: 'pull_request',
+			ref: { kind: 'pull-request' },
+			lifecycle: 'merged-close',
+			claims: {
+				iss: 'https://token.actions.githubusercontent.com',
+				aud: tenant.href,
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				repository: identity.fullName,
+				repository_owner: 'iainlane',
+				sub: `repo:${identity.fullName}:pull_request`,
+				event_name: 'pull_request',
+				ref: 'refs/heads/main',
+				ref_type: 'branch',
+				job_workflow_ref: workflowReference
+			},
+			requests: [
+				cacheLifecycleAuthorizationDetails({
+					cache: { kind: 'named', name: cacheNameSchema.parse('gh-1234-pr-1') },
+					action: 'close'
+				})
+			]
+		}
+	]);
+});
+
+it.each([
+	{
+		name: 'missing closed activity',
+		activityTypes: ['opened', 'reopened'],
+		condition: undefined,
+		close: false,
+		reopen: true,
+		merged: false
+	},
+	{
+		name: 'closed condition blocked',
+		activityTypes: ['closed', 'reopened'],
+		condition: "github.event.action != 'closed'",
+		close: false,
+		reopen: true,
+		merged: false
+	},
+	{
+		name: 'merged condition blocked',
+		activityTypes: ['closed', 'reopened'],
+		condition: '!github.event.pull_request.merged',
+		close: true,
+		reopen: true,
+		merged: false
+	},
+	{
+		name: 'reopened condition blocked',
+		activityTypes: ['closed', 'reopened'],
+		condition: "github.event.action != 'reopened'",
+		close: true,
+		reopen: false,
+		merged: true
+	}
+])(
+	'omits lifecycle authority for $name',
+	({ activityTypes, condition, close, reopen, merged }) => {
+		const model = modelPublishingJob(
+			{
+				...job,
+				triggers: [
+					{
+						event: 'pull_request',
+						filters: {},
+						hasPathFilter: false,
+						activityTypes,
+						...(condition !== undefined && { undecidedConditions: [condition] })
+					}
+				]
+			},
+			identity,
+			tenant,
+			'main'
+		);
+		expect({
+			requests: model.cases.flatMap((publication) =>
+				publication.requests.filter((request) =>
+					request.some(
+						(detail) =>
+							detail.type === 'cupboard_cache' &&
+							detail.actions.some(
+								(action) =>
+									action === 'cache:close' || action === 'cache:reopen'
+							)
+					)
+				)
+			),
+			merged: withMergedCloseCases(model.cases, identity)
+				.filter((publication) => publication.lifecycle === 'merged-close')
+				.map((publication) => publication.requests)
+		}).toStrictEqual({
+			requests: [
+				...(close
+					? [
+							cacheLifecycleAuthorizationDetails({
+								cache: {
+									kind: 'named',
+									name: cacheNameSchema.parse('gh-1234-pr-1')
+								},
+								action: 'close'
+							})
+						]
+					: []),
+				...(reopen
+					? [
+							cacheLifecycleAuthorizationDetails({
+								cache: {
+									kind: 'named',
+									name: cacheNameSchema.parse('gh-1234-pr-1')
+								},
+								action: 'reopen'
+							})
+						]
+					: [])
+			],
+			merged: merged
+				? [
+						[
+							cacheLifecycleAuthorizationDetails({
+								cache: {
+									kind: 'named',
+									name: cacheNameSchema.parse('gh-1234-pr-1')
+								},
+								action: 'close'
+							})
+						]
+					]
+				: []
+		});
+	}
+);

@@ -115,6 +115,36 @@ credential again.
 
 [read-credentials]: ../operator/tenants.md#read-credentials
 
+## Closing and reopening a cache
+
+Close a named cache when publication should stop while readers can still reuse
+its contents:
+
+```sh
+cupboard cache close https://cupboard.example.workers.dev/t/acme gh-1234-pr-7
+```
+
+Closing rejects new publication and retention extensions. Existing roots expire
+at the original close time, and their paths receive the cache's configured grace
+period. A later grace deadline already granted to a path remains in effect.
+Repeating the close command does not restart grace. Garbage collection removes
+expired contents, then removes the cache once pending work has finished. Closing
+does not revoke read credentials or remove the cache from reuse views.
+
+To resume publication before the cache has been removed:
+
+```sh
+cupboard cache reopen https://cupboard.example.workers.dev/t/acme gh-1234-pr-7
+```
+
+Reopening leaves previously applied expiry in effect. A new publication or root
+write can renew retention explicitly. An upload admitted before close retains
+the original close deadline even if it finishes after reopening.
+
+Both commands accept `--github-oidc` and `--audience` for CI. Their grants are
+`cache:close` and `cache:reopen`, separate from `cache:retire` and
+`cache:delete`.
+
 ## Removing a cache
 
 ```sh

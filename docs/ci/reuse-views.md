@@ -174,10 +174,11 @@ private cache stay in that cache. See
 
 With the `pull-request-and-branch` preset, only branch runs use a view.
 
-A view doesn't keep anything. Only the destination's root keeps a path. When a
-pull request is closed without being merged, its cache is removed. Otherwise,
-the view keeps finding the pull request's outputs until garbage collection
-removes paths that their roots no longer keep.
+A view does not extend retention. When a pull request closes, the preset closes
+its cache and starts the configured grace period from that close time. The view
+can still find the pull request's outputs during grace, including after a merge.
+Garbage collection then removes expired contents and the empty cache. A reopened
+pull request explicitly restores publication; new writes can renew retention.
 
 ### Sharing builds between repositories
 

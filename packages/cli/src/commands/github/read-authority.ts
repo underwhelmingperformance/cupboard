@@ -28,7 +28,7 @@ export interface PublicationReadAuthority {
 	readonly cache: CacheScope;
 	readonly requests: readonly AuthorizationDetails[];
 	readonly resources: readonly ReadResourceState[];
-	readonly cacheAccess: CacheAccessMode;
+	readonly cacheAccess?: CacheAccessMode;
 	readonly additionalCaches: readonly {
 		readonly cache: CacheScope;
 		readonly access: CacheAccessMode;
@@ -64,6 +64,17 @@ export async function publicationReadAuthority(
 				name: cacheNameSchema.parse(pullRequestCacheName(repositoryId, 1))
 			}
 		: selectedCache.scope;
+	if (publication.lifecycle !== undefined) {
+		return {
+			cache,
+			requests: [],
+			resources: [],
+			additionalCaches: [],
+			cacheWiring: 'none',
+			viewWiring: 'none'
+		};
+	}
+
 	const selectedViewAccess =
 		isPreset &&
 		!isReadOnly &&

@@ -27,6 +27,7 @@ import {
 	claimsForAdd,
 	githubBranchAddBody,
 	githubPrAddBody,
+	githubPrCloseAddBody,
 	githubTagAddBody,
 	type OidcTrustClient,
 	ruleOptionsGiven,
@@ -76,7 +77,7 @@ const attestActions = ['attestation:negotiate', 'attestation:attach'];
 const rootActions = ['root:set', 'root:list', 'root:attach'];
 // Only the pull-request preset manages the cache itself. Its cache does not
 // exist before the first run and does not outlive the pull request.
-const cacheLifecycleActions = ['cache:create', 'cache:delete'];
+const cacheLifecycleActions = ['cache:create', 'cache:close', 'cache:reopen'];
 const prCaptureSubstitution = {
 	pr: {
 		claim: 'ref',
@@ -887,8 +888,8 @@ describe('githubPrAddBody job_workflow_ref', () => {
 });
 
 // A tenant can serve several repositories, and their pull-request numbers
-// collide. The rule permits `cache:delete`, so two repositories sharing a name
-// would let one repository's closing run destroy the other's live cache.
+// collide. The rule permits `cache:close`, so two repositories with the same
+// cache could close each other's publication.
 describe('pull-request cache naming across repositories', () => {
 	const first: RepositoryIdentity = {
 		repositoryId: 1234,
@@ -914,7 +915,7 @@ describe('pull-request cache naming across repositories', () => {
 				body.permittedGrants,
 				{
 					type: 'cupboard_cache',
-					actions: ['cache:delete'],
+					actions: ['cache:close'],
 					cache: { kind: 'named', name: cacheNameSchema.parse(name) }
 				},
 				{
@@ -1213,6 +1214,52 @@ describe('parsed GitHub read presets', () => {
 								}
 							]
 						}
+					]
+				]
+			});
+		}
+	);
+
+	it.each(['--job-workflow-ref', '--workflow-ref'])(
+		'adds a closure-only rule with %s',
+		async (flag) => {
+			const workflow =
+				'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/vX.Y.Z';
+			mocks.add.mockReset();
+			mocks.add.mockImplementation((input) =>
+				Promise.resolve(summary({ ...input, id: 'rule-close' }))
+			);
+			mocks.lookup.mockReset();
+			mocks.lookup.mockResolvedValue(identity);
+			await buildProgram()
+				.exitOverride()
+				.parseAsync([
+					'node',
+					'cupboard',
+					'--output-mode',
+					'json',
+					'oidc-trust',
+					'add-github-pr-close',
+					tenantUrl,
+					'--repo',
+					identity.fullName,
+					flag,
+					workflow,
+					'--cache-template',
+					'pr-{pr}'
+				]);
+			expect({
+				lookup: mocks.lookup.mock.calls,
+				add: mocks.add.mock.calls
+			}).toStrictEqual({
+				lookup: [[identity.fullName]],
+				add: [
+					[
+						githubPrCloseAddBody(tenantBase, identity, {
+							repo: identity.fullName,
+							jobWorkflowRef: workflow,
+							cacheTemplate: 'pr-{pr}'
+						})
 					]
 				]
 			});

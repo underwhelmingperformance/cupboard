@@ -28,7 +28,11 @@ import {
 	WorkflowReferenceMutableError,
 	WorkflowReferenceNotFoundError
 } from '../../errors.ts';
-import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from '../oidc-trust.ts';
 import {
 	buildAddBody,
 	buildCacheContentReadGrant,
@@ -92,6 +96,694 @@ jobs:
       url: https://cupboard.supply/t/laney
       cache: systems
 `;
+
+const legacyPublishingWorkflow = `
+on:
+  workflow_call:
+jobs:
+  publish:
+    steps:
+      - uses: $/actions/push
+`;
+
+it.each([
+	{
+		name: 'default activity types',
+		trigger: 'pull_request:',
+		condition: '',
+		expected: ['closed', 'merged-close']
+	},
+	{
+		name: 'explicit publication activities',
+		trigger: 'pull_request:\n    types: [opened, synchronize]',
+		condition: '',
+		expected: ['closed', 'merged-close', 'reopened']
+	},
+	{
+		name: 'closed-only activity',
+		trigger: 'pull_request:\n    types: [closed]',
+		condition: '',
+		expected: ['reopened']
+	},
+	{
+		name: 'closed exclusion',
+		trigger:
+			'pull_request:\n    types: [opened, synchronize, reopened, closed]',
+		condition: "github.event.action != 'closed'",
+		expected: ['closed', 'merged-close']
+	},
+	{
+		name: 'merged exclusion',
+		trigger: 'pull_request:\n    types: [reopened, closed]',
+		condition: '!github.event.pull_request.merged',
+		expected: ['merged-close']
+	},
+	{
+		name: 'event exclusion',
+		trigger: 'pull_request:\n    types: [reopened, closed]',
+		condition: "github.event_name == 'push'",
+		expected: ['closed', 'merged-close', 'reopened']
+	}
+])(
+	'fails lifecycle coverage for $name',
+	async ({ trigger, condition, expected }) => {
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  ${trigger}
+jobs:
+  publish:
+    ${condition === '' ? '' : `if: \${{ ${condition} }}`}
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: pr-cache
+      manage-pr-cache: true
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.flatMap((job) =>
+				job.findings
+					.filter(({ finding }) => finding.check === 'pull-request lifecycle')
+					.map(({ trigger, finding }) => ({ trigger, status: finding.status }))
+			)
+		).toStrictEqual(expected.map((trigger) => ({ trigger, status: 'failed' })));
+		expect(result.repairableJobs).toStrictEqual([]);
+	}
+);
+
+it.each([
+	{
+		name: 'dynamic types',
+		types: '${{ inputs.activities }}',
+		condition: undefined
+	},
+	{
+		name: 'an unknown type',
+		types: '[closed, reopened, unknown_activity]',
+		condition: undefined
+	},
+	{
+		name: 'a dynamic type in a list',
+		types: "[closed, reopened, '${{ inputs.activity }}']",
+		condition: undefined
+	},
+	{
+		name: 'a dependency condition',
+		types: '[closed, reopened]',
+		condition: "needs.build.result == 'success'"
+	},
+	{
+		name: 'an invalid condition shape',
+		types: '[closed, reopened]',
+		condition: '[true]'
+	}
+])(
+	'reports lifecycle analysis as unverified for $name',
+	async ({ types, condition }) => {
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  pull_request:
+    types: ${types}
+jobs:
+  publish:
+    ${condition === undefined ? '' : `if: ${condition}`}
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: pr-cache
+      manage-pr-cache: true
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.flatMap((job) =>
+				job.findings
+					.filter(({ finding }) => finding.check === 'pull-request lifecycle')
+					.map(({ trigger, finding }) => ({ trigger, status: finding.status }))
+			)
+		).toStrictEqual(
+			['closed', 'merged-close', 'reopened'].map((trigger) => ({
+				trigger,
+				status: 'unverified'
+			}))
+		);
+		expect(result.repairableJobs).toStrictEqual([]);
+	}
+);
+
+it.each([
+	{
+		name: 'unmanaged simple job',
+		workflow: 'cupboard-publish.yml',
+		inputs: 'cache: pr-cache'
+	},
+	{
+		name: 'read-only simple job',
+		workflow: 'cupboard-publish.yml',
+		inputs: 'cache: pr-cache\n      manage-pr-cache: true\n      publish: none'
+	},
+	{
+		name: 'read-only preset job',
+		workflow: 'cupboard-flake-publish.yml',
+		inputs: 'preset: pull-request-and-branch\n      publish: none'
+	},
+	{
+		name: 'legacy read-only preset job',
+		workflow: 'cupboard-flake-publish.yml',
+		inputs: 'preset: pull-request-and-branch\n      push: false'
+	}
+])(
+	'does not require lifecycle coverage for $name',
+	async ({ workflow, inputs }) => {
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on: pull_request
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/${workflow}@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      ${inputs}
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.flatMap((job) =>
+				job.findings.filter(
+					({ finding }) => finding.check === 'pull-request lifecycle'
+				)
+			)
+		).toStrictEqual([]);
+	}
+);
+
+it.each([
+	{
+		name: 'matching cache across pins',
+		cache: 'pr-cache',
+		management: 'true',
+		publish: 'outputs',
+		isUnverified: false,
+		expected: []
+	},
+	{
+		name: 'different cache',
+		cache: 'other-cache',
+		management: 'true',
+		publish: 'outputs',
+		isUnverified: false,
+		expected: ['closed', 'merged-close', 'reopened']
+	},
+	{
+		name: 'dynamic cache',
+		cache: '${{ inputs.cache }}',
+		management: 'true',
+		publish: 'outputs',
+		isUnverified: true,
+		expected: ['closed', 'merged-close', 'reopened']
+	},
+	{
+		name: 'dynamic management',
+		cache: 'pr-cache',
+		management: '${{ inputs.manage }}',
+		publish: 'outputs',
+		isUnverified: true,
+		expected: ['closed', 'merged-close']
+	},
+	{
+		name: 'dynamic publication',
+		cache: 'pr-cache',
+		management: 'true',
+		publish: '${{ inputs.publish }}',
+		isUnverified: true,
+		expected: ['closed', 'merged-close']
+	}
+])(
+	'checks split lifecycle jobs with $name',
+	async ({ cache, management, publish, isUnverified, expected }) => {
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  publish:
+    if: github.event.action != 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: pr-cache
+      manage-pr-cache: true
+  close:
+    if: github.event.action == 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.36
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: ${cache}
+      manage-pr-cache: ${management}
+      publish: ${publish}
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.flatMap((job) =>
+				job.findings
+					.filter(({ finding }) => finding.check === 'pull-request lifecycle')
+					.map(({ trigger, finding }) => ({ trigger, status: finding.status }))
+			)
+		).toStrictEqual(
+			expected.map((trigger) => ({
+				trigger,
+				status: isUnverified ? 'unverified' : 'failed'
+			}))
+		);
+	}
+);
+
+it('checks nested caller conditions without granting blocked lifecycle operations', async () => {
+	const files: Readonly<Record<string, string>> = {
+		[path]: `
+on:
+  pull_request:
+    types: [closed, reopened]
+jobs:
+  call:
+    if: github.event.action != 'closed'
+    uses: ./.github/workflows/inner.yml
+`,
+		'.github/workflows/inner.yml': `
+on: workflow_call
+jobs:
+  publish:
+    if: github.event.action != 'reopened'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: pr-cache
+      manage-pr-cache: true
+`
+	};
+	const { client, dependencies } = fixture({
+		dependencies: {
+			source: {
+				...source,
+				read: (_repository, selectedPath) =>
+					Promise.resolve(files[selectedPath] ?? '')
+			}
+		}
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+	expect(
+		result.jobs.map((job) => ({
+			job: job.job,
+			lifecycle: job.findings
+				.filter(({ finding }) => finding.check === 'pull-request lifecycle')
+				.map(({ trigger, finding }) => ({ trigger, status: finding.status })),
+			trust: job.findings.filter(
+				({ finding }) => finding.check === 'trust rule'
+			)
+		}))
+	).toStrictEqual([
+		{
+			job: 'call (inner.yml: publish)',
+			lifecycle: ['closed', 'merged-close', 'reopened'].map((trigger) => ({
+				trigger,
+				status: 'failed'
+			})),
+			trust: []
+		}
+	]);
+});
+
+it('verifies split preset publication and close jobs with only their required authority', async () => {
+	const identity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: repository,
+		defaultBranch: 'main'
+	};
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
+	const closeReference = reference.replace('v0.0.35', 'v0.0.36');
+	const pr = githubPrAddBody(tenant, identity, {
+		repo: repository,
+		jobWorkflowRef: reference
+	});
+	const close = githubPrCloseAddBody(tenant, identity, {
+		repo: repository,
+		jobWorkflowRef: closeReference
+	});
+	const { client, dependencies } = fixture({
+		views: [
+			reuseViewSummarySchema.parse({
+				name: 'pull-requests-1234',
+				access: 'public',
+				selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+				priority: 50,
+				revision: 1,
+				createdAt: '2026-01-01T00:00:00.000Z',
+				updatedAt: '2026-01-01T00:00:00.000Z'
+			})
+		],
+		rules: [
+			{
+				...pr,
+				id: 'publication',
+				disabled: false,
+				permittedGrants: pr.permittedGrants.map((grant) => ({
+					...grant,
+					...(grant.type === 'cupboard_cache' && {
+						actions: grant.actions.filter((action) => action !== 'cache:close')
+					})
+				}))
+			},
+			{
+				...pr,
+				id: 'close',
+				disabled: false,
+				claims: { ...pr.claims, job_workflow_ref: closeReference },
+				permittedGrants: pr.permittedGrants.flatMap((grant) =>
+					grant.type === 'cupboard_cache'
+						? [
+								{
+									...grant,
+									actions: ['cache:close'],
+									resources: { cache: grant.resources.cache }
+								}
+							]
+						: []
+				)
+			},
+			{ ...close, id: 'merged-close', disabled: false }
+		],
+		dependencies: {
+			source: {
+				...source,
+				read: () =>
+					Promise.resolve(`
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  publish:
+    if: github.event.action != 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+  close:
+    if: github.event.action == 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.36
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+`)
+			}
+		}
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+	expect(
+		result.jobs.map((job) => ({
+			job: job.job,
+			status: job.status,
+			failures: job.findings
+				.filter(({ finding }) => finding.status === 'failed')
+				.map(({ trigger, finding }) => ({ trigger, ...finding.toJSON() })),
+			lifecycle: job.findings.filter(
+				({ finding }) => finding.check === 'pull-request lifecycle'
+			)
+		}))
+	).toStrictEqual([
+		{ job: 'publish', status: 'ready', failures: [], lifecycle: [] },
+		{ job: 'close', status: 'ready', failures: [], lifecycle: [] }
+	]);
+});
+
+it.each([
+	{
+		name: 'implicit success on a skipped publisher',
+		needs: 'publish',
+		condition: "github.event.action == 'closed'",
+		status: 'failed'
+	},
+	{
+		name: 'explicit success on a skipped publisher',
+		needs: 'publish',
+		condition: "success() && github.event.action == 'closed'",
+		status: 'failed'
+	},
+	{
+		name: 'a transitively skipped dependency',
+		needs: '[middle]',
+		condition: "github.event.action == 'closed'",
+		status: 'failed'
+	},
+	{
+		name: 'a dynamic dependency',
+		needs: '${{ inputs.job }}',
+		condition: "github.event.action == 'closed'",
+		status: 'unverified'
+	},
+	{
+		name: 'a dependency chain beyond the analysis bound',
+		needs: 'chain0',
+		condition: "github.event.action == 'closed'",
+		status: 'unverified'
+	},
+	{
+		name: 'an always override',
+		needs: 'publish',
+		condition: "always() && github.event.action == 'closed'",
+		status: undefined
+	},
+	{
+		name: 'a non-cancelled override',
+		needs: 'publish',
+		condition: "!cancelled() && github.event.action == 'closed'",
+		status: undefined
+	}
+])(
+	'checks lifecycle dependency gates for $name',
+	async ({ needs, condition, status }) => {
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  publish:
+    if: github.event.action != 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+  middle:
+    needs: publish
+    steps:
+      - run: echo middle
+${Array.from({ length: 40 }, (_, index) => `  chain${String(index)}:\n    needs: ${index === 39 ? 'publish' : `chain${String(index + 1)}`}\n    steps:\n      - run: echo chain\n`).join('')}
+  close:
+    needs: ${needs}
+    if: \${{ ${condition} }}
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.36
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.map((job) => ({
+				job: job.job,
+				lifecycle: job.findings
+					.filter(({ finding }) => finding.check === 'pull-request lifecycle')
+					.map(({ trigger, finding }) => ({ trigger, status: finding.status }))
+			}))
+		).toStrictEqual(
+			['publish', 'close'].map((job) => ({
+				job,
+				lifecycle:
+					status === undefined
+						? []
+						: ['closed', 'merged-close'].map((trigger) => ({ trigger, status }))
+			}))
+		);
+	}
+);
+
+it.each(
+	['constructor', 'toString'].flatMap((id) =>
+		[false, true].map((declared) => ({ id, declared }))
+	)
+)(
+	'treats $id as a lifecycle dependency only when declared ($declared)',
+	async ({ id, declared }) => {
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  publish:
+    if: github.event.action != 'closed'
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+${declared ? `  ${id}:\n    steps:\n      - run: echo dependency\n` : ''}
+  close:
+    needs: ${id}
+    if: \${{ !cancelled() && github.event.action == 'closed' }}
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.36
+    with:
+      url: https://cupboard.supply/t/laney
+      preset: pull-request-and-branch
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.map((job) => ({
+				job: job.job,
+				lifecycle: job.findings
+					.filter(({ finding }) => finding.check === 'pull-request lifecycle')
+					.map(({ trigger, finding }) => ({ trigger, status: finding.status }))
+			}))
+		).toStrictEqual(
+			['publish', 'close'].map((job) => ({
+				job,
+				lifecycle: declared
+					? []
+					: ['closed', 'merged-close'].map((trigger) => ({
+							trigger,
+							status: 'unverified'
+						}))
+			}))
+		);
+	}
+);
+
+it('does not read a custom view for a closed-only non-preset flake job', async () => {
+	const { client, dependencies } = fixture({
+		dependencies: {
+			source: {
+				...source,
+				read: () =>
+					Promise.resolve(`
+on:
+  pull_request:
+    types: [closed]
+jobs:
+  close:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      root-prefix: ci/
+      reuse-view: shared
+`)
+			}
+		}
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+	expect(
+		result.jobs.map((job) => ({
+			status: job.status,
+			checks: job.findings.map(({ finding }) => finding.toJSON())
+		}))
+	).toStrictEqual([{ status: 'ready', checks: [] }]);
+});
 
 const source: WorkflowSource = {
 	resolveBranch: () => Promise.resolve('a'.repeat(40)),
@@ -313,7 +1005,9 @@ it.each([
 		disabled: false
 	});
 	const content = `
-on: pull_request
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
 jobs:
   build:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
@@ -322,7 +1016,27 @@ jobs:
       preset: pull-request-and-branch
 ${scenario.input}`;
 	const { client, dependencies } = fixture({
-		rules: [rule],
+		rules: [
+			rule,
+			oidcTrustSummarySchema.parse({
+				...githubPrCloseAddBody(
+					tenant,
+					{
+						repositoryId: 1234,
+						repositoryOwnerId: 5678,
+						fullName: repository,
+						defaultBranch: 'main'
+					},
+					{
+						repo: repository,
+						jobWorkflowRef:
+							'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+					}
+				),
+				id: 'pr-close',
+				disabled: false
+			})
+		],
 		views: [view],
 		caches: [cache],
 		dependencies: {
@@ -1853,6 +2567,14 @@ it("reports the guide's quickstart workflow as ready after github setup", async 
 		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
 	const rules = [
 		{
+			...githubPrCloseAddBody(quickstartTenant, identity, {
+				repo: identity.fullName,
+				jobWorkflowRef: workflowPattern
+			}),
+			id: 'pr-close',
+			disabled: false
+		},
+		{
 			...githubPrAddBody(quickstartTenant, identity, {
 				repo: identity.fullName,
 				jobWorkflowRef: workflowPattern
@@ -2698,5 +3420,71 @@ it.each([false, true])(
 				]
 			]
 		});
+	}
+);
+
+it.each([true, false])(
+	'checks the simple workflow merged-close rule independently (configured: %s)',
+	async (configured) => {
+		const workflowReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+		const closeRule = oidcTrustSummarySchema.parse({
+			...githubPrCloseAddBody(
+				tenant,
+				{
+					repositoryId: 1234,
+					repositoryOwnerId: 5678,
+					fullName: repository,
+					defaultBranch: 'main'
+				},
+				{
+					repo: repository,
+					jobWorkflowRef: workflowReference,
+					cacheTemplate: 'pr-cache'
+				}
+			),
+			id: 'simple-close',
+			disabled: false
+		});
+		const { client, dependencies } = fixture({
+			rules: configured ? [closeRule] : [],
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: pr-cache
+      manage-pr-cache: true
+`)
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			result.jobs.flatMap((job) =>
+				job.findings.filter(({ trigger }) => trigger === 'merged-close')
+			)
+		).toStrictEqual([
+			{
+				trigger: 'merged-close',
+				finding: configured
+					? new PassedCheckFinding('trust rule')
+					: new RepositoryTrustRuleMissingFinding('trust rule')
+			}
+		]);
 	}
 );

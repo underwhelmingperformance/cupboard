@@ -4,7 +4,8 @@ This guide walks you through setting up a GitHub repository so that its CI
 builds your flake and publishes the results to cupboard. When you've finished:
 
 - Each pull request gets a cache of its own, and its builds are published there.
-  If the pull request is closed without being merged, its cache is removed.
+  Closing the pull request expires its roots and starts its configured grace.
+  Reads and reuse remain available during grace, including after a merge.
 - Each push to `main` publishes to your tenant's default cache. Nix users
   normally read from that cache. If a pull request has already built exactly the
   same outputs, the `main` run reuses them instead of building them again.
@@ -56,9 +57,9 @@ This adds three things to your tenant. Two of them are
 Actions jobs to accept, and what each one is allowed to do.
 
 - The **pull-request trust rule** accepts pull-request runs from `acme/app`.
-  Each run can create its pull request's cache, publish to it, and remove it.
-  The cache is called `gh-<repository-id>-pr-<number>`, where `<repository-id>`
-  is GitHub's numeric ID for the repository.
+  Each run can create its pull request's cache, publish to it, close it, and
+  reopen it. The cache is called `gh-<repository-id>-pr-<number>`, where
+  `<repository-id>` is GitHub's numeric ID for the repository.
 - The **branch trust rule** accepts runs of the workflow on `main` and lets them
   publish to the default cache. This covers pushes, manual runs and scheduled
   runs.
@@ -157,7 +158,7 @@ Create a file called `.github/workflows/cupboard.yml` in your repository:
 name: cupboard
 
 on:
-  # `closed` lets the workflow remove an unmerged pull request's cache.
+  # `closed` starts grace; `reopened` restores publication access.
   pull_request:
     types: [opened, synchronize, reopened, closed]
   push:
@@ -165,12 +166,14 @@ on:
 
 permissions: {}
 
-# The reusable workflow sets no concurrency group of its own. This group
-# cancels a pull request's running publication when a new commit is pushed to
-# the pull request. Runs on main queue instead.
+# The reusable workflow sets no concurrency group of its own.
 concurrency:
-  group: cupboard-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group:
+    cupboard-${{ github.workflow }}-${{ github.event.pull_request.number ||
+    github.ref }}
+  cancel-in-progress:
+    ${{ github.event_name == 'pull_request' && github.event.action != 'closed'
+    }}
 
 jobs:
   publish:
@@ -218,12 +221,20 @@ each decision with `build`, `substituter`, `publish` and `attest`; see
 [Choosing publication behaviour](./flake-publish.md#choosing-publication-behaviour).
 For pull request `#42` and for `main`, the preset does this:
 
-| Event                         | Publishes to                   | Retention root                   | Kept for                       |
-| ----------------------------- | ------------------------------ | -------------------------------- | ------------------------------ |
-| Pull request `#42`            | `gh-<repository-id>-pr-42`     | `github:acme/app/pr-42/<suffix>` | 14 days after the latest run   |
-| Run on `main`                 | the default cache              | `github:acme/app/main/<suffix>`  | permanently                    |
-| Pull request closed, unmerged | nothing (its cache is removed) |                                  |                                |
-| Pull request merged           | nothing (nothing is removed)   |                                  | its roots expire after 14 days |
+| Event                         | Publishes to               | Retention root                   | Kept for                     |
+| ----------------------------- | -------------------------- | -------------------------------- | ---------------------------- |
+| Pull request `#42`            | `gh-<repository-id>-pr-42` | `github:acme/app/pr-42/<suffix>` | 14 days after the latest run |
+| Run on `main`                 | the default cache          | `github:acme/app/main/<suffix>`  | permanently                  |
+| Pull request closed or merged | none                       | roots expire at the close time   | configured cache grace       |
+| Pull request reopened         | `gh-<repository-id>-pr-42` | `github:acme/app/pr-42/<suffix>` | 14 days after the new run    |
+
+Closing a cache rejects publication and retention extension. GC removes expired
+contents after grace and deletes the empty cache when pending work has finished.
+A `main` run can reuse PR outputs during grace and retain them in the default
+cache. Reopening restores writes; it does not extend the previous roots. See
+[Cache closure][cache-closure].
+
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 A pull-request run only reads from its own cache and from upstream caches such
 as cache.nixos.org. Only runs on `main` look through the reuse view. That way,
@@ -243,11 +254,23 @@ Two things to watch out for:
 
 ### How the concurrency setting behaves
 
-The `concurrency` section cancels a pull request's running publication when you
-push a newer commit to it. On `main`, runs wait for each other instead of being
-cancelled. GitHub keeps at most one waiting run per group, though. If several
-commits are pushed to `main` while a run is in progress, only the newest of them
-is published. The ones in between are skipped.
+The `concurrency` section uses one group per pull request within this workflow.
+The pull request number stays the same when a merge changes `github.ref` to the
+base branch. A newer publishing run cancels an older publication for the same
+pull request. A `closed` run waits for active publication to finish before it
+closes the cache.
+
+On `main`, runs use a separate group and wait for each other. GitHub keeps at
+most one waiting run per group. If several commits are pushed to `main` while a
+run is in progress, only the newest of them is published. The intermediate runs
+are skipped.
+
+Custom callers that manage PR caches must use the same ordering: all events for
+one pull request share a workflow-specific group, and a `closed` event must not
+cancel active publication. Historical reruns can still reopen or recreate a
+cache after closure. See [Rerunning and cancelling][rerunning].
+
+[rerunning]: ./how-it-works.md#rerunning-and-cancelling
 
 ## 5. Check the setup
 

@@ -1,3 +1,4 @@
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { isGrantPermittedByRule } from './grant-match.ts';
@@ -459,4 +460,59 @@ describe('view content-read issuance', () => {
 			})
 		}).toStrictEqual({ match: true, missing: false, invalid: false });
 	});
+});
+
+it('matches a bounded named-cache family while issuing only concrete grants', () => {
+	const permitted = permittedGrantSchema.parse({
+		type: 'cupboard_cache',
+		actions: ['cache:close'],
+		resources: {
+			cache: {
+				kind: 'named',
+				pattern: '^gh-1234-pr-[0-9]+$',
+				validate: 'cacheName'
+			}
+		}
+	});
+	const claims = {};
+	const matched = [
+		'gh-1234-pr-7',
+		'gh-1234-pr-77',
+		'gh-9999-pr-7',
+		'gh-1234-pr-7-extra',
+		'release'
+	].map((name) =>
+		isGrantPermittedByRule(
+			[permitted],
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:close'],
+				cache: { kind: 'named', name: cacheNameSchema.parse(name) }
+			},
+			claims
+		)
+	);
+	expect(matched).toStrictEqual([true, true, false, false, false]);
+	expect(
+		isGrantPermittedByRule(
+			[permitted],
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:close'],
+				cache: { kind: 'default' }
+			},
+			claims
+		)
+	).toBe(false);
+	expect(
+		isGrantPermittedByRule(
+			[permitted],
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: cacheNameSchema.parse('gh-1234-pr-7') }
+			},
+			claims
+		)
+	).toBe(false);
 });

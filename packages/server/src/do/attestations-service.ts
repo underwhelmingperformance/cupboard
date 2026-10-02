@@ -227,6 +227,8 @@ export interface InheritanceRequest {
 	readonly claimOwner?: string;
 }
 
+import { CacheClosureService } from './cache-closure-service.ts';
+
 export class AttestationsService {
 	constructor(
 		private readonly context: ServerContext,
@@ -2118,6 +2120,7 @@ export class AttestationsService {
 				incarnation === undefined
 					? undefined
 					: await this.context.env.BLOBS.get(casObjectKey(digest, incarnation));
+			new CacheClosureService(this.context).assertWritable(cache);
 			this.context.db
 				.insert(schema.pendingAttestations)
 				.values({
@@ -2241,6 +2244,7 @@ export class AttestationsService {
 			const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
 			const r2Key = attestationStagingObjectKey(body.pushId, uploadId);
 
+			new CacheClosureService(this.context).assertWritable(cache);
 			this.context.db
 				.insert(schema.pendingAttestations)
 				.values({

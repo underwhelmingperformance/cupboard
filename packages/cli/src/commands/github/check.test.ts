@@ -39,7 +39,11 @@ import {
 	WorkflowReferenceNotFoundError,
 	WorkflowReferenceUnpinnedError
 } from '../../errors.ts';
-import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from '../oidc-trust.ts';
 import { type RepositoryIdentity } from '../oidc-trust/github.ts';
 
 import {
@@ -195,6 +199,13 @@ const prRule = storedRule(
 		jobWorkflowRef: options.workflowRef
 	})
 );
+const prCloseRule = storedRule(
+	'pr-close',
+	githubPrCloseAddBody(url, identity, {
+		repo: options.repo,
+		jobWorkflowRef: options.workflowRef
+	})
+);
 const branchRule = storedRule(
 	'branch',
 	githubBranchAddBody(url, identity, {
@@ -239,6 +250,7 @@ function checkClient(overrides: {
 	graceSeconds?: number | undefined;
 	extraPolicies?: { cachePrefix: string; graceSeconds: number }[];
 	rules?: OidcTrustSummaryInput[];
+	includeMergedCloseRule?: boolean;
 	views?: ReuseViewSummaryInput[];
 	caches?: CacheSummaryInput[];
 	cachePages?: { caches: CacheSummaryInput[]; cursor?: string }[];
@@ -265,7 +277,15 @@ function checkClient(overrides: {
 		oidcTrust: {
 			list: () =>
 				Promise.resolve(
-					oidcTrustListResponseSchema.parse({ rules: overrides.rules ?? [] })
+					oidcTrustListResponseSchema.parse({
+						rules: [
+							...(overrides.rules ?? []),
+							...(overrides.rules?.length &&
+							overrides.includeMergedCloseRule !== false
+								? [prCloseRule]
+								: [])
+						]
+					})
 				)
 		}
 	};
@@ -429,7 +449,8 @@ describe('runGithubCheck', () => {
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
 			{ label: 'pull-request cache access', value: 'ok' },
-			{ label: 'root prefix', value: 'ok' }
+			{ label: 'root prefix', value: 'ok' },
+			{ label: 'merged pull-request closure trust rule', value: 'ok' }
 		]);
 	});
 
@@ -469,7 +490,8 @@ describe('runGithubCheck', () => {
 					value:
 						'failed: gh-1234-pr-1 is private; the pull-requests-1234 view aggregates only public caches, so the view never serves it'
 				},
-				{ label: 'root prefix', value: 'ok' }
+				{ label: 'root prefix', value: 'ok' },
+				{ label: 'merged pull-request closure trust rule', value: 'ok' }
 			]
 		});
 	});
@@ -511,7 +533,8 @@ describe('runGithubCheck', () => {
 					value:
 						'failed: gh-1234-pr-2 is private; the pull-requests-1234 view aggregates only public caches, so the view never serves it'
 				},
-				{ label: 'root prefix', value: 'ok' }
+				{ label: 'root prefix', value: 'ok' },
+				{ label: 'merged pull-request closure trust rule', value: 'ok' }
 			]
 		});
 	});
@@ -544,7 +567,8 @@ describe('runGithubCheck', () => {
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
 			{ label: 'pull-request cache access', value: 'ok' },
-			{ label: 'root prefix', value: 'ok' }
+			{ label: 'root prefix', value: 'ok' },
+			{ label: 'merged pull-request closure trust rule', value: 'ok' }
 		]);
 	});
 
@@ -636,7 +660,8 @@ describe('runGithubCheck', () => {
 						{ label: 'main trust rule', value: 'ok' },
 						{ label: 'reuse view', value: `failed: ${detail}` },
 						{ label: 'pull-request cache access', value: accessValue },
-						{ label: 'root prefix', value: 'ok' }
+						{ label: 'root prefix', value: 'ok' },
+						{ label: 'merged pull-request closure trust rule', value: 'ok' }
 					]
 				}
 			);
@@ -684,7 +709,7 @@ describe('runGithubCheck', () => {
 				{
 					label: 'main trust rule',
 					value:
-						'failed: rule pr expects event_name to match pull_request; the modelled run uses push'
+						'failed: rule pr-close expects event_name to match pull_request; the modelled run uses push'
 				},
 				{
 					label: 'reuse view',
@@ -695,7 +720,8 @@ describe('runGithubCheck', () => {
 					label: 'root prefix',
 					value:
 						'failed: github:other/repo/main does not nest under the granted github:acme/app/main/'
-				}
+				},
+				{ label: 'merged pull-request closure trust rule', value: 'ok' }
 			]
 		});
 	});
@@ -843,7 +869,10 @@ describe('runGithubCheck', () => {
 			checks: failure.checks,
 			rows: findings(results).slice(0, 2)
 		}).toStrictEqual({
-			checks: ['pull-request trust rule'],
+			checks: [
+				'pull-request trust rule',
+				'merged pull-request closure trust rule'
+			],
 			rows: [
 				{
 					label: 'pull-request trust rule',
@@ -915,11 +944,11 @@ describe('runGithubCheck', () => {
 		},
 		{
 			name: 'pull-request cache deletion',
-			operation: 'cache:delete',
-			rules: [withoutOperation(prRule, 'cache:delete'), branchRule],
+			operation: 'cache:close',
+			rules: [withoutOperation(prRule, 'cache:close'), branchRule],
 			check: 'pull-request trust rule',
 			row: 0,
-			detail: 'cache:delete on cache gh-1234-pr-1'
+			detail: 'cache:close on cache gh-1234-pr-1'
 		},
 		{
 			name: 'pull-request root listing',
@@ -1048,7 +1077,8 @@ describe('runGithubCheck', () => {
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
 			{ label: 'pull-request cache access', value: 'ok' },
-			{ label: 'root prefix', value: 'ok' }
+			{ label: 'root prefix', value: 'ok' },
+			{ label: 'merged pull-request closure trust rule', value: 'ok' }
 		]);
 	});
 });
@@ -1062,3 +1092,26 @@ function expectIncomplete(
 ): asserts error is GithubCheckIncompleteError {
 	expect(error).toBeInstanceOf(GithubCheckIncompleteError);
 }
+
+it('reports missing merged-close authority separately from ordinary PR publication', async () => {
+	const results: ResultRow[][] = [];
+	await expect(
+		runGithubCheck(
+			url,
+			options,
+			reporter(results),
+			checkClient({
+				rules: [prRule, branchRule],
+				includeMergedCloseRule: false
+			}),
+			checkDependencies({})
+		)
+	).rejects.toMatchObject({
+		checks: ['merged pull-request closure trust rule']
+	});
+	expect(findings(results).at(-1)).toStrictEqual({
+		label: 'merged pull-request closure trust rule',
+		value:
+			'failed: rules branch, pr match the modelled claims but none permits cache:close on cache gh-1234-pr-1; add the grant to one rule'
+	});
+});

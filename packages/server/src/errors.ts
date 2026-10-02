@@ -1667,3 +1667,13 @@ export class EmptyStatementBatchError extends Error {
 		this.name = 'EmptyStatementBatchError';
 	}
 }
+
+export class CacheClosedError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+	constructor(readonly cache: CacheScope) {
+		super(
+			'This cache is closed. Reopen the cache before publishing or extending retention.'
+		);
+		this.name = 'CacheClosedError';
+	}
+}
