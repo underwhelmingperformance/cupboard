@@ -1892,6 +1892,13 @@ export class ProvisionCacheResultError extends CodedError {
 	}
 }
 
+export class ReadCachesInvalidError extends UsageError {
+	constructor(reason: string) {
+		super(`Invalid read-caches input. ${reason}`);
+		this.name = 'ReadCachesInvalidError';
+	}
+}
+
 export class ReadConfigurationUnavailableError extends CodedError {
 	constructor() {
 		super(

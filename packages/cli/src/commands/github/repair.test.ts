@@ -121,6 +121,7 @@ async function fixture(
 		rules?: readonly OidcTrustSummary[];
 		views?: readonly ReuseViewSummary[];
 		cacheAccess?: CacheAccessMode;
+		fetchCacheAccess?: (target: URL) => Promise<CacheAccessMode>;
 	} = {}
 ) {
 	const { ui, captured } = fakeCliUi(
@@ -187,7 +188,9 @@ async function fixture(
 				new CacheInfo(servedStoreDirectory, true, priority)
 			);
 		},
-		fetchCacheAccess: () => Promise.resolve(options.cacheAccess ?? 'public')
+		fetchCacheAccess:
+			options.fetchCacheAccess ??
+			(() => Promise.resolve(options.cacheAccess ?? 'public'))
 	};
 	const check = await inspectDiscoveredGithubCheck(
 		url,
@@ -2187,4 +2190,243 @@ it('keeps different caller audiences separate when repairing identical claims', 
 		{ ...mainBranchRule('packages'), audience: customAudience },
 		mainBranchRule('systems')
 	]);
+});
+
+const extraReadRepairCases = [
+	{
+		label: 'read-only PR',
+		trigger: 'on: pull_request',
+		inputs: '      preset: pull-request-and-branch\n      publish: none',
+		body: {
+			...mainBranchRule(),
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: url.href,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				event_name: 'pull_request',
+				job_workflow_ref: flakeAudienceReference
+			},
+			permittedGrants: [],
+			display: { provider: 'github', repository }
+		}
+	},
+	{
+		label: 'preset PR',
+		trigger: 'on: pull_request',
+		inputs: '      preset: pull-request-and-branch',
+		body: githubPrAddBody(url, customAudienceIdentity, {
+			repo: repository,
+			jobWorkflowRef: flakeAudienceReference
+		})
+	},
+	{
+		label: 'preset branch',
+		trigger: 'on:\n  push:\n    branches: [main]',
+		inputs: '      preset: pull-request-and-branch',
+		body: githubBranchAddBody(url, customAudienceIdentity, {
+			repo: repository,
+			branch: 'main',
+			jobWorkflowRef: flakeAudienceReference
+		})
+	},
+	{
+		label: 'custom branch',
+		trigger: 'on:\n  push:\n    branches: [main]',
+		inputs: '      cache: packages\n      root-prefix: ci/',
+		body: buildAddBody({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: url.href,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				ref: 'refs/heads/main',
+				job_workflow_ref: flakeAudienceReference
+			},
+			permittedGrants: [
+				buildCacheGrant({
+					cache: 'packages',
+					root: 'ci/',
+					allow: ['push', 'attest', 'root', 'attach']
+				})
+			],
+			display: { provider: 'github', repository }
+		})
+	}
+];
+it.each(extraReadRepairCases)(
+	'repairs and verifies a rootless additional private cache read for $label',
+	async ({ trigger, inputs, body }) => {
+		const { ui, captured, added, client, dependencies, check } = await fixture(
+			undefined,
+			`
+${trigger}
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${url.href}
+${inputs}
+      read-caches: ${url.href}/cache/falcon
+`,
+			{
+				views: [audienceView],
+				fetchCacheAccess: (target) =>
+					Promise.resolve(
+						target.pathname.endsWith('/falcon') ? 'private' : 'public'
+					)
+			}
+		);
+		await runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		);
+		expect({
+			added,
+			results: captured.results.map((result) => result.kind)
+		}).toStrictEqual({
+			added: [
+				{
+					...body,
+					permittedGrants: [
+						...body.permittedGrants,
+						buildCacheContentReadGrant({ cache: 'falcon' })
+					]
+				}
+			],
+			results: ['github-check-discovered', 'github-check-verified']
+		});
+	}
+);
+
+it.each([
+	"'${{ inputs.read_caches }}'",
+	`${url.href}/reuse/prs`,
+	'https://cupboard.supply/t/other/cache/falcon'
+])(
+	'refuses repair when additional reads cannot be modelled: %s',
+	async (input) => {
+		const { ui, added, client, dependencies, check } = await fixture(
+			undefined,
+			`
+on: pull_request
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${url.href}
+      preset: pull-request-and-branch
+      publish: none
+      read-caches: ${input}
+`
+		);
+		const error = await rejection(
+			runDiscoveredGithubRepair(
+				url,
+				{ trustScope: 'exact' },
+				ui,
+				client,
+				dependencies,
+				check
+			)
+		);
+		expect({
+			error:
+				error instanceof GithubCheckIncompleteError
+					? { exitCode: error.exitCode, checks: error.checks }
+					: error,
+			added
+		}).toStrictEqual({
+			error: { exitCode: 69, checks: [`${path}, build`] },
+			added: []
+		});
+	}
+);
+
+it('rejects a post-repair rule that omits the additional cache authority', async () => {
+	const { ui, added, client, dependencies, check } = await fixture(
+		undefined,
+		`
+on: pull_request
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${url.href}
+      preset: pull-request-and-branch
+      publish: none
+      read-caches: ${url.href}/cache/falcon
+`,
+		{
+			fetchCacheAccess: (target) =>
+				Promise.resolve(
+					target.pathname.endsWith('/falcon') ? 'private' : 'public'
+				)
+		}
+	);
+	const attempted: OidcTrustAddBodyInput[] = [];
+	const incorrectClient = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			add: (body: OidcTrustAddBodyInput) => {
+				attempted.push(body);
+				return client.oidcTrust.add({
+					...body,
+					permittedGrants: [buildCacheContentReadGrant({ cache: 'other' })]
+				});
+			}
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			incorrectClient,
+			dependencies,
+			check
+		)
+	);
+	const expected = buildAddBody({
+		issuer: 'https://token.actions.githubusercontent.com',
+		audience: url.href,
+		claims: {
+			repository_id: '1234',
+			repository_owner_id: '5678',
+			event_name: 'pull_request',
+			job_workflow_ref: flakeAudienceReference
+		},
+		permittedGrants: [buildCacheContentReadGrant({ cache: 'falcon' })],
+		display: { provider: 'github', repository }
+	});
+	expect({
+		attempted,
+		added,
+		error:
+			error instanceof GithubRepairPartialError
+				? {
+						step: error.step,
+						applied: error.applied,
+						failed: error.cause instanceof GithubCheckFailedError
+					}
+				: error
+	}).toStrictEqual({
+		attempted: [expected],
+		added: [
+			{
+				...expected,
+				permittedGrants: [buildCacheContentReadGrant({ cache: 'other' })]
+			}
+		],
+		error: {
+			step: 'verify the tenant after writing',
+			applied: ['trust rule new-rule'],
+			failed: true
+		}
+	});
 });

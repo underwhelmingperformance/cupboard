@@ -138,6 +138,28 @@ cupboard run https://cupboard.example.workers.dev/t/acme/cache/builds \
   -- nix build .#app
 ```
 
+The setup action and flake workflow accept `read-caches` to add runner
+substituters and OIDC read resources without changing the publication
+destination. Supply canonical cache URLs from the selected tenant, one per line.
+Duplicate URLs are configured once. The sixteen-resource limit includes the
+destination caches and reuse view. Additional read caches are separate from
+destination access checks and the destination's priority comparison with the
+reuse view. A supplied default static read credential conflicts with this input;
+cache-specific and credential-bearing URLs must not select a read cache. Remote
+builders still need their own substituter credentials.
+
+`cupboard github check` probes literal `read-caches` URLs and checks
+content-read authority for each private cache. Repair adds separate rootless
+read grants. Dynamic expressions, invalid URLs and static credential conflicts
+leave the job unverified. If the job supplies secret `private_substituters`, the
+check cannot compare those URLs with `read-caches`; verify that a cache does not
+use both credential sources before configuring its trust rule.
+
+```yaml
+with:
+  read-caches: https://cupboard.example.workers.dev/t/acme/cache/falcon
+```
+
 Resources in the OIDC session must belong to the selected tenant. Other tenants
 on the same host need complete static credentials in their substituter URLs, or
 separate commands and Nix configurations. The session netrc credential applies
