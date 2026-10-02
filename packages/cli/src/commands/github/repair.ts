@@ -264,6 +264,28 @@ function repairReference(
 	return `${parsed.owner}/${parsed.repo}/${parsed.path}@refs/tags/${pattern}`;
 }
 
+function additionalReadGrants(
+	read: PublicationReadAuthority
+): OidcTrustAddBodyInput['permittedGrants'] {
+	return read.additionalCaches
+		.filter(({ access }) => access === 'private')
+		.map(({ cache }) =>
+			buildCacheContentReadGrant({
+				...(cache.kind === 'named' && { cache: cache.name })
+			})
+		);
+}
+
+function withAdditionalReadGrants(
+	body: OidcTrustAddBodyInput,
+	read: PublicationReadAuthority
+): OidcTrustAddBodyInput {
+	return {
+		...body,
+		permittedGrants: [...body.permittedGrants, ...additionalReadGrants(read)]
+	};
+}
+
 // See installableRequests for why every push requests the attestation
 // operations, including a push from a job that skips signing.
 function grantsForJob(
@@ -317,7 +339,8 @@ function grantsForJob(
 		read.viewAccess === 'private' &&
 		read.viewWiring === 'none'
 			? [buildViewContentReadGrant(publication.reuseView.name)]
-			: [])
+			: []),
+		...additionalReadGrants(read)
 	];
 }
 
@@ -370,12 +393,15 @@ function bodyForCase(
 	}
 
 	if (isPreset && publication.trigger === 'pull_request') {
-		return githubPrAddBody(url, result.identity, {
-			repo: result.identity.fullName,
-			audience,
-			jobWorkflowRef: reference,
-			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none'
-		});
+		return withAdditionalReadGrants(
+			githubPrAddBody(url, result.identity, {
+				repo: result.identity.fullName,
+				audience,
+				jobWorkflowRef: reference,
+				readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none'
+			}),
+			read
+		);
 	}
 
 	if (isPreset) {
@@ -386,18 +412,22 @@ function bodyForCase(
 			);
 		}
 
-		return githubBranchAddBody(url, result.identity, {
-			repo: result.identity.fullName,
-			audience,
-			branch: publication.ref.name,
-			jobWorkflowRef: reference,
-			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none',
-			...(publication.reuseView !== undefined &&
-				read.viewAccess === 'private' &&
-				read.viewWiring === 'none' && {
-					readView: publication.reuseView.name
-				})
-		});
+		return withAdditionalReadGrants(
+			githubBranchAddBody(url, result.identity, {
+				repo: result.identity.fullName,
+				audience,
+				branch: publication.ref.name,
+				jobWorkflowRef: reference,
+				readCache:
+					read.cacheAccess === 'private' && read.cacheWiring === 'none',
+				...(publication.reuseView !== undefined &&
+					read.viewAccess === 'private' &&
+					read.viewWiring === 'none' && {
+						readView: publication.reuseView.name
+					})
+			}),
+			read
+		);
 	}
 
 	return buildAddBody({

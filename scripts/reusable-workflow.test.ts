@@ -205,6 +205,23 @@ const reusableWorkflows = [
 	{ name: 'publish', file: publishWorkflow, entryJob: 'publish' }
 ];
 
+it('passes additional runner cache reads to setup in every flake build job', async () => {
+	const workflow = await loadWorkflow(flakeWorkflow);
+	expect({
+		input: workflow.on.workflow_call?.inputs['read-caches']?.type,
+		setups: stepsUsing(workflow, cupboardAction('setup')).map(
+			({ job, step }) => ({ job, readCaches: step.with?.['read-caches'] })
+		)
+	}).toStrictEqual({
+		input: 'string',
+		setups: [
+			{ job: 'plan', readCaches: '${{ inputs.read-caches }}' },
+			{ job: 'cohort', readCaches: '${{ inputs.read-caches }}' },
+			{ job: 'remove-cache', readCaches: undefined }
+		]
+	});
+});
+
 describe('workflow action references', () => {
 	it.each(reusableWorkflows)(
 		'resolves its own actions from the called revision in $name',
@@ -447,6 +464,7 @@ describe('cupboard acquisition', () => {
 			],
 			configureOutput: 'resolve-cupboard',
 			setupInputs: setupInputs.map(() => ({
+				'read-caches': '${{ inputs.read-caches }}',
 				'cache-url': '${{ inputs.url }}',
 				audience: '${{ inputs.audience }}',
 				cache: '${{ needs.configure.outputs.cache }}',

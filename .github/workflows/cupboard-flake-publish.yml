@@ -102,6 +102,16 @@ on:
         required: false
         default: false
         type: boolean
+      read-caches:
+        description:
+          Additional canonical cache URLs from the selected tenant, one per
+          line. Adds runner substituters and OIDC read resources without
+          changing the destination cache. Cannot use credentials for these
+          caches or a default static read credential. Remote builders need their
+          own read credentials.
+        required: false
+        default: ''
+        type: string
       reuse-view:
         description:
           Reuse view to read through, for paths that the destination cache does
@@ -686,6 +696,7 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
+          read-caches: ${{ inputs.read-caches }}
           audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
@@ -850,6 +861,7 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
+          read-caches: ${{ inputs.read-caches }}
           audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
