@@ -62,6 +62,7 @@ import {
 	CustomReuseViewFinding,
 	ForkPullRequestFinding,
 	ManualRunBranchFinding,
+	modelPublishingJob,
 	PresetPushFilterFinding,
 	PresetTagPushFinding,
 	PublicationUnmodelledFinding,
@@ -69,6 +70,7 @@ import {
 	ReferenceFilterExcludesFinding,
 	TagPatternCoverageFinding
 } from './publication.ts';
+import { publicationReadAuthority } from './read-authority.ts';
 import { RepositoryTrustRuleMissingFinding } from './trust-selection.ts';
 
 const tenant = new URL('https://cupboard.supply/t/laney');
@@ -2249,3 +2251,452 @@ it('suggests another branch when discovery finds no publishing job', async () =>
 		}
 	]);
 });
+
+const additionalReadWorkflow = (input: string, secrets = '') => `
+on: pull_request
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${tenant.href}
+      preset: pull-request-and-branch
+      publish: none
+      read-caches: ${input}
+${secrets}
+`;
+
+it.each(['public', 'private'] as const)(
+	'checks the current %s access of additional read caches through discovery',
+	async (access) => {
+		const probed: string[] = [];
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(
+							additionalReadWorkflow(
+								`|\n        ${tenant.href}/cache/falcon\n        ${tenant.href}/cache/falcon/\n        ${tenant.href}`
+							)
+						)
+				},
+				fetchCacheAccess: (target) => {
+					probed.push(target.href);
+					return Promise.resolve(
+						target.pathname.endsWith('/falcon') ? access : 'public'
+					);
+				}
+			}
+		});
+		const check = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect({ jobs: check.jobs, probed }).toStrictEqual({
+			jobs: [
+				{
+					caller: path,
+					job: 'build',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					status: access === 'private' ? 'failed' : 'ready',
+					findings:
+						access === 'private'
+							? [
+									{
+										trigger: 'pull_request',
+										finding: new RepositoryTrustRuleMissingFinding('trust rule')
+									}
+								]
+							: []
+				}
+			],
+			probed: [tenant.href, `${tenant.href}/cache/falcon`]
+		});
+	}
+);
+
+const invalidAdditionalReads = [
+	{
+		input: "'${{ inputs.read_caches }}'",
+		reason:
+			'read-caches must be a literal newline-separated list of cache URLs; resolve expressions before checking or repairing.'
+	},
+	{
+		input: 'true',
+		reason:
+			'read-caches must be a literal newline-separated list of cache URLs; resolve expressions before checking or repairing.'
+	},
+	{
+		input: `${tenant.href}/reuse/prs`,
+		reason:
+			'read-caches must use canonical HTTP(S) cache URLs without credentials, a query or a fragment.'
+	},
+	{
+		input: `${tenant.href}/cache/falcon?token=hidden`,
+		reason:
+			'read-caches must use canonical HTTP(S) cache URLs without credentials, a query or a fragment.'
+	},
+	{
+		input: 'https://user:password@cupboard.supply/t/laney/cache/falcon',
+		reason:
+			'read-caches must use canonical HTTP(S) cache URLs without credentials, a query or a fragment.'
+	},
+	{
+		input: 'https://cupboard.supply/t/other/cache/falcon',
+		reason: 'Every read-caches URL must belong to the selected tenant.'
+	},
+	{
+		input: `${tenant.href}/cache/falcon`,
+		secrets:
+			"    secrets:\n      read_user: '${{ secrets.USER }}'\n      read_password: '${{ secrets.PASSWORD }}'",
+		reason:
+			'read-caches requires OIDC reads; omit the default static read credential and provide complete destination credentials separately.'
+	},
+	{
+		input: tenant.href,
+		secrets:
+			"    secrets:\n      destination_read_user: '${{ secrets.USER }}'\n      destination_read_password: '${{ secrets.PASSWORD }}'",
+		reason:
+			'Do not request OIDC reads for a destination with an explicit static credential.'
+	},
+	{
+		input: `${tenant.href}/cache/falcon`,
+		secrets:
+			"    secrets:\n      private_substituters: '${{ secrets.SUBSTITUTERS }}'",
+		reason:
+			'The check cannot compare read-caches with secret private_substituters; verify that the same cache does not also use a static credential before repairing.'
+	},
+	{
+		input: `|\n${Array.from({ length: 16 }, (_, index) => `        ${tenant.href}/cache/extra-${String(index)}`).join('\n')}`,
+		reason:
+			'read-caches and the destination and reuse view must select at most sixteen distinct resources.'
+	}
+];
+it.each(invalidAdditionalReads)(
+	'does not report readiness for unmodelled additional reads: $input',
+	async ({ input, secrets, reason }) => {
+		const probed: string[] = [];
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () => Promise.resolve(additionalReadWorkflow(input, secrets))
+				},
+				fetchCacheAccess: (target) => {
+					probed.push(target.href);
+					return Promise.resolve('public');
+				}
+			}
+		});
+		const check = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect({
+			jobs: check.jobs,
+			repairable: check.repairableJobs,
+			probed
+		}).toStrictEqual({
+			jobs: [
+				{
+					caller: path,
+					job: 'build',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					status: 'unverified',
+					findings: [{ finding: new PublicationUnmodelledFinding(reason) }]
+				}
+			],
+			repairable: [],
+			probed: []
+		});
+	}
+);
+
+it.each([
+	{
+		label: 'rootless Falcon grant',
+		grants: [buildCacheContentReadGrant({ cache: 'falcon' })],
+		status: 'ready',
+		detail: new PassedCheckFinding('trust rule').toJSON()
+	},
+	{
+		label: 'different cache grant',
+		grants: [buildCacheContentReadGrant({ cache: 'other' })],
+		status: 'failed',
+		detail: {
+			check: 'trust rule',
+			status: 'failed',
+			detail:
+				'rule read matches the modelled claims but does not permit cache:content-read on cache falcon; add a rule with the required grant, or add a corrected rule and remove this one'
+		}
+	},
+	{
+		label: 'publication grant',
+		grants: [
+			buildCacheGrant({ cache: 'falcon', root: 'ci/', allow: ['push', 'root'] })
+		],
+		status: 'failed',
+		detail: {
+			check: 'trust rule',
+			status: 'failed',
+			detail:
+				'rule read matches the modelled claims but does not permit cache:content-read on cache falcon; add a rule with the required grant, or add a corrected rule and remove this one'
+		}
+	}
+])(
+	'checks additional read authority with $label',
+	async ({ grants, status, detail }) => {
+		const { client, dependencies } = fixture({
+			rules: [
+				oidcTrustSummarySchema.parse({
+					id: 'read',
+					issuer: 'https://token.actions.githubusercontent.com',
+					audience: tenant.href,
+					claims: { repository_id: '1234', event_name: 'pull_request' },
+					permittedGrants: grants,
+					disabled: false
+				})
+			],
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(
+							additionalReadWorkflow(`${tenant.href}/cache/falcon`)
+						)
+				},
+				fetchCacheAccess: (target) =>
+					Promise.resolve(
+						target.pathname.endsWith('/falcon') ? 'private' : 'public'
+					)
+			}
+		});
+		const check = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect(
+			check.jobs.map((job) => ({
+				...job,
+				findings: job.findings.map(({ trigger, finding }) => ({
+					trigger,
+					finding: finding.toJSON()
+				}))
+			}))
+		).toStrictEqual([
+			{
+				caller: path,
+				job: 'build',
+				workflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+				status,
+				findings: [{ trigger: 'pull_request', finding: detail }]
+			}
+		]);
+	}
+);
+
+it('composes read grants across matching rules for the exact additional cache union', async () => {
+	const probed: string[] = [];
+	const names = ['falcon', 'runner'];
+	const { client, dependencies } = fixture({
+		rules: names.map((cache) =>
+			oidcTrustSummarySchema.parse({
+				id: cache,
+				issuer: 'https://token.actions.githubusercontent.com',
+				audience: tenant.href,
+				claims: { repository_id: '1234', event_name: 'pull_request' },
+				permittedGrants: [buildCacheContentReadGrant({ cache })],
+				disabled: false
+			})
+		),
+		dependencies: {
+			source: {
+				...source,
+				read: () =>
+					Promise.resolve(
+						additionalReadWorkflow(
+							`|\n        ${tenant.href}/cache/falcon\n        ${tenant.href}/cache/runner\n        ${tenant.href}/cache/public\n        ${tenant.href}/cache/falcon/`
+						)
+					)
+			},
+			fetchCacheAccess: (target) => {
+				probed.push(target.href);
+				return Promise.resolve(
+					target.pathname.endsWith('/public') || target.href === tenant.href
+						? 'public'
+						: 'private'
+				);
+			}
+		}
+	});
+	const check = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository, branch: 'main' },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+	expect({ jobs: check.jobs, probed }).toStrictEqual({
+		jobs: [
+			{
+				caller: path,
+				job: 'build',
+				workflowRef:
+					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+				status: 'ready',
+				findings: [
+					{
+						trigger: 'pull_request',
+						finding: new PassedCheckFinding('trust rule')
+					}
+				]
+			}
+		],
+		probed: [
+			tenant.href,
+			...['falcon', 'runner', 'public'].map(
+				(cache) => `${tenant.href}/cache/${cache}`
+			)
+		]
+	});
+});
+
+it.each([undefined, "''", "'   '"])(
+	'keeps the existing empty additional-read behaviour: %s',
+	async (input) => {
+		const probed: string[] = [];
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(
+							additionalReadWorkflow(input ?? "''").replace(
+								input === undefined ? "      read-caches: ''" : 'no match',
+								''
+							)
+						)
+				},
+				fetchCacheAccess: (target) => {
+					probed.push(target.href);
+					return Promise.resolve('public');
+				}
+			}
+		});
+		const check = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		expect({ jobs: check.jobs, probed }).toStrictEqual({
+			jobs: [
+				{
+					caller: path,
+					job: 'build',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					status: 'ready',
+					findings: []
+				}
+			],
+			probed: [tenant.href]
+		});
+	}
+);
+
+it.each([false, true])(
+	'models one exact additional-cache read union with static destination: %s',
+	async (isStatic) => {
+		const input = `|\n        ${tenant.href}/cache/falcon\n        ${tenant.href}/cache/public\n        ${tenant.href}/cache/falcon/`;
+		const secrets = isStatic
+			? "    secrets:\n      destination_read_user: '${{ secrets.USER }}'\n      destination_read_password: '${{ secrets.PASSWORD }}'"
+			: '';
+		const { client, dependencies } = fixture({
+			dependencies: {
+				source: {
+					...source,
+					read: () => Promise.resolve(additionalReadWorkflow(input, secrets))
+				},
+				fetchCacheAccess: (target) =>
+					Promise.resolve(
+						target.pathname.endsWith('/falcon') ? 'private' : 'public'
+					)
+			}
+		});
+		const check = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+		const job = check.repairableJobs[0];
+		if (job === undefined) {
+			throw new Error('Expected a job requiring Falcon read authority');
+		}
+		const publication = modelPublishingJob(job, check.identity, tenant, 'main')
+			.cases[0];
+		if (publication === undefined) {
+			throw new Error('Expected one modelled pull-request case');
+		}
+		const read = await publicationReadAuthority(
+			job,
+			publication,
+			tenant,
+			check.identity.repositoryId,
+			client,
+			dependencies.fetchCacheAccess
+		);
+		const cacheState = (
+			cache: string | undefined,
+			access: 'public' | 'private'
+		) => ({
+			type: 'cupboard_cache',
+			cache:
+				cache === undefined
+					? { kind: 'default' }
+					: { kind: 'named', name: cache },
+			mode: 'content',
+			state: { kind: 'existing', access, priority: 40 }
+		});
+		expect(read).toStrictEqual({
+			cache: { kind: 'default' },
+			additionalCaches: [
+				{ cache: { kind: 'named', name: 'falcon' }, access: 'private' },
+				{ cache: { kind: 'named', name: 'public' }, access: 'public' }
+			],
+			cacheAccess: 'public',
+			selectedViewAccess: 'public',
+			cacheWiring: isStatic ? 'configured' : 'none',
+			viewWiring: 'none',
+			resources: [
+				...(isStatic ? [] : [cacheState(undefined, 'public')]),
+				cacheState('falcon', 'private'),
+				cacheState('public', 'public')
+			],
+			requests: [
+				[
+					{
+						type: 'cupboard_cache',
+						actions: ['cache:content-read'],
+						cache: { kind: 'named', name: 'falcon' }
+					}
+				]
+			]
+		});
+	}
+);

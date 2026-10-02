@@ -330,3 +330,91 @@ it.each(
 	},
 	30_000
 );
+
+it('forwards additional cache URLs through the actual setup shell', async () => {
+	const action = wrapperActionSchema.parse(
+		parse(await readFile('actions/setup/action.yml', 'utf8'))
+	);
+	const step = action.runs.steps.find(
+		(candidate) => candidate.name === 'Acquire cupboard'
+	);
+	if (step?.run === undefined) {
+		throw new Error('Expected the setup acquisition shell');
+	}
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-setup-read-caches-')
+	);
+	const forwarded = path.join(directory, 'args.json');
+	try {
+		await writeFile(
+			path.join(directory, 'node'),
+			`#!/bin/bash\nexec "${process.execPath}" -e 'require("node:fs").writeFileSync(process.env.FORWARDED_FILE, JSON.stringify(process.argv.slice(1)))' "$@"\n`,
+			{ mode: 0o700 }
+		);
+		const cache = 'https://cache.example.test/t/acme/cache/falcon';
+		const environment = Object.fromEntries(
+			Object.entries(step.env ?? {}).map(([key, value]) => [
+				key,
+				value === '${{ inputs.read-caches }}' ? cache : ''
+			])
+		);
+		await execute('bash', ['-c', step.run], {
+			env: {
+				...process.env,
+				...environment,
+				PATH: `${directory}:${process.env.PATH ?? ''}`,
+				GITHUB_ACTION_PATH: '/setup',
+				FORWARDED_FILE: forwarded
+			}
+		});
+		const arguments_ = z
+			.array(z.string())
+			.parse(JSON.parse(await readFile(forwarded, 'utf8')));
+		expect(arguments_).toStrictEqual([
+			'/setup/../src/main.ts',
+			'setup',
+			'--cupboard',
+			'',
+			'--cupboard-version',
+			'',
+			'--include-prereleases',
+			'',
+			'--release-repository',
+			'',
+			'--expected-source-commit',
+			'',
+			'--install-dir',
+			'',
+			'--add-to-path',
+			'',
+			'--audience',
+			'',
+			'--cache-url',
+			'',
+			'--cache',
+			'',
+			'--read-caches',
+			cache,
+			'--include-default-cache',
+			'',
+			'--provision-cache',
+			'',
+			'--cache-access-mode',
+			'',
+			'--provision-cache-access',
+			'',
+			'--provision-cache-ttl',
+			'',
+			'--reuse-view',
+			'',
+			'--trusted-public-key',
+			'',
+			'--nix-config-file',
+			'',
+			'--checkout-dir',
+			''
+		]);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});

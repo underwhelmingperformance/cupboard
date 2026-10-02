@@ -40,6 +40,7 @@ The calling job must grant:
 | `permanent` | boolean | `false` | Keep every target's root until it is replaced or removed. |
 | `run-root-ttl` | string | `24h` | How long the run root lasts, such as 7d or 12h. Every cohort job adds the paths that it publishes to the run root, so a later cohort can download a shared dependency from the cache instead of building it again. |
 | `run-root-permanent` | boolean | `false` | Keep the run root permanently. Set run-root-ttl to an empty string when you turn this on. |
+| `read-caches` | string |  | Additional canonical cache URLs from the selected tenant, one per line. Adds runner substituters and OIDC read resources without changing the destination cache. Cannot use credentials for these caches or a default static read credential. Remote builders need their own read credentials. |
 | `reuse-view` | string |  | Reuse view to read through, for paths that the destination cache does not have. The workflow refuses a view unless its priority number is greater than the destination's. With the preset, only runs on the branch use a view, and they default to pull-requests-&lt;repository-id>. Leave empty for no view. |
 | `trusted-public-key` | string |  | Nix public key to trust for reads from the tenant's caches. If empty, each job downloads the tenant's current key from /pubkey and trusts it. |
 | `cupboard-version` | string |  | An exact cupboard release tag to install, or latest. If empty, the workflow installs the release that was published from its own commit. If there is no such release, it builds cupboard from that commit. |
@@ -140,6 +141,7 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `cache` |  | Named caches to use, one per line or separated by commas. Leave empty to use the tenant's default cache. |
 | `include-default-cache` |  | When true, use the tenant's default cache as well as the named caches in cache. The cache input cannot refer to the default cache, because a named cache can be called default. |
 | `cache-credentials` |  | JSON array with one entry for each cache that has its own cache read credential, in the form {"cache": {"kind": "named", "name": ...}, "credential": {"user": ..., "password": ...}}. Pass it from a secret. A cache without an entry is read with read-user and read-password. |
+| `read-caches` |  | Additional canonical cache URLs from the selected tenant, one per line. Adds runner substituters and OIDC read resources without changing the destination cache. Cannot use credentials for these caches. |
 | `private-substituters` |  | URLs of other private caches to read from, one per line, with the user name and password in each URL. Pass this value from a secret. setup adds these URLs to Nix's substituters, and Nix still needs each cache's public key. |
 | `destination-read-user` |  | User name of the cache read credential for the selected cache. When you select several caches, use cache-credentials instead. |
 | `destination-read-password` |  | Password of the cache read credential for the selected cache. |

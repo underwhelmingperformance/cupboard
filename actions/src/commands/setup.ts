@@ -81,6 +81,7 @@ import {
 	PrivateSubstitutersCacheUrlRequiredError,
 	ProvisionCacheResultError,
 	ProvisionCacheUrlRequiredError,
+	ReadCachesInvalidError,
 	ReadConfigurationFailedError,
 	ReadConfigurationUnavailableError,
 	ReadPasswordRequiredError,
@@ -91,6 +92,7 @@ import {
 import {
 	appendEnvironmentFile,
 	type Environment,
+	parseLines,
 	requireEnvironment,
 	setOutput
 } from '../inputs.ts';
@@ -134,6 +136,7 @@ export interface SetupOptions {
 	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
 	readonly privateSubstituters?: string;
+	readonly readCaches?: string;
 	readonly destinationReadUser?: string;
 	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
@@ -166,6 +169,7 @@ export interface SetupInputs {
 	readonly cacheUrl: URL | undefined;
 	readonly caches: readonly CacheSelection[];
 	readonly privateSubstituters: readonly URL[];
+	readonly readCaches: readonly CacheScope[];
 	readonly provisionCache: ProvisionCache | undefined;
 	readonly cacheAccessMode: 'public' | 'private' | undefined;
 	readonly reuseView: string;
@@ -197,6 +201,7 @@ interface ConfigureNixInputs extends Pick<
 	SetupInputs,
 	| 'caches'
 	| 'privateSubstituters'
+	| 'readCaches'
 	| 'reuseView'
 	| 'audience'
 	| 'trustedPublicKey'
@@ -275,6 +280,10 @@ export function registerSetupCommand(
 		.option(
 			'--cache-credentials <json>',
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
+		)
+		.option(
+			'--read-caches <urls>',
+			'Additional same-tenant cache URLs for runner reads, one per line.'
 		)
 		.option(
 			'--private-substituters <urls>',
@@ -372,7 +381,13 @@ export function resolveSetupInputs(
 		throw new ReadUserRequiredError();
 	}
 
-	const cacheUrl = providedUrl('cache-url', options.cacheUrl);
+	const configuredCacheUrl = providedUrl('cache-url', options.cacheUrl);
+	const readTarget =
+		configuredCacheUrl !== undefined &&
+		parseLines(options.readCaches ?? '').length > 0
+			? parseTenantCacheUrl(configuredCacheUrl)
+			: undefined;
+	const cacheUrl = readTarget?.tenantUrl ?? configuredCacheUrl;
 	const privateSubstituters = providedPrivateSubstituters(
 		options.privateSubstituters ?? environment.PRIVATE_SUBSTITUTERS
 	);
@@ -401,6 +416,32 @@ export function resolveSetupInputs(
 	}
 	const provisionCache = resolveProvisionCache(options, cacheUrl);
 
+	const caches = resolveCaches(
+		{
+			...options,
+			cache:
+				readTarget?.cache.kind === 'named' &&
+				provided(options.cache) === undefined
+					? readTarget.cache.name
+					: options.cache,
+			cacheCredentials:
+				options.cacheCredentials ?? environment.CACHE_CREDENTIALS
+		},
+		destinationReadUser === ''
+			? undefined
+			: {
+					user: destinationReadUser,
+					password: destinationReadPassword
+				}
+	);
+	const readCaches = resolveReadCaches(
+		options,
+		cacheUrl,
+		caches,
+		readUser,
+		privateSubstituters
+	);
+
 	return {
 		cupboard,
 		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
@@ -421,20 +462,9 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		caches: resolveCaches(
-			{
-				...options,
-				cacheCredentials:
-					options.cacheCredentials ?? environment.CACHE_CREDENTIALS
-			},
-			destinationReadUser === ''
-				? undefined
-				: {
-						user: destinationReadUser,
-						password: destinationReadPassword
-					}
-		),
+		caches,
 		privateSubstituters,
+		readCaches,
 		provisionCache,
 		cacheAccessMode: resolveCacheAccessMode(
 			options,
@@ -455,6 +485,88 @@ export function resolveSetupInputs(
 					)
 				: '')
 	};
+}
+
+function resolveReadCaches(
+	options: SetupOptions,
+	tenantUrl: URL | undefined,
+	caches: readonly CacheSelection[],
+	readUser: ReadUser | '',
+	privateSubstituters: readonly URL[]
+): readonly CacheScope[] {
+	const entries = parseLines(options.readCaches ?? '');
+	if (entries.length === 0) {
+		return [];
+	}
+	if (tenantUrl === undefined || readUser !== '') {
+		throw new ReadCachesInvalidError(
+			'Supply cache-url and omit the default static read credential.'
+		);
+	}
+	const extra: CacheScope[] = [];
+	try {
+		const tenant = canonicalHref(parseTenantCacheUrl(tenantUrl).tenantUrl);
+		for (const entry of entries) {
+			const url = new URL(entry);
+			const parsed = parseTenantCacheUrl(url);
+			if (canonicalHref(parsed.tenantUrl) !== tenant) {
+				throw new ReadCachesInvalidError(
+					'Every read cache must belong to the selected tenant.'
+				);
+			}
+			const selected = caches.find((selection) =>
+				isSameCacheScope(selection.cache, parsed.cache)
+			);
+			if (
+				selected?.credential !== undefined ||
+				privateSubstituters.some((substituter) => {
+					const bare = new URL(substituter);
+					bare.username = '';
+					bare.password = '';
+					return canonicalHref(bare) === canonicalHref(url);
+				})
+			) {
+				throw new ReadCachesInvalidError(
+					'Do not request OIDC reads for a cache with an explicit static credential.'
+				);
+			}
+			if (
+				selected === undefined &&
+				extra.every((cache) => !isSameCacheScope(cache, parsed.cache))
+			) {
+				extra.push(parsed.cache);
+			}
+		}
+		readResourcesSchema.parse([
+			...caches.map(({ cache }) => ({
+				type: 'cupboard_cache',
+				cache,
+				mode: 'content'
+			})),
+			...extra.map((cache) => ({
+				type: 'cupboard_cache',
+				cache,
+				mode: 'content'
+			})),
+			...(provided(options.reuseView) === undefined
+				? []
+				: [{ type: 'cupboard_view', view: options.reuseView?.trim() }])
+		]);
+	} catch (error) {
+		if (error instanceof ReadCachesInvalidError) {
+			throw error;
+		}
+		throw new ReadCachesInvalidError(
+			'Use canonical HTTP(S) cache URLs without credentials, a query or a fragment; select at most sixteen distinct caches and reuse views.'
+		);
+	}
+	return extra;
+}
+
+function allReadCaches(
+	inputs: Pick<SetupInputs, 'caches' | 'readCaches'>
+): readonly CacheSelection[] {
+	return [...inputs.caches, ...inputs.readCaches.map((cache) => ({ cache }))];
 }
 
 function resolveProvisionCache(
@@ -710,7 +822,8 @@ export async function setupAction(
 		inheritedNixConfig: environment.NIX_CONFIG ?? '',
 		cacheMetadata: metadataDestination !== undefined
 	};
-	const readDestinations = inputs.caches.filter(
+	const selectedCaches = allReadCaches(inputs);
+	const readDestinations = selectedCaches.filter(
 		(selection) =>
 			selection.credential === undefined && staticCredential === undefined
 	);
@@ -744,7 +857,7 @@ export async function setupAction(
 				? []
 				: [
 						destination,
-						...inputs.caches.filter(
+						...selectedCaches.filter(
 							(selection) =>
 								!isSameCacheScope(selection.cache, destination.cache) &&
 								(readDestinations.includes(selection) ||
@@ -876,7 +989,7 @@ async function performSetupConfiguration(
 	if (
 		facts.some((fact) =>
 			fact.type === 'cupboard_cache'
-				? inputs.caches.every(
+				? allReadCaches(inputs).every(
 						(selection) => !isSameCacheScope(selection.cache, fact.cache)
 					)
 				: fact.view !== inputs.reuseView
@@ -1071,6 +1184,9 @@ async function performSetupConfiguration(
 		})
 	);
 
+	await Promise.all(
+		inputs.readCaches.map((cache) => accessFor(cache, undefined))
+	);
 	await configureNix({ ...inputs, readFacts: facts }, reporter, {
 		...(dependencies.fetch !== undefined && { fetch: dependencies.fetch }),
 		...(dependencies.signal !== undefined && { signal: dependencies.signal })
@@ -1089,6 +1205,7 @@ const configureNixPayloadSchema = z.object({
 	cacheUrl: z.url(),
 	caches: z.array(configureCacheSelectionSchema),
 	privateSubstituters: z.array(z.url()),
+	readCaches: z.array(cacheScopeSchema).default([]),
 	reuseView: z.string(),
 	trustedPublicKey: z.string(),
 	readUser: z.union([z.literal(''), readUserInputSchema]),
@@ -1172,6 +1289,7 @@ async function configureWithReadAccess(
 		JSON.stringify({
 			cacheUrl: canonicalHref(inputs.cacheUrl),
 			caches: inputs.caches,
+			readCaches: inputs.readCaches,
 			privateSubstituters: inputs.privateSubstituters.map((url) =>
 				canonicalHref(url)
 			),
@@ -1664,7 +1782,11 @@ async function configureNix(
 		},
 		dependencies
 	);
-	const substituters = [...cupboardSubstituters, ...inputs.privateSubstituters];
+	const substituters = [
+		...cupboardSubstituters,
+		...inputs.readCaches.map((cache) => cacheUrlFor(inputs.cacheUrl, cache)),
+		...inputs.privateSubstituters
+	];
 	dependencies.signal?.throwIfAborted();
 	const runnerTemporaryDirectory = requireEnvironment(
 		inputs.environment,

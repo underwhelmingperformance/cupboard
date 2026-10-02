@@ -68,6 +68,12 @@ inputs:
       "credential": {"user": ..., "password": ...}}. Pass it from a secret. A
       cache without an entry is read with read-user and read-password.
     required: false
+  read-caches:
+    description:
+      Additional canonical cache URLs from the selected tenant, one per line.
+      Adds runner substituters and OIDC read resources without changing the
+      destination cache. Cannot use credentials for these caches.
+    required: false
   private-substituters:
     description:
       URLs of other private caches to read from, one per line, with the user
@@ -238,6 +244,7 @@ runs:
         AUDIENCE: ${{ inputs.audience }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
+        READ_CACHES: ${{ inputs.read-caches }}
         INCLUDE_DEFAULT_CACHE: ${{ inputs.include-default-cache }}
         CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
         PRIVATE_SUBSTITUTERS: ${{ inputs.private-substituters }}
@@ -267,6 +274,7 @@ runs:
           --audience "$AUDIENCE"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
+          --read-caches "$READ_CACHES"
           --include-default-cache "$INCLUDE_DEFAULT_CACHE"
           --provision-cache "$PROVISION_CACHE"
           --cache-access-mode "$CACHE_ACCESS_MODE"

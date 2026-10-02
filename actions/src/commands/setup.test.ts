@@ -20,11 +20,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { type ReadResourceState } from '@cupboard/protocol/read-access';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { runWithReadAccess } from '../../../packages/cli/src/commands/run.ts';
 import { probeDeadlineMs } from '../cache-probe.ts';
@@ -302,6 +303,7 @@ describe('resolveSetupInputs', () => {
 		cacheUrl: undefined,
 		caches: [{ cache: defaultCache }],
 		privateSubstituters: [],
+		readCaches: [],
 		provisionCache: undefined,
 		cacheAccessMode: undefined,
 		reuseView: '',
@@ -721,6 +723,7 @@ describe('resolveSubstituters', () => {
 
 		try {
 			const signals: AbortSignal[] = [];
+			const probesStarted = Promise.withResolvers<undefined>();
 			const fetcher: typeof fetch = (_input, init) => {
 				const signal = init?.signal;
 
@@ -729,6 +732,9 @@ describe('resolveSubstituters', () => {
 				}
 
 				signals.push(signal);
+				if (signals.length === 2) {
+					probesStarted.resolve(undefined);
+				}
 				const body = new ReadableStream({
 					start(controller) {
 						signal.addEventListener(
@@ -749,10 +755,19 @@ describe('resolveSubstituters', () => {
 			);
 			const rejection =
 				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
-
-			await vi.waitFor(() => {
-				expect(signals).toHaveLength(2);
+			onTestFinished(async () => {
+				if (!vi.isFakeTimers()) {
+					return;
+				}
+				try {
+					await vi.runOnlyPendingTimersAsync();
+					await rejection;
+				} finally {
+					vi.useRealTimers();
+				}
 			});
+
+			await Promise.race([probesStarted.promise, pending]);
 			await vi.advanceTimersByTimeAsync(30_000);
 			await rejection;
 
@@ -2162,6 +2177,302 @@ describe('setupAction cancellation', () => {
 				entry.startsWith('cupboard-nix-')
 			)
 		}).toStrictEqual({ environmentFile: false, configFiles: [] });
+	});
+});
+
+describe('additional runner read caches', () => {
+	it.each([
+		{
+			cache: '',
+			destinationName: '',
+			cacheUrl: 'https://cache.example.test/t/acme'
+		},
+		{
+			cache: 'builds',
+			destinationName: 'builds',
+			cacheUrl: 'https://cache.example.test/t/acme'
+		},
+		{
+			cache: '',
+			destinationName: 'builds',
+			cacheUrl: 'https://cache.example.test/t/acme/cache/builds'
+		}
+	])(
+		'keeps destination $cacheUrl ($cache) separate from additional cache reads',
+		async ({ cache, destinationName, cacheUrl }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-additional-read-')
+			);
+			const environment = {
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: path.join(directory, 'env'),
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			};
+			const base = 'https://cache.example.test/t/acme';
+			const destination =
+				destinationName === '' ? defaultCache : namedCache(destinationName);
+			const destinationUrl =
+				destinationName === '' ? base : `${base}/cache/${destinationName}`;
+			const requests: unknown[] = [];
+			const resources = [
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('falcon'),
+					mode: 'content'
+				},
+				{ type: 'cupboard_cache', cache: destination, mode: 'content' },
+				{ type: 'cupboard_cache', cache: namedCache('extra'), mode: 'content' },
+				{ type: 'cupboard_view', view: 'prior' }
+			];
+			try {
+				await setupAction(
+					{
+						installDir: path.join(directory, 'bin'),
+						addToPath: 'false',
+						cacheUrl,
+						cache,
+						reuseView: 'prior',
+						trustedPublicKey: 'acme:AAAA',
+						readCaches: `${base}/cache/falcon\n${base}/cache/extra\n${base}/cache/falcon\n${destinationUrl}`
+					},
+					environment,
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: '/installed/cupboard',
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: stubFetch(
+							(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 10),
+							{
+								status: (url) =>
+									url.includes('/cache/falcon/')
+										? StatusCodes.UNAUTHORIZED
+										: StatusCodes.OK
+							}
+						),
+						configureWithReadAccess: async (_binary, inputs, target, view) => {
+							const payload = path.join(directory, 'payload.json');
+							await writeFile(
+								payload,
+								JSON.stringify({ ...inputs, cacheUrl: inputs.cacheUrl.href })
+							);
+							const additional = (inputs.readResources ?? []).flatMap(
+								(resource) => {
+									if (resource.type !== 'cupboard_cache') {
+										return [];
+									}
+									const url = new URL(
+										resource.cache.kind === 'default'
+											? base
+											: `${base}/cache/${resource.cache.name}`
+									);
+									return canonicalHref(url) === canonicalHref(target)
+										? []
+										: [parseTenantCacheUrl(url)];
+								}
+							);
+							await runWithReadAccess(
+								parseTenantCacheUrl(target),
+								['setup-configure', payload],
+								{
+									githubOidc: true,
+									reuseView: reuseViewNameSchema.parse(view),
+									readCache: additional
+								},
+								{
+									storeConfig: discoverNixStoreConfig(),
+									readFile: () => Promise.resolve(''),
+									issue: (input) => {
+										requests.push(input.resources);
+										return Promise.resolve({
+											user: 'cupboard-oidc',
+											password: 'cupboard-access+jwt:example',
+											expiresAtMs: Date.now() + 900_000,
+											resources: input.resources.map(
+												(resource): ReadResourceState => {
+													if (resource.type === 'cupboard_view') {
+														return {
+															...resource,
+															state: {
+																kind: 'existing',
+																access: 'public',
+																priority: cachePrioritySchema.parse(50)
+															}
+														};
+													}
+													const isFalcon =
+														resource.cache.kind === 'named' &&
+														resource.cache.name === 'falcon';
+													return {
+														...resource,
+														state: {
+															kind: 'existing',
+															access: isFalcon ? 'private' : 'public',
+															priority: cachePrioritySchema.parse(
+																isFalcon ? 80 : 10
+															)
+														}
+													};
+												}
+											)
+										});
+									},
+									runChild: async ({ environment: childEnvironment }) => {
+										await setupConfigureAction(
+											payload,
+											{ ...environment, ...childEnvironment },
+											createGithubReporter(),
+											{
+												fetch: () => {
+													throw new Error(
+														'All read facts must come from the session'
+													);
+												}
+											}
+										);
+										return { status: 0, signal: undefined };
+									}
+								}
+							);
+						}
+					}
+				);
+				const outputs = await readActionOutputs(environment.GITHUB_OUTPUT);
+				const config = outputs['nix-config-file'];
+				if (config === undefined) {
+					throw new Error('Expected a generated Nix configuration');
+				}
+				expect({
+					requests,
+					target: outputs['read-session-target'],
+					view: outputs['read-session-view'],
+					caches: outputs['read-session-caches'],
+					config: await readFile(config, 'utf8')
+				}).toStrictEqual({
+					requests: [resources],
+					target: `${base}/cache/falcon`,
+					view: 'prior',
+					caches: JSON.stringify([destinationUrl, `${base}/cache/extra`]),
+					config: `extra-substituters = ${destinationUrl} ${base}/reuse/prior ${base}/cache/falcon ${base}/cache/extra\nextra-trusted-public-keys = acme:AAAA\n`
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it.each([
+		{ readCaches: 'not-a-url' },
+		{ readCaches: 'https://cache.example.test/t/other/cache/falcon' },
+		{ readCaches: 'https://other.example.test/t/acme/cache/falcon' },
+		{
+			readCaches: 'https://alice:secret@cache.example.test/t/acme/cache/falcon'
+		},
+		{ readCaches: 'https://cache.example.test/t/acme/reuse/prior' },
+		{ readCaches: 'https://cache.example.test/t/acme/cache/falcon?x=y' },
+		{
+			readCaches: 'https://cache.example.test/t/acme/cache/falcon',
+			readUser: 'alice',
+			readPassword
+		},
+		{
+			readCaches: 'https://cache.example.test/t/acme/cache/builds',
+			cache: 'builds',
+			destinationReadUser: 'alice',
+			destinationReadPassword: readPassword
+		},
+		{
+			cacheUrl: 'https://cache.example.test/t/acme/cache/builds',
+			readCaches: 'https://cache.example.test/t/acme/cache/builds',
+			destinationReadUser: 'alice',
+			destinationReadPassword: readPassword
+		},
+		{
+			readCaches: 'https://cache.example.test/t/acme/cache/falcon',
+			privateSubstituters:
+				'https://alice:secret@cache.example.test/t/acme/cache/falcon'
+		},
+		{
+			readCaches: Array.from(
+				{ length: 16 },
+				(_, index) =>
+					`https://cache.example.test/t/acme/cache/extra-${String(index)}`
+			).join('\n')
+		}
+	])(
+		'rejects conflicting additional resources before acquisition: %j',
+		async (options) => {
+			const acquire = vi.fn();
+			const fetcher = vi.fn();
+			let error: unknown;
+			try {
+				await setupAction(
+					{
+						cupboard: JSON.stringify({
+							kind: 'source',
+							repository: 'acme/cupboard',
+							sourceCommit: 'a'.repeat(40)
+						}),
+						cacheUrl: 'https://cache.example.test/t/acme',
+						...options
+					},
+					{ RUNNER_TEMP: '/unused', GITHUB_ACTION_PATH: '/action' },
+					createGithubReporter(),
+					{ acquire, fetch: fetcher }
+				);
+			} catch (error_) {
+				error = error_;
+			}
+			expect({
+				error: error instanceof Error ? error.name : error,
+				acquisitions: acquire.mock.calls,
+				requests: fetcher.mock.calls
+			}).toStrictEqual({
+				error: 'ReadCachesInvalidError',
+				acquisitions: [],
+				requests: []
+			});
+		}
+	);
+
+	it('accepts sixteen resources after deduplicating additional URLs', () => {
+		const names = Array.from(
+			{ length: 15 },
+			(_, index) => `extra-${String(index)}`
+		);
+		const inputs = resolveSetupInputs(
+			{
+				cacheUrl: 'https://cache.example.test/t/acme',
+				readCaches: [...names, ...names]
+					.map((name) => `https://cache.example.test/t/acme/cache/${name}`)
+					.join('\n')
+			},
+			{ RUNNER_TEMP: '/unused' }
+		);
+		expect({ caches: inputs.caches, reads: inputs.readCaches }).toStrictEqual({
+			caches: [{ cache: defaultCache }],
+			reads: names.map((name) => namedCache(name))
+		});
+	});
+
+	it('accepts the actual setup parser flag and refuses a missing tenant before work', async () => {
+		const program = new Command()
+			.exitOverride()
+			.configureOutput({ writeErr: vi.fn() });
+		registerSetupCommand(program, { RUNNER_TEMP: '/unused' });
+		await expect(
+			program.parseAsync(
+				[
+					'setup',
+					'--read-caches',
+					'https://cache.example.test/t/acme/cache/falcon'
+				],
+				{ from: 'user' }
+			)
+		).rejects.toMatchObject({ name: 'ReadCachesInvalidError', exitCode: 2 });
 	});
 });
 

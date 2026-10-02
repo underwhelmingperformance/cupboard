@@ -75,6 +75,7 @@ export interface DiscoveredPublishingJob {
 		readonly cache: ReadCredentialWiring;
 		readonly view: ReadCredentialWiring;
 	};
+	readonly privateSubstitutersWiring?: 'configured' | 'unknown';
 	readonly triggers: readonly WorkflowTrigger[];
 }
 
@@ -898,9 +899,8 @@ export async function discoverPublishingJobs(
 				continue;
 			}
 
-			const readSecrets = readCredentialWiring(
-				secretKeys(job.secrets, context.secretKeys)
-			);
+			const keys = secretKeys(job.secrets, context.secretKeys);
+			const readSecrets = readCredentialWiring(keys);
 
 			jobs.push({
 				caller,
@@ -908,6 +908,11 @@ export async function discoverPublishingJobs(
 				kind,
 				workflowRef: workflowReference,
 				inputs: supplied,
+				...(keys === 'unknown'
+					? { privateSubstitutersWiring: 'unknown' as const }
+					: keys.has('private_substituters')
+						? { privateSubstitutersWiring: 'configured' as const }
+						: {}),
 				...(readSecrets !== undefined && { readCredentialWiring: readSecrets }),
 				triggers
 			});
