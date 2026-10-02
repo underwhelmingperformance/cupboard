@@ -10,11 +10,48 @@ import {
 	uploadNegotiateResponseSchema,
 	uploadPreviewRequestSchema,
 	uploadPreviewResponseSchema,
+	uploadRequestLimitErrorCode,
+	uploadRequestLimitErrorDataSchema,
 	uploadStatusResponseSchema
 } from '../upload.ts';
 
 import { baseProcedure } from './base.ts';
 import { cacheScopedProcedure } from './cache-scoped.ts';
+
+const uploadRequestErrors = {
+	[uploadRequestLimitErrorCode]: {
+		status: 413,
+		data: uploadRequestLimitErrorDataSchema
+	}
+};
+
+const negotiate = cacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/uploads',
+		requires: 'upload:negotiate',
+		maintenance: true
+	},
+	uploadNegotiateRequestSchema.shape,
+	uploadNegotiateResponseSchema
+);
+
+// Classifies a closure exactly as negotiation would, including the grace facts
+// needed for a report. Preview creates no upload, repairs no stale narinfo, and
+// extends no deadline. It has no `pushId` because it creates no credentials.
+// The cache-scoped grant and ownership check prevent cross-tenant existence
+// disclosure. Preview does not set `maintenance` and does not schedule
+// background work.
+const preview = cacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/uploads/preview',
+		requires: 'upload:preview',
+		replaySafety: 'replay-safe'
+	},
+	uploadPreviewRequestSchema.shape,
+	uploadPreviewResponseSchema
+);
 
 export const uploadsContract = {
 	// Issues temporary R2 credentials for a push. Without a `pushId`, the server
@@ -32,33 +69,14 @@ export const uploadsContract = {
 		pushCredentialSchema
 	),
 
-	negotiate: cacheScopedProcedure(
-		{
-			method: 'POST',
-			suffix: '/uploads',
-			requires: 'upload:negotiate',
-			maintenance: true
-		},
-		uploadNegotiateRequestSchema.shape,
-		uploadNegotiateResponseSchema
-	),
-
-	// Classifies a closure exactly as negotiation would, including the grace facts
-	// needed for a report. Preview creates no upload, repairs no stale narinfo, and
-	// extends no deadline. It has no `pushId` because it creates no credentials.
-	// The cache-scoped grant and ownership check prevent cross-tenant existence
-	// disclosure. Preview does not set `maintenance` and does not schedule
-	// background work.
-	preview: cacheScopedProcedure(
-		{
-			method: 'POST',
-			suffix: '/uploads/preview',
-			requires: 'upload:preview',
-			replaySafety: 'replay-safe'
-		},
-		uploadPreviewRequestSchema.shape,
-		uploadPreviewResponseSchema
-	),
+	negotiate: {
+		inDefaultCache: negotiate.inDefaultCache.errors(uploadRequestErrors),
+		inNamedCache: negotiate.inNamedCache.errors(uploadRequestErrors)
+	},
+	preview: {
+		inDefaultCache: preview.inDefaultCache.errors(uploadRequestErrors),
+		inNamedCache: preview.inNamedCache.errors(uploadRequestErrors)
+	},
 
 	// Confirms an unretained publication by store path without uploading bytes.
 	// It runs the same exact-generation check and monotonic grace extension as an

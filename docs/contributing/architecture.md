@@ -337,6 +337,27 @@ Paid plan in which 10,000 D1 calls completed and the 10,001st failed. The Free
 allowance hasn't been checked against a hosted Worker. cupboard uses the Workers
 limits for both plans.
 
+Chunked upload negotiation and preview count every forwarded Durable Object
+page. The request limit reserves four D1 calls for admission, including a retry
+of each read when catalogue migration requires a second read. This keeps the
+advertised limit stable across those admission paths. Before forwarding the
+first page, the Worker reserves the maximum number of sends, including adaptive
+splits from 400 paths down to the 100-path direct bound. A page at that bound
+reserves one canonical NAR probe and seven repair calls per path, with another
+100 calls for fixed work beyond the usual reserve. The Worker returns
+`UPLOAD_REQUEST_LIMIT_EXCEEDED` with HTTP 413 and `data.maxPaths` when the
+complete request cannot fit. The refusal precedes all negotiation pages and has
+no `Retry-After` header. A service or provider refusal retains its own status
+and retry metadata.
+
+Upload responses advertise the request limit in `x-cupboard-upload-max-paths`.
+The CLI starts with a 100-path page for compatibility with older servers, then
+uses the advertised limit for each remaining page. The schema still accepts
+100,000 paths, but admission can impose a lower limit for the current Worker
+invocation. The Free allowance permits 51,200 paths per request; the Paid
+allowance permits the schema maximum. A caller can split a larger closure into
+separate requests.
+
 Both Wrangler configurations leave `limits.subrequests` unset, so Cloudflare
 applies the account's plan limit. The allowance doesn't extend the tenant
 object's critical-section deadline.

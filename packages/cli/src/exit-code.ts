@@ -1,4 +1,8 @@
-import { CodedError, genericExitCode } from '@cupboard/shared/errors';
+import {
+	CodedError,
+	genericExitCode,
+	usageExitCode
+} from '@cupboard/shared/errors';
 
 import { translateRpcError } from './client/rpc-errors.ts';
 import {
@@ -24,7 +28,8 @@ export function errorExitCode(error: unknown): number {
 const rankedExitStatuses: readonly RankedExitStatus[] = [
 	authExitCode,
 	transientExitCode,
-	unavailableExitCode
+	unavailableExitCode,
+	usageExitCode
 ];
 
 /**
@@ -40,7 +45,8 @@ export interface FailureClassification<Fallback extends number> {
  * Returns 77 and the first authentication or authorisation failure if there is
  * one, otherwise 75 and the first transient failure, otherwise 69 and the first
  * failure caused by an unavailable dependency. Otherwise it returns
- * `fallbackExitCode` and the first defined cause. Authentication and
+ * 2 if a typed usage error remains, otherwise `fallbackExitCode` and the
+ * first defined cause. Authentication and
  * authorisation rank first because a re-run cannot succeed until the user signs
  * in again or uses a credential with the required access.
  *

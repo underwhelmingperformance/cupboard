@@ -143,7 +143,9 @@ When some paths in a push fail, `push` chooses its status from the failures:
 1. 77, if any path failed a sign-in or permission check.
 2. Otherwise 75, if any path failed temporarily.
 3. Otherwise 69, if something that a path needed was unavailable.
-4. Otherwise 1.
+4. Otherwise 2, if the server rejected an upload request because it exceeded the
+   invocation budget. Split the request at the returned path limit.
+5. Otherwise 1.
 
 `build-push` uses the same order while it publishes, but exits 74 in place of 1.
 A quota refusal counts as a permanent failure. Because 75 ranks above 1, a push

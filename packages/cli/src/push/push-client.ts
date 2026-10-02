@@ -7,11 +7,12 @@ import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
 	uploadGraceFactsCapability,
+	uploadNegotiateMaxPaths,
 	type UploadNegotiateResponse,
-	type UploadPreviewResponse
+	type UploadPreviewResponse,
+	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { chunk } from '@cupboard/shared/collections';
 import { StatusCodes } from 'http-status-codes';
 
 import { callInCache } from '../client/cache-scoped.ts';
@@ -51,6 +52,7 @@ export function pushClientFor(
 	const cache = options.cache;
 	const baseFetcher = options.fetcher ?? fetch;
 	let hasUploadGraceFacts = false;
+	let pageSize = negotiationPageSize;
 	const uploadFetcher: typeof fetch = async (input, init) => {
 		const request = new Request(input, init);
 		const headers = new Headers(request.headers);
@@ -63,6 +65,13 @@ export function pushClientFor(
 				.some(
 					(capability) => capability.trim() === uploadGraceFactsCapability
 				) ?? false;
+
+		const advertised = Number(
+			response.headers.get(uploadRequestMaxPathsHeader)
+		);
+		if (response.ok && Number.isSafeInteger(advertised) && advertised > 0) {
+			pageSize = Math.min(advertised, uploadNegotiateMaxPaths);
+		}
 
 		return response;
 	};
@@ -104,12 +113,12 @@ export function pushClientFor(
 		negotiate: async (body) => {
 			hasUploadGraceFacts = false;
 			const pushId = await session.pushId();
-			const pages = chunk(body.paths, negotiationPageSize);
-			const requestPages = pages.length === 0 ? [[]] : pages;
 			const uploads: UploadNegotiateResponse['uploads'] = [];
 			let hasGraceFactsForEveryPage = true;
 
-			for (const paths of requestPages) {
+			let offset = 0;
+			do {
+				const paths = body.paths.slice(offset, offset + pageSize);
 				const response = await callInCache(uploadRpc.uploads.negotiate, cache, {
 					pushId,
 					paths,
@@ -119,7 +128,8 @@ export function pushClientFor(
 				});
 				uploads.push(...response.uploads);
 				hasGraceFactsForEveryPage &&= hasUploadGraceFacts;
-			}
+				offset += paths.length;
+			} while (offset < body.paths.length);
 
 			hasUploadGraceFacts = hasGraceFactsForEveryPage;
 
@@ -129,18 +139,19 @@ export function pushClientFor(
 		// credential, so preview must not negotiate a pushId to get one.
 		preview: async (body) => {
 			hasUploadGraceFacts = false;
-			const pages = chunk(body.paths, negotiationPageSize);
-			const requestPages = pages.length === 0 ? [[]] : pages;
 			const uploads: UploadPreviewResponse['uploads'] = [];
 			let hasGraceFactsForEveryPage = true;
 
-			for (const paths of requestPages) {
+			let offset = 0;
+			do {
+				const paths = body.paths.slice(offset, offset + pageSize);
 				const response = await callInCache(uploadRpc.uploads.preview, cache, {
 					paths
 				});
 				uploads.push(...response.uploads);
 				hasGraceFactsForEveryPage &&= hasUploadGraceFacts;
-			}
+				offset += paths.length;
+			} while (offset < body.paths.length);
 
 			hasUploadGraceFacts = hasGraceFactsForEveryPage;
 

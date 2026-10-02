@@ -142,15 +142,14 @@ export class UploadPageSplitRequiredError extends ServerHttpError {
 	}
 }
 
-export class UploadRequestBudgetExceededError extends ServerHttpError {
-	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
-	override readonly retryAfterSeconds = 1;
+export class UploadRequestLimitExceededError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
 
-	constructor() {
+	constructor(readonly maxPaths: number) {
 		super(
-			"The upload request exceeds this Worker invocation's subrequest budget. Retry with fewer paths per request."
+			`The upload request exceeds this invocation's subrequest budget. Send at most ${String(maxPaths)} paths per request.`
 		);
-		this.name = 'UploadRequestBudgetExceededError';
+		this.name = 'UploadRequestLimitExceededError';
 	}
 }
 

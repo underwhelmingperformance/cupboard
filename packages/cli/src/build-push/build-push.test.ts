@@ -28,7 +28,7 @@ import {
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
-import { genericExitCode } from '@cupboard/shared/errors';
+import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -39,6 +39,7 @@ import {
 	type CommitSocket,
 	runCommitSession
 } from '../client/commit-socket.ts';
+import { tenantRpc } from '../client/orpc.ts';
 import {
 	AdminApiTransientError,
 	BuildCommandFailedError,
@@ -57,7 +58,8 @@ import {
 	SessionRejectedError,
 	transientExitCode,
 	unavailableExitCode,
-	UntrustedDaemonError
+	UntrustedDaemonError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
@@ -396,6 +398,7 @@ interface FlowConfig {
 	readonly ultimatePaths?: readonly StorePathString[];
 	readonly action?: UploadDecisionInput['action'];
 	readonly uploadFailure?: Error;
+	readonly negotiateFailure?: Error;
 	readonly unwritableReceipt?: boolean;
 	readonly preflightFailure?: Error;
 	readonly sessionOpenFailure?: Error;
@@ -629,6 +632,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			openCommitSession: () => Promise.reject(sessionOpenFailure)
 		}),
 		negotiate: (body) => {
+			if (config.negotiateFailure !== undefined) {
+				return Promise.reject(config.negotiateFailure);
+			}
 			negotiatedPaths.push(
 				body.paths.map((candidate) =>
 					storePathSchema.parse(candidate.storePath)
@@ -1159,6 +1165,22 @@ describe('childExitCode', () => {
 describe('classifyPublicationFailures', () => {
 	it.each([
 		{
+			name: 'a typed request limit',
+			causes: [new UploadRequestLimitExceededError(100)],
+			expectedExitCode: usageExitCode,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'an unavailable dependency outranking a request limit',
+			causes: [
+				new UploadRequestLimitExceededError(100),
+				new UnavailableTestError()
+			],
+			expectedExitCode: unavailableExitCode,
+			expectedCauseIndex: 1
+		},
+
+		{
 			name: 'an authentication failure',
 			causes: [new CupboardHttpError('PUT', '/nar', 401, '')],
 			expectedExitCode: 77,
@@ -1287,6 +1309,47 @@ describe('classifyPublicationFailures', () => {
 });
 
 describe('runBuildPush', () => {
+	it('preserves a decoded request-limit status after publication fails', async () => {
+		let requests = 0;
+		const rpc = tenantRpc(new URL('https://cache.example/t/acme'), {
+			fetcher: () => {
+				requests += 1;
+				return Promise.resolve(
+					Response.json(
+						{
+							defined: true,
+							code: 'UPLOAD_REQUEST_LIMIT_EXCEEDED',
+							status: 413,
+							message: 'Split the request.',
+							data: { maxPaths: 100 }
+						},
+						{ status: 413 }
+					)
+				);
+			}
+		});
+		let failure: unknown;
+		try {
+			await rpc.uploads.preview.inDefaultCache({ paths: [] });
+		} catch (error) {
+			failure = error;
+		}
+		if (!(failure instanceof ORPCError)) {
+			throw new TypeError('Expected a decoded oRPC error');
+		}
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			negotiateFailure: failure
+		});
+		expect({ error: run.error, requests }).toStrictEqual({
+			error: new BuildPublicationFailedError([pathA], usageExitCode, {
+				cause: new UploadRequestLimitExceededError(100, { cause: failure })
+			}),
+			requests: 1
+		});
+	});
+
 	it('reports the streamed mode, the phases in run order and a summary result', async () => {
 		const run = await runFlow({});
 

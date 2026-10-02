@@ -1,5 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
+import { uploadRequestLimitErrorCode } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
@@ -16,7 +17,8 @@ import {
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
 	TenantOffboardingError,
-	TenantQuotaBelowUsageError
+	TenantQuotaBelowUsageError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 import { serverHttpErrorHeaders } from '../http/error-response.ts';
 
@@ -150,6 +152,15 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { id: error.id, usedBytes: error.usedBytes }
+		});
+	}
+
+	if (error instanceof UploadRequestLimitExceededError) {
+		return new ORPCError(uploadRequestLimitErrorCode, {
+			status: error.status,
+			message: error.message,
+			data: { maxPaths: error.maxPaths },
+			defined: true
 		});
 	}
 

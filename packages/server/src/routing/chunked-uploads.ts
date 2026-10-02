@@ -1,10 +1,7 @@
 import {
-	subrequestSafetyReserve,
-	workersInvocationAllowances
-} from '@cupboard/protocol/platform';
-import {
 	uploadCapabilitiesHeader,
 	type UploadDecision,
+	uploadNegotiateMaxPaths,
 	type UploadNegotiateRequest,
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
@@ -19,21 +16,54 @@ import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { StatusCodes } from 'http-status-codes';
 
-import { subrequestsPerReconcileRemoval } from '../do/reconcile-queue-service.ts';
+import { spendSubrequests } from '../do/subrequest-slice.ts';
 import {
 	uploadPageSplitHeader,
-	UploadRequestBudgetExceededError
+	UploadRequestLimitExceededError
 } from '../errors.ts';
+import {
+	directUploadPageSize,
+	uploadPageSize
+} from '../policy/upload-pages.ts';
 
-// Reserve one call per path for its NAR head and another for the remaining
-// classification work. The second reserve covers fixed work in the object.
-const pageSubrequests =
-	workersInvocationAllowances.free.subrequests - 2 * subrequestSafetyReserve;
-export const uploadPageSize = Math.floor(pageSubrequests / 2);
-const directUploadPageSize = Math.floor(
-	pageSubrequests / (1 + subrequestsPerReconcileRemoval)
-);
+export {
+	directUploadPageSize,
+	uploadPageSize
+} from '../policy/upload-pages.ts';
+
 const outgoingConnections = 6;
+
+function maximumPageSends(paths: number): number {
+	if (paths <= directUploadPageSize) {
+		return 1;
+	}
+	const first = Math.ceil(paths / 2);
+	return 1 + maximumPageSends(first) + maximumPageSends(paths - first);
+}
+
+function maximumRequestSends(paths: number): number {
+	const fullPages = Math.floor(paths / uploadPageSize);
+	const remainder = paths % uploadPageSize;
+	return Math.max(
+		1,
+		fullPages * maximumPageSends(uploadPageSize) +
+			(remainder === 0 ? 0 : maximumPageSends(remainder))
+	);
+}
+
+export function uploadRequestMaxPathsFor(availableSubrequests: number): number {
+	let lower = 0;
+	let upper = uploadNegotiateMaxPaths;
+	while (lower < upper) {
+		const middle = Math.ceil((lower + upper) / 2);
+		if (maximumRequestSends(middle) <= availableSubrequests) {
+			lower = middle;
+		} else {
+			upper = middle - 1;
+		}
+	}
+	return lower;
+}
 
 class UploadPageRefused extends Error {
 	constructor(readonly response: Response) {
@@ -67,11 +97,17 @@ export async function answerUploadsInChunks(
 			? uploadNegotiateRequestSchema.safeParse(body)
 			: uploadPreviewRequestSchema.safeParse(body);
 
-	if (!parsed.success || parsed.data.paths.length <= directUploadPageSize) {
+	if (!parsed.success) {
 		return undefined;
 	}
-
 	const input = parsed.data;
+	const maxPaths = uploadRequestMaxPathsFor(availableSubrequests);
+	if (maximumRequestSends(input.paths.length) > availableSubrequests) {
+		throw new UploadRequestLimitExceededError(maxPaths);
+	}
+	if (input.paths.length <= directUploadPageSize) {
+		return undefined;
+	}
 	let sent = 0;
 	const responseSchema =
 		mode === 'negotiate'
@@ -82,15 +118,16 @@ export async function answerUploadsInChunks(
 		paths: readonly UploadPathNegotiation[]
 	): Promise<UploadPageAnswer[]> => {
 		if (sent >= availableSubrequests) {
-			throw new UploadRequestBudgetExceededError();
+			throw new UploadRequestLimitExceededError(maxPaths);
 		}
 
 		sent += 1;
+		spendSubrequests(1, 'upload page');
 		const response = await send({ ...input, paths: [...paths] });
 
 		if (
 			response.headers.get(uploadPageSplitHeader) === '1' &&
-			paths.length > 1
+			paths.length > directUploadPageSize
 		) {
 			await discardResponseBody(response);
 			const middle = Math.ceil(paths.length / 2);

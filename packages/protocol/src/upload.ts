@@ -134,6 +134,12 @@ export type PushCredentialInput = z.input<typeof pushCredentialSchema>;
 // uses the lower 1,000-hash limit below.
 export const uploadNegotiateMaxPaths = 100_000;
 
+export const uploadRequestLimitErrorCode = 'UPLOAD_REQUEST_LIMIT_EXCEEDED';
+export const uploadRequestLimitErrorDataSchema = z.strictObject({
+	maxPaths: z.number().int().nonnegative()
+});
+export const uploadRequestMaxPathsHeader = 'x-cupboard-upload-max-paths';
+
 // `retainUntil` reports the durable deadline after a path was confirmed.
 // `graceSeconds` reports the configured grace when no deadline was written,
 // including zero seconds. An empty object means grace was not configured.
