@@ -53,6 +53,7 @@ builds it in three steps:
 3. It checks the result by running `cupboard --version`, `cupboard push --help`
    and `cupboard config`.
 
-CI builds an archive for every change. It then runs a sample publishing run with
-that archive, by setting `CUPBOARD_RELEASE_ARCHIVE`. If the packaging is broken,
-CI fails before the problem can reach a release.
+CI builds and smoke-tests the executable for every change. The publishing
+pipeline suite also builds its own release archive and publishes with that
+installation. Set `CUPBOARD_RELEASE_ARCHIVE` to test an existing archive
+instead. Packaging failures in either check block CI.

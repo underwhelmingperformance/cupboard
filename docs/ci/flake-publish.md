@@ -289,9 +289,10 @@ as a target of its own, in its own cohort. If you give the aggregate a `cohort`
 label, the components share that cohort instead. Each component takes its
 `system`, `os`, `remote` and `bestEffort` values from the aggregate.
 
-All the components share the aggregate's root. A root can keep at most 149
-paths, and each output that you publish from each component counts towards that
-limit. The plan refuses an aggregate with more than 149 components.
+All the components share the aggregate's root. The plan refuses an aggregate
+with more than 149 components. The root API separately limits each explicit
+replacement of a root's target set to 149 paths; a run root can accumulate more
+paths through additive updates.
 
 The machine that activates the configuration downloads the components from the
 cache. It builds or fetches the rest of the closure itself. The aggregate has no

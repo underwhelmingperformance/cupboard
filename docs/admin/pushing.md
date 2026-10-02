@@ -106,8 +106,9 @@ cupboard push https://cupboard.example.workers.dev/t/acme \
   --root github:acme/app/main ./result
 ```
 
-This replaces whatever that root kept before. A root can keep at most 149 store
-paths, so if you're pushing more than that, split them across several roots.
+This replaces the root's complete target set. One push with `--root` accepts at
+most 149 target paths, so split a larger set across several roots. Run roots
+grow through additive updates and have no total target limit.
 
 If you don't pass `--root`, `push` gives each store path a root of its own,
 called a pin.

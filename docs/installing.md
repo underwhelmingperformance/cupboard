@@ -69,7 +69,10 @@ For example, to add it to a NixOS system:
 The flake also has an overlay, `cupboard.overlays.default`, which provides
 `pkgs.cupboard`. The overlay builds cupboard with your own nixpkgs, so Nix can't
 substitute it from the release cache described below. Your nixpkgs must be
-recent enough to include Node.js 24 and pnpm 10.
+nixpkgs 26.05 or a revision with Node.js 24, pnpm 10 and [fetchPnpmDeps format
+4][fetcher-format-4] support. Node.js and pnpm alone are not sufficient.
+
+[fetcher-format-4]: https://github.com/NixOS/nixpkgs/pull/522703
 
 ### Following releases
 

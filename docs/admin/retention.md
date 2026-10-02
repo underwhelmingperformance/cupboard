@@ -77,7 +77,9 @@ path that was a target before, and isn't now, is released. If the cache has a
 grace period, the grace period keeps the store path for a while. Otherwise
 nothing keeps it.
 
-A root can have at most 149 targets. If you need more, use several roots.
+One `root set` or `root ensure` request accepts at most 149 targets. Both
+commands replace the complete target set, so use several roots if that set is
+larger. Run roots grow through additive updates and have no total target limit.
 
 ### Managing roots directly
 
@@ -267,9 +269,11 @@ cache.
 
 ## Garbage collection
 
-A job runs every hour. It collects each active tenant at least once every six
-hours, and also soon after the tenant's next root expiry or grace deadline.
-Suspended tenants aren't collected.
+An hourly job queues up to 100 active tenants that are due for maintenance. A
+tenant becomes due when its maintenance eligibility was last refreshed six hours
+ago, or earlier when a root expires or a grace deadline passes. The next hourly
+job can queue the work, but a backlog, queue delivery or a failed pass can delay
+collection. Suspended tenants aren't collected.
 
 For each cache, a garbage collection:
 
@@ -304,7 +308,9 @@ are permanent by default.
 The cache becomes eligible to retire one default root TTL after you set this. If
 you set it again, the wait starts again. Once the cache is eligible, a
 maintenance pass removes it when it has no store paths, roots, grace deadlines
-or work in progress. The maintenance pass checks again every six hours.
+or work in progress. If the cache is not empty, it becomes due for another check
+six hours later. The hourly job and maintenance queue determine when that check
+runs.
 
 ## Legacy retention policies
 

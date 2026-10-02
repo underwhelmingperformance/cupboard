@@ -29,7 +29,7 @@ See [Retention](../admin/retention.md).
 
 | Limit                               | Value                                                                                                    |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Targets in one root                 | 149. Run roots have no limit.                                                                            |
+| Targets in one root update          | 149 per root-set or root-ensure request. Run roots have no total target limit.                           |
 | Root TTL                            | 1 second to 3,650 days                                                                                   |
 | Grace period                        | 0 seconds to 3,650 days                                                                                  |
 | Root prefix overrides in one cache  | 4,096                                                                                                    |
