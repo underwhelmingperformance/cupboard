@@ -80,7 +80,8 @@ both are set.
 You can add two options to any of them:
 
 - `--job-workflow-ref` also requires the run to use a particular workflow file.
-  See [Trusting a reusable workflow](#trusting-a-reusable-workflow).
+  `--workflow-ref` is an alias, as on `github setup` and `github check`. See
+  [Trusting a reusable workflow](#trusting-a-reusable-workflow).
 - `--no-attest` leaves out the `attest` grant.
 
 ### Pull requests

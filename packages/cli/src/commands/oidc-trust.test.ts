@@ -1165,6 +1165,60 @@ describe('parsed generic read rules', () => {
 });
 
 describe('parsed GitHub read presets', () => {
+	it.each(['--job-workflow-ref', '--workflow-ref'])(
+		'parses %s on a manual rule',
+		async (flag) => {
+			mocks.add.mockReset();
+			mocks.lookup.mockClear();
+			mocks.add.mockImplementation((body) =>
+				Promise.resolve(summary({ ...body, id: 'rule-1' }))
+			);
+			const workflowReference =
+				'acme/ci/.github/workflows/publish.yml@refs/heads/main';
+			await buildProgram()
+				.exitOverride()
+				.parseAsync([
+					'node',
+					'cupboard',
+					'--output-mode',
+					'json',
+					'oidc-trust',
+					'add',
+					tenantUrl,
+					'--issuer',
+					'https://token.actions.githubusercontent.com',
+					'--audience',
+					tenantUrl,
+					'--allow',
+					'read',
+					flag,
+					workflowReference
+				]);
+			expect({
+				lookup: mocks.lookup.mock.calls,
+				add: mocks.add.mock.calls
+			}).toStrictEqual({
+				lookup: [],
+				add: [
+					[
+						{
+							issuer: 'https://token.actions.githubusercontent.com',
+							audience: tenantUrl,
+							claims: { job_workflow_ref: workflowReference },
+							permittedGrants: [
+								{
+									type: 'cupboard_cache',
+									actions: ['cache:content-read'],
+									resources: { cache: { kind: 'default' } }
+								}
+							]
+						}
+					]
+				]
+			});
+		}
+	);
+
 	const presets = [
 		{
 			command: 'add-github-pr',
@@ -1193,17 +1247,24 @@ describe('parsed GitHub read presets', () => {
 		}
 	];
 	it.each(
-		presets.flatMap((preset) => [
-			{ ...preset, audience: undefined },
-			{
-				...preset,
-				audience: 'cupboard-ci-client',
-				body: { ...preset.body, audience: 'cupboard-ci-client' }
-			}
-		])
+		presets
+			.flatMap((preset) => [
+				{ ...preset, audience: undefined },
+				{
+					...preset,
+					audience: 'cupboard-ci-client',
+					body: { ...preset.body, audience: 'cupboard-ci-client' }
+				}
+			])
+			.flatMap((preset) =>
+				['--job-workflow-ref', '--workflow-ref'].map((flag) => ({
+					...preset,
+					flag
+				}))
+			)
 	)(
 		'parses --read-cache and audience $audience for $command',
-		async ({ command, args, body, audience }) => {
+		async ({ command, args, body, audience, flag }) => {
 			mocks.add.mockReset();
 			mocks.add.mockImplementation((input) =>
 				Promise.resolve(summary({ ...input, id: 'rule-1' }))
@@ -1223,13 +1284,30 @@ describe('parsed GitHub read presets', () => {
 					'--repo',
 					identity.fullName,
 					'--read-cache',
+					flag,
+					'acme/ci/.github/workflows/publish.yml@refs/tags/v*',
 					...(audience === undefined ? [] : ['--audience', audience]),
 					...args
 				]);
 			expect({
 				lookup: mocks.lookup.mock.calls,
 				add: mocks.add.mock.calls
-			}).toStrictEqual({ lookup: [[identity.fullName]], add: [[body]] });
+			}).toStrictEqual({
+				lookup: [[identity.fullName]],
+				add: [
+					[
+						{
+							...body,
+							claims: {
+								...body.claims,
+								job_workflow_ref: {
+									pattern: String.raw`^acme/ci/\.github/workflows/publish\.yml@refs/tags/v[^/]*$`
+								}
+							}
+						}
+					]
+				]
+			});
 		}
 	);
 });

@@ -35,6 +35,35 @@ it.each([
 	{
 		arguments: [
 			'tenant',
+			'set-quota',
+			'http://127.0.0.1:1',
+			'acme',
+			'--quota-bytes',
+			'1e3'
+		],
+		advice: 'Pass a non-negative integer in bytes'
+	},
+	{
+		arguments: [
+			'github',
+			'setup',
+			tenantUrl,
+			'--repo',
+			'acme/app',
+			'--job-workflow-ref',
+			`acme/app/.github/workflows/publish.yml@${'a'.repeat(40)}`,
+			'--access',
+			'invalid'
+		],
+		advice: 'Invalid cache access mode (expected public or private)'
+	},
+	{
+		arguments: ['init', '--tenant', 'INVALID', '--access', 'public', '--yes'],
+		advice: 'Tenant slug must use'
+	},
+	{
+		arguments: [
+			'tenant',
 			'create',
 			'http://127.0.0.1:1',
 			'acme',

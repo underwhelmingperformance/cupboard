@@ -250,6 +250,19 @@ cupboard github check https://cupboard.example.workers.dev/t/acme \
 To accept future cupboard `v*` releases in planned rules, use
 `--trust-scope tag-pattern --tag-pattern 'v*'`.
 
+This selects future reusable workflow release tags for rules created by a
+discovered repair. With `github setup`, put the same pattern in the reference:
+`--workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*'`.
+An explicit `github check --workflow-ref` checks one immutable reference and
+cannot be combined with `--fix`. `--job-workflow-ref` is an alias for
+`--workflow-ref` on both commands; trust-rule commands accept both spellings
+too.
+
+`github setup --access` is an alias for `--cache-access-mode`. Both options
+select the access of new pull-request caches and their reuse view, and do not
+change the tenant's default cache. Use `cache set-access --access` to change an
+existing cache. The reusable workflows use the `cache-access-mode` input.
+
 When `--branch` is not the default branch, the planned rules come from workflow
 files that have not been merged, and anyone who can push to the repository can
 change those files. The preview states that the planned rules come from an

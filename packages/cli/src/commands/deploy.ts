@@ -67,9 +67,8 @@ export function registerDeployCommand(
 			'Cloudflare account ID (by default, the only account you can access, or the one you choose)'
 		)
 		.option(
-			'--cache <slug>',
-			'slug of the first tenant on a new deployment (you are asked if you ' +
-				'leave it out; without a terminal, no tenant is created)',
+			'--tenant, --cache <slug>',
+			'slug of the first tenant, not a named cache (only on a deployment without tenants; prompted in a terminal, and requires --access without a terminal)',
 			parseCacheSlug
 		)
 		.option(

@@ -411,6 +411,11 @@ admin.
 `init` creates the first tenant only on a deployment that has no tenants, and
 only for the admin.
 
+`init --tenant <slug>` is an alias for `--cache <slug>`. Both options specify
+that tenant's slug; neither selects a named cache. To create more tenants or
+named caches, use `tenant create` or `cache create`. `--access` specifies the
+first tenant's default cache access.
+
 - In a terminal, `init` asks for the tenant's slug and the read access of its
   default cache. `--cache` and `--access` answer these questions in advance.
 - Without a terminal, `init` creates the first tenant only from `--cache` and
