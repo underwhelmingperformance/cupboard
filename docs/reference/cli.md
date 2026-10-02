@@ -207,13 +207,13 @@ Usage: cupboard deployment [options] [command]
 Inspect and resume tenant migration work.
 
 Options:
-  -h, --help      display help for command
+  -h, --help              display help for command
 
 Commands:
-  status <url>    Show the schema transitions and pending tenant work.
-  resume <url>    Wake the tenants that are still migrating, wait while they
-                  finish, and report whether the deploy can finish.
-  help [command]  display help for command
+  status [options] <url>  Show the schema transitions and pending tenant work.
+  resume [options] <url>  Wake the tenants that are still migrating, wait while
+                          they finish, and report whether the deploy can finish.
+  help [command]          display help for command
 ```
 
 #### cupboard deployment status
@@ -224,10 +224,15 @@ Usage: cupboard deployment status [options] <url>
 Show the schema transitions and pending tenant work.
 
 Arguments:
-  url         deployment URL (e.g. https://cupboard.example.workers.dev)
+  url                    deployment URL (e.g.
+                         https://cupboard.example.workers.dev)
 
 Options:
-  -h, --help  display help for command
+  --github-oidc          authorise with the workflow's GitHub Actions OIDC token
+                         through a control trust rule
+  --audience <audience>  OIDC audience to request with --github-oidc (default:
+                         the deployment URL)
+  -h, --help             display help for command
 ```
 
 #### cupboard deployment resume
@@ -239,10 +244,15 @@ Wake the tenants that are still migrating, wait while they finish, and report
 whether the deploy can finish.
 
 Arguments:
-  url         deployment URL (e.g. https://cupboard.example.workers.dev)
+  url                    deployment URL (e.g.
+                         https://cupboard.example.workers.dev)
 
 Options:
-  -h, --help  display help for command
+  --github-oidc          authorise with the workflow's GitHub Actions OIDC token
+                         through a control trust rule
+  --audience <audience>  OIDC audience to request with --github-oidc (default:
+                         the deployment URL)
+  -h, --help             display help for command
 ```
 
 ### cupboard login
