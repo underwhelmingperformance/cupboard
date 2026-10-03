@@ -430,8 +430,9 @@ function throwIfMigrationsMissing<Id extends string>(
  *   which the walk leaves unchanged;
  * - every transition that the deployment records as complete has all of its
  *   migrations recorded in `d1_migrations`;
- * - no transition that is not independent follows a transition that is not
- *   complete. Such a transition could expand only after the upload. A fresh
+ * - every incomplete transition can expand after the earlier transitions
+ *   expand and its required earlier contracts complete. A transition without
+ *   `independent` or `expandAfter` requires every earlier contract. A fresh
  *   database is exempt, because every transition completes on it before the
  *   upload.
  *

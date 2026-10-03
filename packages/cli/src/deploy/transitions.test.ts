@@ -1,3 +1,4 @@
+import { readdirSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
@@ -27,7 +28,8 @@ import { databaseIdSchema } from './identifiers.ts';
 import {
 	applyD1Migrations,
 	type D1Migration,
-	D1MigrationDigestError
+	D1MigrationDigestError,
+	parseD1Migrations
 } from './migrations.ts';
 import {
 	completeTransitions,
@@ -98,8 +100,9 @@ const dependent: SchemaTransition = {
 };
 
 const laterDependent: SchemaTransition<'later'> = {
-	...dependent,
-	id: 'later'
+	id: 'later',
+	expand: dependent.expand,
+	contract: dependent.contract
 };
 
 // An independent transition whose expand migration indexes the table that
@@ -406,6 +409,157 @@ describe('planTransitions', () => {
 			new MisclassifiedD1MigrationsError(expected, found)
 		);
 	});
+});
+
+describe('v0.0.35 path authority rollout', () => {
+	it.each([
+		{ phase: 'contracted', through: '0030', step: 5, blocked: false },
+		{ phase: 'native-reads', through: '0027', step: 4, blocked: true }
+	])(
+		'prepares from the $phase journal',
+		async ({ phase: compatibility, through, step, blocked }) => {
+			const directory = new URL('../../../server/drizzle-d1/', import.meta.url);
+			const actualMigrations = parseD1Migrations(
+				readdirSync(directory)
+					.filter((name) => name.endsWith('.sql'))
+					.map((name) => ({
+						name,
+						sql: readFileSync(new URL(name, directory), 'utf8')
+					}))
+			);
+			const baseline = actualMigrations.filter(
+				(migration) => migration.name.slice(0, 4) <= through
+			);
+			const world = fixture();
+			try {
+				world.database.exec(
+					'CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'
+				);
+				const record = world.database.prepare(
+					'INSERT INTO d1_migrations (name) VALUES (?)'
+				);
+				for (const migration of baseline) {
+					for (const statement of migration.statements) {
+						world.database.exec(statement);
+					}
+					record.run(migration.name);
+				}
+				world.database
+					.prepare("INSERT INTO deployment_phase VALUES ('current', ?, ?, ?)")
+					.run(compatibility, step, initial.toISOString());
+				const walk = world.walk(schemaTransitions, {
+					migrations: actualMigrations
+				});
+				if (blocked) {
+					await expect(prepareTransitions(walk, false)).rejects.toStrictEqual(
+						new TransitionIncompleteError(
+							'cache-identity',
+							'blob-reference-read-authority',
+							'v0.0.34'
+						)
+					);
+					expect({
+						applied: applied(world.database),
+						writes: world.writes,
+						phase: phase(world.database)
+					}).toStrictEqual({
+						applied: baseline.map((migration) => migration.name),
+						writes: [],
+						phase: 'native-reads@4'
+					});
+					return;
+				}
+				const preparedStates = await prepareTransitions(walk, false);
+				const prepared = {
+					states: [...preparedStates],
+					applied: applied(world.database),
+					servingChecks: world.servingChecks
+				};
+				const complete = await completeTransitions(walk);
+				expect({
+					prepared,
+					states: Object.fromEntries(complete),
+					applied: applied(world.database),
+					journal: world.database
+						.prepare('SELECT name FROM d1_migrations ORDER BY id')
+						.all()
+						.map((row) => ({ ...row })),
+					phase: phase(world.database),
+					servingChecks: world.servingChecks,
+					index: {
+						...world.database
+							.prepare(
+								"SELECT tbl_name, sql FROM sqlite_master WHERE name = 'attestation_ref_tenant_path_idx'"
+							)
+							.get()
+					},
+					storage: world.database
+						.prepare(
+							"SELECT name, type FROM sqlite_master WHERE name IN ('blob_ref', 'blob_ref_storage', 'attestation_ref', 'attestation_ref_storage', 'cache_lifecycle', 'cache_lifecycle_storage') ORDER BY name"
+						)
+						.all()
+						.map((row) => ({ ...row }))
+				}).toStrictEqual({
+					prepared: {
+						states: [
+							['cache-identity', 'complete'],
+							['deployment-transitions', 'complete'],
+							['attestation-path-index', 'expanded'],
+							['local-step-attempts', 'complete'],
+							['publication-identity', 'complete'],
+							['blob-reference-read-authority', 'expanded'],
+							['tenant-retry-clock', 'complete']
+						],
+						applied: actualMigrations
+							.filter(
+								(migration) =>
+									!migration.name.startsWith('0032') &&
+									!migration.name.startsWith('0036')
+							)
+							.map((migration) => migration.name),
+						servingChecks: 0
+					},
+					states: {
+						'cache-identity': 'complete',
+						'deployment-transitions': 'complete',
+						'attestation-path-index': 'complete',
+						'local-step-attempts': 'complete',
+						'publication-identity': 'complete',
+						'blob-reference-read-authority': 'complete',
+						'tenant-retry-clock': 'complete'
+					},
+					applied: actualMigrations.map((migration) => migration.name),
+					journal: [
+						...actualMigrations
+							.filter(
+								(migration) =>
+									!migration.name.startsWith('0032') &&
+									!migration.name.startsWith('0036')
+							)
+							.map((migration) => ({ name: migration.name })),
+						{ name: '0032_attestation_ref_path_index.sql' },
+						{ name: '0036_path_read_authority_contract.sql' }
+					],
+					phase: 'contracted@5',
+					servingChecks: 1,
+					index: {
+						tbl_name: 'attestation_ref_storage',
+						sql: 'CREATE INDEX `attestation_ref_tenant_path_idx` ON "attestation_ref_storage" (`tenant`,`store_path_hash`,`generation`)'
+					},
+					storage: [
+						{ name: 'attestation_ref', type: 'view' },
+						{ name: 'attestation_ref_storage', type: 'table' },
+						{ name: 'blob_ref', type: 'view' },
+						{ name: 'blob_ref_storage', type: 'table' },
+						{ name: 'cache_lifecycle', type: 'view' },
+						{ name: 'cache_lifecycle_storage', type: 'table' }
+					]
+				});
+			} finally {
+				world.database.close();
+			}
+		}
+	);
 });
 
 describe('transition walk', () => {
