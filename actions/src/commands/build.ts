@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { env } from 'node:process';
+import process, { env } from 'node:process';
 
 import {
 	discoverNixStoreConfig,
@@ -14,6 +14,7 @@ import {
 	parseSshNgStoreUri,
 	selectPublicationPaths
 } from '@cupboard/nix';
+import { receiptSubjects as observedReceiptSubjects } from '@cupboard/nix/build-observation';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import {
 	autoBuildStore,
@@ -25,9 +26,23 @@ import {
 	observeChildProcess,
 	waitForAbortableChildProcess
 } from '@cupboard/shared/child-process';
+import { withCleanups } from '@cupboard/shared/cleanup';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
+import { HookFailureDetector } from '../build-paths/hook-failure.ts';
+import {
+	createJobRoots,
+	type JobOutputProtection,
+	jobOutputProtection,
+	jobRootsEnvironmentKey
+} from '../build-paths/job-roots.ts';
+import {
+	type BuildObservation,
+	BuildObservationIncompleteError,
+	type BuildObservationOptions,
+	observeBuild
+} from '../build-paths/observation.ts';
 import {
 	BuildAttemptsInvalidError,
 	BuildInstallableInvalidError,
@@ -36,8 +51,7 @@ import {
 	BuildProvenanceConflictError,
 	BuildPublicationUrlMissingError,
 	BuildRebuildRemoteDispatchError,
-	CommandFailedError,
-	SimpleBuiltPublicationUnsupportedError
+	CommandFailedError
 } from '../errors.ts';
 import {
 	appendEnvironmentFile,
@@ -69,6 +83,8 @@ export interface BuildAttempt {
 
 export interface BuildOptions {
 	readonly inlinePaths?: string;
+	readonly cupboardPath?: string;
+	readonly intermediatePathsFile?: string;
 	readonly publicationUrl?: string;
 	readonly publish?: string;
 	readonly installables?: readonly string[];
@@ -88,15 +104,21 @@ export interface BuildOptions {
 export interface RunResult {
 	readonly status: number | undefined;
 	readonly stdout: string;
+	readonly hookDeliveryFailed?: boolean;
 }
 
 export interface NixInvocation {
 	readonly arguments: readonly string[];
 	readonly stdin: string;
+	readonly environment?: Environment;
 }
 
 export interface BuildDependencies {
 	readonly buildSettings?: NixBuildSettings;
+	readonly protection?: JobOutputProtection;
+	readonly createObservation?: (
+		options: BuildObservationOptions
+	) => Promise<BuildObservation>;
 	readonly runNix?: (
 		invocation: NixInvocation,
 		signal?: AbortSignal
@@ -158,17 +180,27 @@ function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-async function runNix(
+export async function runNix(
 	invocation: NixInvocation,
 	signal?: AbortSignal
 ): Promise<RunResult> {
 	signal?.throwIfAborted();
 
 	const child = spawn('nix', [...invocation.arguments], {
-		stdio: ['pipe', 'pipe', 'inherit']
+		stdio: ['pipe', 'pipe', 'pipe'],
+		...(invocation.environment !== undefined && {
+			env: { ...invocation.environment }
+		})
 	});
 	const observed = observeChildProcess(child);
 	let stdout = '';
+	const hookFailures = new HookFailureDetector();
+	let hasHookDeliveryFailed = false;
+	child.stderr.setEncoding('utf8');
+	child.stderr.on('data', (chunk: string) => {
+		hasHookDeliveryFailed = hookFailures.accept(chunk);
+		process.stderr.write(chunk);
+	});
 
 	child.stdout.setEncoding('utf8');
 	child.stdout.on('data', (chunk: string) => {
@@ -194,7 +226,11 @@ async function runNix(
 		throw result.error;
 	}
 
-	return { status: result.status ?? undefined, stdout };
+	return {
+		status: result.status ?? undefined,
+		stdout,
+		hookDeliveryFailed: hasHookDeliveryFailed
+	};
 }
 
 function nixBuildInvocation(
@@ -262,6 +298,33 @@ async function readBuildActivities(logFile: string): Promise<BuildActivity[]> {
 	return buildActivities(log);
 }
 
+async function queryExistingOutputInfos(
+	storePaths: readonly string[],
+	queryOutputInfo: (storePath: string) => Promise<NixValidPathInfo>
+): Promise<NixValidPathInfo[]> {
+	const states = await Promise.allSettled(
+		storePaths.map((storePath) => queryOutputInfo(storePath))
+	);
+	for (const state of states) {
+		if (state.status !== 'rejected') {
+			continue;
+		}
+		const reason: unknown = state.reason;
+		if (reason instanceof NixStorePathNotFoundError) {
+			continue;
+		}
+		if (reason instanceof Error) {
+			throw reason;
+		}
+		throw new Error('Could not query the requested build outputs', {
+			cause: reason
+		});
+	}
+	return states.flatMap((state) =>
+		state.status === 'fulfilled' ? [state.value] : []
+	);
+}
+
 export function derivationsRequiringVerification(
 	finalInfos: readonly NixValidPathInfo[],
 	preExisting: ReadonlySet<string>,
@@ -297,46 +360,62 @@ export function receiptSubjects(
 	preExisting: ReadonlySet<string>,
 	provenanceRebuilds: ReadonlySet<string> = new Set()
 ): BuildReceiptV2Input['subjects'] {
-	return finalInfos
-		.flatMap((info) => {
-			if (
-				info.deriver === undefined ||
-				(!info.ultimate && !provenanceRebuilds.has(info.storePath)) ||
-				(preExisting.has(info.storePath) &&
-					!provenanceRebuilds.has(info.storePath))
-			) {
-				return [];
-			}
-
-			const built = attempts.find(
-				(attempt) =>
-					attempt.activities.some(
-						(activity) =>
-							activity.machine === '' && activity.derivation === info.deriver
-					) &&
-					(attempt.validatedOutputs === undefined ||
-						attempt.validatedOutputs.some(
-							(output) =>
-								output.storePath === info.storePath &&
-								output.deriver === info.deriver &&
-								output.narHash.digestHex() === info.narHash.digestHex()
-						))
-			);
-			if (built === undefined) {
-				return [];
-			}
-
-			return [
-				{
+	const hasExplicitChecks = attempts.some((attempt) =>
+		attempt.activities.some((activity) => activity.verifiedByCheck === true)
+	);
+	const subjects = observedReceiptSubjects(
+		attempts.map((attempt) => ({
+			attempt: attempt.attempt,
+			attemptId: attempt.attemptId,
+			activities: attempt.activities,
+			...(attempt.validatedOutputs !== undefined && {
+				completedOutputs: attempt.validatedOutputs.map((info) => ({
 					storePath: info.storePath,
 					narHash: info.narHash.digestHex(),
-					derivation: info.deriver,
-					attempt: built.attempt,
-					attemptId: built.attemptId
-				}
-			];
-		})
-		.toSorted((left, right) => left.storePath.localeCompare(right.storePath));
+					derivation: info.deriver ?? ''
+				}))
+			}),
+			...(attempt.activities.some(
+				(activity) =>
+					(activity.verifiedByCheck === true || !hasExplicitChecks) &&
+					finalInfos.some(
+						(info) =>
+							provenanceRebuilds.has(info.storePath) &&
+							info.deriver === activity.derivation
+					)
+			) && {
+				verifiedOutputs: finalInfos
+					.filter((info) => provenanceRebuilds.has(info.storePath))
+					.map((info) => ({
+						storePath: info.storePath,
+						narHash: info.narHash.digestHex(),
+						derivation: info.deriver ?? ''
+					}))
+			})
+		})),
+		finalInfos.map((info) =>
+			provenanceRebuilds.has(info.storePath)
+				? { ...info, ultimate: true }
+				: info
+		),
+		preExisting,
+		autoBuildStore
+	);
+	return subjects.flatMap((subject) =>
+		subject.origin !== 'built' ||
+		subject.attempt === undefined ||
+		subject.attemptId === undefined
+			? []
+			: [
+					{
+						storePath: subject.storePath,
+						narHash: subject.narHash,
+						derivation: subject.derivation,
+						attempt: subject.attempt,
+						attemptId: subject.attemptId
+					}
+				]
+	);
 }
 
 function originSubjects(
@@ -497,6 +576,14 @@ export function registerBuildCommand(
 			'--publication-url <url>',
 			'destination tenant or cache URL, required when substituter is leave'
 		)
+		.option(
+			'--cupboard-path <path>',
+			'cupboard executable with the compiled build hook relay'
+		)
+		.option(
+			'--intermediate-paths-file <path>',
+			'write completed intermediate output paths to this file'
+		)
 		.option('--paths-file <path>', 'write realised output paths to this file')
 		.option(
 			'--inline-paths <value>',
@@ -529,9 +616,6 @@ export async function buildAction(
 		['none', 'outputs', 'built', 'closure'],
 		'outputs'
 	);
-	if (publish === 'built') {
-		throw new SimpleBuiltPublicationUnsupportedError();
-	}
 
 	const installables = [...(options.installables ?? [])];
 	const isInlinePaths = isEnabled('inline-paths', options.inlinePaths, true);
@@ -597,17 +681,23 @@ export async function buildAction(
 	}
 
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
+	const outputDirectory =
+		environment[jobRootsEnvironmentKey] ?? runnerTemporary;
 	const pathsFile = path.resolve(
 		provided(options.pathsFile) ??
-			path.join(runnerTemporary, 'cupboard-build-paths.txt')
+			path.join(outputDirectory, 'cupboard-build-paths.txt')
 	);
 	const receiptFile = path.resolve(
 		provided(options.receiptFile) ??
-			path.join(runnerTemporary, 'cupboard-build-receipt.json')
+			path.join(outputDirectory, 'cupboard-build-receipt.json')
 	);
 	const publishPathsFile = path.resolve(
 		provided(options.publishPathsFile) ??
-			path.join(runnerTemporary, 'cupboard-publish-paths.txt')
+			path.join(outputDirectory, 'cupboard-publish-paths.txt')
+	);
+	const intermediatePathsFile = path.resolve(
+		provided(options.intermediatePathsFile) ??
+			path.join(outputDirectory, 'cupboard-intermediate-paths.txt')
 	);
 	let attributed: BuildAttempt[] = [];
 	let finalPaths: string[] = [];
@@ -618,375 +708,521 @@ export async function buildAction(
 
 	await mkdir(path.dirname(receiptFile), { recursive: true });
 	const nix = dependencies.nix ?? Nix.open();
-	const executeNix = dependencies.runNix ?? runNix;
-	const execute = (invocation: NixInvocation): Promise<RunResult> =>
-		dependencies.signal === undefined
-			? executeNix(invocation)
-			: executeNix(invocation, dependencies.signal);
-	const nextAttemptId = dependencies.nextAttemptId ?? randomUUID;
-	const waitBeforeRetry = dependencies.sleep ?? sleep;
-	const maxJobs = provided(options.maxJobs);
+	const protection =
+		dependencies.protection ??
+		(publish === 'built' || environment[jobRootsEnvironmentKey] !== undefined
+			? jobOutputProtection(
+					environment[jobRootsEnvironmentKey] ??
+						(await createJobRoots(environment)),
+					storeConfig.storeUri
+				)
+			: undefined);
+	const observation =
+		publish === 'built' && protection !== undefined
+			? await (dependencies.createObservation ?? observeBuild)({
+					environment,
+					config: storeConfig,
+					nix: Nix.open(),
+					invocationId: randomUUID(),
+					protection,
+					...(provided(options.cupboardPath) !== undefined && {
+						cupboardPath: provided(options.cupboardPath)
+					})
+				})
+			: undefined;
+	return withCleanups(async () => {
+		const completedExecution: {
+			readonly attempt: BuildAttempt;
+			readonly outputs: readonly NixValidPathInfo[];
+		}[] = [];
+		const requestedSurvivors = new Set<string>();
+		const executeNix = dependencies.runNix ?? runNix;
+		const execute = (invocation: NixInvocation): Promise<RunResult> => {
+			const observed =
+				observation === undefined
+					? invocation
+					: { ...invocation, environment: observation.environment };
+			return dependencies.signal === undefined
+				? executeNix(observed)
+				: executeNix(observed, dependencies.signal);
+		};
+		const nextAttemptId = dependencies.nextAttemptId ?? randomUUID;
+		const waitBeforeRetry = dependencies.sleep ?? sleep;
+		const maxJobs = provided(options.maxJobs);
 
-	const plan = await execute(
-		nixBuildInvocation(
-			['build', '--dry-run', '--json', '--no-link'],
-			installables
-		)
-	);
-	const plannedPaths = new Set<string>();
-	let plannedInstallables: ReadonlyMap<string, string> = new Map();
-	const queryOutputInfo = async (
-		storePath: string
-	): Promise<NixValidPathInfo> => {
-		const info = await nix.queryPathInfo(storePath);
-		if (info.deriver !== undefined) {
-			return info;
-		}
-		const installable = plannedInstallables.get(info.storePath);
-		const derivation = installable?.split('^', 1)[0];
-		return derivation === undefined ? info : { ...info, deriver: derivation };
-	};
-	const preExisting = new Set<string>();
-	const uncertainInitialPaths = new Set<string>();
-	const earlierExecution: {
-		readonly attempt: BuildAttempt;
-		readonly outputs: readonly NixValidPathInfo[];
-	}[] = [];
-	if (plan.status === 0) {
-		const planned = plannedOutputs(plan.stdout);
-		const candidates = planned.paths;
-		plannedInstallables = planned.installables;
-		for (const candidate of candidates) {
-			plannedPaths.add(candidate);
-		}
-		const states = await Promise.allSettled(
-			candidates.map(async (storePath) => {
-				await nix.queryPathInfo(storePath);
-				return storePath;
-			})
+		const plan = await execute(
+			nixBuildInvocation(
+				['build', '--dry-run', '--json', '--no-link'],
+				installables
+			)
 		);
-		for (const [index, state] of states.entries()) {
-			if (state.status === 'fulfilled') {
-				preExisting.add(state.value);
-			} else if (!(state.reason instanceof NixStorePathNotFoundError)) {
-				const candidate = candidates[index];
-				if (candidate !== undefined) {
-					uncertainInitialPaths.add(candidate);
+		const plannedPaths = new Set<string>();
+		let plannedInstallables: ReadonlyMap<string, string> = new Map();
+		const queryOutputInfo = async (
+			storePath: string
+		): Promise<NixValidPathInfo> => {
+			const info = await nix.queryPathInfo(storePath);
+			if (info.deriver !== undefined) {
+				return info;
+			}
+			const installable = plannedInstallables.get(info.storePath);
+			const derivation = installable?.split('^', 1)[0];
+			return derivation === undefined ? info : { ...info, deriver: derivation };
+		};
+		const preExisting = new Set<string>();
+		const uncertainInitialPaths = new Set<string>();
+		const earlierExecution: {
+			readonly attempt: BuildAttempt;
+			readonly outputs: readonly NixValidPathInfo[];
+		}[] = [];
+		if (plan.status === 0) {
+			const planned = plannedOutputs(plan.stdout);
+			const candidates = planned.paths;
+			plannedInstallables = planned.installables;
+			for (const candidate of candidates) {
+				plannedPaths.add(candidate);
+			}
+			const states = await Promise.allSettled(
+				candidates.map(async (storePath) => {
+					await nix.queryPathInfo(storePath);
+					return storePath;
+				})
+			);
+			for (const [index, state] of states.entries()) {
+				if (state.status === 'fulfilled') {
+					preExisting.add(state.value);
+				} else if (!(state.reason instanceof NixStorePathNotFoundError)) {
+					const candidate = candidates[index];
+					if (candidate !== undefined) {
+						uncertainInitialPaths.add(candidate);
+					}
 				}
 			}
 		}
-	}
-	for (let attempt = 1; attempt <= attempts; attempt += 1) {
-		const attemptId = nextAttemptId();
-		const logFile = path.join(
-			runnerTemporary,
-			`cupboard-nix-${attemptId}.jsonl`
-		);
-		const arguments_ = [
-			'build',
-			'--no-link',
-			'--print-out-paths',
-			'--option',
-			'json-log-path',
-			logFile,
-			...(isKeepGoing ? ['--keep-going'] : []),
-			...(maxJobs === undefined ? [] : ['--max-jobs', maxJobs])
-		];
-		const invocation = nixBuildInvocation(arguments_, installables);
+		await protection?.protect([...preExisting], dependencies.signal);
+		for (let attempt = 1; attempt <= attempts; attempt += 1) {
+			const attemptId = nextAttemptId();
+			const logFile = path.join(
+				runnerTemporary,
+				`cupboard-nix-${attemptId}.jsonl`
+			);
+			const arguments_ = [
+				'build',
+				...(protection === undefined
+					? ['--no-link']
+					: ['--out-link', path.join(protection.directory, 'targets')]),
+				'--print-out-paths',
+				'--option',
+				'json-log-path',
+				logFile,
+				...(isKeepGoing ? ['--keep-going'] : []),
+				...(maxJobs === undefined ? [] : ['--max-jobs', maxJobs])
+			];
+			const invocation = nixBuildInvocation(arguments_, installables);
 
-		const result = await execute(invocation);
-		status = result.status;
-		failedCommand = 'nix build';
-		finalPaths = result.stdout.split(/\r?\n/u).filter((line) => line !== '');
-		const buildAttempt = {
-			attempt,
-			attemptId,
-			activities: await readBuildActivities(logFile)
-		};
-		if (status !== 0 && buildAttempt.activities.length > 0) {
-			const states = await Promise.allSettled(
-				[...new Set([...plannedPaths, ...finalPaths])].map((storePath) =>
-					queryOutputInfo(storePath)
-				)
-			);
-			earlierExecution.push({
-				attempt: buildAttempt,
-				outputs: states.flatMap((state) =>
-					state.status === 'fulfilled' &&
-					buildAttempt.activities.some(
-						(activity) => activity.derivation === state.value.deriver
-					)
-						? [state.value]
-						: []
-				)
-			});
-		}
-		if (status === 0) {
-			const attemptInfos = await Promise.all(
-				finalPaths.map((storePath) => queryOutputInfo(storePath))
-			);
-			if (
-				build === 'rebuild' &&
-				buildAttempt.activities.some(
-					(activity) =>
-						activity.machine !== '' &&
-						attemptInfos.some((info) => info.deriver === activity.derivation)
-				)
-			) {
-				throw new BuildRebuildRemoteDispatchError();
+			const firstEvent = observation?.events.length ?? 0;
+			const result = await execute(invocation);
+			await observation?.flush();
+			if (observation !== undefined && result.hookDeliveryFailed === true) {
+				throw new BuildObservationIncompleteError();
 			}
-			const verificationDerivations =
-				build === 'rebuild'
-					? [
-							...new Set([
-								...derivationsRequiringVerification(
-									attemptInfos,
-									preExisting,
-									plannedPaths,
-									uncertainInitialPaths
-								),
-								...attemptInfos.flatMap((info) =>
-									info.deriver !== undefined &&
-									buildAttempt.activities.every(
-										(activity) => activity.derivation !== info.deriver
-									)
-										? [info.deriver]
-										: []
-								)
-							])
-						].toSorted((left, right) => left.localeCompare(right))
-					: [];
-			const hasUnresolvedDeriver =
-				attemptInfos.some((info) => info.deriver === undefined) &&
-				build === 'rebuild';
-			if (hasUnresolvedDeriver || verificationDerivations.length > 0) {
-				const selectedPaths = hasUnresolvedDeriver
-					? attemptInfos.map((info) => info.storePath)
-					: attemptInfos
-							.filter(
-								(info) =>
-									info.deriver !== undefined &&
-									verificationDerivations.includes(info.deriver)
-							)
-							.map((info) => info.storePath);
-				const selectedInstallables = selectedPaths.map((storePath) =>
-					plannedInstallables.get(storePath)
+			status = result.status;
+			failedCommand = 'nix build';
+			finalPaths = result.stdout.split(/\r?\n/u).filter((line) => line !== '');
+			const requestedInfos =
+				protection === undefined
+					? undefined
+					: await queryExistingOutputInfos(
+							[...new Set([...plannedPaths, ...finalPaths])],
+							queryOutputInfo
+						);
+			if (requestedInfos !== undefined) {
+				await protection?.protect(
+					requestedInfos.map((info) => info.storePath),
+					dependencies.signal
 				);
-				const verificationAttemptId = nextAttemptId();
-				const verificationLogFile = path.join(
-					runnerTemporary,
-					`cupboard-nix-${verificationAttemptId}-${String(attempt)}-rebuild.jsonl`
-				);
-				const verification = await execute(
-					nixBuildInvocation(
-						[
-							'build',
-							'--rebuild',
-							'--option',
-							'builders',
-							'',
-							'--no-link',
-							'--option',
-							'json-log-path',
-							verificationLogFile,
-							...(isKeepGoing ? ['--keep-going'] : []),
-							...(maxJobs === undefined ? [] : ['--max-jobs', maxJobs])
-						],
-						hasUnresolvedDeriver || selectedInstallables.includes(undefined)
-							? installables
-							: selectedInstallables.filter(
-									(installable) => installable !== undefined
-								)
+				for (const info of requestedInfos) {
+					requestedSurvivors.add(info.storePath);
+				}
+			}
+			const buildAttempt = {
+				attempt,
+				attemptId,
+				activities: await readBuildActivities(logFile)
+			};
+			for (const storePath of finalPaths) {
+				requestedSurvivors.add(storePath);
+			}
+			if (observation !== undefined) {
+				const completedPaths = [
+					...new Set(
+						observation.events
+							.slice(firstEvent)
+							.flatMap((event) => event.outputPaths)
 					)
+				];
+				const outputs = await Promise.all(
+					completedPaths.map((storePath) => queryOutputInfo(storePath))
 				);
-				status = verification.status;
-				failedCommand = 'nix build --rebuild';
-				if (status === 0) {
-					const selectedDerivations = new Set(
-						attemptInfos.flatMap((info) =>
-							info.deriver === undefined ? [] : [info.deriver]
+				completedExecution.push({ attempt: buildAttempt, outputs });
+			}
+			if (status !== 0 && buildAttempt.activities.length > 0) {
+				const infos =
+					requestedInfos ??
+					(await queryExistingOutputInfos(
+						[...new Set([...plannedPaths, ...finalPaths])],
+						queryOutputInfo
+					));
+				earlierExecution.push({
+					attempt: buildAttempt,
+					outputs: infos.filter((info) =>
+						buildAttempt.activities.some(
+							(activity) => activity.derivation === info.deriver
+						)
+					)
+				});
+			}
+			if (status === 0) {
+				const attemptInfos = await Promise.all(
+					finalPaths.map((storePath) => queryOutputInfo(storePath))
+				);
+				if (
+					build === 'rebuild' &&
+					buildAttempt.activities.some(
+						(activity) =>
+							activity.machine !== '' &&
+							attemptInfos.some((info) => info.deriver === activity.derivation)
+					)
+				) {
+					throw new BuildRebuildRemoteDispatchError();
+				}
+				const verificationDerivations =
+					build === 'rebuild'
+						? [
+								...new Set([
+									...derivationsRequiringVerification(
+										attemptInfos,
+										preExisting,
+										plannedPaths,
+										uncertainInitialPaths
+									),
+									...attemptInfos.flatMap((info) =>
+										info.deriver !== undefined &&
+										buildAttempt.activities.every(
+											(activity) => activity.derivation !== info.deriver
+										)
+											? [info.deriver]
+											: []
+									)
+								])
+							].toSorted((left, right) => left.localeCompare(right))
+						: [];
+				const hasUnresolvedDeriver =
+					attemptInfos.some((info) => info.deriver === undefined) &&
+					build === 'rebuild';
+				if (hasUnresolvedDeriver || verificationDerivations.length > 0) {
+					const selectedPaths = hasUnresolvedDeriver
+						? attemptInfos.map((info) => info.storePath)
+						: attemptInfos
+								.filter(
+									(info) =>
+										info.deriver !== undefined &&
+										verificationDerivations.includes(info.deriver)
+								)
+								.map((info) => info.storePath);
+					const selectedInstallables = selectedPaths.map((storePath) =>
+						plannedInstallables.get(storePath)
+					);
+					const verificationAttemptId = nextAttemptId();
+					const verificationLogFile = path.join(
+						runnerTemporary,
+						`cupboard-nix-${verificationAttemptId}-${String(attempt)}-rebuild.jsonl`
+					);
+					const verificationFirstEvent = observation?.events.length ?? 0;
+					const verification = await execute(
+						nixBuildInvocation(
+							[
+								'build',
+								'--rebuild',
+								'--option',
+								'builders',
+								'',
+								'--no-link',
+								'--option',
+								'json-log-path',
+								verificationLogFile,
+								...(isKeepGoing ? ['--keep-going'] : []),
+								...(maxJobs === undefined ? [] : ['--max-jobs', maxJobs])
+							],
+							hasUnresolvedDeriver || selectedInstallables.includes(undefined)
+								? installables
+								: selectedInstallables.filter(
+										(installable) => installable !== undefined
+									)
 						)
 					);
+					await observation?.flush();
+					if (
+						observation !== undefined &&
+						verification.hookDeliveryFailed === true
+					) {
+						throw new BuildObservationIncompleteError();
+					}
 					const checkActivities =
 						await readBuildActivities(verificationLogFile);
-					const selectedActivities = checkActivities.filter((activity) =>
-						selectedDerivations.has(activity.derivation)
-					);
-					if (selectedActivities.some((activity) => activity.machine !== '')) {
-						throw new BuildRebuildRemoteDispatchError();
+					if (observation !== undefined) {
+						const intermediateCompletionPaths = [
+							...new Set(
+								observation.events
+									.slice(verificationFirstEvent)
+									.flatMap((event) => event.outputPaths)
+							)
+						].filter((storePath) => !finalPaths.includes(storePath));
+						const outputs = await Promise.all(
+							intermediateCompletionPaths.map((storePath) =>
+								queryOutputInfo(storePath)
+							)
+						);
+						completedExecution.push({
+							attempt: {
+								attempt,
+								attemptId: verificationAttemptId,
+								activities: checkActivities
+							},
+							outputs
+						});
 					}
-					const verificationActivities = selectedActivities
-						.filter((activity) => activity.machine === '')
-						.map((activity) => ({ ...activity, verifiedByCheck: true }));
+					status = verification.status;
+					failedCommand = 'nix build --rebuild';
+					if (status === 0) {
+						const selectedDerivations = new Set(
+							attemptInfos.flatMap((info) =>
+								info.deriver === undefined ? [] : [info.deriver]
+							)
+						);
+						const selectedActivities = checkActivities.filter((activity) =>
+							selectedDerivations.has(activity.derivation)
+						);
+						if (
+							selectedActivities.some((activity) => activity.machine !== '')
+						) {
+							throw new BuildRebuildRemoteDispatchError();
+						}
+						const verificationActivities = selectedActivities
+							.filter((activity) => activity.machine === '')
+							.map((activity) => ({ ...activity, verifiedByCheck: true }));
+						remoteBuilderDerivations = new Set(
+							[...buildAttempt.activities, ...selectedActivities]
+								.filter((activity) => activity.machine !== '')
+								.map((activity) => activity.derivation)
+						);
+						for (const info of attemptInfos) {
+							if (
+								info.deriver !== undefined &&
+								selectedPaths.includes(info.storePath) &&
+								verificationActivities.some(
+									(activity) => activity.derivation === info.deriver
+								)
+							) {
+								checkedPaths.add(info.storePath);
+							}
+						}
+						attributed = [
+							{
+								attempt,
+								attemptId: verificationAttemptId,
+								activities: verificationActivities
+							},
+							buildAttempt
+						];
+					}
+				} else {
+					attributed = [buildAttempt];
 					remoteBuilderDerivations = new Set(
-						[...buildAttempt.activities, ...selectedActivities]
+						buildAttempt.activities
 							.filter((activity) => activity.machine !== '')
 							.map((activity) => activity.derivation)
 					);
-					for (const info of attemptInfos) {
-						if (
-							info.deriver !== undefined &&
-							selectedPaths.includes(info.storePath) &&
-							verificationActivities.some(
-								(activity) => activity.derivation === info.deriver
-							)
-						) {
-							checkedPaths.add(info.storePath);
-						}
+				}
+				if (status === 0 && build === 'rebuild') {
+					const observed = new Set([
+						...remoteBuilderDerivations,
+						...attributed.flatMap((current) =>
+							current.activities.map((activity) => activity.derivation)
+						)
+					]);
+					const unobservedPaths = attemptInfos
+						.filter(
+							(info) =>
+								info.deriver === undefined || !observed.has(info.deriver)
+						)
+						.map((info) => info.storePath);
+					if (unobservedPaths.length > 0) {
+						throw new BuildObservationMissingError(unobservedPaths);
 					}
-					attributed = [
-						{
-							attempt,
-							attemptId: verificationAttemptId,
-							activities: verificationActivities
-						},
-						buildAttempt
-					];
-				}
-			} else {
-				attributed = [buildAttempt];
-				remoteBuilderDerivations = new Set(
-					buildAttempt.activities
-						.filter((activity) => activity.machine !== '')
-						.map((activity) => activity.derivation)
-				);
-			}
-			if (status === 0 && build === 'rebuild') {
-				const observed = new Set([
-					...remoteBuilderDerivations,
-					...attributed.flatMap((current) =>
-						current.activities.map((activity) => activity.derivation)
-					)
-				]);
-				const unobservedPaths = attemptInfos
-					.filter(
-						(info) => info.deriver === undefined || !observed.has(info.deriver)
-					)
-					.map((info) => info.storePath);
-				if (unobservedPaths.length > 0) {
-					throw new BuildObservationMissingError(unobservedPaths);
 				}
 			}
+			if (status === 0) {
+				break;
+			}
+			if (attempt < attempts) {
+				await waitBeforeRetry(attempt * 15_000, dependencies.signal);
+			}
 		}
-		if (status === 0) {
-			break;
-		}
-		if (attempt < attempts) {
-			await waitBeforeRetry(attempt * 15_000, dependencies.signal);
-		}
-	}
 
-	if (status !== 0 && !isAllowFailure) {
-		throw new CommandFailedError(failedCommand, status ?? -1);
-	}
+		if (status !== 0 && !isAllowFailure) {
+			throw new CommandFailedError(failedCommand, status ?? -1);
+		}
 
-	const finalInfos = await Promise.all(
-		finalPaths.map((storePath) => queryOutputInfo(storePath))
-	);
-	attributed = [
-		...earlierExecution.map((execution) => ({
-			...execution.attempt,
-			validatedOutputs: execution.outputs
-		})),
-		...attributed
-	];
-	const subjects = receiptSubjects(
-		attributed,
-		finalInfos,
-		preExisting,
-		checkedPaths
-	);
-	const receipt = buildReceiptV3Schema.parse({
-		version: 3,
-		paths: finalPaths,
-		subjects: originSubjects(
-			subjects,
-			finalInfos,
-			attributed,
-			storeConfig.storeUri
-		)
-	});
-	const selection = await selectPublicationPaths(
-		receipt.subjects.map((subject) => ({
-			...subject,
-			origin:
-				earlierExecution.some((execution) =>
-					execution.outputs.some(
-						(output) =>
-							output.storePath === subject.storePath &&
-							output.narHash.digestHex() === subject.narHash &&
-							output.deriver === subject.derivation &&
-							execution.attempt.activities.some(
-								(activity) => activity.derivation === output.deriver
-							)
-					)
-				) ||
-				(subject.derivation !== undefined &&
-					remoteBuilderDerivations.has(subject.derivation)) ||
-				subject.origin === 'built'
-					? 'built'
-					: subject.origin === 'copied'
-						? 'copied'
-						: 'store-held'
-		})),
-		{
-			substituter: build === 'rebuild' ? 'copy' : substituter,
-			...(tenantUrl !== undefined && { tenantUrl }),
-			...(dependencies.availabilitySettings !== undefined && {
-				settings: dependencies.availabilitySettings
-			}),
-			...(dependencies.availabilityNix !== undefined && {
-				store: dependencies.availabilityNix
-			}),
-			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		await observation?.flush();
+		if (observation !== undefined) {
+			const survivors = await queryExistingOutputInfos(
+				[...requestedSurvivors.union(plannedPaths)],
+				queryOutputInfo
+			);
+			finalPaths = survivors
+				.map((info) => info.storePath)
+				.toSorted((left, right) => left.localeCompare(right));
 		}
-	);
-	const publishPaths = selection.published;
-	const builtSubjects = receipt.subjects.filter(
-		(subject) => subject.origin === 'built'
-	);
-	const builtPaths = builtSubjects
-		.map((subject) => subject.storePath)
-		.toSorted((left, right) => left.localeCompare(right));
-	const builtReceipt = buildReceiptV3Schema.parse({
-		version: 3,
-		paths: builtPaths,
-		subjects: builtSubjects
-	});
-	const builtReceiptFile = path.join(
-		path.dirname(receiptFile),
-		'cupboard-built-receipt.json'
-	);
-	await mkdir(path.dirname(pathsFile), { recursive: true });
-	await mkdir(path.dirname(publishPathsFile), { recursive: true });
-	await writeFile(
-		pathsFile,
-		finalPaths.join('\n').concat(finalPaths.length === 0 ? '' : '\n')
-	);
-	await writeFile(
-		publishPathsFile,
-		publishPaths.join('\n').concat(publishPaths.length === 0 ? '' : '\n')
-	);
-	await writeFile(receiptFile, `${JSON.stringify(receipt)}\n`);
-	await writeFile(builtReceiptFile, `${JSON.stringify(builtReceipt)}\n`);
-	await setOutput(environment, 'paths-file', pathsFile);
-	await setOutput(environment, 'publish-paths-file', publishPathsFile);
-	await setOutput(environment, 'receipt-file', receiptFile);
-	await setOutput(environment, 'built-receipt-file', builtReceiptFile);
-	for (const [output, paths] of [
-		['paths', finalPaths],
-		['publish-paths', publishPaths],
-		['built-paths', builtPaths]
-	] as const) {
-		await setOutput(environment, `${output}-count`, String(paths.length));
-		if (!isInlinePaths) {
-			continue;
-		}
-		const contents = paths.join('\n');
-		const delimiter = `CUPBOARD_PATHS_${randomUUID().replaceAll('-', '_')}`;
-		await appendEnvironmentFile(
-			environment.GITHUB_OUTPUT,
-			`${output}<<${delimiter}\n${contents}\n${delimiter}\n`
+		const observedPaths =
+			observation?.events.flatMap((event) => event.outputPaths) ?? [];
+		const intermediatePaths = [
+			...new Set(
+				observedPaths.filter((storePath) => !finalPaths.includes(storePath))
+			)
+		].toSorted((left, right) => left.localeCompare(right));
+		const allPaths = [...finalPaths, ...intermediatePaths];
+		const finalInfos = await Promise.all(
+			allPaths.map((storePath) => queryOutputInfo(storePath))
 		);
-	}
+		await protection?.protect(allPaths, dependencies.signal);
+		attributed = [
+			...[...earlierExecution, ...completedExecution].map((execution) => ({
+				...execution.attempt,
+				validatedOutputs: execution.outputs
+			})),
+			...attributed
+		];
+		const subjects = receiptSubjects(
+			attributed,
+			finalInfos,
+			preExisting,
+			checkedPaths
+		);
+		const receipt = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: allPaths,
+			subjects: originSubjects(
+				subjects,
+				finalInfos,
+				attributed,
+				storeConfig.storeUri
+			)
+		});
+		const selection = await selectPublicationPaths(
+			receipt.subjects
+				.filter((subject) => finalPaths.includes(subject.storePath))
+				.map((subject) => ({
+					...subject,
+					origin:
+						earlierExecution.some((execution) =>
+							execution.outputs.some(
+								(output) =>
+									output.storePath === subject.storePath &&
+									output.narHash.digestHex() === subject.narHash &&
+									output.deriver === subject.derivation &&
+									execution.attempt.activities.some(
+										(activity) => activity.derivation === output.deriver
+									)
+							)
+						) ||
+						(subject.derivation !== undefined &&
+							remoteBuilderDerivations.has(subject.derivation)) ||
+						subject.origin === 'built'
+							? 'built'
+							: subject.origin === 'copied'
+								? 'copied'
+								: 'store-held'
+				})),
+			{
+				substituter: build === 'rebuild' ? 'copy' : substituter,
+				...(tenantUrl !== undefined && { tenantUrl }),
+				...(dependencies.availabilitySettings !== undefined && {
+					settings: dependencies.availabilitySettings
+				}),
+				...(dependencies.availabilityNix !== undefined && {
+					store: dependencies.availabilityNix
+				}),
+				...(dependencies.signal !== undefined && {
+					signal: dependencies.signal
+				})
+			}
+		);
+		const publishPaths = selection.published;
+		const builtSubjects = receipt.subjects.filter(
+			(subject) =>
+				subject.origin === 'built' && finalPaths.includes(subject.storePath)
+		);
+		const builtPaths = builtSubjects
+			.map((subject) => subject.storePath)
+			.toSorted((left, right) => left.localeCompare(right));
+		const builtReceipt = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: builtPaths,
+			subjects: builtSubjects
+		});
+		const builtReceiptFile = path.join(
+			path.dirname(receiptFile),
+			'cupboard-built-receipt.json'
+		);
+		await mkdir(path.dirname(pathsFile), { recursive: true });
+		await mkdir(path.dirname(publishPathsFile), { recursive: true });
+		await writeFile(
+			pathsFile,
+			finalPaths.join('\n').concat(finalPaths.length === 0 ? '' : '\n')
+		);
+		await writeFile(
+			publishPathsFile,
+			publishPaths.join('\n').concat(publishPaths.length === 0 ? '' : '\n')
+		);
+		await mkdir(path.dirname(intermediatePathsFile), { recursive: true });
+		await writeFile(
+			intermediatePathsFile,
+			intermediatePaths
+				.join('\n')
+				.concat(intermediatePaths.length === 0 ? '' : '\n')
+		);
+		await setOutput(
+			environment,
+			'intermediate-paths-file',
+			intermediatePathsFile
+		);
+		await setOutput(
+			environment,
+			'intermediate-paths-count',
+			String(intermediatePaths.length)
+		);
+		await writeFile(receiptFile, `${JSON.stringify(receipt)}\n`);
+		await writeFile(builtReceiptFile, `${JSON.stringify(builtReceipt)}\n`);
+		await setOutput(environment, 'paths-file', pathsFile);
+		await setOutput(environment, 'publish-paths-file', publishPathsFile);
+		await setOutput(environment, 'receipt-file', receiptFile);
+		await setOutput(environment, 'built-receipt-file', builtReceiptFile);
+		for (const [output, paths] of [
+			['paths', finalPaths],
+			['publish-paths', publishPaths],
+			['built-paths', builtPaths]
+		] as const) {
+			await setOutput(environment, `${output}-count`, String(paths.length));
+			if (!isInlinePaths) {
+				continue;
+			}
+			const contents = paths.join('\n');
+			const delimiter = `CUPBOARD_PATHS_${randomUUID().replaceAll('-', '_')}`;
+			await appendEnvironmentFile(
+				environment.GITHUB_OUTPUT,
+				`${output}<<${delimiter}\n${contents}\n${delimiter}\n`
+			);
+		}
+	}, [() => observation?.close() ?? Promise.resolve()]);
 }

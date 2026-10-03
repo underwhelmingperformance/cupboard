@@ -26,7 +26,7 @@ const publicWorkflows: readonly PublicWorkflow[] = [
 	{
 		file: 'cupboard-publish',
 		summary:
-			'Realises one flake installable on one runner. The defaults are `build: missing`, `substituter: copy`, `publish: outputs` and `attest: true`. For a private destination, the workflow can obtain a short-lived Cupboard read token through GitHub OIDC.'
+			'Realises one flake installable on one runner. The defaults are `build: missing`, `substituter: copy`, `publish: built` and `attest: true`. For a private destination, the workflow can obtain a short-lived Cupboard read token through GitHub OIDC.'
 	}
 ];
 const publicActions = [

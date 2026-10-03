@@ -61,6 +61,21 @@ on:
         required: false
         type: boolean
         default: true
+      run-root-ttl:
+        description:
+          How long the run root lasts after it was last set, such as 7d or 12h.
+          Every published path is added to this root, including built
+          intermediates.
+        required: false
+        type: string
+        default: '24h'
+      run-root-permanent:
+        description:
+          Keep the run root permanently. Set run-root-ttl to an empty string
+          when you turn this on.
+        required: false
+        type: boolean
+        default: false
       build:
         description: >-
           Control when to build the requested outputs. `missing` uses an output
@@ -92,7 +107,7 @@ on:
           `closure` replace the retention root with an empty path list.
         required: false
         type: string
-        default: outputs
+        default: built
       attest:
         description: >-
           Sign and attach SLSA build provenance for paths built on the runner in
@@ -316,6 +331,8 @@ jobs:
         with:
           url: ${{ inputs.url }}
           paths-file: ${{ steps.build.outputs.publish-paths-file }}
+          intermediate-paths-file:
+            ${{ steps.build.outputs.intermediate-paths-file }}
           closure: ${{ inputs.publish == 'closure' }}
           build-receipt-file: ${{ steps.build.outputs.receipt-file }}
           cache: ${{ inputs.cache }}
@@ -324,6 +341,12 @@ jobs:
             github.repository, github.ref_name) }}
           ttl: ${{ inputs.ttl }}
           permanent: ${{ inputs.ttl == '' && inputs.permanent }}
+          run-root:
+            ${{ format('{0}/_cupboard-run/{1}', steps.root.outputs.root ||
+            format('github:{0}/{1}', github.repository, github.ref_name),
+            github.run_id) }}
+          run-root-ttl: ${{ inputs.run-root-ttl }}
+          run-root-permanent: ${{ inputs.run-root-permanent }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}

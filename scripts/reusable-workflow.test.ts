@@ -1041,7 +1041,7 @@ ${sign.run}`
 		expect(workflow.on.workflow_call?.inputs.publish?.default).toBe('built');
 	});
 
-	it('publishes selected outputs by default in the simple workflow', async () => {
+	it('publishes observed builds and retains every published path in the simple workflow', async () => {
 		const workflow = await loadWorkflow(publishWorkflow);
 		const push = allSteps(workflow).find(
 			({ step }) => step.uses === cupboardAction('push')
@@ -1053,9 +1053,15 @@ ${sign.run}`
 				build: inputs?.build?.default,
 				substituter: inputs?.substituter?.default,
 				publish: inputs?.publish?.default,
-				attest: inputs?.attest?.default
+				attest: inputs?.attest?.default,
+				'run-root-ttl': inputs?.['run-root-ttl']?.default,
+				'run-root-permanent': inputs?.['run-root-permanent']?.default
 			},
 			pathsFile: push?.with?.['paths-file'],
+			intermediates: push?.with?.['intermediate-paths-file'],
+			runRoot: push?.with?.['run-root'],
+			runRootTtl: push?.with?.['run-root-ttl'],
+			runRootPermanent: push?.with?.['run-root-permanent'],
 			closure: push?.with?.closure,
 			buildReceipt: push?.with?.['build-receipt-file'],
 			if: push?.if
@@ -1063,10 +1069,17 @@ ${sign.run}`
 			defaults: {
 				build: 'missing',
 				substituter: 'copy',
-				publish: 'outputs',
-				attest: true
+				publish: 'built',
+				attest: true,
+				'run-root-ttl': '24h',
+				'run-root-permanent': false
 			},
 			pathsFile: '${{ steps.build.outputs.publish-paths-file }}',
+			intermediates: '${{ steps.build.outputs.intermediate-paths-file }}',
+			runRoot:
+				"${{ format('{0}/_cupboard-run/{1}', steps.root.outputs.root || format('github:{0}/{1}', github.repository, github.ref_name), github.run_id) }}",
+			runRootTtl: '${{ inputs.run-root-ttl }}',
+			runRootPermanent: '${{ inputs.run-root-permanent }}',
 			closure: "${{ inputs.publish == 'closure' }}",
 			buildReceipt: '${{ steps.build.outputs.receipt-file }}',
 			if: "${{ inputs.publish != 'none' }}"
@@ -1492,7 +1505,7 @@ describe('publication attestation coverage', () => {
 		}
 	])(
 		'evaluates coverage reporting for $status with publish=$publish, cancelled=$cancelled and receipt=$receipt',
-		async ({ status, publish, receipt, cancelled, report }) => {
+		async ({ status, attest = true, publish, receipt, cancelled, report }) => {
 			const results = [];
 
 			for (const file of [publishWorkflow, flakeWorkflow]) {
@@ -1513,6 +1526,7 @@ describe('publication attestation coverage', () => {
 				const expression = condition
 					.replaceAll(/^\$\{\{|\}\}$/g, '')
 					.replaceAll('!cancelled()', '"$CANCELLED" != true')
+					.replaceAll('inputs.attest', '"$ATTEST" == true')
 					.replaceAll(
 						/(?:inputs|needs\.configure\.outputs)\.publish/g,
 						'"$PUBLISH"'
@@ -1536,7 +1550,8 @@ describe('publication attestation coverage', () => {
 							STATUS: status,
 							PUBLISH: publish,
 							RECEIPT: receipt,
-							CANCELLED: String(cancelled)
+							CANCELLED: String(cancelled),
+							ATTEST: String(attest)
 						}
 					}
 				);
@@ -1908,7 +1923,9 @@ async function resolveSimplePublicationEvent(
 				REPOSITORY_ID: '1234',
 				HEAD_REPOSITORY_ID: event.headRepositoryId ?? '1234',
 				MANAGE_PR_CACHE: String(event.managed ?? true),
-				PUBLISH: event.publish ?? 'outputs',
+				PUBLISH:
+					event.publish ??
+					String(workflow.on.workflow_call?.inputs.publish?.default),
 				CACHE: event.cache ?? 'pr-7',
 				GITHUB_OUTPUT: output
 			}
@@ -2224,7 +2241,9 @@ async function resolvePublicationEvent(event: {
 				ROOT_PREFIX: event.preset === '' ? 'release' : '',
 				BUILD: 'missing',
 				SUBSTITUTER: 'copy',
-				PUBLISH: event.publish ?? 'outputs',
+				PUBLISH:
+					event.publish ??
+					String(workflow.on.workflow_call?.inputs.publish?.default),
 				PUSH: String(event.push ?? true),
 				ATTEST: 'true',
 				PERMANENT: 'false',
@@ -2285,7 +2304,7 @@ describe('pull-request cache lifecycle', () => {
 					cacheAccessMode
 				})
 			).toStrictEqual({
-				publish: 'outputs',
+				publish: 'built',
 				cache: 'release',
 				'cache-access-mode': cacheAccessMode,
 				'root-prefix': 'release',
@@ -2394,7 +2413,7 @@ describe('pull-request cache lifecycle', () => {
 			});
 			expect({ outputs, diagnostics }).toStrictEqual({
 				outputs: {
-					publish: 'outputs',
+					publish: 'built',
 					cache: 'gh-1234-pr-7',
 					'cache-access-mode': '',
 					'root-prefix': 'github:acme/infra/pr-7',
@@ -2482,7 +2501,7 @@ describe('pull-request cache lifecycle', () => {
 		'resolves a $action pull request with merged=$merged',
 		async ({ action, merged, removed }) => {
 			expect(await resolvePublicationEvent({ action, merged })).toStrictEqual({
-				publish: 'outputs',
+				publish: 'built',
 				cache: 'gh-1234-pr-7',
 				'cache-access-mode': '',
 				'root-prefix': 'github:acme/infra/pr-7',

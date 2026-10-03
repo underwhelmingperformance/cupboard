@@ -118,15 +118,6 @@ export class BuildObservationMissingError extends CodedError {
 	}
 }
 
-export class SimpleBuiltPublicationUnsupportedError extends UsageError {
-	constructor() {
-		super(
-			'The build-paths action cannot observe all build intermediates. Use the flake publishing workflow for publish: built, or select publish: outputs or closure.'
-		);
-		this.name = 'SimpleBuiltPublicationUnsupportedError';
-	}
-}
-
 export class BuiltPublicationObservationUnsupportedError extends UsageError {
 	constructor() {
 		super(

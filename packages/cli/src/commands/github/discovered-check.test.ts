@@ -828,10 +828,12 @@ function fixture(
 }
 
 function defaultDependencies(
-	overrides: Partial<DiscoveredGithubCheckDependencies> = {}
+	overrides: Partial<DiscoveredGithubCheckDependencies> = {},
+	publishingWorkflow = legacyPublishingWorkflow
 ): DiscoveredGithubCheckDependencies {
+	const callerSource = overrides.source ?? source;
+
 	return {
-		source,
 		lookupRepository: () =>
 			Promise.resolve({
 				repositoryId: 1234,
@@ -843,7 +845,15 @@ function defaultDependencies(
 		fetchCacheInfo: () =>
 			Promise.reject(new Error('unexpected cache-info read')),
 		fetchCacheAccess: () => Promise.resolve('public'),
-		...overrides
+		...overrides,
+		source: {
+			...callerSource,
+			read: (selectedRepository, selectedPath, reference) =>
+				selectedRepository === 'underwhelmingperformance/cupboard' &&
+				selectedPath === '.github/workflows/cupboard-publish.yml'
+					? Promise.resolve(publishingWorkflow)
+					: callerSource.read(selectedRepository, selectedPath, reference)
+		}
 	};
 }
 
@@ -3484,6 +3494,83 @@ jobs:
 				finding: configured
 					? new PassedCheckFinding('trust rule')
 					: new RepositoryTrustRuleMissingFinding('trust rule')
+			}
+		]);
+	}
+);
+
+it.each([
+	{ runRoot: false, attach: false, status: 'ready' },
+	{ runRoot: true, attach: false, status: 'failed' },
+	{ runRoot: true, attach: true, status: 'ready' }
+])(
+	'checks referenced simple workflow run-root=$runRoot with attachment grant=$attach',
+	async ({ runRoot, attach, status }) => {
+		const reference = `underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${'b'.repeat(40)}`;
+		const identity = {
+			repositoryId: 1234,
+			repositoryOwnerId: 5678,
+			fullName: repository,
+			defaultBranch: 'main'
+		};
+		const rule = oidcTrustSummarySchema.parse({
+			id: 'branch',
+			disabled: false,
+			...githubBranchAddBody(tenant, identity, {
+				repo: repository,
+				branch: 'main',
+				jobWorkflowRef: reference
+			})
+		});
+		const selectedRule = {
+			...rule,
+			permittedGrants: rule.permittedGrants.map((grant) =>
+				!attach && grant.type === 'cupboard_cache'
+					? {
+							...grant,
+							actions: grant.actions.filter(
+								(action) => action !== 'root:attach'
+							)
+						}
+					: grant
+			)
+		};
+		const caller = `on:\n  push:\n    branches: [main]\njobs:\n  publish:\n    uses: ${reference}\n    with:\n      url: ${tenant.href}\n      root: github:iainlane/dotfiles/main\n`;
+		const dependencies = defaultDependencies(
+			{ source: { ...source, read: () => Promise.resolve(caller) } },
+			`${legacyPublishingWorkflow}${runRoot ? '        with:\n          run-root: "${{ inputs.root }}/_cupboard-run/${{ github.run_id }}"\n' : ''}`
+		);
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			fixture({ rules: [selectedRule] }).client,
+			dependencies
+		);
+		expect(
+			result.jobs.map((job) => ({
+				status: job.status,
+				findings: job.findings.map(({ finding }) => ({
+					status: finding.status,
+					detail: finding.detail()
+				}))
+			}))
+		).toStrictEqual([
+			{
+				status,
+				findings:
+					status === 'failed'
+						? [
+								{
+									status: 'failed',
+									detail:
+										'rule branch matches the modelled claims but does not permit root:attach on cache (default) with root github:iainlane/dotfiles/main/x86_64-linux/_cupboard-run/1; add a rule with the required grant, or add a corrected rule and remove this one'
+								}
+							]
+						: [
+								{ status: 'ok', detail: undefined },
+								{ status: 'ok', detail: undefined }
+							]
 			}
 		]);
 	}

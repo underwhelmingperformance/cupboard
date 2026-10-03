@@ -9,6 +9,8 @@ import { describe, expect, it, onTestFinished } from 'vitest';
 import { parse } from 'yaml';
 import { z } from 'zod';
 
+import { renderActionBundle } from '../../scripts/action-bundles.ts';
+
 class CommandExitError extends Error {
 	constructor(
 		readonly code: number | null,
@@ -160,6 +162,67 @@ const wrapperStepSchema = z.looseObject({
 const wrapperActionSchema = z.looseObject({
 	runs: z.looseObject({ steps: z.array(wrapperStepSchema) })
 });
+const nativeActionSchema = z.looseObject({
+	runs: z.looseObject({ using: z.literal('node24'), main: z.string() })
+});
+
+async function readSessionEntrypoint(options: {
+	readonly action: string;
+	readonly actionPath: string;
+	readonly directory: string;
+	readonly source: string;
+	readonly audience: string;
+}): Promise<{ run: string; environment: Record<string, string> }> {
+	if (options.action !== 'build-paths') {
+		const document = wrapperActionSchema.parse(parse(options.source));
+		const step = document.runs.steps.find((candidate) =>
+			candidate.run?.includes('run_with_read_session')
+		);
+		if (step?.run === undefined) {
+			throw new Error('Expected an action read wrapper');
+		}
+		return {
+			run: step.run,
+			environment: Object.fromEntries(
+				Object.entries(step.env ?? {}).map(([key, value]) => [
+					key,
+					value === '${{ inputs.audience }}' ? options.audience : ''
+				])
+			)
+		};
+	}
+
+	const action = nativeActionSchema.parse(parse(options.source));
+	const main = path.join(options.directory, 'main.cjs');
+	const worker = path.join(options.directory, 'worker.ts');
+	await writeFile(
+		main,
+		await readFile(path.join(options.actionPath, action.runs.main))
+	);
+	await writeFile(
+		worker,
+		`import { writeFileSync } from 'node:fs';
+const output = process.env.WORKER_ENVIRONMENT_FILE;
+if (output === undefined) throw new Error('Worker environment file is required');
+writeFileSync(output, JSON.stringify({
+	configuration: process.env.NIX_CONFIG ?? '',
+	rootsDirectory: process.env.CUPBOARD_JOB_ROOTS_DIRECTORY ?? ''
+}));
+process.stdout.write('child');
+`
+	);
+	await writeFile(
+		path.join(options.directory, 'worker.cjs'),
+		await renderActionBundle(worker)
+	);
+	return {
+		run: 'exec "$REAL_NODE" "$NATIVE_MAIN"',
+		environment: {
+			NATIVE_MAIN: main,
+			INPUT_AUDIENCE: options.audience
+		}
+	};
+}
 
 it.each(
 	[
@@ -179,7 +242,7 @@ it.each(
 		].map((scenario) => ({ action, ...scenario }))
 	)
 )(
-	'acquires the normalised audience through the actual $action shell for $audience',
+	'acquires the normalised audience through the actual $action entrypoint for $audience',
 	async ({ action, audience, expected }) => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-action-audience-')
@@ -187,6 +250,10 @@ it.each(
 		const binary = path.join(directory, 'cupboard');
 		const node = path.join(directory, 'node');
 		const forwarded = path.join(directory, 'forwarded.json');
+		const workerEnvironmentFile = path.join(
+			directory,
+			'worker-environment.json'
+		);
 		const audiences: string[] = [];
 		const acquisitions: unknown[] = [];
 		let tenant = '';
@@ -244,13 +311,13 @@ it.each(
 				path.join(actionPath, 'action.yml'),
 				'utf8'
 			);
-			const document = wrapperActionSchema.parse(parse(source));
-			const step = document.runs.steps.find((candidate) =>
-				candidate.run?.includes('run_with_read_session')
-			);
-			if (step?.run === undefined) {
-				throw new Error('Expected an action read wrapper');
-			}
+			const entrypoint = await readSessionEntrypoint({
+				action,
+				actionPath,
+				directory,
+				source,
+				audience
+			});
 			await writeFile(
 				binary,
 				`#!/bin/bash\n"$REAL_NODE" -e 'require("node:fs").writeFileSync(process.env.FORWARDED_FILE, JSON.stringify(process.argv.slice(1)))' "$@"\nexec "$REAL_NODE" --experimental-transform-types --disable-warning=ExperimentalWarning "$CLI_MAIN" --output-mode json "$@"\n`,
@@ -261,19 +328,13 @@ it.each(
 				'#!/bin/bash\nfor argument in "$@"; do\n  if [[ "$argument" == "$ACTION_MAIN" ]]; then\n    printf child\n    exit 0\n  fi\ndone\nexec "$REAL_NODE" "$@"\n',
 				{ mode: 0o700 }
 			);
-			const environment = Object.fromEntries(
-				Object.entries(step.env ?? {}).map(([key, value]) => [
-					key,
-					value === '${{ inputs.audience }}' ? audience : ''
-				])
-			);
 			let stdout = '';
 			let status = 0;
 			try {
-				({ stdout } = await execute(step.run, [], {
+				({ stdout } = await execute(entrypoint.run, [], {
 					env: {
 						...process.env,
-						...environment,
+						...entrypoint.environment,
 						PATH: `${directory}:${process.env.PATH ?? ''}`,
 						REAL_NODE: process.execPath,
 						CLI_MAIN: cliMain,
@@ -284,6 +345,15 @@ it.each(
 						READ_SESSION_TARGET: `${tenant}/cache/builds`,
 						READ_SESSION_CACHES: JSON.stringify([`${tenant}/cache/extra`]),
 						READ_SESSION_VIEW: 'prior',
+						'INPUT_CUPBOARD-PATH': binary,
+						'INPUT_READ-SESSION-TARGET': `${tenant}/cache/builds`,
+						'INPUT_READ-SESSION-CACHES': JSON.stringify([
+							`${tenant}/cache/extra`
+						]),
+						'INPUT_READ-SESSION-VIEW': 'prior',
+						RUNNER_TEMP: directory,
+						GITHUB_STATE: path.join(directory, 'github-state'),
+						WORKER_ENVIRONMENT_FILE: workerEnvironmentFile,
 						NIX_CONFIG:
 							'substituters =\nnetrc-file = /cupboard-test-missing-netrc',
 						ACTIONS_ID_TOKEN_REQUEST_URL: `http://127.0.0.1:${String(address.port)}/identity`,
@@ -339,6 +409,29 @@ it.each(
 					]
 				]
 			});
+			if (action === 'build-paths') {
+				const workerEnvironment = z
+					.object({ configuration: z.string(), rootsDirectory: z.string() })
+					.parse(JSON.parse(await readFile(workerEnvironmentFile, 'utf8')));
+				expect({
+					workerArguments: argumentsList.slice(argumentsList.indexOf('--') + 1),
+					configurationLines: workerEnvironment.configuration
+						.split('\n')
+						.map((line) =>
+							line.startsWith('netrc-file = ') ? 'netrc-file' : line
+						),
+					state: await readFile(path.join(directory, 'github-state'), 'utf8'),
+					rootsParent: path.dirname(workerEnvironment.rootsDirectory)
+				}).toStrictEqual({
+					workerArguments: [
+						process.execPath,
+						path.join(directory, 'worker.cjs')
+					],
+					configurationLines: ['substituters =', 'netrc-file', 'netrc-file'],
+					state: `cupboard-job-roots=${workerEnvironment.rootsDirectory}\n`,
+					rootsParent: directory
+				});
+			}
 		} finally {
 			await new Promise<void>((resolve, reject) => {
 				server.close((error) => {

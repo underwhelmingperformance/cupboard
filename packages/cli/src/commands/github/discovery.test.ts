@@ -19,6 +19,8 @@ import {
 
 const repository = 'iainlane/dotfiles';
 const tenant = new URL('https://cupboard.supply/t/laney');
+const legacyPublishingWorkflow =
+	'on: workflow_call\njobs:\n  publish:\n    steps:\n      - uses: $/actions/push\n';
 
 function triggers(...events: string[]): WorkflowTrigger[] {
 	return events.map((event) => ({ event, filters: {}, hasPathFilter: false }));
@@ -28,8 +30,12 @@ function source(files: Readonly<Record<string, string>>): WorkflowSource {
 	return {
 		resolveBranch: () => Promise.resolve('a'.repeat(40)),
 		list: () => Promise.resolve(Object.keys(files)),
-		read: (_repository, path) => {
-			const content = files[path];
+		read: (selectedRepository, path) => {
+			const content =
+				selectedRepository === 'underwhelmingperformance/cupboard' &&
+				path === '.github/workflows/cupboard-publish.yml'
+					? legacyPublishingWorkflow
+					: files[path];
 
 			return content === undefined
 				? Promise.reject(new Error(`Missing fixture ${path}`))
@@ -573,7 +579,11 @@ jobs:
 		const result = await discoverPublishingJobs(repository, 'main', tenant, {
 			resolveBranch: () => Promise.resolve('a'.repeat(40)),
 			list: () => Promise.resolve(['.github/workflows/ci.yml']),
-			read: (_repository, path, reference) => {
+			read: (selectedRepository, path, reference) => {
+				if (selectedRepository === 'underwhelmingperformance/cupboard') {
+					return Promise.resolve(legacyPublishingWorkflow);
+				}
+
 				const key = `${path}@${reference === 'a'.repeat(40) ? 'main' : reference}`;
 				const content = files[key];
 
@@ -917,6 +927,7 @@ jobs:
 		expect(reads).toStrictEqual([
 			`.github/workflows/first.yml@${'a'.repeat(40)}`,
 			`.github/workflows/shared.yml@${'a'.repeat(40)}`,
+			'.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35',
 			`.github/workflows/second.yml@${'a'.repeat(40)}`
 		]);
 	});
@@ -1456,9 +1467,11 @@ describe('discoverPublishingJobs reusable workflow reads', () => {
 		const result = await discoverPublishingJobs(repository, 'main', tenant, {
 			resolveBranch: () => Promise.resolve('a'.repeat(40)),
 			list: () => Promise.resolve(['.github/workflows/ci.yml']),
-			read: (_repository, path) =>
-				path === '.github/workflows/ci.yml'
-					? Promise.resolve(`
+			read: (selectedRepository, path) =>
+				selectedRepository === 'underwhelmingperformance/cupboard'
+					? Promise.resolve(legacyPublishingWorkflow)
+					: path === '.github/workflows/ci.yml'
+						? Promise.resolve(`
 on: push
 jobs:
   missing:
@@ -1468,9 +1481,9 @@ jobs:
     with:
       url: https://cupboard.supply/t/laney
 `)
-					: Promise.reject(
-							new WorkflowDiscoveryError(`Cannot read ${path} from GitHub`)
-						)
+						: Promise.reject(
+								new WorkflowDiscoveryError(`Cannot read ${path} from GitHub`)
+							)
 		});
 
 		expect(result).toStrictEqual({
@@ -1629,4 +1642,99 @@ jobs:
 			]
 		});
 	});
+});
+
+describe('installable run-root capability', () => {
+	it.each([
+		{ reference: 'v0.0.35', runRoot: undefined, enabled: false },
+		{ reference: 'b'.repeat(40), runRoot: '', enabled: false },
+		{
+			reference: 'b'.repeat(40),
+			runRoot:
+				"${{ format('{0}/_cupboard-run/{1}', steps.root.outputs.root, github.run_id) }}",
+			enabled: true
+		}
+	])(
+		'reads actual push wiring at $reference with run-root=$runRoot',
+		async ({ reference, runRoot, enabled }) => {
+			const caller = `on: push
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${reference}
+    with:
+      url: ${tenant.href}
+`;
+			const files = source({ '.github/workflows/publish.yml': caller });
+			const reads: string[] = [];
+			const result = await discoverPublishingJobs(repository, 'main', tenant, {
+				...files,
+				read: (selectedRepository, selectedPath, selectedReference) => {
+					if (selectedRepository !== 'underwhelmingperformance/cupboard') {
+						return files.read(
+							selectedRepository,
+							selectedPath,
+							selectedReference
+						);
+					}
+					reads.push(
+						`${selectedRepository}/${selectedPath}@${selectedReference}`
+					);
+					return Promise.resolve(
+						`${legacyPublishingWorkflow}${runRoot === undefined ? '' : `        with:\n          run-root: ${JSON.stringify(runRoot)}\n`}`
+					);
+				}
+			});
+			expect({
+				reads,
+				jobs: result.jobs.map((job) => ({
+					kind: job.kind,
+					runRoot: job.installableRunRoot === true
+				})),
+				unverified: result.unverified
+			}).toStrictEqual({
+				reads: [
+					`underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${reference.startsWith('v') ? `refs/tags/${reference}` : reference}`
+				],
+				jobs: [{ kind: 'installable', runRoot: enabled }],
+				unverified: []
+			});
+		}
+	);
+
+	it.each(['unreadable', 'unrecognised'] as const)(
+		'reports an %s referenced workflow as unverified',
+		async (reason) => {
+			const reference = 'b'.repeat(40);
+			const caller = `on: push
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${reference}
+    with:
+      url: ${tenant.href}
+`;
+			const files = source({ '.github/workflows/publish.yml': caller });
+			const result = await discoverPublishingJobs(repository, 'main', tenant, {
+				...files,
+				read: (selectedRepository, selectedPath, selectedReference) =>
+					selectedRepository === 'underwhelmingperformance/cupboard'
+						? reason === 'unreadable'
+							? Promise.reject(new WorkflowDiscoveryError('Unavailable source'))
+							: Promise.resolve('on: workflow_call\njobs: {}\n')
+						: files.read(selectedRepository, selectedPath, selectedReference)
+			});
+			expect(result).toStrictEqual({
+				revision: 'a'.repeat(40),
+				jobs: [],
+				unverified: [
+					{
+						caller: '.github/workflows/publish.yml',
+						job: 'publish',
+						workflow: 'cupboard',
+						workflowRef: `underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${reference}`,
+						detail: `the check cannot ${reason === 'unreadable' ? 'inspect' : 'determine'} run-root publication in underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${reference}: ${reason === 'unreadable' ? 'Unavailable source' : 'no recognised push step'}`
+					}
+				]
+			});
+		}
+	);
 });

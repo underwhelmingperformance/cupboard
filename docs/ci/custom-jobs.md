@@ -49,12 +49,17 @@ Things to know before you use it:
   start with `github:acme/app/main/`. If you leave out `root`, the workflow uses
   `github:<repository>/<ref>` without the system. Then each platform's run
   replaces the previous platform's root.
-- Roots are permanent by default. Set `ttl` to make the root expire, or set
-  `permanent: false` to use the cache's default root lifetime.
-- The defaults are `build: missing`, `substituter: copy`, `publish: outputs` and
+- Requested-output roots are permanent by default. Set `ttl` to make the root
+  expire, or set `permanent: false` to use the cache's default root lifetime.
+  Every published path, including intermediates, is also added to a run root
+  beneath the selected root at `_cupboard-run/<run id>`. The run root expires
+  after `run-root-ttl`, which defaults to `24h`. Set `run-root-permanent: true`
+  and clear `run-root-ttl` to keep it permanently. The trust rule must grant
+  `attach` for this root.
+- The defaults are `build: missing`, `substituter: copy`, `publish: built` and
   `attest: true`. An available output can be used without building it again. The
-  workflow selects substituted outputs for publication. It signs build
-  provenance only for builds observed on the runner.
+  workflow selects substituted outputs and observed build intermediates for
+  publication. It signs build provenance only for builds observed on the runner.
 - Set `build: rebuild` when the run must execute every requested output again.
   This builds each requested output again in the selected Nix store, even if it
   is already available. Nix may still substitute dependencies. Set
@@ -149,10 +154,16 @@ jobs:
           audience: ${{ steps.setup.outputs.read-session-audience }}
           url: https://cupboard.example.workers.dev/t/acme
           paths-file: ${{ steps.build.outputs.publish-paths-file }}
+          intermediate-paths-file:
+            ${{ steps.build.outputs.intermediate-paths-file }}
           build-receipt-file: ${{ steps.build.outputs.receipt-file }}
           root:
             github:${{ github.repository }}/${{ github.ref_name }}/x86_64-linux
           permanent: true
+          run-root:
+            github:${{ github.repository }}/${{ github.ref_name
+            }}/x86_64-linux/_cupboard-run/${{ github.run_id }}
+          run-root-ttl: 24h
       - id: attest
         uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
         with:
@@ -189,7 +200,8 @@ The steps do the following:
    Dependencies may still be substituted. It writes a receipt describing how
    each output became available and lists the output paths selected for
    publication.
-4. `push` publishes the selected outputs, sets their retention root, and writes
+4. `push` publishes selected outputs and observed intermediates. It sets the
+   requested-output root, adds every published path to the run root, and writes
    a receipt for the paths that the destination cache serves.
 5. `attest` checks the receipt against the cache. It fails if a path that it
    will sign is missing or has different contents. It then signs build
@@ -204,8 +216,9 @@ inline lists. `attest-attach` fails if it is given no bundles, so the condition
 skips the step when `bundles-file` is empty. A cohort can publish a path without
 building it; that path receives no new build provenance from this run.
 
-Every action also installs a pinned version of Node.js and pnpm. They stay on
-`PATH` for the rest of the job.
+The composite actions install pinned versions of Node.js and pnpm. They stay on
+`PATH` for the rest of the job. The native `build-paths` action uses GitHub's
+Node.js runtime and does not change the toolchain on `PATH`.
 
 ### Permissions and trust rules
 
@@ -383,6 +396,22 @@ activity fails immediately, because another attempt cannot recover the missing
 observation. If every attempt fails, the step fails. Set `allow-failure` to let
 the job continue anyway.
 
+The default `publish: built` includes selected requested outputs and successful
+intermediates reported by the post-build hook. Substituted intermediates are
+excluded. Pass `intermediate-paths-file` to `push` and specify a run root to
+retain those intermediates. `publish-paths-file` contains only selected
+requested outputs, so requested-output roots exclude intermediates. The receipt
+includes both sets of paths. With `allow-failure`, successful intermediates
+remain available even if every requested target fails.
+
+`publish: built` requires `cupboard-path` from `setup` to resolve the hook
+relay. A self-hosted runner needs a trusted local daemon or a daemonless local
+store, and its Nix configuration must permit the post-build hook. An existing
+hook or an unsupported remote store causes the action to fail before building.
+Choose `publish: outputs` or `publish: closure` when the store cannot support
+complete observation. A configured remote builder can report outputs returned to
+the coordinating store, but its internal dependencies are not observed.
+
 The receipt records how the requested outputs became available. Set
 `build: rebuild` to build every requested output again in the selected Nix
 store, even if it is already available. Nix may still substitute dependencies.
@@ -411,8 +440,10 @@ derivation from the dry-run plan when the plan reports a matching output path.
 If the plan cannot identify that derivation, the action passes the original
 installable to Nix for the rebuild.
 
-The action writes the receipt and the list of paths to fixed locations in
-`$RUNNER_TEMP`. A second `build-paths` step in the same job overwrites them.
+The action writes the receipt and path files to a private directory for each
+invocation under `$RUNNER_TEMP`. Nix GC roots protect completed outputs until
+the action's post-job step removes those roots. Repeated `build-paths` steps use
+separate directories and roots.
 
 The receipt can support SLSA build provenance for outputs built on the runner in
 this run when the Nix activity log records the build. If another installable

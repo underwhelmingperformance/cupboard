@@ -102,7 +102,13 @@ function derivedPnpmVersion(): string | undefined {
 }
 
 describe('composite action toolchain derivation', () => {
-	const files = actionFiles();
+	const files = actionFiles().filter((file) => {
+		const document: unknown = parse(readFileSync(file, 'utf8'));
+		return (
+			z.object({ runs: z.object({ using: z.string() }) }).parse(document).runs
+				.using === 'composite'
+		);
+	});
 	const bodies = new Map(
 		files.map((file) => [file, readFileSync(file, 'utf8')])
 	);
@@ -164,6 +170,42 @@ describe('composite action toolchain derivation', () => {
 		);
 
 		expect([...revisions]).toHaveLength(1);
+	});
+});
+
+describe('native build action runtime', () => {
+	it('uses the workspace Node major with generated main and post bundles', () => {
+		const document: unknown = parse(
+			readFileSync(
+				path.join(actionsDirectory, 'build-paths', 'action.yml'),
+				'utf8'
+			)
+		);
+		const action = z
+			.object({
+				runs: z.object({
+					using: z.string(),
+					main: z.string(),
+					post: z.string(),
+					'post-if': z.string()
+				})
+			})
+			.parse(document);
+		const [major] = readFileSync(
+			path.join(repositoryRoot, '.node-version'),
+			'utf8'
+		)
+			.trim()
+			.split('.', 1);
+		if (major === undefined) {
+			throw new Error('The workspace must specify its Node major version');
+		}
+		expect(action.runs).toStrictEqual({
+			using: `node${major}`,
+			main: 'dist/main.cjs',
+			post: 'dist/post.cjs',
+			'post-if': 'always()'
+		});
 	});
 });
 

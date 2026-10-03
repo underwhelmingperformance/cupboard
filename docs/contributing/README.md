@@ -89,7 +89,7 @@ tooling:
 
 | Path                | What's in it                                                                                           |
 | ------------------- | ------------------------------------------------------------------------------------------------------ |
-| `actions/`          | The composite GitHub Actions, with the TypeScript that they share in `actions/src`.                    |
+| `actions/`          | The GitHub Actions, with their TypeScript source in `actions/src`.                                     |
 | `tests/e2e`         | End-to-end suites that run against a Worker under Miniflare.                                           |
 | `tests/conformance` | Tests that check the TypeScript Nix client against a pinned `nix` binary.                              |
 | `tests/perf`        | Benchmarks for pushing and for reuse.                                                                  |
@@ -220,6 +220,7 @@ it.
 | Script                            | What it does                                                                                                                                                                                       | What it needs                                                        |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | `check:deps`                      | Runs `syncpack lint` over the workspace's `package.json` files.                                                                                                                                    |                                                                      |
+| `check:action-bundles`            | Checks that the native build action's generated bundles match its TypeScript source.                                                                                                               |                                                                      |
 | `check:format`                    | Runs `prettier --check .`.                                                                                                                                                                         |                                                                      |
 | `check:lint`                      | Runs `eslint .`.                                                                                                                                                                                   |                                                                      |
 | `check:knip`                      | Runs Knip, to find unused and unlisted dependencies.                                                                                                                                               |                                                                      |
@@ -291,10 +292,16 @@ fails while the generated file is out of date.
 | ------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `pnpm update:cli-reference`                 | `docs/reference/cli.md`, from each command's help.                                     |
 | `pnpm update:actions-reference`             | `docs/reference/actions.md`, from the YAML of the actions and reusable workflows.      |
+| `pnpm update:action-bundles`                | The build action's main, worker and post-job JavaScript bundles, from TypeScript.      |
 | `pnpm update:conformance-oracle`            | `tests/conformance/oracle.json` and the Nix settings table for each system. Needs Nix. |
 | `pnpm update:flake-deps`                    | `pnpm-deps-hash.json`, after the lockfile changes. Needs Nix.                          |
 | `pnpm fixtures:generate`                    | `tests/fixtures/simple`. Needs `nix-store`.                                            |
 | `pnpm --filter @cupboard/server cf:typegen` | `worker-configuration*.d.ts`, after a change to the Wrangler configuration.            |
+
+The native `build-paths` action uses GitHub's Node 24 runtime. Author its
+entrypoints and cleanup in TypeScript, then regenerate the bundles. Do not edit
+the generated JavaScript. The other composite actions continue to derive their
+toolchain from the repository's pins.
 
 ### Database schemas and migrations
 

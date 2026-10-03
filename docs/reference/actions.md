@@ -81,7 +81,7 @@ The calling job must grant:
 
 ### cupboard-publish.yml
 
-Realises one flake installable on one runner. The defaults are `build: missing`, `substituter: copy`, `publish: outputs` and `attest: true`. For a private destination, the workflow can obtain a short-lived Cupboard read token through GitHub OIDC.
+Realises one flake installable on one runner. The defaults are `build: missing`, `substituter: copy`, `publish: built` and `attest: true`. For a private destination, the workflow can obtain a short-lived Cupboard read token through GitHub OIDC.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@vX.Y.Z
@@ -107,9 +107,11 @@ The calling job must grant:
 | `root` | string |  | Start of the retention root name. The workflow appends the runner's Nix system, such as x86_64-linux, so each platform has its own root. If empty, the root is github:&lt;repository>/&lt;ref name>, without the system. |
 | `ttl` | string |  | How long the root lasts after it was last set, such as 7d. If empty, the root is permanent when permanent is true, and follows the cache's retention settings otherwise. |
 | `permanent` | boolean | `true` | Keep the root permanently when ttl is empty. Set it to false to use the cache's retention settings instead. |
+| `run-root-ttl` | string | `24h` | How long the run root lasts after it was last set, such as 7d or 12h. Every published path is added to this root, including built intermediates. |
+| `run-root-permanent` | boolean | `false` | Keep the run root permanently. Set run-root-ttl to an empty string when you turn this on. |
 | `build` | string | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
 | `substituter` | string | `copy` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. With `publish: closure`, all runtime references of selected outputs are published, including substituted dependencies. |
-| `publish` | string | `outputs` | Control which paths are published. `none` skips publication and retention updates. `outputs` publishes selected output paths. `built` also publishes observed build intermediates. `closure` publishes all their runtime references. If no outputs remain selected, `outputs` and `closure` replace the retention root with an empty path list. |
+| `publish` | string | `built` | Control which paths are published. `none` skips publication and retention updates. `outputs` publishes selected output paths. `built` also publishes observed build intermediates. `closure` publishes all their runtime references. If no outputs remain selected, `outputs` and `closure` replace the retention root with an empty path list. |
 | `attest` | boolean | `true` | Sign and attach SLSA build provenance for paths built on the runner in this run. A missing attestation does not change the build choice. The workflow skips signing when publication is disabled. |
 | `runs-on` | string | `ubuntu-24.04` | Runner label to build on. |
 | `trusted-public-key` | string |  | Nix public key to trust for reads from the cache. If empty, the job downloads the cache's current key from /pubkey and trusts it. |
@@ -184,7 +186,7 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | --- | --- | --- |
 | `inline-paths` | `true` | Control how path lists are returned. `true` writes inline path outputs as well as files. `false` returns files and counts without inline path outputs. Use `false` for large path lists. |
 | `publication-url` |  | Destination tenant or cache URL. Required with `substituter: leave` so paths from the destination and its tenant reuse views remain selected for publication. |
-| `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
+| `cupboard-path` |  | Path to the cupboard executable, required for built publication and private OIDC reads. |
 | `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
 | `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
 | `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
@@ -196,13 +198,15 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | `allow-failure` | `false` | Let the step succeed even if all five build attempts fail. |
 | `build` |  | Control when to build the requested outputs. Defaults to `missing` when `require-provenance` is not enabled. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
 | `require-provenance` |  | Deprecated. `true` selects `build: rebuild`; `false` uses the build mode. `true` conflicts with an explicit `build: missing`. Remove this input and set `build: rebuild` to preserve the execution guarantee. |
-| `publish` | `outputs` | Publication scope: none, outputs, built, or closure. This action cannot observe every build intermediate and refuses built before starting work. Use the flake publishing workflow for built publication. |
+| `publish` | `built` | Publication scope: none, outputs, built, or closure. Built includes completed intermediate outputs observed through the build hook. The selected store must be local or a trusted local daemon, with no configured post-build hook. |
 | `substituter` | `copy` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. |
 
 #### Outputs
 
 | Output | Description |
 | --- | --- |
+| `intermediate-paths-file` | File that lists completed intermediate outputs for built publication. |
+| `intermediate-paths-count` | Number of completed intermediate outputs selected for publication. |
 | `paths` | Output paths of the installables, one per line. Available when inline-paths is true; paths-file always contains the full list. |
 | `built-paths` | Output paths with observed runner-local build evidence, one per line. Available when inline-paths is true; built-receipt-file always records these paths. |
 | `publish-paths` | Selected output paths to publish under the substituter policy. Available when inline-paths is true; publish-paths-file always contains the full list. |
@@ -211,7 +215,7 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | `built-paths-count` | Number of output paths with observed runner-local build evidence. |
 | `paths-file` | File that lists the output paths of the installables. |
 | `publish-paths-file` | File that lists the selected output paths to publish. |
-| `receipt-file` | Path to the receipt for all realised outputs. |
+| `receipt-file` | Path to the receipt for realised targets and completed intermediate outputs. |
 | `built-receipt-file` | Receipt restricted to paths with observed runner-local build evidence. |
 
 ### actions/push

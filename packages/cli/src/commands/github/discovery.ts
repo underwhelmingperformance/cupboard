@@ -74,6 +74,10 @@ export interface DiscoveredPublishingJob {
 	readonly caller: string;
 	readonly job: string;
 	readonly kind: 'flake' | 'installable';
+	/**
+	 * Set only when the referenced push step specifies a nonempty run-root input.
+	 */
+	readonly installableRunRoot?: true;
 	readonly workflowRef: string;
 	readonly inputs: WorkflowInputs;
 	readonly readCredentialWiring?: {
@@ -697,8 +701,12 @@ export async function discoverPublishingJobs(
 	const workflows = new Map<string, Promise<Workflow>>();
 	const actions = new Map<string, Promise<LocalAction>>();
 
-	function readWorkflow(path: string, reference: string): Promise<Workflow> {
-		const location = `${path}@${reference}`;
+	function readWorkflow(
+		path: string,
+		reference: string,
+		workflowRepository = repository
+	): Promise<Workflow> {
+		const location = `${workflowRepository}/${path}@${reference}`;
 		const cached = workflows.get(location);
 
 		if (cached !== undefined) {
@@ -706,7 +714,7 @@ export async function discoverPublishingJobs(
 		}
 
 		const workflow = (async () => {
-			const content = await source.read(repository, path, reference);
+			const content = await source.read(workflowRepository, path, reference);
 
 			return yamlFile(content, path, workflowSchema, 'a workflow object');
 		})();
@@ -984,6 +992,7 @@ export async function discoverPublishingJobs(
 				supplied.publish !== undefined &&
 				supplied.publish !== 'none' &&
 				supplied.publish !== 'outputs' &&
+				supplied.publish !== 'built' &&
 				supplied.publish !== 'closure'
 			) {
 				unverified.push({
@@ -1023,6 +1032,62 @@ export async function discoverPublishingJobs(
 				continue;
 			}
 
+			let hasInstallableRunRoot = false;
+
+			if (
+				kind === 'installable' &&
+				supplied.publish !== 'none' &&
+				!workflowReference.includes('@refs/heads/')
+			) {
+				const selected = parseExactWorkflowReference(workflowReference);
+				let publishingWorkflow: Workflow;
+
+				try {
+					publishingWorkflow = await readWorkflow(
+						selected.path,
+						selected.pin.value,
+						`${selected.owner}/${selected.repo}`
+					);
+				} catch (error) {
+					if (
+						!(error instanceof WorkflowDiscoveryError) &&
+						!(error instanceof GithubPermissionError)
+					) {
+						throw error;
+					}
+
+					unverified.push({
+						caller,
+						job: label,
+						workflow: 'cupboard',
+						workflowRef: workflowReference,
+						detail: `the check cannot inspect run-root publication in ${workflowReference}: ${error.message}`
+					});
+					continue;
+				}
+
+				const pushSteps = Object.values(publishingWorkflow.jobs ?? {})
+					.flatMap((job) => job.steps ?? [])
+					.filter((step) => step.uses === '$/actions/push');
+
+				if (pushSteps.length === 0) {
+					unverified.push({
+						caller,
+						job: label,
+						workflow: 'cupboard',
+						workflowRef: workflowReference,
+						detail: `the check cannot determine run-root publication in ${workflowReference}: no recognised push step`
+					});
+					continue;
+				}
+
+				hasInstallableRunRoot = pushSteps.some(
+					(step) =>
+						typeof step.with?.['run-root'] === 'string' &&
+						step.with['run-root'].trim() !== ''
+				);
+			}
+
 			const keys = secretKeys(job.secrets, context.secretKeys);
 			const readSecrets = readCredentialWiring(keys);
 
@@ -1030,6 +1095,7 @@ export async function discoverPublishingJobs(
 				caller,
 				job: label,
 				kind,
+				...(hasInstallableRunRoot && { installableRunRoot: true as const }),
 				workflowRef: workflowReference,
 				inputs: supplied,
 				...(keys === 'unknown'

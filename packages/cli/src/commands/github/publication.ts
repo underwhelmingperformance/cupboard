@@ -442,28 +442,74 @@ export function flakeRequests(
 	];
 }
 
-// The push action never passes --no-attest, so the push that it runs requests
-// the attestation operations even when the workflow skips signing. The workflow
-// appends the builder's Nix system to the root. The model uses the system of
-// the workflow's default runner, and checkRootGrantPrefixes then requires a
-// grant for the whole prefix, which covers every other system.
-function installableRequests(
-	cache: CacheScope,
-	rootPrefix: string,
-	shouldAttest: boolean
-): AuthorizationDetails[] | undefined {
-	const retentionRoot =
-		rootPrefix === '' ? undefined : root(`${rootPrefix}/x86_64-linux`);
+interface InstallableRoots {
+	readonly target?: RootName;
+	readonly run?: RootName;
+}
 
-	if (rootPrefix !== '' && retentionRoot === undefined) {
+function installableRoots(
+	rootPrefix: string,
+	context: {
+		readonly identity: RepositoryIdentity;
+		readonly hasRunRoot: boolean;
+	},
+	entry: TriggerReference
+): InstallableRoots | undefined {
+	if (rootPrefix !== '') {
+		const target = root(`${rootPrefix}/x86_64-linux`);
+
+		if (target === undefined) {
+			return;
+		}
+
+		if (!context.hasRunRoot) {
+			return { target };
+		}
+
+		const run = root(`${target}/_cupboard-run/1`);
+
+		if (run === undefined) {
+			return;
+		}
+
+		return { target, run };
+	}
+
+	if (!context.hasRunRoot) {
+		return {};
+	}
+
+	const referenceName =
+		entry.ref.kind === 'pull-request'
+			? '1/merge'
+			: entry.ref.kind === 'tag'
+				? entry.ref.pattern.example()
+				: entry.ref.name;
+	const run = root(
+		`github:${context.identity.fullName}/${referenceName}/_cupboard-run/1`
+	);
+
+	if (run === undefined) {
 		return;
 	}
 
+	return { run };
+}
+
+// The push action requests attestation operations even when signing is off.
+// Explicit root prefixes include the runner's system. The grant check requires
+// the whole prefix so every runner system remains authorised.
+function installableRequests(
+	cache: CacheScope,
+	{ target, run }: InstallableRoots,
+	shouldAttest: boolean
+): AuthorizationDetails[] {
 	return [
 		pushAuthorizationDetails({
 			cache,
 			attest: true,
-			...(retentionRoot !== undefined && { root: retentionRoot })
+			...(target !== undefined && { root: target }),
+			runRoot: run
 		}),
 		...(shouldAttest ? [attestAttachAuthorizationDetails({ cache })] : [])
 	];
@@ -913,13 +959,22 @@ export function modelPublishingJob(
 			);
 
 			if (job.kind === 'installable') {
-				const requests = isReadOnly
-					? []
-					: installableRequests(cache.scope, rootPrefix, attestInput !== false);
+				const roots = isReadOnly
+					? undefined
+					: installableRoots(
+							rootPrefix,
+							{ identity, hasRunRoot: job.installableRunRoot === true },
+							entry
+						);
 
-				if (requests === undefined) {
+				if (roots === undefined && !isReadOnly) {
 					return unmodelled(`root '${rootPrefix}' is invalid`);
 				}
+
+				const requests =
+					roots === undefined
+						? []
+						: installableRequests(cache.scope, roots, attestInput !== false);
 
 				cases.push({
 					...entry,
