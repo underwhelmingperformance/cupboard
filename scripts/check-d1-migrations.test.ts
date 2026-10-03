@@ -104,7 +104,35 @@ describe('checkD1Migrations', () => {
 				...transition.expand,
 				...transition.contract
 			]).length,
-			replayed: ['tenant-retry-clock']
+			replayed: [
+				'local-step-attempts',
+				'publication-identity',
+				'blob-reference-read-authority',
+				'tenant-retry-clock'
+			]
+		});
+	});
+
+	it('expands path authority after contracted cache identity and contracts the path index before renaming its table', () => {
+		const order = deployOrder(schemaTransitions, 1);
+		expect(order).toStrictEqual({
+			files: [
+				...(schemaTransitions[0]?.expand ?? []),
+				...(schemaTransitions[0]?.contract ?? []),
+				'0031_deployment_transitions.sql',
+				'0033_tenant_local_step_attempts.sql',
+				'0034_publication_identity.sql',
+				'0035_blob_reference_read_authority.sql',
+				'0037_tenant_retry_clock.sql',
+				'0032_attestation_ref_path_index.sql',
+				'0036_path_read_authority_contract.sql'
+			],
+			ahead: [
+				'local-step-attempts',
+				'publication-identity',
+				'blob-reference-read-authority',
+				'tenant-retry-clock'
+			]
 		});
 	});
 

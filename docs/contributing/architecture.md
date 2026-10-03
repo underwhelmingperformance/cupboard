@@ -734,15 +734,24 @@ contract migrations of the transitions before it and don't change existing rows.
 Once every earlier transition has expanded, the deploy may apply an independent
 transition's expand migrations before the earlier transitions' contract
 migrations. A transition that isn't independent is **dependent**, and can only
-expand once every earlier transition is complete. Otherwise its expand
-migrations could run only after the upload, and the new Workers would run
-without them until then. `deployment-transitions`, `attestation-path-index` and
-`local-step-attempts` are independent, so a deployment on v0.0.33 upgrades
-directly. A later release that adds a dependent transition can be blocked, and
-its error lists the releases that complete the earlier transition, aren't older
-than the deployed release, and don't include the later transition. A fresh
-deployment is never blocked, because every transition completes on it before the
-upload.
+expand once every earlier transition is complete, unless it declares its
+contract prerequisites in `expandAfter`. With that declaration, the listed
+transitions must be complete and every earlier transition must have expanded.
+The `blob-reference-read-authority` expansion requires the contracted
+`cache-identity` schema, but does not require the new attestation index to be
+created first. Migration `0035` therefore expands before the upload on a v0.0.35
+deployment whose identity transition is contracted. After the upload, `0032`
+creates the index before `0036` renames the indexed table to
+`attestation_ref_storage`. A deployment with incomplete cache identity still
+requires an earlier release to complete that transition. Without the required
+contracts, the expand migrations could run only after the upload, and the new
+Workers would run without them until then. `deployment-transitions`,
+`attestation-path-index` and `local-step-attempts` are independent, so their
+expansions do not require cache identity to be complete. A later release that
+adds a dependent transition can be blocked, and its error lists the releases
+that complete the earlier transition, aren't older than the deployed release,
+and don't include the later transition. A fresh deployment is never blocked,
+because every transition completes on it before the upload.
 
 The `deployment_transition` table has one row for each transition that the
 deploy has started. The state is `expanded` once the transition's expand
@@ -783,7 +792,8 @@ One `cupboard init` run applies the transitions in list order:
      applied, including a migration of a complete transition;
    - a transition recorded as complete although one of its migrations is missing
      from `d1_migrations`;
-   - a dependent transition that follows a transition that isn't complete.
+   - a transition whose required earlier contracts are incomplete. Without
+     `expandAfter` or `independent`, every earlier contract is required.
 
    One kind of row doesn't stop the deploy: a row that a later release wrote for
    its own transition, in state `expanded` or `complete`, with `contracted_at`
