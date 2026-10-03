@@ -118,6 +118,7 @@ import {
 	pathReadDemotionPendingKey
 } from './path-read-authority-service.ts';
 import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
+import { rowsRemaining, withRowBudget } from './row-budget.ts';
 import { CupboardServer, maintenancePassCursorKey } from './server.ts';
 import {
 	subrequestsAvailable,
@@ -582,49 +583,79 @@ describe('attestation attach and reads', () => {
 			});
 			const cursors: { result: string; digest: Sha256HexDigest | undefined }[] =
 				[];
-			for (let pass = 0; pass < 391; pass += 1) {
-				const cursor = await runInDurableObject(
-					fixtureWorkerServer(),
-					async (instance, state) => {
-						const context = new ServerContext(state, {
-							...instance.context.env,
-							CUPBOARD_DB: binding
-						});
-						const cache = resolvedCache(context, destination);
-						const result = await attestationsFor(context).inheritFromTenant(
-							rootLogger(),
-							{
-								cache,
-								storePathHash: metadata.storePathHash,
-								generation: narInfoGenerationSchema.parse(0),
-								narHash: nar.narHash
-							}
-						);
-						const queue = context.db
-							.select()
-							.from(schema.attestationInheritances)
-							.where(
-								and(
-									eq(schema.attestationInheritances.cacheId, cache.id),
-									eq(
-										schema.attestationInheritances.storePathHash,
-										metadata.storePathHash
-									)
-								)
-							)
-							.get();
-						if (queue === undefined) {
-							throw new Error(
-								'The scale fixture must preserve its queued traversal.'
-							);
-						}
-						return { result, digest: queue.sourceDigest ?? undefined };
+			const budgets: { subrequests: number; rows: number }[] = [];
+			const pageSubrequests =
+				inheritanceLookupSubrequests + inheritanceListSubrequests;
+			const pagesPerDispatch = Math.floor(
+				(workersInvocationAllowances.free.subrequests -
+					subrequestSafetyReserve) /
+					pageSubrequests
+			);
+			const readPage = async (
+				instance: CupboardServer,
+				state: DurableObjectState
+			) => {
+				const context = new ServerContext(state, {
+					...instance.context.env,
+					CUPBOARD_DB: binding
+				});
+				budgets.push({
+					subrequests: subrequestsAvailable(),
+					rows: rowsRemaining()
+				});
+				const cache = resolvedCache(context, destination);
+				const result = await attestationsFor(context).inheritFromTenant(
+					rootLogger(),
+					{
+						cache,
+						storePathHash: metadata.storePathHash,
+						generation: narInfoGenerationSchema.parse(0),
+						narHash: nar.narHash
 					}
 				);
-				cursors.push(cursor);
+				const queue = context.db
+					.select()
+					.from(schema.attestationInheritances)
+					.where(
+						and(
+							eq(schema.attestationInheritances.cacheId, cache.id),
+							eq(
+								schema.attestationInheritances.storePathHash,
+								metadata.storePathHash
+							)
+						)
+					)
+					.get();
+				if (queue === undefined) {
+					throw new Error(
+						'The scale fixture must preserve its queued traversal.'
+					);
+				}
+				return {
+					result,
+					digest: queue.sourceDigest ?? undefined
+				};
+			};
+			const pageGroups = chunk(Array.from({ length: 391 }), pagesPerDispatch);
+			for (const passes of pageGroups) {
+				await runInDurableObject(
+					fixtureWorkerServer(),
+					async (instance, state) => {
+						for (const _pass of passes) {
+							const cursor = await withRowBudget(() =>
+								withSubrequestSlice(() => readPage(instance, state), {
+									subrequests: pageSubrequests,
+									reserve: 0
+								})
+							);
+							cursors.push(cursor);
+						}
+					}
+				);
 			}
 			expect({
 				cursors,
+				budgets,
 				bounded: reads.every((read) => read <= 1000)
 			}).toStrictEqual({
 				cursors: [
@@ -636,6 +667,11 @@ describe('attestation attach and reads', () => {
 					})),
 					{ result: 'complete', digest: undefined }
 				],
+				budgets: Array.from({ length: 391 }, () => ({
+					subrequests:
+						inheritanceLookupSubrequests + inheritanceListSubrequests,
+					rows: 25_000
+				})),
 				bounded: true
 			});
 		}
