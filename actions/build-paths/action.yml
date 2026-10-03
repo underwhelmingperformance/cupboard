@@ -16,7 +16,9 @@ inputs:
       publication.
     required: false
   cupboard-path:
-    description: Path to the cupboard executable when OIDC read access is used.
+    description:
+      Path to the cupboard executable, required for built publication and
+      private OIDC reads.
     required: false
   read-session-target:
     description:
@@ -71,11 +73,12 @@ inputs:
     required: false
   publish:
     description: >-
-      Publication scope: none, outputs, built, or closure. This action cannot
-      observe every build intermediate and refuses built before starting work.
-      Use the flake publishing workflow for built publication.
+      Publication scope: none, outputs, built, or closure. Built includes
+      completed intermediate outputs observed through the build hook. The
+      selected store must be local or a trusted local daemon, with no configured
+      post-build hook.
     required: false
-    default: outputs
+    default: built
   substituter:
     description: >-
       Control whether to publish outputs available from external substituters.
@@ -86,109 +89,46 @@ inputs:
     required: false
     default: copy
 outputs:
+  intermediate-paths-file:
+    description:
+      File that lists completed intermediate outputs for built publication.
+  intermediate-paths-count:
+    description:
+      Number of completed intermediate outputs selected for publication.
   paths:
     description:
       Output paths of the installables, one per line. Available when
       inline-paths is true; paths-file always contains the full list.
-    value: ${{ steps.build.outputs.paths }}
   built-paths:
     description:
       Output paths with observed runner-local build evidence, one per line.
       Available when inline-paths is true; built-receipt-file always records
       these paths.
-    value: ${{ steps.build.outputs.built-paths }}
   publish-paths:
     description:
       Selected output paths to publish under the substituter policy. Available
       when inline-paths is true; publish-paths-file always contains the full
       list.
-    value: ${{ steps.build.outputs.publish-paths }}
   paths-count:
     description: Number of realised output paths, including paths left upstream.
-    value: ${{ steps.build.outputs.paths-count }}
   publish-paths-count:
     description: Number of selected output paths to publish.
-    value: ${{ steps.build.outputs.publish-paths-count }}
   built-paths-count:
     description:
       Number of output paths with observed runner-local build evidence.
-    value: ${{ steps.build.outputs.built-paths-count }}
   paths-file:
     description: File that lists the output paths of the installables.
-    value: ${{ steps.build.outputs.paths-file }}
   publish-paths-file:
     description: File that lists the selected output paths to publish.
-    value: ${{ steps.build.outputs.publish-paths-file }}
   receipt-file:
-    description: Path to the receipt for all realised outputs.
-    value: ${{ steps.build.outputs.receipt-file }}
+    description:
+      Path to the receipt for realised targets and completed intermediate
+      outputs.
   built-receipt-file:
     description:
       Receipt restricted to paths with observed runner-local build evidence.
-    value: ${{ steps.build.outputs.built-receipt-file }}
 runs:
-  using: composite
-  steps:
-    - name: Resolve the pinned toolchain
-      id: toolchain
-      shell: bash
-      run: |
-        manifest="$GITHUB_ACTION_PATH/../../package.json"
-        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
-        node_version="$(tr -d '\r\n' < "$GITHUB_ACTION_PATH/../../.node-version")"
-        test -n "$version" && test -n "$node_version"
-        echo "pnpm-version=$version" >> "$GITHUB_OUTPUT"
-        echo "node-version=$node_version" >> "$GITHUB_OUTPUT"
-
-    - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      with:
-        version: ${{ steps.toolchain.outputs.pnpm-version }}
-        package_json_file: ${{ github.action_path }}/../../package.json
-
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-      with:
-        node-version: ${{ steps.toolchain.outputs.node-version }}
-
-    - name: Install action dependencies
-      shell: bash
-      working-directory: ${{ github.action_path }}/../..
-      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
-
-    - name: Build installables
-      id: build
-      shell: bash
-      env:
-        INSTALLABLES: ${{ inputs.installables }}
-        INLINE_PATHS: ${{ inputs.inline-paths }}
-        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
-        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
-        READ_SESSION_AUDIENCE: ${{ inputs.audience }}
-        READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
-        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
-        INSTALLABLES_FILE: ${{ inputs.installables-file }}
-        KEEP_GOING: ${{ inputs.keep-going }}
-        MAX_JOBS: ${{ inputs.max-jobs }}
-        ALLOW_FAILURE: ${{ inputs.allow-failure }}
-        BUILD: ${{ inputs.build }}
-        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
-        PUBLISH: ${{ inputs.publish }}
-        SUBSTITUTER: ${{ inputs.substituter }}
-        PUBLICATION_URL: ${{ inputs.publication-url }}
-      run: |
-        source "$GITHUB_ACTION_PATH/../read-session.sh"
-        run_with_read_session \
-          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
-          node --experimental-transform-types \
-            --disable-warning=ExperimentalWarning \
-            "$GITHUB_ACTION_PATH/../src/main.ts" build \
-            --installables "$INSTALLABLES" \
-            --inline-paths "$INLINE_PATHS" \
-            --installables-file "$INSTALLABLES_FILE" \
-            --keep-going "$KEEP_GOING" \
-            --max-jobs "$MAX_JOBS" \
-            --allow-failure "$ALLOW_FAILURE" \
-            --build "$BUILD" \
-            --require-provenance "$REQUIRE_PROVENANCE" \
-            --publish "$PUBLISH" \
-            --substituter "$SUBSTITUTER" \
-            --publication-url "$PUBLICATION_URL"
+  using: node24
+  main: dist/main.cjs
+  post: dist/post.cjs
+  post-if: always()

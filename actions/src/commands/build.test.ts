@@ -24,11 +24,13 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import {
+	buildEventSchema,
 	buildReceiptSchema,
 	buildReceiptV3Schema
 } from '@cupboard/protocol/build';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { BuildObservationIncompleteError } from '../build-paths/observation.ts';
 import {
 	BuildAttemptsInvalidError,
 	BuildInstallableInvalidError,
@@ -232,11 +234,73 @@ afterEach(async () => {
 });
 
 describe('buildAction', () => {
-	it('rejects built publication before starting an unobserved build', async () => {
+	it.each([
+		{ status: 0, allowFailure: 'true' },
+		{ status: 0, allowFailure: 'false' },
+		{ status: 17, allowFailure: 'true' },
+		{ status: 17, allowFailure: 'false' }
+	])(
+		'refuses hook failure without a receipt: $status $allowFailure',
+		async ({ status, allowFailure }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-observed-test-')
+			);
+			temporaryDirectories.push(directory);
+			const flush = vi.fn(() => Promise.resolve());
+			const close = vi.fn(() => Promise.resolve());
+			const runNix = vi.fn((invocation: { arguments: readonly string[] }) =>
+				Promise.resolve(
+					invocation.arguments.includes('--dry-run')
+						? { status: 0, stdout: '[]' }
+						: { status, stdout: `${app}\n`, hookDeliveryFailed: true }
+				)
+			);
+			await expect(
+				buildAction(
+					{ installables: ['.#app'], publish: 'built', allowFailure },
+					{ RUNNER_TEMP: directory },
+					{
+						runNix,
+						protection: { directory, protect: () => Promise.resolve() },
+						createObservation: () =>
+							Promise.resolve({
+								environment: {},
+								events: [],
+								flush,
+								close
+							})
+					}
+				)
+			).rejects.toStrictEqual(new BuildObservationIncompleteError());
+			expect({
+				runs: runNix.mock.calls.length,
+				flushes: flush.mock.calls,
+				closes: close.mock.calls,
+				receiptExists: existsSync(
+					path.join(directory, 'cupboard-build-receipt.json')
+				)
+			}).toStrictEqual({
+				runs: 2,
+				flushes: [[]],
+				closes: [[]],
+				receiptExists: false
+			});
+		}
+	);
+
+	it('requires the hook helper before starting built publication', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-observed-test-')
+		);
+		temporaryDirectories.push(directory);
 		const runNix = vi.fn();
 		await expect(
-			buildAction({ installables: ['.#app'], publish: 'built' }, {}, { runNix })
-		).rejects.toThrow('cannot observe all build intermediates');
+			buildAction(
+				{ installables: ['.#app'], publish: 'built' },
+				{ RUNNER_TEMP: directory },
+				{ runNix }
+			)
+		).rejects.toThrow('CUPBOARD_PATH is required');
 		expect(runNix.mock.calls).toStrictEqual([]);
 	});
 
@@ -508,6 +572,7 @@ describe('buildAction', () => {
 				inlinePaths: inlinePaths === 'false' ? undefined : paths.join('\n'),
 				inlinePublished: inlinePaths === 'false' ? undefined : paths.join('\n'),
 				counts: [
+					'intermediate-paths-count=0',
 					'paths-count=1000',
 					'publish-paths-count=1000',
 					'built-paths-count=0'
@@ -2123,4 +2188,249 @@ describe('plannedOutputPaths', () => {
 			)
 		).toStrictEqual([app, library]);
 	});
+});
+
+describe('built publication observation', () => {
+	it.each([false, true])(
+		'protects copied requested survivors before retry backoff (pre-existing: %s)',
+		async (isPreExisting) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-copy-root-test-')
+			);
+			temporaryDirectories.push(directory);
+			const environment = { RUNNER_TEMP: directory };
+			const protectedPaths = new Set<string>();
+			const beforeBuild: string[][] = [];
+			const beforeBackoff: string[][] = [];
+			let hasAttempted = false;
+			await buildAction(
+				{
+					installables: ['.#app', '.#library'],
+					publish: 'built',
+					attempts: '2',
+					keepGoing: 'true',
+					allowFailure: 'true'
+				},
+				environment,
+				{
+					protection: {
+						directory,
+						protect(paths) {
+							for (const storePath of paths) {
+								protectedPaths.add(storePath);
+							}
+							return Promise.resolve();
+						}
+					},
+					createObservation: () =>
+						Promise.resolve({
+							environment,
+							events: [],
+							flush: () => Promise.resolve(),
+							close: () => Promise.resolve()
+						}),
+					nix: {
+						queryPathInfo(storePath) {
+							if (storePath === library && (hasAttempted || isPreExisting)) {
+								return Promise.resolve(pathInfo(library, `${library}.drv`));
+							}
+							return Promise.reject(new NixStorePathNotFoundError(storePath));
+						}
+					},
+					runNix: ({ arguments: arguments_ }) => {
+						if (arguments_.includes('--dry-run')) {
+							return Promise.resolve({
+								status: 0,
+								stdout: JSON.stringify([
+									{ drvPath: `${app}.drv`, outputs: { out: app } },
+									{ drvPath: `${library}.drv`, outputs: { out: library } }
+								])
+							});
+						}
+						beforeBuild.push([...protectedPaths]);
+						hasAttempted = true;
+						return Promise.resolve({ status: 1, stdout: '' });
+					},
+					sleep: () => {
+						beforeBackoff.push([...protectedPaths]);
+						return Promise.resolve();
+					}
+				}
+			);
+			expect({ beforeBuild, beforeBackoff }).toStrictEqual({
+				beforeBuild: [isPreExisting ? [library] : [], [library]],
+				beforeBackoff: [[library]]
+			});
+		}
+	);
+
+	it('rejects unreadable survivor metadata instead of treating the target as missing', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-survivor-test-')
+		);
+		temporaryDirectories.push(directory);
+		const environment = { RUNNER_TEMP: directory };
+		const failure = new Error('The Nix store database could not be read');
+		let isInitialQuery = true;
+		const close = vi.fn(() => Promise.resolve());
+		const result = buildAction(
+			{
+				installables: ['.#app'],
+				publish: 'built',
+				attempts: '1',
+				allowFailure: 'true'
+			},
+			environment,
+			{
+				protection: { directory, protect: () => Promise.resolve() },
+				createObservation: () =>
+					Promise.resolve({
+						environment,
+						events: [],
+						flush: () => Promise.resolve(),
+						close
+					}),
+				nix: {
+					queryPathInfo(storePath) {
+						if (isInitialQuery) {
+							isInitialQuery = false;
+							return Promise.reject(new NixStorePathNotFoundError(storePath));
+						}
+						return Promise.reject(failure);
+					}
+				},
+				runNix: ({ arguments: arguments_ }) =>
+					Promise.resolve(
+						arguments_.includes('--dry-run')
+							? {
+									status: 0,
+									stdout: JSON.stringify([
+										{ drvPath: `${app}.drv`, outputs: { out: app } }
+									])
+								}
+							: { status: 1, stdout: '' }
+					)
+			}
+		);
+		await expect(result).rejects.toBe(failure);
+		expect(close.mock.calls).toStrictEqual([[]]);
+	});
+
+	it.each([
+		{ status: 0, target: true, machine: '' },
+		{ status: 0, target: true, machine: 'ssh-ng://builder' },
+		{ status: 1, target: false, machine: '' }
+	])(
+		'publishes completed intermediates with status=$status and machine=$machine',
+		async ({ status, target, machine }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-observed-test-')
+			);
+			temporaryDirectories.push(directory);
+			const protectedPaths: string[] = [];
+			const initialEvents = [
+				{
+					version: 1 as const,
+					invocationId: 'observed-invocation',
+					derivation: `${library}.drv`,
+					outputPaths: [library]
+				}
+			];
+			const events = initialEvents.map((event) =>
+				buildEventSchema.parse(event)
+			);
+			const output = path.join(directory, 'github-output');
+			const environment = { RUNNER_TEMP: directory, GITHUB_OUTPUT: output };
+			let isRealised = false;
+			const close = vi.fn(() => Promise.resolve());
+			await buildAction(
+				{
+					installables: ['.#app'],
+					publish: 'built',
+					attempts: '1',
+					allowFailure: 'true'
+				},
+				environment,
+				{
+					nextAttemptId: () => 'attempt-1',
+					protection: {
+						directory,
+						protect(paths) {
+							protectedPaths.push(...paths);
+							return Promise.resolve();
+						}
+					},
+					createObservation: () =>
+						Promise.resolve({
+							environment,
+							get events() {
+								return isRealised ? events : [];
+							},
+							flush: () => Promise.resolve(),
+							close
+						}),
+					nix: {
+						queryPathInfo(storePath) {
+							if (!isRealised || (storePath === app && !target)) {
+								return Promise.reject(new NixStorePathNotFoundError(storePath));
+							}
+							return Promise.resolve({
+								...pathInfo(
+									storePathSchema.parse(storePath),
+									`${storePath}.drv`
+								),
+								ultimate: true
+							});
+						}
+					},
+					runNix: async ({ arguments: arguments_ }) => {
+						if (arguments_.includes('--dry-run')) {
+							return {
+								status: 0,
+								stdout: JSON.stringify([
+									{ drvPath: `${app}.drv`, outputs: { out: app } }
+								])
+							};
+						}
+						isRealised = true;
+						const logIndex = arguments_.indexOf('json-log-path');
+						await writeFile(
+							arguments_[logIndex + 1] ?? '',
+							[
+								buildStart(`${library}.drv`, machine),
+								...(target ? [buildStart(`${app}.drv`)] : [])
+							].join('\n')
+						);
+						return { status, stdout: target ? `${app}\n` : '' };
+					}
+				}
+			);
+			const receiptContents = await readFile(
+				path.join(directory, 'cupboard-build-receipt.json'),
+				'utf8'
+			);
+			const receiptJson: unknown = JSON.parse(receiptContents);
+			const receipt = buildReceiptV3Schema.parse(receiptJson);
+			expect(receipt.paths).toStrictEqual([...(target ? [app] : []), library]);
+			expect(
+				receipt.subjects.map(({ storePath, origin }) => ({ storePath, origin }))
+			).toStrictEqual([
+				...(target ? [{ storePath: app, origin: 'built' }] : []),
+				{ storePath: library, origin: machine === '' ? 'built' : 'store-held' }
+			]);
+			expect(
+				await readFile(
+					path.join(directory, 'cupboard-publish-paths.txt'),
+					'utf8'
+				)
+			).toBe(target ? `${app}\n` : '');
+			expect(
+				await readFile(
+					path.join(directory, 'cupboard-intermediate-paths.txt'),
+					'utf8'
+				)
+			).toBe(`${library}\n`);
+			expect(close.mock.calls).toStrictEqual([[]]);
+		}
+	);
 });

@@ -1,4 +1,5 @@
 import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { oidcTrustSummarySchema } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -11,7 +12,9 @@ import {
 	rootListAuthorizationDetails
 } from '../../auth/attenuate.ts';
 import { parseRootName } from '../../root-name.ts';
+import { githubBranchAddBody } from '../oidc-trust.ts';
 
+import { checkTrustRule } from './check.ts';
 import {
 	type DiscoveredPublishingJob,
 	type WorkflowTrigger
@@ -44,8 +47,7 @@ const identity = {
 };
 const workflowReference =
 	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
-const installableWorkflowReference =
-	'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+const installableWorkflowReference = `underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${'b'.repeat(40)}`;
 
 function triggers(...events: string[]): WorkflowTrigger[] {
 	return events.map((event) => ({
@@ -72,6 +74,7 @@ const job: DiscoveredPublishingJob = {
 const installableJob: DiscoveredPublishingJob = {
 	...job,
 	kind: 'installable',
+	installableRunRoot: true,
 	workflowRef: installableWorkflowReference,
 	inputs: { url: tenant.href },
 	triggers: triggers('push')
@@ -93,7 +96,11 @@ const installableBranchClaims = {
 	job_workflow_ref: installableWorkflowReference
 };
 const installableRequests = [
-	pushAuthorizationDetails({ cache: { kind: 'default' }, attest: true }),
+	pushAuthorizationDetails({
+		cache: { kind: 'default' },
+		attest: true,
+		runRoot: parseRootName('github:iainlane/dotfiles/main/_cupboard-run/1')
+	}),
 	attestAttachAuthorizationDetails({ cache: { kind: 'default' } })
 ];
 
@@ -237,12 +244,119 @@ describe('modelPublishingJob', () => {
 										})
 									]
 								: []),
-							pushAuthorizationDetails({ cache, attest: true }),
+							pushAuthorizationDetails({
+								cache,
+								attest: true,
+								runRoot: parseRootName(
+									`github:iainlane/dotfiles/${trigger === 'pull_request' ? '1/merge' : 'main'}/_cupboard-run/1`
+								)
+							}),
 							attestAttachAuthorizationDetails({ cache })
 						]
 			]);
 		}
 	);
+
+	it.each([
+		{
+			rootPrefix: '',
+			event: 'push',
+			runRoot: 'github:iainlane/dotfiles/main/_cupboard-run/1'
+		},
+		{
+			rootPrefix: '',
+			event: 'pull_request',
+			runRoot: 'github:iainlane/dotfiles/1/merge/_cupboard-run/1'
+		},
+		{
+			rootPrefix: 'github:iainlane/dotfiles/main',
+			event: 'push',
+			runRoot: 'github:iainlane/dotfiles/main/x86_64-linux/_cupboard-run/1'
+		}
+	])(
+		'models run-root attachment for $event with root $rootPrefix',
+		({ rootPrefix, event, runRoot }) => {
+			const result = modelPublishingJob(
+				{
+					...installableJob,
+					inputs: { ...installableJob.inputs, root: rootPrefix },
+					triggers: triggers(event)
+				},
+				identity,
+				tenant,
+				'main'
+			);
+			expect(result.cases.map(({ requests }) => requests)).toStrictEqual([
+				[
+					pushAuthorizationDetails({
+						cache: { kind: 'default' },
+						attest: true,
+						...(rootPrefix !== '' && {
+							root: parseRootName(`${rootPrefix}/x86_64-linux`)
+						}),
+						runRoot: parseRootName(runRoot)
+					}),
+					attestAttachAuthorizationDetails({ cache: { kind: 'default' } })
+				]
+			]);
+		}
+	);
+
+	it('checks the simple run-root grant against generated and custom branch rules', () => {
+		const rule = oidcTrustSummarySchema.parse({
+			id: 'branch',
+			disabled: false,
+			...githubBranchAddBody(tenant, identity, {
+				repo: identity.fullName,
+				branch: 'main',
+				jobWorkflowRef: installableWorkflowReference
+			})
+		});
+		const restricted = {
+			...rule,
+			permittedGrants: rule.permittedGrants.map((grant) =>
+				grant.type === 'cupboard_cache'
+					? {
+							...grant,
+							actions: grant.actions.filter(
+								(action) => action !== 'root:attach'
+							)
+						}
+					: grant
+			)
+		};
+		const model = modelPublishingJob(installableJob, identity, tenant, 'main');
+		const publication = model.cases[0];
+
+		if (publication === undefined) {
+			throw new Error('The simple workflow must model its branch publication');
+		}
+
+		const check = 'simple trust rule';
+		const permitted = checkTrustRule(
+			check,
+			[rule],
+			publication.claims,
+			publication.requests
+		);
+		const refused = checkTrustRule(
+			check,
+			[restricted],
+			publication.claims,
+			publication.requests
+		);
+		expect({
+			permitted: { status: permitted.status, detail: permitted.detail() },
+			refused: { status: refused.status, detail: refused.detail() }
+		}).toStrictEqual({
+			permitted: { status: 'ok', detail: undefined },
+			refused: {
+				status: 'failed',
+				detail:
+					'rule branch matches the modelled claims but does not permit root:attach on cache (default) with root github:iainlane/dotfiles/main/_cupboard-run/1; add a rule with the required grant, or add a corrected rule and remove this one'
+			}
+		});
+	});
 
 	it('does not apply the old flake push input to an installable workflow', () => {
 		const result = modelPublishingJob(
@@ -720,7 +834,10 @@ describe('modelPublishingJob', () => {
 									kind: 'named',
 									name: cacheNameSchema.parse('packages')
 								},
-								attest: true
+								attest: true,
+								runRoot: parseRootName(
+									'github:iainlane/dotfiles/main/_cupboard-run/1'
+								)
 							})
 						]
 					}
@@ -818,7 +935,16 @@ describe('modelPublishingJob event filters', () => {
 		trigger: 'push',
 		ref: { kind: 'tag', pattern: ReferencePattern.parse('v1.2.3') },
 		claims: tagClaims,
-		requests: installableRequests
+		requests: [
+			pushAuthorizationDetails({
+				cache: { kind: 'default' },
+				attest: true,
+				runRoot: parseRootName(
+					'github:iainlane/dotfiles/v1.2.3/_cupboard-run/1'
+				)
+			}),
+			attestAttachAuthorizationDetails({ cache: { kind: 'default' } })
+		]
 	};
 	const branchCase = {
 		trigger: 'push',

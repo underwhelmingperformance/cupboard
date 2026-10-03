@@ -78,6 +78,8 @@ jobs:
       url: https://cupboard.supply/t/laney
       cache: systems
 `;
+const legacyPublishingWorkflow =
+	'on: workflow_call\njobs:\n  publish:\n    steps:\n      - uses: $/actions/push\n';
 const unmergedBranchContent = content.replace(
 	'branches: [main]',
 	'branches: [feature/publish]'
@@ -136,7 +138,12 @@ async function fixture(
 	const source = {
 		resolveBranch: () => Promise.resolve(revision),
 		list: () => Promise.resolve([path]),
-		read: () => Promise.resolve(workflowContent)
+		read: (selectedRepository: string) =>
+			Promise.resolve(
+				selectedRepository === 'underwhelmingperformance/cupboard'
+					? legacyPublishingWorkflow
+					: workflowContent
+			)
 	};
 	const client = {
 		caches: {
@@ -1732,7 +1739,12 @@ it('reports unverified jobs after the writes as an incomplete check', async () =
 				...dependencies,
 				source: {
 					...dependencies.source,
-					read: () => Promise.resolve(guarded)
+					read: (selectedRepository) =>
+						Promise.resolve(
+							selectedRepository === 'underwhelmingperformance/cupboard'
+								? legacyPublishingWorkflow
+								: guarded
+						)
 				}
 			},
 			check
@@ -1885,11 +1897,13 @@ jobs:
 							branch === 'main' ? 'b'.repeat(40) : 'a'.repeat(40)
 						),
 					list: () => Promise.resolve([path]),
-					read: (_repository, _path, reference) =>
+					read: (selectedRepository, _path, reference) =>
 						Promise.resolve(
-							(reference === 'b'.repeat(40)
-								? workflows.main
-								: workflows.feature) ?? ''
+							selectedRepository === 'underwhelmingperformance/cupboard'
+								? legacyPublishingWorkflow
+								: ((reference === 'b'.repeat(40)
+										? workflows.main
+										: workflows.feature) ?? '')
 						)
 				}
 			},

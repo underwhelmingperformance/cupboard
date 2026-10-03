@@ -487,7 +487,19 @@ and `attest` enables build provenance. Both workflows default to
 `build: missing` and `attest: true`. The flake workflow defaults to
 `substituter: leave` and `publish: built`, which publishes selected outputs plus
 observed build intermediates. The simpler workflow defaults to
-`substituter: copy` and `publish: outputs`.
+`substituter: copy` and `publish: built`. Select `publish: outputs` to keep
+publishing only requested outputs. Neither publication mode forces a rebuild.
+
+The `build-paths` action now uses GitHub's Node 24 runtime and removes its local
+GC roots in a post-job step. It no longer installs Node or pnpm for later steps
+in your job. All action source is TypeScript; the runtime bundles are generated.
+For `publish: built`, the selected local store must support the post-build hook.
+Daemon users must be trusted, and an existing `post-build-hook` must be removed
+or the caller must select `publish: outputs` or `publish: closure`.
+
+The simple workflow retains every published path under a run root for 24 hours
+by default. Configure `run-root-ttl` or `run-root-permanent` to change this
+retention. Requested targets still use their ordinary retention root.
 
 | v0.0.35 caller                                                                                                   | Change for this release                                                                                                                                                                                                               |
 | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

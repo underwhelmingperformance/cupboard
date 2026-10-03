@@ -5,6 +5,7 @@ pnpm-lock.yaml.*
 .wrangler
 .tmp-*
 dist
+!actions/build-paths/dist/
 build
 
 .DS_Store
