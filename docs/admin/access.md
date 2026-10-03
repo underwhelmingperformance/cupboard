@@ -7,8 +7,12 @@ controlled differently:
   administrators. You allow this by adding a trust rule for the person.
 - Publish to it from CI, which means pushing store paths from a GitHub Actions
   job. You allow this by adding a trust rule for the job.
-- Read a private cache, which means downloading store paths with Nix. This needs
-  a read credential. Only the deployment's operator can issue one.
+- Read a private cache, which means downloading store paths with Nix. A trust
+  rule can permit OIDC content reads, or a caller can use a static tenant or
+  cache read credential. Only the deployment's operator can issue static read
+  credentials. See [Private reads in CI][private-ci-reads].
+
+[private-ci-reads]: ../ci/private-caches.md
 
 Anyone can read a public cache. They don't need anything.
 
@@ -99,9 +103,11 @@ cupboard oidc-trust remove https://cupboard.example.workers.dev/t/acme <rule-id>
 Removing a rule disables it rather than deleting it, so it still appears in the
 list, marked as disabled.
 
-The person loses access within ten minutes. Their session can't be renewed, and
-their current access token expires within that time. If the rule was for a CI
-job, any tokens that the job has already received expire within 15 minutes.
+If no remaining matching rules permit the person's session authority, their
+session cannot be renewed. Their current access token expires within ten
+minutes. Another matching rule can continue to permit renewal under current
+policy. If the rule was for a CI job, any tokens that the job has already
+received expire within 15 minutes.
 
 ## Letting CI publish
 
@@ -119,3 +125,12 @@ the deployment's operator can issue these read credentials. See
 
 You can make a cache public or private yourself, with
 `cupboard cache set-access`. The change takes effect immediately.
+
+Setting access to public removes any cache read credential. If you make the
+cache private again, the old cache credential no longer works. Static reads fall
+back to the tenant read credential, if one is configured. Ask the [operator to
+issue a new cache read credential][cache-read-credentials] if the cache needs
+its own credential again. Content-read tokens remain an independent way to
+authorise private reads.
+
+[cache-read-credentials]: ../operator/tenants.md#read-credentials

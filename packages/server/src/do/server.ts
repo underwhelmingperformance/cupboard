@@ -9,7 +9,6 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
-import { attestationStatusRequestSchema } from '@cupboard/protocol/attestations';
 import {
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse,
@@ -41,11 +40,12 @@ import {
 	uploadCapabilitiesValue,
 	uploadGraceFactsCapability,
 	type UploadId,
-	uploadIdSchema
+	uploadIdSchema,
+	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
-import { and, asc, eq, gt, isNull, or } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -111,6 +111,7 @@ import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
+import { directUploadPageSize } from '../policy/upload-pages.ts';
 import {
 	cacheMetadataPageResponse,
 	parseCacheMetadataRequest
@@ -158,13 +159,13 @@ import {
 	CommitPipelineService,
 	type PrefetchedMaterialisationFacts,
 	type TenantAccount,
+	verifyBackstopDelayMs,
 	verifyBackstopKey
 } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type GarbageCollectionOutcome,
 	type GarbageCollectionTarget,
-	ownerRuleId,
 	type RuntimeEnv,
 	ServerContext
 } from './context.ts';
@@ -202,8 +203,10 @@ import {
 import { type ObjectFamily } from './object-move.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
+import { RetryClockService } from './retry-clock-service.ts';
 import {
 	type ResolvedReuseView,
 	ReuseViewAdminService
@@ -220,6 +223,7 @@ import {
 } from './tenant-identity-service.ts';
 import { TokenExchangeService } from './token-exchange-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
+import { UploadRetrySchedule } from './upload-retry-schedule.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
@@ -295,6 +299,7 @@ export const gcContinuationKey = 'maintenance:gc-pending';
 export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 
 type MaintenancePassKey =
+	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'cache-listing-projection'
 	| 'garbage-collection'
@@ -573,7 +578,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.tokenExchange = new TokenExchangeService(
 			this.context,
 			this.authKeys,
-			this.oidcTrust
+			this.oidcTrust,
+			() => this.reconcileMaintenanceEligibility()
 		);
 		this.roots = new RootsService(
 			this.context,
@@ -680,6 +686,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				const isUploadGraceEndpoint =
 					context.req.method === 'POST' &&
 					uploadGracePathPattern.test(pathname);
+
+				if (isUploadGraceEndpoint && !pathname.endsWith('/confirm')) {
+					response.headers.set(
+						uploadRequestMaxPathsHeader,
+						String(directUploadPageSize)
+					);
+				}
 
 				if (
 					isUploadGraceEndpoint &&
@@ -823,25 +836,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.get('cache'),
 					context.req.param('hash')
 				)
-		);
-		this.app.on(
-			'POST',
-			['/api/v1/attested-paths', '/cache/:cacheName/api/v1/attested-paths'],
-			async (context) => {
-				const request = await parseRequestBody(
-					attestationStatusRequestSchema,
-					context.req.raw
-				);
-
-				return context.json(
-					await this.attestations.attestedPathHashes(
-						context.get('cache'),
-						request.storePathHashes
-					),
-					StatusCodes.OK,
-					{ 'cache-control': 'no-store' }
-				);
-			}
 		);
 		this.app.on(
 			'GET',
@@ -1769,6 +1763,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.get()?.complete ?? false;
 
 		this.oidcTrust.seedOwnerRule();
+		await this.uploadState.migratePendingNarRefreshMarkers();
 
 		this.context.dbCost.recordOutstanding();
 		logMethodFinished(rootLogger().with({ method: 'initialise' }), {
@@ -1945,6 +1940,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.runExclusiveMaintenance('verify', () =>
 			(async () => {
 				this.commitPipeline.onVerificationPassStarted();
+				const retryClock = new RetryClockService(this.context);
+				if (retryClock.isBlocked()) {
+					await retryClock.read();
+				}
 				await this.verification.processPendingWithoutDecode(logger, limit);
 
 				if (this.verification.hasPendingUploads()) {
@@ -2123,23 +2122,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// queue again. Fresh NAR decoding must stay off the Durable Object.
 	// {@link armVerifyBackstopAlarm} handles a deadline that has not arrived.
 	private async resumeVerifyBackstop(backstopLogger: Logger): Promise<void> {
-		// The verdict drain owns rows with a recorded verdict. Exclude them from the
-		// pending check used to maintain the verification backstop deadline.
-		const awaitingVerdict = or(
-			eq(schema.pendingUploads.verdict, 'pending'),
-			eq(schema.pendingUploads.verdict, 'committing')
-		);
-		const pending = this.context.db
-			.select({ id: schema.pendingUploads.id })
-			.from(schema.pendingUploads)
-			.where(
-				and(awaitingVerdict, isNull(schema.pendingUploads.recordedVerdictJson))
-			)
-			.limit(1)
-			.get();
-
-		if (pending === undefined) {
+		const dueAt = new UploadRetrySchedule(this.context).freshAt();
+		if (dueAt === undefined) {
 			await this.ctx.storage.delete(verifyBackstopKey);
+			return;
+		}
+		if (dueAt > Date.now()) {
+			await this.ctx.storage.put(verifyBackstopKey, dueAt);
+			await armAlarmNoLaterThan(this.ctx.storage, dueAt);
 			return;
 		}
 
@@ -2183,11 +2173,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 				signal?.throwIfAborted();
 
-				const batch = this.verification.listPendingForVerify(
-					limit,
-					maxNarBytes,
+				const batch = await this.verification.beginVerificationBatch(
+					this.verification.listPendingForVerify(limit, maxNarBytes, signal),
 					signal
 				);
+				await this.withMaintenanceEligibility(() =>
+					this.verification.processExhaustedUploads(logger, signal)
+				);
+				await this.armUploadRetries();
+
 				onClaimed?.(batch);
 
 				if (settled > 0 && this.verification.hasPendingUploads()) {
@@ -2212,6 +2206,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	private async armUploadRetries(): Promise<void> {
+		const schedule = new UploadRetrySchedule(this.context);
+		const freshAt = schedule.freshAt();
+		if (freshAt === undefined) {
+			await this.ctx.storage.delete(verifyBackstopKey);
+		}
+		if (freshAt !== undefined) {
+			const now = Date.now();
+			const dueAt = freshAt <= now ? now + verifyBackstopDelayMs : freshAt;
+			await this.ctx.storage.put(verifyBackstopKey, dueAt);
+			await armAlarmNoLaterThan(this.ctx.storage, dueAt);
+		}
+		const recordedAt = schedule.recordedAt();
+		if (recordedAt !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, recordedAt);
+		}
+	}
+
 	// The RPC stores every non-abandoned verdict on its upload row; an abandoned
 	// verdict releases the lease locally. It then applies as many stored verdicts
 	// as the allowance covers and arms the alarm when recorded verdicts remain.
@@ -2228,9 +2240,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 				signal?.throwIfAborted();
 
-				if (this.verification.hasRecordedVerdicts()) {
-					await this.ctx.storage.setAlarm(Date.now());
-				}
+				await this.armUploadRetries();
 
 				return applied;
 			})()
@@ -2243,11 +2253,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async drainRecordedVerdicts(): Promise<MaintenanceProgress> {
 		const page = await this.metered('verdict-drain', (logger) =>
 			this.withMaintenanceEligibility(() =>
-				this.verification.applyRecordedVerdicts(logger)
+				(async () => {
+					await this.verification.processExhaustedUploads(logger);
+					return this.verification.applyRecordedVerdicts(logger);
+				})()
 			)
 		);
 
-		if (!this.verification.hasRecordedVerdicts()) {
+		const dueAt = new UploadRetrySchedule(this.context).recordedAt();
+		if (dueAt === undefined || dueAt > Date.now()) {
 			return 'progressed';
 		}
 
@@ -2328,9 +2342,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			},
 			{
 				key: 'verdict-drain',
-				workAt: readyWhen(() =>
-					Promise.resolve(this.verification.hasRecordedVerdicts())
-				),
+				workAt: () =>
+					Promise.resolve(new UploadRetrySchedule(this.context).recordedAt()),
 				run: () => this.drainRecordedVerdicts()
 			},
 			{
@@ -2371,6 +2384,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 					return 'progressed';
 				}
+			},
+			{
+				key: 'read-authority-demotion',
+				workAt: readyWhen(() =>
+					new PathReadAuthorityService(this.context).hasPending()
+				),
+				run: () =>
+					this.metered('read-authority-demotion', () =>
+						this.withMaintenanceEligibility(() =>
+							this.context.criticalSection(() =>
+								new PathReadAuthorityService(this.context).drain()
+							)
+						)
+					)
 			},
 			{
 				key: 'attestation-inheritance',
@@ -2775,6 +2802,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 		const logger = rootLogger().with({ trigger: 'alarm' });
+		await this.uploadState.migratePendingNarRefreshMarkers();
 		const now = Date.now();
 		this.commitCredit.closeExpiredSessions(now);
 		this.commitCredit.closeIdleSessions(now, () =>
@@ -2830,6 +2858,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.commitPipeline.onVerificationPassStarted();
 			await this.metered('verification', (logger) =>
 				this.withMaintenanceEligibility(async () => {
+					const retryClock = new RetryClockService(this.context);
+					if (retryClock.isBlocked()) {
+						await retryClock.read();
+					}
 					await this.verification.processPendingWithoutDecode(
 						logger,
 						verificationBatchSize
@@ -2956,6 +2988,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		authorization: string,
 		cache: CacheScope
 	): Promise<boolean> {
+		await this.initialise();
 		const request = new Request('https://cupboard.invalid/uploads', {
 			headers: { authorization }
 		});
@@ -2982,6 +3015,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: CacheScope,
 		isAbsent = false
 	): Promise<boolean> {
+		await this.initialise();
 		return this.isReadTokenAuthorised(
 			token,
 			isAbsent ? ['cache:content-read', 'cache:read'] : 'cache:content-read',
@@ -3171,17 +3205,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 
 		return this.metered('enqueue-narinfo-reconciliation', async () => {
-			const withinCache =
-				after === undefined
-					? undefined
-					: and(
-							eq(schema.narInfos.cacheId, after.cacheId),
-							gt(schema.narInfos.storePathHash, after.storePathHash)
-						);
 			const afterCursor =
 				after === undefined
 					? undefined
-					: or(gt(schema.narInfos.cacheId, after.cacheId), withinCache);
+					: sql`(${schema.narInfos.cacheId}, ${schema.narInfos.storePathHash}) > (${after.cacheId}, ${after.storePathHash})`;
 			const page = this.context.db
 				.select({
 					cacheId: schema.narInfos.cacheId,
@@ -3315,7 +3342,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					return;
 				}
 
-				this.tokenExchange.revokeRuleFamilies(ownerRuleId, transaction);
 				this.oidcTrust.seedOwnerRule(transaction);
 			});
 
@@ -3653,6 +3679,7 @@ function logRequestFinished(
 }
 
 type MeteredMethod =
+	| 'read-authority-demotion'
 	| 'attestation-inheritance'
 	| 'auth-key-retirement'
 	| 'cache-teardown'

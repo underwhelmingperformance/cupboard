@@ -64,6 +64,14 @@ and uses the routed URL.
    belongs to someone else. `--headless` uses the device flow. If the sign-in
    returns another identity, `init` stops before it changes anything.
 
+After a successful admin sign-in, a refused token exchange or a token without
+the wildcard grant stops the update. `init` prints the deployment's refusal or
+the missing grant and directs you to correct the admin's control trust rule. See
+[Restoring the admin's wildcard grant][restore-admin-grant]. Temporary exchange
+failures retain their server details and do not prompt another sign-in.
+
+[restore-admin-grant]: ./operators.md#restoring-the-admins-wildcard-grant
+
 Any operator whose control trust rule gives the wildcard grant can upgrade the
 deployment this way, not only the admin. See [Operators](./operators.md).
 
@@ -236,6 +244,13 @@ cupboard deployment resume https://cupboard.example.workers.dev
 as the deploy, and stops with the same error when no pending tenant is working
 ten minutes after the wake.
 
+In GitHub Actions, pass `--github-oidc` to either command. The job needs
+`id-token: write`, and its control trust rule must permit `deployment:read` and
+`local-step:read`. `resume` also requests `local-step:wake`. Use `--audience`
+when the rule specifies a custom audience; the default is the deployment URL.
+The commands renew their CI token during the run. Without `--github-oidc`, they
+use the session from `cupboard login`.
+
 If `status` reports a tenant configuration or migration error, repair it first.
 Once no tenants are pending, run `cupboard init` again to finish the upgrade.
 
@@ -278,10 +293,11 @@ Two more things stay behind after a rollback:
   deploy of the newer release doesn't necessarily move that object again,
   because the tenant has already recorded the step that moves objects. Recover
   such objects yourself before you rely on the new keys.
-- A release can accept a D1 migration history that is longer than its own, when
-  the extra migrations have verified digests. That only means the deploy can
-  continue. It doesn't mean that the older release can use the schema that those
-  extra migrations produced.
+- A release can accept a D1 migration history that is longer than its own.
+  Digest verification checks only migration files included in that release; it
+  does not verify extra recorded migrations. Acceptance only means that
+  deployment can continue. It does not establish that the older release can use
+  the schema produced by those extra migrations.
 
 ### Deploying an older release over a newer one
 

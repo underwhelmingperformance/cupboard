@@ -11,6 +11,8 @@ import {
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type {
+	CacheCloseResponse,
+	CacheCreationDefaults,
 	CacheListEntry,
 	CacheListInput,
 	CacheListResponse,
@@ -31,6 +33,7 @@ import type { Command } from 'commander';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	cacheCreateAuthorizationDetails,
+	cacheLifecycleAuthorizationDetails,
 	cacheRemoveAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
@@ -47,6 +50,7 @@ import {
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
 import {
+	CacheDefaultsTenantUrlRequiredError,
 	InvalidCachePriorityError,
 	InvalidCacheRetirementChoiceError,
 	NamedCacheTargetRequiredError,
@@ -107,6 +111,8 @@ export interface CacheClient {
 		cacheName: CacheName;
 		retireWhenEmpty: boolean;
 	}): Promise<CacheSummary>;
+	close(input: { cacheName: CacheName }): Promise<CacheCloseResponse>;
+	reopen(input: { cacheName: CacheName }): Promise<CacheSummary>;
 	remove(input: {
 		params: { cacheName: string };
 		query?: { force?: boolean };
@@ -159,6 +165,56 @@ export function registerCacheCommands(
 			const rpc = cacheRpc(tenantUrl, programOptions);
 
 			await runCacheList(reporter, rpc.caches);
+		});
+
+	cache
+		.command('defaults')
+		.description('Inspect the tenant defaults for newly created caches.')
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
+			const tenantUrl = cacheDefaultsTarget(url);
+			const reporter = commandUi(program, programOptions).reporter();
+			await runCacheCreationDefaults(
+				reporter,
+				cacheRpc(tenantUrl, programOptions).caches.defaults
+			);
+		});
+
+	cache
+		.command('set-default-grace')
+		.description('Set the grace period inherited by newly created caches.')
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.requiredOption(
+			'--grace <duration>',
+			'grace period (e.g. 24h, 0s)',
+			parseGrace
+		)
+		.action(async (url: URL, options: CacheSetGraceOptions) => {
+			const tenantUrl = cacheDefaultsTarget(url);
+			const reporter = commandUi(program, programOptions).reporter();
+			await runCacheCreationDefaults(
+				reporter,
+				cacheRpc(tenantUrl, programOptions).caches.defaults,
+				{
+					grace: { kind: 'duration', graceSeconds: options.grace }
+				}
+			);
+		});
+
+	cache
+		.command('clear-default-grace')
+		.description('Remove the grace default for newly created caches.')
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
+			const tenantUrl = cacheDefaultsTarget(url);
+			const reporter = commandUi(program, programOptions).reporter();
+			await runCacheCreationDefaults(
+				reporter,
+				cacheRpc(tenantUrl, programOptions).caches.defaults,
+				{
+					grace: { kind: 'none' }
+				}
+			);
 		});
 
 	cache
@@ -451,6 +507,65 @@ export function registerCacheCommands(
 			}
 		);
 
+	for (const action of ['close', 'reopen'] as const) {
+		cache
+			.command(action)
+			.description(
+				action === 'close'
+					? 'Stop publication and expire the roots of a named cache with its configured grace.'
+					: 'Restore publication to a closed named cache.'
+			)
+			.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+			.argument('[name]', 'cache name, if the URL is a tenant URL')
+			.option(
+				'--github-oidc',
+				"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
+			)
+			.option(
+				'--audience <audience>',
+				'OIDC audience to request with --github-oidc (default: the tenant URL)',
+				parseAudience
+			)
+			.action(
+				async (
+					url: URL,
+					name: string | undefined,
+					options: Pick<CacheRemoveOptions, 'githubOidc' | 'audience'>
+				) => {
+					const target = cacheCommandTarget(url, name);
+					if (target.cache.kind === 'default') {
+						throw new NamedCacheTargetRequiredError(`Cache ${action}`);
+					}
+					const reporter = commandUi(program, programOptions).reporter();
+					const credential = await authenticateForPush(
+						CupboardClient.fromUrl(target.tenantUrl, {
+							cache: target.cache,
+							signal: programOptions.signal
+						}),
+						{
+							githubOidc: options.githubOidc,
+							audience:
+								options.audience ?? audienceSchema.parse(target.tenantUrl),
+							authorizationDetails: cacheLifecycleAuthorizationDetails({
+								cache: target.cache,
+								action
+							})
+						}
+					);
+					const rpc = tenantRpc(target.tenantUrl, {
+						credential,
+						signal: programOptions.signal
+					});
+					await runCacheLifecycle(
+						target.cache.name,
+						action,
+						reporter,
+						rpc.caches
+					);
+				}
+			);
+	}
+
 	cache
 		.command('remove')
 		.description('Remove a named cache.')
@@ -578,10 +693,9 @@ export async function runCacheCreate(
 					request.rootTtl === undefined
 						? { kind: 'permanent' }
 						: { kind: 'duration', seconds: request.rootTtl },
-				grace:
-					request.grace === undefined
-						? { kind: 'none' }
-						: { kind: 'duration', graceSeconds: request.grace }
+				...(request.grace !== undefined && {
+					grace: { kind: 'duration', graceSeconds: request.grace }
+				})
 			});
 		} catch (error) {
 			if (request.ifAbsent !== true || !isRpcCacheAlreadyExistsError(error)) {
@@ -593,6 +707,30 @@ export async function runCacheCreate(
 	});
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export interface CacheCreationDefaultsClient {
+	get(): Promise<CacheCreationDefaults>;
+	set(configuration: CacheCreationDefaults): Promise<CacheCreationDefaults>;
+}
+
+export async function runCacheCreationDefaults(
+	reporter: Reporter,
+	client: CacheCreationDefaultsClient,
+	configuration?: CacheCreationDefaults
+): Promise<void> {
+	const defaults = await reporter.phase(
+		configuration === undefined
+			? 'Inspecting cache creation defaults'
+			: 'Setting cache creation defaults',
+		() =>
+			configuration === undefined ? client.get() : client.set(configuration)
+	);
+	reporter.result({
+		kind: 'cache-defaults',
+		data: defaults,
+		rows: [{ label: 'New cache grace', value: graceLabel(defaults.grace) }]
+	});
 }
 
 export async function runCacheSetAccess(
@@ -619,6 +757,38 @@ export async function runCacheSetPriority(
 	);
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export async function runCacheLifecycle(
+	cacheName: CacheName,
+	action: 'close' | 'reopen',
+	reporter: Reporter,
+	client: Pick<CacheClient, 'close' | 'reopen'>
+): Promise<void> {
+	const result = await reporter.phase<CacheCloseResponse | CacheSummary>(
+		action === 'close' ? 'Closing cache' : 'Reopening cache',
+		() => client[action]({ cacheName })
+	);
+	if ('closed' in result) {
+		reporter.result({
+			kind: 'cache-close',
+			data: result,
+			rows: [
+				{ label: 'Cache', value: cacheLabel(result.scope) },
+				{ label: 'Closed', value: result.closed ? 'yes' : 'not present' },
+				...(result.retirementStartedAt === undefined
+					? []
+					: [
+							{
+								label: 'Closed at',
+								value: formatTimestamp(result.retirementStartedAt)
+							}
+						])
+			]
+		});
+		return;
+	}
+	reporter.result({ kind: 'cache', data: result, rows: summaryRows(result) });
 }
 
 export async function runCacheSetRetirement(
@@ -912,6 +1082,14 @@ function cacheCommandTarget(url: URL, name: string | undefined) {
 	const urlTarget = cacheTargetFromUrl(url);
 
 	return name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
+}
+
+function cacheDefaultsTarget(url: URL): URL {
+	const target = cacheTargetFromUrl(url);
+	if (target.cache.kind !== 'default') {
+		throw new CacheDefaultsTenantUrlRequiredError();
+	}
+	return target.tenantUrl;
 }
 
 function cacheRpc(tenantUrl: URL, programOptions: ProgramOptions) {

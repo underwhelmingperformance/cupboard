@@ -10,7 +10,7 @@ Always reference them from `underwhelmingperformance/cupboard`, because the acti
 
 ### cupboard-flake-publish.yml
 
-Realises the targets in a flake manifest. The defaults are `build: missing`, `substituter: leave`, `publish: outputs` and `attest: true`. Each input can be set independently.
+Realises the targets in a flake manifest. The defaults are `build: missing`, `substituter: leave`, `publish: built` and `attest: true`. Each input can be set independently.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
@@ -28,10 +28,11 @@ The calling job must grant:
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
+| `audience` | string |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
 | `url` | string | **required** | Tenant URL to publish to. |
 | `targets` | string | `.#cupboardOutputs` | Flake attribute that evaluates to the target manifest. |
-| `preset` | string |  | Choose the cache, root prefix and TTL from the event that triggered the run. The only preset is pull-request-and-branch. A pull_request run publishes to the cache gh-&lt;repository-id>-pr-&lt;number>, with roots under github:&lt;repository>/pr-&lt;number>/ that expire after 14 days. When `publish` is `outputs` or `closure`, the workflow creates that cache if it does not exist. With `publish: none`, it reads from the tenant's default cache without creating or removing a pull-request cache. The preset refuses a pull request from a fork. When an unmerged pull request is closed and publication is enabled, the run removes that pull request's cache. A run on the branch in the branch input publishes to the default cache, with permanent roots under github:&lt;repository>/&lt;branch>/. The preset fails any other run. Cannot be combined with cache, root-prefix, ttl or permanent. Leave empty to set those inputs yourself. |
-| `cache-access-mode` | string |  | Access for a pull-request cache that the preset creates, public or private. When omitted, a new cache inherits the tenant's default cache access. An existing cache keeps its access, and an explicit mode must match it. Set an explicit mode when the new cache must differ from the default cache. |
+| `preset` | string |  | Choose the cache, root prefix and TTL from the event that triggered the run. The only preset is pull-request-and-branch. A pull_request run publishes to the cache gh-&lt;repository-id>-pr-&lt;number>, with roots under github:&lt;repository>/pr-&lt;number>/ that expire after 14 days. When publication is enabled, the workflow creates that cache if it does not exist. With `publish: none`, it reads from the tenant's default cache without creating or removing a pull-request cache. The preset refuses a pull request from a fork. When a pull request is closed and publication is enabled, the run closes that pull request's cache. Its contents remain available through the cache's configured grace period. A run on the branch in the branch input publishes to the default cache, with permanent roots under github:&lt;repository>/&lt;branch>/. The preset fails any other run. Cannot be combined with cache, root-prefix, ttl or permanent. Leave empty to set those inputs yourself. |
+| `cache-access-mode` | string |  | Required access for the selected cache, public or private. Without a preset, setup checks this on every event. With the preset, it selects access only for a publishing pull-request cache; branch and read-only runs use the default cache's access. When omitted, a new cache inherits the tenant's default cache access. An existing cache keeps its access, and an explicit mode must match it. |
 | `branch` | string | `main` | Branch whose runs publish to the default cache under the pull-request-and-branch preset. Must match the --branch option of cupboard github setup. |
 | `cache` | string |  | Named cache to publish to. Leave empty to publish to the default cache. If this cache needs a different static read credential from read_user and read_password, supply destination_read_user and destination_read_password. |
 | `root-prefix` | string |  | Start of every target's root name. The target's rootSuffix follows it. Required unless preset is set. |
@@ -39,13 +40,14 @@ The calling job must grant:
 | `permanent` | boolean | `false` | Keep every target's root until it is replaced or removed. |
 | `run-root-ttl` | string | `24h` | How long the run root lasts, such as 7d or 12h. Every cohort job adds the paths that it publishes to the run root, so a later cohort can download a shared dependency from the cache instead of building it again. |
 | `run-root-permanent` | boolean | `false` | Keep the run root permanently. Set run-root-ttl to an empty string when you turn this on. |
+| `read-caches` | string |  | Additional canonical cache URLs from the selected tenant, one per line. Adds runner substituters and OIDC read resources without changing the destination cache. Cannot use credentials for these caches or a default static read credential. Remote builders need their own read credentials. |
 | `reuse-view` | string |  | Reuse view to read through, for paths that the destination cache does not have. The workflow refuses a view unless its priority number is greater than the destination's. With the preset, only runs on the branch use a view, and they default to pull-requests-&lt;repository-id>. Leave empty for no view. |
 | `trusted-public-key` | string |  | Nix public key to trust for reads from the tenant's caches. If empty, each job downloads the tenant's current key from /pubkey and trusts it. |
 | `cupboard-version` | string |  | An exact cupboard release tag to install, or latest. If empty, the workflow installs the release that was published from its own commit. If there is no such release, it builds cupboard from that commit. |
 | `maximise-space` | boolean | `false` | Free disk space before building by deleting preinstalled software, such as language toolchains, the Android and .NET SDKs and Docker images on Linux, and Xcode on macOS. The software is not restored, so only use this on ephemeral GitHub-hosted runners. |
 | `build` | string | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
 | `substituter` | string | `leave` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. The reuse view is part of this tenant and can publish paths by reference. |
-| `publish` | string | `outputs` | Control which paths are published. `none` publishes no paths. `outputs` publishes selected requested outputs. `closure` also publishes their runtime references. With `outputs` or `closure`, a successful run with no selected outputs replaces its retention roots with empty path lists. |
+| `publish` | string | `built` | Control which paths are published. `none` publishes no paths. `outputs` publishes selected requested outputs. `built` also publishes intermediates built during this run. `closure` also publishes their runtime references. With publication enabled, a successful run with no selected outputs replaces its retention roots with empty path lists. |
 | `push` | boolean | `true` | Publish the selected paths and update retention roots. When false, publication is disabled regardless of the publish input. |
 | `attest` | boolean | `true` | Sign and attach SLSA build provenance for paths built on the runner in this run. A missing attestation does not change the build choice. The workflow skips signing when publication is disabled. |
 | `gc-between-cohorts` | boolean | `false` | Run garbage collection on the runner's Nix store after each cohort in a job has been published. This frees the disk space that the published paths used, and a later build downloads them from the cache if it needs them. It only happens on GitHub-hosted runners that use their own store. On a self-hosted runner, or when store is set, the job prints a notice and leaves the store as it is. |
@@ -73,8 +75,8 @@ The calling job must grant:
 | `destination_read_password` | no | Password of the destination cache's distinct read credential. |
 | `read_user` | no | User name of the default static read credential for the selected cache and reuse view. |
 | `read_password` | no | Password of the default static read credential. |
-| `fallback_read_user` | no | Deprecated alias of read_user. Supply both aliases or neither. |
-| `fallback_read_password` | no | Deprecated alias of read_password. Supply both aliases or neither. |
+| `fallback_read_user` | no | Deprecated alias of read_user. Supply it with fallback_read_password. The workflow warns when this secret is supplied. |
+| `fallback_read_password` | no | Deprecated alias of read_password. Supply it with fallback_read_user. The workflow warns when this secret is supplied. |
 | `private_substituters` | no | URLs of other private caches to read from, one per line, with the credential in each URL. |
 
 ### cupboard-publish.yml
@@ -97,15 +99,17 @@ The calling job must grant:
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
+| `audience` | string |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
 | `url` | string | **required** | Tenant URL or cache URL to publish to. |
 | `installable` | string | `.` | Flake installable to realise and, when enabled, publish. |
 | `cache` | string |  | Named cache to publish to. Leave empty to publish to the default cache. |
+| `manage-pr-cache` | boolean | `false` | Create the named cache for pull requests from this repository, reopen it when the pull request reopens, and close it through its configured grace when the pull request closes. Requires cache. Closed pull requests skip publication. |
 | `root` | string |  | Start of the retention root name. The workflow appends the runner's Nix system, such as x86_64-linux, so each platform has its own root. If empty, the root is github:&lt;repository>/&lt;ref name>, without the system. |
 | `ttl` | string |  | How long the root lasts after it was last set, such as 7d. If empty, the root is permanent when permanent is true, and follows the cache's retention settings otherwise. |
 | `permanent` | boolean | `true` | Keep the root permanently when ttl is empty. Set it to false to use the cache's retention settings instead. |
 | `build` | string | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
 | `substituter` | string | `copy` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. With `publish: closure`, all runtime references of selected outputs are published, including substituted dependencies. |
-| `publish` | string | `outputs` | Control which paths are published. `none` skips publication and retention updates. `outputs` publishes selected output paths. `closure` also publishes all their runtime references. If no outputs remain selected, `outputs` and `closure` replace the retention root with an empty path list. |
+| `publish` | string | `outputs` | Control which paths are published. `none` skips publication and retention updates. `outputs` publishes selected output paths. `built` also publishes observed build intermediates. `closure` publishes all their runtime references. If no outputs remain selected, `outputs` and `closure` replace the retention root with an empty path list. |
 | `attest` | boolean | `true` | Sign and attach SLSA build provenance for paths built on the runner in this run. A missing attestation does not change the build choice. The workflow skips signing when publication is disabled. |
 | `runs-on` | string | `ubuntu-24.04` | Runner label to build on. |
 | `trusted-public-key` | string |  | Nix public key to trust for reads from the cache. If empty, the job downloads the cache's current key from /pubkey and trusts it. |
@@ -133,16 +137,18 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `expected-source-commit` |  | Full commit ID that the release's provenance must record. Requires an exact cupboard-version. |
 | `install-dir` |  | Directory to install cupboard into. Defaults to cupboard-bin under RUNNER_TEMP. |
 | `add-to-path` | `true` | Add the directory that contains the cupboard binary to PATH. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
 | `cache-url` |  | Tenant URL whose caches setup adds to Nix's substituters. |
 | `cache` |  | Named caches to use, one per line or separated by commas. Leave empty to use the tenant's default cache. |
 | `include-default-cache` |  | When true, use the tenant's default cache as well as the named caches in cache. The cache input cannot refer to the default cache, because a named cache can be called default. |
 | `cache-credentials` |  | JSON array with one entry for each cache that has its own cache read credential, in the form {"cache": {"kind": "named", "name": ...}, "credential": {"user": ..., "password": ...}}. Pass it from a secret. A cache without an entry is read with read-user and read-password. |
+| `read-caches` |  | Additional canonical cache URLs from the selected tenant, one per line. Adds runner substituters and OIDC read resources without changing the destination cache. Cannot use credentials for these caches. |
 | `private-substituters` |  | URLs of other private caches to read from, one per line, with the user name and password in each URL. Pass this value from a secret. setup adds these URLs to Nix's substituters, and Nix still needs each cache's public key. |
 | `destination-read-user` |  | User name of the cache read credential for the selected cache. When you select several caches, use cache-credentials instead. |
 | `destination-read-password` |  | Password of the cache read credential for the selected cache. |
 | `provision-cache` |  | Named cache to create with the job's OIDC token before Nix is configured. cache-access-mode and provision-cache-ttl set its access and default root TTL. If the cache already exists, setup keeps its settings. An explicit public or private access requirement must match that cache. |
 | `cache-access-mode` |  | Access for the created cache, public or private. If omitted, new caches inherit the tenant's default cache access. An existing cache keeps its access, and an explicit mode must match it. A configured reuse view must have the same access as the cache. |
-| `provision-cache-access` |  | Deprecated alias for cache-access-mode. |
+| `provision-cache-access` |  | Deprecated alias for cache-access-mode, applied only when provision-cache is set. Use cache-access-mode to check an existing cache without provisioning. Setup warns when this alias is supplied. |
 | `provision-cache-ttl` |  | Default root TTL for the created cache, such as 14d. When a root expires, garbage collection can remove the paths that no other root keeps. Leave empty for roots that never expire. |
 | `trusted-public-key` |  | Nix public key to trust for reads from the cache. If empty, setup downloads the cache's current keys from /pubkey, trusts them, and prints a warning. |
 | `read-user` |  | User name of the tenant read credential. setup writes the credential to a netrc file, and Nix uses it for every cache on the tenant's host that does not have its own credential. |
@@ -161,6 +167,8 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `nix-config-file` | Path to the Nix configuration file that setup wrote under RUNNER_TEMP. |
 | `read-session-target` | Cache or reuse-view URL that later steps must read through cupboard run. Includes configured public targets when an absent or private target needs OIDC. Empty for anonymous public reads or accepted static credentials. |
 | `read-session-view` | Configured reuse view to add to cupboard run alongside the destination. Empty for view-only sessions or when a static credential covers the view. |
+| `read-session-caches` | JSON array of additional cache URLs for the same read session. |
+| `read-session-audience` | Audience to pass to later actions for the read session and publication. |
 
 ### actions/build-paths
 
@@ -175,16 +183,20 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 | Input | Default | Description |
 | --- | --- | --- |
 | `inline-paths` | `true` | Control how path lists are returned. `true` writes inline path outputs as well as files. `false` returns files and counts without inline path outputs. Use `false` for large path lists. |
-| `publication-url` |  | Destination tenant or cache URL. With `substituter: leave`, this keeps paths from the destination and its tenant reuse views selected for publication. Supply this when the destination is a configured substituter. |
+| `publication-url` |  | Destination tenant or cache URL. Required with `substituter: leave` so paths from the destination and its tenant reuse views remain selected for publication. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `installables` |  | Nix installables to build, one per line. |
 | `installables-file` |  | File that lists the Nix installables to build, one per line. Use it for a long generated list, because action inputs have a size limit. |
 | `keep-going` | `false` | Keep building the other installables after one of them fails. |
 | `max-jobs` |  | Maximum number of local build jobs. Leave empty to use the value from the Nix configuration. |
 | `allow-failure` | `false` | Let the step succeed even if all five build attempts fail. |
-| `build` | `missing` | Control when to build the requested outputs. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
+| `build` |  | Control when to build the requested outputs. Defaults to `missing` when `require-provenance` is not enabled. `missing` uses an output from the store or a substituter when one is available, and builds it otherwise. `rebuild` builds each output again in the selected Nix store, even if it is already available. Nix may still fetch dependencies from substituters. |
+| `require-provenance` |  | Deprecated. `true` selects `build: rebuild`; `false` uses the build mode. `true` conflicts with an explicit `build: missing`. Remove this input and set `build: rebuild` to preserve the execution guarantee. |
+| `publish` | `outputs` | Publication scope: none, outputs, built, or closure. This action cannot observe every build intermediate and refuses built before starting work. Use the flake publishing workflow for built publication. |
 | `substituter` | `copy` | Control whether to publish outputs available from external substituters. `copy` selects them for publication. `leave` keeps them upstream if consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Both modes select outputs built in this run. |
 
 #### Outputs
@@ -218,8 +230,9 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 | `paths` |  | Store paths to publish, one per line. A path that resolves to a store path, such as a `result` symlink, also works. Build flake outputs before you publish them. Required unless paths-file, root-groups or an explicit root is set. An explicit root with no paths replaces that root with an empty path list. |
 | `paths-file` |  | File containing store paths to publish, one per line. Use this input for large path lists. The installed Cupboard CLI must support push --paths-file. An empty file with an explicit root replaces that root with an empty path list. |
 | `cupboard-path` |  | Path to a cupboard executable that an earlier actions/setup step installed. When it is set, the action does not install a release. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `cupboard-version` |  | cupboard release to install, either latest or an exact release tag. Defaults to latest. |
 | `include-prereleases` |  | Whether latest can resolve to a prerelease. Defaults to true. |
 | `github-token` |  | GitHub token for release API requests. Defaults to the job's token. |
@@ -273,14 +286,16 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 | --- | --- | --- |
 | `inline-bundles` | `true` | Control how bundle lists are returned. `true` writes inline bundle outputs as well as files. `false` returns files without inline bundle outputs. Use `false` for large bundle lists. |
 | `receipt-file` | **required** | Receipt written earlier in the job by actions/build-paths or by a cohort build in the flake publish workflow. |
-| `checksums-file` |  | Where to write the checksums of every accepted receipt path. Defaults to a file under RUNNER_TEMP. |
+| `checksums-file` |  | Where to write the checksums of every accepted receipt path. Defaults to a file in a unique directory under RUNNER_TEMP. |
 | `built-checksums-file` |  | Where to write the checksums of the paths that the job built. The build-provenance attestations cover these paths. Defaults to a file next to the checksums file. |
 | `predicate-file` |  | Where to write the SCAI reproduction report. Empty when no local verification rebuild succeeded. Defaults to a file next to the checksums file. |
 | `url` | **required** | Tenant URL of the destination. Before signing, the action checks every path against the narinfo in this tenant's cache. |
 | `cache` |  | Named destination cache. Leave empty to use the default cache. |
 | `cupboard-path` |  | Path to the cupboard executable when OIDC read access is used. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `read-user` |  | User name of a read credential for a private destination cache. |
 | `read-password` |  | Password of a read credential for a private destination cache. |
 | `github-token` |  | GitHub token that the action uses to upload bundles to the repository's attestation store when upload-to-github is true. |
@@ -315,8 +330,9 @@ uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
 | --- | --- | --- |
 | `url` | **required** | Tenant URL of the destination. |
 | `cupboard-path` | **required** | Path to the cupboard executable that actions/setup installed. |
-| `read-session-target` |  | Internal setup output for OIDC read access. |
-| `read-session-view` |  | Internal setup output for an additional reuse view. |
+| `read-session-target` |  | Pass the read-session-target output from actions/setup for private OIDC reads. |
+| `read-session-caches` |  | Pass the read-session-caches output from actions/setup, a JSON array of additional cache URLs. |
+| `read-session-view` |  | Pass the read-session-view output from actions/setup. |
 | `cache` |  | Named cache that the paths were published to. Leave empty for the default cache. |
 | `audience` |  | Audience of the GitHub OIDC token. Defaults to url without a trailing slash. |
 | `read-user` |  | User name of a read credential for a private destination cache. |
@@ -328,4 +344,4 @@ uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
 
 ## Internal actions
 
-`actions/plan`, `actions/build-cohort`, `actions/prepare`, `actions/resolve-cupboard` are building blocks of the reusable workflows. Their inputs can change in any release, so don't call them directly. Use the reusable workflows instead.
+`actions/plan`, `actions/build-cohort`, `actions/attest-status`, `actions/prepare`, `actions/resolve-cupboard` are building blocks of the reusable workflows. Their inputs can change in any release, so don't call them directly. Use the reusable workflows instead.

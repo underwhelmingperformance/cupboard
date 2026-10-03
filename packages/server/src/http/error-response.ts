@@ -1,10 +1,16 @@
 import { type Logger } from '@cupboard/logger';
+import {
+	uploadRequestLimitErrorCode,
+	uploadRequestMaxPathsHeader
+} from '@cupboard/protocol/upload';
+import { ORPCError } from '@orpc/server';
 import type { Context, ErrorHandler } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import { isD1Overload } from '../db/transient.ts';
 import {
+	AttestationInfoHttpError,
 	DatabaseOverloadedError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
@@ -12,9 +18,11 @@ import {
 	OAuthError,
 	ServerHttpError,
 	TenantDispatchInterruptedError,
+	TenantMigrationPendingError,
 	UnauthenticatedError,
 	uploadPageSplitHeader,
-	UploadPageSplitRequiredError
+	UploadPageSplitRequiredError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 import { rootLogger } from '../observability/logging.ts';
 
@@ -40,6 +48,15 @@ function errorResponse(error: unknown): Response | undefined {
 		return serverHttpErrorResponse(error);
 	}
 
+	// RPC preserves an error's name but does not preserve its custom prototype.
+	if (
+		error instanceof Error &&
+		(error.name === 'LocalSchemaMigrationPendingError' ||
+			error.name === 'CacheCatalogueMigrationPendingError')
+	) {
+		return serverHttpErrorResponse(new TenantMigrationPendingError());
+	}
+
 	return undefined;
 }
 
@@ -48,6 +65,33 @@ export function serverHttpErrorResponse(error: ServerHttpError): Response {
 	// stored this response would keep retrying against a cache instead of the
 	// origin, well past whatever made it transient.
 	const headers = serverHttpErrorHeaders(error);
+	if (error instanceof UploadRequestLimitExceededError) {
+		headers.set('cache-control', 'no-store');
+		return Response.json(
+			new ORPCError(uploadRequestLimitErrorCode, {
+				status: error.status,
+				message: error.message,
+				data: { maxPaths: error.maxPaths },
+				defined: true
+			}).toJSON(),
+			{ status: error.status, headers }
+		);
+	}
+	if (error instanceof AttestationInfoHttpError) {
+		return Response.json(
+			{
+				code: error.code,
+				message: error.message,
+				...(error.storePathHash !== undefined && {
+					storePathHash: error.storePathHash
+				})
+			},
+			{
+				status: error.status,
+				headers: { ...Object.fromEntries(headers), 'cache-control': 'no-store' }
+			}
+		);
+	}
 	if (error instanceof MetadataHttpError) {
 		headers.set('content-type', 'application/json');
 		headers.set('cache-control', 'no-store');
@@ -72,6 +116,10 @@ HTTP metadata shared by ordinary and oRPC error renderers.
 */
 export function serverHttpErrorHeaders(error: ServerHttpError): Headers {
 	const headers = new Headers();
+
+	if (error instanceof UploadRequestLimitExceededError) {
+		headers.set(uploadRequestMaxPathsHeader, String(error.maxPaths));
+	}
 
 	if (error instanceof UploadPageSplitRequiredError) {
 		headers.set(uploadPageSplitHeader, '1');

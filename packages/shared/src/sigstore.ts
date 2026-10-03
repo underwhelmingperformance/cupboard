@@ -130,7 +130,7 @@ export interface BundleVerifyOptions extends VerifierOptions {
 	readonly trustedRoot?: string;
 }
 
-export class CertificateIdentityModeError extends Error {
+export class CertificateIdentityModeError extends UsageError {
 	constructor(public readonly identityModes: readonly string[]) {
 		super(
 			'Pass exactly one of --certificate-identity or --certificate-identity-regex'
@@ -139,12 +139,26 @@ export class CertificateIdentityModeError extends Error {
 	}
 }
 
-export class CertificateIssuerModeError extends Error {
+export class CertificateIssuerModeError extends UsageError {
 	constructor(public readonly issuerModes: readonly string[]) {
 		super(
 			'Pass exactly one of --certificate-oidc-issuer or --certificate-oidc-issuer-regex'
 		);
 		this.name = 'CertificateIssuerModeError';
+	}
+}
+
+type CertificateRegexOption =
+	'--certificate-identity-regex' | '--certificate-oidc-issuer-regex';
+
+export class CertificatePatternError extends UsageError {
+	constructor(
+		public readonly option: CertificateRegexOption,
+		public readonly pattern: string,
+		cause: SyntaxError
+	) {
+		super(`Invalid ${option} regular expression: ${pattern}`, { cause });
+		this.name = 'CertificatePatternError';
 	}
 }
 
@@ -270,7 +284,8 @@ export class AttestationBundleShapeError extends Error {
 function resolveCertificateTerm(
 	exact: string | undefined,
 	pattern: string | undefined,
-	modeError: (modes: readonly string[]) => never
+	modeError: (modes: readonly string[]) => never,
+	regexOption: CertificateRegexOption
 ): string | RegExp {
 	if (exact !== undefined && pattern !== undefined) {
 		modeError(['exact', 'regex']);
@@ -281,7 +296,15 @@ function resolveCertificateTerm(
 	}
 
 	if (pattern !== undefined) {
-		return new RegExp(pattern);
+		try {
+			return new RegExp(pattern);
+		} catch (error) {
+			if (!(error instanceof SyntaxError)) {
+				throw error;
+			}
+
+			throw new CertificatePatternError(regexOption, pattern, error);
+		}
 	}
 
 	return modeError([]);
@@ -301,14 +324,16 @@ export function identityPolicy(
 			options.certificateIdentityRegex,
 			(modes) => {
 				throw new CertificateIdentityModeError(modes);
-			}
+			},
+			'--certificate-identity-regex'
 		),
 		issuer: resolveCertificateTerm(
 			options.certificateOidcIssuer,
 			options.certificateOidcIssuerRegex,
 			(modes) => {
 				throw new CertificateIssuerModeError(modes);
-			}
+			},
+			'--certificate-oidc-issuer-regex'
 		)
 	};
 }

@@ -70,9 +70,28 @@ Things to know before you use it:
 - The first push to a named cache that doesn't exist creates it, with the
   default cache's access and no default root TTL. Create the cache first with
   `cupboard cache create` if it needs other settings.
+- Set `manage-pr-cache: true` with an explicit `cache` input to manage a cache
+  for each pull request from the same repository. Setup creates a missing cache
+  before publication. A `reopened` event restores write access. Every `closed`
+  event, including a merge, closes the cache through its configured grace and
+  skips publication. Include `closed` and `reopened` in the caller's event
+  types. The trust rule needs `cache:create`, `cache:close` and `cache:reopen`
+  for the selected cache. Setup acquires read authority before creating a
+  missing cache. Publication and creation grants already imply scoped
+  `cache:read`, which permits the absence response. Private content requires a
+  `cache:content-read` grant without a root selector. Merged closes also need a
+  separate closure-only rule. For an immutable workflow reference, use
+  `oidc-trust add-github-pr-close` with the same `--cache-template` and the
+  simple workflow's `--workflow-ref`. A caller that deliberately follows a
+  branch needs a manual close-only rule with that exact workflow selector. See
+  [Merged PR closure][merged-pr-closure]. Branch runs and `publish: none` do not
+  change the cache lifecycle. See [Cache closure][cache-closure].
 - The job needs a trust rule of its own. The rules that `cupboard github setup`
   adds accept only the flake publish workflow. See
   [Trust rules for these jobs](#trust-rules-for-these-jobs).
+
+[merged-pr-closure]: ./trust-rules.md#pull-requests
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 The `attest` input remains a boolean. Set `attest: false` to publish without
 signing new build provenance. A missing attestation does not cause an available
@@ -106,6 +125,11 @@ jobs:
       - id: build
         uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
         with:
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           installables: .#package
           inline-paths: false
           publication-url: https://cupboard.example.workers.dev/t/acme
@@ -114,8 +138,12 @@ jobs:
       - id: push
         uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
         with:
-          url: https://cupboard.example.workers.dev/t/acme
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
+          url: https://cupboard.example.workers.dev/t/acme
           paths-file: ${{ steps.build.outputs.publish-paths-file }}
           build-receipt-file: ${{ steps.build.outputs.receipt-file }}
           root:
@@ -124,14 +152,23 @@ jobs:
       - id: attest
         uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
         with:
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           url: https://cupboard.example.workers.dev/t/acme
           inline-bundles: false
           receipt-file: ${{ steps.push.outputs.receipt-file }}
       - if: ${{ steps.attest.outputs.bundles-file != '' }}
         uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
         with:
-          url: https://cupboard.example.workers.dev/t/acme
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
+          url: https://cupboard.example.workers.dev/t/acme
           receipt-file: ${{ steps.push.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
@@ -169,7 +206,8 @@ Every action also installs a pinned version of Node.js and pnpm. They stay on
 ### Permissions and trust rules
 
 Each action needs certain job permissions, and some need grants in the trust
-rule that accepts the job:
+rule that accepts the job. The table lists publication requirements. Private
+OIDC reads additionally need `id-token: write` and content-read grants:
 
 | Action          | Job permissions                                                                                      | Trust rule grants                                         |
 | --------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
@@ -192,8 +230,19 @@ cupboard, grant `attestations: read` and `contents: read` as well. The flake
 publish workflow grants `attestations: read` to its plan and cache-removal jobs,
 which verify the cupboard release that they install.
 
-For a private cache, `attest` and `attest-attach` also need `read-user` and
-`read-password`.
+For private OIDC reads, pass the setup outputs to every later action that reads
+the configured resources, as the example does. `read-session-target` selects the
+primary cache or view, `read-session-view` adds the view, and
+`read-session-caches` adds the other caches. Pass `read-session-audience` as
+`audience` so read acquisition and publication use the same audience. Each step
+obtains one read token for all required resources and renews that token while
+its command runs. These reads require `id-token: write` and content-read grants
+in the trust rules that match the job. Set setup's `audience` input when the
+trust rules use a custom audience.
+
+A tenant read credential can also read a private view. A cache read credential
+only reads its cache; use the destination credential inputs for that pair and
+OIDC for the view.
 
 ### Trust rules for these jobs
 
@@ -212,7 +261,7 @@ rule that pins cupboard's workflow:
 
 ```sh
 cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
-  --repo acme/app --branch main \
+  --repo acme/app --branch main --read-cache \
   --job-workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v*'
 ```
 
@@ -224,7 +273,7 @@ accepts the job's runs on `main`:
 
 ```sh
 cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
-  --repo acme/app --branch main
+  --repo acme/app --branch main --read-cache
 ```
 
 That rule accepts every workflow in the repository that runs on `main`. To
@@ -240,7 +289,7 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --claim repository_id=123456 --claim repository_owner_id=654321 \
   --claim ref=refs/heads/main \
   --claim workflow_ref=acme/app/.github/workflows/publish.yml@refs/heads/main \
-  --allow push --allow root --allow attach --allow attest \
+  --allow read --allow push --allow root --allow attach --allow attest \
   --root github:acme/app/main/
 ```
 
@@ -278,8 +327,10 @@ There are three ways to give `setup` credentials, depending on what you're
 reading:
 
 - To use the tenant read credential, pass it as `read-user` and `read-password`.
-  `setup` writes it to a netrc file. Nix uses it for every cache on the same
-  host that doesn't have its own credential.
+  `setup` writes it to a netrc file. Nix uses it for authorised caches that
+  don't have their own credential and for private views in the tenant. Because
+  netrc uses the hostname as its machine key, other tenants on that host need
+  their own complete URL credentials or separate jobs.
 - To use cache read credentials, pass a single cache's credential as
   `destination-read-user` and `destination-read-password`. For several caches,
   pass `cache-credentials`, a JSON array with one entry per cache:
@@ -323,31 +374,47 @@ writes files and counts. By default, the action also writes inline path lists to
 the step outputs.
 
 If the build fails, the action tries again, up to five attempts in total, and
-waits longer after each failure. If every attempt fails, the step fails. Set
-`allow-failure` to let the job continue anyway.
+waits longer after each failure. A successful rebuild that reports no build
+activity fails immediately, because another attempt cannot recover the missing
+observation. If every attempt fails, the step fails. Set `allow-failure` to let
+the job continue anyway.
 
 The receipt records how the requested outputs became available. Set
 `build: rebuild` to build every requested output again in the selected Nix
 store, even if it is already available. Nix may still substitute dependencies.
 
-With `substituter: leave`, supply `publication-url` with the destination tenant
-or cache URL. The build action keeps paths from that tenant selected for
-publication, including public cache and reuse-view results. Without this URL,
-the action cannot distinguish public tenant caches from external substituters.
+The deprecated `require-provenance: true` input also selects `build: rebuild`
+when `build` is omitted. An explicit `build: missing` conflicts with that input
+and fails before building. Replace `require-provenance: true` with
+`build: rebuild`.
+
+With `substituter: leave`, `publication-url` is required and must specify the
+destination tenant or cache URL. The build action keeps paths from that tenant
+selected for publication, including public cache and reuse-view results. The
+action rejects a missing URL before planning or building.
 
 `substituter: leave` excludes an output from publication only when external
-consumers can obtain matching NARs for the output and all its runtime
-references. `substituter: copy` includes those outputs. Outputs built in this
-run remain selected, including builds dispatched to a configured remote builder.
-When a requested output has no recorded derivation, the action passes its
+consumers can obtain matching NARs for the output and all its runtime references
+under the configured signature policy. The action checks anonymous access to
+each narinfo and its advertised NAR. Runner-only netrc or URL credentials do not
+establish access for consumers. If anonymous access cannot be confirmed, the
+action keeps the output selected for publication. `substituter: copy` includes
+those outputs. Outputs built in this run remain selected, including builds
+dispatched to a configured remote builder.
+
+When a requested output has no recorded derivation, the action uses its
+derivation from the dry-run plan when the plan reports a matching output path.
+If the plan cannot identify that derivation, the action passes the original
 installable to Nix for the rebuild.
 
 The action writes the receipt and the list of paths to fixed locations in
 `$RUNNER_TEMP`. A second `build-paths` step in the same job overwrites them.
 
 The receipt can support SLSA build provenance for outputs built on the runner in
-this run when the Nix activity log records the build. Outputs reused from the
-selected store or obtained from a substituter receive no new build claim.
+this run when the Nix activity log records the build. If another installable
+fails and the action retries, the receipt preserves earlier local build evidence
+only when the output's NAR hash and derivation still match. Outputs reused from
+the selected store or obtained from a substituter receive no new build claim.
 
 ### `push`
 

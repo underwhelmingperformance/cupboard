@@ -71,6 +71,7 @@ import {
 import {
 	BuildObservationMissingError,
 	BuildRebuildRemoteDispatchError,
+	BuiltPublicationObservationUnsupportedError,
 	CohortEvaluationDriftError,
 	CohortJsonInvalidError,
 	CohortJsonSchemaError,
@@ -427,7 +428,7 @@ export interface BuildCohortInputs {
 	readonly readPassword: string;
 	readonly maxJobs: string;
 	readonly store: string;
-	readonly publish: 'none' | 'outputs' | 'closure';
+	readonly publish: 'none' | 'outputs' | 'built' | 'closure';
 	readonly push: boolean;
 	readonly build: 'missing' | 'rebuild';
 	readonly substituter: 'leave' | 'copy';
@@ -559,7 +560,7 @@ export function resolveBuildCohortInputs(
 	const publish = providedChoice(
 		'publish',
 		options.publish,
-		['none', 'outputs', 'closure'],
+		['none', 'outputs', 'built', 'closure'],
 		'none'
 	);
 	const isPushEnabled = publish !== 'none';
@@ -677,7 +678,7 @@ export function registerBuildCohortCommand(
 		)
 		.option(
 			'--publish <scope>',
-			'control published paths: none, outputs, or closure'
+			'control published paths: none, outputs, built, or closure'
 		)
 		.option(
 			'--build <mode>',
@@ -821,6 +822,10 @@ export async function buildCohortAction(
 	dependencies.signal?.throwIfAborted();
 
 	const inputs = resolveBuildCohortInputs(options, environment);
+	if (inputs.publish === 'built' && inputs.store !== '') {
+		throw new BuiltPublicationObservationUnsupportedError();
+	}
+
 	if (
 		inputs.build === 'rebuild' &&
 		inputs.store === '' &&
@@ -971,7 +976,7 @@ export async function buildCohortAction(
 				? retainedDependencyBuilds(partition, buildInstallables)
 				: [];
 
-		if (localDependencyBuilds.length > 0) {
+		if (localDependencyBuilds.length > 0 && inputs.publish !== 'built') {
 			await realiseLocalDependencies(
 				localDependencyBuilds,
 				inputs,
@@ -995,7 +1000,8 @@ export async function buildCohortAction(
 					provenanceRebuilds,
 					environment,
 					runCupboard,
-					cupboardRunDependencies
+					cupboardRunDependencies,
+					inputs.publish === 'built' ? localDependencyBuilds : []
 				);
 			} catch (error) {
 				if (!inputs.allBestEffort) {
@@ -1089,6 +1095,7 @@ export async function buildCohortAction(
 					...dependencyCopies
 				])
 			];
+			let settledTerminalFailure: TerminalBuildFailure | undefined;
 			const publishRemoteResults: RemoteBuildPublisher = async (
 				results,
 				failures,
@@ -1171,6 +1178,7 @@ export async function buildCohortAction(
 						...(terminalFailure !== undefined && { terminalFailure })
 					}
 				);
+				settledTerminalFailure = terminalFailure;
 			};
 			const installablesByTarget = new Map(
 				remoteBindings.map((binding) => [
@@ -1179,69 +1187,79 @@ export async function buildCohortAction(
 				])
 			);
 
-			await reporter.progress(
-				'Building remote targets',
-				{ total: remoteBindings.length },
-				(bar) =>
-					runNixWithResults(
-						remoteBindings.map((binding) => binding.target),
-						inputs.maxJobs,
-						inputs.store,
-						publishRemoteResults,
-						dependencies.signal,
-						{
-							copyPaths: copiedPaths,
-							...(dependencyBuilds.length > 0 && { dependencyBuilds }),
-							...(inputs.build === 'rebuild' && {
-								rebuild: true
-							}),
-							...(closureSources.length > 0 && {
-								materialiseClosure: (
-									session: Pick<
-										NixDaemonSession,
-										'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
-									>
-								) =>
-									withLocalStoreSession(async (localNix, localStore) => {
-										await mkdir(path.dirname(inputs.receiptFile), {
-											recursive: true
-										});
+			try {
+				await reporter.progress(
+					'Building remote targets',
+					{ total: remoteBindings.length },
+					(bar) =>
+						runNixWithResults(
+							remoteBindings.map((binding) => binding.target),
+							inputs.maxJobs,
+							inputs.store,
+							publishRemoteResults,
+							dependencies.signal,
+							{
+								copyPaths: copiedPaths,
+								...(dependencyBuilds.length > 0 && { dependencyBuilds }),
+								...(inputs.build === 'rebuild' && {
+									rebuild: true
+								}),
+								...(closureSources.length > 0 && {
+									materialiseClosure: (
+										session: Pick<
+											NixDaemonSession,
+											'addTempRoot' | 'buildPathsWithResults' | 'resolveClosure'
+										>
+									) =>
+										withLocalStoreSession(async (localNix, localStore) => {
+											await mkdir(path.dirname(inputs.receiptFile), {
+												recursive: true
+											});
 
-										return materialiseClosure({
-											sources: closureSources,
-											store: inputs.store,
-											localStore,
-											nix: session,
-											localNix,
-											onReferenced: recordClosureReferences,
-											...(dependencies.fetcher !== undefined && {
-												fetch: dependencies.fetcher
-											}),
-											...(dependencies.signal && {
-												signal: dependencies.signal
-											})
-										});
-									})
-							}),
-							publishClosure: inputs.publish === 'closure',
-							onTargetStarted: (target) => {
-								reporter.info(
-									`Building remote target ${installablesByTarget.get(target) ?? target}`
-								);
-							},
-							onDependencyStarted: (dependency) => {
-								reporter.info(`Building remote dependency ${dependency}`);
-							},
-							onTargetCompleted: () => {
-								bar.advance();
-							},
-							copy: () =>
-								copiedPaths.length === 0
-									? Promise.resolve()
-									: runCopy(copiedPaths, inputs.store, dependencies.signal)
-						}
-					)
-			);
+											return materialiseClosure({
+												sources: closureSources,
+												store: inputs.store,
+												localStore,
+												nix: session,
+												localNix,
+												onReferenced: recordClosureReferences,
+												...(dependencies.fetcher !== undefined && {
+													fetch: dependencies.fetcher
+												}),
+												...(dependencies.signal && {
+													signal: dependencies.signal
+												})
+											});
+										})
+								}),
+								publishClosure: inputs.publish === 'closure',
+								onTargetStarted: (target) => {
+									reporter.info(
+										`Building remote target ${installablesByTarget.get(target) ?? target}`
+									);
+								},
+								onDependencyStarted: (dependency) => {
+									reporter.info(`Building remote dependency ${dependency}`);
+								},
+								onTargetCompleted: () => {
+									bar.advance();
+								},
+								copy: () =>
+									copiedPaths.length === 0
+										? Promise.resolve()
+										: runCopy(copiedPaths, inputs.store, dependencies.signal)
+							}
+						)
+				);
+			} catch (error) {
+				if (!(
+					inputs.allBestEffort &&
+					error instanceof RemoteCohortBuildFailedError &&
+					settledTerminalFailure?.kind === 'target-build'
+				)) {
+					throw error;
+				}
+			}
 			return;
 		}
 
@@ -1346,12 +1364,8 @@ export async function buildCohortAction(
 			});
 		}
 
-		if (build.status === 0) {
+		if (streamedFailure !== undefined || build.status === 0) {
 			return;
-		}
-
-		if (streamedFailure !== undefined) {
-			throw streamedFailure.error;
 		}
 
 		throw new CommandFailedError('nix build', build.status);
@@ -1499,7 +1513,7 @@ async function resolveStreamedBuildOwners(options: {
 			],
 			inputs: options.inputs,
 			runNix: options.runNix,
-			allowIncomplete: true,
+			allowIncomplete: false,
 			...(onResolved !== undefined && { onResolved }),
 			...(options.signal !== undefined && { signal: options.signal })
 		});
@@ -1689,6 +1703,14 @@ async function settleCohortBuild(
 	);
 	const claimable = claimableOutputPaths(publicationBuilds, provenanceRebuilds);
 
+	if (inputs.build === 'rebuild' && inputs.store !== '' && inputs.push) {
+		const reportedBuilt = new Set(claimable);
+		const missing = built.filter((storePath) => !reportedBuilt.has(storePath));
+		if (missing.length > 0) {
+			throw new BuildObservationMissingError(missing);
+		}
+	}
+
 	const streamedReceipt = isStreamed
 		? buildReceiptV3Schema.parse(
 				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
@@ -1749,7 +1771,7 @@ async function settleCohortBuild(
 		);
 	}
 	const selectedPublicationPaths =
-		isStreamed && inputs.publish === 'closure'
+		isStreamed && (inputs.publish === 'closure' || inputs.publish === 'built')
 			? [
 					...new Set([
 						...(streamedReceipt?.paths ?? []),
@@ -1841,19 +1863,6 @@ async function settleCohortBuild(
 			environment,
 			cupboardRunDependencies
 		);
-
-		if (inputs.build === 'rebuild') {
-			const reportedBuilt = new Set(claimable);
-			const missing = built.filter(
-				(storePath) => !reportedBuilt.has(storePath)
-			);
-
-			if (missing.length > 0) {
-				throw new Error(
-					`The selected remote store did not report rebuilding: ${missing.join(', ')}`
-				);
-			}
-		}
 	}
 
 	if (terminalFailure !== undefined) {
@@ -2002,13 +2011,41 @@ export function cohortBuildPushArguments(
 	];
 }
 
+function supervisedCohortsFile(
+	dependencyBuilds: readonly RemoteDependencyBuild[],
+	buildInstallables: readonly string[],
+	maxJobs: string,
+	shouldSeparateTargets: boolean,
+	provenanceRebuilds: ReadonlySet<string>
+): { readonly cohorts: readonly Record<string, unknown>[] } {
+	const { cohorts } = buildPushCohortsFile(
+		buildInstallables,
+		maxJobs,
+		shouldSeparateTargets,
+		provenanceRebuilds
+	);
+	return {
+		cohorts: cohorts.map((cohort, index) => ({
+			...cohort,
+			...(index === 0 &&
+				dependencyBuilds.length > 0 && {
+					dependencyBuilds: dependencyBuilds.map(({ path, installables }) => ({
+						path,
+						installables
+					}))
+				})
+		}))
+	};
+}
+
 async function runBuildPushCohort(
 	inputs: BuildCohortInputs,
 	buildInstallables: readonly string[],
 	provenanceRebuilds: ReadonlySet<string>,
 	environment: Environment,
 	runCupboard: typeof defaultRunCupboard,
-	cupboardRunDependencies: CupboardRunDependencies | undefined
+	cupboardRunDependencies: CupboardRunDependencies | undefined,
+	dependencyBuilds: readonly RemoteDependencyBuild[] = []
 ): Promise<void> {
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const cohortsFile = path.join(
@@ -2019,7 +2056,8 @@ async function runBuildPushCohort(
 	await writeFile(
 		cohortsFile,
 		`${JSON.stringify(
-			buildPushCohortsFile(
+			supervisedCohortsFile(
+				dependencyBuilds,
 				buildInstallables,
 				inputs.maxJobs,
 				inputs.allBestEffort,
@@ -4112,7 +4150,7 @@ export async function buildAndRootNixResults(
 					outputs: buildResultOutputPaths(built),
 					failures: notBuilt.map((result) => ({
 						target: result.target,
-						kind: 'target',
+						kind: 'verification',
 						outcome: 'not-built',
 						message: `the rebuild did not prove execution in the selected store (result: ${result.outcome.kind}; execution: ${result.execution ?? 'unobserved'})`
 					}))
@@ -4471,14 +4509,19 @@ function recordRemoteDependencyResults(
 
 		state.lastFailure = {
 			...failure,
-			kind: failure.kind === 'protocol' ? 'dependency-protocol' : 'dependency'
+			kind:
+				failure.kind === 'protocol'
+					? 'dependency-protocol'
+					: failure.kind === 'verification'
+						? 'verification'
+						: 'dependency'
 		};
 
-		if (failure.kind !== 'protocol') {
+		if (failure.kind === 'target') {
 			continue;
 		}
 
-		state.hasProtocolFailure = true;
+		state.hasProtocolFailure = failure.kind === 'protocol';
 		state.isExhausted = true;
 	}
 }
@@ -4548,7 +4591,9 @@ function incompleteRootsFor(
 ): ReadonlySet<string> {
 	const failedTargets = new Set(
 		failures
-			.filter((failure) => ['protocol', 'target'].includes(failure.kind))
+			.filter((failure) =>
+				['protocol', 'target', 'verification'].includes(failure.kind)
+			)
 			.map((failure) =>
 				canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target))
 			)
@@ -4616,21 +4661,19 @@ function reconcileBuildResults(
 			continue;
 		}
 
-		if (
-			'outputs' in result.outcome &&
-			Object.values(result.outcome.outputs).length > 0
-		) {
+		if ('outputs' in result.outcome) {
 			const expectedOutputs = expectedOutputsByTarget.get(target);
 
 			if (
 				expectedOutputs === undefined ||
+				Object.values(result.outcome.outputs).length === 0 ||
 				!hasMatchingRemoteOutputs(result.outcome.outputs, expectedOutputs)
 			) {
 				failures.push({
 					target,
 					kind: 'protocol',
 					outcome: 'invalid-outputs',
-					message: `the daemon reported ${formatRemoteOutputEntries(Object.entries(result.outcome.outputs))}; expected ${formatRemoteOutputEntries(expectedOutputs?.entries().toArray() ?? [])}`
+					message: `the daemon reported ${Object.values(result.outcome.outputs).length === 0 ? 'no outputs' : formatRemoteOutputEntries(Object.entries(result.outcome.outputs))}; expected ${formatRemoteOutputEntries(expectedOutputs?.entries().toArray() ?? [])}`
 				});
 				continue;
 			}
@@ -4641,12 +4684,10 @@ function reconcileBuildResults(
 
 		failures.push({
 			target,
-			kind: 'target',
+			kind:
+				result.outcome.kind === 'not-deterministic' ? 'verification' : 'target',
 			outcome: result.outcome.kind,
-			message:
-				'message' in result.outcome
-					? result.outcome.message
-					: 'the daemon reported no outputs for this settled target'
+			message: result.outcome.message
 		});
 	}
 

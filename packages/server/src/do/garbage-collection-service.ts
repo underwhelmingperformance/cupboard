@@ -189,6 +189,8 @@ const maxOrphanReclaim = 1000;
 // staging namespace; later passes and the lifecycle rule provide recovery.
 export const maxOrphanListPages = maxOutgoingConnections;
 
+import { CacheClosureService } from './cache-closure-service.ts';
+
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
@@ -284,6 +286,8 @@ export class GarbageCollectionService {
 		hasMoreExpiredRoots: boolean;
 	} {
 		const rootPage = maxRootsExpiredPerRun;
+		const closure = new CacheClosureService(this.context);
+		const hasMoreClosedRoots = closure.materialiseRoots(cache, rootPage);
 
 		// Expire roots even when no unreachable path is collected. Permanent roots
 		// have a null expiry and cannot match this query.
@@ -291,7 +295,9 @@ export class GarbageCollectionService {
 		const expiredRootCandidates = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
-				expiresAt: schema.retentionRoots.expiresAt
+				expiresAt: schema.retentionRoots.expiresAt,
+				closeGraceUntil: schema.retentionRoots.closeGraceUntil,
+				retentionEpoch: schema.retentionRoots.retentionEpoch
 			})
 			.from(schema.retentionRoots)
 			.where(
@@ -314,6 +320,21 @@ export class GarbageCollectionService {
 			)
 		);
 
+		const closeGraceByRoot = new Map(
+			expiredRoots.flatMap((root) =>
+				root.closeGraceUntil === null
+					? []
+					: [
+							[
+								root.name,
+								{
+									retentionEpoch: root.retentionEpoch,
+									retainUntil: root.closeGraceUntil
+								}
+							] as const
+						]
+			)
+		);
 		const targetPage = phaseStepSize;
 
 		// Anchor each target's grace period to the root's recorded expiry. Using the
@@ -339,6 +360,9 @@ export class GarbageCollectionService {
 			this.retention.applyGraceTransitions(
 				cache,
 				expiredRootTargets.flatMap((target) => {
+					if (closeGraceByRoot.has(target.rootName)) {
+						return [];
+					}
 					const anchorIso = expiryByRoot.get(target.rootName);
 
 					return anchorIso === undefined
@@ -348,6 +372,17 @@ export class GarbageCollectionService {
 				tx
 			);
 
+			for (const target of expiredRootTargets) {
+				const deadline = closeGraceByRoot.get(target.rootName);
+				if (deadline !== undefined) {
+					this.retention.extendClosedRootGraceDeadlines(
+						cache,
+						[target.storePathHash],
+						deadline,
+						tx
+					);
+				}
+			}
 			for (const targets of jsonRowLists(expiredRootTargets)) {
 				tx.delete(schema.retentionRootTargets)
 					.where(
@@ -402,7 +437,10 @@ export class GarbageCollectionService {
 
 			rootsExpired = completedRoots.length;
 		});
+		const hasMoreHistory = closure.cleanHistory(cache, rootPage);
 		const hasMoreExpiredRoots =
+			hasMoreClosedRoots ||
+			hasMoreHistory ||
 			expiredRootCandidates.length > expiredRoots.length ||
 			expiredRoots.length > rootsExpired;
 
@@ -1259,6 +1297,37 @@ export class GarbageCollectionService {
 		return true;
 	}
 
+	private collectRefreshCredentialMaintenance(now: IsoTimestamp): boolean {
+		for (const table of [
+			schema.legacyRefreshTokenMembers,
+			schema.legacyRefreshTokenFamilies,
+			schema.legacyRefreshTokens
+		]) {
+			this.context.db.run(
+				sql`DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} ORDER BY id LIMIT ${phaseStepSize})`
+			);
+		}
+		this.context.db
+			.run(sql`UPDATE refresh_session_member SET successor_envelope = NULL, successor_expires_at = NULL
+			WHERE id IN (SELECT id FROM refresh_session_member INDEXED BY refresh_session_member_successor_expiry_idx
+			WHERE successor_expires_at IS NOT NULL AND successor_expires_at < ${now}
+			ORDER BY successor_expires_at, id LIMIT ${phaseStepSize})`);
+		return (
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_token_member LIMIT 1`
+			).length > 0 ||
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_token_family LIMIT 1`
+			).length > 0 ||
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_token LIMIT 1`
+			).length > 0 ||
+			this.context.db.all<{ present: number }>(
+				sql`SELECT 1 AS present FROM refresh_session_member INDEXED BY refresh_session_member_successor_expiry_idx WHERE successor_expires_at IS NOT NULL AND successor_expires_at < ${now} LIMIT 1`
+			).length > 0
+		);
+	}
+
 	/**
 	 * Deletes expired refresh-token families a step at a time until the budget is
 	 * spent or none is left. A family row is deleted only after its last member,
@@ -1375,6 +1444,8 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
 
+		const hasMoreRefreshCredentialMaintenance =
+			this.collectRefreshCredentialMaintenance(now);
 		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
 
 		if (expiredRefreshFamilies.hasMoreWork) {
@@ -1476,6 +1547,7 @@ export class GarbageCollectionService {
 				? this.advanceTenantCollection(collectionCache)
 				: collected.hasMoreWork;
 		const hasMoreWork =
+			hasMoreRefreshCredentialMaintenance ||
 			expiredRefreshFamilies.hasMoreWork ||
 			hasMorePendingRows ||
 			hasMoreCollectionWork;

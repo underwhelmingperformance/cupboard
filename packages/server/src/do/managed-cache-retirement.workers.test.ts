@@ -424,7 +424,7 @@ describe('managed cache retirement', () => {
 
 		expect(plans).toStrictEqual({
 			upload: [
-				'SEARCH pending_upload USING COVERING INDEX pending_upload_gc_path_idx (cache_id=?)'
+				'SEARCH pending_upload USING COVERING INDEX pending_upload_cache_retention_epoch_idx (cache_id=?)'
 			],
 			attestation: [
 				'SEARCH pending_attestation USING COVERING INDEX pending_attestation_cache_id_idx (cache_id=?)'
@@ -613,7 +613,7 @@ describe('managed cache retirement', () => {
 			cacheLive: true,
 			wake: '2026-01-01T06:00:00.000Z',
 			steadyPassCost: [
-				{ method: 'garbage-collection', rowsRead: 187, rowsWritten: 8 }
+				{ method: 'garbage-collection', rowsRead: 249, rowsWritten: 8 }
 			]
 		});
 

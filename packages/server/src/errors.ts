@@ -3,16 +3,19 @@ import {
 	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
+	type Sha256HexDigest,
 	type SigningKeyId,
 	type StoreDirectory,
 	type StorePathHash,
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type AttestationInfoError } from '@cupboard/protocol/attestations';
 import {
 	type CacheMetadataError,
 	cacheMetadataErrorCodes
 } from '@cupboard/protocol/cache-metadata';
+import { type AuthorizationDetail } from '@cupboard/protocol/grants';
 import {
 	type OidcIssuer,
 	type SubjectTokenProblem,
@@ -37,6 +40,25 @@ export abstract class ServerHttpError extends Error {
 
 export abstract class InvalidRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
+}
+
+export class AttestationInfoHttpError extends ServerHttpError {
+	readonly status: number;
+	constructor(
+		readonly code: AttestationInfoError['code'],
+		message: string,
+		readonly storePathHash?: StorePathHash,
+		override readonly cause?: unknown
+	) {
+		super(message);
+		this.name = 'AttestationInfoHttpError';
+		this.status =
+			code === 'scope-changed'
+				? StatusCodes.CONFLICT
+				: code === 'list-invalid'
+					? StatusCodes.BAD_GATEWAY
+					: StatusCodes.REQUEST_TOO_LONG;
+	}
 }
 
 export abstract class MetadataHttpError extends ServerHttpError {
@@ -120,15 +142,26 @@ export class UploadPageSplitRequiredError extends ServerHttpError {
 	}
 }
 
-export class UploadRequestBudgetExceededError extends ServerHttpError {
+export class UploadRequestLimitExceededError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(readonly maxPaths: number) {
+		super(
+			`The upload request exceeds this invocation's subrequest budget. Send at most ${String(maxPaths)} paths per request.`
+		);
+		this.name = 'UploadRequestLimitExceededError';
+	}
+}
+
+export class ObjectIncarnationReservationContendedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
 
 	constructor() {
 		super(
-			"The upload request exceeds this Worker invocation's subrequest budget. Retry with fewer paths per request."
+			'The object incarnation changed during reservation. Retry the publication.'
 		);
-		this.name = 'UploadRequestBudgetExceededError';
+		this.name = 'ObjectIncarnationReservationContendedError';
 	}
 }
 
@@ -156,6 +189,16 @@ export class CacheCatalogueMigrationPendingError extends ServerHttpError {
 	constructor() {
 		super('The cache catalogue migration is still in progress; retry shortly');
 		this.name = 'CacheCatalogueMigrationPendingError';
+	}
+}
+
+export class TenantMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super('Tenant migration is still in progress; retry shortly');
+		this.name = 'TenantMigrationPendingError';
 	}
 }
 
@@ -196,6 +239,18 @@ export class CacheAccessMigrationPendingError extends ServerHttpError {
 			'Cache access cannot change before deployment contraction. Complete cupboard deploy, then retry this change.'
 		);
 		this.name = 'CacheAccessMigrationPendingError';
+	}
+}
+
+export class PathReadAuthorityMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor(public override readonly cause?: unknown) {
+		super(
+			'Reference changes are unavailable until both Workers use path read revocation. Complete cupboard deploy, then retry the request.'
+		);
+		this.name = 'PathReadAuthorityMigrationPendingError';
 	}
 }
 
@@ -834,6 +889,15 @@ export class UnsupportedSubjectTokenTypeError extends InvalidRequestError {
 	}
 }
 
+export class RefreshCredentialSizeLimitError extends InvalidRequestError {
+	readonly problem = 'refresh-credential-size-limit';
+
+	constructor() {
+		super('Refresh credential exceeds the 65536-byte limit');
+		this.name = 'RefreshCredentialSizeLimitError';
+	}
+}
+
 export class RefreshTokenRequiredError extends InvalidRequestError {
 	readonly problem = 'refresh-token-required';
 
@@ -880,6 +944,50 @@ export class InvalidAuthorizationDetailsError extends OAuthError {
 		super('The requested authorization_details are not permitted');
 		this.problem = problem;
 		this.name = 'InvalidAuthorizationDetailsError';
+	}
+}
+
+export class InvalidReadResourcesError extends InvalidRequestError {
+	readonly problem = 'invalid-read-resources';
+
+	constructor() {
+		super(
+			'read_resources must contain one to sixteen distinct cache or view resources, including at most one reuse view.'
+		);
+		this.name = 'InvalidReadResourcesError';
+	}
+}
+
+export class ReadResourcesNotPermittedError extends OAuthError {
+	readonly status = StatusCodes.BAD_REQUEST;
+	readonly error = 'invalid_authorization_details';
+	readonly problem = 'read-resources-not-permitted';
+	override readonly detail: Readonly<Record<string, string>>;
+
+	constructor(uncovered: readonly AuthorizationDetail[]) {
+		const advice = uncovered.flatMap((resource) => {
+			if (resource.type === 'cupboard_cache') {
+				const cache =
+					resource.cache.kind === 'default'
+						? 'the default cache'
+						: `cache '${resource.cache.name}'`;
+				return [`Add ${resource.actions.join(', ')} for ${cache}.`];
+			}
+			if (resource.type === 'cupboard_view') {
+				return [
+					`Add ${resource.actions.join(', ')} for reuse view '${resource.view}'.`
+				];
+			}
+			return [];
+		});
+		super(
+			[
+				'The matching trust rules do not permit the requested read_resources.',
+				...advice
+			].join(' ')
+		);
+		this.name = 'ReadResourcesNotPermittedError';
+		this.detail = { read_resources: JSON.stringify(uncovered) };
 	}
 }
 
@@ -1319,6 +1427,18 @@ export class AttestationPathNotFoundError extends ServerHttpError {
 	}
 }
 
+export class AttestationInheritanceSourceChangedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor(public readonly digest: Sha256HexDigest) {
+		super(
+			'The attestation object changed during inheritance. Retry inheritance.'
+		);
+		this.name = 'AttestationInheritanceSourceChangedError';
+	}
+}
+
 export class AttestationBundleInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
 
@@ -1545,5 +1665,15 @@ export class EmptyStatementBatchError extends Error {
 			`A D1 batch builder produced no statements for a chunk of ${String(items)} items`
 		);
 		this.name = 'EmptyStatementBatchError';
+	}
+}
+
+export class CacheClosedError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+	constructor(readonly cache: CacheScope) {
+		super(
+			'This cache is closed. Reopen the cache before publishing or extending retention.'
+		);
+		this.name = 'CacheClosedError';
 	}
 }

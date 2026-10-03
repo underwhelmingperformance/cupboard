@@ -4,7 +4,7 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { type Audience, audienceSchema } from '../audience.ts';
@@ -41,6 +41,7 @@ import {
 	DeploymentUnclaimedError,
 	endBeforeReady,
 	envR2Credentials,
+	executeDeploy,
 	FirstCacheAccessRequiredError,
 	FirstCacheSlugRequiredError,
 	isVersionServed,
@@ -78,6 +79,35 @@ import { TokenManagementNotPermittedError } from './r2-token.ts';
 import { claimSecretSchema } from './secrets.ts';
 import type { DeploymentObservation } from './transition.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
+import * as deployUi from './ui.ts';
+
+describe('executeDeploy result file', () => {
+	it('passes the result-file path into the deployment UI', async () => {
+		const failure = new Error('stop before external work');
+		const runtime = {
+			resultFile: '/tmp/deployment-results.jsonl',
+			colour: false
+		};
+		const uiFactory = vi
+			.spyOn(deployUi, 'createDeployUi')
+			.mockImplementation(() => {
+				throw failure;
+			});
+		try {
+			await expect(
+				executeDeploy(
+					{ oidcIssuer: 'https://dash.cloudflare.com', clientId: 'client' },
+					runtime
+				)
+			).rejects.toBe(failure);
+			expect(uiFactory.mock.calls).toStrictEqual([
+				[{ ...runtime, signal: undefined }]
+			]);
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+});
 
 function principal(
 	issuer: string,
@@ -413,9 +443,13 @@ describe('chooseDeployAccount', () => {
 
 		if (rejection instanceof AccountOptionRequiredError) {
 			expect({
-				error: { name: rejection.name, accounts: rejection.accounts }
+				error: {
+					name: rejection.name,
+					accounts: rejection.accounts,
+					exitCode: rejection.exitCode
+				}
 			}).toStrictEqual({
-				error: { name: AccountOptionRequiredError.name, accounts }
+				error: { name: AccountOptionRequiredError.name, accounts, exitCode: 2 }
 			});
 		}
 	});

@@ -86,7 +86,8 @@ export function runConfig(input: ConfigInput, reporter: Reporter): void {
 	if (input.netrcCredential !== undefined) {
 		reporter.info(
 			[
-				'# Add this line to your Nix netrc-file (for example, ~/.config/nix/netrc):',
+				"# Add this line to the file configured by Nix's netrc-file setting:",
+				'# Check its path with: nix config show netrc-file',
 				renderNetrc(
 					input.url,
 					input.netrcCredential.user,

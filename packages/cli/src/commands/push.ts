@@ -451,8 +451,8 @@ export function registerPushCommand(
 			'JSON file, written by the build, that lists the stores each path was copied from'
 		)
 		.option(
-			'--attestation <bundle>',
-			'a Sigstore bundle file to attach to the pushed paths that it covers (repeatable)',
+			'--bundle, --attestation <bundle>',
+			'a Sigstore bundle file to attach to the pushed paths that it covers (repeatable; both option names are equivalent)',
 			collect,
 			[]
 		)
@@ -489,12 +489,12 @@ export function registerPushCommand(
 				'has already set the root or pins, unless --no-retain was given.',
 				'',
 				'When a path fails, the command exits 77 if any failure was a sign-in or',
-				'permission failure, otherwise 75 if any was temporary, otherwise 69 if',
-				'a service that the push needs was unavailable, and otherwise 1. A',
-				'failure caused by the storage quota exits 1, because running the push',
-				'again fails in the same way until space is freed or the quota is',
-				'raised. For exit status 75, run the push again to publish the paths',
-				'that failed.',
+				'permission failure, otherwise 75 if any was temporary, otherwise 2 if',
+				'an argument was invalid or an upload request exceeded its limit, and',
+				'otherwise 1. A failure caused by the storage quota exits 1, because',
+				'running the push again fails in the same way until space is freed or',
+				'the quota is raised. For exit status 75, run the push again to publish',
+				'the paths that failed.',
 				'',
 				'Examples:',
 				'  # Push a build result to a tenant and keep it under a root',

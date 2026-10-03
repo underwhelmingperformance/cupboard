@@ -3,7 +3,7 @@
 The [quickstart][quickstart] uses public caches. A GitHub Actions job can also
 read a private destination cache and reuse view without a stored read password.
 The job exchanges its GitHub OIDC identity token for a short-lived Cupboard read
-token for each private resource. Trust rules authorise these reads separately
+token for the required resources. Trust rules authorise these reads separately
 from publication.
 
 [quickstart]: ./quickstart.md
@@ -12,10 +12,12 @@ from publication.
 
 For the `pull-request-and-branch` preset, a new pull-request cache inherits the
 tenant's default cache access. Set `cache-access-mode: private` when the default
-cache is public but pull-request caches should be private. An existing cache
-keeps its access; an explicit mode that disagrees with it fails. The reuse view
-must have the same access as the pull-request caches. Adding or removing a
-secret does not change these access modes.
+cache is public but pull-request caches should be private, or
+`cache-access-mode: public` when the default is private but pull-request caches
+should be public. An existing cache keeps its access; an explicit mode that
+disagrees with it fails. The reuse view must have the same access as the
+pull-request caches. Adding or removing a secret does not change these access
+modes.
 
 ```yaml
 jobs:
@@ -38,10 +40,13 @@ cupboard github setup https://cupboard.example.workers.dev/t/acme \
 ```
 
 `github setup` configures the reuse view and trust rules for the selected
-access. If a view or pull-request cache already exists with different access,
-the command reports the mismatch instead of changing it. To change a cache, use
-`cupboard cache set-access`. To replace a view, pass its full definition to
-`cupboard reuse-view set`, including its selector and current priority:
+access. Without `--cache-access-mode`, it uses the default cache's access.
+`--read-user` and `--read-password` authenticate metadata queries and do not
+select access. If a view or pull-request cache already exists with different
+access, the command reports the mismatch instead of changing it. To change a
+cache, use `cupboard cache set-access`. To replace a view, pass its full
+definition to `cupboard reuse-view set`, including its selector and current
+priority:
 
 ```sh
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
@@ -63,8 +68,9 @@ existing baseline without a cache-creation grant.
 
 Public resources remain readable without a content-read grant or a matching CI
 trust rule. Setup keeps public read-only operations anonymous. When a
-destination challenges, setup acquires access for the configured destination and
-reuse view before validating their access modes and priorities.
+destination challenges, setup acquires one session for all configured caches
+without static credentials and the configured reuse view before validating their
+access modes and priorities.
 
 With `--github-oidc`, `cupboard run` sends the exact configured targets to the
 tenant's token endpoint. The server requires content-read authority for existing
@@ -75,11 +81,29 @@ the absence response without creating a cache or granting private content
 access. The first push still creates a named destination implicitly.
 
 Every read-acquisition token expires after 15 minutes and has no refresh token.
-The wrapper repeats OIDC acquisition and exchange while the command runs. It
-writes the credential to a private netrc file for Nix. Direct HTTP readers use
-the current credential for each request. The file is removed when the command
-finishes. Without `--github-oidc`, the wrapper runs the child with its existing
-configuration; read failures are reported by the child.
+The wrapper repeats OIDC acquisition and exchange for the same resource union
+while the command runs. Add other caches in the tenant with repeatable
+`--read-cache <cache-url>` options. Setup uses
+`--read-cache-metadata <cache-url>` for additional caches whose content uses
+static credentials. These metadata resources do not become content resources in
+downstream action sessions. A session accepts up to sixteen distinct resources,
+including at most one reuse view. It writes the credential to a private netrc
+file for Nix. Direct HTTP readers use the current credential for each request.
+The file is removed when the command finishes. Without `--github-oidc`, the
+wrapper runs the child with its existing configuration; read failures are
+reported by the child. The audience, resource and metadata options require
+`--github-oidc`. Explicit OIDC acquisition replaces an incidental netrc
+credential for the same deployment host. An explicit credential in a selected
+substituter URL conflicts with OIDC content access. Explicit OIDC acquisition
+requires `id-token: write` and a matching trust rule, including when the
+requested resources are public.
+
+`cupboard run` forwards the child's input and output and returns the child's
+exit status. A missing executable exits 127. OIDC acquisition or renewal exits
+77 for refused authority and 75 for temporary failures. Permanent renewal
+refusals stop the child immediately; temporary failures retry within the
+credential's remaining lifetime. The wrapper stops the child and removes its
+temporary credentials when renewal cannot continue.
 
 Setup validates `cache-access-mode` against authenticated configuration facts.
 For an absent destination, the facts describe the tenant's current first-write
@@ -96,6 +120,51 @@ elsewhere][building-elsewhere].
 
 [building-elsewhere]: ./building-elsewhere.md
 
+`cupboard run` can include additional caches from the same tenant in one read
+session. Repeat `--read-cache` for each cache. The combined request accepts up
+to sixteen distinct resources, including at most one reuse view. Matching trust
+rules in the current preferred identity tier can authorise different resources
+or actions in the request. Every required action must be permitted; a refused
+request receives no partial credential. See [Matching trust
+rules][matching-rules]. Configure the additional substituter URLs and trusted
+public keys in Nix separately:
+
+[matching-rules]: ./trust-rules.md#when-several-rules-match
+
+```sh
+cupboard run https://cupboard.example.workers.dev/t/acme/cache/builds \
+  --github-oidc --reuse-view prior \
+  --read-cache https://cupboard.example.workers.dev/t/acme/cache/falcon \
+  -- nix build .#app
+```
+
+The setup action and flake workflow accept `read-caches` to add runner
+substituters and OIDC read resources without changing the publication
+destination. Supply canonical cache URLs from the selected tenant, one per line.
+Duplicate URLs are configured once. The sixteen-resource limit includes the
+destination caches and reuse view. Additional read caches are separate from
+destination access checks and the destination's priority comparison with the
+reuse view. A supplied default static read credential conflicts with this input;
+cache-specific and credential-bearing URLs must not select a read cache. Remote
+builders still need their own substituter credentials.
+
+`cupboard github check` probes literal `read-caches` URLs and checks
+content-read authority for each private cache. Repair adds separate rootless
+read grants. Dynamic expressions, invalid URLs and static credential conflicts
+leave the job unverified. If the job supplies secret `private_substituters`, the
+check cannot compare those URLs with `read-caches`; verify that a cache does not
+use both credential sources before configuring its trust rule.
+
+```yaml
+with:
+  read-caches: https://cupboard.example.workers.dev/t/acme/cache/falcon
+```
+
+Resources in the OIDC session must belong to the selected tenant. Other tenants
+on the same host need complete static credentials in their substituter URLs, or
+separate commands and Nix configurations. The session netrc credential applies
+to the whole host.
+
 ## Optional static read credentials
 
 You can continue to pass an operator-issued username and password. A supplied
@@ -108,19 +177,19 @@ credentials][static-reads] for issuing and protecting static credentials.
 
 The flake workflow accepts these optional secrets:
 
-| Secrets                                              | Use                                                                                      |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `read_user`, `read_password`                         | Default static pair for the selected cache and reuse view. It may be cache-specific.     |
-| `destination_read_user`, `destination_read_password` | Override for the selected destination cache when it needs a different static credential. |
-| `fallback_read_user`, `fallback_read_password`       | Deprecated aliases for the default pair.                                                 |
+| Secrets                                              | Use                                                                                                            |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `read_user`, `read_password`                         | Default static pair for the selected cache and reuse view. A private view requires the tenant read credential. |
+| `destination_read_user`, `destination_read_password` | Override for the selected destination cache when it needs a different static credential.                       |
+| `fallback_read_user`, `fallback_read_password`       | Deprecated aliases for the default pair.                                                                       |
 
 Supply both values in each pair that you use. If both the default pair and its
 deprecated alias are supplied, they must match. The destination override applies
 to the cache that the run selects. For a read-only pull-request run, that is the
 default cache.
 
-For example, one static credential can read both the default cache and the reuse
-view:
+For example, the tenant read credential can read both the default cache and a
+private reuse view:
 
 ```yaml
 secrets:
@@ -149,6 +218,17 @@ secrets:
 Percent-encode reserved characters in the username and password. Supply each
 cache's trusted public key through `trusted-public-key` or `nix-config`. A
 remote store needs independent access to these substituters.
+
+Nix [uses optional netrc authentication][nix-filetransfer], which [prefers a
+complete credential pair in the URL][curl-netrc]. An explicit URL pair can
+therefore read another tenant on the same deployment hostname without using the
+publication tenant's read-session credential. These static substituters remain
+outside the OIDC resource request. A second tenant that needs a different netrc
+pair on that hostname requires a separate job and Nix configuration.
+
+[nix-filetransfer]:
+  https://github.com/NixOS/nix/blob/2.34.7/src/libstore/filetransfer.cc#L516
+[curl-netrc]: https://curl.se/libcurl/c/CURLOPT_NETRC.html
 
 ## Attestations for private caches
 

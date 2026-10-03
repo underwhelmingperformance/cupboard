@@ -8,8 +8,14 @@ import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { bestEffort, withCleanup } from '@cupboard/shared/cleanup';
 
 import { abortable, abortReason, delayMs, throwIfAborted } from '../abort.ts';
-import { CliError } from '../errors.ts';
+import {
+	authExitCode,
+	CliError,
+	CupboardHttpError,
+	transientExitCode
+} from '../errors.ts';
 
+import { GithubOidcRequestError } from './github-oidc.ts';
 import { writeSecretFile } from './secret-file.ts';
 
 const defaultRenewalMarginMs = 5 * 60 * 1000;
@@ -45,11 +51,16 @@ export interface ReadCredentialSessionOptions {
 }
 
 export class ReadCredentialRenewalError extends CliError {
-	constructor() {
+	constructor(cause?: unknown) {
 		super(
-			'Could not renew cache read access before its credential expires. Check the workflow OIDC permission and the cache read trust rule.'
+			'Could not renew cache read access. Check the workflow OIDC permission and the cache read trust rule.',
+			{ cause }
 		);
 		this.name = 'ReadCredentialRenewalError';
+	}
+
+	override get exitCode(): number {
+		return isPermanentRefusal(this.cause) ? authExitCode : transientExitCode;
 	}
 }
 
@@ -172,7 +183,8 @@ async function renewWhileRunning(
 	} catch (error) {
 		if (!controller.signal.aborted) {
 			controller.abort(
-				error instanceof ReadCredentialPublicationError
+				error instanceof ReadCredentialPublicationError ||
+					error instanceof ReadCredentialRenewalError
 					? error
 					: new ReadCredentialRenewalError()
 			);
@@ -215,7 +227,6 @@ async function renewBeforeExpiry(
 				throw lastFailure;
 			};
 			const due = deadline();
-			lastFailure = new ReadCredentialRenewalError();
 			const next = await Promise.race([issue(attempt.signal), due]);
 			throwIfAborted(controller.signal);
 			if (next.expiresAtMs - now() <= safetyMarginMs) {
@@ -228,7 +239,14 @@ async function renewBeforeExpiry(
 			throwIfAborted(controller.signal);
 
 			return next;
-		} catch {
+		} catch (error) {
+			if (publication === undefined && !controller.signal.aborted) {
+				lastFailure = new ReadCredentialRenewalError(error);
+				if (isPermanentRefusal(error)) {
+					throw lastFailure;
+				}
+			}
+
 			const pendingPublication = publication;
 			if (pendingPublication !== undefined && controller.signal.aborted) {
 				await bestEffort(() => pendingPublication);
@@ -255,7 +273,9 @@ async function createTemporaryReadCredentialFile(
 	url: URL,
 	existingNetrc: string | undefined
 ): Promise<ReadCredentialFile> {
-	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-read-'));
+	const directory = await mkdtemp(
+		path.join(process.env.RUNNER_TEMP ?? tmpdir(), 'cupboard-read-')
+	);
 	const file = path.join(directory, 'netrc');
 	const factsPath = path.join(directory, 'read-access.json');
 
@@ -282,4 +302,15 @@ async function createTemporaryReadCredentialFile(
 		},
 		remove: () => rm(directory, { recursive: true, force: true })
 	};
+}
+
+function isPermanentRefusal(error: unknown): boolean {
+	return (
+		(error instanceof CupboardHttpError ||
+			error instanceof GithubOidcRequestError) &&
+		error.status >= 400 &&
+		error.status < 500 &&
+		error.status !== 408 &&
+		error.status !== 429
+	);
 }

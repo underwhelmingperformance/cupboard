@@ -1,4 +1,7 @@
-import { type AuthorizationDetails } from './grants.ts';
+import {
+	type AuthorizationDetail,
+	type AuthorizationDetails
+} from './grants.ts';
 import {
 	type OidcTrustRule,
 	type VerifiedOidcClaims
@@ -6,17 +9,19 @@ import {
 import { evaluateOidcTrust } from './oidc-trust-selection-internal.ts';
 
 export type OidcTrustSelection =
-	| { readonly outcome: 'selected'; readonly rule: OidcTrustRule }
+	| {
+			readonly outcome: 'selected';
+			readonly rule?: OidcTrustRule;
+			readonly grants?: AuthorizationDetails;
+	  }
 	| { readonly outcome: 'identity-unmatched' }
 	| {
 			readonly outcome: 'authority-unmatched';
 			readonly rules: readonly [OidcTrustRule, ...OidcTrustRule[]];
-			/**
-			 * The requested details that no rule in the tier permits. Empty when
-			 * every detail is permitted by some rule but no single rule permits
-			 * the complete request.
-			 */
-			readonly uncovered: AuthorizationDetails;
+			readonly uncovered: readonly [
+				AuthorizationDetail,
+				...AuthorizationDetail[]
+			];
 	  }
 	| {
 			readonly outcome: 'ambiguous';
@@ -24,15 +29,9 @@ export type OidcTrustSelection =
 	  };
 
 /**
- * Selects one trust rule for an external token exchange. Identity precedence is
- * resolved before authority, so a broader identity rule cannot bypass a more
- * specific restriction. Requested grants distinguish tied identity rules only
- * when exactly one rule permits the complete request. Grants are never
- * combined across rules.
- *
- * Only OIDC verification can produce `VerifiedOidcClaims`. Selection chooses a
- * policy rule but does not grant access; the token-exchange service must still
- * resolve the request against that rule before creating a token.
+ * Composes exact requested authority within the preferred verified identity
+ * tier. An omitted request retains single-rule selection for implicit authority.
+ * The issuer must re-evaluate current policy after asynchronous work.
  */
 export function selectOidcTrust(
 	rules: readonly OidcTrustRule[],

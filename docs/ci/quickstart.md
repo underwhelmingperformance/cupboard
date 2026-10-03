@@ -4,7 +4,8 @@ This guide walks you through setting up a GitHub repository so that its CI
 builds your flake and publishes the results to cupboard. When you've finished:
 
 - Each pull request gets a cache of its own, and its builds are published there.
-  If the pull request is closed without being merged, its cache is removed.
+  Closing the pull request expires its roots and starts its configured grace.
+  Reads and reuse remain available during grace, including after a merge.
 - Each push to `main` publishes to your tenant's default cache. Nix users
   normally read from that cache. If a pull request has already built exactly the
   same outputs, the `main` run reuses them instead of building them again.
@@ -56,9 +57,9 @@ This adds three things to your tenant. Two of them are
 Actions jobs to accept, and what each one is allowed to do.
 
 - The **pull-request trust rule** accepts pull-request runs from `acme/app`.
-  Each run can create its pull request's cache, publish to it, and remove it.
-  The cache is called `gh-<repository-id>-pr-<number>`, where `<repository-id>`
-  is GitHub's numeric ID for the repository.
+  Each run can create its pull request's cache, publish to it, close it, and
+  reopen it. The cache is called `gh-<repository-id>-pr-<number>`, where
+  `<repository-id>` is GitHub's numeric ID for the repository.
 - The **branch trust rule** accepts runs of the workflow on `main` and lets them
   publish to the default cache. This covers pushes, manual runs and scheduled
   runs.
@@ -78,12 +79,20 @@ A few things to know about `github setup`:
 
 - It looks up the repository on GitHub to find its numeric ID. The rules use the
   ID because it doesn't change if the repository is renamed. For a private
-  repository, set `GH_TOKEN` or `GITHUB_TOKEN` so the command can see it.
+  repository, set `GH_TOKEN` or `GITHUB_TOKEN` to a token with permission to
+  read it. A non-empty `GH_TOKEN` takes precedence over `GITHUB_TOKEN`. GitHub
+  also returns 404 when a private repository is inaccessible, so check the
+  repository name and the token's access if the command reports that it was not
+  found.
+- Temporary GitHub failures exit with status 75. Check [GitHub Status] and try
+  again. For a connection failure, also check your network connection.
 - The root names include the repository's name, so if you rename the repository,
   run `github setup` again.
 - It's safe to run again. It reports what's already in place. The exception is a
   reuse view with the same name but a different definition: the command shows
   you the difference, makes no changes, and exits with an error.
+
+[GitHub Status]: https://www.githubstatus.com/
 
 ### Why the workflow reference ends in `v*`
 
@@ -149,7 +158,7 @@ Create a file called `.github/workflows/cupboard.yml` in your repository:
 name: cupboard
 
 on:
-  # `closed` lets the workflow remove an unmerged pull request's cache.
+  # `closed` starts grace; `reopened` restores publication access.
   pull_request:
     types: [opened, synchronize, reopened, closed]
   push:
@@ -203,19 +212,27 @@ Then fill in your own values:
 The `preset: pull-request-and-branch` line tells the workflow to decide where to
 publish based on what triggered the run. Without it, you'd have to set the cache
 and root names yourself. The other defaults use available outputs, leave outputs
-from external substituters upstream, publish selected outputs, and sign build
-provenance for builds observed on the runner. Reused or substituted outputs
-receive no new build claim. You can change each decision with `build`,
-`substituter`, `publish` and `attest`; see
+from external substituters upstream, publish selected outputs plus observed
+build intermediates, and sign build provenance for builds observed on the
+runner. Reused or substituted outputs receive no new build claim. You can change
+each decision with `build`, `substituter`, `publish` and `attest`; see
 [Choosing publication behaviour](./flake-publish.md#choosing-publication-behaviour).
 For pull request `#42` and for `main`, the preset does this:
 
-| Event                         | Publishes to                   | Retention root                   | Kept for                       |
-| ----------------------------- | ------------------------------ | -------------------------------- | ------------------------------ |
-| Pull request `#42`            | `gh-<repository-id>-pr-42`     | `github:acme/app/pr-42/<suffix>` | 14 days after the latest run   |
-| Run on `main`                 | the default cache              | `github:acme/app/main/<suffix>`  | permanently                    |
-| Pull request closed, unmerged | nothing (its cache is removed) |                                  |                                |
-| Pull request merged           | nothing (nothing is removed)   |                                  | its roots expire after 14 days |
+| Event                         | Publishes to               | Retention root                   | Kept for                     |
+| ----------------------------- | -------------------------- | -------------------------------- | ---------------------------- |
+| Pull request `#42`            | `gh-<repository-id>-pr-42` | `github:acme/app/pr-42/<suffix>` | 14 days after the latest run |
+| Run on `main`                 | the default cache          | `github:acme/app/main/<suffix>`  | permanently                  |
+| Pull request closed or merged | none                       | roots expire at the close time   | configured cache grace       |
+| Pull request reopened         | `gh-<repository-id>-pr-42` | `github:acme/app/pr-42/<suffix>` | 14 days after the new run    |
+
+Closing a cache rejects publication and retention extension. GC removes expired
+contents after grace and deletes the empty cache when pending work has finished.
+A `main` run can reuse PR outputs during grace and retain them in the default
+cache. Reopening restores writes; it does not extend the previous roots. See
+[Cache closure][cache-closure].
+
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 A pull-request run only reads from its own cache and from upstream caches such
 as cache.nixos.org. Only runs on `main` look through the reuse view. That way,
@@ -264,15 +281,13 @@ the tenant and ask it for, and checks that against your trust rules and reuse
 view. After `cupboard github setup`, the job in the workflow file from step 4
 passes.
 
-If a job fails, the command lists it and exits with status 1. For example, if
-two jobs publish to the tenant and no trust rule accepts them, the result looks
-like this:
+If a job fails, the command lists it and exits with status 1. For example, if no
+trust rule accepts the publishing job from step 4, this excerpt shows the failed
+job and repair hint. The context rows are omitted:
 
 ```text
-Workflow revision: acme/app@<commit>
-.github/workflows/publish.yml, packages: failed: push: no rule pins this repository
-.github/workflows/publish.yml, systems: failed: push: no rule pins this repository
-Review a repair: cupboard github check https://cupboard.example.workers.dev/t/acme --repo acme/app --branch main --fix
+.github/workflows/cupboard.yml, publish: failed: pull_request: the job condition limits the job to pull requests from this repository; the check does not model pull requests from forks; pull_request: no rule pins this repository; push: no rule pins this repository
+Review a repair: cupboard github check https://cupboard.example.workers.dev/t/acme --repo acme/app --branch add-cupboard --fix
 ```
 
 To see the tenant changes that would fix failures like these, and apply them

@@ -5,6 +5,11 @@ name: cupboard flake publish
 on:
   workflow_call:
     inputs:
+      audience:
+        description:
+          Audience of the GitHub OIDC token. Defaults to the tenant URL.
+        required: false
+        type: string
       url:
         description: Tenant URL to publish to.
         required: true
@@ -20,26 +25,28 @@ on:
           the run. The only preset is pull-request-and-branch. A pull_request
           run publishes to the cache gh-<repository-id>-pr-<number>, with roots
           under github:<repository>/pr-<number>/ that expire after 14 days. When
-          `publish` is `outputs` or `closure`, the workflow creates that cache
-          if it does not exist. With `publish: none`, it reads from the tenant's
-          default cache without creating or removing a pull-request cache. The
-          preset refuses a pull request from a fork. When an unmerged pull
-          request is closed and publication is enabled, the run removes that
-          pull request's cache. A run on the branch in the branch input
-          publishes to the default cache, with permanent roots under
-          github:<repository>/<branch>/. The preset fails any other run. Cannot
-          be combined with cache, root-prefix, ttl or permanent. Leave empty to
-          set those inputs yourself.
+          publication is enabled, the workflow creates that cache if it does not
+          exist. With `publish: none`, it reads from the tenant's default cache
+          without creating or removing a pull-request cache. The preset refuses
+          a pull request from a fork. When a pull request is closed and
+          publication is enabled, the run closes that pull request's cache. Its
+          contents remain available through the cache's configured grace period.
+          A run on the branch in the branch input publishes to the default
+          cache, with permanent roots under github:<repository>/<branch>/. The
+          preset fails any other run. Cannot be combined with cache,
+          root-prefix, ttl or permanent. Leave empty to set those inputs
+          yourself.
         required: false
         default: ''
         type: string
       cache-access-mode:
         description:
-          Access for a pull-request cache that the preset creates, public or
-          private. When omitted, a new cache inherits the tenant's default cache
-          access. An existing cache keeps its access, and an explicit mode must
-          match it. Set an explicit mode when the new cache must differ from the
-          default cache.
+          Required access for the selected cache, public or private. Without a
+          preset, setup checks this on every event. With the preset, it selects
+          access only for a publishing pull-request cache; branch and read-only
+          runs use the default cache's access. When omitted, a new cache
+          inherits the tenant's default cache access. An existing cache keeps
+          its access, and an explicit mode must match it.
         required: false
         default: ''
         type: string
@@ -96,6 +103,16 @@ on:
         required: false
         default: false
         type: boolean
+      read-caches:
+        description:
+          Additional canonical cache URLs from the selected tenant, one per
+          line. Adds runner substituters and OIDC read resources without
+          changing the destination cache. Cannot use credentials for these
+          caches or a default static read credential. Remote builders need their
+          own read credentials.
+        required: false
+        default: ''
+        type: string
       reuse-view:
         description:
           Reuse view to read through, for paths that the destination cache does
@@ -154,12 +171,12 @@ on:
       publish:
         description: >-
           Control which paths are published. `none` publishes no paths.
-          `outputs` publishes selected requested outputs. `closure` also
-          publishes their runtime references. With `outputs` or `closure`, a
-          successful run with no selected outputs replaces its retention roots
-          with empty path lists.
+          `outputs` publishes selected requested outputs. `built` also publishes
+          intermediates built during this run. `closure` also publishes their
+          runtime references. With publication enabled, a successful run with no
+          selected outputs replaces its retention roots with empty path lists.
         required: false
-        default: outputs
+        default: built
         type: string
       push:
         description: >-
@@ -321,11 +338,13 @@ on:
         required: false
       fallback_read_user:
         description:
-          Deprecated alias of read_user. Supply both aliases or neither.
+          Deprecated alias of read_user. Supply it with fallback_read_password.
+          The workflow warns when this secret is supplied.
         required: false
       fallback_read_password:
         description:
-          Deprecated alias of read_password. Supply both aliases or neither.
+          Deprecated alias of read_password. Supply it with fallback_read_user.
+          The workflow warns when this secret is supplied.
         required: false
       private_substituters:
         description:
@@ -349,13 +368,14 @@ jobs:
       cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
       publish: ${{ steps.resolve.outputs.publish }}
       cache: ${{ steps.resolve.outputs.cache }}
+      cache-access-mode: ${{ steps.resolve.outputs.cache-access-mode }}
       root-prefix: ${{ steps.resolve.outputs.root-prefix }}
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
       provision-cache: ${{ steps.resolve.outputs.provision-cache }}
       provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
-      remove-cache: ${{ steps.resolve.outputs.remove-cache }}
+      close-cache: ${{ steps.resolve.outputs.close-cache }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -423,8 +443,8 @@ jobs:
             *) echo '::error::substituter must be leave or copy'; exit 1 ;;
           esac
           case "${PUBLISH}" in
-            none|outputs|closure) ;;
-            *) echo '::error::publish must be none, outputs, or closure'; exit 1 ;;
+            none|outputs|built|closure) ;;
+            *) echo '::error::publish must be none, outputs, built, or closure'; exit 1 ;;
           esac
           case "${ATTEST}" in
             true|false) ;;
@@ -452,6 +472,12 @@ jobs:
                [ "${READ_PASSWORD}" != "${FALLBACK_READ_PASSWORD}" ]; }; then
             echo '::error::read_user/read_password and fallback_read_user/fallback_read_password must match when both are supplied'
             exit 1
+          fi
+          if [ -n "${FALLBACK_READ_USER}" ]; then
+            echo '::warning::fallback_read_user is deprecated. Use read_user.'
+          fi
+          if [ -n "${FALLBACK_READ_PASSWORD}" ]; then
+            echo '::warning::fallback_read_password is deprecated. Use read_password.'
           fi
           for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do
             if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
@@ -554,8 +580,8 @@ jobs:
                 if [ "${PUBLISH}" != none ]; then
                   CACHE="${pr_cache}"
                   PROVISION_CACHE="${CACHE}"
-                  if [ "${EVENT_ACTION}" = closed ] && [ "${MERGED}" != true ]; then
-                    REMOVE_CACHE="${CACHE}"
+                  if [ "${EVENT_ACTION}" = closed ]; then
+                    CLOSE_CACHE="${CACHE}"
                   fi
                 fi
                 if [ -n "${REUSE_VIEW}" ]; then
@@ -581,16 +607,22 @@ jobs:
               exit 1
               ;;
           esac
+          DESTINATION_ACCESS_MODE="${CACHE_ACCESS_MODE}"
+          if [ -n "${PRESET}" ] &&
+             { [ "${EVENT_NAME}" != pull_request ] || [ "${PUBLISH}" = none ]; }; then
+            DESTINATION_ACCESS_MODE=''
+          fi
           {
             echo "publish=${PUBLISH}"
             echo "cache=${CACHE}"
+            echo "cache-access-mode=${DESTINATION_ACCESS_MODE}"
             echo "root-prefix=${ROOT_PREFIX}"
             echo "ttl=${TTL}"
             echo "permanent=${PERMANENT}"
             echo "reuse-view=${REUSE_VIEW}"
             echo "provision-cache=${PROVISION_CACHE:-}"
             echo "provision-cache-ttl=${TTL}"
-            echo "remove-cache=${REMOVE_CACHE:-}"
+            echo "close-cache=${CLOSE_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
@@ -665,13 +697,12 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
+          read-caches: ${{ inputs.read-caches }}
+          audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           provision-cache: ${{ needs.configure.outputs.provision-cache }}
-          cache-access-mode:
-            ${{ github.event_name == 'pull_request' &&
-            needs.configure.outputs.publish != 'none' &&
-            inputs.cache-access-mode || '' }}
+          cache-access-mode: ${{ needs.configure.outputs.cache-access-mode }}
           provision-cache-ttl:
             ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
@@ -684,6 +715,21 @@ jobs:
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
+      - name: Reopen the pull request cache
+        if:
+          github.event_name == 'pull_request' && github.event.action ==
+          'reopened' && needs.configure.outputs.provision-cache != ''
+        env:
+          AUDIENCE: ${{ steps.setup.outputs.read-session-audience }}
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ needs.configure.outputs.provision-cache }}
+        run: |
+          set -euo pipefail
+          args=(cache reopen "$URL" "$CACHE" --github-oidc)
+          if [[ -n "$AUDIENCE" ]]; then args+=(--audience "$AUDIENCE"); fi
+          "${CUPBOARD_PATH}" "${args[@]}"
+
       - name: Evaluate target manifest
         id: targets
         env:
@@ -691,6 +737,9 @@ jobs:
           PUBLISH: ${{ needs.configure.outputs.publish }}
           CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
           READ_SESSION_TARGET: ${{ steps.setup.outputs.read-session-target }}
+          READ_SESSION_AUDIENCE:
+            ${{ steps.setup.outputs.read-session-audience }}
+          READ_SESSION_CACHES: ${{ steps.setup.outputs.read-session-caches }}
           READ_SESSION_VIEW: ${{ steps.setup.outputs.read-session-view }}
         run: |
           set -euo pipefail
@@ -700,6 +749,13 @@ jobs:
           fi
           if [[ -n "${READ_SESSION_TARGET}" ]]; then
             wrapper=("${CUPBOARD_PATH}" run "${READ_SESSION_TARGET}" --github-oidc)
+            if [[ -n "${READ_SESSION_AUDIENCE}" ]]; then
+              wrapper+=(--audience "${READ_SESSION_AUDIENCE}")
+            fi
+            cache_lines=$(node -e 'for (const url of JSON.parse(process.env.READ_SESSION_CACHES || "[]")) console.log(url)')
+            while IFS= read -r cache_url; do
+              if [[ -n "$cache_url" ]]; then wrapper+=(--read-cache "$cache_url"); fi
+            done <<< "$cache_lines"
             if [[ -n "${READ_SESSION_VIEW}" ]]; then
               wrapper+=(--reuse-view "${READ_SESSION_VIEW}")
             fi
@@ -717,6 +773,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ needs.configure.outputs.cache }}
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
@@ -819,12 +877,11 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
+          read-caches: ${{ inputs.read-caches }}
+          audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
-          cache-access-mode:
-            ${{ github.event_name == 'pull_request' &&
-            needs.configure.outputs.publish != 'none' &&
-            inputs.cache-access-mode || '' }}
+          cache-access-mode: ${{ needs.configure.outputs.cache-access-mode }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           destination-read-user: ${{ secrets.destination_read_user }}
           destination-read-password: ${{ secrets.destination_read_password }}
@@ -848,6 +905,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ needs.configure.outputs.cache }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
@@ -891,6 +950,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           read-user:
             ${{ secrets.destination_read_user || secrets.read_user ||
             secrets.fallback_read_user }}
@@ -908,6 +969,8 @@ jobs:
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           read-session-target: ${{ steps.setup.outputs.read-session-target }}
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ needs.configure.outputs.cache }}
           read-user:
             ${{ secrets.destination_read_user || secrets.read_user ||
@@ -918,6 +981,28 @@ jobs:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
+
+      - name: Report stored attestation coverage
+        uses: $/actions/attest-status
+        if:
+          ${{ needs.configure.outputs.publish != 'none' &&
+          steps.build-cohort.outputs.receipt-file != '' }}
+        with:
+          url: ${{ inputs.url }}
+          cache: ${{ needs.configure.outputs.cache }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          read-session-target: ${{ steps.setup.outputs.read-session-target }}
+          read-session-view: ${{ steps.setup.outputs.read-session-view }}
+          read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
+          audience: ${{ steps.setup.outputs.read-session-audience }}
+          receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
+          bundles-file: ${{ steps.attest.outputs.bundles-file }}
+          read-user:
+            ${{ secrets.destination_read_user || secrets.read_user ||
+            secrets.fallback_read_user }}
+          read-password:
+            ${{ secrets.destination_read_password || secrets.read_password ||
+            secrets.fallback_read_password }}
 
       # At this point, every retention root has been set on the destination and
       # attestation has read the committed narinfos. Remove this build's
@@ -954,16 +1039,16 @@ jobs:
             echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
 
-  remove-cache:
-    name: Remove the pull request's cache
+  close-cache:
+    name: Close the pull request's cache
     needs: configure
-    if: needs.configure.outputs.remove-cache != ''
+    if: needs.configure.outputs.close-cache != ''
     runs-on: ${{ inputs.plan-runner }}
     timeout-minutes: 10
     permissions:
       attestations: read # verify a selected cupboard release
       contents: read # check out the workflow code that installs cupboard
-      id-token: write # OIDC token for the cache removal
+      id-token: write # OIDC token for closing the cache
     steps:
       - uses: $/actions/prepare
         if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
@@ -992,13 +1077,16 @@ jobs:
         with:
           cupboard: ${{ needs.configure.outputs.cupboard }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
+          audience: ${{ inputs.audience }}
 
-      - name: Remove the cache
+      - name: Close the cache
         env:
+          AUDIENCE: ${{ steps.setup.outputs.read-session-audience }}
           CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
           URL: ${{ inputs.url }}
-          CACHE: ${{ needs.configure.outputs.remove-cache }}
+          CACHE: ${{ needs.configure.outputs.close-cache }}
         run: |
           set -euo pipefail
-          "${CUPBOARD_PATH}" cache remove "${URL}" "${CACHE}" \
-            --github-oidc --force --yes
+          args=(cache close "$URL" "$CACHE" --github-oidc)
+          if [[ -n "$AUDIENCE" ]]; then args+=(--audience "$AUDIENCE"); fi
+          "${CUPBOARD_PATH}" "${args[@]}"

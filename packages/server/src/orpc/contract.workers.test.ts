@@ -1,8 +1,10 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	cacheGenerationSchema,
 	narInfoGenerationSchema,
 	predicateTypeSchema,
-	signingKeyIdSchema
+	signingKeyIdSchema,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
@@ -21,9 +23,17 @@ import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	onTestFinished,
+	vi
+} from 'vitest';
 import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
@@ -33,6 +43,10 @@ import { AttestationCasService } from '../do/attestation-cas-service.ts';
 import { AttestationsService } from '../do/attestations-service.ts';
 import { CacheRegistrationService } from '../do/cache-registration-service.ts';
 import { NarInfoObjectsService } from '../do/narinfo-objects-service.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from '../do/subrequest-slice.ts';
 import { casObjectKey } from '../http/http.ts';
 import { runCasReaper } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -40,6 +54,7 @@ import {
 	attestationReferenceRows,
 	bootstrap,
 	cacheWriteGrants,
+	casObjectRows,
 	currentCasObjectKey,
 	currentOrigin,
 	currentServer,
@@ -54,7 +69,9 @@ import {
 	readFetch,
 	recordTransition,
 	resetTestServer,
+	resolvedCache,
 	sigstoreBundleBytes,
+	testBase,
 	testPushId,
 	uploadMetadata,
 	uploadPathNegotiation,
@@ -84,7 +101,10 @@ function tenantClient(token: string): TenantClient {
 
 describe('tenant contract round trip', () => {
 	beforeEach(resetTestServer);
-	afterEach(() => vi.restoreAllMocks());
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+	});
 
 	it('refuses usage when the accounting row is missing', async () => {
 		const init = await bootstrap();
@@ -753,6 +773,8 @@ describe('tenant contract round trip', () => {
 	});
 
 	it('issues, refreshes and bounds a push credential to the token', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(testBase);
 		await useTestServer('contract-credential');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -762,9 +784,6 @@ describe('tenant contract round trip', () => {
 			pushId: issued.pushId
 		});
 
-		const expiresInSeconds =
-			(new Date(issued.expiresAt).getTime() - Date.now()) / 1000;
-
 		expect({
 			pushIdShape: /^[0-9a-f]{104}$/u.test(issued.pushId),
 			bucket: issued.bucket,
@@ -773,16 +792,14 @@ describe('tenant contract round trip', () => {
 				issued.accessKeyId.length > 0 &&
 				issued.secretAccessKey.length > 0 &&
 				issued.sessionToken.length > 0,
-			// The admin token lives 600s, far under the six-hour cap, so a credential
-			// bounded to the token lands well under an hour.
-			boundToToken: expiresInSeconds > 0 && expiresInSeconds < 700,
+			expiresAt: issued.expiresAt,
 			refreshKeepsPrefix: refreshed.pushId === issued.pushId
 		}).toStrictEqual({
 			pushIdShape: true,
 			bucket: 'cupboard-blobs',
 			endpoint: 'https://test-account-id.r2.cloudflarestorage.com',
 			hasCredential: true,
-			boundToToken: true,
+			expiresAt: '2026-01-01T00:10:00.000Z',
 			refreshKeepsPrefix: true
 		});
 
@@ -958,6 +975,313 @@ describe('tenant contract round trip', () => {
 				),
 				measured: 1,
 				promoted: 1
+			});
+		}
+	);
+
+	it.each([
+		{ change: 'path-generation', error: undefined },
+		{
+			change: 'cache-generation',
+			error: {
+				code: 'NOT_FOUND',
+				status: StatusCodes.NOT_FOUND,
+				message: 'Attestation upload not found'
+			}
+		},
+		{
+			change: 'pending-removed',
+			error: {
+				code: 'NOT_FOUND',
+				status: StatusCodes.NOT_FOUND,
+				message: 'Attestation upload not found'
+			}
+		},
+		{
+			change: 'pending-expired',
+			error: {
+				code: 'NOT_FOUND',
+				status: StatusCodes.NOT_FOUND,
+				message: 'Attestation upload expired'
+			}
+		},
+		{
+			change: 'quota',
+			error: {
+				code: 'INSUFFICIENT_STORAGE',
+				status: StatusCodes.INSUFFICIENT_STORAGE,
+				message: "This upload would exceed the tenant's storage quota"
+			}
+		},
+		{
+			change: 'tenant-stopped',
+			error: {
+				code: 'FORBIDDEN',
+				status: StatusCodes.FORBIDDEN,
+				message: 'Writes for this tenant are stopped (suspended)'
+			}
+		}
+	] as const)(
+		'releases the input gate during a grouped bundle read and rechecks $change',
+		async ({ change, error }) => {
+			const fixture = await bundleFixture(
+				'default',
+				1,
+				`bundle-gate-${change}`
+			);
+			const decision = await stageFixtureBundle(
+				fixture,
+				bundleForSubjects(fixture.subjects)
+			);
+			const readState = {
+				started: false,
+				finished: false,
+				attachmentSettled: false
+			};
+			const stopWaiting = new AbortController();
+			let releaseRead: (() => void) | undefined;
+			const restore = await runInDurableObject(currentServer(), (instance) => {
+				const context = instance.context;
+				const originalEnv = context.env;
+				context.env = {
+					...originalEnv,
+					BLOBS: new Proxy(originalEnv.BLOBS, {
+						get(bucket, property) {
+							if (property === 'get') {
+								return async (key: string, options?: R2GetOptions) => {
+									const object = await bucket.get(key, options);
+									if (
+										object === null ||
+										key !== decision.r2Key ||
+										!('arrayBuffer' in object)
+									) {
+										return object;
+									}
+									return new Proxy(object, {
+										get(target, member) {
+											if (member === 'arrayBuffer') {
+												return async () => {
+													const latch = Promise.withResolvers<undefined>();
+													releaseRead = () => {
+														latch.resolve(undefined);
+													};
+													readState.started = true;
+													await latch.promise;
+													readState.finished = true;
+													return target.arrayBuffer();
+												};
+											}
+											const value: unknown = Reflect.get(
+												target,
+												member,
+												target
+											);
+											const bound: unknown =
+												typeof value === 'function'
+													? value.bind(target)
+													: value;
+											return bound;
+										}
+									});
+								};
+							}
+							const value: unknown = Reflect.get(bucket, property, bucket);
+							const bound: unknown =
+								typeof value === 'function' ? value.bind(bucket) : value;
+							return bound;
+						}
+					})
+				};
+				return () => {
+					context.env = originalEnv;
+				};
+			});
+			onTestFinished(() => {
+				stopWaiting.abort();
+				releaseRead?.();
+				restore();
+			});
+			const promoted = vi.spyOn(
+				AttestationCasService.prototype,
+				'promoteMeasuredBundle'
+			);
+			const attaching = (async () => {
+				const result = await safe(
+					fixture.attach(decision.uploadId, fixture.hashes)
+				);
+				readState.attachmentSettled = true;
+				return result;
+			})();
+			while (!readState.started) {
+				if (readState.attachmentSettled) {
+					const result = await attaching;
+					if (result.error !== null) {
+						throw result.error;
+					}
+					throw new Error(
+						'Attachment completed without reading the staged bundle'
+					);
+				}
+				await scheduler.wait(0, { signal: stopWaiting.signal });
+			}
+			const changed = runInDurableObject(currentServer(), (instance) =>
+				instance.context.criticalSection(async () => {
+					const context = instance.context;
+					const wasReading = !readState.finished;
+					const cache = resolvedCache(context);
+					switch (change) {
+						case 'path-generation': {
+							context.db
+								.update(schema.narInfos)
+								.set({ generation: narInfoGenerationSchema.parse(1) })
+								.where(eq(schema.narInfos.cacheId, cache.id))
+								.run();
+							break;
+						}
+						case 'cache-generation': {
+							context.db
+								.update(schema.cacheIdentities)
+								.set({
+									generation: cacheGenerationSchema.parse(cache.generation + 1)
+								})
+								.where(eq(schema.cacheIdentities.id, cache.id))
+								.run();
+							break;
+						}
+						case 'pending-removed': {
+							context.db
+								.delete(schema.pendingAttestations)
+								.where(eq(schema.pendingAttestations.id, decision.uploadId))
+								.run();
+							break;
+						}
+						case 'pending-expired': {
+							context.db
+								.update(schema.pendingAttestations)
+								.set({ expiresAt: isoTimestamp(new Date(0)) })
+								.where(eq(schema.pendingAttestations.id, decision.uploadId))
+								.run();
+							break;
+						}
+						case 'quota': {
+							await context.d1
+								.update(d1Schema.tenantUsage)
+								.set({
+									quotaBytes: sql`${d1Schema.tenantUsage.bytes} + ${d1Schema.tenantUsage.casBytes}`
+								})
+								.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant));
+							break;
+						}
+						case 'tenant-stopped': {
+							await context.d1
+								.update(d1Schema.tenant)
+								.set({ status: 'suspended' })
+								.where(eq(d1Schema.tenant.id, fixtureTenant));
+							break;
+						}
+					}
+					releaseRead?.();
+					return wasReading;
+				})
+			);
+			const didOpenGate = await changed;
+			const result = await attaching;
+			restore();
+			if (result.error !== null && !(result.error instanceof ORPCError)) {
+				throw result.error;
+			}
+			expect({
+				didOpenGate,
+				result: {
+					data: result.data,
+					error:
+						result.error === null
+							? undefined
+							: {
+									code: z.string().parse(result.error.code),
+									status: result.error.status,
+									message: result.error.message
+								}
+				},
+				promotions: promoted.mock.calls.length,
+				references: await attestationReferenceRows(),
+				objects: await casObjectRows()
+			}).toStrictEqual({
+				didOpenGate: true,
+				result: {
+					data:
+						change === 'path-generation'
+							? {
+									paths: [
+										pathOutcome(fixture.hash(0), decision.digest, 'unservable')
+									],
+									expiresAt: result.data?.expiresAt
+								}
+							: undefined,
+					error
+				},
+				promotions: 0,
+				references: [],
+				objects: []
+			});
+		}
+	);
+
+	it.each([
+		{ mode: 'fresh', operations: 18 },
+		{ mode: 'replay', operations: 10 },
+		{ mode: 'restore', operations: 24 }
+	] as const)(
+		'keeps grouped attachment operation counts bounded for $mode',
+		async ({ mode, operations }) => {
+			const fixture = await bundleFixture('default', 1, `bundle-cost-${mode}`);
+			const decision = await stageFixtureBundle(
+				fixture,
+				bundleForSubjects(fixture.subjects)
+			);
+			if (mode !== 'fresh') {
+				await fixture.attach(decision.uploadId, fixture.hashes);
+			}
+			if (mode === 'restore') {
+				await env.BLOBS.delete(await currentCasObjectKey(decision.digest));
+			}
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					await instance.context.ctx.storage.deleteAlarm();
+					const context = instance.context;
+					const service = new AttestationsService(
+						context,
+						new CacheRegistrationService(context),
+						new AttestationCasService(context),
+						new NarInfoObjectsService(context)
+					);
+					return withSubrequestSlice(
+						async () => {
+							const before = subrequestsAvailable();
+							const response = await service.attachPaths(
+								defaultCache(),
+								decision.uploadId,
+								[storePathHashSchema.parse(fixture.hash(0))]
+							);
+							return { response, operations: before - subrequestsAvailable() };
+						},
+						{ subrequests: 1000, reserve: 0 }
+					);
+				}
+			);
+			expect(observed).toStrictEqual({
+				response: {
+					paths: [
+						pathOutcome(
+							fixture.hash(0),
+							decision.digest,
+							mode === 'fresh' ? 'attached' : 'already-present'
+						)
+					],
+					expiresAt: observed.response.expiresAt
+				},
+				operations
 			});
 		}
 	);
@@ -1280,11 +1604,12 @@ describe('tenant contract round trip', () => {
 			bundleForSubjects(fixture.subjects)
 		);
 		const write = await boundListWriter();
+		vi.useFakeTimers();
 		vi.spyOn(
 			AttestationsService.prototype,
 			'materialiseList'
 		).mockImplementation(async (...arguments_) => {
-			await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+			await vi.advanceTimersByTimeAsync(2000);
 			await write(...arguments_);
 		});
 		await runInDurableObject(currentServer(), (instance) => {
@@ -1515,11 +1840,15 @@ function bundleForSubjects(
 }
 
 type BundleCache = 'default' | 'default-private' | 'public' | 'private';
-async function bundleFixture(kind: BundleCache, count: number) {
+async function bundleFixture(
+	kind: BundleCache,
+	count: number,
+	serverName = `bundle-pages-${kind}-${String(count)}`
+) {
 	if (kind === 'default-private') {
 		await recordTransition('cache-identity', 'complete');
 	}
-	await useTestServer(`bundle-pages-${kind}-${String(count)}`);
+	await useTestServer(serverName);
 	const init = await bootstrap();
 	const client = tenantClient(init.token);
 	const cache = kind.startsWith('default')

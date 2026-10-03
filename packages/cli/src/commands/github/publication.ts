@@ -2,14 +2,17 @@ import { cacheUrl, parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import {
 	cacheNameSchema,
 	type CacheScope,
+	isSameCacheScope,
 	type RootName
 } from '@cupboard/nix-store/scalars';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import { readResourcesSchema } from '@cupboard/protocol/read-access';
 
 import {
 	attestAttachAuthorizationDetails,
 	cacheCreateAuthorizationDetails,
-	cacheRemoveAuthorizationDetails,
+	cacheLifecycleAuthorizationDetails,
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
@@ -22,6 +25,7 @@ import { type RepositoryIdentity } from '../oidc-trust/github.ts';
 import {
 	type GithubActionsClaims,
 	githubBranchClaims,
+	githubMergedPullRequestClaims,
 	githubPullRequestClaims,
 	githubTagPushClaims
 } from './claims.ts';
@@ -63,9 +67,11 @@ export interface ReuseViewRequirement {
 }
 
 export type PublicationCase = TriggerReference & {
+	readonly lifecycle?: 'merged-close';
 	readonly claims: GithubActionsClaims;
 	readonly requests: readonly AuthorizationDetails[];
 	readonly reuseView?: ReuseViewRequirement;
+	readonly readCaches?: readonly CacheScope[];
 };
 
 export interface PublishingJobFinding {
@@ -402,7 +408,7 @@ function flakeRoots(rootPrefix: string): FlakeRoots | undefined {
 
 /**
  * The publication requests of one flake workflow run. The workflow creates
- * and removes the cache only for a pull request under the preset.
+ * and closes or reopens the cache only for a pull request under the preset.
  */
 export function flakeRequests(
 	cache: CacheScope,
@@ -413,7 +419,8 @@ export function flakeRequests(
 		...(shouldCreateCache
 			? [
 					cacheCreateAuthorizationDetails({ cache }),
-					cacheRemoveAuthorizationDetails({ cache })
+					cacheLifecycleAuthorizationDetails({ cache, action: 'close' }),
+					cacheLifecycleAuthorizationDetails({ cache, action: 'reopen' })
 				]
 			: []),
 		pushAuthorizationDetails({
@@ -645,26 +652,26 @@ function triggerReferences(
 }
 
 function claimsForReference(
-	tenant: URL,
+	audience: string | URL,
 	identity: RepositoryIdentity,
 	job: DiscoveredPublishingJob,
 	entry: TriggerReference
 ): GithubActionsClaims {
 	if (entry.trigger === 'pull_request') {
-		return githubPullRequestClaims(tenant, identity, {
+		return githubPullRequestClaims(audience, identity, {
 			pullRequestNumber: 1,
 			workflowReference: job.workflowRef
 		});
 	}
 
 	if (entry.ref.kind === 'tag') {
-		return githubTagPushClaims(tenant, identity, {
+		return githubTagPushClaims(audience, identity, {
 			tag: entry.ref.pattern.example(),
 			workflowReference: job.workflowRef
 		});
 	}
 
-	return githubBranchClaims(tenant, identity, {
+	return githubBranchClaims(audience, identity, {
 		branch: entry.ref.name,
 		eventName: entry.trigger,
 		workflowReference: job.workflowRef
@@ -676,6 +683,84 @@ function unmodelled(reason: string): PublicationModel {
 		cases: [],
 		findings: [{ finding: new PublicationUnmodelledFinding(reason) }]
 	};
+}
+
+function jobReadCaches(
+	job: DiscoveredPublishingJob,
+	tenant: URL,
+	cache: CacheScope
+):
+	| { readonly outcome: 'resolved'; readonly caches: readonly CacheScope[] }
+	| { readonly outcome: 'unresolved'; readonly reason: string } {
+	const input = scalar(job, 'read-caches');
+	if (input === undefined) {
+		return {
+			outcome: 'unresolved',
+			reason:
+				'read-caches must be a literal newline-separated list of cache URLs; resolve expressions before checking or repairing.'
+		};
+	}
+	const entries = input
+		.split(/\r?\n/u)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry !== '');
+	if (entries.length === 0) {
+		return { outcome: 'resolved', caches: [] };
+	}
+	if (job.kind !== 'flake') {
+		return {
+			outcome: 'unresolved',
+			reason:
+				'read-caches is supported by the flake publishing workflow; remove it from the installable workflow.'
+		};
+	}
+	if ((job.readCredentialWiring?.view ?? 'none') !== 'none') {
+		return {
+			outcome: 'unresolved',
+			reason:
+				'read-caches requires OIDC reads; omit the default static read credential and provide complete destination credentials separately.'
+		};
+	}
+	if (job.privateSubstitutersWiring !== undefined) {
+		return {
+			outcome: 'unresolved',
+			reason:
+				'The check cannot compare read-caches with secret private_substituters; verify that the same cache does not also use a static credential before repairing.'
+		};
+	}
+	const caches: CacheScope[] = [];
+	for (const entry of entries) {
+		let target: ReturnType<typeof parseTenantCacheUrl>;
+		try {
+			target = parseTenantCacheUrl(new URL(entry));
+		} catch {
+			return {
+				outcome: 'unresolved',
+				reason:
+					'read-caches must use canonical HTTP(S) cache URLs without credentials, a query or a fragment.'
+			};
+		}
+		if (canonicalHref(target.tenantUrl) !== canonicalHref(tenant)) {
+			return {
+				outcome: 'unresolved',
+				reason: 'Every read-caches URL must belong to the selected tenant.'
+			};
+		}
+		if (
+			isSameCacheScope(cache, target.cache) &&
+			(job.readCredentialWiring?.cache ?? 'none') !== 'none'
+		) {
+			return {
+				outcome: 'unresolved',
+				reason:
+					'Do not request OIDC reads for a destination with an explicit static credential.'
+			};
+		}
+		if (caches.every((selected) => !isSameCacheScope(selected, target.cache))) {
+			caches.push(target.cache);
+		}
+	}
+	return { outcome: 'resolved', caches };
 }
 
 export function modelPublishingJob(
@@ -692,14 +777,32 @@ export function modelPublishingJob(
 		return unmodelled('preset must be a literal string');
 	}
 
+	const audience = scalar(job, 'audience')?.trim();
+	if (audience === undefined) {
+		return unmodelled('audience must be a literal string');
+	}
+
 	const cache = jobCache(job);
 
 	if (cache.outcome === 'unresolved') {
 		return unmodelled(cache.reason);
 	}
 
+	const readCaches = jobReadCaches(job, tenant, cache.scope);
+	if (readCaches.outcome === 'unresolved') {
+		return unmodelled(readCaches.reason);
+	}
+
 	const isPreset = isPresetJob(job);
 	const isReadOnly = isReadOnlyJob(job);
+	const managePrCache =
+		job.kind === 'installable' ? job.inputs['manage-pr-cache'] : undefined;
+	if (managePrCache !== undefined && typeof managePrCache !== 'boolean') {
+		return unmodelled('manage-pr-cache must be a literal boolean');
+	}
+	if (managePrCache === true && cache.scope.kind === 'default') {
+		return unmodelled('manage-pr-cache requires a named cache');
+	}
 	const cacheAccessMode = scalar(job, 'cache-access-mode');
 
 	if (
@@ -791,7 +894,12 @@ export function modelPublishingJob(
 			}
 
 			const isPullRequest = entry.trigger === 'pull_request';
-			const claims = claimsForReference(tenant, identity, job, entry);
+			const claims = claimsForReference(
+				audience === '' ? tenant : audience,
+				identity,
+				job,
+				entry
+			);
 
 			if (job.kind === 'installable') {
 				const requests = isReadOnly
@@ -802,7 +910,26 @@ export function modelPublishingJob(
 					return unmodelled(`root '${rootPrefix}' is invalid`);
 				}
 
-				cases.push({ ...entry, claims, requests });
+				cases.push({
+					...entry,
+					claims,
+					requests: [
+						...(managePrCache === true && isPullRequest && !isReadOnly
+							? [
+									cacheCreateAuthorizationDetails({ cache: cache.scope }),
+									cacheLifecycleAuthorizationDetails({
+										cache: cache.scope,
+										action: 'close'
+									}),
+									cacheLifecycleAuthorizationDetails({
+										cache: cache.scope,
+										action: 'reopen'
+									})
+								]
+							: []),
+						...requests
+					]
+				});
 				continue;
 			}
 
@@ -829,11 +956,40 @@ export function modelPublishingJob(
 				: flakeRequests(publicationCache, roots, isPreset && isPullRequest);
 
 			const hasReuseView = isPreset ? !isPullRequest : reuseView !== '';
+			const additionalCaches = readCaches.caches.filter(
+				(selected) => !isSameCacheScope(selected, publicationCache)
+			);
+			if (
+				readCaches.caches.length > 0 &&
+				!readResourcesSchema.safeParse([
+					...[publicationCache, ...additionalCaches].map((selected) => ({
+						type: 'cupboard_cache',
+						cache: selected,
+						mode: 'content'
+					})),
+					...(hasReuseView
+						? [
+								{
+									type: 'cupboard_view',
+									view:
+										reuseView === ''
+											? pullRequestViewName(identity.repositoryId)
+											: reuseView
+								}
+							]
+						: [])
+				]).success
+			) {
+				return unmodelled(
+					'read-caches and the destination and reuse view must select at most sixteen distinct resources.'
+				);
+			}
 
 			cases.push({
 				...entry,
 				claims,
 				requests,
+				...(additionalCaches.length > 0 && { readCaches: additionalCaches }),
 				...(hasReuseView && {
 					reuseView: {
 						name:
@@ -848,4 +1004,57 @@ export function modelPublishingJob(
 	}
 
 	return { cases, findings };
+}
+
+/**
+ * Includes the merged-close identity when a PR run manages its cache.
+ */
+export function withMergedCloseCases(
+	cases: readonly PublicationCase[],
+	identity: RepositoryIdentity
+): readonly PublicationCase[] {
+	const lifecycle: PublicationCase[] = [];
+
+	for (const publication of cases) {
+		if (publication.trigger !== 'pull_request') {
+			continue;
+		}
+
+		const requests = publication.requests.filter(
+			(request) =>
+				request.length > 0 &&
+				request.every(
+					(detail) =>
+						detail.type === 'cupboard_cache' &&
+						detail.actions.length === 1 &&
+						detail.actions[0] === 'cache:close'
+				)
+		);
+
+		if (requests.length === 0) {
+			continue;
+		}
+
+		const audience = publication.claims.aud;
+		const workflowReference = publication.claims.job_workflow_ref;
+
+		if (audience === undefined || workflowReference === undefined) {
+			throw new Error(
+				'Modelled merged-close claims require an audience and workflow reference.'
+			);
+		}
+
+		lifecycle.push({
+			trigger: 'pull_request',
+			ref: { kind: 'pull-request' },
+			lifecycle: 'merged-close',
+			requests,
+			claims: githubMergedPullRequestClaims(audience, identity, {
+				baseBranch: identity.defaultBranch,
+				workflowReference
+			})
+		});
+	}
+
+	return [...cases, ...lifecycle];
 }

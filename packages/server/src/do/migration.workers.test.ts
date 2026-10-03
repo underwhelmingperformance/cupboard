@@ -1,6 +1,9 @@
 import {
+	firstCacheGeneration,
 	graceSecondsSchema,
-	storePathHashSchema
+	nixSha256HashSchema,
+	storePathHashSchema,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { cacheSummarySchema } from '@cupboard/protocol/caches';
 import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
@@ -11,29 +14,49 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
+import { sql } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
+import journal from '../../drizzle/meta/_journal.json' with { type: 'json' };
+import retrySnapshot from '../../drizzle/meta/0069_snapshot.json' with { type: 'json' };
+import creationDefaultsSnapshot from '../../drizzle/meta/0070_snapshot.json' with { type: 'json' };
+import closeSnapshot from '../../drizzle/meta/0071_snapshot.json' with { type: 'json' };
 import migrations from '../../drizzle/migrations.js';
-import { cacheScopeFromRow } from '../db/cache.ts';
+import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
-	oidcTrust,
-	refreshTokenFamilies,
-	refreshTokenMembers
+	legacyRefreshTokenFamilies,
+	legacyRefreshTokenMembers,
+	oidcTrust
 } from '../db/schema.ts';
 import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts';
 import {
 	beforeCacheIdentityContract,
 	bootstrap,
+	currentServer,
 	migrateThrough,
 	migrateThroughConvertedCatalogue,
 	testServerFor,
-	useTestServer
+	useTestServer,
+	withoutAlarmArming
 } from '../test-support.ts';
 
+import { runBoundedLocalMigration } from './bounded-migration.ts';
+import { chunk } from './bulk.ts';
+import {
+	projectLocalCacheLifecycles,
+	resetCacheLifecycleProjection
+} from './cache-lifecycle-projection.ts';
+import { ServerContext } from './context.ts';
+import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
 import { barrierTriggers } from './garbage-collection-service.ts';
 import { applyMigrations, migrationsThrough } from './migrate.ts';
+import { localMigrationRecipe } from './migration-recipes.ts';
 
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
@@ -59,6 +82,1154 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('adds creation defaults after retry migration without changing predecessor state', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-creation-defaults-after-retries'),
+			async (_instance, state) => {
+				await migrateThrough(state, 69);
+				state.storage.sql.exec(
+					"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict,session_id,claimed_at,claim_owner,grace_decision_json,attach_root_name,recorded_verdict_json,settle_failures,settle_retry_after,last_settle_error,nar_refresh_pending,accepted_sequence,accepted_expires_at,commit_started_sequence,retry_started_active_ms,settle_exhaustion) VALUES (17,'admitted',1,'sha256:nar','staging/key','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','committing','session','2026-01-02T00:00:00.000Z','upload-owner','{}','build','{}',7,'2026-01-03T00:00:00.000Z','verification-failed',1,101,'2098-01-01T00:00:00.000Z',102,5000,'attempt-limit')"
+				);
+				state.storage.sql.exec(
+					"INSERT INTO attestation_inheritance(rowid,cache_id,store_path_hash,generation,nar_hash,source_predicate_type,source_digest,attempts,not_before,accepted_upload_id,accepted_sequence,accepted_expires_at,commit_started_sequence,queued_sequence,source_end_cache_id,source_end_generation,source_cache_id,source_generation,source_reference_generation,source_reference_complete,source_reference_cache_id,source_reference_end_generation,retry_started_active_ms,claim_owner) VALUES (19,1,'00000000000000000000000000000001',3,'sha256:nar','https://predicate.invalid/type','digest',7,'2026-01-03T00:00:00.000Z','admitted',101,'2098-01-01T00:00:00.000Z',102,103,104,105,106,107,108,1,109,110,5000,'inheritance-owner')"
+				);
+				const definitions = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name,type,tbl_name,sql FROM sqlite_master WHERE name <> 'cache_creation_defaults' ORDER BY name"
+						)
+						.toArray();
+				const data = () =>
+					['pending_upload', 'attestation_inheritance', 'cache_identity'].map(
+						(table) => ({
+							table,
+							rows: state.storage.sql
+								.exec(`SELECT rowid,* FROM ${table} ORDER BY rowid`)
+								.toArray()
+						})
+					);
+				const beforeDefinitions = definitions();
+				const beforeData = data();
+				const migrated = await applyMigrations(
+					drizzle(state.storage),
+					migrationsThrough(migrations, 70)
+				);
+				return {
+					migrated,
+					beforeDefinitions,
+					afterDefinitions: definitions(),
+					beforeData,
+					afterData: data(),
+					defaults: state.storage.sql
+						.exec('SELECT * FROM cache_creation_defaults')
+						.toArray()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: { kind: 'complete', hasCommitted: true },
+			beforeDefinitions: result.beforeDefinitions,
+			afterDefinitions: result.beforeDefinitions,
+			beforeData: result.beforeData,
+			afterData: result.beforeData,
+			defaults: []
+		});
+		expect(creationDefaultsSnapshot).toStrictEqual({
+			...retrySnapshot,
+			id: creationDefaultsSnapshot.id,
+			prevId: retrySnapshot.id,
+			tables: {
+				...retrySnapshot.tables,
+				cache_creation_defaults:
+					creationDefaultsSnapshot.tables.cache_creation_defaults
+			}
+		});
+	});
+
+	it('bounds retry index construction over a preserved pending backlog', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-retry-row-budget'),
+			async (_instance, state) => {
+				await migrateThrough(state, 68);
+				state.storage.sql.exec(
+					"WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<5000) INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict,last_settle_error) SELECT 'pending-'||i, 1,'sha256:nar','staging/key','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','pending','old-error' FROM seq"
+				);
+				const meter = new DatabaseCostMeter();
+				const migrated = await applyMigrations(
+					drizzle(meteredStorage(state.storage, meter)),
+					migrationsThrough(migrations, 69),
+					{
+						budget: {
+							sourceRowsRemaining: 1,
+							structuralOperationsRemaining: 365,
+							freshStore: false
+						}
+					}
+				);
+				meter.recordOutstanding();
+				return {
+					migrated,
+					bounded: meter.rowsRead + meter.rowsWritten <= 25_000,
+					recorded: state.storage.sql
+						.exec(
+							"SELECT hash FROM __drizzle_migrations WHERE hash = '0069_retry_limits'"
+						)
+						.toArray()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: {
+				kind: 'pending',
+				migration: '0069_retry_limits',
+				stage: 'copy-pending_upload',
+				cursor: 1,
+				sourceRows: 1,
+				declaredSourceWrites: 1,
+				hasCommitted: true
+			},
+			bounded: true,
+			recorded: []
+		});
+	});
+
+	it('preserves retry reservations and resets inheritance in bounded restartable pages', async () => {
+		const uploads = Array.from({ length: 5000 }, (_, index) => ({
+			rowid: index * 2 + 1,
+			id: `upload-${String(index)}`,
+			cache_id: 1,
+			nar_hash: 'sha256:nar',
+			r2_key: `staging/${String(index)}`,
+			metadata_json: JSON.stringify({
+				storePathHash: String(index).padStart(32, '0')
+			}),
+			created_at: '2026-01-01T00:00:00.000Z',
+			expires_at: '2099-01-01T00:00:00.000Z',
+			verdict: index % 2 === 0 ? 'pending' : 'committing',
+			session_id: `session-${String(index)}`,
+			claimed_at: '2026-01-01T00:00:00.000Z',
+			claim_owner: index % 3 === 0 ? undefined : 'previous-owner',
+			grace_decision_json: '{}',
+			attach_root_name: 'build',
+			recorded_verdict_json: index % 3 === 0 ? '{}' : undefined,
+			settle_failures: index % 5,
+			settle_retry_after:
+				index % 2 === 0 ? undefined : '2026-01-02T00:00:00.000Z',
+			last_settle_error:
+				index % 2 === 0 ? undefined : 'https://secret.invalid/token',
+			nar_refresh_pending: index % 2,
+			accepted_sequence: index + 100,
+			accepted_expires_at: '2098-01-01T00:00:00.000Z',
+			commit_started_sequence: index + 200
+		}));
+		const inheritance = Array.from({ length: 5000 }, (_, index) => ({
+			rowid: index * 2 + 1,
+			cache_id: 1,
+			store_path_hash: String(index).padStart(32, '0'),
+			generation: index + 1,
+			nar_hash: 'sha256:nar',
+			attempts: 15,
+			not_before: '2026-01-02T00:00:00.000Z',
+			source_digest: String(index).padStart(64, 'a'),
+			source_predicate_type: 'https://predicate.invalid/type',
+			accepted_upload_id: `admitted-${String(index)}`,
+			accepted_sequence: index + 100,
+			accepted_expires_at: '2098-01-01T00:00:00.000Z',
+			commit_started_sequence: index + 200,
+			queued_sequence: index + 300,
+			source_end_cache_id: index + 400,
+			source_end_generation: index + 500,
+			source_cache_id: index + 600,
+			source_generation: index + 700,
+			source_reference_generation: index + 800,
+			source_reference_complete: index % 2,
+			source_reference_cache_id: index + 900,
+			source_reference_end_generation: index + 1000
+		}));
+		const result = await runInDurableObject(
+			testServerFor('migration-retry-preservation'),
+			async (_instance, state) => {
+				await migrateThrough(state, 68);
+				const insert = (table: string, rows: readonly object[]): void => {
+					const row = rows[0];
+					if (row === undefined) {
+						throw new Error('The retry migration fixture has no rows');
+					}
+					const columns = Object.keys(row);
+					for (const page of chunk(rows, 500)) {
+						state.storage.sql.exec(
+							`INSERT INTO \`${table}\` (${columns.map((column) => `\`${column}\``).join(', ')}) SELECT ${columns.map((column) => `json_extract(value, '$.${column}')`).join(', ')} FROM json_each(?)`,
+							JSON.stringify(page)
+						);
+					}
+				};
+				insert('pending_upload', uploads);
+				insert('attestation_inheritance', inheritance);
+				const triggers = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'pending_upload' ORDER BY name"
+						)
+						.toArray();
+				const beforeTriggers = triggers();
+				const inheritedIndexes = () =>
+					Array.from(
+						state.storage.sql.exec<{ name: string; sql: string }>(
+							"SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN ('pending_upload_inheritance_cutoff_idx', 'pending_upload_inheritance_path_idx') ORDER BY name"
+						),
+						(row) => ({
+							...row,
+							sql: row.sql.replaceAll('"pending_upload"', '`pending_upload`')
+						})
+					);
+				const beforeIndexes = inheritedIndexes();
+				let pages = 0;
+				let isBounded = true;
+				const rows = (table: string) =>
+					Array.from(
+						state.storage.sql.exec(
+							`SELECT rowid, * FROM \`${table}\` ORDER BY rowid`
+						),
+						(row) =>
+							Object.fromEntries(
+								Object.entries(row).map(([column, value]) => [
+									column,
+									value ?? undefined
+								])
+							)
+					);
+				for (;;) {
+					const meter = new DatabaseCostMeter();
+					const migrated = await applyMigrations(
+						drizzle(meteredStorage(state.storage, meter)),
+						migrationsThrough(migrations, 69),
+						{
+							budget: {
+								sourceRowsRemaining: 1000,
+								structuralOperationsRemaining: 365,
+								freshStore: false
+							}
+						}
+					);
+					meter.recordOutstanding();
+					isBounded &&= meter.rowsRead + meter.rowsWritten <= 25_000;
+					if (migrated.kind === 'complete') {
+						return {
+							migrated,
+							bounded: isBounded,
+							paged: pages > 1,
+							uploads: rows('pending_upload'),
+							inheritance: rows('attestation_inheritance'),
+							beforeIndexes,
+							afterIndexes: inheritedIndexes(),
+							beforeTriggers,
+							afterTriggers: triggers(),
+							temporary: state.storage.sql
+								.exec(
+									"SELECT name FROM sqlite_master WHERE name LIKE '__bounded_%' OR name LIKE '__new_%' ORDER BY name"
+								)
+								.toArray(),
+							indexPlans: [
+								'pending_upload_fresh_ready_idx',
+								'pending_upload_recorded_ready_idx',
+								'pending_upload_exhausted_ready_idx'
+							].map((index) =>
+								Array.from(
+									state.storage.sql.exec<{ detail: string }>(
+										`EXPLAIN QUERY PLAN SELECT id FROM pending_upload INDEXED BY ${index} WHERE ${index === 'pending_upload_fresh_ready_idx' ? "(verdict = 'pending' OR verdict = 'committing') AND (recorded_verdict_json IS NULL OR claim_owner IS NULL) AND settle_exhaustion IS NULL" : index === 'pending_upload_recorded_ready_idx' ? 'recorded_verdict_json IS NOT NULL OR settle_exhaustion IS NOT NULL' : 'settle_exhaustion IS NOT NULL'} LIMIT 1`
+									),
+									({ detail }) => detail
+								)
+							)
+						};
+					}
+					pages += 1;
+				}
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: { kind: 'complete', hasCommitted: true },
+			bounded: true,
+			paged: true,
+			uploads: uploads.map((upload) => ({
+				...upload,
+				last_settle_error:
+					upload.last_settle_error === undefined
+						? undefined
+						: 'verification-failed',
+				retry_started_active_ms: undefined,
+				settle_exhaustion: undefined
+			})),
+			inheritance: inheritance.map((entry) => ({
+				...entry,
+				attempts: 0,
+				retry_started_active_ms: undefined,
+				claim_owner: undefined
+			})),
+			beforeIndexes: result.beforeIndexes,
+			afterIndexes: result.beforeIndexes,
+			beforeTriggers: result.beforeTriggers,
+			afterTriggers: result.beforeTriggers,
+			temporary: [],
+			indexPlans: [
+				['SCAN pending_upload USING INDEX pending_upload_fresh_ready_idx'],
+				['SCAN pending_upload USING INDEX pending_upload_recorded_ready_idx'],
+				['SCAN pending_upload USING INDEX pending_upload_exhausted_ready_idx']
+			]
+		});
+	});
+
+	it.each(['copy-pending_upload', 'copy-canonical-pending_upload'])(
+		'preserves upload rollback writes during %s',
+		async (stage) => {
+			const result = await runInDurableObject(
+				testServerFor(`migration-retry-rollback-${stage}`),
+				async (_instance, state) => {
+					await migrateThrough(state, 68);
+					state.storage.sql.exec(
+						"WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<1001) INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict) SELECT 'pending-'||i, 1,'sha256:nar','staging/key','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','pending' FROM seq"
+					);
+					let page = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 69)
+					);
+					while (page.kind === 'pending' && page.stage !== stage) {
+						page = await applyMigrations(
+							drizzle(state.storage),
+							migrationsThrough(migrations, 69)
+						);
+					}
+					if (page.kind !== 'pending') {
+						throw new Error(
+							`The retry migration did not pause during ${stage}.`
+						);
+					}
+					const rollback = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 68)
+					);
+					state.storage.sql.exec(
+						"UPDATE pending_upload SET accepted_sequence = 101, accepted_expires_at = '2098-01-01T00:00:00.000Z', commit_started_sequence = 102, settle_failures = 7, last_settle_error = 'https://secret.invalid/token', claim_owner = NULL, recorded_verdict_json = '{}' WHERE rowid = 1"
+					);
+					state.storage.sql.exec('DELETE FROM pending_upload WHERE rowid = 2');
+					state.storage.sql.exec(
+						"INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at,verdict,accepted_sequence,accepted_expires_at,commit_started_sequence) VALUES ('rollback-added',1,'sha256:added','staging/added','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z','pending',201,'2098-01-01T00:00:00.000Z',202)"
+					);
+					const rows = () =>
+						state.storage.sql
+							.exec('SELECT rowid, * FROM pending_upload ORDER BY rowid')
+							.toArray();
+					const before = rows();
+					let migrated = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 69)
+					);
+					while (migrated.kind === 'pending') {
+						migrated = await applyMigrations(
+							drizzle(state.storage),
+							migrationsThrough(migrations, 69)
+						);
+					}
+					return { rollback, migrated, before, after: rows() };
+				}
+			);
+			expect(result).toStrictEqual({
+				rollback: { kind: 'complete', hasCommitted: false },
+				migrated: { kind: 'complete', hasCommitted: true },
+				before: result.before,
+				after: result.before.map((row) => ({
+					...row,
+					last_settle_error:
+						row.last_settle_error === 'https://secret.invalid/token'
+							? 'verification-failed'
+							: row.last_settle_error
+				}))
+			});
+		}
+	);
+
+	it('projects bounded lifecycle pages before contraction', async () => {
+		await useTestServer('expanded-lifecycle-projection');
+		await bootstrap();
+		await env.CUPBOARD_DB.batch(
+			[
+				'DROP VIEW cache_lifecycle',
+				'ALTER TABLE cache_lifecycle_storage RENAME TO cache_lifecycle',
+				'CREATE VIEW cache_lifecycle_storage AS SELECT * FROM cache_lifecycle',
+				"UPDATE deployment_transition SET state = 'expanded', contracted_at = NULL WHERE id = 'blob-reference-read-authority'"
+			].map((query) => env.CUPBOARD_DB.prepare(query))
+		);
+		try {
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const costs: { read: number; written: number }[] = [];
+					const wrap = (
+						statement: D1PreparedStatement,
+						query: string
+					): D1PreparedStatement =>
+						new Proxy(statement, {
+							get(source, field) {
+								if (field === 'bind') {
+									return (...values: unknown[]) =>
+										wrap(source.bind(...values), query);
+								}
+								if (
+									field === 'run' &&
+									query.startsWith('insert into "cache_lifecycle"')
+								) {
+									return async () => {
+										const response = await source.run();
+										costs.push({
+											read: response.meta.rows_read,
+											written: response.meta.rows_written
+										});
+										return response;
+									};
+								}
+								const value: unknown = Reflect.get(source, field, source);
+								return typeof value === 'function'
+									? (...arguments_: unknown[]): unknown =>
+											Reflect.apply(value, source, arguments_)
+									: value;
+							}
+						});
+					const binding = new Proxy(env.CUPBOARD_DB, {
+						get(target, field) {
+							if (field === 'prepare') {
+								return (query: string) => wrap(target.prepare(query), query);
+							}
+							const value: unknown = Reflect.get(target, field, target);
+							return typeof value === 'function'
+								? (...arguments_: unknown[]): unknown =>
+										Reflect.apply(value, target, arguments_)
+								: value;
+						}
+					});
+					const context = new ServerContext(state, {
+						...instance.context.env,
+						CUPBOARD_DB: binding
+					});
+					state.storage.sql
+						.exec(`WITH RECURSIVE source(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM source WHERE n < 73)
+					INSERT INTO cache_identity(kind,name,access,priority,created_at)
+					SELECT 'named', printf('project-%03d',n), 'public', 40, '2026-01-01T00:00:00.000Z' FROM source`);
+					await resetCacheLifecycleProjection(context);
+					const pages = [];
+					for (let page = 0; page < 3; page++) {
+						pages.push(
+							await projectLocalCacheLifecycles(
+								context,
+								context.requireTenant()
+							)
+						);
+					}
+					const count = await env.CUPBOARD_DB.prepare(
+						'SELECT count(*) AS count FROM cache_lifecycle'
+					).first();
+					return { pages, costs, count };
+				}
+			);
+			expect(result).toStrictEqual({
+				costs: [
+					{ read: 35, written: 105 },
+					{ read: 36, written: 108 },
+					{ read: 2, written: 6 }
+				],
+				pages: [
+					{
+						lifecycles: [
+							{
+								scope: { kind: 'default' },
+								generation: firstCacheGeneration,
+								isLive: true
+							}
+						],
+						projected: 35,
+						hasMore: true,
+						progressed: true
+					},
+					{ lifecycles: [], projected: 36, hasMore: true, progressed: true },
+					{ lifecycles: [], projected: 2, hasMore: false, progressed: true }
+				],
+				count: { count: 74 }
+			});
+		} finally {
+			await env.CUPBOARD_DB.batch(
+				[
+					'DROP VIEW cache_lifecycle_storage',
+					'ALTER TABLE cache_lifecycle RENAME TO cache_lifecycle_storage',
+					'CREATE VIEW cache_lifecycle AS SELECT * FROM cache_lifecycle_storage WHERE false',
+					"UPDATE deployment_transition SET state = 'complete', contracted_at = '2026-01-01T00:00:00.000Z' WHERE id = 'blob-reference-read-authority'"
+				].map((query) => env.CUPBOARD_DB.prepare(query))
+			);
+		}
+	});
+
+	it('pages the protected-inheritance upgrade over 25,000 legacy rows per table', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-protected-inheritance-scale'),
+			async (instance, state) => {
+				await migrateThrough(state, 67);
+				state.storage.sql
+					.exec(`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 25000)
+			INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) SELECT printf('legacy-%d', value), 1, 'sha256:legacy', 'staging/legacy', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:30:00.000Z', CASE WHEN value % 2 = 0 THEN 'committing' ELSE NULL END FROM rows`);
+				state.storage.sql
+					.exec(`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 25000)
+			INSERT INTO attestation_inheritance(cache_id, store_path_hash, generation, nar_hash, not_before) SELECT 1, printf('%032d', value), 0, 'sha256:legacy', '2026-01-01T00:00:00.000Z' FROM rows`);
+				state.storage.sql
+					.exec(`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 25000)
+			INSERT INTO narinfo_deletion(cache_id, store_path_hash, generation, nar_hash, created_at) SELECT 1, printf('%032d', value), 0, 'sha256:legacy', '2026-01-01T00:00:00.000Z' FROM rows`);
+				state.storage.sql.exec(
+					`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 25000) INSERT INTO narinfo(cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, generation, created_at) SELECT 1, printf('%032d', value), printf('/nix/store/%032d-legacy', value), 'sha256:legacy', value, '[]', value, '2026-01-01T00:00:00.000Z' FROM rows`
+				);
+
+				const tables = [
+					'pending_upload',
+					'attestation_inheritance',
+					'narinfo_deletion',
+					'narinfo'
+				];
+				const snapshots = tables.map((table) =>
+					state.storage.sql
+						.exec(`SELECT rowid, * FROM ${table} ORDER BY rowid`)
+						.toArray()
+				);
+				const triggers = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN ('pending_upload', 'attestation_inheritance', 'narinfo_deletion', 'narinfo') ORDER BY name"
+						)
+						.toArray();
+				const beforeTriggers = triggers();
+				const meter = instance.context.dbCost;
+				let maxRead = 0;
+				let maxWrite = 0;
+				let invocations = 0;
+				const page = async () => {
+					meter.recordOutstanding();
+					const before = {
+						rowsRead: meter.rowsRead,
+						rowsWritten: meter.rowsWritten
+					};
+					const result = await applyMigrations(
+						instance.context.db,
+						migrationsThrough(migrations, 68)
+					);
+					meter.recordOutstanding();
+					maxRead = Math.max(maxRead, meter.rowsRead - before.rowsRead);
+					maxWrite = Math.max(maxWrite, meter.rowsWritten - before.rowsWritten);
+					invocations += 1;
+					return result;
+				};
+				const first = await page();
+				let next = first;
+				while (next.kind === 'pending') {
+					next = await page();
+				}
+				for (const [index, table] of tables.entries()) {
+					const original = snapshots[index];
+					if (original === undefined) {
+						throw new Error('The migration must preserve every source table.');
+					}
+					const expected = original.map((row) => {
+						if (table === 'narinfo') {
+							return row;
+						}
+						if (table === 'pending_upload') {
+							return {
+								...row,
+								accepted_sequence: 0,
+								accepted_expires_at: row.expires_at,
+								commit_started_sequence:
+									row.verdict === 'committing' ? 0 : undefined
+							};
+						}
+						if (table === 'narinfo_deletion') {
+							return {
+								...row,
+								explicit: 0,
+								protection_cutoff: undefined,
+								protection_captured_at: undefined
+							};
+						}
+						return {
+							...row,
+							accepted_upload_id: undefined,
+							accepted_sequence: 0,
+							accepted_expires_at: undefined,
+							commit_started_sequence: undefined,
+							queued_sequence: 0,
+							source_end_cache_id: undefined,
+							source_end_generation: undefined,
+							source_cache_id: 0,
+							source_generation: -1,
+							source_reference_cache_id: 0,
+							source_reference_end_generation: undefined,
+							source_reference_generation: -1,
+							source_reference_complete: 0
+						};
+					});
+					const normalise = (rows: Record<string, unknown>[]) =>
+						rows.map((row) =>
+							Object.fromEntries(
+								Object.entries(row).map(([key, value]) => [
+									key,
+									value ?? undefined
+								])
+							)
+						);
+					expect(
+						normalise(
+							state.storage.sql
+								.exec(`SELECT rowid, * FROM ${table} ORDER BY rowid`)
+								.toArray()
+						)
+					).toStrictEqual(normalise(expected));
+				}
+				expect(triggers()).toStrictEqual(beforeTriggers);
+				expect(
+					state.storage.sql
+						.exec(
+							"SELECT name FROM sqlite_master WHERE name LIKE '__bounded_%' AND name != '__bounded_migration_progress' ORDER BY name"
+						)
+						.toArray()
+				).toStrictEqual([]);
+				return { first, maxRead, maxWrite, invocations };
+			}
+		);
+		expect(result).toStrictEqual({
+			first: {
+				kind: 'pending',
+				migration: '0068_protected_inheritance',
+				stage: 'copy-pending_upload',
+				cursor: 1000,
+				sourceRows: 1000,
+				declaredSourceWrites: 1000,
+				hasCommitted: true
+			},
+			maxRead: 11_496,
+			maxWrite: 9053,
+			invocations: 401
+		});
+	});
+
+	it.each([
+		{
+			boundary: 'before',
+			operation: 'INSERT OR REPLACE INTO `__new_pending_upload`'
+		},
+		{
+			boundary: 'after',
+			operation: 'INSERT OR REPLACE INTO `__new_pending_upload`'
+		},
+		{
+			boundary: 'before',
+			operation:
+				'ALTER TABLE `pending_upload` RENAME TO `__bounded_old_pending_upload`'
+		},
+		{
+			boundary: 'after',
+			operation:
+				'ALTER TABLE `pending_upload` RENAME TO `__bounded_old_pending_upload`'
+		},
+		{
+			boundary: 'before',
+			operation: 'DELETE FROM `__bounded_old_pending_upload`'
+		},
+		{
+			boundary: 'after',
+			operation: 'DELETE FROM `__bounded_old_pending_upload`'
+		}
+	])(
+		'recovers the protected upgrade at the $boundary $operation storage boundary',
+		async ({ boundary, operation }) => {
+			await runInDurableObject(
+				testServerFor(
+					`migration-protection-${boundary}-${operation.slice(0, 6).trim().toLowerCase()}`
+				),
+				async (instance, state) => {
+					await migrateThrough(state, 67);
+					state.storage.sql.exec(
+						"INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('legacy', 1, 'sha256:legacy', 'staging/legacy', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:30:00.000Z', 'committing')"
+					);
+					const recipe = localMigrationRecipe(
+						'0068_protected_inheritance',
+						z
+							.string()
+							.parse(migrations.migrations.m0068)
+							.split('--> statement-breakpoint')
+							.map((statement) => statement.trim())
+							.filter(Boolean)
+					);
+					if (recipe === undefined) {
+						throw new Error('The upgrade must use a bounded migration recipe.');
+					}
+					const snapshot = () => {
+						const objects = state.storage.sql
+							.exec(
+								"SELECT type, name, sql FROM sqlite_master WHERE name != '__bounded_migration_progress' ORDER BY type, name"
+							)
+							.toArray();
+						const tables = state.storage.sql
+							.exec<{ name: string }>(
+								"SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE '%pending_upload' OR name LIKE '%attestation_inheritance' OR name LIKE '%narinfo_deletion') ORDER BY name"
+							)
+							.toArray();
+						return {
+							objects,
+							tables: tables.map(({ name }) => ({
+								name,
+								rows: state.storage.sql
+									.exec(`SELECT rowid, * FROM ${name} ORDER BY rowid`)
+									.toArray()
+							}))
+						};
+					};
+					const original = instance.context.ctx.storage.sql.exec.bind(
+						instance.context.ctx.storage.sql
+					);
+					let reached: ReturnType<typeof snapshot> | undefined;
+					const injected = new Error('upgrade storage fault');
+					const failing = vi
+						.spyOn(instance.context.ctx.storage.sql, 'exec')
+						.mockImplementation((query: string, ...parameters: unknown[]) => {
+							if (
+								reached === undefined &&
+								operation.startsWith('ALTER TABLE') &&
+								query.startsWith('DROP TRIGGER IF EXISTS')
+							) {
+								reached = snapshot();
+							}
+							if (!query.startsWith(operation)) {
+								return original(query, ...parameters);
+							}
+							reached ??= snapshot();
+							if (boundary === 'after') {
+								original(query, ...parameters);
+							}
+							throw injected;
+						});
+					try {
+						expect(() =>
+							runBoundedLocalMigration(instance.context.db, recipe)
+						).toThrow(expect.objectContaining({ cause: injected }));
+					} finally {
+						failing.mockRestore();
+					}
+					if (reached === undefined) {
+						throw new Error(
+							'The test must reach the specified storage operation.'
+						);
+					}
+					expect(snapshot()).toStrictEqual(reached);
+					let result = runBoundedLocalMigration(instance.context.db, recipe);
+					while (result.kind === 'pending') {
+						result = runBoundedLocalMigration(instance.context.db, recipe);
+					}
+					expect(
+						state.storage.sql
+							.exec(
+								'SELECT id, accepted_sequence, accepted_expires_at, commit_started_sequence FROM pending_upload'
+							)
+							.toArray()
+					).toStrictEqual([
+						{
+							id: 'legacy',
+							accepted_sequence: 0,
+							accepted_expires_at: '2026-01-01T00:30:00.000Z',
+							commit_started_sequence: 0
+						}
+					]);
+					expect(
+						state.storage.sql
+							.exec(
+								"SELECT name FROM sqlite_master WHERE name LIKE '__bounded_%' AND name != '__bounded_migration_progress' ORDER BY name"
+							)
+							.toArray()
+					).toStrictEqual([]);
+				}
+			);
+		}
+	);
+
+	it.each(['copy-pending_upload', 'copy-canonical-pending_upload'])(
+		'preserves legacy committing writes during the protected upgrade stage %s',
+		async (stage) => {
+			const result = await runInDurableObject(
+				testServerFor(stage.replaceAll('_', '-')),
+				async (instance, state) => {
+					await migrateThrough(state, 67);
+					state.storage.sql
+						.exec(`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 1001)
+			INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at) SELECT printf('legacy-%d', value), 1, 'sha256:legacy', 'staging/legacy', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:30:00.000Z' FROM rows`);
+					let page = await applyMigrations(instance.context.db, migrations);
+					while (page.kind === 'pending' && page.stage !== stage) {
+						page = await applyMigrations(instance.context.db, migrations);
+					}
+					if (page.kind !== 'pending') {
+						throw new Error(
+							'The migration must pause at the requested copy stage.'
+						);
+					}
+					await applyMigrations(
+						instance.context.db,
+						migrationsThrough(migrations, 67)
+					);
+					state.storage.sql.exec(
+						"UPDATE pending_upload SET verdict = 'committing' WHERE id = 'legacy-1'"
+					);
+					state.storage.sql.exec(
+						"DELETE FROM pending_upload WHERE id = 'legacy-2'"
+					);
+					state.storage.sql.exec(
+						"INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('legacy-extra', 1, 'sha256:extra', 'staging/extra', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:45:00.000Z', 'committing')"
+					);
+					do {
+						page = await applyMigrations(instance.context.db, migrations);
+					} while (page.kind === 'pending');
+					return {
+						count: state.storage.sql
+							.exec('SELECT count(*) AS count FROM pending_upload')
+							.one(),
+						rows: state.storage.sql
+							.exec(
+								"SELECT id, accepted_sequence, accepted_expires_at, commit_started_sequence FROM pending_upload WHERE id IN ('legacy-1', 'legacy-2', 'legacy-extra') ORDER BY id"
+							)
+							.toArray()
+					};
+				}
+			);
+			expect(result).toStrictEqual({
+				count: { count: 1001 },
+				rows: [
+					{
+						id: 'legacy-1',
+						accepted_sequence: 0,
+						accepted_expires_at: '2026-01-01T00:30:00.000Z',
+						commit_started_sequence: 0
+					},
+					{
+						id: 'legacy-extra',
+						accepted_sequence: 0,
+						accepted_expires_at: '2026-01-01T00:45:00.000Z',
+						commit_started_sequence: 0
+					}
+				]
+			});
+		}
+	);
+
+	it('refuses application reads until every protected-upgrade copy and drain completes', async () => {
+		const tenant = tenantIdSchema.parse('protected-upgrade-admission');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await d1.insert(d1Schema.tenant).values({
+			id: tenant,
+			status: 'active',
+			ownerIssuer: 'https://owner.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'https://owner.test',
+			configVersion: 1,
+			createdAt: now
+		});
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			cacheName: sql`null`,
+			access: 'public',
+			generation: firstCacheGeneration,
+			updatedAt: now
+		});
+		const server = testServerFor(tenant);
+		const statuses = await withoutAlarmArming(
+			() =>
+				runInDurableObject(server, async (instance, state) => {
+					await migrateThrough(state, 67);
+					state.storage.sql.exec(
+						"INSERT INTO tenant_identity(id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version) VALUES ('singleton', ?, 'https://tenant.test', 'https://tenant.test', 'https://owner.test', 'owner', 'https://owner.test', 1)",
+						tenant
+					);
+					state.storage.sql
+						.exec(`WITH RECURSIVE rows(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM rows WHERE value < 1001)
+			INSERT INTO pending_upload(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at) SELECT printf('legacy-%d', value), 1, 'sha256:legacy', 'staging/legacy', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:30:00.000Z' FROM rows`);
+					const responses = [];
+					for (let attempt = 0; attempt < 20; attempt += 1) {
+						const response = await instance.fetch(
+							new Request('https://tenant.test/nix-cache-info')
+						);
+						responses.push({
+							status: response.status,
+							retryAfter: response.headers.get('retry-after') ?? undefined
+						});
+						if (response.status === 200) {
+							break;
+						}
+					}
+					return responses;
+				}),
+			server
+		);
+		expect(statuses).toStrictEqual([
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 503, retryAfter: '1' },
+			{ status: 200, retryAfter: undefined }
+		]);
+	});
+
+	it.each([1, 2000])(
+		'creates minimal refresh metadata without rewriting %i legacy sessions',
+		async (count) => {
+			const result = await runInDurableObject(
+				testServerFor(`refresh-authority-migration-${String(count)}`),
+				async (_instance, state) => {
+					await migrateThrough(state, 66);
+					state.storage.sql.exec(
+						"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) SELECT value, value, 0, 'owner', 'alice', '[{\"type\":\"cupboard_wildcard\"}]', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z' FROM json_each(?)",
+						JSON.stringify(
+							Array.from({ length: count }, (_, index) => String(index))
+						)
+					);
+					const meter = new DatabaseCostMeter();
+					const migrated = await applyMigrations(
+						drizzle(meteredStorage(state.storage, meter)),
+						migrationsThrough(migrations, 67)
+					);
+					meter.recordOutstanding();
+					return {
+						migrated,
+						bounded: meter.rowsRead + meter.rowsWritten <= 500,
+						legacyRows: state.storage.sql
+							.exec<{ count: number }>(
+								'SELECT count(*) AS count FROM refresh_token_family'
+							)
+							.one().count,
+						queryPlan: Array.from(
+							state.storage.sql.exec<{ detail: string }>(
+								"EXPLAIN QUERY PLAN SELECT id FROM refresh_session_member INDEXED BY refresh_session_member_successor_expiry_idx WHERE successor_expires_at IS NOT NULL AND successor_expires_at < '2026-01-01T00:00:00.000Z' ORDER BY successor_expires_at, id LIMIT 128"
+							),
+							({ detail }) => detail
+						)
+					};
+				}
+			);
+			expect(result).toStrictEqual({
+				migrated: { kind: 'complete', hasCommitted: true },
+				bounded: true,
+				legacyRows: count,
+				queryPlan: [
+					'SEARCH refresh_session_member USING COVERING INDEX refresh_session_member_successor_expiry_idx (successor_expires_at>? AND successor_expires_at<?)'
+				]
+			});
+		}
+	);
+
+	it('indexes narinfo refresh by NAR hash after upgrading', async () => {
+		const plan = await runInDurableObject(
+			testServerFor('migration-narinfo-refresh-index'),
+			async (_instance, state) => {
+				await migrateThrough(state, 65);
+				await migrateThroughConvertedCatalogue(state);
+				return Array.from(
+					state.storage.sql.exec<{ detail: string }>(
+						'EXPLAIN QUERY PLAN SELECT cache_id, store_path_hash FROM narinfo WHERE nar_hash = ? ORDER BY cache_id, store_path_hash LIMIT 100',
+						'sha256:missing'
+					),
+					(row) => row.detail
+				);
+			}
+		);
+		expect(plan).toStrictEqual([
+			'SEARCH narinfo USING COVERING INDEX narinfo_nar_hash_cache_id_store_path_hash_idx (nar_hash=?)'
+		]);
+	});
+
+	it('preserves narinfo rows, rowids and triggers during a bounded index upgrade', async () => {
+		const records = Array.from({ length: 1001 }, (_, index) => ({
+			rowid: index * 2 + 1,
+			cache_id: 1,
+			store_path_hash: String(index).padStart(32, '0'),
+			store_path: `/nix/store/${String(index).padStart(32, '0')}-upgrade`,
+			nar_hash: 'sha256:upgrade',
+			nar_size: 10,
+			references_json: '[]',
+			deriver: `/nix/store/${String(index).padStart(32, '0')}-deriver`,
+			ca: 'fixed:r:sha256:upgrade',
+			sigs_json: '["cupboard:signature"]',
+			generation: index + 1,
+			signature_generation: index + 2,
+			pending_signature_generation: index + 3,
+			created_at: '2026-09-27T12:00:00.000Z'
+		}));
+		const result = await runInDurableObject(
+			testServerFor('migration-bounded-narinfo-index'),
+			async (_instance, state) => {
+				await migrateThrough(state, 65);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo (rowid, cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, deriver, ca, sigs_json, generation, signature_generation, pending_signature_generation, created_at) SELECT json_extract(value, '$.rowid'), json_extract(value, '$.cache_id'), json_extract(value, '$.store_path_hash'), json_extract(value, '$.store_path'), json_extract(value, '$.nar_hash'), json_extract(value, '$.nar_size'), json_extract(value, '$.references_json'), json_extract(value, '$.deriver'), json_extract(value, '$.ca'), json_extract(value, '$.sigs_json'), json_extract(value, '$.generation'), json_extract(value, '$.signature_generation'), json_extract(value, '$.pending_signature_generation'), json_extract(value, '$.created_at') FROM json_each(?)",
+					JSON.stringify(records)
+				);
+				const triggers = () =>
+					state.storage.sql
+						.exec(
+							"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'narinfo' ORDER BY name"
+						)
+						.toArray();
+				const beforeTriggers = triggers();
+				const counts = () =>
+					state.storage.sql.exec('SELECT * FROM cache_narinfo_count').toArray();
+				const beforeCounts = counts();
+				const first = await applyMigrations(
+					drizzle(state.storage),
+					migrationsThrough(migrations, 66)
+				);
+				await migrateThrough(state, 66);
+				return {
+					first,
+					rows: state.storage.sql
+						.exec('SELECT rowid, * FROM narinfo ORDER BY rowid')
+						.toArray(),
+					beforeTriggers,
+					afterTriggers: triggers(),
+					beforeCounts,
+					afterCounts: counts()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			first: {
+				kind: 'pending',
+				migration: '0066_publication_recovery',
+				stage: 'copy-narinfo',
+				cursor: 1999,
+				sourceRows: 1000,
+				declaredSourceWrites: 1000,
+				hasCommitted: true
+			},
+			rows: records,
+			beforeTriggers: result.beforeTriggers,
+			afterTriggers: result.beforeTriggers,
+			beforeCounts: result.beforeCounts,
+			afterCounts: result.beforeCounts
+		});
+	});
+
+	it.each(['copy-narinfo', 'copy-canonical-narinfo'])(
+		'preserves rollback writes during %s',
+		async (stage) => {
+			const result = await runInDurableObject(
+				testServerFor(`migration-publication-rollback-${stage}`),
+				async (_instance, state) => {
+					await migrateThrough(state, 65);
+					state.storage.sql.exec(
+						"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) SELECT 1, printf('%032d', value), '/nix/store/rollback', 'sha256:rollback', 10, '[]', '2026-01-01T00:00:00.000Z' FROM json_each(?)",
+						JSON.stringify(Array.from({ length: 1001 }, (_, index) => index))
+					);
+					let page = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 66)
+					);
+					while (page.kind === 'pending' && page.stage !== stage) {
+						page = await applyMigrations(
+							drizzle(state.storage),
+							migrationsThrough(migrations, 66)
+						);
+					}
+					if (page.kind !== 'pending') {
+						throw new Error(`The migration did not pause during ${stage}.`);
+					}
+					const rollback = await applyMigrations(
+						drizzle(state.storage),
+						migrationsThrough(migrations, 65)
+					);
+					state.storage.sql.exec(
+						'UPDATE narinfo SET sigs_json = \'["rollback:signature"]\' WHERE rowid = 1'
+					);
+					state.storage.sql.exec('DELETE FROM narinfo WHERE rowid = 2');
+					state.storage.sql.exec(
+						"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (1, 'rollback-added', '/nix/store/added', 'sha256:added', 10, '[]', '2026-01-01T00:00:00.000Z')"
+					);
+					const rows = () =>
+						state.storage.sql
+							.exec('SELECT rowid, * FROM narinfo ORDER BY rowid')
+							.toArray();
+					const before = rows();
+					await migrateThrough(state, 66);
+					return { rollback, before, after: rows() };
+				}
+			);
+			expect(result).toStrictEqual({
+				rollback: { kind: 'complete', hasCommitted: false },
+				before: result.before,
+				after: result.before
+			});
+		}
+	);
+
+	it('seeks directly after the narinfo refresh cursor', async () => {
+		const plan = await runInDurableObject(
+			testServerFor('migration-narinfo-refresh-cursor'),
+			async (_instance, state) => {
+				await migrateThroughConvertedCatalogue(state);
+				return Array.from(
+					state.storage.sql.exec<{ detail: string }>(
+						'EXPLAIN QUERY PLAN SELECT cache_id, store_path_hash FROM narinfo WHERE nar_hash = ? AND (cache_id, store_path_hash) > (?, ?) ORDER BY cache_id, store_path_hash LIMIT 101',
+						'sha256:missing',
+						1,
+						'a'.repeat(32)
+					),
+					(row) => row.detail
+				);
+			}
+		);
+		expect(plan).toStrictEqual([
+			'SEARCH narinfo USING COVERING INDEX narinfo_nar_hash_cache_id_store_path_hash_idx (nar_hash=? AND (cache_id,store_path_hash)>(?,?))'
+		]);
+	});
+
+	it('bounds rows read after a late narinfo refresh cursor', async () => {
+		await useTestServer('migration-refresh-cursor-cost');
+		await bootstrap();
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const narHash = nixSha256HashSchema.parse(`sha256:${'a'.repeat(52)}`);
+				const paths = Array.from({ length: 1001 }, (_, index) =>
+					String(index).padStart(32, '0')
+				);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) SELECT 1, value, '/nix/store/' || value || '-refresh', ?, 10, '[]', '2026-09-27T12:00:00.000Z' FROM json_each(?)",
+					narHash,
+					JSON.stringify(paths)
+				);
+				instance.context.dbCost.recordOutstanding();
+				const before = instance.context.dbCost.rowsRead;
+				const cursor = await instance.enqueueNarInfoReconciliation(narHash, {
+					cacheId: cacheIdSchema.parse(1),
+					storePathHash: storePathHashSchema.parse(
+						String(900).padStart(32, '0')
+					)
+				});
+				instance.context.dbCost.recordOutstanding();
+				return {
+					cursor,
+					bounded: instance.context.dbCost.rowsRead - before <= 120
+				};
+			}
+		);
+		expect(result).toStrictEqual({ cursor: undefined, bounded: true });
+	});
+
 	it('preserves pending uploads and committed narinfo rows through attestation migrations', async () => {
 		const server = testServerFor('migration-attestation-preservation');
 		const migrated = await runInDurableObject(
@@ -361,7 +1532,7 @@ describe('migrations', () => {
 				await migrateThroughConvertedCatalogue(state);
 
 				const database = drizzle(state.storage, {
-					schema: { refreshTokenFamilies, refreshTokenMembers }
+					schema: { legacyRefreshTokenFamilies, legacyRefreshTokenMembers }
 				});
 				const clearedLegacyRows = state.storage.sql
 					.exec('SELECT id FROM refresh_token ORDER BY id')
@@ -401,7 +1572,7 @@ describe('migrations', () => {
 				);
 				database.transaction((transaction) => {
 					transaction
-						.insert(refreshTokenFamilies)
+						.insert(legacyRefreshTokenFamilies)
 						.values({
 							id: 'new-family',
 							activeMemberId: 'new-member',
@@ -414,7 +1585,7 @@ describe('migrations', () => {
 						})
 						.run();
 					transaction
-						.insert(refreshTokenMembers)
+						.insert(legacyRefreshTokenMembers)
 						.values({
 							id: 'new-member',
 							familyId: 'new-family',
@@ -426,7 +1597,7 @@ describe('migrations', () => {
 				});
 				const members = database
 					.select()
-					.from(refreshTokenMembers)
+					.from(legacyRefreshTokenMembers)
 					.all()
 					.map((member) => ({
 						...member,
@@ -438,7 +1609,7 @@ describe('migrations', () => {
 					newTables,
 					legacySchema,
 					precedingWorkerLookup,
-					families: database.select().from(refreshTokenFamilies).all(),
+					families: database.select().from(legacyRefreshTokenFamilies).all(),
 					members,
 					legacyRows: {
 						live: state.storage.sql
@@ -1179,6 +2350,8 @@ describe('migrations', () => {
 			],
 			indexes: [
 				{ name: 'retention_root_cache_expires_at_name_idx' },
+				{ name: 'retention_root_cache_retention_epoch_idx' },
+				{ name: 'retention_root_close_applied_epoch_idx' },
 				{ name: 'retention_root_expires_at_idx' },
 				{ name: 'sqlite_autoindex_retention_root_1' }
 			]
@@ -1650,5 +2823,401 @@ describe('migrations', () => {
 			buildsId: migrated.buildsId,
 			retentionMigration: { status: 'complete', discardedRuleCount: 2 }
 		});
+	});
+});
+
+it('adds close metadata after creation defaults without replacing predecessor schema', () => {
+	const additions = new Map([
+		['narinfo', { columns: ['retention_epoch'], indexes: [] }],
+		[
+			'cache_identity',
+			{ columns: ['retention_epoch', 'close_history_cursor'], indexes: [] }
+		],
+		[
+			'managed_cache_retirement',
+			{ columns: ['retirement_started_at'], indexes: [] }
+		],
+		[
+			'pending_upload',
+			{
+				columns: ['retention_epoch'],
+				indexes: ['pending_upload_cache_retention_epoch_idx']
+			}
+		],
+		[
+			'retention_root',
+			{
+				columns: [
+					'retention_epoch',
+					'close_applied_epoch',
+					'close_grace_until'
+				],
+				indexes: [
+					'retention_root_cache_retention_epoch_idx',
+					'retention_root_close_applied_epoch_idx'
+				]
+			}
+		]
+	]);
+	const predecessorTables = Object.fromEntries(
+		Object.entries(closeSnapshot.tables)
+			.filter(([table]) => table !== 'cache_close_event')
+			.map(([table, definition]) => {
+				const added = additions.get(table);
+				return [
+					table,
+					{
+						...definition,
+						columns: Object.fromEntries(
+							Object.entries(definition.columns).filter(
+								([column]) => !added?.columns.includes(column)
+							)
+						),
+						indexes: Object.fromEntries(
+							Object.entries(definition.indexes).filter(
+								([index]) => !added?.indexes.includes(index)
+							)
+						)
+					}
+				];
+			})
+	);
+	expect({
+		...closeSnapshot,
+		id: creationDefaultsSnapshot.id,
+		prevId: creationDefaultsSnapshot.prevId,
+		tables: predecessorTables
+	}).toStrictEqual(creationDefaultsSnapshot);
+	expect(closeSnapshot.prevId).toBe(creationDefaultsSnapshot.id);
+	expect(journal.entries.slice(-2)).toStrictEqual([
+		{
+			idx: 70,
+			version: '6',
+			when: 1_790_931_592_556,
+			tag: '0070_cache_creation_defaults',
+			breakpoints: true
+		},
+		{
+			idx: 71,
+			version: '6',
+			when: 1_790_931_592_557,
+			tag: '0071_cache_close',
+			breakpoints: true
+		}
+	]);
+});
+
+it('adds admission epoch zero to existing narinfos without changing their publications', async () => {
+	const result = await runInDurableObject(
+		testServerFor('close-narinfo-admission'),
+		async (_instance, state) => {
+			await migrateThrough(state, 70);
+			for (const rowid of [1, 2]) {
+				const hash = String(rowid).repeat(32);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,generation,created_at) VALUES (?,1,?,?,'sha256:old',10,'[]',?,'2026-01-01T00:00:00.000Z')",
+					rowid,
+					hash,
+					`/nix/store/${hash}-existing`,
+					rowid + 4
+				);
+			}
+			const query =
+				'SELECT rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,generation,created_at FROM narinfo ORDER BY rowid';
+			const before = state.storage.sql.exec(query).toArray();
+			await migrateThrough(state, 71);
+			return {
+				before,
+				after: state.storage.sql.exec(query).toArray(),
+				epochs: state.storage.sql
+					.exec('SELECT rowid,retention_epoch FROM narinfo ORDER BY rowid')
+					.toArray()
+			};
+		}
+	);
+	expect(result.after).toStrictEqual(result.before);
+	expect(result.epochs).toStrictEqual([
+		{ rowid: 1, retention_epoch: 0 },
+		{ rowid: 2, retention_epoch: 0 }
+	]);
+});
+
+it('adds close metadata within a one-row allowance for 5,000 roots, uploads and narinfos', async () => {
+	const result = await runInDurableObject(
+		testServerFor('close-bounded-indexes'),
+		async (_instance, state) => {
+			await migrateThrough(state, 70);
+			const values = JSON.stringify(
+				Array.from({ length: 5000 }, (_, index) => index)
+			);
+			state.storage.sql.exec(
+				"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at) SELECT value+1, 'upload-' || value, 1, 'sha256:old', 'staging/' || value, '{}', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z' FROM json_each(?)",
+				values
+			);
+			state.storage.sql.exec(
+				"INSERT INTO retention_root(rowid,cache_id,name,expires_at,created_at,updated_at) SELECT value+1,1,'root-' || value,NULL,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z' FROM json_each(?)",
+				values
+			);
+			state.storage.sql.exec(
+				"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,created_at) SELECT value+1,1,'hash-' || value,'/nix/store/path-' || value,'sha256:old',10,'[]','2026-01-01T00:00:00.000Z' FROM json_each(?)",
+				values
+			);
+			const indexes = () =>
+				Array.from(
+					state.storage.sql.exec<{ name: string; sql: string }>(
+						"SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='pending_upload' AND sql IS NOT NULL AND name <> 'pending_upload_cache_retention_epoch_idx' ORDER BY name"
+					),
+					(row) => ({
+						...row,
+						sql: row.sql.replaceAll('"pending_upload"', '`pending_upload`')
+					})
+				);
+			const beforeIndexes = indexes();
+			const meter = new DatabaseCostMeter();
+			const first = await applyMigrations(
+				drizzle(meteredStorage(state.storage, meter)),
+				migrations,
+				{
+					budget: { sourceRowsRemaining: 1, structuralOperationsRemaining: 365 }
+				}
+			);
+			meter.recordOutstanding();
+			const firstCost = meter.rowsRead + meter.rowsWritten;
+			if (first.kind !== 'pending') {
+				return { firstKind: first.kind, firstCost };
+			}
+			let arePassesBounded = true;
+			for (;;) {
+				const pageMeter = new DatabaseCostMeter();
+				const page = await applyMigrations(
+					drizzle(meteredStorage(state.storage, pageMeter)),
+					migrations,
+					{
+						budget: {
+							sourceRowsRemaining: 1000,
+							structuralOperationsRemaining: 365,
+							freshStore: false
+						}
+					}
+				);
+				pageMeter.recordOutstanding();
+				arePassesBounded &&=
+					pageMeter.rowsRead + pageMeter.rowsWritten <= 25_000;
+				if (page.kind === 'complete') {
+					break;
+				}
+			}
+			return {
+				arePassesBounded,
+				firstKind: first.kind,
+				firstSourceRows: first.sourceRows,
+				bounded: firstCost <= 1000,
+				narinfos: state.storage.sql
+					.exec(
+						'SELECT count(*) AS count, min(rowid) AS first, max(rowid) AS last, min(retention_epoch) AS firstEpoch, max(retention_epoch) AS lastEpoch FROM narinfo'
+					)
+					.toArray(),
+				uploads: state.storage.sql
+					.exec(
+						'SELECT count(*) AS count, min(rowid) AS first, max(rowid) AS last, min(retention_epoch) AS epoch FROM pending_upload'
+					)
+					.toArray(),
+				roots: state.storage.sql
+					.exec(
+						'SELECT count(*) AS count, min(rowid) AS first, max(rowid) AS last, min(retention_epoch) AS epoch, min(close_applied_epoch) AS applied, max(close_grace_until IS NOT NULL) AS hasGrace FROM retention_root'
+					)
+					.toArray(),
+				plans: [
+					'SELECT id FROM pending_upload WHERE cache_id=1 AND retention_epoch=0',
+					'SELECT name FROM retention_root WHERE cache_id=1 AND retention_epoch=0',
+					'SELECT name FROM retention_root WHERE cache_id=1 AND close_applied_epoch=0'
+				].map((query) =>
+					Array.from(
+						state.storage.sql.exec<{ detail: string }>(
+							`EXPLAIN QUERY PLAN ${query}`
+						),
+						(row) => row.detail
+					)
+				),
+				beforeIndexes,
+				afterIndexes: indexes(),
+				shadows: state.storage.sql
+					.exec(
+						"SELECT name FROM sqlite_master WHERE name GLOB '__new_*' OR name GLOB '__bounded_*'"
+					)
+					.toArray()
+			};
+		}
+	);
+	expect(result).toStrictEqual({
+		arePassesBounded: true,
+		firstKind: 'pending',
+		firstSourceRows: 1,
+		bounded: true,
+		narinfos: [
+			{ count: 5000, first: 1, last: 5000, firstEpoch: 0, lastEpoch: 0 }
+		],
+		uploads: [{ count: 5000, first: 1, last: 5000, epoch: 0 }],
+		roots: [
+			{ count: 5000, first: 1, last: 5000, epoch: 0, applied: 0, hasGrace: 0 }
+		],
+		plans: [
+			[
+				'SEARCH pending_upload USING INDEX pending_upload_cache_retention_epoch_idx (cache_id=? AND retention_epoch=?)'
+			],
+			[
+				'SEARCH retention_root USING COVERING INDEX retention_root_cache_retention_epoch_idx (cache_id=? AND retention_epoch=?)'
+			],
+			[
+				'SEARCH retention_root USING COVERING INDEX retention_root_close_applied_epoch_idx (cache_id=? AND close_applied_epoch=?)'
+			]
+		],
+		beforeIndexes: result.beforeIndexes,
+		afterIndexes: result.beforeIndexes,
+		shadows: []
+	});
+});
+
+it.each([
+	'copy-pending_upload',
+	'copy-retention_root',
+	'copy-canonical-pending_upload',
+	'copy-canonical-retention_root'
+])('preserves rollback writes during close migration %s', async (stage) => {
+	const result = await runInDurableObject(
+		testServerFor(`close-rollback-${stage}`),
+		async (_instance, state) => {
+			await migrateThrough(state, 70);
+			const sourceQueries = () =>
+				['pending_upload', 'retention_root', 'narinfo'].map((table) => {
+					const columns = Array.from(
+						state.storage.sql.exec<{ name: string }>(
+							`PRAGMA table_info(${table})`
+						),
+						(row) => `\`${row.name}\``
+					);
+					return `SELECT rowid, ${columns.join(', ')} FROM ${table} ORDER BY rowid`;
+				});
+			for (const rowid of [1, 2, 3]) {
+				state.storage.sql.exec(
+					"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at) VALUES (?, ?, 1, 'sha256:old', 'staging/old', '{}', '2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z')",
+					rowid,
+					`upload-${String(rowid)}`
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_root(rowid,cache_id,name,created_at,updated_at) VALUES (?,1,?,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+					rowid,
+					`root-${String(rowid)}`
+				);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,created_at) VALUES (?,1,?,?,'sha256:old',10,'[]','2026-01-01T00:00:00.000Z')",
+					rowid,
+					String(rowid).repeat(32),
+					`/nix/store/${String(rowid).repeat(32)}-existing`
+				);
+			}
+			state.storage.sql.exec(
+				"UPDATE pending_upload SET verdict='committing', session_id='session', claimed_at='2026-01-01T00:00:00.000Z', claim_owner='owner', grace_decision_json='{}', attach_root_name='ci/run', recorded_verdict_json='{}', settle_failures=3, settle_retry_after='2026-01-02T00:00:00.000Z', last_settle_error='retry', nar_refresh_pending=1, accepted_sequence=101, accepted_expires_at='2098-01-01T00:00:00.000Z', commit_started_sequence=102, retry_started_active_ms=5000, settle_exhaustion='attempt-limit'"
+			);
+			for (let pass = 0; pass < 40; pass++) {
+				const progress = await applyMigrations(
+					drizzle(state.storage),
+					migrations,
+					{
+						budget: {
+							sourceRowsRemaining: 1,
+							structuralOperationsRemaining: 365
+						}
+					}
+				);
+				if (
+					progress.kind === 'pending' &&
+					progress.stage === stage &&
+					progress.cursor === 1
+				) {
+					break;
+				}
+				if (pass === 39 || progress.kind === 'complete') {
+					throw new Error(
+						'Expected migration to stop in the requested copy stage'
+					);
+				}
+			}
+			const rollback = await applyMigrations(
+				drizzle(state.storage),
+				migrationsThrough(migrations, 70)
+			);
+			state.storage.sql.exec(
+				"UPDATE pending_upload SET metadata_json=?, accepted_sequence=201, accepted_expires_at='2097-01-01T00:00:00.000Z', commit_started_sequence=202, retry_started_active_ms=6000, settle_exhaustion='eligible-age-limit' WHERE rowid=1",
+				JSON.stringify({ updated: true })
+			);
+			state.storage.sql.exec(
+				"UPDATE retention_root SET expires_at='2099-01-01T00:00:00.000Z' WHERE rowid=1"
+			);
+			state.storage.sql.exec('DELETE FROM pending_upload WHERE rowid=2');
+			state.storage.sql.exec('DELETE FROM retention_root WHERE rowid=2');
+			state.storage.sql.exec(
+				'UPDATE narinfo SET retention_epoch=19 WHERE rowid=1'
+			);
+			state.storage.sql.exec('DELETE FROM narinfo WHERE rowid=2');
+			state.storage.sql.exec(
+				"INSERT INTO narinfo(rowid,cache_id,store_path_hash,store_path,nar_hash,nar_size,references_json,created_at) VALUES (88,1,?,'/nix/store/new','sha256:new',20,'[]','2026-01-01T00:00:00.000Z')",
+				'8'.repeat(32)
+			);
+			state.storage.sql.exec(
+				"INSERT INTO pending_upload(rowid,id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at) VALUES (88,'new',1,'sha256:new','staging/new',?,'2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z')",
+				JSON.stringify({ new: true })
+			);
+			state.storage.sql.exec(
+				"INSERT INTO retention_root(rowid,cache_id,name,created_at,updated_at) VALUES (88,1,'new','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')"
+			);
+			if (stage.startsWith('copy-canonical-')) {
+				state.storage.sql.exec(
+					'UPDATE pending_upload SET retention_epoch=19 WHERE rowid=1'
+				);
+				state.storage.sql.exec(
+					"UPDATE retention_root SET retention_epoch=19, close_applied_epoch=18, close_grace_until='2098-01-01T00:00:00.000Z' WHERE rowid=1"
+				);
+			}
+			const queries = sourceQueries();
+			const before = queries.map((query) =>
+				state.storage.sql.exec(query).toArray()
+			);
+			await migrateThrough(state, 71);
+			return {
+				before,
+				after: queries.map((query) => state.storage.sql.exec(query).toArray()),
+				rollback,
+				uploads: state.storage.sql
+					.exec(
+						'SELECT rowid,id,metadata_json FROM pending_upload ORDER BY rowid'
+					)
+					.toArray(),
+				roots: state.storage.sql
+					.exec(
+						"SELECT rowid,name,coalesce(expires_at, 'permanent') AS expires_at FROM retention_root ORDER BY rowid"
+					)
+					.toArray()
+			};
+		}
+	);
+	const { before, after, ...reported } = result;
+	expect(after).toStrictEqual(before);
+	expect(reported).toStrictEqual({
+		rollback: { kind: 'complete', hasCommitted: false },
+		uploads: [
+			{
+				rowid: 1,
+				id: 'upload-1',
+				metadata_json: JSON.stringify({ updated: true })
+			},
+			{ rowid: 3, id: 'upload-3', metadata_json: '{}' },
+			{ rowid: 88, id: 'new', metadata_json: JSON.stringify({ new: true }) }
+		],
+		roots: [
+			{ rowid: 1, name: 'root-1', expires_at: '2099-01-01T00:00:00.000Z' },
+			{ rowid: 3, name: 'root-3', expires_at: 'permanent' },
+			{ rowid: 88, name: 'new', expires_at: 'permanent' }
+		]
 	});
 });

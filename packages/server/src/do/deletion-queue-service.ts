@@ -11,6 +11,7 @@ import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponseInput } from '@cupboard/protocol/upload';
 import {
 	and,
+	desc,
 	eq,
 	exists,
 	gt,
@@ -34,14 +35,19 @@ import {
 } from '../db/cache.ts';
 import {
 	authorisedByCacheGeneration,
+	currentCacheGenerationReference,
 	referencedCacheLifecycle,
 	revokedByCacheGeneration,
 	secondCacheGeneration,
 	secondCacheReadRevision
 } from '../db/cache-generation.ts';
+import { writeCacheLifecycle } from '../db/cache-lifecycle-write.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { CacheNotFoundError } from '../errors.ts';
+import {
+	CacheNotFoundError,
+	PathReadAuthorityMigrationPendingError
+} from '../errors.ts';
 import { type RequestOrigin } from '../http/http.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
@@ -56,12 +62,22 @@ import { cacheLifecycleFilter } from './cache-registration-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import {
 	type JsonRowList,
+	jsonRowList,
 	jsonRowLists,
 	type JsonValueList,
 	jsonValueLists
 } from './json-list.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import {
+	PathReadAuthorityService,
+	reclaimPathReadFence
+} from './path-read-authority-service.ts';
+import {
+	inheritanceAcceptedBeforeDeletion,
+	pendingAcceptedBeforeDeletion,
+	ProtectedInheritanceService
+} from './protected-inheritance-service.ts';
 import {
 	affordableSubrequestOperations,
 	hasSubrequestsFor,
@@ -75,14 +91,19 @@ import {
 //
 // The unary `+` removes the TEXT affinity of `store_path_hash`. With the
 // affinity, SQLite converts the `json_extract` side and cannot search
-// `pending_upload_gc_path_idx` by the path.
-function deferredDeletionCondition(now: IsoTimestamp): SQL<boolean> {
+// `pending_upload_inheritance_path_idx` by the path.
+export function deferredDeletionCondition(now: IsoTimestamp): SQL<boolean> {
 	const deletion = schema.narInfoDeletions;
 	const pending = schema.pendingUploads;
 	const inheritance = schema.attestationInheritances;
 	const crossCache = crossCacheInheritanceCondition(now);
 
-	return sql`(${crossCache} or exists (select 1 from ${pending} where ${pending.cacheId} = ${deletion.cacheId} and ${pending.narHash} = ${deletion.narHash} and (${pending.expiresAt} > ${now} or ${pending.verdict} = 'committing') and json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}) or exists (select 1 from ${inheritance} where ${inheritance.cacheId} = ${deletion.cacheId} and ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash} and ${inheritance.generation} > ${deletion.generation}))`.mapWith(
+	const ordinary =
+		sql`(${crossCache} or exists (select 1 from ${pending} where ${pending.cacheId} = ${deletion.cacheId} and ${pending.narHash} = ${deletion.narHash} and (${pending.expiresAt} > ${now} or ${pending.verdict} = 'committing') and json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}) or exists (select 1 from ${inheritance} where ${inheritance.cacheId} = ${deletion.cacheId} and ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash} and ${inheritance.generation} > ${deletion.generation}))`.mapWith(
+			Boolean
+		);
+	const captured = sql`exists (select 1 from ${pending} where json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash} and ${pending.narHash} = ${deletion.narHash} and (${pending.cacheId} = ${deletion.cacheId} or exists (select 1 from ${schema.cacheIdentities} where ${schema.cacheIdentities.id} = ${deletion.cacheId} and ${schema.cacheIdentities.access} = 'public')) and (${pending.expiresAt} > ${now} or ${pending.verdict} = 'committing') and ${pendingAcceptedBeforeDeletion()}) or exists (select 1 from ${inheritance} where ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash} and ((${inheritance.cacheId} = ${deletion.cacheId} and ${inheritance.generation} > ${deletion.generation}) or (${inheritance.cacheId} != ${deletion.cacheId} and exists (select 1 from ${schema.cacheIdentities} where ${schema.cacheIdentities.id} = ${deletion.cacheId} and ${schema.cacheIdentities.access} = 'public'))) and (${inheritanceAcceptedBeforeDeletion()}))`;
+	return sql`case when ${deletion.explicit} then ${captured} else ${ordinary} end`.mapWith(
 		Boolean
 	);
 }
@@ -94,7 +115,7 @@ function crossCacheInheritanceCondition(now: IsoTimestamp): SQL<boolean> {
 	const identities = schema.cacheIdentities;
 	const publicSource = sql`exists (select 1 from ${identities} where ${identities.id} = ${deletion.cacheId} and ${identities.access} = 'public')`;
 
-	return sql`(${publicSource} and exists (select 1 from ${identities} destination_cache where destination_cache.id != ${deletion.cacheId} and (exists (select 1 from ${pending} where ${pending.cacheId} = destination_cache.id and ${pending.narHash} = ${deletion.narHash} and (${pending.expiresAt} > ${now} or ${pending.verdict} = 'committing') and json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash}) or exists (select 1 from ${inheritance} where ${inheritance.cacheId} = destination_cache.id and ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash}))))`.mapWith(
+	return sql`(${publicSource} and (exists (select 1 from ${pending} where json_extract(${pending.metadataJson}, '$.storePathHash') = +${deletion.storePathHash} and ${pending.narHash} = ${deletion.narHash} and ${pending.cacheId} != ${deletion.cacheId} and (${pending.expiresAt} > ${now} or ${pending.verdict} = 'committing')) or exists (select 1 from ${inheritance} where ${inheritance.storePathHash} = ${deletion.storePathHash} and ${inheritance.narHash} = ${deletion.narHash} and ${inheritance.cacheId} != ${deletion.cacheId})))`.mapWith(
 		Boolean
 	);
 }
@@ -290,6 +311,7 @@ export function fencedEdgeRetirement(
 			})
 			.where(eq(d1Schema.tenantUsage.tenant, tenant)),
 		edgeDelete: database.delete(d1Schema.blobReference).where(edgeFilter),
+		fenceDelete: reclaimPathReadFence(database, tenant, cache, batch),
 		publicationDelete: database.delete(d1Schema.publication).where(
 			and(
 				eq(d1Schema.publication.tenant, tenant),
@@ -422,7 +444,86 @@ export class DeletionQueueService {
 
 		await this.narInfoObjects.deleteNarInfoObjects(cache, removed);
 		await this.cachePurges.enqueueNarInfos(cache, removed);
+		await this.revokeReadAuthority(cache, deferred);
 		await this.markWithdrawn(cache, deferred);
+	}
+
+	private async revokeReadAuthority(
+		cache: ResolvedCache,
+		entries: readonly TornDownNarInfo[]
+	): Promise<void> {
+		const table = schema.narInfoDeletions;
+		for (const list of jsonRowLists(entries)) {
+			const explicit = this.context.db
+				.select({
+					storePathHash: table.storePathHash,
+					generation: table.generation
+				})
+				.from(table)
+				.where(
+					and(
+						eq(table.cacheId, cache.id),
+						eq(table.explicit, true),
+						list.matches({
+							storePathHash: table.storePathHash,
+							generation: table.generation
+						})
+					)
+				)
+				.all();
+			if (explicit.length === 0) {
+				continue;
+			}
+			await new PathReadAuthorityService(this.context).revoke(cache, explicit);
+			await this.cachePurges.enqueueNars(cache, [
+				...new Set(entries.map((entry) => entry.narHash))
+			]);
+		}
+	}
+
+	private async finishStorePathDeletion(
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		origin: RequestOrigin
+	): Promise<DeletePathResponseInput> {
+		const retirement = await this.retireQueuedNarInfoEdge(
+			cache,
+			storePathHash,
+			generation
+		);
+
+		if (retirement.kind !== 'retired') {
+			return {
+				storePathHash,
+				deleted: true,
+				narScheduledForDeletion: false
+			};
+		}
+
+		let isNarScheduledForDeletion = false;
+
+		// The retired generation no longer authorises reads. Keep retirement
+		// outside this catch so a failed deletion cannot be reported as success;
+		// queued cleanup can retry the remaining work.
+		try {
+			({ narScheduledForDeletion: isNarScheduledForDeletion } =
+				await this.cleanUpQueuedNarInfo(
+					cache,
+					storePathHash,
+					generation,
+					retirement.retired,
+					origin
+				));
+		} catch {
+			// The durable queue remains for garbage collection to retry.
+		}
+
+		return {
+			storePathHash,
+			deleted: true,
+			narScheduledForDeletion: isNarScheduledForDeletion
+		};
 	}
 
 	private async markWithdrawn(
@@ -508,7 +609,13 @@ export class DeletionQueueService {
 				})
 				.where(creditNarInfoFilter),
 			this.context.d1.delete(d1Schema.blobReference).where(edgeFilter),
-			this.context.d1.delete(d1Schema.publication).where(publicationFilter)
+			this.context.d1.delete(d1Schema.publication).where(publicationFilter),
+			reclaimPathReadFence(
+				this.context.d1,
+				tenant,
+				cache.scope,
+				jsonRowList([{ storePathHash }])
+			)
 		]);
 
 		const hashReferencedFilter = and(
@@ -519,9 +626,9 @@ export class DeletionQueueService {
 			eq(d1Schema.tenantBlob.tenant, tenant),
 			eq(d1Schema.tenantBlob.narHash, narHash)
 		);
-		const authorisedReferenceFilter = and(
+		const retainedReferenceFilter = and(
 			hashReferencedFilter,
-			authorisedByCacheGeneration()
+			currentCacheGenerationReference()
 		);
 
 		const [stillReferencedRows, presenceRows] = await this.context.d1.batch([
@@ -532,7 +639,7 @@ export class DeletionQueueService {
 				})
 				.from(d1Schema.blobReference)
 				.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
-				.where(authorisedReferenceFilter),
+				.where(retainedReferenceFilter),
 			this.context.d1
 				.select({ fileSize: d1Schema.tenantBlob.fileSize })
 				.from(d1Schema.tenantBlob)
@@ -802,7 +909,7 @@ export class DeletionQueueService {
 		// Compute the credit from edges that still exist, then delete those exact
 		// generations in the same transaction. Replays cannot double-credit.
 		for (const entries of jsonRowLists(batch)) {
-			const { creditUpdate, edgeDelete, publicationDelete } =
+			const { creditUpdate, edgeDelete, publicationDelete, fenceDelete } =
 				fencedEdgeRetirement(
 					this.context.d1,
 					tenant,
@@ -814,7 +921,8 @@ export class DeletionQueueService {
 			await this.context.d1.batch([
 				creditUpdate,
 				edgeDelete,
-				publicationDelete
+				publicationDelete,
+				fenceDelete
 			]);
 		}
 
@@ -963,6 +1071,9 @@ export class DeletionQueueService {
 						rows.column('narHash'),
 						rows.column('generation'),
 						sql`${now}`,
+						sql`0`,
+						sql`null`,
+						sql`null`,
 						sql`0`
 					])
 				)
@@ -988,6 +1099,8 @@ export class DeletionQueueService {
 		origin?: RequestOrigin,
 		limit: number = maxNarInfoDeletionsFlushedPerRun
 	): Promise<number> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		// Read the retirable entries first, in key order. Fill the rest of the
 		// flush with deferred entries that have not been withdrawn yet. Each
 		// deferred entry is therefore read for withdrawal once, and deferred
@@ -1183,11 +1296,6 @@ export class DeletionQueueService {
 	 * Removes one queued narinfo's published object, then retires its reference
 	 * edge. Returns undefined when the queue has no such entry.
 	 *
-	 * The object must go first because public narinfo reads do not consult D1.
-	 * A crash between the operations then leaves an edge with no object, which
-	 * a narinfo read answers with 404. The queue survives so collection can
-	 * finish retiring the edge.
-	 *
 	 * Retire the edge before calling {@link blobHashUnreferenced}; otherwise
 	 * this edge would still authorise the NAR. An object owned by a later
 	 * publication is preserved. Callers reporting a deletion must propagate a
@@ -1201,6 +1309,8 @@ export class DeletionQueueService {
 		generation: NarInfoGeneration,
 		shouldDeferForInheritance = true
 	): Promise<QueuedNarInfoRetirement> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const now = isoTimestamp(new Date());
 		const deferred = shouldDeferForInheritance
 			? deferredDeletionCondition(now)
@@ -1238,6 +1348,10 @@ export class DeletionQueueService {
 
 		if (!wasNewerCommitted) {
 			await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
+		}
+
+		if (queued.explicit) {
+			await this.revokeReadAuthority(cache, [queued]);
 		}
 
 		// The edge stays for inheritance, but readers stop receiving the queued
@@ -1394,77 +1508,79 @@ export class DeletionQueueService {
 	async revokeCacheGenerationAndClearCredential(
 		cache: ResolvedCache
 	): Promise<void> {
-		const tenant = this.context.requireTenant();
-		const now = isoTimestamp(new Date());
-		const { scope, access } = cache;
-		const credential = and(
-			eq(d1Schema.tenantCacheReadCredential.tenant, tenant),
-			cacheIdentityCondition(
-				d1Schema.tenantCacheReadCredential.cacheKind,
-				d1Schema.tenantCacheReadCredential.cacheName,
-				scope
-			),
-			sql`changes() > 0`
-		);
-		const credentialDeleteStatement = this.context.d1
-			.delete(d1Schema.tenantCacheReadCredential)
-			.where(credential);
-		const update = this.context.d1
-			.update(d1Schema.cacheLifecycle)
-			.set({
-				access,
-				generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
-				readRevision: sql`${d1Schema.cacheLifecycle.readRevision} + 1`,
-				deletedAt: now,
-				updatedAt: now
-			})
-			.where(
-				and(
-					cacheLifecycleFilter(tenant, scope),
-					eq(d1Schema.cacheLifecycle.generation, cache.generation),
-					isNull(d1Schema.cacheLifecycle.deletedAt)
-				)
+		await writeCacheLifecycle(this.context.d1, async (table) => {
+			const tenant = this.context.requireTenant();
+			const now = isoTimestamp(new Date());
+			const { scope, access } = cache;
+			const credential = and(
+				eq(d1Schema.tenantCacheReadCredential.tenant, tenant),
+				cacheIdentityCondition(
+					d1Schema.tenantCacheReadCredential.cacheKind,
+					d1Schema.tenantCacheReadCredential.cacheName,
+					scope
+				),
+				sql`changes() > 0`
 			);
-		const [revoked] = await this.context.d1.batch([
-			update,
-			credentialDeleteStatement
-		]);
+			const credentialDeleteStatement = this.context.d1
+				.delete(d1Schema.tenantCacheReadCredential)
+				.where(credential);
+			const update = this.context.d1
+				.update(table)
+				.set({
+					access,
+					generation: sql`${table.generation} + 1`,
+					readRevision: sql`${table.readRevision} + 1`,
+					deletedAt: now,
+					updatedAt: now
+				})
+				.where(
+					and(
+						cacheLifecycleFilter(tenant, scope, table),
+						eq(table.generation, cache.generation),
+						isNull(table.deletedAt)
+					)
+				);
+			const [revoked] = await this.context.d1.batch([
+				update,
+				credentialDeleteStatement
+			]);
 
-		if (revoked.meta.changes > 0) {
-			return;
-		}
-
-		const lifecycle = await this.context.d1
-			.select({ deletedAt: d1Schema.cacheLifecycle.deletedAt })
-			.from(d1Schema.cacheLifecycle)
-			.where(cacheLifecycleFilter(tenant, scope))
-			.get();
-		if (lifecycle !== undefined) {
-			if (lifecycle.deletedAt !== null) {
+			if (revoked.meta.changes > 0) {
 				return;
 			}
-			throw new CacheNotFoundError(scope);
-		}
 
-		const insert = this.context.d1
-			.insert(d1Schema.cacheLifecycle)
-			.values({
-				tenant,
-				...cacheIdentityColumns(scope),
-				access,
-				generation: secondCacheGeneration,
-				readRevision: secondCacheReadRevision,
-				deletedAt: now,
-				updatedAt: now
-			})
-			.onConflictDoNothing();
-		const [inserted] = await this.context.d1.batch([
-			insert,
-			credentialDeleteStatement
-		]);
-		if (inserted.meta.changes === 0) {
-			throw new CacheNotFoundError(scope);
-		}
+			const lifecycle = await this.context.d1
+				.select({ deletedAt: table.deletedAt })
+				.from(table)
+				.where(cacheLifecycleFilter(tenant, scope, table))
+				.get();
+			if (lifecycle !== undefined) {
+				if (lifecycle.deletedAt !== null) {
+					return;
+				}
+				throw new CacheNotFoundError(scope);
+			}
+
+			const insert = this.context.d1
+				.insert(table)
+				.values({
+					tenant,
+					...cacheIdentityColumns(scope),
+					access,
+					generation: secondCacheGeneration,
+					readRevision: secondCacheReadRevision,
+					deletedAt: now,
+					updatedAt: now
+				})
+				.onConflictDoNothing();
+			const [inserted] = await this.context.d1.batch([
+				insert,
+				credentialDeleteStatement
+			]);
+			if (inserted.meta.changes === 0) {
+				throw new CacheNotFoundError(scope);
+			}
+		});
 	}
 
 	/**
@@ -1553,6 +1669,8 @@ export class DeletionQueueService {
 		_origin?: RequestOrigin,
 		shouldDeferForInheritance = true
 	): Promise<number> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		if (entries.length === 0) {
 			return 0;
 		}
@@ -1607,6 +1725,16 @@ export class DeletionQueueService {
 		// Keep row removal and opportunistic object cleanup in one critical section
 		// so healing cannot recreate the object between them.
 		return this.context.criticalSection(async () => {
+			await this.context.transitions.refresh();
+			if (
+				!(await this.context.transitions.hasReached(
+					'blob-reference-read-authority',
+					'complete'
+				))
+			) {
+				throw new PathReadAuthorityMigrationPendingError();
+			}
+
 			const row = this.context.db
 				.select()
 				.from(schema.narInfos)
@@ -1619,6 +1747,27 @@ export class DeletionQueueService {
 				.get();
 
 			if (row === undefined) {
+				const deletion = schema.narInfoDeletions;
+				const queued = this.context.db
+					.select({ generation: deletion.generation })
+					.from(deletion)
+					.where(
+						and(
+							eq(deletion.cacheId, cache.id),
+							eq(deletion.storePathHash, storePathHash),
+							eq(deletion.explicit, true)
+						)
+					)
+					.orderBy(desc(deletion.generation))
+					.get();
+				if (queued !== undefined) {
+					return this.finishStorePathDeletion(
+						cache,
+						storePathHash,
+						queued.generation,
+						origin
+					);
+				}
 				return {
 					storePathHash,
 					deleted: false,
@@ -1656,48 +1805,20 @@ export class DeletionQueueService {
 					row.generation,
 					now
 				);
+				new ProtectedInheritanceService(this.context).capture(
+					tx,
+					cache,
+					row,
+					now
+				);
 			});
 
-			// An explicit delete retires the edge despite a pending upload in this
-			// cache. A public source still supplies another cache's inheritance.
-			const retirement = await this.retireQueuedNarInfoEdge(
+			return this.finishStorePathDeletion(
 				cache,
 				storePathHash,
 				row.generation,
-				false
+				origin
 			);
-
-			if (retirement.kind !== 'retired') {
-				return {
-					storePathHash,
-					deleted: true,
-					narScheduledForDeletion: false
-				};
-			}
-
-			let isNarScheduledForDeletion = false;
-
-			// The retired generation no longer authorises reads. Keep retirement
-			// outside this catch so a failed deletion cannot be reported as success;
-			// queued cleanup can retry the remaining work.
-			try {
-				({ narScheduledForDeletion: isNarScheduledForDeletion } =
-					await this.cleanUpQueuedNarInfo(
-						cache,
-						storePathHash,
-						row.generation,
-						retirement.retired,
-						origin
-					));
-			} catch {
-				// The durable queue remains for garbage collection to retry.
-			}
-
-			return {
-				storePathHash,
-				deleted: true,
-				narScheduledForDeletion: isNarScheduledForDeletion
-			};
 		});
 	}
 
@@ -1709,6 +1830,8 @@ export class DeletionQueueService {
 		origin?: RequestOrigin,
 		shouldDeferCleanup = false
 	): Promise<boolean> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const now = isoTimestamp(new Date());
 		const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
 		const wasRemoved = this.context.db.transaction((tx) => {
@@ -1779,6 +1902,8 @@ export class DeletionQueueService {
 		rows: readonly (typeof schema.narInfos.$inferSelect)[],
 		origin?: RequestOrigin
 	): Promise<void> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		for (const row of rows) {
 			const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
 

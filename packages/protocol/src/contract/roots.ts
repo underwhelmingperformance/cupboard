@@ -12,7 +12,10 @@ import {
 	rootTargetsPageSchema
 } from '../retention.ts';
 
-import { cacheScopedProcedure } from './cache-scoped.ts';
+import {
+	cacheScopedProcedure,
+	writableCacheScopedProcedure
+} from './cache-scoped.ts';
 
 // Both listing routes accept the opaque cursor from the previous page and a
 // limit within the shared page bound. They are GET routes, so oRPC sends any
@@ -21,6 +24,34 @@ const listPageShape = {
 	cursor: z.string().min(1).optional(),
 	limit: z.number().int().min(1).max(rootListPageSize).optional()
 };
+
+const retentionMigrationPendingError = {
+	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
+};
+
+const rootSet = writableCacheScopedProcedure(
+	{
+		method: 'PUT',
+		suffix: '/roots/{name}',
+		requires: 'root:set',
+		resource: { root: { field: 'name' } },
+		maintenance: true
+	},
+	{ name: rootNameSchema, ...rootSetBodySchema.shape },
+	rootSetResponseSchema
+);
+
+const rootEnsure = writableCacheScopedProcedure(
+	{
+		method: 'POST',
+		suffix: '/roots/{name}/ensure',
+		requires: 'root:set',
+		resource: { root: { field: 'name' } },
+		maintenance: true
+	},
+	{ name: rootNameSchema, ...rootEnsureBodySchema.shape },
+	rootEnsureResponseSchema
+);
 
 export const rootsContract = {
 	list: cacheScopedProcedure(
@@ -53,29 +84,19 @@ export const rootsContract = {
 	// target list clears the targets but keeps the root. The CLI's `root set`
 	// and `root ensure` commands require at least one store path, so
 	// clearing a root requires a direct request with an empty list.
-	set: cacheScopedProcedure(
-		{
-			method: 'PUT',
-			suffix: '/roots/{name}',
-			requires: 'root:set',
-			resource: { root: { field: 'name' } },
-			maintenance: true
-		},
-		{ name: rootNameSchema, ...rootSetBodySchema.shape },
-		rootSetResponseSchema
-	),
+	set: {
+		inDefaultCache: rootSet.inDefaultCache.errors(
+			retentionMigrationPendingError
+		),
+		inNamedCache: rootSet.inNamedCache.errors(retentionMigrationPendingError)
+	},
 
-	ensure: cacheScopedProcedure(
-		{
-			method: 'POST',
-			suffix: '/roots/{name}/ensure',
-			requires: 'root:set',
-			resource: { root: { field: 'name' } },
-			maintenance: true
-		},
-		{ name: rootNameSchema, ...rootEnsureBodySchema.shape },
-		rootEnsureResponseSchema
-	),
+	ensure: {
+		inDefaultCache: rootEnsure.inDefaultCache.errors(
+			retentionMigrationPendingError
+		),
+		inNamedCache: rootEnsure.inNamedCache.errors(retentionMigrationPendingError)
+	},
 
 	// Removal keeps the default. A retry sent after the name was bound to a new
 	// root would delete that one.

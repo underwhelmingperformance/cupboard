@@ -13,6 +13,7 @@ import { z } from 'zod';
 
 import {
 	CacheAlreadyExistsError,
+	CacheClosedError,
 	CacheNotEmptyError,
 	CacheRetentionRuleLimitExceededError,
 	CommitSessionLimitError,
@@ -20,12 +21,53 @@ import {
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
 	TenantOffboardingError,
-	UploadNotFoundError
+	UploadNotFoundError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 
 import { bridgedError } from './error-bridge.ts';
 
 describe('bridgedError', () => {
+	it('maps a closed cache to its declared conflict', () => {
+		const error = new CacheClosedError({
+			kind: 'named',
+			name: cacheNameSchema.parse('pr-1')
+		});
+		const bridged = bridgedError(rootLogger(), error);
+		if (!(bridged instanceof ORPCError)) {
+			throw new TypeError('Expected an oRPC error');
+		}
+		expect(bridged.toJSON()).toStrictEqual({
+			defined: true,
+			code: 'CACHE_CLOSED',
+			status: StatusCodes.CONFLICT,
+			message: error.message,
+			data: { cache: { kind: 'named', name: 'pr-1' } }
+		});
+	});
+
+	it('maps upload request limits to the declared nonretryable error', () => {
+		const error = new UploadRequestLimitExceededError(100);
+		const headers = new Headers();
+		const bridged = bridgedError(rootLogger(), error, headers);
+		if (!(bridged instanceof ORPCError)) {
+			throw new TypeError('Expected an oRPC error');
+		}
+		expect({
+			body: bridged.toJSON(),
+			headers: Object.fromEntries(headers)
+		}).toStrictEqual({
+			body: {
+				defined: true,
+				code: 'UPLOAD_REQUEST_LIMIT_EXCEEDED',
+				status: 413,
+				message: error.message,
+				data: { maxPaths: 100 }
+			},
+			headers: { 'x-cupboard-upload-max-paths': '100' }
+		});
+	});
+
 	let capture: Capture;
 	const incomingKeyId = signingKeyIdSchema.parse(
 		'123e4567-e89b-12d3-a456-426614174000'

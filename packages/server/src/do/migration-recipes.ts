@@ -1261,10 +1261,615 @@ function attestationBundlePagesRecipe(
 	};
 }
 
+function publicationRecoveryMirror(target: string): readonly string[] {
+	const columns = [
+		'rowid',
+		'cache_id',
+		'store_path_hash',
+		'store_path',
+		'nar_hash',
+		'nar_size',
+		'references_json',
+		'deriver',
+		'ca',
+		'sigs_json',
+		'generation',
+		'signature_generation',
+		'pending_signature_generation',
+		'created_at'
+	];
+	const insert = `INSERT OR REPLACE INTO \`${target}\` (${columns.map((column) => `\`${column}\``).join(', ')}) VALUES (${columns.map((column) => `NEW.\`${column}\``).join(', ')});`;
+	const remove = `DELETE FROM \`${target}\` WHERE rowid = OLD.rowid;`;
+	return [
+		`CREATE TRIGGER \`__bounded_publication_narinfo_insert\` AFTER INSERT ON \`narinfo\` BEGIN ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_publication_narinfo_update\` AFTER UPDATE ON \`narinfo\` BEGIN ${remove} ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_publication_narinfo_delete\` AFTER DELETE ON \`narinfo\` BEGIN ${remove} END;`
+	];
+}
+
+const publicationRecoveryMirrorDrops = ['insert', 'update', 'delete'].map(
+	(event) => `DROP TRIGGER \`__bounded_publication_narinfo_${event}\`;`
+);
+
+function publicationRecoveryRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const table: RebuildTable = {
+		table: 'narinfo',
+		create: 1,
+		copy: 2,
+		indexes: statements.flatMap((statement, index) =>
+			statement.startsWith('CREATE INDEX ') ? [index] : []
+		)
+	};
+	const dropTriggers = statements.filter((statement) =>
+		statement.startsWith('DROP TRIGGER ')
+	);
+	const triggerStatements = statements.filter((statement) =>
+		statement.startsWith('CREATE TRIGGER ')
+	);
+
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-publication-recovery-shadow',
+				statements: [
+					statementAt(statements, 0),
+					statementAt(statements, table.create),
+					...table.indexes.map((index) =>
+						shadowIndex(statementAt(statements, index), table.table)
+					),
+					...publicationRecoveryMirror('__new_narinfo')
+				]
+			},
+			copyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-publication-recovery-shadow',
+				statements: [
+					...publicationRecoveryMirrorDrops,
+					...dropTriggers,
+					'ALTER TABLE `narinfo` RENAME TO `__bounded_old_narinfo`;',
+					'ALTER TABLE `__new_narinfo` RENAME TO `narinfo`;',
+					...triggerStatements
+				]
+			},
+			drainStage(table.table),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-publication-recovery-shadow',
+				statements: [
+					'DROP TABLE `__bounded_old_narinfo`;',
+					canonicalTable(statementAt(statements, table.create), table.table),
+					...table.indexes.map((index) =>
+						canonicalIndex(statementAt(statements, index), table.table)
+					),
+					...publicationRecoveryMirror('__bounded_canonical_narinfo')
+				]
+			},
+			canonicalCopyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-publication-recovery-shadow',
+				statements: [
+					...publicationRecoveryMirrorDrops,
+					...dropTriggers,
+					'ALTER TABLE `narinfo` RENAME TO `__bounded_noncanonical_narinfo`;',
+					'ALTER TABLE `__bounded_canonical_narinfo` RENAME TO `narinfo`;',
+					...triggerStatements
+				]
+			},
+			drainNoncanonicalStage(table.table),
+			{
+				kind: 'batch',
+				name: 'finish-publication-recovery-shadow',
+				statements: ['DROP TABLE `__bounded_noncanonical_narinfo`;']
+			}
+		]
+	};
+}
+
+function protectedInheritanceMirror(
+	table: RebuildTable,
+	copy: string
+): readonly string[] {
+	const prefix = `__bounded_protection_${table.table}`;
+	const projection = copy.slice(
+		copy.indexOf(' SELECT ') + 8,
+		copy.indexOf(' FROM ')
+	);
+	const insertion = copy.slice(0, copy.indexOf(' SELECT '));
+	const target = insertion.slice(
+		'INSERT OR REPLACE INTO '.length,
+		insertion.indexOf(' (')
+	);
+	const values = projection.replaceAll(/`([a-z0-9_]+)`/gu, 'NEW.`$1`');
+	return [
+		`CREATE TRIGGER \`${prefix}_insert\` AFTER INSERT ON \`${table.table}\` BEGIN ${insertion} VALUES (${values}); END;`,
+		`CREATE TRIGGER \`${prefix}_update\` AFTER UPDATE ON \`${table.table}\` BEGIN ${insertion} VALUES (${values}); END;`,
+		`CREATE TRIGGER \`${prefix}_delete\` AFTER DELETE ON \`${table.table}\` BEGIN DELETE FROM ${target} WHERE rowid = OLD.rowid; END;`
+	];
+}
+
+function protectedInheritanceRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const tables = [
+		'pending_upload',
+		'attestation_inheritance',
+		'narinfo_deletion',
+		'narinfo'
+	].map((table) => {
+		const create = statements.findIndex((statement) =>
+			statement.startsWith(`CREATE TABLE \`__new_${table}\``)
+		);
+		const copy = create + 1;
+		const indexes = statements.flatMap((statement, index) =>
+			statement.startsWith('CREATE INDEX ') &&
+			statement.includes(`ON \`${table}\``)
+				? [index]
+				: []
+		);
+		const triggers = statements.filter(
+			(statement) =>
+				statement.startsWith('CREATE TRIGGER ') &&
+				statement.includes(`\`${table}\``)
+		);
+		return { table, create, copy, indexes, triggers };
+	});
+	const copies = statements.map((statement) =>
+		statement.replace('INSERT INTO `__new_', 'INSERT OR REPLACE INTO `__new_')
+	);
+	const fullCopy = (table: RebuildTable) => {
+		const copy = statementAt(copies, table.copy);
+		const columns = copy.slice(copy.indexOf('(') + 1, copy.indexOf(') SELECT'));
+		const projection = columns
+			.split(', ')
+			.map((column) => {
+				if (table.table !== 'pending_upload') {
+					return column;
+				}
+				if (column === '`accepted_expires_at`') {
+					return 'coalesce(`accepted_expires_at`, `expires_at`)';
+				}
+				if (column === '`commit_started_sequence`') {
+					return "coalesce(`commit_started_sequence`, CASE WHEN `verdict` = 'committing' THEN 0 ELSE NULL END)";
+				}
+				return column;
+			})
+			.join(', ');
+		return `INSERT OR REPLACE INTO \`__new_${table.table}\` (${columns}) SELECT ${projection} FROM \`${table.table}\`;`;
+	};
+	const drops = tables.flatMap(({ table }) =>
+		['insert', 'update', 'delete'].map(
+			(event) =>
+				`DROP TRIGGER IF EXISTS \`__bounded_protection_${table}_${event}\`;`
+		)
+	);
+	const triggerDrops = tables.flatMap(({ triggers }) =>
+		triggers.map((statement) => {
+			const [trigger] = statement
+				.slice('CREATE TRIGGER '.length)
+				.split(/\s/u, 1);
+			if (trigger === undefined) {
+				throw new Error('The migration trigger must have an identifier.');
+			}
+			return `DROP TRIGGER ${trigger};`;
+		})
+	);
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-protected-inheritance-shadows',
+				statements: [
+					statementAt(statements, 0),
+					statementAt(statements, 1),
+					...tables.flatMap((table) => [
+						statementAt(statements, table.create),
+						...table.indexes.map((index) =>
+							shadowIndex(statementAt(statements, index), table.table)
+						),
+						...protectedInheritanceMirror(
+							table,
+							statementAt(copies, table.copy)
+						)
+					])
+				]
+			},
+			...tables.map((table) => copyStage(table, copies)),
+			{
+				kind: 'batch',
+				name: 'switch-protected-inheritance-shadows',
+				statements: [
+					...drops,
+					...triggerDrops,
+					...tables.flatMap(({ table }) => [
+						`ALTER TABLE \`${table}\` RENAME TO \`__bounded_old_${table}\`;`,
+						`ALTER TABLE \`__new_${table}\` RENAME TO \`${table}\`;`
+					]),
+					...tables.flatMap(({ triggers }) => triggers)
+				]
+			},
+			...tables.map(({ table }) => drainStage(table)),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-protected-inheritance-shadows',
+				statements: [
+					...tables.map(
+						({ table }) => `DROP TABLE \`__bounded_old_${table}\`;`
+					),
+					...tables.flatMap((table) => [
+						canonicalTable(statementAt(statements, table.create), table.table),
+						...table.indexes.map((index) =>
+							canonicalIndex(statementAt(statements, index), table.table)
+						),
+						...protectedInheritanceMirror(
+							table,
+							canonicalTable(fullCopy(table), table.table)
+						)
+					])
+				]
+			},
+			...tables.map((table) => ({
+				kind: 'page' as const,
+				name: `copy-canonical-${table.table}`,
+				source: table.table,
+				writesPerSourceRow: 1,
+				statements: (cursor: number, last: number) => [
+					boundedCopy(
+						canonicalTable(fullCopy(table), table.table),
+						table.table,
+						cursor,
+						last
+					)
+				]
+			})),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-protected-inheritance-shadows',
+				statements: [
+					...drops,
+					...triggerDrops,
+					...tables.flatMap(({ table }) => [
+						`ALTER TABLE \`${table}\` RENAME TO \`__bounded_noncanonical_${table}\`;`,
+						`ALTER TABLE \`__bounded_canonical_${table}\` RENAME TO \`${table}\`;`
+					]),
+					...tables.flatMap(({ triggers }) => triggers)
+				]
+			},
+			...tables.map(({ table }) => drainNoncanonicalStage(table)),
+			{
+				kind: 'batch',
+				name: 'finish-protected-inheritance-shadows',
+				statements: tables.map(
+					({ table }) => `DROP TABLE \`__bounded_noncanonical_${table}\`;`
+				)
+			}
+		]
+	};
+}
+
+function retryUploadMirror(copy: string, target: string): readonly string[] {
+	const insert = copy
+		.replaceAll('__new_pending_upload', () => target)
+		.replace(
+			'FROM `pending_upload`;',
+			'FROM `pending_upload` WHERE rowid = NEW.rowid;'
+		);
+	const remove = `DELETE FROM \`${target}\` WHERE rowid = OLD.rowid;`;
+
+	return [
+		`CREATE TRIGGER \`__bounded_retry_upload_insert\` AFTER INSERT ON \`pending_upload\` BEGIN ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_retry_upload_update\` AFTER UPDATE ON \`pending_upload\` BEGIN ${remove} ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_retry_upload_delete\` AFTER DELETE ON \`pending_upload\` BEGIN ${remove} END;`
+	];
+}
+
+const retryUploadMirrorDrops = ['insert', 'update', 'delete'].map(
+	(event) => `DROP TRIGGER \`__bounded_retry_upload_${event}\`;`
+);
+
+function retryLimitsRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const table: RebuildTable = {
+		table: 'pending_upload',
+		create: 9,
+		copy: 10,
+		indexes: statements.flatMap((statement, index) =>
+			statement.startsWith('CREATE INDEX `pending_upload_') ? [index] : []
+		)
+	};
+	const dropTrigger = statementAt(statements, 11);
+	const trigger = statementAt(statements, 27);
+	const copy = statementAt(statements, table.copy);
+
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-retry-upload-shadow',
+				statements: [
+					...[0, 1, 2, 3, 5, 6, 7, 8, table.create].map((index) =>
+						statementAt(statements, index)
+					),
+					...table.indexes.map((index) =>
+						shadowIndex(statementAt(statements, index), table.table)
+					),
+					...retryUploadMirror(copy, '__new_pending_upload')
+				]
+			},
+			copyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-retry-upload-shadow',
+				statements: [
+					...retryUploadMirrorDrops,
+					dropTrigger,
+					'ALTER TABLE `pending_upload` RENAME TO `__bounded_old_pending_upload`;',
+					'ALTER TABLE `__new_pending_upload` RENAME TO `pending_upload`;',
+					trigger
+				]
+			},
+			drainStage(table.table),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-retry-upload-shadow',
+				statements: [
+					'DROP TABLE `__bounded_old_pending_upload`;',
+					canonicalTable(statementAt(statements, table.create), table.table),
+					...table.indexes.map((index) =>
+						canonicalIndex(statementAt(statements, index), table.table)
+					),
+					...retryUploadMirror(copy, '__bounded_canonical_pending_upload')
+				]
+			},
+			canonicalCopyStage(table, statements),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-retry-upload-shadow',
+				statements: [
+					...retryUploadMirrorDrops,
+					dropTrigger,
+					'ALTER TABLE `pending_upload` RENAME TO `__bounded_noncanonical_pending_upload`;',
+					'ALTER TABLE `__bounded_canonical_pending_upload` RENAME TO `pending_upload`;',
+					trigger
+				]
+			},
+			drainNoncanonicalStage(table.table),
+			{
+				kind: 'page',
+				name: 'reset-inheritance-attempts',
+				source: 'attestation_inheritance',
+				writesPerSourceRow: 1,
+				statements: (cursor, last) => [
+					`UPDATE \`attestation_inheritance\` SET \`attempts\` = 0 WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+				]
+			},
+			{
+				kind: 'batch',
+				name: 'finish-retry-upload-shadow',
+				statements: ['DROP TABLE `__bounded_noncanonical_pending_upload`;']
+			}
+		]
+	};
+}
+
+interface CloseIndexedTable extends RebuildTable {
+	readonly columns: readonly string[];
+	readonly addedColumns: readonly string[];
+}
+
+const closeIndexedTables: readonly CloseIndexedTable[] = [
+	{
+		table: 'pending_upload',
+		create: 4,
+		copy: 5,
+		indexes: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+		columns: [
+			'id',
+			'cache_id',
+			'nar_hash',
+			'r2_key',
+			'metadata_json',
+			'created_at',
+			'expires_at',
+			'verdict',
+			'session_id',
+			'claimed_at',
+			'claim_owner',
+			'grace_decision_json',
+			'attach_root_name',
+			'recorded_verdict_json',
+			'settle_failures',
+			'settle_retry_after',
+			'last_settle_error',
+			'nar_refresh_pending',
+			'accepted_sequence',
+			'accepted_expires_at',
+			'commit_started_sequence',
+			'retry_started_active_ms',
+			'settle_exhaustion'
+		],
+		addedColumns: ['retention_epoch']
+	},
+	{
+		table: 'retention_root',
+		create: 24,
+		copy: 25,
+		indexes: [28, 29, 30, 31],
+		columns: ['cache_id', 'name', 'expires_at', 'created_at', 'updated_at'],
+		addedColumns: [
+			'retention_epoch',
+			'close_applied_epoch',
+			'close_grace_until'
+		]
+	}
+];
+
+function closeMirrorTriggers(
+	table: CloseIndexedTable,
+	isCanonical: boolean
+): readonly string[] {
+	const columns = [
+		'rowid',
+		...table.columns,
+		...(isCanonical ? table.addedColumns : [])
+	];
+	const target = isCanonical
+		? canonicalTableName(table.table)
+		: `__new_${table.table}`;
+	const insert = `INSERT OR REPLACE INTO \`${target}\` (${columns.map((column) => `\`${column}\``).join(', ')}) VALUES (${columns.map((column) => `NEW.\`${column}\``).join(', ')});`;
+	const remove = `DELETE FROM \`${target}\` WHERE rowid = OLD.rowid;`;
+	return [
+		`CREATE TRIGGER \`__bounded_close_${table.table}_insert\` AFTER INSERT ON \`${table.table}\` BEGIN ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_close_${table.table}_update\` AFTER UPDATE ON \`${table.table}\` BEGIN ${remove} ${insert} END;`,
+		`CREATE TRIGGER \`__bounded_close_${table.table}_delete\` AFTER DELETE ON \`${table.table}\` BEGIN ${remove} END;`
+	];
+}
+
+function closeMirrorDrops(): readonly string[] {
+	return closeIndexedTables.flatMap((table) =>
+		['insert', 'update', 'delete'].map(
+			(event) => `DROP TRIGGER \`__bounded_close_${table.table}_${event}\`;`
+		)
+	);
+}
+
+function closeCanonicalCopyStage(
+	table: CloseIndexedTable
+): LocalMigrationStage {
+	const columns = ['rowid', ...table.columns, ...table.addedColumns]
+		.map((column) => `\`${column}\``)
+		.join(', ');
+	return {
+		kind: 'page',
+		name: `copy-canonical-${table.table}`,
+		source: table.table,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			`INSERT OR REPLACE INTO \`${canonicalTableName(table.table)}\` (${columns}) SELECT ${columns} FROM \`${table.table}\` WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+		]
+	};
+}
+
+function cacheCloseRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const dropOperational = [statementAt(statements, 6)];
+	const operationalTriggers = [statementAt(statements, 23)];
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-cache-close-shadows',
+				statements: [
+					...statements.slice(0, 4),
+					statementAt(statements, 32),
+					...closeIndexedTables.flatMap((table) => [
+						statementAt(statements, table.create),
+						...table.indexes.map((index) =>
+							shadowIndex(statementAt(statements, index), table.table)
+						),
+						...closeMirrorTriggers(table, false)
+					])
+				]
+			},
+			...closeIndexedTables.map((table) => copyStage(table, statements)),
+			{
+				kind: 'batch',
+				name: 'switch-cache-close-shadows',
+				statements: [
+					...closeMirrorDrops(),
+					...dropOperational,
+					...closeIndexedTables.flatMap((table) => [
+						`ALTER TABLE \`${table.table}\` RENAME TO \`__bounded_old_${table.table}\`;`,
+						`ALTER TABLE \`__new_${table.table}\` RENAME TO \`${table.table}\`;`
+					]),
+					...operationalTriggers
+				]
+			},
+			...closeIndexedTables.map((table) => drainStage(table.table)),
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-cache-close-shadows',
+				statements: closeIndexedTables.flatMap((table) => [
+					`DROP TABLE \`__bounded_old_${table.table}\`;`,
+					canonicalTable(statementAt(statements, table.create), table.table),
+					...table.indexes.map((index) =>
+						canonicalIndex(statementAt(statements, index), table.table)
+					),
+					...closeMirrorTriggers(table, true)
+				])
+			},
+			...closeIndexedTables.map((table) => closeCanonicalCopyStage(table)),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-cache-close-shadows',
+				statements: [
+					...closeMirrorDrops(),
+					...dropOperational,
+					...closeIndexedTables.flatMap((table) => [
+						`ALTER TABLE \`${table.table}\` RENAME TO \`__bounded_noncanonical_${table.table}\`;`,
+						`ALTER TABLE \`${canonicalTableName(table.table)}\` RENAME TO \`${table.table}\`;`
+					]),
+					...operationalTriggers
+				]
+			},
+			...closeIndexedTables.map((table) => drainNoncanonicalStage(table.table)),
+			{
+				kind: 'batch',
+				name: 'finish-cache-close-shadows',
+				statements: closeIndexedTables.map(
+					(table) => `DROP TABLE \`__bounded_noncanonical_${table.table}\`;`
+				)
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
+	if (tag === '0071_cache_close') {
+		return cacheCloseRecipe(tag, statements);
+	}
+
+	if (tag === '0069_retry_limits') {
+		return retryLimitsRecipe(tag, statements);
+	}
+
+	if (tag === '0068_protected_inheritance') {
+		return protectedInheritanceRecipe(tag, statements);
+	}
+
+	if (tag === '0066_publication_recovery') {
+		return publicationRecoveryRecipe(tag, statements);
+	}
+
 	if (tag === '0064_attestation-bundle-pages') {
 		return attestationBundlePagesRecipe(tag, statements);
 	}

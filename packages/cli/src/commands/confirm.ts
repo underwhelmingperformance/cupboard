@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+
+import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import {
 	type CacheScope,
 	type StorePathHash
@@ -24,11 +27,64 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { translateRpcError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { ConfirmIncompleteError, PathsNotConfirmedError } from '../errors.ts';
+import {
+	CliUsageError,
+	ConfirmIncompleteError,
+	PathsNotConfirmedError
+} from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+class ConfirmPathInputError extends CliUsageError {
+	constructor(value: string, source: string, cause: InvalidStorePathError) {
+		super(
+			`Invalid store path '${value}' in ${source}. Pass an absolute store path with a 32-character Nix hash and a name.`,
+			{ cause }
+		);
+		this.name = 'ConfirmPathInputError';
+	}
+}
+
+function parseConfirmPath(
+	value: string,
+	source = 'the command arguments'
+): StorePath {
+	try {
+		return new StorePath(value);
+	} catch (error) {
+		if (!(error instanceof InvalidStorePathError)) {
+			throw error;
+		}
+
+		throw new ConfirmPathInputError(value, source, error);
+	}
+}
+
+async function confirmFilePaths(
+	file: string | undefined
+): Promise<readonly StorePath[]> {
+	if (file === undefined) {
+		return [];
+	}
+
+	const contents = await readFile(file, 'utf8');
+
+	return contents.split(/\r?\n/u).flatMap((line, index) => {
+		const entry = line.trim();
+
+		if (entry === '') {
+			return [];
+		}
+
+		return [
+			parseConfirmPath(entry, `--paths-file ${file}, line ${String(index + 1)}`)
+		];
+	});
+}
+
 interface ConfirmOptions {
+	readonly pathsFile?: string;
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
@@ -66,8 +122,12 @@ export function registerConfirmCommand(
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
-			'<arguments...>',
+			'[arguments...]',
 			'an optional cache name, then the store paths to check'
+		)
+		.option(
+			'--paths-file <path>',
+			'read additional store paths from this file, one per line'
 		)
 		.option(
 			'--github-oidc',
@@ -89,14 +149,15 @@ export function registerConfirmCommand(
 			].join('\n')
 		)
 		.action(async (url: URL, storePaths: string[], options: ConfirmOptions) => {
+			const filePaths = await confirmFilePaths(options.pathsFile);
 			const reporter = commandUi(program, programOptions).reporter();
 			const resolved = await resolveAuthorisedCachePositionals(
 				url,
 				storePaths,
 				{
-					minimumPayload: 1,
+					minimumPayload: filePaths.length === 0 ? 1 : 0,
 					payloadDescription: 'a store path',
-					parsePayloadEntry: (entry) => new StorePath(entry),
+					parsePayloadEntry: (entry) => parseConfirmPath(entry),
 					authorise: (target) =>
 						authenticate(
 							CupboardClient.fromUrl(target.tenantUrl, {
@@ -122,7 +183,7 @@ export function registerConfirmCommand(
 
 			await runConfirm(
 				resolved.target.cache,
-				resolved.payload.map((storePath) => storePath.value),
+				[...resolved.payload, ...filePaths].map((storePath) => storePath.value),
 				reporter,
 				rpc.uploads
 			);
@@ -179,7 +240,11 @@ export async function runConfirm(
 			throw error;
 		}
 
-		throw new ConfirmIncompleteError(confirmedBatches, totalBatches, error);
+		throw new ConfirmIncompleteError(
+			confirmedBatches,
+			totalBatches,
+			translateRpcError(error, { keepAuthCause: true })
+		);
 	}
 
 	reportConfirmedPaths(reporter, paths);

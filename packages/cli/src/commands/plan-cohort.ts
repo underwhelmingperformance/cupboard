@@ -373,7 +373,7 @@ export function registerPlanCommands(
 		)
 		.option(
 			'--publish <mode>',
-			'which paths to publish: none skips publication; outputs selects target outputs; closure includes their runtime references (default: outputs)',
+			'which paths to publish: none skips publication; outputs selects target outputs; built includes observed builds; closure includes their runtime references (default: outputs)',
 			parsePublishScope,
 			'outputs'
 		)
@@ -479,6 +479,7 @@ export function registerPlanCommands(
 				// positive narinfo caching, so each check uses their current offer.
 				const permittedStore = Nix.openForAvailability(undefined, {
 					...storeSelection,
+					requirePublicNar: true,
 					overrides: upstreamConfirmationOverrides(
 						substitution,
 						target.tenantUrl
@@ -949,11 +950,14 @@ function parsePublishScope(value: string): PublishScope {
 		case 'outputs': {
 			return 'outputs';
 		}
+		case 'built': {
+			return 'built';
+		}
 		case 'closure': {
 			return 'closure';
 		}
 		default: {
-			throw new InvalidArgumentError('must be none, outputs or closure');
+			throw new InvalidArgumentError('must be none, outputs, built or closure');
 		}
 	}
 }

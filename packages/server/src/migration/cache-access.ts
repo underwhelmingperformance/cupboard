@@ -15,6 +15,7 @@ import {
 	cacheIdentityCondition,
 	cacheScopeFromRow
 } from '../db/cache.ts';
+import { writeCacheLifecycle } from '../db/cache-lifecycle-write.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import type { ServerContext } from '../do/context.ts';
@@ -42,30 +43,32 @@ export async function revokeCacheLifecycle(
 	access: CacheAccessMode,
 	now: IsoTimestamp
 ): Promise<void> {
-	const updated = await context.d1
-		.update(d1Schema.cacheLifecycle)
-		.set({
+	await writeCacheLifecycle(context.d1, async (table) => {
+		const updated = await context.d1
+			.update(table)
+			.set({
+				access,
+				generation: sql`${table.generation} + 1`,
+				deletedAt: now,
+				updatedAt: now
+			})
+			.where(
+				sql`${table.tenant} = ${tenant} and ${cacheIdentityCondition(table.cacheKind, table.cacheName, scope)}`
+			)
+			.run();
+
+		if (updated.meta.changes > 0) {
+			return;
+		}
+
+		await context.d1.insert(table).values({
+			tenant,
+			...cacheIdentityColumns(scope),
 			access,
-			generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
+			generation: cacheGenerationSchema.parse(2),
 			deletedAt: now,
 			updatedAt: now
-		})
-		.where(
-			sql`${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${cacheIdentityCondition(d1Schema.cacheLifecycle.cacheKind, d1Schema.cacheLifecycle.cacheName, scope)}`
-		)
-		.run();
-
-	if (updated.meta.changes > 0) {
-		return;
-	}
-
-	await context.d1.insert(d1Schema.cacheLifecycle).values({
-		tenant,
-		...cacheIdentityColumns(scope),
-		access,
-		generation: cacheGenerationSchema.parse(2),
-		deletedAt: now,
-		updatedAt: now
+		});
 	});
 }
 
@@ -76,29 +79,31 @@ export async function clearCacheLifecycleDeletion(
 	access: CacheAccessMode,
 	now: IsoTimestamp
 ): Promise<void> {
-	const updated = await context.d1
-		.update(d1Schema.cacheLifecycle)
-		.set({
+	await writeCacheLifecycle(context.d1, async (table) => {
+		const updated = await context.d1
+			.update(table)
+			.set({
+				access,
+				deletedAt: sql`null`,
+				updatedAt: now
+			})
+			.where(
+				sql`${table.tenant} = ${tenant} and ${cacheIdentityCondition(table.cacheKind, table.cacheName, scope)}`
+			)
+			.run();
+
+		if (updated.meta.changes > 0) {
+			return;
+		}
+
+		await context.d1.insert(table).values({
+			tenant,
+			...cacheIdentityColumns(scope),
 			access,
+			generation: cacheGenerationSchema.parse(1),
 			deletedAt: sql`null`,
 			updatedAt: now
-		})
-		.where(
-			sql`${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${cacheIdentityCondition(d1Schema.cacheLifecycle.cacheKind, d1Schema.cacheLifecycle.cacheName, scope)}`
-		)
-		.run();
-
-	if (updated.meta.changes > 0) {
-		return;
-	}
-
-	await context.d1.insert(d1Schema.cacheLifecycle).values({
-		tenant,
-		...cacheIdentityColumns(scope),
-		access,
-		generation: cacheGenerationSchema.parse(1),
-		deletedAt: sql`null`,
-		updatedAt: now
+		});
 	});
 }
 
@@ -242,12 +247,15 @@ async function reconcileLocalPage(
 			deletedAt: entry.deletedAt
 		}))
 	);
-	await context.d1.run(sql`
-		insert into cache_lifecycle (tenant, cache_kind, cache_name, access, generation, deleted_at, updated_at)
+	await writeCacheLifecycle(context.d1, async (table) => {
+		await context.d1.run(sql`
+		insert into ${table} (tenant, cache_kind, cache_name, access, generation, deleted_at, updated_at)
 		select ${tenant}, json_extract(value, '$.kind'), json_extract(value, '$.name'),
 			json_extract(value, '$.access'), 1, json_extract(value, '$.deletedAt'), ${now}
 		from json_each(${document}) where true on conflict do nothing
 	`);
+	});
+
 	const last = rows.at(-1);
 	if (last !== undefined) {
 		await context.ctx.storage.put(progressKey, {
@@ -303,17 +311,20 @@ async function reconcileRemotePage(
 		}))
 	);
 	const now = isoTimestamp(new Date());
-	await context.d1.run(sql`
-		update cache_lifecycle set generation = generation + 1, deleted_at = ${now}, updated_at = ${now}
+	await writeCacheLifecycle(context.d1, async (table) => {
+		await context.d1.run(sql`
+		update ${table} set generation = generation + 1, deleted_at = ${now}, updated_at = ${now}
 		where tenant = ${tenant} and cache_kind = 'named'
 			and cache_name in (select json_extract(value, '$.name') from json_each(${document}))
 			and deleted_at is null and exists (
 			select 1 from json_each(${document}) where
-				json_extract(value, '$.kind') = cache_lifecycle.cache_kind and
-				json_extract(value, '$.name') is cache_lifecycle.cache_name and
-				json_extract(value, '$.updatedAt') = cache_lifecycle.updated_at
+				json_extract(value, '$.kind') = ${table.cacheKind} and
+				json_extract(value, '$.name') is ${table.cacheName} and
+				json_extract(value, '$.updatedAt') = ${table.updatedAt}
 		)
 	`);
+	});
+
 	const last = rows.at(-1);
 	if (last !== undefined) {
 		await context.ctx.storage.put(progressKey, {
@@ -343,16 +354,9 @@ export async function reconcileCacheCatalogue(
 			: progressSchema.parse(saved);
 	if (progress.phase === 'local') {
 		context.db
-			.insert(schema.cacheIdentities)
-			.values({
-				kind: 'default',
-				name: sql`null`,
-				access: legacyAccess,
-				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: isoTimestamp(new Date())
-			})
-			.onConflictDoNothing()
-			.run();
+			.run(sql`INSERT INTO cache_identity(kind, name, access, priority, created_at)
+   VALUES ('default', NULL, ${legacyAccess}, ${cachePrioritySchema.parse(CacheInfo.default.priority)}, ${isoTimestamp(new Date())})
+   ON CONFLICT DO NOTHING`);
 		const local = await reconcileLocalPage(
 			context,
 			tenant,

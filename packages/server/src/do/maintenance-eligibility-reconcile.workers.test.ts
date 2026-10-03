@@ -6,10 +6,10 @@ import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -30,8 +30,11 @@ import {
 	resetTestServer,
 	resolvedCache,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
+
+import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 
 const wakeImmediately = isoTimestamp(new Date(0));
 
@@ -79,9 +82,9 @@ describe('maintenance reconcile', () => {
 		const status = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				Object.defineProperty(instance.context.db, 'insert', {
+				Object.defineProperty(instance.context.db, 'transaction', {
 					value: () => {
-						throw new Error('insert failed mid-body');
+						throw new Error('transaction failed mid-body');
 					},
 					configurable: true
 				});
@@ -131,44 +134,58 @@ describe('maintenance reconcile', () => {
 	});
 
 	it('republishes the wake time when a commit settles an upload', async () => {
-		const { token } = await bootstrap();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const negotiate = await negotiateUploads(token, [metadata]);
-		const upload = expectSingleUploadDecision(negotiate, metadata);
-		await putNarBytes(upload.r2Key);
+		await withoutAlarmArming(async () => {
+			const { token } = await bootstrap();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			const negotiate = await negotiateUploads(token, [metadata]);
+			const upload = expectSingleUploadDecision(negotiate, metadata);
+			await putNarBytes(upload.r2Key);
 
-		// Use a wake time that current local state cannot produce, so the commit must
-		// replace the seeded projection.
-		const staleReconciledAt = isoTimestampSchema.parse(
-			'2000-01-01T00:00:00.000Z'
-		);
-		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-			.insert(d1Schema.tenantMaintenanceEligibility)
-			.values({
-				tenant: tenantIdSchema.parse(fixtureTenant),
-				nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
-				reconciledAt: staleReconciledAt
-			})
-			.onConflictDoUpdate({
-				target: d1Schema.tenantMaintenanceEligibility.tenant,
-				set: {
+			const staleReconciledAt = isoTimestampSchema.parse(
+				'2000-01-01T00:00:00.000Z'
+			);
+			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+				.insert(d1Schema.tenantMaintenanceEligibility)
+				.values({
+					tenant: tenantIdSchema.parse(fixtureTenant),
 					nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
 					reconciledAt: staleReconciledAt
-				}
-			})
-			.run();
+				})
+				.onConflictDoUpdate({
+					target: d1Schema.tenantMaintenanceEligibility.tenant,
+					set: {
+						nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
+						reconciledAt: staleReconciledAt
+					}
+				})
+				.run();
 
-		await commitUpload(token, upload.uploadId);
+			await commitUpload(token, upload.uploadId);
 
-		const row = await eligibilityRow();
-		expect({
-			tenant: row?.tenant,
-			nextWakeAt: row?.nextWakeAt ?? undefined,
-			advancedOffStale: row?.reconciledAt !== staleReconciledAt
-		}).toStrictEqual({
-			tenant: fixtureTenant,
-			nextWakeAt: undefined,
-			advancedOffStale: true
+			const inheritance = await runInDurableObject(
+				currentServer(),
+				(instance) =>
+					instance.context.db
+						.select({
+							storePathHash: schema.attestationInheritances.storePathHash,
+							generation: schema.attestationInheritances.generation
+						})
+						.from(schema.attestationInheritances)
+						.orderBy(asc(schema.attestationInheritances.storePathHash))
+						.all()
+			);
+			const row = await eligibilityRow();
+			expect({
+				tenant: row?.tenant,
+				nextWakeAt: row?.nextWakeAt ?? undefined,
+				advancedOffStale: row?.reconciledAt !== staleReconciledAt,
+				inheritance
+			}).toStrictEqual({
+				tenant: fixtureTenant,
+				nextWakeAt: wakeImmediately,
+				advancedOffStale: true,
+				inheritance: [{ storePathHash: metadata.storePathHash, generation: 0 }]
+			});
 		});
 	});
 });
@@ -230,40 +247,71 @@ describe('coalesced maintenance reconcile', () => {
 	beforeEach(resetTestServer);
 
 	it('publishes the wake time behind a settled reuse commit', async () => {
-		const { token, uploadId } = await ownedReuseDecision();
+		await withoutAlarmArming(async () => {
+			const { token, uploadId } = await ownedReuseDecision();
 
-		// Current local state cannot produce this wake, so the asynchronous publish
-		// must replace it.
-		const staleReconciledAt = isoTimestampSchema.parse(
-			'2000-01-01T00:00:00.000Z'
-		);
-		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-			.insert(d1Schema.tenantMaintenanceEligibility)
-			.values({
-				tenant: tenantIdSchema.parse(fixtureTenant),
-				nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
-				reconciledAt: staleReconciledAt
-			})
-			.onConflictDoUpdate({
-				target: d1Schema.tenantMaintenanceEligibility.tenant,
-				set: {
+			const staleReconciledAt = isoTimestampSchema.parse(
+				'2000-01-01T00:00:00.000Z'
+			);
+			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+				.insert(d1Schema.tenantMaintenanceEligibility)
+				.values({
+					tenant: tenantIdSchema.parse(fixtureTenant),
 					nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
 					reconciledAt: staleReconciledAt
-				}
-			})
-			.run();
+				})
+				.onConflictDoUpdate({
+					target: d1Schema.tenantMaintenanceEligibility.tenant,
+					set: {
+						nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
+						reconciledAt: staleReconciledAt
+					}
+				})
+				.run();
 
-		const response = await commitUpload(token, uploadId);
-
-		expect(response.status).toBe('committed');
-
-		await vi.waitFor(async () => {
+			const reconcile = vi.spyOn(
+				MaintenanceEligibilityService.prototype,
+				'reconcile'
+			);
+			onTestFinished(() => {
+				reconcile.mockRestore();
+			});
+			const response = await commitUpload(token, uploadId);
+			await Promise.all(
+				reconcile.mock.results.map((result) => {
+					if (result.type !== 'return') {
+						throw result.value;
+					}
+					return result.value;
+				})
+			);
+			const inheritance = await runInDurableObject(
+				currentServer(),
+				(instance) =>
+					instance.context.db
+						.select({
+							storePathHash: schema.attestationInheritances.storePathHash,
+							generation: schema.attestationInheritances.generation
+						})
+						.from(schema.attestationInheritances)
+						.orderBy(asc(schema.attestationInheritances.storePathHash))
+						.all()
+			);
 			const row = await eligibilityRow();
-
 			expect({
+				status: response.status,
 				nextWakeAt: row?.nextWakeAt ?? undefined,
-				advancedOffStale: row?.reconciledAt !== staleReconciledAt
-			}).toStrictEqual({ nextWakeAt: undefined, advancedOffStale: true });
+				advancedOffStale: row?.reconciledAt !== staleReconciledAt,
+				inheritance
+			}).toStrictEqual({
+				status: 'committed',
+				nextWakeAt: wakeImmediately,
+				advancedOffStale: true,
+				inheritance: [
+					{ storePathHash: 'a'.repeat(32), generation: 0 },
+					{ storePathHash: 'b'.repeat(32), generation: 0 }
+				]
+			});
 		});
 	});
 

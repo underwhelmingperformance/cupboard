@@ -463,6 +463,48 @@
 			"when": 1790583673821,
 			"tag": "0065_attestation-inheritance-cursor",
 			"breakpoints": true
+		},
+		{
+			"idx": 66,
+			"version": "6",
+			"when": 1790884440337,
+			"tag": "0066_publication_recovery",
+			"breakpoints": true
+		},
+		{
+			"idx": 67,
+			"version": "6",
+			"when": 1790899062261,
+			"tag": "0067_refresh_session_authority",
+			"breakpoints": true
+		},
+		{
+			"idx": 68,
+			"version": "6",
+			"when": 1790906178614,
+			"tag": "0068_protected_inheritance",
+			"breakpoints": true
+		},
+		{
+			"idx": 69,
+			"version": "6",
+			"when": 1790928300000,
+			"tag": "0069_retry_limits",
+			"breakpoints": true
+		},
+		{
+			"idx": 70,
+			"version": "6",
+			"when": 1790931592556,
+			"tag": "0070_cache_creation_defaults",
+			"breakpoints": true
+		},
+		{
+			"idx": 71,
+			"version": "6",
+			"when": 1790931592557,
+			"tag": "0071_cache_close",
+			"breakpoints": true
 		}
 	]
 }

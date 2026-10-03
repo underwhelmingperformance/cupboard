@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises';
 
 import type { CliUi } from '@cupboard/cli-ui';
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { quotePatternLiteral } from '@cupboard/protocol/capture';
+import { templateSchema, templateVariables } from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
 	controlOidcTrustAddBodySchema,
@@ -24,6 +27,7 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import {
+	CliUsageError,
 	InvalidClaimError,
 	TrustRuleFileConflictError,
 	TrustRuleOptionsRequiredError
@@ -33,18 +37,24 @@ import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import { githubActionsIssuer } from './github/claims.ts';
 import {
+	parseWorkflowReference,
+	workflowReferenceClaim
+} from './github/convention.ts';
+import {
 	pullRequestCacheTemplate,
 	pullRequestRootTemplate
 } from './github/convention.ts';
 import { trustRuleSummaryRows } from './oidc-trust/format.ts';
 import {
 	lookupRepository,
+	parseRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
 import {
 	buildAddBody,
 	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildCacheGrants,
 	buildViewContentReadGrant,
 	collectSubstitutions,
 	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
@@ -64,6 +74,13 @@ interface GithubPrOptions {
 	readonly readCache?: boolean;
 }
 
+interface GithubPrCloseOptions {
+	readonly repo: string;
+	readonly audience?: Audience;
+	readonly cacheTemplate?: string;
+	readonly jobWorkflowRef: string;
+}
+
 interface GithubTagOptions {
 	readonly repo: string;
 	readonly audience?: Audience;
@@ -71,6 +88,7 @@ interface GithubTagOptions {
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
 	readonly attest?: boolean;
+	readonly readCache?: boolean;
 }
 
 interface GithubBranchOptions {
@@ -149,16 +167,14 @@ async function addBodyFor(
 		issuer,
 		audience,
 		claims: claimsForAdd(options.claim, options.jobWorkflowRef),
-		permittedGrants: [
-			buildCacheGrant({
-				cache: options.cache,
-				cacheTemplate: options.cacheTemplate,
-				allow: options.allow,
-				root: options.root,
-				rootTemplate: options.rootTemplate,
-				substitutions
-			})
-		]
+		permittedGrants: buildCacheGrants({
+			cache: options.cache,
+			cacheTemplate: options.cacheTemplate,
+			allow: options.allow,
+			root: options.root,
+			rootTemplate: options.rootTemplate,
+			substitutions
+		})
 	});
 }
 
@@ -331,7 +347,7 @@ export function githubPrAddBody(
 				rootTemplate:
 					options.rootTemplate ?? pullRequestRootTemplate(identity.fullName),
 				allow: withAttest(
-					['push', 'root', 'attach', 'create', 'remove'],
+					['push', 'root', 'attach', 'create', 'close', 'reopen'],
 					options.attest
 				),
 				substitutions: collectSubstitutions({
@@ -350,6 +366,78 @@ export function githubPrAddBody(
 						})
 					]
 				: [])
+		],
+		display: { provider: 'github', repository: identity.fullName }
+	});
+}
+
+class MergedCloseTemplateError extends CliUsageError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'MergedCloseTemplateError';
+	}
+}
+
+/**
+Permits merged pull-request runs to close the repository's selected PR caches.
+*/
+export function githubPrCloseAddBody(
+	url: URL,
+	identity: RepositoryIdentity,
+	options: GithubPrCloseOptions
+): OidcTrustAddBodyInput {
+	const template = templateSchema.parse(
+		options.cacheTemplate ?? pullRequestCacheTemplate()
+	);
+
+	if (
+		templateVariables(template).some(
+			(variable) => variable !== 'pr' && variable !== 'repository_id'
+		)
+	) {
+		throw new MergedCloseTemplateError(
+			'The merged-close cache template supports only {pr} and {repository_id}. Use an exact cache grant in a manual trust rule for other templates.'
+		);
+	}
+
+	const rendered = template.replaceAll('{repository_id}', () =>
+		String(identity.repositoryId)
+	);
+	const parts = rendered.split('{pr}');
+
+	if (parts.length > 2) {
+		throw new MergedCloseTemplateError(
+			'The merged-close cache template supports at most one {pr}. Keep the publication rule, and configure exact cache:close grants in a manual lifecycle rule for repeated {pr} templates.'
+		);
+	}
+
+	const binding =
+		parts.length === 1
+			? { exact: cacheNameSchema.parse(rendered) }
+			: {
+					pattern: `^${parts.map((part) => quotePatternLiteral(part)).join('[0-9]+')}$`
+				};
+
+	return buildAddBody({
+		issuer: githubActionsIssuer,
+		audience: options.audience ?? audienceSchema.parse(url),
+		claims: {
+			repository_id: String(identity.repositoryId),
+			repository_owner_id: String(identity.repositoryOwnerId),
+			event_name: 'pull_request',
+			ref: { pattern: '^refs/heads/.+$' },
+			job_workflow_ref: workflowReferenceClaim(
+				parseWorkflowReference(options.jobWorkflowRef)
+			)
+		},
+		permittedGrants: [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:close'],
+				resources: {
+					cache: { kind: 'named', ...binding, validate: 'cacheName' }
+				}
+			}
 		],
 		display: { provider: 'github', repository: identity.fullName }
 	});
@@ -390,7 +478,18 @@ export function githubTagAddBody(
 					templateSource: 'github-tag',
 					captures: []
 				})
-			})
+			}),
+			...(options.readCache === true
+				? [
+						buildCacheContentReadGrant({
+							cacheTemplate,
+							substitutions: collectSubstitutions({
+								templateSource: 'github-tag',
+								captures: []
+							})
+						})
+					]
+				: [])
 		],
 		display: { provider: 'github', repository: identity.fullName }
 	});
@@ -493,7 +592,11 @@ function buildOidcTrustCommands(
 				'Add a trust rule that lets each pull request in a GitHub repository publish to a cache of its own.'
 			)
 			.argument('<url>', plane.urlArgument, parseWorkerUrl)
-			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
 			.option(
 				'--audience <audience>',
 				'audience that the token must have (default: the tenant URL)',
@@ -508,8 +611,12 @@ function buildOidcTrustCommands(
 				'root prefix for each pull request (default: github:<owner>/<repo>/pr-{pr}/)'
 			)
 			.option(
-				'--job-workflow-ref <value>',
+				'--workflow-ref, --job-workflow-ref <value>',
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
+			)
+			.option(
+				'--read-cache',
+				'also permit content reads from the selected cache'
 			)
 			.option(
 				'--no-attest',
@@ -540,12 +647,52 @@ function buildOidcTrustCommands(
 			});
 
 		oidcTrust
+			.command('add-github-pr-close')
+			.description(
+				'Permit merged pull-request runs to close the selected PR cache family, without publication or read authority.'
+			)
+			.argument('<url>', plane.urlArgument, parseWorkerUrl)
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
+			.requiredOption(
+				'--workflow-ref, --job-workflow-ref <value>',
+				'require this workflow pinned to a commit, release tag or tag pattern, as owner/repo/path@ref'
+			)
+			.option(
+				'--audience <audience>',
+				'audience that the token must have (default: the tenant URL)',
+				parseAudience
+			)
+			.option(
+				'--cache-template <template>',
+				'PR cache family, with at most one {pr} (default: gh-{repository_id}-pr-{pr})'
+			)
+			.action(async (url: URL, options: GithubPrCloseOptions) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const identity = await reporter.phase('Resolving repository', () =>
+					lookupRepository(options.repo)
+				);
+				await runOidcTrustAdd(
+					githubPrCloseAddBody(url, identity, options),
+					reporter,
+					plane.clientFor(url, programOptions)
+				);
+			});
+
+		oidcTrust
 			.command('add-github-tag')
 			.description(
 				"Add a trust rule that lets a GitHub repository's tag runs publish to a cache named after the tag."
 			)
 			.argument('<url>', plane.urlArgument, parseWorkerUrl)
-			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
 			.option(
 				'--audience <audience>',
 				'audience that the token must have (default: the tenant URL)',
@@ -560,8 +707,12 @@ function buildOidcTrustCommands(
 				'root prefix for each tag (default: github:<owner>/<repo>/<cache name>/)'
 			)
 			.option(
-				'--job-workflow-ref <value>',
+				'--workflow-ref, --job-workflow-ref <value>',
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
+			)
+			.option(
+				'--read-cache',
+				'also permit content reads from the selected cache'
 			)
 			.option(
 				'--no-attest',
@@ -597,19 +748,27 @@ function buildOidcTrustCommands(
 				"Add a trust rule that lets runs on one branch of a GitHub repository publish to the tenant's default cache."
 			)
 			.argument('<url>', plane.urlArgument, parseWorkerUrl)
-			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.requiredOption(
+				'--repo <owner/name>',
+				'the GitHub repository',
+				parseRepository
+			)
 			.requiredOption(
 				'--branch <name>',
 				'the branch whose runs may publish (e.g. main)'
 			)
 			.option(
-				'--job-workflow-ref <value>',
+				'--workflow-ref, --job-workflow-ref <value>',
 				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
 			)
 			.option(
 				'--audience <audience>',
 				'audience that the token must have (default: the tenant URL)',
 				parseAudience
+			)
+			.option(
+				'--read-cache',
+				'also permit content reads from the selected cache'
 			)
 			.option(
 				'--no-attest',
@@ -661,8 +820,8 @@ function buildOidcTrustCommands(
 }
 
 /**
- * `oidc-trust add`: a tenant rule built from options, whose grant is scoped to a
- * cache and optionally a root, or read whole from `--from-file`.
+ * `oidc-trust add`: a tenant rule built from options or read whole from
+ * `--from-file`.
  */
 function registerTenantRuleAdd(
 	oidcTrust: Command,
@@ -692,12 +851,12 @@ function registerTenantRuleAdd(
 			[]
 		)
 		.option(
-			'--job-workflow-ref <ref>',
-			'require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs'
+			'--workflow-ref, --job-workflow-ref <ref>',
+			'require the job_workflow_ref claim, which identifies the workflow file and ref that the job runs; the same reference is --workflow-ref on github setup/check'
 		)
 		.option(
 			'--allow <action>',
-			'a grant to give (repeatable): push, attest, root, attach, create or remove',
+			'a grant to give (repeatable): read, push, attest, root, attach, create, close, reopen or remove',
 			collect,
 			[]
 		)
@@ -711,11 +870,11 @@ function registerTenantRuleAdd(
 		)
 		.option(
 			'--root <name>',
-			'the root that the grants cover, or a root prefix ending in /'
+			'the root that publication grants cover, or a root prefix ending in /'
 		)
 		.option(
 			'--root-template <template>',
-			'make the root name from values in the token (see --template-source and --capture)'
+			'make the publication root name from values in the token (see --template-source and --capture)'
 		)
 		.option(
 			'--capture <claim=pattern>',

@@ -12,6 +12,7 @@ export interface DeployUi extends CliUi {
 }
 
 export interface DeployUiOptions {
+	readonly resultFile?: string;
 	readonly signal?: AbortSignal;
 	readonly colour?: boolean;
 }
@@ -20,7 +21,8 @@ export function createDeployUi(options: DeployUiOptions = {}): DeployUi {
 	const ui = createCliUi({
 		mode: 'terminal',
 		colour: options.colour,
-		signal: options.signal
+		signal: options.signal,
+		resultFile: options.resultFile
 	});
 
 	return {

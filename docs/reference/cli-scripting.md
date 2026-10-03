@@ -17,6 +17,9 @@ The CLI keeps two kinds of output apart:
   `whoami --provider` produces in `json` mode is part of its result event, on
   standard error.
 
+`cupboard run` forwards its child's standard input, standard output and standard
+error directly. Cupboard's own progress and errors still go to standard error.
+
 This means you can capture a command's data, or redirect it to a file, without
 picking up anything else:
 
@@ -37,7 +40,7 @@ The CLI formats what it writes to standard error in one of three modes:
 The CLI picks the first of these that applies:
 
 1. The mode that you pass with `--output-mode`.
-2. `terminal`, if `FORCE_COLOR` is set to anything other than `0`.
+2. `terminal`, if `FORCE_COLOR` is non-empty and is not `0`.
 3. `json`, if `PRE_COMMIT=1`. pre-commit sets this for its hooks.
 4. `github`, if `GITHUB_ACTIONS=true`.
 5. `terminal`, if standard error is a terminal.
@@ -63,7 +66,11 @@ streams would go to `/dev/null`.
 
 You can also write results to a file with `--result-file <path>`, in any mode.
 The CLI adds one line to the file for each result, in the form
-`{"kind": …, "data": …}`. It doesn't write failures to this file.
+`{"kind": …, "data": …}`. Error events are not written to this file. A command
+can report useful partial results before failing, so the file can contain
+results even when the command exits non-zero. For example, `confirm` reports
+completed batches before a later request fails, and `init` reports deployed
+resources before onboarding finishes.
 
 ### Colour
 
@@ -79,7 +86,7 @@ Without `--yes`, a command only asks when all of these are true:
 
 - it's in `terminal` mode;
 - standard input and standard error are both terminals;
-- it isn't running in CI.
+- `CI` is not `true`.
 
 Otherwise, it exits with status 2 without doing anything.
 
@@ -89,17 +96,35 @@ Otherwise, it exits with status 2 without doing anything.
 | ------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0      |                  | Success.                                                                                                                                                                                                                                                                                    |
 | 1      |                  | A failure that doesn't fit another status. For example, `confirm` found a path missing, `check` found a problem, or the tenant's storage quota refused an upload (`build-push` exits 74 for that).                                                                                          |
-| 2      |                  | A usage error. For example, an unknown option, an invalid value, more than 149 targets for one root, or a confirmation needed without `--yes`.                                                                                                                                              |
+| 2      |                  | A usage error. For example, an unknown option, an invalid value, more than 149 targets in one root update, or a confirmation needed without `--yes`.                                                                                                                                        |
 | 69     | `EX_UNAVAILABLE` | Something that the command needs isn't available. For example, `build-push` can't publish outputs from an `ssh-ng` store while the build runs, or `github check` couldn't complete one of its checks.                                                                                       |
 | 74     | `EX_IOERR`       | `build-push` only: publishing or setting the root failed, and no more specific status applies.                                                                                                                                                                                              |
 | 75     | `EX_TEMPFAIL`    | At least one failure was temporary. See [Retrying](#retrying).                                                                                                                                                                                                                              |
 | 77     | `EX_NOPERM`      | Signing in or a permission check failed. For example, you aren't signed in, your session has expired, the credential doesn't grant what the command needs, a GitHub token lacks a permission, or the Nix daemon doesn't list you in `trusted-users` when `build-push` runs a build command. |
+| 127    |                  | `run` could not find the child executable. Install the command or pass its full path.                                                                                                                                                                                                       |
 | 130    |                  | Interrupted with Ctrl-C (`SIGINT`).                                                                                                                                                                                                                                                         |
 | 143    |                  | Terminated with `SIGTERM`.                                                                                                                                                                                                                                                                  |
 
 The sysexits names come from [`sysexits(3)`][sysexits]. Some commands give a
 status a more specific meaning, which their `--help` describes.
 `cupboard root ensure` exits with status 0 whether or not it changed the root.
+
+When a later `confirm` batch fails, the CLI reports completed batches and keeps
+the failure's status. `github setup` also reports the applied configuration
+before a trust-rule removal failure. If several removals fail, authority
+refusals have priority over temporary failures, followed by other failures.
+
+OAuth token endpoints also use HTTP 400 for refused authority. The CLI uses exit
+77 for rejected identities, expired refresh tokens and refused grants. Malformed
+token requests or grant details use exit 2. Temporary HTTP failures retain exit
+75, including when the response contains an OAuth error.
+
+`cupboard run` returns the child's exit status, or 128 plus the signal number
+when a signal terminates the child. SIGINT and SIGTERM received by Cupboard are
+forwarded to the child. A child that does not stop within ten seconds is killed.
+An OIDC acquisition or renewal failure uses Cupboard's own status: 77 for
+refused authority and 75 for a temporary service or malformed token response. A
+renewal failure stops the child and removes temporary credentials.
 
 [sysexits]: https://man.freebsd.org/cgi/man.cgi?query=sysexits&sektion=3
 
@@ -126,7 +151,8 @@ When some paths in a push fail, `push` chooses its status from the failures:
 
 1. 77, if any path failed a sign-in or permission check.
 2. Otherwise 75, if any path failed temporarily.
-3. Otherwise 69, if something that a path needed was unavailable.
+3. Otherwise 2, if the server rejected an upload request because it exceeded the
+   invocation budget. Split the request at the returned path limit.
 4. Otherwise 1.
 
 `build-push` uses the same order while it publishes, but exits 74 in place of 1.

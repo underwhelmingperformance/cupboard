@@ -1,6 +1,7 @@
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import {
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader,
@@ -110,7 +111,7 @@ describe('cache metadata probe', () => {
 			}).toStrictEqual({
 				status: StatusCodes.OK,
 				cacheControl: 'no-store',
-				discoveryCapability: cacheMetadataCapability,
+				discoveryCapability: `${cacheMetadataCapability} ${attestationInfoCapability}`,
 				body: {
 					scopeVersion: stringMatcher,
 					entries: [
@@ -119,6 +120,39 @@ describe('cache metadata probe', () => {
 				}
 			});
 			expect(NarInfo.parse(expected).sigs.length).toBeGreaterThan(0);
+		}
+	);
+
+	it.each(['default', 'named'] as const)(
+		'returns ordered attestation discovery for the %s cache',
+		async (kind) => {
+			const cache = kind === 'default' ? defaultCache() : namedCache('builds');
+			const path = await committedPath(`attestation-discovery-${kind}`, cache);
+			const missing = '0'.repeat(32);
+			const prefix = kind === 'default' ? '' : '/cache/builds';
+			const response = await readFetch(`${prefix}/api/v1/attestation-info`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ storePathHashes: [missing, path.storePathHash] })
+			});
+			expect({
+				status: response.status,
+				body: await response.text()
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				body: JSON.stringify({
+					scopeVersion: 'cache:1:1:public:false',
+					entries: [
+						{ storePathHash: missing, status: 'missing' },
+						{
+							storePathHash: path.storePathHash,
+							status: 'found',
+							narHash: path.narHash,
+							attestations: []
+						}
+					]
+				})
+			});
 		}
 	);
 

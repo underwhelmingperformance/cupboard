@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig } from '@cupboard/nix-store/nix-config';
@@ -23,6 +23,7 @@ import {
 	filterGithubReleases
 } from '@cupboard/shared/octokit';
 import { readResponseText } from '@cupboard/shared/response-body';
+import { type Document, isMap, parseDocument } from 'yaml';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -39,6 +40,7 @@ interface ReleaseSummary {
 	readonly draft: boolean;
 	readonly uploadUrl: string;
 	readonly htmlUrl: string;
+	readonly body: string;
 	readonly assets: readonly AssetSummary[];
 }
 
@@ -65,11 +67,13 @@ interface CreateDraftBody {
 interface UpdateDraftBody {
 	readonly target_commitish: string;
 	readonly name: string;
+	readonly body: string;
 	readonly draft: true;
 }
 
 interface CreateDraftOptions {
 	readonly version: string;
+	readonly repository: Repository;
 	readonly commitish: string;
 	readonly name: string;
 	readonly body: string;
@@ -78,6 +82,9 @@ interface CreateDraftOptions {
 interface UpdateDraftOptions {
 	readonly commitish: string;
 	readonly name: string;
+	readonly version: string;
+	readonly repository: Repository;
+	readonly body: string;
 }
 
 interface Repository {
@@ -137,7 +144,9 @@ class MalformedCacheUrlError extends UsageError {
 
 class UnknownCommandError extends UsageError {
 	constructor(public readonly command: string) {
-		super(`expected 'checksums' or 'publish', got '${command}'`);
+		super(
+			`expected 'prepare', 'check-preparation', 'checksums' or 'publish', got '${command}'`
+		);
 		this.name = 'UnknownCommandError';
 	}
 }
@@ -176,6 +185,170 @@ export function assertCanonicalVersion(version: string): string {
 	return version;
 }
 
+export interface ReleaseSources {
+	readonly workflow: string;
+	readonly upgradeNotes: string;
+}
+
+export class ReleasePreparationError extends UsageError {
+	constructor(detail: string) {
+		super(`Release preparation failed: ${detail}`);
+		this.name = 'ReleasePreparationError';
+	}
+}
+
+const releaseWorkflow =
+	'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml';
+const releaseUsesPath = ['jobs', 'publish', 'uses'];
+const releaseOverridePath = ['jobs', 'publish', 'with', 'cupboard-version'];
+const pendingReleaseHeading = /^## Next release(?=[\t ]*\r?$)/gmu;
+
+/**
+Prepares and checks the source references for one canonical release tag.
+*/
+export class ReleasePreparation {
+	readonly version: string;
+	readonly workflowReference: string;
+	readonly trustWorkflowReference: string;
+
+	constructor(version: string) {
+		this.version = assertCanonicalVersion(version);
+		this.workflowReference = `${releaseWorkflow}@${this.version}`;
+		this.trustWorkflowReference = `${releaseWorkflow}@refs/tags/${this.version}`;
+	}
+
+	prepare(sources: ReleaseSources): ReleaseSources {
+		const document = releaseWorkflowDocument(sources.workflow);
+		const pending = sources.upgradeNotes
+			.matchAll(pendingReleaseHeading)
+			.toArray();
+		if (pending.length > 1) {
+			throw new ReleasePreparationError(
+				'upgrade notes contain several Next release headings'
+			);
+		}
+		if (
+			pending.length > 0 &&
+			sources.upgradeNotes
+				.split(/\r?\n/u)
+				.some((line) => line.trimEnd() === `## ${this.version}`)
+		) {
+			throw new ReleasePreparationError(
+				`upgrade notes already contain ${this.version}`
+			);
+		}
+		document.setIn(releaseUsesPath, this.workflowReference);
+		document.deleteIn(releaseOverridePath);
+		const prepared = {
+			workflow: document.toString({
+				lineWidth: 0,
+				flowCollectionPadding: false
+			}),
+			upgradeNotes: sources.upgradeNotes.replaceAll(
+				pendingReleaseHeading,
+				() => `## ${this.version}`
+			)
+		};
+		this.check(prepared);
+		return prepared;
+	}
+
+	check(sources: ReleaseSources): void {
+		const document = releaseWorkflowDocument(sources.workflow);
+		if (document.getIn(releaseUsesPath) !== this.workflowReference) {
+			throw new ReleasePreparationError(
+				`release-cache.yml must call ${this.workflowReference}; run release.ts prepare with VERSION=${this.version} and commit the preparation`
+			);
+		}
+		if (document.hasIn(releaseOverridePath)) {
+			throw new ReleasePreparationError(
+				'release-cache.yml must omit cupboard-version so the CLI uses the called workflow revision'
+			);
+		}
+		if (!sources.upgradeNotes.matchAll(pendingReleaseHeading).next().done) {
+			throw new ReleasePreparationError(
+				'version the Next release upgrade notes before releasing'
+			);
+		}
+	}
+}
+
+function releaseWorkflowDocument(workflow: string): Document {
+	const document = parseDocument(workflow, { uniqueKeys: true });
+	const reference = document.getIn(releaseUsesPath);
+	if (
+		typeof reference !== 'string' ||
+		document.errors.length > 0 ||
+		!isMap(document.getIn(['jobs', 'publish', 'with'])) ||
+		!reference.startsWith(`${releaseWorkflow}@`)
+	) {
+		throw new ReleasePreparationError(
+			'release-cache.yml must contain the Cupboard publish job and its inputs in valid YAML'
+		);
+	}
+	return document;
+}
+
+interface ReleaseFiles {
+	readonly workflowPath: string;
+	readonly upgradeNotesPath: string;
+	readonly sources: ReleaseSources;
+}
+
+async function readReleaseFiles(
+	environment: Environment
+): Promise<ReleaseFiles> {
+	const scriptDirectory = fileURLToPath(new URL('..', import.meta.url));
+	const directory = path.resolve(
+		input(environment, 'REPOSITORY_DIRECTORY', scriptDirectory)
+	);
+	const workflowPath = path.join(
+		directory,
+		'.github/workflows/release-cache.yml'
+	);
+	const upgradeNotesPath = path.join(
+		directory,
+		'docs/operator/upgrade-notes.md'
+	);
+	const [workflow, upgradeNotes] = await Promise.all([
+		readFile(workflowPath, 'utf8'),
+		readFile(upgradeNotesPath, 'utf8')
+	]);
+	return {
+		workflowPath,
+		upgradeNotesPath,
+		sources: { workflow, upgradeNotes }
+	};
+}
+
+export async function prepareAction(
+	environment: Environment = env
+): Promise<void> {
+	const preparation = new ReleasePreparation(input(environment, 'VERSION'));
+	const files = await readReleaseFiles(environment);
+	const sources = preparation.prepare(files.sources);
+	await writeFile(files.workflowPath, sources.workflow);
+	await writeFile(files.upgradeNotesPath, sources.upgradeNotes);
+	log(
+		`Prepared ${preparation.version}. Commit the release workflow and upgrade notes before dispatching the release.`
+	);
+	log(
+		`Release trust rule job_workflow_ref: ${preparation.trustWorkflowReference}`
+	);
+	log(
+		'Add a reviewed replacement release trust rule with this selector before disabling the preceding release rule. Preserve its other claims and grants.'
+	);
+}
+
+export async function checkPreparationAction(
+	environment: Environment = env
+): Promise<void> {
+	const preparation = new ReleasePreparation(input(environment, 'VERSION'));
+	const files = await readReleaseFiles(environment);
+	preparation.check(files.sources);
+	log(`Release preparation matches ${preparation.version}.`);
+}
+
 export function selectDraftRelease(
 	releases: readonly ReleaseSummary[],
 	version: string
@@ -198,7 +371,7 @@ export function createDraftBody(options: CreateDraftOptions): CreateDraftBody {
 		tag_name: options.version,
 		target_commitish: options.commitish,
 		name: options.name,
-		body: options.body,
+		body: withUpgradeNotes(options),
 		draft: true,
 		generate_release_notes: true
 	};
@@ -259,8 +432,31 @@ export function updateDraftBody(options: UpdateDraftOptions): UpdateDraftBody {
 	return {
 		target_commitish: options.commitish,
 		name: options.name,
+		body: withUpgradeNotes(options),
 		draft: true
 	};
+}
+
+function withUpgradeNotes(options: {
+	readonly body: string;
+	readonly version: string;
+	readonly repository: Repository;
+}): string {
+	const { owner, repo } = options.repository;
+	const url = `https://github.com/${owner}/${repo}/blob/${options.version}/docs/operator/upgrade-notes.md`;
+
+	if (options.body.includes(url)) {
+		return options.body;
+	}
+
+	const reference = `cupboard-upgrade-notes-${options.version}`;
+	const separator = options.body === '' ? '' : '\n\n';
+
+	return (
+		`${options.body}${separator}` +
+		`Before upgrading an existing deployment, read the [${options.version} upgrade notes][${reference}].\n\n` +
+		`[${reference}]: ${url}`
+	);
 }
 
 export function assetContentType(assetName: string): string {
@@ -324,6 +520,8 @@ export async function publishAction(
 	environment: Environment = env
 ): Promise<void> {
 	const inputs = publishInputs(environment);
+	const files = await readReleaseFiles(environment);
+	new ReleasePreparation(inputs.version).check(files.sources);
 	const octokit = createOctokitClient(
 		inputs.githubToken === '' ? {} : { auth: inputs.githubToken }
 	);
@@ -394,6 +592,7 @@ async function upsertDraft(
 			...inputs.repository,
 			...createDraftBody({
 				version: inputs.version,
+				repository: inputs.repository,
 				commitish: inputs.commitish,
 				name: inputs.name,
 				body
@@ -407,7 +606,13 @@ async function upsertDraft(
 	const { data } = await octokit.rest.repos.updateRelease({
 		...inputs.repository,
 		release_id: existing.id,
-		...updateDraftBody({ commitish: inputs.commitish, name: inputs.name })
+		...updateDraftBody({
+			commitish: inputs.commitish,
+			name: inputs.name,
+			version: inputs.version,
+			repository: inputs.repository,
+			body: existing.body
+		})
 	});
 
 	return toReleaseSummary(data);
@@ -449,6 +654,7 @@ function toReleaseSummary(release: {
 	readonly draft: boolean;
 	readonly upload_url: string;
 	readonly html_url: string;
+	readonly body?: string | null;
 	readonly assets: readonly { readonly id: number; readonly name: string }[];
 }): ReleaseSummary {
 	return {
@@ -457,6 +663,7 @@ function toReleaseSummary(release: {
 		draft: release.draft,
 		uploadUrl: release.upload_url,
 		htmlUrl: release.html_url,
+		body: release.body ?? '',
 		assets: release.assets.map((asset) => ({ id: asset.id, name: asset.name }))
 	};
 }
@@ -538,6 +745,16 @@ function log(message: string): void {
 
 async function main(): Promise<void> {
 	const command = process.argv[2];
+
+	if (command === 'prepare') {
+		await prepareAction();
+		return;
+	}
+
+	if (command === 'check-preparation') {
+		await checkPreparationAction();
+		return;
+	}
 
 	if (command === 'checksums') {
 		await checksumsAction();

@@ -24,6 +24,7 @@ import {
 	integer,
 	primaryKey,
 	sqliteTable,
+	sqliteView,
 	text,
 	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
@@ -139,13 +140,11 @@ export const blobState = sqliteTable(
 // as distinct, so each cache kind has its own partial unique index rather than
 // one primary key over the identity columns.
 //
-// These rows also authorise NAR reads. The
-// `(tenant, nar_hash, cache_kind, cache_name, cache_generation)` index answers
-// that check in one seek and supplies every `blob_ref` column needed by the
-// check. The same index supports a single cache and the half-open range for a
-// namespace.
+// NAR reads select candidates from the partial readable index, then check each
+// candidate's path revocation fence. Cache selectors and access policy may
+// exclude earlier candidates before the read finds an authorised reference.
 export const blobReference = sqliteTable(
-	'blob_ref',
+	'blob_ref_storage',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
@@ -153,6 +152,7 @@ export const blobReference = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		readable: integer('readable', { mode: 'boolean' }).notNull().default(true),
 		// The generation of the cache name when this edge was committed.
 		cacheGeneration: integer('cache_generation')
 			.$type<CacheGeneration>()
@@ -169,13 +169,78 @@ export const blobReference = sqliteTable(
 		uniqueIndex('blob_ref_named_identity_idx')
 			.on(table.tenant, table.cacheName, table.storePathHash, table.generation)
 			.where(sql`${table.cacheKind} = 'named'`),
+		index('blob_ref_readable_path_idx')
+			.on(
+				table.tenant,
+				table.cacheKind,
+				table.cacheName,
+				table.storePathHash,
+				table.cacheGeneration,
+				table.generation
+			)
+			.where(sql`${table.readable} = true`),
+		index('blob_ref_readable_nar_idx')
+			.on(
+				table.tenant,
+				table.narHash,
+				table.cacheKind,
+				table.cacheName,
+				table.cacheGeneration
+			)
+			.where(sql`${table.readable} = true`),
 		index('blob_ref_nar_hash_idx').on(table.narHash),
+		index('blob_ref_path_lifecycle_generation_idx').on(
+			table.tenant,
+			table.cacheKind,
+			table.cacheName,
+			table.storePathHash,
+			table.cacheGeneration,
+			table.generation
+		),
 		index('blob_ref_tenant_nar_hash_native_idx').on(
 			table.tenant,
 			table.narHash,
 			table.cacheKind,
 			table.cacheName,
 			table.cacheGeneration
+		)
+	]
+);
+
+export const pathReadRevocation = sqliteTable(
+	'path_read_revocation',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		isPending: integer('is_pending', { mode: 'boolean' })
+			.notNull()
+			.default(true)
+	},
+	(table) => [
+		check(
+			'path_read_revocation_cache_identity_check',
+			cacheIdentityConstraint(table.cacheKind, table.cacheName)
+		),
+		uniqueIndex('path_read_revocation_default_identity_idx')
+			.on(table.tenant, table.storePathHash)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('path_read_revocation_named_identity_idx')
+			.on(table.tenant, table.cacheName, table.storePathHash)
+			.where(sql`${table.cacheKind} = 'named'`),
+		index('path_read_revocation_pending_idx')
+			.on(table.tenant, table.cacheKind, table.cacheName, table.storePathHash)
+			.where(sql`${table.isPending} = true`),
+		index('path_read_revocation_native_identity_idx').on(
+			table.tenant,
+			table.cacheKind,
+			table.cacheName,
+			table.storePathHash
 		)
 	]
 );
@@ -218,7 +283,7 @@ export const publication = sqliteTable(
 // A missing lifecycle row represents generation 1. The first deletion writes
 // generation 2 and immediately revokes those edges.
 export const cacheLifecycle = sqliteTable(
-	'cache_lifecycle',
+	'cache_lifecycle_storage',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
@@ -265,6 +330,14 @@ export const cacheLifecycle = sqliteTable(
 			table.cacheName
 		)
 	]
+);
+
+export const precedingCacheAdmission = sqliteView('cache_lifecycle').as(
+	(query) =>
+		query
+			.select()
+			.from(cacheLifecycle)
+			.where(sql`false`)
 );
 
 // The control-plane signing key set, held in D1 so the stateless Worker can issue
@@ -321,6 +394,10 @@ export const tenant = sqliteTable(
 		ownerSubject: text('owner_subject').notNull(),
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
+		retryActiveElapsedMs: integer('retry_active_elapsed_ms')
+			.notNull()
+			.default(0),
+		retryActiveSinceMs: integer('retry_active_since_ms'),
 		// Null until a later release's cache reconciliation records the version
 		// it reached for this tenant. Nothing in this build reads or writes it.
 		cacheCatalogueVersion: integer('cache_catalogue_version'),
@@ -512,7 +589,7 @@ export const casObject = sqliteTable(
 // generation is part of the key so stale deletion can retire only the captured
 // narinfo version and never a later recommit.
 export const attestationReference = sqliteTable(
-	'attestation_ref',
+	'attestation_ref_storage',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
@@ -520,7 +597,8 @@ export const attestationReference = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>().notNull(),
-		digest: text('digest').$type<Sha256HexDigest>().notNull()
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		readable: integer('readable', { mode: 'boolean' }).notNull().default(true)
 	},
 	(table) => [
 		check(
@@ -554,6 +632,27 @@ export const attestationReference = sqliteTable(
 			table.storePathHash,
 			table.generation
 		),
+		index('attestation_ref_readable_path_idx')
+			.on(
+				table.tenant,
+				table.cacheKind,
+				table.cacheName,
+				table.storePathHash,
+				table.generation,
+				table.predicateType,
+				table.digest
+			)
+			.where(sql`${table.readable} = true`),
+		index('attestation_ref_readable_digest_idx')
+			.on(
+				table.tenant,
+				table.cacheKind,
+				table.cacheName,
+				table.digest,
+				table.storePathHash,
+				table.generation
+			)
+			.where(sql`${table.readable} = true`),
 		index('attestation_ref_digest_idx').on(table.digest)
 	]
 );
@@ -608,3 +707,29 @@ export const localStepWakeCursor = sqliteTable('local_step_wake_cursor', {
 	id: integer('id').primaryKey(),
 	afterTenant: text('after_tenant').$type<TenantId>().notNull()
 });
+
+export const readableBlobReference = sqliteView('blob_ref').as((query) =>
+	query.select().from(blobReference)
+		.where(sql`${blobReference.readable} = true AND NOT EXISTS (
+		SELECT 1 FROM path_read_revocation AS fence
+		WHERE fence.tenant = ${blobReference.tenant}
+		 AND fence.cache_kind = ${blobReference.cacheKind}
+		 AND fence.cache_name IS ${blobReference.cacheName}
+		 AND fence.store_path_hash = ${blobReference.storePathHash}
+		 AND fence.cache_generation = ${blobReference.cacheGeneration}
+		 AND fence.generation >= ${blobReference.generation}
+	)`)
+);
+
+export const readableAttestationReference = sqliteView('attestation_ref').as(
+	(query) =>
+		query.select().from(attestationReference)
+			.where(sql`${attestationReference.readable} = true AND EXISTS (
+		SELECT 1 FROM ${readableBlobReference}
+		WHERE ${readableBlobReference.tenant} = ${attestationReference.tenant}
+		 AND ${readableBlobReference.cacheKind} = ${attestationReference.cacheKind}
+		 AND ${readableBlobReference.cacheName} IS ${attestationReference.cacheName}
+		 AND ${readableBlobReference.storePathHash} = ${attestationReference.storePathHash}
+		 AND ${readableBlobReference.generation} = ${attestationReference.generation}
+	)`)
+);

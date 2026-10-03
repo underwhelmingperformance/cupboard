@@ -1,11 +1,16 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
+import { base64ToBytes } from '@cupboard/nix-store/encoding';
 import {
 	cacheNameSchema,
 	type CacheScope,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import { type PermittedGrant } from '@cupboard/protocol/grants';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import {
+	type PermittedGrant,
+	storedPermittedGrantsSchema
+} from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	oidcAudienceSchema,
@@ -20,7 +25,9 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	readAccessGrantType,
-	readAccessResponseSchema
+	readAccessResponseSchema,
+	type ReadResource,
+	readResourcesSchema
 } from '@cupboard/protocol/read-access';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
@@ -35,14 +42,22 @@ import {
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds
 } from '../auth/auth.ts';
+import {
+	RefreshCredential,
+	refreshCredentialMaxBytes,
+	refreshPolicyIdentity
+} from '../auth/refresh-credential.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
+	cacheIdentities,
 	oidcTrust,
 	refreshTokenFamilies,
 	refreshTokenMembers
 } from '../db/schema.ts';
 import {
+	OAuthError,
 	OwnerConfigurationInvalidError,
+	ReadResourcesNotPermittedError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
 	StoredOidcTrustInvalidError,
@@ -64,7 +79,6 @@ import {
 	provisionNamedTenant,
 	putTestCache,
 	readFetch,
-	recordTransition,
 	resetTestServer,
 	testPushId,
 	underOneUnitOfWork,
@@ -648,6 +662,86 @@ describe('POST /token', () => {
 	});
 });
 
+async function installComposedReadRules(isOverlapping = false): Promise<{
+	readonly subject: string;
+	readonly resources: readonly ReadResource[];
+}> {
+	await installTrustedIdp('write');
+	const subject = await installTrustedIdp('read');
+	const administrator = await issueServerSignedToken(adminGrants());
+	for (const name of ['a', 'b']) {
+		await putTestCache(
+			administrator,
+			{ kind: 'named', name: cacheNameSchema.parse(name) },
+			'private'
+		);
+	}
+	const view = await authorisedFetch('/reuse-views/sources', administrator, {
+		method: 'PUT',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			access: 'private',
+			priority: 80,
+			selectors: [{ kind: 'all' }]
+		})
+	});
+	expect(view.status).toBe(200);
+	await view.text();
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const database = drizzle(state.storage, { schema: { oidcTrust } });
+		for (const rule of [
+			{ id: 'write-rule', caches: ['a'], view: false },
+			{
+				id: 'read-rule',
+				caches: isOverlapping ? ['a', 'b'] : ['b'],
+				view: true
+			}
+		]) {
+			const grants = [
+				...rule.caches.map((name) => ({
+					type: 'cupboard_cache',
+					actions: ['cache:content-read'],
+					resources: {
+						cache: { kind: 'named', exact: name, validate: 'cacheName' }
+					}
+				})),
+				...(rule.view
+					? [
+							{
+								type: 'cupboard_view',
+								actions: ['view:content-read'],
+								resources: {
+									view: { exact: 'sources', validate: 'reuseViewName' }
+								}
+							}
+						]
+					: [])
+			];
+			database
+				.update(oidcTrust)
+				.set({ permittedGrantsJson: JSON.stringify(grants) })
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse(rule.id)))
+				.run();
+		}
+	});
+	return {
+		subject,
+		resources: readResourcesSchema.parse([
+			{
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: 'a' },
+				mode: 'content'
+			},
+			{
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: 'b' },
+				mode: 'content'
+			},
+			{ type: 'cupboard_view', view: 'sources' }
+		])
+	};
+}
+
 describe('server-resolved read acquisition', () => {
 	beforeEach(resetTestServer);
 
@@ -658,6 +752,12 @@ describe('server-resolved read acquisition', () => {
 	it.each([
 		'[]',
 		'{',
+		JSON.stringify(
+			Array.from({ length: 17 }, (_, index) => ({
+				type: 'cupboard_cache',
+				cache: { kind: 'named', name: `cache-${String(index)}` }
+			}))
+		),
 		JSON.stringify([
 			{
 				type: 'cupboard_cache',
@@ -667,7 +767,7 @@ describe('server-resolved read acquisition', () => {
 		]),
 		JSON.stringify([
 			{ type: 'cupboard_cache', cache: { kind: 'default' } },
-			{ type: 'cupboard_cache', cache: { kind: 'named', name: 'ci' } }
+			{ type: 'cupboard_cache', cache: { kind: 'default' } }
 		])
 	])('rejects malformed or excessive read intent %s', async (intent) => {
 		const subject = await installTrustedIdp('write');
@@ -684,13 +784,702 @@ describe('server-resolved read acquisition', () => {
 		}).toStrictEqual({
 			status: 400,
 			body: {
-				error: 'invalid_authorization_details',
+				error: 'invalid_request',
 				error_description:
-					'The requested authorization_details are not permitted',
-				problem: 'not-permitted'
+					'read_resources must contain one to sixteen distinct cache or view resources, including at most one reuse view.',
+				problem: 'invalid-read-resources'
 			}
 		});
 	});
+
+	it.each(['absent', 'private'] as const)(
+		'limits missing read authority advice to the requested %s cache',
+		async (state) => {
+			const subject = await installTrustedIdp('release-write');
+			const cache = {
+				kind: 'named' as const,
+				name: cacheNameSchema.parse('ci')
+			};
+			if (state === 'private') {
+				await putTestCache(
+					await issueServerSignedToken(adminGrants()),
+					cache,
+					'private'
+				);
+			}
+			const response = await postToken({
+				grant_type: readAccessGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify([
+					{ type: 'cupboard_cache', cache, mode: 'content' }
+				])
+			});
+			expect({
+				status: response.status,
+				body: await response.json()
+			}).toStrictEqual({
+				status: 400,
+				body: {
+					error: 'invalid_authorization_details',
+					error_description:
+						"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'ci'.",
+					problem: 'read-resources-not-permitted',
+					detail: {
+						read_resources: JSON.stringify([
+							{ type: 'cupboard_cache', actions: ['cache:content-read'], cache }
+						])
+					}
+				}
+			});
+		}
+	);
+
+	it('explains missing view authority without listing unrelated resources', async () => {
+		const subject = await installTrustedIdp('release-write');
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify([{ type: 'cupboard_view', view: 'prior' }])
+		});
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: 400,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description:
+					"The matching trust rules do not permit the requested read_resources. Add view:content-read for reuse view 'prior'.",
+				problem: 'read-resources-not-permitted',
+				detail: {
+					read_resources: JSON.stringify([
+						{
+							type: 'cupboard_view',
+							actions: ['view:content-read'],
+							view: 'prior'
+						}
+					])
+				}
+			}
+		});
+	});
+
+	it.each([false, true])(
+		'composes private cache reads with view included=%s',
+		async (includeView) => {
+			const { subject, resources } = await installComposedReadRules();
+			const requested = resources.filter(
+				(resource) => includeView || resource.type === 'cupboard_cache'
+			);
+			const response = await postToken({
+				grant_type: readAccessGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify(requested)
+			});
+			expect(response.status).toBe(200);
+			const result = readAccessResponseSchema.parse(await response.json());
+			const decoded = decodeJwt(result.access_token);
+			const grants = requested.map((resource) =>
+				resource.type === 'cupboard_cache'
+					? {
+							type: resource.type,
+							cache: resource.cache,
+							actions: ['cache:content-read']
+						}
+					: {
+							type: resource.type,
+							view: resource.view,
+							actions: ['view:content-read']
+						}
+			);
+			expect({
+				expires: result.expires_in,
+				refresh: result.refresh_token,
+				grants: result.authorization_details,
+				jwtGrants: decoded.authorization_details,
+				rule: decoded.cb_rule,
+				rules: decoded.cb_rules,
+				facts: result.read_resources
+			}).toStrictEqual({
+				expires: 900,
+				refresh: undefined,
+				grants,
+				jwtGrants: grants,
+				rule: undefined,
+				rules: undefined,
+				facts: requested.map((resource) => ({
+					...resource,
+					state: {
+						kind: 'existing',
+						access: 'private',
+						priority: resource.type === 'cupboard_cache' ? 40 : 80
+					}
+				}))
+			});
+		}
+	);
+
+	it('selects one identity witness for public-only zero-authority read acquisition', async () => {
+		await installTrustedIdp('write');
+		const subject = await installTrustedIdp('read');
+		const cache: CacheScope = {
+			kind: 'named',
+			name: cacheNameSchema.parse('public-outside-grants')
+		};
+		await putTestCache(
+			await issueServerSignedToken(adminGrants()),
+			cache,
+			'public'
+		);
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify([{ type: 'cupboard_cache', cache }])
+		});
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = readAccessResponseSchema.parse(await response.json());
+		const claims = decodeJwt(result.access_token);
+		expect({
+			grants: result.authorization_details,
+			tokenGrants: claims.authorization_details,
+			refresh: result.refresh_token,
+			rule: claims.cb_rule,
+			rules: claims.cb_rules
+		}).toStrictEqual({
+			grants: [],
+			tokenGrants: [],
+			refresh: undefined,
+			rule: 'read-rule',
+			rules: undefined
+		});
+	});
+
+	it('refuses private authority from a lower-precedence matching read rule', async () => {
+		const { subject, resources } = await installComposedReadRules();
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { oidcTrust } })
+				.update(oidcTrust)
+				.set({ claimsJson: '{}' })
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('read-rule')))
+				.run();
+		});
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(resources.slice(0, 2))
+		});
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description:
+					"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'b'.",
+				problem: 'read-resources-not-permitted',
+				detail: {
+					read_resources: JSON.stringify([
+						{
+							type: 'cupboard_cache',
+							actions: ['cache:content-read'],
+							cache: { kind: 'named', name: 'b' }
+						}
+					])
+				}
+			}
+		});
+	});
+
+	it('deduplicates overlapping read grants and preserves single-rule audit compatibility', async () => {
+		const { subject, resources } = await installComposedReadRules(true);
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(resources)
+		});
+		expect(response.status).toBe(200);
+		const result = readAccessResponseSchema.parse(await response.json());
+		const decoded = decodeJwt(result.access_token);
+		expect({
+			grants: result.authorization_details,
+			rule: decoded.cb_rule,
+			rules: decoded.cb_rules
+		}).toStrictEqual({
+			grants: [
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'a' },
+					actions: ['cache:content-read']
+				},
+				{
+					type: 'cupboard_cache',
+					cache: { kind: 'named', name: 'b' },
+					actions: ['cache:content-read']
+				},
+				{
+					type: 'cupboard_view',
+					view: 'sources',
+					actions: ['view:content-read']
+				}
+			],
+			rule: 'read-rule',
+			rules: undefined
+		});
+	});
+
+	it.each([
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'write-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'read-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'write-rule',
+			replace: false,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: false,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: true,
+			priorNarrow: false
+		},
+		{
+			kind: 'explicit',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: true,
+			priorNarrow: false
+		},
+		{
+			kind: 'read',
+			removed: 'read-rule',
+			replace: true,
+			restrictive: false,
+			priorNarrow: true
+		}
+	])(
+		'rechecks $kind current policy after $removed removal (replacement: $replace, higher tier: $restrictive)',
+		async ({ kind, removed, replace, restrictive, priorNarrow }) => {
+			const { subject, resources } =
+				await installComposedReadRules(priorNarrow);
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const identity = new TenantIdentityService(instance.context);
+					const authKeys = new AuthKeysService(instance.context, identity);
+					const trust = new OidcTrustService(instance.context, identity);
+					if (priorNarrow) {
+						const original = trust.getRule(trustRuleIdSchema.parse(removed));
+						instance.context.db
+							.update(oidcTrust)
+							.set({
+								claimsJson: JSON.stringify({
+									...original.claims,
+									iss: original.issuer
+								})
+							})
+							.where(eq(oidcTrust.id, original.id))
+							.run();
+					}
+					const key = await authKeys.activeAuthKey();
+					const signingStarted = Promise.withResolvers<undefined>();
+					const releaseSigning = Promise.withResolvers<undefined>();
+					vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
+						signingStarted.resolve(undefined);
+						await releaseSigning.promise;
+						return key;
+					});
+					const service = new TokenExchangeService(
+						instance.context,
+						authKeys,
+						trust
+					);
+					const requested = resources.map((resource) =>
+						resource.type === 'cupboard_cache'
+							? {
+									type: resource.type,
+									cache: resource.cache,
+									actions: ['cache:content-read']
+								}
+							: {
+									type: resource.type,
+									view: resource.view,
+									actions: ['view:content-read']
+								}
+					);
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type:
+								kind === 'read' ? readAccessGrantType : tokenExchangeGrantType,
+							subject_token: subject,
+							subject_token_type: subjectTokenTypeIdToken,
+							...(kind === 'read'
+								? { read_resources: JSON.stringify(resources) }
+								: {
+										authorization_details: JSON.stringify(requested)
+									})
+						}).toString()
+					});
+					const issuing = service.handleToken(rootLogger(), request);
+					await signingStarted.promise;
+					try {
+						const rule = trust.getRule(trustRuleIdSchema.parse(removed));
+						trust.removeRule(rule.id);
+						if (replace) {
+							await trust.addRule({
+								issuer: rule.issuer,
+								audience: rule.audience,
+								claims: restrictive
+									? { ...rule.claims, iss: rule.issuer }
+									: priorNarrow
+										? { sub: 'alice' }
+										: rule.claims,
+								permittedGrants: restrictive
+									? []
+									: [
+											...rule.permittedGrants,
+											{
+												type: 'cupboard_cache',
+												actions: ['cache:content-read'],
+												resources: {
+													cache: {
+														kind: 'named',
+														exact: 'extra',
+														validate: 'cacheName'
+													}
+												}
+											}
+										]
+							});
+						}
+					} finally {
+						releaseSigning.resolve(undefined);
+					}
+					try {
+						const response = await issuing;
+						const result = (
+							kind === 'read' ? readAccessResponseSchema : tokenResponseSchema
+						).parse(await response.json());
+						expect({
+							grants: result.authorization_details,
+							tokenGrants: decodeJwt(result.access_token).authorization_details
+						}).toStrictEqual({ grants: requested, tokenGrants: requested });
+						return 'issued';
+					} catch (error) {
+						expect(error).toBeInstanceOf(
+							kind === 'read'
+								? ReadResourcesNotPermittedError
+								: TenantSubjectTokenUntrustedError
+						);
+						return 'refused';
+					}
+				}
+			);
+			expect(result).toBe(replace && !restrictive ? 'issued' : 'refused');
+		}
+	);
+
+	it.each(['cache becomes private', 'content grant is removed'])(
+		'reports requested authority when %s during signing',
+		async (change) => {
+			const { subject, resources } = await installComposedReadRules();
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const identity = new TenantIdentityService(instance.context);
+					const authKeys = new AuthKeysService(instance.context, identity);
+					const trust = new OidcTrustService(instance.context, identity);
+					instance.context.db
+						.update(cacheIdentities)
+						.set({ access: 'public' })
+						.run();
+					if (change === 'cache becomes private') {
+						instance.context.db
+							.update(oidcTrust)
+							.set({ permittedGrantsJson: '[]' })
+							.run();
+					}
+					const key = await authKeys.activeAuthKey();
+					const signingStarted = Promise.withResolvers<undefined>();
+					const releaseSigning = Promise.withResolvers<undefined>();
+					vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
+						signingStarted.resolve(undefined);
+						await releaseSigning.promise;
+						return key;
+					});
+					const service = new TokenExchangeService(
+						instance.context,
+						authKeys,
+						trust
+					);
+					const readResources = JSON.stringify(resources.slice(0, 1));
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: readAccessGrantType,
+							subject_token: subject,
+							subject_token_type: subjectTokenTypeIdToken,
+							read_resources: readResources
+						})
+					});
+					const issuing = service.handleToken(rootLogger(), request);
+					await signingStarted.promise;
+					try {
+						if (change === 'cache becomes private') {
+							instance.context.db
+								.update(cacheIdentities)
+								.set({ access: 'private' })
+								.run();
+						} else if (change === 'content grant is removed') {
+							instance.context.db
+								.update(oidcTrust)
+								.set({ permittedGrantsJson: '[]' })
+								.run();
+						}
+					} finally {
+						releaseSigning.resolve(undefined);
+					}
+					try {
+						await issuing;
+						return 'issued';
+					} catch (error) {
+						if (!(error instanceof OAuthError)) {
+							throw error;
+						}
+						return {
+							status: error.status,
+							body: {
+								error: error.error,
+								error_description: error.message,
+								problem: error.problem,
+								detail: error.detail
+							}
+						};
+					}
+				}
+			);
+			expect(result).toStrictEqual({
+				status: 400,
+				body: {
+					error: 'invalid_authorization_details',
+					error_description:
+						"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'a'.",
+					problem: 'read-resources-not-permitted',
+					detail: {
+						read_resources: JSON.stringify([
+							{
+								type: 'cupboard_cache',
+								actions: ['cache:content-read'],
+								cache: { kind: 'named', name: 'a' }
+							}
+						])
+					}
+				}
+			});
+		}
+	);
+
+	it('identifies genuinely uncovered grants after composing matching rules', async () => {
+		await installTrustedIdp('write');
+		const subject = await installTrustedIdp('read');
+		const caches = ['a', 'b', 'c'].map((name) => ({
+			kind: 'named' as const,
+			name: cacheNameSchema.parse(name)
+		}));
+		const administrator = await issueServerSignedToken(adminGrants());
+		for (const cache of caches) {
+			await putTestCache(administrator, cache, 'private');
+		}
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			const database = drizzle(state.storage, { schema: { oidcTrust } });
+			for (const rule of [
+				{ id: 'write-rule', cache: 'a' },
+				{ id: 'read-rule', cache: 'b' }
+			]) {
+				database
+					.update(oidcTrust)
+					.set({
+						permittedGrantsJson: JSON.stringify([
+							{
+								type: 'cupboard_cache',
+								actions: ['cache:content-read'],
+								resources: {
+									cache: {
+										kind: 'named',
+										exact: rule.cache,
+										validate: 'cacheName'
+									}
+								}
+							}
+						])
+					})
+					.where(eq(oidcTrust.id, trustRuleIdSchema.parse(rule.id)))
+					.run();
+			}
+		});
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(
+				caches.map((cache) => ({
+					type: 'cupboard_cache',
+					cache,
+					mode: 'content'
+				}))
+			)
+		});
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: 400,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description:
+					"The matching trust rules do not permit the requested read_resources. Add cache:content-read for cache 'c'.",
+				problem: 'read-resources-not-permitted',
+				detail: {
+					read_resources: JSON.stringify([
+						{
+							type: 'cupboard_cache',
+							actions: ['cache:content-read'],
+							cache: { kind: 'named', name: 'c' }
+						}
+					])
+				}
+			}
+		});
+	});
+
+	it('acquires exact content grants for several private caches in one session', async () => {
+		const subject = await installTrustedIdp('admin');
+		const ciCache = {
+			kind: 'named' as const,
+			name: cacheNameSchema.parse('ci')
+		};
+		const falconCache = {
+			kind: 'named' as const,
+			name: cacheNameSchema.parse('falcon')
+		};
+		const scopes: CacheScope[] = [{ kind: 'default' }, ciCache, falconCache];
+		const administrator = await issueServerSignedToken(adminGrants());
+		await putTestCache(administrator, ciCache, 'private');
+		await putTestCache(administrator, falconCache, 'private');
+		const resources = scopes.map((cache) => ({
+			type: 'cupboard_cache' as const,
+			cache,
+			mode: 'content' as const
+		}));
+		const response = await postToken({
+			grant_type: readAccessGrantType,
+			subject_token: subject,
+			subject_token_type: subjectTokenTypeIdToken,
+			read_resources: JSON.stringify(resources)
+		});
+		const result = readAccessResponseSchema.parse(await response.json());
+		const grants = scopes.map((cache) => ({
+			type: 'cupboard_cache',
+			cache,
+			actions: ['cache:content-read']
+		}));
+		expect({
+			status: response.status,
+			expires: result.expires_in,
+			refresh: result.refresh_token,
+			grants: result.authorization_details,
+			facts: result.read_resources,
+			jwtGrants: decodeJwt(result.access_token).authorization_details
+		}).toStrictEqual({
+			status: 200,
+			expires: 900,
+			refresh: undefined,
+			grants,
+			facts: resources.map((resource) => ({
+				...resource,
+				state: {
+					kind: 'existing',
+					access: resource.cache.kind === 'default' ? 'public' : 'private',
+					priority: 40
+				}
+			})),
+			jwtGrants: grants
+		});
+	});
+
+	it.each([undefined, 'legacy-rule'])(
+		'accepts an existing read token with legacy audit rule %s without reacquisition',
+		async (auditRule) => {
+			const cache: CacheScope = {
+				kind: 'named',
+				name: cacheNameSchema.parse('legacy-private')
+			};
+			await putTestCache(
+				await issueServerSignedToken(adminGrants()),
+				cache,
+				'private'
+			);
+			const token = await issueServerSignedToken(
+				[{ type: 'cupboard_cache', cache, actions: ['cache:content-read'] }],
+				'legacy-session',
+				auditRule === undefined ? undefined : { cb_rule: auditRule }
+			);
+			const claims = decodeJwt(token);
+			const isAuthorised = await currentServer().authoriseCacheContentRead(
+				token,
+				cache
+			);
+			expect({
+				authorised: isAuthorised,
+				rule: claims.cb_rule,
+				rules: claims.cb_rules
+			}).toStrictEqual({ authorised: true, rule: auditRule, rules: undefined });
+		}
+	);
 
 	it.each(['content', 'metadata'] as const)(
 		'keeps interactive read acquisition short-lived and read-only for %s intent',
@@ -1095,6 +1884,302 @@ async function staleRefreshOutcome(refreshToken: string): Promise<{
 describe('refresh grant', () => {
 	beforeEach(resetTestServer);
 
+	it('issues client-contained refresh authority with only replay metadata in active storage', async () => {
+		const subject = await installTrustedIdp('admin');
+		const response = await exchange(subject);
+		const parts = response.refresh_token?.split('.') ?? [];
+		expect(parts).toEqual([
+			expect.any(String),
+			expect.any(String),
+			expect.any(String)
+		]);
+		const encodedPayload = (parts[2] ?? '')
+			.replaceAll('-', '+')
+			.replaceAll('_', '/');
+		const payloadJson = new TextDecoder().decode(base64ToBytes(encodedPayload));
+		const payload: unknown = JSON.parse(payloadJson);
+		const stored = await runInDurableObject(currentServer(), (instance) => ({
+			tenant: instance.context.requireTenant(),
+			families: instance.context.db.select().from(refreshTokenFamilies).all(),
+			members: instance.context.db.select().from(refreshTokenMembers).all()
+		}));
+		const family = stored.families[0];
+		if (family === undefined) {
+			throw new Error('Expected a refresh family');
+		}
+		const identity = Object.fromEntries(
+			Object.entries(decodeJwt(subject)).filter(
+				([key, value]) => typeof value === 'string' || key === 'aud'
+			)
+		);
+		expect({
+			payload,
+			familyFields: Object.keys(family).toSorted(byCodeUnit),
+			memberFields: Object.keys(stored.members[0] ?? {}).toSorted(byCodeUnit)
+		}).toStrictEqual({
+			payload: {
+				purpose: 'cupboard-refresh',
+				version: 1,
+				tenant: stored.tenant,
+				familyId: family.id,
+				memberId: family.activeMemberId,
+				generation: 0,
+				expiresAt: family.expiresAt,
+				identity,
+				grants: [{ type: 'cupboard_wildcard' }]
+			},
+			familyFields: [
+				'activeMemberId',
+				'createdAt',
+				'expiresAt',
+				'generation',
+				'id'
+			],
+			memberFields: [
+				'createdAt',
+				'credentialHash',
+				'familyId',
+				'generation',
+				'id',
+				'successorEnvelope',
+				'successorExpiresAt'
+			]
+		});
+	});
+
+	it.each(['rotation', 'retry'] as const)(
+		'renews %s under equivalent current policy after the original rule is removed',
+		async (mode) => {
+			const original = await exchange(await installTrustedIdp('admin'));
+			if (mode === 'retry') {
+				const first = await refresh(original.refresh_token ?? '');
+				expect(first.status).toBe(200);
+				await first.text();
+			}
+			await runInDurableObject(currentServer(), async (instance) => {
+				const trust = new OidcTrustService(
+					instance.context,
+					new TenantIdentityService(instance.context)
+				);
+				const existing = trust.getRule(trustRuleIdSchema.parse('admin-rule'));
+				trust.removeRule(existing.id);
+				await trust.addRule({
+					issuer: existing.issuer,
+					audience: existing.audience,
+					claims: existing.claims,
+					permittedGrants: existing.permittedGrants
+				});
+			});
+			const renewed = await refresh(original.refresh_token ?? '');
+			expect({
+				status: renewed.status,
+				grants: tokenResponseSchema.safeParse(await renewed.json()).data
+					?.authorization_details
+			}).toStrictEqual({
+				status: 200,
+				grants: [{ type: 'cupboard_wildcard' }]
+			});
+		}
+	);
+
+	it.each([
+		{ operation: 'cache:close', explicitRead: false, permitted: true },
+		{ operation: 'cache:read', explicitRead: false, permitted: false },
+		{ operation: 'cache:content-read', explicitRead: false, permitted: false },
+		{ operation: 'cache:close', explicitRead: true, permitted: true },
+		{ operation: 'cache:read', explicitRead: true, permitted: true },
+		{ operation: 'cache:content-read', explicitRead: true, permitted: false }
+	])(
+		'checks close-only $operation during issuance, attenuation and refresh (explicit metadata read: $explicitRead)',
+		async ({ operation, explicitRead, permitted }) => {
+			const cache = namedCache('gh-1234-pr-7');
+			const actions = explicitRead
+				? ['cache:close', 'cache:read']
+				: ['cache:close'];
+			const ceiling = [{ type: 'cupboard_cache', cache, actions }];
+			const requested = [
+				{ type: 'cupboard_cache', cache, actions: [operation] }
+			];
+			const subject = await installTrustedIdp('admin');
+			const original = await exchange(subject, ceiling);
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.delete(oidcTrust)
+					.where(eq(oidcTrust.id, trustRuleIdSchema.parse('admin-rule')))
+					.run();
+			});
+			await installAdditionalTrustRule(
+				'close-pattern',
+				storedPermittedGrantsSchema.parse([
+					{
+						type: 'cupboard_cache',
+						actions,
+						resources: {
+							cache: {
+								kind: 'named',
+								pattern: '^gh-1234-pr-[0-9]+$',
+								validate: 'cacheName'
+							}
+						}
+					}
+				])
+			);
+			const issuance = await postToken({
+				grant_type: tokenExchangeGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				authorization_details: JSON.stringify(requested)
+			});
+			const attenuation = await attenuate(original.access_token, requested);
+			const refreshed = await postToken({
+				grant_type: refreshTokenGrantType,
+				refresh_token: original.refresh_token ?? '',
+				authorization_details: JSON.stringify(requested)
+			});
+			const outcomes = [];
+			for (const response of [issuance, attenuation, refreshed]) {
+				outcomes.push({
+					status: response.status,
+					grants: tokenResponseSchema.safeParse(await response.json()).data
+						?.authorization_details
+				});
+			}
+			const expected = {
+				status: permitted ? 200 : 400,
+				grants: permitted ? requested : undefined
+			};
+			expect(outcomes).toStrictEqual([expected, expected, expected]);
+		}
+	);
+
+	it('rechecks named-cache patterns when a refresh session rotates', async () => {
+		const requested = [
+			{
+				type: 'cupboard_cache',
+				cache: namedCache('gh-1234-pr-7'),
+				actions: ['cache:close']
+			}
+		];
+		const original = await exchange(
+			await installTrustedIdp('admin'),
+			requested
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.delete(oidcTrust)
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('admin-rule')))
+				.run();
+		});
+		await installAdditionalTrustRule('pattern-close', [
+			{
+				type: 'cupboard_cache',
+				actions: ['cache:close'],
+				resources: {
+					cache: {
+						kind: 'named',
+						pattern: '^gh-1234-pr-[0-9]+$',
+						validate: 'cacheName'
+					}
+				}
+			}
+		]);
+		const renewed = await refresh(original.refresh_token ?? '');
+		const body = tokenResponseSchema.parse(await renewed.json());
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(oidcTrust)
+				.set({
+					permittedGrantsJson: JSON.stringify([
+						{
+							type: 'cupboard_cache',
+							actions: ['cache:close'],
+							resources: {
+								cache: {
+									kind: 'named',
+									pattern: '^gh-9999-pr-[0-9]+$',
+									validate: 'cacheName'
+								}
+							}
+						}
+					])
+				})
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('pattern-close')))
+				.run();
+		});
+		expect({
+			originalStatus: original.status,
+			renewedStatus: renewed.status,
+			grants: body.authorization_details,
+			revoked: await staleRefreshOutcome(body.refresh_token ?? '')
+		}).toStrictEqual({
+			originalStatus: 200,
+			renewedStatus: 200,
+			grants: requested,
+			revoked: {
+				status: 400,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			}
+		});
+	});
+
+	it('redeems and rotates an issued credential near the request size limit', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const large = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const credential = RefreshCredential.parse(
+					exchanged.refresh_token ?? ''
+				);
+				if (credential === undefined) {
+					throw new Error('Expected refresh credential');
+				}
+				const member = instance.context.db
+					.select()
+					.from(refreshTokenMembers)
+					.where(eq(refreshTokenMembers.id, credential.id))
+					.get();
+				if (member === undefined) {
+					throw new Error('Expected refresh member');
+				}
+				const authority = await credential.authenticate(
+					member.credentialHash,
+					instance.context.requireTenant()
+				);
+				if (authority === undefined) {
+					throw new Error('Expected authenticated authority');
+				}
+				const large = RefreshCredential.issue({
+					...authority,
+					identity: {
+						...refreshPolicyIdentity(authority.identity),
+						extraClaim: 'x'.repeat(48_000)
+					}
+				});
+				instance.context.db
+					.update(refreshTokenMembers)
+					.set({ credentialHash: await sha256Hex(large.value) })
+					.where(eq(refreshTokenMembers.id, member.id))
+					.run();
+				return large.value;
+			}
+		);
+		const response = await refresh(large);
+		const result = tokenResponseSchema.parse(await response.json());
+		expect({
+			status: response.status,
+			nearLimit: large.length > refreshCredentialMaxBytes - 1500,
+			withinLimit:
+				(result.refresh_token?.length ?? Infinity) <= refreshCredentialMaxBytes,
+			grants: result.authorization_details
+		}).toStrictEqual({
+			status: 200,
+			nearLimit: true,
+			withinLimit: true,
+			grants: [{ type: 'cupboard_wildcard' }]
+		});
+	});
+
 	it('rotates an admin refresh token and rejects its replay', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
@@ -1128,19 +2213,14 @@ describe('refresh grant', () => {
 		});
 	});
 
-	// The cache-scope migration discards every refresh-token family, because a
-	// stored family carries the grants it was issued with and those name their
-	// cache in the retired grammar. A client presenting a token from before the
-	// cutover must therefore be told its grant is invalid, which is the signal
-	// that sends it back to the identity-token exchange.
-	it('refuses a refresh token whose family the cutover discarded', async () => {
+	it('refuses a refresh token whose replay state was removed', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
-			state.storage.sql.exec('DELETE FROM refresh_token_member');
-			state.storage.sql.exec('DELETE FROM refresh_token_family');
+			state.storage.sql.exec('DELETE FROM refresh_session_member');
+			state.storage.sql.exec('DELETE FROM refresh_session_family');
 		});
 
 		expect(await staleRefreshOutcome(refreshToken)).toStrictEqual({
@@ -1313,7 +2393,7 @@ describe('refresh grant', () => {
 		const firstResponse = await refresh(original);
 		const first = tokenResponseSchema.parse(await firstResponse.json());
 		const [originalId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -1352,7 +2432,7 @@ describe('refresh grant', () => {
 		const firstResponse = await refresh(original);
 		const first = tokenResponseSchema.parse(await firstResponse.json());
 		const [originalId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -1570,12 +2650,20 @@ describe('refresh grant', () => {
 			authorization_details: JSON.stringify(narrowed)
 		});
 		const matched = tokenResponseSchema.parse(await matchedResponse.json());
+		const implicitResponse = await refresh(original);
+		const implicitRetry = tokenResponseSchema.parse(
+			await implicitResponse.json()
+		);
 		const families = await refreshTokenRows();
 
 		expect({
 			mismatched: {
 				status: mismatched.status,
 				problem: oauthErrorShape(await mismatched.json()).problem
+			},
+			implicitRetry: {
+				refreshToken: implicitRetry.refresh_token,
+				grants: implicitRetry.authorization_details
 			},
 			matched: {
 				refreshToken: matched.refresh_token,
@@ -1589,6 +2677,7 @@ describe('refresh grant', () => {
 				status: StatusCodes.BAD_REQUEST,
 				problem: 'stale-refresh-token'
 			},
+			implicitRetry: { refreshToken: first.refresh_token, grants: narrowed },
 			matched: {
 				refreshToken: first.refresh_token,
 				grants: narrowed
@@ -1648,7 +2737,7 @@ describe('refresh grant', () => {
 		const second = tokenResponseSchema.parse(await secondResponse.json());
 		const active = second.refresh_token ?? '';
 		const [activeMemberId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(active.split('.'));
 		const beforeReplay = {
 			families: await refreshTokenRows(),
@@ -1705,7 +2794,7 @@ describe('refresh grant', () => {
 			(_instance, state) =>
 				state.storage.sql
 					.exec(
-						'SELECT generation, successor_envelope FROM refresh_token_member ORDER BY generation'
+						'SELECT generation, successor_envelope FROM refresh_session_member ORDER BY generation'
 					)
 					.toArray()
 		);
@@ -1788,10 +2877,10 @@ describe('refresh grant', () => {
 			);
 			const successor = refreshed.refresh_token ?? '';
 			const [originalId, originalSecret] = z
-				.tuple([z.uuid(), z.string().min(1)])
+				.tuple([z.uuid(), z.string().min(1), z.string()])
 				.parse(original.split('.'));
 			const [successorId, successorSecret] = z
-				.tuple([z.uuid(), z.string().min(1)])
+				.tuple([z.uuid(), z.string().min(1), z.string()])
 				.parse(successor.split('.'));
 			const hash = async (secret: string): Promise<string> =>
 				[
@@ -1805,19 +2894,19 @@ describe('refresh grant', () => {
 					.map((byte) => byte.toString(16).padStart(2, '0'))
 					.join('');
 			const [originalHash, successorHash] = await Promise.all([
-				hash(originalSecret),
-				hash(successorSecret)
+				hash(original),
+				hash(successor)
 			]);
 			const persisted = await runInDurableObject(
 				currentServer(),
 				(_instance, state) => ({
 					families: state.storage.sql
 						.exec(
-							'SELECT id, active_member_id, generation, rule_id, subject, created_at, expires_at FROM refresh_token_family'
+							'SELECT id, active_member_id, generation, created_at, expires_at FROM refresh_session_family'
 						)
 						.toArray(),
 					members: state.storage.sql
-						.exec('SELECT * FROM refresh_token_member ORDER BY generation')
+						.exec('SELECT * FROM refresh_session_member ORDER BY generation')
 						.toArray(),
 					legacy: {
 						live: state.storage.sql
@@ -1832,6 +2921,7 @@ describe('refresh grant', () => {
 				...persisted,
 				members: persisted.members.map((member) => ({
 					...member,
+					successor_expires_at: member.successor_expires_at ?? undefined,
 					successor_envelope: typeof member.successor_envelope
 				}))
 			};
@@ -1842,7 +2932,7 @@ describe('refresh grant', () => {
 				containsSuccessorSecret: serialised.includes(successorSecret),
 				envelopeFormat:
 					typeof envelope === 'string' &&
-					/^[\da-f]{24}\.[\da-f]{160}$/u.test(envelope)
+					/^[\da-f]{24}\.(?:[\da-f]{2}){17,}$/u.test(envelope)
 			}).toStrictEqual({
 				persisted: {
 					families: [
@@ -1850,8 +2940,6 @@ describe('refresh grant', () => {
 							id: persisted.families[0]?.id,
 							active_member_id: successorId,
 							generation: 1,
-							rule_id: 'admin-rule',
-							subject: 'alice',
 							created_at: '2026-01-01T00:00:00.000Z',
 							expires_at: '2026-01-31T00:00:00.000Z'
 						}
@@ -1861,16 +2949,18 @@ describe('refresh grant', () => {
 							id: originalId,
 							family_id: persisted.families[0]?.id,
 							generation: 0,
-							secret_hash: originalHash,
+							credential_hash: originalHash,
 							successor_envelope: 'string',
+							successor_expires_at: '2026-01-01T00:01:00.000Z',
 							created_at: '2026-01-01T00:00:00.000Z'
 						},
 						{
 							id: successorId,
 							family_id: persisted.families[0]?.id,
 							generation: 1,
-							secret_hash: successorHash,
+							credential_hash: successorHash,
 							successor_envelope: 'object',
+							successor_expires_at: undefined,
 							created_at: '2026-01-01T00:00:00.000Z'
 						}
 					],
@@ -1940,9 +3030,9 @@ describe('refresh grant', () => {
 	it('revokes a rapidly rotated family at its member bound', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
-		const original = exchanged.refresh_token ?? '';
+		let original = exchanged.refresh_token ?? '';
 		const [originalMemberId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -1957,12 +3047,12 @@ describe('refresh grant', () => {
 			const activeGeneration = maxRefreshTokenFamilyMembers - 2;
 
 			state.storage.sql.exec(
-				'UPDATE refresh_token_family SET generation = ? WHERE id = ?',
+				'UPDATE refresh_session_family SET generation = ? WHERE id = ?',
 				activeGeneration,
 				family.id
 			);
 			state.storage.sql.exec(
-				'UPDATE refresh_token_member SET generation = ? WHERE id = ?',
+				'UPDATE refresh_session_member SET generation = ? WHERE id = ?',
 				activeGeneration,
 				originalMemberId
 			);
@@ -1975,7 +3065,7 @@ describe('refresh grant', () => {
 				   CROSS JOIN digits AS hundreds
 				   CROSS JOIN digits AS thousands
 				 )
-				 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+				 INSERT INTO refresh_session_member (id, family_id, generation, credential_hash, created_at)
 				 SELECT printf('spent-%d', value), ?, value, lower(hex(randomblob(32))), ?
 				 FROM generations
 				 WHERE value < ?`,
@@ -1985,6 +3075,35 @@ describe('refresh grant', () => {
 			);
 		});
 
+		original = await runInDurableObject(currentServer(), async (instance) => {
+			const credential = RefreshCredential.parse(original);
+			const member = instance.context.db
+				.select()
+				.from(refreshTokenMembers)
+				.where(eq(refreshTokenMembers.id, originalMemberId))
+				.get();
+			if (credential === undefined || member === undefined) {
+				throw new Error('Expected refresh member');
+			}
+			const authority = await credential.authenticate(
+				member.credentialHash,
+				instance.context.requireTenant()
+			);
+			if (authority === undefined) {
+				throw new Error('Expected authenticated refresh authority');
+			}
+			const updated = RefreshCredential.issue({
+				...authority,
+				identity: refreshPolicyIdentity(authority.identity),
+				generation: maxRefreshTokenFamilyMembers - 2
+			});
+			instance.context.db
+				.update(refreshTokenMembers)
+				.set({ credentialHash: await sha256Hex(updated.value) })
+				.where(eq(refreshTokenMembers.id, originalMemberId))
+				.run();
+			return updated.value;
+		});
 		const lastAllowedResponse = await refresh(original);
 		const lastAllowed = tokenResponseSchema.parse(
 			await lastAllowedResponse.json()
@@ -2083,7 +3202,7 @@ describe('refresh grant', () => {
 			])
 			.parse(outcomes);
 		const [firstId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(first.refreshToken.split('.'));
 		const families = await refreshTokenRows();
 		const members = await refreshTokenMemberRows();
@@ -2298,81 +3417,199 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('refuses a refresh completed after its trust rule is removed', async () => {
-		const subjectToken = await installTrustedIdp('admin');
-		const exchanged = await exchange(subjectToken);
-		const ruleId = trustRuleIdSchema.parse('admin-rule');
+	it.each([
+		'removed',
+		'equivalent replacement',
+		'broader current tier',
+		'narrower current tier'
+	] as const)(
+		'checks current policy when %s during signing',
+		async (change) => {
+			const subjectToken = await installTrustedIdp('admin', {
+				claims: { team: 'engineering' }
+			});
+			const exchanged = await exchange(subjectToken, ciRequest);
+			const ruleId = trustRuleIdSchema.parse('admin-rule');
 
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const signingStarted = Promise.withResolvers<undefined>();
+					const releaseSigning = Promise.withResolvers<undefined>();
+					const tenantIdentity = new TenantIdentityService(instance.context);
+					const authKeys = new AuthKeysService(
+						instance.context,
+						tenantIdentity
+					);
+					const oidcTrustService = new OidcTrustService(
+						instance.context,
+						tenantIdentity
+					);
+					const key = await authKeys.activeAuthKey();
+
+					vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
+						signingStarted.resolve(undefined);
+						await releaseSigning.promise;
+
+						return key;
+					});
+
+					const service = new TokenExchangeService(
+						instance.context,
+						authKeys,
+						oidcTrustService
+					);
+					const parameters = new URLSearchParams({
+						grant_type: refreshTokenGrantType,
+						refresh_token: exchanged.refresh_token ?? ''
+					});
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: parameters.toString()
+					});
+					const refreshing = service.handleToken(rootLogger(), request);
+
+					await signingStarted.promise;
+
+					try {
+						const existing = oidcTrustService.getRule(ruleId);
+						oidcTrustService.removeRule(ruleId);
+						if (change !== 'removed') {
+							await oidcTrustService.addRule({
+								issuer: existing.issuer,
+								audience: existing.audience,
+								claims:
+									change === 'broader current tier'
+										? {}
+										: change === 'narrower current tier'
+											? { ...existing.claims, team: 'engineering' }
+											: existing.claims,
+								permittedGrants:
+									change === 'narrower current tier'
+										? storedPermittedGrantsSchema.parse(
+												trustClassGrants['release-write']
+											)
+										: existing.permittedGrants
+							});
+						}
+						if (change === 'narrower current tier') {
+							await oidcTrustService.addRule({
+								issuer: existing.issuer,
+								audience: existing.audience,
+								claims: {},
+								permittedGrants: storedPermittedGrantsSchema.parse(
+									trustClassGrants.write
+								)
+							});
+						}
+					} finally {
+						releaseSigning.resolve(undefined);
+					}
+
+					let result: { readonly kind: 'refused' | 'issued' };
+
+					try {
+						await refreshing;
+						result = { kind: 'issued' };
+					} catch (error) {
+						expect(error).toBeInstanceOf(StaleRefreshTokenError);
+						result = { kind: 'refused' };
+					}
+
+					const database = drizzle(state.storage, {
+						schema: { refreshTokenFamilies, refreshTokenMembers }
+					});
+
+					return {
+						result,
+						familyGenerations: database
+							.select()
+							.from(refreshTokenFamilies)
+							.all()
+							.map((family) => family.generation),
+						memberGenerations: database
+							.select()
+							.from(refreshTokenMembers)
+							.all()
+							.map((member) => member.generation)
+					};
+				}
+			);
+
+			const isPermitted =
+				change === 'equivalent replacement' ||
+				change === 'broader current tier';
+			expect(outcome).toStrictEqual({
+				result: { kind: isPermitted ? 'issued' : 'refused' },
+				familyGenerations: isPermitted ? [1] : [],
+				memberGenerations: isPermitted ? [0, 1] : []
+			});
+		}
+	);
+
+	it('does not create a fresh refresh session when current policy permits only CI authority', async () => {
+		const subject = await installTrustedIdp('admin');
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				const signingStarted = Promise.withResolvers<undefined>();
-				const releaseSigning = Promise.withResolvers<undefined>();
-				const tenantIdentity = new TenantIdentityService(instance.context);
-				const authKeys = new AuthKeysService(instance.context, tenantIdentity);
-				const oidcTrustService = new OidcTrustService(
-					instance.context,
-					tenantIdentity
-				);
-				const key = await authKeys.activeAuthKey();
-
-				vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
-					signingStarted.resolve(undefined);
-					await releaseSigning.promise;
-
-					return key;
-				});
-
-				const service = new TokenExchangeService(
-					instance.context,
-					authKeys,
-					oidcTrustService
-				);
-				const parameters = new URLSearchParams({
-					grant_type: refreshTokenGrantType,
-					refresh_token: exchanged.refresh_token ?? ''
-				});
-				const request = new Request(new URL('/token', currentOrigin()), {
-					method: 'POST',
-					headers: { 'content-type': 'application/x-www-form-urlencoded' },
-					body: parameters.toString()
-				});
-				const refreshing = service.handleToken(rootLogger(), request);
-
-				await signingStarted.promise;
-
+				const identity = new TenantIdentityService(instance.context);
+				const keys = new AuthKeysService(instance.context, identity);
+				const trust = new OidcTrustService(instance.context, identity);
+				const service = new TokenExchangeService(instance.context, keys, trust);
+				const activeAuthKey = keys.activeAuthKey.bind(keys);
+				const spy = vi
+					.spyOn(keys, 'activeAuthKey')
+					.mockImplementation(async () => {
+						const existing = trust.getRule(
+							trustRuleIdSchema.parse('admin-rule')
+						);
+						trust.removeRule(existing.id);
+						await trust.addRule({
+							issuer: existing.issuer,
+							audience: existing.audience,
+							claims: existing.claims,
+							permittedGrants: storedPermittedGrantsSchema.parse(
+								trustClassGrants.write
+							)
+						});
+						return activeAuthKey();
+					});
 				try {
-					oidcTrustService.removeRule(ruleId);
+					const endpoint = new URL('/token', currentOrigin());
+					const request = new Request(endpoint, {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: tokenExchangeGrantType,
+							subject_token: subject,
+							subject_token_type: subjectTokenTypeIdToken,
+							authorization_details: JSON.stringify(ciRequest)
+						}).toString()
+					});
+					const response = await service.handleToken(rootLogger(), request);
+					const result = tokenResponseSchema.parse(await response.json());
+					return {
+						status: response.status,
+						refresh: result.refresh_token,
+						grants: result.authorization_details,
+						families: drizzle(state.storage, {
+							schema: { refreshTokenFamilies }
+						})
+							.select()
+							.from(refreshTokenFamilies)
+							.all()
+					};
 				} finally {
-					releaseSigning.resolve(undefined);
+					spy.mockRestore();
 				}
-
-				let result: { readonly kind: 'refused' | 'issued' };
-
-				try {
-					await refreshing;
-					result = { kind: 'issued' };
-				} catch (error) {
-					expect(error).toBeInstanceOf(StaleRefreshTokenError);
-					result = { kind: 'refused' };
-				}
-
-				const database = drizzle(state.storage, {
-					schema: { refreshTokenFamilies, refreshTokenMembers }
-				});
-
-				return {
-					result,
-					families: database.select().from(refreshTokenFamilies).all(),
-					members: database.select().from(refreshTokenMembers).all()
-				};
 			}
 		);
-
 		expect(outcome).toStrictEqual({
-			result: { kind: 'refused' },
-			families: [],
-			members: []
+			status: 200,
+			refresh: undefined,
+			grants: ciRequest,
+			families: []
 		});
 	});
 
@@ -2434,7 +3671,7 @@ describe('refresh grant', () => {
 				.insert(refreshTokenMembers)
 				.values({
 					...blocking,
-					secretHash: '0'.repeat(64),
+					credentialHash: '0'.repeat(64),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
@@ -2639,7 +3876,7 @@ describe('refresh grant', () => {
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
 		const [memberId] = z
-			.tuple([z.uuid(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string()])
 			.parse(refreshToken.split('.'));
 		const forged = await staleRefreshOutcome(`${memberId}.deadbeef`);
 		const valid = await refresh(refreshToken);
@@ -2798,17 +4035,17 @@ describe('refresh grant', () => {
 					])
 					.parse(database.select().from(refreshTokenFamilies).all());
 				state.storage.sql.exec(
-					"UPDATE refresh_token_family SET expires_at = '2019-01-01T00:00:00.000Z', generation = ? WHERE id = ?",
+					"UPDATE refresh_session_family SET expires_at = '2019-01-01T00:00:00.000Z', generation = ? WHERE id = ?",
 					spentMembers,
 					largeFamily.id
 				);
 				state.storage.sql.exec(
-					'UPDATE refresh_token_member SET generation = ? WHERE id = ?',
+					'UPDATE refresh_session_member SET generation = ? WHERE id = ?',
 					spentMembers,
 					largeFamily.activeMemberId
 				);
 				state.storage.sql.exec(
-					"UPDATE refresh_token_family SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+					"UPDATE refresh_session_family SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
 					smallFamily.id
 				);
 				state.storage.sql.exec(
@@ -2820,7 +4057,7 @@ describe('refresh grant', () => {
 					   CROSS JOIN digits AS hundreds
 					   CROSS JOIN digits AS thousands
 					 )
-					 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+					 INSERT INTO refresh_session_member (id, family_id, generation, credential_hash, created_at)
 					 SELECT printf('gc-spent-%d', value), ?, value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
 					 FROM generations
 					 WHERE value < ?`,
@@ -2910,104 +4147,6 @@ describe('refresh grant', () => {
 			families: [],
 			members: [],
 			continuation: undefined
-		});
-	});
-});
-
-function registerCaches(): Promise<void> {
-	return runInDurableObject(currentServer(), (instance) => {
-		instance.context.cacheRepository.resolveOrCreate(
-			{ kind: 'named', name: cacheNameSchema.parse('ci') },
-			'private'
-		);
-		instance.context.cacheRepository.resolveOrCreate(
-			{ kind: 'named', name: cacheNameSchema.parse('docs') },
-			'public'
-		);
-	});
-}
-
-// The grants of every refresh-token family as the object stores them.
-function familyGrants(): Promise<unknown[]> {
-	return runInDurableObject(currentServer(), (_instance, state) => {
-		const rows = state.storage.sql
-			.exec<{ grants_json: string }>(
-				'SELECT grants_json FROM refresh_token_family'
-			)
-			.toArray();
-
-		return rows.map((row) => {
-			const stored: unknown = JSON.parse(row.grants_json);
-
-			return stored;
-		});
-	});
-}
-
-describe('stored spelling of a refresh-token family', () => {
-	beforeEach(resetTestServer);
-	afterEach(() => {
-		vi.unstubAllGlobals();
-	});
-
-	const grants = [
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: { kind: 'default' }
-		},
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: namedCache('ci'),
-			root: 'pr-1'
-		},
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: namedCache('docs')
-		}
-	];
-	const selectorSpelling = [
-		{ type: 'cupboard_cache', actions: ['upload:commit'], cache: '_default' },
-		{
-			type: 'cupboard_cache',
-			actions: ['upload:commit'],
-			cache: '_private-ci',
-			root: 'pr-1'
-		},
-		{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'docs' }
-	];
-
-	it.each([
-		{
-			name: 'the selector spelling until `cache-identity` is complete',
-			state: 'expanded' as const,
-			stored: selectorSpelling
-		},
-		{
-			name: 'the scope spelling once `cache-identity` is complete',
-			state: 'complete' as const,
-			stored: grants
-		}
-	])("records a family's grants in $name", async ({ state, stored }) => {
-		await recordTransition('cache-identity', state);
-		const subjectToken = await installTrustedIdp('admin');
-		await registerCaches();
-
-		const exchanged = await exchange(subjectToken, grants);
-		const atIssue = await familyGrants();
-		const refreshed = await refresh(exchanged.refresh_token ?? '');
-		const refreshedBody = tokenResponseSchema.parse(await refreshed.json());
-
-		expect({
-			atIssue,
-			afterRefresh: await familyGrants(),
-			issued: refreshedBody.authorization_details
-		}).toStrictEqual({
-			atIssue: [stored],
-			afterRefresh: [stored],
-			issued: grants
 		});
 	});
 });
@@ -3201,7 +4340,7 @@ describe('requested grants', () => {
 		});
 	});
 
-	it('refuses tied rules that both permit the requested authority', async () => {
+	it('deterministically composes overlapping explicit authority', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const overlappingGrant: PermittedGrant = {
 			type: 'cupboard_cache',
@@ -3218,20 +4357,87 @@ describe('requested grants', () => {
 			subject_token_type: subjectTokenTypeIdToken,
 			authorization_details: JSON.stringify(ciRequest)
 		});
-		const body = oauthErrorShape(await response.json());
-
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = tokenResponseSchema.parse(await response.json());
+		const claims = decodeJwt(result.access_token);
 		expect({
-			status: response.status,
-			problem: body.problem,
-			detail: body.detail
+			grants: result.authorization_details,
+			tokenGrants: claims.authorization_details,
+			refresh: result.refresh_token,
+			rule: claims.cb_rule,
+			rules: claims.cb_rules
 		}).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			problem: 'subject-token-untrusted',
-			detail: undefined
+			grants: ciRequest,
+			tokenGrants: ciRequest,
+			refresh: undefined,
+			rule: 'overlapping-rule',
+			rules: undefined
 		});
 	});
 
-	it('does not combine requested authority from separate rules', async () => {
+	it.each(['run/1', 'other/1'])(
+		'composes actions for the same cache without extending root authority to %s',
+		async (root) => {
+			const subject = await installTrustedIdp('write');
+			await installAdditionalTrustRule('retain-rule', [
+				{
+					type: 'cupboard_cache',
+					actions: ['root:set'],
+					resources: {
+						cache: { kind: 'named', exact: 'ci', validate: 'cacheName' },
+						root: { exact: 'run/', validate: 'rootName' }
+					}
+				}
+			]);
+			const requested = [
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('ci'),
+					actions: ['upload:commit', 'root:set'],
+					root
+				}
+			];
+			const response = await postToken({
+				grant_type: tokenExchangeGrantType,
+				subject_token: subject,
+				subject_token_type: subjectTokenTypeIdToken,
+				authorization_details: JSON.stringify(requested)
+			});
+			if (root === 'other/1') {
+				expect({
+					status: response.status,
+					body: await response.json()
+				}).toStrictEqual({
+					status: StatusCodes.BAD_REQUEST,
+					body: {
+						error: 'invalid_authorization_details',
+						error_description:
+							'The requested authorization_details are not permitted',
+						problem: 'not-permitted'
+					}
+				});
+				return;
+			}
+			expect(response.status).toBe(StatusCodes.OK);
+			const result = tokenResponseSchema.parse(await response.json());
+			const claims = decodeJwt(result.access_token);
+			expect({
+				grants: result.authorization_details,
+				tokenGrants: claims.authorization_details,
+				refresh: result.refresh_token,
+				rule: claims.cb_rule,
+				rules: claims.cb_rules
+			}).toStrictEqual({
+				grants: requested,
+				tokenGrants: requested,
+				refresh: undefined,
+				rule: undefined,
+				rules: undefined
+			});
+		}
+	);
+
+	it('composes exact explicit authority from separate rules without refresh', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const privateGrant: PermittedGrant = {
 			type: 'cupboard_cache',
@@ -3256,16 +4462,21 @@ describe('requested grants', () => {
 			subject_token_type: subjectTokenTypeIdToken,
 			authorization_details: JSON.stringify(requested)
 		});
-		const body = oauthErrorShape(await response.json());
-
-		expect({ status: response.status, body }).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			body: {
-				error: 'invalid_authorization_details',
-				error_description:
-					'The requested authorization_details are not permitted',
-				problem: 'not-permitted'
-			}
+		expect(response.status).toBe(StatusCodes.OK);
+		const result = tokenResponseSchema.parse(await response.json());
+		const claims = decodeJwt(result.access_token);
+		expect({
+			grants: result.authorization_details,
+			tokenGrants: claims.authorization_details,
+			refresh: result.refresh_token,
+			rule: claims.cb_rule,
+			rules: claims.cb_rules
+		}).toStrictEqual({
+			grants: requested,
+			tokenGrants: requested,
+			refresh: undefined,
+			rule: undefined,
+			rules: undefined
 		});
 	});
 

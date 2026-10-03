@@ -6,6 +6,7 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type SessionId,
 	type UploadId,
+	uploadIdSchema,
 	type UploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -21,11 +22,13 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import { chunk, maxOutgoingConnections, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 import { requireSubrequestsFor } from './subrequest-slice.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
+import { WorkSequenceService } from './work-sequence-service.ts';
 
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 
@@ -37,6 +40,8 @@ type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 // still missing records the hash again.
 const missingCanonicalNarPrefix = 'uploads:missing-canonical-nar:';
 const pendingNarRefreshPrefix = 'uploads:pending-nar-refresh:';
+const pendingNarRefreshMigrationCursorKey =
+	'uploads:pending-nar-refresh-migration-cursor';
 const missingCanonicalNarTtlMs = 60 * 60 * 1000;
 // Durable Object storage reads at most this many keys in one call.
 const maxStorageKeysPerGet = 128;
@@ -45,12 +50,18 @@ function missingCanonicalNarKey(narHash: NixSha256HashString): string {
 	return `${missingCanonicalNarPrefix}${narHash}`;
 }
 
-function pendingNarRefreshKey(uploadId: UploadId): string {
-	return `${pendingNarRefreshPrefix}${uploadId}`;
-}
-
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
+
+	private setPendingNarRefresh(uploadId: UploadId): boolean {
+		const rows = this.context.db
+			.update(schema.pendingUploads)
+			.set({ narRefreshPending: true })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.returning({ id: schema.pendingUploads.id })
+			.all();
+		return rows.length === 1;
+	}
 
 	// Reuse visibility is tenant-scoped. Joining through `tenant_blob` exposes a
 	// canonical blob only after this tenant has established its own presence edge,
@@ -173,19 +184,87 @@ export class UploadStateService {
 	}
 
 	async markPendingNarRefresh(uploadId: UploadId): Promise<void> {
-		await this.context.ctx.storage.put(pendingNarRefreshKey(uploadId), true);
-	}
-
-	async hasPendingNarRefresh(uploadId: UploadId): Promise<boolean> {
-		return (
-			(await this.context.ctx.storage.get<boolean>(
-				pendingNarRefreshKey(uploadId)
-			)) === true
+		if (!this.setPendingNarRefresh(uploadId)) {
+			return;
+		}
+		// Older builds read this key after canonical activation.
+		await this.context.ctx.storage.put(
+			`${pendingNarRefreshPrefix}${uploadId}`,
+			true
 		);
 	}
 
-	async clearPendingNarRefresh(uploadId: UploadId): Promise<void> {
-		await this.context.ctx.storage.delete(pendingNarRefreshKey(uploadId));
+	hasPendingNarRefresh(uploadId: UploadId): boolean {
+		return (
+			this.context.db
+				.select({ pending: schema.pendingUploads.narRefreshPending })
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.get()?.pending ?? false
+		);
+	}
+
+	clearPendingNarRefresh(uploadId: UploadId): void {
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ narRefreshPending: false })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	}
+
+	async clearDeliveredNarRefresh(uploadId: UploadId): Promise<void> {
+		await this.context.ctx.storage.delete(
+			`${pendingNarRefreshPrefix}${uploadId}`
+		);
+		this.clearPendingNarRefresh(uploadId);
+	}
+
+	async migratePendingNarRefreshMarkers(uploadId?: UploadId): Promise<void> {
+		const key = `${pendingNarRefreshPrefix}${uploadId ?? ''}`;
+		const cursor =
+			uploadId === undefined
+				? await this.context.ctx.storage.get<string>(
+						pendingNarRefreshMigrationCursorKey
+					)
+				: undefined;
+		const records =
+			uploadId === undefined
+				? await this.context.ctx.storage.list({
+						prefix: pendingNarRefreshPrefix,
+						limit: maxStorageKeysPerGet,
+						...(cursor !== undefined && { startAfter: cursor })
+					})
+				: await this.context.ctx.storage.get([key]);
+		const obsolete: string[] = [];
+		for (const [key, pending] of records) {
+			const parsedUploadId = uploadIdSchema.safeParse(
+				key.slice(pendingNarRefreshPrefix.length)
+			);
+			if (
+				pending === true &&
+				parsedUploadId.success &&
+				this.setPendingNarRefresh(parsedUploadId.data)
+			) {
+				continue;
+			}
+			obsolete.push(key);
+		}
+		if (obsolete.length > 0) {
+			await this.context.ctx.storage.delete(obsolete);
+		}
+		if (uploadId !== undefined) {
+			return;
+		}
+		const last = records.keys().toArray().at(-1);
+		if (last !== undefined && records.size === maxStorageKeysPerGet) {
+			await this.context.ctx.storage.put(
+				pendingNarRefreshMigrationCursorKey,
+				last
+			);
+			await armAlarmNoLaterThan(this.context.ctx.storage, Date.now());
+			return;
+		}
+		await this.context.ctx.storage.delete(pendingNarRefreshMigrationCursorKey);
 	}
 
 	/**
@@ -306,6 +385,10 @@ export class UploadStateService {
 			return false;
 		}
 
+		await this.context.ctx.storage.delete(
+			`${pendingNarRefreshPrefix}${uploadId}`
+		);
+
 		if (r2Key !== narObjectKey(narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);
 		}
@@ -313,8 +396,8 @@ export class UploadStateService {
 		return true;
 	}
 
-	// A new verification drive supersedes any existing claim lease. Clearing
-	// `claimedAt` makes the row immediately eligible for the next pass.
+	// A new verification drive supersedes the claim lease. The retry deadline
+	// and failure budget remain unchanged.
 	markUploadPending(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
@@ -362,15 +445,17 @@ export class UploadStateService {
 	// re-drives `committing`; a null verdict still means that commit work has not
 	// begun.
 	markUploadCommitting(uploadId: UploadId): void {
-		this.context.db
-			.update(schema.pendingUploads)
-			.set({
-				verdict: 'committing',
-				claimedAt: sql`null`,
-				claimOwner: sql`null`
-			})
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.run();
+		this.context.db.transaction((tx) => {
+			tx.update(schema.pendingUploads)
+				.set({
+					verdict: 'committing',
+					commitStartedSequence: sql`coalesce(${schema.pendingUploads.commitStartedSequence}, ${new WorkSequenceService(tx).allocate()})`,
+					claimedAt: sql`null`,
+					claimOwner: sql`null`
+				})
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.run();
+		});
 	}
 
 	// Keep a deferred upload's terminal verdict so `push --wait` and the status
@@ -395,7 +480,11 @@ export class UploadStateService {
 
 		const updated = this.context.db
 			.update(schema.pendingUploads)
-			.set({ verdict, expiresAt: isoTimestamp(expiresAt) })
+			.set({
+				verdict,
+				acceptedExpiresAt: sql`coalesce(${schema.pendingUploads.acceptedExpiresAt}, ${schema.pendingUploads.expiresAt})`,
+				expiresAt: isoTimestamp(expiresAt)
+			})
 			.where(
 				and(eq(schema.pendingUploads.id, uploadId), awaitingFilter, ownerFilter)
 			)

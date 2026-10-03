@@ -35,6 +35,27 @@ jobs:
 
           echo "version=v${INPUT_VERSION#v}" >> "${GITHUB_OUTPUT}"
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check release preparation
+        env:
+          INPUT_VERSION: ${{ steps.version.outputs.version }}
+        run: >
+          node --experimental-transform-types
+          --disable-warning=ExperimentalWarning scripts/release.ts
+          check-preparation
+
   build:
     name: build ${{ matrix.asset-platform }} ${{ matrix.asset-arch }}
     needs: validate
@@ -65,6 +86,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
+
+      - name: Check flake reproducibility
+        shell: bash
+        run: |
+          nix build .#cupboard --no-link --option builders ''
+          nix build .#cupboard --no-link --rebuild --keep-failed --option builders ''
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 

@@ -42,6 +42,13 @@ describe('jobWorkflowReferenceClaim', () => {
 });
 
 describe('expandAllow', () => {
+	it('grants content reads without publishing or root authority', () => {
+		expect(expandAllow(['read'])).toStrictEqual({
+			cacheActions: ['cache:content-read'],
+			rootActions: []
+		});
+	});
+
 	it('expands the shorthands into cache and root actions', () => {
 		expect(expandAllow(['push', 'root', 'attest', 'attach'])).toStrictEqual({
 			cacheActions: [

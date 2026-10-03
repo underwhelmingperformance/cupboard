@@ -84,6 +84,15 @@ export class BuildInstallablesMissingError extends UsageError {
 	}
 }
 
+export class BuildPublicationUrlMissingError extends UsageError {
+	constructor() {
+		super(
+			'Set publication-url when substituter is leave so the destination cache is excluded from external availability'
+		);
+		this.name = 'BuildPublicationUrlMissingError';
+	}
+}
+
 export class BuildInstallableInvalidError extends UsageError {
 	constructor(public readonly installables: readonly string[]) {
 		super(
@@ -106,6 +115,33 @@ export class BuildObservationMissingError extends CodedError {
 			`build: rebuild did not observe a build for ${storePaths.join(', ')}; check the selected Nix store and its build logs`
 		);
 		this.name = 'BuildObservationMissingError';
+	}
+}
+
+export class SimpleBuiltPublicationUnsupportedError extends UsageError {
+	constructor() {
+		super(
+			'The build-paths action cannot observe all build intermediates. Use the flake publishing workflow for publish: built, or select publish: outputs or closure.'
+		);
+		this.name = 'SimpleBuiltPublicationUnsupportedError';
+	}
+}
+
+export class BuiltPublicationObservationUnsupportedError extends UsageError {
+	constructor() {
+		super(
+			'publish: built cannot observe all build intermediates in a remote store. Publish from a local store with a supported post-build hook, or select publish: outputs or closure.'
+		);
+		this.name = 'BuiltPublicationObservationUnsupportedError';
+	}
+}
+
+export class BuildProvenanceConflictError extends UsageError {
+	constructor() {
+		super(
+			'require-provenance: true conflicts with build: missing. Remove require-provenance and set build: rebuild to preserve the execution guarantee.'
+		);
+		this.name = 'BuildProvenanceConflictError';
 	}
 }
 
@@ -1134,7 +1170,9 @@ export class CacheAccessProbeError extends CodedError {
 
 export class StaticReadCredentialRejectedError extends CodedError {
 	constructor(public readonly url: URL) {
-		super(`The configured read credential was rejected by ${url.href}`);
+		super(
+			`The configured read credential was rejected by ${url.href}. For a private reuse view, supply the tenant read credential or remove the static pair and use OIDC with view:content-read authority.`
+		);
 		this.name = 'StaticReadCredentialRejectedError';
 	}
 }
@@ -1518,7 +1556,12 @@ export class CommandFailedError extends CodedError {
 
 export interface RemoteCohortBuildFailure {
 	readonly target: string;
-	readonly kind: 'dependency' | 'dependency-protocol' | 'target' | 'protocol';
+	readonly kind:
+		| 'dependency'
+		| 'dependency-protocol'
+		| 'target'
+		| 'protocol'
+		| 'verification';
 	readonly outcome: string;
 	readonly message: string;
 }
@@ -1849,6 +1892,13 @@ export class ProvisionCacheResultError extends CodedError {
 	}
 }
 
+export class ReadCachesInvalidError extends UsageError {
+	constructor(reason: string) {
+		super(`Invalid read-caches input. ${reason}`);
+		this.name = 'ReadCachesInvalidError';
+	}
+}
+
 export class ReadConfigurationUnavailableError extends CodedError {
 	constructor() {
 		super(
@@ -1864,14 +1914,5 @@ export class ReadConfigurationFailedError extends CodedError {
 			`Could not configure Nix read access: cupboard run exited with status ${String(status)}`
 		);
 		this.name = 'ReadConfigurationFailedError';
-	}
-}
-
-export class ReadConfigurationScopeError extends CodedError {
-	constructor() {
-		super(
-			'Automatic OIDC read access in setup supports one destination cache and an optional reuse view. Supply static read credentials when configuring several caches.'
-		);
-		this.name = 'ReadConfigurationScopeError';
 	}
 }

@@ -13,6 +13,7 @@ import {
 import { readUserSchema } from '@cupboard/shared/http';
 import {
 	createExecutionContext,
+	runInDurableObject,
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -39,6 +40,7 @@ import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
+import { cacheCatalogueVersion } from '../migration/cache-access.ts';
 import {
 	isReadPasswordMatching,
 	readPasswordHashSchema,
@@ -49,6 +51,7 @@ import {
 	defaultCache,
 	flakyD1,
 	issueTokenForTenant,
+	migrateThrough,
 	provisionNamedTenant,
 	testServerFor
 } from '../test-support.ts';
@@ -91,6 +94,32 @@ function createBody(
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
 		ownerAudience: 'aud'
+	});
+}
+
+async function prepareColdMigrationTenant(slug: string): Promise<void> {
+	await provisionNamedTenant(slug, {
+		defaultCacheAccess: 'private',
+		configure: false
+	});
+	await database()
+		.update(d1Schema.tenant)
+		.set({ cacheCatalogueVersion })
+		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(slug)))
+		.run();
+	await runInDurableObject(testServerFor(slug), async (_instance, state) => {
+		await migrateThrough(state, 42);
+		state.storage.sql.exec(
+			"INSERT INTO tenant_identity (id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version) VALUES ('singleton', ?, 'https://tenant.test', 'https://tenant.test', 'https://owner.test', 'owner', 'https://owner.test', 1)",
+			slug
+		);
+		for (let index = 0; index < 3001; index++) {
+			state.storage.sql.exec(
+				'INSERT INTO cache (name, priority, created_at) VALUES (?, 40, ?)',
+				`cache-${String(index)}`,
+				'2026-01-01T00:00:00.000Z'
+			);
+		}
 	});
 }
 
@@ -519,6 +548,46 @@ describe('layered admission gate', () => {
 			status: response.status,
 			retryAfter: response.headers.get('retry-after')
 		}).toStrictEqual({ status: 503, retryAfter: '5' });
+	});
+
+	it('returns migration admission before authenticating a cold private content read', async () => {
+		const slug = 'cold-content-read-migration';
+		await prepareColdMigrationTenant(slug);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request(`https://cache.example/t/${slug}/nix-cache-info`, {
+				headers: {
+					authorization: `Basic ${btoa('cupboard-oidc:cupboard-access+jwt:invalid')}`
+				}
+			}),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+		expect({
+			status: response.status,
+			retryAfter: response.headers.get('retry-after'),
+			cacheControl: response.headers.get('cache-control'),
+			body: await response.text()
+		}).toStrictEqual({
+			status: 503,
+			retryAfter: '1',
+			cacheControl: 'no-store',
+			body: 'Tenant migration is still in progress; retry shortly\n'
+		});
+	});
+
+	it('admits migrations before checking cold negotiation hint credentials', async () => {
+		const slug = 'cold-negotiate-hints-migration';
+		await prepareColdMigrationTenant(slug);
+		const isAuthorised = async (): Promise<boolean> =>
+			testServerFor(slug).authoriseNegotiateHints(
+				'Bearer invalid',
+				defaultCache()
+			);
+		await expect(isAuthorised()).rejects.toThrow(
+			'Durable Object migration 0043_cache_access_backfill is still running stage catalogue-cache; retry shortly'
+		);
 	});
 
 	it('reflects a tenant read credential change with no row caching', async () => {

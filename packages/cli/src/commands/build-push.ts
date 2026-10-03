@@ -41,7 +41,10 @@ import {
 	childExitCode,
 	runBuildPush
 } from '../build-push/build-push.ts';
-import { runCohortSequence } from '../build-push/cohorts.ts';
+import {
+	cohortSequenceFailure,
+	runCohortSequence
+} from '../build-push/cohorts.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
 import {
 	type ChildCommand,
@@ -90,7 +93,7 @@ interface BuildPushOptions {
 	readonly permanent?: boolean;
 	readonly retain?: boolean;
 	readonly closure?: boolean;
-	readonly publicationScope?: 'outputs' | 'closure';
+	readonly publicationScope?: 'outputs' | 'built' | 'closure';
 	readonly substituter?: 'leave' | 'copy';
 	readonly intermediatePathsFile?: string;
 	readonly runRoot?: RootName;
@@ -109,7 +112,12 @@ interface BuildPushOptions {
 const commandCohortSchema = z.strictObject({
 	command: z.array(z.string().min(1)).min(1)
 });
+const dependencyBuildSchema = z.strictObject({
+	path: storePathSchema,
+	installables: z.array(z.string().min(1)).min(1)
+});
 const constructedCohortSchema = z.strictObject({
+	dependencyBuilds: z.array(dependencyBuildSchema).optional(),
 	installables: z.array(z.string().min(1)).min(1),
 	attempts: z.number().int().positive().optional(),
 	rebuild: z.boolean().optional(),
@@ -216,6 +224,9 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 			kind: 'constructed',
 			build: {
 				installables: cohort.installables,
+				...(cohort.dependencyBuilds !== undefined && {
+					dependencyBuilds: cohort.dependencyBuilds
+				}),
 				...(cohort.attempts !== undefined && { attempts: cohort.attempts }),
 				...(cohort.rebuild !== undefined && { rebuild: cohort.rebuild }),
 				...(cohort.requireProvenance !== undefined && {
@@ -466,9 +477,9 @@ export function registerBuildPushCommand(
 		.addOption(
 			new Option(
 				'--publication-scope <scope>',
-				'Control which paths build-push publishes for installable cohorts. `outputs` publishes the selected outputs; `closure` also publishes their runtime references. Publication starts after the build.'
+				'Control which paths build-push publishes for installable cohorts. `outputs` publishes the selected outputs; `built` also publishes observed build intermediates; `closure` also publishes their runtime references. Publication starts after the build.'
 			)
-				.choices(['outputs', 'closure'])
+				.choices(['outputs', 'built', 'closure'])
 				.conflicts(['closure', 'intermediatePathsFile'])
 		)
 		.addOption(
@@ -526,7 +537,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--keep-going-cohorts',
-			'run the remaining cohorts after one fails. The exit status is still that of the first cohort to fail.'
+			'run the remaining cohorts after one fails. The first failure without validated target-build evidence determines the exit status; otherwise the first target build failure does.'
 		)
 		.addHelpText(
 			'after',
@@ -540,7 +551,8 @@ export function registerBuildPushCommand(
 				"fails, build-push exits with the build's own status. If the build",
 				'succeeds but publishing or updating the root fails, build-push exits',
 				'with 77 for a sign-in or permission failure, 75 for a temporary',
-				'failure, 69 when something that publishing needs is unavailable, or',
+				'failure, 69 when something that publishing needs is unavailable, 2 for',
+				'an invalid argument or an upload request that exceeds its limit, or',
 				'74 for any other publishing failure.',
 				'',
 				'Examples:',
@@ -774,7 +786,7 @@ export function registerBuildPushCommand(
 							})
 						}
 					);
-					const [firstFailure] = result.failures;
+					const failure = cohortSequenceFailure(result.failures);
 
 					if (cohorts.length > 1 && options.receiptFile !== undefined) {
 						const receipt = multiCohortReceiptDocument(
@@ -791,7 +803,7 @@ export function registerBuildPushCommand(
 						await updateAggregateCohortRoot(
 							{
 								cohortCount: cohorts.length,
-								failed: firstFailure !== undefined,
+								failed: failure !== undefined,
 								root: targetRoot,
 								settledTargets,
 								retention: rootRetentionChoice(options.ttl, options.permanent)
@@ -803,8 +815,8 @@ export function registerBuildPushCommand(
 						);
 					}
 
-					if (firstFailure !== undefined) {
-						throw firstFailure.error;
+					if (failure !== undefined) {
+						throw failure.error;
 					}
 				} finally {
 					if (sequenceDirectory !== undefined) {

@@ -9,6 +9,7 @@ import {
 	requiredLocalStepAmong,
 	requiredLocalStepFrom,
 	type SchemaTransition,
+	SchemaTransitionDependencyError,
 	schemaTransitions,
 	type TransitionId,
 	transitionIds,
@@ -145,6 +146,64 @@ describe('schemaTransitions', () => {
 	});
 });
 
+describe('path authority rollout', () => {
+	it.each([
+		{ name: 'contracted cache identity', state: 'complete', blocked: false },
+		{ name: 'expanded cache identity', state: 'expanded', blocked: true },
+		{ name: 'pending cache identity', state: undefined, blocked: true }
+	] as const)(
+		'checks $name before path authority expands',
+		({ state, blocked }) => {
+			const recorded =
+				state === undefined
+					? new Map<TransitionId, TransitionState>()
+					: states([['cache-identity', state]]);
+			const result = deferredTransition(schemaTransitions, recorded);
+			expect(
+				result === undefined
+					? undefined
+					: { transition: result.transition.id, waitsFor: result.waitsFor.id }
+			).toStrictEqual(
+				blocked
+					? {
+							transition: 'blob-reference-read-authority',
+							waitsFor: 'cache-identity'
+						}
+					: undefined
+			);
+		}
+	);
+});
+
+describe('tenant retry clock rollout', () => {
+	it('expands the retry clock while path authority awaits contraction', () => {
+		const authority = schemaTransitions.find(
+			(transition) => transition.id === 'blob-reference-read-authority'
+		);
+		const retry = schemaTransitions.find(
+			(transition) => transition.id === 'tenant-retry-clock'
+		);
+		expect(retry).toStrictEqual({
+			id: 'tenant-retry-clock',
+			expand: ['0037_tenant_retry_clock.sql'],
+			contract: [],
+			independent: true
+		});
+		if (authority === undefined || retry === undefined) {
+			throw new Error('Both transitions must be declared');
+		}
+		expect(
+			deferredTransition(
+				schemaTransitions,
+				states([
+					['cache-identity', 'complete'],
+					[authority.id, 'expanded']
+				])
+			)
+		).toBeUndefined();
+	});
+});
+
 describe('deferredTransition', () => {
 	const first: SchemaTransition<string> = {
 		id: 'first',
@@ -198,6 +257,52 @@ describe('deferredTransition', () => {
 					new Map<string, TransitionState>(recorded)
 				)
 			).toStrictEqual(deferred);
+		}
+	);
+});
+
+describe('explicit expansion prerequisites', () => {
+	const first: SchemaTransition<string> = {
+		id: 'first',
+		expand: [],
+		contract: ['0000_contract.sql']
+	};
+	const index: SchemaTransition<string> = {
+		id: 'index',
+		expand: [],
+		contract: ['0001_index.sql'],
+		independent: true
+	};
+	const authority: SchemaTransition<string> = {
+		id: 'authority',
+		expand: ['0002_authority.sql'],
+		contract: [],
+		expandAfter: ['first']
+	};
+	it.each([
+		{ state: 'complete', deferred: undefined },
+		{ state: 'expanded', deferred: { transition: authority, waitsFor: first } }
+	] as const)(
+		'checks the $state state of its declared contract',
+		({ state, deferred }) => {
+			expect(
+				deferredTransition(
+					[first, index, authority],
+					new Map([['first', state]])
+				)
+			).toStrictEqual(deferred);
+		}
+	);
+	it.each(['missing', 'authority', 'later'])(
+		'refuses an invalid prerequisite %s',
+		(dependency) => {
+			const invalid = { ...authority, expandAfter: [dependency] };
+			expect(() =>
+				deferredTransition(
+					[first, index, invalid, { id: 'later', expand: [], contract: [] }],
+					new Map()
+				)
+			).toThrow(new SchemaTransitionDependencyError('authority', dependency));
 		}
 	);
 });

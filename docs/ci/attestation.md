@@ -25,6 +25,47 @@ verify a bundle.
 [in-toto Envelope]:
   https://github.com/in-toto/attestation/blob/main/spec/v1/envelope.md
 
+## Discover stored evidence
+
+Use `cupboard attest status` to inspect stored attestation metadata for several
+published paths:
+
+```sh
+cupboard attest status https://cupboard.example.workers.dev/t/acme \
+  --paths-file published-paths.txt \
+  --predicate-type https://slsa.dev/provenance/v1
+```
+
+The report distinguishes covered paths, published paths without matching
+evidence, and missing published paths. Omit `--predicate-type` to include every
+type, or repeat the option to match any of the exact predicate URIs. Use
+`--output-mode json` for structured results. Private caches accept the read
+credential options, a configured Nix netrc, or `--github-oidc` in GitHub
+Actions. OIDC credentials renew while discovery runs, and the temporary
+credential files are removed when the check ends.
+
+A successful status check exits zero even when some paths have no evidence. Pass
+`--require-all` to exit one when any requested path lacks matching evidence.
+Invalid arguments exit two, a scope change during discovery exits 69, temporary
+service failures exit 75, and authentication refusals exit 77.
+
+Current servers support pages of up to 32 paths. The client uses bounded
+individual list reads when an older server does not advertise batch discovery.
+Authentication and storage failures fail the status check.
+
+Both publication workflows report coverage after publication and attachment,
+including when signing is disabled or produces no bundles. The report compares
+stored bundle digests with the manifest from the signing step. It lists paths
+with fresh bundles separately from paths with other stored evidence. A path can
+appear in both groups when the cache contains both kinds of evidence. All paths
+in the receipt are checked, including older receipts with build subjects for
+only some paths. The report compares the current NAR hash with the receipt's
+expected hash wherever a subject records that hash.
+
+Discovery reports stored descriptors. Use `attest verify` to check the bundle's
+signature, signer, issuer, predicate and NAR subject. Stored evidence does not
+change build selection or suppress provenance for a fresh local rebuild.
+
 ## How a bundle refers to a store path
 
 Each attestation lists its **subjects**: the things that it makes claims about.
@@ -142,11 +183,27 @@ job's OIDC token, when Fulcio refuses to issue a certificate, or when the signed
 bundle fails the action's own check.
 
 If attachment fails, retained bundle files can be passed to
-`actions/attest-attach` again. A rerun that reuses an output does not recreate
-build provenance for the earlier attempt. Set `build: rebuild` when the new run
-must execute each requested builder again and produce fresh build evidence. Nix
-may still substitute dependencies, and delegated builders or selected remote
-stores do not produce runner-local SLSA provenance.
+`actions/attest-attach` again. For a manual retry, `cupboard attest attach`
+accepts `--bundle` for each bundle file or `--bundles-file` for the manifest
+produced by `actions/attest`. The existing `--attestation` and
+`--attestations-file` options are equivalent. `cupboard push` also accepts
+`--bundle` and `--attestation`. Repeated bundle options append files in argument
+order. The manifest options accept one path; supplying different paths fails
+with usage status 2 before authentication.
+
+`cupboard attest attach` also accepts `--paths-file` with one store path or
+local link per line. File entries are always path payload, so they cannot select
+a cache. Invalid path entries report the file and line number. Before acquiring
+credentials, the command validates file entries and unambiguous positional
+paths, and reads and parses bundle files. The first positional argument can also
+select a named cache. Resolving an ambiguous cache argument requires
+authentication. Invalid or unreadable input files exit with usage status 2.
+
+A rerun that reuses an output does not recreate build provenance for the earlier
+attempt. Set `build: rebuild` when the new run must execute each requested
+builder again and produce fresh build evidence. Nix may still substitute
+dependencies, and delegated builders or selected remote stores do not produce
+runner-local SLSA provenance.
 
 ## Attestations of reused paths
 
@@ -160,10 +217,12 @@ the tenant, it can inherit attestations for the same store path and NAR:
 Bundles in another private cache stay in that cache, even if the destination
 later becomes public. Inheritance runs after publication. While a destination
 publication or inheritance is pending, cupboard keeps eligible source
-attestation references so the destination can inherit them. If the source bundle
-was already unavailable when publication began, the destination cannot inherit
-it. A transient failure leaves inheritance queued for another attempt. A quota
-refusal removes the pending item.
+attestation references so the destination can inherit them. An explicit path
+deletion revokes reads from the source immediately. Only destination work that
+was eligible when deletion began can inherit those protected references. If the
+source bundle was already unavailable when publication began, the destination
+cannot inherit it. A transient failure leaves inheritance queued for another
+attempt. A quota refusal removes the pending item.
 
 The destination creates its own CAS reference and attestation list for the
 committed path. Both refer to the original bundle bytes and signature. The
@@ -219,12 +278,14 @@ where it may publish records. For `tsa-only` and `rekor-and-tsa` bundles, it
 then checks each bundle's timestamp or log entry, signature, predicate type and
 subjects before writing the bundle.
 
-By default, the action writes bundles beside the checksums file under
-`$RUNNER_TEMP/cupboard-attestations/`. The manifest is
-`$RUNNER_TEMP/cupboard-attest/bundles.txt`; `bundles-file` returns its path and
-lists all bundle files, one per line. Pass `bundles-file` to
-`actions/attest-attach`, and run that step only when `bundles-file` is not
-empty. [Writing your own publishing job][custom-jobs] shows the steps.
+By default, each action invocation writes subject files in a unique directory
+under `$RUNNER_TEMP/cupboard-attestations/`. Each signing step writes its
+bundles, signed checksums and `bundles.txt` manifest in a separate unique
+directory under `$RUNNER_TEMP/`, including when explicit subject files share a
+directory. `bundles-file` returns the manifest path and lists all bundle files,
+one per line. Pass `bundles-file` to `actions/attest-attach`, and run that step
+only when `bundles-file` is not empty. [Writing your own publishing
+job][custom-jobs] shows the steps.
 
 [custom-jobs]: ./custom-jobs.md
 
@@ -282,6 +343,12 @@ The command needs three things to check against:
   `--certificate-identity-regex`;
 - the issuer of that identity, with `--certificate-oidc-issuer` or
   `--certificate-oidc-issuer-regex`.
+
+Pass exactly one identity option and one issuer option. Missing or conflicting
+options and invalid regular expressions exit with usage status 2 before the
+command reads a bundle or cache content. Remote verification also requires
+exactly one of `--trusted-public-key` or `--trust-cache-pubkey`; a missing or
+conflicting narinfo trust source exits with status 2 before any cache request.
 
 For bundles signed in GitHub Actions, the issuer is
 `https://token.actions.githubusercontent.com`. The identity is the workflow that

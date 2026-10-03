@@ -414,7 +414,7 @@ describe('blob reaper', () => {
 			seed: () => seedBlobStates([syntheticNarHash(1)]),
 			reference: () =>
 				env.CUPBOARD_DB.prepare(
-					"INSERT INTO blob_ref (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES ('v1', ?, 'default', '00000000000000000000000000000000', 1, 1)"
+					"INSERT INTO blob_ref_storage (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES ('v1', ?, 'default', '00000000000000000000000000000000', 1, 1)"
 				)
 					.bind(syntheticNarHash(1))
 					.run(),
@@ -432,7 +432,7 @@ describe('blob reaper', () => {
 			seed: () => seedCasObjects([syntheticCasDigest(1)]),
 			reference: () =>
 				env.CUPBOARD_DB.prepare(
-					"INSERT INTO attestation_ref (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES ('v1', ?, 'default', '00000000000000000000000000000000', 1, 'https://slsa.dev/provenance/v1')"
+					"INSERT INTO attestation_ref_storage (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES ('v1', ?, 'default', '00000000000000000000000000000000', 1, 'https://slsa.dev/provenance/v1')"
 				)
 					.bind(syntheticCasDigest(1))
 					.run(),

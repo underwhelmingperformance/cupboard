@@ -8,11 +8,11 @@ import {
 	type NixStoreConfig
 } from '@cupboard/nix';
 import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
+import { isSameCacheScope } from '@cupboard/nix-store/scalars';
 import {
 	readAccessFileEnvironment,
 	type ReadResource,
-	readTokenBasicUser,
-	readTokenPasswordPrefix
+	readResourcesSchema
 } from '@cupboard/protocol/read-access';
 import {
 	type ReuseViewName,
@@ -23,7 +23,10 @@ import { type Command, InvalidArgumentError } from 'commander';
 
 import { throwIfAborted } from '../abort.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
-import { fetchGithubOidcToken } from '../auth/github-oidc.ts';
+import {
+	issueGithubReadCredential,
+	type IssueGithubReadCredentialInput
+} from '../auth/github-read-credential.ts';
 import {
 	type ReadCredentialLease,
 	type ReadCredentialSessionOptions,
@@ -32,21 +35,23 @@ import {
 import { childExitCode } from '../build-push/build-push.ts';
 import {
 	type ChildCommand,
+	type ChildExit,
 	type RunChild,
 	runChild
 } from '../build-push/supervisor.ts';
 import type { CacheTarget } from '../cache-target.ts';
 import { cacheTargetFromUrl } from '../cache-target.ts';
 import type { ProgramOptions } from '../cli.ts';
-import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
-import { CliError } from '../errors.ts';
+import { CliError, CliUsageError } from '../errors.ts';
 
 interface RunOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly reuseView?: ReuseViewName;
 	readonly cacheMetadata?: boolean;
+	readonly readCache?: readonly CacheTarget[];
+	readonly readCacheMetadata?: readonly CacheTarget[];
 }
 
 interface ViewTarget {
@@ -56,23 +61,13 @@ interface ViewTarget {
 
 type ReadTarget = CacheTarget | ViewTarget;
 
-interface IssueReadCredentialInput {
-	readonly target: ReadTarget;
-	readonly audience: Audience;
-	readonly resources: readonly ReadResource[];
-	readonly signal: AbortSignal;
-	readonly now: () => number;
-	readonly fetcher: typeof fetch;
-	readonly environment: NodeJS.ProcessEnv;
-}
-
 export interface RunReadAccessDependencies {
 	readonly environment?: NodeJS.ProcessEnv;
 	readonly storeConfig?: NixStoreConfig;
 	readonly readFile?: (file: string, encoding: 'utf8') => Promise<string>;
 	readonly fetcher?: typeof fetch;
 	readonly issue?: (
-		input: IssueReadCredentialInput
+		input: IssueGithubReadCredentialInput
 	) => Promise<ReadCredentialLease>;
 	readonly runChild?: RunChild;
 	readonly signal?: AbortSignal;
@@ -82,12 +77,36 @@ export interface RunReadAccessDependencies {
 	>;
 }
 
+export class RunReadAccessOptionsError extends CliUsageError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'RunReadAccessOptionsError';
+	}
+}
+
 export class UnreadableReadCredentialFileError extends CliError {
 	constructor(file: string) {
 		super(
 			`Cannot preserve credentials from the configured Nix netrc at ${file}. Make the file readable before requesting temporary read access.`
 		);
 		this.name = 'UnreadableReadCredentialFileError';
+	}
+}
+
+export class RunExecutableNotFoundError extends CliError {
+	constructor(
+		readonly executable: string,
+		options: ErrorOptions
+	) {
+		super(
+			`Command executable '${executable}' was not found. Install it or pass its full path.`,
+			options
+		);
+		this.name = 'RunExecutableNotFoundError';
+	}
+
+	override get exitCode(): number {
+		return 127;
 	}
 }
 
@@ -121,12 +140,62 @@ export async function runWithReadAccess(
 	const environment = dependencies.environment ?? process.env;
 
 	if (options.githubOidc !== true) {
+		if (
+			options.audience !== undefined ||
+			options.reuseView !== undefined ||
+			options.cacheMetadata === true ||
+			(options.readCache?.length ?? 0) > 0 ||
+			(options.readCacheMetadata?.length ?? 0) > 0
+		) {
+			throw new RunReadAccessOptionsError(
+				'--audience, --reuse-view, --cache-metadata, --read-cache and --read-cache-metadata require --github-oidc.'
+			);
+		}
 		await runOwnedChild(command, environment, dependencies);
 
 		return;
 	}
 
+	const additionalCaches = [
+		...(options.readCache ?? []).map((target) => ({
+			target,
+			mode: 'content' as const
+		})),
+		...(options.readCacheMetadata ?? []).map((target) => ({
+			target,
+			mode: 'metadata' as const
+		}))
+	];
+	for (const { target: additional } of additionalCaches) {
+		if (additional.tenantUrl.href !== target.tenantUrl.href) {
+			throw new RunReadAccessOptionsError(
+				'Additional read caches must belong to the same tenant as the selected cache or view. Run separate commands for other tenants.'
+			);
+		}
+	}
+
 	const storeConfig = dependencies.storeConfig ?? discoverNixStoreConfig();
+	for (const configured of storeConfig.substitution.substituters) {
+		if (!URL.canParse(configured)) {
+			continue;
+		}
+		const url = new URL(configured);
+		if (
+			url.hostname !== target.tenantUrl.hostname ||
+			(url.username !== '' && url.password !== '')
+		) {
+			continue;
+		}
+		const tenantPath = /^(.*\/t\/[^/]+)(?:\/|$)/u.exec(url.pathname)?.[1];
+		if (
+			tenantPath !== undefined &&
+			tenantPath !== target.tenantUrl.pathname.replace(/\/$/u, '')
+		) {
+			throw new RunReadAccessOptionsError(
+				'A configured substituter belongs to a different tenant on the same host. Nix netrc credentials apply to a whole host. Supply complete URL credentials for the substituter of the other tenant, or use separate commands and Nix configurations.'
+			);
+		}
+	}
 	const fetcher = resilientFetcher('replay-safe', dependencies.fetcher);
 	const cache = 'cache' in target ? target.cache : undefined;
 	const targetUrl =
@@ -155,6 +224,12 @@ export async function runWithReadAccess(
 		}
 	}
 
+	if (isNetrcUnreadable) {
+		throw new UnreadableReadCredentialFileError(
+			storeConfig.fileTransfer.netrcFile
+		);
+	}
+
 	const cacheCredential =
 		targetUrl === undefined
 			? undefined
@@ -163,30 +238,8 @@ export async function runWithReadAccess(
 					storeConfig.substitution.substituters,
 					configuredNetrc
 				);
-	const requiresCacheOidc =
-		targetUrl !== undefined &&
-		(options.cacheMetadata === true || cacheCredential === undefined);
-	const viewCredential =
-		viewUrl === undefined
-			? undefined
-			: staticCredentialFor(
-					viewUrl,
-					storeConfig.substitution.substituters,
-					configuredNetrc
-				);
-	const requiresViewOidc =
-		viewUrl !== undefined && viewCredential === undefined;
-
-	if (!requiresCacheOidc && !requiresViewOidc) {
-		await runOwnedChild(command, environment, dependencies);
-		return;
-	}
-
-	if (isNetrcUnreadable) {
-		throw new UnreadableReadCredentialFileError(
-			storeConfig.fileTransfer.netrcFile
-		);
-	}
+	const requiresCacheOidc = targetUrl !== undefined;
+	const requiresViewOidc = viewUrl !== undefined;
 
 	const issue = dependencies.issue ?? issueGithubReadCredential;
 	const resources: ReadResource[] = [
@@ -202,10 +255,58 @@ export async function runWithReadAccess(
 					}
 				]
 			: []),
+		...additionalCaches.flatMap(({ target: additional, mode }, index, all) => {
+			if (
+				(cache !== undefined && isSameCacheScope(additional.cache, cache)) ||
+				all
+					.slice(0, index)
+					.some((previous) =>
+						isSameCacheScope(previous.target.cache, additional.cache)
+					)
+			) {
+				return [];
+			}
+			return [
+				{
+					type: 'cupboard_cache' as const,
+					cache: additional.cache,
+					mode
+				}
+			];
+		}),
 		...(requiresViewOidc && viewName !== undefined
 			? [{ type: 'cupboard_view' as const, view: viewName }]
 			: [])
 	];
+
+	const parsedResources = readResourcesSchema.safeParse(resources);
+	if (!parsedResources.success) {
+		throw new RunReadAccessOptionsError(
+			'A read session accepts up to sixteen distinct resources, including at most one reuse view.'
+		);
+	}
+
+	for (const resource of resources) {
+		if (resource.type === 'cupboard_cache' && resource.mode === 'metadata') {
+			continue;
+		}
+
+		const resourceUrl =
+			resource.type === 'cupboard_cache'
+				? cacheUrl(target.tenantUrl, resource.cache)
+				: reuseViewUrl(target.tenantUrl, resource.view);
+		if (
+			staticCredentialFor(
+				resourceUrl,
+				storeConfig.substitution.substituters,
+				undefined
+			) !== undefined
+		) {
+			throw new RunReadAccessOptionsError(
+				'Remove explicit substituter URL credentials for every resource requested with OIDC content access.'
+			);
+		}
+	}
 
 	await withRenewingReadCredential(
 		{
@@ -214,19 +315,25 @@ export async function runWithReadAccess(
 			...(configuredNetrc !== undefined && { existingNetrc: configuredNetrc }),
 			issue: async (signal) => {
 				const credential = await issue({
-					target,
+					tenantUrl: target.tenantUrl,
+					...(cache !== undefined && { cache }),
 					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
 					resources,
 					fetcher,
-					environment,
+					environment: {
+						requestUrl: environment.ACTIONS_ID_TOKEN_REQUEST_URL,
+						requestToken: environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN
+					},
 					signal,
 					now: dependencies.renewal?.now ?? Date.now
 				});
 
 				if (
-					!requiresViewOidc &&
 					cacheCredential !== undefined &&
-					options.cacheMetadata === true
+					resources.every(
+						(resource) =>
+							resource.type === 'cupboard_cache' && resource.mode === 'metadata'
+					)
 				) {
 					return {
 						...credential,
@@ -261,11 +368,20 @@ async function runOwnedChild(
 	environment: NodeJS.ProcessEnv,
 	dependencies: RunReadAccessDependencies
 ): Promise<void> {
-	const exit = await (dependencies.runChild ?? runChild)({
-		command,
-		environment,
-		...(dependencies.signal !== undefined && { signal: dependencies.signal })
-	});
+	let exit: ChildExit;
+	try {
+		exit = await (dependencies.runChild ?? runChild)({
+			command,
+			environment,
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		});
+	} catch (error) {
+		if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+			throw new RunExecutableNotFoundError(command[0], { cause: error });
+		}
+		throw error;
+	}
+
 	throwIfAborted(dependencies.signal);
 	if (childExitCode(exit) !== 0) {
 		throw new RunCommandFailedError(exit.status, exit.signal);
@@ -341,36 +457,6 @@ function staticCredentialFor(
 			};
 }
 
-async function issueGithubReadCredential(
-	input: IssueReadCredentialInput
-): Promise<ReadCredentialLease> {
-	const requestedAtMs = input.now();
-	const client = new CupboardClient(
-		input.target.tenantUrl,
-		input.fetcher,
-		'cache' in input.target ? input.target.cache : { kind: 'default' },
-		input.signal
-	);
-	const subject = await fetchGithubOidcToken({
-		audience: input.audience,
-		signal: input.signal,
-		fetcher: client.fetcher,
-		environment: {
-			requestUrl: input.environment.ACTIONS_ID_TOKEN_REQUEST_URL,
-			requestToken: input.environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN
-		}
-	});
-	const exchanged = await client.acquireReadAccess(subject, input.resources);
-
-	return {
-		user: readTokenBasicUser,
-		password: `${readTokenPasswordPrefix}${exchanged.access_token}`,
-		expiresAtMs: requestedAtMs + exchanged.expires_in * 1000,
-		resources: exchanged.read_resources,
-		authorizationDetails: exchanged.authorization_details
-	};
-}
-
 function parseReuseView(value: string): ReuseViewName {
 	const parsed = reuseViewNameSchema.safeParse(value);
 	if (!parsed.success) {
@@ -380,6 +466,13 @@ function parseReuseView(value: string): ReuseViewName {
 	}
 
 	return parsed.data;
+}
+
+function collectReadCache(
+	value: string,
+	previous: CacheTarget[]
+): CacheTarget[] {
+	return [...previous, cacheTargetFromUrl(parseWorkerUrl(value))];
 }
 
 function readTargetFromUrl(url: URL): ReadTarget {
@@ -411,7 +504,7 @@ export function registerRunCommand(
 		.argument('<command...>', 'command to run after --')
 		.option(
 			'--github-oidc',
-			'acquire server-resolved read access through GitHub Actions OIDC'
+			'acquire read access even for public resources; requires id-token: write and overrides incidental netrc credentials'
 		)
 		.option(
 			'--audience <audience>',
@@ -423,9 +516,25 @@ export function registerRunCommand(
 			'acquire only cache metadata for setup when content uses a static credential'
 		)
 		.option(
+			'--read-cache <cache-url>',
+			'additional cache in this tenant to include in the OIDC read session (repeatable)',
+			collectReadCache,
+			[]
+		)
+		.option(
+			'--read-cache-metadata <cache-url>',
+			'additional cache in this tenant whose metadata setup requires (repeatable)',
+			collectReadCache,
+			[]
+		)
+		.option(
 			'--reuse-view <name>',
 			'reuse view whose private cache content the command will read',
 			parseReuseView
+		)
+		.addHelpText(
+			'after',
+			"\nThe child inherits stdin, stdout and stderr. The command returns the child's exit status, or 128 plus the signal number when a signal terminates the child. A missing executable exits 127. OIDC acquisition or renewal failures use Cupboard's own exit statuses, including 77 for refused authority and 75 for temporary failures."
 		)
 		.action(async (url: URL, commandParts: string[], options: RunOptions) => {
 			const target = readTargetFromUrl(url);

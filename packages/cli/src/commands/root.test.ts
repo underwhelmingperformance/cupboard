@@ -16,14 +16,17 @@ import {
 	rootListResponseSchema,
 	type RootRemoveResponse,
 	rootRemoveResponseSchema,
+	rootSetMaxTargets,
 	type RootSummaryInput,
 	rootSummarySchema,
 	rootTargetsPageSchema
 } from '@cupboard/protocol/retention';
 import type { ResultRow } from '@cupboard/reporter';
+import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { cliExitCode } from '../cli.ts';
 import {
 	type RecordedCall,
 	recordingCacheScopedClient
@@ -31,6 +34,7 @@ import {
 
 import {
 	describeExpiry,
+	registerRootCommands,
 	type RootClient,
 	rootListingAuthorizationDetails,
 	runRootEnsure,
@@ -71,6 +75,40 @@ function expectRootClientRefusal(
 ): asserts error is RootClientRefusal {
 	expect(error).toBeInstanceOf(RootClientRefusal);
 }
+
+describe('root update argument limits', () => {
+	it.each(['set', 'ensure'])(
+		'rejects oversized %s updates before authentication',
+		async (command) => {
+			const program = new Command().exitOverride();
+			registerRootCommands(program);
+			const targets = Array.from(
+				{ length: rootSetMaxTargets + 1 },
+				() => target
+			);
+			let failure: unknown;
+			try {
+				await program.parseAsync(
+					[
+						'root',
+						command,
+						'http://127.0.0.1:1/t/acme',
+						'main',
+						...targets,
+						...(command === 'ensure' ? ['--github-oidc'] : [])
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				failure = error;
+			}
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				status: cliExitCode(failure, 130)
+			}).toStrictEqual({ name: 'RootTargetLimitError', status: 2 });
+		}
+	);
+});
 
 describe('describeExpiry', () => {
 	it.each([

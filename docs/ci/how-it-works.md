@@ -23,19 +23,24 @@ running side by side.
    `publish` and `attest` inputs decide what each job builds, publishes and
    signs.
 
-When an unmerged pull request is closed, the run is different. The configure job
-runs, then a remove-cache job removes the pull request's cache. There's no
-planning or building. When a merged pull request's `closed` event arrives, only
-the configure job runs.
+When publication is enabled under the preset, closing a pull request runs the
+configure job, then the close-cache job, whether the pull request was merged or
+not. There's no planning, building or publication. Closure brings root expiry
+forward to the close time and starts the cache's configured grace period. Reads
+and reuse remain available during grace. Garbage collection removes expired
+contents, then removes the empty cache once pending work has finished. See
+[Closing and reopening caches][cache-closure].
+
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 Each job has a time limit:
 
-| Job          | Runs on            | Time limit  |
-| ------------ | ------------------ | ----------- |
-| configure    | `plan-runner`      | 10 minutes  |
-| plan         | `plan-runner`      | 30 minutes  |
-| cohort       | each cohort's `os` | 180 minutes |
-| remove-cache | `plan-runner`      | 10 minutes  |
+| Job         | Runs on            | Time limit  |
+| ----------- | ------------------ | ----------- |
+| configure   | `plan-runner`      | 10 minutes  |
+| plan        | `plan-runner`      | 30 minutes  |
+| cohort      | each cohort's `os` | 180 minutes |
+| close-cache | `plan-runner`      | 10 minutes  |
 
 `plan-runner` is a workflow input, and defaults to `ubuntu-latest`.
 
@@ -62,12 +67,13 @@ before grouping the targets:
   `bestEffort` settings.
 - No target may go over the limits on retention roots.
 
-With `build: missing` and `publish: outputs`, the plan can skip a target whose
-root already retains the outputs that the destination cache serves. It can also
-skip a cohort when each target already has its required path in the destination.
-An attestation's presence does not decide whether to build. With
-`build: rebuild`, each requested output is built again on the configured
-builder, even if it is already available. Nix may still substitute dependencies.
+With `build: missing`, the plan can skip a target when its root already retains
+the outputs that the destination cache serves and `publish` is `outputs` or
+`built`. It can also skip a cohort when each target already has its required
+path in the destination. An attestation's presence does not decide whether to
+build. With `build: rebuild`, each requested output is built again on the
+configured builder, even if it is already available. Nix may still substitute
+dependencies.
 
 If you turn on `enable-packing`, the plan works differently. It measures the
 size of each target's closure, and packs small unlabelled cohorts into as few
@@ -88,7 +94,8 @@ Each cohort job goes through these steps:
    log. `build: rebuild` puts each requested output in the build work even if
    the output was already available.
 5. It builds the requested outputs that the selected build mode requires. With
-   `publish: outputs`, it publishes the selected outputs. With
+   `publish: outputs`, it publishes the selected outputs. With `publish: built`,
+   it also publishes intermediates built during the run. With
    `publish: closure`, it also publishes their runtime references. With
    `publish: none`, it publishes nothing.
 6. After publication succeeds, it sets each published target's retention root.
@@ -168,10 +175,14 @@ they share the same run root as the original attempt.
 - If you cancel a run, whatever it has already published stays in the cache,
   kept by the run root. The roots of targets that it hadn't finished stay as
   they were.
-- If you rerun a pull request's run after the pull request was closed without
-  being merged, the run recreates the pull request's cache. The workflow doesn't
-  remove the cache a second time, so remove it yourself with
-  `cupboard cache remove`.
+- If you rerun an `opened` or `synchronize` publishing run after its pull
+  request has closed, an existing closed cache rejects publication. Use
+  `cupboard cache reopen` before rerunning if you want to publish to it. A rerun
+  of a `reopened` event explicitly reopens the cache again. If garbage
+  collection has already removed the cache, the rerun creates an empty
+  replacement. The pull request's earlier `closed` event does not close the
+  replacement, so close it yourself with `cupboard cache close` after
+  publication.
 
 ## Where to look when something goes wrong
 

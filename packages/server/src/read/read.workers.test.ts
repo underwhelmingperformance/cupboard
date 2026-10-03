@@ -19,9 +19,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { cacheIdentityColumns } from '../db/cache.ts';
+import { writeCacheLifecycle } from '../db/cache-lifecycle-write.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { jsonValueLists } from '../do/json-list.ts';
-import { SharedFactsUnavailableError } from '../errors.ts';
+import { jsonRowList, jsonValueLists } from '../do/json-list.ts';
+import { reuseEdgeSelect } from '../do/reuse-view-lookup-service.ts';
+import {
+	PathReadAuthorityMigrationPendingError,
+	SharedFactsUnavailableError
+} from '../errors.ts';
 import { narCacheTag } from '../http/cache-tags.ts';
 import {
 	narInfoObjectKey,
@@ -487,10 +492,10 @@ describe('NAR reference index', () => {
 		// check remains one statement that never scans.
 		expect({
 			edge: rows.some((row) =>
-				row.detail.includes('blob_ref_tenant_nar_hash_native_idx')
+				row.detail.includes('blob_ref_readable_nar_idx')
 			),
 			blobState: isIndexSeek('blob_state'),
-			lifecycle: isIndexSeek('cache_lifecycle'),
+			lifecycle: isIndexSeek('cache_lifecycle_storage'),
 			scans: rows.filter((row) => row.detail.startsWith('SCAN ')).length
 		}).toStrictEqual({
 			edge: true,
@@ -533,8 +538,8 @@ describe('NAR reference index', () => {
 		// index once per store path, so only a scan of a real table would show
 		// that the list had stopped the index being used.
 		expect({
-			edge: isIndexSeek('blob_ref'),
-			lifecycle: isIndexSeek('cache_lifecycle'),
+			edge: isIndexSeek('blob_ref_storage'),
+			lifecycle: isIndexSeek('cache_lifecycle_storage'),
 			tableScans: rows.filter(
 				(row) =>
 					row.detail.startsWith('SCAN ') &&
@@ -739,5 +744,532 @@ describe('private narinfo reference gate', () => {
 			status: StatusCodes.NOT_FOUND,
 			cacheControl: 'no-store'
 		});
+	});
+});
+
+async function restoreExpandedAuthority(): Promise<void> {
+	await env.CUPBOARD_DB.batch(
+		[
+			'DROP VIEW attestation_ref',
+			'DROP VIEW blob_ref',
+			'ALTER TABLE blob_ref_storage RENAME TO blob_ref',
+			'ALTER TABLE attestation_ref_storage RENAME TO attestation_ref',
+			'CREATE VIEW blob_ref_storage AS SELECT * FROM blob_ref',
+			'CREATE VIEW attestation_ref_storage AS SELECT * FROM attestation_ref',
+			'DROP VIEW cache_lifecycle',
+			'ALTER TABLE cache_lifecycle_storage RENAME TO cache_lifecycle',
+			'CREATE VIEW cache_lifecycle_storage AS SELECT * FROM cache_lifecycle'
+		].map((query) => env.CUPBOARD_DB.prepare(query))
+	);
+	await env.CUPBOARD_DB.prepare(
+		"UPDATE deployment_transition SET state = 'expanded', contracted_at = NULL WHERE id = 'blob-reference-read-authority'"
+	).run();
+}
+
+async function contractAuthority(): Promise<void> {
+	const contract = env.TEST_MIGRATIONS.find(
+		(migration) => migration.name === '0036_path_read_authority_contract.sql'
+	);
+	if (contract === undefined) {
+		throw new Error('The path read authority contract migration is missing.');
+	}
+	await env.CUPBOARD_DB.batch(
+		contract.queries.map((query) => env.CUPBOARD_DB.prepare(query))
+	);
+	await env.CUPBOARD_DB.prepare(
+		"UPDATE deployment_transition SET state = 'complete', contracted_at = '2026-01-01T00:00:00.000Z' WHERE id = 'blob-reference-read-authority'"
+	).run();
+}
+
+describe('cache admission compatibility', () => {
+	it('writes lifecycle rows before contraction, refuses the switch, and resumes on physical storage', async () => {
+		await seedOwnedNar();
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await restoreExpandedAuthority();
+		try {
+			const before = await writeCacheLifecycle(database, async (table) =>
+				database
+					.update(table)
+					.set({ access: 'private' })
+					.where(sql`${table.tenant} = ${tenant}`)
+					.returning({ access: table.access })
+					.all()
+			);
+			await env.CUPBOARD_DB.prepare(
+				"UPDATE deployment_transition SET contracted_at = '2026-01-01T00:00:00.000Z' WHERE id = 'blob-reference-read-authority'"
+			).run();
+			const mutation = () =>
+				writeCacheLifecycle(database, async (table) =>
+					database
+						.update(table)
+						.set({ access: 'public' })
+						.where(sql`${table.tenant} = ${tenant}`)
+						.returning({ access: table.access })
+						.all()
+				);
+			await expect(mutation()).rejects.toBeInstanceOf(
+				PathReadAuthorityMigrationPendingError
+			);
+			await contractAuthority();
+			const after = await mutation();
+			expect({ before, after }).toStrictEqual({
+				before: [{ access: 'private' }],
+				after: [{ access: 'public' }]
+			});
+		} finally {
+			const type = await env.CUPBOARD_DB.prepare(
+				"SELECT type FROM sqlite_master WHERE name = 'cache_lifecycle'"
+			).first<{ type: string }>();
+			if (type?.type === 'table') {
+				await contractAuthority();
+			}
+		}
+	});
+
+	it('classifies an overlapping lifecycle switch and rolls back the whole write batch', async () => {
+		await seedOwnedNar();
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const before = await env.CUPBOARD_DB.prepare(
+			'SELECT * FROM tenant_usage'
+		).all();
+		await restoreExpandedAuthority();
+		try {
+			const mutation = writeCacheLifecycle(database, async (table) => {
+				await contractAuthority();
+				return database.batch([
+					database
+						.update(d1Schema.tenantUsage)
+						.set({ narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1` }),
+					database
+						.update(table)
+						.set({ access: 'private' })
+						.where(sql`${table.tenant} = ${tenant}`)
+				]);
+			});
+			let failure:
+				| {
+						name: string;
+						status: number;
+						retryAfterSeconds: number;
+						hasCause: boolean;
+				  }
+				| undefined;
+			try {
+				await mutation;
+			} catch (error) {
+				if (!(error instanceof PathReadAuthorityMigrationPendingError)) {
+					throw error;
+				}
+				failure = {
+					name: error.name,
+					status: error.status,
+					retryAfterSeconds: error.retryAfterSeconds,
+					hasCause: error.cause instanceof Error
+				};
+			}
+			expect(failure).toStrictEqual({
+				name: 'PathReadAuthorityMigrationPendingError',
+				status: 503,
+				retryAfterSeconds: 1,
+				hasCause: true
+			});
+			const after = await env.CUPBOARD_DB.prepare(
+				'SELECT * FROM tenant_usage'
+			).all();
+			expect(after.results).toStrictEqual(before.results);
+		} finally {
+			const type = await env.CUPBOARD_DB.prepare(
+				"SELECT type FROM sqlite_master WHERE name = 'cache_lifecycle'"
+			).first<{ type: string }>();
+			if (type?.type === 'table') {
+				await contractAuthority();
+			}
+		}
+	});
+
+	it.each([
+		{ access: 'public', stage: 'expanded' },
+		{ access: 'private', stage: 'expanded' },
+		{ access: 'public', stage: 'contracted' },
+		{ access: 'private', stage: 'contracted' }
+	] as const)(
+		'keeps current $access admission through $stage storage',
+		async ({ access, stage }) => {
+			await seedOwnedNar(defaultCache(), access);
+			if (stage === 'expanded') {
+				await restoreExpandedAuthority();
+			}
+			try {
+				const database = drizzleD1(env.CUPBOARD_DB);
+				const current = await database
+					.select({
+						access: d1Schema.cacheLifecycle.access,
+						generation: d1Schema.cacheLifecycle.generation
+					})
+					.from(d1Schema.cacheLifecycle)
+					.where(sql`${d1Schema.cacheLifecycle.tenant} = ${tenant}`)
+					.get();
+				const preceding = await env.CUPBOARD_DB.prepare(
+					'SELECT count(*) AS admitted FROM cache_lifecycle WHERE tenant = ?'
+				)
+					.bind(tenant)
+					.first();
+				expect({ current, preceding }).toStrictEqual({
+					current: { access, generation: firstCacheGeneration },
+					preceding: { admitted: stage === 'expanded' ? 1 : 0 }
+				});
+			} finally {
+				if (stage === 'expanded') {
+					await contractAuthority();
+				}
+			}
+		}
+	);
+
+	it.each(['insert', 'update', 'delete'] as const)(
+		'rolls back a preceding lifecycle %s after contraction',
+		async (operation) => {
+			await seedOwnedNar();
+			const before = await env.CUPBOARD_DB.prepare(
+				'SELECT * FROM tenant_usage'
+			).all();
+			const queries = {
+				insert:
+					"INSERT INTO cache_lifecycle(tenant,cache_kind,access,generation,updated_at) VALUES (?, 'default', 'public', 1, '2026-01-01T00:00:00.000Z')",
+				update: 'UPDATE cache_lifecycle SET deleted_at = NULL WHERE tenant = ?',
+				delete: 'DELETE FROM cache_lifecycle WHERE tenant = ?'
+			};
+			await expect(
+				env.CUPBOARD_DB.batch([
+					env.CUPBOARD_DB.prepare(
+						'UPDATE tenant_usage SET narinfos = narinfos + 1'
+					),
+					env.CUPBOARD_DB.prepare(queries[operation]).bind(tenant)
+				])
+			).rejects.toThrow('cannot modify cache_lifecycle because it is a view');
+			const after = await env.CUPBOARD_DB.prepare(
+				'SELECT * FROM tenant_usage'
+			).all();
+			expect(after.results).toStrictEqual(before.results);
+		}
+	);
+});
+
+describe('preceding reference authority queries', () => {
+	it.each([0, 2, 5, 6, 7, 8])(
+		'resumes an interrupted authority contract after statement %s without changing rows or indexes',
+		async (boundary) => {
+			await seedOwnedNar();
+			const contract = env.TEST_MIGRATIONS.find(
+				(migration) =>
+					migration.name === '0036_path_read_authority_contract.sql'
+			);
+			if (contract === undefined) {
+				throw new Error(
+					'The path read authority contract migration is missing.'
+				);
+			}
+			await restoreExpandedAuthority();
+			const before = await env.CUPBOARD_DB.prepare(
+				"SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name LIKE '%ref%' OR name LIKE '%lifecycle%' ORDER BY name"
+			).all();
+			const queries = contract.queries.flatMap((query, index) =>
+				index === boundary
+					? [query, 'SELECT * FROM interrupted_authority_contract']
+					: [query]
+			);
+			try {
+				await expect(
+					env.CUPBOARD_DB.batch(
+						queries.map((query) => env.CUPBOARD_DB.prepare(query))
+					)
+				).rejects.toThrow('no such table: interrupted_authority_contract');
+				const after = await env.CUPBOARD_DB.prepare(
+					"SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name LIKE '%ref%' OR name LIKE '%lifecycle%' ORDER BY name"
+				).all();
+				expect(after.results).toStrictEqual(before.results);
+			} finally {
+				await contractAuthority();
+			}
+			const rows = await drizzleD1(env.CUPBOARD_DB)
+				.select()
+				.from(d1Schema.blobReference)
+				.all();
+			expect(
+				rows.map((row) => ({ ...row, cacheName: row.cacheName ?? undefined }))
+			).toStrictEqual([
+				{
+					tenant,
+					cacheKind: 'default',
+					cacheName: undefined,
+					storePathHash: referencingPath,
+					generation: referencedGeneration,
+					narHash,
+					readable: true,
+					cacheGeneration: firstCacheGeneration
+				}
+			]);
+		}
+	);
+
+	it.each(['insert', 'update', 'delete'] as const)(
+		'refuses a preceding %s and rolls back its quota charge after contraction',
+		async (operation) => {
+			await seedOwnedNar();
+			const before = await env.CUPBOARD_DB.prepare(
+				'SELECT * FROM tenant_usage'
+			).all();
+			const statements = {
+				insert:
+					"INSERT INTO blob_ref(tenant,cache_kind,store_path_hash,generation,nar_hash,cache_generation) VALUES (?, 'default', ?, 2, ?, 1)",
+				update:
+					'UPDATE blob_ref SET readable = true WHERE tenant = ? AND store_path_hash = ? AND nar_hash = ?',
+				delete:
+					'DELETE FROM blob_ref WHERE tenant = ? AND store_path_hash = ? AND nar_hash = ?'
+			};
+			const mutation = env.CUPBOARD_DB.prepare(statements[operation]).bind(
+				tenant,
+				referencingPath,
+				narHash
+			);
+			await expect(
+				env.CUPBOARD_DB.batch([
+					env.CUPBOARD_DB.prepare(
+						'UPDATE tenant_usage SET narinfos = narinfos + 1'
+					),
+					mutation
+				])
+			).rejects.toThrow('cannot modify blob_ref because it is a view');
+			const after = await env.CUPBOARD_DB.prepare(
+				'SELECT * FROM tenant_usage'
+			).all();
+			expect(after.results).toStrictEqual(before.results);
+		}
+	);
+
+	it.each(['current', 'preceding'] as const)(
+		'refuses a first authority query after revocation through the %s representation',
+		async (reader) => {
+			await seedOwnedNar();
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const hasReadAuthority = async () => {
+				if (reader === 'current') {
+					const rows = await narReferenceQuery(
+						database,
+						tenant,
+						narHash,
+						defaultPublicAuthority
+					).all();
+					return rows.some((row) => row.available);
+				}
+				const result = await env.CUPBOARD_DB.prepare(
+					`SELECT blob_state.nar_hash FROM blob_ref
+					INNER JOIN blob_state ON blob_state.nar_hash = blob_ref.nar_hash
+					INNER JOIN cache_lifecycle ON cache_lifecycle.tenant = blob_ref.tenant
+					 AND cache_lifecycle.cache_kind = blob_ref.cache_kind
+					 AND ((blob_ref.cache_kind = 'default' AND cache_lifecycle.cache_name IS NULL AND blob_ref.cache_name IS NULL)
+					 OR (blob_ref.cache_kind = 'named' AND cache_lifecycle.cache_name = blob_ref.cache_name))
+					WHERE blob_ref.tenant = ? AND blob_ref.nar_hash = ?
+					 AND blob_ref.cache_kind = 'default' AND blob_ref.cache_name IS NULL
+					 AND cache_lifecycle.access = 'public'
+					 AND blob_ref.cache_generation = coalesce(cache_lifecycle.generation, 1)`
+				)
+					.bind(tenant, narHash)
+					.first();
+				return result !== null;
+			};
+			await restoreExpandedAuthority();
+			const wasAuthorisedBefore = await hasReadAuthority();
+			await contractAuthority();
+			await database.insert(d1Schema.pathReadRevocation).values({
+				tenant,
+				...cacheIdentityColumns(defaultCache()),
+				storePathHash: referencingPath,
+				cacheGeneration: firstCacheGeneration,
+				generation: referencedGeneration
+			});
+			const wasAuthorisedAfter = await hasReadAuthority();
+			const retained = await database
+				.select({
+					generation: d1Schema.blobReference.generation,
+					readable: d1Schema.blobReference.readable
+				})
+				.from(d1Schema.blobReference)
+				.all();
+			const object = await env.BLOBS.get(narObjectKey(narHash));
+			expect({
+				wasAuthorisedBefore,
+				wasAuthorisedAfter,
+				retained,
+				bytes: await object?.text()
+			}).toStrictEqual({
+				wasAuthorisedBefore: true,
+				wasAuthorisedAfter: false,
+				retained: [{ generation: referencedGeneration, readable: true }],
+				bytes: narBytes
+			});
+		}
+	);
+});
+
+describe('path read revocation scale', () => {
+	it('bounds candidate reads after revoking 25,000 retained generations', async () => {
+		await seedOwnedNarReference();
+		await env.CUPBOARD_DB.prepare(
+			`WITH RECURSIVE source(n) AS (SELECT 2 UNION ALL SELECT n + 1 FROM source WHERE n < 25000)
+   INSERT INTO blob_ref_storage(tenant,cache_kind,store_path_hash,generation,nar_hash,cache_generation)
+   SELECT ?, 'default', ?, n, ?, 1 FROM source`
+		)
+			.bind(tenant, referencingPath, narHash)
+			.run();
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.insert(d1Schema.pathReadRevocation)
+			.values({
+				tenant,
+				...cacheIdentityColumns(defaultCache()),
+				storePathHash: referencingPath,
+				cacheGeneration: firstCacheGeneration,
+				generation: narInfoGenerationSchema.parse(25_000)
+			});
+		const query = narReferenceQuery(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			tenant,
+			narHash,
+			defaultPublicAuthority
+		).toSQL();
+		const measured = await env.CUPBOARD_DB.prepare(query.sql)
+			.bind(...query.params)
+			.all();
+		expect({
+			candidates: measured.results.length,
+			read: measured.meta.rows_read
+		}).toStrictEqual({ candidates: 65, read: 196 });
+		const [paths] = jsonValueLists([referencingPath]);
+		if (paths === undefined) {
+			throw new Error('The direct read has no requested path.');
+		}
+		const direct = narInfoReferenceQuery(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			tenant,
+			defaultCache(),
+			paths
+		).toSQL();
+		const before = await env.CUPBOARD_DB.prepare(direct.sql)
+			.bind(...direct.params)
+			.all();
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.insert(d1Schema.blobReference)
+			.values({
+				tenant,
+				...cacheIdentityColumns(defaultCache()),
+				storePathHash: referencingPath,
+				generation: narInfoGenerationSchema.parse(25_001),
+				narHash,
+				cacheGeneration: firstCacheGeneration
+			});
+		const after = await env.CUPBOARD_DB.prepare(direct.sql)
+			.bind(...direct.params)
+			.all();
+		expect({
+			before: before.results,
+			beforeRead: before.meta.rows_read,
+			after: after.results,
+			afterRead: after.meta.rows_read
+		}).toStrictEqual({
+			before: [],
+			beforeRead: 5,
+			after: [
+				{
+					store_path_hash: referencingPath,
+					generation: 25_001,
+					nar_hash: narHash,
+					cache_generation: 1
+				}
+			],
+			afterRead: 6
+		});
+		const reused = reuseEdgeSelect(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			tenant,
+			'public',
+			jsonRowList([
+				{
+					cacheKind: 'default',
+					cacheName: '',
+					storePathHash: referencingPath,
+					generation: narInfoGenerationSchema.parse(25_001)
+				}
+			])
+		).toSQL();
+		const reuseResult = await env.CUPBOARD_DB.prepare(reused.sql)
+			.bind(...reused.params)
+			.all();
+		expect({
+			rows: reuseResult.results.map((row) => ({
+				...row,
+				cache_name: row.cache_name ?? undefined
+			})),
+			read: reuseResult.meta.rows_read
+		}).toStrictEqual({
+			rows: [
+				{
+					cache_kind: 'default',
+					cache_name: undefined,
+					store_path_hash: referencingPath,
+					generation: 25_001,
+					nar_hash: narHash
+				}
+			],
+			read: 4
+		});
+
+		await expect(
+			serveNar(
+				new Request('https://example.com/nar'),
+				env,
+				tenant,
+				parsedNar(),
+				defaultPublicAuthority,
+				false
+			)
+		).rejects.toBeInstanceOf(SharedFactsUnavailableError);
+	});
+});
+
+it('discovers a public source after 25,000 earlier policy-ineligible references', async () => {
+	await seedOwnedNarReference(defaultCache(), 'private');
+	await env.CUPBOARD_DB.prepare(
+		`WITH RECURSIVE source(n) AS (SELECT 2 UNION ALL SELECT n+1 FROM source WHERE n < 25001)
+ INSERT INTO blob_ref_storage(tenant,cache_kind,store_path_hash,generation,nar_hash,cache_generation) SELECT ?, 'default', ?, n, ?, 1 FROM source`
+	)
+		.bind(tenant, referencingPath, narHash)
+		.run();
+	await seedOwnedNarReference(namedCache('zz-authorised'), 'public');
+	const query = narReferenceQuery(
+		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		tenant,
+		narHash,
+		viewAuthority('public')
+	).toSQL();
+	const result = await env.CUPBOARD_DB.prepare(query.sql)
+		.bind(...query.params)
+		.all();
+	const plan = await env.CUPBOARD_DB.prepare(`EXPLAIN QUERY PLAN ${query.sql}`)
+		.bind(...query.params)
+		.all();
+	expect({
+		rows: result.results,
+		read: result.meta.rows_read,
+		plan: plan.results.map((row) => row.detail)
+	}).toStrictEqual({
+		rows: [{ nar_hash: narHash, available: 1 }],
+		read: 75_006,
+		plan: [
+			'SEARCH blob_state USING COVERING INDEX sqlite_autoindex_blob_state_1 (nar_hash=?)',
+			'SEARCH blob_ref_storage USING INDEX blob_ref_readable_nar_idx (tenant=? AND nar_hash=?)',
+			'SEARCH cache_lifecycle_storage USING INDEX cache_lifecycle_native_identity_idx (tenant=? AND cache_kind=?)',
+			'CORRELATED SCALAR SUBQUERY 1',
+			'SEARCH path_read_revocation USING INDEX path_read_revocation_native_identity_idx (tenant=? AND cache_kind=? AND cache_name=? AND store_path_hash=?)'
+		]
 	});
 });

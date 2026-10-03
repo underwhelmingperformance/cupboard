@@ -1,4 +1,4 @@
-import { setTimeout as sleep } from 'node:timers/promises';
+import { setImmediate as yieldTurn } from 'node:timers/promises';
 
 import { capturingReporter } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
@@ -12,7 +12,7 @@ import {
 	type TransitionStates
 } from '@cupboard/protocol/deployment';
 import { StatusCodes } from 'http-status-codes';
-import { expect, it } from 'vitest';
+import { expect, it, onTestFinished } from 'vitest';
 
 import { cacheCreateAuthorizationDetails } from '../../packages/cli/src/auth/attenuate.ts';
 import { githubPullRequestClaims } from '../../packages/cli/src/commands/github/claims.ts';
@@ -26,20 +26,22 @@ import {
 	completeTransitions,
 	prepareTransitions
 } from '../../packages/cli/src/deploy/transitions.ts';
-import { LocalStepUnreachedError } from '../../packages/cli/src/errors.ts';
+import {
+	LocalStepUnreachedError,
+	TransitionIncompleteError
+} from '../../packages/cli/src/errors.ts';
 import {
 	predecessorDurableObjectMigration,
 	sleepingFixtureTenants
 } from '../fixtures/cache-deployment-predecessor/constants.ts';
+import { intermediateTransitions } from '../support/intermediate-deployment.ts';
+import { ManualClock } from '../support/manual-clock.ts';
 import {
 	type DeploymentClient,
 	stagedDeploymentDatabaseId,
 	StagedDeploymentServer
 } from '../support/staged-deployment-server.ts';
 
-// The settlement reads the tenants every five seconds; the tests read them
-// more often so that they finish sooner.
-const pollDelayMs = 200;
 // The most reads of an offboarding tenant's cache that a test makes while the
 // tenant's object continues its migrations.
 const pendingReadLimit = 100;
@@ -67,8 +69,11 @@ const noTenantPending = {
 // known.
 const deployedAt = new Date('2026-01-01T00:00:00.000Z');
 
-function recordedAs(state: (transition: SchemaTransition) => TransitionState) {
-	return schemaTransitions.map((transition) => ({
+function recordedAs(
+	state: (transition: SchemaTransition) => TransitionState,
+	transitions: readonly SchemaTransition[] = schemaTransitions
+) {
+	return transitions.map((transition) => ({
 		id: transition.id,
 		state: state(transition),
 		updatedAt: deployedAt.toISOString()
@@ -84,17 +89,19 @@ const terminalTransitions = Object.fromEntries(
 	schemaTransitions.map((transition) => [transition.id, 'complete'])
 );
 
-// What the walk records before the upload on the predecessor path. The first
+// What the intermediate walk records before its upload. The first
 // transition has contract migrations, so the walk only expands it. The walk
 // expands each later transition before the upload because it is independent,
 // and immediately completes a transition with no contract migrations and no
 // contract step. The expectation reads the transition's lists directly, not
 // the walk's own predicate, so a defect in that predicate fails the test.
 const preUploadTransitions = {
-	transitions: recordedAs((transition) =>
-		transition.contract.length === 0 && transition.contractStep === undefined
-			? 'complete'
-			: 'expanded'
+	transitions: recordedAs(
+		(transition) =>
+			transition.contract.length === 0 && transition.contractStep === undefined
+				? 'complete'
+				: 'expanded',
+		intermediateTransitions
 	),
 	unrecognised: []
 };
@@ -110,13 +117,18 @@ async function wakeUntilStep(
 	client: DeploymentClient,
 	requiredStep: LocalStep
 ): Promise<void> {
+	const clock = new ManualClock();
+	const controller = new AbortController();
+	onTestFinished(() => {
+		controller.abort();
+	});
 	await settleTenants(
 		{
 			status: () => client.localStepStatus(),
 			wake: () => client.wakeLocalStep()
 		},
 		capturingReporter([]),
-		{ delay: () => sleep(pollDelayMs) }
+		{ now: clock.now, delay: () => yieldTurn(), signal: controller.signal }
 	);
 	const readiness = await readLocalStepReadiness(
 		d1QueryApi(server),
@@ -141,15 +153,24 @@ function d1QueryApi(server: StagedDeploymentServer): D1QueryApi {
 }
 
 /**
- * Applies the schema transitions as `cupboard deploy` does before it uploads
- * the Workers, then swaps in the Workers built from the working tree.
+ * Expands the intermediate release before its upload. A rerun after the
+ * handoff expands and uploads the current release.
  */
 async function deployOverPredecessor(
 	server: StagedDeploymentServer,
 	now = deployedAt
 ): Promise<void> {
-	await prepareTransitions(server.transitionWalk({ now: () => now }), false);
-	await server.deployCurrent();
+	const stage =
+		server.deploymentStage === 'current' ? 'current' : 'intermediate';
+	await prepareTransitions(
+		server.transitionWalk({ now: () => now }, stage),
+		false
+	);
+	if (stage === 'current') {
+		await server.deployCurrent();
+		return;
+	}
+	await server.deployIntermediate();
 }
 
 /**
@@ -158,12 +179,60 @@ async function deployOverPredecessor(
  * local step, applies the contract migrations and records the transition
  * complete.
  */
-function contractOverPredecessor(
+async function contractOverPredecessor(
 	server: StagedDeploymentServer,
 	now = deployedAt
 ): Promise<TransitionStates> {
+	if (server.deploymentStage === 'intermediate') {
+		await completeTransitions(
+			server.transitionWalk({ now: () => now }, 'intermediate')
+		);
+		await prepareTransitions(server.transitionWalk({ now: () => now }), false);
+		await server.deployCurrent();
+	}
 	return completeTransitions(server.transitionWalk({ now: () => now }));
 }
+
+it.each(['predecessor', 'intermediate'] as const)(
+	'refuses a direct upgrade from %s until cache identity is complete',
+	async (stage) => {
+		const server = await StagedDeploymentServer.start(process.cwd());
+
+		try {
+			await server.seedPredecessor();
+			if (stage === 'intermediate') {
+				await deployOverPredecessor(server);
+			}
+			const database = await server.database();
+			const before = await database
+				.prepare('SELECT name, type, sql FROM sqlite_master ORDER BY name')
+				.all();
+
+			await expect(
+				prepareTransitions(
+					server.transitionWalk({ now: () => deployedAt }),
+					false
+				)
+			).rejects.toStrictEqual(
+				new TransitionIncompleteError(
+					'cache-identity',
+					'blob-reference-read-authority',
+					'v0.0.34'
+				)
+			);
+
+			const after = await database
+				.prepare('SELECT name, type, sql FROM sqlite_master ORDER BY name')
+				.all();
+			expect({
+				stage: server.deploymentStage,
+				schema: after.results
+			}).toStrictEqual({ stage, schema: before.results });
+		} finally {
+			await server.stop();
+		}
+	}
+);
 
 /**
  * The tenants that `LocalStepUnreachedError` lists when the deploy stops before
@@ -185,15 +254,21 @@ async function stoppedBeforeContract(
 	return undefined;
 }
 
-// `preUploadTransitions` relies on every transition after the first being
-// independent.
-it('defines only independent transitions after the first', () => {
+it('defines the dependencies of the staged schema transitions', () => {
 	expect(
-		schemaTransitions
-			.slice(1)
-			.filter((transition) => transition.independent !== true)
-			.map((transition) => transition.id)
-	).toStrictEqual([]);
+		schemaTransitions.map((transition) => ({
+			id: transition.id,
+			independent: transition.independent === true
+		}))
+	).toStrictEqual([
+		{ id: 'cache-identity', independent: false },
+		{ id: 'deployment-transitions', independent: true },
+		{ id: 'attestation-path-index', independent: true },
+		{ id: 'local-step-attempts', independent: true },
+		{ id: 'publication-identity', independent: true },
+		{ id: 'blob-reference-read-authority', independent: false },
+		{ id: 'tenant-retry-clock', independent: true }
+	]);
 });
 
 it('upgrades a populated predecessor deployment', async () => {
@@ -217,6 +292,8 @@ it('upgrades a populated predecessor deployment', async () => {
 
 		const client = await server.deploymentClient();
 		const expanded = await client.transitions();
+		await server.restart();
+		const intermediateStage = server.deploymentStage;
 		await wakeUntilStep(server, client, expansionLocalStep);
 		const expandedStatus = await client.localStepStatus();
 
@@ -226,6 +303,8 @@ it('upgrades a populated predecessor deployment', async () => {
 		expect({
 			refused,
 			expanded,
+			intermediateStage,
+			currentStage: server.deploymentStage,
 			expandedStatus,
 			status: await client.localStepStatus(),
 			recorded: await client.transitions(),
@@ -243,6 +322,8 @@ it('upgrades a populated predecessor deployment', async () => {
 			// the transitions with no contract migrations and no contract step.
 			// The tenants then had to record step 4.
 			expanded: preUploadTransitions,
+			intermediateStage: 'intermediate',
+			currentStage: 'current',
 			expandedStatus: {
 				current: currentLocalStep,
 				required: expansionLocalStep,

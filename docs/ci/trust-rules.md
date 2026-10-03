@@ -33,8 +33,9 @@ others.
 ## Why a job gets either everything that it asks for or nothing
 
 When a job exchanges its token, it asks for the specific grants that it needs.
-The exchange succeeds only if a single rule accepts the token and allows
-everything that the job asked for.
+The exchange succeeds only if eligible matching rules collectively allow
+everything that the job asked for. Separate rules can permit separate resources
+or actions. The response contains exactly the requested grants.
 
 cupboard never gives a job less than it asked for. Suppose a push asks to
 publish, to set a root and to attach attestations, and the rule doesn't allow
@@ -59,27 +60,30 @@ cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acm
   --repo acme/app --branch main
 ```
 
-There is also `add-github-tag`, for release tags. Each command writes one rule:
+There is also `add-github-tag`, for release tags, and `add-github-pr-close`, for
+merged PR closure. Each command writes one rule:
 
-| Command             | Accepts runs with                    | Cache                        | Roots                             | Grants                                     |
-| ------------------- | ------------------------------------ | ---------------------------- | --------------------------------- | ------------------------------------------ |
-| `add-github-pr`     | `event_name=pull_request`            | `gh-{repository_id}-pr-{pr}` | `github:<owner>/<repo>/pr-{pr}/`  | push, root, attach, create, remove, attest |
-| `add-github-branch` | `ref=refs/heads/<branch>`, any event | the default cache            | `github:<owner>/<repo>/<branch>/` | push, root, attach, attest                 |
-| `add-github-tag`    | `ref_type=tag`, any event            | `{tag}`                      | `github:<owner>/<repo>/<cache>/`  | push, root, attach, attest                 |
+| Command               | Accepts runs with                               | Cache                                     | Roots                             | Grants                                            |
+| --------------------- | ----------------------------------------------- | ----------------------------------------- | --------------------------------- | ------------------------------------------------- |
+| `add-github-pr`       | `event_name=pull_request`                       | `gh-{repository_id}-pr-{pr}`              | `github:<owner>/<repo>/pr-{pr}/`  | push, root, attach, create, close, reopen, attest |
+| `add-github-pr-close` | `event_name=pull_request`, `ref=refs/heads/...` | the repository's selected PR cache family | none                              | close only                                        |
+| `add-github-branch`   | `ref=refs/heads/<branch>`, any event            | the default cache                         | `github:<owner>/<repo>/<branch>/` | push, root, attach, attest                        |
+| `add-github-tag`      | `ref_type=tag`, any event                       | `{tag}`                                   | `github:<owner>/<repo>/<cache>/`  | push, root, attach, attest                        |
 
 The grants are explained in [What a rule can grant](#what-a-rule-can-grant).
 Names in braces are filled in from each run's token.
 
-All three commands accept tokens from GitHub Actions only. They pin the
+All four commands accept tokens from GitHub Actions only. They pin the
 repository by its numeric IDs, and set the audience to the tenant URL unless you
 choose another. To look up the IDs, they call the GitHub API. For a private
 repository, set `GH_TOKEN` or `GITHUB_TOKEN` so they can. They use `GH_TOKEN` if
 both are set.
 
-You can add two options to any of them:
+The publication presets also accept these options:
 
 - `--job-workflow-ref` also requires the run to use a particular workflow file.
-  See [Trusting a reusable workflow](#trusting-a-reusable-workflow).
+  `--workflow-ref` is an alias, as on `github setup` and `github check`. See
+  [Trusting a reusable workflow](#trusting-a-reusable-workflow).
 - `--no-attest` leaves out the `attest` grant.
 
 ### Pull requests
@@ -90,10 +94,57 @@ which GitHub signs. A token can therefore only ever reach its own pull request's
 cache. If the `ref` is missing or has another form, the rule can't work out a
 cache name, so the exchange is refused with status 400 and "The requested
 authorization_details are not permitted". For example, a run for pull request 7
-of repository 1234 can create, publish to and remove the cache `gh-1234-pr-7`,
-and nothing else.
+of repository 1234 can create, publish to, close and reopen the cache
+`gh-1234-pr-7`. The grant does not authorise another cache or destructive cache
+deletion.
 
 Runs triggered by `pull_request_target` don't match this rule.
+
+Merged close runs use `refs/heads/<base-branch>` in the signed `ref`. GitHub's
+OIDC issuer does not provide a signed PR number, so a merged close run cannot
+use the publication rule's `{pr}` substitution. `github setup` creates a
+separate rule for merged closure, and `github check` models the merged ref
+separately. To add that rule manually:
+
+```sh
+cupboard oidc-trust add-github-pr-close https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app \
+  --workflow-ref underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/vX.Y.Z
+```
+
+This rule requires a workflow pinned to a commit, tag or explicit tag pattern,
+the repository and owner IDs, `event_name=pull_request`, a base-branch `ref`,
+and the specified workflow. It permits only `cache:close` within the
+repository's PR cache family. The provider does not sign the event's `action` or
+PR number, so this authority covers the family, not a single PR. `cache:close`
+does not imply metadata or content reads. Add `cache:read` explicitly to an
+exact cache grant if a lifecycle caller needs metadata. Open PR tokens with
+`refs/pull/<n>/merge` cannot use this rule. Publication, content reads, roots
+and reopening still use the publication rule's exact PR binding. The default
+preset's closure family excludes the default and release caches. A custom
+template selects a different closure family.
+
+The helper refuses branch workflow references. If a caller deliberately follows
+a branch, write a manual rule with `--from-file`. Keep the repository and owner
+IDs, `event_name=pull_request`, the signed base-branch ref and the exact
+`job_workflow_ref`, including `@refs/heads/<branch>`. Permit only `cache:close`
+for a named-cache pattern restricted to the repository's PR cache family.
+Preserve the publication rule's cache naming convention; default and release
+caches must remain outside that pattern. See [Writing a rule as
+JSON][manual-rule-json].
+
+[manual-rule-json]: #writing-a-rule-as-json
+
+Deploy the server version that supports named-cache patterns before adding the
+merged-close rule. See [PR cache closure][pr-cache-closure-upgrade]. GitHub
+explains the ref change in [Pull request events][github-pr-events]; the [OIDC
+issuer metadata][github-oidc-metadata] lists the available signed claims.
+
+[pr-cache-closure-upgrade]: ../operator/upgrade-notes.md#pr-cache-closure
+[github-pr-events]:
+  https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+[github-oidc-metadata]:
+  https://token.actions.githubusercontent.com/.well-known/openid-configuration
 
 ### Branches
 
@@ -125,7 +176,21 @@ tag's paths under its own root.
 
 In `add-github-pr`, the root doesn't follow the cache template.
 
+`add-github-pr-close` accepts `--cache-template` with `{repository_id}` and at
+most one `{pr}`. Static templates produce an exact grant. A single `{pr}`
+produces a bounded named-cache pattern with a numeric PR component; literal
+characters in the template match exactly. Supply the same cache template as the
+publication rule. Repeated `{pr}` remains supported for publication, but
+merged-close rule generation refuses that template because independent numeric
+matches would also permit mismatched PR numbers. Keep the publication rule and
+configure exact `cache:close` grants in a manual lifecycle rule for those
+caches.
+
 `add-github-branch` has no templates.
+
+All three presets accept `--read-cache` to permit content reads from the cache
+that the preset selects. Add this flag when the job reads that private cache
+through OIDC. The flag does not grant access to other caches or a reuse view.
 
 ## Matching a token
 
@@ -164,12 +229,20 @@ A rule for GitHub should pin:
 
 | Grant    | Lets the job                                                          |
 | -------- | --------------------------------------------------------------------- |
+| `read`   | Read private cache content.                                           |
 | `push`   | Upload and publish store paths.                                       |
 | `root`   | Set and list retention roots.                                         |
 | `attach` | Add published paths to a [run root](../admin/retention.md#run-roots). |
 | `attest` | Attach attestation bundles.                                           |
 | `create` | Create the cache.                                                     |
+| `close`  | Close publication and expire roots with configured grace.             |
+| `reopen` | Restore publication to a closed cache.                                |
 | `remove` | Remove the cache.                                                     |
+
+When `read` is combined with other permissions, the CLI creates a separate
+content-read grant with the same cache selector. Content reads apply to the
+whole cache and cannot select a root. `--root` and `--root-template` apply to
+the publication grant. A read-only rule cannot use either root option.
 
 ### Which cache a grant applies to
 
@@ -186,12 +259,13 @@ Trust rules can grant a CI job `cache:content-read` for one cache or
 identity token for a short-lived Cupboard read token. A static [read
 credential][static-credential] remains an option.
 
-Read acquisition resolves the configured cache and view together against one
-matching rule. Public resources require no content-read grant; acquisition
-includes a permitted content-read grant and omits an unpermitted public grant.
-An absent publication destination can receive scoped metadata-read authority.
-That token authorises an absence response but cannot read private content after
-creation. Existing private resources require their exact content-read grants.
+Read acquisition composes authority for the configured cache and view from the
+preferred matching rules. Public resources require no content-read grant;
+acquisition includes a permitted content-read grant and omits an unpermitted
+public grant. An absent publication destination can receive scoped metadata-read
+authority. That token authorises an absence response but cannot read private
+content after creation. Existing private resources require their exact
+content-read grants.
 
 [static-credential]: ../use/private-caches.md#read-credentials
 
@@ -258,17 +332,17 @@ out the most preferred group of matching rules:
 2. Otherwise, rules that pin more claims come first. The issuer and audience
    don't count. A pattern counts the same as an exact value.
 
-Within that group, exactly one rule must allow the whole request, or the
-exchange is refused.
+Within that group, cupboard composes the requested authority from the rules.
+Every requested action must be permitted for its exact resource and root.
+Overlapping grants do not make an explicit request ambiguous. cupboard never
+falls back to a less preferred group and never returns a partial subset of the
+requested grants. After signing, cupboard re-evaluates the exact authority
+against current policy. Removing a rule changes the policy; an equivalent
+matching rule can still permit the request.
 
-- cupboard never falls back to a less preferred rule.
-- cupboard never combines rules. If a push needs a grant for its target root and
-  another for its run root, one rule must give both.
-- If two rules in the group both allow the request, the exchange is refused as
-  ambiguous.
-
-Rules in the same group can still cover different things, such as different
-caches. That works because each request is then allowed by exactly one of them.
+An exchange that omits explicit grants still requires a single matching rule.
+Only an interactive rule can issue implicit wildcard authority. CI composition
+does not create refresh tokens.
 
 ## Writing a rule by hand
 
@@ -323,6 +397,14 @@ example.
 
 The file contains the whole rule, so the command refuses `--from-file` together
 with any other rule option, including `--issuer` and `--audience`.
+
+A named-cache binding may use `pattern` instead of `exact` or `equalsTemplate`.
+The expression must be anchored at both ends, valid RE2 and at most 512
+characters. It cannot be combined with template substitutions. cupboard checks
+the concrete requested cache against the cache-name grammar and the pattern;
+issued tokens contain the exact requested cache, not the pattern. Root, tenant
+and view bindings do not accept patterns. Current authorisation checks and
+refresh policy use the same matching rules.
 
 ## Listing, changing and removing rules
 

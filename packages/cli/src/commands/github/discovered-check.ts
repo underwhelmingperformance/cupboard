@@ -10,7 +10,8 @@ import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { selectModelledOidcTrust } from '@cupboard/protocol/oidc-trust-diagnostics';
 import {
 	isClaimSatisfied,
-	type OidcTrustRule
+	type OidcTrustRule,
+	preferredModelledOidcTrustRules
 } from '@cupboard/protocol/oidc-trust-match';
 import { type ReadResourceState } from '@cupboard/protocol/read-access';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
@@ -61,10 +62,12 @@ import {
 } from './finding.ts';
 import {
 	isPresetJob,
+	isReadOnlyJob,
 	modelPublishingJob,
 	type PublicationCase,
 	type PublishingJobFinding,
-	type ReuseViewRequirement
+	type ReuseViewRequirement,
+	withMergedCloseCases
 } from './publication.ts';
 import { publicationReadAuthority } from './read-authority.ts';
 import {
@@ -149,7 +152,7 @@ export class PublishingJobMissingFinding extends CheckFinding {
 	}
 
 	detail(): string {
-		return `no Cupboard publishing job targeting ${this.tenant.href} was found on ${this.branch}`;
+		return `no Cupboard publishing job targeting ${this.tenant.href} was found on ${this.branch}. If the workflow exists on another branch, pass --branch <branch>.`;
 	}
 }
 
@@ -393,26 +396,40 @@ function checkRootGrantPrefixes(
 				continue;
 			}
 
-			const hasPrefixGrant = selection.rule.permittedGrants.some((grant) => {
-				if (grant.type === 'cupboard_wildcard') {
-					return true;
-				}
+			const hasPrefixGrant = preferredModelledOidcTrustRules(
+				rules,
+				publication.claims
+			).some((rule) =>
+				rule.permittedGrants.some((grant) => {
+					if (grant.type === 'cupboard_wildcard') {
+						return true;
+					}
 
-				if (
-					grant.type !== 'cupboard_cache' ||
-					grant.resources.root === undefined
-				) {
-					return false;
-				}
+					if (
+						grant.type !== 'cupboard_cache' ||
+						grant.resources.root === undefined
+					) {
+						return false;
+					}
 
-				const root =
-					grant.resources.root.exact ?? grant.resources.root.equalsTemplate;
+					const root =
+						grant.resources.root.exact ?? grant.resources.root.equalsTemplate;
 
-				return (
-					root?.endsWith('/') === true &&
-					isGrantPermittedByRule([grant], detail, publication.claims)
-				);
-			});
+					return (
+						root?.endsWith('/') === true &&
+						isGrantPermittedByRule(
+							[grant],
+							{
+								...detail,
+								actions: detail.actions.filter((operation) =>
+									isRootOperation(operation)
+								)
+							},
+							publication.claims
+						)
+					);
+				})
+			);
 
 			if (!hasPrefixGrant) {
 				return new RootGrantPrefixUnverifiedFinding('root grant', detail.root);
@@ -434,7 +451,11 @@ function trustFindings(
 		return [];
 	}
 
-	if (!isPreset && publication.trigger === 'pull_request') {
+	if (
+		!isPreset &&
+		publication.trigger === 'pull_request' &&
+		publication.lifecycle === undefined
+	) {
 		return [new SharedPullRequestCacheFinding()];
 	}
 
@@ -446,7 +467,10 @@ function trustFindings(
 		readResources
 	);
 
-	if (publication.requests.length === 0) {
+	if (
+		publication.requests.length === 0 ||
+		publication.lifecycle !== undefined
+	) {
 		return [trust];
 	}
 
@@ -485,6 +509,11 @@ async function inspectPublication(
 	dependencies: DiscoveredGithubCheckDependencies
 ): Promise<CheckFinding[]> {
 	const isPreset = isPresetJob(job);
+	const cacheMode = job.inputs['cache-access-mode'];
+	const accessSource: ReuseViewAccessModeMismatchFinding['source'] =
+		!isReadOnlyJob(job) && (cacheMode === 'public' || cacheMode === 'private')
+			? 'workflow-input'
+			: 'tenant-default';
 	const read = await publicationReadAuthority(
 		job,
 		publication,
@@ -525,7 +554,8 @@ async function inspectPublication(
 				'reuse view access',
 				publication.reuseView.name,
 				read.viewAccess,
-				read.selectedViewAccess
+				read.selectedViewAccess,
+				accessSource
 			)
 		);
 	}
@@ -551,7 +581,8 @@ async function inspectPublication(
 			await checkPullRequestCacheAccess(
 				identity,
 				client,
-				read.selectedViewAccess
+				read.selectedViewAccess,
+				accessSource
 			)
 		);
 	}
@@ -599,7 +630,7 @@ async function inspectJob(
 	const model = modelPublishingJob(job, identity, tenant, branch);
 	const findings = [...model.findings];
 
-	for (const publication of model.cases) {
+	for (const publication of withMergedCloseCases(model.cases, identity)) {
 		const checked = await inspectPublication(
 			job,
 			publication,
@@ -612,7 +643,7 @@ async function inspectJob(
 
 		findings.push(
 			...checked.map((finding) => ({
-				trigger: publication.trigger,
+				trigger: publication.lifecycle ?? publication.trigger,
 				finding
 			}))
 		);

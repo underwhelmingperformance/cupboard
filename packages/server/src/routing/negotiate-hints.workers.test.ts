@@ -4,13 +4,21 @@ import {
 	uploadGraceFactsCapability,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadata,
-	uploadPreviewResponseSchema
+	type UploadPathNegotiation,
+	uploadPreviewResponseSchema,
+	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as schema from '../db/schema.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from '../do/subrequest-slice.ts';
 import {
 	armBlobReaperTimer,
 	authorisedFetch,
@@ -38,9 +46,11 @@ import {
 	uploadPathNegotiation,
 	useTestServer,
 	verifiableNar,
-	verifiablePath
+	verifiablePath,
+	withoutAlarmArming
 } from '../test-support.ts';
 
+import { directUploadPageSize } from './chunked-uploads.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
@@ -219,6 +229,196 @@ describe('computing negotiate hints', () => {
 		});
 	});
 
+	it('rejects a negotiation through the Worker before any pending upload is created', async () => {
+		const token = await initialise();
+		const before = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db.select().from(schema.pendingUploads).all()
+		);
+		const inputs = Array.from({ length: 401 }, () => path);
+		const response = await withSubrequestSlice(
+			() =>
+				handlerFetch(`/t/${fixtureTenant}/uploads`, {
+					method: 'POST',
+					headers: {
+						authorization: `Bearer ${token}`,
+						'content-type': 'application/json'
+					},
+					body: JSON.stringify({
+						pushId: testPushId,
+						paths: inputs
+					})
+				}),
+			{ subrequests: 7, reserve: 0 }
+		);
+		const pending = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db.select().from(schema.pendingUploads).all()
+		);
+		expect({
+			status: response.status,
+			retryAfter: response.headers.get('retry-after') ?? undefined,
+			limit: response.headers.get('x-cupboard-upload-max-paths'),
+			body: await response.json(),
+			pending
+		}).toStrictEqual({
+			status: 413,
+			retryAfter: undefined,
+			limit: '201',
+			body: {
+				defined: true,
+				code: 'UPLOAD_REQUEST_LIMIT_EXCEEDED',
+				status: 413,
+				message:
+					"The upload request exceeds this invocation's subrequest budget. Send at most 201 paths per request.",
+				data: { maxPaths: 201 }
+			},
+			pending: before
+		});
+	});
+
+	it('accepts the advertised page limit after an admission retry', async () => {
+		const token = await issueServerSignedToken(
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:preview'],
+					cache: defaultCache()
+				}
+			])
+		);
+		const request = (paths: readonly UploadPathNegotiation[]) => ({
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ paths })
+		});
+		const first = await handlerFetch(
+			`/t/${fixtureTenant}/uploads/preview`,
+			request([path])
+		);
+		const limit = Number(first.headers.get(uploadRequestMaxPathsHeader));
+		expect(limit).toBeGreaterThan(0);
+		let batchCalls = 0;
+		const retryingDatabase = new Proxy(env.CUPBOARD_DB, {
+			get(target, property) {
+				if (property === 'batch') {
+					return async <T>(
+						statements: D1PreparedStatement[]
+					): Promise<D1Result<T>[]> => {
+						batchCalls += 1;
+						if (batchCalls === 1) {
+							throw new Error('D1_ERROR: transient admission read');
+						}
+						return target.batch<T>(statements);
+					};
+				}
+				const value: unknown = Reflect.get(target, property);
+				if (typeof value !== 'function') {
+					return value;
+				}
+				return (...arguments_: unknown[]): unknown => {
+					const result: unknown = Reflect.apply(value, target, arguments_);
+					return result;
+				};
+			}
+		});
+		const paths = Array.from({ length: limit }, () => path);
+		const next = await handlerFetch(
+			`/t/${fixtureTenant}/uploads/preview`,
+			request(paths),
+			{ CUPBOARD_DB: retryingDatabase }
+		);
+		expect({
+			status: next.status,
+			limit: next.headers.get(uploadRequestMaxPathsHeader),
+			batchCalls
+		}).toStrictEqual({
+			status: 200,
+			limit: String(limit),
+			batchCalls: 2
+		});
+		expect(uploadPreviewResponseSchema.parse(await next.json())).toStrictEqual({
+			uploads: paths.map(() => ({
+				action: 'upload',
+				storePathHash: path.storePathHash,
+				narHash: path.narHash
+			}))
+		});
+	}, 60_000);
+
+	it.each([false, true])(
+		'bounds a direct page after canonical NAR loss with duplicate paths=%s',
+		async (duplicates) => {
+			const token = await initialise();
+			await withoutAlarmArming(async () => {
+				const inputs: UploadPathMetadata[] = [];
+				for (
+					let index = 0;
+					index < (duplicates ? 1 : directUploadPageSize);
+					index += 1
+				) {
+					const nar = await verifiableNar(`direct-budget-${String(index)}`);
+					const metadata = uploadMetadata({
+						storePathHash: String(index).padStart(32, '0'),
+						narHash: nar.narHash,
+						fileHash: nar.fileHash,
+						fileSize: nar.narBytes.byteLength,
+						narSize: nar.narSize
+					});
+					await commitPath(token, metadata, nar);
+					await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
+					inputs.push(metadata);
+				}
+				const first = inputs[0];
+				if (first === undefined) {
+					throw new TypeError('Expected a seeded path');
+				}
+				const input = duplicates
+					? Array.from({ length: directUploadPageSize }, () => first)
+					: inputs;
+				const negotiatedPaths = input.map((metadata) =>
+					uploadPathNegotiation(metadata)
+				);
+				const measured = await runInDurableObject(currentServer(), (instance) =>
+					withSubrequestSlice(
+						async () => {
+							const before = subrequestsAvailable();
+							const response = await instance.fetch(
+								new Request('https://cache.example/uploads', {
+									method: 'POST',
+									headers: {
+										authorization: `Bearer ${token}`,
+										'content-type': 'application/json'
+									},
+									body: JSON.stringify({
+										pushId: testPushId,
+										paths: negotiatedPaths
+									})
+								})
+							);
+							const answer = uploadNegotiateResponseSchema.parse(
+								await response.json()
+							);
+							return {
+								status: response.status,
+								calls: before - subrequestsAvailable(),
+								actions: answer.uploads.map((decision) => decision.action)
+							};
+						},
+						{ subrequests: 1000, reserve: 100 }
+					)
+				);
+				expect(measured).toStrictEqual({
+					status: 200,
+					calls: duplicates ? 7 : 205,
+					actions: Array.from({ length: directUploadPageSize }, () => 'upload')
+				});
+			});
+		},
+		60_000
+	);
+
 	it('returns no hints without a bearer header', async () => {
 		const hints = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths: [path] }, {}),
@@ -354,7 +554,7 @@ describe('negotiate hints', () => {
 					([query]) =>
 						query.includes('"blob_state"') ||
 						query.includes('"tenant_blob"') ||
-						query.includes('"blob_ref"')
+						query.includes('"blob_ref_storage"')
 				)
 			}).toStrictEqual({ status: StatusCodes.UNAUTHORIZED, hintReads: [] });
 		} finally {

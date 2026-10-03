@@ -18,6 +18,7 @@ import {
 
 import { controlTenantSetQuota } from '../control/control-plane.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { pendingUploads } from '../db/schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -55,8 +56,6 @@ import {
 	verifyCurrentTenant,
 	withoutAlarmArming
 } from '../test-support.ts';
-
-import { noProgressRetryMs } from './alarm.ts';
 
 // Both encodings decompress to the same NAR and therefore share a narHash. Only
 // their compressed sizes differ.
@@ -400,24 +399,36 @@ describe('per-tenant quota', () => {
 		);
 
 		await dropFixtureTenantUsage();
-		// The refused verdict is the only one in the page, so the drain pass that
-		// applies it stalls. Run that pass here, so its retry deadline is left in
-		// this test and not by an alarm racing the teardown.
 		await withoutAlarmArming(async () => {
 			await verifyCurrentTenant();
 			await runInDurableObject(currentServer(), (instance) => instance.alarm());
 		});
+		const retry = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({
+					failures: pendingUploads.settleFailures,
+					retryAfter: pendingUploads.settleRetryAfter
+				})
+				.from(pendingUploads)
+				.where(eq(pendingUploads.id, upload.uploadId))
+				.get()
+		);
 
 		expect({
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			verdict: await pendingUploadVerdict(upload.uploadId),
-			parked: await takeStalledMaintenancePasses()
+			parked: await takeStalledMaintenancePasses(),
+			retry
 		}).toStrictEqual({
 			edges: [],
 			presence: [],
 			verdict: 'pending',
-			parked: [{ pass: 'verdict-drain', waitMs: noProgressRetryMs }]
+			parked: [],
+			retry: {
+				failures: 1,
+				retryAfter: new Date(testBase.getTime() + 30_000).toISOString()
+			}
 		});
 	});
 
@@ -682,32 +693,74 @@ describe('the probe-to-charge window', () => {
 	const releaseKey = 'test/probe-window-release';
 	const pausedKey = 'test/probe-window-paused';
 
-	// Promotion performs the first canonical head, so pause on the second head
-	// during materialisation. R2 markers coordinate the requests because a pending
-	// promise cannot be awaited from another Durable Object request context.
-	function holdProbeHead(canonicalKey: string): {
-		spy: MockInstance;
+	function holdAccountRead(): {
+		restore: () => void;
 	} {
+		const originalPrepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
-		let heads = 0;
-		const spy = vi
-			.spyOn(env.BLOBS, 'head')
-			.mockImplementation(async (key: string) => {
-				if (key === canonicalKey) {
-					heads += 1;
-
-					if (heads === 2) {
-						await env.BLOBS.put(pausedKey, 'paused');
-						while ((await originalHead(releaseKey)) === null) {
-							await new Promise((resolve) => setTimeout(resolve, 25));
-						}
-					}
+		const statements: MockInstance[] = [];
+		let hasPaused = false;
+		let isReleased = false;
+		const prepare = vi
+			.spyOn(env.CUPBOARD_DB, 'prepare')
+			.mockImplementation((query) => {
+				const statement = originalPrepare(query);
+				if (
+					!query.startsWith(
+						'select "tenant"."status", "tenant_usage"."tenant", "tenant_usage"."bytes", "tenant_usage"."cas_bytes", "tenant_usage"."quota_bytes" from "tenant" left join "tenant_usage"'
+					)
+				) {
+					return statement;
 				}
-
-				return originalHead(key);
+				const originalBind = statement.bind.bind(statement);
+				statements.push(
+					vi.spyOn(statement, 'bind').mockImplementation((...values) => {
+						const bound = originalBind(...values);
+						const originalRaw = bound.raw.bind(bound);
+						statements.push(
+							vi.spyOn(bound, 'raw').mockImplementation(async (options) => {
+								const result = await originalRaw(options);
+								if (!hasPaused) {
+									hasPaused = true;
+									await env.BLOBS.put(pausedKey, JSON.stringify(result));
+									while (
+										!isReleased &&
+										(await originalHead(releaseKey)) === null
+									) {
+										await new Promise<void>((resolve) =>
+											setTimeout(resolve, 0)
+										);
+									}
+								}
+								return result;
+							})
+						);
+						return bound;
+					})
+				);
+				return statement;
 			});
+		return {
+			restore: () => {
+				isReleased = true;
+				prepare.mockRestore();
+				for (const statement of statements) {
+					statement.mockRestore();
+				}
+			}
+		};
+	}
 
-		return { spy };
+	async function releaseHeldVerification(
+		held: ReturnType<typeof holdAccountRead>,
+		pass: Promise<void>
+	): Promise<void> {
+		try {
+			await env.BLOBS.put(releaseKey, 'go');
+		} finally {
+			held.restore();
+			await pass;
+		}
 	}
 
 	async function heldVerify(quotaOf: (nar: VerifiableNar) => number) {
@@ -732,71 +785,99 @@ describe('the probe-to-charge window', () => {
 		await putNarBytes(decision.r2Key, nar);
 		await markUploadPendingVerification(decision.uploadId);
 
-		const held = holdProbeHead(narObjectKey(nar.narHash, 2));
-		const pass = verifyCurrentTenant();
-
-		while ((await env.BLOBS.head(pausedKey)) === null) {
-			await new Promise((resolve) => setTimeout(resolve, 25));
+		const held = holdAccountRead();
+		const state = { isComplete: false };
+		async function verify(): Promise<void> {
+			try {
+				await verifyCurrentTenant();
+			} finally {
+				state.isComplete = true;
+			}
 		}
-
-		return { nar, metadata, decision, held, pass };
+		const pass = verify();
+		const completion = Promise.allSettled([pass]);
+		try {
+			let paused = await env.BLOBS.get(pausedKey);
+			while (paused === null) {
+				if (state.isComplete) {
+					await completion;
+					await pass;
+					throw new Error(
+						'Verification completed before the advisory account read paused.'
+					);
+				}
+				await new Promise<void>((resolve) => setTimeout(resolve, 0));
+				paused = await env.BLOBS.get(pausedKey);
+			}
+			expect(await paused.json()).toStrictEqual([
+				['active', fixtureTenant, 0, 0, quotaOf(nar)]
+			]);
+			return { nar, metadata, decision, held, pass };
+		} catch (error) {
+			await releaseHeldVerification(held, pass);
+			throw error;
+		}
 	}
 
 	it('rejects a charge after quota shrinks between the pre-check and charge', async () => {
-		const { nar, metadata, decision, held, pass } = await heldVerify(
-			(fits) => fits.narBytes.byteLength
-		);
+		await withoutAlarmArming(async () => {
+			const { nar, metadata, decision, held, pass } = await heldVerify(
+				(fits) => fits.narBytes.byteLength
+			);
 
-		try {
-			// The advisory read has already observed the old quota. The charge batch
-			// must detect the lower value and record an over-quota result.
-			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-				.update(d1Schema.tenantUsage)
-				.set({ quotaBytes: nar.narBytes.byteLength - 1 })
-				.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
-				.run();
-			await env.BLOBS.put(releaseKey, 'go');
-			await pass;
+			try {
+				// The advisory read has already observed the old quota. The charge batch
+				// must detect the lower value and record an over-quota result.
+				await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+					.update(d1Schema.tenantUsage)
+					.set({ quotaBytes: nar.narBytes.byteLength - 1 })
+					.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+					.run();
+				await env.BLOBS.put(releaseKey, 'go');
+				await pass;
 
-			expect({
-				verdict: await pendingUploadVerdict(decision.uploadId),
-				...(await probeWindowState(metadata.storePathHash))
-			}).toStrictEqual({
-				verdict: 'over-quota',
-				edges: [],
-				presence: [],
-				bytes: 0,
-				servable: false
-			});
-		} finally {
-			held.spy.mockRestore();
-		}
+				expect({
+					verdict: await pendingUploadVerdict(decision.uploadId),
+					...(await probeWindowState(metadata.storePathHash))
+				}).toStrictEqual({
+					verdict: 'over-quota',
+					edges: [],
+					presence: [],
+					bytes: 0,
+					servable: false
+				});
+			} finally {
+				await releaseHeldVerification(held, pass);
+			}
+		});
 	});
 
 	it('rejects a commit after the tenant is suspended between the pre-check and charge', async () => {
-		const { metadata, decision, held, pass } = await heldVerify(
-			(fits) => fits.narBytes.byteLength * 2
-		);
+		await withoutAlarmArming(async () => {
+			const { metadata, decision, held, pass } = await heldVerify(
+				(fits) => fits.narBytes.byteLength * 2
+			);
 
-		try {
-			// The advisory read has already observed an active tenant. The charge
-			// batch must reject the newly suspended tenant.
-			await suspendTenant(fixtureTenant);
-			await env.BLOBS.put(releaseKey, 'go');
-			await pass;
+			try {
+				// The advisory read has already observed an active tenant. The charge
+				// batch must reject the newly suspended tenant.
+				await suspendTenant(fixtureTenant);
+				await env.BLOBS.put(releaseKey, 'go');
+				await pass;
 
-			expect({
-				verdict: await pendingUploadVerdict(decision.uploadId),
-				...(await probeWindowState(metadata.storePathHash))
-			}).toStrictEqual({
-				verdict: undefined,
-				edges: [],
-				presence: [],
-				bytes: 0,
-				servable: false
-			});
-		} finally {
-			held.spy.mockRestore();
-		}
+				expect({
+					verdict: await pendingUploadVerdict(decision.uploadId),
+					...(await probeWindowState(metadata.storePathHash))
+				}).toStrictEqual({
+					verdict: undefined,
+					edges: [],
+					presence: [],
+					bytes: 0,
+					servable: false
+				});
+			} finally {
+				await releaseHeldVerification(held, pass);
+			}
+		});
 	});
 });

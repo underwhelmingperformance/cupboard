@@ -10,15 +10,24 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { withReadAuthentication } from '@cupboard/nix';
+import { discoverNixStoreConfig, withReadAuthentication } from '@cupboard/nix';
+import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
-import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	cachePrioritySchema,
+	type CacheScope
+} from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { type ReadResourceState } from '@cupboard/protocol/read-access';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
+import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
+import { runWithReadAccess } from '../../../packages/cli/src/commands/run.ts';
 import { probeDeadlineMs } from '../cache-probe.ts';
 import {
 	BooleanInputInvalidError,
@@ -33,7 +42,6 @@ import {
 	PrivateSubstitutersCacheUrlRequiredError,
 	ProbeTimeoutError,
 	ProvisionCacheUrlRequiredError,
-	ReadConfigurationScopeError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError,
@@ -44,6 +52,7 @@ import {
 import {
 	cupboardPathEntry,
 	fetchCachePublicKeyAt,
+	registerSetupCommand,
 	resolveSetupInputs,
 	resolveSubstituters,
 	type ResolveSubstitutersOptions,
@@ -146,7 +155,8 @@ describe('setupAction acquisition outputs', () => {
 		expect(await readActionOutputs(outputFile)).toStrictEqual({
 			'cupboard-path': binaryPath,
 			cupboard: JSON.stringify(testCase.cupboard),
-			'cupboard-version': testCase.expectedVersion
+			'cupboard-version': testCase.expectedVersion,
+			'read-session-audience': ''
 		});
 	});
 
@@ -198,7 +208,8 @@ describe('setupAction acquisition outputs', () => {
 						tag: resolved,
 						sourceCommit: 'c'.repeat(40)
 					}),
-					'cupboard-version': resolved
+					'cupboard-version': resolved,
+					'read-session-audience': ''
 				},
 				selectedVersion: selected ?? 'latest'
 			});
@@ -292,9 +303,11 @@ describe('resolveSetupInputs', () => {
 		cacheUrl: undefined,
 		caches: [{ cache: defaultCache }],
 		privateSubstituters: [],
+		readCaches: [],
 		provisionCache: undefined,
 		cacheAccessMode: undefined,
 		reuseView: '',
+		audience: '',
 		trustedPublicKey: '',
 		readUser: '',
 		readPassword: '',
@@ -710,6 +723,7 @@ describe('resolveSubstituters', () => {
 
 		try {
 			const signals: AbortSignal[] = [];
+			const probesStarted = Promise.withResolvers<undefined>();
 			const fetcher: typeof fetch = (_input, init) => {
 				const signal = init?.signal;
 
@@ -718,6 +732,9 @@ describe('resolveSubstituters', () => {
 				}
 
 				signals.push(signal);
+				if (signals.length === 2) {
+					probesStarted.resolve(undefined);
+				}
 				const body = new ReadableStream({
 					start(controller) {
 						signal.addEventListener(
@@ -738,10 +755,19 @@ describe('resolveSubstituters', () => {
 			);
 			const rejection =
 				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
-
-			await vi.waitFor(() => {
-				expect(signals).toHaveLength(2);
+			onTestFinished(async () => {
+				if (!vi.isFakeTimers()) {
+					return;
+				}
+				try {
+					await vi.runOnlyPendingTimersAsync();
+					await rejection;
+				} finally {
+					vi.useRealTimers();
+				}
 			});
+
+			await Promise.race([probesStarted.promise, pending]);
 			await vi.advanceTimersByTimeAsync(30_000);
 			await rejection;
 
@@ -1155,6 +1181,403 @@ describe('setupAction cache-credential masking', () => {
 });
 
 describe('setupAction Nix configuration', () => {
+	it.each(['exact', 'mode', 'missing', 'extra'] as const)(
+		'checks the mixed resource union across run and setup-configure: %s',
+		async (mutation) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-mixed-union-')
+			);
+			const environment = {
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: path.join(directory, 'env'),
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			};
+			const ambientOutput = path.join(directory, 'ambient-output');
+			const ambientEnvironment = path.join(directory, 'ambient-env');
+			const tenant = new URL('https://cache.example.test/t/acme');
+			const requests: unknown[] = [];
+			const priority = cachePrioritySchema.parse(40);
+			let outcome = 'configured';
+			try {
+				await writeFile(ambientOutput, 'ambient-output=unchanged\n');
+				await writeFile(ambientEnvironment, 'ambient-environment=unchanged\n');
+				vi.stubEnv('GITHUB_OUTPUT', ambientOutput);
+				vi.stubEnv('GITHUB_ENV', ambientEnvironment);
+				try {
+					await setupAction(
+						{
+							installDir: path.join(directory, 'bin'),
+							addToPath: 'false',
+							cacheUrl: tenant.href,
+							cache: 'fresh,archive,builds',
+							cacheCredentials: JSON.stringify(
+								['fresh', 'archive'].map((cache) => ({
+									cache: namedCache(cache),
+									credential: { user: 'alice', password: readPassword }
+								}))
+							),
+							trustedPublicKey: 'acme:AAAA'
+						},
+						environment,
+						createGithubReporter(),
+						{
+							installRelease: () =>
+								Promise.resolve({
+									binaryPath: '/cupboard',
+									version: 'v1.2.3',
+									sourceCommit: 'd'.repeat(40)
+								}),
+							fetch: stubFetch(() => cacheInfoBody(40), {
+								status: (url) =>
+									url.includes('/cache/fresh/') ||
+									url.includes('/cache/archive/')
+										? 404
+										: 401
+							}),
+							configureWithReadAccess: async (_binary, inputs, target) => {
+								const payloadFile = path.join(directory, 'payload.json');
+								await writeFile(
+									payloadFile,
+									JSON.stringify({ ...inputs, cacheUrl: inputs.cacheUrl.href })
+								);
+								await runWithReadAccess(
+									parseTenantCacheUrl(target),
+									['setup-configure', payloadFile],
+									{
+										githubOidc: true,
+										cacheMetadata: true,
+										readCache: [
+											parseTenantCacheUrl(
+												new URL(`${tenant.href}/cache/builds`)
+											)
+										],
+										readCacheMetadata: [
+											parseTenantCacheUrl(
+												new URL(`${tenant.href}/cache/archive`)
+											)
+										]
+									},
+									{
+										environment: inputs.environment,
+										storeConfig: discoverNixStoreConfig(),
+										readFile: () => Promise.resolve(''),
+										issue: (input) => {
+											requests.push(input.resources);
+											let resources: ReadResourceState[] = input.resources.map(
+												(resource) => ({
+													...resource,
+													state: {
+														kind: 'existing',
+														access: 'private',
+														priority
+													}
+												})
+											);
+											switch (mutation) {
+												case 'mode': {
+													resources = resources.map((resource) =>
+														resource.type === 'cupboard_cache' &&
+														resource.cache.kind === 'named' &&
+														resource.cache.name === 'archive'
+															? { ...resource, mode: 'content' }
+															: resource
+													);
+													break;
+												}
+												case 'missing': {
+													resources = resources.slice(0, 2);
+													break;
+												}
+												case 'extra': {
+													resources.push({
+														type: 'cupboard_cache',
+														cache: namedCache('unrelated'),
+														mode: 'content',
+														state: {
+															kind: 'existing',
+															access: 'private',
+															priority
+														}
+													});
+													break;
+												}
+												case 'exact': {
+													break;
+												}
+											}
+											return Promise.resolve({
+												user: 'cupboard-oidc',
+												password: 'cupboard-access+jwt:example',
+												expiresAtMs: Date.now() + 900_000,
+												resources
+											});
+										},
+										runChild: async ({ environment }) => {
+											await setupConfigureAction(
+												payloadFile,
+												{ ...inputs.environment, ...environment },
+												createGithubReporter(),
+												{
+													fetch: () => {
+														throw new Error(
+															'All configuration facts must come from the session'
+														);
+													}
+												}
+											);
+											return { status: 0, signal: undefined };
+										}
+									}
+								);
+							}
+						}
+					);
+				} catch (error) {
+					if (!(error instanceof Error)) {
+						throw error;
+					}
+					outcome = error.message;
+				}
+				expect({
+					outcome,
+					requests,
+					ambientOutput: await readFile(ambientOutput, 'utf8'),
+					ambientEnvironment: await readFile(ambientEnvironment, 'utf8')
+				}).toStrictEqual({
+					ambientOutput: 'ambient-output=unchanged\n',
+					ambientEnvironment: 'ambient-environment=unchanged\n',
+					outcome:
+						mutation === 'exact'
+							? 'configured'
+							: 'The read session does not describe exactly the configured resources.',
+					requests: [
+						[
+							{
+								type: 'cupboard_cache',
+								cache: namedCache('fresh'),
+								mode: 'metadata'
+							},
+							{
+								type: 'cupboard_cache',
+								cache: namedCache('builds'),
+								mode: 'content'
+							},
+							{
+								type: 'cupboard_cache',
+								cache: namedCache('archive'),
+								mode: 'metadata'
+							}
+						]
+					]
+				});
+			} finally {
+				vi.unstubAllEnvs();
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it.each([
+		{
+			caches: 'fresh,archive',
+			view: '',
+			downstreamTarget: '',
+			downstreamView: '',
+			resources: [
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('fresh'),
+					mode: 'metadata'
+				},
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('archive'),
+					mode: 'metadata'
+				}
+			]
+		},
+		{
+			caches: 'fresh',
+			view: '',
+			downstreamTarget: '',
+			downstreamView: '',
+			resources: [
+				{ type: 'cupboard_cache', cache: namedCache('fresh'), mode: 'metadata' }
+			]
+		},
+		{
+			caches: 'fresh,builds',
+			view: 'prior',
+			downstreamTarget: 'https://cache.example.test/t/acme/cache/builds',
+			downstreamView: 'prior',
+			resources: [
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('fresh'),
+					mode: 'metadata'
+				},
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('builds'),
+					mode: 'content'
+				},
+				{ type: 'cupboard_view', view: 'prior' }
+			]
+		}
+	])(
+		'exports only content resources after metadata configuration for $caches',
+		async ({ caches, view, downstreamTarget, downstreamView, resources }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-metadata-')
+			);
+			const sessions: unknown[] = [];
+			try {
+				await setupAction(
+					{
+						installDir: path.join(directory, 'bin'),
+						addToPath: 'false',
+						cacheUrl: 'https://cache.example.test/t/acme',
+						cache: caches,
+						reuseView: view,
+						cacheCredentials: JSON.stringify(
+							caches
+								.split(',')
+								.filter((cache) => cache !== 'builds')
+								.map((cache) => ({
+									cache: namedCache(cache),
+									credential: { user: 'alice', password: readPassword }
+								}))
+						),
+						trustedPublicKey: 'acme:AAAA'
+					},
+					{
+						RUNNER_TEMP: directory,
+						GITHUB_OUTPUT: path.join(directory, 'output')
+					},
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: '/cupboard',
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: stubFetch(() => cacheInfoBody(40), {
+							status: (url) =>
+								url.includes('/cache/fresh/') || url.includes('/cache/archive/')
+									? 404
+									: 401
+						}),
+						configureWithReadAccess: (_binary, inputs, target) => {
+							sessions.push({
+								target: target.href,
+								resources: inputs.readResources
+							});
+							return Promise.resolve();
+						}
+					}
+				);
+				const outputs = await readActionOutputs(path.join(directory, 'output'));
+				expect({
+					sessions,
+					target: outputs['read-session-target'],
+					view: outputs['read-session-view'],
+					caches: outputs['read-session-caches']
+				}).toStrictEqual({
+					sessions: [
+						{
+							target: 'https://cache.example.test/t/acme/cache/fresh',
+							resources
+						}
+					],
+					target: downstreamTarget,
+					view: downstreamView,
+					caches: '[]'
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+	it.each(['content', 'metadata'] as const)(
+		'passes the complete %s session and custom audience to the installed run command',
+		async (mode) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-setup-process-')
+			);
+			const binary = path.join(directory, 'cupboard');
+			const captured = path.join(directory, 'captured.json');
+			try {
+				vi.stubEnv('CUPBOARD_SETUP_CAPTURE', captured);
+				await writeFile(
+					binary,
+					`#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); if (args.includes('--help')) { console.log('Usage: cupboard run [options] <url>\\n  --github-oidc\\n  --cache-metadata\\n  --read-cache <url>\\n  --read-cache-metadata <url>\\n  --audience <audience>'); } else { const payload = JSON.parse(fs.readFileSync(args.at(-1), 'utf8')); fs.writeFileSync(process.env.CUPBOARD_SETUP_CAPTURE, JSON.stringify({args: args.slice(0, args.indexOf('--')), resources: payload.readResources, audience: payload.audience})); }\n`,
+					{ mode: 0o700 }
+				);
+				await setupAction(
+					{
+						installDir: path.join(directory, 'bin'),
+						addToPath: 'false',
+						cacheUrl: 'https://cache.example.test/t/acme',
+						cache: 'builds,releases',
+						reuseView: mode === 'content' ? 'prior' : '',
+						...(mode === 'metadata' && {
+							cacheCredentials: JSON.stringify(
+								['builds', 'releases'].map((cache) => ({
+									cache: namedCache(cache),
+									credential: { user: 'alice', password: readPassword }
+								}))
+							)
+						}),
+						audience: 'custom-audience',
+						trustedPublicKey: 'acme:AAAA'
+					},
+					{
+						RUNNER_TEMP: directory,
+						GITHUB_OUTPUT: path.join(directory, 'output')
+					},
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: binary,
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: stubFetch(() => cacheInfoBody(40), {
+							status: (url) =>
+								mode === 'metadata' && url.includes('/cache/') ? 404 : 401
+						})
+					}
+				);
+				expect(JSON.parse(await readFile(captured, 'utf8'))).toStrictEqual({
+					args: [
+						'run',
+						'https://cache.example.test/t/acme/cache/builds',
+						'--github-oidc',
+						'--audience',
+						'custom-audience',
+						mode === 'content' ? '--read-cache' : '--read-cache-metadata',
+						'https://cache.example.test/t/acme/cache/releases',
+						...(mode === 'metadata'
+							? ['--cache-metadata']
+							: ['--reuse-view', 'prior'])
+					],
+					audience: 'custom-audience',
+					resources: [
+						{ type: 'cupboard_cache', cache: namedCache('builds'), mode },
+						{ type: 'cupboard_cache', cache: namedCache('releases'), mode },
+						...(mode === 'content'
+							? [{ type: 'cupboard_view', view: 'prior' }]
+							: [])
+					]
+				});
+			} finally {
+				vi.unstubAllEnvs();
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
 	it('preserves an accepted ambient netrc for subsequent steps', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-setup-ambient-')
@@ -1245,7 +1668,7 @@ describe('setupAction Nix configuration', () => {
 		{ caches: 'builds,release', state: 'absent' },
 		{ caches: 'release,builds', state: 'absent' }
 	] as const)(
-		'acquires only the unresolved destination with $caches and $state state',
+		'acquires all configured destinations with $caches and $state state',
 		async ({ caches, state }) => {
 			const directory = await mkdtemp(
 				path.join(tmpdir(), 'cupboard-setup-mixed-')
@@ -1358,6 +1781,11 @@ describe('setupAction Nix configuration', () => {
 									type: 'cupboard_cache',
 									cache: namedCache('builds'),
 									mode: 'content'
+								},
+								{
+									type: 'cupboard_cache',
+									cache: namedCache('release'),
+									mode: 'content'
 								}
 							]
 						}
@@ -1376,14 +1804,69 @@ describe('setupAction Nix configuration', () => {
 		}
 	);
 
-	it('still refuses multiple unresolved OIDC destinations', async () => {
-		await expect(
-			runSetup({
-				includeDefaultCache: 'true',
-				existingAccess: 'private',
-				defaultAccess: 'private'
-			})
-		).rejects.toBeInstanceOf(ReadConfigurationScopeError);
+	it('configures all private caches and the reuse view in one read session', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-union-'));
+		const sessions: unknown[] = [];
+		try {
+			await setupAction(
+				{
+					installDir: path.join(directory, 'bin'),
+					addToPath: 'false',
+					cacheUrl: 'https://cache.example.test/t/acme',
+					cache: 'builds,release',
+					includeDefaultCache: 'true',
+					reuseView: 'prior',
+					audience: 'custom-audience',
+					trustedPublicKey: 'acme:AAAA'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'outputs')
+				},
+				createGithubReporter(),
+				{
+					installRelease: () =>
+						Promise.resolve({
+							binaryPath: '/cupboard',
+							version: 'v1.2.3',
+							sourceCommit: 'd'.repeat(40)
+						}),
+					fetch: stubFetch(() => cacheInfoBody(40), { status: () => 401 }),
+					configureWithReadAccess: (_binary, inputs, target, view) => {
+						sessions.push({
+							target: target.href,
+							view,
+							audience: inputs.audience,
+							resources: inputs.readResources
+						});
+						return Promise.resolve();
+					}
+				}
+			);
+			expect(sessions).toStrictEqual([
+				{
+					target: 'https://cache.example.test/t/acme',
+					view: 'prior',
+					audience: 'custom-audience',
+					resources: [
+						{ type: 'cupboard_cache', cache: defaultCache, mode: 'content' },
+						{
+							type: 'cupboard_cache',
+							cache: namedCache('builds'),
+							mode: 'content'
+						},
+						{
+							type: 'cupboard_cache',
+							cache: namedCache('release'),
+							mode: 'content'
+						},
+						{ type: 'cupboard_view', view: 'prior' }
+					]
+				}
+			]);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 
 	it('keeps cache credentials in a protected file and includes it by path', async () => {
@@ -1712,6 +2195,484 @@ describe('setupAction cancellation', () => {
 			)
 		}).toStrictEqual({ environmentFile: false, configFiles: [] });
 	});
+});
+
+describe('additional runner read caches', () => {
+	it.each([
+		{
+			cache: '',
+			destinationName: '',
+			cacheUrl: 'https://cache.example.test/t/acme'
+		},
+		{
+			cache: 'builds',
+			destinationName: 'builds',
+			cacheUrl: 'https://cache.example.test/t/acme'
+		},
+		{
+			cache: '',
+			destinationName: 'builds',
+			cacheUrl: 'https://cache.example.test/t/acme/cache/builds'
+		}
+	])(
+		'keeps destination $cacheUrl ($cache) separate from additional cache reads',
+		async ({ cache, destinationName, cacheUrl }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-additional-read-')
+			);
+			const environment = {
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: path.join(directory, 'env'),
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			};
+			const ambientOutput = path.join(directory, 'ambient-output');
+			const ambientEnvironment = path.join(directory, 'ambient-env');
+			const base = 'https://cache.example.test/t/acme';
+			const destination =
+				destinationName === '' ? defaultCache : namedCache(destinationName);
+			const destinationUrl =
+				destinationName === '' ? base : `${base}/cache/${destinationName}`;
+			const requests: unknown[] = [];
+			const resources = [
+				{
+					type: 'cupboard_cache',
+					cache: namedCache('falcon'),
+					mode: 'content'
+				},
+				{ type: 'cupboard_cache', cache: destination, mode: 'content' },
+				{ type: 'cupboard_cache', cache: namedCache('extra'), mode: 'content' },
+				{ type: 'cupboard_view', view: 'prior' }
+			];
+			try {
+				await writeFile(ambientOutput, 'ambient-output=unchanged\n');
+				await writeFile(ambientEnvironment, 'ambient-environment=unchanged\n');
+				vi.stubEnv('GITHUB_OUTPUT', ambientOutput);
+				vi.stubEnv('GITHUB_ENV', ambientEnvironment);
+				await setupAction(
+					{
+						installDir: path.join(directory, 'bin'),
+						addToPath: 'false',
+						cacheUrl,
+						cache,
+						reuseView: 'prior',
+						trustedPublicKey: 'acme:AAAA',
+						readCaches: `${base}/cache/falcon\n${base}/cache/extra\n${base}/cache/falcon\n${destinationUrl}`
+					},
+					environment,
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: '/installed/cupboard',
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: stubFetch(
+							(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 10),
+							{
+								status: (url) =>
+									url.includes('/cache/falcon/')
+										? StatusCodes.UNAUTHORIZED
+										: StatusCodes.OK
+							}
+						),
+						configureWithReadAccess: async (_binary, inputs, target, view) => {
+							const payload = path.join(directory, 'payload.json');
+							await writeFile(
+								payload,
+								JSON.stringify({ ...inputs, cacheUrl: inputs.cacheUrl.href })
+							);
+							const additional = (inputs.readResources ?? []).flatMap(
+								(resource) => {
+									if (resource.type !== 'cupboard_cache') {
+										return [];
+									}
+									const url = new URL(
+										resource.cache.kind === 'default'
+											? base
+											: `${base}/cache/${resource.cache.name}`
+									);
+									return canonicalHref(url) === canonicalHref(target)
+										? []
+										: [parseTenantCacheUrl(url)];
+								}
+							);
+							await runWithReadAccess(
+								parseTenantCacheUrl(target),
+								['setup-configure', payload],
+								{
+									githubOidc: true,
+									reuseView: reuseViewNameSchema.parse(view),
+									readCache: additional
+								},
+								{
+									environment,
+									storeConfig: discoverNixStoreConfig(),
+									readFile: () => Promise.resolve(''),
+									issue: (input) => {
+										requests.push(input.resources);
+										return Promise.resolve({
+											user: 'cupboard-oidc',
+											password: 'cupboard-access+jwt:example',
+											expiresAtMs: Date.now() + 900_000,
+											resources: input.resources.map(
+												(resource): ReadResourceState => {
+													if (resource.type === 'cupboard_view') {
+														return {
+															...resource,
+															state: {
+																kind: 'existing',
+																access: 'public',
+																priority: cachePrioritySchema.parse(50)
+															}
+														};
+													}
+													const isFalcon =
+														resource.cache.kind === 'named' &&
+														resource.cache.name === 'falcon';
+													return {
+														...resource,
+														state: {
+															kind: 'existing',
+															access: isFalcon ? 'private' : 'public',
+															priority: cachePrioritySchema.parse(
+																isFalcon ? 80 : 10
+															)
+														}
+													};
+												}
+											)
+										});
+									},
+									runChild: async ({ environment: childEnvironment }) => {
+										await setupConfigureAction(
+											payload,
+											{ ...environment, ...childEnvironment },
+											createGithubReporter(),
+											{
+												fetch: () => {
+													throw new Error(
+														'All read facts must come from the session'
+													);
+												}
+											}
+										);
+										return { status: 0, signal: undefined };
+									}
+								}
+							);
+						}
+					}
+				);
+				const outputs = await readActionOutputs(environment.GITHUB_OUTPUT);
+				const config = outputs['nix-config-file'];
+				if (config === undefined) {
+					throw new Error('Expected a generated Nix configuration');
+				}
+				expect({
+					requests,
+					outputs,
+					ambientOutput: await readFile(ambientOutput, 'utf8'),
+					ambientEnvironment: await readFile(ambientEnvironment, 'utf8'),
+					config: await readFile(config, 'utf8')
+				}).toStrictEqual({
+					requests: [resources],
+					outputs: {
+						'cupboard-path': '/installed/cupboard',
+						cupboard: JSON.stringify({
+							kind: 'release',
+							repository: 'cupboard/cupboard',
+							tag: 'v1.2.3',
+							sourceCommit: 'd'.repeat(40)
+						}),
+						'cupboard-version': 'v1.2.3',
+						'read-session-audience': '',
+						'read-session-target': `${base}/cache/falcon`,
+						'read-session-view': 'prior',
+						'read-session-caches': JSON.stringify([
+							destinationUrl,
+							`${base}/cache/extra`
+						]),
+						'nix-config-file': config
+					},
+					ambientOutput: 'ambient-output=unchanged\n',
+					ambientEnvironment: 'ambient-environment=unchanged\n',
+					config: `extra-substituters = ${destinationUrl} ${base}/reuse/prior ${base}/cache/falcon ${base}/cache/extra\nextra-trusted-public-keys = acme:AAAA\n`
+				});
+			} finally {
+				vi.unstubAllEnvs();
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it.each([
+		{ readCaches: 'not-a-url' },
+		{ readCaches: 'https://cache.example.test/t/other/cache/falcon' },
+		{ readCaches: 'https://other.example.test/t/acme/cache/falcon' },
+		{
+			readCaches: 'https://alice:secret@cache.example.test/t/acme/cache/falcon'
+		},
+		{ readCaches: 'https://cache.example.test/t/acme/reuse/prior' },
+		{ readCaches: 'https://cache.example.test/t/acme/cache/falcon?x=y' },
+		{
+			readCaches: 'https://cache.example.test/t/acme/cache/falcon',
+			readUser: 'alice',
+			readPassword
+		},
+		{
+			readCaches: 'https://cache.example.test/t/acme/cache/builds',
+			cache: 'builds',
+			destinationReadUser: 'alice',
+			destinationReadPassword: readPassword
+		},
+		{
+			cacheUrl: 'https://cache.example.test/t/acme/cache/builds',
+			readCaches: 'https://cache.example.test/t/acme/cache/builds',
+			destinationReadUser: 'alice',
+			destinationReadPassword: readPassword
+		},
+		{
+			readCaches: 'https://cache.example.test/t/acme/cache/falcon',
+			privateSubstituters:
+				'https://alice:secret@cache.example.test/t/acme/cache/falcon'
+		},
+		{
+			readCaches: Array.from(
+				{ length: 16 },
+				(_, index) =>
+					`https://cache.example.test/t/acme/cache/extra-${String(index)}`
+			).join('\n')
+		}
+	])(
+		'rejects conflicting additional resources before acquisition: %j',
+		async (options) => {
+			const acquire = vi.fn();
+			const fetcher = vi.fn();
+			let error: unknown;
+			try {
+				await setupAction(
+					{
+						cupboard: JSON.stringify({
+							kind: 'source',
+							repository: 'acme/cupboard',
+							sourceCommit: 'a'.repeat(40)
+						}),
+						cacheUrl: 'https://cache.example.test/t/acme',
+						...options
+					},
+					{ RUNNER_TEMP: '/unused', GITHUB_ACTION_PATH: '/action' },
+					createGithubReporter(),
+					{ acquire, fetch: fetcher }
+				);
+			} catch (error_) {
+				error = error_;
+			}
+			expect({
+				error: error instanceof Error ? error.name : error,
+				acquisitions: acquire.mock.calls,
+				requests: fetcher.mock.calls
+			}).toStrictEqual({
+				error: 'ReadCachesInvalidError',
+				acquisitions: [],
+				requests: []
+			});
+		}
+	);
+
+	it('accepts sixteen resources after deduplicating additional URLs', () => {
+		const names = Array.from(
+			{ length: 15 },
+			(_, index) => `extra-${String(index)}`
+		);
+		const inputs = resolveSetupInputs(
+			{
+				cacheUrl: 'https://cache.example.test/t/acme',
+				readCaches: [...names, ...names]
+					.map((name) => `https://cache.example.test/t/acme/cache/${name}`)
+					.join('\n')
+			},
+			{ RUNNER_TEMP: '/unused' }
+		);
+		expect({ caches: inputs.caches, reads: inputs.readCaches }).toStrictEqual({
+			caches: [{ cache: defaultCache }],
+			reads: names.map((name) => namedCache(name))
+		});
+	});
+
+	it('accepts the actual setup parser flag and refuses a missing tenant before work', async () => {
+		const program = new Command()
+			.exitOverride()
+			.configureOutput({ writeErr: vi.fn() });
+		registerSetupCommand(program, { RUNNER_TEMP: '/unused' });
+		await expect(
+			program.parseAsync(
+				[
+					'setup',
+					'--read-caches',
+					'https://cache.example.test/t/acme/cache/falcon'
+				],
+				{ from: 'user' }
+			)
+		).rejects.toMatchObject({ name: 'ReadCachesInvalidError', exitCode: 2 });
+	});
+});
+
+describe('cross-tenant setup', () => {
+	it.each(['content', 'metadata'] as const)(
+		'parses and configures an explicit other-tenant URL alongside %s access',
+		async (mode) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-other-tenant-')
+			);
+			const environment = {
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			};
+			const partner =
+				'https://cupboard:partner%2Fsecret@cache.example.test/t/partner/cache/deps';
+			const sessions: unknown[] = [];
+			try {
+				const program = new Command();
+				registerSetupCommand(program, environment);
+				const setup = program.commands[0];
+				if (setup === undefined) {
+					throw new Error('The setup command must be registered');
+				}
+				setup.parseOptions([
+					'--install-dir',
+					path.join(directory, 'bin'),
+					'--add-to-path',
+					'false',
+					'--cache-url',
+					'https://cache.example.test/t/acme',
+					'--cache',
+					'builds',
+					'--private-substituters',
+					partner,
+					'--trusted-public-key',
+					'acme:AAAA',
+					...(mode === 'metadata'
+						? [
+								'--destination-read-user',
+								'alice',
+								'--destination-read-password',
+								readPassword
+							]
+						: [])
+				]);
+				await setupAction(
+					setup.opts<SetupOptions>(),
+					environment,
+					createGithubReporter(),
+					{
+						installRelease: () =>
+							Promise.resolve({
+								binaryPath: '/cupboard',
+								version: 'v1.2.3',
+								sourceCommit: 'd'.repeat(40)
+							}),
+						fetch: stubFetch(() => cacheInfoBody(40), {
+							status: (url) =>
+								mode === 'metadata' && url.includes('/cache/builds/')
+									? 404
+									: 401
+						}),
+						configureWithReadAccess: async (_binary, inputs, target) => {
+							sessions.push({
+								target: target.href,
+								resources: inputs.readResources
+							});
+							const payload = path.join(directory, 'payload.json');
+							const facts = path.join(directory, 'facts.json');
+							await writeFile(
+								payload,
+								JSON.stringify({
+									...inputs,
+									cacheUrl: inputs.cacheUrl.href,
+									privateSubstituters: inputs.privateSubstituters.map(
+										(url) => url.href
+									)
+								})
+							);
+							await writeFile(
+								facts,
+								JSON.stringify({
+									authorization_details: [],
+									read_resources: inputs.readResources?.map((resource) => ({
+										...resource,
+										state: { kind: 'existing', access: 'private', priority: 40 }
+									}))
+								})
+							);
+							await setupConfigureAction(
+								payload,
+								{ ...environment, CUPBOARD_READ_ACCESS_FILE: facts },
+								createGithubReporter(),
+								{
+									fetch: () => {
+										throw new Error(
+											'Private substituters must keep their URL credentials and remain outside the OIDC session'
+										);
+									}
+								}
+							);
+						}
+					}
+				);
+				const outputs = await readActionOutputs(environment.GITHUB_OUTPUT);
+				const config = outputs['nix-config-file'];
+				if (config === undefined) {
+					throw new Error('Setup must output its generated configuration');
+				}
+				expect({
+					sessions,
+					config: await readFile(config, 'utf8'),
+					target: outputs['read-session-target']
+				}).toStrictEqual({
+					sessions: [
+						{
+							target: 'https://cache.example.test/t/acme/cache/builds',
+							resources: [
+								{ type: 'cupboard_cache', cache: namedCache('builds'), mode }
+							]
+						}
+					],
+					config: `extra-substituters = https://${mode === 'metadata' ? `alice:${readPassword}@` : ''}cache.example.test/t/acme/cache/builds ${partner}\nextra-trusted-public-keys = acme:AAAA\n`,
+					target:
+						mode === 'metadata'
+							? ''
+							: 'https://cache.example.test/t/acme/cache/builds'
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it.each([
+		'https://cache.example.test/t/other/cache/builds',
+		'https://alice@cache.example.test/t/other/cache/builds',
+		'https://:secret@cache.example.test/t/other/cache/builds'
+	])(
+		'rejects an incomplete other-tenant private URL before acquisition: %s',
+		async (url) => {
+			const acquire = vi.fn();
+			await expect(
+				setupAction(
+					{
+						installDir: '/unused',
+						cacheUrl: 'https://cache.example.test/t/acme',
+						privateSubstituters: url
+					},
+					{},
+					createGithubReporter(),
+					{ installRelease: acquire }
+				)
+			).rejects.toThrow('private-substituters');
+			expect(acquire.mock.calls).toStrictEqual([]);
+		}
+	);
 });
 
 describe('resolveSetupInputs read credentials', () => {
@@ -2119,6 +3080,58 @@ describe('destination read credentials', () => {
 });
 
 describe('setupAction cache provisioning', () => {
+	it.each([
+		{ alias: undefined, provisioning: false, modern: 'public', warned: false },
+		{ alias: '', provisioning: false, modern: undefined, warned: false },
+		{ alias: 'public', provisioning: false, modern: undefined, warned: true },
+		{ alias: 'public', provisioning: true, modern: undefined, warned: true },
+		{ alias: 'public', provisioning: true, modern: 'public', warned: true }
+	])('warns for the provisioning alias: %j', async (selection) => {
+		const warnings: string[] = [];
+		const stream = vi
+			.spyOn(process.stderr, 'write')
+			.mockImplementation((value) => {
+				warnings.push(String(value));
+				return true;
+			});
+
+		try {
+			const result = await runSetup({
+				provisionCacheAccess: selection.alias,
+				cacheAccessMode: selection.modern,
+				existingAccess: 'public',
+				...(selection.provisioning && { provisionCache: 'pr-1' })
+			});
+
+			expect({ result, warnings }).toStrictEqual({
+				result: {
+					invocations: selection.provisioning
+						? [
+								[
+									'cache',
+									'create',
+									'https://cache.example.test/t/acme',
+									'pr-1',
+									'--github-oidc',
+									'--if-absent',
+									'--access',
+									'public'
+								]
+							]
+						: [],
+					wroteNixConfigFirst: selection.provisioning ? [false] : []
+				},
+				warnings: selection.warned
+					? [
+							'::warning::provision-cache-access is deprecated and only applies with provision-cache. Use cache-access-mode to require access for an existing cache.\n'
+						]
+					: []
+			});
+		} finally {
+			stream.mockRestore();
+		}
+	});
+
 	it.each(['destination-read', 'cache-credentials'] as const)(
 		'uses %s ahead of a distinct tenant credential during provisioning',
 		async (kind) => {
@@ -2246,14 +3259,21 @@ describe('setupAction cache provisioning', () => {
 		}
 	);
 
-	it('validates an explicit access mode for an existing cache without provisioning', async () => {
-		await expect(
-			runSetup({
-				cacheAccessMode: 'private',
-				existingAccess: 'public'
-			})
-		).rejects.toThrow('has public access; private access is required');
-	});
+	it.each([
+		{ cacheAccessMode: 'private', existingAccess: 'public' },
+		{ cacheAccessMode: 'public', existingAccess: 'private' }
+	] as const)(
+		'checks required $cacheAccessMode access for an existing $existingAccess cache without provisioning',
+		async (selection) => {
+			const provision = vi.fn();
+			await expect(
+				runSetup({ ...selection, onProvision: provision })
+			).rejects.toThrow(
+				`Cache at https://cache.example.test/t/acme/cache/pr-1 has ${selection.existingAccess} access; ${selection.cacheAccessMode} access is required.`
+			);
+			expect(provision.mock.calls).toStrictEqual([]);
+		}
+	);
 	it('keeps the deprecated provisioning alias scoped to provisioning', async () => {
 		expect(
 			await runSetup({
@@ -2541,3 +3561,53 @@ describe('including the default cache', () => {
 		expect(inputs.caches).toStrictEqual(credentials);
 	});
 });
+
+it.each([
+	{ audience: '', expected: '' },
+	{ audience: ' '.repeat(3), expected: '' },
+	{ audience: '  custom-audience  ', expected: 'custom-audience' },
+	{ audience: ' custom-audience ', expected: 'custom-audience' }
+])(
+	'outputs the normalised audience for install-only setup: $audience',
+	async ({ audience, expected }) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-audience-output-')
+		);
+		const environment = {
+			RUNNER_TEMP: directory,
+			GITHUB_OUTPUT: path.join(directory, 'output'),
+			GITHUB_ACTION_REPOSITORY: 'owner/cupboard'
+		};
+		try {
+			await setupAction(
+				{ audience, addToPath: 'false' },
+				environment,
+				createGithubReporter(),
+				{
+					installRelease: () =>
+						Promise.resolve({
+							binaryPath: '/cupboard',
+							version: 'v1.2.3',
+							sourceCommit: 'd'.repeat(40)
+						}),
+					fetch: () => {
+						throw new Error('Install-only setup must not query a cache');
+					}
+				}
+			);
+			expect(await readActionOutputs(environment.GITHUB_OUTPUT)).toStrictEqual({
+				'cupboard-path': '/cupboard',
+				cupboard: JSON.stringify({
+					kind: 'release',
+					repository: 'owner/cupboard',
+					tag: 'v1.2.3',
+					sourceCommit: 'd'.repeat(40)
+				}),
+				'cupboard-version': 'v1.2.3',
+				'read-session-audience': expected
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	}
+);

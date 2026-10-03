@@ -28,7 +28,11 @@ export interface PublicationReadAuthority {
 	readonly cache: CacheScope;
 	readonly requests: readonly AuthorizationDetails[];
 	readonly resources: readonly ReadResourceState[];
-	readonly cacheAccess: CacheAccessMode;
+	readonly cacheAccess?: CacheAccessMode;
+	readonly additionalCaches: readonly {
+		readonly cache: CacheScope;
+		readonly access: CacheAccessMode;
+	}[];
 	readonly viewAccess?: CacheAccessMode;
 	readonly selectedViewAccess?: CacheAccessMode;
 	readonly cacheWiring: ReadCredentialWiring;
@@ -60,6 +64,17 @@ export async function publicationReadAuthority(
 				name: cacheNameSchema.parse(pullRequestCacheName(repositoryId, 1))
 			}
 		: selectedCache.scope;
+	if (publication.lifecycle === 'merged-close') {
+		return {
+			cache,
+			requests: [],
+			resources: [],
+			additionalCaches: [],
+			cacheWiring: 'none',
+			viewWiring: 'none'
+		};
+	}
+
 	const selectedViewAccess =
 		isPreset &&
 		!isReadOnly &&
@@ -95,10 +110,20 @@ export async function publicationReadAuthority(
 		}
 	}
 
+	const additionalCaches = await Promise.all(
+		(publication.readCaches ?? []).map(async (cache) => ({
+			cache,
+			access: await fetchCacheAccess(cacheUrl(tenant, cache))
+		}))
+	);
+	const isAdditionalContent = additionalCaches.some(
+		({ access }) => access === 'private'
+	);
 	const isCacheContent = cacheAccess === 'private' && cacheWiring === 'none';
 	const isViewContent =
 		view !== undefined && viewAccess === 'private' && viewWiring === 'none';
-	const isNeedsOidc = isPullRequest || isCacheContent || isViewContent;
+	const isNeedsOidc =
+		isPullRequest || isCacheContent || isViewContent || isAdditionalContent;
 	const resources: ReadResourceState[] = isNeedsOidc
 		? [
 				...(cacheWiring === 'none'
@@ -118,6 +143,16 @@ export async function publicationReadAuthority(
 							}
 						]
 					: []),
+				...additionalCaches.map(({ cache, access }) => ({
+					type: 'cupboard_cache' as const,
+					cache,
+					mode: 'content' as const,
+					state: {
+						kind: 'existing' as const,
+						access,
+						priority: cachePrioritySchema.parse(40)
+					}
+				})),
 				...(view !== undefined &&
 				viewAccess !== undefined &&
 				viewWiring === 'none'
@@ -135,13 +170,19 @@ export async function publicationReadAuthority(
 					: [])
 			]
 		: [];
-	const grants = contentReadAuthorizationDetails({
-		...(isCacheContent && { cache }),
-		...(isViewContent && { view: reuseViewNameSchema.parse(view.name) })
-	});
+	const grants = [
+		...contentReadAuthorizationDetails({
+			...(isCacheContent && { cache }),
+			...(isViewContent && { view: reuseViewNameSchema.parse(view.name) })
+		}),
+		...additionalCaches
+			.filter(({ access }) => access === 'private')
+			.flatMap(({ cache }) => contentReadAuthorizationDetails({ cache }))
+	];
 
 	return {
 		cache,
+		additionalCaches,
 		resources,
 		cacheAccess,
 		...(viewAccess !== undefined && { viewAccess }),

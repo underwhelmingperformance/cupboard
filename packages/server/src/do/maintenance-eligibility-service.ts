@@ -21,6 +21,7 @@ import {
 	subrequestSliceReserve,
 	withHeldSubrequests
 } from './subrequest-slice.ts';
+import { UploadRetrySchedule } from './upload-retry-schedule.ts';
 
 // Use one fixed past instant for work due now. Repeated mutations in the same
 // push then leave the published wake time unchanged.
@@ -30,27 +31,34 @@ const managedRetirementRetryMs = 6 * 60 * 60 * 1000;
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
 
+	private earliestInheritanceWake(): IsoTimestamp | undefined {
+		const queued = this.context.db
+			.select({ at: schema.attestationInheritances.notBefore })
+			.from(schema.attestationInheritances)
+			.orderBy(schema.attestationInheritances.notBefore)
+			.limit(1)
+			.get()?.at;
+		const expires = this.context.db
+			.select({ at: schema.attestationInheritanceFailures.expiresAt })
+			.from(schema.attestationInheritanceFailures)
+			.orderBy(schema.attestationInheritanceFailures.expiresAt)
+			.limit(1)
+			.get()?.at;
+		return [queued, expires]
+			.filter((at) => at !== undefined)
+			.toSorted(byCodeUnit)[0];
+	}
+
 	// Indexed existence checks keep this calculation independent of the number
 	// of pending uploads and queued deletions.
 	private hasImmediateWork(now: IsoTimestamp): boolean {
-		const awaitingVerification = this.context.db.all<{ present: number }>(
-			sql`SELECT 1 AS present FROM pending_upload INDEXED BY pending_upload_settle_retry_after_idx
-			WHERE (verdict = 'pending' OR verdict = 'committing')
-			  AND settle_retry_after <= ${now}
-			LIMIT 1`
-		);
-		if (awaitingVerification.length > 0) {
+		const retryAt = new UploadRetrySchedule(this.context).projectedAt();
+		if (retryAt !== undefined && retryAt <= Date.parse(now)) {
 			return true;
 		}
 
-		const awaitingFirstAttempt = this.context.db.all<{ present: number }>(
-			sql`SELECT 1 AS present FROM pending_upload INDEXED BY pending_upload_settle_retry_after_idx
-			WHERE (verdict = 'pending' OR verdict = 'committing')
-			  AND settle_retry_after IS NULL
-			LIMIT 1`
-		);
-
-		if (awaitingFirstAttempt.length > 0) {
+		const inheritanceAt = this.earliestInheritanceWake();
+		if (inheritanceAt !== undefined && inheritanceAt <= now) {
 			return true;
 		}
 
@@ -60,7 +68,21 @@ export class MaintenanceEligibilityService {
 			.limit(1)
 			.get();
 
-		return queuedDeletion !== undefined;
+		if (queuedDeletion !== undefined) {
+			return true;
+		}
+		return [
+			schema.legacyRefreshTokenMembers,
+			schema.legacyRefreshTokenFamilies,
+			schema.legacyRefreshTokens
+		].some(
+			(table) =>
+				this.context.db
+					.select({ present: sql`1` })
+					.from(table)
+					.limit(1)
+					.get() !== undefined
+		);
 	}
 
 	private earliestUploadExpiry(): IsoTimestamp | undefined {
@@ -137,27 +159,49 @@ export class MaintenanceEligibilityService {
 	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
 			this.earliestSettleRetry(now),
+			this.earliestInheritanceWake(),
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
 			this.earliestGraceExpiry(),
 			this.earliestAuthKeyRetirement(),
-			this.earliestManagedCacheRetirement()
+			this.earliestManagedCacheRetirement(),
+			this.earliestRefreshMaintenance()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
 	}
 
+	private earliestRefreshMaintenance(): IsoTimestamp | undefined {
+		const family = this.context.db
+			.select({ expiresAt: schema.refreshTokenFamilies.expiresAt })
+			.from(schema.refreshTokenFamilies)
+			.orderBy(
+				asc(schema.refreshTokenFamilies.expiresAt),
+				asc(schema.refreshTokenFamilies.id)
+			)
+			.limit(1)
+			.get()?.expiresAt;
+		const envelope =
+			this.context.db
+				.select({ expiresAt: schema.refreshTokenMembers.successorExpiresAt })
+				.from(schema.refreshTokenMembers)
+				.where(isNotNull(schema.refreshTokenMembers.successorExpiresAt))
+				.orderBy(
+					asc(schema.refreshTokenMembers.successorExpiresAt),
+					asc(schema.refreshTokenMembers.id)
+				)
+				.limit(1)
+				.get()?.expiresAt ?? undefined;
+		return [family, envelope]
+			.filter((value) => value !== undefined)
+			.toSorted(byCodeUnit)[0];
+	}
+
 	private earliestSettleRetry(now: IsoTimestamp): IsoTimestamp | undefined {
-		return (
-			this.context.db.all<{ retryAfter: IsoTimestamp }>(
-				sql`SELECT settle_retry_after AS retryAfter
-					FROM pending_upload INDEXED BY pending_upload_settle_retry_after_idx
-					WHERE (verdict = 'pending' OR verdict = 'committing')
-					  AND settle_retry_after > ${now}
-					ORDER BY settle_retry_after
-					LIMIT 1`
-			)[0]?.retryAfter ?? undefined
-		);
+		const retryAt = new UploadRetrySchedule(this.context).projectedAt();
+		return retryAt !== undefined && retryAt > Date.parse(now)
+			? isoTimestamp(new Date(retryAt))
+			: undefined;
 	}
 
 	private nextWakeAt(now: IsoTimestamp): IsoTimestamp | undefined {

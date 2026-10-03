@@ -216,7 +216,7 @@ describe('per-cache private reads', () => {
 				}
 			},
 			{
-				path: '/api/v1/attested-paths',
+				path: '/api/v1/attestation-info',
 				init: {
 					method: 'POST',
 					headers: { 'content-type': 'application/json' },
@@ -288,7 +288,7 @@ describe('per-cache private reads', () => {
 					cacheControl: 'no-store'
 				},
 				{
-					path: '/api/v1/attested-paths',
+					path: '/api/v1/attestation-info',
 					status: StatusCodes.OK,
 					cacheControl: 'no-store'
 				}

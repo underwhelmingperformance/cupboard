@@ -44,6 +44,9 @@ inputs:
     description: Add the directory that contains the cupboard binary to PATH.
     required: false
     default: 'true'
+  audience:
+    description: Audience of the GitHub OIDC token. Defaults to the tenant URL.
+    required: false
   cache-url:
     description: Tenant URL whose caches setup adds to Nix's substituters.
     required: false
@@ -64,6 +67,12 @@ inputs:
       credential, in the form {"cache": {"kind": "named", "name": ...},
       "credential": {"user": ..., "password": ...}}. Pass it from a secret. A
       cache without an entry is read with read-user and read-password.
+    required: false
+  read-caches:
+    description:
+      Additional canonical cache URLs from the selected tenant, one per line.
+      Adds runner substituters and OIDC read resources without changing the
+      destination cache. Cannot use credentials for these caches.
     required: false
   private-substituters:
     description:
@@ -95,7 +104,10 @@ inputs:
       have the same access as the cache.
     required: false
   provision-cache-access:
-    description: Deprecated alias for cache-access-mode.
+    description:
+      Deprecated alias for cache-access-mode, applied only when provision-cache
+      is set. Use cache-access-mode to check an existing cache without
+      provisioning. Setup warns when this alias is supplied.
     required: false
   provision-cache-ttl:
     description:
@@ -164,6 +176,13 @@ outputs:
       Configured reuse view to add to cupboard run alongside the destination.
       Empty for view-only sessions or when a static credential covers the view.
     value: ${{ steps.setup.outputs.read-session-view }}
+  read-session-caches:
+    description: JSON array of additional cache URLs for the same read session.
+    value: ${{ steps.setup.outputs.read-session-caches }}
+  read-session-audience:
+    description:
+      Audience to pass to later actions for the read session and publication.
+    value: ${{ steps.setup.outputs.read-session-audience }}
 runs:
   using: composite
   steps:
@@ -222,8 +241,10 @@ runs:
         EXPECTED_SOURCE_COMMIT: ${{ inputs.expected-source-commit }}
         INSTALL_DIR: ${{ inputs.install-dir }}
         ADD_TO_PATH: ${{ inputs.add-to-path }}
+        AUDIENCE: ${{ inputs.audience }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
+        READ_CACHES: ${{ inputs.read-caches }}
         INCLUDE_DEFAULT_CACHE: ${{ inputs.include-default-cache }}
         CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
         PRIVATE_SUBSTITUTERS: ${{ inputs.private-substituters }}
@@ -250,8 +271,10 @@ runs:
           --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
           --install-dir "$INSTALL_DIR"
           --add-to-path "$ADD_TO_PATH"
+          --audience "$AUDIENCE"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
+          --read-caches "$READ_CACHES"
           --include-default-cache "$INCLUDE_DEFAULT_CACHE"
           --provision-cache "$PROVISION_CACHE"
           --cache-access-mode "$CACHE_ACCESS_MODE"

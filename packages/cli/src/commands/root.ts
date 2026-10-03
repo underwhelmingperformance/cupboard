@@ -17,6 +17,7 @@ import type {
 	RootTarget,
 	RootTargetsPage
 } from '@cupboard/protocol/retention';
+import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import {
 	formatTimestamp,
 	type Reporter,
@@ -37,6 +38,7 @@ import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
+import { RootTargetLimitError } from '../push/push.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -163,6 +165,7 @@ export function registerRootCommands(
 				targets: string[],
 				options: RootEnsureOptions
 			) => {
+				validateRootTargets(targets);
 				const target = cacheTargetFromUrl(url);
 				const reporter = commandUi(program, programOptions).reporter();
 				const credential = await authenticateForPush(
@@ -227,6 +230,7 @@ export function registerRootCommands(
 				targets: string[],
 				options: RootSetOptions
 			) => {
+				validateRootTargets(targets);
 				const target = cacheTargetFromUrl(url);
 				const reporter = commandUi(program, programOptions).reporter();
 				const rpc = tenantRpc(target.tenantUrl, {
@@ -365,6 +369,7 @@ export async function runRootEnsure(
 	reporter: Reporter,
 	client: Pick<RootClient, 'ensure'>
 ): Promise<void> {
+	validateRootTargets(targets);
 	const result = await reporter.phase('Checking retention root', () =>
 		callInCache(client.ensure, cache, {
 			name,
@@ -402,6 +407,7 @@ export async function runRootSet(
 	reporter: Reporter,
 	client: Pick<RootClient, 'set'>
 ): Promise<void> {
+	validateRootTargets(targets);
 	const summary = await reporter.phase('Setting retention root', () =>
 		callInCache(client.set, cache, {
 			name,
@@ -537,4 +543,10 @@ export function describeExpiry(summary: {
 	}
 
 	return `expires ${formatTimestamp(summary.expiresAt)}`;
+}
+
+function validateRootTargets(targets: readonly string[]): void {
+	if (targets.length > rootSetMaxTargets) {
+		throw new RootTargetLimitError(targets.length, rootSetMaxTargets);
+	}
 }

@@ -60,7 +60,9 @@ export const transitionIdSchema = z.enum([
 	'deployment-transitions',
 	'attestation-path-index',
 	'local-step-attempts',
-	'publication-identity'
+	'publication-identity',
+	'blob-reference-read-authority',
+	'tenant-retry-clock'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -189,6 +191,12 @@ export interface SchemaTransition<Id extends string = TransitionId> {
 	 */
 	readonly independent?: true;
 	/**
+	 * Earlier transitions whose contract migrations must complete before this
+	 * transition expands. Every earlier transition must still have expanded.
+	 * Without this list or `independent`, every earlier transition must complete.
+	 */
+	readonly expandAfter?: readonly Id[];
+	/**
 	 * The highest local step that objects can record once this transition is
 	 * complete. For `cache-identity`, objects record at most
 	 * `expansionLocalStep` until then. The required local step never falls below
@@ -294,6 +302,18 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0034_publication_identity.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'blob-reference-read-authority',
+		expand: ['0035_blob_reference_read_authority.sql'],
+		contract: ['0036_path_read_authority_contract.sql'],
+		expandAfter: ['cache-identity']
+	},
+	{
+		id: 'tenant-retry-clock',
+		expand: ['0037_tenant_retry_clock.sql'],
+		contract: [],
+		independent: true
 	}
 ];
 
@@ -361,10 +381,25 @@ export function isCompleteOnExpand(
 	);
 }
 
+/**
+An expansion prerequisite that is not an earlier transition in the plan.
+*/
+export class SchemaTransitionDependencyError extends Error {
+	constructor(
+		readonly transition: string,
+		readonly dependency: string
+	) {
+		super(
+			`Schema transition '${transition}' requires completion of '${dependency}', which must be an earlier transition in the plan`
+		);
+		this.name = 'SchemaTransitionDependencyError';
+	}
+}
+
 export interface DeferredTransition<Id extends string = TransitionId> {
 	readonly transition: SchemaTransition<Id>;
 	/**
-	The first earlier transition that is not complete.
+	The first earlier prerequisite that is not complete.
 	*/
 	readonly waitsFor: SchemaTransition<Id>;
 }
@@ -373,10 +408,11 @@ export interface DeferredTransition<Id extends string = TransitionId> {
  * Returns the first transition whose expand migrations the deploy could apply
  * only after the upload, or undefined when every incomplete transition can
  * expand before it. Before the upload, the deploy goes through the transitions
- * in order and expands each one when every earlier transition is complete, or
- * when it is independent and every earlier transition has expanded. A
- * transition that is not independent and follows an incomplete one meets
- * neither condition.
+ * in order and expands each one when every earlier transition is complete.
+ * An independent transition needs only every earlier transition expanded.
+ * A transition with `expandAfter` also requires those listed predecessors
+ * complete, so unrelated earlier contract migrations can wait until after the
+ * upload. Without either declaration, an incomplete predecessor blocks it.
  *
  * The deploy stops with an error for such a deployment, because the new
  * Workers would otherwise run without that transition's expand migrations.
@@ -394,27 +430,36 @@ export function deferredTransition<Id extends string>(
 	): boolean => hasReachedTransitionState(states.get(transition.id), state);
 
 	for (const [index, transition] of transitions.entries()) {
+		const earlier = transitions.slice(0, index);
+		const dependencies = transition.expandAfter?.map((id) => {
+			const dependency = earlier.find((candidate) => candidate.id === id);
+			if (dependency === undefined) {
+				throw new SchemaTransitionDependencyError(transition.id, id);
+			}
+			return dependency;
+		});
+
 		if (hasReached(transition, 'complete')) {
 			continue;
 		}
 
-		const earlier = transitions.slice(0, index);
+		const requiredComplete =
+			dependencies ?? (transition.independent === true ? [] : earlier);
 		const waitsFor = earlier.find(
-			(candidate) => !hasReached(candidate, 'complete')
+			(candidate) =>
+				!hasReached(
+					candidate,
+					requiredComplete.includes(candidate) ? 'complete' : 'expanded'
+				)
 		);
-		const canExpandAhead =
-			transition.independent === true &&
-			earlier.every((candidate) => hasReached(candidate, 'expanded'));
-
-		if (waitsFor === undefined || canExpandAhead) {
-			states.set(
-				transition.id,
-				isCompleteOnExpand(transition) ? 'complete' : 'expanded'
-			);
-			continue;
+		if (waitsFor !== undefined) {
+			return { transition, waitsFor };
 		}
 
-		return { transition, waitsFor };
+		states.set(
+			transition.id,
+			isCompleteOnExpand(transition) ? 'complete' : 'expanded'
+		);
 	}
 
 	return undefined;

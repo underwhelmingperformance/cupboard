@@ -106,8 +106,9 @@ cupboard push https://cupboard.example.workers.dev/t/acme \
   --root github:acme/app/main ./result
 ```
 
-This replaces whatever that root kept before. A root can keep at most 149 store
-paths, so if you're pushing more than that, split them across several roots.
+This replaces the root's complete target set. One push with `--root` accepts at
+most 149 target paths, so split a larger set across several roots. Run roots
+grow through additive updates and have no total target limit.
 
 If you don't pass `--root`, `push` gives each store path a root of its own,
 called a pin.
@@ -204,18 +205,18 @@ runs. Because of this:
 `build-push` uses different exit statuses for a failed build and for failed
 publishing, so a retry system can tell which one to retry:
 
-| Status          | Meaning                                                                                                                                                                                                              |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0               | The build succeeded and every output was published. `build-push` confirms that the cache serves every output only when it waits for verification, which it does unless you pass `--no-wait`.                         |
-| the build's own | The build failed with this status. If a signal killed the build, the status is 128 plus the signal number.                                                                                                           |
-| 1               | `build-push` refused to start because the Nix configuration already sets `post-build-hook`, the installation is missing its hook helper, or no runtime directory gives a socket path that's short enough.            |
-| 2               | A usage error, such as an unknown option.                                                                                                                                                                            |
-| 69              | Something that the run needs isn't available, either before the build (for example, an `ssh-ng` store) or while publishing.                                                                                          |
-| 74              | The build succeeded, but publishing or setting the root failed, and no more specific status applies.                                                                                                                 |
-| 75              | A temporary failure, either before the build (for example, in the `--github-oidc` token exchange) or while publishing. Retrying may work.                                                                            |
-| 77              | Signing in or a permission check failed, either before the build or while publishing. Before the build, this includes a missing retention grant, and a user that isn't in `trusted-users` when a build command runs. |
-| 130             | Interrupted with Ctrl-C.                                                                                                                                                                                             |
-| 143             | Terminated with `SIGTERM`.                                                                                                                                                                                           |
+| Status          | Meaning                                                                                                                                                                                                                                                                     |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0               | The build succeeded and every output was published. `build-push` confirms that the cache serves every output only when it waits for verification, which it does unless you pass `--no-wait`.                                                                                |
+| the build's own | The build failed with this status. If a signal killed the build, the status is 128 plus the signal number.                                                                                                                                                                  |
+| 1               | A rebuild or provenance requirement could not be met, or another failure has no specific status. Before the build, examples include an existing `post-build-hook`, a missing hook helper, a runtime socket path that is too long, or an API resource that returns HTTP 404. |
+| 2               | A usage error, such as an unknown option or an upload request that exceeds the invocation budget.                                                                                                                                                                           |
+| 69              | Something that the run needs isn't available, either before the build (for example, an `ssh-ng` store) or while publishing.                                                                                                                                                 |
+| 74              | The build succeeded, but publishing or setting the root failed, and no more specific status applies.                                                                                                                                                                        |
+| 75              | A temporary failure, either before the build (for example, in the GitHub OIDC token request or cupboard token exchange) or while publishing. Retrying may work.                                                                                                             |
+| 77              | Signing in or a permission check failed, either before the build or while publishing. Before the build, this includes a missing retention grant or GitHub OIDC request permission, and a user that isn't in `trusted-users` when a build command runs.                      |
+| 130             | Interrupted with Ctrl-C.                                                                                                                                                                                                                                                    |
+| 143             | Terminated with `SIGTERM`.                                                                                                                                                                                                                                                  |
 
 `build-push` never exits 1 for a publishing failure. If your build command
 itself exits with 1, 2, 69, 74, 75 or 77, though, you can't tell its status
@@ -230,6 +231,13 @@ several builds in order. Each one is either a list of installables or a command.
 See the [CLI reference](../reference/cli.md#cupboard-build-push) for the file's
 format.
 
+With `--keep-going-cohorts`, later cohorts still run after a failure. The first
+failure without validated target-build evidence determines the exit status. If
+every failure has that evidence, the first target build failure determines the
+status. The combined receipt records command failures even when a failed cohort
+could not write its own receipt, so a later successful cohort cannot hide an
+authentication or publication failure.
+
 ## Checking that store paths are published
 
 `cupboard confirm` checks that store paths are already in a cache, without
@@ -239,6 +247,13 @@ uploading anything:
 cupboard confirm https://cupboard.example.workers.dev/t/acme \
   /nix/store/<hash>-app /nix/store/<hash>-runtime
 ```
+
+For a large set, pass `--paths-file paths.txt` to read store paths one per line.
+Blank lines are ignored. File entries are additional store paths, so specify a
+named cache in the URL or as a positional argument. Every file entry must be a
+store path. The CLI validates the file before requesting credentials. An invalid
+store path in an argument or file exits with usage status 2. For a file entry,
+the error identifies the file and line number.
 
 It also refreshes each store path's grace period, as a new push would. It
 doesn't add the store paths to a root. It fails if any store path is missing, or

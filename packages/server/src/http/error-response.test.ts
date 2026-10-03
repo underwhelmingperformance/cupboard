@@ -13,10 +13,18 @@ import {
 	InvalidAccessTokenError,
 	MetadataNarInfoInvalidError,
 	MetadataNarInfoTooLargeError,
-	UnauthenticatedError
+	UnauthenticatedError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 
 import { serverErrorHandler } from './error-response.ts';
+
+class SerializedRpcError extends Error {
+	constructor(name: string) {
+		super('provider-private-detail');
+		this.name = name;
+	}
+}
 
 function appThatThrows(error: unknown): Hono {
 	const app = new Hono();
@@ -29,6 +37,30 @@ function appThatThrows(error: unknown): Hono {
 }
 
 describe('serverErrorHandler', () => {
+	it('returns a typed nonretryable upload request limit at the Worker boundary', async () => {
+		const error = new UploadRequestLimitExceededError(100);
+		const response = await appThatThrows(error).request('/');
+		expect({
+			status: response.status,
+			headers: Object.fromEntries(response.headers),
+			body: await response.json()
+		}).toStrictEqual({
+			status: 413,
+			headers: {
+				'cache-control': 'no-store',
+				'content-type': 'application/json',
+				'x-cupboard-upload-max-paths': '100'
+			},
+			body: {
+				defined: true,
+				code: 'UPLOAD_REQUEST_LIMIT_EXCEEDED',
+				status: 413,
+				message: error.message,
+				data: { maxPaths: 100 }
+			}
+		});
+	});
+
 	let capture: Capture;
 
 	beforeEach(() => {
@@ -80,6 +112,30 @@ describe('serverErrorHandler', () => {
 				challenge,
 				cacheControl,
 				body,
+				logged: []
+			});
+		}
+	);
+
+	it.each([
+		'LocalSchemaMigrationPendingError',
+		'CacheCatalogueMigrationPendingError'
+	])(
+		'translates a serialized %s without exposing its message',
+		async (name) => {
+			const error = new SerializedRpcError(name);
+			const response = await appThatThrows(error).request('/');
+			expect({
+				status: response.status,
+				retryAfter: response.headers.get('retry-after'),
+				cacheControl: response.headers.get('cache-control'),
+				body: await response.text(),
+				logged: capture.logs
+			}).toStrictEqual({
+				status: 503,
+				retryAfter: '1',
+				cacheControl: 'no-store',
+				body: 'Tenant migration is still in progress; retry shortly\n',
 				logged: []
 			});
 		}

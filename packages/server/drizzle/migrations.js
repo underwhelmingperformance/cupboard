@@ -65,6 +65,12 @@ import m0062 from './0062_pending_upload_settle_retry.sql';
 import m0063 from './0063_refresh_successor_recovery.sql';
 import m0064 from './0064_attestation-bundle-pages.sql';
 import m0065 from './0065_attestation-inheritance-cursor.sql';
+import m0066 from './0066_publication_recovery.sql';
+import m0067 from './0067_refresh_session_authority.sql';
+import m0068 from './0068_protected_inheritance.sql';
+import m0069 from './0069_retry_limits.sql';
+import m0070 from './0070_cache_creation_defaults.sql';
+import m0071 from './0071_cache_close.sql';
 
 export default {
 	journal,
@@ -134,6 +140,12 @@ export default {
 		m0062,
 		m0063,
 		m0064,
-		m0065
+		m0065,
+		m0066,
+		m0067,
+		m0068,
+		m0069,
+		m0070,
+		m0071
 	}
 };

@@ -21,6 +21,13 @@ export const cacheGraceSchema = z.discriminatedUnion('kind', [
 ]);
 export type CacheGrace = z.output<typeof cacheGraceSchema>;
 
+export const cacheCreationDefaultsSchema = z.strictObject({
+	grace: cacheGraceSchema
+});
+export type CacheCreationDefaults = z.output<
+	typeof cacheCreationDefaultsSchema
+>;
+
 export const rootRetentionOverrideSchema = z.strictObject({
 	rootPrefix: rootNameSchema,
 	retention: cacheRootRetentionSchema
@@ -44,6 +51,7 @@ export const cacheSummarySchema = z.strictObject({
 	rootRetentionOverrides: z.array(rootRetentionOverrideSchema),
 	graceManaged: z.boolean().optional(),
 	retireWhenEmpty: z.boolean().optional(),
+	retirementStartedAt: isoTimestampSchema.optional(),
 	retirementEligibleAfter: isoTimestampSchema.optional(),
 	earliestGraceDeadline: isoTimestampSchema.optional()
 });
@@ -97,7 +105,7 @@ export const cachePutBodySchema = z.strictObject({
 	access: cacheAccessModeSchema,
 	priority: cachePrioritySchema,
 	defaultRootRetention: cacheRootRetentionSchema.default({ kind: 'permanent' }),
-	grace: cacheGraceSchema.default({ kind: 'none' })
+	grace: cacheGraceSchema.optional()
 });
 export type CachePutBody = z.output<typeof cachePutBodySchema>;
 
@@ -135,6 +143,13 @@ export const cacheUpdateBodySchema = z.discriminatedUnion('kind', [
 	z.strictObject({ kind: z.literal('clear-grace') })
 ]);
 export type CacheUpdateBody = z.output<typeof cacheUpdateBodySchema>;
+
+export const cacheCloseResponseSchema = z.strictObject({
+	scope: cacheScopeSchema,
+	closed: z.boolean(),
+	retirementStartedAt: isoTimestampSchema.optional()
+});
+export type CacheCloseResponse = z.output<typeof cacheCloseResponseSchema>;
 
 export const cacheRemoveResponseSchema = z.strictObject({
 	scope: cacheScopeSchema,

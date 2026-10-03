@@ -12,6 +12,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { isAnchoredRe2 } from './capture.ts';
 import { type ReuseViewName, reuseViewNameSchema } from './reuse-views.ts';
 
 // Tokens encode grants in the RFC 9396 `authorization_details` claim.
@@ -39,6 +40,8 @@ export const cacheOperationSchema = z.enum([
 	'cache:create',
 	'cache:update',
 	'cache:retire',
+	'cache:close',
+	'cache:reopen',
 	'cache:delete',
 	'narinfo:delete',
 	'gc:run',
@@ -55,6 +58,8 @@ export type ViewOperation = z.infer<typeof viewOperationSchema>;
 // issuer. They have no separate resource selector.
 const domainOperationSchema = z.enum([
 	'cache:list',
+	'cache:defaults-read',
+	'cache:defaults-update',
 	'stats:read',
 	'check:run',
 	'verification:run',
@@ -132,8 +137,12 @@ export const operationSchema = z.enum([
 	'cache:create',
 	'cache:update',
 	'cache:retire',
+	'cache:close',
+	'cache:reopen',
 	'cache:delete',
 	'cache:list',
+	'cache:defaults-read',
+	'cache:defaults-update',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read',
@@ -281,7 +290,10 @@ const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
 const metadataImplyingCacheOperations: ReadonlySet<Operation> = new Set(
-	cacheOperations.filter((operation) => operation !== 'cache:content-read')
+	cacheOperations.filter(
+		(operation) =>
+			operation !== 'cache:content-read' && operation !== 'cache:close'
+	)
 );
 
 function isOperationImplied(
@@ -539,10 +551,30 @@ export const cacheBindingSchema = z.discriminatedUnion('kind', [
 		.strictObject({
 			kind: z.literal('named'),
 			...bindingShape,
+			pattern: z
+				.string()
+				.min(1)
+				.max(capturePatternMaxLength)
+				.refine(isAnchoredRe2, 'pattern must be an anchored RE2 expression')
+				.optional(),
 			validate: z.literal('cacheName')
 		})
 		.superRefine((value, ctx) => {
-			refineBinding(value, ctx);
+			if (value.pattern === undefined) {
+				refineBinding(value, ctx);
+				return;
+			}
+			if (
+				value.exact !== undefined ||
+				value.equalsTemplate !== undefined ||
+				value.substitutions !== undefined
+			) {
+				ctx.addIssue({
+					code: 'custom',
+					message:
+						'A cache pattern cannot be combined with exact, equalsTemplate or substitutions'
+				});
+			}
 		})
 ]);
 export const rootBindingSchema = z

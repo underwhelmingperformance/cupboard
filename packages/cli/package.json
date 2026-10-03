@@ -41,7 +41,9 @@
 		"@types/ws": "catalog:",
 		"esbuild": "catalog:",
 		"miniflare": "catalog:",
+		"msw": "^2.14.6",
 		"typescript": "catalog:",
+		"undici": "^8.11.2",
 		"vitest": "catalog:"
 	},
 	"engines": {

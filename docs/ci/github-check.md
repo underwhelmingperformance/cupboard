@@ -33,6 +33,12 @@ workflow file exists and, for a tag pin, that the release is immutable. It then
 works out the OIDC claims and requested operations of each run and checks them
 against the tenant's trust rules and reuse view.
 
+For both reusable publishing workflows, the check uses the literal `audience`
+input when it is supplied, after trimming surrounding whitespace. A blank or
+omitted audience uses the tenant URL. An unresolved audience expression needs
+manual review. A repair uses the modelled audience for every new trust rule and
+checks that audience again after writing.
+
 The check works out the requests that the cupboard workflows of the current
 release make. A job that pins another release can request other operations.
 
@@ -83,12 +89,15 @@ The check reports these jobs as unverified, for manual review:
   cache.
 
 For `publish: none` and the flake workflow's older `push: false`, the check
-models the selected cache read without publication or cache-removal grants. A
+models the selected cache read without publication or cache lifecycle grants. A
 pull-request run with the flake preset reads from the tenant's default cache. A
 public read needs no trust grant. A private read needs the exact cache
 content-read grant unless the workflow supplies a static read pair. When
-publication is enabled, the flake preset can remove an unmerged pull request's
-cache on the `closed` event. The check does not cover that removal.
+publication is enabled, the check models cache creation, closure and reopening
+alongside publication for the flake preset's pull-request runs, and checks the
+corresponding grants. See [Closing and reopening caches][cache-closure].
+
+[cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
 The check can see that a workflow declares an explicit static username and
 password pair, but GitHub does not reveal the secret values. It reports the pair
@@ -164,8 +173,8 @@ branch and tag, but the check simulates only the checked branch. It reports the
 job as unverified because other pushes can use different trust-rule claims. Add
 branch or tag filters for the refs that should publish. A flake preset run fails
 on a push to any branch other than its `branch` input, so the check reports an
-unfiltered preset job as unverified and suggests adding that branch as a
-`branches` filter.
+unfiltered preset job as failed and suggests adding that branch as a `branches`
+filter.
 
 The installable workflow appends the builder's Nix system to its `root` input.
 The check works out the root for the workflow's default `x86_64-linux` runner,
@@ -195,8 +204,8 @@ branches, review the trust rules for each branch or give each branch its own
 workflow with an exact filter.
 
 The check evaluates literal names with `*` and `**` wildcards. It reports other
-patterns and `tags-ignore` filters for manual review. It also reports a flake
-preset job with a tag filter, because a preset run fails on a tag push. The
+patterns and `tags-ignore` filters for manual review. A flake preset job with an
+explicit tag filter is failed, because a preset run fails on a tag push. The
 check does not evaluate `paths` or `paths-ignore` filters. It notes them on the
 job and checks the run as if the filter allows it to start. For the pattern
 rules, see GitHub's [filter syntax][github-filters].
@@ -244,6 +253,19 @@ cupboard github check https://cupboard.example.workers.dev/t/acme \
 To accept future cupboard `v*` releases in planned rules, use
 `--trust-scope tag-pattern --tag-pattern 'v*'`.
 
+This selects future reusable workflow release tags for rules created by a
+discovered repair. With `github setup`, put the same pattern in the reference:
+`--workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*'`.
+An explicit `github check --workflow-ref` checks one immutable reference and
+cannot be combined with `--fix`. `--job-workflow-ref` is an alias for
+`--workflow-ref` on both commands; trust-rule commands accept both spellings
+too.
+
+`github setup --access` is an alias for `--cache-access-mode`. Both options
+select the access of new pull-request caches and their reuse view, and do not
+change the tenant's default cache. Use `cache set-access --access` to change an
+existing cache. The reusable workflows use the `cache-access-mode` input.
+
 When `--branch` is not the default branch, the planned rules come from workflow
 files that have not been merged, and anyone who can push to the repository can
 change those files. The preview states that the planned rules come from an
@@ -252,12 +274,16 @@ terminal. Review such a repair at a terminal, or run it after the change is
 merged into the default branch.
 
 The repair can create the preset's `pull-requests-<repository-id>` reuse view.
-It creates a private view when you pass `--read-user`, and a public view
-otherwise. A view includes only caches with the same access, so a public view
+The repair selects the view's access from the discovered jobs. A publishing job
+uses its literal `cache-access-mode` input, or the tenant's default cache access
+when the input is omitted. A read-only job uses the default cache's access. Jobs
+that use the same view must select the same access. `--read-user` and
+`--read-password` authenticate metadata queries and do not select the view's
+access. A view includes only caches with the same access, so a public view
 cannot reuse the outputs of private pull-request caches. The repair stops with
 an error when an existing pull-request cache of the repository has the other
-access. Pass `--read-user` and `--read-password` when the tenant's reads are
-private.
+access. Supply the tenant read credential with `--read-user` and
+`--read-password` when private metadata queries require it.
 
 When a job uses a custom reuse view that passes the reuse-view check, the repair
 leaves that view unchanged. The repair does not create or change a custom view,

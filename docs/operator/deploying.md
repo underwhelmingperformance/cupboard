@@ -23,8 +23,12 @@ can make and the details of what `init` does.
 - A terminal, and a browser where you can sign in. The identity that you sign in
   with for the [claim](#claiming-the-deployment) becomes the deployment's admin.
   By default this is your Cloudflare identity.
-- An R2 bucket and an R2 API token. The first step below shows how to create
-  them.
+- An R2 bucket and an R2 API token for the browser-sign-in walkthrough below. If
+  your Cloudflare API token can manage account tokens, `init` can create the
+  bucket and a write-only key instead. See [Letting `init` create a
+  key][create-r2-key].
+
+[create-r2-key]: #letting-init-create-a-key
 
 If you're logged in to `wrangler` on this machine, `init` may use wrangler's
 stored token to make changes on the Cloudflare account. Pass `--no-wrangler` to
@@ -407,11 +411,18 @@ admin.
 `init` creates the first tenant only on a deployment that has no tenants, and
 only for the admin.
 
+`init --tenant <slug>` is an alias for `--cache <slug>`. Both options specify
+that tenant's slug; neither selects a named cache. To create more tenants or
+named caches, use `tenant create` or `cache create`. `--access` specifies the
+first tenant's default cache access.
+
 - In a terminal, `init` asks for the tenant's slug and the read access of its
   default cache. `--cache` and `--access` answer these questions in advance.
 - Without a terminal, `init` creates the first tenant only from `--cache` and
   `--access`, on a deployment that already has an admin. It refuses either
-  option without the other. If the slug is taken, it exits with an error.
+  option without the other before deploying, including on update runs when a
+  tenant already exists. Pass both options or omit both. If the slug is taken,
+  it exits with an error.
 - A first deploy without a terminal has no admin, so it ignores both options,
   and warns about them before it changes anything.
 
@@ -550,8 +561,10 @@ that you're deploying:
      queue;
    - the `CUPBOARD_TENANT` service and the `CUPBOARD_DO` `script_name`: the
      tenant Worker's script name;
-   - under `vars`, `CUPBOARD_DEPLOYMENT_URL`: the deployment's URL, such as
-     `https://cache.example.com`.
+   - add `CUPBOARD_DEPLOYMENT_URL` under `vars`: the deployment's URL, such as
+     `https://cupboard.example.workers.dev`. The checkout's configuration does
+     not include this binding; `init` normally adds it when uploading the
+     Worker.
 3. If the tenant Worker was deleted too, deploy it first. Set `name` and the
    `CUPBOARD_DB`, `BLOBS` and `MAINTENANCE_QUEUE` bindings in
    `packages/server/wrangler.tenant.jsonc` in the same way, then run

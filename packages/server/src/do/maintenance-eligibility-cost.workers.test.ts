@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import {
 	authKeyIdSchema,
@@ -7,12 +8,11 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
@@ -27,6 +27,7 @@ import {
 } from '../test-support.ts';
 
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
+import { type VerificationService } from './verification-service.ts';
 
 const methodLineSchema = z.object({
 	method: z.string(),
@@ -78,8 +79,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 22,
-			largeBacklogCost: 22
+			emptyBacklogCost: 39,
+			largeBacklogCost: 39
 		});
 	});
 
@@ -95,8 +96,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 10,
-			largeBacklogCost: 10
+			smallBacklogCost: 21,
+			largeBacklogCost: 21
 		});
 	});
 
@@ -110,8 +111,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 3,
-			largeBacklogCost: 3
+			smallBacklogCost: 6,
+			largeBacklogCost: 6
 		});
 	});
 
@@ -127,6 +128,19 @@ describe('upload negotiation cost', () => {
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
 			smallBacklogCost: 3,
 			largeBacklogCost: 3
+		});
+	});
+
+	it('finds no due exhausted cleanup without scanning future retries', async () => {
+		await initialise();
+
+		await seedPendingUploads(3, 'cleanup-small', 'pending');
+		const small = await exhaustedCleanupCost();
+		await seedPendingUploads(197, 'cleanup-large', 'committing');
+		const large = await exhaustedCleanupCost();
+		expect({ small, large }).toStrictEqual({
+			small: { resolved: 0, rowsRead: 1 },
+			large: { resolved: 0, rowsRead: 1 }
 		});
 	});
 
@@ -156,12 +170,32 @@ describe('upload negotiation cost', () => {
 		const sparseDue = await reconcileCost();
 
 		expect({ smallDeferred, largeDeferred, sparseDue }).toStrictEqual({
-			smallDeferred: 10,
-			largeDeferred: 10,
-			sparseDue: 2
+			smallDeferred: 21,
+			largeDeferred: 21,
+			sparseDue: 3
 		});
 	});
 });
+
+async function exhaustedCleanupCost(): Promise<{
+	resolved: number;
+	rowsRead: number;
+}> {
+	return runInDurableObject(currentServer(), async (instance, state) => {
+		state.storage.sql.exec(
+			"UPDATE pending_upload SET settle_exhaustion = 'attempt-limit', settle_retry_after = '2099-01-01T00:00:00.000Z'"
+		);
+		const verification = (
+			instance as unknown as { verification: VerificationService }
+		).verification;
+		const { dbCost } = instance.context;
+		dbCost.recordOutstanding();
+		const before = dbCost.rowsRead;
+		const resolved = await verification.processExhaustedUploads(rootLogger());
+		dbCost.recordOutstanding();
+		return { resolved, rowsRead: dbCost.rowsRead - before };
+	});
+}
 
 async function seedNarInfoDeletions(
 	count: number,
@@ -188,6 +222,91 @@ async function seedNarInfoDeletions(
 // These entrypoints bypass `fetch`; each must retain its explicit cost meter.
 describe('maintenance pass cost', () => {
 	beforeEach(resetTestServer);
+
+	it.each([200, 2000])(
+		'retires %i legacy authorities and expired successor envelopes in bounded pages',
+		async (count) => {
+			await initialise();
+			await runInDurableObject(currentServer(), (instance, state) => {
+				for (let index = 0; index < count; index += 1) {
+					const id = `legacy-${String(index).padStart(3, '0')}`;
+					state.storage.sql.exec(
+						"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) VALUES (?, ?, 0, 'owner', 'alice', '[{\"type\":\"cupboard_wildcard\"}]', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+						id,
+						id
+					);
+					state.storage.sql.exec(
+						"INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at) VALUES (?, ?, 0, 'hash', '2026-01-01T00:00:00.000Z')",
+						id,
+						id
+					);
+					instance.context.db
+						.insert(schema.refreshTokenMembers)
+						.values({
+							id,
+							familyId: 'live',
+							generation: index,
+							credentialHash: 'hash',
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+							successorEnvelope: 'encrypted-authority',
+							successorExpiresAt: isoTimestampSchema.parse(
+								'1970-01-01T00:01:00.000Z'
+							)
+						})
+						.run();
+				}
+			});
+			const { cost, remaining } = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const setAlarm = vi
+						.spyOn(state.storage, 'setAlarm')
+						.mockResolvedValue();
+
+					try {
+						const cost = await maintenancePassCost('garbage-collection', () =>
+							underOneUnitOfWork(() => instance.runGarbageCollection())
+						);
+						return {
+							cost,
+							remaining: {
+								families: state.storage.sql
+									.exec<{ count: number }>(
+										'SELECT count(*) AS count FROM refresh_token_family'
+									)
+									.one().count,
+								members: state.storage.sql
+									.exec<{ count: number }>(
+										'SELECT count(*) AS count FROM refresh_token_member'
+									)
+									.one().count,
+								envelopes: state.storage.sql
+									.exec<{ count: number }>(
+										'SELECT count(*) AS count FROM refresh_session_member WHERE successor_envelope IS NOT NULL'
+									)
+									.one().count
+							}
+						};
+					} finally {
+						setAlarm.mockRestore();
+					}
+				}
+			);
+			expect({
+				remaining,
+				isLogged: cost.isLogged,
+				withinBudget: cost.rowsRead + cost.rowsWritten <= 25_000
+			}).toStrictEqual({
+				remaining: {
+					families: count - 128,
+					members: count - 128,
+					envelopes: count - 128
+				},
+				isLogged: true,
+				withinBudget: true
+			});
+		}
+	);
 
 	const passes = [
 		{
@@ -249,8 +368,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 186,
-			largeBacklogCost: 186
+			smallBacklogCost: 248,
+			largeBacklogCost: 248
 		});
 	});
 
@@ -260,12 +379,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 182,
+				rowsRead: 233,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 182,
+				rowsRead: 233,
 				usesIndex: true,
 				sorts: false
 			}
@@ -302,8 +421,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 178,
-			largeBacklogCost: 178
+			smallBacklogCost: 240,
+			largeBacklogCost: 240
 		});
 	});
 
@@ -334,8 +453,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 810, rowsWritten: 131 },
-			largeBacklog: { rowsRead: 810, rowsWritten: 131 }
+			smallBacklog: { rowsRead: 872, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 872, rowsWritten: 131 }
 		});
 	});
 
@@ -358,8 +477,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 194,
-			largeBacklogCost: 194
+			smallBacklogCost: 256,
+			largeBacklogCost: 256
 		});
 	});
 });
@@ -461,9 +580,6 @@ async function seedRefreshTokenFamilies(
 						id,
 						activeMemberId,
 						generation: 0,
-						ruleId: trustRuleIdSchema.parse('rule'),
-						subject: oidcSubjectSchema.parse('subject'),
-						grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
 						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 						expiresAt: isoTimestampSchema.parse(expiresAt)
 					})
@@ -474,7 +590,7 @@ async function seedRefreshTokenFamilies(
 						id: activeMemberId,
 						familyId: id,
 						generation: 0,
-						secretHash: 'hash',
+						credentialHash: 'hash',
 						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 					})
 					.run();
@@ -497,9 +613,6 @@ async function seedExpiredRefreshFamily(
 				id: label,
 				activeMemberId,
 				generation: activeGeneration,
-				ruleId: trustRuleIdSchema.parse('rule'),
-				subject: oidcSubjectSchema.parse('subject'),
-				grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
 				createdAt: isoTimestampSchema.parse('2019-01-01T00:00:00.000Z'),
 				expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
 			})
@@ -513,7 +626,7 @@ async function seedExpiredRefreshFamily(
 			   CROSS JOIN digits AS hundreds
 			   CROSS JOIN digits AS thousands
 			 )
-			 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+			 INSERT INTO refresh_session_member (id, family_id, generation, credential_hash, created_at)
 			 SELECT printf('%s-%d', ?, value), ?, value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
 			 FROM generations
 			 WHERE value < ?`,

@@ -255,3 +255,19 @@ export function cacheRemoveAuthorizationDetails(
 		}
 	]);
 }
+
+/**
+Requests the operation for closing or reopening one cache.
+*/
+export function cacheLifecycleAuthorizationDetails(intent: {
+	readonly cache: CacheScope;
+	readonly action: 'close' | 'reopen';
+}): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: [`cache:${intent.action}`],
+			cache: intent.cache
+		}
+	]);
+}

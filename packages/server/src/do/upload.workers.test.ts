@@ -120,12 +120,14 @@ import {
 	verifiableNarStored,
 	verifiablePath,
 	verifyCurrentTenant,
+	withoutAlarmArming,
 	workerFetch
 } from '../test-support.ts';
 
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { type VerificationService } from './verification-service.ts';
+import { WorkSequenceService } from './work-sequence-service.ts';
 
 function byUploadId(
 	left: { readonly uploadId: string },
@@ -404,6 +406,162 @@ describe('upload flow', () => {
 			commit: StatusCodes.UNAUTHORIZED
 		});
 	});
+
+	it.each([
+		{ boundary: 'before', table: 'work_sequence', operation: 'UPDATE' },
+		{ boundary: 'after', table: 'work_sequence', operation: 'UPDATE' },
+		{ boundary: 'before', table: 'pending_upload', operation: 'INSERT' },
+		{ boundary: 'after', table: 'pending_upload', operation: 'INSERT' }
+	])(
+		'rolls back acceptance at the $boundary $table storage boundary',
+		async ({ boundary, table, operation }) => {
+			const token = await initialise();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			await withoutAlarmArming(async () => {
+				await runInDurableObject(currentServer(), (_instance, state) => {
+					state.storage.sql.exec(
+						`CREATE TRIGGER acceptance_fault ${boundary} ${operation} ON ${table} BEGIN SELECT RAISE(ABORT, 'acceptance fault'); END`
+					);
+				});
+				const failed = await authorisedFetch('/uploads', token, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						pushId: testPushId,
+						paths: [uploadPathNegotiation(metadata)]
+					})
+				});
+				const rolledBack = await runInDurableObject(
+					currentServer(),
+					(instance, state) => {
+						const snapshot = {
+							sequence: new WorkSequenceService(instance.context.db).current(),
+							pending: instance.context.db
+								.select()
+								.from(schema.pendingUploads)
+								.all()
+						};
+						state.storage.sql.exec('DROP TRIGGER acceptance_fault');
+						return snapshot;
+					}
+				);
+				expect({ status: failed.status, ...rolledBack }).toStrictEqual({
+					status: 500,
+					sequence: 0,
+					pending: []
+				});
+				const accepted = expectSingleUploadDecision(
+					await negotiateUploads(token, [metadata]),
+					metadata
+				);
+				const recovered = await runInDurableObject(
+					currentServer(),
+					(instance) => ({
+						sequence: new WorkSequenceService(instance.context.db).current(),
+						pending: instance.context.db
+							.select({
+								id: schema.pendingUploads.id,
+								acceptedSequence: schema.pendingUploads.acceptedSequence,
+								expiresAt: schema.pendingUploads.expiresAt,
+								acceptedExpiresAt: schema.pendingUploads.acceptedExpiresAt
+							})
+							.from(schema.pendingUploads)
+							.all()
+					})
+				);
+				expect(recovered).toStrictEqual({
+					sequence: 1,
+					pending: [
+						{
+							id: accepted.uploadId,
+							acceptedSequence: 1,
+							expiresAt: accepted.expiresAt,
+							acceptedExpiresAt: accepted.expiresAt
+						}
+					]
+				});
+			});
+		}
+	);
+
+	it.each(['before', 'after'] as const)(
+		'preserves the first commit sequence after a $0 pending-write fault',
+		async (boundary) => {
+			const token = await initialise();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			const accepted = expectSingleUploadDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
+			const actual = await runInDurableObject(
+				currentServer(),
+				(instance, state) => {
+					state.storage.sql.exec(
+						`CREATE TRIGGER commit_fault ${boundary} UPDATE ON pending_upload BEGIN SELECT RAISE(ABORT, 'commit fault'); END`
+					);
+					const uploadState = new UploadStateService(instance.context);
+					expect(() => {
+						uploadState.markUploadCommitting(accepted.uploadId);
+					}).toThrow('commit fault');
+					const snapshot = () => ({
+						sequence: new WorkSequenceService(instance.context.db).current(),
+						rows: instance.context.db
+							.select({
+								acceptedSequence: schema.pendingUploads.acceptedSequence,
+								commitStartedSequence:
+									schema.pendingUploads.commitStartedSequence,
+								verdict: schema.pendingUploads.verdict
+							})
+							.from(schema.pendingUploads)
+							.all()
+							.map((row) => ({
+								...row,
+								commitStartedSequence: row.commitStartedSequence ?? undefined,
+								verdict: row.verdict ?? undefined
+							}))
+					});
+					const failed = snapshot();
+					state.storage.sql.exec('DROP TRIGGER commit_fault');
+					uploadState.markUploadCommitting(accepted.uploadId);
+					const recovered = snapshot();
+					uploadState.markUploadCommitting(accepted.uploadId);
+					return { failed, recovered, repeated: snapshot() };
+				}
+			);
+			expect(actual).toStrictEqual({
+				failed: {
+					sequence: 1,
+					rows: [
+						{
+							acceptedSequence: 1,
+							commitStartedSequence: undefined,
+							verdict: undefined
+						}
+					]
+				},
+				recovered: {
+					sequence: 2,
+					rows: [
+						{
+							acceptedSequence: 1,
+							commitStartedSequence: 2,
+							verdict: 'committing'
+						}
+					]
+				},
+				repeated: {
+					sequence: 3,
+					rows: [
+						{
+							acceptedSequence: 1,
+							commitStartedSequence: 2,
+							verdict: 'committing'
+						}
+					]
+				}
+			});
+		}
+	);
 
 	it('negotiates, commits, serves narinfo and skips uploaded paths', async () => {
 		const init = await bootstrap();
@@ -2273,34 +2431,86 @@ describe('upload flow', () => {
 		).resolves.toBeNull();
 	});
 
-	it('keeps a deferred upload pending on a transient verify error, then commits on retry', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
+	it('keeps a deferred upload pending on a transient verify error, then commits at its retry deadline', async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			const upload = expectSingleUploadDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
 
-		await putNarBytes(upload.r2Key);
-		await markUploadPendingVerification(upload.uploadId);
+			await putNarBytes(upload.r2Key);
+			await markUploadPendingVerification(upload.uploadId);
+			const now = Date.now();
+			const state = async () => {
+				const pending = await runInDurableObject(currentServer(), (instance) =>
+					instance.context.db
+						.select({
+							verdict: schema.pendingUploads.verdict,
+							failures: schema.pendingUploads.settleFailures,
+							retryAfter: schema.pendingUploads.settleRetryAfter,
+							startedAt: schema.pendingUploads.retryStartedActiveMs,
+							category: schema.pendingUploads.lastSettleError,
+							owner: schema.pendingUploads.claimOwner
+						})
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, upload.uploadId))
+						.get()
+				);
+				return {
+					pending:
+						pending === undefined
+							? undefined
+							: { ...pending, owner: pending.owner ?? undefined },
+					stagingExists: (await env.BLOBS.head(upload.r2Key)) !== null
+				};
+			};
+			const get = vi
+				.spyOn(env.BLOBS, 'get')
+				.mockRejectedValueOnce(new Error('transient R2 read'));
+			try {
+				await verifyCurrentTenant();
+			} finally {
+				get.mockRestore();
+			}
 
-		// A transient staging read failure must leave the upload pending and retain
-		// its bytes for retry.
-		const getSpy = vi
-			.spyOn(env.BLOBS, 'get')
-			.mockRejectedValueOnce(new Error('transient R2 read'));
-
-		await verifyCurrentTenant();
-		getSpy.mockRestore();
-
-		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
-		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
-
-		await verifyCurrentTenant();
-
-		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
-		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
+			const failed = await state();
+			await verifyCurrentTenant();
+			const immediate = await state();
+			const deadline = failed.pending?.retryAfter;
+			if (deadline == undefined) {
+				throw new Error(
+					'The transient verification failure did not record a retry deadline.'
+				);
+			}
+			vi.setSystemTime(new Date(deadline));
+			await verifyCurrentTenant();
+			const retried = await state();
+			const narInfo = await fetchNarInfo(metadata.storePathHash);
+			const waiting = {
+				pending: {
+					verdict: 'pending',
+					failures: 1,
+					retryAfter: new Date(now + 30_000).toISOString(),
+					startedAt: 0,
+					category: 'verification-failed',
+					owner: undefined
+				},
+				stagingExists: true
+			};
+			expect({
+				failed,
+				immediate,
+				retried,
+				publishedNarHash: narInfo.narHash.toString()
+			}).toStrictEqual({
+				failed: waiting,
+				immediate: waiting,
+				retried: { pending: undefined, stagingExists: false },
+				publishedNarHash: metadata.narHash
+			});
+		});
 	});
 
 	it('chains a verify pass that fills its batch and drains the rest, stopping on a short batch', async () => {
@@ -3597,12 +3807,14 @@ describe('upload flow', () => {
 
 			expect({ afterFirst, afterSecond }).toStrictEqual({
 				afterFirst: [
+					narCacheTag(fixtureTenant, defaultCache(), first.narHash),
+					legacyNarCacheTag(fixtureTenant, first.narHash),
 					narInfoCacheTag(fixtureTenant, defaultCache(), first.storePathHash)
-				],
-				// The NAR purge queues the tag responses carried before the tag named
-				// the cache as well as the current one.
+				].toSorted(byCodeUnit),
 				afterSecond: [
 					narCacheTag(fixtureTenant, defaultCache(), second.narHash),
+					narCacheTag(fixtureTenant, defaultCache(), second.narHash),
+					legacyNarCacheTag(fixtureTenant, second.narHash),
 					legacyNarCacheTag(fixtureTenant, second.narHash),
 					narInfoCacheTag(fixtureTenant, defaultCache(), second.storePathHash)
 				].toSorted(byCodeUnit)

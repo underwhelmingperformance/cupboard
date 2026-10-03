@@ -18,7 +18,7 @@ import { env } from 'cloudflare:workers';
 import { and, asc, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { cacheIdentityCondition, cacheScopeFromRow } from '../db/cache.ts';
@@ -52,6 +52,158 @@ import {
 	setTenantReadCredential,
 	setTenantStatus
 } from './tenant-registry.ts';
+
+interface RetryClock {
+	set(milliseconds: number): Promise<void>;
+}
+
+interface RetryClockTrigger {
+	readonly name: string;
+	readonly sql: string;
+}
+
+async function withRetryClock(
+	run: (clock: RetryClock) => Promise<void>
+): Promise<void> {
+	const nativeClock =
+		"CAST(strftime('%s', 'now') AS INTEGER) * 1000 + CAST(substr(strftime('%f', 'now'), 4, 3) AS INTEGER)";
+	const query = env.CUPBOARD_DB.prepare(
+		"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ('tenant_retry_clock_insert', 'tenant_retry_clock_status') ORDER BY name"
+	);
+	const { results: triggers } = await query.all<RetryClockTrigger>();
+	expect(
+		triggers.map((trigger) => ({
+			name: trigger.name,
+			clockReads: trigger.sql.split(nativeClock).length - 1
+		}))
+	).toStrictEqual([
+		{ name: 'tenant_retry_clock_insert', clockReads: 1 },
+		{ name: 'tenant_retry_clock_status', clockReads: 2 }
+	]);
+
+	await env.CUPBOARD_DB.batch([
+		env.CUPBOARD_DB.prepare(
+			'CREATE TABLE __test_retry_clock (id INTEGER PRIMARY KEY CHECK(id = 1), milliseconds INTEGER NOT NULL)'
+		),
+		env.CUPBOARD_DB.prepare(
+			'INSERT INTO __test_retry_clock (id, milliseconds) VALUES (1, 0)'
+		),
+		...triggers.flatMap((trigger) => [
+			env.CUPBOARD_DB.prepare(`DROP TRIGGER ${trigger.name}`),
+			env.CUPBOARD_DB.prepare(
+				trigger.sql.replaceAll(
+					nativeClock,
+					'(SELECT milliseconds FROM __test_retry_clock WHERE id = 1)'
+				)
+			)
+		])
+	]);
+
+	try {
+		await run({
+			async set(milliseconds) {
+				vi.setSystemTime(milliseconds);
+				await env.CUPBOARD_DB.prepare(
+					'UPDATE __test_retry_clock SET milliseconds = ? WHERE id = 1'
+				)
+					.bind(milliseconds)
+					.run();
+			}
+		});
+	} finally {
+		await env.CUPBOARD_DB.batch([
+			...triggers.flatMap((trigger) => [
+				env.CUPBOARD_DB.prepare(`DROP TRIGGER ${trigger.name}`),
+				env.CUPBOARD_DB.prepare(trigger.sql)
+			]),
+			env.CUPBOARD_DB.prepare('DROP TABLE __test_retry_clock')
+		]);
+	}
+
+	const { results: restored } = await query.all<RetryClockTrigger>();
+	const { results: clocks } = await env.CUPBOARD_DB.prepare(
+		"SELECT name FROM sqlite_master WHERE name = '__test_retry_clock'"
+	).all<{ name: string }>();
+	expect({ triggers: restored, clocks }).toStrictEqual({
+		triggers,
+		clocks: []
+	});
+}
+
+describe('tenant retry eligibility clock', () => {
+	it.each(['suspended', 'offboarding'] as const)(
+		'pauses active time on a predecessor-compatible %s status write',
+		async (status) => {
+			await withRetryClock(async (clock) => {
+				const started = Date.parse(now);
+				await clock.set(started);
+				await ensureTenant(database(), createBody(acme), now);
+				const row = env.CUPBOARD_DB.prepare(
+					'SELECT status, retry_active_elapsed_ms AS elapsed, retry_active_since_ms AS started FROM tenant WHERE id = ?'
+				).bind(acme);
+				const read = async () => {
+					const stored = await row.first<{
+						status: TenantStatus;
+						elapsed: number;
+						started: number | null;
+					}>();
+					if (stored == undefined) {
+						return;
+					}
+					return { ...stored, started: stored.started ?? undefined };
+				};
+				const initial = await read();
+				await env.CUPBOARD_DB.prepare(
+					'UPDATE tenant SET retry_active_elapsed_ms = 5000 WHERE id = ?'
+				)
+					.bind(acme)
+					.run();
+
+				await clock.set(started + 1000);
+				await env.CUPBOARD_DB.prepare(
+					'UPDATE tenant SET status = ? WHERE id = ?'
+				)
+					.bind(status, acme)
+					.run();
+				const paused = await read();
+
+				await clock.set(started + 6000);
+				await env.CUPBOARD_DB.prepare(
+					'UPDATE tenant SET status = ? WHERE id = ?'
+				)
+					.bind(status, acme)
+					.run();
+				const repeated = await read();
+				expect({ initial, paused, repeated }).toStrictEqual({
+					initial: { status: 'active', elapsed: 0, started },
+					paused: { status, elapsed: 6000, started: undefined },
+					repeated: { status, elapsed: 6000, started: undefined }
+				});
+				if (status !== 'suspended') {
+					return;
+				}
+
+				await resumeTenant(database(), acme);
+				const resumed = await read();
+				await clock.set(started + 6500);
+				await env.CUPBOARD_DB.prepare(
+					'UPDATE tenant SET status = ? WHERE id = ?'
+				)
+					.bind('suspended', acme)
+					.run();
+				const pausedAgain = await read();
+				expect({ resumed, pausedAgain }).toStrictEqual({
+					resumed: { status: 'active', elapsed: 6000, started: started + 6000 },
+					pausedAgain: {
+						status: 'suspended',
+						elapsed: 6500,
+						started: undefined
+					}
+				});
+			});
+		}
+	);
+});
 
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const acme = tenantIdSchema.parse('acme');
@@ -504,15 +656,15 @@ describe('tenant registry', () => {
 			digest: 'a'.repeat(64)
 		},
 		{
-			table: 'blob_ref',
+			table: 'blob_ref_storage',
 			insert:
-				"INSERT INTO blob_ref (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 1)",
+				"INSERT INTO blob_ref_storage (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 1)",
 			digest: `sha256:${'0'.repeat(52)}`
 		},
 		{
-			table: 'attestation_ref',
+			table: 'attestation_ref_storage',
 			insert:
-				"INSERT INTO attestation_ref (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 'https://slsa.dev/provenance/v1')",
+				"INSERT INTO attestation_ref_storage (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 'https://slsa.dev/provenance/v1')",
 			digest: 'a'.repeat(64)
 		}
 	])(
@@ -1259,11 +1411,13 @@ describe('private cache read credentials', () => {
 			now
 		);
 
+		const error = rejectionFields(() => rotation);
+
 		await setTenantStatus(database(), acme, 'offboarding');
 		await finaliseOffboardedTenant(database(), acme);
 
 		expect({
-			error: await rejectionFields(() => rotation),
+			error: await error,
 			stored: await storedCacheCredentials(acme)
 		}).toStrictEqual({
 			error: {

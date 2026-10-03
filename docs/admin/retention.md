@@ -1,9 +1,9 @@
 # Retention
 
-cupboard doesn't keep store paths forever by default. It keeps a store path only
-while something keeps it, and deletes the rest. This page explains what can keep
-a store path, how long it's kept for, and how to choose settings for your
-caches.
+With the default cache settings, retention roots and pins are permanent. A store
+path stays in the cache while a root, pin or grace period keeps it. This page
+explains how to choose retention settings and when garbage collection deletes
+store paths.
 
 ## How retention works
 
@@ -17,7 +17,10 @@ expires or you point it at something else.
 The second is the cache's **grace period**. This is a length of time, such as 24
 hours, set on the cache. When a store path is published, or a root stops keeping
 it, the grace period keeps it for that long even if no root refers to it. Caches
-have no grace period unless you set one.
+have no grace period unless you set one for the cache or configure [creation
+defaults] before creating the cache.
+
+[creation defaults]: ./caches.md#defaults-for-new-caches
 
 A garbage collection runs regularly and deletes every store path that neither of
 these is keeping.
@@ -77,7 +80,9 @@ path that was a target before, and isn't now, is released. If the cache has a
 grace period, the grace period keeps the store path for a while. Otherwise
 nothing keeps it.
 
-A root can have at most 149 targets. If you need more, use several roots.
+One `root set` or `root ensure` request accepts at most 149 targets. Both
+commands replace the complete target set, so use several roots if that set is
+larger. Run roots grow through additive updates and have no total target limit.
 
 ### Managing roots directly
 
@@ -134,7 +139,11 @@ cupboard push https://cupboard.example.workers.dev/t/acme \
 
 A CI token needs the `attach` grant to add to a run root. See
 [Trust rules](../ci/trust-rules.md#what-a-rule-can-grant). The flake publish
-workflow uses a run root automatically.
+workflow uses a run root automatically, with a 24-hour TTL by default.
+
+Run roots use `--run-root-ttl` or `--run-root-permanent` for their lifetime,
+independently of the ordinary root or pins in the same push. If neither option
+is supplied, the run root inherits the cache's root retention settings.
 
 ## How long a root lasts
 
@@ -267,9 +276,11 @@ cache.
 
 ## Garbage collection
 
-A job runs every hour. It collects each active tenant at least once every six
-hours, and also soon after the tenant's next root expiry or grace deadline.
-Suspended tenants aren't collected.
+An hourly job queues up to 100 active tenants that are due for maintenance. A
+tenant becomes due when its maintenance eligibility was last refreshed six hours
+ago, or earlier when a root expires or a grace deadline passes. The next hourly
+job can queue the work, but a backlog, queue delivery or a failed pass can delay
+collection. Suspended tenants aren't collected.
 
 For each cache, a garbage collection:
 
@@ -304,7 +315,9 @@ are permanent by default.
 The cache becomes eligible to retire one default root TTL after you set this. If
 you set it again, the wait starts again. Once the cache is eligible, a
 maintenance pass removes it when it has no store paths, roots, grace deadlines
-or work in progress. The maintenance pass checks again every six hours.
+or work in progress. If the cache is not empty, it becomes due for another check
+six hours later. The hourly job and maintenance queue determine when that check
+runs.
 
 ## Legacy retention policies
 

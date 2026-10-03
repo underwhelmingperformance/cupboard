@@ -34,14 +34,14 @@ export function contractCacheGrants(context: ServerContext): {
 			.all();
 		const families = transaction
 			.select({
-				id: schema.refreshTokenFamilies.id,
-				grants: schema.refreshTokenFamilies.grantsJson
+				id: schema.legacyRefreshTokenFamilies.id,
+				grants: schema.legacyRefreshTokenFamilies.grantsJson
 			})
-			.from(schema.refreshTokenFamilies)
+			.from(schema.legacyRefreshTokenFamilies)
 			.where(
-				sql`exists (select 1 from json_each(${schema.refreshTokenFamilies.grantsJson}) as grant where json_extract(grant.value, '$.type') = 'cupboard_cache' and json_extract(grant.value, '$.cache.kind') is null)`
+				sql`exists (select 1 from json_each(${schema.legacyRefreshTokenFamilies.grantsJson}) as grant where json_extract(grant.value, '$.type') = 'cupboard_cache' and json_extract(grant.value, '$.cache.kind') is null)`
 			)
-			.orderBy(schema.refreshTokenFamilies.id)
+			.orderBy(schema.legacyRefreshTokenFamilies.id)
 			.limit(grantContractionBatchSize)
 			.all();
 
@@ -58,9 +58,9 @@ export function contractCacheGrants(context: ServerContext): {
 				JSON.parse(family.grants ?? 'null')
 			);
 			transaction
-				.update(schema.refreshTokenFamilies)
+				.update(schema.legacyRefreshTokenFamilies)
 				.set({ grantsJson: JSON.stringify(grants) })
-				.where(eq(schema.refreshTokenFamilies.id, family.id))
+				.where(eq(schema.legacyRefreshTokenFamilies.id, family.id))
 				.run();
 		}
 		if (

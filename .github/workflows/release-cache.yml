@@ -39,16 +39,14 @@ jobs:
       attestations: write # allow the attest action to upload bundles to the repository's attestation store
       contents: read # check out the flake source
       id-token: write # OIDC token for the cache push and Sigstore signing
-    # The @main reference is load-bearing: the tenant's trust rule pins the
-    # job_workflow_ref claim to this file at refs/heads/main.
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main # zizmor: ignore[unpinned-uses]
     with:
       runs-on: ${{ matrix.runner }}
       url: https://cupboard.supply/t/cupboard
+      build: rebuild
       cache: releases
       trusted-public-key: cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU=
       root: github:${{ github.repository }}/${{ github.event.release.tag_name }}
-      cupboard-version: ${{ github.event.release.tag_name }}
 
   flakehub:
     name: publish (flakehub)

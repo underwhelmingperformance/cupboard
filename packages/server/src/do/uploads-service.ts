@@ -74,6 +74,8 @@ type ReusableBlob = Pick<
 	'fileHash' | 'fileSize' | 'compression' | 'narSize'
 >;
 
+import { WorkSequenceService } from './work-sequence-service.ts';
+
 const uploadTtlMs = 15 * 60 * 1000;
 
 interface ClosureClassification {
@@ -116,6 +118,8 @@ export function uploadStatusOf(
 		}
 	}
 }
+
+import { CacheClosureService } from './cache-closure-service.ts';
 
 export class UploadsService {
 	constructor(
@@ -177,22 +181,26 @@ export class UploadsService {
 				? stagingObjectKey(pushId, uploadId)
 				: narObjectKey(metadata.narHash);
 
-		this.context.db
-			.insert(schema.pendingUploads)
-			.values({
-				id: uploadId,
-				// Commit accepts only the upload identifier, so the cache recorded
-				// here is what prevents cross-cache redirection.
-				cacheId: cache.id,
-				narHash: metadata.narHash,
-				r2Key,
-				metadataJson: JSON.stringify(pendingMetadata),
-				createdAt: isoTimestamp(now),
-				expiresAt: isoTimestamp(expiresAt),
-				graceDecisionJson: serialiseGraceDecision(graceDecision),
-				attachRootName
-			})
-			.run();
+		this.context.db.transaction((tx) => {
+			tx.insert(schema.pendingUploads)
+				.values({
+					id: uploadId,
+					acceptedSequence: new WorkSequenceService(tx).allocate(),
+					acceptedExpiresAt: isoTimestamp(expiresAt),
+					// Commit accepts only the upload identifier, so the cache recorded
+					// here is what prevents cross-cache redirection.
+					cacheId: cache.id,
+					narHash: metadata.narHash,
+					r2Key,
+					metadataJson: JSON.stringify(pendingMetadata),
+					createdAt: isoTimestamp(now),
+					expiresAt: isoTimestamp(expiresAt),
+					graceDecisionJson: serialiseGraceDecision(graceDecision),
+					retentionEpoch: graceDecision.retentionEpoch,
+					attachRootName
+				})
+				.run();
+		});
 
 		if (existingBlob !== undefined) {
 			return {
@@ -214,6 +222,7 @@ export class UploadsService {
 	}
 
 	private requireCurrentCache(cache: ResolvedCache): void {
+		new CacheClosureService(this.context).assertWritable(cache);
 		const current = this.context.cacheRepository.resolve(cache.scope);
 
 		if (current?.id !== cache.id || current.generation !== cache.generation) {
@@ -417,6 +426,9 @@ export class UploadsService {
 
 		const uploads = await this.context.criticalSection(async () => {
 			this.requireCurrentCache(cache);
+			graceDecision.retentionEpoch = new CacheClosureService(
+				this.context
+			).epoch(cache);
 
 			for (const metadata of body.paths) {
 				const existing = existingByStorePathHash.get(metadata.storePathHash);
@@ -453,7 +465,7 @@ export class UploadsService {
 					generation: row.generation,
 					narHash: row.narHash
 				})),
-				resolvedGraceSeconds
+				graceDecision
 			);
 
 			// A skip has no later commit step. Attach each confirmed skip to the run root
@@ -692,13 +704,16 @@ export class UploadsService {
 		});
 		// The shared-fact reads allow a concurrent publication to replace a row.
 		// Re-check identity while applying grace and confirm only unchanged rows.
-		const facts = confirmGraceBatch(
-			this.context,
-			this.retention,
-			cache,
-			confirmable,
-			resolvedGraceSeconds
-		);
+		const facts = await this.context.criticalSection(() => {
+			new CacheClosureService(this.context).assertWritable(cache);
+			return Promise.resolve(
+				confirmGraceBatch(this.context, this.retention, cache, confirmable, {
+					reportsGrace: true,
+					graceSeconds: resolvedGraceSeconds,
+					retentionEpoch: new CacheClosureService(this.context).epoch(cache)
+				})
+			);
+		});
 
 		return {
 			paths: storePathHashes.map((storePathHash) => {

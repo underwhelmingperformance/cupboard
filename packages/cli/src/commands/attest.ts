@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { env } from 'node:process';
 
-import { storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
 import { formatCount, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import {
@@ -11,9 +15,10 @@ import {
 	type VerifyTrust
 } from '@cupboard/shared/sigstore';
 import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
-import type { Command } from 'commander';
+import { type Command, InvalidArgumentError } from 'commander';
 
 import {
+	parseAttestationBundle,
 	readCommittedAttestationPathInfos,
 	requireAttestationAttachClient,
 	runAttestAttach
@@ -36,12 +41,18 @@ import {
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { AttestAttachBundleRequiredError, CliUsageError } from '../errors.ts';
+import {
+	AttestationBundleInvalidError,
+	AttestAttachBundleRequiredError,
+	CliUsageError
+} from '../errors.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import { registerAttestStatusCommand } from './attest-status.ts';
 import { parsePathFile, resolvePushPath } from './push.ts';
+import { readCredentials } from './read-credentials.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -124,15 +135,125 @@ export async function appendPathFile(
 	return [...paths, ...parsePathFile(await readFile(pathsFile, 'utf8'))];
 }
 
+interface AttestCommandDependencies {
+	readonly authenticate?: typeof authenticateForPush;
+}
+
+class AttestAttachInputError extends CliUsageError {
+	constructor(detail: string, options?: ErrorOptions) {
+		super(detail, options);
+		this.name = 'AttestAttachInputError';
+	}
+}
+
+function parseAttachPath(
+	entry: string,
+	source = 'the command arguments'
+): StorePathString {
+	const parsed = storePathSchema.safeParse(resolvePushPath(entry));
+	if (!parsed.success) {
+		throw new AttestAttachInputError(
+			`Invalid store path '${entry}' in ${source}. Pass an absolute store path or a local link to one.`,
+			{ cause: parsed.error }
+		);
+	}
+
+	return parsed.data;
+}
+
+async function readAttachFile(
+	file: string,
+	description: string
+): Promise<Buffer> {
+	try {
+		return await readFile(file);
+	} catch (error) {
+		throw new AttestAttachInputError(
+			`Cannot read ${description} ${file}. Check that the file exists and is readable.`,
+			{ cause: error }
+		);
+	}
+}
+
+async function attachmentFilePaths(
+	file: string | undefined
+): Promise<readonly StorePathString[]> {
+	if (file === undefined) {
+		return [];
+	}
+
+	const bytes = await readAttachFile(file, '--paths-file');
+	const contents = bytes.toString('utf8');
+	return contents.split(/\r?\n/u).flatMap((line, index) => {
+		const entry = line.trim();
+		if (entry === '') {
+			return [];
+		}
+
+		return [
+			parseAttachPath(entry, `--paths-file ${file}, line ${String(index + 1)}`)
+		];
+	});
+}
+
+async function attachmentBundlePaths(
+	paths: readonly string[],
+	manifest: string | undefined
+): Promise<readonly string[]> {
+	if (manifest === undefined) {
+		return paths;
+	}
+
+	const bytes = await readAttachFile(manifest, '--bundles-file');
+	const contents = bytes.toString('utf8');
+	return [...paths, ...parsePathFile(contents)];
+}
+
+async function readAttachmentBundles(
+	paths: readonly string[]
+): Promise<ReadonlyMap<string, Uint8Array>> {
+	const bundles = new Map<string, Uint8Array>();
+	for (const path of paths) {
+		if (bundles.has(path)) {
+			continue;
+		}
+
+		const bytes = await readAttachFile(path, 'bundle');
+		if (bytes.byteLength > maxAttestationBundleBytes) {
+			throw new AttestAttachInputError(
+				`Bundle ${path} exceeds the maximum size of ${String(maxAttestationBundleBytes)} bytes.`
+			);
+		}
+
+		try {
+			parseAttestationBundle(path, bytes);
+		} catch (error) {
+			if (!(error instanceof AttestationBundleInvalidError)) {
+				throw error;
+			}
+
+			throw new AttestAttachInputError(error.message, { cause: error });
+		}
+
+		bundles.set(path, bytes);
+	}
+
+	return bundles;
+}
+
 export function registerAttestCommands(
 	program: Command,
-	programOptions: ProgramOptions = {}
+	programOptions: ProgramOptions = {},
+	dependencies: AttestCommandDependencies = {}
 ): void {
+	const authenticate = dependencies.authenticate ?? authenticateForPush;
 	const attest = program
 		.command('attest')
 		.description(
 			'Attach Sigstore attestations to published store paths, and verify them.'
 		);
+
+	registerAttestStatusCommand(attest, program, programOptions);
 
 	attest
 		.command('attach')
@@ -164,14 +285,23 @@ export function registerAttestCommands(
 			'password of the read credential for a private cache (default: $CUPBOARD_READ_PASSWORD)'
 		)
 		.option(
-			'--attestation <bundle>',
-			'a Sigstore bundle file to attach (repeatable). Every in-toto subject in the bundle must match one of the given store paths.',
+			'--bundle, --attestation <bundle>',
+			'a Sigstore bundle file to attach (repeatable; both option names are equivalent). Every in-toto subject in the bundle must match one of the given store paths.',
 			collect,
 			[]
 		)
 		.option(
-			'--attestations-file <path>',
-			'read additional Sigstore bundle paths from this file, one per line'
+			'--bundles-file, --attestations-file <path>',
+			'read additional Sigstore bundle paths from this file, one per line (one manifest; both option names are equivalent)',
+			(value: string, previous: string | undefined) => {
+				if (previous !== undefined && previous !== value) {
+					throw new InvalidArgumentError(
+						'Pass one bundle manifest with --bundles-file or --attestations-file; conflicting paths were supplied.'
+					);
+				}
+
+				return value;
+			}
 		)
 		.addHelpText(
 			'after',
@@ -184,7 +314,11 @@ export function registerAttestCommands(
 			].join('\n')
 		)
 		.action(async (url: URL, paths: string[], options: AttachOptions) => {
-			const bundlePaths = await appendPathFile(
+			const readUser =
+				options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER);
+			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
+			readCredentials({ readUser, readPassword });
+			const bundlePaths = await attachmentBundlePaths(
 				options.attestation,
 				options.attestationsFile
 			);
@@ -192,40 +326,32 @@ export function registerAttestCommands(
 				throw new AttestAttachBundleRequiredError();
 			}
 
-			const requestedPaths = await appendPathFile(paths, options.pathsFile);
-			const resolved = await resolveAuthorisedCachePositionals(
-				url,
-				requestedPaths,
-				{
-					minimumPayload: 1,
-					payloadDescription: 'a published store path',
-					parsePayloadEntry: (entry) => entry,
-					authorise: (target) =>
-						authenticateForPush(
-							CupboardClient.fromUrl(target.tenantUrl, {
-								cache: target.cache,
-								signal: programOptions.signal
-							}),
-							{
-								githubOidc: options.githubOidc,
-								audience:
-									options.audience ?? audienceSchema.parse(target.tenantUrl),
-								authorizationDetails: attestAttachAuthorizationDetails({
-									cache: target.cache
-								})
-							}
-						),
-					signal: programOptions.signal
-				}
-			);
+			const filePaths = await attachmentFilePaths(options.pathsFile);
+			const bundleBytes = await readAttachmentBundles(bundlePaths);
+			const resolved = await resolveAuthorisedCachePositionals(url, paths, {
+				minimumPayload: filePaths.length === 0 ? 1 : 0,
+				payloadDescription: 'a published store path',
+				parsePayloadEntry: (entry) => parseAttachPath(entry),
+				authorise: (target) =>
+					authenticate(
+						CupboardClient.fromUrl(target.tenantUrl, {
+							cache: target.cache,
+							signal: programOptions.signal
+						}),
+						{
+							githubOidc: options.githubOidc,
+							audience:
+								options.audience ?? audienceSchema.parse(target.tenantUrl),
+							authorizationDetails: attestAttachAuthorizationDetails({
+								cache: target.cache
+							})
+						}
+					),
+				signal: programOptions.signal
+			});
 			const reporter = commandUi(program, programOptions).reporter();
 			const cache = resolved.target.cache;
-			const resolvedPaths = resolved.payload.map((path) =>
-				storePathSchema.parse(resolvePushPath(path))
-			);
-			const readUser =
-				options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER);
-			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
+			const resolvedPaths = [...resolved.payload, ...filePaths];
 			const pathInfos = await readCommittedAttestationPathInfos(
 				resolvedPaths,
 				{
@@ -248,6 +374,17 @@ export function registerAttestCommands(
 					})
 				),
 				attestations: bundlePaths.map((path) => ({ path })),
+				readAttestationBundle: (path) => {
+					const bytes = bundleBytes.get(path);
+					if (bytes === undefined) {
+						throw new AttestationBundleInvalidError(
+							path,
+							'validated bundle bytes are unavailable'
+						);
+					}
+
+					return Promise.resolve(bytes);
+				},
 				pathInfos
 			});
 		});
@@ -321,19 +458,19 @@ export function registerAttestCommands(
 		)
 		.option(
 			'--certificate-identity <identity>',
-			'identity that the signing certificate must have exactly (cannot be used with --certificate-identity-regex)'
+			'identity that the signing certificate must have exactly (required unless --certificate-identity-regex is supplied; the two options conflict)'
 		)
 		.option(
 			'--certificate-identity-regex <regex>',
-			"regular expression that the signing certificate's identity must match (cannot be used with --certificate-identity)"
+			"regular expression that the signing certificate's identity must match (required unless --certificate-identity is supplied; the two options conflict)"
 		)
 		.option(
 			'--certificate-oidc-issuer <issuer>',
-			'OIDC issuer that the signing certificate must have exactly (cannot be used with --certificate-oidc-issuer-regex)'
+			'OIDC issuer that the signing certificate must have exactly (required unless --certificate-oidc-issuer-regex is supplied; the two options conflict)'
 		)
 		.option(
 			'--certificate-oidc-issuer-regex <regex>',
-			"regular expression that the signing certificate's OIDC issuer must match (cannot be used with --certificate-oidc-issuer)"
+			"regular expression that the signing certificate's OIDC issuer must match (required unless --certificate-oidc-issuer is supplied; the two options conflict)"
 		)
 		.addHelpText(
 			'after',
@@ -342,12 +479,14 @@ export function registerAttestCommands(
 				'Examples:',
 				'  # Verify local bundle files against an expected NAR hash',
 				'  cupboard attest verify ./app.sigstore.json \\',
-				'    --nar-hash sha256:... --predicate-type https://slsa.dev/provenance/v1',
+				'    --nar-hash sha256:... --predicate-type https://slsa.dev/provenance/v1 \\',
+				'    --certificate-identity "$identity" --certificate-oidc-issuer "$issuer"',
 				'',
 				'  # Verify the bundles that a cache has for a store path',
 				'  cupboard attest verify --url https://cupboard.example.workers.dev/t/acme \\',
 				'    --store-path-hash <hash> --trust-cache-pubkey \\',
-				'    --predicate-type https://slsa.dev/provenance/v1',
+				'    --predicate-type https://slsa.dev/provenance/v1 \\',
+				'    --certificate-identity "$identity" --certificate-oidc-issuer "$issuer"',
 				'',
 				"  # GitHub's Sigstore instance creates no Rekor entry, and its trusted",
 				'  # root lists no certificate-transparency log. Verify a bundle from that',
@@ -356,6 +495,7 @@ export function registerAttestCommands(
 				'  gh attestation trusted-root > github-trusted-roots.jsonl',
 				'  cupboard attest verify ./app.sigstore.json --nar-hash sha256:... \\',
 				'    --predicate-type https://slsa.dev/provenance/v1 \\',
+				'    --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" \\',
 				'    --trusted-root github-trusted-roots.jsonl \\',
 				'    --tlog-threshold 0 --ctlog-threshold 0'
 			].join('\n')

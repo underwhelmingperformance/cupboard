@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
-import { discoverNixStoreConfig } from '@cupboard/nix';
+import { discoverNixStoreConfig, type NixBuildSettings } from '@cupboard/nix';
 import {
 	type CacheScope,
 	rootNameMaxLength,
@@ -37,6 +37,8 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	BuildRebuildRemoteDispatchError,
+	BuiltPublicationObservationUnsupportedError,
 	CommandFailedError,
 	ComponentRootTargetLimitError,
 	MatrixJobLimitError,
@@ -257,7 +259,7 @@ export interface PlanInputs {
 	readonly store: string;
 	readonly build: 'missing' | 'rebuild';
 	readonly substituter: 'leave' | 'copy';
-	readonly publish: 'none' | 'outputs' | 'closure';
+	readonly publish: 'none' | 'outputs' | 'built' | 'closure';
 }
 
 /**
@@ -265,6 +267,7 @@ export interface PlanInputs {
  * or Cupboard processes or making network requests.
  */
 export interface PlanDependencies {
+	readonly buildSettings?: NixBuildSettings;
 	readonly evaluator?: NixEvaluator;
 	/**
 	 * When omitted, planning reads the store directory from the runner's Nix
@@ -344,7 +347,7 @@ export function registerPlanCommand(
 		)
 		.option(
 			'--publish <scope>',
-			'control published paths: none, outputs, or closure'
+			'control published paths: none, outputs, built, or closure'
 		)
 		.action((options: PlanOptions) =>
 			planAction(options, environment, undefined, {
@@ -446,7 +449,7 @@ export function resolvePlanInputs(
 		publish: providedChoice(
 			'publish',
 			options.publish,
-			['none', 'outputs', 'closure'],
+			['none', 'outputs', 'built', 'closure'],
 			'outputs'
 		)
 	};
@@ -565,6 +568,19 @@ export async function planAction(
 	dependencies.signal?.throwIfAborted();
 
 	const inputs = resolvePlanInputs(options, environment);
+	if (
+		inputs.build === 'rebuild' &&
+		inputs.store === '' &&
+		(inputs.targets.some((target) => target.remote) ||
+			(dependencies.buildSettings ?? discoverNixStoreConfig().building)
+				.builders !== undefined)
+	) {
+		throw new BuildRebuildRemoteDispatchError();
+	}
+	if (inputs.publish === 'built' && inputs.store !== '') {
+		throw new BuiltPublicationObservationUnsupportedError();
+	}
+
 	const { plan, evaluations } = inputs.optimise
 		? await optimisedPlan(inputs, reporter, dependencies)
 		: { plan: unoptimisedPlan(inputs.targets), evaluations: [] };
@@ -575,7 +591,7 @@ export async function planAction(
 	if (
 		inputs.optimise &&
 		inputs.build === 'missing' &&
-		inputs.publish === 'outputs'
+		(inputs.publish === 'outputs' || inputs.publish === 'built')
 	) {
 		const checked = await cohortPreFilter(
 			inputs,
@@ -657,7 +673,10 @@ async function retainedRootsFor(
 	evaluations: readonly TargetEvaluation[],
 	dependencies: PlanDependencies
 ): Promise<Set<string>> {
-	if (inputs.build === 'rebuild' || inputs.publish !== 'outputs') {
+	if (
+		inputs.build === 'rebuild' ||
+		(inputs.publish !== 'outputs' && inputs.publish !== 'built')
+	) {
 		return new Set<string>();
 	}
 

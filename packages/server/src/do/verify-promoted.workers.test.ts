@@ -1,5 +1,8 @@
 import { rootLogger } from '@cupboard/logger';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,8 +29,11 @@ import {
 	testBase,
 	uploadMetadata,
 	verifiableNar,
-	verifiablePath
+	verifiablePath,
+	withoutAlarmArming
 } from '../test-support.ts';
+
+import { UploadStateService } from './upload-state-service.ts';
 
 // An older consumer can report `promoted` after it has written the canonical
 // object and `blob_state` row. The current Durable Object must still record that
@@ -37,6 +43,294 @@ describe('recording an older promoted verdict', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		await resetTestServer();
+	});
+
+	it('removes the pending refresh marker when its upload is cleared', async () => {
+		const token = await initialise();
+		const { metadata } = await verifiablePath('cleared-refresh-marker', {
+			storePathHash: 'a'.repeat(32),
+			name: 'cleared-refresh-marker'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const uploads = new UploadStateService(instance.context);
+				await uploads.markPendingNarRefresh(upload.uploadId);
+				const wasCleared = uploads.clearPendingUpload(upload.uploadId);
+				return {
+					wasCleared,
+					refreshPending: uploads.hasPendingNarRefresh(upload.uploadId)
+				};
+			}
+		);
+		expect(result).toStrictEqual({ wasCleared: true, refreshPending: false });
+	});
+
+	it('imports a live legacy refresh beyond the first migration page before recovery', async () => {
+		const token = await initialise();
+		const { metadata } = await verifiablePath('legacy-refresh-page', {
+			storePathHash: 'a'.repeat(32),
+			name: 'legacy-refresh-page'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const result = await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
+				const uploads = new UploadStateService(instance.context);
+				const keys = Array.from(
+					{ length: 128 },
+					(_, index) => `uploads:pending-nar-refresh:!orphan-${String(index)}`
+				);
+				await state.storage.put(
+					Object.fromEntries(
+						[...keys, `uploads:pending-nar-refresh:${upload.uploadId}`].map(
+							(key) => [key, true]
+						)
+					)
+				);
+				await uploads.migratePendingNarRefreshMarkers(upload.uploadId);
+				const isPending = uploads.hasPendingNarRefresh(upload.uploadId);
+				await uploads.migratePendingNarRefreshMarkers();
+				const legacy = await state.storage.list({
+					prefix: 'uploads:pending-nar-refresh:'
+				});
+				await state.storage.deleteAlarm();
+				return { isPending, legacy: [...legacy] };
+			})
+		);
+		expect(result).toStrictEqual({
+			isPending: true,
+			legacy: [[`uploads:pending-nar-refresh:${upload.uploadId}`, true]]
+		});
+	});
+
+	it('keeps new refresh intent readable by the predecessor until delivery', async () => {
+		const token = await initialise();
+		const { metadata } = await verifiablePath('rollback-refresh', {
+			storePathHash: 'a'.repeat(32),
+			name: 'rollback-refresh'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const uploads = new UploadStateService(instance.context);
+				await uploads.markPendingNarRefresh(upload.uploadId);
+				return {
+					current: uploads.hasPendingNarRefresh(upload.uploadId),
+					predecessor: await state.storage.get(
+						`uploads:pending-nar-refresh:${upload.uploadId}`
+					)
+				};
+			}
+		);
+		expect(result).toStrictEqual({ current: true, predecessor: true });
+	});
+
+	it('resumes legacy migration beyond a retained page after restart', async () => {
+		const token = await initialise();
+		const { metadata } = await verifiablePath('retained-refresh-page', {
+			storePathHash: 'a'.repeat(32),
+			name: 'retained-refresh-page'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const result = await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
+				const ids = [
+					...Array.from(
+						{ length: 128 },
+						(_, index) => `!live-${String(index).padStart(3, '0')}`
+					),
+					upload.uploadId
+				];
+				state.storage.sql.exec(
+					'INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at) SELECT value, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at FROM json_each(?), pending_upload WHERE pending_upload.id = ?',
+					JSON.stringify(ids.slice(0, 128)),
+					upload.uploadId
+				);
+				await state.storage.put(
+					Object.fromEntries(
+						ids.map((id) => [`uploads:pending-nar-refresh:${id}`, true])
+					)
+				);
+				await new UploadStateService(
+					instance.context
+				).migratePendingNarRefreshMarkers();
+				const afterFirst = state.storage.sql
+					.exec(
+						'SELECT id FROM pending_upload WHERE nar_refresh_pending = 1 ORDER BY id'
+					)
+					.toArray();
+				await new UploadStateService(
+					instance.context
+				).migratePendingNarRefreshMarkers();
+				return {
+					afterFirst,
+					afterSecond: state.storage.sql
+						.exec(
+							'SELECT id FROM pending_upload WHERE nar_refresh_pending = 1 ORDER BY id'
+						)
+						.toArray(),
+					legacy: [
+						...(await state.storage.list({
+							prefix: 'uploads:pending-nar-refresh:'
+						}))
+					]
+				};
+			})
+		);
+		const ids = [
+			...Array.from(
+				{ length: 128 },
+				(_, index) => `!live-${String(index).padStart(3, '0')}`
+			),
+			upload.uploadId
+		];
+		expect(result).toStrictEqual({
+			afterFirst: ids.slice(0, 128).map((id) => ({ id })),
+			afterSecond: ids.map((id) => ({ id })),
+			legacy: ids.map((id) => [`uploads:pending-nar-refresh:${id}`, true])
+		});
+	});
+
+	it('defers a contended reservation without charging or discarding its verdict', async () => {
+		const token = await initialise();
+		const upload = await deferFreshUpload(
+			token,
+			'contended-verdict',
+			'a'.repeat(32)
+		);
+		const result = await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
+				const claim = await instance.claimVerificationBatch(
+					1,
+					Number.MAX_SAFE_INTEGER
+				);
+				const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+				await database.insert(d1Schema.objectIncarnation).values({
+					kind: 'nar',
+					objectId: upload.nar.narHash,
+					incarnation: 2,
+					state: 'pending',
+					reservationOwner: 'competing-owner',
+					updatedAt: isoTimestamp(new Date())
+				});
+				const key = `uploads:pending-nar-refresh:${upload.uploadId}`;
+				await state.storage.put(key, true);
+				const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+				let batches = 0;
+				const batch = vi
+					.spyOn(env.CUPBOARD_DB, 'batch')
+					.mockImplementation(async (statements) => {
+						batches += 1;
+						if (batches === 2) {
+							await database
+								.update(d1Schema.objectIncarnation)
+								.set({ incarnation: 3 })
+								.where(
+									eq(d1Schema.objectIncarnation.objectId, upload.nar.narHash)
+								)
+								.run();
+						}
+						return originalBatch(statements);
+					});
+				const send = vi
+					.spyOn(instance.context.env.MAINTENANCE_QUEUE, 'send')
+					.mockResolvedValue({
+						metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } }
+					});
+				const usage = () =>
+					database
+						.select({
+							bytes: d1Schema.tenantUsage.bytes,
+							narinfos: d1Schema.tenantUsage.narinfos,
+							blobs: d1Schema.tenantUsage.blobs
+						})
+						.from(d1Schema.tenantUsage)
+						.where(
+							eq(d1Schema.tenantUsage.tenant, instance.context.requireTenant())
+						)
+						.get();
+				try {
+					const applied = await instance.recordVerifications(claim.owner, [
+						{
+							uploadId: upload.uploadId,
+							verdict: {
+								kind: 'verified',
+								verification: {
+									ok: true,
+									fileHash: upload.nar.fileHash,
+									fileSize: upload.nar.narBytes.byteLength
+								}
+							}
+						}
+					]);
+					const held = state.storage.sql
+						.exec(
+							'SELECT verdict, recorded_verdict_json IS NOT NULL AS recorded, nar_refresh_pending AS refresh, settle_failures AS failures FROM pending_upload WHERE id = ?',
+							upload.uploadId
+						)
+						.one();
+					const deferred = {
+						applied,
+						held,
+						usage: await usage(),
+						predecessor: await state.storage.get(key),
+						queued: send.mock.calls.length
+					};
+					const beforeRetry = await instance.recordVerifications(
+						claim.owner,
+						[]
+					);
+					vi.setSystemTime(new Date(Date.now() + 1000));
+					const retried = await instance.recordVerifications(claim.owner, []);
+					return {
+						deferred,
+						beforeRetry,
+						retried,
+						usage: await usage(),
+						remaining: state.storage.sql
+							.exec(
+								'SELECT id FROM pending_upload WHERE id = ?',
+								upload.uploadId
+							)
+							.toArray(),
+						predecessor: await state.storage.get(key),
+						queued: send.mock.calls
+					};
+				} finally {
+					batch.mockRestore();
+					send.mockRestore();
+				}
+			})
+		);
+		expect(result).toStrictEqual({
+			beforeRetry: 0,
+			deferred: {
+				applied: 0,
+				held: { verdict: 'pending', recorded: 1, refresh: 1, failures: 0 },
+				usage: { bytes: 0, narinfos: 0, blobs: 0 },
+				predecessor: true,
+				queued: 0
+			},
+			retried: 1,
+			usage: { bytes: upload.nar.narBytes.byteLength, narinfos: 1, blobs: 1 },
+			remaining: [],
+			predecessor: undefined,
+			queued: [[{ kind: 'narinfo-refresh', narHash: upload.nar.narHash }]]
+		});
 	});
 
 	it('settles the upload without re-promoting', async () => {
@@ -172,6 +466,7 @@ describe('consumer verify pass', () => {
 			second: await pendingUploadVerdict(second.uploadId)
 		}).toStrictEqual({ first: undefined, second: 'pending' });
 
+		vi.setSystemTime(new Date(Date.now() + 30_000));
 		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({

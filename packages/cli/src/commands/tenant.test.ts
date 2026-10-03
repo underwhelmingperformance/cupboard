@@ -19,13 +19,17 @@ import {
 } from '@cupboard/protocol/tenants';
 import type { ResultRow } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
-import { describe, expect, it } from 'vitest';
+import { Command } from 'commander';
+import { describe, expect, it, vi } from 'vitest';
+
+import { cliExitCode } from '../cli.ts';
 
 import {
 	InvalidQuotaBytesError,
 	parseQuotaBytes,
 	readCredentialFromOptions,
 	ReadUserWithoutCredentialError,
+	registerTenantCommands,
 	runTenantClearCacheCredential,
 	runTenantClearCredential,
 	runTenantCreate,
@@ -43,6 +47,91 @@ import {
 const acme = tenantIdSchema.parse('acme');
 const alice = readUserInputSchema.parse('alice');
 const password = 'A'.repeat(43);
+
+const quotaMocks = vi.hoisted(() => ({ client: vi.fn(), set: vi.fn() }));
+vi.mock('../client/orpc.ts', () => ({ controlRpc: quotaMocks.client }));
+
+describe('parsed quota selection', () => {
+	it.each([['0'], ['--quota-bytes', '0']])(
+		'sets zero bytes with %j',
+		async (...arguments_) => {
+			quotaMocks.set.mockReset();
+			quotaMocks.client.mockReset();
+			quotaMocks.set.mockResolvedValue({
+				id: acme,
+				quota: { kind: 'limited', bytes: 0 },
+				usedBytes: 0
+			});
+			quotaMocks.client.mockReturnValue({
+				tenants: { setQuota: quotaMocks.set }
+			});
+			const program = new Command().exitOverride();
+			registerTenantCommands(program);
+			await program.parseAsync(
+				[
+					'tenant',
+					'set-quota',
+					'https://cupboard.example.workers.dev',
+					'acme',
+					...arguments_
+				],
+				{ from: 'user' }
+			);
+			expect(quotaMocks.set.mock.calls).toStrictEqual([
+				[{ id: acme, quota: { kind: 'limited', bytes: 0 } }]
+			]);
+		}
+	);
+
+	it.each([
+		{
+			args: [],
+			message:
+				'Pass a quota in bytes as the positional argument or with --quota-bytes.'
+		},
+		{
+			args: ['1', '--quota-bytes', '2'],
+			message:
+				'Pass the quota once: use either the positional bytes argument or --quota-bytes.'
+		},
+		{
+			args: ['0', '--quota-bytes', '0'],
+			message:
+				'Pass the quota once: use either the positional bytes argument or --quota-bytes.'
+		}
+	])(
+		'refuses $args before creating an authenticated client',
+		async ({ args, message }) => {
+			quotaMocks.client.mockClear();
+			const program = new Command()
+				.exitOverride()
+				.configureOutput({ writeErr: vi.fn() });
+			registerTenantCommands(program);
+			let result: unknown;
+			try {
+				await program.parseAsync(
+					[
+						'tenant',
+						'set-quota',
+						'https://cupboard.example.workers.dev',
+						'acme',
+						...args
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				result = {
+					status: cliExitCode(error, 1),
+					message: error instanceof Error ? error.message : undefined
+				};
+			}
+			expect({
+				result,
+				clientCalls: quotaMocks.client.mock.calls
+			}).toStrictEqual({ result: { status: 2, message }, clientCalls: [] });
+		}
+	);
+});
 
 function summary(status: 'active' | 'suspended' = 'active') {
 	return tenantSummarySchema.parse({
@@ -104,6 +193,41 @@ describe('parseQuotaBytes', () => {
 			expect(() => parseQuotaBytes(value)).toThrow(InvalidQuotaBytesError);
 		}
 	);
+});
+
+describe('tenant argument error statuses', () => {
+	it.each(['', '-1', '1.5', '1e3', String(Number.MAX_SAFE_INTEGER + 1)])(
+		'explains the quota format and exits two for %j',
+		(value) => {
+			let failure: unknown;
+			try {
+				parseQuotaBytes(value);
+			} catch (error) {
+				failure = error;
+			}
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				message: failure instanceof Error ? failure.message : undefined,
+				status: cliExitCode(failure, 130)
+			}).toStrictEqual({
+				name: 'InvalidQuotaBytesError',
+				message: `Invalid quota bytes: ${value}. Pass a non-negative integer in bytes, such as 1048576 (at most ${String(Number.MAX_SAFE_INTEGER)}).`,
+				status: 2
+			});
+		}
+	);
+	it('classifies a username without a credential as a usage error', () => {
+		let failure: unknown;
+		try {
+			readCredentialFromOptions({ readUser: alice, readPassword: false });
+		} catch (error) {
+			failure = error;
+		}
+		expect({
+			name: failure instanceof Error ? failure.name : undefined,
+			status: cliExitCode(failure, 130)
+		}).toStrictEqual({ name: 'ReadUserWithoutCredentialError', status: 2 });
+	});
 });
 
 describe('readCredentialFromOptions', () => {

@@ -31,10 +31,12 @@ import type { ResultRow } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { cliExitCode } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
+	AdminApiTransientError,
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
 	CacheInfoTimeoutError,
@@ -46,6 +48,8 @@ import {
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
 	ReadCredentialPairError,
+	ScopeForbiddenError,
+	SessionRejectedError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
 
@@ -59,8 +63,15 @@ import {
 } from './github.ts';
 import { type DiscoveredGithubCheckResult } from './github/discovered-check.ts';
 import { RepositoryTrustRuleMissingFinding } from './github/trust-selection.ts';
-import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
-import { type RepositoryIdentity } from './oidc-trust/github.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from './oidc-trust.ts';
+import {
+	InvalidRepositoryError,
+	type RepositoryIdentity
+} from './oidc-trust/github.ts';
 
 const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
 const alice = readUserInputSchema.parse('alice');
@@ -85,6 +96,10 @@ const options: GithubSetupOptions = {
 };
 
 const prBody = githubPrAddBody(url, identity, {
+	repo: options.repo,
+	jobWorkflowRef: options.workflowRef
+});
+const prCloseBody = githubPrCloseAddBody(url, identity, {
 	repo: options.repo,
 	jobWorkflowRef: options.workflowRef
 });
@@ -266,7 +281,11 @@ describe('runGithubSetup', () => {
 							selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 						}
 					],
-					rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+					rules: [
+						storedRule('pr', prBody),
+						storedRule('branch', branchBody),
+						storedRule('pr-close', prCloseBody)
+					]
 				});
 				let failure: unknown;
 
@@ -360,7 +379,14 @@ describe('runGithubSetup', () => {
 						priority: 50
 					}
 				],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [
+					prBody,
+					branchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: options.workflowRef
+					})
+				],
 				ruleRemoves: []
 			},
 			results: [
@@ -370,7 +396,11 @@ describe('runGithubSetup', () => {
 						value: 'created: public gh-1234-pr- caches at priority 50'
 					},
 					{ label: 'pull-request trust rule', value: ruleCreated },
-					{ label: 'main trust rule', value: ruleCreated }
+					{ label: 'main trust rule', value: ruleCreated },
+					{
+						label: 'merged pull-request closure trust rule',
+						value: ruleCreated
+					}
 				]
 			]
 		});
@@ -430,7 +460,8 @@ describe('runGithubSetup', () => {
 					jobWorkflowRef: options.workflowRef,
 					readCache: true,
 					readView: 'pull-requests-1234'
-				}).permittedGrants
+				}).permittedGrants,
+				prCloseBody.permittedGrants
 			]
 		});
 	});
@@ -519,20 +550,21 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `retained: main pushes; ${previousWorkflowReference}`
+					value: `retained: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -577,7 +609,11 @@ describe('runGithubSetup', () => {
 					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
-			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+			rules: [
+				storedRule('pr', prBody),
+				storedRule('branch', branchBody),
+				storedRule('pr-close', prCloseBody)
+			]
 		});
 
 		await runGithubSetup(url, options, reporter(results), client, dependencies);
@@ -592,7 +628,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
-				{ label: 'main trust rule', value: 'unchanged' }
+				{ label: 'main trust rule', value: 'unchanged' },
+				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
 			]
 		});
 	});
@@ -641,20 +678,21 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `retained: main pushes; ${previousWorkflowReference}`
+					value: `retained: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			],
 			verifiedReferences: [pinnedWorkflowReference, previousWorkflowReference]
@@ -726,7 +764,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: ['previous-branch', 'previous-pr']
 			},
 			prompts: [
@@ -735,12 +773,13 @@ describe('runGithubSetup', () => {
 					entries: [
 						{
 							value: 'previous-branch',
-							label: 'main pushes (previous-branch)',
+							label: 'main pushes and merged pull requests (previous-branch)',
 							hint: previousWorkflowReference
 						},
 						{
 							value: 'previous-pr',
-							label: 'pull requests and main pushes (previous-pr)',
+							label:
+								'pull requests and main pushes and merged pull requests (previous-pr)',
 							hint: previousWorkflowReference
 						}
 					],
@@ -751,13 +790,14 @@ describe('runGithubSetup', () => {
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `removed: main pushes; ${previousWorkflowReference}`
+					value: `removed: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `removed: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `removed: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -829,7 +869,7 @@ describe('runGithubSetup', () => {
 			confirms: [
 				{
 					message: 'Remove all conflicting trust rules to continue?',
-					detail: `main pushes (conflict): ${pinnedWorkflowReference}`
+					detail: `main pushes and merged pull requests (conflict): ${pinnedWorkflowReference}`
 				}
 			],
 			cancellations: ['GitHub setup was left unchanged.']
@@ -870,7 +910,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
@@ -880,7 +920,8 @@ describe('runGithubSetup', () => {
 					value: `retained: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated }
+				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -927,7 +968,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: ['dispatch']
 			},
 			prompts: [
@@ -950,7 +991,8 @@ describe('runGithubSetup', () => {
 					value: `removed: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated }
+				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -996,7 +1038,7 @@ describe('runGithubSetup', () => {
 						priority: 50
 					}
 				],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
@@ -1005,7 +1047,8 @@ describe('runGithubSetup', () => {
 					value: 'created: public gh-1234-pr- caches at priority 50'
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated }
+				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -1029,7 +1072,12 @@ describe('runGithubSetup', () => {
 					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
-			rules: [owner, storedRule('pr', prBody), storedRule('branch', branchBody)]
+			rules: [
+				owner,
+				storedRule('pr', prBody),
+				storedRule('branch', branchBody),
+				storedRule('pr-close', prCloseBody)
+			]
 		});
 
 		await runGithubSetup(url, options, ui, client, dependencies);
@@ -1079,13 +1127,13 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody],
+				ruleAdds: [prBody, prCloseBody],
 				ruleRemoves: ['conflict']
 			},
 			confirms: [
 				{
 					message: 'Remove all conflicting trust rules to continue?',
-					detail: `pull requests and main pushes (conflict): ${pinnedWorkflowReference}`
+					detail: `pull requests and main pushes and merged pull requests (conflict): ${pinnedWorkflowReference}`
 				}
 			]
 		});
@@ -1172,24 +1220,25 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: ['conflict']
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule conflict',
-					value: `removed: pull requests and main pushes; ${pinnedWorkflowReference}`
+					value: `removed: pull requests and main pushes and merged pull requests; ${pinnedWorkflowReference}`
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
-					value: `retained: main pushes; ${previousWorkflowReference}`
+					value: `retained: main pushes and merged pull requests; ${previousWorkflowReference}`
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -1247,7 +1296,7 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			prompts: [
@@ -1256,7 +1305,8 @@ describe('runGithubSetup', () => {
 					entries: [
 						{
 							value: 'legacy',
-							label: 'pull requests and main pushes (legacy)',
+							label:
+								'pull requests and main pushes and merged pull requests (legacy)',
 							hint: `${movableWorkflowReference} (trusts future edits to the workflow)`
 						}
 					],
@@ -1267,9 +1317,10 @@ describe('runGithubSetup', () => {
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule legacy',
-					value: `retained: pull requests and main pushes; ${movableWorkflowReference}; trusts future edits to the workflow`
+					value: `retained: pull requests and main pushes and merged pull requests; ${movableWorkflowReference}; trusts future edits to the workflow`
 				}
 			],
 			verifiedReferences: [pinnedWorkflowReference]
@@ -1320,96 +1371,161 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [prBody, branchBody],
+				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
+				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule legacy',
 					value:
-						'retained: pull requests and main pushes; workflow references matching ^other/.*$'
+						'retained: pull requests and main pushes and merged pull requests; workflow references matching ^other/.*$'
 				}
 			],
 			verifiedReferences: [pinnedWorkflowReference]
 		});
 	});
 
-	it('reports the applied configuration when a superseded removal fails', async () => {
-		const results: ResultRow[][] = [];
-		const removalFailure = new Error('remove failed');
-		const { ui } = fakeCliUi({
-			interactive: true,
-			multiSelects: [['previous-branch', 'previous-pr']]
-		});
-		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
-			rules: [
-				storedRule('previous-pr', previousPrBody),
-				storedRule('previous-branch', previousBranchBody)
-			]
-		});
-		const failingClient: GithubSetupClient = {
-			...client,
-			oidcTrust: {
-				...client.oidcTrust,
-				remove: (input) =>
-					input.id === 'previous-pr'
-						? Promise.reject(removalFailure)
-						: client.oidcTrust.remove(input)
-			}
-		};
-
-		let failure: unknown;
-		try {
-			await runGithubSetup(
-				url,
-				options,
-				{ ...ui, reporter: () => capturingReporter(results) },
-				failingClient,
-				dependencies
-			);
-		} catch (error) {
-			failure = error;
+	it.each([
+		{
+			kind: 'generic',
+			removalFailure: new Error('remove failed'),
+			earlierFailure: undefined,
+			exitCode: 1
+		},
+		{
+			kind: 'temporary',
+			removalFailure: new AdminApiTransientError(503, 'SERVICE_UNAVAILABLE'),
+			earlierFailure: undefined,
+			exitCode: 75
+		},
+		{
+			kind: 'session',
+			removalFailure: new SessionRejectedError(),
+			earlierFailure: undefined,
+			exitCode: 77
+		},
+		{
+			kind: 'scope',
+			removalFailure: new ScopeForbiddenError(),
+			earlierFailure: undefined,
+			exitCode: 77
+		},
+		{
+			kind: 'temporary after generic',
+			removalFailure: new AdminApiTransientError(503, 'SERVICE_UNAVAILABLE'),
+			earlierFailure: new Error('earlier removal failed'),
+			exitCode: 75
+		},
+		{
+			kind: 'scope after generic',
+			removalFailure: new ScopeForbiddenError(),
+			earlierFailure: new Error('earlier removal failed'),
+			exitCode: 77
+		},
+		{
+			kind: 'session after temporary',
+			removalFailure: new SessionRejectedError(),
+			earlierFailure: new AdminApiTransientError(503, 'SERVICE_UNAVAILABLE'),
+			exitCode: 77
 		}
-
-		expectRemovalError(failure);
-		expect({
-			ruleIds: failure.ruleIds,
-			recorded,
-			outcomes: results[0]
-		}).toStrictEqual({
-			ruleIds: ['previous-pr'],
-			recorded: {
-				graceAdds: [],
-				viewSets: [],
-				ruleAdds: [prBody, branchBody],
-				ruleRemoves: ['previous-branch']
-			},
-			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: ruleCreated },
-				{ label: 'main trust rule', value: ruleCreated },
-				{
-					label: 'superseded trust rule previous-branch',
-					value: `removed: main pushes; ${previousWorkflowReference}`
-				},
-				{
-					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}; the removal failed`
+	])(
+		'reports applied configuration and preserves a $kind removal failure',
+		async ({ removalFailure, earlierFailure, exitCode }) => {
+			const results: ResultRow[][] = [];
+			const { ui } = fakeCliUi({
+				interactive: true,
+				multiSelects: [['previous-branch', 'previous-pr']]
+			});
+			const { client, recorded } = setupClient({
+				gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+				views: [
+					{
+						name: 'pull-requests-1234',
+						priority: 50,
+						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
+					}
+				],
+				rules: [
+					storedRule('previous-pr', previousPrBody),
+					storedRule('previous-branch', previousBranchBody)
+				]
+			});
+			const failingClient: GithubSetupClient = {
+				...client,
+				oidcTrust: {
+					...client.oidcTrust,
+					remove: (input) => {
+						if (input.id === 'previous-pr') {
+							return Promise.reject(removalFailure);
+						}
+						if (earlierFailure !== undefined) {
+							return Promise.reject(earlierFailure);
+						}
+						return client.oidcTrust.remove(input);
+					}
 				}
-			]
-		});
-	});
+			};
+
+			let failure: unknown;
+			try {
+				await runGithubSetup(
+					url,
+					options,
+					{ ...ui, reporter: () => capturingReporter(results) },
+					failingClient,
+					dependencies
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expectRemovalError(failure);
+			expect({
+				ruleIds: failure.ruleIds,
+				cause: failure.cause,
+				exitCode: cliExitCode(failure, 130),
+				recorded,
+				outcomes: results[0]
+			}).toStrictEqual({
+				ruleIds:
+					earlierFailure === undefined
+						? ['previous-pr']
+						: ['previous-branch', 'previous-pr'],
+				cause: removalFailure,
+				exitCode,
+				recorded: {
+					graceAdds: [],
+					viewSets: [],
+					ruleAdds: [prBody, branchBody, prCloseBody],
+					ruleRemoves: earlierFailure === undefined ? ['previous-branch'] : []
+				},
+				outcomes: [
+					{ label: 'reuse view', value: 'unchanged' },
+					{ label: 'pull-request trust rule', value: ruleCreated },
+					{ label: 'main trust rule', value: ruleCreated },
+					{
+						label: 'merged pull-request closure trust rule',
+						value: ruleCreated
+					},
+					{
+						label: 'superseded trust rule previous-branch',
+						value:
+							earlierFailure === undefined
+								? `removed: main pushes and merged pull requests; ${previousWorkflowReference}`
+								: `retained: main pushes and merged pull requests; ${previousWorkflowReference}; the removal failed`
+					},
+					{
+						label: 'superseded trust rule previous-pr',
+						value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}; the removal failed`
+					}
+				]
+			});
+		}
+	);
 
 	it('reports configuration setup would create alongside drift', async () => {
 		const results: ResultRow[][] = [];
@@ -1421,7 +1537,11 @@ describe('runGithubSetup', () => {
 					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
-			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+			rules: [
+				storedRule('pr', prBody),
+				storedRule('branch', branchBody),
+				storedRule('pr-close', prCloseBody)
+			]
 		});
 
 		let failure: unknown;
@@ -1523,7 +1643,7 @@ describe('runGithubSetup', () => {
 				},
 				{
 					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
 				}
 			]
 		});
@@ -1575,20 +1695,31 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [patternPrBody, patternBranchBody],
+				ruleAdds: [
+					patternPrBody,
+					patternBranchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: patternReference
+					})
+				],
 				ruleRemoves: ['exact']
 			},
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule exact',
-					value: `removed: pull requests and main pushes; ${pinnedWorkflowReference}`
+					value: `removed: pull requests and main pushes and merged pull requests; ${pinnedWorkflowReference}`
 				},
 				{
 					label: 'pull-request trust rule',
 					value: `created: ${patternDetail}`
 				},
-				{ label: 'main trust rule', value: `created: ${patternDetail}` }
+				{ label: 'main trust rule', value: `created: ${patternDetail}` },
+				{
+					label: 'merged pull-request closure trust rule',
+					value: `created: ${patternDetail}`
+				}
 			]
 		});
 	});
@@ -1647,7 +1778,14 @@ describe('runGithubSetup', () => {
 			expect(recorded).toStrictEqual({
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [desiredPrBody, desiredBranchBody],
+				ruleAdds: [
+					desiredPrBody,
+					desiredBranchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: desiredReference
+					})
+				],
 				ruleRemoves: expectedRemovals
 			});
 		}
@@ -1694,7 +1832,14 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [patternPrBody, patternBranchBody],
+				ruleAdds: [
+					patternPrBody,
+					patternBranchBody,
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: patternReference
+					})
+				],
 				ruleRemoves: []
 			},
 			outcomes: [
@@ -1703,7 +1848,11 @@ describe('runGithubSetup', () => {
 					label: 'pull-request trust rule',
 					value: `created: ${patternDetail}`
 				},
-				{ label: 'main trust rule', value: `created: ${patternDetail}` }
+				{ label: 'main trust rule', value: `created: ${patternDetail}` },
+				{
+					label: 'merged pull-request closure trust rule',
+					value: `created: ${patternDetail}`
+				}
 			]
 		});
 	});
@@ -1732,7 +1881,14 @@ describe('runGithubSetup', () => {
 			],
 			rules: [
 				storedRule('pattern-pr', patternPrBody),
-				storedRule('pattern-branch', patternBranchBody)
+				storedRule('pattern-branch', patternBranchBody),
+				storedRule(
+					'pattern-close',
+					githubPrCloseAddBody(url, identity, {
+						repo: options.repo,
+						jobWorkflowRef: patternReference
+					})
+				)
 			]
 		});
 
@@ -1758,13 +1914,113 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
-				{ label: 'main trust rule', value: 'unchanged' }
+				{ label: 'main trust rule', value: 'unchanged' },
+				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
 			]
 		});
 	});
 });
 
 describe('registerGithubCommands', () => {
+	it.each(['setup', 'check'])(
+		'validates repository syntax before the %s handler',
+		async (commandName) => {
+			const program = new Command();
+			registerGithubCommands(program);
+			const command = program.commands
+				.find((entry) => entry.name() === 'github')
+				?.commands.find((entry) => entry.name() === commandName);
+			if (command === undefined) {
+				throw new Error(`Missing github ${commandName} command`);
+			}
+			const handlers: string[] = [];
+			command.action(() => {
+				handlers.push(commandName);
+			});
+			let result: { exitCode: number; message: string } | undefined;
+			try {
+				await program.parseAsync(
+					[
+						'github',
+						commandName,
+						url.href,
+						'--repo',
+						'owner/repo/extra',
+						'--workflow-ref',
+						`acme/app/.github/workflows/publish.yml@${'a'.repeat(40)}`
+					],
+					{ from: 'user' }
+				);
+			} catch (error) {
+				if (!(error instanceof InvalidRepositoryError)) {
+					throw error;
+				}
+				result = { exitCode: error.exitCode, message: error.message };
+			}
+			expect({ handlers, result }).toStrictEqual({
+				handlers: [],
+				result: {
+					exitCode: 2,
+					message: "--repo must be <owner>/<name>, got 'owner/repo/extra'."
+				}
+			});
+		}
+	);
+
+	it.each([
+		{
+			command: 'setup',
+			workflowFlag: '--workflow-ref',
+			accessFlag: '--cache-access-mode'
+		},
+		{
+			command: 'setup',
+			workflowFlag: '--job-workflow-ref',
+			accessFlag: '--access'
+		},
+		{ command: 'check', workflowFlag: '--workflow-ref', accessFlag: undefined },
+		{
+			command: 'check',
+			workflowFlag: '--job-workflow-ref',
+			accessFlag: undefined
+		}
+	])(
+		'parses compatible vocabulary for $command with $workflowFlag',
+		async ({ command, workflowFlag, accessFlag }) => {
+			const program = new Command().exitOverride();
+			registerGithubCommands(program);
+			const selected = program.commands[0]?.commands.find(
+				(candidate) => candidate.name() === command
+			);
+			let parsed: unknown;
+			selected?.action((_url: URL, options: unknown) => {
+				parsed = options;
+			});
+			const workflowReference = `acme/app/.github/workflows/publish.yml@${'a'.repeat(40)}`;
+			await program.parseAsync(
+				[
+					'github',
+					command,
+					url.href,
+					'--repo',
+					'acme/app',
+					workflowFlag,
+					workflowReference,
+					...(accessFlag === undefined ? [] : [accessFlag, 'private'])
+				],
+				{ from: 'user' }
+			);
+			expect(parsed).toStrictEqual({
+				repo: 'acme/app',
+				workflowRef: workflowReference,
+				...(command === 'setup' && {
+					branch: 'main',
+					cacheAccessMode: 'private'
+				})
+			});
+		}
+	);
+
 	it('offers generic conflict confirmation without a retirement flag', () => {
 		const program = new Command();
 		registerGithubCommands(program);
@@ -1778,11 +2034,11 @@ describe('registerGithubCommands', () => {
 		expect(setup?.options.map((option) => option.flags)).toStrictEqual([
 			'--repo <owner/name>',
 			'--branch <name>',
-			'--workflow-ref <owner/repo/path@ref>',
+			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
 			'-y, --yes',
 			'--read-user <user>',
 			'--read-password <password>',
-			'--cache-access-mode <mode>'
+			'--access, --cache-access-mode <mode>'
 		]);
 	});
 
@@ -1825,7 +2081,10 @@ describe('registerGithubCommands', () => {
 		).toStrictEqual([
 			{ flags: '--repo <owner/name>', mandatory: true },
 			{ flags: '--branch <name>', mandatory: false },
-			{ flags: '--workflow-ref <owner/repo/path@ref>', mandatory: false },
+			{
+				flags: '--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
+				mandatory: false
+			},
 			{ flags: '--fix', mandatory: false },
 			{ flags: '-y, --yes', mandatory: false },
 			{ flags: '--trust-scope <scope>', mandatory: false },
@@ -2029,6 +2288,21 @@ it('does not classify an HTML login response as a public cache', async () => {
 });
 
 describe('cacheInfoFetcher', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.spyOn(AbortSignal, 'timeout').mockImplementation((milliseconds) => {
+			const controller = new AbortController();
+			setTimeout(() => {
+				controller.abort(new DOMException('Timed out', 'TimeoutError'));
+			}, milliseconds);
+			return controller.signal;
+		});
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+	});
+
 	const info = new CacheInfo(
 		servedStoreDirectory,
 		true,
@@ -2158,15 +2432,17 @@ describe('cacheInfoFetcher', () => {
 						Promise.resolve(
 							new Response(undefined, {
 								status,
-								headers: { 'retry-after': '0.001' }
+								headers: { 'retry-after': '1' }
 							})
 						)
 				}
 			);
 
-			await expect(
+			const rejection = expect(
 				fetch(new URL('https://cupboard.example/t/acme'))
 			).rejects.toBeInstanceOf(error);
+			await vi.advanceTimersByTimeAsync(5000);
+			await rejection;
 		}
 	);
 
@@ -2188,7 +2464,7 @@ describe('cacheInfoFetcher', () => {
 						attempts === 1
 							? new Response(undefined, {
 									status: StatusCodes.SERVICE_UNAVAILABLE,
-									headers: { 'retry-after': '0.001' }
+									headers: { 'retry-after': '1' }
 								})
 							: new Response(info)
 					);
@@ -2196,7 +2472,11 @@ describe('cacheInfoFetcher', () => {
 			}
 		);
 
-		const fetched = await fetch(new URL('https://cupboard.example/t/acme'));
+		const pending = fetch(new URL('https://cupboard.example/t/acme'));
+		await vi.advanceTimersByTimeAsync(999);
+		expect(attempts).toBe(1);
+		await vi.advanceTimersByTimeAsync(1);
+		const fetched = await pending;
 
 		expect({ attempts, priority: fetched.priority }).toStrictEqual({
 			attempts: 2,
@@ -2218,13 +2498,15 @@ describe('cacheInfoFetcher', () => {
 							{ once: true }
 						);
 					}),
-				timeoutMs: 1
+				timeoutMs: 1000
 			}
 		);
 
-		await expect(
+		const rejection = expect(
 			fetch(new URL('https://cupboard.example/t/acme'))
 		).rejects.toBeInstanceOf(CacheInfoTimeoutError);
+		await vi.advanceTimersByTimeAsync(1000);
+		await rejection;
 	});
 
 	it('translates a stalled cache-info body into a timeout', async () => {
@@ -2254,13 +2536,15 @@ describe('cacheInfoFetcher', () => {
 
 					return Promise.resolve(new Response(body));
 				},
-				timeoutMs: 1
+				timeoutMs: 1000
 			}
 		);
 
-		await expect(
+		const rejection = expect(
 			fetch(new URL('https://cupboard.example/t/acme'))
 		).rejects.toBeInstanceOf(CacheInfoTimeoutError);
+		await vi.advanceTimersByTimeAsync(1000);
+		await rejection;
 		expect(signals.map(({ aborted }) => aborted)).toStrictEqual([true]);
 	});
 

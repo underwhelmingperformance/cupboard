@@ -2,6 +2,8 @@ import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
+	cacheCloseResponseSchema,
+	cacheCreationDefaultsSchema,
 	cacheListInputSchema,
 	cacheListResponseSchema,
 	cachePutBodySchema,
@@ -12,6 +14,7 @@ import {
 } from '../caches.ts';
 
 import { baseProcedure } from './base.ts';
+import { cacheClosedError } from './cache-scoped.ts';
 
 const forceQuerySchema = z
 	.strictObject({ force: z.boolean().default(false) })
@@ -34,6 +37,18 @@ const namedCacheUpdateSchema = z.intersection(
 );
 
 export const cachesContract = {
+	defaults: {
+		get: baseProcedure
+			.meta({ requires: 'cache:defaults-read', replaySafety: 'replay-safe' })
+			.route({ method: 'GET', path: '/cache-defaults' })
+			.output(cacheCreationDefaultsSchema),
+		set: baseProcedure
+			.meta({ requires: 'cache:defaults-update', replaySafety: 'replay-safe' })
+			.route({ method: 'PUT', path: '/cache-defaults' })
+			.input(cacheCreationDefaultsSchema)
+			.errors(retentionMigrationPendingError)
+			.output(cacheCreationDefaultsSchema)
+	},
 	list: baseProcedure
 		.meta({ requires: 'cache:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/caches' })
@@ -103,6 +118,7 @@ export const cachesContract = {
 			.route({ method: 'PATCH', path: '/cache' })
 			.input(cacheUpdateBodySchema)
 			.errors({
+				...cacheClosedError,
 				...retentionMigrationPendingError,
 				CACHE_RETENTION_RULE_LIMIT_EXCEEDED: { status: 409 },
 				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 }
@@ -117,12 +133,36 @@ export const cachesContract = {
 			.route({ method: 'PATCH', path: '/caches/{cacheName}' })
 			.input(namedCacheUpdateSchema)
 			.errors({
+				...cacheClosedError,
 				...retentionMigrationPendingError,
 				CACHE_RETENTION_RULE_LIMIT_EXCEEDED: { status: 409 },
 				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 }
 			})
 			.output(cacheSummarySchema)
 	},
+
+	close: baseProcedure
+		.meta({
+			requires: 'cache:close',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true,
+			replaySafety: 'replay-safe'
+		})
+		.route({ method: 'POST', path: '/caches/{cacheName}/close' })
+		.input(z.strictObject({ cacheName: cacheNameSchema }))
+		.errors(retentionMigrationPendingError)
+		.output(cacheCloseResponseSchema),
+
+	reopen: baseProcedure
+		.meta({
+			requires: 'cache:reopen',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true,
+			replaySafety: 'replay-safe'
+		})
+		.route({ method: 'POST', path: '/caches/{cacheName}/reopen' })
+		.input(z.strictObject({ cacheName: cacheNameSchema }))
+		.output(cacheSummarySchema),
 
 	retirement: baseProcedure
 		.meta({
@@ -137,7 +177,10 @@ export const cachesContract = {
 				...cacheRetirementBodySchema.shape
 			})
 		)
-		.errors({ CACHE_RETIREMENT_TTL_REQUIRED: { status: 409 } })
+		.errors({
+			...cacheClosedError,
+			CACHE_RETIREMENT_TTL_REQUIRED: { status: 409 }
+		})
 		.output(cacheSummarySchema),
 
 	// Removal keeps the default. A retry sent after the name was registered

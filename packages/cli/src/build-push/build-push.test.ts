@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -28,7 +28,7 @@ import {
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
-import { genericExitCode } from '@cupboard/shared/errors';
+import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -39,6 +39,7 @@ import {
 	type CommitSocket,
 	runCommitSession
 } from '../client/commit-socket.ts';
+import { tenantRpc } from '../client/orpc.ts';
 import {
 	AdminApiTransientError,
 	BuildCommandFailedError,
@@ -57,7 +58,8 @@ import {
 	SessionRejectedError,
 	transientExitCode,
 	unavailableExitCode,
-	UntrustedDaemonError
+	UntrustedDaemonError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
@@ -348,12 +350,18 @@ interface RebuildTargetFixture {
 	readonly derivation: string;
 	readonly paths: readonly StorePathString[];
 	readonly origin: 'built' | 'substituted' | 'existing';
+	readonly failure?: 'command' | 'build';
 	readonly machine?: string;
 }
 
 interface ConstructedFlowConfig {
+	readonly dependencyBuilds?: readonly {
+		readonly path: StorePathString;
+		readonly installables: readonly string[];
+	}[];
 	readonly targets?: readonly RebuildTargetFixture[];
 	readonly succeedOn: number;
+	readonly isValidOnSuccess?: boolean;
 	readonly dependencyPaths?: readonly StorePathString[];
 	readonly installables?: readonly string[];
 	readonly attempts?: number;
@@ -390,6 +398,7 @@ interface FlowConfig {
 	readonly ultimatePaths?: readonly StorePathString[];
 	readonly action?: UploadDecisionInput['action'];
 	readonly uploadFailure?: Error;
+	readonly negotiateFailure?: Error;
 	readonly unwritableReceipt?: boolean;
 	readonly preflightFailure?: Error;
 	readonly sessionOpenFailure?: Error;
@@ -449,19 +458,19 @@ const stubNixScript = [
 	"const logFile = args[args.indexOf('json-log-path') + 1];",
 	"const builtTargets = targets.filter((target) => rebuild || target.origin === 'built');",
 	String.raw`const activity = rebuild && process.env.STUB_CHECK_DERIVATIONS ? JSON.parse(process.env.STUB_CHECK_DERIVATIONS).map((derivation) => JSON.stringify({ action: 'start', type: 105, fields: [derivation, ''] })).join('\n') : targets.length === 0 ? process.env.STUB_LOG_LINE : builtTargets.map((target) => JSON.stringify({ action: 'start', type: 105, fields: [target.derivation, target.machine || ''] })).join('\n');`,
-	String.raw`fs.writeFileSync(logFile, activity + '\n');`,
+	String.raw`fs.writeFileSync(logFile, (targets.some((target) => target.failure === 'command') ? '' : activity) + '\n');`,
 	'let runs = 0;',
 	'try {',
 	"\truns = Number(fs.readFileSync(process.env.STUB_COUNT_FILE, 'utf8'));",
 	'} catch {}',
 	'runs += 1;',
 	'fs.writeFileSync(process.env.STUB_COUNT_FILE, String(runs));',
-	'if (runs < Number(process.env.STUB_SUCCEED_ON)) process.exit(1);',
+	'if (runs < Number(process.env.STUB_SUCCEED_ON) || targets.some((target) => target.failure)) process.exit(1);',
 	"if (rebuild && process.env.STUB_FAIL_CHECK === '1') process.exit(1);",
 	"const outLinkIndex = args.indexOf('--out-link');",
 	'if (outLinkIndex !== -1) {',
 	'\tconst outLink = args[outLinkIndex + 1];',
-	"\tconst outPaths = process.env.STUB_OUT_PATHS.split(' ').filter(Boolean);",
+	"\tconst outPaths = targets.length > 0 ? targets.flatMap((target) => target.paths) : process.env.STUB_OUT_PATHS.split(' ').filter(Boolean);",
 	'\toutPaths.forEach((outPath, index) => {',
 	"\t\tconst link = index === 0 ? outLink : outLink + '-' + String(index);",
 	'\t\tfs.rmSync(link, { force: true });',
@@ -478,8 +487,10 @@ const stubNixScript = [
 	"\tsocket.on('error', reject);",
 	'});',
 	'void (async () => {',
-	'\tif (process.env.STUB_DEPENDENCY_EVENT) await send(process.env.STUB_DEPENDENCY_EVENT);',
-	'\tawait send(process.env.STUB_EVENT);',
+	'\tif (process.env.STUB_DEPENDENCY_EVENT && (targets.length === 0 || targets.some((target) => target.derivation === process.env.STUB_DEPENDENCY_DERIVATION))) await send(process.env.STUB_DEPENDENCY_EVENT);',
+	'\tconst event = JSON.parse(process.env.STUB_EVENT);',
+	'\tif (targets.length > 0) event.outputPaths = targets.flatMap((target) => target.paths);',
+	'\tawait send(JSON.stringify(event));',
 	'})().then(() => process.exit(0), () => process.exit(1));'
 ].join('\n');
 
@@ -520,6 +531,7 @@ async function stubNixEnvironment(
 		STUB_COMMANDS_FILE: path.join(workspace, 'commands.jsonl'),
 		STUB_SOCKET: constructed.suppressEvent === true ? '' : socketPath,
 		STUB_OUT_PATHS: outPaths.join(' '),
+		STUB_DEPENDENCY_DERIVATION: drvB,
 		STUB_DEPENDENCY_EVENT:
 			constructed.dependencyPaths === undefined
 				? ''
@@ -620,6 +632,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			openCommitSession: () => Promise.reject(sessionOpenFailure)
 		}),
 		negotiate: (body) => {
+			if (config.negotiateFailure !== undefined) {
+				return Promise.reject(config.negotiateFailure);
+			}
 			negotiatedPaths.push(
 				body.paths.map((candidate) =>
 					storePathSchema.parse(candidate.storePath)
@@ -664,8 +679,19 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	// The count file separates paths that existed before the stub build from
 	// paths that became valid during it. Flows without the stub use one stable
 	// set of valid paths throughout.
-	const hasBuilt = (): boolean =>
-		config.constructed === undefined || existsSync(stubCountFile(workspace));
+	const hasBuilt = (): boolean => {
+		if (config.constructed === undefined) {
+			return true;
+		}
+		if (!existsSync(stubCountFile(workspace))) {
+			return false;
+		}
+		return (
+			config.constructed.isValidOnSuccess !== true ||
+			Number(readFileSync(stubCountFile(workspace), 'utf8')) >=
+				config.constructed.succeedOn
+		);
+	};
 	const recordCall = (name: string): void => {
 		record.storeCalls.push(
 			`${name} ${hasBuilt() ? 'after' : 'before'} the build`
@@ -856,6 +882,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 					kind: 'constructed',
 					build: {
 						installables: config.constructed.installables ?? ['.#app'],
+						...(config.constructed.dependencyBuilds !== undefined && {
+							dependencyBuilds: config.constructed.dependencyBuilds
+						}),
 						...(config.constructed.attempts !== undefined && {
 							attempts: config.constructed.attempts
 						}),
@@ -1136,6 +1165,22 @@ describe('childExitCode', () => {
 describe('classifyPublicationFailures', () => {
 	it.each([
 		{
+			name: 'a typed request limit',
+			causes: [new UploadRequestLimitExceededError(100)],
+			expectedExitCode: usageExitCode,
+			expectedCauseIndex: 0
+		},
+		{
+			name: 'an unavailable dependency outranking a request limit',
+			causes: [
+				new UploadRequestLimitExceededError(100),
+				new UnavailableTestError()
+			],
+			expectedExitCode: unavailableExitCode,
+			expectedCauseIndex: 1
+		},
+
+		{
 			name: 'an authentication failure',
 			causes: [new CupboardHttpError('PUT', '/nar', 401, '')],
 			expectedExitCode: 77,
@@ -1264,6 +1309,47 @@ describe('classifyPublicationFailures', () => {
 });
 
 describe('runBuildPush', () => {
+	it('preserves a decoded request-limit status after publication fails', async () => {
+		let requests = 0;
+		const rpc = tenantRpc(new URL('https://cache.example/t/acme'), {
+			fetcher: () => {
+				requests += 1;
+				return Promise.resolve(
+					Response.json(
+						{
+							defined: true,
+							code: 'UPLOAD_REQUEST_LIMIT_EXCEEDED',
+							status: 413,
+							message: 'Split the request.',
+							data: { maxPaths: 100 }
+						},
+						{ status: 413 }
+					)
+				);
+			}
+		});
+		let failure: unknown;
+		try {
+			await rpc.uploads.preview.inDefaultCache({ paths: [] });
+		} catch (error) {
+			failure = error;
+		}
+		if (!(failure instanceof ORPCError)) {
+			throw new TypeError('Expected a decoded oRPC error');
+		}
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			negotiateFailure: failure
+		});
+		expect({ error: run.error, requests }).toStrictEqual({
+			error: new BuildPublicationFailedError([pathA], usageExitCode, {
+				cause: new UploadRequestLimitExceededError(100, { cause: failure })
+			}),
+			requests: 1
+		});
+	});
+
 	it('reports the streamed mode, the phases in run order and a summary result', async () => {
 		const run = await runFlow({});
 
@@ -1661,15 +1747,27 @@ describe('runBuildPush', () => {
 		}
 	);
 
-	it('refuses a user-supplied command with the condition that ruled streaming out', async () => {
-		const failure = new UntrustedDaemonError('not-trusted');
-		const run = await runFlow({ preflightFailure: failure });
+	it.each(['not-trusted', 'unknown'] as const)(
+		'refuses a user-supplied command without announcing publication when trust is %s',
+		async (trust) => {
+			const failure = new UntrustedDaemonError(trust);
+			const run = await runFlow({ preflightFailure: failure });
 
-		expect({ error: run.error, phases: run.phases }).toStrictEqual({
-			error: failure,
-			phases: []
-		});
-	});
+			expect({
+				error: run.error,
+				info: run.info,
+				phases: run.phases,
+				attemptIdsIssued: run.attemptIdsIssued,
+				commands: run.commands
+			}).toStrictEqual({
+				error: failure,
+				info: [],
+				phases: [],
+				attemptIdsIssued: 0,
+				commands: []
+			});
+		}
+	);
 
 	it('fails the run on a refusal no mode works around', async () => {
 		const failure = new PostBuildHookConflictError('/etc/nix/hook.sh');
@@ -1916,6 +2014,222 @@ describe('runBuildPush', () => {
 	});
 
 	it.each([
+		{ succeedOn: 1, producers: [`${drvB}^out`] },
+		{ succeedOn: 2, producers: ['.#broken', `${drvB}^out`] }
+	])(
+		'observes producer builds and transitive intermediates before targets ($succeedOn)',
+		async ({ succeedOn, producers }) => {
+			const run = await runFlow({
+				constructed: {
+					succeedOn,
+					isValidOnSuccess: true,
+					targets: [
+						{
+							installable: `${drvB}^out`,
+							derivation: drvB,
+							paths: [pathB],
+							origin: 'built'
+						},
+						{
+							installable: `${drvA}^out`,
+							derivation: drvA,
+							paths: [pathA],
+							origin: 'built'
+						}
+					],
+					attempts: 1,
+					dependencyBuilds: [{ path: pathB, installables: producers }],
+					dependencyPaths: [pathB, pathC],
+					installables: [`${drvA}^out`]
+				},
+				declaredOutputs: [pathA],
+				ultimatePaths: [pathA, pathB, pathC],
+				valid: [pathA, pathB, pathC],
+				outPaths: [pathA],
+				options: { publicationScope: 'built' },
+				action: 'upload'
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				error: run.error,
+				commands: run.commands,
+				negotiated: [...new Set(run.negotiatedPaths.flat())].toSorted(
+					byCodeUnit
+				),
+				published: receipt.paths,
+				settledTargets: run.settledTargets,
+				built: receipt.subjects
+					.filter((subject) => subject.origin === 'built')
+					.map((subject) => subject.storePath)
+			}).toStrictEqual({
+				error: undefined,
+				commands: [...producers, `${drvA}^out`].map((installable) => ({
+					rebuild: false,
+					installables: [installable]
+				})),
+				negotiated: [pathA, pathB, pathC],
+				published: [pathA, pathB, pathC],
+				settledTargets: [pathA],
+				built: [pathA, pathB, pathC]
+			});
+		}
+	);
+
+	it.each(['command', 'build'] as const)(
+		'classifies a target %s failure independently of producer activity',
+		async (failure) => {
+			const run = await runFlow({
+				constructed: {
+					succeedOn: 1,
+					attempts: 1,
+					installables: [`${drvA}^out`],
+					dependencyBuilds: [{ path: pathB, installables: [`${drvB}^out`] }],
+					targets: [
+						{
+							installable: `${drvB}^out`,
+							derivation: drvB,
+							paths: [pathB],
+							origin: 'built'
+						},
+						{
+							installable: `${drvA}^out`,
+							derivation: drvA,
+							paths: [pathA],
+							origin: 'built',
+							failure
+						}
+					]
+				},
+				valid: [pathB],
+				declaredOutputs: [pathA],
+				ultimatePaths: [pathB],
+				options: { publicationScope: 'built' }
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				error:
+					run.error instanceof BuildCommandFailedError
+						? {
+								status: run.error.status,
+								signal: run.error.signal,
+								exitCode: run.error.exitCode
+							}
+						: run.error,
+				commands: run.commands,
+				receipt
+			}).toStrictEqual({
+				error: { status: 1, signal: undefined, exitCode: 1 },
+				commands: [
+					{ rebuild: false, installables: [`${drvB}^out`] },
+					{ rebuild: false, installables: [`${drvA}^out`] }
+				],
+				receipt: {
+					version: 3,
+					paths: [pathB],
+					subjects: [
+						{
+							origin: 'built',
+							storePath: pathB,
+							narHash: narHash.digestHex(),
+							derivation: drvB,
+							attempt: 1,
+							attemptId: 'attempt-1',
+							buildStore: 'auto',
+							verification: 'local'
+						}
+					],
+					outcomes: [],
+					childExitStatus: 1,
+					uploaded: [],
+					failed: [],
+					collected: [],
+					terminalFailure:
+						failure === 'command'
+							? { kind: 'command' }
+							: { kind: 'target-build', failedTargets: [`${drvA}^out`] }
+				}
+			});
+		}
+	);
+
+	it('keeps an unavailable producer fatal and does not start its target', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				attempts: 1,
+				suppressEvent: true,
+				installables: [`${drvA}^out`],
+				dependencyBuilds: [{ path: pathB, installables: [`${drvB}^out`] }]
+			},
+			valid: [pathA],
+			declaredOutputs: [pathA],
+			outPaths: [pathA],
+			options: { publicationScope: 'built' }
+		});
+		const receipt = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(run.receiptFile, 'utf8'))
+		);
+		expect({
+			error:
+				run.error instanceof BuildCommandFailedError
+					? {
+							status: run.error.status,
+							signal: run.error.signal,
+							exitCode: run.error.exitCode
+						}
+					: run.error,
+			commands: run.commands,
+			receipt
+		}).toStrictEqual({
+			error: { status: 1, signal: undefined, exitCode: 1 },
+			commands: [{ rebuild: false, installables: [`${drvB}^out`] }],
+			receipt: {
+				version: 3,
+				paths: [],
+				subjects: [],
+				outcomes: [],
+				childExitStatus: 1,
+				uploaded: [],
+				failed: [],
+				collected: [],
+				terminalFailure: { kind: 'command' }
+			}
+		});
+	});
+
+	it('rejects built publication before an untrusted-daemon build starts', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				installables: [`${drvA}^out`],
+				dependencyBuilds: [{ path: pathB, installables: [`${drvB}^out`] }]
+			},
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			options: { publicationScope: 'built' }
+		});
+
+		expect(run.error).toBeInstanceOf(Error);
+		expect(
+			run.error instanceof Error ? run.error.message : undefined
+		).toContain('cannot observe all build intermediates');
+		expect({
+			info: run.info,
+			attemptIdsIssued: run.attemptIdsIssued,
+			commands: run.commands
+		}).toStrictEqual({ info: [], attemptIdsIssued: 0, commands: [] });
+	});
+
+	it.each([
+		{
+			scope: 'built' as const,
+			published: [pathA, pathB],
+			closure: [pathA, pathC],
+			built: [pathA, pathB]
+		},
 		{
 			scope: 'outputs' as const,
 			published: [pathA],

@@ -3,6 +3,7 @@ import {
 	localStepStallWindowMs,
 	type LocalStepStatus
 } from '@cupboard/protocol/deployment';
+import { subjectTokenProblemSchema } from '@cupboard/protocol/oidc';
 import { formatBytes } from '@cupboard/reporter';
 import {
 	CodedError,
@@ -37,8 +38,12 @@ export const publicationExitCode = 74;
  * The exit statuses that `classifyFailures` checks for before its fallback.
  */
 export type RankedExitStatus =
-	typeof authExitCode | typeof transientExitCode | typeof unavailableExitCode;
+	| typeof authExitCode
+	| typeof transientExitCode
+	| typeof unavailableExitCode
+	| typeof usageExitCode;
 
+const badRequestStatusCode: number = StatusCodes.BAD_REQUEST;
 const unauthorisedStatusCode: number = StatusCodes.UNAUTHORIZED;
 const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
 const requestTimeoutStatusCode: number = StatusCodes.REQUEST_TIMEOUT;
@@ -48,12 +53,33 @@ const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
 export abstract class CliError extends CodedError {}
 
+abstract class CliCausedError extends CliError {
+	override get exitCode(): number {
+		return this.cause instanceof CodedError
+			? this.cause.exitCode
+			: genericExitCode;
+	}
+}
+
 /**
 A misuse of the CLI: a bad flag value or an unsupported combination.
 */
 export abstract class CliUsageError extends CliError {
 	override get exitCode(): number {
 		return usageExitCode;
+	}
+}
+
+export class UploadRequestLimitExceededError extends CliUsageError {
+	constructor(
+		readonly maxPaths: number,
+		options?: ErrorOptions
+	) {
+		super(
+			`The upload request is too large. Send at most ${String(maxPaths)} paths per request.`,
+			options
+		);
+		this.name = 'UploadRequestLimitExceededError';
 	}
 }
 
@@ -351,6 +377,15 @@ export class CacheTargetConflictError extends CliUsageError {
 			`The URL already selects cache '${cache}', so do not supply another cache name.`
 		);
 		this.name = 'CacheTargetConflictError';
+	}
+}
+
+export class CacheDefaultsTenantUrlRequiredError extends CliUsageError {
+	constructor() {
+		super(
+			'Cache creation defaults require a tenant URL without a /cache/<name> segment.'
+		);
+		this.name = 'CacheDefaultsTenantUrlRequiredError';
 	}
 }
 
@@ -762,6 +797,26 @@ export class CupboardHttpError extends CliError {
 			return authExitCode;
 		}
 
+		if (this.status === badRequestStatusCode && this.oauthError !== undefined) {
+			const { error, problem } = this.oauthError;
+			if (error === 'invalid_grant') {
+				return authExitCode;
+			}
+			if (error === 'invalid_authorization_details') {
+				return problem === 'malformed' || problem === 'empty'
+					? usageExitCode
+					: authExitCode;
+			}
+			if (error === 'invalid_request') {
+				return subjectTokenProblemSchema.safeParse(problem).success
+					? authExitCode
+					: usageExitCode;
+			}
+			if (error === 'unsupported_grant_type') {
+				return usageExitCode;
+			}
+		}
+
 		// The server returns 507 when the cache is over its storage quota, and a
 		// re-run fails in the same way.
 		if (this.status === insufficientStorageStatusCode) {
@@ -881,6 +936,10 @@ export class UploadVerificationFailedError extends CliError {
 	) {
 		super(uploadVerificationMessage(status));
 		this.name = 'UploadVerificationFailedError';
+	}
+
+	override get exitCode(): number {
+		return this.status === 'absent' ? transientExitCode : genericExitCode;
 	}
 }
 
@@ -1069,7 +1128,7 @@ export class PathsNotConfirmedError extends CliError {
  * the retention deadlines of its paths on the server. The counts show how many
  * batches completed.
  */
-export class ConfirmIncompleteError extends CliError {
+export class ConfirmIncompleteError extends CliCausedError {
 	constructor(
 		public readonly confirmedBatches: number,
 		public readonly totalBatches: number,
@@ -1644,7 +1703,7 @@ export class GithubCheckOptionError extends CliUsageError {
  * applied. The result report names each rule that stayed behind; the non-zero
  * exit tells scripts the cleanup is incomplete.
  */
-export class GithubSetupRemovalError extends CliError {
+export class GithubSetupRemovalError extends CliCausedError {
 	constructor(
 		public readonly ruleIds: readonly string[],
 		options: { readonly cause: unknown }

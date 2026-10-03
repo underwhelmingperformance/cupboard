@@ -1,11 +1,13 @@
 import { type Logger } from '@cupboard/logger';
 import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
+import { uploadRequestLimitErrorCode } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
 import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
+	CacheClosedError,
 	CacheListingProjectionPendingError,
 	CacheNotEmptyError,
 	CacheRetentionMigrationPendingError,
@@ -16,7 +18,8 @@ import {
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
 	TenantOffboardingError,
-	TenantQuotaBelowUsageError
+	TenantQuotaBelowUsageError,
+	UploadRequestLimitExceededError
 } from '../errors.ts';
 import { serverHttpErrorHeaders } from '../http/error-response.ts';
 
@@ -90,6 +93,15 @@ export function bridgedError(
 		});
 	}
 
+	if (error instanceof CacheClosedError) {
+		return new ORPCError('CACHE_CLOSED', {
+			defined: true,
+			status: error.status,
+			message: error.message,
+			data: { cache: error.cache }
+		});
+	}
+
 	if (error instanceof CacheNotEmptyError) {
 		return new ORPCError('CACHE_NOT_EMPTY', {
 			status: error.status,
@@ -150,6 +162,15 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { id: error.id, usedBytes: error.usedBytes }
+		});
+	}
+
+	if (error instanceof UploadRequestLimitExceededError) {
+		return new ORPCError(uploadRequestLimitErrorCode, {
+			status: error.status,
+			message: error.message,
+			data: { maxPaths: error.maxPaths },
+			defined: true
 		});
 	}
 

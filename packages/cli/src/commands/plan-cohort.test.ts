@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,21 +9,34 @@ import type {
 	NixSubstitutablePathInfo
 } from '@cupboard/nix';
 import {
+	SubstituterAnswerUnreadableError,
+	SubstituterUnreachableError
+} from '@cupboard/nix';
+import {
 	type CacheScope,
 	rootNameSchema,
+	storeDirectorySchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
 import { Command } from 'commander';
+import { fetch as undiciFetch, Response } from 'undici';
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+	maxSubstituterDocumentByteLength,
+	openSubstituters,
+	SubstituterClient
+} from '../../../nix/src/substituter.ts';
+import { cliExitCode } from '../cli.ts';
 import {
 	type RecordedCall,
 	recordingCacheScopedClient
 } from '../client/cache-scoped.test-support.ts';
 import { InvalidStoreUriError } from '../errors.ts';
+import { confirmUpstreamAvailabilityWith } from '../plan/upstream-confirmation.ts';
 
 const defaultCache: CacheScope = { kind: 'default' };
 
@@ -671,6 +684,186 @@ describe('runPlanCohort', () => {
 		]);
 	});
 
+	it.each([
+		{ description: 'anonymous authentication', status: 401, expected: 77 },
+		{ description: 'anonymous authorisation', status: 403, expected: 77 },
+		{ description: 'a request timeout', status: 408, expected: 75 },
+		{ description: 'rate limiting', status: 429, expected: 75 },
+		{ description: 'a provider error', status: 500, expected: 75 },
+		{ description: 'service unavailability', status: 503, expected: 75 },
+		{ description: 'a storage quota refusal', status: 507, expected: 1 },
+		{ description: 'an HTML login response', status: 200, expected: 75 },
+		{ description: 'a malformed partial response', status: 206, expected: 75 },
+		{ description: 'a malformed narinfo', status: 0, expected: 75 },
+		{ description: 'an oversized narinfo', status: -1, expected: 75 },
+		{ description: 'a lost connection', status: -2, expected: 75 }
+	])(
+		'preserves the upstream probe failure for $description at the cohort CLI boundary',
+		async ({ status, expected }) => {
+			const directory = mkdtempSync(
+				path.join(tmpdir(), 'cupboard-plan-cohort-')
+			);
+			const planFile = path.join(directory, 'plan.json');
+			const payloads: ResultPayload[] = [];
+			const requested: string[] = [];
+			const requestedHeaders: unknown[] = [];
+			const fetcher: typeof undiciFetch = (input, init) => {
+				requestedHeaders.push(init?.headers);
+				const url = new URL(
+					typeof input === 'string'
+						? input
+						: 'href' in input
+							? input.href
+							: input.url
+				);
+				requested.push(url.pathname);
+				if (url.pathname === '/nix-cache-info') {
+					return Promise.resolve(
+						new Response('StoreDir: /nix/store\nWantMassQuery: 1\n')
+					);
+				}
+				if (url.pathname.endsWith('.narinfo')) {
+					const document =
+						status === 0
+							? `StorePath: ${appPath}\nNarHash: invalid\n`
+							: status === -1
+								? 'a'.repeat(maxSubstituterDocumentByteLength + 1)
+								: [
+										`StorePath: ${appPath}`,
+										'URL: https://archives.example/nar/app',
+										'Compression: none',
+										`NarHash: sha256:${'22'.repeat(32)}`,
+										'NarSize: 1000',
+										'FileSize: 400',
+										'References: '
+									].join('\n') + '\n';
+					return Promise.resolve(new Response(document));
+				}
+				if (status === -2) {
+					return Promise.reject(new Error('connection lost'));
+				}
+				return Promise.resolve(
+					new Response(
+						status === 200 ? '<html>Sign in</html>' : new Uint8Array([1]),
+						{
+							status,
+							headers: status === 200 ? { 'content-type': 'text/html' } : {}
+						}
+					)
+				);
+			};
+			const storeDirectory = storeDirectorySchema.parse('/nix/store');
+			const external = new SubstituterClient(
+				() =>
+					openSubstituters(['https://runner:secret@upstream.example'], {
+						requirePublicNar: true,
+						netrc:
+							'machine upstream.example login runner password secret\nmachine archives.example login runner password secret',
+						fetch: fetcher
+					}),
+				{
+					storeDirectory,
+					substitute: true,
+					fallback: true,
+					requirePublicNar: true,
+					fetch: fetcher
+				}
+			);
+			let probeFailure: unknown;
+			const confirm = confirmUpstreamAvailabilityWith({
+				substitution: {
+					substitute: true,
+					fallback: true,
+					alwaysAllowSubstitutes: false,
+					substituters: ['https://upstream.example']
+				},
+				accepts: () => Promise.resolve(true),
+				store: {
+					honoursSubstituterSettings: () =>
+						Promise.resolve({ isHonoured: true }),
+					canSubstituteDerivation: () => Promise.resolve(true),
+					resolveSubstitutableClosure: async () => {
+						try {
+							await external.querySubstitutablePathInfos([appPath]);
+						} catch (error) {
+							probeFailure = error;
+							throw error;
+						}
+						return {
+							kind: 'served',
+							pathCount: 1,
+							narSize: 1000,
+							downloadSize: 400
+						};
+					}
+				}
+			});
+			try {
+				const probeDependencies = dependencies({
+					rootClient: recordingRootClient(buildRequired([appPath])),
+					store: {
+						...missingStore(emptyMissing()),
+						queryValidPaths: () => Promise.resolve([appPath]),
+						querySubstitutablePaths: () => Promise.resolve([appPath])
+					},
+					confirmUpstreamAvailability: confirm
+				});
+				const run = runPlanCohort(
+					runOptions({ targets: [target()], planFile }),
+					reporter(payloads),
+					probeDependencies
+				);
+				const failure = await rejectionOf(run);
+				expect(failure).toBe(probeFailure);
+				expect(failure).toHaveProperty(
+					'substituter',
+					'https://upstream.example'
+				);
+				expect(failure).toHaveProperty(
+					'message',
+					expect.stringContaining('--substituter copy')
+				);
+				expect(failure).toBeInstanceOf(
+					status === 0 || status === -1
+						? SubstituterAnswerUnreadableError
+						: SubstituterUnreachableError
+				);
+				expect({
+					exitCode: cliExitCode(failure, 130),
+					planWritten: existsSync(planFile),
+					payloads,
+					requested,
+					requestedHeaders
+				}).toStrictEqual({
+					exitCode: expected,
+					requestedHeaders:
+						status === 0 || status === -1
+							? [undefined, undefined]
+							: [
+									undefined,
+									undefined,
+									{ range: 'bytes=0-0', 'accept-encoding': 'identity' }
+								],
+					planWritten: false,
+					payloads: [],
+					requested:
+						status === 0 || status === -1
+							? [
+									'/nix-cache-info',
+									`/${appPath.slice('/nix/store/'.length, '/nix/store/'.length + 32)}.narinfo`
+								]
+							: [
+									'/nix-cache-info',
+									`/${appPath.slice('/nix/store/'.length, '/nix/store/'.length + 32)}.narinfo`,
+									'/nar/app'
+								]
+				});
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
 	it('adds a candidate to buildSet and records closure-not-served when upstream confirmation fails', async () => {
 		const payloads: ResultPayload[] = [];
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
@@ -1011,7 +1204,7 @@ describe('plan cohort command', () => {
 		{
 			flag: '--publish',
 			value: 'all',
-			allowed: 'none, outputs or closure'
+			allowed: 'none, outputs, built or closure'
 		}
 	])('rejects invalid $flag choice', async ({ flag, value, allowed }) => {
 		await expect(

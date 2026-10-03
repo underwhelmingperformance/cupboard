@@ -21,7 +21,8 @@ import {
 	GithubRateLimitError,
 	isGithubRateLimitResponse,
 	isGithubResponseStatus,
-	type LookupRepositoryOptions
+	type LookupRepositoryOptions,
+	throwIfGithubTemporaryError
 } from '../oidc-trust/github.ts';
 
 import { parseExactWorkflowReference } from './convention.ts';
@@ -74,6 +75,7 @@ export interface DiscoveredPublishingJob {
 		readonly cache: ReadCredentialWiring;
 		readonly view: ReadCredentialWiring;
 	};
+	readonly privateSubstitutersWiring?: 'configured' | 'unknown';
 	readonly triggers: readonly WorkflowTrigger[];
 }
 
@@ -342,7 +344,7 @@ const cupboardAction =
 // through a variable, such as "${CUPBOARD_PATH}" cache remove, has no
 // `cupboard` word, so the check also looks for the flag itself.
 const publishingCommand =
-	/\bcupboard\s+(?:push|build-push|attest\s+attach|plan\s+cohort|cache\s+(?:create|remove)|root\s+ensure|confirm)\b|--github-oidc\b/u;
+	/\bcupboard\s+(?:push|build-push|attest\s+attach|plan\s+cohort|cache\s+(?:create|remove|close|reopen)|root\s+ensure|confirm)\b|--github-oidc\b/u;
 
 function publicationKind(
 	uses: string
@@ -897,9 +899,8 @@ export async function discoverPublishingJobs(
 				continue;
 			}
 
-			const readSecrets = readCredentialWiring(
-				secretKeys(job.secrets, context.secretKeys)
-			);
+			const keys = secretKeys(job.secrets, context.secretKeys);
+			const readSecrets = readCredentialWiring(keys);
 
 			jobs.push({
 				caller,
@@ -907,6 +908,11 @@ export async function discoverPublishingJobs(
 				kind,
 				workflowRef: workflowReference,
 				inputs: supplied,
+				...(keys === 'unknown'
+					? { privateSubstitutersWiring: 'unknown' as const }
+					: keys.has('private_substituters')
+						? { privateSubstitutersWiring: 'configured' as const }
+						: {}),
 				...(readSecrets !== undefined && { readCredentialWiring: readSecrets }),
 				triggers
 			});
@@ -1004,6 +1010,7 @@ export function githubWorkflowSource(
 				throw error;
 			}
 
+			throwIfGithubTemporaryError(error, resource);
 			throw new WorkflowDiscoveryError(`Cannot read ${resource} from GitHub`, {
 				cause: error
 			});

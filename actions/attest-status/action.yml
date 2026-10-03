@@ -1,0 +1,116 @@
+name: Report cupboard attestation coverage
+description:
+  Reports stored attestation metadata for every published receipt path and
+  distinguishes bundles signed in this run from previously stored evidence.
+inputs:
+  url:
+    description: Destination tenant URL.
+    required: true
+  cache:
+    description: Named destination cache. Leave empty for the default cache.
+    required: false
+  cupboard-path:
+    description: Path to the cupboard executable installed by actions/setup.
+    required: true
+  receipt-file:
+    description: Receipt for paths published by this run.
+    required: true
+  bundles-file:
+    description:
+      Manifest of bundles signed in this run. Leave empty when signing was
+      skipped.
+    required: false
+  read-session-target:
+    description: Setup output for OIDC read access.
+    required: false
+  audience:
+    description: Audience of the GitHub OIDC token. Defaults to the tenant URL.
+    required: false
+  read-session-caches:
+    description:
+      Pass the read-session-caches output from actions/setup, a JSON array of
+      additional cache URLs.
+    required: false
+  read-session-view:
+    description: Setup output for an additional reuse view.
+    required: false
+  read-user:
+    description: Destination cache read user.
+    required: false
+  read-password:
+    description: Destination cache read password.
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned toolchain
+      id: toolchain
+      shell: bash
+      # The workspace manifest's packageManager field is the single pnpm pin;
+      # the release integrity suffix, when present, is not part of the version.
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        node_version_file="$GITHUB_ACTION_PATH/../../.node-version"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        if [ -z "$version" ]; then
+          echo "::error::package.json declares no pnpm packageManager pin"
+          exit 1
+        fi
+        if [ ! -r "$node_version_file" ]; then
+          echo "::error::.node-version is not readable"
+          exit 1
+        fi
+        node_version="$(tr -d '\r\n' < "$node_version_file")"
+        if [ -z "$node_version" ]; then
+          echo "::error::.node-version declares no Node version"
+          exit 1
+        fi
+        echo "pnpm-version=$version" | tee -a "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" | tee -a "$GITHUB_OUTPUT"
+
+    - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      with:
+        version: ${{ steps.toolchain.outputs.pnpm-version }}
+        # Point pnpm/action-setup's manifest lookup at this action's own
+        # manifest, not the caller's checkout, whose pinned pnpm would
+        # otherwise conflict with `version`. Parity between this pin and the
+        # workspace manifest is enforced by scripts/action-tool-parity.test.ts.
+        package_json_file: ${{ github.action_path }}/../../package.json
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ steps.toolchain.outputs.node-version }}
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../..
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+
+    - name: Report stored attestation coverage
+      shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        CACHE: ${{ inputs.cache }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        RECEIPT_FILE: ${{ inputs.receipt-file }}
+        BUNDLES_FILE: ${{ inputs.bundles-file }}
+        READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_AUDIENCE: ${{ inputs.audience }}
+        READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
+        READ_SESSION_VIEW: ${{ inputs.read-session-view }}
+        READ_USER: ${{ inputs.read-user }}
+        READ_PASSWORD: ${{ inputs.read-password }}
+      run: |
+        source "$GITHUB_ACTION_PATH/../read-session.sh"
+        run_with_read_session \
+          "$CUPBOARD_PATH" "$READ_SESSION_TARGET" "$READ_SESSION_VIEW" -- \
+          node --experimental-transform-types \
+            --disable-warning=ExperimentalWarning \
+            "$GITHUB_ACTION_PATH/../src/main.ts" attest-status \
+            --url "$URL" \
+            --cache "$CACHE" \
+            --cupboard-path "$CUPBOARD_PATH" \
+            --receipt-file "$RECEIPT_FILE" \
+            --bundles-file "$BUNDLES_FILE" \
+            --read-user "$READ_USER" \
+            --read-password "$READ_PASSWORD"

@@ -117,6 +117,47 @@ const baseOptions: PlanOptions = {
 };
 
 describe('planAction', () => {
+	it.each([
+		{ optimise: 'true', remote: true, builders: undefined },
+		{ optimise: 'false', remote: true, builders: undefined },
+		{ optimise: 'true', remote: false, builders: 'ssh://builder' },
+		{ optimise: 'false', remote: false, builders: 'ssh://builder' }
+	])(
+		'rejects remote dispatch before any planning (optimise=$optimise, remote=$remote, builders=$builders)',
+		async ({ optimise, remote, builders }) => {
+			const evaluator = vi.fn(() => Promise.resolve({ stdout: '{}' }));
+			const runner = vi.fn(() => Promise.resolve({ stdout: '', stderr: '' }));
+			await expect(
+				planAction(
+					{
+						...baseOptions,
+						build: 'rebuild',
+						optimise,
+						targets: JSON.stringify([
+							{ ...target, remote: false },
+							{ ...secondTarget, remote }
+						])
+					},
+					{ RUNNER_TEMP: '/tmp' },
+					undefined,
+					{
+						evaluator,
+						runner,
+						buildSettings: {
+							systems: ['x86_64-linux'],
+							features: [],
+							...(builders !== undefined && { builders })
+						}
+					}
+				)
+			).rejects.toMatchObject({ name: 'BuildRebuildRemoteDispatchError' });
+			expect({
+				evaluations: evaluator.mock.calls,
+				runs: runner.mock.calls
+			}).toStrictEqual({ evaluations: [], runs: [] });
+		}
+	);
+
 	it('emits every target directly when optimisation is disabled', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const output = path.join(directory, 'output');
@@ -293,7 +334,12 @@ describe('planAction', () => {
 		const probe = recordingFetcher();
 
 		await planAction(
-			{ ...baseOptions, optimise: 'true', build },
+			{
+				...baseOptions,
+				optimise: 'true',
+				build,
+				...(build === 'rebuild' && { store: 'ssh-ng://build@example.test' })
+			},
 			{
 				RUNNER_TEMP: directory,
 				GITHUB_RUN_ID: '12345',
@@ -314,6 +360,15 @@ describe('planAction', () => {
 
 describe('resolvePlanInputs', () => {
 	const environment = { RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' };
+
+	it('accepts publication of requested outputs and observed builds', () => {
+		const inputs = resolvePlanInputs(
+			{ ...baseOptions, publish: 'built' },
+			environment
+		);
+
+		expect(inputs.publish).toBe('built');
+	});
 
 	it('resolves explicit permanent retention', () => {
 		const inputs = resolvePlanInputs(
@@ -1462,7 +1517,14 @@ describe('cohort-matrix output', () => {
 		};
 
 		await planAction(
-			{ ...baseOptions, optimise: 'true', ...options },
+			{
+				...baseOptions,
+				optimise: 'true',
+				...options,
+				...(options.build === 'rebuild' && {
+					store: 'ssh-ng://build@example.test'
+				})
+			},
 			{
 				GITHUB_RUN_ID: '12345',
 				RUNNER_TEMP: planDirectory,

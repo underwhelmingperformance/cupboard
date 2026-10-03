@@ -22,10 +22,10 @@ isn't visible through another.
 ### Nix gets a 404 for a NAR that the narinfo lists
 
 The cache still has a narinfo that records a NAR URL whose file has gone
-missing. Push the path again. The first push can skip the path while the cache
-removes the old narinfo in the background, so push a second time if the path is
-still missing. Other caches that share the NAR keep the old URL until they next
-check the path. See
+missing. Push the path again. Upload negotiation detects the missing NAR and
+requests a replacement in that push. Maintenance rewrites the narinfos in other
+caches that shared the old NAR URL. Those caches can return a NAR 404 until the
+rewrite completes. See
 [When a cache has lost a NAR](./ci/how-it-works.md#when-a-cache-has-lost-a-nar).
 
 ### "lacks a signature by a trusted key"
@@ -133,15 +133,17 @@ cupboard can't choose between them. Check that a rule:
 If a rule matches the token's exact repository IDs, the error message identifies
 that rule and the first claim that didn't match.
 
-If two rules are equally specific and both allow the request, cupboard refuses
-it. Remove one of the rules.
+An exchange without explicit grants requires one matching rule. If equally
+specific rules match, request explicit grants or distinguish the rules' identity
+constraints.
 
 ### "The requested authorization_details are not permitted"
 
-A trust rule matched the token, but it doesn't allow everything that the job
-asked for. For example, the job might need `root` for its root, `attach` for a
-run root, or `attest`. cupboard never combines rules, so a single rule must
-allow everything. See
+The preferred matching trust rules do not permit every action that the job
+requested. For example, the job might need `root:set` for its target root,
+`root:attach` for its run root, or `attestation:attach`. Add the missing grant
+to an eligible rule. Grants can compose within the preferred identity group, but
+a less preferred rule cannot supply missing authority. See
 [When several rules match](./ci/trust-rules.md#when-several-rules-match).
 
 ### The preset fails the run
@@ -236,9 +238,8 @@ Each of these must be true. Check them in order:
 The plan job checks the target manifest before anything is built. These are the
 usual problems:
 
-- One root would keep too many paths. A root can keep at most 149 paths, and all
-  of an aggregate target's components share one root. Split the aggregate into
-  smaller ones.
+- An aggregate has more than 149 components. The planner limits each aggregate
+  to 149 components. Split the aggregate into smaller ones.
 - A target has no `rootDrvPath`. Every target needs one unless it's best-effort,
   and that includes each component of an aggregate. With a remote store,
   best-effort targets need one too.
@@ -286,7 +287,10 @@ An operator can't set a tenant's quota below the amount that the tenant already
 stores. Choose a larger quota, or ask the tenant's administrators to free some
 space first.
 
-### "Tenant … is being removed, so its status and quota can no longer be changed"
+### "Tenant '…' is being removed; its status and quota can no longer be changed"
+
+The CLI reports this as "Tenant … is being removed, so its status and quota can
+no longer be changed."
 
 Once an operator starts removing a tenant, the removal can't be undone.
 `cupboard tenant list` shows how far the removal has got.

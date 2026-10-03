@@ -65,7 +65,7 @@ export const cacheIdentities = sqliteTable(
 		name: text('name'),
 		access: text('access', { enum: ['public', 'private'] }).notNull(),
 		priority: integer('priority').notNull(),
-		// The generation from `cache_lifecycle` in D1, copied when registration
+		// The generation from `cache_lifecycle_storage` in D1, copied when registration
 		// returns. D1 remains authoritative.
 		generation: integer('generation')
 			.$type<CacheGeneration>()
@@ -79,6 +79,8 @@ export const cacheIdentities = sqliteTable(
 			'default_root_ttl_seconds'
 		).$type<TtlSeconds>(),
 		graceSeconds: integer('grace_seconds').$type<GraceSeconds>(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
+		closeHistoryCursor: integer('close_history_cursor').notNull().default(0),
 		// Never cleared, even by clear-grace: collection must finish draining
 		// the cache after its last grace deadline expires.
 		graceManaged: integer('grace_managed', { mode: 'boolean' })
@@ -112,10 +114,16 @@ export const cacheIdentities = sqliteTable(
 
 const initialManagedRetirementCheckAt = isoTimestamp(new Date(0));
 
+export const cacheCreationDefaults = sqliteTable('cache_creation_defaults', {
+	id: integer('id').primaryKey(),
+	graceSeconds: integer('grace_seconds').$type<GraceSeconds>()
+});
+
 export const managedCacheRetirements = sqliteTable(
 	'managed_cache_retirement',
 	{
 		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+		retirementStartedAt: text('retirement_started_at').$type<IsoTimestamp>(),
 		eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull(),
 		incarnation: text('incarnation').notNull().default(''),
 		revision: integer('revision').notNull().default(0),
@@ -130,6 +138,17 @@ export const managedCacheRetirements = sqliteTable(
 		),
 		index('managed_cache_retirement_next_check_at_idx').on(table.nextCheckAt)
 	]
+);
+
+export const cacheCloseEvents = sqliteTable(
+	'cache_close_event',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		epoch: integer('epoch').notNull(),
+		closedAt: text('closed_at').$type<IsoTimestamp>().notNull(),
+		graceUntil: text('grace_until').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.cacheId, table.epoch] })]
 );
 
 export const cacheListingProjectionMigration = sqliteTable(
@@ -295,15 +314,30 @@ export const narInfos = sqliteTable(
 		pendingSignatureGeneration: integer(
 			'pending_signature_generation'
 		).$type<SigningKeyGeneration>(),
-		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
+		inheritanceExhausted: integer('inheritance_exhausted', { mode: 'boolean' })
+			.notNull()
+			.default(false)
 	},
 	(table) => [
 		primaryKey({ columns: [table.cacheId, table.storePathHash] }),
 		// Reuse-view lookup starts with a store-path hash and then narrows to the
 		// caches the view selects. Keep `store_path_hash` first in this index.
+		index('narinfo_inheritance_source_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.cacheId,
+			table.generation
+		),
 		index('narinfo_store_path_hash_cache_idx').on(
 			table.storePathHash,
 			table.cacheId
+		),
+		index('narinfo_nar_hash_cache_id_store_path_hash_idx').on(
+			table.narHash,
+			table.cacheId,
+			table.storePathHash
 		),
 		index('narinfo_pending_signature_generation_idx').on(
 			table.pendingSignatureGeneration,
@@ -348,11 +382,20 @@ export const generationSeq = sqliteTable(
 	]
 );
 
+export const workSequence = sqliteTable('work_sequence', {
+	id: integer('id').primaryKey(),
+	value: integer('value').notNull().default(0)
+});
+
 export const pendingUploads = sqliteTable(
 	'pending_upload',
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
+		acceptedSequence: integer('accepted_sequence').notNull().default(0),
+		acceptedExpiresAt: text('accepted_expires_at').$type<IsoTimestamp>(),
+		commitStartedSequence: integer('commit_started_sequence'),
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
@@ -366,13 +409,20 @@ export const pendingUploads = sqliteTable(
 		settleFailures: integer('settle_failures').notNull().default(0),
 		settleRetryAfter: text('settle_retry_after').$type<IsoTimestamp>(),
 		lastSettleError: text('last_settle_error'),
+		retryStartedActiveMs: integer('retry_started_active_ms'),
+		settleExhaustion: text('settle_exhaustion', {
+			enum: ['attempt-limit', 'eligible-age-limit']
+		}),
+		narRefreshPending: integer('nar_refresh_pending', { mode: 'boolean' })
+			.notNull()
+			.default(false),
 		// Verification re-reads the subscribed session before sending a terminal
 		// verdict, so a reconnect can replace this value while verification is running.
 		sessionId: text('session_id').$type<SessionId>(),
 		// `claimed_at` records the lease time, and `claim_owner` identifies the
 		// verification pass. Owner checks prevent an expired pass from changing a row
 		// after another pass claims it. Both columns are null while unclaimed; a client
-		// re-drive clears them to request an immediate retry.
+		// re-drive clears them without changing the retry deadline.
 		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
 		claimOwner: text('claim_owner'),
 		// Capture the retention decision during negotiation so a later cache update
@@ -392,6 +442,33 @@ export const pendingUploads = sqliteTable(
 	// verification, and checks listed staging keys for pending owners. Without
 	// these indexes each pass scans the whole in-flight set.
 	(table) => [
+		index('pending_upload_fresh_ready_idx')
+			.on(
+				sql`MAX(COALESCE(${table.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${table.claimedAt}, '+360 seconds'), ''))`,
+				table.id
+			)
+			.where(
+				sql`(${table.verdict} = 'pending' OR ${table.verdict} = 'committing') AND (${table.recordedVerdictJson} IS NULL OR ${table.claimOwner} IS NULL) AND ${table.settleExhaustion} IS NULL`
+			),
+		index('pending_upload_recorded_ready_idx')
+			.on(
+				sql`CASE WHEN ${table.recordedVerdictJson} IS NOT NULL THEN COALESCE(${table.settleRetryAfter}, '') ELSE MAX(COALESCE(${table.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${table.claimedAt}, '+360 seconds'), '')) END`,
+				table.id
+			)
+			.where(
+				sql`${table.recordedVerdictJson} IS NOT NULL OR ${table.settleExhaustion} IS NOT NULL`
+			),
+
+		index('pending_upload_exhausted_ready_idx')
+			.on(
+				sql`MAX(COALESCE(${table.settleRetryAfter}, ''), COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', ${table.claimedAt}, '+360 seconds'), ''))`,
+				table.id
+			)
+			.where(sql`${table.settleExhaustion} IS NOT NULL`),
+		index('pending_upload_cache_retention_epoch_idx').on(
+			table.cacheId,
+			table.retentionEpoch
+		),
 		index('pending_upload_expires_at_idx').on(table.expiresAt),
 		index('pending_upload_terminal_expires_at_idx')
 			.on(table.expiresAt, table.id)
@@ -407,9 +484,19 @@ export const pendingUploads = sqliteTable(
 		index('pending_upload_r2_key_idx').on(table.r2Key),
 		index('pending_upload_recorded_verdict_idx')
 			.on(table.id)
-			.where(sql`${table.recordedVerdictJson} IS NOT NULL`)
+			.where(sql`${table.recordedVerdictJson} IS NOT NULL`),
+		index('pending_upload_recorded_retry_idx')
+			.on(sql`COALESCE(${table.settleRetryAfter}, '')`, table.id)
+			.where(
+				sql`${table.recordedVerdictJson} IS NOT NULL AND ${table.settleExhaustion} IS NULL`
+			)
 	]
 );
+
+export const retryEligibility = sqliteTable('retry_eligibility', {
+	id: text('id').primaryKey(),
+	isEligible: integer('is_eligible', { mode: 'boolean' }).notNull()
+});
 
 export const pendingAttestations = sqliteTable(
 	'pending_attestation',
@@ -462,6 +549,9 @@ export const narInfoDeletions = sqliteTable(
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		explicit: integer('explicit', { mode: 'boolean' }).notNull().default(false),
+		protectionCutoff: integer('protection_cutoff'),
+		protectionCapturedAt: text('protection_captured_at').$type<IsoTimestamp>(),
 		// Whether a deletion deferred for attestation inheritance has already
 		// deleted its narinfo object. Garbage collection does not treat such an
 		// entry as work until the deferral ends.
@@ -472,7 +562,26 @@ export const narInfoDeletions = sqliteTable(
 	(table) => [
 		primaryKey({
 			columns: [table.cacheId, table.storePathHash, table.generation]
-		})
+		}),
+		index('narinfo_deletion_reference_cutoff_idx').on(
+			table.storePathHash,
+			table.cacheId,
+			table.explicit,
+			table.generation
+		),
+		index('narinfo_deletion_inheritance_source_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.cacheId,
+			table.generation
+		),
+		index('narinfo_deletion_path_nar_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.explicit,
+			table.cacheId,
+			table.generation
+		)
 	]
 );
 
@@ -489,16 +598,77 @@ export const attestationInheritances = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		acceptedUploadId: text('accepted_upload_id').$type<UploadId>(),
+		acceptedSequence: integer('accepted_sequence').notNull().default(0),
+		acceptedExpiresAt: text('accepted_expires_at').$type<IsoTimestamp>(),
+		commitStartedSequence: integer('commit_started_sequence'),
+		queuedSequence: integer('queued_sequence').notNull().default(0),
+		sourceEndCacheId: integer('source_end_cache_id'),
+		sourceEndGeneration: integer('source_end_generation'),
+		sourceCacheId: integer('source_cache_id').notNull().default(0),
+		sourceGeneration: integer('source_generation').notNull().default(-1),
+		sourceReferenceCacheId: integer('source_reference_cache_id')
+			.notNull()
+			.default(0),
+		sourceReferenceEndGeneration: integer('source_reference_end_generation'),
+		sourceReferenceGeneration: integer('source_reference_generation')
+			.notNull()
+			.default(-1),
+		sourceReferenceComplete: integer('source_reference_complete', {
+			mode: 'boolean'
+		})
+			.notNull()
+			.default(false),
 		sourcePredicateType: text('source_predicate_type').$type<PredicateType>(),
 		sourceDigest: text('source_digest').$type<Sha256HexDigest>(),
 		attempts: integer('attempts').notNull().default(0),
+		retryStartedActiveMs: integer('retry_started_active_ms'),
+		claimOwner: text('claim_owner'),
 		notBefore: text('not_before').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		primaryKey({
 			columns: [table.cacheId, table.storePathHash, table.generation]
 		}),
-		index('attestation_inheritance_not_before_idx').on(table.notBefore)
+		index('attestation_inheritance_not_before_idx').on(table.notBefore),
+		index('attestation_inheritance_cutoff_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.acceptedSequence,
+			table.cacheId,
+			table.generation,
+			table.queuedSequence,
+			table.acceptedExpiresAt,
+			table.commitStartedSequence
+		),
+		index('attestation_inheritance_path_nar_idx').on(
+			table.storePathHash,
+			table.narHash,
+			table.cacheId,
+			table.generation
+		)
+	]
+);
+
+export const attestationInheritanceFailures = sqliteTable(
+	'attestation_inheritance_failure',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
+		category: text('category', { enum: ['inheritance-failed'] }).notNull(),
+		exhaustion: text('exhaustion', {
+			enum: ['attempt-limit', 'eligible-age-limit']
+		}).notNull(),
+		failures: integer('failures').notNull(),
+		exhaustedAt: text('exhausted_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.storePathHash, table.generation]
+		}),
+		index('attestation_inheritance_failure_expiry_idx').on(table.expiresAt)
 	]
 );
 
@@ -551,7 +721,7 @@ export const legacyRefreshTokens = sqliteTable(
 // the family. The stored grants start with the authority granted by the external
 // exchange and narrow when a refresh requests less authority. Every later
 // rotation is bounded by the stored grants.
-export const refreshTokenFamilies = sqliteTable(
+export const legacyRefreshTokenFamilies = sqliteTable(
 	'refresh_token_family',
 	{
 		id: text('id').primaryKey(),
@@ -574,7 +744,7 @@ export const refreshTokenFamilies = sqliteTable(
 
 // Every member remains until its family expires or is revoked. A spent member
 // may also store an encrypted successor secret for retry recovery.
-export const refreshTokenMembers = sqliteTable(
+export const legacyRefreshTokenMembers = sqliteTable(
 	'refresh_token_member',
 	{
 		id: text('id').primaryKey(),
@@ -590,6 +760,46 @@ export const refreshTokenMembers = sqliteTable(
 			table.generation
 		),
 		index('refresh_token_member_family_idx').on(table.familyId)
+	]
+);
+
+export const refreshTokenFamilies = sqliteTable(
+	'refresh_session_family',
+	{
+		id: text('id').primaryKey(),
+		activeMemberId: text('active_member_id').notNull(),
+		generation: integer('generation').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		unique('refresh_session_family_active_member_unique').on(
+			table.activeMemberId
+		),
+		index('refresh_session_family_expires_at_idx').on(table.expiresAt, table.id)
+	]
+);
+
+export const refreshTokenMembers = sqliteTable(
+	'refresh_session_member',
+	{
+		id: text('id').primaryKey(),
+		familyId: text('family_id').notNull(),
+		generation: integer('generation').notNull(),
+		credentialHash: text('credential_hash').notNull(),
+		successorEnvelope: text('successor_envelope'),
+		successorExpiresAt: text('successor_expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		unique('refresh_session_member_family_generation_unique').on(
+			table.familyId,
+			table.generation
+		),
+		index('refresh_session_member_family_idx').on(table.familyId),
+		index('refresh_session_member_successor_expiry_idx')
+			.on(table.successorExpiresAt, table.id)
+			.where(sql`${table.successorExpiresAt} IS NOT NULL`)
 	]
 );
 
@@ -667,6 +877,9 @@ export const retentionRoots = sqliteTable(
 	{
 		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		name: text('name').$type<RootName>().notNull(),
+		retentionEpoch: integer('retention_epoch').notNull().default(0),
+		closeAppliedEpoch: integer('close_applied_epoch').notNull().default(0),
+		closeGraceUntil: text('close_grace_until').$type<IsoTimestamp>(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
@@ -675,6 +888,16 @@ export const retentionRoots = sqliteTable(
 	// it a scan of every root.
 	(table) => [
 		primaryKey({ columns: [table.cacheId, table.name] }),
+		index('retention_root_cache_retention_epoch_idx').on(
+			table.cacheId,
+			table.retentionEpoch,
+			table.name
+		),
+		index('retention_root_close_applied_epoch_idx').on(
+			table.cacheId,
+			table.closeAppliedEpoch,
+			table.name
+		),
 		index('retention_root_expires_at_idx').on(table.expiresAt),
 		index('retention_root_cache_expires_at_name_idx').on(
 			table.cacheId,

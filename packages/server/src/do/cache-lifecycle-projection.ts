@@ -11,7 +11,7 @@ import { z } from 'zod';
 
 import { cacheScopeFromRow } from '../db/cache.ts';
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
-import * as d1Schema from '../db/d1-schema.ts';
+import { writeCacheLifecycle } from '../db/cache-lifecycle-write.ts';
 import * as schema from '../db/schema.ts';
 import { readCacheLifecycles } from '../migration/lifecycle-read.ts';
 
@@ -56,7 +56,7 @@ function identityKey(scope: CacheScope): string {
 }
 
 /**
- * Writes the missing `cache_lifecycle` rows for this tenant's live caches, up
+ * Writes the missing shared lifecycle rows for this tenant's live caches, up
  * to {@link maxCachesProjectedPerRun} of them per call.
  *
  * Older builds did not create a lifecycle row when registering an empty
@@ -119,24 +119,26 @@ export async function projectLocalCacheLifecycles(
 		access: cache.access
 	}));
 
-	for (const rows of jsonRowLists(listed)) {
-		await context.d1
-			.insert(d1Schema.cacheLifecycle)
-			.select(
-				rows.insertSource([
-					sql`${tenant}`,
-					rows.column('cacheKind'),
-					sql`nullif(${rows.column('cacheName')}, '')`,
-					rows.column('access'),
-					sql`${firstCacheGeneration}`,
-					sql`${firstCacheReadRevision}`,
-					sql`null`,
-					sql`${now}`
-				])
-			)
-			.onConflictDoNothing()
-			.run();
-	}
+	await writeCacheLifecycle(context.d1, async (table) => {
+		for (const rows of jsonRowLists(listed)) {
+			await context.d1
+				.insert(table)
+				.select(
+					rows.insertSource([
+						sql`${tenant}`,
+						rows.column('cacheKind'),
+						sql`nullif(${rows.column('cacheName')}, '')`,
+						rows.column('access'),
+						sql`${firstCacheGeneration}`,
+						sql`${firstCacheReadRevision}`,
+						sql`null`,
+						sql`${now}`
+					])
+				)
+				.onConflictDoNothing()
+				.run();
+		}
+	});
 
 	const last = localRows.at(-1);
 	if (last !== undefined && localRows.length === maxCachesProjectedPerRun) {

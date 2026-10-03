@@ -137,14 +137,14 @@ export class DeployCancelledError extends CliError {
 	}
 }
 
-export class ConfirmationRequiredError extends CliError {
+export class ConfirmationRequiredError extends CliUsageError {
 	constructor() {
 		super('Not running in a terminal: pass --yes to deploy without prompts.');
 		this.name = 'ConfirmationRequiredError';
 	}
 }
 
-export class AccountOptionRequiredError extends CliError {
+export class AccountOptionRequiredError extends CliUsageError {
 	constructor(public readonly accounts: readonly AccountSummary[]) {
 		super(
 			'Several Cloudflare accounts are available; pass --account <id>:\n' +
@@ -234,6 +234,7 @@ export interface DeployCliOptions {
 }
 
 export interface DeployRuntimeOptions {
+	readonly resultFile?: string;
 	readonly signal?: AbortSignal;
 	readonly colour?: boolean;
 }
@@ -962,7 +963,8 @@ export async function executeDeploy(
 
 	const ui = createDeployUi({
 		signal: runtimeOptions.signal,
-		colour: runtimeOptions.colour
+		colour: runtimeOptions.colour,
+		resultFile: runtimeOptions.resultFile
 	});
 	const isInteractive = ui.interactive;
 

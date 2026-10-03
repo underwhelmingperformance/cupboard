@@ -111,6 +111,30 @@ tenant object, which verifies the selected candidates and rechecks the view
 revision before returning the page. Each page checks its source scope; the
 client's traversal across pages and sources is not an atomic closure snapshot.
 
+`POST /api/v1/attestation-info` discovers stored attestation descriptors for a
+cache. The same route is available under a named-cache prefix. It accepts up to
+32 unique store-path hashes, optional exact predicate-type filters and an
+optional expected scope version. Several predicate types match any of those
+types. An omitted filter returns every descriptor. Entries preserve request
+order and distinguish missing paths from published paths with an empty list.
+Published entries include the current NAR hash and each matching descriptor's
+digest, predicate type and size. Discovery reports metadata; bundle verification
+checks the signer, issuer, predicate and NAR subject.
+
+The Worker reads committed D1 reference generations and canonical R2 lists with
+at most six simultaneous object reads. Requests are limited to 64 KiB, lists to
+1 MiB and responses to 4 MiB. A partial page reports `nextIndex` after the
+processed prefix. The next request submits the remaining hashes and the previous
+page's `scopeVersion` as `expectedScopeVersion`. Lifecycle or access changes
+produce a `scope-changed` refusal. Private pages revalidate read credentials
+before returning. Malformed and oversized lists produce typed errors; provider
+failures remain temporary failures. Generation checks retain the existing
+acceptance of public lists without valid generation metadata.
+
+The read capability header advertises `attestation-info-v1`. Clients may use
+bounded individual list reads when this capability is absent. An authentication
+or storage failure does not permit fallback.
+
 It also runs the **scheduled work**: the hourly cron trigger, and the consumer
 for the maintenance queue.
 
@@ -125,6 +149,31 @@ which has no binding, so nothing can create an instance of it. Cloudflare
 refuses to deploy an earlier Worker version across a change to a Worker's
 Durable Object classes, so this class stops a rollback of the tenant Worker to a
 version from before the change to versioned R2 object keys.
+
+The `blob-reference-read-authority` expansion provides read-only aliases for
+shared reference and cache-lifecycle storage. Current Workers query those
+aliases and defer reference changes until contraction completes. Lifecycle
+writes use the preceding physical table before contraction and refuse retryably
+while the contract step runs, so the mandatory local projection can finish.
+After both serving builds are verified, one D1 batch renames the physical tables
+to the alias identifiers. The preceding reference identifiers become authority
+views that exclude revoked paths and demoted references. The preceding
+cache-admission identifier becomes an empty view, so a preceding request whose
+first admission query runs after contraction is refused before it can serve R2
+content. A request admitted before contraction may finish its response. Current
+Workers use the physical lifecycle table and retain the cache's access mode.
+Preceding writes fail against the read-only views; D1 rolls back their entire
+charge batch.
+
+Both Workers also export `PathReadAuthorityRollbackGuard`, an unbound SQLite
+Durable Object class. [Cloudflare's class lifecycle checks] prevent version
+rollback across its introduction. The contract marker makes preceding CLIs
+reject a fresh deployment against this database. Interrupted uploads or
+contraction return retryable errors for reference changes until the transition
+completes.
+
+[Cloudflare's class lifecycle checks]:
+  https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/
 
 It has no `workers.dev` route and no preview URLs. Its default `fetch`
 entrypoint answers every request with 404. The control Worker reaches it in two
@@ -191,12 +240,13 @@ migrations are in `packages/server/drizzle-d1`.
 | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `tenant`                                                       | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
 | `tenant_cache_read_credential`                                 | The verifier for each cache that has its own read credential.                                                                |
-| `cache_lifecycle`                                              | Each cache's access mode, generation, read revision and deletion time.                                                       |
+| `cache_lifecycle_storage`                                      | Each cache's access mode, generation, read revision and deletion time.                                                       |
+| `path_read_revocation`                                         | Per-path revocation fences and pending demotion of readable references.                                                      |
 | `blob_state`                                                   | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
-| `blob_ref`                                                     | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
+| `blob_ref_storage`                                             | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
 | `tenant_blob`, `tenant_cas_blob`                               | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
 | `tenant_usage`                                                 | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
-| `cas_object`, `attestation_ref`                                | Stored attestation bundles and their references.                                                                             |
+| `cas_object`, `attestation_ref_storage`                        | Stored attestation bundles and their references.                                                                             |
 | `object_incarnation`, `object_deletion`                        | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
 | `control_auth_key`, `control_trust`, `global_admin`            | The control plane's signing keys (with the private part wrapped), its trust rules, and the first operator.                   |
 | `deployment_transition`                                        | The state of each schema transition that the deploy has started.                                                             |
@@ -313,6 +363,27 @@ Paid plan in which 10,000 D1 calls completed and the 10,001st failed. The Free
 allowance hasn't been checked against a hosted Worker. cupboard uses the Workers
 limits for both plans.
 
+Chunked upload negotiation and preview count every forwarded Durable Object
+page. The request limit reserves four D1 calls for admission, including a retry
+of each read when catalogue migration requires a second read. This keeps the
+advertised limit stable across those admission paths. Before forwarding the
+first page, the Worker reserves the maximum number of sends, including adaptive
+splits from 400 paths down to the 100-path direct bound. A page at that bound
+reserves one canonical NAR probe and seven repair calls per path, with another
+100 calls for fixed work beyond the usual reserve. The Worker returns
+`UPLOAD_REQUEST_LIMIT_EXCEEDED` with HTTP 413 and `data.maxPaths` when the
+complete request cannot fit. The refusal precedes all negotiation pages and has
+no `Retry-After` header. A service or provider refusal retains its own status
+and retry metadata.
+
+Upload responses advertise the request limit in `x-cupboard-upload-max-paths`.
+The CLI starts with a 100-path page for compatibility with older servers, then
+uses the advertised limit for each remaining page. The schema still accepts
+100,000 paths, but admission can impose a lower limit for the current Worker
+invocation. The Free allowance permits 51,200 paths per request; the Paid
+allowance permits the schema maximum. A caller can split a larger closure into
+separate requests.
+
 Both Wrangler configurations leave `limits.subrequests` unset, so Cloudflare
 applies the account's plan limit. The allowance doesn't extend the tenant
 object's critical-section deadline.
@@ -345,9 +416,10 @@ steps:
    cache generation and read revision that admission found. `CachedTenantReads`
    serves the read through the Workers Cache, and tags each narinfo so that
    exactly that narinfo can be purged later.
-5. A narinfo is the R2 object at the tenant's narinfo key. A public read needs
-   no further D1 query. An authenticated read also checks the `blob_ref`
-   reference in D1, so it can't serve an object from a different commit.
+5. A narinfo is the R2 object at the tenant's narinfo key. An origin read checks
+   the committed reference in D1 for both public and authenticated caches before
+   fetching the object from R2. The check excludes references revoked by path
+   deletion and objects from a different commit.
 6. For a NAR, the Worker checks that there's a `blob_ref` reference from the
    addressed cache to that hash, at the cache's current generation and access
    mode. It then streams `nar/<hash>.nar.zst` from R2. If the cache doesn't
@@ -458,18 +530,56 @@ How long a token lasts depends on the rule that matched:
 - A rule for CI, or an OIDC exchange that requests only content-read grants,
   gives a token that lasts 15 minutes, and no refresh token.
 
+Explicit external exchanges can combine grants from eligible rules, including
+separate actions for the same resource. The response grants only the requested
+actions and resources. After signing, the server re-evaluates the exact
+authority against current policy and its current preferred identity tier. A
+replacement matching rule can permit the request; a rule in a less preferred
+tier cannot supply authority while a more preferred tier matches. When a single
+rule covers the response, `cb_rule` remains an audit claim. Request
+authorisation uses the issued grants and does not depend on that audit claim.
+
+Implicit interactive exchanges keep their existing single-rule selection.
+Composition does not create refresh sessions for CI or read acquisition.
+
+Interactive refresh credentials contain a versioned, tenant-bound identity and
+maximum grant set. Their complete opaque value is authenticated against the
+member's stored hash before any claims enter policy selection. Each refresh
+re-evaluates current trust policy and its current preferred identity tier. The
+response preserves or narrows the credential's authority and its original 30-day
+deadline. Rule IDs are not session dependencies.
+
+`refresh_session_family` records the active member, generation and timestamps.
+`refresh_session_member` records credential hashes and replay metadata. A spent
+member briefly includes an encrypted successor credential so a retry can recover
+an explicitly narrowed successor, even when the retry omits the grant field. The
+grace window remains one minute. Indexed bounded maintenance clears expired
+envelopes; physical ciphertext removal occurs when maintenance runs. Existing
+legacy refresh tables receive no new sessions and are retired in bounded pages.
+
 A client can also exchange a cupboard access token for one with fewer grants.
 
 CI read acquisition uses the extension grant
 `urn:cupboard:params:oauth:grant-type:read-access` at the tenant token endpoint.
 The request contains an external ID token and a bounded `read_resources` array
-with at most one cache and one reuse view. The server selects one trust rule
-using the existing identity precedence, then resolves exact read grants against
-current resource state. Public resources need no content-read grant. Existing
-private resources require content-read; an absent cache accepts scoped metadata
-authority, which publication grants already imply. The read response includes
-access and priority facts for setup validation. Acquisition never creates a
-cache. Ordinary token exchange keeps its strict requested-grant semantics.
+with up to sixteen distinct resources, including at most one reuse view. The
+server converts current resource state into exact read requirements and uses the
+same grant composer as ordinary external OIDC exchange. The composer combines
+authority across matching rules in the preferred identity tier. Public resources
+need no content-read grant. Existing private resources require content-read; an
+absent cache accepts scoped metadata authority, which publication grants already
+imply. The read response includes access and priority facts for setup
+validation. Acquisition never creates a cache. Ordinary token exchange keeps its
+strict requested-grant semantics.
+
+Malformed `read_resources` returns `invalid_request`. A valid request without
+matching authority returns `invalid_authorization_details` and identifies the
+requested resources and missing read actions. The refusal does not list other
+private resources. Every required action must be covered by an eligible trust
+rule. The composer cannot fall back to a less specific identity tier. Cold
+content-read and negotiation-hint authentication initialise the tenant before
+accessing local state. While a local migration is pending, the Worker returns a
+retryable 503 with `Retry-After: 1` and `Cache-Control: no-store`.
 
 Read acquisition always issues a 15-minute token without a refresh token,
 including metadata-only and zero-authority results. Request-time checks still
@@ -624,15 +734,24 @@ contract migrations of the transitions before it and don't change existing rows.
 Once every earlier transition has expanded, the deploy may apply an independent
 transition's expand migrations before the earlier transitions' contract
 migrations. A transition that isn't independent is **dependent**, and can only
-expand once every earlier transition is complete. Otherwise its expand
-migrations could run only after the upload, and the new Workers would run
-without them until then. `deployment-transitions`, `attestation-path-index` and
-`local-step-attempts` are independent, so a deployment on v0.0.33 upgrades
-directly. A later release that adds a dependent transition can be blocked, and
-its error lists the releases that complete the earlier transition, aren't older
-than the deployed release, and don't include the later transition. A fresh
-deployment is never blocked, because every transition completes on it before the
-upload.
+expand once every earlier transition is complete, unless it declares its
+contract prerequisites in `expandAfter`. With that declaration, the listed
+transitions must be complete and every earlier transition must have expanded.
+The `blob-reference-read-authority` expansion requires the contracted
+`cache-identity` schema, but does not require the new attestation index to be
+created first. Migration `0035` therefore expands before the upload on a v0.0.35
+deployment whose identity transition is contracted. After the upload, `0032`
+creates the index before `0036` renames the indexed table to
+`attestation_ref_storage`. A deployment with incomplete cache identity still
+requires an earlier release to complete that transition. Without the required
+contracts, the expand migrations could run only after the upload, and the new
+Workers would run without them until then. `deployment-transitions`,
+`attestation-path-index` and `local-step-attempts` are independent, so their
+expansions do not require cache identity to be complete. A later release that
+adds a dependent transition can be blocked, and its error lists the releases
+that complete the earlier transition, aren't older than the deployed release,
+and don't include the later transition. A fresh deployment is never blocked,
+because every transition completes on it before the upload.
 
 The `deployment_transition` table has one row for each transition that the
 deploy has started. The state is `expanded` once the transition's expand
@@ -673,7 +792,8 @@ One `cupboard init` run applies the transitions in list order:
      applied, including a migration of a complete transition;
    - a transition recorded as complete although one of its migrations is missing
      from `d1_migrations`;
-   - a dependent transition that follows a transition that isn't complete.
+   - a transition whose required earlier contracts are incomplete. Without
+     `expandAfter` or `independent`, every earlier contract is required.
 
    One kind of row doesn't stop the deploy: a row that a later release wrote for
    its own transition, in state `expanded` or `complete`, with `contracted_at`
@@ -843,16 +963,17 @@ A stored cache grant identifies its cache in one of two formats. A **selector
 grant** uses `_default` for the default cache, the cache's name for a public
 cache, and `_private-<name>` for a private cache. A **scope grant** identifies
 the default cache or a named cache whatever its access. A trust rule's grant can
-contain a template. A refresh-token family contains the concrete caches that
-were granted. This build reads both formats.
+contain a template. Legacy refresh-token families contain the concrete caches
+that were granted. This build reads both stored formats while retiring those
+legacy records. New refresh authority is client-contained and uses scope grants.
 
-Until the `cache-identity` transition is complete, new grants use the selector
-format, so that the previous release can read them. A grant for a named cache
-whose access is known uses the selector for that access. A template, or a name
-whose access isn't known yet, gets both the public and the private selector, and
-current readers combine them into one grant. cupboard refuses to change a
-cache's access until `cache-identity` is complete, so an existing selector keeps
-its meaning for the whole transition.
+Until the `cache-identity` transition is complete, new stored trust grants use
+the selector format, so that the previous release can read them. A grant for a
+named cache whose access is known uses the selector for that access. A template,
+or a name whose access isn't known yet, gets both the public and the private
+selector, and current readers combine them into one grant. cupboard refuses to
+change a cache's access until `cache-identity` is complete, so an existing
+selector keeps its meaning for the whole transition.
 
 The control plane can't look up a tenant cache's access, so it stores every
 named-cache grant with both selectors. When a template is too long to take the

@@ -29,7 +29,11 @@ import {
 	GithubCheckOptionError,
 	WorkflowReferenceTagPatternError
 } from '../../errors.ts';
-import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from '../oidc-trust.ts';
 import { trustGrantRows } from '../oidc-trust/format.ts';
 import {
 	buildAddBody,
@@ -80,7 +84,8 @@ import {
 	jobCache,
 	modelPublishingJob,
 	type PublicationCase,
-	type ReuseViewRequirement
+	type ReuseViewRequirement,
+	withMergedCloseCases
 } from './publication.ts';
 import {
 	type PublicationReadAuthority,
@@ -139,7 +144,7 @@ function shadowReason(
 			return `a planned rule would be selected in place of ${existing} for ${trigger ?? 'the'} runs of ${job}, and the planned rule does not grant what that job requests.`;
 		}
 		case 'ambiguous': {
-			return `a planned rule and ${existing} would both match ${trigger ?? 'the'} runs of ${job} with as many claims and permit the same request, so the server would have no single rule to select.`;
+			return `a planned rule and ${existing} would both match ${trigger ?? 'the'} runs of ${job} with as many claims, so an exchange without explicit grants would be ambiguous.`;
 		}
 		case 'unmodelled': {
 			return `the check cannot model ${job}, and a planned rule could match its runs with at least as many claims as ${existing}, which may authorise those runs now.`;
@@ -264,6 +269,28 @@ function repairReference(
 	return `${parsed.owner}/${parsed.repo}/${parsed.path}@refs/tags/${pattern}`;
 }
 
+function additionalReadGrants(
+	read: PublicationReadAuthority
+): OidcTrustAddBodyInput['permittedGrants'] {
+	return read.additionalCaches
+		.filter(({ access }) => access === 'private')
+		.map(({ cache }) =>
+			buildCacheContentReadGrant({
+				...(cache.kind === 'named' && { cache: cache.name })
+			})
+		);
+}
+
+function withAdditionalReadGrants(
+	body: OidcTrustAddBodyInput,
+	read: PublicationReadAuthority
+): OidcTrustAddBodyInput {
+	return {
+		...body,
+		permittedGrants: [...body.permittedGrants, ...additionalReadGrants(read)]
+	};
+}
+
 // See installableRequests for why every push requests the attestation
 // operations, including a push from a job that skips signing.
 function grantsForJob(
@@ -317,7 +344,8 @@ function grantsForJob(
 		read.viewAccess === 'private' &&
 		read.viewWiring === 'none'
 			? [buildViewContentReadGrant(publication.reuseView.name)]
-			: [])
+			: []),
+		...additionalReadGrants(read)
 	];
 }
 
@@ -352,11 +380,22 @@ function bodyForCase(
 	reference: string
 ): OidcTrustAddBodyInput {
 	const isPreset = isPresetJob(job);
+	const audience = audienceSchema.parse(publication.claims.aud);
+
+	if (publication.lifecycle === 'merged-close') {
+		return githubPrCloseAddBody(url, result.identity, {
+			repo: result.identity.fullName,
+			audience,
+			jobWorkflowRef: reference,
+			...(!isPreset &&
+				read.cache.kind === 'named' && { cacheTemplate: read.cache.name })
+		});
+	}
 
 	if (publication.requests.length === 0) {
 		return buildAddBody({
 			issuer: githubActionsIssuer,
-			audience: audienceSchema.parse(url),
+			audience,
 			claims: {
 				repository_id: String(result.identity.repositoryId),
 				repository_owner_id: String(result.identity.repositoryOwnerId),
@@ -369,11 +408,15 @@ function bodyForCase(
 	}
 
 	if (isPreset && publication.trigger === 'pull_request') {
-		return githubPrAddBody(url, result.identity, {
-			repo: result.identity.fullName,
-			jobWorkflowRef: reference,
-			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none'
-		});
+		return withAdditionalReadGrants(
+			githubPrAddBody(url, result.identity, {
+				repo: result.identity.fullName,
+				audience,
+				jobWorkflowRef: reference,
+				readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none'
+			}),
+			read
+		);
 	}
 
 	if (isPreset) {
@@ -384,22 +427,27 @@ function bodyForCase(
 			);
 		}
 
-		return githubBranchAddBody(url, result.identity, {
-			repo: result.identity.fullName,
-			branch: publication.ref.name,
-			jobWorkflowRef: reference,
-			readCache: read.cacheAccess === 'private' && read.cacheWiring === 'none',
-			...(publication.reuseView !== undefined &&
-				read.viewAccess === 'private' &&
-				read.viewWiring === 'none' && {
-					readView: publication.reuseView.name
-				})
-		});
+		return withAdditionalReadGrants(
+			githubBranchAddBody(url, result.identity, {
+				repo: result.identity.fullName,
+				audience,
+				branch: publication.ref.name,
+				jobWorkflowRef: reference,
+				readCache:
+					read.cacheAccess === 'private' && read.cacheWiring === 'none',
+				...(publication.reuseView !== undefined &&
+					read.viewAccess === 'private' &&
+					read.viewWiring === 'none' && {
+						readView: publication.reuseView.name
+					})
+			}),
+			read
+		);
 	}
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
-		audience: audienceSchema.parse(url),
+		audience,
 		claims: {
 			repository_id: String(result.identity.repositoryId),
 			repository_owner_id: String(result.identity.repositoryOwnerId),
@@ -429,7 +477,11 @@ function mergeBodies(
 	const merged = new Map<string, OidcTrustAddBodyInput>();
 
 	for (const body of bodies) {
-		const key = JSON.stringify(body.claims);
+		const key = JSON.stringify({
+			issuer: body.issuer,
+			audience: body.audience,
+			claims: body.claims
+		});
 		const previous = merged.get(key);
 
 		if (previous === undefined) {
@@ -693,7 +745,9 @@ function checkModelledCase(
 	const selected = requests.flatMap((request) => {
 		const selection = selectModelledOidcTrust(existing, claims, request);
 
-		return selection.outcome === 'selected' ? [selection.rule.id] : [];
+		return selection.outcome === 'selected' && selection.rule !== undefined
+			? [selection.rule.id]
+			: [];
 	});
 
 	throw new GithubRepairShadowsRuleError(
@@ -747,7 +801,10 @@ async function checkPlannedRulesKeepOtherJobs(
 				continue;
 			}
 
-			for (const publication of model.cases) {
+			for (const publication of withMergedCloseCases(
+				model.cases,
+				result.identity
+			)) {
 				const read = await publicationReadAuthority(
 					job,
 					publication,
@@ -840,7 +897,10 @@ async function modelRepairableJobs(
 			);
 		}
 
-		for (const publication of model.cases) {
+		for (const publication of withMergedCloseCases(
+			model.cases,
+			result.identity
+		)) {
 			const read = await publicationReadAuthority(
 				job,
 				publication,
@@ -891,6 +951,14 @@ export async function runDiscoveredGithubRepair(
 	}
 
 	if (!isRepairOffered(result)) {
+		if (result.jobs.every((job) => job.status !== 'failed')) {
+			throw new GithubCheckIncompleteError(
+				result.jobs
+					.filter((job) => job.status === 'unverified')
+					.map((job) => jobLabel(job))
+			);
+		}
+
 		throw new GithubRepairUnavailableError(
 			'no-repairable-job',
 			'every failed or unverified publishing job needs manual review'
@@ -1225,7 +1293,9 @@ export async function runDiscoveredGithubRepair(
 			const number = index + 1;
 			const trigger =
 				body.claims.event_name === 'pull_request'
-					? 'any pull request'
+					? body.claims.ref === undefined
+						? 'any pull request'
+						: `pull request with ref ${claimSummary(body.claims.ref)}`
 					: `ref ${claimSummary(body.claims.ref)}`;
 			const workflow =
 				typeof body.claims.job_workflow_ref === 'string'

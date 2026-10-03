@@ -23,11 +23,11 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-// Each committed narinfo generation has one `blob_ref` edge. A tenant also has
+// Each committed narinfo generation has one `blob_ref_storage` edge. A tenant also has
 // one `tenant_blob` presence row for each shared NAR hash it references. These
 // single-tenant fixtures use tenant `v1`.
 
-describe('blob_ref / tenant_blob reference edges', () => {
+describe('blob_ref_storage / tenant_blob reference edges', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));

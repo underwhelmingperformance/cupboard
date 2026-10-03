@@ -114,7 +114,7 @@ read credential when its runner or remote daemon needs one.
 
 | To revoke                       | Do this                                                                                    | It takes effect                                     |
 | ------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------- |
-| An administrator                | Remove their [trust rule](./admin/access.md#removing-an-administrator).                    | Within 10 minutes, when their access token expires. |
+| An administrator                | Remove every matching trust rule that permits their authority.                             | Within 10 minutes, when their access token expires. |
 | A CI job                        | Remove its trust rule.                                                                     | Within 15 minutes.                                  |
 | A leaked access token           | [Rotate the access-token key](./admin/keys.md#access-token-keys), then retire the old one. | Immediately.                                        |
 | A leaked static read credential | Rotate it with `cupboard tenant rotate-credential` or `rotate-cache-credential`.           | Immediately.                                        |

@@ -44,7 +44,8 @@ destination from the event. This is what [the quickstart](./quickstart.md) uses.
 
 - A pull request from the same repository publishes to a cache for that pull
   request, `gh-<repository-id>-pr-<number>`, when publication is enabled. The
-  workflow creates the cache if it doesn't exist. Roots are named under
+  workflow creates the cache if it doesn't exist and restores write access when
+  the pull request reopens. Roots are named under
   `github:<repository>/pr-<number>/` and expire 14 days after the latest run.
   With `publish: none`, the run reads from the tenant's default cache and does
   not create a pull-request cache. Pull-request runs don't read a reuse view.
@@ -54,9 +55,12 @@ destination from the event. This is what [the quickstart](./quickstart.md) uses.
   permanent. These runs read through the reuse view
   `pull-requests-<repository-id>`, or the view that `reuse-view` specifies if
   you set that input.
-- When an unmerged pull request is closed and publication is enabled, the run
-  removes that pull request's cache. With `publish: none`, it leaves the cache
-  unchanged. When a merged pull request is closed, the run does nothing.
+- When a pull request is closed and publication is enabled, the run closes its
+  cache, whether the pull request was merged or not. Closure rejects publication
+  and retention-extending writes and brings root expiry forward to the close
+  time. Reads and reuse remain available during the configured grace period.
+  Garbage collection removes expired contents, then deletes the empty cache
+  after pending work finishes. With `publish: none`, the cache stays unchanged.
 - Anything else fails. That includes pull requests from forks, other branches,
   and tags.
 
@@ -160,6 +164,11 @@ Your users then need only one substituter,
 release has its own root, publishing a new release never stops the cache keeping
 an old release's paths.
 
+Without a preset, `cache-access-mode` requires the selected cache to have that
+access on every event, including pushes, manual runs and scheduled runs. With
+the `pull-request-and-branch` preset, the input selects access for publishing
+pull-request caches. Branch and read-only runs use the default cache's access.
+
 ## The target manifest
 
 The manifest lists the requested outputs. Each target specifies an output that
@@ -204,8 +213,11 @@ Targets in the same cohort must have the same `system`, `os`, `remote` and
 
 ### Letting a target fail without failing the run
 
-Set `bestEffort = true` on a target whose build is allowed to fail. If it fails,
-the rest of the run still succeeds.
+Set `bestEffort = true` on a target whose build is allowed to fail. The workflow
+publishes successful outputs, updates their roots and signs eligible build
+provenance even when another target fails to build. The receipt records the
+failed targets. Authentication, command, publication, verification and retention
+failures still fail the run.
 
 `bestEffort` doesn't cover evaluation. The manifest is evaluated as a whole, so
 if evaluating a best-effort target's `rootDrvPath` fails, the whole manifest
@@ -286,9 +298,10 @@ as a target of its own, in its own cohort. If you give the aggregate a `cohort`
 label, the components share that cohort instead. Each component takes its
 `system`, `os`, `remote` and `bestEffort` values from the aggregate.
 
-All the components share the aggregate's root. A root can keep at most 149
-paths, and each output that you publish from each component counts towards that
-limit. The plan refuses an aggregate with more than 149 components.
+All the components share the aggregate's root. The plan refuses an aggregate
+with more than 149 components. The root API separately limits each explicit
+replacement of a root's target set to 149 paths; a run root can accumulate more
+paths through additive updates.
 
 The machine that activates the configuration downloads the components from the
 cache. It builds or fetches the rest of the closure itself. The aggregate has no
@@ -317,8 +330,9 @@ different view, and pull-request runs never use a view.
 `build: rebuild` requires execution in the selected Nix store. For a remote
 machine, set `store: ssh-ng://...`. A cohort with `remote: true` and no `store`
 uses delegated builders, which can reuse outputs without executing their
-builders. Cupboard rejects that combination with `build: rebuild`. See [Building
-elsewhere][building-elsewhere] for the configuration.
+builders. Planning rejects that combination with `build: rebuild` before any
+cohort builds or publishes. See [Building elsewhere][building-elsewhere] for the
+configuration.
 
 [building-elsewhere]: ./building-elsewhere.md
 
@@ -330,31 +344,40 @@ workflow][simpler-workflow].
 
 [simpler-workflow]: ./custom-jobs.md#the-simpler-workflow-cupboard-publishyml
 
-| Input         | Values                       | Default here | Decision                                                                                                                                                                                                                                                                                                                                                            |
-| ------------- | ---------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `build`       | `missing`, `rebuild`         | `missing`    | `missing` uses an available output and builds it otherwise. `rebuild` builds each requested output again in the selected Nix store, even if it is already available. Dependencies may still be substituted.                                                                                                                                                         |
-| `substituter` | `leave`, `copy`              | `leave`      | `copy` selects outputs available from external substituters for publication. `leave` keeps an output upstream only if external consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Outputs built in this run remain selected. A reuse view belongs to this tenant and can publish by reference. |
-| `publish`     | `none`, `outputs`, `closure` | `outputs`    | `none` publishes no paths; `outputs` publishes selected output paths; `closure` also publishes all their runtime references.                                                                                                                                                                                                                                        |
-| `attest`      | `true`, `false`              | `true`       | Sign build provenance for builds observed on the runner and attach the bundles to published paths. Reused and substituted outputs receive no new build claim.                                                                                                                                                                                                       |
+| Input         | Values                                | Default here | Decision                                                                                                                                                                                                                                                                                                                                                            |
+| ------------- | ------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `build`       | `missing`, `rebuild`                  | `missing`    | `missing` uses an available output and builds it otherwise. `rebuild` builds each requested output again in the selected Nix store, even if it is already available. Dependencies may still be substituted.                                                                                                                                                         |
+| `substituter` | `leave`, `copy`                       | `leave`      | `copy` selects outputs available from external substituters for publication. `leave` keeps an output upstream only if external consumers can obtain matching NARs for the output and all its runtime references under the configured signature policy. Outputs built in this run remain selected. A reuse view belongs to this tenant and can publish by reference. |
+| `publish`     | `none`, `outputs`, `built`, `closure` | `built`      | `none` publishes no paths; `outputs` publishes selected output paths; `built` also publishes observed build intermediates; `closure` also publishes all their runtime references.                                                                                                                                                                                   |
+| `attest`      | `true`, `false`                       | `true`       | Sign build provenance for builds observed on the runner and attach the bundles to published paths. Reused and substituted outputs receive no new build claim.                                                                                                                                                                                                       |
 
 `push: false` is a compatibility alias that disables publication, even when
-`publish` selects outputs or a closure. It also disables signing.
+`publish` selects outputs, built intermediates or a closure. It also disables
+signing.
 
-| Build     | Substituter | Publish                | Attest  | Result                                                                                                                                                                                                                                        |
-| --------- | ----------- | ---------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `missing` | `leave`     | `outputs`              | `true`  | The defaults reuse available outputs, publish selected outputs and sign build provenance for builds observed on the runner. Eligible outputs from external substituters stay upstream. Paths from a reuse view can be published by reference. |
-| `missing` | `copy`      | `closure`              | `true`  | The published path set includes substituted outputs and runtime references. Only builds observed on the runner receive new build provenance.                                                                                                  |
-| `rebuild` | `leave`     | `outputs`              | `true`  | Each requested output is built again in the selected Nix store. The workflow publishes selected outputs and signs build provenance for builds observed on the runner. Dependencies may still be substituted.                                  |
-| `rebuild` | `copy`      | `closure`              | `true`  | Each requested output is built again and its runtime closure is published. Builds observed on the runner receive build provenance. Dependencies may still be substituted.                                                                     |
-| Any       | Any         | `outputs` or `closure` | `false` | The workflow publishes the selected paths without signing new build provenance.                                                                                                                                                               |
-| `missing` | Any         | `none`                 | Any     | The workflow publishes no paths or attestations. Available requested outputs can be reused.                                                                                                                                                   |
-| `rebuild` | Any         | `none`                 | Any     | The workflow builds each requested output again but publishes no paths or attestations.                                                                                                                                                       |
+| Build     | Substituter | Publish                         | Attest  | Result                                                                                                                                                                                                                                                                          |
+| --------- | ----------- | ------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `missing` | `leave`     | `built`                         | `true`  | The defaults reuse available outputs, publish selected outputs plus observed build intermediates and sign build provenance for builds observed on the runner. Eligible outputs from external substituters stay upstream. Paths from a reuse view can be published by reference. |
+| `missing` | `copy`      | `closure`                       | `true`  | The published path set includes substituted outputs and runtime references. Only builds observed on the runner receive new build provenance.                                                                                                                                    |
+| `rebuild` | `leave`     | `outputs`                       | `true`  | Each requested output is built again in the selected Nix store. The workflow publishes selected outputs and signs build provenance for builds observed on the runner. Dependencies may still be substituted.                                                                    |
+| `rebuild` | `copy`      | `closure`                       | `true`  | Each requested output is built again and its runtime closure is published. Builds observed on the runner receive build provenance. Dependencies may still be substituted.                                                                                                       |
+| Any       | Any         | `outputs`, `built` or `closure` | `false` | The workflow publishes the selected paths without signing new build provenance.                                                                                                                                                                                                 |
+| `missing` | Any         | `none`                          | Any     | The workflow publishes no paths or attestations. Available requested outputs can be reused.                                                                                                                                                                                     |
+| `rebuild` | Any         | `none`                          | Any     | The workflow builds each requested output again but publishes no paths or attestations.                                                                                                                                                                                         |
 
 For outputs already in the destination cache or a reuse view, `publish: closure`
 reads narinfos to discover their runtime references. It publishes cached
 references without copying NARs into the runner or remote builder. If a
 reference is absent from both caches, the workflow uses the selected Nix store
 or configured substituters to obtain the missing path before publication.
+
+With `substituter: leave`, confirmation checks anonymous access to each narinfo
+and its advertised NAR. Runner-only netrc or URL credentials do not establish
+access for consumers. An anonymous authentication refusal stops cohort planning
+before the build with exit status 77. Temporary failures and malformed provider
+responses stop planning with exit status 75. To publish selected paths from a
+cache that requires runner credentials, set `substituter: copy`. Nix can still
+use those credentials to obtain build inputs.
 
 With `substituter: leave`, an output left upstream does not select its closure
 for publication. If another published output references that path,
@@ -366,8 +389,13 @@ they differ. A fresh output is built once. Reusing an available output without
 building it creates no new build provenance, even when this run publishes it to
 the destination.
 
-The default settings reuse available outputs and publish only selected outputs.
-To build each requested output again and publish its runtime closure, set:
+The flake workflow defaults to `publish: built`. It publishes selected requested
+outputs and intermediates reported by the post-build hook. Substituted
+intermediates are excluded. The run root protects the published intermediates;
+only requested outputs enter target roots. A remote store or an untrusted local
+daemon cannot report and protect every intermediate, so select
+`publish: outputs` or `publish: closure` for those stores. To build each
+requested output again and publish its runtime closure, set:
 
 ```yaml
 with:
@@ -506,17 +534,25 @@ repository's `main` never picks up another repository's pull-request builds. If
 you want repositories to share builds, see
 [Sharing builds between repositories](./reuse-views.md#sharing-builds-between-repositories).
 
-### Removing merged pull-request caches once they're empty
+### Retaining closed pull-request outputs during grace
 
-When a pull request is merged, its cache is kept so that `main` can reuse its
-outputs. Its roots expire after 14 days, but the empty cache stays behind. To
-have a cache removed once it's empty:
+The preset closes caches for both merged and unmerged pull requests. Closure
+starts the cache's configured grace period, so `main` can reuse the outputs
+through the pull-request reuse view during grace. Publication to the main cache
+retains reused paths independently of the closed cache.
+
+Configure the tenant's default grace period before creating pull-request caches:
 
 ```sh
-cupboard cache set-retirement https://cupboard.example.workers.dev/t/acme \
-  gh-123456-pr-42 --when-empty true
+cupboard cache set-default-grace https://cupboard.example.workers.dev/t/acme \
+  --grace 24h
 ```
 
-Here `123456` is the repository ID and `42` is the pull request number. This is
-a setting on each cache, and the preset doesn't set it for you. See
-[Retiring empty caches](../admin/retention.md#retiring-empty-caches).
+Existing caches keep their grace settings. Use `cupboard cache set-grace` to
+change an existing cache's grace period. Repeated close events do not restart
+grace, and closure preserves existing later grace deadlines. Reopening restores
+write access before the next publication. See [Cache creation defaults] and
+[Closing and reopening caches].
+
+[Cache creation defaults]: ../admin/caches.md#defaults-for-new-caches
+[Closing and reopening caches]: ../admin/caches.md#closing-and-reopening-a-cache

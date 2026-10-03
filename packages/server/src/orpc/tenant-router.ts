@@ -71,6 +71,14 @@ export const tenantRouter = os.router({
 		)
 	},
 	caches: {
+		defaults: {
+			get: os.caches.defaults.get.handler(({ context }) =>
+				context.services.cacheAdmin.creationDefaults()
+			),
+			set: os.caches.defaults.set.handler(({ input, context }) =>
+				context.services.cacheAdmin.setCreationDefaults(input)
+			)
+		},
 		list: os.caches.list.handler(({ input, context }) =>
 			context.services.cacheAdmin.listCaches(input)
 		),
@@ -115,6 +123,18 @@ export const tenantRouter = os.router({
 				}
 			)
 		},
+		close: os.caches.close.handler(({ input, context }) =>
+			context.services.cacheAdmin.closeCache({
+				kind: 'named',
+				name: input.cacheName
+			})
+		),
+		reopen: os.caches.reopen.handler(({ input, context }) =>
+			context.services.cacheAdmin.reopenCache({
+				kind: 'named',
+				name: input.cacheName
+			})
+		),
 		retirement: os.caches.retirement.handler(({ input, context }) =>
 			context.services.cacheAdmin.setRetireWhenEmpty(
 				{ kind: 'named', name: input.cacheName },

@@ -11,18 +11,28 @@ inputs:
     default: 'true'
   publication-url:
     description: >-
-      Destination tenant or cache URL. With `substituter: leave`, this keeps
-      paths from the destination and its tenant reuse views selected for
-      publication. Supply this when the destination is a configured substituter.
+      Destination tenant or cache URL. Required with `substituter: leave` so
+      paths from the destination and its tenant reuse views remain selected for
+      publication.
     required: false
   cupboard-path:
     description: Path to the cupboard executable when OIDC read access is used.
     required: false
   read-session-target:
-    description: Internal setup output for OIDC read access.
+    description:
+      Pass the read-session-target output from actions/setup for private OIDC
+      reads.
+    required: false
+  audience:
+    description: Audience of the GitHub OIDC token. Defaults to the tenant URL.
+    required: false
+  read-session-caches:
+    description:
+      Pass the read-session-caches output from actions/setup, a JSON array of
+      additional cache URLs.
     required: false
   read-session-view:
-    description: Internal setup output for an additional reuse view.
+    description: Pass the read-session-view output from actions/setup.
     required: false
   installables:
     description: Nix installables to build, one per line.
@@ -47,12 +57,25 @@ inputs:
     default: 'false'
   build:
     description:
-      Control when to build the requested outputs. `missing` uses an output from
-      the store or a substituter when one is available, and builds it otherwise.
+      Control when to build the requested outputs. Defaults to `missing` when
+      `require-provenance` is not enabled. `missing` uses an output from the
+      store or a substituter when one is available, and builds it otherwise.
       `rebuild` builds each output again in the selected Nix store, even if it
       is already available. Nix may still fetch dependencies from substituters.
     required: false
-    default: missing
+  require-provenance:
+    description: >-
+      Deprecated. `true` selects `build: rebuild`; `false` uses the build mode.
+      `true` conflicts with an explicit `build: missing`. Remove this input and
+      set `build: rebuild` to preserve the execution guarantee.
+    required: false
+  publish:
+    description: >-
+      Publication scope: none, outputs, built, or closure. This action cannot
+      observe every build intermediate and refuses built before starting work.
+      Use the flake publishing workflow for built publication.
+    required: false
+    default: outputs
   substituter:
     description: >-
       Control whether to publish outputs available from external substituters.
@@ -139,12 +162,16 @@ runs:
         INLINE_PATHS: ${{ inputs.inline-paths }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         READ_SESSION_TARGET: ${{ inputs.read-session-target }}
+        READ_SESSION_AUDIENCE: ${{ inputs.audience }}
+        READ_SESSION_CACHES: ${{ inputs.read-session-caches }}
         READ_SESSION_VIEW: ${{ inputs.read-session-view }}
         INSTALLABLES_FILE: ${{ inputs.installables-file }}
         KEEP_GOING: ${{ inputs.keep-going }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
         BUILD: ${{ inputs.build }}
+        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
+        PUBLISH: ${{ inputs.publish }}
         SUBSTITUTER: ${{ inputs.substituter }}
         PUBLICATION_URL: ${{ inputs.publication-url }}
       run: |
@@ -161,5 +188,7 @@ runs:
             --max-jobs "$MAX_JOBS" \
             --allow-failure "$ALLOW_FAILURE" \
             --build "$BUILD" \
+            --require-provenance "$REQUIRE_PROVENANCE" \
+            --publish "$PUBLISH" \
             --substituter "$SUBSTITUTER" \
             --publication-url "$PUBLICATION_URL"

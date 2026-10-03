@@ -1622,6 +1622,157 @@ describe('runDeploy', () => {
 });
 
 describe('contract migrations within a deploy', () => {
+	it.each(['control-upload', 'serving-check', 'contract'] as const)(
+		'keeps path deletion inactive after interruption at %s and completes on retry',
+		async (stage) => {
+			const authority = schemaTransitions.find(
+				(transition) => transition.id === 'blob-reference-read-authority'
+			);
+			if (authority === undefined) {
+				throw new Error('The path read authority transition is missing.');
+			}
+			const migrations = [...authority.expand, ...authority.contract].map(
+				(name) => ({
+					name,
+					sha256: 'c'.repeat(64),
+					statements: [
+						authority.contract.includes(name) ? 'SELECT 123;' : 'SELECT 124;'
+					]
+				})
+			);
+			const guard = {
+				PathReadAuthorityRollbackGuard: {
+					type: 'durable-object' as const,
+					storage: 'sqlite' as const
+				}
+			};
+			const source: DeploymentArtifact = {
+				...artifact,
+				buildVersion: 'authority-build',
+				config: {
+					control: { ...artifact.config.control, exports: guard },
+					tenant: {
+						...artifact.config.tenant,
+						exports: { ...artifact.config.tenant.exports, ...guard }
+					}
+				},
+				d1Migrations: [...artifact.d1Migrations, ...migrations]
+			};
+			const recording = recordingApi();
+			await seedApplied(recording, [expandMigration]);
+			insertTenants(recording.database, [
+				{ id: 'alpha', localStep: currentLocalStep }
+			]);
+			await runDeploy({
+				artifact,
+				api: recording.api,
+				now: fixedNow,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } }
+			});
+			const interruption = new Error(`Interrupted ${stage}`);
+			let shouldInterrupt = true;
+			const uploaded: string[] = [];
+			const api: CloudflareApi = {
+				...recording.api,
+				async uploadScript(name, metadata, bundle) {
+					if (
+						shouldInterrupt &&
+						stage === 'control-upload' &&
+						name === source.config.control.name
+					) {
+						throw interruption;
+					}
+					expect(
+						metadata.exports?.PathReadAuthorityRollbackGuard
+					).toStrictEqual(guard.PathReadAuthorityRollbackGuard);
+					uploaded.push(name);
+					await recording.api.uploadScript(name, metadata, bundle);
+				},
+				listDeployedVersions(name) {
+					if (
+						shouldInterrupt &&
+						stage === 'serving-check' &&
+						uploaded.length === 2
+					) {
+						throw interruption;
+					}
+					return recording.api.listDeployedVersions(name);
+				},
+				d1QueryBatch(id, statements) {
+					if (
+						shouldInterrupt &&
+						stage === 'contract' &&
+						statements.includes('SELECT 123;')
+					) {
+						throw interruption;
+					}
+					return recording.api.d1QueryBatch(id, statements);
+				}
+			};
+			const deploy = () =>
+				runPlannedDeploy({
+					plan: {
+						artifact: source,
+						allowanceSource: { kind: 'offline' },
+						observation: { kind: 'offline' },
+						transitions: planTransitions(source.d1Migrations, [
+							...testTransitions,
+							authority
+						])
+					},
+					api,
+					now: fixedNow,
+					reporter: silentReporter,
+					options: { domain: undefined, secrets: { control: [], tenant: [] } }
+				});
+			const readAuthority = () => {
+				const row = recording.database
+					.prepare(
+						'SELECT state, contracted_at FROM deployment_transition WHERE id = ?'
+					)
+					.get(authority.id);
+				return {
+					state: row?.state,
+					contracted_at: row?.contracted_at ?? undefined
+				};
+			};
+			await expect(deploy()).rejects.toBe(interruption);
+			expect({
+				uploaded,
+				authority: readAuthority(),
+				contractApplied: appliedMigrations(recording.database).includes(
+					authority.contract[0] ?? ''
+				)
+			}).toStrictEqual({
+				uploaded:
+					stage === 'control-upload'
+						? ['cupboard-tenant']
+						: ['cupboard-tenant', 'cupboard'],
+				authority: {
+					state: 'expanded',
+					contracted_at:
+						stage === 'contract' ? fixedNow().toISOString() : undefined
+				},
+				contractApplied: false
+			});
+			shouldInterrupt = false;
+			await deploy();
+			expect({
+				authority: readAuthority(),
+				contractApplied: appliedMigrations(recording.database).includes(
+					authority.contract[0] ?? ''
+				)
+			}).toStrictEqual({
+				authority: {
+					state: 'complete',
+					contracted_at: fixedNow().toISOString()
+				},
+				contractApplied: true
+			});
+		}
+	);
+
 	it('contracts once both Workers serve the build and records the transition complete afterwards', async () => {
 		const recording = recordingApi();
 		await seedApplied(recording, [expandMigration]);

@@ -41,7 +41,10 @@ import {
 	cacheIdentityCondition,
 	type ResolvedCache
 } from '../db/cache.ts';
-import { currentCacheGeneration } from '../db/cache-generation.ts';
+import {
+	currentCacheGeneration,
+	pathReferenceReadability
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -64,6 +67,7 @@ import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 import { armAlarmNoLaterThan } from './alarm.ts';
 import { type AttestationsService } from './attestations-service.ts';
 import { batchNonEmpty } from './bulk.ts';
+import { CacheClosureService } from './cache-closure-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type MaterialiseOutcome,
@@ -80,6 +84,7 @@ import {
 } from './grace-decision.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
@@ -327,6 +332,7 @@ export class CommitPipelineService {
 		cache: ResolvedCache,
 		uploadId: UploadId,
 		metadata: UploadPathNegotiation,
+		retentionEpoch: number,
 		graceDecision: GraceDecision | undefined,
 		attachRootName: RootName | undefined,
 		probe: MaterialisationProbe,
@@ -334,7 +340,11 @@ export class CommitPipelineService {
 		isProbeFromPrefetch: boolean
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
-		const reserved = await this.reserveNarInfoRow(cache, metadata);
+		const reserved = await this.reserveNarInfoRow(
+			cache,
+			metadata,
+			retentionEpoch
+		);
 
 		if (reserved.kind === 'lost') {
 			return this.concedeToWinner(
@@ -410,7 +420,8 @@ export class CommitPipelineService {
 				cache,
 				metadata.storePathHash,
 				generation,
-				metadata.narHash
+				metadata.narHash,
+				uploadId
 			);
 
 			const status = await this.publicationStatus(
@@ -488,7 +499,8 @@ export class CommitPipelineService {
 				cache,
 				attachRootName,
 				metadata.storePathHash,
-				metadata.storePath
+				metadata.storePath,
+				graceDecision?.retentionEpoch ?? 0
 			);
 
 			return confirmGrace(
@@ -498,7 +510,7 @@ export class CommitPipelineService {
 				metadata.storePathHash,
 				generation,
 				metadata.narHash,
-				graceDecision?.graceSeconds
+				graceDecision
 			);
 		});
 
@@ -507,7 +519,8 @@ export class CommitPipelineService {
 				cache,
 				metadata.storePathHash,
 				generation,
-				metadata.narHash
+				metadata.narHash,
+				uploadId
 			);
 			const status = await this.publicationStatus(
 				cache,
@@ -744,6 +757,12 @@ export class CommitPipelineService {
 							narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
 								'nar_hash'
 							),
+							readable: pathReferenceReadability(
+								tenant,
+								cache.scope,
+								metadata.storePathHash,
+								generation
+							).as('readable'),
 							cacheGeneration: currentCacheGeneration(tenant, cache.scope).as(
 								'cache_generation'
 							)
@@ -810,6 +829,8 @@ export class CommitPipelineService {
 		tenant: TenantId,
 		charge: MaterialisationCharge
 	): Promise<ChargeOutcome> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const { metadata, blob } = charge;
 		const now = isoTimestamp(new Date());
 
@@ -856,6 +877,8 @@ export class CommitPipelineService {
 		tenant: TenantId,
 		charges: readonly MaterialisationCharge[]
 	): Promise<BatchChargeOutcome> {
+		await new PathReadAuthorityService(this.context).requireWritable();
+
 		const now = isoTimestamp(new Date());
 		const statements = charges.flatMap((charge) =>
 			this.chargeStatements(tenant, charge, now)
@@ -1080,20 +1103,24 @@ export class CommitPipelineService {
 			}
 
 			const graceSeconds = request.graceDecision?.graceSeconds;
+			const close = new CacheClosureService(this.context).firstClose(
+				request.cache,
+				request.graceDecision?.retentionEpoch ?? 0
+			);
 
-			if (graceSeconds === undefined) {
+			if (graceSeconds === undefined && close === undefined) {
 				continue;
 			}
 
 			managedCaches.set(request.cache.id, request.cache);
 
-			if (graceSeconds === 0) {
+			if (graceSeconds === 0 && close === undefined) {
 				continue;
 			}
 
-			const retainUntil = isoTimestamp(
-				new Date(settledAt + graceSeconds * 1000)
-			);
+			const retainUntil =
+				close?.graceUntil ??
+				isoTimestamp(new Date(settledAt + (graceSeconds ?? 0) * 1000));
 			const key = `${String(request.cache.id)} ${retainUntil}`;
 			const group = extensions.get(key) ?? {
 				cache: request.cache,
@@ -1143,7 +1170,11 @@ export class CommitPipelineService {
 	): void {
 		const targets = requests.flatMap((request, index) =>
 			outcomes[index]?.kind === 'materialised' &&
-			request.attachRootName !== undefined
+			request.attachRootName !== undefined &&
+			new CacheClosureService(this.context).firstClose(
+				request.cache,
+				request.graceDecision?.retentionEpoch ?? 0
+			) === undefined
 				? [
 						{
 							cacheId: request.cache.id,
@@ -1293,9 +1324,17 @@ export class CommitPipelineService {
 		cache: ResolvedCache,
 		rootName: RootName | null | undefined,
 		storePathHash: StorePathHash,
-		storePath: StorePathString
+		storePath: StorePathString,
+		retentionEpoch = 0
 	): void {
-		if (rootName === null || rootName === undefined) {
+		if (
+			rootName === null ||
+			rootName === undefined ||
+			new CacheClosureService(this.context).firstClose(
+				cache,
+				retentionEpoch
+			) !== undefined
+		) {
 			return;
 		}
 
@@ -1362,7 +1401,7 @@ export class CommitPipelineService {
 				winner.storePathHash,
 				winner.generation,
 				winner.narHash,
-				graceDecision?.graceSeconds
+				graceDecision
 			);
 
 			// The winner can change while its object is repaired. Confirm its
@@ -1375,7 +1414,8 @@ export class CommitPipelineService {
 				cache,
 				attachRootName,
 				winner.storePathHash,
-				winner.storePath
+				winner.storePath,
+				graceDecision?.retentionEpoch ?? 0
 			);
 
 			await this.uploadState.clearPendingUploadAndStaging(
@@ -1502,7 +1542,10 @@ export class CommitPipelineService {
 
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ expiresAt: isoTimestamp(renewedExpiry) })
+			.set({
+				acceptedExpiresAt: sql`coalesce(${schema.pendingUploads.acceptedExpiresAt}, ${schema.pendingUploads.expiresAt})`,
+				expiresAt: isoTimestamp(renewedExpiry)
+			})
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 
@@ -1564,7 +1607,7 @@ export class CommitPipelineService {
 					existingNarInfo.storePathHash,
 					existingNarInfo.generation,
 					existingNarInfo.narHash,
-					graceDecision?.graceSeconds
+					graceDecision
 				);
 
 				// The row can change during the reference check and object repair. If
@@ -1588,7 +1631,8 @@ export class CommitPipelineService {
 					cache,
 					pending.attachRootName,
 					existingNarInfo.storePathHash,
-					existingNarInfo.storePath
+					existingNarInfo.storePath,
+					pending.retentionEpoch
 				);
 
 				await this.uploadState.clearPendingUploadAndStaging(
@@ -1694,6 +1738,7 @@ export class CommitPipelineService {
 				cache,
 				uploadId,
 				metadata,
+				pending.retentionEpoch,
 				graceDecision,
 				pending.attachRootName ?? undefined,
 				probe,
@@ -1716,7 +1761,7 @@ export class CommitPipelineService {
 
 		// Reserve the row before verification so a root can retain it during the
 		// verification window. The verification pass repeats this idempotently.
-		await this.reserveNarInfoRow(cache, metadata);
+		await this.reserveNarInfoRow(cache, metadata, pending.retentionEpoch);
 
 		await this.requestVerification(logger, tenant);
 
@@ -1735,16 +1780,19 @@ export class CommitPipelineService {
 	// reuse a generation after deletion.
 	async reserveNarInfoRow(
 		cache: ResolvedCache,
-		metadata: UploadPathNegotiation
+		metadata: UploadPathNegotiation,
+		retentionEpoch: number
 	): Promise<ReserveOutcome>;
 	async reserveNarInfoRow(
 		cache: ResolvedCache,
 		metadata: UploadPathNegotiation,
+		retentionEpoch: number,
 		isStillOwned: () => boolean
 	): Promise<ReserveOutcome | undefined>;
 	async reserveNarInfoRow(
 		cache: ResolvedCache,
 		metadata: UploadPathNegotiation,
+		retentionEpoch: number,
 		isStillOwned?: () => boolean
 	): Promise<ReserveOutcome | undefined> {
 		const now = isoTimestamp(new Date());
@@ -1808,6 +1856,7 @@ export class CommitPipelineService {
 					sigsJson: JSON.stringify(sigs),
 					generation,
 					signatureGeneration,
+					retentionEpoch,
 					createdAt: now
 				} satisfies typeof schema.narInfos.$inferInsert)
 				.onConflictDoNothing()

@@ -31,11 +31,11 @@ import { z } from 'zod';
 
 import { setupAction } from '../../actions/src/commands/setup.ts';
 import { audienceSchema } from '../../packages/cli/src/audience.ts';
-import { ReadCredentialRenewalError } from '../../packages/cli/src/auth/read-credential-session.ts';
 import { runChild } from '../../packages/cli/src/build-push/supervisor.ts';
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { runWithReadAccess } from '../../packages/cli/src/commands/run.ts';
+import { CupboardHttpError } from '../../packages/cli/src/errors.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/store-config.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
@@ -66,6 +66,46 @@ const cases: ReadCase[] = (['public', 'private'] as const).flatMap((access) =>
 	])
 );
 
+async function expectReadAuthorityRefusal(
+	request: Promise<ReadAccessResponse>,
+	uncovered: AuthorizationDetails,
+	advice: string
+): Promise<void> {
+	let error: unknown;
+	try {
+		await request;
+	} catch (error_) {
+		error = error_;
+	}
+	expect(error).toBeInstanceOf(CupboardHttpError);
+	if (!(error instanceof CupboardHttpError)) {
+		throw new Error('Expected a typed read authority refusal');
+	}
+	const body = z
+		.strictObject({
+			error: z.string(),
+			error_description: z.string(),
+			problem: z.string(),
+			detail: z.strictObject({
+				read_resources: z
+					.string()
+					.transform((value) =>
+						authorizationDetailsSchema.parse(JSON.parse(value))
+					)
+			})
+		})
+		.parse(JSON.parse(error.body));
+	expect({ status: error.status, body }).toStrictEqual({
+		status: 400,
+		body: {
+			error: 'invalid_authorization_details',
+			error_description: `The matching trust rules do not permit the requested read_resources. ${advice}`,
+			problem: 'read-resources-not-permitted',
+			detail: { read_resources: uncovered }
+		}
+	});
+}
+
 async function withReadFixture(
 	testCase: ReadCase,
 	body: (context: {
@@ -82,7 +122,6 @@ async function withReadFixture(
 		'cupboard-oidc-read-',
 		async (directory) => {
 			const server = await CupboardTestServer.start(directory, {
-				completedTransitions: ['cache-identity'],
 				provision: { defaultCacheAccess: testCase.access }
 			});
 
@@ -237,7 +276,7 @@ async function substitute(
 			{
 				githubOidc: !isAnonymous,
 				...(!isViewOnly && reuse !== undefined && { reuseView: reuse }),
-				audience: audienceSchema.parse(audience)
+				...(!isAnonymous && { audience: audienceSchema.parse(audience) })
 			},
 			{
 				environment: {
@@ -276,7 +315,7 @@ async function substitute(
 }
 
 describe('OIDC read acquisition and real Nix substitution', () => {
-	it('renews through OIDC, then cancels pending acquisition and cleans up after revocation', () =>
+	it('renews through OIDC, then stops immediately and cleans up after revocation', () =>
 		withReadFixture(
 			{ access: 'private', content: true, absent: false, scope: named },
 			async (context) => {
@@ -292,14 +331,8 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 
 				let identities = 0;
 				const clock = new ManualClock();
-				const pendingIdentity = Promise.withResolvers<undefined>();
 				const job = createServer((_request, response) => {
 					identities++;
-
-					if (identities === 4) {
-						pendingIdentity.resolve(undefined);
-						return;
-					}
 
 					response.writeHead(200, { 'content-type': 'application/json' });
 					response.end(JSON.stringify({ value: context.subject }));
@@ -372,19 +405,14 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 						}
 					);
 
-					await Promise.race([
-						(async () => {
-							await clock.advanceThroughDelay(600_000);
-							await clock.advanceThroughDelay(600_000);
-							await clock.advanceThroughDelay(30_000);
-							await pendingIdentity.promise;
-						})(),
-						session
-					]);
-					clock.advanceTo(1_470_000);
-					await expect(session).rejects.toBeInstanceOf(
-						ReadCredentialRenewalError
-					);
+					const refused = expect(session).rejects.toMatchObject({
+						name: 'ReadCredentialRenewalError',
+						exitCode: 77,
+						cause: { status: 400 }
+					});
+					await clock.advanceThroughDelay(600_000);
+					await clock.advanceThroughDelay(600_000);
+					await refused;
 
 					expect({
 						exchanges,
@@ -398,7 +426,7 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 							{ identity: 2, status: 200 },
 							{ identity: 3, status: 400 }
 						],
-						identities: 4,
+						identities: 3,
 						filesRemoved: true
 					});
 				} finally {
@@ -637,9 +665,11 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 				const resources = [{ type: 'cupboard_view' as const, view }];
 
 				if (testCase.access === 'private' && !testCase.content) {
-					await expect(
-						context.client.acquireReadAccess(subject, resources)
-					).rejects.toThrow('not permitted');
+					await expectReadAuthorityRefusal(
+						context.client.acquireReadAccess(subject, resources),
+						[{ type: 'cupboard_view', actions: ['view:content-read'], view }],
+						"Add view:content-read for reuse view 'prior'."
+					);
 
 					return;
 				}
@@ -754,12 +784,28 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 					});
 
 					if (authority !== 'both') {
-						await expect(
+						await expectReadAuthorityRefusal(
 							context.client.acquireReadAccess(subject, [
 								{ type: 'cupboard_cache', cache: named, mode: 'content' },
 								{ type: 'cupboard_view', view }
-							])
-						).rejects.toThrow('not permitted');
+							]),
+							[
+								authority === 'cache-only'
+									? {
+											type: 'cupboard_view',
+											actions: ['view:content-read'],
+											view
+										}
+									: {
+											type: 'cupboard_cache',
+											actions: ['cache:content-read'],
+											cache: named
+										}
+							],
+							authority === 'cache-only'
+								? "Add view:content-read for reuse view 'prior'."
+								: "Add cache:content-read for cache 'builds'."
+						);
 
 						return;
 					}
@@ -865,9 +911,19 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 					!testCase.content &&
 					!testCase.absent
 				) {
-					await expect(
-						context.client.acquireReadAccess(context.subject, resources)
-					).rejects.toThrow('not permitted');
+					await expectReadAuthorityRefusal(
+						context.client.acquireReadAccess(context.subject, resources),
+						[
+							{
+								type: 'cupboard_cache',
+								actions: ['cache:content-read'],
+								cache: testCase.scope
+							}
+						],
+						testCase.scope.kind === 'default'
+							? 'Add cache:content-read for the default cache.'
+							: "Add cache:content-read for cache 'builds'."
+					);
 
 					return;
 				}
@@ -947,9 +1003,17 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 						const privateRead = await fetch(url, { headers });
 
 						expect(privateRead.status).toBe(401);
-						await expect(
-							context.client.acquireReadAccess(context.subject, resources)
-						).rejects.toThrow('not permitted');
+						await expectReadAuthorityRefusal(
+							context.client.acquireReadAccess(context.subject, resources),
+							[
+								{
+									type: 'cupboard_cache',
+									actions: ['cache:content-read'],
+									cache: testCase.scope
+								}
+							],
+							"Add cache:content-read for cache 'builds'."
+						);
 
 						return;
 					}

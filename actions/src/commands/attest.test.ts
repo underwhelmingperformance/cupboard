@@ -487,17 +487,43 @@ describe('resolveAttestInputs', () => {
 			{ RUNNER_TEMP: '/runner/temp' }
 		);
 
+		const directory = path.dirname(inputs.checksumsFile);
+		expect(directory).toMatch(
+			/^\/runner\/temp\/cupboard-attestations\/[\da-f-]{36}$/
+		);
+
 		expect(inputs).toStrictEqual({
 			receiptFile,
 			url: new URL('https://cache.example.test/t/acme'),
 			cache: { kind: 'named', name: 'builds' },
 			readUser: 'reader',
 			readPassword: 'secret',
-			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt',
-			builtChecksumsFile:
-				'/runner/temp/cupboard-attestations/built-subjects.txt',
-			predicateFile: '/runner/temp/cupboard-attestations/attribute-report.json'
+			checksumsFile: path.join(directory, 'subjects.txt'),
+			builtChecksumsFile: path.join(directory, 'built-subjects.txt'),
+			predicateFile: path.join(directory, 'attribute-report.json')
 		});
+	});
+
+	it('allocates separate default files for successive attestation steps', () => {
+		const options = {
+			receiptFile,
+			url: 'https://cache.example.test/t/acme'
+		};
+		const first = resolveAttestInputs(options, { RUNNER_TEMP: '/runner/temp' });
+		const second = resolveAttestInputs(options, {
+			RUNNER_TEMP: '/runner/temp'
+		});
+		const filesFor = (inputs: typeof first) => [
+			inputs.checksumsFile,
+			inputs.builtChecksumsFile,
+			inputs.predicateFile
+		];
+
+		expect({
+			overlappingFiles: filesFor(first).filter((file) =>
+				filesFor(second).includes(file)
+			)
+		}).toStrictEqual({ overlappingFiles: [] });
 	});
 
 	it('puts the default predicate file beside an explicit checksums file', () => {

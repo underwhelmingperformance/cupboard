@@ -9,12 +9,17 @@ import {
 	storePathSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
+import { buildReceiptV3Schema } from '@cupboard/protocol/build';
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 
-import { runCohortSequence } from '../build-push/cohorts.ts';
+import {
+	cohortSequenceFailure,
+	runCohortSequence
+} from '../build-push/cohorts.ts';
 import {
 	BuildCommandFailedError,
+	BuildPublicationFailedError,
 	CacheTargetConflictError,
 	CliAbortError,
 	CohortInputError,
@@ -244,6 +249,102 @@ describe('aggregateBuildReceipts', () => {
 		});
 	});
 
+	it.each<{ status: 75 | 77; staleReceipt: boolean }>([
+		{ status: 75, staleReceipt: false },
+		{ status: 77, staleReceipt: false },
+		{ status: 75, staleReceipt: true },
+		{ status: 77, staleReceipt: true }
+	])(
+		'keeps fatal status $status after a target failure with stale receipt $staleReceipt',
+		async ({ status, staleReceipt }) => {
+			const targetFailure = new BuildCommandFailedError(1, undefined, 1);
+			const fatalFailure = new BuildPublicationFailedError([], status);
+			const failedReceipt = buildReceiptV3Schema.parse({
+				version: 3,
+				paths: [],
+				subjects: [],
+				childExitStatus: 1,
+				terminalFailure: { kind: 'target-build', failedTargets: ['.#optional'] }
+			});
+			const sequence = await runCohortSequence(
+				{
+					cohorts: [1, 2, 3].map(() => ({
+						kind: 'command',
+						command: ['true']
+					})),
+					keepGoingCohorts: true
+				},
+				{
+					runCohort: (_invocation, cohort) => {
+						if (cohort === 1) {
+							return Promise.reject(targetFailure);
+						}
+						if (cohort === 2) {
+							return Promise.reject(fatalFailure);
+						}
+						return Promise.resolve(
+							buildReceiptV3Schema.parse({
+								version: 3,
+								paths: [pathC],
+								subjects: [],
+								childExitStatus: 0
+							})
+						);
+					},
+					recoverReceipt: (_error, cohort) =>
+						Promise.resolve(
+							cohort === 1 || (cohort === 2 && staleReceipt)
+								? failedReceipt
+								: undefined
+						)
+				}
+			);
+
+			expect(cohortSequenceFailure(sequence.failures)?.error).toBe(
+				fatalFailure
+			);
+			expect(aggregateBuildReceipts(sequence.receipts)).toStrictEqual({
+				version: 3,
+				paths: [pathC],
+				subjects: [],
+				childExitStatus: 1,
+				terminalFailure: { kind: 'command' },
+				uploaded: [],
+				failed: [],
+				collected: []
+			});
+		}
+	);
+
+	it('preserves target failure classification when every failed cohort has matching evidence', async () => {
+		const failure = new BuildCommandFailedError(1, undefined, 1);
+		const receipt = buildReceiptV3Schema.parse({
+			version: 3,
+			paths: [pathA],
+			subjects: [],
+			childExitStatus: 1,
+			terminalFailure: { kind: 'target-build', failedTargets: ['.#optional'] }
+		});
+		const sequence = await runCohortSequence(
+			{
+				cohorts: [{ kind: 'command', command: ['false'] }],
+				keepGoingCohorts: true
+			},
+			{
+				runCohort: () => Promise.reject(failure),
+				recoverReceipt: () => Promise.resolve(receipt)
+			}
+		);
+
+		expect({
+			failure: cohortSequenceFailure(sequence.failures),
+			receipt: aggregateBuildReceipts(sequence.receipts)
+		}).toStrictEqual({
+			failure: { cohort: 1, error: failure, kind: 'target-build' },
+			receipt: { ...receipt, uploaded: [], failed: [], collected: [] }
+		});
+	});
+
 	it('keeps the public envelope unless the V3 aggregate is explicit', () => {
 		const receipts = [
 			{
@@ -434,6 +535,7 @@ describe('parseCohortsFile', () => {
 				{ command: ['nix', 'build', '--no-link', '.#app'] },
 				{
 					installables: ['.#lib'],
+					dependencyBuilds: [{ path: pathA, installables: ['.#producer'] }],
 					attempts: 2,
 					rebuild: true,
 					requireProvenance: true,
@@ -450,6 +552,7 @@ describe('parseCohortsFile', () => {
 				kind: 'constructed',
 				build: {
 					installables: ['.#lib'],
+					dependencyBuilds: [{ path: pathA, installables: ['.#producer'] }],
 					attempts: 2,
 					rebuild: true,
 					requireProvenance: true,
@@ -472,6 +575,30 @@ describe('parseCohortsFile', () => {
 	});
 
 	it.each([
+		{
+			name: 'an invalid dependency path',
+			contents: JSON.stringify({
+				cohorts: [
+					{
+						installables: ['.#app'],
+						dependencyBuilds: [
+							{ path: 'invalid', installables: ['.#producer'] }
+						]
+					}
+				]
+			})
+		},
+		{
+			name: 'a dependency without producers',
+			contents: JSON.stringify({
+				cohorts: [
+					{
+						installables: ['.#app'],
+						dependencyBuilds: [{ path: pathA, installables: [] }]
+					}
+				]
+			})
+		},
 		{ name: 'a body that is not JSON', contents: 'not json' },
 		{ name: 'a body with no cohorts', contents: '{"cohorts": []}' },
 		{

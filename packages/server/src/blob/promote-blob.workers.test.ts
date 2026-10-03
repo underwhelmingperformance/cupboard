@@ -1,11 +1,16 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { boundedBlobs, boundedD1 } from '../do/bounded-io.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from '../do/subrequest-slice.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import {
@@ -16,13 +21,180 @@ import {
 } from '../test-support.ts';
 
 import { reserveObjectIncarnation } from './object-incarnation.ts';
-import { promoteVerifiedBlob, stagePromotedBlob } from './promote-blob.ts';
+import {
+	commitStagedBlobPromotion,
+	promoteVerifiedBlob,
+	stagePromotedBlob
+} from './promote-blob.ts';
 
 describe('promoteVerifiedBlob', () => {
 	beforeEach(async () => {
 		await resetTestServer();
 		await clearBlobStorage();
 	});
+
+	it.each([
+		{
+			contended: false,
+			loser: false,
+			incoherent: false,
+			calls: 14,
+			activation: 'live'
+		},
+		{
+			contended: false,
+			loser: true,
+			incoherent: false,
+			calls: 15,
+			activation: 'live'
+		},
+		{
+			contended: false,
+			loser: true,
+			incoherent: true,
+			calls: 17,
+			activation: 'retired'
+		},
+		{
+			contended: true,
+			loser: true,
+			incoherent: true,
+			calls: 7,
+			activation: 'deferred'
+		}
+	])(
+		'meters $calls calls when replacing a missing NAR (loser=$loser, incoherent=$incoherent)',
+		async ({ contended, loser, incoherent, calls, activation }) => {
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const nar = await verifiableNar('metered-promotion');
+			const target = { narHash: nar.narHash, narSize: nar.narSize };
+			const blob = {
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			};
+			const stagingKey = r2ObjectKeySchema.parse(
+				'staging/metered-promotion/upload'
+			);
+			await env.BLOBS.put(stagingKey, nar.narBytes);
+			await database.insert(d1Schema.blobState).values({
+				...target,
+				...blob,
+				compression: 'zstd',
+				incarnation: 2,
+				verifiedAt: isoTimestamp(new Date())
+			});
+			await database.insert(d1Schema.objectIncarnation).values({
+				kind: 'nar',
+				objectId: nar.narHash,
+				incarnation: 2,
+				state: 'live',
+				updatedAt: isoTimestamp(new Date())
+			});
+			const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+			let reservationBatches = 0;
+			const batch = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockImplementation(async (statements) => {
+					reservationBatches += 1;
+					if (contended && reservationBatches === 2) {
+						await database
+							.update(d1Schema.objectIncarnation)
+							.set({ incarnation: 4, reservationOwner: 'competing-owner' })
+							.where(eq(d1Schema.objectIncarnation.objectId, nar.narHash))
+							.run();
+					}
+					return originalBatch(statements);
+				});
+
+			const originalHead = env.BLOBS.head.bind(env.BLOBS);
+			const originalPut = env.BLOBS.put.bind(env.BLOBS);
+			const head = vi
+				.spyOn(env.BLOBS, 'head')
+				.mockImplementation(async (key) => {
+					if (key === narObjectKey(nar.narHash, 2)) {
+						await database
+							.update(d1Schema.objectIncarnation)
+							.set({
+								incarnation: 3,
+								state: 'pending',
+								reservationOwner: contended ? 'other-owner' : 'metered-owner'
+							})
+							.where(eq(d1Schema.objectIncarnation.objectId, nar.narHash));
+					}
+					return originalHead(key);
+				});
+			const put = vi
+				.spyOn(env.BLOBS, 'put')
+				.mockImplementation(async (...arguments_) => {
+					if (loser && arguments_[0] === narObjectKey(nar.narHash, 3)) {
+						await originalPut(arguments_[0], nar.narBytes, {
+							sha256: NixSha256Hash.parse(nar.fileHash).digestBytes()
+						});
+						if (incoherent) {
+							await database
+								.update(d1Schema.objectIncarnation)
+								.set({ state: 'live', reservationOwner: sql`null` })
+								.where(eq(d1Schema.objectIncarnation.objectId, nar.narHash));
+							await database
+								.update(d1Schema.blobState)
+								.set({ incarnation: 4 })
+								.where(eq(d1Schema.blobState.narHash, nar.narHash));
+						}
+					}
+					return originalPut(...arguments_);
+				});
+			try {
+				const result = await withSubrequestSlice(
+					async () => {
+						const before = subrequestsAvailable();
+						try {
+							const staged = await stagePromotedBlob(
+								drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema }),
+								boundedBlobs(env.BLOBS),
+								stagingKey,
+								target,
+								blob,
+								'metered-owner',
+								() => true
+							);
+							if (staged === undefined) {
+								throw new Error(
+									'The owned promotion did not produce a staging result.'
+								);
+							}
+							const activation = await commitStagedBlobPromotion(
+								drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema }),
+								staged,
+								() => true
+							);
+							return { activation, calls: before - subrequestsAvailable() };
+						} catch (error) {
+							if (!contended || !(error instanceof Error)) {
+								throw error;
+							}
+							return {
+								activation: 'deferred',
+								error: error.name,
+								calls: before - subrequestsAvailable()
+							};
+						}
+					},
+					{ subrequests: 17, reserve: 0 }
+				);
+				expect(result).toStrictEqual({
+					activation,
+					calls,
+					...(contended && {
+						error: 'ObjectIncarnationReservationContendedError'
+					})
+				});
+			} finally {
+				head.mockRestore();
+				put.mockRestore();
+				batch.mockRestore();
+			}
+		}
+	);
 
 	it('uses the canonical object metadata after a concurrent promotion', async () => {
 		const staged = await verifiableNar('promote-loser');

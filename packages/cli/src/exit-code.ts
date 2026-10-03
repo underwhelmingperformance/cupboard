@@ -1,4 +1,12 @@
-import { CodedError, genericExitCode } from '@cupboard/shared/errors';
+import {
+	SubstituterAnswerUnreadableError,
+	SubstituterUnreachableError
+} from '@cupboard/nix';
+import {
+	CodedError,
+	genericExitCode,
+	usageExitCode
+} from '@cupboard/shared/errors';
 
 import { translateRpcError } from './client/rpc-errors.ts';
 import {
@@ -10,11 +18,34 @@ import {
 } from './errors.ts';
 
 /**
- * Returns the exit status for a failure: a `CodedError`'s own exit status, or 1
- * for anything else. `cliExitCode` handles cancellation and Commander errors.
+ * Returns the failure's exit status. Typed substituter failures use the CLI's
+ * authority and service-failure categories; other errors use a `CodedError`'s
+ * status or 1. `cliExitCode` handles cancellation and Commander errors.
  */
 export function errorExitCode(error: unknown): number {
-	return error instanceof CodedError ? error.exitCode : genericExitCode;
+	if (error instanceof CodedError) {
+		return error.exitCode;
+	}
+	if (error instanceof SubstituterAnswerUnreadableError) {
+		return transientExitCode;
+	}
+	if (!(error instanceof SubstituterUnreachableError)) {
+		return genericExitCode;
+	}
+	const status = error.status;
+	if (status === undefined) {
+		return transientExitCode;
+	}
+	if ([401, 403, 407].includes(status)) {
+		return authExitCode;
+	}
+	if (status === 507) {
+		return genericExitCode;
+	}
+	if ([200, 206, 408, 429].includes(status) || status >= 500) {
+		return transientExitCode;
+	}
+	return genericExitCode;
 }
 
 /**
@@ -24,7 +55,8 @@ export function errorExitCode(error: unknown): number {
 const rankedExitStatuses: readonly RankedExitStatus[] = [
 	authExitCode,
 	transientExitCode,
-	unavailableExitCode
+	unavailableExitCode,
+	usageExitCode
 ];
 
 /**
@@ -40,7 +72,8 @@ export interface FailureClassification<Fallback extends number> {
  * Returns 77 and the first authentication or authorisation failure if there is
  * one, otherwise 75 and the first transient failure, otherwise 69 and the first
  * failure caused by an unavailable dependency. Otherwise it returns
- * `fallbackExitCode` and the first defined cause. Authentication and
+ * 2 if a typed usage error remains, otherwise `fallbackExitCode` and the
+ * first defined cause. Authentication and
  * authorisation rank first because a re-run cannot succeed until the user signs
  * in again or uses a credential with the required access.
  *

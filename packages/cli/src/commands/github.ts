@@ -21,6 +21,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { type Command, Option } from 'commander';
@@ -46,12 +47,14 @@ import {
 	GithubSetupRemovalError,
 	ReadCredentialPairError
 } from '../errors.ts';
+import { classifyFailures } from '../exit-code.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { type GithubCheckOptions, runGithubCheck } from './github/check.ts';
 import {
 	githubBranchClaims,
+	githubMergedPullRequestClaims,
 	githubPullRequestClaims
 } from './github/claims.ts';
 import {
@@ -70,9 +73,14 @@ import {
 	runDiscoveredGithubRepair
 } from './github/repair.ts';
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
-import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
+import {
+	githubBranchAddBody,
+	githubPrAddBody,
+	githubPrCloseAddBody
+} from './oidc-trust.ts';
 import {
 	lookupRepository,
+	parseRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
@@ -332,7 +340,7 @@ function isRuleMatchingBody(
 
 interface DesiredTrustRule {
 	readonly step: string;
-	readonly kind: 'pull-request' | 'branch';
+	readonly kind: 'pull-request' | 'branch' | 'merged-close';
 	readonly trigger: string;
 	readonly body: OidcTrustAddBodyInput;
 	readonly tokenClaims: Readonly<Record<string, string>>;
@@ -880,6 +888,21 @@ export async function runGithubSetup(
 					workflowReference: workflowReference.reference
 				})
 			})
+		},
+		{
+			step: 'merged pull-request closure trust rule',
+			kind: 'merged-close',
+			trigger: 'merged pull requests',
+			body: githubPrCloseAddBody(url, identity, {
+				repo: options.repo,
+				jobWorkflowRef: options.workflowRef
+			}),
+			tokenClaims: githubMergedPullRequestClaims(url, identity, {
+				baseBranch: identity.defaultBranch,
+				...(workflowReference.pin.kind !== 'tag-pattern' && {
+					workflowReference: workflowReference.reference
+				})
+			})
 		}
 	];
 	const { rules } = await reporter.phase('Reading trust rules', () =>
@@ -1119,7 +1142,8 @@ export async function runGithubSetup(
 		.toSorted((left, right) => left.localeCompare(right));
 
 	throw new GithubSetupRemovalError(failedIds, {
-		cause: removalFailures.values().next().value
+		cause: classifyFailures(removalFailures.values().toArray(), genericExitCode)
+			.cause
 	});
 }
 
@@ -1152,7 +1176,8 @@ export function registerGithubCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
 			'--repo <owner/name>',
-			'the GitHub repository that will publish'
+			'the GitHub repository that will publish',
+			parseRepository
 		)
 		.option(
 			'--branch <name>',
@@ -1160,8 +1185,8 @@ export function registerGithubCommands(
 			'main'
 		)
 		.requiredOption(
-			'--workflow-ref <owner/repo/path@ref>',
-			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later.'
+			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
+			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.'
 		)
 		.option(
 			'-y, --yes',
@@ -1174,8 +1199,8 @@ export function registerGithubCommands(
 		)
 		.option('--read-password <password>', 'password of the read credential')
 		.option(
-			'--cache-access-mode <mode>',
-			'public or private for new pull-request caches (default: the tenant default cache access)',
+			'--access, --cache-access-mode <mode>',
+			'read access for new pull-request caches and their reuse view: public or private (default: the tenant default cache access); does not change the default cache',
 			parseCacheAccess
 		)
 		.action(async (url: URL, options: GithubSetupOptions) => {
@@ -1218,13 +1243,17 @@ export function registerGithubCommands(
 			"Check that the tenant will accept the publishing jobs in a GitHub repository's workflow files, and offer to repair the tenant's settings."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.requiredOption('--repo <owner/name>', 'the GitHub repository to check')
+		.requiredOption(
+			'--repo <owner/name>',
+			'the GitHub repository to check',
+			parseRepository
+		)
 		.option(
 			'--branch <name>',
 			"branch to read the workflow files from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main)."
 		)
 		.option(
-			'--workflow-ref <owner/repo/path@ref>',
+			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
 			'check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref must be a full commit ID or the tag of a release that GitHub reports as immutable.'
 		)
 		.option(
@@ -1240,7 +1269,7 @@ export function registerGithubCommands(
 		)
 		.option(
 			'--tag-pattern <glob>',
-			'release tag pattern that new trust rules accept, such as v*'
+			'release tag pattern that new trust rules accept, such as v* (without refs/tags/); github setup instead includes refs/tags/v* in --workflow-ref'
 		)
 		.option(
 			'--root-prefix <value>',
