@@ -76,11 +76,16 @@ Things to know before you use it:
   event, including a merge, closes the cache through its configured grace and
   skips publication. Include `closed` and `reopened` in the caller's event
   types. The trust rule needs `cache:create`, `cache:close` and `cache:reopen`
-  grants for the selected cache. Merged closes also need a separate closure-only
-  rule: use `oidc-trust add-github-pr-close` with the same `--cache-template`
-  and the simple workflow's `--workflow-ref`. See [Merged PR
-  closure][merged-pr-closure]. Branch runs and `publish: none` do not change the
-  cache lifecycle. See [Cache closure][cache-closure].
+  for the selected cache. Setup acquires read authority before creating a
+  missing cache. Publication and creation grants already imply scoped
+  `cache:read`, which permits the absence response. Private content requires a
+  `cache:content-read` grant without a root selector. Merged closes also need a
+  separate closure-only rule. For an immutable workflow reference, use
+  `oidc-trust add-github-pr-close` with the same `--cache-template` and the
+  simple workflow's `--workflow-ref`. A caller that deliberately follows a
+  branch needs a manual close-only rule with that exact workflow selector. See
+  [Merged PR closure][merged-pr-closure]. Branch runs and `publish: none` do not
+  change the cache lifecycle. See [Cache closure][cache-closure].
 - The job needs a trust rule of its own. The rules that `cupboard github setup`
   adds accept only the flake publish workflow. See
   [Trust rules for these jobs](#trust-rules-for-these-jobs).

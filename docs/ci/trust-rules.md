@@ -124,6 +124,17 @@ and reopening still use the publication rule's exact PR binding. The default
 preset's closure family excludes the default and release caches. A custom
 template selects a different closure family.
 
+The helper refuses branch workflow references. If a caller deliberately follows
+a branch, write a manual rule with `--from-file`. Keep the repository and owner
+IDs, `event_name=pull_request`, the signed base-branch ref and the exact
+`job_workflow_ref`, including `@refs/heads/<branch>`. Permit only `cache:close`
+for a named-cache pattern restricted to the repository's PR cache family.
+Preserve the publication rule's cache naming convention; default and release
+caches must remain outside that pattern. See [Writing a rule as
+JSON][manual-rule-json].
+
+[manual-rule-json]: #writing-a-rule-as-json
+
 Deploy the server version that supports named-cache patterns before adding the
 merged-close rule. See [PR cache closure][pr-cache-closure-upgrade]. GitHub
 explains the ref change in [Pull request events][github-pr-events]; the [OIDC

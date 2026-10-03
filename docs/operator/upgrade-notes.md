@@ -26,8 +26,12 @@ signatures; use `cupboard attest verify` for verification.
 The simple `cupboard-publish.yml` workflow accepts `manage-pr-cache: true` with
 an explicit `cache` input. Add `closed` and `reopened` to the caller's
 `pull_request` event types, and grant `cache:create`, `cache:close` and
-`cache:reopen` for the selected cache. Closed runs skip builds and publication,
-including merged pull requests. Existing calls leave this input disabled.
+`cache:reopen` for the selected cache. Setup acquires read authority before
+creating a missing cache. Existing publication grants and `cache:create` already
+imply scoped `cache:read`, which permits the absence response. Private content
+requires a `cache:content-read` grant without a root selector. Closed runs skip
+builds and publication, including merged pull requests. Existing calls leave
+this input disabled.
 
 Newly created PR caches inherit the tenant's default creation grace. A close
 expires their roots at the close time, while reads and reuse remain available
@@ -112,8 +116,11 @@ choices, and the accepted workflow reference for this release. Confirm
 replacement of the PR rule, or use `--yes` for non-interactive setup. To update
 a rule manually, add both actions to the same-cache PR grant and preserve its
 read, publication, root and attestation grants. Add
-`oidc-trust add-github-pr-close` with the same cache template and workflow
-reference for merged closes. See [PR trust rules].
+`oidc-trust add-github-pr-close` with the same cache template and an immutable
+workflow reference for merged closes. The helper refuses branch workflow
+references. If the caller deliberately follows a branch, including Cupboard's
+`@main` dogfood workflow, add a reviewed manual close-only rule with that exact
+workflow selector. See [PR trust rules].
 
 If the calling workflow explicitly lists `pull_request.types`, include both
 `closed` and `reopened`. The closed event starts grace; the reopened event
