@@ -15,8 +15,7 @@ import { platform } from 'node:process';
 import { invocationIdSchema } from '@cupboard/protocol/build';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { SocketPathTooLongError } from '../errors.ts';
-
+import { SocketPathTooLongError } from './errors.ts';
 import {
 	createInvocationRuntimeDirectory,
 	createRootLinkDirectory,

@@ -4,6 +4,7 @@
 	"devDependencies": {
 		"@cloudflare/workers-types": "catalog:",
 		"@cupboard/cli-ui": "workspace:*",
+		"@cupboard/nix": "workspace:*",
 		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/reporter": "workspace:*",

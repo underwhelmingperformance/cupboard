@@ -5,17 +5,18 @@ export interface HookScriptOptions {
 	readonly helperPath: string;
 	readonly socketPath: string;
 	readonly rootLinkDirectory?: string;
+	readonly indirectRootLinks?: boolean;
+	readonly deliveryErrorFile?: string;
 }
 
-// The values baked into the script are wrapped in single quotes; an embedded
-// single quote is spelt with the standard close-quote, escaped-quote,
-// reopen-quote sequence so any path the supervisor planned survives intact.
+// A shell single-quoted value can include a quote only through a close-quote,
+// escaped-quote, reopen-quote sequence.
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 
 /**
- * The event line the generated script's `printf` produces. Nix supplies
+ * The event line produced by the generated script's `printf`. Nix supplies
  * `OUT_PATHS` as a space-separated list. The function wraps each path in JSON
  * quotes; store paths contain no characters that require JSON escaping.
  */
@@ -44,6 +45,10 @@ export function renderHookScript(options: HookScriptOptions): string {
 	const invocationId = shellQuote(options.invocationId);
 	const helper = shellQuote(options.helperPath);
 	const socket = shellQuote(options.socketPath);
+	const errorRedirect =
+		options.deliveryErrorFile === undefined
+			? ''
+			: ` 2>>${shellQuote(options.deliveryErrorFile)}`;
 	const rootSetup =
 		options.rootLinkDirectory === undefined
 			? 'root_directory=\noutput_protection=\n'
@@ -56,7 +61,7 @@ output_protection=
 			: `	path_name=\${path##*/}
 	path_hash=\${path_name%%-*}
 	root="$root_directory/$path_hash"
-	if ! nix-store --realise "$path" --add-root "$root" >/dev/null && [ ! -L "$root" ]; then
+	if ! nix-store --realise "$path" --add-root "$root"${options.indirectRootLinks === true ? ' --indirect' : ''} >/dev/null && [ ! -L "$root" ]; then
 		output_protection=',"outputProtection":"failed"'
 	fi
 `;
@@ -79,6 +84,6 @@ done
 if [ -n "$output_protection" ]; then
 	printf '%s\n' 'cupboard: failed to protect every completed output from garbage collection. Cupboard will try to publish the outputs that remain after the build.' >&2
 fi
-printf '{"version":1,"invocationId":"%s","derivation":"%s","outputPaths":[%s]%s}\n' ${invocationId} "$DRV_PATH" "$out" "$output_protection" | exec ${helper} ${socket}
+printf '{"version":1,"invocationId":"%s","derivation":"%s","outputPaths":[%s]%s}\n' ${invocationId} "$DRV_PATH" "$out" "$output_protection" | exec ${helper} ${socket}${errorRedirect}
 `;
 }

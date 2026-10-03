@@ -17,8 +17,7 @@ import {
 	BuildEventOutsideStoreError,
 	type BuildEventRejectedError,
 	BuildEventTooLargeError
-} from '../errors.ts';
-
+} from './errors.ts';
 import { BuildEventListener, maximumBuildEventBytes } from './listener.ts';
 
 const storeDirectory = storeDirectorySchema.parse('/nix/store');
@@ -129,6 +128,17 @@ function send(socketPath: string, payload: string | Uint8Array): Promise<void> {
 }
 
 describe('BuildEventListener', () => {
+	it('flushes one attempt without refusing the next attempt', async () => {
+		const event = buildEvent();
+		const started = await startListener();
+		await send(started.socketPath, `${JSON.stringify(event)}\n`);
+		await started.listener.flush();
+		await send(started.socketPath, `${JSON.stringify(event)}\n`);
+		await started.listener.drain();
+		expect(started.listener.accepted).toStrictEqual([event, event]);
+		expect(started.rejections).toStrictEqual([]);
+	});
+
 	it('accepts a valid event and records it', async () => {
 		const harness = await startListener();
 		const event = buildEvent();

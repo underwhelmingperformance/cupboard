@@ -7,7 +7,7 @@ import process from 'node:process';
 import type { InvocationId } from '@cupboard/protocol/build';
 import { withCleanups } from '@cupboard/shared/cleanup';
 
-import { SocketPathTooLongError } from '../errors.ts';
+import { SocketPathTooLongError } from './errors.ts';
 
 // `sun_path` is a fixed buffer holding the socket path and its terminator, so
 // a usable path is strictly shorter than the platform's buffer size. The limit

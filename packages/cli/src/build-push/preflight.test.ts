@@ -7,6 +7,7 @@ import {
 	defaultSignatureSettings,
 	type NixStoreConfig
 } from '@cupboard/nix';
+import { linuxSunPathBytes } from '@cupboard/nix/build-observation';
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -30,7 +31,6 @@ import {
 	type BuildPushPreflightOptions,
 	preflightBuildPush
 } from './preflight.ts';
-import { linuxSunPathBytes } from './runtime-directory.ts';
 
 const invocationId = invocationIdSchema.parse('invocation-1');
 const cache: CacheScope = {
