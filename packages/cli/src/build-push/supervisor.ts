@@ -4,10 +4,11 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
+import {
+	type ChildEnvironment,
+	removeInvocationRuntimeDirectory
+} from '@cupboard/nix/build-observation';
 import { withCleanups } from '@cupboard/shared/cleanup';
-
-import type { ChildEnvironment } from './nix-config.ts';
-import { removeInvocationRuntimeDirectory } from './runtime-directory.ts';
 
 export type ChildCommand = readonly [string, ...string[]];
 

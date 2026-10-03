@@ -13,7 +13,7 @@ import {
 	BuildEventOutsideStoreError,
 	type BuildEventRejectedError,
 	BuildEventTooLargeError
-} from '../errors.ts';
+} from './errors.ts';
 
 const newlineByte = 0x0a;
 const acceptedByte = 0x01;
@@ -245,27 +245,7 @@ export class BuildEventListener {
 		}
 	}
 
-	get accepted(): readonly BuildEvent[] {
-		return this.acceptedEvents;
-	}
-
-	/**
-	 * Quiesces the endpoint: refuses connections arriving from here on and
-	 * resolves once every accepted connection has reached its terminal state,
-	 * with its message recorded, its rejection reported, or the connection
-	 * closed. A connection that never settles is destroyed once the drain
-	 * timeout elapses. Closing a connection also cancels any output protection
-	 * that was waiting to acknowledge its event. After drain resolves the accepted
-	 * set is complete.
-	 */
-	async drain(): Promise<void> {
-		// A helper that connected before this call may still be waiting for its
-		// connection to be dispatched, so the queued arrivals are accepted
-		// before the endpoint starts refusing them.
-		await afterNextPoll();
-
-		this.draining = true;
-
+	private async finishPending(): Promise<void> {
 		if (this.unsettledSockets.size === 0) {
 			return;
 		}
@@ -286,6 +266,37 @@ export class BuildEventListener {
 			this.notifySettled = undefined;
 			clearTimeout(deadline);
 		}
+	}
+
+	get accepted(): readonly BuildEvent[] {
+		return this.acceptedEvents;
+	}
+
+	/**
+	 * Quiesces the endpoint: refuses connections arriving from here on and
+	 * resolves once every accepted connection has reached its terminal state,
+	 * with its message recorded, its rejection reported, or the connection
+	 * closed. A connection that never settles is destroyed once the drain
+	 * timeout elapses. Closing a connection also cancels any output protection
+	 * that was waiting to acknowledge its event. After drain resolves the accepted
+	 * set is complete.
+	 */
+	async drain(): Promise<void> {
+		// A helper that connected before this call may still be waiting for its
+		// connection to be dispatched, so the queued arrivals are accepted
+		// before the endpoint starts refusing them.
+		await afterNextPoll();
+
+		this.draining = true;
+		await this.finishPending();
+	}
+
+	/**
+	Completes pending hook acknowledgements between build attempts.
+	*/
+	async flush(): Promise<void> {
+		await afterNextPoll();
+		await this.finishPending();
 	}
 
 	async close(): Promise<void> {

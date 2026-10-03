@@ -10,6 +10,24 @@ import {
 	type PublicationSelection,
 	selectPublicationPaths
 } from '@cupboard/nix';
+import {
+	abortReason,
+	type BuildAttempt,
+	BuildEventListener,
+	type ChildEnvironment,
+	createRootLinkDirectory,
+	createRuntimeDirectory,
+	environmentWithPostBuildHook,
+	type InvocationRuntimeOptions,
+	parseBuildActivities,
+	planInvocationDirectory,
+	receiptSubjects,
+	removeInvocationRuntimeDirectory,
+	renderHookScript,
+	type RootLinkDirectory,
+	type VerifiedBuildOutput,
+	waitForProtection
+} from '@cupboard/nix/build-observation';
 import { derivationPathOf } from '@cupboard/nix-store/derivation';
 import {
 	type RootName,
@@ -71,20 +89,8 @@ import {
 	runPush
 } from '../push/push.ts';
 
-import {
-	type BuildAttempt,
-	parseBuildActivities,
-	receiptSubjects,
-	type VerifiedBuildOutput
-} from './attribution.ts';
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
-import { renderHookScript } from './hook-script.ts';
-import { BuildEventListener } from './listener.ts';
 import { buildPushModeDescription, selectBuildPushMode } from './mode.ts';
-import {
-	type ChildEnvironment,
-	environmentWithPostBuildHook
-} from './nix-config.ts';
 import type { BuildPushPreflight } from './preflight.ts';
 import {
 	reconcileBuild,
@@ -92,14 +98,6 @@ import {
 	type ReconcileResult,
 	type ReconcileTarget
 } from './reconcile.ts';
-import {
-	createRootLinkDirectory,
-	createRuntimeDirectory,
-	type InvocationRuntimeOptions,
-	planInvocationDirectory,
-	removeInvocationRuntimeDirectory,
-	type RootLinkDirectory
-} from './runtime-directory.ts';
 import {
 	type ChildCommand,
 	type ChildExit,
@@ -288,35 +286,6 @@ function alreadyProtectedBatchStore(
 				queryPathInfo: (storePath) => store.queryPathInfo(storePath)
 			})
 	};
-}
-
-function waitForProtection(
-	operation: Promise<void>,
-	signal: AbortSignal
-): Promise<void> {
-	if (signal.aborted) {
-		return Promise.reject(abortReason(signal));
-	}
-
-	return new Promise((resolve, reject) => {
-		const abort = (): void => {
-			reject(abortReason(signal));
-		};
-
-		signal.addEventListener('abort', abort, { once: true });
-		void operation
-			.then(resolve)
-			.catch(reject)
-			.finally(() => {
-				signal.removeEventListener('abort', abort);
-			});
-	});
-}
-
-function abortReason(signal: AbortSignal): Error {
-	return signal.reason instanceof Error
-		? signal.reason
-		: new Error('Output protection was cancelled.');
 }
 
 async function runStreamedBuildPush(

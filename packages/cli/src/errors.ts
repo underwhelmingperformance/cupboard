@@ -1,3 +1,18 @@
+export type { BuildEventMalformedKind } from '@cupboard/nix/build-observation';
+export {
+	BuildEventConnectionClosedError,
+	BuildEventHandlingError,
+	BuildEventMalformedError,
+	BuildEventOutsideStoreError,
+	BuildEventRejectedError,
+	BuildEventTooLargeError,
+	HookHelperMissingError,
+	PostBuildHookConflictError,
+	RemoteBuildPushStoreError,
+	SocketPathTooLongError,
+	UntrustedDaemonError
+} from '@cupboard/nix/build-observation';
+
 import type { TenantId } from '@cupboard/nix-store/scalars';
 import {
 	localStepStallWindowMs,
@@ -1799,134 +1814,6 @@ export class GithubCheckIncompleteError extends CliError {
 }
 
 /**
- * No candidate runtime directory yields a hook socket path that fits within
- * `sun_path`, so the invocation endpoint cannot be created anywhere.
- */
-export class SocketPathTooLongError extends CliError {
-	constructor(
-		public readonly socketPath: string,
-		public readonly limitBytes: number
-	) {
-		super(
-			`No runtime directory yields a hook socket path within ` +
-				`${String(limitBytes)} bytes; the shortest candidate was ${socketPath}`
-		);
-		this.name = 'SocketPathTooLongError';
-	}
-}
-
-/**
-A build event the invocation listener refused to accept.
-*/
-export abstract class BuildEventRejectedError extends CliError {}
-
-export type BuildEventMalformedKind =
-	'missing-line' | 'invalid-json' | 'invalid-event';
-
-export class BuildEventMalformedError extends BuildEventRejectedError {
-	constructor(public readonly kind: BuildEventMalformedKind) {
-		super(`Rejected a malformed build event: ${kind}`);
-		this.name = 'BuildEventMalformedError';
-	}
-}
-
-/**
-The invocation listener received a build event that exceeded the fixed byte
-limit.
-*/
-export class BuildEventTooLargeError extends BuildEventRejectedError {
-	constructor(
-		public readonly maximumBytes: number,
-		public readonly observedBytes: number
-	) {
-		super(
-			`Rejected a build event after ${String(observedBytes)} bytes; the limit is ${String(maximumBytes)} bytes`
-		);
-		this.name = 'BuildEventTooLargeError';
-	}
-}
-
-/**
-The listener accepted a valid event but could not protect its output paths from
-garbage collection.
-*/
-export class BuildEventHandlingError extends BuildEventRejectedError {
-	constructor(public override readonly cause: unknown) {
-		super('Cupboard could not protect the completed outputs for streaming.');
-		this.name = 'BuildEventHandlingError';
-	}
-}
-
-/**
-The hook stopped waiting before the listener could acknowledge the event.
-*/
-export class BuildEventConnectionClosedError extends Error {
-	constructor() {
-		super(
-			'The build hook stopped waiting before Cupboard protected the completed outputs from garbage collection.'
-		);
-		this.name = 'BuildEventConnectionClosedError';
-	}
-}
-
-/**
- * The daemon does not trust this client, so it would silently ignore the
- * invocation's `post-build-hook` override. The listener would therefore receive
- * no completed-output events. Refuse the build before it starts;
- * `requiredSetting` is the daemon setting that must list the user.
- */
-export class UntrustedDaemonError extends CliError {
-	public readonly requiredSetting = 'trusted-users';
-
-	constructor(public readonly trust: 'not-trusted' | 'unknown') {
-		super(
-			`The Nix daemon does not trust this user, so it would ignore the ` +
-				`post-build-hook this run sets. Add the user to the daemon's ` +
-				`trusted-users setting.`
-		);
-		this.name = 'UntrustedDaemonError';
-	}
-
-	override get exitCode(): number {
-		return authExitCode;
-	}
-}
-
-/**
-The selected store runs on another machine, so its build hook cannot connect to
-the listener on this machine.
-*/
-export class RemoteBuildPushStoreError extends CliError {
-	constructor(public readonly storeKind: 'ssh-ng') {
-		super(
-			'Cupboard cannot stream build outputs from an ssh-ng store because ' +
-				'the build hook and Cupboard run on different machines. Use a local ' +
-				'store or a local Nix daemon.'
-		);
-		this.name = 'RemoteBuildPushStoreError';
-	}
-
-	override get exitCode(): number {
-		return unavailableExitCode;
-	}
-}
-
-/**
- * The effective configuration already sets `post-build-hook`. Nix supports
- * exactly one, so streaming mode refuses; it never silently overrides an
- * operator's hook.
- */
-export class PostBuildHookConflictError extends CliError {
-	constructor(public readonly existingHook: string) {
-		super(
-			`The Nix configuration already sets post-build-hook (${existingHook}), ` +
-				`and Nix supports exactly one. Remove it, or run without streaming.`
-		);
-		this.name = 'PostBuildHookConflictError';
-	}
-}
-
-/**
  * The token's granted authorization_details do not cover an operation this
  * run needs on a root, so a later step would fail after the expensive build.
  * The run is refused before the build starts, and the error states which
@@ -1946,38 +1833,6 @@ export class MissingGrantError extends CliError {
 
 	override get exitCode(): number {
 		return authExitCode;
-	}
-}
-
-/**
- * This installation has no compiled hook helper at any expected location, so
- * streaming publication cannot start. `candidates` lists every location that
- * was checked.
- */
-export class HookHelperMissingError extends CliError {
-	constructor(public readonly candidates: readonly string[]) {
-		super(
-			`This installation is missing its cupboard-hook-relay hook helper; ` +
-				`checked: ${candidates.join(', ')}.`
-		);
-		this.name = 'HookHelperMissingError';
-	}
-}
-
-/**
- * A well-formed build event naming an output path outside the selected store
- * directory. Only paths beneath that directory are publication candidates, so
- * the event is refused before anything enters the accepted set.
- */
-export class BuildEventOutsideStoreError extends BuildEventRejectedError {
-	constructor(
-		public readonly storePath: string,
-		public readonly storeDirectory: string
-	) {
-		super(
-			`Rejected a build event: ${storePath} is not beneath ${storeDirectory}`
-		);
-		this.name = 'BuildEventOutsideStoreError';
 	}
 }
 

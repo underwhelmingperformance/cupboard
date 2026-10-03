@@ -11,8 +11,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { HookHelperMissingError } from '../errors.ts';
-
+import { HookHelperMissingError } from './errors.ts';
 import { hookHelperName, resolveHookHelper } from './helper-resolution.ts';
 
 const bases: string[] = [];

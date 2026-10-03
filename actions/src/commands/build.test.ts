@@ -17,6 +17,7 @@ import {
 	defaultSignatureSettings,
 	NixStorePathNotFoundError
 } from '@cupboard/nix';
+import { receiptSubjects as cliReceiptSubjects } from '@cupboard/nix/build-observation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storePathSchema,
@@ -28,7 +29,6 @@ import {
 } from '@cupboard/protocol/build';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { receiptSubjects as cliReceiptSubjects } from '../../../packages/cli/src/build-push/attribution.ts';
 import {
 	BuildAttemptsInvalidError,
 	BuildInstallableInvalidError,

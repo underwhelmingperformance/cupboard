@@ -1,7 +1,9 @@
-import { activityLogRecords, type NixValidPathInfo } from '@cupboard/nix';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type { BuildSubjectV3Input } from '@cupboard/protocol/build';
 import { z } from 'zod';
+
+import { activityLogRecords } from '../activity-log.ts';
+import type { NixValidPathInfo } from '../nix-store.ts';
 
 /**
 An empty `machine` denotes a local build.
@@ -16,6 +18,7 @@ export interface BuildAttempt {
 	readonly attemptId: string;
 	readonly activities: readonly BuildActivity[];
 	readonly verifiedOutputs?: readonly VerifiedBuildOutput[];
+	readonly completedOutputs?: readonly VerifiedBuildOutput[];
 }
 
 export interface VerifiedBuildOutput {
@@ -81,7 +84,10 @@ export function receiptSubjects(
 	const firstBuild = new Map<string, FirstBuild>();
 
 	for (const attempt of attempts) {
-		if (attempt.verifiedOutputs !== undefined) {
+		if (
+			attempt.verifiedOutputs !== undefined ||
+			attempt.completedOutputs !== undefined
+		) {
 			continue;
 		}
 
@@ -119,12 +125,29 @@ export function receiptSubjects(
 				return [];
 			}
 
-			const original = firstBuild.get(info.deriver);
+			const validatedAttempt = attempts.find((attempt) =>
+				attempt.completedOutputs?.some(
+					(output) =>
+						output.storePath === info.storePath &&
+						output.derivation === info.deriver &&
+						output.narHash === info.narHash.digestHex()
+				)
+			);
+			const original =
+				validatedAttempt === undefined
+					? firstBuild.get(info.deriver)
+					: {
+							attempt: validatedAttempt.attempt,
+							attemptId: validatedAttempt.attemptId,
+							activity: validatedAttempt.activities.find(
+								(activity) => activity.derivation === info.deriver
+							)
+						};
 			const built = checked ?? original;
 
 			if (
 				built === undefined ||
-				(checked === undefined && original?.activity.machine !== '')
+				(checked === undefined && original?.activity?.machine !== '')
 			) {
 				return [];
 			}

@@ -14,6 +14,10 @@ import process from 'node:process';
 import { promisify } from 'node:util';
 
 import {
+	BuildEventListener,
+	renderHookScript
+} from '@cupboard/nix/build-observation';
+import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -27,8 +31,6 @@ import {
 	hookScriptFileName,
 	runBuildPush
 } from '../../packages/cli/src/build-push/build-push.ts';
-import { renderHookScript } from '../../packages/cli/src/build-push/hook-script.ts';
-import { BuildEventListener } from '../../packages/cli/src/build-push/listener.ts';
 import { preflightBuildPush } from '../../packages/cli/src/build-push/preflight.ts';
 import type { ChildCommand } from '../../packages/cli/src/build-push/supervisor.ts';
 import {
