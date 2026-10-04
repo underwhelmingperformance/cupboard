@@ -210,6 +210,7 @@ The object owns everything that belongs to one tenant alone. That includes:
 - its caches, in `cache_identity`;
 - its committed narinfos, each with a generation counter per store path;
 - pending uploads, and the result of verifying each one;
+- staged-object cleanup queued for deleted cache identities;
 - retention roots, what they point at, grace deadlines, and the state of garbage
   collection;
 - the keys that it signs narinfos with, in `signing_key`, and the keys that it
@@ -282,12 +283,26 @@ generation onwards. When you delete a cache, its generation goes up by one. A
 new cache with the same name then uses different keys, so it can't read anything
 left over from the old one.
 
+Cache deletion revokes access before removing local state. Its local transaction
+copies pending staging keys into `staging_cleanup`, removes the pending rows,
+marks the cache deleted and records `cache_teardown` under its identity. Alarm
+passes retire published state first, then delete staging objects in pages of at
+most 1,000 keys while the maintenance budget permits. The queue retains a page
+until R2 confirms its deletion, and the teardown marker remains until staging
+and published-state cleanup finish. The indexed teardown header allows a pass to
+reconstruct a missing teardown marker. Only staging keys enter this queue;
+canonical NARs and bundles remain subject to shared-object reference accounting
+and the reapers.
+
 Earlier releases stored private caches under a `private/` name. A migration in a
 later release moved those objects to the current keys.
 
 The deploy sets an R2 lifecycle rule on the `staging/` prefix. It deletes
 anything there a day after it's written, and aborts multipart uploads there that
 are still incomplete after a day.
+
+Orphan staging reconciliation and the lifecycle rule also remove late writes
+from upload requests that were already in progress when the cache was deleted.
 
 ### KV
 

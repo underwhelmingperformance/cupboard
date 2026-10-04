@@ -23,7 +23,8 @@ import {
 	negotiateViaInstance,
 	resetTestServer,
 	resolvedCache,
-	underOneUnitOfWork
+	underOneUnitOfWork,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
@@ -79,8 +80,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 39,
-			largeBacklogCost: 39
+			emptyBacklogCost: 40,
+			largeBacklogCost: 40
 		});
 	});
 
@@ -96,8 +97,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 21,
-			largeBacklogCost: 21
+			smallBacklogCost: 22,
+			largeBacklogCost: 22
 		});
 	});
 
@@ -113,6 +114,30 @@ describe('upload negotiation cost', () => {
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
 			smallBacklogCost: 6,
 			largeBacklogCost: 6
+		});
+	});
+
+	it('reconciles without scanning durable teardown headers', async () => {
+		await initialise();
+		await withoutAlarmArming(async () => {
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				await state.storage.deleteAlarm();
+				instance.context.db
+					.insert(schema.cacheTeardowns)
+					.values({ cacheId: resolvedCache(instance.context).id })
+					.run();
+			});
+			const smallBacklogCost = await reconcileCost();
+			await runInDurableObject(currentServer(), (_instance, state) => {
+				state.storage.sql.exec(
+					`WITH RECURSIVE sequence(n) AS (SELECT 100000 UNION ALL SELECT n + 1 FROM sequence WHERE n < 100199) INSERT INTO cache_teardown(cache_id) SELECT n FROM sequence`
+				);
+			});
+			const largeBacklogCost = await reconcileCost();
+			expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
+				smallBacklogCost: 7,
+				largeBacklogCost: 7
+			});
 		});
 	});
 
@@ -170,8 +195,8 @@ describe('upload negotiation cost', () => {
 		const sparseDue = await reconcileCost();
 
 		expect({ smallDeferred, largeDeferred, sparseDue }).toStrictEqual({
-			smallDeferred: 21,
-			largeDeferred: 21,
+			smallDeferred: 22,
+			largeDeferred: 22,
 			sparseDue: 3
 		});
 	});
@@ -368,8 +393,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 248,
-			largeBacklogCost: 248
+			smallBacklogCost: 252,
+			largeBacklogCost: 252
 		});
 	});
 
@@ -379,12 +404,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 233,
+				rowsRead: 236,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 233,
+				rowsRead: 236,
 				usesIndex: true,
 				sorts: false
 			}
@@ -421,8 +446,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 240,
-			largeBacklogCost: 240
+			smallBacklogCost: 244,
+			largeBacklogCost: 244
 		});
 	});
 
@@ -453,8 +478,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 872, rowsWritten: 131 },
-			largeBacklog: { rowsRead: 872, rowsWritten: 131 }
+			smallBacklog: { rowsRead: 876, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 876, rowsWritten: 131 }
 		});
 	});
 
@@ -477,8 +502,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 256,
-			largeBacklogCost: 256
+			smallBacklogCost: 260,
+			largeBacklogCost: 260
 		});
 	});
 });

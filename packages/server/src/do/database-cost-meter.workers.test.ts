@@ -147,8 +147,9 @@ describe('db cost meter', () => {
 		// it reads from that list as a row, so a one-path negotiation reads two
 		// rows more than its table rows. One further row is the cache identity the
 		// request resolves before it negotiates anything. The request also probes
-		// for a managed retirement before eligibility reconciliation, then checks
-		// that the cache is still live before it inserts the pending upload.
+		// for a managed retirement and durable teardown before eligibility
+		// reconciliation, then checks that the cache is still live before it
+		// inserts the pending upload.
 		const negotiate = capture.logs
 			.filter((entry) => entry.message === 'request finished')
 			.map((entry) => costLineSchema.parse(entry.properties))
@@ -160,7 +161,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 39,
+			rowsRead: 40,
 			rowsWritten: 11
 		});
 	});
@@ -194,7 +195,7 @@ describe('db cost meter', () => {
 			status: negotiate?.status,
 			rowsRead: negotiate?.rowsRead,
 			rowsWritten: negotiate?.rowsWritten
-		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 39, rowsWritten: 13 });
+		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 40, rowsWritten: 13 });
 	});
 
 	it('logs the cost line with a 500 status when the request fails', async () => {
@@ -231,7 +232,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 39,
+			rowsRead: 40,
 			rowsWritten: 1
 		});
 	});

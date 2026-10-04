@@ -535,6 +535,19 @@ export const pendingAttestationSubjects = sqliteTable(
 	]
 );
 
+export const cacheTeardowns = sqliteTable('cache_teardown', {
+	cacheId: integer('cache_id').$type<CacheId>().primaryKey()
+});
+
+export const stagingCleanup = sqliteTable(
+	'staging_cleanup',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.cacheId, table.r2Key] })]
+);
+
 export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{

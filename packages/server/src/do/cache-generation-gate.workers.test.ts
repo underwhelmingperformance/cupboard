@@ -22,8 +22,12 @@ import { count, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import {
+	closeAlarmFence,
+	openAlarmFence
+} from '../alarm-fence.test-support.ts';
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { cacheIdentityColumns, cacheScopeFromRow } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
@@ -62,6 +66,7 @@ import {
 	resetTestServer,
 	tenantCasBlobRows,
 	tenantUsageRow,
+	testServerFor,
 	uploadMetadata,
 	useTestServer,
 	type VerifiableNar,
@@ -101,6 +106,21 @@ const firstNarInfoGeneration = 0;
 const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
 	user: 'reader',
 	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+});
+
+const parkedTeardowns = new Map<string, ReturnType<typeof currentServer>>();
+
+afterEach(async () => {
+	for (const [id, stub] of parkedTeardowns) {
+		parkedTeardowns.delete(id);
+		await runInDurableObject(stub, async (_instance, state) => {
+			try {
+				await state.storage.deleteAlarm();
+			} finally {
+				closeAlarmFence(state);
+			}
+		});
+	}
 });
 
 interface ReadCredential {
@@ -318,21 +338,36 @@ function teardownPending(_cache: CacheScope): Promise<unknown> {
 	});
 }
 
-/**
- * Deletes a cache and removes its teardown marker in one Durable Object
- * invocation, so that a test can observe the published state the deletion left
- * for its drain.
- *
- * Both steps belong to the same invocation because the deletion arms an alarm
- * before it returns. Clearing that alarm afterwards is not enough on its own:
- * workerd delivers an alarm that is already due, and the pass it runs claims
- * whatever marker it finds.
- */
+async function parkTeardownAlarms(
+	stub: ReturnType<typeof currentServer>
+): Promise<void> {
+	const id = stub.id.toString();
+
+	if (parkedTeardowns.has(id)) {
+		return;
+	}
+
+	await runInDurableObject(stub, async (_instance, state) => {
+		openAlarmFence(state);
+		parkedTeardowns.set(id, stub);
+		await state.storage.deleteAlarm();
+	});
+}
+
+// Publication can arm an immediate alarm. Deleting it after it becomes due
+// cannot cancel delivery, so fence the object before configuration and writes.
+async function useParkedTestServer(name: string): Promise<void> {
+	await parkTeardownAlarms(testServerFor(name));
+	await useTestServer(name);
+}
+
 async function deleteAndParkTeardown(cache: CacheScope): Promise<void> {
-	await runInDurableObject(currentServer(), async (instance, state) => {
-		const resolved = instance.context.cacheRepository.require(cache);
+	if (!parkedTeardowns.has(currentServer().id.toString())) {
+		throw new Error('Park teardown alarms before publishing cache contents.');
+	}
+
+	await runInDurableObject(currentServer(), async (instance) => {
 		await instance.runCacheTeardown(cache, origin);
-		await state.storage.delete(`${teardownEntryPrefix}${String(resolved.id)}`);
 	});
 }
 
@@ -624,7 +659,7 @@ async function publishPrivatePath(
 	metadata: UploadPathMetadata;
 	nar: VerifiableNar;
 }> {
-	await useTestServer(server);
+	await useParkedTestServer(server);
 
 	const { token } = await bootstrap({
 		caches: [{ scope: privateBuilds, access: 'private' }]
@@ -1071,7 +1106,7 @@ describe('deleted private cache', () => {
 	});
 
 	it('refuses attestations from the previous cache after the name is reused', async () => {
-		await useTestServer('gen-deleted-bundle');
+		await useParkedTestServer('gen-deleted-bundle');
 
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const nar = await verifiableNar('bundle-path');
@@ -1155,7 +1190,7 @@ describe('attestation list generation', () => {
 	beforeEach(resetTestServer);
 
 	it('refuses an attestation list published for the generation before a recommit', async () => {
-		await useTestServer('gen-stale-list');
+		await useParkedTestServer('gen-stale-list');
 
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const nar = await verifiableNar('stale-list');
@@ -1325,7 +1360,7 @@ describe('cache generation gate', () => {
 	});
 
 	it('does not let an undrained edge authorise the cache created next', async () => {
-		await useTestServer('gen-recreate');
+		await useParkedTestServer('gen-recreate');
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const oldNar = await verifiableNar('recreate-old');
 		const newNar = await verifiableNar('recreate-new');
@@ -1367,7 +1402,7 @@ describe('cache generation gate', () => {
 	});
 
 	it('refuses the previous public cache narinfo once the name is registered again', async () => {
-		await useTestServer('gen-public-narinfo');
+		await useParkedTestServer('gen-public-narinfo');
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const oldNar = await verifiableNar('public-narinfo-old');
 		const newNar = await verifiableNar('public-narinfo-new');
@@ -1425,7 +1460,7 @@ describe('cache generation gate', () => {
 	// caches of the name write and read in separate directories. The first cache
 	// keeps the keys it has, which is why nothing it wrote has to be moved.
 	it('keys a re-registered cache away from the objects the previous one left', async () => {
-		await useTestServer('gen-public-incarnation-keys');
+		await useParkedTestServer('gen-public-incarnation-keys');
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const oldNar = await verifiableNar('incarnation-keys-old');
 		const newNar = await verifiableNar('incarnation-keys-new');

@@ -1235,60 +1235,45 @@ describe('cache registry admin', () => {
 		});
 	});
 
-	it('keeps the identity live when a teardown fails before its transaction', async () => {
+	it('confirms local deletion while R2 cleanup is unavailable', async () => {
 		await useTestServer('cache-admin-identity-teardown-failure');
 
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await putCache(init.token, 'builds', 30);
-		// A fresh upload stages under its own key, so the teardown has an R2
-		// object to delete before its local transaction.
 		await negotiateUploads(init.token, [metadata], buildsCache);
 
 		const deleteSpy = vi
 			.spyOn(env.BLOBS, 'delete')
 			.mockRejectedValue(new Error('R2 unavailable'));
 
-		let failed: Response;
-
 		try {
-			failed = await authorisedFetch('/caches/builds', init.token, {
-				method: 'DELETE'
+			await withoutAlarmArming(async () => {
+				const removed = await authorisedFetch('/caches/builds', init.token, {
+					method: 'DELETE'
+				});
+				expect({
+					status: removed.status,
+					identities: await cacheIdentities(),
+					deletions: deleteSpy.mock.calls
+				}).toStrictEqual({
+					status: StatusCodes.OK,
+					identities: [
+						defaultIdentity,
+						{
+							id: 2,
+							scope: { kind: 'named', name: 'builds' },
+							access: 'public',
+							deleted: true
+						}
+					],
+					deletions: []
+				});
 			});
 		} finally {
 			deleteSpy.mockRestore();
 		}
-
-		const afterFailure = {
-			identities: await cacheIdentities()
-		};
-		const removed = await authorisedFetch('/caches/builds', init.token, {
-			method: 'DELETE'
-		});
-		const builds = {
-			id: 2,
-			scope: { kind: 'named', name: 'builds' },
-			access: 'public'
-		};
-
-		expect({
-			failed: failed.status,
-			afterFailure,
-			removed: removed.status,
-			afterRemoval: {
-				identities: await cacheIdentities()
-			}
-		}).toStrictEqual({
-			failed: StatusCodes.INTERNAL_SERVER_ERROR,
-			afterFailure: {
-				identities: [defaultIdentity, { ...builds, deleted: false }]
-			},
-			removed: StatusCodes.OK,
-			afterRemoval: {
-				identities: [defaultIdentity, { ...builds, deleted: true }]
-			}
-		});
 	});
 
 	it('keeps lifecycle and local identity live when D1 revocation fails', async () => {
@@ -1937,11 +1922,21 @@ describe('cache registry admin', () => {
 
 		await putNarBytes(decision.r2Key);
 
-		const stagedBefore = await env.BLOBS.head(decision.r2Key);
-		const removed = await authorisedFetch('/caches/builds', init.token, {
-			method: 'DELETE'
+		const deletion = await withoutAlarmArming(async () => {
+			const stagedBefore = await env.BLOBS.head(decision.r2Key);
+			const removed = await authorisedFetch('/caches/builds', init.token, {
+				method: 'DELETE'
+			});
+			const stagedAfter = await env.BLOBS.head(decision.r2Key);
+			await currentServer().resumeCacheTeardown();
+			const cleaned = await env.BLOBS.head(decision.r2Key);
+			return {
+				stagedBefore: stagedBefore !== null,
+				removed: removed.status,
+				stagedAfter: stagedAfter !== null,
+				cleaned: cleaned === null
+			};
 		});
-		const stagedAfter = await env.BLOBS.head(decision.r2Key);
 
 		// The pending upload is gone with the cache, so a late commit cannot
 		// resurrect it.
@@ -1953,14 +1948,13 @@ describe('cache registry admin', () => {
 
 		expectCommitUpgradeError(commitError);
 		expect({
-			stagedBefore: stagedBefore !== null,
-			removed: removed.status,
-			stagedAfter: stagedAfter === null,
+			...deletion,
 			commit: commitError.status
 		}).toStrictEqual({
 			stagedBefore: true,
 			removed: StatusCodes.OK,
 			stagedAfter: true,
+			cleaned: true,
 			commit: StatusCodes.NOT_FOUND
 		});
 	});

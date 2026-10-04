@@ -53,13 +53,13 @@ import {
 	CacheRetirementTtlRequiredError
 } from '../errors.ts';
 import {
-	narObjectKey,
 	type RequestOrigin,
-	requestOriginSchema
+	requestOriginSchema,
+	stagingPrefix
 } from '../http/http.ts';
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
-import { deleteObjects } from './bulk.ts';
+import { drainObjectDeletionPages } from './bulk.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import { CacheCreationDefaultsService } from './cache-creation-defaults-service.ts';
 import {
@@ -77,23 +77,30 @@ import { jsonValueLists } from './json-list.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
+import { isRowBudgetExhausted } from './row-budget.ts';
+import { hasSubrequestsFor } from './subrequest-slice.ts';
 // Once the chunk empties the queue, the pass sweeps for revoked edges.
 const revokedEdgeSweepSubrequestsPerPass = 1;
+const stagingCleanupSubrequestsPerPass = 1;
 
 /**
  * The most paths one pass reads from the teardown queue.
  *
  * This caps the rows read. The drain can retire the entire page when its paths
  * have no attestation references. Otherwise the remaining subrequests can
- * stop it earlier. The calculation reserves one call for the revoked-edge
- * sweep.
+ * stop it earlier. The calculation reserves calls for the revoked-edge
+ * sweep and, when staging work exists, at least one staging deletion.
  */
-export function maxPathsTornDownPerRun(subrequestAllowance: number): number {
+export function maxPathsTornDownPerRun(
+	subrequestAllowance: number,
+	hasStagingCleanup = false
+): number {
 	return Math.min(
 		maxNarInfoDeletionsFlushedPerRun,
 		Math.floor(
 			(maintenancePassSubrequests(subrequestAllowance) -
-				revokedEdgeSweepSubrequestsPerPass) /
+				revokedEdgeSweepSubrequestsPerPass -
+				(hasStagingCleanup ? stagingCleanupSubrequestsPerPass : 0)) /
 				(1 + narInfoRetirementSubrequests(maxFencedRetireRows))
 		) * maxFencedRetireRows
 	);
@@ -159,6 +166,74 @@ export class CacheAdminService {
 			.get();
 
 		return row !== undefined;
+	}
+
+	private hasStagingCleanup(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ cacheId: schema.stagingCleanup.cacheId })
+				.from(schema.stagingCleanup)
+				.where(eq(schema.stagingCleanup.cacheId, cache.id))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	private durableTeardownCacheId(): CacheId | undefined {
+		return this.context.db
+			.select({ cacheId: schema.cacheTeardowns.cacheId })
+			.from(schema.cacheTeardowns)
+			.orderBy(schema.cacheTeardowns.cacheId)
+			.limit(1)
+			.get()?.cacheId;
+	}
+
+	private async recoverTeardownMarker(): Promise<
+		{ cache: ResolvedCache; origin: undefined } | undefined
+	> {
+		const cacheId = this.durableTeardownCacheId();
+		if (cacheId === undefined) {
+			return undefined;
+		}
+
+		const cache = this.context.cacheRepository.resolvedForId(cacheId);
+		await this.context.ctx.storage.put(this.teardownKey(cache), {});
+		await this.context.ctx.storage.put(
+			teardownCursorKey,
+			this.teardownKey(cache)
+		);
+		return { cache, origin: undefined };
+	}
+
+	private drainStagingCleanup(cache: ResolvedCache): Promise<number> {
+		return drainObjectDeletionPages(
+			this.context.env.BLOBS,
+			{
+				read: (limit) =>
+					this.context.db
+						.select({ r2Key: schema.stagingCleanup.r2Key })
+						.from(schema.stagingCleanup)
+						.where(eq(schema.stagingCleanup.cacheId, cache.id))
+						.orderBy(schema.stagingCleanup.r2Key)
+						.limit(limit)
+						.all()
+						.map((entry) => entry.r2Key),
+				acknowledge: (keys) => {
+					for (const list of jsonValueLists(keys)) {
+						this.context.db
+							.delete(schema.stagingCleanup)
+							.where(
+								and(
+									eq(schema.stagingCleanup.cacheId, cache.id),
+									inArray(schema.stagingCleanup.r2Key, list)
+								)
+							)
+							.run();
+					}
+				}
+			},
+			() => !isRowBudgetExhausted()
+		);
 	}
 
 	private managedRetirementKey(cacheId: CacheId): string {
@@ -262,7 +337,7 @@ export class CacheAdminService {
 		cache: ResolvedCache,
 		origin: RequestOrigin | undefined,
 		limit: number
-	): Promise<void> {
+	): Promise<boolean> {
 		const queued = this.context.db
 			.select({
 				storePathHash: schema.narInfoDeletions.storePathHash,
@@ -283,11 +358,12 @@ export class CacheAdminService {
 			false
 		);
 
-		if (this.hasQueuedDeletions(cache)) {
-			return;
+		if (this.hasQueuedDeletions(cache) || !hasSubrequestsFor(1)) {
+			return false;
 		}
 
 		await this.deletionQueue.queueRevokedCacheEdges(cache, limit);
+		return true;
 	}
 
 	// Canonical UTC timestamps sort chronologically as strings.
@@ -350,35 +426,21 @@ export class CacheAdminService {
 
 		const now = isoTimestamp(new Date());
 
-		const pending = this.context.db
-			.select({
-				r2Key: schema.pendingUploads.r2Key,
-				narHash: schema.pendingUploads.narHash
-			})
-			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.cacheId, cache.id))
-			.all();
-		const pendingAttestations = this.context.db
-			.select({ r2Key: schema.pendingAttestations.r2Key })
-			.from(schema.pendingAttestations)
-			.where(eq(schema.pendingAttestations.cacheId, cache.id))
-			.all();
-
-		await deleteObjects(
-			this.context.env.BLOBS,
-			pending
-				.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
-				.map((upload) => upload.r2Key)
-		);
-		await deleteObjects(
-			this.context.env.BLOBS,
-			pendingAttestations.map((upload) => upload.r2Key)
-		);
-
 		// Remove every narinfo row in the same transaction that queues its
 		// retirement. A later recommit creates a new generation that the queued
 		// deletion cannot remove.
 		this.context.db.transaction((tx) => {
+			tx.insert(schema.cacheTeardowns)
+				.values({ cacheId: cache.id })
+				.onConflictDoNothing()
+				.run();
+			for (const table of [schema.pendingUploads, schema.pendingAttestations]) {
+				tx.run(sql`INSERT INTO staging_cleanup (cache_id, r2_key)
+					SELECT cache_id, r2_key FROM ${table}
+					WHERE cache_id = ${cache.id}
+						AND substr(r2_key, 1, ${stagingPrefix.length}) = ${stagingPrefix}
+					ON CONFLICT (cache_id, r2_key) DO NOTHING`);
+			}
 			tx.run(
 				sql`INSERT INTO narinfo_deletion (cache_id, store_path_hash, nar_hash, generation, created_at)
 						SELECT cache_id, store_path_hash, nar_hash, generation, ${now}
@@ -1212,7 +1274,7 @@ export class CacheAdminService {
 					continue;
 				}
 				await this.context.ctx.storage.delete(teardownCursorKey);
-				return undefined;
+				return this.recoverTeardownMarker();
 			}
 
 			const [key, storedMarker] = entry;
@@ -1256,12 +1318,13 @@ export class CacheAdminService {
 			limit: 1
 		});
 
-		return remaining.size > 0;
+		return remaining.size > 0 || this.durableTeardownCacheId() !== undefined;
 	}
 
 	/**
 	 * Revokes a cache's read authority, then removes its local state. Bounded
-	 * alarm passes run by {@link resumeTeardownPass} retire published state.
+	 * alarm passes run by {@link resumeTeardownPass} remove staging objects and
+	 * retire published state.
 	 *
 	 * Revocation advances the generation, records deletion and clears the cache
 	 * credential in one D1 transaction. Reads then exclude earlier generations
@@ -1288,11 +1351,13 @@ export class CacheAdminService {
 		cache: ResolvedCache,
 		origin: RequestOrigin | undefined,
 		limit: number = maxPathsTornDownPerRun(
-			this.context.subrequestsPerInvocation
+			this.context.subrequestsPerInvocation,
+			this.hasStagingCleanup(cache)
 		)
 	): Promise<void> {
 		await this.context.criticalSection(async () => {
-			await this.drainTeardownChunk(cache, origin, limit);
+			const hasSweptEdges = await this.drainTeardownChunk(cache, origin, limit);
+			await this.drainStagingCleanup(cache);
 
 			// The queue, not the marker, decides when teardown is complete. The pass
 			// leaves it empty only once the sweep has also found no revoked edge to
@@ -1302,9 +1367,23 @@ export class CacheAdminService {
 				cache,
 				limit
 			);
-			if (!hasMoreHistory && !this.hasQueuedDeletions(cache)) {
-				await this.context.ctx.storage.delete(this.teardownKey(cache));
+			if (
+				!hasSweptEdges ||
+				hasMoreHistory ||
+				this.hasQueuedDeletions(cache) ||
+				this.hasStagingCleanup(cache)
+			) {
+				return;
 			}
+
+			await this.context.ctx.storage.delete([
+				this.teardownKey(cache),
+				this.managedRetirementKey(cache.id)
+			]);
+			this.context.db
+				.delete(schema.cacheTeardowns)
+				.where(eq(schema.cacheTeardowns.cacheId, cache.id))
+				.run();
 		});
 	}
 }

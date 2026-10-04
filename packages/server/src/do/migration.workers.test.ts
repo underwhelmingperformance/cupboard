@@ -25,6 +25,7 @@ import journal from '../../drizzle/meta/_journal.json' with { type: 'json' };
 import retrySnapshot from '../../drizzle/meta/0069_snapshot.json' with { type: 'json' };
 import creationDefaultsSnapshot from '../../drizzle/meta/0070_snapshot.json' with { type: 'json' };
 import closeSnapshot from '../../drizzle/meta/0071_snapshot.json' with { type: 'json' };
+import stagingCleanupSnapshot from '../../drizzle/meta/0072_snapshot.json' with { type: 'json' };
 import migrations from '../../drizzle/migrations.js';
 import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -82,6 +83,63 @@ function queued(storePathHash: string): unknown {
 }
 
 describe('migrations', () => {
+	it('adds a durable staging queue without changing pending state', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-staging-cleanup'),
+			async (_instance, state) => {
+				await migrateThrough(state, 71);
+				state.storage.sql.exec(
+					"INSERT INTO pending_upload(id,cache_id,nar_hash,r2_key,metadata_json,created_at,expires_at) VALUES ('pending',1,'sha256:nar','staging/pending','{}','2026-01-01T00:00:00.000Z','2099-01-01T00:00:00.000Z')"
+				);
+				const before = state.storage.sql
+					.exec('SELECT * FROM pending_upload')
+					.toArray();
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 72)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 72)
+				);
+				state.storage.sql.exec(
+					"INSERT INTO staging_cleanup(cache_id,r2_key) VALUES (1,'staging/pending'),(2,'staging/pending')"
+				);
+				return {
+					before,
+					after: state.storage.sql
+						.exec('SELECT * FROM pending_upload')
+						.toArray(),
+					migrated,
+					repeated,
+					queue: state.storage.sql
+						.exec('SELECT * FROM staging_cleanup ORDER BY cache_id,r2_key')
+						.toArray()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			before: result.before,
+			after: result.before,
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false },
+			queue: [
+				{ cache_id: 1, r2_key: 'staging/pending' },
+				{ cache_id: 2, r2_key: 'staging/pending' }
+			]
+		});
+		expect(stagingCleanupSnapshot).toStrictEqual({
+			...closeSnapshot,
+			id: stagingCleanupSnapshot.id,
+			prevId: closeSnapshot.id,
+			tables: {
+				...closeSnapshot.tables,
+				cache_teardown: stagingCleanupSnapshot.tables.cache_teardown,
+				staging_cleanup: stagingCleanupSnapshot.tables.staging_cleanup
+			}
+		});
+	});
 	it('adds creation defaults after retry migration without changing predecessor state', async () => {
 		const result = await runInDurableObject(
 			testServerFor('migration-creation-defaults-after-retries'),
@@ -2889,7 +2947,9 @@ it('adds close metadata after creation defaults without replacing predecessor sc
 		tables: predecessorTables
 	}).toStrictEqual(creationDefaultsSnapshot);
 	expect(closeSnapshot.prevId).toBe(creationDefaultsSnapshot.id);
-	expect(journal.entries.slice(-2)).toStrictEqual([
+	expect(
+		journal.entries.filter((entry) => entry.idx <= 71).slice(-2)
+	).toStrictEqual([
 		{
 			idx: 70,
 			version: '6',
