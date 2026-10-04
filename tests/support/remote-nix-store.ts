@@ -4,13 +4,10 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { bestEffort, withCleanup } from '@cupboard/shared/cleanup';
-import {
-	GenericContainer,
-	type StartedTestContainer,
-	Wait
-} from 'testcontainers';
+import { type StartedTestContainer, Wait } from 'testcontainers';
 
 import { onceAsync } from './cleanup.ts';
+import { prepareNixFixtureImage } from './fixture-image.ts';
 import { runCommand } from './process.ts';
 
 const fixtureDirectory = path.resolve('tests/fixtures/nix-ssh-store');
@@ -150,8 +147,7 @@ export async function startNixSshStore(): Promise<NixSshStoreFixture> {
 		process.env.RYUK_CONTAINER_IMAGE = ryukImage;
 
 		try {
-			const image =
-				await GenericContainer.fromDockerfile(fixtureDirectory).build();
+			const image = await prepareNixFixtureImage(fixtureDirectory);
 			container = await image
 				.withExposedPorts(sshPort)
 				// Nix GC inspects process mappings and environments for runtime roots.
