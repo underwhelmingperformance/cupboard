@@ -1,6 +1,7 @@
 import {
 	cacheScopeSchema,
 	nixSha256HashSchema,
+	sha256HexDigestSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -169,6 +170,36 @@ export const attestationAttachSummarySchema = z.strictObject({
 });
 export type AttestationAttachSummary = z.output<
 	typeof attestationAttachSummarySchema
+>;
+
+export const attestationAttachPartialResultKind = 'attestation-attach-partial';
+
+// An unconfirmed pair had a request without a validated attachment response;
+// the server may have recorded it. An unattempted pair had no attachment request.
+export const attestationAttachPartialBundleSchema = z.strictObject({
+	storePathHash: storePathHashSchema,
+	storePath: storePathSchema.optional(),
+	digest: sha256HexDigestSchema,
+	outcome: z.enum([
+		'attached',
+		'reused',
+		'unservable',
+		'unconfirmed',
+		'unattempted'
+	])
+});
+
+export const attestationAttachPartialSchema = z.strictObject({
+	attached: countSchema,
+	reused: countSchema,
+	unservable: countSchema,
+	unconfirmed: countSchema,
+	unattempted: countSchema,
+	uploadedBytes: countSchema,
+	bundles: z.array(attestationAttachPartialBundleSchema)
+});
+export type AttestationAttachPartial = z.output<
+	typeof attestationAttachPartialSchema
 >;
 
 // The `kind` under which `cupboard build-push` emits its final summary result.

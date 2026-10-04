@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { Writable } from 'node:stream';
 
+import { createCliUi } from '@cupboard/cli-ui';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	cacheNameSchema,
@@ -20,6 +25,7 @@ import {
 	attestationNegotiateMaxBundles
 } from '@cupboard/protocol/attestations';
 import {
+	parseReporterResults,
 	type Reporter,
 	type ResultPayload,
 	type ResultRow,
@@ -457,6 +463,259 @@ function transportFixture(paths = 1, bundleCount = 1) {
 }
 
 describe('bundle attachment transport', () => {
+	it('stops renewal work after a sibling fails and preserves the failure if reporting throws', async () => {
+		const { prepared, client, log, expiry } = transportFixture(1, 2);
+		const started = Promise.withResolvers<undefined>();
+		const renewal = Promise.withResolvers<undefined>();
+		const failed = Promise.withResolvers<undefined>();
+		const failure = new ORPCError('INTERNAL_SERVER_ERROR');
+		const partial = vi.fn(() => {
+			throw new Error('result file unavailable');
+		});
+		client.negotiateAttestationBundles.mockImplementation(async (body) => {
+			if (body.bundles.length === 1) {
+				started.resolve(undefined);
+				await renewal.promise;
+			}
+			return {
+				bundles: body.bundles.map(({ digest }) => ({
+					digest,
+					action: 'upload',
+					uploadId: digest,
+					r2Key: `staging/${digest}`,
+					expiresAt:
+						body.bundles.length === 2 && digest === prepared[1]?.digest
+							? new Date(0).toISOString()
+							: expiry()
+				}))
+			};
+		});
+		client.attachAttestationPaths.mockImplementation(async () => {
+			await started.promise;
+			failed.resolve(undefined);
+			throw failure;
+		});
+		const pending = runAttestationAttachment(prepared, log, {
+			client,
+			onPartial: partial
+		});
+		const rejected = expect(pending).rejects.toBe(failure);
+		await failed.promise;
+		await new Promise<void>((resolve) => setTimeout(resolve, 1));
+		renewal.resolve(undefined);
+		await rejected;
+		expect({
+			uploads: client.uploadNar.mock.calls.map(([key]) => key),
+			attachments: client.attachAttestationPaths.mock.calls,
+			partial: partial.mock.calls
+		}).toStrictEqual({
+			uploads: prepared.map(({ digest }) => `staging/${digest}`),
+			attachments: [
+				[prepared[0]?.digest, { storePathHashes: [prepared[0]?.storePathHash] }]
+			],
+			partial: [
+				{
+					uploadedBytes: 2,
+					bundles: prepared.map(({ storePathHash, digest }, index) => ({
+						storePathHash,
+						digest,
+						outcome: index === 0 ? 'unconfirmed' : 'unattempted'
+					}))
+				}
+			].map((result) => [result])
+		});
+	});
+	it('records a complete mixed page before a strict publication refusal and awaits its sibling', async () => {
+		const { prepared, client, log, responseFor } = transportFixture(2, 2);
+		const partial = vi.fn();
+		client.attachAttestationPaths.mockImplementation(async (digest, body) => {
+			const response = responseFor(digest, body.storePathHashes);
+			if (digest === prepared[0]?.digest) {
+				return {
+					...response,
+					paths: response.paths.map((path, index) => ({
+						...path,
+						status: index === 0 ? 'attached' : 'unservable'
+					}))
+				};
+			}
+			await new Promise<void>((resolve) => setTimeout(resolve, 1));
+			return response;
+		});
+		await expect(
+			runAttestationAttachment(prepared, log, { client, onPartial: partial })
+		).rejects.toBeInstanceOf(AttestationPathUnservableError);
+		expect(partial.mock.calls).toStrictEqual([
+			[
+				{
+					uploadedBytes: 2,
+					bundles: prepared.map(({ storePathHash, digest }, index) => ({
+						storePathHash,
+						digest,
+						outcome: index === 1 ? 'unservable' : 'attached'
+					}))
+				}
+			]
+		]);
+	});
+	it.each([
+		{ transport: 'grouped', failureKind: 'cancelled' },
+		{ transport: 'grouped', failureKind: 'invalid-response' },
+		{ transport: 'legacy fallback', failureKind: 'cancelled' },
+		{ transport: 'legacy fallback', failureKind: 'invalid-response' }
+	])(
+		'reports uncertain $failureKind responses and awaits concurrent $transport attachments',
+		async ({ transport, failureKind }) => {
+			const { prepared, client, log, responseFor } = transportFixture(1, 8);
+			const partial = vi.fn();
+			const siblings = Promise.withResolvers<undefined>();
+			const failed = Promise.withResolvers<undefined>();
+			const failure = new DOMException('cancelled', 'AbortError');
+			const first = prepared[0];
+			if (first === undefined) {
+				throw new Error('missing fixture pair');
+			}
+			client.attachAttestationPaths.mockImplementation(async (digest, body) => {
+				if (digest === first.digest) {
+					failed.resolve(undefined);
+					if (failureKind === 'cancelled') {
+						throw failure;
+					}
+					return responseFor('f'.repeat(64), body.storePathHashes);
+				}
+				await siblings.promise;
+				const response = responseFor(digest, body.storePathHashes);
+				return {
+					...response,
+					paths: response.paths.map((path) => ({
+						...path,
+						status:
+							digest === prepared[1]?.digest
+								? 'already-present'
+								: digest === prepared[2]?.digest
+									? 'unservable'
+									: 'attached'
+					}))
+				};
+			});
+			if (transport === 'legacy fallback') {
+				client.negotiateAttestationBundles.mockRejectedValue(
+					new ORPCError('NOT_FOUND', { status: 404 })
+				);
+				client.negotiateAttestations.mockImplementation((body) =>
+					Promise.resolve({
+						bundles: body.bundles.map((bundle) => ({
+							...bundle,
+							action: 'upload',
+							uploadId: bundle.digest,
+							r2Key: `staging/${bundle.digest}`,
+							expiresAt: transportExpiry()
+						}))
+					})
+				);
+				client.attachAttestation.mockImplementation(async (digest) => {
+					const pair = prepared.find((bundle) => bundle.digest === digest);
+					if (pair === undefined) {
+						throw new Error('missing legacy pair');
+					}
+					if (digest === prepared[2]?.digest) {
+						await siblings.promise;
+						throw new ORPCError('NOT_FOUND');
+					}
+					const response = await client.attachAttestationPaths(digest, {
+						storePathHashes: [pair.storePathHash]
+					});
+					const path = response.paths[0];
+					if (path === undefined || path.status === 'unservable') {
+						throw new Error('invalid legacy fixture');
+					}
+					return { ...path, status: path.status };
+				});
+			}
+			const pending = runAttestationAttachment(prepared, log, {
+				client,
+				skipUnservable: true,
+				onPartial: partial
+			});
+			const rejection =
+				failureKind === 'cancelled'
+					? expect(pending).rejects.toBe(failure)
+					: expect(pending).rejects.toBeInstanceOf(
+							transport === 'grouped'
+								? AttestationBundleResponseMismatchError
+								: AttestationAttachResponseMismatchError
+						);
+			await failed.promise;
+			await new Promise<void>((resolve) => setTimeout(resolve, 1));
+			expect(partial.mock.calls).toStrictEqual([]);
+			siblings.resolve(undefined);
+			await rejection;
+			expect(partial.mock.calls).toStrictEqual([
+				[
+					{
+						uploadedBytes: transport === 'grouped' ? 6 : 8,
+						bundles: prepared.map(({ storePathHash, digest }, index) => ({
+							storePathHash,
+							digest,
+							outcome:
+								index === 0
+									? 'unconfirmed'
+									: index === 1
+										? 'reused'
+										: index === 2
+											? 'unservable'
+											: index < 6
+												? 'attached'
+												: 'unattempted'
+						}))
+					}
+				]
+			]);
+		}
+	);
+
+	it('reports confirmed pages and concurrent completions before the original failure', async () => {
+		const { prepared, client, log, responseFor } = transportFixture(
+			attestationAttachMaxPaths + 1,
+			7
+		);
+		const failure = new Error('attachment failed');
+		const partial = vi.fn();
+		client.attachAttestationPaths.mockImplementation(async (digest, body) => {
+			if (digest === prepared[0]?.digest && body.storePathHashes.length === 1) {
+				throw failure;
+			}
+			await new Promise<void>((resolve) => setTimeout(resolve, 1));
+			return responseFor(digest, body.storePathHashes);
+		});
+		await expect(
+			runAttestationAttachment(prepared, log, {
+				client,
+				onPartial: partial
+			})
+		).rejects.toBe(failure);
+		expect(partial.mock.calls).toStrictEqual([
+			[
+				{
+					uploadedBytes: 6,
+					bundles: prepared.map(({ storePathHash, digest }, index) => ({
+						storePathHash,
+						digest,
+						outcome:
+							index < attestationAttachMaxPaths
+								? 'attached'
+								: index === attestationAttachMaxPaths
+									? 'unconfirmed'
+									: index >= 6 * (attestationAttachMaxPaths + 1) ||
+										  index % (attestationAttachMaxPaths + 1) ===
+												attestationAttachMaxPaths
+										? 'unattempted'
+										: 'attached'
+					}))
+				}
+			]
+		]);
+	});
 	it.each([
 		{ description: 'a public bundle', paths: 1600, bundleCount: 1 },
 		{
@@ -994,6 +1253,130 @@ describe('bundle attachment transport', () => {
 });
 
 describe('runAttestAttach', () => {
+	it.each(['terminal', 'json', 'github'] as const)(
+		'records each bundle in %s output and result files, then reuses confirmed attachments on retry',
+		async (mode) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-attach-partial-')
+			);
+			try {
+				const bundle = sigstoreBundleBytes(bundleSubject(appPath, appHash));
+				const second = sigstoreBundleBytes({
+					...bundleSubject(appPath, appHash),
+					name: 'second'
+				});
+				const firstDigest = sha256Hex(bundle);
+				const secondDigest = sha256Hex(second);
+				const record: RecordedClient = {
+					negotiations: [],
+					uploads: [],
+					attached: []
+				};
+				const failure = new ORPCError('INTERNAL_SERVER_ERROR', { status: 500 });
+				const client = recordedClient(record, {
+					decide: ({ digest }) => (digest === firstDigest ? 'skip' : 'upload'),
+					attach: () => Promise.reject(failure)
+				});
+				const output: string[] = [];
+				const stream = new Writable({
+					write(chunk: Buffer | string, _encoding, callback) {
+						output.push(String(chunk));
+						callback();
+					}
+				});
+				const resultFile = path.join(directory, 'result.jsonl');
+				const ui = createCliUi({
+					mode,
+					colour: false,
+					stream,
+					out: stream,
+					resultFile
+				});
+				const dependencies = {
+					client,
+					pathInfos: [pathInfo(appPath, appHash)],
+					attestations: [{ path: 'first' }, { path: 'second' }],
+					readAttestationBundle: (path: string) =>
+						Promise.resolve(path === 'first' ? bundle : second)
+				};
+				await expect(
+					runAttestAttach([appPath], ui.reporter(), dependencies)
+				).rejects.toBe(failure);
+				const partial = {
+					kind: 'attestation-attach-partial',
+					data: {
+						attached: 0,
+						reused: 1,
+						unservable: 0,
+						unconfirmed: 1,
+						unattempted: 0,
+						uploadedBytes: second.byteLength,
+						bundles: [
+							{
+								storePathHash: StorePath.hash(appPath),
+								storePath: appPath,
+								digest: firstDigest,
+								outcome: 'reused'
+							},
+							{
+								storePathHash: StorePath.hash(appPath),
+								storePath: appPath,
+								digest: secondDigest,
+								outcome: 'unconfirmed'
+							}
+						]
+					}
+				};
+				const outputText = output
+					.join('')
+					.replaceAll('│', '')
+					.replaceAll(/\s+/g, ' ');
+				const recoveryAdvice =
+					'After resolving the reported error, retry with the same bundle files. Existing attachments will be reused.';
+				expect({
+					results: parseReporterResults(await readFile(resultFile, 'utf8')),
+					outputContainsPairs:
+						outputText.includes(firstDigest) &&
+						outputText.includes(secondDigest),
+					recoveryAdviceAfterPairs:
+						outputText.indexOf(recoveryAdvice) >
+						outputText.indexOf(secondDigest)
+				}).toStrictEqual({
+					results: [partial],
+					outputContainsPairs: true,
+					recoveryAdviceAfterPairs: mode !== 'json'
+				});
+				client.negotiateAttestations = (body) =>
+					Promise.resolve({
+						bundles: body.bundles.map((pair) => ({ ...pair, action: 'skip' }))
+					});
+				await runAttestAttach([appPath], ui.reporter(), dependencies);
+				expect(
+					parseReporterResults(await readFile(resultFile, 'utf8'))
+				).toStrictEqual([
+					partial,
+					{
+						kind: 'attestation-attach-summary',
+						data: {
+							attached: 0,
+							reused: 2,
+							unservable: 0,
+							uploadedBytes: 0,
+							paths: [
+								{
+									storePathHash: StorePath.hash(appPath),
+									storePath: appPath,
+									outcome: 'reused'
+								}
+							]
+						}
+					}
+				]);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
 	it('negotiates a closure larger than the protocol cap in bounded batches', async () => {
 		const prepared: PreparedAttestationBundle[] = Array.from(
 			{ length: attestationNegotiateMaxBundles + 1 },

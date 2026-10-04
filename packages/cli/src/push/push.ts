@@ -64,6 +64,7 @@ import {
 	type DivergentSkip,
 	prepareAttestationBundles,
 	type ReadAttestationBundle,
+	reportPartialAttestationAttachment,
 	requireAttestationAttachClient,
 	runAttestationAttachment
 } from '../attest/attach.ts';
@@ -1598,7 +1599,15 @@ async function attachPushedAttestations(
 		}
 
 		const outcome = await runAttestationAttachment(ready, log, {
-			client: requireAttestationAttachClient(dependencies.client)
+			client: requireAttestationAttachClient(dependencies.client),
+			onPartial: (partial) => {
+				reportPartialAttestationAttachment(
+					partial,
+					reporter,
+					pathInfos,
+					prepared
+				);
+			}
 		});
 
 		return attestationResultRows({

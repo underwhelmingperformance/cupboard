@@ -19,6 +19,8 @@ import type {
 } from '@cupboard/protocol/attestations';
 import { attestationNegotiateMaxBundles } from '@cupboard/protocol/attestations';
 import {
+	attestationAttachPartialResultKind,
+	attestationAttachPartialSchema,
 	type AttestationAttachPathInput,
 	attestationAttachSummaryResultKind,
 	attestationAttachSummarySchema
@@ -53,6 +55,10 @@ import {
 	type ReferenceFetchDependencies
 } from '../push/reference.ts';
 
+import {
+	AttachmentProgress,
+	type AttestationAttachPartialOutcome
+} from './attachment-progress.ts';
 import {
 	type AttestationBundleClient,
 	groupAttestationBundles,
@@ -265,6 +271,7 @@ function recordPreparedBundle(
 
 export interface AttestationAttachmentOptions {
 	readonly client: AttestationAttachClient;
+	readonly onPartial?: (outcome: AttestationAttachPartialOutcome) => void;
 	/**
 	 * Treats `NOT_FOUND` during attachment as an `unservable` outcome and
 	 * continues with the other bundles. The server uses this response when the
@@ -381,6 +388,25 @@ export async function runAttestationAttachment(
 	log: StepLog,
 	options: AttestationAttachmentOptions
 ): Promise<AttestationAttachOutcome> {
+	const progress = new AttachmentProgress(prepared);
+	try {
+		return await attachWithProgress(prepared, log, options, progress);
+	} catch (error) {
+		try {
+			options.onPartial?.(progress.snapshot());
+		} catch {
+			throw error;
+		}
+		throw error;
+	}
+}
+
+async function attachWithProgress(
+	prepared: readonly PreparedAttestationBundle[],
+	log: StepLog,
+	options: AttestationAttachmentOptions,
+	progress: AttachmentProgress
+): Promise<AttestationAttachOutcome> {
 	const groups = groupAttestationBundles(prepared);
 	const { negotiateAttestationBundles, attachAttestationPaths } =
 		options.client;
@@ -390,6 +416,7 @@ export async function runAttestationAttachment(
 	) {
 		try {
 			return await runBundleAttachment(groups, log, {
+				progress,
 				client: {
 					negotiateAttestationBundles: (body) =>
 						negotiateAttestationBundles(body),
@@ -410,6 +437,9 @@ export async function runAttestationAttachment(
 
 	const negotiateStep = log.group('negotiate');
 	const decisions: AttestationDecisionInput[] = [];
+	const preparedByIdentity = new Map(
+		prepared.map((bundle) => [attestationBundleIdentityKey(bundle), bundle])
+	);
 
 	for (const batch of chunk(prepared, attestationNegotiateMaxBundles)) {
 		const negotiation = await options.client.negotiateAttestations({
@@ -418,12 +448,21 @@ export async function runAttestationAttachment(
 				digest: bundle.digest
 			}))
 		});
-		decisions.push(...exactAttestationDecisions(batch, negotiation.bundles));
+		const validated = exactAttestationDecisions(batch, negotiation.bundles);
+		decisions.push(...validated);
+		for (const decision of validated) {
+			if (!isAttestationSkip(decision)) {
+				continue;
+			}
+			const bundle = preparedByIdentity.get(
+				attestationBundleIdentityKey(decision)
+			);
+			if (bundle !== undefined) {
+				progress.record({ ...bundle, outcome: 'reused' });
+			}
+		}
 	}
 
-	const preparedByIdentity = new Map(
-		prepared.map((bundle) => [attestationBundleIdentityKey(bundle), bundle])
-	);
 	const toUpload = decisions.filter((decision) =>
 		isAttestationUpload(decision)
 	);
@@ -448,6 +487,7 @@ export async function runAttestationAttachment(
 		await options.client.uploadNar(decision.r2Key, byteStream([bundle.bytes]));
 
 		uploadedBytes += bundle.bytes.byteLength;
+		progress.uploaded(bundle.bytes.byteLength);
 	});
 
 	uploadStep.success(formatBytes(uploadedBytes));
@@ -480,6 +520,7 @@ export async function runAttestationAttachment(
 		);
 
 		try {
+			progress.started([bundle]);
 			const response = requireMatchingAttachResponse(
 				decision,
 				await options.client.attachAttestation(decision.uploadId)
@@ -498,6 +539,7 @@ export async function runAttestationAttachment(
 				digest: bundle.digest,
 				outcome
 			});
+			progress.record({ ...bundle, outcome });
 		} catch (error) {
 			if (
 				options.skipUnservable !== true ||
@@ -512,6 +554,7 @@ export async function runAttestationAttachment(
 				digest: bundle.digest,
 				outcome: 'unservable'
 			});
+			progress.record({ ...bundle, outcome: 'unservable' });
 		}
 	});
 
@@ -591,6 +634,9 @@ export async function runAttestAttach(
 				prepared: bundles,
 				outcome: await runAttestationAttachment(bundles, log, {
 					client: dependencies.client,
+					onPartial: (partial) => {
+						reportPartialAttestationAttachment(partial, reporter, pathInfos);
+					},
 					skipUnservable: true
 				})
 			};
@@ -661,6 +707,74 @@ function attachPathRow(outcome: AttestationAttachPathInput['outcome']): string {
 			return 'attachment no longer available; not recorded';
 		}
 	}
+}
+
+export function reportPartialAttestationAttachment(
+	partial: AttestationAttachPartialOutcome,
+	reporter: Reporter,
+	pathInfos: readonly AttestationPathInfo[],
+	requested: readonly PreparedAttestationBundle[] = []
+): void {
+	const storePathByHash = new Map(
+		pathInfos.map((info) => [StorePath.hash(info.storePath), info.storePath])
+	);
+	const outcomes = new Map(
+		partial.bundles.map((bundle) => [
+			attestationBundleIdentityKey(bundle),
+			bundle
+		])
+	);
+	const pairs = requested.length === 0 ? partial.bundles : requested;
+	const bundles = pairs.map((pair) => {
+		const storePath = storePathByHash.get(pair.storePathHash);
+		return {
+			storePathHash: pair.storePathHash,
+			digest: pair.digest,
+			...(storePath !== undefined && { storePath }),
+			outcome:
+				outcomes.get(attestationBundleIdentityKey(pair))?.outcome ??
+				('unattempted' as const)
+		};
+	});
+	const summary = {
+		attached: bundles.filter((bundle) => bundle.outcome === 'attached').length,
+		reused: bundles.filter((bundle) => bundle.outcome === 'reused').length,
+		unservable: bundles.filter((bundle) => bundle.outcome === 'unservable')
+			.length,
+		unconfirmed: bundles.filter((bundle) => bundle.outcome === 'unconfirmed')
+			.length,
+		unattempted: bundles.filter((bundle) => bundle.outcome === 'unattempted')
+			.length,
+		uploadedBytes: partial.uploadedBytes,
+		bundles
+	};
+	const validated = attestationAttachPartialSchema.safeParse(summary);
+	reporter.result({
+		kind: attestationAttachPartialResultKind,
+		data: validated.success ? validated.data : summary,
+		rows: [
+			{
+				label: 'Partial attestations',
+				value: `${formatCount(summary.attached)} attached, ${formatCount(summary.reused)} reused, ${formatCount(summary.unservable)} unservable, ${formatCount(summary.unconfirmed)} unconfirmed, ${formatCount(summary.unattempted)} unattempted`
+			},
+			{
+				label: 'Attestation upload',
+				value: formatBytes(summary.uploadedBytes)
+			},
+			...bundles.map((bundle): ResultRow => ({
+				label: `${bundle.storePathHash} ${bundle.digest}`,
+				value:
+					bundle.outcome === 'unconfirmed' || bundle.outcome === 'unattempted'
+						? bundle.outcome
+						: attachPathRow(bundle.outcome)
+			})),
+			{
+				label: 'Next step',
+				value:
+					'After resolving the reported error, retry with the same bundle files. Existing attachments will be reused.'
+			}
+		]
+	});
 }
 
 // Fold the bundle outcomes into one result per path, preserving preparation

@@ -173,6 +173,17 @@ The run signs after it publishes. Signing or attachment can fail after the paths
 become available in the cache; the workflow then fails. Publication and
 attestation attachment are separate operations.
 
+When attachment fails, the CLI waits for attachment requests already in progress
+and reports their validated outcomes before returning the original failure. The
+`attestation-attach-partial` result records every requested path and bundle pair
+as `attached`, `reused`, `unservable`, `unconfirmed` or `unattempted`. Its
+counts refer to pairs, not whole paths. An `unconfirmed` pair had an attachment
+request but no validated response, so the server may have recorded the
+attachment. An `unattempted` pair had no attachment request. The report appears
+in terminal and JSON output and in the existing `--result-file`, including
+attachments during publication. After resolving the reported error, retry with
+the same bundle files. Existing attachments will be reused.
+
 To sign, the action requests a certificate from Fulcio, and contacts a timestamp
 authority, Rekor, or both. The Sigstore client sends each of these requests up
 to four times while it gets no response, or gets a 408 or 429 status or any 5xx
