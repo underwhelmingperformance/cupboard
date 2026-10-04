@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { readFile } from 'node:fs/promises';
 
 import { describe, expect, it } from 'vitest';
 import { parseDocument } from 'yaml';
@@ -13,9 +14,11 @@ import {
 	githubWorkflowSource,
 	WorkflowBranchNotFoundError,
 	WorkflowDiscoveryError,
+	WorkflowReferenceMissingError,
 	type WorkflowSource,
 	type WorkflowTrigger
 } from './discovery.ts';
+import { ForkPullRequestFinding, modelPublishingJob } from './publication.ts';
 
 const repository = 'iainlane/dotfiles';
 const tenant = new URL('https://cupboard.supply/t/laney');
@@ -1108,6 +1111,91 @@ jobs:
 });
 
 describe('githubWorkflowSource', () => {
+	it.each([
+		{ reference: 'refs/heads/main', expectedCacheControl: 'no-cache' },
+		{ reference: 'refs/tags/v0.0.35', expectedCacheControl: undefined },
+		{ reference: 'b'.repeat(40), expectedCacheControl: undefined }
+	])(
+		'reads workflow contents at $reference',
+		async ({ reference, expectedCacheControl }) => {
+			const cacheControl: (string | undefined)[] = [];
+			const workflows = githubWorkflowSource({
+				fetch: (input, init) => {
+					const headers = new Headers(
+						init?.headers ??
+							(input instanceof Request ? input.headers : undefined)
+					);
+					cacheControl.push(headers.get('cache-control') ?? undefined);
+					return Promise.resolve(
+						Response.json({
+							type: 'file',
+							encoding: 'base64',
+							content: Buffer.from('on: push\n').toString('base64')
+						})
+					);
+				}
+			});
+			expect({
+				content: await workflows.read(
+					repository,
+					'.github/workflows/ci.yml',
+					reference
+				),
+				cacheControl
+			}).toStrictEqual({
+				content: 'on: push\n',
+				cacheControl: [expectedCacheControl]
+			});
+		}
+	);
+	it.each([
+		{ tagStatus: 200, branchStatus: 200, expected: 'refs/tags/main' },
+		{ tagStatus: 404, branchStatus: 200, expected: 'refs/heads/main' },
+		{ tagStatus: 404, branchStatus: 404, expected: undefined }
+	])(
+		'resolves a bare workflow ref with tag precedence: $tagStatus/$branchStatus',
+		async ({ tagStatus, branchStatus, expected }) => {
+			const requests: string[] = [];
+			const workflows = githubWorkflowSource({
+				fetch: (input) => {
+					const url = input instanceof Request ? input.url : String(input);
+					requests.push(url);
+					const status = url.endsWith('/git/ref/tags%2Fmain')
+						? tagStatus
+						: branchStatus;
+					return Promise.resolve(
+						status === 200
+							? Response.json({
+									ref: url.endsWith('/git/ref/tags%2Fmain')
+										? 'refs/tags/main'
+										: 'refs/heads/main'
+								})
+							: new Response(undefined, { status })
+					);
+				}
+			});
+			let result: string | undefined;
+			let isRefused = false;
+			try {
+				result = await workflows.resolveWorkflowReference?.(repository, 'main');
+			} catch (error) {
+				isRefused = error instanceof WorkflowReferenceMissingError;
+			}
+			expect({ result, refused: isRefused, requests }).toStrictEqual({
+				result: expected,
+				refused: expected === undefined,
+				requests: [
+					`https://api.github.com/repos/${repository}/git/ref/tags%2Fmain`,
+					...(tagStatus === 404
+						? [
+								`https://api.github.com/repos/${repository}/git/ref/heads%2Fmain`
+							]
+						: [])
+				]
+			});
+		}
+	);
+
 	const revision = 'b'.repeat(40);
 	const api = 'https://api.github.com/repos/iainlane/dotfiles';
 
@@ -1316,6 +1404,284 @@ describe('githubWorkflowSource', () => {
 });
 
 describe('discoverPublishingJobs job conditions', () => {
+	it.each(['refs/heads/.bad', 'refs/heads/main?'])(
+		'keeps inspecting other jobs when a workflow ref is invalid: %s',
+		async (pin) => {
+			const caller = '.github/workflows/ci.yml';
+			const uses = `underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@${pin}`;
+			const result = await discoverPublishingJobs(
+				repository,
+				'main',
+				tenant,
+				source({
+					[caller]: `on: push\njobs:\n  invalid:\n    uses: ${uses}\n    with:\n      url: ${tenant.href}\n  present:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35\n    with:\n      url: ${tenant.href}\n`
+				})
+			);
+			expect({
+				jobs: result.jobs.map((job) => job.job),
+				unverified: result.unverified
+			}).toStrictEqual({
+				jobs: ['present'],
+				unverified: [
+					{
+						caller,
+						job: 'invalid',
+						workflow: 'cupboard',
+						detail: `${uses} does not use an exact release tag, branch ref or full commit ID`
+					}
+				]
+			});
+		}
+	);
+	it('does not resolve a bare workflow ref for another tenant', async () => {
+		let resolutions = 0;
+		const fixtures = source({
+			'.github/workflows/ci.yml':
+				'on: push\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main\n    with:\n      url: https://other.example/t/other\n'
+		});
+		const result = await discoverPublishingJobs(repository, 'main', tenant, {
+			...fixtures,
+			resolveWorkflowReference: () => {
+				resolutions += 1;
+				return Promise.reject(new GithubPermissionError('unrelated reference'));
+			}
+		});
+		expect({ result, resolutions }).toStrictEqual({
+			result: { revision: 'a'.repeat(40), jobs: [], unverified: [] },
+			resolutions: 0
+		});
+	});
+	it('keeps inspecting other jobs when a bare workflow ref has disappeared', async () => {
+		const caller = '.github/workflows/ci.yml';
+		const failure = new WorkflowReferenceMissingError(
+			'underwhelmingperformance/cupboard',
+			'missing'
+		);
+		const fixtures = source({
+			[caller]: `on: push\njobs:\n  missing:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@missing\n    with:\n      url: ${tenant.href}\n  present:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35\n    with:\n      url: ${tenant.href}\n`
+		});
+		const result = await discoverPublishingJobs(repository, 'main', tenant, {
+			...fixtures,
+			resolveWorkflowReference: () => Promise.reject(failure)
+		});
+		expect({
+			jobs: result.jobs.map((job) => job.job),
+			unverified: result.unverified
+		}).toStrictEqual({
+			jobs: ['present'],
+			unverified: [
+				{
+					caller,
+					job: 'missing',
+					workflow: 'cupboard',
+					detail: failure.message
+				}
+			]
+		});
+	});
+
+	it('propagates a bare workflow ref permission failure', async () => {
+		const failure = new GithubPermissionError('workflow reference');
+		const fixtures = source({
+			'.github/workflows/ci.yml': `on: push\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main\n    with:\n      url: ${tenant.href}\n`
+		});
+		await expect(
+			discoverPublishingJobs(repository, 'main', tenant, {
+				...fixtures,
+				resolveWorkflowReference: () => Promise.reject(failure)
+			})
+		).rejects.toBe(failure);
+	});
+	it.each([
+		{
+			filter: 'branches: [main]',
+			condition: "github.ref == 'refs/heads/main'",
+			outcome: 'decided'
+		},
+		{
+			filter: 'branches: [release]',
+			condition: "github.ref == 'refs/heads/main'",
+			outcome: 'excluded'
+		},
+		{
+			filter: 'branches: [main, release]',
+			condition: "github.ref == 'refs/heads/main'",
+			outcome: 'unknown'
+		},
+		{
+			filter: 'branches: [release/**]',
+			condition: "github.ref == 'refs/heads/main'",
+			outcome: 'unknown'
+		},
+		{
+			filter: '{}',
+			condition: "github.ref == 'refs/heads/main'",
+			outcome: 'unknown'
+		},
+		{
+			filter: 'branches: [main]',
+			condition: "inputs.publish == 'true'",
+			outcome: 'unknown'
+		}
+	])(
+		'proves push conditions only for an exact branch: $filter/$condition',
+		async ({ filter, condition, outcome }) => {
+			const caller = '.github/workflows/ci.yml';
+			const result = await discoverPublishingJobs(
+				repository,
+				'main',
+				tenant,
+				source({
+					[caller]: `on:\n  push:\n    ${filter}\njobs:\n  publish:\n    if: ${condition}\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35\n    with:\n      url: ${tenant.href}\n      root: github:iainlane/dotfiles/main\n`
+				})
+			);
+			expect({
+				jobs: result.jobs.map((job) => ({
+					job: job.job,
+					conditions: job.triggers.map((trigger) => trigger.undecidedConditions)
+				})),
+				unverified: result.unverified
+			}).toStrictEqual({
+				jobs:
+					outcome === 'excluded'
+						? []
+						: [
+								{
+									job: 'publish',
+									conditions: [outcome === 'unknown' ? [condition] : undefined]
+								}
+							],
+				unverified: []
+			});
+		}
+	);
+
+	it('models both jobs in the repository cache publishing workflow', async () => {
+		const repository = 'underwhelmingperformance/cupboard';
+		const tenant = new URL('https://cupboard.supply/t/cupboard');
+		const caller = await readFile(
+			new URL(
+				'../../../../../.github/workflows/cache-publish.yml',
+				import.meta.url
+			),
+			'utf8'
+		);
+		const reusable = await readFile(
+			new URL(
+				'../../../../../.github/workflows/cupboard-publish.yml',
+				import.meta.url
+			),
+			'utf8'
+		);
+		const discovered = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			{
+				resolveBranch: () => Promise.resolve('a'.repeat(40)),
+				resolveWorkflowReference: () => Promise.resolve('refs/heads/main'),
+				list: () => Promise.resolve(['.github/workflows/cache-publish.yml']),
+				read: (_repository, path) =>
+					Promise.resolve(
+						path === '.github/workflows/cache-publish.yml' ? caller : reusable
+					)
+			}
+		);
+		const identity = {
+			repositoryId: 1234,
+			repositoryOwnerId: 5678,
+			fullName: repository,
+			defaultBranch: 'main'
+		};
+
+		expect({
+			unverified: discovered.unverified,
+			jobs: discovered.jobs.map((job) => {
+				const model = modelPublishingJob(job, identity, tenant, 'main');
+
+				return {
+					job: job.job,
+					kind: job.kind,
+					workflowRef: job.workflowRef,
+					workflowRefInput: job.workflowRefInput,
+					installableRunRoot: job.installableRunRoot,
+					rootAttach: model.cases.some((publication) =>
+						publication.requests.some((request) =>
+							request.some(
+								(detail) =>
+									detail.type === 'cupboard_cache' &&
+									detail.actions.includes('root:attach')
+							)
+						)
+					),
+					cache: job.inputs.cache,
+					root: job.inputs.root,
+					findings: model.findings,
+					cases: model.cases.map((publication) => ({
+						trigger: publication.trigger,
+						cache: publication.cache,
+						pullRequestTemplates: publication.pullRequestTemplates
+					}))
+				};
+			})
+		}).toStrictEqual({
+			unverified: [],
+			jobs: [
+				{
+					job: 'publish-pr',
+					kind: 'installable',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main',
+					workflowRefInput:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main',
+					installableRunRoot: true,
+					rootAttach: true,
+					cache: 'pr-${{ github.event.pull_request.number }}',
+					root: 'github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}',
+					findings: [
+						{
+							trigger: 'pull_request',
+							finding: new ForkPullRequestFinding()
+						}
+					],
+					cases: [
+						{
+							trigger: 'pull_request',
+							cache: {
+								kind: 'named',
+								name: 'pr-1'
+							},
+							pullRequestTemplates: {
+								cache: 'pr-{pr}',
+								root: 'github:underwhelmingperformance/cupboard/pr-{pr}/'
+							}
+						}
+					]
+				},
+				{
+					job: 'publish-main',
+					kind: 'installable',
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main',
+					workflowRefInput:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main',
+					installableRunRoot: true,
+					rootAttach: true,
+					cache: undefined,
+					root: 'github:${{ github.repository }}/main',
+					findings: [],
+					cases: [
+						{
+							trigger: 'push',
+							cache: undefined,
+							pullRequestTemplates: undefined
+						}
+					]
+				}
+			]
+		});
+	});
+
 	it('keeps only the triggers that each guarded job can run for', async () => {
 		const result = await discoverPublishingJobs(
 			repository,
@@ -1368,10 +1734,7 @@ jobs:
 						{
 							event: 'push',
 							filters: { branches: ['main'] },
-							hasPathFilter: false,
-							undecidedConditions: [
-								"github.event_name == 'push' && github.ref == 'refs/heads/main'"
-							]
+							hasPathFilter: false
 						}
 					]
 				}

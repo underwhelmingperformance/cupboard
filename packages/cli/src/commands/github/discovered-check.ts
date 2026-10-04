@@ -50,6 +50,7 @@ import {
 	type WorkflowSource
 } from './discovery.ts';
 import {
+	BranchWorkflowTrustFinding,
 	CheckFinding,
 	FailedCheckFinding,
 	PassedCheckFinding,
@@ -158,8 +159,8 @@ export class PublishingJobMissingFinding extends CheckFinding {
 }
 
 /**
- * A job without the flake preset publishes its pull-request runs to the cache
- * and root of its branch runs. The check reports this case for manual review
+ * A job without a preset or claim-bound PR templates publishes its pull-request
+ * runs to the cache and root of its branch runs. The check reports this case for manual review
  * whether or not a trust rule for those runs exists.
  */
 export class SharedPullRequestCacheFinding extends CheckFinding {
@@ -455,6 +456,7 @@ function trustFindings(
 	if (
 		!isPreset &&
 		publication.trigger === 'pull_request' &&
+		publication.pullRequestTemplates === undefined &&
 		publication.lifecycle === undefined
 	) {
 		return [new SharedPullRequestCacheFinding()];
@@ -616,10 +618,11 @@ async function inspectJob(
 	};
 
 	try {
-		await verifyReference(
-			parseExactWorkflowReference(job.workflowRef),
-			lookupOptions
-		);
+		const parsed = parseExactWorkflowReference(job.workflowRef);
+		await verifyReference(parsed, {
+			...lookupOptions,
+			...(parsed.pin.kind === 'branch' && { allowBranchWorkflow: true })
+		});
 	} catch (error) {
 		if (
 			error instanceof WorkflowReferenceMutableError ||
@@ -635,6 +638,9 @@ async function inspectJob(
 
 	const model = modelPublishingJob(job, identity, tenant, branch);
 	const findings = [
+		...(parseExactWorkflowReference(job.workflowRef).pin.kind === 'branch'
+			? [{ finding: new BranchWorkflowTrustFinding(job.workflowRef) }]
+			: []),
 		...model.findings,
 		...pullRequestLifecycleFindings(
 			job,

@@ -9,6 +9,7 @@ import {
 import {
 	type ClaimMatch,
 	type OidcTrustAddBodyInput,
+	type OidcTrustExtendBodyInput,
 	type OidcTrustSummary,
 	oidcTrustSummarySchema
 } from '@cupboard/protocol/oidc';
@@ -22,23 +23,28 @@ import {
 	reuseViewPrioritySchema,
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
+import { genericExitCode } from '@cupboard/shared/errors';
+import { ORPCError } from '@orpc/client';
 
 import { isAbortError } from '../../abort.ts';
 import { audienceSchema } from '../../audience.ts';
 import { cacheLabel } from '../../client/client.ts';
 import {
 	CliError,
+	CupboardHttpError,
 	GithubCheckFailedError,
 	GithubCheckIncompleteError,
 	GithubCheckOptionError,
 	WorkflowReferenceTagPatternError
 } from '../../errors.ts';
+import { classifyFailures } from '../../exit-code.ts';
 import {
 	githubBranchAddBody,
 	githubPrAddBody,
 	githubPrCloseAddBody
 } from '../oidc-trust.ts';
 import { trustGrantRows } from '../oidc-trust/format.ts';
+import { lookupRepository } from '../oidc-trust/github.ts';
 import {
 	buildAddBody,
 	buildCacheContentReadGrant,
@@ -100,6 +106,7 @@ import {
 	describeAuthorizationDetail,
 	TrustRuleGrantMissingFinding
 } from './trust-selection.ts';
+import { verifyWorkflowReference } from './workflow-reference.ts';
 
 export type GithubRepairProblem =
 	| 'no-repairable-job'
@@ -187,7 +194,8 @@ export class GithubRepairPartialError extends CliError {
 	constructor(
 		public readonly step: string,
 		public readonly applied: readonly string[],
-		cause: unknown
+		cause: unknown,
+		public readonly isUnconfirmed = false
 	) {
 		const reason =
 			cause instanceof GithubCheckFailedError
@@ -197,11 +205,30 @@ export class GithubRepairPartialError extends CliError {
 					: `Could not ${step}.`;
 
 		super(
-			`${reason} Applied: ${applied.join(', ')}. Run cupboard github check again before you retry the repair.`,
+			`${isUnconfirmed ? `Could not confirm the attempt to ${step}. The attempted write may have completed.` : reason} ${applied.length === 0 ? 'No writes were confirmed.' : `Applied: ${applied.join(', ')}.`} Run cupboard github check again before you retry the repair.`,
 			{ cause }
 		);
 		this.name = 'GithubRepairPartialError';
 	}
+
+	override get exitCode(): number {
+		if (isAbortError(this.cause)) {
+			return 130;
+		}
+
+		if (!this.isUnconfirmed) {
+			return genericExitCode;
+		}
+
+		return classifyFailures([this.cause], genericExitCode).exitCode;
+	}
+}
+
+function isValidatedWriteRefusal(error: unknown): boolean {
+	return (
+		(error instanceof ORPCError || error instanceof CupboardHttpError) &&
+		[400, 401, 403, 404, 409, 422].includes(error.status)
+	);
 }
 
 export const githubTrustScopes = ['exact', 'tag-pattern'] as const;
@@ -215,6 +242,7 @@ export interface GithubRepairOptions {
 	 * a branch.
 	 */
 	readonly yes?: boolean;
+	readonly allowBranchWorkflow?: boolean;
 	readonly trustScope?: GithubTrustScope;
 	readonly tagPattern?: string;
 	readonly readUser?: string;
@@ -228,7 +256,16 @@ export interface GithubRepairClient extends GithubCheckClient {
 	};
 	readonly oidcTrust: GithubCheckClient['oidcTrust'] & {
 		add(input: OidcTrustAddBodyInput): Promise<OidcTrustSummary>;
+		extend(
+			input: OidcTrustExtendBodyInput & { readonly id: string }
+		): Promise<OidcTrustSummary>;
 	};
+}
+
+interface PlannedExtension {
+	readonly expected: OidcTrustSummary;
+	readonly permittedGrants: OidcTrustAddBodyInput['permittedGrants'];
+	readonly rule: OidcTrustSummary;
 }
 
 interface PlannedView {
@@ -264,9 +301,9 @@ function repairReference(
 		return job.workflowRef;
 	}
 
-	if (parsed.pin.kind === 'commit') {
+	if (parsed.pin.kind === 'commit' || parsed.pin.kind === 'branch') {
 		throw new GithubCheckOptionError(
-			'A rule for a commit-pinned workflow cannot use a release tag pattern. Choose --trust-scope exact.'
+			'A rule for a commit or branch workflow cannot use a release tag pattern. Choose --trust-scope exact.'
 		);
 	}
 
@@ -346,7 +383,10 @@ function grantsForJob(
 	publication: PublicationCase,
 	read: PublicationReadAuthority
 ): OidcTrustAddBodyInput['permittedGrants'] {
-	const cache = jobCache(job);
+	const cache =
+		publication.cache === undefined
+			? jobCache(job)
+			: { outcome: 'resolved' as const, scope: publication.cache };
 
 	if (cache.outcome === 'unresolved') {
 		throw new GithubRepairUnavailableError(
@@ -364,7 +404,9 @@ function grantsForJob(
 		];
 	}
 
-	const root = job.inputs[job.kind === 'flake' ? 'root-prefix' : 'root'];
+	const root =
+		publication.rootPrefix ??
+		job.inputs[job.kind === 'flake' ? 'root-prefix' : 'root'];
 
 	if (typeof root !== 'string' && root !== undefined) {
 		throw new GithubRepairUnavailableError(
@@ -374,6 +416,13 @@ function grantsForJob(
 	}
 
 	const hasRoot = root !== undefined && root !== '';
+	const requiresAttach = publication.requests.some((request) =>
+		request.some(
+			(detail) =>
+				detail.type === 'cupboard_cache' &&
+				detail.actions.includes('root:attach')
+		)
+	);
 
 	return [
 		...(publication.requests.length > 0
@@ -385,7 +434,7 @@ function grantsForJob(
 							'push',
 							'attest',
 							...(hasRoot || job.kind === 'flake' ? ['root'] : []),
-							...(job.kind === 'flake' ? ['attach'] : [])
+							...(requiresAttach || job.kind === 'flake' ? ['attach'] : [])
 						]
 					})
 				]
@@ -413,7 +462,8 @@ function triggerClaim(
 	if (publication.trigger === 'pull_request') {
 		if (
 			publication.requests.length === 0 ||
-			publication.lifecycle === 'closed'
+			publication.lifecycle === 'closed' ||
+			publication.pullRequestTemplates !== undefined
 		) {
 			return { event_name: 'pull_request' };
 		}
@@ -447,8 +497,11 @@ function bodyForCase(
 			repo: result.identity.fullName,
 			audience,
 			jobWorkflowRef: reference,
-			...(!isPreset &&
-				read.cache.kind === 'named' && { cacheTemplate: read.cache.name })
+			allowBranchWorkflow: true,
+			...(publication.pullRequestTemplates === undefined
+				? !isPreset &&
+					read.cache.kind === 'named' && { cacheTemplate: read.cache.name }
+				: { cacheTemplate: publication.pullRequestTemplates.cache })
 		});
 	}
 
@@ -467,13 +520,21 @@ function bodyForCase(
 		});
 	}
 
-	if (isPreset && publication.trigger === 'pull_request') {
+	if (
+		publication.trigger === 'pull_request' &&
+		(isPreset || publication.pullRequestTemplates !== undefined)
+	) {
 		return withAdditionalReadGrants(
 			withModelledPrPublicationGrants(
 				githubPrAddBody(url, result.identity, {
 					repo: result.identity.fullName,
 					audience,
 					jobWorkflowRef: reference,
+					allowBranchWorkflow: true,
+					...(publication.pullRequestTemplates !== undefined && {
+						cacheTemplate: publication.pullRequestTemplates.cache,
+						rootTemplate: publication.pullRequestTemplates.root
+					}),
 					readCache:
 						read.cacheAccess === 'private' && read.cacheWiring === 'none'
 				}),
@@ -497,6 +558,7 @@ function bodyForCase(
 				audience,
 				branch: publication.ref.name,
 				jobWorkflowRef: reference,
+				allowBranchWorkflow: true,
 				readCache:
 					read.cacheAccess === 'private' && read.cacheWiring === 'none',
 				...(publication.reuseView !== undefined &&
@@ -840,7 +902,12 @@ async function checkPlannedRulesKeepOtherJobs(
 	dependencies: DiscoveredGithubCheckDependencies
 ): Promise<void> {
 	const repaired = new Set(result.repairableJobs);
-	const candidates = [...existing, ...planned];
+	const candidates = [
+		...existing.filter((rule) =>
+			planned.every((candidate) => candidate.id !== rule.id)
+		),
+		...planned
+	];
 
 	for (const { branch, discovery } of branches) {
 		for (const job of discovery.jobs) {
@@ -926,7 +993,14 @@ function checkRetainedRules(
 		(rule) => claimCount(rule) >= claimCount(planned)
 	);
 
-	if (blocking === undefined) {
+	if (
+		blocking === undefined ||
+		(blocking.id !== 'owner' &&
+			blocking.issuer === planned.issuer &&
+			blocking.audience === planned.audience &&
+			typeof blocking.claims.job_workflow_ref === 'string' &&
+			isDeepEqual(blocking.claims, planned.claims))
+	) {
 		return;
 	}
 
@@ -1030,6 +1104,15 @@ export async function runDiscoveredGithubRepair(
 	}
 
 	for (const job of result.repairableJobs) {
+		if (
+			parseExactWorkflowReference(job.workflowRef).pin.kind === 'branch' &&
+			options.allowBranchWorkflow !== true
+		) {
+			throw new GithubCheckOptionError(
+				'A branch workflow can change after review. Pass --allow-branch-workflow to accept future edits to that workflow.'
+			);
+		}
+
 		if (!result.verifiedWorkflowReferences.has(job.workflowRef)) {
 			throw new GithubRepairUnavailableError(
 				'unverified-reference',
@@ -1063,10 +1146,10 @@ export async function runDiscoveredGithubRepair(
 		);
 	}
 
-	const hasCommitPin = modelled.some(
+	const hasNonTagPin = modelled.some(
 		(item) =>
 			item.needsTrustRule &&
-			parseExactWorkflowReference(item.job.workflowRef).pin.kind === 'commit'
+			parseExactWorkflowReference(item.job.workflowRef).pin.kind !== 'tag'
 	);
 
 	let scope = requiresNewTrustRule ? options.trustScope : 'exact';
@@ -1076,7 +1159,7 @@ export async function runDiscoveredGithubRepair(
 			{ value: 'exact', label: 'Only the current Cupboard workflow pins' }
 		];
 
-		if (!hasCommitPin) {
+		if (!hasNonTagPin) {
 			choices.push({
 				value: 'tag-pattern',
 				label: 'Future Cupboard workflow release tags matching a pattern'
@@ -1101,9 +1184,9 @@ export async function runDiscoveredGithubRepair(
 		);
 	}
 
-	if (scope === 'tag-pattern' && hasCommitPin) {
+	if (scope === 'tag-pattern' && hasNonTagPin) {
 		throw new GithubCheckOptionError(
-			'A commit-pinned workflow cannot use a release tag pattern. Choose --trust-scope exact.'
+			'A commit or branch workflow cannot use a release tag pattern. Choose --trust-scope exact.'
 		);
 	}
 
@@ -1161,37 +1244,78 @@ export async function runDiscoveredGithubRepair(
 		desired.push(bodyForCase(url, result, job, publication, read, reference));
 	}
 
-	const additions = mergeBodies(desired).filter((body) =>
-		listed.rules.every((rule) => rule.disabled || !isSameBody(rule, body))
-	);
-	// The IDs appear in error details, so they match the preview's labels.
-	const planned = activeMatcherRules(
-		additions.map((body, index) =>
+	const additions: OidcTrustAddBodyInput[] = [];
+	const extensions: PlannedExtension[] = [];
+
+	for (const body of mergeBodies(desired)) {
+		if (listed.rules.some((rule) => !rule.disabled && isSameBody(rule, body))) {
+			continue;
+		}
+
+		const matching = listed.rules.filter(
+			(rule) =>
+				!rule.disabled &&
+				rule.issuer === body.issuer &&
+				rule.audience === body.audience &&
+				isDeepEqual(rule.claims, body.claims)
+		);
+
+		if (matching.length === 0) {
+			additions.push(body);
+			continue;
+		}
+
+		const expected = matching[0];
+
+		if (
+			expected === undefined ||
+			matching.length !== 1 ||
+			expected.id === 'owner' ||
+			typeof expected.claims.job_workflow_ref !== 'string'
+		) {
+			throw new GithubRepairUnavailableError(
+				'existing-rule',
+				'the matching rules do not identify one exact workflow rule that can be extended safely'
+			);
+		}
+
+		const permittedGrants = body.permittedGrants.filter((grant) =>
+			expected.permittedGrants.every(
+				(candidate) => !isDeepEqual(candidate, grant)
+			)
+		);
+		if (permittedGrants.length === 0) {
+			continue;
+		}
+
+		extensions.push({
+			expected,
+			permittedGrants,
+			rule: {
+				...expected,
+				permittedGrants: [...expected.permittedGrants, ...permittedGrants]
+			}
+		});
+		retainedGrantMissingRules.delete(expected.id);
+	}
+
+	const planned = activeMatcherRules([
+		...extensions.map((extension) => extension.rule),
+		...additions.map((body, index) =>
 			oidcTrustSummarySchema.parse({
 				...body,
 				id: `planned rule ${String(index + 1)}`,
 				disabled: false
 			})
 		)
-	);
+	]);
 
-	for (const rule of planned) {
-		const duplicate = existing.find(
-			(candidate) =>
-				candidate.issuer === rule.issuer &&
-				candidate.audience === rule.audience &&
-				isDeepEqual(candidate.claims, rule.claims)
-		);
-
-		if (duplicate !== undefined) {
-			throw new GithubRepairUnavailableError(
-				'existing-rule',
-				`trust rule ${duplicate.id} has the same claims as ${rule.id} but other grants. Remove ${duplicate.id}, or replace it with a rule that grants every operation that the discovered jobs request.`
-			);
-		}
-	}
-
-	const candidates = [...existing, ...planned];
+	const candidates = [
+		...existing.filter((rule) =>
+			planned.every((candidate) => candidate.id !== rule.id)
+		),
+		...planned
+	];
 
 	for (const item of modelled) {
 		const finding = checkTrustRule(
@@ -1353,6 +1477,22 @@ export async function runDiscoveredGithubRepair(
 			label: 'Keep existing rule',
 			value: `${id} does not grant every operation that the discovered jobs request. The repair adds a planned rule that grants them and has more claims than ${id}. ${id} stays active, but the server selects the planned rule for the runs that both rules match.`
 		})),
+		...extensions.flatMap(({ expected, permittedGrants }) => [
+			{
+				label: 'Extend existing rule',
+				value: `${expected.id}: keep its claims, resources and existing grants; add the following grants atomically`
+			},
+			...Object.entries(expected.claims).map(([claim, value]) => ({
+				label: `Claim ${claim}`,
+				value: claimSummary(value)
+			})),
+			...expected.permittedGrants.flatMap((grant, index) =>
+				trustGrantRows(grant, `Keep grant ${String(index + 1)}`)
+			),
+			...permittedGrants.flatMap((grant, index) =>
+				trustGrantRows(grant, `Add grant ${String(index + 1)}`)
+			)
+		]),
 		...additions.flatMap((body, index) => {
 			const number = index + 1;
 			const trigger =
@@ -1413,6 +1553,19 @@ export async function runDiscoveredGithubRepair(
 		});
 	}
 
+	if (
+		modelled.some(
+			({ job }) =>
+				parseExactWorkflowReference(job.workflowRef).pin.kind === 'branch'
+		)
+	) {
+		rows.push({
+			label: 'Future workflow edits',
+			value:
+				'These rules accept future edits to the selected Cupboard workflow branches. The repair checks that each branch workflow exists again before writing.'
+		});
+	}
+
 	if (ui.interactive) {
 		ui.note('Planned GitHub repair', rows);
 	} else {
@@ -1420,6 +1573,11 @@ export async function runDiscoveredGithubRepair(
 			kind: 'github-repair-plan',
 			data: {
 				rules: additions,
+				extensions: extensions.map(({ expected, permittedGrants }) => ({
+					id: expected.id,
+					expected,
+					permittedGrants
+				})),
 				retainedRuleIds: [...retainedGrantMissingRules],
 				reuseViews: missingViews.map((view) => view.input)
 			},
@@ -1436,26 +1594,112 @@ export async function runDiscoveredGithubRepair(
 		return;
 	}
 
-	const revision = await source.resolveBranch(
-		result.identity.fullName,
-		result.branch
+	const revisions = await Promise.all(
+		branches.map(({ branch }) =>
+			source.resolveBranch(result.identity.fullName, branch)
+		)
 	);
-	const [currentRules, currentViews] = await Promise.all([
+	const [currentRules, currentViews, currentIdentity] = await Promise.all([
 		client.oidcTrust.list(),
-		client.reuseViews.list()
+		client.reuseViews.list(),
+		(dependencies.lookupRepository ?? lookupRepository)(
+			result.identity.fullName,
+			{ ...lookupOptions, shouldRevalidate: true }
+		)
 	]);
 
 	if (
-		revision !== result.discovery.revision ||
+		revisions.some(
+			(revision, index) => revision !== branches[index]?.discovery.revision
+		) ||
+		!isDeepEqual(currentIdentity, result.identity) ||
 		JSON.stringify(currentRules) !== JSON.stringify(listed) ||
 		JSON.stringify(currentViews) !== JSON.stringify(views)
 	) {
 		throw new GithubRepairStateChangedError();
 	}
 
+	const freshSource =
+		dependencies.source ??
+		githubWorkflowSource({ ...lookupOptions, shouldRevalidate: true });
+
+	for (const job of result.repairableJobs) {
+		if (job.workflowRefInput === undefined) {
+			continue;
+		}
+
+		if (freshSource.resolveWorkflowReference === undefined) {
+			throw new GithubRepairStateChangedError();
+		}
+
+		const parsed = parseExactWorkflowReference(job.workflowRef);
+		const bare = job.workflowRefInput.slice(
+			job.workflowRefInput.lastIndexOf('@') + 1
+		);
+		const current = await freshSource.resolveWorkflowReference(
+			`${parsed.owner}/${parsed.repo}`,
+			bare
+		);
+
+		if (current !== parsed.pin.value) {
+			throw new GithubRepairStateChangedError();
+		}
+	}
+
+	const repairReferences = new Set(
+		result.repairableJobs.map((job) => job.workflowRef)
+	);
+
+	for (const reference of repairReferences) {
+		const parsed = parseExactWorkflowReference(reference);
+
+		if (parsed.pin.kind === 'branch') {
+			await (dependencies.verifyWorkflowReference ?? verifyWorkflowReference)(
+				parsed,
+				{ ...lookupOptions, allowBranchWorkflow: true, shouldRevalidate: true }
+			);
+		}
+	}
+
 	const applied: string[] = [];
 
+	for (const { expected, permittedGrants } of extensions) {
+		try {
+			await client.oidcTrust.extend({
+				id: expected.id,
+				expected,
+				permittedGrants
+			});
+		} catch (error) {
+			const cause =
+				(error instanceof ORPCError || error instanceof CupboardHttpError) &&
+				error.status === 404
+					? new GithubRepairUnavailableError(
+							'existing-rule',
+							'the server does not support atomic trust-rule grant extensions. Upgrade the server before retrying this repair.'
+						)
+					: error;
+
+			const isRefused = isValidatedWriteRefusal(error);
+
+			if (isRefused && applied.length === 0) {
+				throw cause;
+			}
+
+			throw new GithubRepairPartialError(
+				`extend trust rule ${expected.id}`,
+				applied,
+				cause,
+				!isRefused
+			);
+		}
+
+		applied.push(`extended trust rule ${expected.id}`);
+	}
+
 	for (const view of missingViews) {
+		let isWriteAttempted = false;
+
 		try {
 			const destination = await dependencies.fetchCacheInfo(
 				view.destinationUrl
@@ -1465,16 +1709,20 @@ export async function runDiscoveredGithubRepair(
 				throw new GithubRepairStateChangedError();
 			}
 
+			isWriteAttempted = true;
 			await client.reuseViews.set(view.input);
 		} catch (error) {
-			if (applied.length === 0 || isAbortError(error)) {
+			const isUnconfirmed = isWriteAttempted && !isValidatedWriteRefusal(error);
+
+			if (!isUnconfirmed && applied.length === 0) {
 				throw error;
 			}
 
 			throw new GithubRepairPartialError(
 				`create reuse view ${view.input.name}`,
 				applied,
-				error
+				error,
+				isUnconfirmed
 			);
 		}
 
@@ -1487,14 +1735,17 @@ export async function runDiscoveredGithubRepair(
 		try {
 			added = await client.oidcTrust.add(body);
 		} catch (error) {
-			if (applied.length === 0 || isAbortError(error)) {
+			const isUnconfirmed = !isValidatedWriteRefusal(error);
+
+			if (!isUnconfirmed && applied.length === 0) {
 				throw error;
 			}
 
 			throw new GithubRepairPartialError(
 				`add trust rule ${String(index + 1)}`,
 				applied,
-				error
+				error,
+				isUnconfirmed
 			);
 		}
 
@@ -1517,7 +1768,7 @@ export async function runDiscoveredGithubRepair(
 			dependencies
 		);
 	} catch (error) {
-		if (isAbortError(error)) {
+		if (isAbortError(error) && applied.length === 0) {
 			throw error;
 		}
 
@@ -1560,7 +1811,7 @@ export async function runDiscoveredGithubRepair(
 			)
 	);
 	ui.success(
-		`Applied ${String(additions.length + missingViews.length)} tenant configuration change(s). ${isStaticReadUnverified ? 'The publication grants now pass, but the workflow read secrets remain unverified.' : 'The repaired publishing jobs now pass.'}`
+		`Applied ${String(additions.length + extensions.length + missingViews.length)} tenant configuration change(s). ${isStaticReadUnverified ? 'The publication grants now pass, but the workflow read secrets remain unverified.' : 'The repaired publishing jobs now pass.'}`
 	);
 	finishDiscoveredGithubCheck(verified);
 }

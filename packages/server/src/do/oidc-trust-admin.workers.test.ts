@@ -96,6 +96,32 @@ function addRule(
 	});
 }
 
+function extensionSnapshot(
+	condition: string,
+	original: OidcTrustSummary
+): OidcTrustSummary {
+	switch (condition) {
+		case 'owner': {
+			return ownerSummary;
+		}
+		case 'disabled': {
+			return { ...original, disabled: true };
+		}
+		case 'changed claims': {
+			return { ...original, claims: { repository_owner_id: 'different' } };
+		}
+		case 'changed grants': {
+			return { ...original, permittedGrants: [] };
+		}
+		case 'different id': {
+			return oidcTrustSummarySchema.parse({ ...original, id: 'different' });
+		}
+		default: {
+			return original;
+		}
+	}
+}
+
 describe('oidc-trust admin API', () => {
 	beforeEach(resetTestServer);
 
@@ -156,6 +182,157 @@ describe('oidc-trust admin API', () => {
 				owner: ownerSummary,
 				[id]: expected
 			}
+		});
+	});
+
+	it('extends grants in place and refuses a stale expected rule', async () => {
+		const token = await adminToken();
+		const added = await addRule(token, additionBody);
+		const expected = oidcTrustSummarySchema.parse(await added.json());
+		const grant = { type: 'cupboard_domain', actions: ['gc:run'] };
+		const extend = () =>
+			authorisedFetch(`/oidc-trust/${expected.id}/grants`, token, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ expected, permittedGrants: [grant, grant] })
+			});
+		const extended = await extend();
+		const stale = await extend();
+		const staleBody = orpcErrorBodySchema.parse(await stale.json());
+		const list = await listRules(token);
+		const summary = {
+			...expected,
+			permittedGrants: [...expected.permittedGrants, grant]
+		};
+
+		expect({
+			status: extended.status,
+			summary: oidcTrustSummarySchema.parse(await extended.json()),
+			stale: {
+				status: stale.status,
+				code: staleBody.code,
+				defined: staleBody.defined
+			},
+			rules: rulesById(await list.json())
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			summary,
+			stale: {
+				status: StatusCodes.CONFLICT,
+				code: 'OIDC_TRUST_RULE_CHANGED',
+				defined: true
+			},
+			rules: { owner: ownerSummary, [expected.id]: summary }
+		});
+	});
+
+	it.each([
+		'owner',
+		'disabled',
+		'changed claims',
+		'changed grants',
+		'different id'
+	])(
+		'refuses an extension for %s without changing the rule',
+		async (condition) => {
+			const token = await adminToken();
+			const added = await addRule(token, additionBody);
+			const original = oidcTrustSummarySchema.parse(await added.json());
+			if (condition === 'disabled') {
+				await authorisedFetch(`/oidc-trust/${original.id}`, token, {
+					method: 'DELETE'
+				});
+			}
+
+			const expected = extensionSnapshot(condition, original);
+
+			const id = condition === 'owner' ? ownerSummary.id : original.id;
+			const response = await authorisedFetch(
+				`/oidc-trust/${id}/grants`,
+				token,
+				{
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
+						expected,
+						permittedGrants: [{ type: 'cupboard_domain', actions: ['gc:run'] }]
+					})
+				}
+			);
+			const list = await listRules(token);
+
+			expect({
+				status: response.status,
+				rules: rulesById(await list.json())
+			}).toStrictEqual({
+				status: StatusCodes.CONFLICT,
+				rules: {
+					owner: ownerSummary,
+					[original.id]: { ...original, disabled: condition === 'disabled' }
+				}
+			});
+		}
+	);
+
+	it('allows only one concurrent extension from the same snapshot', async () => {
+		const token = await adminToken();
+		const added = await addRule(token, additionBody);
+		const expected = oidcTrustSummarySchema.parse(await added.json());
+		const grant = { type: 'cupboard_domain', actions: ['gc:run'] };
+		const input = {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ expected, permittedGrants: [grant] })
+		};
+		const responses = await Promise.all([
+			authorisedFetch(`/oidc-trust/${expected.id}/grants`, token, input),
+			authorisedFetch(`/oidc-trust/${expected.id}/grants`, token, input)
+		]);
+		const list = await listRules(token);
+
+		expect({
+			statuses: responses
+				.map((response) => response.status)
+				.toSorted((left, right) => left - right),
+			rules: rulesById(await list.json())
+		}).toStrictEqual({
+			statuses: [StatusCodes.OK, StatusCodes.CONFLICT],
+			rules: {
+				owner: ownerSummary,
+				[expected.id]: {
+					...expected,
+					permittedGrants: [...expected.permittedGrants, grant]
+				}
+			}
+		});
+	});
+
+	it('requires the existing add authority to extend grants', async () => {
+		const token = await adminToken();
+		const added = await addRule(token, additionBody);
+		const expected = oidcTrustSummarySchema.parse(await added.json());
+		const writer = await issueServerSignedToken(cacheWriteGrants());
+		const response = await authorisedFetch(
+			`/oidc-trust/${expected.id}/grants`,
+			writer,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					expected,
+					permittedGrants: [{ type: 'cupboard_domain', actions: ['gc:run'] }]
+				})
+			}
+		);
+
+		const list = await listRules(token);
+
+		expect({
+			status: response.status,
+			rules: rulesById(await list.json())
+		}).toStrictEqual({
+			status: StatusCodes.FORBIDDEN,
+			rules: { owner: ownerSummary, [expected.id]: expected }
 		});
 	});
 

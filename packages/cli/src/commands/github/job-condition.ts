@@ -11,12 +11,17 @@ export type ConditionOutcome = boolean | undefined;
  */
 export type PullRequestSource = 'repository' | 'fork';
 
-export interface PullRequestActivity {
-	readonly action: string;
-	readonly merged: boolean;
+export interface JobConditionContext {
+	readonly action?: string;
+	readonly merged?: boolean;
 	readonly ref?: string;
 	readonly dependencies?: ConditionOutcome;
 	readonly isCancelled?: boolean;
+}
+
+export interface PullRequestActivity extends JobConditionContext {
+	readonly action: string;
+	readonly merged: boolean;
 }
 
 export interface JobDependencyGate {
@@ -356,7 +361,7 @@ function compareEvent(
 	expression: Extract<Expression, { kind: 'compare' }>,
 	event: string,
 	source: PullRequestSource,
-	activity: PullRequestActivity | undefined
+	activity: JobConditionContext | undefined
 ): ConditionOutcome {
 	const { left, right, operator } = expression;
 
@@ -413,7 +418,7 @@ function evaluate(
 	expression: Expression,
 	event: string,
 	source: PullRequestSource,
-	activity: PullRequestActivity | undefined
+	activity: JobConditionContext | undefined
 ): ConditionOutcome {
 	switch (expression.kind) {
 		case 'or': {
@@ -602,8 +607,9 @@ function parseCondition(condition: string): Expression | undefined {
  * An `if` value may be written with or without the `${{ }}` wrapper, because
  * GitHub accepts both. For `pull_request`, the guard is true when `source` is
  * `repository` and false when it is `fork`.
- * When `activity` is supplied, the evaluator also handles `github.event.action`,
- * `github.event.pull_request.merged` and the supplied `github.ref` value.
+ * The supplied context can specify `github.ref` for a verified push branch.
+ * For pull requests, it can also specify `github.event.action` and
+ * `github.event.pull_request.merged`.
  * `cancelled()` uses `activity.isCancelled`, and remains unknown when the
  * caller does not supply a cancellation state.
  */
@@ -611,7 +617,7 @@ export function jobConditionOutcome(
 	condition: string | boolean,
 	event: string,
 	source: PullRequestSource = 'repository',
-	activity?: PullRequestActivity
+	activity?: JobConditionContext
 ): ConditionOutcome {
 	if (typeof condition === 'boolean') {
 		return condition;
@@ -621,10 +627,5 @@ export function jobConditionOutcome(
 
 	return expression === undefined
 		? undefined
-		: evaluate(
-				expression,
-				event,
-				source,
-				event === 'pull_request' ? activity : undefined
-			);
+		: evaluate(expression, event, source, activity);
 }

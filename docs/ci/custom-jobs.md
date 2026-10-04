@@ -91,7 +91,9 @@ Things to know before you use it:
   rule. For an immutable workflow reference, use
   `oidc-trust add-github-pr-close` with the same `--cache-template` and the
   simple workflow's `--workflow-ref`. A caller that deliberately follows a
-  branch needs a manual close-only rule with that exact workflow selector. See
+  branch can pass `--allow-branch-workflow` with its exact
+  `@refs/heads/<branch>` workflow reference. This trusts future workflow edits.
+  `github check --fix` can also repair the discovered lifecycle grants. See
   [Merged PR closure][merged-pr-closure]. Branch runs and `publish: none` do not
   change the cache lifecycle. See [Cache closure][cache-closure].
 - The job needs a trust rule of its own. The rules that `cupboard github setup`

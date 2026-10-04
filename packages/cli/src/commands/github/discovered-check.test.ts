@@ -791,6 +791,89 @@ const source: WorkflowSource = {
 	read: () => Promise.resolve(workflow)
 };
 
+it('models existing branch workflow trust and reports future edits', async () => {
+	const workflowReference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main';
+	const branch = githubBranchAddBody(
+		tenant,
+		{
+			repositoryId: 1234,
+			repositoryOwnerId: 5678,
+			fullName: repository,
+			defaultBranch: 'main'
+		},
+		{ repo: repository, branch: 'main', jobWorkflowRef: workflowReference }
+	);
+	const checks: unknown[] = [];
+	const { client, dependencies } = fixture({
+		rules: [{ ...branch, id: 'branch', disabled: false }],
+		dependencies: {
+			source: {
+				...source,
+				read: () =>
+					Promise.resolve(
+						`on:\n  push:\n    branches: [main]\njobs:\n  packages:\n    uses: ${workflowReference}\n    with:\n      url: ${tenant.href}\n`
+					)
+			},
+			verifyWorkflowReference: (reference, options) => {
+				checks.push({ reference, options });
+				return Promise.resolve();
+			}
+		}
+	});
+	const result = await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository },
+		capturingReporter([]),
+		client,
+		dependencies
+	);
+	expect({
+		checks,
+		jobs: result.jobs.map((job) => ({
+			...job,
+			findings: job.findings.map(({ trigger, finding }) => ({
+				...(trigger !== undefined && { trigger }),
+				finding: finding.toJSON()
+			}))
+		})),
+		verified: [...result.verifiedWorkflowReferences]
+	}).toStrictEqual({
+		checks: [
+			{
+				reference: {
+					reference: workflowReference,
+					owner: 'underwhelmingperformance',
+					repo: 'cupboard',
+					path: '.github/workflows/cupboard-publish.yml',
+					pin: { kind: 'branch', value: 'refs/heads/main', branch: 'main' }
+				},
+				options: { allowBranchWorkflow: true }
+			}
+		],
+		jobs: [
+			{
+				caller: path,
+				job: 'packages',
+				workflowRef: workflowReference,
+				status: 'ready',
+				findings: [
+					{
+						finding: {
+							check: 'branch workflow trust',
+							status: 'ok',
+							detail: `${workflowReference}; trust rules accept future edits to this branch workflow`
+						}
+					},
+					{ trigger: 'push', finding: { check: 'trust rule', status: 'ok' } },
+					{ trigger: 'push', finding: { check: 'root grant', status: 'ok' } }
+				]
+			}
+		],
+		verified: [workflowReference]
+	});
+});
+
 function fixture(
 	options: {
 		readonly rules?: readonly unknown[];
@@ -2544,7 +2627,7 @@ jobs:
 		}))
 	).toStrictEqual([
 		{ job: 'publish-pr', triggers: ['pull_request'] },
-		{ job: 'publish-main', triggers: ['push', 'push'] }
+		{ job: 'publish-main', triggers: ['push'] }
 	]);
 });
 

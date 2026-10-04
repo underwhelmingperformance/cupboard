@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import {
 	oidcTrustAddBodySchema,
+	oidcTrustExtendBodySchema,
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
 	oidcTrustSummarySchema,
@@ -27,6 +28,16 @@ export const oidcTrustContract = {
 		.route({ method: 'POST', path: '/oidc-trust' })
 		.input(oidcTrustAddBodySchema)
 		.errors({ CACHE_GRANT_MIGRATION_PENDING: { status: 409 } })
+		.output(oidcTrustSummarySchema),
+
+	extend: baseProcedure
+		.meta({ requires: 'oidc-trust:add' })
+		.route({ method: 'POST', path: '/oidc-trust/{id}/grants' })
+		.input(oidcTrustExtendBodySchema.extend({ id: trustRuleIdSchema }))
+		.errors({
+			OIDC_TRUST_RULE_CHANGED: { status: 409 },
+			CACHE_GRANT_MIGRATION_PENDING: { status: 409 }
+		})
 		.output(oidcTrustSummarySchema),
 
 	remove: baseProcedure

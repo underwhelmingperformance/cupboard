@@ -53,6 +53,7 @@ import {
 	pullRequestViewName
 } from './convention.ts';
 import {
+	BranchWorkflowTrustFinding,
 	CheckFinding,
 	PassedCheckFinding,
 	ReuseViewAccessModeMismatchFinding,
@@ -385,7 +386,12 @@ export async function runGithubCheck(
 	const workflowReference = parseExactWorkflowReference(options.workflowRef);
 
 	await reporter.phase('Checking workflow reference on GitHub', () =>
-		verifyReference(workflowReference, lookupOptions)
+		verifyReference(workflowReference, {
+			...lookupOptions,
+			...(workflowReference.pin.kind === 'branch' && {
+				allowBranchWorkflow: true
+			})
+		})
 	);
 
 	const identity = await reporter.phase(
@@ -472,6 +478,12 @@ export async function runGithubCheck(
 			)
 		]
 	);
+
+	if (workflowReference.pin.kind === 'branch') {
+		findings.unshift(
+			new BranchWorkflowTrustFinding(workflowReference.reference)
+		);
+	}
 
 	const rows: ResultRow[] = findings.map((finding) => ({
 		label: finding.check,

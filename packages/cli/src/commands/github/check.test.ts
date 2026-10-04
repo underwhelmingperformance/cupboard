@@ -318,6 +318,54 @@ function findings(results: ResultRow[][]): ResultRow[] {
 }
 
 describe('runGithubCheck', () => {
+	it('checks an exact branch workflow reference without mutation opt-in', async () => {
+		const reference = 'acme/ci/.github/workflows/publish.yml@refs/heads/main';
+		const results: ResultRow[][] = [];
+		const checked: unknown[] = [];
+		try {
+			await runGithubCheck(
+				url,
+				{ ...options, workflowRef: reference },
+				reporter(results),
+				checkClient({ rules: [] }),
+				{
+					...checkDependencies({}),
+					verifyWorkflowReference: (workflow, lookupOptions) => {
+						checked.push({ workflow, lookupOptions });
+						return Promise.resolve();
+					}
+				}
+			);
+		} catch (error) {
+			expect(error).toBeInstanceOf(GithubCheckFailedError);
+		}
+		expect({
+			checked,
+			caveats: findings(results).filter(
+				(row) => row.label === 'branch workflow trust'
+			)
+		}).toStrictEqual({
+			checked: [
+				{
+					workflow: {
+						reference,
+						owner: 'acme',
+						repo: 'ci',
+						path: '.github/workflows/publish.yml',
+						pin: { kind: 'branch', value: 'refs/heads/main', branch: 'main' }
+					},
+					lookupOptions: { allowBranchWorkflow: true }
+				}
+			],
+			caveats: [
+				{
+					label: 'branch workflow trust',
+					value: `ok: ${reference}; trust rules accept future edits to this branch workflow`
+				}
+			]
+		});
+	});
+
 	it('cancels a stalled repository lookup with the command signal', async () => {
 		const controller = new AbortController();
 		const reason = new CliAbortError();

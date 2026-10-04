@@ -772,6 +772,17 @@ export class OwnerRuleImmutableError extends ServerHttpError {
 	}
 }
 
+export class OidcTrustRuleChangedError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: string) {
+		super(
+			'The OIDC trust rule changed. Read the current rule before retrying.'
+		);
+		this.name = 'OidcTrustRuleChangedError';
+	}
+}
+
 export class OidcTrustRuleNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 

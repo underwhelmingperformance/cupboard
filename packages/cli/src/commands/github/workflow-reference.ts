@@ -16,14 +16,22 @@ import {
 
 import { type ExactWorkflowReference } from './convention.ts';
 
+interface VerifyWorkflowReferenceOptions extends LookupRepositoryOptions {
+	readonly allowBranchWorkflow?: boolean;
+}
+
 /**
  * Checks that GitHub currently returns a workflow file for an exact reference.
  * For a tag, GitHub must also report that the associated release is immutable.
  */
 export async function verifyWorkflowReference(
 	parsed: ExactWorkflowReference,
-	options: LookupRepositoryOptions = {}
+	options: VerifyWorkflowReferenceOptions = {}
 ): Promise<void> {
+	if (parsed.pin.kind === 'branch' && options.allowBranchWorkflow !== true) {
+		throw new WorkflowReferenceMutableError(parsed.reference, parsed.pin.value);
+	}
+
 	const octokit = githubApi(options);
 
 	try {

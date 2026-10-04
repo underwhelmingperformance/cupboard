@@ -65,6 +65,102 @@ describe('lookupRepository', () => {
 		vi.unstubAllEnvs();
 	});
 
+	it('revalidates repository identity before a configuration write', async () => {
+		const headers: (string | null)[] = [];
+		const result = await lookupRepository('iainlane/cupboard', {
+			shouldRevalidate: true,
+			fetch: (input, init) => {
+				headers.push(new Request(input, init).headers.get('cache-control'));
+				return Promise.resolve(
+					Response.json({
+						id: 123,
+						owner: { id: 456 },
+						full_name: 'iainlane/cupboard',
+						default_branch: 'main'
+					})
+				);
+			}
+		});
+
+		expect({ result, headers }).toStrictEqual({
+			result: {
+				repositoryId: 123,
+				repositoryOwnerId: 456,
+				fullName: 'iainlane/cupboard',
+				defaultBranch: 'main'
+			},
+			headers: ['no-cache']
+		});
+	});
+
+	it('refreshes a cached repository identity when revalidation is requested', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-github-revalidate-')
+		);
+		let ownerId = 456;
+		let requests = 0;
+		const server = setupServer(
+			http.get(
+				/https:\/\/api\.github\.com(?::80)?\/repos\/iainlane\/cupboard/u,
+				() => {
+					requests += 1;
+					return HttpResponse.json(
+						{
+							id: 123,
+							owner: { id: ownerId },
+							full_name: 'iainlane/cupboard',
+							default_branch: 'main'
+						},
+						{
+							headers: {
+								'cache-control': 'public, max-age=3600',
+								date: new Date().toUTCString()
+							}
+						}
+					);
+				}
+			)
+		);
+		vi.stubEnv('XDG_CACHE_HOME', directory);
+		vi.stubEnv('GH_TOKEN', '');
+		vi.stubEnv('GITHUB_TOKEN', '');
+		server.listen({ onUnhandledRequest: 'error' });
+
+		try {
+			const original = await lookupRepository('iainlane/cupboard');
+			ownerId = 999;
+			const cached = await lookupRepository('iainlane/cupboard');
+			const current = await lookupRepository('iainlane/cupboard', {
+				shouldRevalidate: true
+			});
+
+			expect({ original, cached, current, requests }).toStrictEqual({
+				original: {
+					repositoryId: 123,
+					repositoryOwnerId: 456,
+					fullName: 'iainlane/cupboard',
+					defaultBranch: 'main'
+				},
+				cached: {
+					repositoryId: 123,
+					repositoryOwnerId: 456,
+					fullName: 'iainlane/cupboard',
+					defaultBranch: 'main'
+				},
+				current: {
+					repositoryId: 123,
+					repositoryOwnerId: 999,
+					fullName: 'iainlane/cupboard',
+					defaultBranch: 'main'
+				},
+				requests: 2
+			});
+		} finally {
+			server.close();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('returns the repository ids and current full name from GitHub', async () => {
 		const fetch = stubFetch(
 			repoUrl,

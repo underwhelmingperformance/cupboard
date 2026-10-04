@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { Writable } from 'node:stream';
 
 import { createCliUi } from '@cupboard/cli-ui';
@@ -8,7 +9,9 @@ import {
 } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
-	cachePrioritySchema
+	cacheNameSchema,
+	cachePrioritySchema,
+	rootNameSchema
 } from '@cupboard/nix-store/scalars';
 import { cacheListResponseSchema } from '@cupboard/protocol/caches';
 import {
@@ -22,9 +25,16 @@ import {
 	type ReuseViewSummary,
 	reuseViewSummarySchema
 } from '@cupboard/protocol/reuse-views';
+import { ORPCError } from '@orpc/client';
 import { expect, it } from 'vitest';
 
 import { audienceSchema } from '../../audience.ts';
+import {
+	attestAttachAuthorizationDetails,
+	cacheCreateAuthorizationDetails,
+	cacheLifecycleAuthorizationDetails,
+	pushAuthorizationDetails
+} from '../../auth/attenuate.ts';
 import {
 	CliAbortError,
 	GithubCheckFailedError,
@@ -46,6 +56,12 @@ import {
 } from '../oidc-trust/rule-builder.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
 
+import { activeMatcherRules, checkTrustRule } from './check.ts';
+import {
+	githubBranchClaims,
+	githubMergedPullRequestClaims,
+	githubPullRequestClaims
+} from './claims.ts';
 import {
 	DiscoveryUnverifiedFinding,
 	inspectDiscoveredGithubCheck
@@ -125,6 +141,7 @@ async function fixture(
 		rules?: readonly OidcTrustSummary[];
 		views?: readonly ReuseViewSummary[];
 		cacheAccess?: CacheAccessMode;
+		publishingWorkflow?: string;
 		fetchCacheAccess?: (target: URL) => Promise<CacheAccessMode>;
 	} = {}
 ) {
@@ -132,16 +149,24 @@ async function fixture(
 		script ?? { interactive: true, confirm: 'yes' }
 	);
 	const added: OidcTrustAddBodyInput[] = [];
+	const extended: {
+		expected: OidcTrustSummary;
+		permittedGrants: OidcTrustAddBodyInput['permittedGrants'];
+	}[] = [];
 	const verified: string[] = [];
 	const rules: unknown[] = [...(options.rules ?? [])];
 	let revision = 'a'.repeat(40);
 	const source = {
 		resolveBranch: () => Promise.resolve(revision),
+		resolveWorkflowReference: (_repository: string, reference: string) =>
+			Promise.resolve(
+				reference === 'main' ? 'refs/heads/main' : `refs/tags/${reference}`
+			),
 		list: () => Promise.resolve([path]),
 		read: (selectedRepository: string) =>
 			Promise.resolve(
 				selectedRepository === 'underwhelmingperformance/cupboard'
-					? legacyPublishingWorkflow
+					? (options.publishingWorkflow ?? legacyPublishingWorkflow)
 					: workflowContent
 			)
 	};
@@ -171,6 +196,28 @@ async function fixture(
 
 				rules.push(rule);
 				return Promise.resolve(rule);
+			},
+			extend: (input: {
+				id: string;
+				expected: OidcTrustSummary;
+				permittedGrants: OidcTrustAddBodyInput['permittedGrants'];
+			}) => {
+				extended.push({
+					expected: input.expected,
+					permittedGrants: input.permittedGrants
+				});
+				const index = rules.findIndex(
+					(rule) => oidcTrustSummarySchema.parse(rule).id === input.id
+				);
+				const summary = oidcTrustSummarySchema.parse({
+					...input.expected,
+					permittedGrants: [
+						...input.expected.permittedGrants,
+						...input.permittedGrants
+					]
+				});
+				rules[index] = summary;
+				return Promise.resolve(summary);
 			},
 			remove: () => Promise.reject(new Error('unexpected rule removal'))
 		}
@@ -213,6 +260,7 @@ async function fixture(
 		ui,
 		captured,
 		added,
+		extended,
 		verified,
 		client,
 		dependencies,
@@ -552,7 +600,7 @@ jobs:
 	});
 });
 
-it('rethrows the abort reason after an earlier tenant write', async () => {
+it('reports prior writes after cancellation with exit status 130', async () => {
 	const workflowContent = `
 on:
   push:
@@ -585,7 +633,7 @@ jobs:
 		}
 	};
 
-	await expect(
+	const error = await rejection(
 		runDiscoveredGithubRepair(
 			url,
 			{ trustScope: 'exact' },
@@ -594,7 +642,22 @@ jobs:
 			dependencies,
 			check
 		)
-	).rejects.toBe(aborted);
+	);
+	expect(
+		error instanceof GithubRepairPartialError
+			? {
+					applied: error.applied,
+					cause: error.cause,
+					isUnconfirmed: error.isUnconfirmed,
+					exitCode: error.exitCode
+				}
+			: error
+	).toStrictEqual({
+		applied: ['trust rule new-rule'],
+		cause: aborted,
+		isUnconfirmed: true,
+		exitCode: 130
+	});
 	expect(added).toStrictEqual([mainBranchRule('packages')]);
 });
 
@@ -928,6 +991,7 @@ jobs:
 		},
 		oidcTrust: {
 			list: () => Promise.resolve({ rules }),
+			extend: () => Promise.reject(new Error('unexpected trust extension')),
 			add: (body: OidcTrustAddBodyInput) => {
 				added.push(body);
 				return Promise.reject(new Error('unexpected trust write'));
@@ -1605,7 +1669,7 @@ it.each([
 		name: 'a condition that the check cannot evaluate',
 		job: `
   other:
-    if: github.ref == 'refs/heads/main'
+    if: inputs.publish == 'outputs'
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
     with:
       url: https://cupboard.supply/t/laney
@@ -1688,14 +1752,14 @@ it.each([
 	{ name: 'the same cache', cache: 'packages' },
 	{ name: 'another cache', cache: 'systems' }
 ])(
-	'stops before the scope prompt when a rule with the same claims grants $name',
+	'extends a rule with the same claims while preserving its grants for $name',
 	async ({ cache }) => {
 		const existing = oidcTrustSummarySchema.parse({
 			...mainBranchRule(cache),
 			id: 'setup-rule',
 			disabled: false
 		});
-		const { ui, added, client, dependencies, check } = await fixture(
+		const { ui, added, extended, client, dependencies, check } = await fixture(
 			{ interactive: true, confirm: 'yes' },
 			`
 on:
@@ -1712,22 +1776,1201 @@ jobs:
 			{ rules: [existing] }
 		);
 		const error = await rejection(
-			runDiscoveredGithubRepair(url, {}, ui, client, dependencies, check)
+			runDiscoveredGithubRepair(
+				url,
+				{ trustScope: 'exact' },
+				ui,
+				client,
+				dependencies,
+				check
+			)
 		);
 
 		expect({
-			problem:
-				error instanceof GithubRepairUnavailableError ? error.problem : error,
-			added
-		}).toStrictEqual({ problem: 'existing-rule', added: [] });
+			error,
+			added,
+			extended
+		}).toStrictEqual({
+			error: undefined,
+			added: [],
+			extended: [
+				{
+					expected: existing,
+					permittedGrants: [
+						buildCacheGrant({
+							cache: 'packages',
+							root: 'pkgs/',
+							allow: ['push', 'attest', 'root']
+						})
+					]
+				}
+			]
+		});
 	}
 );
+
+const upgradeWorkflow = `
+on:
+  push:
+    branches: [main]
+jobs:
+  packages:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: packages
+      root: pkgs
+`;
+
+it('previews preserved claims and grants before extending an existing rule', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, captured, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+
+	expect(captured.notes[0]?.body).toContain(
+		'Extend existing rule\texisting: keep its claims, resources and existing grants; add the following grants atomically'
+	);
+	expect(captured.notes[0]?.body).toContain('Claim repository_owner_id\t5678');
+	expect(captured.notes[0]?.body).toContain('systems');
+	expect(await client.oidcTrust.list()).toStrictEqual({
+		rules: [
+			{
+				...expected,
+				permittedGrants: [
+					...expected.permittedGrants,
+					buildCacheGrant({
+						cache: 'packages',
+						root: 'pkgs/',
+						allow: ['push', 'attest', 'root']
+					})
+				]
+			}
+		]
+	});
+});
+
+it('stops before extending a rule that changed during review', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	let lists = 0;
+	const changing = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			list: () => {
+				lists += 1;
+				return Promise.resolve(
+					oidcTrustListResponseSchema.parse({
+						rules: [{ ...expected, disabled: lists > 1 }]
+					})
+				);
+			}
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			changing,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		changed: error instanceof GithubRepairStateChangedError,
+		added,
+		extended
+	}).toStrictEqual({ changed: true, added: [], extended: [] });
+});
+
+it('explains that an older server must be upgraded before a rule extension', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	const older = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			extend: () => Promise.reject(new ORPCError('NOT_FOUND', { status: 404 }))
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			older,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		reason:
+			error instanceof GithubRepairUnavailableError ? error.reason : error,
+		added,
+		extended
+	}).toStrictEqual({
+		reason:
+			'the server does not support atomic trust-rule grant extensions. Upgrade the server before retrying this repair.',
+		added: [],
+		extended: []
+	});
+});
+
+it('reports an applied extension when a later addition fails and retries only the remaining change', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const workflow =
+		upgradeWorkflow +
+		`
+  systems:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.36
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: systems
+`;
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		workflow,
+		{ rules: [expected] }
+	);
+	const failing = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			add: () => Promise.reject(new Error('addition failed'))
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			failing,
+			dependencies,
+			check
+		)
+	);
+	const current = await inspectDiscoveredGithubCheck(
+		url,
+		{ repo: repository, branch: 'main' },
+		ui.reporter(),
+		client,
+		dependencies
+	);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		current
+	);
+
+	expect({
+		partial:
+			error instanceof GithubRepairPartialError
+				? { step: error.step, applied: error.applied }
+				: error,
+		extensions: extended.map(({ expected }) => expected.id),
+		additions: added.map((body) => body.claims.job_workflow_ref)
+	}).toStrictEqual({
+		partial: {
+			step: 'add trust rule 1',
+			applied: ['extended trust rule existing']
+		},
+		extensions: ['existing'],
+		additions: [
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.36'
+		]
+	});
+});
+
+it.each([
+	{
+		name: 'a workflow pattern',
+		id: 'existing',
+		claims: {
+			...mainBranchRule().claims,
+			job_workflow_ref: { pattern: '^underwhelmingperformance/cupboard/.*$' }
+		}
+	},
+	{ name: 'the owner rule', id: 'owner', claims: mainBranchRule().claims },
+	{
+		name: 'an extra selector',
+		id: 'existing',
+		claims: { ...mainBranchRule().claims, event_name: 'push' }
+	}
+])('refuses to extend $name automatically', async ({ id, claims }) => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id,
+		claims,
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		problem:
+			error instanceof GithubRepairUnavailableError ? error.problem : error,
+		added,
+		extended
+	}).toStrictEqual({ problem: 'existing-rule', added: [], extended: [] });
+});
+
+it('reports a successful extension that cannot be read back as a partial repair', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	const stale = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			extend: (input: Parameters<typeof client.oidcTrust.extend>[0]) =>
+				Promise.resolve(
+					oidcTrustSummarySchema.parse({
+						...input.expected,
+						permittedGrants: [
+							...input.expected.permittedGrants,
+							...input.permittedGrants
+						]
+					})
+				)
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			stale,
+			dependencies,
+			check
+		)
+	);
+
+	expect(
+		error instanceof GithubRepairPartialError
+			? {
+					step: error.step,
+					applied: error.applied,
+					failed: error.cause instanceof GithubCheckFailedError
+				}
+			: error
+	).toStrictEqual({
+		step: 'verify the tenant after writing',
+		applied: ['extended trust rule existing'],
+		failed: true
+	});
+});
+
+it.each([false, true])(
+	'requires explicit branch workflow trust before extending a rule: %s',
+	async (allowBranchWorkflow) => {
+		const reference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main';
+		const expected = oidcTrustSummarySchema.parse({
+			...mainBranchRule('systems'),
+			claims: { ...mainBranchRule().claims, job_workflow_ref: reference },
+			id: 'existing',
+			disabled: false
+		});
+		const workflow = upgradeWorkflow.replace('@v0.0.35', '@refs/heads/main');
+		const {
+			ui,
+			captured,
+			added,
+			extended,
+			verified,
+			client,
+			dependencies,
+			check
+		} = await fixture(undefined, workflow, { rules: [expected] });
+		const error = await rejection(
+			runDiscoveredGithubRepair(
+				url,
+				{ trustScope: 'exact', allowBranchWorkflow },
+				ui,
+				client,
+				dependencies,
+				check
+			)
+		);
+
+		expect({
+			optionError: error instanceof GithubCheckOptionError,
+			added,
+			extended: extended.map(({ expected }) => expected.id),
+			futureEdits: captured.notes[0]?.body.includes('accept future edits'),
+			verifications: verified
+		}).toStrictEqual({
+			optionError: !allowBranchWorkflow,
+			added: [],
+			extended: allowBranchWorkflow ? ['existing'] : [],
+			futureEdits: allowBranchWorkflow || undefined,
+			verifications: allowBranchWorkflow
+				? [reference, reference, reference]
+				: [reference]
+		});
+	}
+);
+
+it('rechecks the branch workflow before any write', async () => {
+	const workflow = upgradeWorkflow.replace('@v0.0.35', '@refs/heads/main');
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		workflow
+	);
+	const missing = new Error('branch workflow was removed');
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact', allowBranchWorkflow: true },
+			ui,
+			client,
+			{
+				...dependencies,
+				verifyWorkflowReference: () => Promise.reject(missing)
+			},
+			check
+		)
+	);
+
+	expect({ error, added, extended }).toStrictEqual({
+		error: missing,
+		added: [],
+		extended: []
+	});
+});
+
+it('reports an unconfirmed first extension and checks current policy before retrying', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, extended, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	const lost = new Error('response lost');
+	const uncertain = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			extend: async (input: Parameters<typeof client.oidcTrust.extend>[0]) => {
+				await client.oidcTrust.extend(input);
+				throw lost;
+			}
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			uncertain,
+			dependencies,
+			check
+		)
+	);
+	const current = await inspectDiscoveredGithubCheck(
+		url,
+		{ repo: repository, branch: 'main' },
+		ui.reporter(),
+		client,
+		dependencies
+	);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		current
+	);
+
+	expect(
+		error instanceof GithubRepairPartialError
+			? {
+					step: error.step,
+					applied: error.applied,
+					cause: error.cause,
+					message: error.message
+				}
+			: error
+	).toStrictEqual({
+		step: 'extend trust rule existing',
+		applied: [],
+		cause: lost,
+		message:
+			'Could not confirm the attempt to extend trust rule existing. The attempted write may have completed. No writes were confirmed. Run cupboard github check again before you retry the repair.'
+	});
+	expect(extended.map(({ expected }) => expected.id)).toStrictEqual([
+		'existing'
+	]);
+});
+
+it('repairs claim-bound PR publication and merged-close rules for the simple workflow', async () => {
+	const workflow = `
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  packages:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: pr-\${{ github.event.pull_request.number }}
+      root: github:\${{ github.repository }}/pr-\${{ github.event.pull_request.number }}
+      manage-pr-cache: true
+`;
+	const publishingWorkflow = await readFile(
+		new URL(
+			'../../../../../.github/workflows/cupboard-publish.yml',
+			import.meta.url
+		),
+		'utf8'
+	);
+	const { ui, added, client, dependencies, check } = await fixture(
+		undefined,
+		workflow,
+		{ publishingWorkflow }
+	);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact', allowBranchWorkflow: true },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main';
+	const identity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: repository,
+		defaultBranch: 'main'
+	};
+	const pr = githubPrAddBody(url, identity, {
+		repo: repository,
+		jobWorkflowRef: reference,
+		allowBranchWorkflow: true,
+		cacheTemplate: 'pr-{pr}',
+		rootTemplate: 'github:iainlane/dotfiles/pr-{pr}/'
+	});
+	const body = {
+		...pr,
+		permittedGrants: pr.permittedGrants.map((grant) =>
+			grant.type === 'cupboard_cache'
+				? {
+						...grant,
+						actions: grant.actions.filter(
+							(action) => action !== 'upload:confirm' && action !== 'root:list'
+						)
+					}
+				: grant
+		)
+	};
+
+	expect(added).toStrictEqual([
+		body,
+		githubPrCloseAddBody(url, identity, {
+			repo: repository,
+			jobWorkflowRef: reference,
+			cacheTemplate: 'pr-{pr}',
+			allowBranchWorkflow: true
+		})
+	]);
+	const cache = { kind: 'named' as const, name: cacheNameSchema.parse('pr-2') };
+	const listed = await client.oidcTrust.list();
+	const rules = activeMatcherRules(listed.rules);
+	const claims = githubPullRequestClaims(url, identity, {
+		pullRequestNumber: 2,
+		workflowReference: reference
+	});
+	const requests = [
+		cacheCreateAuthorizationDetails({ cache }),
+		cacheLifecycleAuthorizationDetails({ cache, action: 'close' }),
+		cacheLifecycleAuthorizationDetails({ cache, action: 'reopen' }),
+		pushAuthorizationDetails({
+			cache,
+			attest: true,
+			root: rootNameSchema.parse('github:iainlane/dotfiles/pr-2/x86_64-linux'),
+			runRoot: rootNameSchema.parse(
+				'github:iainlane/dotfiles/pr-2/x86_64-linux/_cupboard-run/1'
+			)
+		}),
+		attestAttachAuthorizationDetails({ cache })
+	];
+	const publication = checkTrustRule(
+		'PR 2 publication',
+		rules,
+		claims,
+		requests
+	);
+	const close = checkTrustRule(
+		'PR 2 merged-close',
+		rules,
+		githubMergedPullRequestClaims(url, identity, {
+			baseBranch: 'main',
+			workflowReference: reference
+		}),
+		[cacheLifecycleAuthorizationDetails({ cache, action: 'close' })]
+	);
+	const wrongPr = checkTrustRule(
+		'PR 1 cannot publish to PR 2',
+		rules,
+		githubPullRequestClaims(url, identity, {
+			pullRequestNumber: 1,
+			workflowReference: reference
+		}),
+		requests
+	);
+
+	expect({
+		publication: publication.status,
+		close: close.status,
+		wrongPr: wrongPr.status
+	}).toStrictEqual({ publication: 'ok', close: 'ok', wrongPr: 'failed' });
+});
+
+it('upgrades the current main and PR publication jobs without removing existing authority', async () => {
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main';
+	const identity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: repository,
+		defaultBranch: 'main'
+	};
+	const main = oidcTrustSummarySchema.parse({
+		...mainBranchRule(),
+		claims: { ...mainBranchRule().claims, job_workflow_ref: reference },
+		id: 'existing-main',
+		disabled: false
+	});
+	const prBody = githubPrAddBody(url, identity, {
+		repo: repository,
+		jobWorkflowRef: reference,
+		allowBranchWorkflow: true,
+		cacheTemplate: 'pr-{pr}',
+		rootTemplate: 'github:iainlane/dotfiles/pr-{pr}/'
+	});
+	const pr = oidcTrustSummarySchema.parse({
+		...prBody,
+		id: 'existing-pr',
+		disabled: false,
+		permittedGrants: [
+			buildCacheGrant({ cache: 'unrelated', allow: ['push'] }),
+			...prBody.permittedGrants.map((grant) =>
+				grant.type === 'cupboard_cache'
+					? {
+							...grant,
+							actions: grant.actions.filter(
+								(action) =>
+									![
+										'root:attach',
+										'cache:create',
+										'cache:close',
+										'cache:reopen'
+									].includes(action)
+							)
+						}
+					: grant
+			)
+		]
+	});
+	const workflowSource = await readFile(
+		new URL(
+			'../../../../../.github/workflows/cache-publish.yml',
+			import.meta.url
+		),
+		'utf8'
+	);
+	const workflow = workflowSource.replaceAll(
+		'https://cupboard.supply/t/cupboard',
+		() => url.href
+	);
+	const publishingWorkflow = await readFile(
+		new URL(
+			'../../../../../.github/workflows/cupboard-publish.yml',
+			import.meta.url
+		),
+		'utf8'
+	);
+	const { ui, extended, added, client, dependencies, check } = await fixture(
+		undefined,
+		workflow,
+		{ rules: [main, pr], publishingWorkflow }
+	);
+
+	expect({
+		jobs: check.jobs.map(({ job, status }) => ({ job, status })),
+		repairable: check.repairableJobs.map(({ job }) => job)
+	}).toStrictEqual({
+		jobs: [
+			{ job: 'publish-pr', status: 'failed' },
+			{ job: 'publish-main', status: 'failed' }
+		],
+		repairable: ['publish-pr', 'publish-main']
+	});
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact', allowBranchWorkflow: true },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+	const verified = await inspectDiscoveredGithubCheck(
+		url,
+		{ repo: repository, branch: 'main' },
+		ui.reporter(),
+		client,
+		dependencies
+	);
+	const listed = await client.oidcTrust.list();
+	const rules = activeMatcherRules(listed.rules);
+	const claims = githubBranchClaims(url, identity, {
+		branch: 'main',
+		workflowReference: reference
+	});
+	const mainRequests = pushAuthorizationDetails({
+		cache: { kind: 'default' },
+		attest: true,
+		root: rootNameSchema.parse('github:iainlane/dotfiles/main/x86_64-linux'),
+		runRoot: rootNameSchema.parse(
+			'github:iainlane/dotfiles/main/x86_64-linux/_cupboard-run/2'
+		)
+	});
+	const foreignRoot = pushAuthorizationDetails({
+		cache: { kind: 'default' },
+		attest: true,
+		root: rootNameSchema.parse('github:another/repository/main/x86_64-linux'),
+		runRoot: rootNameSchema.parse(
+			'github:another/repository/main/x86_64-linux/_cupboard-run/2'
+		)
+	});
+	const outsideCache = pushAuthorizationDetails({
+		cache: { kind: 'named', name: cacheNameSchema.parse('other') },
+		attest: true,
+		root: rootNameSchema.parse('github:iainlane/dotfiles/main/x86_64-linux')
+	});
+	const mergedClaims = githubMergedPullRequestClaims(url, identity, {
+		baseBranch: 'main',
+		workflowReference: reference
+	});
+	const close = (cache: string) =>
+		checkTrustRule('merged-close', rules, mergedClaims, [
+			cacheLifecycleAuthorizationDetails({
+				cache: { kind: 'named', name: cacheNameSchema.parse(cache) },
+				action: 'close'
+			})
+		]).status;
+
+	expect({
+		jobs: verified.jobs.map(({ job, status }) => ({ job, status })),
+		extended: extended.map(({ expected }) => expected),
+		added,
+		main: checkTrustRule('main publication', rules, claims, [mainRequests])
+			.status,
+		foreignRoot: checkTrustRule('outside root', rules, claims, [foreignRoot])
+			.status,
+		outsideCache: checkTrustRule('outside cache', rules, claims, [outsideCache])
+			.status,
+		closePr2: close('pr-2'),
+		closeOther: close('other'),
+		retained: listed.rules
+			.filter((rule) => rule.id !== 'new-rule')
+			.map((rule) => ({
+				...rule,
+				permittedGrants: rule.permittedGrants.slice(
+					0,
+					rule.id === main.id
+						? main.permittedGrants.length
+						: pr.permittedGrants.length
+				)
+			}))
+	}).toStrictEqual({
+		jobs: [
+			{ job: 'publish-pr', status: 'ready' },
+			{ job: 'publish-main', status: 'ready' }
+		],
+		extended: [pr, main],
+		added: [
+			githubPrCloseAddBody(url, identity, {
+				repo: repository,
+				jobWorkflowRef: reference,
+				allowBranchWorkflow: true,
+				cacheTemplate: 'pr-{pr}'
+			})
+		],
+		main: 'ok',
+		foreignRoot: 'failed',
+		outsideCache: 'failed',
+		closePr2: 'ok',
+		closeOther: 'failed',
+		retained: [main, pr]
+	});
+});
+
+it('stops before writing when a new tag changes the meaning of a bare branch workflow reference', async () => {
+	const publishingWorkflow = await readFile(
+		new URL(
+			'../../../../../.github/workflows/cupboard-publish.yml',
+			import.meta.url
+		),
+		'utf8'
+	);
+	const workflow = upgradeWorkflow.replace('@v0.0.35', '@main');
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		workflow,
+		{ publishingWorkflow }
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact', allowBranchWorkflow: true },
+			ui,
+			client,
+			{
+				...dependencies,
+				source: {
+					...dependencies.source,
+					resolveWorkflowReference: () => Promise.resolve('refs/tags/main')
+				}
+			},
+			check
+		)
+	);
+
+	expect({
+		changed: error instanceof GithubRepairStateChangedError,
+		added,
+		extended
+	}).toStrictEqual({ changed: true, added: [], extended: [] });
+});
+
+it('reports confirmed extensions when the post-write check is cancelled', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	const aborted = new CliAbortError();
+	let reads = 0;
+	const cancelling = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			list: () => {
+				reads += 1;
+				return reads === 3 ? Promise.reject(aborted) : client.oidcTrust.list();
+			}
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			cancelling,
+			dependencies,
+			check
+		)
+	);
+
+	expect(
+		error instanceof GithubRepairPartialError
+			? {
+					step: error.step,
+					applied: error.applied,
+					isUnconfirmed: error.isUnconfirmed,
+					cause: error.cause,
+					exitCode: error.exitCode
+				}
+			: error
+	).toStrictEqual({
+		step: 'verify the tenant after writing',
+		applied: ['extended trust rule existing'],
+		isUnconfirmed: false,
+		cause: aborted,
+		exitCode: 130
+	});
+});
+
+it('reports an unconfirmed first addition and avoids adding a second rule on retry', async () => {
+	const { ui, added, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow
+	);
+	const lost = new Error('response lost');
+	const uncertain = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			add: async (body: OidcTrustAddBodyInput) => {
+				await client.oidcTrust.add(body);
+				throw lost;
+			}
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			uncertain,
+			dependencies,
+			check
+		)
+	);
+	const current = await inspectDiscoveredGithubCheck(
+		url,
+		{ repo: repository, branch: 'main' },
+		ui.reporter(),
+		client,
+		dependencies
+	);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		current
+	);
+
+	expect({
+		partial:
+			error instanceof GithubRepairPartialError
+				? {
+						step: error.step,
+						applied: error.applied,
+						isUnconfirmed: error.isUnconfirmed,
+						cause: error.cause
+					}
+				: error,
+		additions: added.length
+	}).toStrictEqual({
+		partial: {
+			step: 'add trust rule 1',
+			applied: [],
+			isUnconfirmed: true,
+			cause: lost
+		},
+		additions: 1
+	});
+});
+
+it('reports an unconfirmed reuse-view write after a confirmed extension', async () => {
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35';
+	const identity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: repository,
+		defaultBranch: 'main'
+	};
+	const expected = oidcTrustSummarySchema.parse({
+		...githubBranchAddBody(url, identity, {
+			repo: repository,
+			branch: 'main',
+			jobWorkflowRef: reference
+		}),
+		id: 'existing',
+		disabled: false,
+		permittedGrants: [buildCacheGrant({ cache: 'unrelated', allow: ['push'] })]
+	});
+	const { ui, client, dependencies, check } = await fixture(
+		undefined,
+		presetPushWorkflow,
+		{ rules: [expected] }
+	);
+	const lost = new Error('view response lost');
+	const uncertain = {
+		...client,
+		reuseViews: { ...client.reuseViews, set: () => Promise.reject(lost) }
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			uncertain,
+			dependencies,
+			check
+		)
+	);
+
+	expect(
+		error instanceof GithubRepairPartialError
+			? {
+					step: error.step,
+					applied: error.applied,
+					isUnconfirmed: error.isUnconfirmed,
+					cause: error.cause
+				}
+			: error
+	).toStrictEqual({
+		step: 'create reuse view pull-requests-1234',
+		applied: ['extended trust rule existing'],
+		isUnconfirmed: true,
+		cause: lost
+	});
+});
+
+it('includes the expected rule and additive grants in a JSON repair preview', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, captured, client, dependencies, check } = await fixture(
+		{ interactive: false, confirm: 'yes' },
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact', yes: true },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+
+	expect(
+		captured.results.find((result) => result.kind === 'github-repair-plan')
+			?.data
+	).toStrictEqual({
+		rules: [],
+		extensions: [
+			{
+				id: 'existing',
+				expected,
+				permittedGrants: [
+					buildCacheGrant({
+						cache: 'packages',
+						root: 'pkgs/',
+						allow: ['push', 'attest', 'root']
+					})
+				]
+			}
+		],
+		retainedRuleIds: [],
+		reuseViews: []
+	});
+});
+
+it('stops before writing when repository ownership changes during review', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			{
+				...dependencies,
+				lookupRepository: () =>
+					Promise.resolve({ ...check.identity, repositoryOwnerId: 9999 })
+			},
+			check
+		)
+	);
+
+	expect({
+		changed: error instanceof GithubRepairStateChangedError,
+		added,
+		extended
+	}).toStrictEqual({ changed: true, added: [], extended: [] });
+});
+
+it('refuses an extension when another matching job cannot be modelled', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const workflow =
+		upgradeWorkflow +
+		`
+  other:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: systems
+      root: \${{ vars.ROOT }}
+`;
+	const { ui, added, extended, client, dependencies, check } = await fixture(
+		undefined,
+		workflow,
+		{ rules: [expected] }
+	);
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		shadow:
+			error instanceof GithubRepairShadowsRuleError
+				? { kind: error.shadow, job: error.job, rules: error.rules }
+				: error,
+		added,
+		extended
+	}).toStrictEqual({
+		shadow: { kind: 'unmodelled', job: `${path}, other`, rules: ['existing'] },
+		added: [],
+		extended: []
+	});
+});
+
+it('reports an unconfirmed extension after cancellation and preserves exit status 130', async () => {
+	const expected = oidcTrustSummarySchema.parse({
+		...mainBranchRule('systems'),
+		id: 'existing',
+		disabled: false
+	});
+	const { ui, extended, client, dependencies, check } = await fixture(
+		undefined,
+		upgradeWorkflow,
+		{ rules: [expected] }
+	);
+	const aborted = new CliAbortError();
+	const uncertain = {
+		...client,
+		oidcTrust: {
+			...client.oidcTrust,
+			extend: async (input: Parameters<typeof client.oidcTrust.extend>[0]) => {
+				await client.oidcTrust.extend(input);
+				throw aborted;
+			}
+		}
+	};
+	const error = await rejection(
+		runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			uncertain,
+			dependencies,
+			check
+		)
+	);
+
+	expect({
+		partial:
+			error instanceof GithubRepairPartialError
+				? {
+						step: error.step,
+						applied: error.applied,
+						isUnconfirmed: error.isUnconfirmed,
+						cause: error.cause,
+						exitCode: error.exitCode
+					}
+				: error,
+		extensions: extended.map(({ expected }) => expected.id)
+	}).toStrictEqual({
+		partial: {
+			step: 'extend trust rule existing',
+			applied: [],
+			isUnconfirmed: true,
+			cause: aborted,
+			exitCode: 130
+		},
+		extensions: ['existing']
+	});
+});
 
 it('reports unverified jobs after the writes as an incomplete check', async () => {
 	const { ui, client, dependencies, check } = await fixture();
 	const guarded = content.replaceAll(
 		'    uses:',
-		"    if: github.ref == 'refs/heads/main'\n    uses:"
+		"    if: inputs.publish == 'outputs'\n    uses:"
 	);
 	const error = await rejection(
 		runDiscoveredGithubRepair(

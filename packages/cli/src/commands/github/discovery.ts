@@ -30,6 +30,7 @@ import {
 	jobConditionOutcome,
 	type JobDependencyGate
 } from './job-condition.ts';
+import { ReferencePattern } from './reference-pattern.ts';
 
 type WorkflowInput = string | number | boolean;
 type WorkflowInputs = Readonly<Record<string, WorkflowInput>>;
@@ -37,6 +38,10 @@ export type ReadCredentialWiring =
 	'none' | 'configured' | 'incomplete' | 'unknown';
 
 export interface WorkflowSource {
+	resolveWorkflowReference?(
+		repository: string,
+		reference: string
+	): Promise<string>;
 	resolveBranch(repository: string, branch: string): Promise<string>;
 	list(repository: string, reference: string): Promise<readonly string[]>;
 	read(repository: string, path: string, reference: string): Promise<string>;
@@ -79,6 +84,7 @@ export interface DiscoveredPublishingJob {
 	 */
 	readonly installableRunRoot?: true;
 	readonly workflowRef: string;
+	readonly workflowRefInput?: string;
 	readonly inputs: WorkflowInputs;
 	readonly readCredentialWiring?: {
 		readonly cache: ReadCredentialWiring;
@@ -133,6 +139,18 @@ export class WorkflowBranchNotFoundError extends WorkflowDiscoveryError {
 	) {
 		super(`GitHub repository ${repository} has no branch ${branch}.`);
 		this.name = 'WorkflowBranchNotFoundError';
+	}
+}
+
+export class WorkflowReferenceMissingError extends WorkflowDiscoveryError {
+	constructor(
+		public readonly repository: string,
+		public readonly reference: string
+	) {
+		super(
+			`GitHub could not find a tag or branch for ${repository}@${reference}`
+		);
+		this.name = 'WorkflowReferenceMissingError';
 	}
 }
 
@@ -504,27 +522,23 @@ function isDirectPublicationStep(step: WorkflowStep, tenant: URL): boolean {
 
 /**
  * The reference to verify for a Cupboard workflow pin. A caller can write a
- * tag with or without `refs/tags/`. A `refs/heads/` pin is returned as
- * written, so the pin check fails it as a branch pin.
+ * tag with or without `refs/tags/`. GitHub resolves bare refs with tag
+ * precedence. Branch refs remain exact for an opted-in repair.
  */
-function pinnedReference(uses: string): string | undefined {
+async function pinnedReference(
+	uses: string,
+	source: WorkflowSource
+): Promise<string | undefined> {
 	const at = uses.lastIndexOf('@');
 	const pin = uses.slice(at + 1);
 	const reference =
 		pin.startsWith('refs/') || /^[0-9a-f]{40}$/.test(pin)
 			? uses
-			: `${uses.slice(0, at + 1)}refs/tags/${pin}`;
+			: `${uses.slice(0, at + 1)}${(await source.resolveWorkflowReference?.(cupboardRepository, pin)) ?? `refs/tags/${pin}`}`;
 
 	try {
 		return parseExactWorkflowReference(reference).reference;
 	} catch (error) {
-		if (
-			error instanceof WorkflowReferenceMutableError &&
-			pin.startsWith('refs/heads/')
-		) {
-			return reference;
-		}
-
 		if (
 			error instanceof WorkflowReferenceExactRequiredError ||
 			error instanceof WorkflowReferenceMalformedError ||
@@ -571,8 +585,23 @@ function conditionedTriggers(
 	dependencyGates: readonly JobDependencyGate[]
 ): WorkflowTrigger[] {
 	return triggers.flatMap((trigger) => {
+		const [branch] = trigger.filters.branches ?? [];
+		const reference =
+			branch !== undefined &&
+			trigger.event === 'push' &&
+			trigger.filters.branches?.length === 1 &&
+			Object.keys(trigger.filters).length === 1 &&
+			ReferencePattern.parse(branch) !== undefined &&
+			!branch.includes('*')
+				? `refs/heads/${branch}`
+				: undefined;
 		const outcomes = conditions.map((condition) =>
-			jobConditionOutcome(condition, trigger.event)
+			jobConditionOutcome(
+				condition,
+				trigger.event,
+				'repository',
+				reference === undefined ? undefined : { ref: reference }
+			)
 		);
 
 		if (outcomes.includes(false)) {
@@ -700,6 +729,19 @@ export async function discoverPublishingJobs(
 	const files = await source.list(repository, revision);
 	const workflows = new Map<string, Promise<Workflow>>();
 	const actions = new Map<string, Promise<LocalAction>>();
+	const workflowReferences = new Map<string, Promise<string | undefined>>();
+
+	function resolvePublishingReference(
+		reference: string
+	): Promise<string | undefined> {
+		const cached = workflowReferences.get(reference);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const resolved = pinnedReference(reference, source);
+		workflowReferences.set(reference, resolved);
+		return resolved;
+	}
 
 	function readWorkflow(
 		path: string,
@@ -962,15 +1004,35 @@ export async function discoverPublishingJobs(
 			}
 
 			const pin = uses.slice(uses.lastIndexOf('@') + 1);
+			const target = supplied.url;
+			if (
+				typeof target === 'string' &&
+				!target.includes('${{') &&
+				!isTargetTenant(target, tenant)
+			) {
+				continue;
+			}
 			const workflowPath =
 				kind === 'flake'
 					? 'cupboard-flake-publish.yml'
 					: 'cupboard-publish.yml';
-			const workflowReference = pinnedReference(
-				`${cupboardWorkflowPrefix}${workflowPath}@${pin}`
-			);
-			const target = supplied.url;
-
+			let workflowReference: string | undefined;
+			try {
+				workflowReference = await resolvePublishingReference(
+					`${cupboardWorkflowPrefix}${workflowPath}@${pin}`
+				);
+			} catch (error) {
+				if (!(error instanceof WorkflowReferenceMissingError)) {
+					throw error;
+				}
+				unverified.push({
+					caller,
+					job: label,
+					workflow: 'cupboard',
+					detail: error.message
+				});
+				continue;
+			}
 			if (typeof target !== 'string' || target.includes('${{')) {
 				unverified.push({
 					caller,
@@ -1027,18 +1089,14 @@ export async function discoverPublishingJobs(
 					caller,
 					job: label,
 					workflow: 'cupboard',
-					detail: `${uses} does not use an exact release tag or full commit ID`
+					detail: `${uses} does not use an exact release tag, branch ref or full commit ID`
 				});
 				continue;
 			}
 
 			let hasInstallableRunRoot = false;
 
-			if (
-				kind === 'installable' &&
-				supplied.publish !== 'none' &&
-				!workflowReference.includes('@refs/heads/')
-			) {
+			if (kind === 'installable' && supplied.publish !== 'none') {
 				const selected = parseExactWorkflowReference(workflowReference);
 				let publishingWorkflow: Workflow;
 
@@ -1097,6 +1155,11 @@ export async function discoverPublishingJobs(
 				kind,
 				...(hasInstallableRunRoot && { installableRunRoot: true as const }),
 				workflowRef: workflowReference,
+				...(!pin.startsWith('refs/') &&
+					parseExactWorkflowReference(workflowReference).pin.kind ===
+						'branch' && {
+						workflowRefInput: `${cupboardWorkflowPrefix}${workflowPath}@${pin}`
+					}),
 				inputs: supplied,
 				...(keys === 'unknown'
 					? { privateSubstitutersWiring: 'unknown' as const }
@@ -1222,6 +1285,25 @@ export function githubWorkflowSource(
 	}
 
 	return {
+		resolveWorkflowReference(repository, reference) {
+			return request(`${repository} workflow ref ${reference}`, async () => {
+				for (const prefix of ['tags', 'heads']) {
+					try {
+						const response = await octokit.rest.git.getRef({
+							...repositoryParts(repository),
+							ref: `${prefix}/${reference}`,
+							headers: { 'cache-control': 'no-cache' }
+						});
+						return response.data.ref;
+					} catch (error) {
+						if (!isGithubResponseStatus(error, StatusCodes.NOT_FOUND)) {
+							throw error;
+						}
+					}
+				}
+				throw new WorkflowReferenceMissingError(repository, reference);
+			});
+		},
 		resolveBranch(repository, branch) {
 			return request(`${repository} branch ${branch}`, async () => {
 				try {
@@ -1275,7 +1357,10 @@ export function githubWorkflowSource(
 				const response = await octokit.rest.repos.getContent({
 					...repositoryParts(repository),
 					path,
-					ref: reference
+					ref: reference,
+					...(reference.startsWith('refs/heads/') && {
+						headers: { 'cache-control': 'no-cache' }
+					})
 				});
 
 				if (

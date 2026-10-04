@@ -75,6 +75,18 @@ export class PassedCheckFinding extends CheckFinding {
 	}
 }
 
+export class BranchWorkflowTrustFinding extends CheckFinding {
+	readonly status = 'ok' as const;
+
+	constructor(public readonly reference: string) {
+		super('branch workflow trust');
+	}
+
+	detail(): string {
+		return `${this.reference}; trust rules accept future edits to this branch workflow`;
+	}
+}
+
 export class ReuseViewMissingFinding extends FailedCheckFinding {
 	constructor(
 		check: string,

@@ -223,6 +223,18 @@ export type OidcTrustSummary = z.output<typeof oidcTrustSummarySchema>;
 export type OidcTrustSummaryInput = z.input<typeof oidcTrustSummarySchema>;
 
 /**
+ * Adds grants without changing a rule's selectors or existing authority.
+ */
+export const oidcTrustExtendBodySchema = z.strictObject({
+	expected: oidcTrustSummarySchema,
+	permittedGrants: z.array(permittedGrantSchema).min(1)
+});
+export type OidcTrustExtendBody = z.output<typeof oidcTrustExtendBodySchema>;
+export type OidcTrustExtendBodyInput = z.input<
+	typeof oidcTrustExtendBodySchema
+>;
+
+/**
  * A stored control rule that fails validation when the server reads it. The
  * `disabled` flag identifies rules that have already been disabled and remain
  * only as a record.
