@@ -39,12 +39,43 @@ export const maxR2DeleteKeys = 1000;
  * an R2 request when `keys` is empty.
  */
 export async function deleteObjects(
-	bucket: R2Bucket,
+	bucket: Pick<R2Bucket, 'delete'>,
 	keys: readonly R2ObjectKey[]
 ): Promise<void> {
 	for (const batch of chunk(keys, maxR2DeleteKeys)) {
 		await bucket.delete(batch);
 	}
+}
+
+export interface ObjectDeletionPageSource {
+	read(limit: number): readonly R2ObjectKey[];
+	acknowledge(keys: readonly R2ObjectKey[]): void;
+}
+
+/**
+ * Drains a durable queue one R2 deletion page at a time. Acknowledges each page
+ * only after its deletion succeeds and returns the number of confirmed keys.
+ * The continuation policy checks the caller's work budget between pages.
+ */
+export async function drainObjectDeletionPages(
+	bucket: Pick<R2Bucket, 'delete'>,
+	source: ObjectDeletionPageSource,
+	canContinue: () => boolean
+): Promise<number> {
+	let processed = 0;
+
+	while (hasSubrequestsFor(1) && canContinue()) {
+		const keys = source.read(maxR2DeleteKeys);
+		if (keys.length === 0) {
+			break;
+		}
+
+		await deleteObjects(bucket, keys);
+		source.acknowledge(keys);
+		processed += keys.length;
+	}
+
+	return processed;
 }
 
 export type InspectableBatchItem = BatchItem<'sqlite'> & {

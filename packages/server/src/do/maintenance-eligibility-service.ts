@@ -71,6 +71,14 @@ export class MaintenanceEligibilityService {
 		if (queuedDeletion !== undefined) {
 			return true;
 		}
+		const teardown = this.context.db
+			.select({ present: sql`1` })
+			.from(schema.cacheTeardowns)
+			.limit(1)
+			.get();
+		if (teardown !== undefined) {
+			return true;
+		}
 		return [
 			schema.legacyRefreshTokenMembers,
 			schema.legacyRefreshTokenFamilies,

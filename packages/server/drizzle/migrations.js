@@ -71,6 +71,7 @@ import m0068 from './0068_protected_inheritance.sql';
 import m0069 from './0069_retry_limits.sql';
 import m0070 from './0070_cache_creation_defaults.sql';
 import m0071 from './0071_cache_close.sql';
+import m0072 from './0072_staging_cleanup.sql';
 
 export default {
 	journal,
@@ -146,6 +147,7 @@ export default {
 		m0068,
 		m0069,
 		m0070,
-		m0071
+		m0071,
+		m0072
 	}
 };

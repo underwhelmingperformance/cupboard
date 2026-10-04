@@ -158,6 +158,11 @@ cache that has roots but no store paths is removed without `--force`. If there's
 no cache with that name, the command succeeds and reports that it removed
 nothing.
 
+Success confirms that access has been revoked and the cache's local state has
+been removed. Physical cleanup continues asynchronously. The tenant's alarms
+remove staged uploads and retire published objects in bounded batches. Shared
+NARs remain available to other caches that reference them.
+
 The command asks you to confirm. In a script, add `--yes` to skip the question.
 
 You can't remove the default cache.
