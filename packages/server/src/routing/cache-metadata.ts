@@ -34,6 +34,7 @@ import {
 import { type WorkerHonoEnv } from './hono-env.ts';
 import {
 	cacheReadScopeVersion,
+	revalidateCacheReadAuthority,
 	revalidateCacheReadScope
 } from './read-scope.ts';
 import { cachedTenantRead, withoutStoring } from './tenant-forward.ts';
@@ -165,6 +166,7 @@ export async function answerCacheMetadata(
 	try {
 		const response = await cacheMetadataPageResponse(version, paths, entries);
 		await revalidateCacheReadScope(context, version);
+		await revalidateCacheReadAuthority(context);
 		return response;
 	} catch (error) {
 		if (error instanceof ForwardedMetadataRefusal) {

@@ -1038,6 +1038,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			) {
 				throw new MetadataScopeChangedError();
 			}
+			const denied = await this.guardReuseViewRead(context.req.raw, current);
+			if (denied !== undefined) {
+				return denied;
+			}
 			return response;
 		});
 	}
