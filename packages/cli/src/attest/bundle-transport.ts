@@ -24,6 +24,7 @@ import type {
 	AttestationBundleOutcome,
 	PreparedAttestationBundle
 } from './attach.ts';
+import type { AttachmentProgress } from './attachment-progress.ts';
 
 export interface AttestationBundleClient {
 	negotiateAttestationBundles(
@@ -149,6 +150,7 @@ export async function runBundleAttachment(
 	log: StepLog,
 	options: {
 		readonly client: AttestationBundleClient;
+		readonly progress: AttachmentProgress;
 		readonly skipUnservable?: boolean;
 	}
 ): Promise<AttestationAttachOutcome> {
@@ -189,6 +191,7 @@ export async function runBundleAttachment(
 		}
 		await options.client.uploadNar(decision.r2Key, byteStream([group.bytes]));
 		uploadedBytes += group.bytes.byteLength;
+		options.progress.uploaded(group.bytes.byteLength);
 	};
 	const bundles: AttestationBundleOutcome[] = [];
 	const batches = chunk(
@@ -198,7 +201,9 @@ export async function runBundleAttachment(
 
 	for (const batch of batches) {
 		const decisions = await negotiate(batch);
-		const outcomes = await mapWithConcurrency(batch, 6, async (group) => {
+		const attachGroup = async (
+			group: BundleGroup
+		): Promise<readonly AttestationBundleOutcome[]> => {
 			let decision = decisions.get(group.digest);
 			if (decision === undefined) {
 				throw new AttestationBundleResponseMismatchError(
@@ -218,16 +223,30 @@ export async function runBundleAttachment(
 						group.digest
 					);
 				}
-				await upload(group, renewed);
+				if (!options.progress.isStopped()) {
+					await upload(group, renewed);
+				}
 				return renewed;
 			};
 			let expiresAt = decision.expiresAt;
 			const outcomes: AttestationBundleOutcome[] = [];
 			const pages = chunk([...group.paths], attestationAttachMaxPaths);
 			for (const paths of pages) {
+				if (options.progress.isStopped()) {
+					return outcomes;
+				}
 				if (Date.now() >= Date.parse(expiresAt)) {
 					decision = await renew();
 				}
+				if (options.progress.isStopped()) {
+					return outcomes;
+				}
+				options.progress.started(
+					paths.map((storePathHash) => ({
+						storePathHash,
+						digest: group.digest
+					}))
+				);
 				let response: AttestationAttachPathsResponseInput;
 				try {
 					response = await options.client.attachAttestationPaths(
@@ -238,7 +257,13 @@ export async function runBundleAttachment(
 					if (!(error instanceof ORPCError) || error.code !== 'NOT_FOUND') {
 						throw error;
 					}
+					if (options.progress.isStopped()) {
+						return outcomes;
+					}
 					decision = await renew();
+					if (options.progress.isStopped()) {
+						return outcomes;
+					}
 					response = await options.client.attachAttestationPaths(
 						decision.uploadId,
 						{ storePathHashes: paths }
@@ -246,6 +271,9 @@ export async function runBundleAttachment(
 				}
 				expiresAt = response.expiresAt;
 				const page = exactPathOutcomes(group.digest, paths, response);
+				for (const result of page) {
+					options.progress.record(result);
+				}
 				if (options.skipUnservable !== true) {
 					const unavailable = page.find(
 						(result) => result.outcome === 'unservable'
@@ -257,6 +285,14 @@ export async function runBundleAttachment(
 				outcomes.push(...page);
 			}
 			return outcomes;
+		};
+		const outcomes = await mapWithConcurrency(batch, 6, async (group) => {
+			try {
+				return await attachGroup(group);
+			} catch (error) {
+				options.progress.stop();
+				throw error;
+			}
 		});
 		bundles.push(...outcomes.flat());
 	}

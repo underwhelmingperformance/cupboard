@@ -167,6 +167,85 @@ function unexpectedSetRootCall(): Promise<never> {
 }
 
 describe('runPush', () => {
+	it('reports confirmed and uncertain attestation pairs before propagating publication attachment failures', async () => {
+		const bundle = sigstoreBundleBytes(
+			bundleSubject(appPath, appDigest.narHash)
+		);
+		const runtimeBundle = sigstoreBundleBytes(
+			bundleSubject(runtimePath, runtimeDigest.narHash)
+		);
+		const failure = new ORPCError('INTERNAL_SERVER_ERROR', { status: 500 });
+		const payloads: ResultPayload[] = [];
+		const client: PushClient = {
+			...skipClient([], []),
+			negotiateAttestations: (body) =>
+				Promise.resolve({
+					bundles: body.bundles.map((pair) =>
+						pair.storePathHash === StorePath.hash(appPath)
+							? { ...pair, action: 'skip' }
+							: {
+									...pair,
+									action: 'upload',
+									uploadId: 'runtime',
+									r2Key: 'staging/runtime',
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+					)
+				}),
+			attachAttestation: () => Promise.reject(failure)
+		};
+		const pending = runPush(
+			publication([appPath, runtimePath]),
+			reporter([], [], payloads),
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				client,
+				attestations: [{ path: 'app' }, { path: 'runtime' }],
+				readAttestationBundle: (path) =>
+					Promise.resolve(path === 'app' ? bundle : runtimeBundle),
+				nix: nixStore({
+					[appPath]: pathInfo(appPath, appDigest, []),
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				})
+			}
+		);
+		await expect(pending).rejects.toBe(failure);
+		expect(payloads[0]?.rows.slice(-1)).toStrictEqual([
+			{
+				label: 'Next step',
+				value:
+					'After resolving the reported error, retry with the same bundle files. Existing attachments will be reused.'
+			}
+		]);
+		expect(payloads.map(({ kind, data }) => ({ kind, data }))).toStrictEqual([
+			{
+				kind: 'attestation-attach-partial',
+				data: {
+					attached: 0,
+					reused: 1,
+					unservable: 0,
+					unconfirmed: 1,
+					unattempted: 0,
+					uploadedBytes: runtimeBundle.byteLength,
+					bundles: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							digest: sha256Hex(bundle),
+							outcome: 'reused'
+						},
+						{
+							storePathHash: StorePath.hash(runtimePath),
+							storePath: runtimePath,
+							digest: sha256Hex(runtimeBundle),
+							outcome: 'unconfirmed'
+						}
+					]
+				}
+			}
+		]);
+	});
 	it.each([
 		{
 			name: 'empty',
