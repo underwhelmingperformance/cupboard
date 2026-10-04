@@ -6475,6 +6475,123 @@ published intermediates and their storage cost.
       `attestation-path-index` landed before this extension with an empty
       expand, so expanding it early applies no migration.
 
+## Remaining release repairs
+
+Complete these repairs on the current release branch before release preparation.
+All authored implementation and test code must be TypeScript. Generated action
+bundles remain build outputs.
+
+- [x] Detect build-hook failure markers incrementally with bounded stderr
+      retention. Forward the complete log and preserve child-exit and receipt
+      behaviour.
+- [x] Recheck current read authority after buffering private cache and
+      reuse-view metadata, after the existing scope and revision checks.
+      Preserve refusal statuses and responses that prohibit storage.
+- [x] Give native build-action users an existing-hook remedy through
+      `publish: outputs` or `publish: closure`. Explain that these modes do not
+      publish observed intermediate outputs, and preserve the CLI remedy.
+- [x] Report partial attestation attachment through a typed
+      `attestation-attach-partial` result. Record validated responses per
+      path/bundle pair, distinguish unconfirmed requests from unattempted pairs,
+      await in-progress requests after failure, and preserve the original error.
+      Cover grouped attachment, legacy fallback and attachment during
+      publication. Keep successful summaries unchanged and retries idempotent.
+- [x] Queue staging-object cleanup in the cache's local teardown transaction.
+      Revoke access and remove pending state promptly, then drain the durable
+      queue in bounded alarm passes. Retain entries after R2 failure, protect
+      canonical shared objects and scope cleanup to the deleted cache identity.
+      Process successive batches while the invocation budget permits, with
+      budget reserved for published cleanup and rescheduling. Use a shared
+      helper for durable R2 page draining, alongside the existing request-size
+      and SQL batching helpers. Keep queue selection and acknowledgement
+      specific to the deleted cache identity. Keep the teardown marker until all
+      cleanup finishes, and preserve orphan reconciliation for late staging
+      writes.
+- [x] Repair the local development bootstrap found by the consolidated review.
+      Initialise deployment transition state after applying the complete local
+      schema, preserve staged deployment safety and verify lifecycle writes
+      through the documented setup.
+- [x] Repair Docker fixture preparation when an image or its build cache
+      disappears. Preserve the actual build diagnostic, recover only from a
+      confirmed missing-image condition and retain test-owned resource cleanup.
+- [x] Verify each behaviour with red/green regression tests, regenerate affected
+      bundles and references, and run `pnpm check` on the consolidated tree.
+      Repair every failure found during verification, including pre-existing
+      failures and flakes. Keep security assertions and maintenance work limits
+      intact.
+- [x] Review and integrate Sol high subagent patches, autosquash branch fixups,
+      and complete a context-blind Sol high review of main plus the branch,
+      including compatibility, operations and UX. Use separate commits for
+      pre-existing follow-ups and preserve main's history.
+
+The initial consolidated `pnpm check` passed with 10,576 tests and nine existing
+skips. The context-blind release review found the local bootstrap defect above.
+Its correction and the Docker fixture repair passed separate independent
+reviews.
+
+### Release UX follow-up
+
+- [x] Check the caller's PR activity types and job conditions when publication
+      manages a PR cache. Diagnose missing close or reopen events and conditions
+      that prevent lifecycle handling. Follow literal dependencies with bounded
+      analysis and preserve skipped ancestors. Model non-cancelled lifecycle
+      runs and support `!cancelled()`. Keep uncertain analysis unverified and
+      limit trust repairs to the reachable jobs' operations.
+- [x] Report attestation coverage as paths with matching stored attestations.
+      Preserve structured results and the separate verification command.
+- [x] Add terminal recovery advice after partial attachment: resolve the error,
+      then retry with the same bundle files. Preserve the original error,
+      per-pair outcomes, structured results and idempotent reuse.
+- [x] Separate expected feature semantics from unresolved UX problems in the
+      release report. Keep deletion output and built publication unchanged.
+      Queue private Nix configuration diagnostics for the following release
+      alongside managed read sessions.
+- [x] Verify the follow-up with focused regression tests and `pnpm check`,
+      review the consolidated patch and autosquash its branch fixups.
+
+The follow-up `pnpm check` passed with 10,637 tests and nine existing skips.
+Independent review passed 691 focused tests and CLI type checking; the final
+import-order correction passed all 42 affected tests. The source autosquash
+preserved an identical Git tree and both main references. No actionable review
+finding remains within this follow-up.
+
+An additional dependency regression reproduced false coverage for missing jobs
+whose identifiers matched inherited object properties. The checker now requires
+a declared job and preserves explicitly declared jobs with those identifiers.
+The final `pnpm check` passed with 10,641 tests and nine existing skips.
+Supplementary independent review passed all 516 GitHub tests, the 134 affected
+inspection tests and CLI type checking. The reviewed source fingerprint remained
+unchanged through the full gate.
+
+The first merge-queue run exposed two generation-gate fixture races. Initial
+publication could schedule an alarm before deletion opened the test fence, and a
+due delivery could remove the old objects before their assertions. All 12 parked
+fixtures now fence configuration and publication. The existing assertions on old
+objects and refused reads remain intact. The affected file passed ten
+consecutive runs and a final run (22 tests each). Independent review passed 23
+tests, including the replacement-instance fence regression. The corrected full
+`pnpm check` passed 10,641 tests with nine existing skips and unchanged reviewed
+source hashes. Delivery requires fresh CI and merge-queue validation.
+
+The second merge-queue run exposed a recorded-verdict fixture collision. The
+absent and legacy cursor cases used identical NAR bytes, so a late alarm could
+make the next case reuse a canonical object instead of starting a fresh upload.
+Manual claims also armed immediate alarms that could race the controlled verdict
+passes. The cases now use distinct bytes and store paths, with the selected
+object fenced before configuration through the cursor assertions. The
+readiness-order and retry-count assertions remain unchanged. Controlled red
+checks reproduced both causes. Ten consecutive affected-file runs passed nine
+tests each, and independent review passed ten tests, including alarm-fence
+replacement coverage. The repeated `pnpm check` passed 10,641 tests with nine
+existing skips and unchanged reviewed source hashes. Delivery requires history
+consolidation and fresh CI and merge-queue validation.
+
+Existing cache grace policies remain unchanged because persisted values do not
+distinguish a default from an explicit selection. Managed read sessions remain
+queued for the following release. After source sign-off and history
+consolidation, push this branch, wait for CI, repair any failures and merge
+through the merge queue. Release publication and deployment remain separate.
+
 ## Managed read sessions (following release)
 
 Queue this work for the release after the current release candidate. The current
@@ -6487,6 +6604,11 @@ scheduled service maintains the read sessions and publishes their current tokens
 into a managed netrc file. Netrc is the Nix transport adapter; the session model
 records the deployment, tenant, requested caches or reuse view, grants, identity
 source, expiry and renewal authority.
+
+- [ ] Add secret-safe diagnostics for private Nix configuration. Check the
+      effective configuration for the relevant client or daemon account and
+      explain missing credentials or inaccessible parent directories without
+      exposing credential-bearing URLs.
 
 - [ ] Define renewable read sessions for interactive users and unattended
       workloads. Keep their authority limited to the requested read resources;
