@@ -6475,6 +6475,63 @@ published intermediates and their storage cost.
       `attestation-path-index` landed before this extension with an empty
       expand, so expanding it early applies no migration.
 
+## Managed read sessions (following release)
+
+Queue this work for the release after the current release candidate. The current
+release keeps command-owned CI renewal and static read credentials. All authored
+implementation and test code must be TypeScript.
+
+Ordinary Nix commands should use renewable read credentials without requiring
+the user to invoke `cupboard` periodically. A supported background process or
+scheduled service maintains the read sessions and publishes their current tokens
+into a managed netrc file. Netrc is the Nix transport adapter; the session model
+records the deployment, tenant, requested caches or reuse view, grants, identity
+source, expiry and renewal authority.
+
+- [ ] Define renewable read sessions for interactive users and unattended
+      workloads. Keep their authority limited to the requested read resources;
+      existing admin refresh sessions do not imply permission to renew reads.
+      Identify which identity sources support unattended renewal and require a
+      new login when renewable authority expires or is revoked.
+- [ ] Select credentials explicitly through a stable, non-secret username in
+      each Nix substituter URL and matching host/login entries in netrc. Keep
+      canonical cache URLs, issuers and audiences free of userinfo. Validate
+      access from the token's grants, independently of the username selector.
+- [ ] Support multiple sessions for caches and reuse views across tenants on the
+      same deployment host. Keep renewal and expiry independent for each
+      session. Update the server's read-token Basic authentication, CLI, actions
+      and TypeScript Nix client together; preserve existing static credentials
+      and the fixed `cupboard-oidc` login during migration.
+- [ ] Renew before expiry, retry transient failures while the current token
+      remains valid, and stop publishing credentials for sessions whose renewal
+      authority is refused or exhausted. Recover after process restart, machine
+      sleep and network interruption. Serialise refresh-token rotation and
+      publication so concurrent renewals cannot lose another session's update.
+- [ ] Publish the complete managed netrc through an atomic rename at a stable
+      path. Protect both renewal authority and read tokens with permissions
+      appropriate to the user and Nix daemon. Define ownership of managed
+      entries and preserve separately configured credentials without duplicate
+      matches.
+- [ ] Provide supported installation, startup, status, logout and removal for
+      the background or scheduled service on Linux and macOS. Report which
+      sessions require login and the effect on cache reads. Users should not
+      need to edit netrc or create their own periodic CLI invocation.
+- [ ] Reuse the session manager for command-owned CI renewal. Preserve child
+      cancellation and cleanup, and report identity sources that cannot renew
+      during a job. Configure remote builders with their own credentials and
+      renewal mechanism; a local managed file does not configure a remote host.
+- [ ] Verify real Nix substitution through cache-info, narinfo and relative NAR
+      URLs across token renewal, including long builds, retries, daemon reads,
+      redirects and absolute NAR URLs. Test concurrent same-host tenants,
+      independent session failures, wrong selectors, expiry, revocation and
+      rotation. Keep the current static URL configuration usable during rollout.
+
+Current same-host alternatives are complete static credentials in each
+substituter URL, or one tenant's shared credential for caches that accept it. A
+CI OIDC session can include several caches in one tenant and coexist with static
+credentials in other substituter URLs. Multiple tenant OIDC sessions within one
+command remain deferred to this work.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.
