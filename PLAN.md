@@ -6592,6 +6592,58 @@ queued for the following release. After source sign-off and history
 consolidation, push this branch, wait for CI, repair any failures and merge
 through the merge queue. Release publication and deployment remain separate.
 
+## Guided GitHub trust upgrades
+
+Implement this follow-up on `codex/guided-trust-repairs`, based on the merged
+release repairs at `2330adfd`. Open a separate PR. All authored implementation
+and test code must be TypeScript.
+
+The post-merge dogfood runs exposed command gaps. The existing server needs an
+upgrade, and its trust rules lack run-root attachment and PR lifecycle grants.
+Before these repairs, the guided commands refused the deliberately selected
+`@main` workflow reference. They could not extend an existing matched rule's
+grants or model the dogfood workflow's dynamic PR cache and root inputs.
+Operators can now review and apply these upgrades through supported commands.
+
+- [x] Model canonical branch workflow references and verify that the referenced
+      workflow exists. Keep immutable references as the default for guided
+      mutations. Support deliberate branch trust through an explicit option in
+      setup, repair and the GitHub trust helpers. Explain that the choice trusts
+      future workflow edits. Read-only checks should model branch references.
+- [x] Recognise the simple workflow's bounded GitHub repository and PR-number
+      expressions. Generate claim-bound cache and root templates for the whole
+      PR family. Preserve fork, event, dependency and cancellation guards. Keep
+      unsupported expressions unverified.
+- [x] Add a contract-first, conditional grant-extension operation. Preserve the
+      rule ID, issuer, audience, claims, display and existing grants. Reject
+      stale snapshots, disabled rules and the protected owner rule. Use existing
+      trust-add authority because the operation only adds grants.
+- [x] Preview existing-rule extensions and new close-only rules in the guided
+      repair. Apply an extension atomically, without adding an ambiguous
+      duplicate or disabling existing authority. Preserve unrelated grants and
+      jobs; retain refusals for selectors that cannot be safely modelled.
+      Recheck state before writes and verify the result. Report partial writes
+      and make retries resume from current state.
+- [x] Cover the actual dogfood workflow through discovery, modelling, preview,
+      application and verification. Check main publication, PR creation and
+      reopening, and merged closure. Keep closure confined to the PR cache
+      family and exclude publication and read authority from that rule.
+- [x] Update the owning guides, upgrade notes and generated CLI reference. Run
+      red/green tests for each behaviour, focused checks during development, and
+      `pnpm check` on the consolidated tree. Obtain an independent review,
+      address its findings.
+
+The focused integration suite passed all 585 tests. A context-blind Sol high
+review found no remaining issues after its findings were addressed. The final
+`pnpm check` passed, including the Docker and Nix integration suites, with
+10,735 passing tests and nine configured skips. Commit the reviewed changes and
+open the follow-up PR.
+
+Sol high subagents implement branch-reference handling, atomic rule extension
+and publication modelling. The parent integrates the patches, checks user-facing
+output and documentation, and runs the final gate. Production deployment, live
+trust changes and workflow retries remain pending separate approval.
+
 ## Managed read sessions (following release)
 
 Queue this work for the release after the current release candidate. The current

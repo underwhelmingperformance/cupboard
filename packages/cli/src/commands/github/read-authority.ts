@@ -47,7 +47,10 @@ export async function publicationReadAuthority(
 	client: GithubCheckClient,
 	fetchCacheAccess: (url: URL) => Promise<CacheAccessMode>
 ): Promise<PublicationReadAuthority> {
-	const selectedCache = jobCache(job);
+	const selectedCache =
+		publication.cache === undefined
+			? jobCache(job)
+			: { outcome: 'resolved' as const, scope: publication.cache };
 
 	if (selectedCache.outcome === 'unresolved') {
 		throw new Error(selectedCache.reason);
@@ -56,9 +59,14 @@ export async function publicationReadAuthority(
 	const isPreset = isPresetJob(job);
 	const isReadOnly = isReadOnlyJob(job);
 	const cacheMode = job.inputs['cache-access-mode'];
-	const isPullRequest =
+	const isPresetPullRequest =
 		isPreset && publication.trigger === 'pull_request' && !isReadOnly;
-	const cache: CacheScope = isPullRequest
+	const isManagedPullRequest =
+		publication.pullRequestTemplates !== undefined &&
+		publication.trigger === 'pull_request' &&
+		job.inputs['manage-pr-cache'] === true &&
+		!isReadOnly;
+	const cache: CacheScope = isPresetPullRequest
 		? {
 				kind: 'named',
 				name: cacheNameSchema.parse(pullRequestCacheName(repositoryId, 1))
@@ -83,9 +91,39 @@ export async function publicationReadAuthority(
 			: isPreset
 				? await fetchCacheAccess(tenant)
 				: undefined;
-	const cacheAccess = isPullRequest
-		? (selectedViewAccess ?? (await fetchCacheAccess(tenant)))
-		: await fetchCacheAccess(cacheUrl(tenant, cache));
+	let cacheAccess: CacheAccessMode;
+	if (isPresetPullRequest) {
+		cacheAccess = selectedViewAccess ?? (await fetchCacheAccess(tenant));
+	} else if (isManagedPullRequest && cache.kind === 'named') {
+		const [prefix = '', suffix = ''] =
+			publication.pullRequestTemplates.cache.split('{pr}', 2);
+		let cursor: string | undefined;
+		let hasPrivateFamilyCache = false;
+		do {
+			const page = await client.caches.list({ namePrefix: prefix, cursor });
+			hasPrivateFamilyCache ||= page.caches.some((candidate) => {
+				if (
+					candidate.scope.kind !== 'named' ||
+					candidate.access !== 'private'
+				) {
+					return false;
+				}
+				const name = candidate.scope.name;
+				return (
+					name.startsWith(prefix) &&
+					name.endsWith(suffix) &&
+					/^[0-9]+$/u.test(
+						name.slice(prefix.length, name.length - suffix.length)
+					)
+				);
+			});
+			cursor = page.cursor;
+		} while (!hasPrivateFamilyCache && cursor !== undefined);
+		const defaultAccess = await fetchCacheAccess(tenant);
+		cacheAccess = hasPrivateFamilyCache ? 'private' : defaultAccess;
+	} else {
+		cacheAccess = await fetchCacheAccess(cacheUrl(tenant, cache));
+	}
 	const view = publication.reuseView;
 	const cacheWiring = job.readCredentialWiring?.cache ?? 'none';
 	const viewWiring = job.readCredentialWiring?.view ?? 'none';
@@ -123,7 +161,10 @@ export async function publicationReadAuthority(
 	const isViewContent =
 		view !== undefined && viewAccess === 'private' && viewWiring === 'none';
 	const isNeedsOidc =
-		isPullRequest || isCacheContent || isViewContent || isAdditionalContent;
+		isPresetPullRequest ||
+		isCacheContent ||
+		isViewContent ||
+		isAdditionalContent;
 	const resources: ReadResourceState[] = isNeedsOidc
 		? [
 				...(cacheWiring === 'none'
@@ -133,7 +174,7 @@ export async function publicationReadAuthority(
 								cache,
 								mode: 'content' as const,
 								state:
-									isPullRequest && cacheAccess === 'public'
+									isPresetPullRequest && cacheAccess === 'public'
 										? { kind: 'absent' as const }
 										: {
 												kind: 'existing' as const,

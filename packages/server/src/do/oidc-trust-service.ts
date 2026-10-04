@@ -1,10 +1,12 @@
 import { type Logger } from '@cupboard/logger';
+import { isDeepEqual } from '@cupboard/protocol/deep-equal';
 import {
 	type OidcAudience,
 	type OidcIssuer,
 	oidcIssuerSchema,
 	type OidcSubject,
 	type OidcTrustAddBody,
+	type OidcTrustExtendBody,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
@@ -24,6 +26,7 @@ import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 import {
 	OidcIssuerTransportRequiredError,
+	OidcTrustRuleChangedError,
 	OidcTrustRuleNotFoundError,
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
@@ -181,6 +184,53 @@ export class OidcTrustService {
 			...(body.display !== undefined && { display: body.display }),
 			disabled: false
 		};
+	}
+
+	async extendRule(
+		id: TrustRuleId,
+		body: OidcTrustExtendBody
+	): Promise<OidcTrustSummary> {
+		if (id === ownerRuleId) {
+			throw new OwnerRuleImmutableError(id);
+		}
+
+		const grants = [...body.expected.permittedGrants];
+
+		for (const grant of body.permittedGrants) {
+			if (grants.every((existing) => !isDeepEqual(existing, grant))) {
+				grants.push(grant);
+			}
+		}
+
+		const prepared = await this.grantSpelling.permittedGrantsJson(grants);
+
+		return this.context.db.transaction((tx) => {
+			const row = tx
+				.select()
+				.from(schema.oidcTrust)
+				.where(eq(schema.oidcTrust.id, id))
+				.get();
+
+			if (
+				row?.disabledAt !== null ||
+				!isDeepEqual(
+					oidcTrustSummaryFromRow(row, canUseLoopbackHttp(this.context.env)),
+					body.expected
+				)
+			) {
+				throw new OidcTrustRuleChangedError(id);
+			}
+
+			tx.update(schema.oidcTrust)
+				.set({
+					permittedGrantsJson:
+						this.grantSpelling.permittedGrantsForWrite(prepared)
+				})
+				.where(eq(schema.oidcTrust.id, id))
+				.run();
+
+			return { ...body.expected, permittedGrants: grants };
+		});
 	}
 
 	removeRule(id: TrustRuleId): OidcTrustRemoveResponse {

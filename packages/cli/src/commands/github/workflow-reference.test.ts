@@ -46,6 +46,42 @@ function forbiddenFetch(remaining: string): typeof globalThis.fetch {
 }
 
 describe('verifyWorkflowReference', () => {
+	it.each([false, true])(
+		'verifies a branch only with explicit opt-in: %s',
+		async (allowBranchWorkflow) => {
+			const reference = `${workflowPath}@refs/heads/main`;
+			const requested: string[] = [];
+			const fetch: typeof globalThis.fetch = (input) => {
+				const url = requestUrl(input);
+				requested.push(`${url.pathname}${url.search}`);
+				return Promise.resolve(Response.json({ type: 'file' }));
+			};
+			let outcome: unknown;
+			try {
+				await verifyWorkflowReference(parseExactWorkflowReference(reference), {
+					fetch,
+					allowBranchWorkflow
+				});
+			} catch (error) {
+				outcome = error;
+			}
+			expect({ outcome, requested }).toStrictEqual(
+				allowBranchWorkflow
+					? {
+							outcome: undefined,
+							requested: [`${contentPath}?ref=refs%2Fheads%2Fmain`]
+						}
+					: {
+							outcome: new WorkflowReferenceMutableError(
+								reference,
+								'refs/heads/main'
+							),
+							requested: []
+						}
+			);
+		}
+	);
+
 	it('accepts a workflow file at a full commit id', async () => {
 		const commit = 'a'.repeat(40);
 		const requested: { pathname: string; ref: string | null }[] = [];
@@ -91,14 +127,17 @@ describe('verifyWorkflowReference', () => {
 		]);
 	});
 
-	it('refuses a tag whose release GitHub reports as mutable', async () => {
-		await expect(
-			verifyWorkflowReference(
-				parseExactWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`),
-				{ fetch: mutableReleaseFetch }
-			)
-		).rejects.toBeInstanceOf(WorkflowReferenceMutableError);
-	});
+	it.each([false, true])(
+		'refuses a mutable release even with branch opt-in: %s',
+		async (allowBranchWorkflow) => {
+			await expect(
+				verifyWorkflowReference(
+					parseExactWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`),
+					{ fetch: mutableReleaseFetch, allowBranchWorkflow }
+				)
+			).rejects.toBeInstanceOf(WorkflowReferenceMutableError);
+		}
+	);
 
 	it('refuses a reference whose workflow file does not exist', async () => {
 		const parsed = parseExactWorkflowReference(

@@ -21,6 +21,11 @@ Publishing jobs that the repair did not change still give 1 or 69 as above. The
 [CLI scripting reference][cli-scripting] lists the exit statuses that all
 commands share.
 
+Cancellation keeps exit status 130 and reports any confirmed changes. An
+unconfirmed write request keeps the underlying failure's exit status, such as 75
+for a temporary failure or 130 for cancellation. Its error reports that the
+attempted write may have completed.
+
 [cli-scripting]: ../reference/cli-scripting.md#exit-status
 
 ## Finding the publishing jobs
@@ -48,11 +53,13 @@ called workflow's file name and job ID, such as
 `github-check-discovered` result lists its findings. Each finding has the event
 that it applies to, the name of the check, its status and any detail.
 
-The check fails a job that pins a cupboard workflow to a branch, because a
-branch can move. This applies whether the caller writes `refs/heads/main` or
-`main`. The check also fails a pin to a tag whose release GitHub does not report
-as immutable. It fails a pin when GitHub cannot find its release or workflow
-file.
+The read-only check can inspect a cupboard workflow at a branch reference,
+whether the caller writes `refs/heads/main` or `main`. It verifies that the file
+exists and reports that branch trust accepts future workflow edits. A branch
+reference does not fix the workflow's contents. Guided mutations require
+`--allow-branch-workflow` to select this trust explicitly. The check still fails
+a tag whose release GitHub does not report as immutable, or a reference whose
+release or workflow file GitHub cannot find.
 
 The check sends the lookup of the checked branch with `Cache-Control: no-cache`,
 so it reads the branch's current head even while the local HTTP cache has a
@@ -80,13 +87,18 @@ The check reports these jobs as unverified, for manual review:
 - A job with cupboard workflow inputs that the check cannot evaluate. A dynamic
   `publish` input, for example, prevents a static check from determining whether
   the job publishes paths.
-- A job without the flake preset that runs for `pull_request`. The job's
-  pull-request runs publish to the same cache and root as its branch runs, so a
-  `pull_request` trust rule would let any pull request from the repository write
-  to that cache and root. The check reports these runs for manual review whether
-  or not such a rule exists. Use the flake preset, which publishes each pull
-  request's outputs to a separate cache, or publish pull requests to a separate
-  cache.
+- A pull-request publisher whose inputs do not prove that each PR writes to its
+  own cache and root. A rule for the pull-request event alone would allow every
+  PR from the repository to write to a shared cache or root. Use the flake
+  preset or a PR-number binding in the simple workflow's cache and root.
+
+For the simple workflow, the check recognises `github.repository` and
+`github.event.pull_request.number` in cache and root inputs. For example,
+`cache: pr-${{ github.event.pull_request.number }}` and
+`root: github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}`
+select a PR cache family and root prefix. The generated grants derive the PR
+number from GitHub's signed `ref`, rather than authorising only the example PR
+that the check simulates. Other expressions still require manual review.
 
 For `publish: none` and the flake workflow's older `push: false`, the check
 models the selected cache read without publication or cache lifecycle grants. A
@@ -170,9 +182,10 @@ The check reads each job's `if` condition. It evaluates comparisons of
 not simulate a job's runs for an event that its condition excludes. For example,
 a job guarded by `github.event_name == 'push'` is not checked for
 `pull_request`. The status functions `success()` and `always()` count as true
-for a job without skipped dependencies. When the condition also depends on
-another term, such as `github.ref == 'refs/heads/main'`, the check simulates the
-run and reports the job as unverified for that event.
+for a job without skipped dependencies. A push with one exact branch filter also
+supplies the ref for comparisons such as `github.ref == 'refs/heads/main'`. When
+the condition depends on another term that the check cannot evaluate, the check
+simulates the run and reports the job as unverified for that event.
 
 The check simulates a pull request from the repository itself. A guard that
 compares the head repository with the repository, such as
@@ -258,13 +271,13 @@ without a required grant, and a missing `pull-requests-<repository-id>` view for
 the flake preset. When every failure of a job is one of these, an interactive
 check offers the repair after reporting failures. `--fix` starts it directly.
 
-The preview lists the claims, grants and view changes before you confirm them.
-The repair adds rules and views only for jobs in which it can fix every failure.
-Any other failed or unverified job still makes the command exit unsuccessfully.
-After writing, the repair runs the check again and reports it under a separate
-`github-check-verified` result kind. If a repaired job is still failed or
-unverified, the command exits with an error that lists the changes already
-applied.
+The preview lists new rules, additional grants for existing rules, and view
+changes before you confirm them. The repair changes tenant settings only for
+jobs in which it can fix every failure. Any other failed or unverified job still
+makes the command exit unsuccessfully. After writing, the repair runs the check
+again and reports it under a separate `github-check-verified` result kind. If a
+repaired job is still failed or unverified, the command exits with an error that
+lists the changes already applied.
 
 The repair does not create a trust rule from one modelled ref when the workflow
 can publish on other refs that the check cannot verify. An unfiltered push or a
@@ -282,15 +295,27 @@ cupboard github check https://cupboard.example.workers.dev/t/acme \
 ```
 
 To accept future cupboard `v*` releases in planned rules, use
-`--trust-scope tag-pattern --tag-pattern 'v*'`.
-
-This selects future reusable workflow release tags for rules created by a
-discovered repair. With `github setup`, put the same pattern in the reference:
+`--trust-scope tag-pattern --tag-pattern 'v*'`. This selects future reusable
+workflow release tags for rules created by a discovered repair. With
+`github setup`, put the same pattern in the reference:
 `--workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*'`.
-An explicit `github check --workflow-ref` checks one immutable reference and
-cannot be combined with `--fix`. `--job-workflow-ref` is an alias for
-`--workflow-ref` on both commands; trust-rule commands accept both spellings
-too.
+
+To follow a branch workflow deliberately, keep `--trust-scope exact` and add
+`--allow-branch-workflow`:
+
+```sh
+cupboard github check https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app --fix --trust-scope exact --allow-branch-workflow
+```
+
+The preview states that the rules accept future edits to each branch workflow.
+The flag does not permit a rule for any workflow reference, or convert branch
+trust to a release-tag pattern. Without the flag, guided repair refuses branch
+trust. Read-only checks do not require the flag.
+
+An explicit `github check --workflow-ref` checks one exact reference and cannot
+be combined with `--fix`. `--job-workflow-ref` is an alias for `--workflow-ref`
+on both commands; trust-rule commands accept both spellings too.
 
 `github setup --access` is an alias for `--cache-access-mode`. Both options
 select the access of new pull-request caches and their reuse view, and do not
@@ -342,18 +367,30 @@ The repair does not read workflow files at tags or on other branches, so it
 cannot check the runs of those files. The preview lists the branches that it
 checked.
 
-If a rule matches the workflow claims but lacks a grant, the repair adds a
-planned rule with more claims that grants the missing operations. The existing
-rule stays active, but the server selects the planned rule for the runs that
-both rules match. Remove the existing rule separately if the planned rule makes
-it unnecessary. When the existing rule has at least as many claims as the
-planned rule, the server would not prefer the planned rule, so the repair stops
-before it asks for a trust scope. Remove the existing rule, or replace it with a
-rule that also grants the missing operation.
+If a matched GitHub rule has the required selectors but lacks grants, the repair
+can extend its grants atomically. It preserves the ID, issuer, audience, claims,
+display and existing grants. The preview distinguishes retained grants from
+additions. A conditional write refuses an existing rule whose state changed
+after the preview. The repair does not disable the rule or create an ambiguous
+duplicate. Other jobs retain their existing authority.
 
-When the repair stops for one of these reasons, it does not change the tenant.
-The error lists the job and the existing rules. Change the configuration by
-hand.
+The repair still refuses selectors that it cannot safely model, protected owner
+rules and disabled rules. A narrower new rule can be added where the existing
+selection permits it; the preview identifies any retained rule. The repair
+checks the final candidate policy against the discovered jobs before writing. An
+older server that lacks atomic grant extension requires an upgrade before this
+repair can complete. See [Upgrade notes][grant-extension-upgrade].
+
+If a configuration write fails without a confirmed response, the write may have
+completed. The command reports the uncertain attempt separately from confirmed
+changes. Run `cupboard github check` again before retrying. A new repair uses
+the current rules and adds only grants that are still missing.
+
+[grant-extension-upgrade]: ../operator/upgrade-notes.md#pr-cache-closure
+
+When the repair refuses a planned rule before writing, it does not change the
+tenant. The error identifies the job and any existing rules that prevent the
+repair. Change the configuration by hand.
 
 Before writing, the repair reads the branch revision, trust rules and views
 again, and sends the branch lookup with `Cache-Control: no-cache`. If the
@@ -374,9 +411,10 @@ cupboard github check https://cupboard.example.workers.dev/t/acme \
 ```
 
 In this mode, the check verifies that the workflow file exists and, for a tag
-pin, that GitHub reports the release as immutable. It constructs expected claims
-from the supplied reference and evaluates the stored trust rules. The supplied
-reference must match the caller's eventual `uses` value.
+pin, that GitHub reports the release as immutable. A branch reference receives
+the same future-edits note as a discovered branch workflow. The check constructs
+expected claims from the supplied reference and evaluates the stored trust
+rules. The supplied reference must match the caller's eventual `uses` value.
 
 The explicit-reference check fails if only an interactive administrator rule
 matches, even when that rule's wildcard grant would allow the operations. It

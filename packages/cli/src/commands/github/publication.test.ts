@@ -1,4 +1,5 @@
 import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { cacheListResponseSchema } from '@cupboard/protocol/caches';
 import { oidcTrustSummarySchema } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
@@ -7,6 +8,7 @@ import {
 	cacheCreateAuthorizationDetails,
 	cacheLifecycleAuthorizationDetails,
 	confirmAuthorizationDetails,
+	contentReadAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
 	rootListAuthorizationDetails
@@ -14,7 +16,7 @@ import {
 import { parseRootName } from '../../root-name.ts';
 import { githubBranchAddBody } from '../oidc-trust.ts';
 
-import { checkTrustRule } from './check.ts';
+import { checkTrustRule, type GithubCheckClient } from './check.ts';
 import {
 	type DiscoveredPublishingJob,
 	type WorkflowTrigger
@@ -36,6 +38,7 @@ import {
 	TagsIgnoreUnmodelledFinding,
 	withMergedCloseCases
 } from './publication.ts';
+import { publicationReadAuthority } from './read-authority.ts';
 import { ReferencePattern } from './reference-pattern.ts';
 
 const tenant = new URL('https://cupboard.supply/t/laney');
@@ -79,6 +82,16 @@ const installableJob: DiscoveredPublishingJob = {
 	inputs: { url: tenant.href },
 	triggers: triggers('push')
 };
+const managedPrJob: DiscoveredPublishingJob = {
+	...installableJob,
+	inputs: {
+		url: tenant.href,
+		cache: 'pr-${{ github.event.pull_request.number }}',
+		root: 'github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}',
+		'manage-pr-cache': true
+	},
+	triggers: triggers('pull_request')
+};
 const repositoryClaims = {
 	iss: 'https://token.actions.githubusercontent.com',
 	aud: tenant.href,
@@ -103,6 +116,12 @@ const installableRequests = [
 	}),
 	attestAttachAuthorizationDetails({ cache: { kind: 'default' } })
 ];
+
+const unusedClient: GithubCheckClient = {
+	caches: { list: () => Promise.reject(new Error('Unexpected cache list')) },
+	reuseViews: { list: () => Promise.reject(new Error('Unexpected view list')) },
+	oidcTrust: { list: () => Promise.reject(new Error('Unexpected rule list')) }
+};
 
 describe('modelPublishingJob', () => {
 	it.each<{ name: string; inputJob: DiscoveredPublishingJob }>([
@@ -184,6 +203,337 @@ describe('modelPublishingJob', () => {
 			]
 		});
 	});
+
+	it('models claim-bound PR cache and root expressions for the simple workflow', () => {
+		const cache = {
+			kind: 'named' as const,
+			name: cacheNameSchema.parse('pr-1')
+		};
+		const target = parseRootName('github:iainlane/dotfiles/pr-1/x86_64-linux');
+		const run = parseRootName(
+			'github:iainlane/dotfiles/pr-1/x86_64-linux/_cupboard-run/1'
+		);
+		const result = modelPublishingJob(managedPrJob, identity, tenant, 'main');
+
+		expect(result).toStrictEqual({
+			cases: [
+				{
+					trigger: 'pull_request',
+					ref: { kind: 'pull-request' },
+					claims: {
+						...repositoryClaims,
+						sub: 'repo:iainlane/dotfiles:pull_request',
+						event_name: 'pull_request',
+						ref: 'refs/pull/1/merge',
+						ref_type: 'branch',
+						job_workflow_ref: installableWorkflowReference
+					},
+					cache,
+					pullRequestTemplates: {
+						cache: 'pr-{pr}',
+						root: 'github:iainlane/dotfiles/pr-{pr}/'
+					},
+					requests: [
+						cacheCreateAuthorizationDetails({ cache }),
+						cacheLifecycleAuthorizationDetails({ cache, action: 'close' }),
+						cacheLifecycleAuthorizationDetails({ cache, action: 'reopen' }),
+						pushAuthorizationDetails({
+							cache,
+							attest: true,
+							root: target,
+							runRoot: run
+						}),
+						attestAttachAuthorizationDetails({ cache })
+					]
+				}
+			],
+			findings: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'a new public cache',
+			defaultAccess: 'public',
+			existingAccess: undefined,
+			laterPage: false,
+			expectedAccess: 'public'
+		},
+		{
+			name: 'a new private cache',
+			defaultAccess: 'private',
+			existingAccess: undefined,
+			laterPage: false,
+			expectedAccess: 'private'
+		},
+		{
+			name: 'a private cache elsewhere in the PR family',
+			defaultAccess: 'public',
+			existingAccess: 'private',
+			laterPage: false,
+			expectedAccess: 'private'
+		},
+		{
+			name: 'a private cache on a later list page',
+			defaultAccess: 'public',
+			existingAccess: 'private',
+			laterPage: true,
+			expectedAccess: 'private'
+		}
+	] as const)(
+		'reads access for $name',
+		async ({ defaultAccess, existingAccess, laterPage, expectedAccess }) => {
+			const publication = modelPublishingJob(
+				managedPrJob,
+				identity,
+				tenant,
+				'main'
+			).cases[0];
+			if (publication === undefined) {
+				throw new Error('Expected a modelled PR publication');
+			}
+			const urls: string[] = [];
+			const cacheQueries: {
+				namePrefix: string | undefined;
+				cursor: string | undefined;
+			}[] = [];
+			const read = await publicationReadAuthority(
+				managedPrJob,
+				publication,
+				tenant,
+				identity.repositoryId,
+				{
+					...unusedClient,
+					caches: {
+						list: (input) => {
+							cacheQueries.push({
+								namePrefix: input?.namePrefix,
+								cursor: input?.cursor
+							});
+							if (laterPage && input?.cursor === undefined) {
+								return Promise.resolve({ caches: [], cursor: 'next' });
+							}
+							return Promise.resolve(
+								cacheListResponseSchema.parse({
+									caches:
+										existingAccess === undefined
+											? []
+											: [
+													{
+														scope: { kind: 'named', name: 'pr-42' },
+														access: existingAccess,
+														priority: 40,
+														storePaths: 0,
+														defaultRootRetention: { kind: 'permanent' },
+														grace: { kind: 'none' }
+													}
+												]
+								})
+							);
+						}
+					}
+				},
+				(url) => {
+					urls.push(url.href);
+					return Promise.resolve(defaultAccess);
+				}
+			);
+			const cache = publication.cache;
+			if (cache === undefined) {
+				throw new Error('Expected the representative PR cache');
+			}
+
+			expect({ urls, cacheQueries, read }).toStrictEqual({
+				urls: [tenant.href],
+				cacheQueries: [
+					{ namePrefix: 'pr-', cursor: undefined },
+					...(laterPage ? [{ namePrefix: 'pr-', cursor: 'next' }] : [])
+				],
+				read: {
+					cache,
+					additionalCaches: [],
+					cacheAccess: expectedAccess,
+					cacheWiring: 'none',
+					viewWiring: 'none',
+					resources:
+						expectedAccess === 'private'
+							? [
+									{
+										type: 'cupboard_cache',
+										cache,
+										mode: 'content',
+										state: {
+											kind: 'existing',
+											access: expectedAccess,
+											priority: 40
+										}
+									}
+								]
+							: [],
+					requests:
+						expectedAccess === 'private'
+							? [contentReadAuthorizationDetails({ cache })]
+							: []
+				}
+			});
+		}
+	);
+
+	it('resolves github.repository in the main branch root', () => {
+		const target = parseRootName('github:iainlane/dotfiles/main/x86_64-linux');
+		const run = parseRootName(
+			'github:iainlane/dotfiles/main/x86_64-linux/_cupboard-run/1'
+		);
+		const result = modelPublishingJob(
+			{
+				...installableJob,
+				inputs: {
+					url: tenant.href,
+					root: 'github:${{ github.repository }}/main'
+				},
+				triggers: [
+					{
+						event: 'push',
+						filters: { branches: ['main'] },
+						hasPathFilter: false
+					}
+				]
+			},
+			identity,
+			tenant,
+			'main'
+		);
+
+		expect(result).toStrictEqual({
+			cases: [
+				{
+					trigger: 'push',
+					rootPrefix: 'github:iainlane/dotfiles/main',
+					ref: { kind: 'branch', name: 'main' },
+					claims: installableBranchClaims,
+					requests: [
+						pushAuthorizationDetails({
+							cache: { kind: 'default' },
+							attest: true,
+							root: target,
+							runRoot: run
+						}),
+						attestAttachAuthorizationDetails({ cache: { kind: 'default' } })
+					]
+				}
+			],
+			findings: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'an unsupported expression',
+			cache: 'pr-${{ github.event.pull_request.head.repo.id }}',
+			root: 'github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}',
+			trigger: 'pull_request',
+			reason: 'cache must be a literal string'
+		},
+		{
+			name: 'repeated PR numbers',
+			cache:
+				'pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.number }}',
+			root: 'github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}',
+			trigger: 'pull_request',
+			reason: 'cache must be a literal string'
+		},
+		{
+			name: 'an additional cache expression',
+			cache: 'pr-${{ github.event.pull_request.number }}-${{ inputs.suffix }}',
+			root: 'github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}',
+			trigger: 'pull_request',
+			reason: 'cache must be a literal string'
+		},
+		{
+			name: 'an unsupported root expression',
+			cache: 'pr-${{ github.event.pull_request.number }}',
+			root: 'github:${{ github.repository }}/pr-${{ github.ref_name }}',
+			trigger: 'pull_request',
+			reason: 'root must be a literal string'
+		},
+		{
+			name: 'a PR number on a push',
+			cache: 'pr-${{ github.event.pull_request.number }}',
+			root: 'github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}',
+			trigger: 'push',
+			reason:
+				'github.event.pull_request.number is available only for pull_request runs'
+		}
+	])('does not model $name', ({ cache, root, trigger, reason }) => {
+		const result = modelPublishingJob(
+			{
+				...installableJob,
+				inputs: { url: tenant.href, cache, root },
+				triggers: [
+					{
+						event: trigger,
+						filters: { branches: ['main'] },
+						hasPathFilter: false
+					}
+				]
+			},
+			identity,
+			tenant,
+			'main'
+		);
+
+		expect(result).toStrictEqual({
+			cases: [],
+			findings: [
+				{
+					...(trigger === 'push' && { trigger }),
+					finding: new PublicationUnmodelledFinding(reason)
+				}
+			]
+		});
+	});
+
+	it.each(['cache list', 'tenant default'] as const)(
+		'propagates a failed %s lookup for a managed PR cache',
+		async (failedLookup) => {
+			const publication = modelPublishingJob(
+				managedPrJob,
+				identity,
+				tenant,
+				'main'
+			).cases[0];
+			if (publication === undefined) {
+				throw new Error('Expected a modelled PR publication');
+			}
+			const failure = new Error(`${failedLookup} unavailable`);
+			const urls: string[] = [];
+
+			await expect(
+				publicationReadAuthority(
+					managedPrJob,
+					publication,
+					tenant,
+					identity.repositoryId,
+					{
+						...unusedClient,
+						caches: {
+							list: () =>
+								failedLookup === 'cache list'
+									? Promise.reject(failure)
+									: Promise.resolve({ caches: [] })
+						}
+					},
+					(url) => {
+						urls.push(url.href);
+						return Promise.reject(failure);
+					}
+				)
+			).rejects.toBe(failure);
+			expect(urls).toStrictEqual(
+				failedLookup === 'cache list' ? [] : [tenant.href]
+			);
+		}
+	);
 
 	it.each([
 		{
@@ -1226,6 +1576,39 @@ it('models merged-close claims separately without publication or reads', () => {
 					action: 'close'
 				})
 			]
+		}
+	]);
+});
+
+it('keeps claim-bound templates for the managed PR merged-close case', () => {
+	const model = modelPublishingJob(managedPrJob, identity, tenant, 'main');
+	const merged = withMergedCloseCases(model.cases, identity).filter(
+		(publication) => publication.lifecycle === 'merged-close'
+	);
+	const cache = {
+		kind: 'named' as const,
+		name: cacheNameSchema.parse('pr-1')
+	};
+
+	expect(merged).toStrictEqual([
+		{
+			trigger: 'pull_request',
+			ref: { kind: 'pull-request' },
+			lifecycle: 'merged-close',
+			cache,
+			pullRequestTemplates: {
+				cache: 'pr-{pr}',
+				root: 'github:iainlane/dotfiles/pr-{pr}/'
+			},
+			claims: {
+				...repositoryClaims,
+				sub: 'repo:iainlane/dotfiles:pull_request',
+				event_name: 'pull_request',
+				ref: 'refs/heads/main',
+				ref_type: 'branch',
+				job_workflow_ref: installableWorkflowReference
+			},
+			requests: [cacheLifecycleAuthorizationDetails({ cache, action: 'close' })]
 		}
 	]);
 });

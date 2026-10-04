@@ -113,17 +113,19 @@ grant publication, metadata or content reads, roots or reopening. The new
 must include `cache:read` explicitly if its caller also inspects metadata.
 Deploy the server before adding this pattern binding.
 
-A `cache:delete` grant does not permit either operation. Run
-`cupboard github setup` again with the existing repository, branch and access
-choices, and the accepted workflow reference for this release. Confirm
-replacement of the PR rule, or use `--yes` for non-interactive setup. To update
-a rule manually, add both actions to the same-cache PR grant and preserve its
-read, publication, root and attestation grants. Add
-`oidc-trust add-github-pr-close` with the same cache template and an immutable
-workflow reference for merged closes. The helper refuses branch workflow
-references. If the caller deliberately follows a branch, including Cupboard's
-`@main` dogfood workflow, add a reviewed manual close-only rule with that exact
-workflow selector. See [PR trust rules].
+A `cache:delete` grant does not permit either operation. After deploying the
+server, run `cupboard github check` with `--repo`, `--fix` and
+`--trust-scope exact` to review the grants and close-only rules that the
+repository's current workflows require. Matched GitHub rules can receive an
+atomic grant extension that preserves their IDs, selectors and existing grants.
+The extension refuses a rule that changed after the preview. Confirm the repair,
+or use `--yes` for a reviewed non-interactive run.
+
+For a deliberately selected branch workflow, including Cupboard's `@main`
+dogfood workflow, also pass `--allow-branch-workflow`. This choice trusts future
+edits to that branch's workflow. The merged-close helper accepts the same
+explicit choice with an exact `@refs/heads/<branch>` reference. Preserve the
+publication rule's cache family with `--cache-template`. See [PR trust rules].
 
 If the calling workflow explicitly lists `pull_request.types`, include both
 `closed` and `reopened`. The closed event starts grace; the reopened event

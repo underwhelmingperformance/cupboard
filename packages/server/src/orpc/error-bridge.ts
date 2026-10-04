@@ -13,6 +13,7 @@ import {
 	CacheRetentionMigrationPendingError,
 	CacheRetentionRuleLimitExceededError,
 	CacheRetirementTtlRequiredError,
+	OidcTrustRuleChangedError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -56,6 +57,13 @@ export function bridgedError(
 		for (const [name, value] of serverHttpErrorHeaders(error)) {
 			responseHeaders.set(name, value);
 		}
+	}
+
+	if (error instanceof OidcTrustRuleChangedError) {
+		return new ORPCError('OIDC_TRUST_RULE_CHANGED', {
+			status: error.status,
+			message: error.message
+		});
 	}
 
 	if (error instanceof SelectorTemplateUnrepresentableError) {

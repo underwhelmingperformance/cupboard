@@ -2191,7 +2191,8 @@ Options:
   --audience <audience>                       audience that the token must have (default: the tenant URL)
   --cache-template <template>                 cache name for each pull request (default: gh-{repository_id}-pr-{pr})
   --root-template <template>                  root prefix for each pull request (default: github:<owner>/<repo>/pr-{pr}/)
-  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.
+  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Branch refs require --allow-branch-workflow and accept future workflow edits. Without @ref, it matches the workflow file at any ref.
+  --allow-branch-workflow                     permit an exact branch workflow reference and its future edits
   --read-cache                                also permit content reads from the selected cache
   --no-attest                                 leave out the attest grant, so that runs cannot attach attestations
   -h, --help                                  display help for command
@@ -2216,7 +2217,8 @@ Arguments:
 
 Options:
   --repo <owner/name>                         the GitHub repository
-  --workflow-ref, --job-workflow-ref <value>  require this workflow pinned to a commit, release tag or tag pattern, as owner/repo/path@ref
+  --workflow-ref, --job-workflow-ref <value>  require this workflow pinned to a commit, release tag or tag pattern, as owner/repo/path@ref; an exact refs/heads/<branch> reference requires --allow-branch-workflow
+  --allow-branch-workflow                     also accept an exact refs/heads/<branch> workflow reference; the closure rule will accept future edits to that branch workflow
   --audience <audience>                       audience that the token must have (default: the tenant URL)
   --cache-template <template>                 PR cache family, with at most one {pr} (default: gh-{repository_id}-pr-{pr})
   -h, --help                                  display help for command
@@ -2238,7 +2240,8 @@ Options:
   --audience <audience>                       audience that the token must have (default: the tenant URL)
   --cache-template <template>                 cache name for each tag (default: {tag})
   --root-template <template>                  root prefix for each tag (default: github:<owner>/<repo>/<cache name>/)
-  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.
+  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Branch refs require --allow-branch-workflow and accept future workflow edits. Without @ref, it matches the workflow file at any ref.
+  --allow-branch-workflow                     permit an exact branch workflow reference and its future edits
   --read-cache                                also permit content reads from the selected cache
   --no-attest                                 leave out the attest grant, so that runs cannot attach attestations
   -h, --help                                  display help for command
@@ -2264,7 +2267,8 @@ Arguments:
 Options:
   --repo <owner/name>                         the GitHub repository
   --branch <name>                             the branch whose runs may publish (e.g. main)
-  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.
+  --workflow-ref, --job-workflow-ref <value>  also require the job_workflow_ref claim, given as owner/repo/path@ref. Branch refs require --allow-branch-workflow and accept future workflow edits. Without @ref, it matches the workflow file at any ref.
+  --allow-branch-workflow                     permit an exact branch workflow reference and its future edits
   --audience <audience>                       audience that the token must have (default: the tenant URL)
   --read-cache                                also permit content reads from the selected cache
   --no-attest                                 leave out the attest grant, so that runs cannot attach attestations
@@ -2328,7 +2332,8 @@ Arguments:
 Options:
   --repo <owner/name>                                       the GitHub repository that will publish
   --branch <name>                                           the branch whose runs publish to the default cache (default: "main")
-  --job-workflow-ref, --workflow-ref <owner/repo/path@ref>  the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.
+  --job-workflow-ref, --workflow-ref <owner/repo/path@ref>  the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. An exact refs/heads/<branch> reference requires --allow-branch-workflow and accepts future workflow edits. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.
+  --allow-branch-workflow                                   also accept an exact refs/heads/<branch> workflow reference; trust rules will accept future edits to that branch workflow
   -y, --yes                                                 remove conflicting trust rules without asking. Rules that only might conflict, and rules for a different workflow reference, are kept.
   --read-user <user>                                        user name of a read credential for checking private cache information
   --read-password <password>                                password of the read credential
@@ -2350,8 +2355,9 @@ Arguments:
 Options:
   --repo <owner/name>                                       the GitHub repository to check
   --branch <name>                                           branch to read the workflow files from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main).
-  --job-workflow-ref, --workflow-ref <owner/repo/path@ref>  check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref must be a full commit ID or the tag of a release that GitHub reports as immutable.
+  --job-workflow-ref, --workflow-ref <owner/repo/path@ref>  check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or an exact refs/heads/<branch> reference. Branch trust accepts future workflow edits.
   --fix                                                     show the tenant changes that would repair the failing jobs, and apply them after you confirm
+  --allow-branch-workflow                                   with --fix, also permit exact trust in branch workflow references; trust rules will accept future edits to those branch workflows
   -y, --yes                                                 apply the repair without the confirmation prompt
   --trust-scope <scope>                                     which cupboard workflow references the repair's new trust rules accept: exact (the references that the workflows use now) or tag-pattern (release tags that match --tag-pattern) (choices: "exact", "tag-pattern")
   --tag-pattern <glob>                                      release tag pattern that new trust rules accept, such as v* (without refs/tags/); github setup instead includes refs/tags/v* in --workflow-ref

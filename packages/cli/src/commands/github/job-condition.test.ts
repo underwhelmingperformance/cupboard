@@ -276,3 +276,18 @@ it.each([
 		}).toStrictEqual({ repository, fork });
 	}
 );
+
+it.each([
+	{ ref: 'refs/heads/main', expected: true },
+	{ ref: 'refs/heads/release', expected: false },
+	{ ref: undefined, expected: undefined }
+])('evaluates a push condition with verified ref $ref', ({ ref, expected }) => {
+	expect(
+		jobConditionOutcome(
+			"github.event_name == 'push' && github.ref == 'refs/heads/main'",
+			'push',
+			'repository',
+			{ ref }
+		)
+	).toBe(expected);
+});

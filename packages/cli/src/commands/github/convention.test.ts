@@ -27,6 +27,21 @@ function workflowPatternClaim(glob: string) {
 describe('parseWorkflowReference', () => {
 	it.each<[string, string, WorkflowReference]>([
 		[
+			'a canonical branch ref',
+			`${workflowPath}@refs/heads/feature/publish`,
+			{
+				reference: `${workflowPath}@refs/heads/feature/publish`,
+				owner: 'acme',
+				repo: 'app',
+				path: '.github/workflows/publish.yml',
+				pin: {
+					kind: 'branch',
+					value: 'refs/heads/feature/publish',
+					branch: 'feature/publish'
+				}
+			}
+		],
+		[
 			'a release tag',
 			`${workflowPath}@refs/tags/v1.2.3`,
 			{
@@ -133,7 +148,12 @@ describe('parseWorkflowReference', () => {
 	});
 
 	it.each([
-		['a branch ref', 'refs/heads/main'],
+		['an empty branch ref', 'refs/heads/'],
+		['a branch ref with an empty segment', 'refs/heads/feature//publish'],
+		['a branch ref with traversal', 'refs/heads/feature/../publish'],
+		['a branch ref with a lock suffix', 'refs/heads/main.lock'],
+		['a branch ref with a space', 'refs/heads/my branch'],
+		['a bare branch name', 'main'],
 		['a pull-request ref', 'refs/pull/7/merge'],
 		['an abbreviated commit id', 'aaaaaaa'],
 		['an empty ref', '']
@@ -201,6 +221,7 @@ describe('parseExactWorkflowReference', () => {
 
 describe('workflowReferenceClaim', () => {
 	it.each([
+		['a branch ref', `${workflowPath}@refs/heads/main`],
 		['a tag pin', `${workflowPath}@refs/tags/v1.2.3`],
 		['a commit pin', `${workflowPath}@${'a'.repeat(40)}`]
 	])('pins %s exactly', (_name, reference) => {

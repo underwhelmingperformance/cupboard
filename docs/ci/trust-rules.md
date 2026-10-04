@@ -85,6 +85,10 @@ The publication presets also accept these options:
   `--workflow-ref` is an alias, as on `github setup` and `github check`. See
   [Trusting a reusable workflow](#trusting-a-reusable-workflow).
 - `--no-attest` leaves out the `attest` grant.
+- `--allow-branch-workflow` accepts an exact branch workflow reference. The
+  command verifies the file and explains that the rule trusts future workflow
+  edits. A bare ref is resolved with GitHub's tag precedence; the rule stores
+  the canonical ref.
 
 ### Pull requests
 
@@ -124,16 +128,17 @@ and reopening still use the publication rule's exact PR binding. The default
 preset's closure family excludes the default and release caches. A custom
 template selects a different closure family.
 
-The helper refuses branch workflow references. If a caller deliberately follows
-a branch, write a manual rule with `--from-file`. Keep the repository and owner
-IDs, `event_name=pull_request`, the signed base-branch ref and the exact
-`job_workflow_ref`, including `@refs/heads/<branch>`. Permit only `cache:close`
-for a named-cache pattern restricted to the repository's PR cache family.
-Preserve the publication rule's cache naming convention; default and release
-caches must remain outside that pattern. See [Writing a rule as
-JSON][manual-rule-json].
+If a caller deliberately follows a branch, pass `--allow-branch-workflow` and
+use its exact `@refs/heads/<branch>` reference. This choice trusts future edits
+to that branch's workflow. The helper keeps the repository and owner IDs, the
+pull-request event and the PR cache family restrictions:
 
-[manual-rule-json]: #writing-a-rule-as-json
+```sh
+cupboard oidc-trust add-github-pr-close https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app --cache-template 'pr-{pr}' \
+  --workflow-ref underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main \
+  --allow-branch-workflow
+```
 
 Deploy the server version that supports named-cache patterns before adding the
 merged-close rule. See [PR cache closure][pr-cache-closure-upgrade]. GitHub
@@ -307,7 +312,9 @@ instead of them.
 | `owner/repo/.github/workflows/f.yml`              | That file at any ref. Only the rule's trigger pin then limits which runs match.                           |
 
 The quickstart passes a tag pattern to `github setup`. `github setup` also
-accepts a full commit ID, or a tag that has an immutable release.
+accepts a full commit ID, or a tag that has an immutable release. To trust a
+branch deliberately, use an exact `refs/heads/<branch>` workflow reference with
+`--allow-branch-workflow`. The trust rule accepts future edits to that workflow.
 
 A tag pattern means you write the rule once, and every later cupboard release is
 accepted without changing your tenant. There are two costs:
@@ -426,8 +433,15 @@ cupboard oidc-trust show https://cupboard.example.workers.dev/t/acme <rule-id>
 
 Add `--output-mode json` to either command for the complete records.
 
-You can't edit a rule. To change one, add a corrected rule, then remove the old
-one:
+`cupboard github check --fix` can extend a matched GitHub rule with missing
+grants. The preview lists the additional grants. The extension preserves the
+rule's ID, issuer, audience, claims and existing grants, and refuses a rule that
+changed after the preview. It does not disable the existing rule or create a
+duplicate. Deploy a server that supports grant extensions before using this
+repair.
+
+To change a rule's identity or selectors, or remove grants, add a corrected
+rule, then remove the old one:
 
 ```sh
 cupboard oidc-trust remove https://cupboard.example.workers.dev/t/acme <rule-id>
@@ -462,6 +476,7 @@ that a real run would present. For the error messages themselves, see
 
 `cupboard github check` reads a repository's workflow files, works out the token
 and requests of each publishing job's runs, and checks them against the tenant's
-trust rules and reuse view. With `--fix`, it can add the rules that are missing.
+trust rules and reuse view. With `--fix`, it can add missing rules and extend
+matched GitHub rules with missing grants.
 [Checking publishing jobs](./github-check.md) describes what it checks and what
 its repair changes.

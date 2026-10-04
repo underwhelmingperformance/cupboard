@@ -22,7 +22,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildProgram } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { CliUsageError, InvalidClaimError } from '../errors.ts';
+import {
+	CliUsageError,
+	InvalidClaimError,
+	WorkflowReferenceMutableError
+} from '../errors.ts';
 
 import {
 	claimsForAdd,
@@ -43,7 +47,24 @@ import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
 const mocks = vi.hoisted(() => ({
 	add: vi.fn<OidcTrustClient['add']>(),
-	lookup: vi.fn<(repo: string) => Promise<RepositoryIdentity>>()
+	lookup: vi.fn<(repo: string) => Promise<RepositoryIdentity>>(),
+	verify:
+		vi.fn<
+			typeof import('./github/workflow-reference.ts').verifyWorkflowReference
+		>(),
+	resolveWorkflowRef:
+		vi.fn<(repository: string, reference: string) => Promise<string>>()
+}));
+
+vi.mock('./github/discovery.ts', async (importOriginal) => ({
+	...(await importOriginal<typeof import('./github/discovery.ts')>()),
+	githubWorkflowSource: () => ({
+		resolveWorkflowReference: mocks.resolveWorkflowRef
+	})
+}));
+
+vi.mock('./github/workflow-reference.ts', () => ({
+	verifyWorkflowReference: mocks.verify
 }));
 
 // The commands build their oRPC clients from these functions, so a command
@@ -1178,6 +1199,202 @@ describe('parsed generic read rules', () => {
 });
 
 describe('parsed GitHub read presets', () => {
+	it.each(
+		['add-github-pr', 'add-github-tag', 'add-github-branch'].flatMap(
+			(command) =>
+				['main', 'refs/heads/main'].flatMap((pin) =>
+					[false, true].map((allowBranchWorkflow) => ({
+						command,
+						pin,
+						allowBranchWorkflow
+					}))
+				)
+		)
+	)(
+		'guards branch trust at $command boundary for $pin with opt-in $allowBranchWorkflow',
+		async ({ command, pin, allowBranchWorkflow }) => {
+			mocks.add.mockReset();
+			mocks.add.mockImplementation((input) =>
+				Promise.resolve(summary({ ...input, id: 'branch' }))
+			);
+			mocks.lookup.mockResolvedValue(identity);
+			mocks.verify.mockReset();
+			mocks.verify.mockResolvedValue();
+			mocks.resolveWorkflowRef.mockReset();
+			mocks.resolveWorkflowRef.mockResolvedValue('refs/heads/main');
+			const reference = 'acme/ci/.github/workflows/publish.yml@refs/heads/main';
+			let failure: unknown;
+			try {
+				await oidcTrustProgram()
+					.exitOverride()
+					.parseAsync([
+						'node',
+						'cupboard',
+						'--output-mode',
+						'json',
+						'oidc-trust',
+						command,
+						tenantUrl,
+						'--repo',
+						identity.fullName,
+						'--workflow-ref',
+						`acme/ci/.github/workflows/publish.yml@${pin}`,
+						...(command === 'add-github-branch' ? ['--branch', 'main'] : []),
+						...(allowBranchWorkflow ? ['--allow-branch-workflow'] : [])
+					]);
+			} catch (error) {
+				failure = error;
+			}
+			const expectedBody =
+				command === 'add-github-pr'
+					? githubPrAddBody(tenantBase, identity, {
+							repo: identity.fullName,
+							jobWorkflowRef: reference
+						})
+					: command === 'add-github-tag'
+						? githubTagAddBody(tenantBase, identity, {
+								repo: identity.fullName,
+								jobWorkflowRef: reference
+							})
+						: githubBranchAddBody(tenantBase, identity, {
+								repo: identity.fullName,
+								branch: 'main',
+								jobWorkflowRef: reference
+							});
+			expect({
+				failure,
+				resolved: mocks.resolveWorkflowRef.mock.calls,
+				verified: mocks.verify.mock.calls,
+				added: mocks.add.mock.calls
+			}).toStrictEqual({
+				failure: allowBranchWorkflow
+					? undefined
+					: new WorkflowReferenceMutableError(reference, 'refs/heads/main'),
+				resolved: pin === 'main' ? [['acme/ci', 'main']] : [],
+				verified: allowBranchWorkflow
+					? [
+							[
+								{
+									reference,
+									owner: 'acme',
+									repo: 'ci',
+									path: '.github/workflows/publish.yml',
+									pin: {
+										kind: 'branch',
+										value: 'refs/heads/main',
+										branch: 'main'
+									}
+								},
+								{ allowBranchWorkflow: true }
+							]
+						]
+					: [],
+				added: allowBranchWorkflow ? [[expectedBody]] : []
+			});
+		}
+	);
+
+	it.each([false, true])(
+		'requires branch workflow opt-in for closure trust: %s',
+		async (allowBranchWorkflow) => {
+			mocks.add.mockReset();
+			mocks.add.mockImplementation((input) =>
+				Promise.resolve(summary({ ...input, id: 'close' }))
+			);
+			mocks.lookup.mockResolvedValue(identity);
+			mocks.verify.mockReset();
+			mocks.verify.mockResolvedValue();
+			const workflow = 'acme/ci/.github/workflows/publish.yml@refs/heads/main';
+			let failure: unknown;
+			try {
+				await oidcTrustProgram()
+					.exitOverride()
+					.parseAsync([
+						'node',
+						'cupboard',
+						'--output-mode',
+						'json',
+						'oidc-trust',
+						'add-github-pr-close',
+						tenantUrl,
+						'--repo',
+						identity.fullName,
+						'--workflow-ref',
+						workflow,
+						...(allowBranchWorkflow ? ['--allow-branch-workflow'] : [])
+					]);
+			} catch (error) {
+				failure = error;
+			}
+			expect({
+				failure,
+				verified: mocks.verify.mock.calls,
+				rules: mocks.add.mock.calls
+			}).toStrictEqual(
+				allowBranchWorkflow
+					? {
+							failure: undefined,
+							verified: [
+								[
+									{
+										reference: workflow,
+										owner: 'acme',
+										repo: 'ci',
+										path: '.github/workflows/publish.yml',
+										pin: {
+											kind: 'branch',
+											value: 'refs/heads/main',
+											branch: 'main'
+										}
+									},
+									{ allowBranchWorkflow: true }
+								]
+							],
+							rules: [
+								[
+									{
+										issuer: 'https://token.actions.githubusercontent.com',
+										audience: tenantUrl,
+										claims: {
+											repository_id: '1234',
+											repository_owner_id: '5678',
+											event_name: 'pull_request',
+											ref: { pattern: '^refs/heads/.+$' },
+											job_workflow_ref: workflow
+										},
+										permittedGrants: [
+											{
+												type: 'cupboard_cache',
+												actions: ['cache:close'],
+												resources: {
+													cache: {
+														kind: 'named',
+														pattern: '^gh-1234-pr-[0-9]+$',
+														validate: 'cacheName'
+													}
+												}
+											}
+										],
+										display: {
+											provider: 'github',
+											repository: identity.fullName
+										}
+									}
+								]
+							]
+						}
+					: {
+							failure: new WorkflowReferenceMutableError(
+								workflow,
+								'refs/heads/main'
+							),
+							verified: [],
+							rules: []
+						}
+			);
+		}
+	);
+
 	it.each(
 		['--job-workflow-ref', '--workflow-ref'].flatMap((flag) =>
 			[

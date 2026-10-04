@@ -204,6 +204,9 @@ export const tenantRouter = os.router({
 		add: os.oidcTrust.add.handler(({ input, context }) =>
 			context.services.oidcTrust.addRule(input)
 		),
+		extend: os.oidcTrust.extend.handler(({ input, context }) =>
+			context.services.oidcTrust.extendRule(input.id, input)
+		),
 		remove: os.oidcTrust.remove.handler(({ input, context }) =>
 			context.services.oidcTrust.removeRule(input.id)
 		)

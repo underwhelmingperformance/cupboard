@@ -1651,7 +1651,7 @@ export class WorkflowReferenceMalformedError extends CliUsageError {
 /**
  * A mutable ref moves to whichever commit it later points at, so a trust rule
  * that pins a mutable ref also trusts every future edit to the workflow. The
- * github commands accept only an immutable pin.
+ * GitHub mutations require explicit opt-in for a branch workflow reference.
  */
 export class WorkflowReferenceMutableError extends CliUsageError {
 	constructor(
@@ -1659,7 +1659,7 @@ export class WorkflowReferenceMutableError extends CliUsageError {
 		public readonly pin: string
 	) {
 		super(
-			`--workflow-ref must pin a full commit id or an immutable release tag; got '${pin}' in '${reference}'`
+			`--workflow-ref must pin a full commit id or an immutable release tag; an exact refs/heads/<branch> reference requires --allow-branch-workflow and accepts future workflow edits; got '${pin}' in '${reference}'`
 		);
 		this.name = 'WorkflowReferenceMutableError';
 	}

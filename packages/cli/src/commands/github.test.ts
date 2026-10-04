@@ -598,6 +598,78 @@ describe('runGithubSetup', () => {
 		});
 	});
 
+	it('sets up exact branch workflow trust only after explicit opt-in', async () => {
+		const { client, recorded } = setupClient({});
+		const { ui, captured } = fakeCliUi();
+		const beforeVerification: unknown[] = [];
+		const verification = vi
+			.fn<
+				typeof import('./github/workflow-reference.ts').verifyWorkflowReference
+			>()
+			.mockImplementation(() => {
+				beforeVerification.push({
+					notes: [...captured.notes],
+					writes: [...recorded.ruleAdds]
+				});
+				return Promise.resolve();
+			});
+		const results: ResultRow[][] = [];
+		await runGithubSetup(
+			url,
+			{
+				...options,
+				workflowRef: movableWorkflowReference,
+				allowBranchWorkflow: true
+			},
+			{ ...ui, reporter: () => capturingReporter(results) },
+			client,
+			{ ...dependencies, verifyWorkflowReference: verification }
+		);
+		expect({
+			beforeVerification,
+			verification: verification.mock.calls,
+			rules: recorded.ruleAdds.map((rule) => rule.claims.job_workflow_ref),
+			consequences: results
+				.flat()
+				.filter((row) => row.value.includes('future edits'))
+		}).toStrictEqual({
+			beforeVerification: [
+				{
+					notes: [
+						{
+							title: 'Branch workflow trust',
+							body: `${movableWorkflowReference}\tTrust rules accept future edits to this branch workflow.`
+						}
+					],
+					writes: []
+				}
+			],
+			verification: [
+				[
+					{
+						reference: movableWorkflowReference,
+						owner: 'acme',
+						repo: 'app',
+						path: '.github/workflows/publish.yml',
+						pin: { kind: 'branch', value: 'refs/heads/main', branch: 'main' }
+					},
+					{ allowBranchWorkflow: true }
+				]
+			],
+			rules: [
+				movableWorkflowReference,
+				movableWorkflowReference,
+				movableWorkflowReference
+			],
+			consequences: [
+				{
+					label: 'branch workflow trust',
+					value: `unchanged: ${movableWorkflowReference}; trust rules accept future edits to this branch workflow`
+				}
+			]
+		});
+	});
+
 	it('performs no writes against converged state', async () => {
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
@@ -2035,6 +2107,7 @@ describe('registerGithubCommands', () => {
 			'--repo <owner/name>',
 			'--branch <name>',
 			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
+			'--allow-branch-workflow',
 			'-y, --yes',
 			'--read-user <user>',
 			'--read-password <password>',
@@ -2086,6 +2159,7 @@ describe('registerGithubCommands', () => {
 				mandatory: false
 			},
 			{ flags: '--fix', mandatory: false },
+			{ flags: '--allow-branch-workflow', mandatory: false },
 			{ flags: '-y, --yes', mandatory: false },
 			{ flags: '--trust-scope <scope>', mandatory: false },
 			{ flags: '--tag-pattern <glob>', mandatory: false },
@@ -2197,6 +2271,7 @@ describe('registerGithubCommands', () => {
 				'--repo',
 				'acme/app',
 				'--fix',
+				'--allow-branch-workflow',
 				'--trust-scope',
 				'exact'
 			],
@@ -2205,7 +2280,14 @@ describe('registerGithubCommands', () => {
 
 		expect({ inspected, repaired }).toStrictEqual({
 			inspected: [{ repo: 'acme/app', isFixRequested: true }],
-			repaired: [{ repo: 'acme/app', fix: true, trustScope: 'exact' }]
+			repaired: [
+				{
+					repo: 'acme/app',
+					fix: true,
+					trustScope: 'exact',
+					allowBranchWorkflow: true
+				}
+			]
 		});
 	});
 

@@ -77,6 +77,12 @@ export type PublicationCase = TriggerReference & {
 	readonly mergedCloseRequests?: readonly AuthorizationDetails[];
 	readonly claims: GithubActionsClaims;
 	readonly requests: readonly AuthorizationDetails[];
+	readonly cache?: CacheScope;
+	readonly rootPrefix?: string;
+	readonly pullRequestTemplates?: {
+		readonly cache: string;
+		readonly root: string;
+	};
 	readonly reuseView?: ReuseViewRequirement;
 	readonly readCaches?: readonly CacheScope[];
 };
@@ -296,6 +302,52 @@ interface ModelContext {
 	readonly defaultBranch: string;
 }
 
+interface PublicationInput {
+	readonly value: string;
+	readonly template?: string;
+}
+
+const repositoryExpression = /\$\{\{\s*github\.repository\s*\}\}/gu;
+const pullRequestNumberExpression =
+	/\$\{\{\s*github\.event\.pull_request\.number\s*\}\}/gu;
+
+function publicationInput(
+	job: DiscoveredPublishingJob,
+	key: string,
+	identity: RepositoryIdentity
+): PublicationInput | undefined {
+	const input = job.inputs[key] ?? '';
+
+	if (typeof input !== 'string') {
+		return;
+	}
+
+	const repository = input.replaceAll(
+		repositoryExpression,
+		() => identity.fullName
+	);
+	const occurrences = repository
+		.matchAll(pullRequestNumberExpression)
+		.toArray();
+
+	if (occurrences.length > 1) {
+		return;
+	}
+
+	const value = repository.replaceAll(pullRequestNumberExpression, '1');
+
+	if (value.includes('${{')) {
+		return;
+	}
+
+	return {
+		value,
+		...(occurrences.length === 1 && {
+			template: repository.replaceAll(pullRequestNumberExpression, '{pr}')
+		})
+	};
+}
+
 function scalar(
 	job: DiscoveredPublishingJob,
 	key: string,
@@ -342,6 +394,10 @@ export function jobCache(job: DiscoveredPublishingJob): JobCache {
 		return unresolved('cache must be a literal string');
 	}
 
+	return cacheForInput(job, input);
+}
+
+function cacheForInput(job: DiscoveredPublishingJob, input: string): JobCache {
 	const url = job.inputs.url;
 
 	if (typeof url !== 'string') {
@@ -835,7 +891,13 @@ export function modelPublishingJob(
 		return unmodelled('audience must be a literal string');
 	}
 
-	const cache = jobCache(job);
+	const cacheInput = publicationInput(job, 'cache', identity);
+
+	if (cacheInput === undefined) {
+		return unmodelled('cache must be a literal string');
+	}
+
+	const cache = cacheForInput(job, cacheInput.value);
 
 	if (cache.outcome === 'unresolved') {
 		return unmodelled(cache.reason);
@@ -881,10 +943,25 @@ export function modelPublishingJob(
 	}
 
 	const rootInput = job.kind === 'flake' ? 'root-prefix' : 'root';
-	const rootPrefix = scalar(job, rootInput);
+	const rootInputValue = publicationInput(job, rootInput, identity);
 
-	if (rootPrefix === undefined) {
+	if (rootInputValue === undefined) {
 		return unmodelled(`${rootInput} must be a literal string`);
+	}
+
+	const rootPrefix = rootInputValue.value;
+
+	const hasPullRequestExpression =
+		cacheInput.template !== undefined || rootInputValue.template !== undefined;
+	if (
+		hasPullRequestExpression &&
+		(job.kind !== 'installable' ||
+			cacheInput.template === undefined ||
+			rootInputValue.template === undefined)
+	) {
+		return unmodelled(
+			'PR cache and root expressions must both include github.event.pull_request.number in an installable workflow'
+		);
 	}
 
 	if (mode !== '' && !isPreset && job.kind === 'flake') {
@@ -910,6 +987,14 @@ export function modelPublishingJob(
 	if (attestInput !== undefined && typeof attestInput !== 'boolean') {
 		return unmodelled('attest must be a literal boolean');
 	}
+
+	const pullRequestTemplates =
+		cacheInput.template !== undefined && rootInputValue.template !== undefined
+			? {
+					cache: cacheInput.template,
+					root: `${rootInputValue.template}/`
+				}
+			: undefined;
 
 	const context: ModelContext = {
 		isPreset,
@@ -951,6 +1036,15 @@ export function modelPublishingJob(
 			}
 
 			const isPullRequest = entry.trigger === 'pull_request';
+			if (hasPullRequestExpression && !isPullRequest) {
+				findings.push({
+					trigger: entry.trigger,
+					finding: new PublicationUnmodelledFinding(
+						'github.event.pull_request.number is available only for pull_request runs'
+					)
+				});
+				continue;
+			}
 			const claims = claimsForReference(
 				audience === '' ? tenant : audience,
 				identity,
@@ -979,6 +1073,14 @@ export function modelPublishingJob(
 				cases.push({
 					...entry,
 					claims,
+					...(rootInputValue.value !== scalar(job, rootInput) &&
+						pullRequestTemplates === undefined && { rootPrefix }),
+					...(cacheInput.value !== scalar(job, 'cache') &&
+						cacheInput.template === undefined && { cache: cache.scope }),
+					...(pullRequestTemplates !== undefined && {
+						cache: cache.scope,
+						pullRequestTemplates
+					}),
 					requests: [
 						...(managePrCache === true && isPullRequest && !isReadOnly
 							? [
@@ -1054,6 +1156,10 @@ export function modelPublishingJob(
 			cases.push({
 				...entry,
 				claims,
+				...(rootInputValue.value !== scalar(job, rootInput) && { rootPrefix }),
+				...(cacheInput.value !== scalar(job, 'cache') && {
+					cache: cache.scope
+				}),
 				requests,
 				...(additionalCaches.length > 0 && { readCaches: additionalCaches }),
 				...(hasReuseView && {
@@ -1092,6 +1198,12 @@ export function modelPublishingJob(
 						trigger: publication.trigger,
 						ref: publication.ref,
 						claims: publication.claims,
+						...(publication.cache !== undefined && {
+							cache: publication.cache
+						}),
+						...(publication.pullRequestTemplates !== undefined && {
+							pullRequestTemplates: publication.pullRequestTemplates
+						}),
 						requests: publication.requests
 					}
 				: publication;
@@ -1176,6 +1288,10 @@ export function withMergedCloseCases(
 			trigger: 'pull_request',
 			ref: { kind: 'pull-request' },
 			lifecycle: 'merged-close',
+			...(publication.cache !== undefined && { cache: publication.cache }),
+			...(publication.pullRequestTemplates !== undefined && {
+				pullRequestTemplates: publication.pullRequestTemplates
+			}),
 			requests,
 			claims: githubMergedPullRequestClaims(audience, identity, {
 				baseBranch: identity.defaultBranch,

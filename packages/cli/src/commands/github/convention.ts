@@ -50,19 +50,17 @@ export function pullRequestRootTemplate(repositoryFullName: string): string {
 	return `github:${repositoryFullName}/pr-${pullRequestVariable}/`;
 }
 
-// Branches, pull-request merge refs and abbreviated commit ids can resolve to
-// different workflow contents later. The GitHub commands therefore accept
-// only full commit ids and tag refs. Tags require a separate GitHub lookup to
-// check whether their release is reported as immutable.
 const immutableReferencePattern = /^(?:refs\/tags\/.+|[0-9a-f]{40})$/;
 const workflowPathPattern = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 const tagReferencePrefix = 'refs/tags/';
+const branchReferencePrefix = 'refs/heads/';
 
 const tagGlobCharacters = /^[A-Za-z0-9._/+*-]+$/;
 
 export type ExactWorkflowReferencePin =
 	| { readonly kind: 'commit'; readonly value: string }
+	| { readonly kind: 'branch'; readonly value: string; readonly branch: string }
 	| { readonly kind: 'tag'; readonly value: string; readonly tag: string };
 
 export type WorkflowReferencePin =
@@ -164,6 +162,14 @@ function workflowReferencePin(
 	}
 
 	if (!immutableReferencePattern.test(pin)) {
+		if (pin.startsWith(branchReferencePrefix)) {
+			const branch = pin.slice(branchReferencePrefix.length);
+
+			if (isBranchReference(branch)) {
+				return { kind: 'branch', value: pin, branch };
+			}
+		}
+
 		throw new WorkflowReferenceMutableError(reference, pin);
 	}
 
@@ -176,8 +182,31 @@ function workflowReferencePin(
 		: { kind: 'commit', value: pin };
 }
 
+function isBranchReference(branch: string): boolean {
+	for (const character of branch) {
+		const codePoint = character.codePointAt(0);
+		if (codePoint !== undefined && (codePoint === 127 || codePoint <= 32)) {
+			return false;
+		}
+	}
+
+	return (
+		branch !== '' &&
+		!/[~^:?[\\]/u.test(branch) &&
+		!branch.includes('..') &&
+		!branch.includes('@{') &&
+		!branch.endsWith('.') &&
+		branch
+			.split('/')
+			.every(
+				(part) =>
+					part !== '' && !part.startsWith('.') && !part.endsWith('.lock')
+			)
+	);
+}
+
 /**
- * Returns an exact `job_workflow_ref` value for a commit or tag. A tag pattern
+ * Returns an exact `job_workflow_ref` value for a commit, branch or tag. A tag pattern
  * becomes an anchored RE2 pattern. The owner, repository and workflow path
  * remain literal, and only the tag can contain wildcards.
  */

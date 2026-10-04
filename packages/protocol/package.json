@@ -24,6 +24,7 @@
 		"./capture": "./src/capture.ts",
 		"./contract": "./src/contract/index.ts",
 		"./control-keys": "./src/control-keys.ts",
+		"./deep-equal": "./src/deep-equal.ts",
 		"./deployment": "./src/deployment.ts",
 		"./grant-match": "./src/grant-match.ts",
 		"./grants": "./src/grants.ts",

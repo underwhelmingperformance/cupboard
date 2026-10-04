@@ -30,13 +30,15 @@ import {
 	CliUsageError,
 	InvalidClaimError,
 	TrustRuleFileConflictError,
-	TrustRuleOptionsRequiredError
+	TrustRuleOptionsRequiredError,
+	WorkflowReferenceMutableError
 } from '../errors.ts';
 import { principalLabel } from '../principal.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import { githubActionsIssuer } from './github/claims.ts';
 import {
+	parseExactWorkflowReference,
 	parseWorkflowReference,
 	workflowReferenceClaim
 } from './github/convention.ts';
@@ -44,6 +46,11 @@ import {
 	pullRequestCacheTemplate,
 	pullRequestRootTemplate
 } from './github/convention.ts';
+import {
+	githubWorkflowSource,
+	WorkflowDiscoveryError
+} from './github/discovery.ts';
+import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { trustRuleSummaryRows } from './oidc-trust/format.ts';
 import {
 	lookupRepository,
@@ -64,41 +71,98 @@ type OidcTrustListResult = readonly (
 	OidcTrustSummary | (UnreadableOidcTrustRule & { readonly unreadable: true })
 )[];
 
-interface GithubPrOptions {
+interface GithubWorkflowOptions {
+	readonly jobWorkflowRef?: string;
+	readonly allowBranchWorkflow?: boolean;
+}
+
+interface GithubPrOptions extends GithubWorkflowOptions {
 	readonly repo: string;
 	readonly audience?: Audience;
 	readonly cacheTemplate?: string;
 	readonly rootTemplate?: string;
-	readonly jobWorkflowRef?: string;
 	readonly attest?: boolean;
 	readonly readCache?: boolean;
 }
 
-interface GithubPrCloseOptions {
+interface GithubPrCloseOptions extends GithubWorkflowOptions {
 	readonly repo: string;
 	readonly audience?: Audience;
 	readonly cacheTemplate?: string;
 	readonly jobWorkflowRef: string;
 }
 
-interface GithubTagOptions {
+interface GithubTagOptions extends GithubWorkflowOptions {
 	readonly repo: string;
 	readonly audience?: Audience;
 	readonly cacheTemplate?: string;
 	readonly rootTemplate?: string;
-	readonly jobWorkflowRef?: string;
 	readonly attest?: boolean;
 	readonly readCache?: boolean;
 }
 
-interface GithubBranchOptions {
+interface GithubBranchOptions extends GithubWorkflowOptions {
 	readonly repo: string;
 	readonly branch: string;
-	readonly jobWorkflowRef?: string;
 	readonly audience?: Audience;
 	readonly attest?: boolean;
 	readonly readCache?: boolean;
 	readonly readView?: string;
+}
+
+async function prepareGithubWorkflowReference(
+	options: GithubWorkflowOptions,
+	ui: CliUi,
+	signal?: AbortSignal
+): Promise<string | undefined> {
+	const reference = options.jobWorkflowRef;
+	if (
+		reference === undefined ||
+		!reference.includes('@') ||
+		reference.includes('*')
+	) {
+		return reference;
+	}
+	const separator = reference.lastIndexOf('@');
+	const prefix = reference.slice(0, separator);
+	const pin = reference.slice(separator + 1);
+	const lookupOptions = signal === undefined ? {} : { signal };
+	let canonical = reference;
+	if (!pin.startsWith('refs/') && !/^[0-9a-f]{40}$/u.test(pin)) {
+		const parsed = parseExactWorkflowReference(`${prefix}@refs/tags/${pin}`);
+		const resolved = await githubWorkflowSource(
+			lookupOptions
+		).resolveWorkflowReference?.(`${parsed.owner}/${parsed.repo}`, pin);
+		if (resolved === undefined) {
+			throw new WorkflowDiscoveryError(
+				`Cannot resolve workflow reference ${reference}`
+			);
+		}
+		canonical = `${prefix}@${resolved}`;
+	}
+	const workflow = parseExactWorkflowReference(canonical);
+	if (workflow.pin.kind !== 'branch') {
+		return canonical;
+	}
+	if (options.allowBranchWorkflow !== true) {
+		throw new WorkflowReferenceMutableError(
+			workflow.reference,
+			workflow.pin.value
+		);
+	}
+	ui.note('Branch workflow trust', [
+		{
+			label: workflow.reference,
+			value: 'Trust rules accept future edits to this branch workflow.'
+		}
+	]);
+	await ui.reporter().phase('Checking workflow reference on GitHub', () =>
+		verifyWorkflowReference(workflow, {
+			...lookupOptions,
+			allowBranchWorkflow: true
+		})
+	);
+	return canonical;
 }
 
 // GitHub presets grant attestation by default. The dedicated `--no-attest`
@@ -389,6 +453,13 @@ export function githubPrCloseAddBody(
 	const template = templateSchema.parse(
 		options.cacheTemplate ?? pullRequestCacheTemplate()
 	);
+	const workflow = parseWorkflowReference(options.jobWorkflowRef);
+	if (workflow.pin.kind === 'branch' && options.allowBranchWorkflow !== true) {
+		throw new WorkflowReferenceMutableError(
+			workflow.reference,
+			workflow.pin.value
+		);
+	}
 
 	if (
 		templateVariables(template).some(
@@ -426,9 +497,7 @@ export function githubPrCloseAddBody(
 			repository_owner_id: String(identity.repositoryOwnerId),
 			event_name: 'pull_request',
 			ref: { pattern: '^refs/heads/.+$' },
-			job_workflow_ref: workflowReferenceClaim(
-				parseWorkflowReference(options.jobWorkflowRef)
-			)
+			job_workflow_ref: workflowReferenceClaim(workflow)
 		},
 		permittedGrants: [
 			{
@@ -612,7 +681,11 @@ function buildOidcTrustCommands(
 			)
 			.option(
 				'--workflow-ref, --job-workflow-ref <value>',
-				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
+				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Branch refs require --allow-branch-workflow and accept future workflow edits. Without @ref, it matches the workflow file at any ref.'
+			)
+			.option(
+				'--allow-branch-workflow',
+				'permit an exact branch workflow reference and its future edits'
 			)
 			.option(
 				'--read-cache',
@@ -634,13 +707,24 @@ function buildOidcTrustCommands(
 				].join('\n')
 			)
 			.action(async (url: URL, options: GithubPrOptions) => {
-				const reporter = commandUi(program, programOptions).reporter();
+				const ui = commandUi(program, programOptions);
+				const reporter = ui.reporter();
+				const jobWorkflowReference = await prepareGithubWorkflowReference(
+					options,
+					ui,
+					programOptions.signal
+				);
 				const identity = await reporter.phase('Resolving repository', () =>
 					lookupRepository(options.repo)
 				);
 
 				await runOidcTrustAdd(
-					githubPrAddBody(url, identity, options),
+					githubPrAddBody(url, identity, {
+						...options,
+						...(jobWorkflowReference !== undefined && {
+							jobWorkflowRef: jobWorkflowReference
+						})
+					}),
 					reporter,
 					plane.clientFor(url, programOptions)
 				);
@@ -659,7 +743,11 @@ function buildOidcTrustCommands(
 			)
 			.requiredOption(
 				'--workflow-ref, --job-workflow-ref <value>',
-				'require this workflow pinned to a commit, release tag or tag pattern, as owner/repo/path@ref'
+				'require this workflow pinned to a commit, release tag or tag pattern, as owner/repo/path@ref; an exact refs/heads/<branch> reference requires --allow-branch-workflow'
+			)
+			.option(
+				'--allow-branch-workflow',
+				'also accept an exact refs/heads/<branch> workflow reference; the closure rule will accept future edits to that branch workflow'
 			)
 			.option(
 				'--audience <audience>',
@@ -671,12 +759,21 @@ function buildOidcTrustCommands(
 				'PR cache family, with at most one {pr} (default: gh-{repository_id}-pr-{pr})'
 			)
 			.action(async (url: URL, options: GithubPrCloseOptions) => {
-				const reporter = commandUi(program, programOptions).reporter();
+				const ui = commandUi(program, programOptions);
+				const reporter = ui.reporter();
+				const jobWorkflowReference = await prepareGithubWorkflowReference(
+					options,
+					ui,
+					programOptions.signal
+				);
 				const identity = await reporter.phase('Resolving repository', () =>
 					lookupRepository(options.repo)
 				);
 				await runOidcTrustAdd(
-					githubPrCloseAddBody(url, identity, options),
+					githubPrCloseAddBody(url, identity, {
+						...options,
+						jobWorkflowRef: jobWorkflowReference ?? options.jobWorkflowRef
+					}),
 					reporter,
 					plane.clientFor(url, programOptions)
 				);
@@ -708,7 +805,11 @@ function buildOidcTrustCommands(
 			)
 			.option(
 				'--workflow-ref, --job-workflow-ref <value>',
-				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
+				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Branch refs require --allow-branch-workflow and accept future workflow edits. Without @ref, it matches the workflow file at any ref.'
+			)
+			.option(
+				'--allow-branch-workflow',
+				'permit an exact branch workflow reference and its future edits'
 			)
 			.option(
 				'--read-cache',
@@ -730,13 +831,24 @@ function buildOidcTrustCommands(
 				].join('\n')
 			)
 			.action(async (url: URL, options: GithubTagOptions) => {
-				const reporter = commandUi(program, programOptions).reporter();
+				const ui = commandUi(program, programOptions);
+				const reporter = ui.reporter();
+				const jobWorkflowReference = await prepareGithubWorkflowReference(
+					options,
+					ui,
+					programOptions.signal
+				);
 				const identity = await reporter.phase('Resolving repository', () =>
 					lookupRepository(options.repo)
 				);
 
 				await runOidcTrustAdd(
-					githubTagAddBody(url, identity, options),
+					githubTagAddBody(url, identity, {
+						...options,
+						...(jobWorkflowReference !== undefined && {
+							jobWorkflowRef: jobWorkflowReference
+						})
+					}),
 					reporter,
 					plane.clientFor(url, programOptions)
 				);
@@ -759,7 +871,11 @@ function buildOidcTrustCommands(
 			)
 			.option(
 				'--workflow-ref, --job-workflow-ref <value>',
-				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Without @ref, it matches the workflow file at any ref.'
+				'also require the job_workflow_ref claim, given as owner/repo/path@ref. Branch refs require --allow-branch-workflow and accept future workflow edits. Without @ref, it matches the workflow file at any ref.'
+			)
+			.option(
+				'--allow-branch-workflow',
+				'permit an exact branch workflow reference and its future edits'
 			)
 			.option(
 				'--audience <audience>',
@@ -787,13 +903,24 @@ function buildOidcTrustCommands(
 				].join('\n')
 			)
 			.action(async (url: URL, options: GithubBranchOptions) => {
-				const reporter = commandUi(program, programOptions).reporter();
+				const ui = commandUi(program, programOptions);
+				const reporter = ui.reporter();
+				const jobWorkflowReference = await prepareGithubWorkflowReference(
+					options,
+					ui,
+					programOptions.signal
+				);
 				const identity = await reporter.phase('Resolving repository', () =>
 					lookupRepository(options.repo)
 				);
 
 				await runOidcTrustAdd(
-					githubBranchAddBody(url, identity, options),
+					githubBranchAddBody(url, identity, {
+						...options,
+						...(jobWorkflowReference !== undefined && {
+							jobWorkflowRef: jobWorkflowReference
+						})
+					}),
 					reporter,
 					plane.clientFor(url, programOptions)
 				);

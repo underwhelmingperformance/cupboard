@@ -165,6 +165,7 @@ export function throwIfGithubTemporaryError(
 export interface LookupRepositoryOptions {
 	readonly fetch?: typeof fetch;
 	readonly signal?: AbortSignal;
+	readonly shouldRevalidate?: boolean;
 }
 
 function isAsyncByteIterable(
@@ -267,7 +268,7 @@ export function githubApi(
 	);
 	const fetcher = options.fetch ?? cachedGithubFetch(cachePath);
 
-	return createOctokitClient({
+	const client = createOctokitClient({
 		replaySafety: 'replay-safe',
 		...(token !== undefined && { auth: token }),
 		request: {
@@ -275,6 +276,13 @@ export function githubApi(
 			...(signal !== undefined && { signal })
 		}
 	});
+	if (options.shouldRevalidate === true) {
+		client.hook.before('request', (request) => {
+			request.headers['cache-control'] = 'no-cache';
+		});
+	}
+
+	return client;
 }
 
 export function parseRepository(value: string): string {

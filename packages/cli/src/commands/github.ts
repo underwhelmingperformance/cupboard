@@ -45,7 +45,8 @@ import {
 	GithubSetupDriftError,
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
-	ReadCredentialPairError
+	ReadCredentialPairError,
+	WorkflowReferenceMutableError
 } from '../errors.ts';
 import { classifyFailures } from '../exit-code.ts';
 import { parseReadUser } from '../read-user.ts';
@@ -158,12 +159,14 @@ interface GithubCheckCommandOptions extends Omit<
 	readonly yes?: boolean;
 	readonly trustScope?: GithubTrustScope;
 	readonly tagPattern?: string;
+	readonly allowBranchWorkflow?: boolean;
 }
 
 export interface GithubSetupOptions {
 	readonly repo: string;
 	readonly branch: string;
 	readonly workflowRef: string;
+	readonly allowBranchWorkflow?: boolean;
 	readonly yes?: boolean;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
@@ -570,7 +573,8 @@ function pinnedReference(
 	reference: string
 ): ReturnType<typeof parseExactWorkflowReference> | undefined {
 	try {
-		return parseExactWorkflowReference(reference);
+		const parsed = parseExactWorkflowReference(reference);
+		return parsed.pin.kind === 'branch' ? undefined : parsed;
 	} catch {
 		return undefined;
 	}
@@ -824,13 +828,36 @@ export async function runGithubSetup(
 		dependencies.signal === undefined ? {} : { signal: dependencies.signal };
 	const workflowReference = parseWorkflowReference(options.workflowRef);
 
+	if (
+		workflowReference.pin.kind === 'branch' &&
+		options.allowBranchWorkflow !== true
+	) {
+		throw new WorkflowReferenceMutableError(
+			workflowReference.reference,
+			workflowReference.pin.value
+		);
+	}
+
 	if (workflowReference.pin.kind !== 'tag-pattern') {
 		const exactWorkflowReference = parseExactWorkflowReference(
 			workflowReference.reference
 		);
+		if (exactWorkflowReference.pin.kind === 'branch') {
+			ui.note('Branch workflow trust', [
+				{
+					label: exactWorkflowReference.reference,
+					value: 'Trust rules accept future edits to this branch workflow.'
+				}
+			]);
+		}
 
 		await reporter.phase('Checking workflow reference on GitHub', () =>
-			verifyReference(exactWorkflowReference, lookupOptions)
+			verifyReference(exactWorkflowReference, {
+				...lookupOptions,
+				...(options.allowBranchWorkflow === true && {
+					allowBranchWorkflow: true
+				})
+			})
 		);
 	}
 
@@ -895,7 +922,8 @@ export async function runGithubSetup(
 			trigger: 'merged pull requests',
 			body: githubPrCloseAddBody(url, identity, {
 				repo: options.repo,
-				jobWorkflowRef: options.workflowRef
+				jobWorkflowRef: options.workflowRef,
+				allowBranchWorkflow: options.allowBranchWorkflow
 			}),
 			tokenClaims: githubMergedPullRequestClaims(url, identity, {
 				baseBranch: identity.defaultBranch,
@@ -1075,6 +1103,13 @@ export async function runGithubSetup(
 			];
 		}
 	);
+	if (workflowReference.pin.kind === 'branch') {
+		steps.push({
+			step: 'branch workflow trust',
+			outcome: 'unchanged',
+			detail: `${workflowReference.reference}; trust rules accept future edits to this branch workflow`
+		});
+	}
 	let supersededRuleIds = new Set<string>();
 
 	if (
@@ -1186,7 +1221,11 @@ export function registerGithubCommands(
 		)
 		.requiredOption(
 			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
-			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.'
+			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. An exact refs/heads/<branch> reference requires --allow-branch-workflow and accepts future workflow edits. A pattern also matches tags created later. With github check --fix, choose future tags using --trust-scope tag-pattern --tag-pattern v* instead.'
+		)
+		.option(
+			'--allow-branch-workflow',
+			'also accept an exact refs/heads/<branch> workflow reference; trust rules will accept future edits to that branch workflow'
 		)
 		.option(
 			'-y, --yes',
@@ -1254,11 +1293,15 @@ export function registerGithubCommands(
 		)
 		.option(
 			'--job-workflow-ref, --workflow-ref <owner/repo/path@ref>',
-			'check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref must be a full commit ID or the tag of a release that GitHub reports as immutable.'
+			'check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or an exact refs/heads/<branch> reference. Branch trust accepts future workflow edits.'
 		)
 		.option(
 			'--fix',
 			'show the tenant changes that would repair the failing jobs, and apply them after you confirm'
+		)
+		.option(
+			'--allow-branch-workflow',
+			'with --fix, also permit exact trust in branch workflow references; trust rules will accept future edits to those branch workflows'
 		)
 		.option('-y, --yes', 'apply the repair without the confirmation prompt')
 		.addOption(
@@ -1301,6 +1344,12 @@ export function registerGithubCommands(
 			) {
 				throw new GithubCheckOptionError(
 					'--yes, --trust-scope and --tag-pattern require --fix.'
+				);
+			}
+
+			if (options.fix !== true && options.allowBranchWorkflow === true) {
+				throw new GithubCheckOptionError(
+					'--allow-branch-workflow requires --fix. Read-only checks already inspect branch workflow references.'
 				);
 			}
 
