@@ -165,9 +165,13 @@ export function cacheSelectionSyntax(
 export function commandOptionsFromHelp(output: string): CommandOptions {
 	const options = new Set<string>();
 
-	for (const match of output.matchAll(/^\s+(?:-\w, )?(?<option>--[\w-]+)/gmu)) {
-		if (match.groups?.option !== undefined) {
-			options.add(match.groups.option);
+	for (const match of output.matchAll(
+		/^\s+(?:-\w, )?(?<options>--[\w-]+(?:, --[\w-]+)*)/gmu
+	)) {
+		const aliases = match.groups?.options?.split(', ') ?? [];
+
+		for (const option of aliases) {
+			options.add(option);
 		}
 	}
 
