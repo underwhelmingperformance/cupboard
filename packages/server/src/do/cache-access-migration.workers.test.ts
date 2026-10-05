@@ -1191,40 +1191,46 @@ describe('cache access migration', () => {
 			);
 		});
 
-		let hasCompleted = false;
-		for (let attempt = 0; attempt < 20; attempt++) {
-			try {
-				await server.migrateCacheCatalogue(tenant);
-				hasCompleted = true;
-				break;
-			} catch (error) {
-				if (
-					!(error instanceof Error) ||
-					![
-						'LocalSchemaMigrationPendingError',
-						'CacheCatalogueMigrationPendingError'
-					].includes(error.name)
-				) {
-					throw error;
+		const result = await withoutAlarmArming(async () => {
+			let hasCompleted = false;
+
+			for (let attempt = 0; attempt < 20; attempt++) {
+				try {
+					await server.migrateCacheCatalogue(tenant);
+					hasCompleted = true;
+					break;
+				} catch (error) {
+					if (
+						!(error instanceof Error) ||
+						![
+							'LocalSchemaMigrationPendingError',
+							'CacheCatalogueMigrationPendingError'
+						].includes(error.name)
+					) {
+						throw error;
+					}
 				}
 			}
-		}
-		const caches = await runInDurableObject(server, (_instance, state) => {
-			const rows = state.storage.sql
-				.exec<{
-					kind: 'default' | 'named';
-					name: string | null;
-					access: string;
-				}>('SELECT kind, name, access FROM cache_identity ORDER BY id')
-				.toArray();
 
-			return rows.map((row) => ({
-				cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
-				access: row.access
-			}));
-		});
+			const caches = await runInDurableObject(server, (_instance, state) => {
+				const rows = state.storage.sql
+					.exec<{
+						kind: 'default' | 'named';
+						name: string | null;
+						access: string;
+					}>('SELECT kind, name, access FROM cache_identity ORDER BY id')
+					.toArray();
 
-		expect({ hasCompleted, caches }).toStrictEqual({
+				return rows.map((row) => ({
+					cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+					access: row.access
+				}));
+			});
+
+			return { hasCompleted, caches };
+		}, server);
+
+		expect(result).toStrictEqual({
 			hasCompleted: true,
 			caches: [
 				{ cache: { kind: 'default' }, access: 'private' },
