@@ -14,7 +14,6 @@ import { Command } from 'commander';
 import { expect, it, onTestFinished, vi } from 'vitest';
 
 import { abortable } from '../abort.ts';
-import * as secretFile from '../auth/secret-file.ts';
 
 import { registerAttestStatusCommand } from './attest-status.ts';
 
@@ -24,6 +23,10 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 	const started = Promise.withResolvers<undefined>();
 	const resume = Promise.withResolvers<undefined>();
 	const renewed = Promise.withResolvers<undefined>();
+	const waits: {
+		readonly milliseconds: number;
+		readonly resume: VoidFunction;
+	}[] = [];
 	const requests: (string | undefined)[] = [];
 	const audiences: (string | undefined)[] = [];
 	const intents: unknown[] = [];
@@ -104,25 +107,13 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 		throw new Error('Expected a TCP test server.');
 	}
 	const url = `http://127.0.0.1:${String(address.port)}/t/acme`;
+	let now = 0;
 
 	vi.stubEnv('RUNNER_TEMP', directory);
 	vi.stubEnv('ACTIONS_ID_TOKEN_REQUEST_URL', new URL('/job-token', url).href);
 	vi.stubEnv('ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'job-secret');
 	vi.stubEnv('CUPBOARD_READ_USER', undefined);
 	vi.stubEnv('CUPBOARD_READ_PASSWORD', undefined);
-	vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
-	const writeSecretFile = secretFile.writeSecretFile;
-	const publication = vi
-		.spyOn(secretFile, 'writeSecretFile')
-		.mockImplementation(async (...arguments_) => {
-			await writeSecretFile(...arguments_);
-			if (arguments_[1].includes('token-2')) {
-				renewed.resolve(undefined);
-			}
-		});
-	onTestFinished(() => {
-		publication.mockRestore();
-	});
 	const controller = new AbortController();
 	const program = new Command().exitOverride();
 	registerAttestStatusCommand(
@@ -130,14 +121,20 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 		program,
 		{ signal: controller.signal },
 		{
-			now: Date.now,
-			wait: (milliseconds, signal) =>
-				abortable(
-					new Promise<void>((resolve) => {
-						setTimeout(resolve, milliseconds);
-					}),
-					signal
-				)
+			now: () => now,
+			wait: (milliseconds, signal) => {
+				const pending = Promise.withResolvers<undefined>();
+				waits.push({
+					milliseconds,
+					resume: () => {
+						pending.resolve(undefined);
+					}
+				});
+				if (waits.length === 3) {
+					renewed.resolve(undefined);
+				}
+				return abortable(pending.promise, signal);
+			}
 		}
 	);
 	const operation = program.parseAsync(
@@ -170,7 +167,6 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 					});
 				});
 			} finally {
-				vi.useRealTimers();
 				vi.unstubAllEnvs();
 				await rm(directory, { recursive: true, force: true });
 			}
@@ -180,7 +176,10 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 	onTestFinished(cleanup);
 	try {
 		await Promise.race([started.promise, operation]);
-		await vi.advanceTimersByTimeAsync(10_000);
+		const firstWait = waits[0];
+		expect(firstWait?.milliseconds).toBe(10_000);
+		now = 10_000;
+		firstWait?.resume();
 		await Promise.race([renewed.promise, operation]);
 		expect(intents).toStrictEqual(
 			Array.from({ length: 2 }, () => [
@@ -203,6 +202,7 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 		expect({
 			requests,
 			audiences,
+			waits: waits.map(({ milliseconds }) => milliseconds),
 			remainingFiles: await readdir(directory)
 		}).toStrictEqual({
 			requests: ['token-1', 'token-1', 'token-2'].map(
@@ -210,6 +210,7 @@ it('renews OIDC read access between coverage pages and removes its credential fi
 					`Basic ${Buffer.from(`cupboard-oidc:cupboard-access+jwt:${token}`).toString('base64')}`
 			),
 			audiences: ['https://audience.example', 'https://audience.example'],
+			waits: [10_000, 270_000, 10_000],
 			remainingFiles: []
 		});
 	} finally {
