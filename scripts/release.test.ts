@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
@@ -12,23 +11,17 @@ import {
 import { parseBaseUrl } from '@cupboard/nix-store/url';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
-import { parseDocument } from 'yaml';
-
-import { resolveCupboard } from '../actions/src/cupboard-resolution.ts';
 
 import {
 	assertCanonicalVersion,
 	assetContentType,
-	checkPreparationAction,
 	checksumTargets,
 	createDraftBody,
 	fetchCachePublicKeys,
 	MissingInputError,
 	NonCanonicalVersionError,
-	prepareAction,
 	PublicKeyFetchError,
 	publishAction,
-	ReleasePreparationError,
 	renderChecksums,
 	selectDraftRelease,
 	substituterSection,
@@ -128,26 +121,30 @@ describe('createDraftBody', () => {
 	it.each([
 		{ owner: 'acme', repo: 'app', version: 'v1.2.3' },
 		{ owner: 'acme', repo: 'other', version: 'v2.0.0' }
-	])('links the $version upgrade notes for $repo in a new draft', (input) => {
-		expect(
-			createDraftBody({
-				version: input.version,
-				repository: { owner: input.owner, repo: input.repo },
-				commitish: 'abc123',
+	])(
+		'embeds the $version upgrade guidance for $repo in a new draft',
+		(input) => {
+			expect(
+				createDraftBody({
+					version: input.version,
+					repository: { owner: input.owner, repo: input.repo },
+					commitish: 'abc123',
+					name: input.version,
+					body: 'substituters...',
+					upgradeNotes: [
+						{ path: 'notes.md', body: 'Upgrade the tenant schema.' }
+					]
+				})
+			).toStrictEqual({
+				tag_name: input.version,
+				target_commitish: 'abc123',
 				name: input.version,
-				body: 'substituters...'
-			})
-		).toStrictEqual({
-			tag_name: input.version,
-			target_commitish: 'abc123',
-			name: input.version,
-			body:
-				`substituters...\n\nBefore upgrading an existing deployment, read the [${input.version} upgrade notes][cupboard-upgrade-notes-${input.version}].\n\n` +
-				`[cupboard-upgrade-notes-${input.version}]: https://github.com/${input.owner}/${input.repo}/blob/${input.version}/docs/operator/upgrade-notes.md`,
-			draft: true,
-			generate_release_notes: true
-		});
-	});
+				body: 'substituters...\n\n<!-- cupboard:upgrade-notes:start -->\n## Upgrade guidance\n\nUpgrade the tenant schema.\n<!-- cupboard:upgrade-notes:end -->',
+				draft: true,
+				generate_release_notes: true
+			});
+		}
+	);
 });
 
 const unavailable = () =>
@@ -242,29 +239,23 @@ describe('substituterSection', () => {
 });
 
 describe('updateDraftBody', () => {
-	const linkedNotes =
-		'Maintainer notes.\n\nBefore upgrading an existing deployment, read the [v1.2.3 upgrade notes][cupboard-upgrade-notes-v1.2.3].\n\n' +
-		'[cupboard-upgrade-notes-v1.2.3]: https://github.com/acme/app/blob/v1.2.3/docs/operator/upgrade-notes.md';
-
-	it.each(['Maintainer notes.', linkedNotes])(
-		'preserves existing notes and includes one upgrade link',
-		(body) => {
-			expect(
-				updateDraftBody({
-					commitish: 'def456',
-					name: 'v1.2.3',
-					version: 'v1.2.3',
-					repository: { owner: 'acme', repo: 'app' },
-					body
-				})
-			).toStrictEqual({
-				target_commitish: 'def456',
+	it('preserves maintainer prose and embeds the selected guidance', () => {
+		expect(
+			updateDraftBody({
+				commitish: 'def456',
 				name: 'v1.2.3',
-				body: linkedNotes,
-				draft: true
-			});
-		}
-	);
+				version: 'v1.2.3',
+				repository: { owner: 'acme', repo: 'app' },
+				body: 'Maintainer notes.',
+				upgradeNotes: [{ path: 'notes.md', body: 'Upgrade the tenant schema.' }]
+			})
+		).toStrictEqual({
+			target_commitish: 'def456',
+			name: 'v1.2.3',
+			body: 'Maintainer notes.\n\n<!-- cupboard:upgrade-notes:start -->\n## Upgrade guidance\n\nUpgrade the tenant schema.\n<!-- cupboard:upgrade-notes:end -->',
+			draft: true
+		});
+	});
 });
 
 describe('assetContentType', () => {
@@ -314,345 +305,155 @@ describe('renderChecksums', () => {
 	});
 });
 
-const releaseScript = new URL('release.ts', import.meta.url);
 const execFileAsync = promisify(execFile);
-const preparationWorkflow = `name: release cache
-on:
-  release:
-    types: [published]
-jobs:
-  publish:
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main
-    with:
-      cache: releases
-      build: rebuild
-      trusted-public-key: cupboard-acme-1:test
-      cupboard-version: \${{ github.event.release.tag_name }}
-  flakehub:
-    needs: publish
-    runs-on: ubuntu-24.04
-`;
-const preparedWorkflow = `name: release cache
-on:
-  release:
-    types: [published]
-jobs:
-  publish:
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v1.2.3
-    with:
-      cache: releases
-      build: rebuild
-      trusted-public-key: cupboard-acme-1:test
-  flakehub:
-    needs: publish
-    runs-on: ubuntu-24.04
-`;
-const preparationNotes =
-	'# Upgrade notes\n\n## Next release\n\nDeploy the server first.\n\n## v1.0.0\n\nEarlier notes.\n';
 
-async function releaseFixture(
-	workflow = preparationWorkflow,
-	notes = preparationNotes
-) {
-	const directory = await mkdtemp(
-		path.join(tmpdir(), 'cupboard-release-preparation-')
-	);
+it.each(['release metadata', 'target Git metadata'] as const)(
+	'fails before draft mutations when %s is unavailable',
+	async (failure) => {
+		const requests: string[] = [];
+		vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = new Request(input, init);
+			requests.push(request.method + ' ' + request.url);
+			if (failure === 'release metadata') {
+				return Promise.resolve(
+					Response.json({ message: 'Unavailable' }, { status: 401 })
+				);
+			}
+			return Promise.resolve(
+				Response.json(
+					[draftOne, draftTwo].map((draft) => ({
+						...draft,
+						tag_name: draft.tagName,
+						upload_url: draft.uploadUrl,
+						html_url: draft.htmlUrl
+					}))
+				)
+			);
+		});
+		try {
+			await expect(
+				publishAction({
+					VERSION: 'v1.2.3',
+					DIRECTORY: '/missing-assets',
+					REPOSITORY_DIRECTORY: '/missing-release-repository',
+					RELEASE_REPOSITORY: 'acme/app',
+					COMMITISH: 'missing',
+					GITHUB_TOKEN: 'test-token',
+					CACHE_URL: 'https://cupboard.example/t/acme'
+				})
+			).rejects.toThrow();
+			expect(requests).toStrictEqual([
+				'GET https://api.github.com/repos/acme/app/releases?page=1&per_page=100'
+			]);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	}
+);
+
+it('publishes without preparation from the exact commit and preserves draft edits on retry', async () => {
+	const directory = await mkdtemp(path.join(tmpdir(), 'release-publish-'));
+	const git = async (...arguments_: string[]) => {
+		const result = await execFileAsync('git', arguments_, { cwd: directory });
+		return result.stdout.trim();
+	};
+	await git('init', '--initial-branch=main');
+	await git('config', 'user.email', 'test@example.com');
+	await git('config', 'user.name', 'Release fixture');
+	await git('config', 'commit.gpgsign', 'false');
 	await mkdir(path.join(directory, '.github/workflows'), { recursive: true });
-	await mkdir(path.join(directory, 'docs/operator'), { recursive: true });
+	await mkdir(path.join(directory, 'docs/operator/upgrade-notes'), {
+		recursive: true
+	});
+	await mkdir(path.join(directory, 'assets'));
+	const workflow =
+		'jobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main\n    with:\n      cache: releases\n';
 	await writeFile(
 		path.join(directory, '.github/workflows/release-cache.yml'),
 		workflow
 	);
 	await writeFile(
-		path.join(directory, '.github/workflows/cache-publish.yml'),
-		'dogfood @main\n'
+		path.join(directory, 'docs/operator/upgrade-notes/schema.md'),
+		'Upgrade from the tagged schema.'
 	);
+	await git('add', '--all');
+	await git('commit', '-qm', 'fixture');
+	const commitish = await git('rev-parse', 'HEAD');
 	await writeFile(
-		path.join(directory, 'docs/operator/upgrade-notes.md'),
-		notes
+		path.join(directory, 'docs/operator/upgrade-notes/schema.md'),
+		'Uncommitted guidance must not appear.'
 	);
-	return directory;
-}
-
-async function fixtureSources(directory: string) {
-	return {
-		workflow: await readFile(
-			path.join(directory, '.github/workflows/release-cache.yml'),
-			'utf8'
-		),
-		upgradeNotes: await readFile(
-			path.join(directory, 'docs/operator/upgrade-notes.md'),
-			'utf8'
-		),
-		dogfood: await readFile(
-			path.join(directory, '.github/workflows/cache-publish.yml'),
-			'utf8'
-		)
+	let draft: Record<string, unknown> | undefined;
+	const requests: string[] = [];
+	const fetcher: typeof fetch = async (input, init) => {
+		const request = new Request(input, init);
+		requests.push(request.method + ' ' + request.url);
+		if (request.url.endsWith('/pubkey')) {
+			return new Response(firstKey);
+		}
+		if (request.method === 'GET') {
+			return Response.json(draft === undefined ? [] : [draft]);
+		}
+		const body: unknown = await request.json();
+		if (typeof body !== 'object' || body === null || !('body' in body)) {
+			throw new Error('Expected release body');
+		}
+		draft = {
+			id: 1,
+			tag_name: 'v1.2.3',
+			draft: true,
+			upload_url: 'https://uploads.example.test/1',
+			html_url: 'https://example.test/releases/1',
+			assets: [],
+			...body
+		};
+		return Response.json(draft);
 	};
-}
-
-describe('release preparation command', () => {
-	it('prepares the entered tag and preserves the dogfood workflow and earlier notes', async () => {
-		const directory = await releaseFixture();
-		try {
-			const { stdout } = await execFileAsync(
-				process.execPath,
-				[
-					'--experimental-transform-types',
-					'--disable-warning=ExperimentalWarning',
-					fileURLToPath(releaseScript),
-					'prepare'
-				],
-				{
-					env: {
-						...process.env,
-						VERSION: 'v1.2.3',
-						REPOSITORY_DIRECTORY: directory
-					}
-				}
-			);
-			expect(await fixtureSources(directory)).toStrictEqual({
-				workflow: preparedWorkflow,
-				upgradeNotes: preparationNotes.replace('## Next release', '## v1.2.3'),
-				dogfood: 'dogfood @main\n'
-			});
-			expect(stdout).toContain(
-				'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v1.2.3'
-			);
-			const first = await fixtureSources(directory);
-			await execFileAsync(
-				process.execPath,
-				[
-					'--experimental-transform-types',
-					'--disable-warning=ExperimentalWarning',
-					fileURLToPath(releaseScript),
-					'prepare'
-				],
-				{
-					env: {
-						...process.env,
-						VERSION: 'v1.2.3',
-						REPOSITORY_DIRECTORY: directory
-					}
-				}
-			);
-			expect(await fixtureSources(directory)).toStrictEqual(first);
-		} finally {
-			await rm(directory, { recursive: true, force: true });
+	vi.stubGlobal('fetch', fetcher);
+	try {
+		const environment = {
+			VERSION: 'v1.2.3',
+			DIRECTORY: path.join(directory, 'assets'),
+			REPOSITORY_DIRECTORY: directory,
+			RELEASE_REPOSITORY: 'acme/app',
+			COMMITISH: commitish,
+			GITHUB_TOKEN: 'test-token',
+			CACHE_URL: 'https://cupboard.example/t/acme'
+		};
+		await publishAction(environment);
+		if (draft === undefined || typeof draft.body !== 'string') {
+			throw new Error('Expected created draft');
 		}
-	});
-});
-
-const preparedNotes = preparationNotes.replace('## Next release', '## v1.2.3');
-
-describe('release preparation validation', () => {
-	it.each([
-		{
-			name: 'malformed workflow',
-			workflow: 'jobs: [\n',
-			notes: preparedNotes
-		},
-		{
-			name: 'main workflow',
-			workflow: preparedWorkflow.replace('@v1.2.3', '@main'),
-			notes: preparedNotes
-		},
-		{
-			name: 'different tag',
-			workflow: preparedWorkflow.replace('@v1.2.3', '@v2.0.0'),
-			notes: preparedNotes
-		},
-		{
-			name: 'CLI override',
-			workflow: preparedWorkflow.replace(
-				'      cache: releases',
-				'      cupboard-version: v1.2.3\n      cache: releases'
+		const firstBody = draft.body;
+		draft.body =
+			'Maintainer introduction.\n\n' +
+			firstBody +
+			'\n\nGenerated GitHub notes.\nMaintainer follow-up.';
+		await publishAction(environment);
+		expect({
+			body: draft.body,
+			workflow: await readFile(
+				path.join(directory, '.github/workflows/release-cache.yml'),
+				'utf8'
 			),
-			notes: preparedNotes
-		},
-		{
-			name: 'pending upgrade notes',
-			workflow: preparedWorkflow,
-			notes: preparationNotes
-		}
-	])(
-		'rejects $name before any draft API request',
-		async ({ workflow, notes }) => {
-			const directory = await releaseFixture(workflow, notes);
-			const fetcher = vi.fn(() =>
-				Promise.reject(new Error('Unexpected GitHub request'))
-			);
-			vi.stubGlobal('fetch', fetcher);
-			try {
-				const environment = {
-					VERSION: 'v1.2.3',
-					REPOSITORY_DIRECTORY: directory,
-					DIRECTORY: directory,
-					RELEASE_REPOSITORY: 'acme/app',
-					COMMITISH: 'a'.repeat(40),
-					GITHUB_TOKEN: 'test-token'
-				};
-				const before = await fixtureSources(directory);
-				await expect(checkPreparationAction(environment)).rejects.toThrow(
-					ReleasePreparationError
-				);
-				await expect(publishAction(environment)).rejects.toThrow(
-					ReleasePreparationError
-				);
-				expect({
-					sources: await fixtureSources(directory),
-					requests: fetcher.mock.calls
-				}).toStrictEqual({ sources: before, requests: [] });
-			} finally {
-				vi.unstubAllGlobals();
-				await rm(directory, { recursive: true, force: true });
-			}
-		}
-	);
-
-	it.each([
-		{
-			name: 'invalid version',
-			version: '1.2.3',
-			workflow: preparationWorkflow,
-			notes: preparationNotes,
-			error: NonCanonicalVersionError
-		},
-		{
-			name: 'malformed YAML',
-			version: 'v1.2.3',
-			workflow: 'jobs: [\n',
-			notes: preparationNotes,
-			error: ReleasePreparationError
-		},
-		{
-			name: 'unexpected workflow',
-			version: 'v1.2.3',
-			workflow: preparationWorkflow.replace(
-				'underwhelmingperformance/cupboard/',
-				'acme/app/'
-			),
-			notes: preparationNotes,
-			error: ReleasePreparationError
-		},
-		{
-			name: 'duplicate pending headings',
-			version: 'v1.2.3',
-			workflow: preparationWorkflow,
-			notes: preparationNotes + '\n## Next release\n',
-			error: ReleasePreparationError
-		},
-		{
-			name: 'existing selected heading',
-			version: 'v1.2.3',
-			workflow: preparationWorkflow,
-			notes: preparationNotes + '\n## v1.2.3\n',
-			error: ReleasePreparationError
-		}
-	])(
-		'rejects $name before writing preparation files',
-		async ({ version, workflow, notes, error }) => {
-			const directory = await releaseFixture(workflow, notes);
-			try {
-				const before = await fixtureSources(directory);
-				await expect(
-					prepareAction({ VERSION: version, REPOSITORY_DIRECTORY: directory })
-				).rejects.toThrow(error);
-				expect(await fixtureSources(directory)).toStrictEqual(before);
-			} finally {
-				await rm(directory, { recursive: true, force: true });
-			}
-		}
-	);
-
-	it('checks the prepared files and resolves the matching release from the workflow commit', async () => {
-		const directory = await releaseFixture();
-		try {
-			await prepareAction({
-				VERSION: 'v1.2.3',
-				REPOSITORY_DIRECTORY: directory
-			});
-			await checkPreparationAction({
-				VERSION: 'v1.2.3',
-				REPOSITORY_DIRECTORY: directory
-			});
-			const sources = await fixtureSources(directory);
-			const document = parseDocument(sources.workflow);
-			const uses = document.getIn(['jobs', 'publish', 'uses']);
-			const override = document.getIn([
-				'jobs',
-				'publish',
-				'with',
-				'cupboard-version'
-			]);
-			if (typeof uses !== 'string' || override !== undefined) {
-				throw new Error('Expected a prepared workflow without a CLI override');
-			}
-			const workflowSha = 'a'.repeat(40);
-			const release = await resolveCupboard(
-				{
-					includePrereleases: true,
-					releaseRepository: 'underwhelmingperformance/cupboard',
-					githubToken: '',
-					workflowSha,
-					workflowRef: uses.replace('@v1.2.3', '@refs/tags/v1.2.3')
-				},
-				{
-					releaseDiscoveryPage: () =>
-						Promise.resolve({
-							data: {
-								repository: {
-									releases: {
-										nodes: [
-											{
-												tagName: 'v1.2.3',
-												isDraft: false,
-												tagCommit: { oid: workflowSha }
-											},
-											{
-												tagName: 'v1.2.2',
-												isDraft: false,
-												tagCommit: { oid: workflowSha }
-											}
-										],
-										pageInfo: { hasNextPage: false, endCursor: 'last-page' }
-									}
-								}
-							}
-						})
-				}
-			);
-			expect({ release, override }).toStrictEqual({
-				release: {
-					kind: 'release',
-					repository: 'underwhelmingperformance/cupboard',
-					tag: 'v1.2.3',
-					sourceCommit: workflowSha
-				},
-				override: undefined
-			});
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	it('prepares a release without new upgrade instructions without changing historical notes', async () => {
-		const directory = await releaseFixture(
-			preparationWorkflow,
-			'# Upgrade notes\n\n## v1.0.0\n\nEarlier notes.\n'
-		);
-		try {
-			const before = await fixtureSources(directory);
-			await prepareAction({
-				VERSION: 'v1.2.3',
-				REPOSITORY_DIRECTORY: directory
-			});
-			expect(await fixtureSources(directory)).toStrictEqual({
-				...before,
-				workflow: preparedWorkflow
-			});
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
+			requests
+		}).toStrictEqual({
+			body:
+				'Maintainer introduction.\n\n' +
+				firstBody +
+				'\n\nGenerated GitHub notes.\nMaintainer follow-up.',
+			workflow,
+			requests: [
+				'GET https://api.github.com/repos/acme/app/releases?page=1&per_page=100',
+				'GET https://cupboard.example/t/acme/pubkey',
+				'POST https://api.github.com/repos/acme/app/releases',
+				'GET https://api.github.com/repos/acme/app/releases?page=1&per_page=100',
+				'GET https://cupboard.example/t/acme/pubkey',
+				'PATCH https://api.github.com/repos/acme/app/releases/1'
+			]
+		});
+	} finally {
+		vi.unstubAllGlobals();
+		await rm(directory, { recursive: true, force: true });
+	}
 });

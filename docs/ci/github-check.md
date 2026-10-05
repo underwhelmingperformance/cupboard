@@ -400,7 +400,8 @@ completed. The command reports the uncertain attempt separately from confirmed
 changes. Run `cupboard github check` again before retrying. A new repair uses
 the current rules and adds only grants that are still missing.
 
-[grant-extension-upgrade]: ../operator/upgrade-notes.md#pr-cache-closure
+[grant-extension-upgrade]:
+  ../operator/upgrade-notes/release-repairs.md#pr-cache-closure
 
 When the repair refuses a planned rule before writing, it does not change the
 tenant. The error identifies the job and any existing rules that prevent the

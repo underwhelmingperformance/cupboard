@@ -1780,6 +1780,7 @@ describe('release cache publication', () => {
 		const publish = workflow.jobs.publish;
 
 		expect({
+			uses: publish?.uses,
 			matrix: releaseCacheMatrixSchema.parse(publish?.strategy?.matrix).include,
 			with: publish?.with,
 			failFast: publish?.strategy?.['fail-fast'],
@@ -1787,6 +1788,7 @@ describe('release cache publication', () => {
 			tolerance: publish?.['continue-on-error'],
 			flakehubNeedsPublish: jobNeeds(workflow, 'flakehub')
 		}).toStrictEqual({
+			uses: 'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main',
 			matrix: nixSystemRunners,
 			with: {
 				'runs-on': '${{ matrix.runner }}',
@@ -1809,23 +1811,27 @@ describe('binary release', () => {
 		const workflow = await loadWorkflow(releaseWorkflow);
 		const validate = workflow.jobs.validate;
 		const steps = validate?.steps ?? [];
-		const guardIndex = steps.findIndex(
-			(step) => step.name === 'Check release preparation'
-		);
-		const installIndex = steps.findIndex(
-			(step) => step.run === 'pnpm install --frozen-lockfile'
-		);
 		expect({
-			check: steps[guardIndex],
-			bootstrapBeforeCheck: installIndex !== -1 && installIndex < guardIndex,
+			versionEnvironment: steps[0]?.env,
+			validatesCanonicalVersion:
+				steps[0]?.run?.includes(
+					String.raw`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`
+				) ?? false,
+			preparationSteps: steps.filter((step) =>
+				step.run?.includes('check-preparation')
+			),
+			draftCheckout: stepsUsing(
+				workflow,
+				'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+			)
+				.filter(({ job }) => job === 'draft')
+				.map(({ step }) => step.with),
 			buildNeeds: jobNeeds(workflow, 'build')
 		}).toStrictEqual({
-			check: {
-				name: 'Check release preparation',
-				env: { INPUT_VERSION: '${{ steps.version.outputs.version }}' },
-				run: 'node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/release.ts check-preparation\n'
-			},
-			bootstrapBeforeCheck: true,
+			versionEnvironment: { INPUT_VERSION: '${{ inputs.version }}' },
+			validatesCanonicalVersion: true,
+			preparationSteps: [],
+			draftCheckout: [{ 'persist-credentials': false, 'fetch-depth': 0 }],
 			buildNeeds: ['validate']
 		});
 	});

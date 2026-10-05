@@ -11,9 +11,11 @@ deployment, you install a newer CLI and deploy with it.
    curl -fsS https://cupboard.example.workers.dev/_version
    ```
 
-2. Read the [upgrade notes](./upgrade-notes.md) for every release after that
-   one, up to and including the release that you're installing. Some releases
-   need you to do something before or after you deploy.
+2. Read the upgrade instructions in the [GitHub releases][release-notes] for
+   every release after that one, up to and including the release that you're
+   installing. [Earlier upgrade notes](./upgrade-notes.md) preserve guidance
+   from before releases included these instructions. Some releases need you to
+   do something before or after you deploy.
 
 3. Install the new CLI. If you installed it into your profile from a tag, remove
    it and install the new tag, as
@@ -30,6 +32,8 @@ deployment, you install a newer CLI and deploy with it.
 options. An upgrade keeps the custom domain, resource names and cron triggers.
 If you passed `--workers-plan` when you first deployed, pass it again. See
 [Running `init` again](./deploying.md#running-init-again).
+
+[release-notes]: https://github.com/underwhelmingperformance/cupboard/releases
 
 ## Signing in to upgrade
 
@@ -278,7 +282,7 @@ and a newer CLI falls back to older behaviour when it talks to an older server.
 
 Upgrade the server first. Some newer CLI features need support from the server,
 such as `push --no-retain`, and refuse to run against an older server. The
-[upgrade notes](./upgrade-notes.md) list any release that needs a matching CLI.
+[release notes][release-notes] specify when a release needs a matching CLI.
 
 `cupboard deployment status` and `cupboard deployment resume` are an exception.
 Use them from the same release as the deployed control Worker. The CLI and the
