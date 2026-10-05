@@ -117,6 +117,26 @@ interface CommitSessionCounters {
 	abandonedUpgrades: number;
 }
 
+type TestServerStartStage =
+	| 'runtime-configuration'
+	| 'database-binding'
+	| 'database-migrations'
+	| 'deployment-transitions'
+	| 'bucket-binding'
+	| 'http-listen'
+	| 'tenant-provisioning';
+
+export class CupboardTestServerStartError extends Error {
+	constructor(
+		readonly stage: TestServerStartStage,
+		cause: unknown,
+		readonly cleanupErrors: readonly unknown[]
+	) {
+		super(`Test server startup failed during ${stage}`, { cause });
+		this.name = 'CupboardTestServerStartError';
+	}
+}
+
 function countWorkerFrame(counters: CommitSessionCounters, data: string): void {
 	try {
 		const frame: unknown = JSON.parse(data);
@@ -177,127 +197,154 @@ export class CupboardTestServer {
 			CUPBOARD_SIGNUP_SECRET: signupSecret,
 			...options.bindings
 		};
-		const worker = new Miniflare({
-			workers: [
-				{
-					name: 'cupboard',
-					compatibilityDate: '2026-05-15',
-					compatibilityFlags: ['nodejs_compat'],
-					modules: true,
-					modulesRoot: bundle.directory,
-					scriptPath: path.join(bundle.directory, bundle.controlEntrypoint),
-					bindings: controlBindings,
-					durableObjects: {
-						CUPBOARD_DO: {
-							className: 'CupboardServer',
-							scriptName: 'cupboard-tenant',
-							useSQLite: true
+		let stage: TestServerStartStage = 'runtime-configuration';
+		let cleanupWorker: Miniflare | undefined;
+		let httpServer: Server | undefined;
+
+		try {
+			const worker = new Miniflare({
+				workers: [
+					{
+						name: 'cupboard',
+						compatibilityDate: '2026-05-15',
+						compatibilityFlags: ['nodejs_compat'],
+						modules: true,
+						modulesRoot: bundle.directory,
+						scriptPath: path.join(bundle.directory, bundle.controlEntrypoint),
+						bindings: controlBindings,
+						durableObjects: {
+							CUPBOARD_DO: {
+								className: 'CupboardServer',
+								scriptName: 'cupboard-tenant',
+								useSQLite: true
+							}
+						},
+						d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
+						r2Buckets: { BLOBS: r2Credentials.bucketName },
+						kvNamespaces: { TENANT_CACHE: 'tenant-cache' },
+						// The maintenance queue, consumed by the control Worker as in
+						// production, so a deferred commit's verification request is
+						// processed.
+						queueProducers: {
+							MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
+						},
+						queueConsumers: {
+							'cupboard-maintenance': { maxBatchSize: 1, maxBatchTimeout: 0 }
 						}
 					},
-					d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
-					r2Buckets: { BLOBS: r2Credentials.bucketName },
-					kvNamespaces: { TENANT_CACHE: 'tenant-cache' },
-					// The maintenance queue, consumed by the control Worker as in
-					// production, so a deferred commit's verification request is
-					// processed.
-					queueProducers: {
-						MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
-					},
-					queueConsumers: {
-						'cupboard-maintenance': { maxBatchSize: 1, maxBatchTimeout: 0 }
-					}
-				},
-				{
-					name: 'cupboard-tenant',
-					compatibilityDate: '2026-05-15',
-					compatibilityFlags: ['nodejs_compat'],
-					modules: true,
-					modulesRoot: bundle.directory,
-					scriptPath: path.join(bundle.directory, bundle.tenantEntrypoint),
-					bindings: tenantBindings,
-					durableObjects: {
-						CUPBOARD_DO: {
-							className: 'CupboardServer',
-							useSQLite: true
+					{
+						name: 'cupboard-tenant',
+						compatibilityDate: '2026-05-15',
+						compatibilityFlags: ['nodejs_compat'],
+						modules: true,
+						modulesRoot: bundle.directory,
+						scriptPath: path.join(bundle.directory, bundle.tenantEntrypoint),
+						bindings: tenantBindings,
+						durableObjects: {
+							CUPBOARD_DO: {
+								className: 'CupboardServer',
+								useSQLite: true
+							}
+						},
+						d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
+						r2Buckets: { BLOBS: r2Credentials.bucketName },
+						queueProducers: {
+							MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
 						}
-					},
-					d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
-					r2Buckets: { BLOBS: r2Credentials.bucketName },
-					queueProducers: {
-						MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
 					}
-				}
-			]
-		});
-		await applyD1Migrations(
-			await worker.getD1Database('CUPBOARD_DB', 'cupboard')
-		);
-
-		const database = await worker.getD1Database('CUPBOARD_DB', 'cupboard');
-		const timestamp = new Date().toISOString();
-		const completedTransitions = options.completedTransitions ?? transitionIds;
-
-		for (const transition of completedTransitions) {
-			await database
-				.prepare(
-					'INSERT OR REPLACE INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (?, ?, ?, ?)'
-				)
-				.bind(transition, 'complete', timestamp, timestamp)
-				.run();
-		}
-		const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
-		const requests: { method: string; path: string; status: number }[] = [];
-		const httpServer = createServer((request, response) => {
-			response.on('finish', () => {
-				requests.push({
-					method: request.method ?? 'GET',
-					path: new URL(request.url ?? '/', 'http://localhost').pathname,
-					status: response.statusCode
-				});
+				]
 			});
+			cleanupWorker = worker;
+			stage = 'database-binding';
+			const database = await worker.getD1Database('CUPBOARD_DB', 'cupboard');
+			stage = 'database-migrations';
+			await applyD1Migrations(database);
+			stage = 'deployment-transitions';
+			const timestamp = new Date().toISOString();
+			const completedTransitions =
+				options.completedTransitions ?? transitionIds;
 
-			void forwardToWorker(worker, request, response);
-		});
-		const upgrades = new WebSocketServer({ noServer: true });
-		upgrades.on('headers', forwardWorkerUpgradeHeaders);
-		const commitCounters: CommitSessionCounters = {
-			onAbandonedUpgrade: options.onAbandonedUpgrade,
-			upgrades: 0,
-			creditFrames: 0,
-			queuedFrames: 0,
-			abandonedUpgrades: 0
-		};
-		httpServer.on('upgrade', (request, socket, head) => {
-			void forwardUpgradeToWorker(
+			for (const transition of completedTransitions) {
+				await database
+					.prepare(
+						'INSERT OR REPLACE INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (?, ?, ?, ?)'
+					)
+					.bind(transition, 'complete', timestamp, timestamp)
+					.run();
+			}
+			stage = 'bucket-binding';
+			const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
+			const requests: { method: string; path: string; status: number }[] = [];
+			httpServer = createServer((request, response) => {
+				response.on('finish', () => {
+					requests.push({
+						method: request.method ?? 'GET',
+						path: new URL(request.url ?? '/', 'http://localhost').pathname,
+						status: response.statusCode
+					});
+				});
+
+				void forwardToWorker(worker, request, response);
+			});
+			const upgrades = new WebSocketServer({ noServer: true });
+			upgrades.on('headers', forwardWorkerUpgradeHeaders);
+			const commitCounters: CommitSessionCounters = {
+				onAbandonedUpgrade: options.onAbandonedUpgrade,
+				upgrades: 0,
+				creditFrames: 0,
+				queuedFrames: 0,
+				abandonedUpgrades: 0
+			};
+			httpServer.on('upgrade', (request, socket, head) => {
+				void forwardUpgradeToWorker(
+					worker,
+					upgrades,
+					request,
+					socket,
+					head,
+					commitCounters
+				);
+			});
+			stage = 'http-listen';
+			const url = await listen(httpServer);
+			const instance = new CupboardTestServer(
+				url,
+				issuer,
 				worker,
-				upgrades,
-				request,
-				socket,
-				head,
-				commitCounters
+				bucket,
+				httpServer,
+				commitCounters,
+				requests
 			);
-		});
-		const url = await listen(httpServer);
-		const instance = new CupboardTestServer(
-			url,
-			issuer,
-			worker,
-			bucket,
-			httpServer,
-			commitCounters,
-			requests
-		);
 
-		// Mirror a deployment: the fixture tenant is provisioned through the control
-		// plane before it can serve. A test that exercises a fresh bootstrap (or only
-		// the control surface) opts out with `provision: false`.
-		if (options.provision !== false) {
-			await instance.provisionFixtureTenant(
-				options.provision ?? { defaultCacheAccess: 'public' }
+			// Mirror a deployment: the fixture tenant is provisioned through the control
+			// plane before it can serve. A test that exercises a fresh bootstrap (or only
+			// the control surface) opts out with `provision: false`.
+			if (options.provision !== false) {
+				stage = 'tenant-provisioning';
+				await instance.provisionFixtureTenant(
+					options.provision ?? { defaultCacheAccess: 'public' }
+				);
+			}
+
+			return instance;
+		} catch (error) {
+			const cleanups = [issuer.stop()];
+
+			if (cleanupWorker !== undefined) {
+				cleanups.push(cleanupWorker.dispose());
+			}
+
+			if (httpServer?.listening === true) {
+				cleanups.push(closeServer(httpServer));
+			}
+
+			const results = await Promise.allSettled(cleanups);
+			const cleanupErrors = results.flatMap((result): unknown[] =>
+				result.status === 'rejected' ? [result.reason] : []
 			);
+			throw new CupboardTestServerStartError(stage, error, cleanupErrors);
 		}
-
-		return instance;
 	}
 
 	private constructor(
