@@ -33,7 +33,6 @@ import {
 	checkPullRequestCacheAccess,
 	checkReuseView,
 	checkReuseViewCacheInfo,
-	checkTrustRule,
 	type GithubCheckClient
 } from './check.ts';
 import { githubActionsIssuer } from './claims.ts';
@@ -72,6 +71,7 @@ import {
 } from './publication.ts';
 import { pullRequestLifecycleFindings } from './pull-request-lifecycle.ts';
 import { publicationReadAuthority } from './read-authority.ts';
+import { checkPublicationTrust } from './release-authority.ts';
 import {
 	RepositoryTrustRuleMissingFinding,
 	TrustRuleAudienceMismatchFinding,
@@ -462,13 +462,13 @@ function trustFindings(
 		return [new SharedPullRequestCacheFinding()];
 	}
 
-	const trust = checkTrustRule(
-		'trust rule',
+	const trust = checkPublicationTrust({
+		check: 'trust rule',
+		publication,
 		rules,
-		publication.claims,
 		requests,
-		readResources
-	);
+		resources: readResources
+	});
 
 	if (
 		publication.requests.length === 0 ||

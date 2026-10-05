@@ -251,6 +251,124 @@ describe('modelPublishingJob', () => {
 		});
 	});
 
+	it('models release roots with the signed release tag', () => {
+		const cache = {
+			kind: 'named' as const,
+			name: cacheNameSchema.parse('releases')
+		};
+		const target = parseRootName(
+			'github:iainlane/dotfiles/v0.0.0/x86_64-linux'
+		);
+		const run = parseRootName(`${target}/_cupboard-run/1`);
+		const result = modelPublishingJob(
+			{
+				...installableJob,
+				triggers: triggers('release'),
+				inputs: {
+					url: tenant.href,
+					cache: 'releases',
+					root: 'github:${{ github.repository }}/${{ github.event.release.tag_name }}'
+				}
+			},
+			identity,
+			tenant,
+			'main'
+		);
+		expect(result).toStrictEqual({
+			cases: [
+				{
+					trigger: 'release',
+					ref: { kind: 'release-tag' },
+					claims: {
+						...repositoryClaims,
+						sub: 'repo:iainlane/dotfiles:ref:refs/tags/v0.0.0',
+						event_name: 'release',
+						ref: 'refs/tags/v0.0.0',
+						ref_type: 'tag',
+						job_workflow_ref: installableWorkflowReference
+					},
+					rootPrefix: 'github:iainlane/dotfiles/v0.0.0',
+					releaseRootTemplate: 'github:iainlane/dotfiles/{tag}/',
+					requests: [
+						pushAuthorizationDetails({
+							cache,
+							attest: true,
+							root: target,
+							runRoot: run
+						}),
+						attestAttachAuthorizationDetails({ cache })
+					]
+				}
+			],
+			findings: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'a non-release trigger',
+			event: 'push',
+			cache: 'releases',
+			root: 'github:${{ github.repository }}/${{ github.event.release.tag_name }}',
+			reason:
+				'github.event.release.tag_name is available only for release runs',
+			trigger: 'push'
+		},
+		{
+			name: 'a tag-dependent cache',
+			event: 'release',
+			cache: '${{ github.event.release.tag_name }}',
+			root: 'github:${{ github.repository }}/${{ github.event.release.tag_name }}',
+			reason:
+				'release tag expressions require a literal cache and an installable workflow root'
+		},
+		{
+			name: 'a repeated tag expression',
+			event: 'release',
+			cache: 'releases',
+			root: '${{ github.event.release.tag_name }}/${{ github.event.release.tag_name }}',
+			reason: 'root must be a literal string'
+		},
+		{
+			name: 'an unrelated expression',
+			event: 'release',
+			cache: 'releases',
+			root: '${{ secrets.ROOT }}',
+			reason: 'root must be a literal string'
+		},
+		{
+			name: 'an implicit tag-dependent root',
+			event: 'release',
+			cache: 'releases',
+			root: '',
+			reason: 'release publication requires an explicit root'
+		}
+	])('keeps $name unverified', ({ event, cache, root, reason, trigger }) => {
+		expect(
+			modelPublishingJob(
+				{
+					...installableJob,
+					triggers: triggers(event).map((trigger) => ({
+						...trigger,
+						...(event === 'push' && { filters: { branches: ['main'] } })
+					})),
+					inputs: { url: tenant.href, cache, root }
+				},
+				identity,
+				tenant,
+				'main'
+			)
+		).toStrictEqual({
+			cases: [],
+			findings: [
+				{
+					...(trigger !== undefined && { trigger }),
+					finding: new PublicationUnmodelledFinding(reason)
+				}
+			]
+		});
+	});
+
 	it.each([
 		{
 			name: 'a new public cache',

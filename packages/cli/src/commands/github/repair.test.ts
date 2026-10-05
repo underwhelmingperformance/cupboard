@@ -45,6 +45,7 @@ import {
 	githubBranchAddBody,
 	githubPrAddBody,
 	githubPrCloseAddBody,
+	githubTagAddBody,
 	type OidcTrustClient
 } from '../oidc-trust.ts';
 import {
@@ -142,6 +143,7 @@ async function fixture(
 		views?: readonly ReuseViewSummary[];
 		cacheAccess?: CacheAccessMode;
 		publishingWorkflow?: string;
+		workflowFiles?: Readonly<Record<string, string>>;
 		fetchCacheAccess?: (target: URL) => Promise<CacheAccessMode>;
 	} = {}
 ) {
@@ -162,12 +164,15 @@ async function fixture(
 			Promise.resolve(
 				reference === 'main' ? 'refs/heads/main' : `refs/tags/${reference}`
 			),
-		list: () => Promise.resolve([path]),
-		read: (selectedRepository: string) =>
+		list: () =>
+			Promise.resolve(
+				Object.keys(options.workflowFiles ?? { [path]: workflowContent })
+			),
+		read: (selectedRepository: string, selectedPath: string) =>
 			Promise.resolve(
 				selectedRepository === 'underwhelmingperformance/cupboard'
 					? (options.publishingWorkflow ?? legacyPublishingWorkflow)
-					: workflowContent
+					: (options.workflowFiles?.[selectedPath] ?? workflowContent)
 			)
 	};
 	const client = {
@@ -315,6 +320,371 @@ it('plans one rule for both publishing jobs and applies it after review', async 
 		notes: ['Planned GitHub repair']
 	});
 });
+
+it('repairs the repository main, PR and release workflows together', async () => {
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/heads/main';
+	const identity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: repository,
+		defaultBranch: 'main'
+	};
+	const main = githubBranchAddBody(url, identity, {
+		repo: repository,
+		branch: 'main',
+		jobWorkflowRef: reference
+	});
+	const pr = githubPrAddBody(url, identity, {
+		repo: repository,
+		jobWorkflowRef: reference,
+		cacheTemplate: 'pr-{pr}'
+	});
+	const release = githubTagAddBody(url, identity, {
+		repo: repository,
+		jobWorkflowRef: reference,
+		cacheTemplate: 'releases',
+		rootTemplate: 'github:iainlane/dotfiles/{tag}/'
+	});
+	const original = [
+		main,
+		pr,
+		{ ...release, claims: { ...release.claims, event_name: 'release' } }
+	].map((body, index) =>
+		oidcTrustSummarySchema.parse({
+			...body,
+			id: ['main', 'pr', 'release'][index],
+			disabled: false,
+			permittedGrants: body.permittedGrants.map((grant) =>
+				grant.type === 'cupboard_cache'
+					? {
+							...grant,
+							actions: grant.actions.filter(
+								(action) =>
+									![
+										'root:attach',
+										'cache:create',
+										'cache:close',
+										'cache:reopen'
+									].includes(action)
+							)
+						}
+					: grant
+			)
+		})
+	);
+	const files = await Promise.all(
+		['cache-publish.yml', 'release-cache.yml', 'cupboard-publish.yml'].map(
+			async (file) =>
+				[
+					file,
+					await readFile(
+						new URL(
+							`../../../../../.github/workflows/${file}`,
+							import.meta.url
+						),
+						'utf8'
+					)
+				] as const
+		)
+	);
+	const sources = Object.fromEntries(files);
+	const workflowFiles = Object.fromEntries(
+		files
+			.filter(([file]) => file !== 'cupboard-publish.yml')
+			.map(([file, source]) => [
+				`.github/workflows/${file}`,
+				source.replaceAll('https://cupboard.supply/t/cupboard', () => url.href)
+			])
+	);
+	const { ui, client, dependencies, check, extended, added } = await fixture(
+		undefined,
+		content,
+		{
+			rules: original,
+			publishingWorkflow: sources['cupboard-publish.yml'],
+			workflowFiles
+		}
+	);
+	expect(check.jobs.map(({ job, status }) => ({ job, status }))).toStrictEqual([
+		{ job: 'publish-pr', status: 'failed' },
+		{ job: 'publish-main', status: 'failed' },
+		{ job: 'publish', status: 'failed' }
+	]);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact', allowBranchWorkflow: true },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+	const verified = await inspectDiscoveredGithubCheck(
+		url,
+		{ repo: repository, branch: 'main' },
+		ui.reporter(),
+		client,
+		dependencies
+	);
+	expect({
+		jobs: verified.jobs.map(({ job, status }) => ({ job, status })),
+		extended: extended
+			.map(({ expected }) => expected.id)
+			.toSorted((left, right) => left.localeCompare(right)),
+		added: added.map(({ claims }) => claims)
+	}).toStrictEqual({
+		jobs: [
+			{ job: 'publish-pr', status: 'ready' },
+			{ job: 'publish-main', status: 'ready' },
+			{ job: 'publish', status: 'ready' }
+		],
+		extended: ['main', 'pr', 'release'],
+		added: [
+			{
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				event_name: 'pull_request',
+				ref: { pattern: '^refs/heads/.+$' },
+				job_workflow_ref: reference
+			}
+		]
+	});
+});
+
+it.each([
+	'exact ref',
+	'future exact ref',
+	'fixed root',
+	'restricted capture',
+	'restricted cache'
+] as const)(
+	'does not verify release coverage from one tag with an %s rule',
+	async (restriction) => {
+		const reference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+		const body = githubTagAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{
+				repo: repository,
+				jobWorkflowRef: reference,
+				cacheTemplate: 'releases',
+				rootTemplate: 'github:iainlane/dotfiles/{tag}/'
+			}
+		);
+		const rule = oidcTrustSummarySchema.parse({
+			...body,
+			id: 'release',
+			disabled: false,
+			claims: {
+				...body.claims,
+				event_name: 'release',
+				...(['exact ref', 'future exact ref'].includes(restriction) && {
+					ref:
+						restriction === 'exact ref'
+							? 'refs/tags/v0.0.0'
+							: 'refs/tags/v9.8.7'
+				})
+			},
+			permittedGrants: body.permittedGrants.map((grant) =>
+				grant.type === 'cupboard_cache'
+					? {
+							...grant,
+							resources: {
+								...grant.resources,
+								...(restriction === 'restricted cache' && {
+									cache: {
+										kind: 'named',
+										equalsTemplate: 'releases{cache}',
+										substitutions: {
+											cache: {
+												claim: 'ref',
+												capture: {
+													pattern: String.raw`^refs/tags/v0\.0\.0(?<cache>.*)$`,
+													group: 'cache'
+												}
+											}
+										},
+										validate: 'cacheName'
+									}
+								}),
+								root:
+									restriction === 'fixed root'
+										? {
+												exact: `github:${repository}/v0.0.0/`,
+												validate: 'rootName'
+											}
+										: restriction === 'restricted capture'
+											? {
+													equalsTemplate: 'github:iainlane/dotfiles/{tag}/',
+													substitutions: {
+														tag: {
+															claim: 'ref',
+															capture: {
+																pattern: String.raw`^refs/tags/(?<tag>v0\..*)$`,
+																group: 'tag'
+															}
+														}
+													},
+													validate: 'rootName'
+												}
+											: grant.resources.root
+							}
+						}
+					: grant
+			)
+		});
+		const workflow = `on:\n  release:\n    types: [published]\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35\n    with:\n      url: ${url.href}\n      cache: releases\n      root: github:\${{ github.repository }}/\${{ github.event.release.tag_name }}\n`;
+		const { check } = await fixture(undefined, workflow, { rules: [rule] });
+		expect(check.jobs.map(({ status }) => status)).toStrictEqual([
+			'unverified'
+		]);
+	}
+);
+
+it('keeps a sufficient release grant usable beside a legacy exact-root grant', async () => {
+	const reference =
+		'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+	const body = githubTagAddBody(
+		url,
+		{
+			repositoryId: 1234,
+			repositoryOwnerId: 5678,
+			fullName: repository,
+			defaultBranch: 'main'
+		},
+		{
+			repo: repository,
+			jobWorkflowRef: reference,
+			cacheTemplate: 'releases',
+			rootTemplate: 'github:iainlane/dotfiles/{tag}/'
+		}
+	);
+	const rule = oidcTrustSummarySchema.parse({
+		...body,
+		id: 'release',
+		disabled: false,
+		claims: { ...body.claims, event_name: 'release' },
+		permittedGrants: [
+			...body.permittedGrants,
+			buildCacheGrant({
+				cache: 'releases',
+				root: 'github:iainlane/dotfiles/v0.0.0/',
+				allow: ['root']
+			})
+		]
+	});
+	const workflow = `on: release\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35\n    with:\n      url: ${url.href}\n      cache: releases\n      root: github:\${{ github.repository }}/\${{ github.event.release.tag_name }}\n`;
+	const { check } = await fixture(undefined, workflow, { rules: [rule] });
+	expect(check.jobs.map(({ job, status }) => ({ job, status }))).toStrictEqual([
+		{ job: 'publish', status: 'ready' }
+	]);
+});
+
+it.each(['literal', 'tag-dependent'] as const)(
+	'accepts a constant root template for a %s release root',
+	async (kind) => {
+		const reference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/v0.0.35';
+		const body = githubTagAddBody(
+			url,
+			{
+				repositoryId: 1234,
+				repositoryOwnerId: 5678,
+				fullName: repository,
+				defaultBranch: 'main'
+			},
+			{
+				repo: repository,
+				jobWorkflowRef: reference,
+				cacheTemplate: 'releases',
+				rootTemplate: 'release/'
+			}
+		);
+		const rule = oidcTrustSummarySchema.parse({
+			...body,
+			id: 'release',
+			disabled: false,
+			claims: { ...body.claims, event_name: 'release' }
+		});
+		const root =
+			kind === 'literal'
+				? 'release'
+				: 'release/${{ github.event.release.tag_name }}';
+		const workflow = `on: release\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35\n    with:\n      url: ${url.href}\n      cache: releases\n      root: ${root}\n`;
+		const { check } = await fixture(undefined, workflow, { rules: [rule] });
+		expect(
+			check.jobs.map(({ job, status }) => ({ job, status }))
+		).toStrictEqual([{ job: 'publish', status: 'ready' }]);
+	}
+);
+
+it.each(['release event', 'exact tag'] as const)(
+	'refuses a tag repair that would shadow release authority selected by %s before writing',
+	async (selector) => {
+		const rule = buildAddBody({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: url.href,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				...(selector === 'release event'
+					? { event_name: 'release' }
+					: { ref: 'refs/tags/v1.2.3' })
+			},
+			permittedGrants: [
+				buildCacheGrant({
+					cache: 'releases',
+					root: 'release/',
+					allow: ['push', 'root', 'attest']
+				})
+			]
+		});
+		const old = oidcTrustSummarySchema.parse({
+			...rule,
+			id: 'release',
+			disabled: false
+		});
+		const workflowFiles = {
+			'.github/workflows/tag.yml': `on:\n  push:\n    tags: [v1.2.3]\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35\n    with:\n      url: ${url.href}\n      cache: packages\n      root: tags\n`,
+			'.github/workflows/release.yml': `on: release\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@v0.0.35\n    with:\n      url: ${url.href}\n      cache: releases\n      root: release\n`
+		};
+		const { ui, check, client, dependencies, added, extended } = await fixture(
+			undefined,
+			content,
+			{ rules: [old], workflowFiles }
+		);
+		expect(
+			check.jobs.map(({ caller, status }) => ({ caller, status }))
+		).toStrictEqual([
+			{
+				caller: '.github/workflows/release.yml',
+				status: selector === 'release event' ? 'ready' : 'unverified'
+			},
+			{ caller: '.github/workflows/tag.yml', status: 'failed' }
+		]);
+		const error = await rejection(
+			runDiscoveredGithubRepair(
+				url,
+				{ trustScope: 'exact' },
+				ui,
+				client,
+				dependencies,
+				check
+			)
+		);
+		expect({
+			error: error instanceof GithubRepairShadowsRuleError,
+			added,
+			extended
+		}).toStrictEqual({ error: true, added: [], extended: [] });
+	}
+);
 
 it('repairs a private read-only pull request with a content-read grant only', async () => {
 	const readOnlyWorkflow = `
