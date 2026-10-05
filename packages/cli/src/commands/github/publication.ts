@@ -27,6 +27,7 @@ import {
 	githubBranchClaims,
 	githubMergedPullRequestClaims,
 	githubPullRequestClaims,
+	githubReleaseClaims,
 	githubTagPushClaims
 } from './claims.ts';
 import { pullRequestCacheName, pullRequestViewName } from './convention.ts';
@@ -62,6 +63,10 @@ type TriggerReference =
 	  }
 	| { readonly trigger: 'push'; readonly ref: BranchReference | TagReference }
 	| {
+			readonly trigger: 'release';
+			readonly ref: { readonly kind: 'release-tag' };
+	  }
+	| {
 			readonly trigger: 'workflow_dispatch' | 'schedule';
 			readonly ref: BranchReference;
 	  };
@@ -79,6 +84,7 @@ export type PublicationCase = TriggerReference & {
 	readonly requests: readonly AuthorizationDetails[];
 	readonly cache?: CacheScope;
 	readonly rootPrefix?: string;
+	readonly releaseRootTemplate?: string;
 	readonly pullRequestTemplates?: {
 		readonly cache: string;
 		readonly root: string;
@@ -305,11 +311,14 @@ interface ModelContext {
 interface PublicationInput {
 	readonly value: string;
 	readonly template?: string;
+	readonly releaseTemplate?: string;
 }
 
 const repositoryExpression = /\$\{\{\s*github\.repository\s*\}\}/gu;
 const pullRequestNumberExpression =
 	/\$\{\{\s*github\.event\.pull_request\.number\s*\}\}/gu;
+const releaseTagExpression =
+	/\$\{\{\s*github\.event\.release\.tag_name\s*\}\}/gu;
 
 function publicationInput(
 	job: DiscoveredPublishingJob,
@@ -334,7 +343,18 @@ function publicationInput(
 		return;
 	}
 
-	const value = repository.replaceAll(pullRequestNumberExpression, '1');
+	const releaseOccurrences = repository
+		.matchAll(releaseTagExpression)
+		.toArray();
+	if (
+		releaseOccurrences.length > 1 ||
+		(releaseOccurrences.length > 0 && occurrences.length > 0)
+	) {
+		return;
+	}
+	const value = repository
+		.replaceAll(pullRequestNumberExpression, '1')
+		.replaceAll(releaseTagExpression, 'v0.0.0');
 
 	if (value.includes('${{')) {
 		return;
@@ -342,6 +362,9 @@ function publicationInput(
 
 	return {
 		value,
+		...(releaseOccurrences.length === 1 && {
+			releaseTemplate: repository.replaceAll(releaseTagExpression, '{tag}')
+		}),
 		...(occurrences.length === 1 && {
 			template: repository.replaceAll(pullRequestNumberExpression, '{pr}')
 		})
@@ -538,9 +561,11 @@ function installableRoots(
 	const referenceName =
 		entry.ref.kind === 'pull-request'
 			? '1/merge'
-			: entry.ref.kind === 'tag'
-				? entry.ref.pattern.example()
-				: entry.ref.name;
+			: entry.ref.kind === 'release-tag'
+				? 'v0.0.0'
+				: entry.ref.kind === 'tag'
+					? entry.ref.pattern.example()
+					: entry.ref.name;
 	const run = root(
 		`github:${context.identity.fullName}/${referenceName}/_cupboard-run/1`
 	);
@@ -728,6 +753,15 @@ function triggerReferences(
 	trigger: WorkflowTrigger
 ): (TriggerReference | CheckFinding)[] {
 	switch (trigger.event) {
+		case 'release': {
+			return [
+				context.isPreset
+					? new PublicationUnmodelledFinding(
+							'the flake preset does not support release events'
+						)
+					: { trigger: 'release', ref: { kind: 'release-tag' } }
+			];
+		}
 		case 'push': {
 			return pushReferences(context, trigger);
 		}
@@ -766,6 +800,12 @@ function claimsForReference(
 	job: DiscoveredPublishingJob,
 	entry: TriggerReference
 ): GithubActionsClaims {
+	if (entry.trigger === 'release') {
+		return githubReleaseClaims(audience, identity, {
+			tag: 'v0.0.0',
+			workflowReference: job.workflowRef
+		});
+	}
 	if (entry.trigger === 'pull_request') {
 		return githubPullRequestClaims(audience, identity, {
 			pullRequestNumber: 1,
@@ -950,6 +990,15 @@ export function modelPublishingJob(
 	}
 
 	const rootPrefix = rootInputValue.value;
+	const releaseRootTemplate = rootInputValue.releaseTemplate;
+	if (
+		cacheInput.releaseTemplate !== undefined ||
+		(releaseRootTemplate !== undefined && job.kind !== 'installable')
+	) {
+		return unmodelled(
+			'release tag expressions require a literal cache and an installable workflow root'
+		);
+	}
 
 	const hasPullRequestExpression =
 		cacheInput.template !== undefined || rootInputValue.template !== undefined;
@@ -1035,6 +1084,18 @@ export function modelPublishingJob(
 				continue;
 			}
 
+			if (releaseRootTemplate !== undefined && entry.trigger !== 'release') {
+				findings.push({
+					trigger: entry.trigger,
+					finding: new PublicationUnmodelledFinding(
+						'github.event.release.tag_name is available only for release runs'
+					)
+				});
+				continue;
+			}
+			if (!isReadOnly && rootPrefix === '' && entry.trigger === 'release') {
+				return unmodelled('release publication requires an explicit root');
+			}
 			const isPullRequest = entry.trigger === 'pull_request';
 			if (hasPullRequestExpression && !isPullRequest) {
 				findings.push({
@@ -1073,6 +1134,9 @@ export function modelPublishingJob(
 				cases.push({
 					...entry,
 					claims,
+					...(releaseRootTemplate !== undefined && {
+						releaseRootTemplate: `${releaseRootTemplate.replace(/\/$/u, '')}/`
+					}),
 					...(rootInputValue.value !== scalar(job, rootInput) &&
 						pullRequestTemplates === undefined && { rootPrefix }),
 					...(cacheInput.value !== scalar(job, 'cache') &&

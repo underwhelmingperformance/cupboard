@@ -101,6 +101,17 @@ export function githubTagPushClaims(
 	};
 }
 
+export function githubReleaseClaims(
+	audience: string | URL,
+	identity: GithubRepositoryClaimsIdentity,
+	options: TagPushClaimsOptions
+): GithubActionsClaims {
+	return {
+		...githubTagPushClaims(audience, identity, options),
+		event_name: 'release'
+	};
+}
+
 /**
 The signed claim shape of a merged pull-request close run.
 */

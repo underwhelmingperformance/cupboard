@@ -50,15 +50,12 @@ import {
 	buildCacheContentReadGrant,
 	buildCacheGrant,
 	buildViewContentReadGrant,
+	collectSubstitutions,
 	jobWorkflowReferenceClaim
 } from '../oidc-trust/rule-builder.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
 
-import {
-	activeMatcherRules,
-	checkTrustRule,
-	type GithubCheckClient
-} from './check.ts';
+import { activeMatcherRules, type GithubCheckClient } from './check.ts';
 import { githubActionsIssuer } from './claims.ts';
 import {
 	parseExactWorkflowReference,
@@ -86,6 +83,7 @@ import {
 	type WorkflowDiscovery
 } from './discovery.ts';
 import {
+	type CheckStatus,
 	ReadAuthenticationUnverifiedFinding,
 	ReuseViewMissingFinding
 } from './finding.ts';
@@ -101,6 +99,7 @@ import {
 	type PublicationReadAuthority,
 	publicationReadAuthority
 } from './read-authority.ts';
+import { checkPublicationTrust } from './release-authority.ts';
 import {
 	AmbiguousTrustRulesFinding,
 	describeAuthorizationDetail,
@@ -429,7 +428,15 @@ function grantsForJob(
 			? [
 					buildCacheGrant({
 						...(cache.scope.kind === 'named' && { cache: cache.scope.name }),
-						...(hasRoot && { root: `${root.replace(/\/$/u, '')}/` }),
+						...(publication.releaseRootTemplate === undefined
+							? hasRoot && { root: `${root.replace(/\/$/u, '')}/` }
+							: {
+									rootTemplate: publication.releaseRootTemplate,
+									substitutions: collectSubstitutions({
+										templateSource: 'github-tag',
+										captures: []
+									})
+								}),
 						allow: [
 							'push',
 							'attest',
@@ -459,6 +466,9 @@ function triggerClaim(
 	job: DiscoveredPublishingJob,
 	publication: PublicationCase
 ): OidcTrustAddBodyInput['claims'] {
+	if (publication.trigger === 'release') {
+		return { event_name: 'release', ref_type: 'tag' };
+	}
 	if (publication.trigger === 'pull_request') {
 		if (
 			publication.requests.length === 0 ||
@@ -837,35 +847,35 @@ function checkModelledCase(
 	read: PublicationReadAuthority,
 	existing: readonly OidcTrustRule[],
 	candidates: readonly OidcTrustRule[]
-): void {
+): CheckStatus {
 	const { claims } = publication;
 	const requests: readonly AuthorizationDetails[] = [
 		...publication.requests,
 		...read.requests
 	];
 
-	if (
-		checkTrustRule(
-			'current trust rules',
-			existing,
-			claims,
-			requests,
-			read.resources
-		).status !== 'ok'
-	) {
-		return;
+	const current = checkPublicationTrust({
+		check: 'current trust rules',
+		publication,
+		rules: existing,
+		requests,
+		resources: read.resources
+	});
+
+	if (current.status !== 'ok') {
+		return current.status;
 	}
 
-	const finding = checkTrustRule(
-		'planned trust rules',
-		candidates,
-		claims,
+	const finding = checkPublicationTrust({
+		check: 'planned trust rules',
+		publication,
+		rules: candidates,
 		requests,
-		read.resources
-	);
+		resources: read.resources
+	});
 
 	if (finding.status === 'ok') {
-		return;
+		return 'ok';
 	}
 
 	const selected = requests.flatMap((request) => {
@@ -944,13 +954,24 @@ async function checkPlannedRulesKeepOtherJobs(
 					client,
 					dependencies.fetchCacheAccess
 				);
-				checkModelledCase(
+				const status = checkModelledCase(
 					jobLabel(job),
 					publication,
 					read,
 					existing,
 					candidates
 				);
+
+				if (status === 'unverified') {
+					checkUnmodelledJob(
+						jobLabel(job),
+						result.identity,
+						existing,
+						planned,
+						'cupboard',
+						job.workflowRef
+					);
+				}
 			}
 		}
 
@@ -1047,13 +1068,13 @@ async function modelRepairableJobs(
 				client,
 				dependencies.fetchCacheAccess
 			);
-			const finding = checkTrustRule(
-				'current trust rules',
-				existing,
-				publication.claims,
-				[...publication.requests, ...read.requests],
-				read.resources
-			);
+			const finding = checkPublicationTrust({
+				check: 'current trust rules',
+				publication,
+				rules: existing,
+				requests: [...publication.requests, ...read.requests],
+				resources: read.resources
+			});
 
 			if (finding instanceof TrustRuleGrantMissingFinding) {
 				checkRetainedRules(url, result, job, publication, read, finding);
@@ -1318,13 +1339,13 @@ export async function runDiscoveredGithubRepair(
 	];
 
 	for (const item of modelled) {
-		const finding = checkTrustRule(
-			'planned trust rules',
-			candidates,
-			item.publication.claims,
-			[...item.publication.requests, ...item.read.requests],
-			item.read.resources
-		);
+		const finding = checkPublicationTrust({
+			check: 'planned trust rules',
+			publication: item.publication,
+			rules: candidates,
+			requests: [...item.publication.requests, ...item.read.requests],
+			resources: item.read.resources
+		});
 
 		if (finding.status !== 'ok') {
 			throw new GithubRepairUnavailableError(

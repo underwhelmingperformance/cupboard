@@ -98,7 +98,21 @@ For the simple workflow, the check recognises `github.repository` and
 `root: github:${{ github.repository }}/pr-${{ github.event.pull_request.number }}`
 select a PR cache family and root prefix. The generated grants derive the PR
 number from GitHub's signed `ref`, rather than authorising only the example PR
-that the check simulates. Other expressions still require manual review.
+that the check simulates.
+
+For release events, the simple workflow also recognises
+`github.event.release.tag_name` in an explicit root, such as
+`root: github:${{ github.repository }}/${{ github.event.release.tag_name }}`.
+The cache must be literal. The check and repair bind the root to GitHub's signed
+tag `ref`, with `event_name: release` and `ref_type: tag`. Supported tag names
+start with a lowercase letter or digit and contain only lowercase letters,
+digits, dots, underscores and hyphens, as with the [tag trust
+helper][tag-rules]. The check proves coverage from the rule's bindings, not from
+one example tag. Tag-specific identity rules or root captures that the check
+cannot prove cover this family remain unverified. Other expressions still
+require manual review.
+
+[tag-rules]: ./trust-rules.md#tags
 
 For `publish: none` and the flake workflow's older `push: false`, the check
 models the selected cache read without publication or cache lifecycle grants. A
