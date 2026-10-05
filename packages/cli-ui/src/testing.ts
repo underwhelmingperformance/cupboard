@@ -1,9 +1,12 @@
-import type {
-	Reporter,
-	ResultPayload,
-	ResultRow,
-	StepGroup,
-	StepLog
+import {
+	type MessagePresentation,
+	type PresentationLevel,
+	type Reporter,
+	type ResultPayload,
+	type ResultRow,
+	shouldDisplay,
+	type StepGroup,
+	type StepLog
 } from '@cupboard/reporter';
 
 import type {
@@ -40,6 +43,7 @@ export interface CliUiCapture {
  */
 export interface CliUiScript {
 	readonly interactive?: boolean;
+	readonly presentation?: PresentationLevel;
 	readonly confirm?: ConfirmOutcome;
 	readonly menu?: string;
 	readonly multiSelects?: readonly (readonly string[] | undefined)[];
@@ -90,12 +94,31 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 		opened: []
 	};
 
-	const recordWarn = (label: string, value?: string): void => {
-		captured.warnings.push(value === undefined ? label : `${label}: ${value}`);
+	const presentation = script.presentation ?? 'summary';
+	const record = (
+		destination: string[],
+		message: string,
+		options?: MessagePresentation
+	): void => {
+		if (shouldDisplay(presentation, options?.level)) {
+			destination.push(options?.humanMessage ?? message);
+		}
+	};
+	const recordWarn = (
+		label: string,
+		value?: string,
+		options?: MessagePresentation
+	): void => {
+		record(
+			captured.warnings,
+			value === undefined ? label : `${label}: ${value}`,
+			options
+		);
 	};
 	let multiSelectIndex = 0;
 
 	const reporter: Reporter = {
+		presentation,
 		phase: (_label, body) =>
 			Promise.resolve(body({ fact: noop, warn: recordWarn })),
 		progress: (_label, _options, body) =>
@@ -109,14 +132,14 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 			captured.data.push(text);
 		},
 		warn: recordWarn,
-		info: (message) => {
-			captured.infos.push(message);
+		info: (message, options) => {
+			record(captured.infos, message, options);
 		},
-		success: (message) => {
-			captured.successes.push(message);
+		success: (message, options) => {
+			record(captured.successes, message, options);
 		},
-		step: (message) => {
-			captured.steps.push(message);
+		step: (message, options) => {
+			record(captured.steps, message, options);
 		},
 		error: (error) => {
 			captured.errors.push(error);
@@ -238,17 +261,29 @@ export function capturingReporter(
 			}
 		},
 		data: noop,
-		warn: (label, value) => {
-			warns.push(value === undefined ? label : `${label}: ${value}`);
+		warn: (label, value, options) => {
+			if (!shouldDisplay('summary', options?.level)) {
+				return;
+			}
+			warns.push(
+				options?.humanMessage ??
+					(value === undefined ? label : `${label}: ${value}`)
+			);
 		},
-		info: (message) => {
-			infos.push(message);
+		info: (message, options) => {
+			if (shouldDisplay('summary', options?.level)) {
+				infos.push(options?.humanMessage ?? message);
+			}
 		},
-		success: (message) => {
-			infos.push(message);
+		success: (message, options) => {
+			if (shouldDisplay('summary', options?.level)) {
+				infos.push(options?.humanMessage ?? message);
+			}
 		},
-		step: (message) => {
-			infos.push(message);
+		step: (message, options) => {
+			if (shouldDisplay('summary', options?.level)) {
+				infos.push(options?.humanMessage ?? message);
+			}
 		},
 		error: noop
 	};

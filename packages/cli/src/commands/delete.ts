@@ -82,7 +82,9 @@ export async function runDelete(
 	const storePathHash = StorePath.hash(storePath);
 
 	const outcome = await ui.confirm({
-		message: `Permanently delete ${storePath} from the cache?`
+		message: `Remove ${storePath} from the cache?`,
+		detail:
+			'Downloads from this cache will stop. Storage cleanup runs separately.'
 	});
 
 	if (outcome !== 'yes') {
@@ -97,11 +99,15 @@ export async function runDelete(
 
 	reporter.result({
 		kind: 'deleted-path',
+		title: 'Path removal',
 		data: result,
 		rows: [
-			{ label: 'Store path hash', value: result.storePathHash },
-			{ label: 'Deleted', value: result.deleted ? 'yes' : 'not present' },
-			{ label: 'NAR', value: describeNarOutcome(result) }
+			{ label: 'Store path', value: StorePath.basename(storePath) },
+			{
+				label: 'Availability',
+				value: result.deleted ? 'removed from this cache' : 'not present'
+			},
+			{ label: 'Storage cleanup', value: describeNarOutcome(result) }
 		]
 	});
 }
@@ -113,5 +119,5 @@ export function describeNarOutcome(result: DeletePathResponse): string {
 
 	return result.narScheduledForDeletion
 		? 'scheduled for deletion'
-		: 'retained (still referenced)';
+		: 'cleanup status unknown; data may still be in use';
 }

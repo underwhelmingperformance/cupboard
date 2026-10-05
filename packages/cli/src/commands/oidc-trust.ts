@@ -16,7 +16,7 @@ import {
 	trustRuleIdSchema,
 	type UnreadableOidcTrustRule
 } from '@cupboard/protocol/oidc';
-import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
@@ -33,7 +33,6 @@ import {
 	TrustRuleOptionsRequiredError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
-import { principalLabel } from '../principal.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import { githubActionsIssuer } from './github/claims.ts';
@@ -371,7 +370,7 @@ const tenantPlane: OidcTrustPlane = {
 const controlPlane: OidcTrustPlane = {
 	name: 'control-oidc-trust',
 	description:
-		'Manage the rules that admit OIDC tokens to the control plane, for CI jobs and for other operators (operator only).',
+		'Manage the trust rules that let other operators and CI jobs manage the deployment (operator only).',
 	urlArgument: deploymentUrlArgument,
 	kind: 'control',
 	clientFor: (url, programOptions) =>
@@ -628,7 +627,12 @@ function buildOidcTrustCommands(
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 
-			await runOidcTrustList(reporter, plane.clientFor(url, programOptions));
+			await runOidcTrustList(
+				reporter,
+				plane.clientFor(url, programOptions),
+				plane.kind,
+				url
+			);
 		});
 
 	oidcTrust
@@ -1096,7 +1100,9 @@ function registerControlRuleAdd(
 
 export async function runOidcTrustList(
 	reporter: Reporter,
-	client: Pick<OidcTrustClient, 'list'>
+	client: Pick<OidcTrustClient, 'list'>,
+	plane: 'tenant' | 'control' = 'tenant',
+	url?: URL
 ): Promise<void> {
 	const { rules, unreadable = [] } = await reporter.phase(
 		'Listing OIDC trust rules',
@@ -1109,8 +1115,9 @@ export async function runOidcTrustList(
 
 	reporter.result({
 		kind: 'oidc-trust-rules',
+		title: 'Trust rules',
 		data,
-		rows: rules.map((rule) => trustRow(rule)),
+		rows: rules.flatMap((rule) => trustRuleSummaryRows(rule)),
 		empty: unreadable.length === 0 ? 'No OIDC trust rules.' : undefined
 	});
 
@@ -1124,7 +1131,13 @@ export async function runOidcTrustList(
 
 		reporter.warn(
 			`The server cannot read trust rule ${id}, which is enabled`,
-			'ID token exchanges fail until you remove the rule'
+			'ID token exchanges fail until you remove the rule',
+			{
+				humanMessage:
+					plane === 'control'
+						? `Operator sign-ins are blocked by unreadable trust rule ${id}. Repair or remove it with \`cupboard control-oidc-trust remove ${url?.href.replace(/\/$/u, '') ?? '<url>'} ${id}\`.`
+						: `Trust rule ${id} cannot authorise new sign-ins. Repair or remove the rule. Other readable rules can still authorise access.`
+			}
 		);
 	}
 }
@@ -1140,6 +1153,7 @@ export async function runOidcTrustAdd(
 
 	reporter.result({
 		kind: 'oidc-trust-rule',
+		title: 'Trust rule',
 		data: summary,
 		rows: trustRuleSummaryRows(summary)
 	});
@@ -1156,6 +1170,7 @@ export async function runOidcTrustShow(
 
 	reporter.result({
 		kind: 'oidc-trust-rule',
+		title: 'Trust rule',
 		data: summary,
 		rows: trustRuleSummaryRows(summary)
 	});
@@ -1168,7 +1183,8 @@ export async function runOidcTrustRemove(
 ): Promise<void> {
 	const outcome = await ui.confirm({
 		message: `Remove OIDC trust rule ${id}?`,
-		detail: 'CI workflows relying on this rule can no longer exchange tokens.'
+		detail:
+			'People and CI jobs that rely on this rule will no longer be able to start or renew sign-ins. Existing credentials may continue to work until they expire.'
 	});
 
 	if (outcome !== 'yes') {
@@ -1183,30 +1199,11 @@ export async function runOidcTrustRemove(
 
 	reporter.result({
 		kind: 'oidc-trust-rule',
+		title: 'Trust rule',
 		data: result,
 		rows: [
 			{ label: 'Rule', value: result.id },
 			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
 		]
 	});
-}
-
-function trustRow(rule: OidcTrustSummary): ResultRow {
-	const state = rule.disabled ? ' (disabled)' : '';
-	const grants = rule.permittedGrants.some(
-		(grant) => grant.type === 'cupboard_wildcard'
-	)
-		? 'wildcard'
-		: `${String(rule.permittedGrants.length)} grant(s)`;
-
-	const pinnedSubject = rule.claims.sub;
-	const principal =
-		typeof pinnedSubject === 'string'
-			? principalLabel({ issuer: rule.issuer, subject: pinnedSubject })
-			: rule.issuer;
-
-	return {
-		label: rule.id,
-		value: `${grants} ${principal} aud=${rule.audience}${state}`
-	};
 }

@@ -2,7 +2,11 @@ import {
 	type CheckReport,
 	checkReportSchema
 } from '@cupboard/protocol/reports';
-import type { Reporter, ResultRow } from '@cupboard/reporter';
+import type {
+	MessagePresentation,
+	Reporter,
+	ResultRow
+} from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import { CheckDiscrepanciesError } from '../errors.ts';
@@ -21,8 +25,15 @@ interface Captured {
 }
 
 function reporter(captured: Captured): Reporter {
-	const recordWarn = (label: string, value?: string): void => {
-		captured.warnings.push({ label, value });
+	const recordWarn = (
+		label: string,
+		value?: string,
+		presentation?: MessagePresentation
+	): void => {
+		captured.warnings.push({
+			label: presentation?.humanMessage ?? label,
+			value: presentation?.humanMessage === undefined ? value : undefined
+		});
 	};
 
 	return {
@@ -77,8 +88,8 @@ function reporter(captured: Captured): Reporter {
 			return;
 		},
 		warn: recordWarn,
-		info(message) {
-			captured.infos.push(message);
+		info(message, presentation) {
+			captured.infos.push(presentation?.humanMessage ?? message);
 		},
 		success(message) {
 			captured.infos.push(message);
@@ -140,12 +151,12 @@ describe('runCheck', () => {
 			captured: {
 				results: [
 					[
-						{ label: 'Narinfos checked', value: '3' },
-						{ label: 'NAR blobs checked', value: '2' },
-						{ label: 'Discrepancies', value: '0' }
+						{ label: 'Cache metadata checked', value: '3' },
+						{ label: 'Stored archives checked', value: '2' },
+						{ label: 'Problems found', value: '0' }
 					]
 				],
-				infos: ['No discrepancies.'],
+				infos: ['No problems found.'],
 				warnings: []
 			}
 		});
@@ -185,12 +196,12 @@ describe('runCheck', () => {
 			],
 			results: [
 				[
-					{ label: 'Narinfos checked', value: '1,007' },
-					{ label: 'NAR blobs checked', value: '905' },
-					{ label: 'Discrepancies', value: '0' }
+					{ label: 'Cache metadata checked', value: '1,007' },
+					{ label: 'Stored archives checked', value: '905' },
+					{ label: 'Problems found', value: '0' }
 				]
 			],
-			infos: ['No discrepancies.']
+			infos: ['No problems found.']
 		});
 	});
 
@@ -226,17 +237,20 @@ describe('runCheck', () => {
 			captured: {
 				results: [
 					[
-						{ label: 'Narinfos checked', value: '2' },
-						{ label: 'NAR blobs checked', value: '1' },
-						{ label: 'Discrepancies', value: '2' }
+						{ label: 'Cache metadata checked', value: '2' },
+						{ label: 'Stored archives checked', value: '1' },
+						{ label: 'Problems found', value: '2' }
 					]
 				],
 				infos: [],
 				warnings: [
-					{ label: 'missing-nar', value: `(default) ${'a'.repeat(32)}` },
 					{
-						label: 'missing-narinfo-object',
-						value: `builds ${'b'.repeat(32)}`
+						label: `Stored archive is missing: (default) ${'a'.repeat(32)}. Ask the tenant administrator to investigate and restore the published path.`,
+						value: undefined
+					},
+					{
+						label: `Cache metadata file is missing: builds ${'b'.repeat(32)}. Ask the tenant administrator to investigate and restore the published path.`,
+						value: undefined
 					}
 				]
 			}

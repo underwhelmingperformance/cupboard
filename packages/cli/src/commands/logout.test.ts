@@ -130,9 +130,10 @@ describe('runLogout', () => {
 			results: [
 				{
 					kind: 'logout',
+					title: 'Signed out on this machine',
 					data: result,
 					rows: [
-						{ label: tenant, value: 'session removed' },
+						{ label: tenant, value: 'saved sign-in removed' },
 						{ label: 'Cloudflare sign-in', value: 'still cached' }
 					]
 				}
@@ -165,8 +166,9 @@ describe('runLogout', () => {
 			results: [
 				{
 					kind: 'logout',
+					title: 'Signed out on this machine',
 					data: result,
-					rows: [{ label: tenant, value: 'no session was cached' }]
+					rows: [{ label: tenant, value: 'no saved sign-in' }]
 				}
 			],
 			warnings: 0
@@ -203,9 +205,10 @@ describe('runLogout', () => {
 			results: [
 				{
 					kind: 'logout',
+					title: 'Signed out on this machine',
 					data: result,
 					rows: [
-						{ label: tenant, value: 'session removed' },
+						{ label: tenant, value: 'saved sign-in removed' },
 						{ label: 'Cloudflare sign-in', value: 'could not be checked' }
 					]
 				}
@@ -241,9 +244,10 @@ describe('runLogout', () => {
 			results: [
 				{
 					kind: 'logout',
+					title: 'Signed out on this machine',
 					data: result,
 					rows: [
-						{ label: 'Sessions removed', value: '2' },
+						{ label: 'Saved sign-ins removed', value: '2' },
 						{ label: 'Cloudflare sign-in', value: 'removed' }
 					]
 				}

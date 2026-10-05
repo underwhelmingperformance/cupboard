@@ -1,9 +1,16 @@
 import {
 	currentLocalStep,
+	hasReachedTransitionState,
 	type LocalStep
 } from '@cupboard/protocol/deployment';
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
-import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
+import {
+	type PhaseContext,
+	type PresentationLevel,
+	type Reporter,
+	type ResultRow,
+	shouldShowDetails
+} from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
 
@@ -26,7 +33,11 @@ import {
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
 import type { DeploySecrets } from './secrets.ts';
-import { type DeploymentPlan, hasWorkerScripts } from './transition.ts';
+import {
+	type DeploymentPlan,
+	hasWorkerScripts,
+	transitionPlanRows
+} from './transition.ts';
 import {
 	completeTransitions,
 	prepareTransitions,
@@ -203,43 +214,187 @@ export function choicePlanRows(
 	];
 }
 
+/**
+Returns the deployment review at the requested level of detail.
+*/
+export function deploymentReviewRows(
+	plan: DeploymentPlan,
+	secrets: DeploySecrets,
+	domain: string | undefined,
+	annotatedSecrets: readonly string[] = [],
+	presentation: PresentationLevel = 'summary'
+): ResultRow[] {
+	const observed = plan.observation;
+	const config = plan.artifact.config;
+	const resources = collectResources(config);
+	const pending =
+		observed.kind === 'existing'
+			? plan.transitions.filter(
+					(item) =>
+						!hasReachedTransitionState(
+							observed.transitions.get(item.transition.id),
+							'complete'
+						)
+				).length
+			: undefined;
+	const rows: ResultRow[] = [
+		{ label: 'Version', value: plan.artifact.buildVersion },
+		{
+			label: 'Deployment URL',
+			value:
+				domain === undefined
+					? (config.control.vars.CUPBOARD_DEPLOYMENT_URL ??
+						'Assigned during deployment')
+					: `https://${domain}`
+		},
+		{
+			label: 'Changes',
+			value:
+				observed.kind === 'offline'
+					? 'Preview only; existing deployment has not been checked'
+					: observed.kind === 'new'
+						? 'Create a deployment'
+						: `${String(pending)} outstanding upgrade steps; update the deployment configuration`
+		},
+		{
+			label: 'Resources',
+			value: `${String(resources.r2Buckets.length)} storage buckets, ${String(resources.d1Databases.length)} databases, ${String(resources.kvTitles.length)} key-value stores, ${String(resources.queues.length)} queues; create missing resources and reuse existing resources`
+		},
+		{
+			label: 'Storage credentials',
+			value: [...secrets.control, ...secrets.tenant].some(
+				(secret) => secret.name === 'R2_ACCESS_KEY_ID'
+			)
+				? 'Set the supplied credentials'
+				: annotatedSecrets.length > 0
+					? 'Review existing storage credentials before upload'
+					: 'Checked during deployment'
+		},
+		{
+			label: 'Tenant readiness',
+			value:
+				observed.kind === 'offline'
+					? 'Not checked'
+					: observed.kind === 'new'
+						? 'No existing tenants'
+						: observed.readiness.pending > 0
+							? `${String(observed.readiness.pending)} pending data updates; full readiness will be checked during deployment`
+							: 'No pending data updates in the preflight check. Full readiness will be checked during deployment.'
+		},
+		...(observed.kind === 'offline'
+			? [
+					{
+						label: 'Checks',
+						value:
+							'Account, existing resources, credentials and tenant readiness have not been checked.'
+					}
+				]
+			: []),
+		{
+			label: 'Recovery',
+			value:
+				'Deploying an older release will not undo this upgrade. If deployment stops partway through, fix the reported problem and rerun it with the same release and source.'
+		},
+		{
+			label: 'Waiting',
+			value:
+				'Waits for tenant updates and checks deployment availability. Cancelling stops the wait; tenant updates continue on the server.'
+		}
+	];
+	if (presentation !== 'summary') {
+		rows.push(
+			{ label: '', value: '' },
+			...resources.r2Buckets.map((value) => ({
+				label: 'Storage bucket',
+				value
+			})),
+			...resources.d1Databases.map((value) => ({ label: 'Database', value })),
+			...resources.kvTitles.map((value) => ({
+				label: 'Key-value store',
+				value
+			})),
+			...resources.queues.map((value) => ({
+				label: queueRole(config, value),
+				value
+			})),
+			{
+				label: 'Maintenance schedule',
+				value: config.control.crons.join(', ') || '(none)'
+			},
+			{ label: 'Custom domain', value: domain ?? '(none)' }
+		);
+	}
+	if (presentation === 'debug') {
+		rows.push(
+			{ label: '', value: '' },
+			...derivedPlanRows(plan.artifact, secrets, annotatedSecrets),
+			...transitionPlanRows(plan)
+		);
+	}
+	return rows;
+}
+
+/**
+Identifies the configured purpose of an editable queue.
+*/
+export function queueRole(config: DeploymentConfig, queue: string): string {
+	const consumers = config.control.queueConsumers;
+	const isDeadLetter = consumers.some(
+		(consumer) => consumer.deadLetterQueue === queue
+	);
+	const isMaintenance =
+		consumers.some((consumer) => consumer.queue === queue) ||
+		config.control.queueProducers.some((producer) => producer.queue === queue);
+	if (isDeadLetter && isMaintenance) {
+		return 'Maintenance and dead-letter queue';
+	}
+	if (isDeadLetter) {
+		return 'Dead-letter queue';
+	}
+	return 'Maintenance queue';
+}
+
 async function reconcileResources(
 	dependencies: DeployDependencies,
 	plan: ResourcePlan
 ): Promise<ResolvedResources> {
 	const { api, reporter } = dependencies;
 
-	return reporter.phase('Reconciling resources', async (context) => {
-		await Promise.all(
-			plan.r2Buckets.map(async (name) => {
-				await api.ensureR2Bucket(name);
-				await api.ensureStagingLifecycleRule(name);
-			})
-		);
-		await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));
+	return reporter.phase(
+		'Reconciling resources',
+		async (context) => {
+			await Promise.all(
+				plan.r2Buckets.map(async (name) => {
+					await api.ensureR2Bucket(name);
+					await api.ensureStagingLifecycleRule(name);
+				})
+			);
+			await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));
 
-		const d1 = new Map<string, DatabaseId>();
+			const d1 = new Map<string, DatabaseId>();
 
-		for (const name of plan.d1Databases) {
-			d1.set(name, await api.ensureD1Database(name));
-		}
+			for (const name of plan.d1Databases) {
+				d1.set(name, await api.ensureD1Database(name));
+			}
 
-		const kv = new Map<string, KvNamespaceId>();
+			const kv = new Map<string, KvNamespaceId>();
 
-		for (const title of plan.kvTitles) {
-			kv.set(title, await api.ensureKvNamespace(title));
-		}
+			for (const title of plan.kvTitles) {
+				kv.set(title, await api.ensureKvNamespace(title));
+			}
 
-		context.fact(
-			'resources',
-			plan.r2Buckets.length +
-				plan.d1Databases.length +
-				plan.kvTitles.length +
-				plan.queues.length
-		);
+			context.fact(
+				'resources',
+				plan.r2Buckets.length +
+					plan.d1Databases.length +
+					plan.kvTitles.length +
+					plan.queues.length
+			);
 
-		return { d1, kv };
-	});
+			return { d1, kv };
+		},
+		{ humanLabel: 'Preparing deployment resources' }
+	);
 }
 
 async function configureTriggers(
@@ -249,43 +404,47 @@ async function configureTriggers(
 	const { artifact } = plan;
 	const control = artifact.config.control;
 
-	await reporter.phase('Configuring triggers', async (context) => {
-		for (const consumer of control.queueConsumers) {
-			const queueId = await api.ensureQueue(consumer.queue);
+	await reporter.phase(
+		'Configuring triggers',
+		async (context) => {
+			for (const consumer of control.queueConsumers) {
+				const queueId = await api.ensureQueue(consumer.queue);
 
-			await api.ensureQueueConsumer(queueId, control.name, {
-				maxBatchSize: consumer.maxBatchSize,
-				maxBatchTimeout: consumer.maxBatchTimeout,
-				maxRetries: consumer.maxRetries,
-				maxConcurrency: consumer.maxConcurrency,
-				deadLetterQueue: consumer.deadLetterQueue
+				await api.ensureQueueConsumer(queueId, control.name, {
+					maxBatchSize: consumer.maxBatchSize,
+					maxBatchTimeout: consumer.maxBatchTimeout,
+					maxRetries: consumer.maxRetries,
+					maxConcurrency: consumer.maxConcurrency,
+					deadLetterQueue: consumer.deadLetterQueue
+				});
+			}
+
+			await api.ensureSchedules(control.name, control.crons);
+
+			if (options.domain === undefined) {
+				await api.setCustomDomain(control.name, undefined);
+
+				return;
+			}
+
+			const zoneId = await findZoneId(api, options.domain);
+
+			if (zoneId === undefined) {
+				context.warn(
+					'No Cloudflare zone for',
+					`${options.domain}; add the domain to this account, then re-run.`
+				);
+
+				return;
+			}
+
+			await api.setCustomDomain(control.name, {
+				hostname: options.domain,
+				zoneId
 			});
-		}
-
-		await api.ensureSchedules(control.name, control.crons);
-
-		if (options.domain === undefined) {
-			await api.setCustomDomain(control.name, undefined);
-
-			return;
-		}
-
-		const zoneId = await findZoneId(api, options.domain);
-
-		if (zoneId === undefined) {
-			context.warn(
-				'No Cloudflare zone for',
-				`${options.domain}; add the domain to this account, then re-run.`
-			);
-
-			return;
-		}
-
-		await api.setCustomDomain(control.name, {
-			hostname: options.domain,
-			zoneId
-		});
-	});
+		},
+		{ humanLabel: 'Configuring maintenance and domain' }
+	);
 }
 
 async function findZoneId(
@@ -420,13 +579,16 @@ async function performDeploy(
 		// migrations a newer release has started, stops the deploy with an
 		// error here, before this build's Workers run against that release's
 		// schema.
-		await reporter.phase('Preparing schema transitions', async (context) =>
-			prepareTransitions(
-				transitionWalk(dependencies, d1Database, context),
-				await isFreshDeployment(d1QueryApiOf(api), d1Database.id, () =>
-					hasWorkerScripts(api, artifact)
-				)
-			)
+		await reporter.phase(
+			'Preparing schema transitions',
+			async (context) =>
+				prepareTransitions(
+					transitionWalk(dependencies, d1Database, context),
+					await isFreshDeployment(d1QueryApiOf(api), d1Database.id, () =>
+						hasWorkerScripts(api, artifact)
+					)
+				),
+			{ humanLabel: 'Preparing the upgrade' }
 		);
 	}
 
@@ -447,7 +609,7 @@ async function performDeploy(
 	const unchanged = await reporter.phase(
 		'Checking the deployed Workers',
 		async (context) => {
-			context.fact('build', artifact.buildVersion);
+			context.fact('build', artifact.buildVersion, { level: 'debug' });
 
 			// A dirty build's version cannot distinguish two different working trees.
 			if (artifact.buildVersion.endsWith('+dirty')) {
@@ -471,45 +633,60 @@ async function performDeploy(
 					controlLive.cacheEnabled === artifact.config.control.cacheEnabled &&
 					controlLive.crossVersionCache === artifact.config.control.cacheEnabled
 			};
-		}
+		},
+		{ humanLabel: 'Checking the current deployment' }
 	);
 
 	const uploadTenant = async (isForced = false): Promise<void> => {
 		if (!isForced && unchanged.tenant) {
 			reporter.step(
-				`${artifact.config.tenant.name} already runs this build and configuration; upload skipped.`
+				`${artifact.config.tenant.name} already runs this build and configuration; upload skipped.`,
+				{
+					humanMessage:
+						'This service already has the requested version and configuration.'
+				}
 			);
 
 			return;
 		}
 
-		await reporter.phase('Uploading tenant worker', (context) =>
-			uploadScriptForPlan(
-				dependencies,
-				context,
-				artifact.config.tenant.name,
-				tenantMetadata,
-				artifact.tenantBundle
-			)
+		await reporter.phase(
+			'Uploading tenant worker',
+			(context) =>
+				uploadScriptForPlan(
+					dependencies,
+					context,
+					artifact.config.tenant.name,
+					tenantMetadata,
+					artifact.tenantBundle
+				),
+			{ humanLabel: 'Updating tenant services' }
 		);
 	};
 	const uploadControl = async (isForced = false): Promise<void> => {
 		if (!isForced && unchanged.control) {
 			reporter.step(
-				`${artifact.config.control.name} already runs this build and configuration; upload skipped.`
+				`${artifact.config.control.name} already runs this build and configuration; upload skipped.`,
+				{
+					humanMessage:
+						'This service already has the requested version and configuration.'
+				}
 			);
 
 			return;
 		}
 
-		await reporter.phase('Uploading control worker', (context) =>
-			uploadScriptForPlan(
-				dependencies,
-				context,
-				artifact.config.control.name,
-				controlMetadata,
-				artifact.controlBundle
-			)
+		await reporter.phase(
+			'Uploading control worker',
+			(context) =>
+				uploadScriptForPlan(
+					dependencies,
+					context,
+					artifact.config.control.name,
+					controlMetadata,
+					artifact.controlBundle
+				),
+			{ humanLabel: 'Updating the deployment' }
 		);
 	};
 	const tenantRoutes = {
@@ -567,15 +744,21 @@ async function performDeploy(
 	];
 
 	if (secretWork.length > 0) {
-		await reporter.phase('Setting secrets', async (context) => {
-			for (const { scriptName, secret } of secretWork) {
-				await api.putSecret(scriptName, secret);
-			}
+		await reporter.phase(
+			'Setting secrets',
+			async (context) => {
+				for (const { scriptName, secret } of secretWork) {
+					await api.putSecret(scriptName, secret);
+				}
 
-			context.fact('secrets', secretWork.length);
-		});
+				context.fact('secrets', secretWork.length);
+			},
+			{ humanLabel: 'Configuring storage access' }
+		);
 	} else {
-		reporter.step('Setting secrets · no secrets to set');
+		reporter.step('Setting secrets · no secrets to set', {
+			humanMessage: 'Keeping the existing storage credentials.'
+		});
 	}
 
 	for (const { secrets, upload } of orderedUploads) {
@@ -587,8 +770,11 @@ async function performDeploy(
 	await configureTriggers(dependencies);
 
 	if (d1Database !== undefined) {
-		await reporter.phase('Completing schema transitions', (context) =>
-			completeTransitions(transitionWalk(dependencies, d1Database, context))
+		await reporter.phase(
+			'Completing schema transitions',
+			(context) =>
+				completeTransitions(transitionWalk(dependencies, d1Database, context)),
+			{ humanLabel: 'Completing the upgrade' }
 		);
 		if (dependencies.settleTenants !== undefined) {
 			await dependencies.settleTenants(currentLocalStep);
@@ -613,6 +799,7 @@ async function performDeploy(
 
 	reporter.result({
 		kind: 'deployment',
+		title: 'Deployment uploaded',
 		data: {
 			controlWorker: artifact.config.control.name,
 			tenantWorker: artifact.config.tenant.name,
@@ -620,7 +807,14 @@ async function performDeploy(
 			cacheUrl:
 				options.domain === undefined ? undefined : `https://${options.domain}`
 		},
-		rows
+		rows: shouldShowDetails(reporter)
+			? rows
+			: [
+					{ label: 'Upload', value: 'Completed; availability is checked next' },
+					...(options.domain === undefined
+						? []
+						: [{ label: 'Deployment URL', value: `https://${options.domain}` }])
+				]
 	});
 
 	return rows;
@@ -671,7 +865,9 @@ function transitionWalk(
 			checkServing: () => checkServing(api, plan.artifact),
 			wakeTenants: dependencies.settleTenants,
 			report: (event) => {
-				context.fact(event.transition, transitionEventText(event));
+				context.fact(event.transition, transitionEventText(event), {
+					level: 'debug'
+				});
 			}
 		}
 	};

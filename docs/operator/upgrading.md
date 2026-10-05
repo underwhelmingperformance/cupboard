@@ -198,24 +198,19 @@ describes the transitions in more detail.
 
 ### When a deploy stops before finishing
 
-The deploy records its progress as it goes. If it's interrupted, running it
-again continues from where it stopped. It skips migrations that it has already
-applied, after it checks their recorded digests.
+The deploy records its progress as it goes. If it stops partway through, fix the
+reported problem and rerun it with the same release and source. Deploying an
+older release will not undo the upgrade. The next run checks the recorded
+database changes and continues the unfinished work.
 
 The deploy waits as long as some pending tenant is making progress. It gives up
 when ten minutes have passed since it woke the tenants and none of the pending
-tenants is working. It then stops before that transition's contract migrations,
-and lists the stalled tenants with their errors and the tenants that haven't
-been woken yet:
+tenants is working. The command reports the affected tenants and the commands to
+check progress and retry. Add `--debug` to inspect the server diagnostics.
 
-```
-3 tenants have not reached local step 4, and 10 minutes after the wake none of
-them is classified as working. Stalled: acme: attempted …, last progress …, …
-```
-
-Press Ctrl-C during this wait to quit `init`. The queued wakes and tenant alarms
-continue on the server. Use `deployment status` to check progress, or
-`deployment resume` to wait again.
+Press Ctrl-C during this wait to quit `init`. Tenant updates continue on the
+server. Use `deployment status` to check progress, or `deployment resume` to
+retry pending updates and wait again.
 
 The tenants don't depend on the deploy. A tenant that is making progress keeps
 going after the deploy stops. A tenant that has made no progress for ten minutes
@@ -231,32 +226,39 @@ cupboard deployment status https://cupboard.example.workers.dev
 ```
 
 This shows deployment readiness, tenant counts, progress for pending tenants and
-the next action if the deployment needs attention. Use `--details` to include
-schema transitions, data-step numbers and migration stages and cursors. The
-pending tenants are divided into three groups, measured over the last ten
-minutes:
+the next action if the deployment needs attention. `Schema and data ready` means
+that the required database changes and tenant updates are complete. It does not
+check whether the deployment serves the expected release or whether publishing
+and reading work. Use `--details` for the full tenant counts and `--debug` for
+schema transitions, data-step numbers, migration stages, cursors and server
+errors. The pending tenants are divided into three groups, measured over the
+last ten minutes:
 
 - **Migrating**: the tenant has made progress recently, or has started and
   hasn't failed yet.
 - **Needs attention**: the tenant hasn't made progress for ten minutes, or its
   last attempt failed without any progress. `status` lists up to 20 of them,
-  with when each last tried, when it last made progress, and its error.
+  with when each last tried and when it last made progress. Add `--debug` to
+  include the error.
 - **Waiting to start**: no recent attempt at the tenant's outstanding work has
   been recorded. Its wake may still be waiting in the maintenance queue. If a
   tenant stays in this group after a wake and an hourly run, check the
   maintenance queue, its dead-letter queue and the control Worker's logs.
 
-A stalled tenant with an error has a fault that the error describes. A tenant
-that shows `TenantNotConfiguredError` needs its creation repeated. To wake the
-pending tenants and wait for them without deploying again:
+A tenant with an error needs the reported fault investigated before its update
+can finish. To retry the pending tenant updates and wait for them without
+deploying again:
 
 ```sh
 cupboard deployment resume https://cupboard.example.workers.dev
 ```
 
-`resume` wakes the stalled and unwoken tenants once, then waits in the same way
-as the deploy, and stops with the same error when no pending tenant is working
-ten minutes after the wake.
+`resume` retries the tenants that need attention or are waiting to start, then
+waits in the same way as the deploy. It stops when no pending tenant is working
+ten minutes after the retry. Cancelling the command stops the wait; tenant
+updates continue on the server. Completion confirms schema and data readiness.
+If database changes remain unfinished, rerun `cupboard deploy` with the same
+release and source to finish the deployment.
 
 In GitHub Actions, pass `--github-oidc` to either command. The job needs
 `id-token: write`, and its control trust rule must permit `deployment:read` and
@@ -359,9 +361,9 @@ deploy sets just before the first contract migration runs:
   release that knows the transition and the state.
 
 A row for a transition that the release knows, but in a state that it doesn't,
-also stops the deploy. `cupboard deployment status --details` lists every row
-that its own release doesn't recognise, and says what that release's deploy
-would do with it.
+also stops the deploy. `cupboard deployment status --debug` lists every row that
+its own release doesn't recognise, and says what that release's deploy would do
+with it.
 
 v0.0.34 and v0.0.35 don't read `deployment_transition`. They read the
 `deployment_phase` row, which later releases keep up to date for them, so a

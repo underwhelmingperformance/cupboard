@@ -1,7 +1,7 @@
 import { stderr, stdin, stdout } from 'node:process';
 import type { Writable } from 'node:stream';
 
-import { TextPrompt } from '@clack/core';
+import { getColumns, TextPrompt } from '@clack/core';
 import {
 	box,
 	cancel,
@@ -30,12 +30,16 @@ import {
 	createGithubReporter,
 	createReporter,
 	formatDuration,
+	type PresentationLevel,
 	type Reporter,
 	type ReporterMode,
 	type ReporterOptions,
-	type ResultRow
+	type ResultRow,
+	shouldDisplay
 } from '@cupboard/reporter';
 import { errorCauses } from '@cupboard/shared/errors';
+import stringWidth from 'fast-string-width';
+import { wrapAnsi } from 'fast-wrap-ansi';
 import pc from 'picocolors';
 
 import { type BrowserMessages, openBrowser } from './open-browser.ts';
@@ -60,17 +64,55 @@ export function configureClackUi(): void {
  */
 export function formatRows(
 	rows: readonly ResultRow[],
-	colours: Colours = pc
+	colours: Colours = pc,
+	contentWidth = 74
 ): string {
-	const width = Math.max(...rows.map((row) => row.label.length));
+	if (rows.length === 0) {
+		return '';
+	}
+
+	const columns = Math.max(3, Math.floor(contentWidth));
+	const labelWidth = Math.max(...rows.map((row) => stringWidth(row.label)));
+	const valueWidth = columns - labelWidth - 2;
+	const isStacked = valueWidth < 24;
+	const wrap = (value: string, width: number): string[] =>
+		wrapAnsi(value, Math.max(1, width), { hard: true, trim: false }).split(
+			'\n'
+		);
 
 	return rows
-		.map((row) =>
-			row.label === '' && row.value === ''
-				? ''
-				: `${colours.dim(row.label.padEnd(width))}  ${row.value}`
-		)
+		.map((row) => {
+			if (row.label === '' && row.value === '') {
+				return '';
+			}
+			if (row.raw === true) {
+				return row.label === ''
+					? row.value
+					: `${colours.dim(row.label)}\n${row.value}`;
+			}
+			if (isStacked) {
+				const label = wrap(row.label, columns).map((line) => colours.dim(line));
+				const value = wrap(row.value, columns - 2).map((line) => `  ${line}`);
+				return [...label, ...value].join('\n');
+			}
+			const prefix = `${colours.dim(row.label)}${' '.repeat(labelWidth - stringWidth(row.label) + 2)}`;
+			const continuation = ' '.repeat(labelWidth + 2);
+			return wrap(row.value, valueWidth)
+				.map((line, index) => `${index === 0 ? prefix : continuation}${line}`)
+				.join('\n');
+		})
 		.join('\n');
+}
+
+function writeRows(
+	output: Writable,
+	title: string,
+	rows: readonly ResultRow[],
+	colours: Colours
+): void {
+	output.write(
+		`\n${colours.bold(title)}\n${formatRows(rows, colours, getColumns(output) - 6)}\n\n`
+	);
 }
 
 const OSC8 = `${String.fromCodePoint(0x1b)}]8;;`;
@@ -267,6 +309,7 @@ export interface CliUiOptions {
 	 * Formats GitHub error annotations without changing the thrown error.
 	 */
 	readonly formatError?: ReporterOptions['formatError'];
+	readonly presentation?: PresentationLevel;
 	/**
 	 * Whether to emit ANSI colour (the `--colour`/`--no-colour` flag). Defaults to
 	 * picocolors' own detection over `NO_COLOR`, `FORCE_COLOR` and the TTY.
@@ -313,12 +356,15 @@ function reporterFor(
 			options.stream,
 			options.out,
 			options.signal,
-			options.resultFile
+			options.resultFile,
+			options.presentation,
+			options.formatError
 		);
 	}
 
 	if (mode === 'github') {
 		return createGithubReporter({
+			presentation: options.presentation,
 			formatError: options.formatError,
 			stream: options.stream,
 			out: options.out,
@@ -327,6 +373,7 @@ function reporterFor(
 	}
 
 	return createReporter({
+		presentation: options.presentation,
 		stream: options.stream,
 		out: options.out,
 		resultFile: options.resultFile
@@ -398,9 +445,17 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		note(title, rows) {
-			if (mode === 'terminal') {
-				note(formatRows(rows, colours), title, { output });
+			if (mode !== 'terminal') {
+				return;
 			}
+
+			if (rows.some((row) => row.raw === true)) {
+				writeRows(output, title, rows, colours);
+				return;
+			}
+			note(formatRows(rows, colours, getColumns(output) - 6), title, {
+				output
+			});
 		},
 
 		data(text) {
@@ -673,10 +728,14 @@ function clackReporter(
 	output: Writable = stderr,
 	out: NodeJS.WritableStream = stdout,
 	signal?: AbortSignal,
-	resultFile?: string
+	resultFile?: string,
+	presentation: PresentationLevel = 'summary',
+	formatError?: ReporterOptions['formatError']
 ): Reporter {
 	return {
-		async phase(label, body) {
+		presentation,
+		async phase(machineLabel, body, display) {
+			const label = display?.humanLabel ?? machineLabel;
 			const indicator = spinner({
 				output,
 				signal,
@@ -690,11 +749,25 @@ function clackReporter(
 
 			try {
 				const value = await body({
-					fact(factLabel, factValue) {
-						facts.set(factLabel, String(factValue));
+					fact(factLabel, factValue, display) {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						facts.set(
+							display?.humanLabel ?? factLabel,
+							String(display?.humanValue ?? factValue)
+						);
 						indicator.message(renderFacts(label, facts, colours));
 					},
-					warn: notes.warn
+					warn: (label, value, display) => {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						notes.warn(
+							display?.humanMessage ?? label,
+							display?.humanMessage === undefined ? value : undefined
+						);
+					}
 				});
 
 				indicator.stop(
@@ -713,7 +786,8 @@ function clackReporter(
 			}
 		},
 
-		async progress(label, options, body) {
+		async progress(machineLabel, options, body) {
+			const label = options.humanLabel ?? machineLabel;
 			const bar = progress({
 				max: options.total,
 				output,
@@ -731,11 +805,25 @@ function clackReporter(
 					advance(step = 1, message) {
 						bar.advance(step, message ?? renderFacts(label, facts, colours));
 					},
-					fact(factLabel, factValue) {
-						facts.set(factLabel, String(factValue));
+					fact(factLabel, factValue, display) {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						facts.set(
+							display?.humanLabel ?? factLabel,
+							String(display?.humanValue ?? factValue)
+						);
 						bar.message(renderFacts(label, facts, colours));
 					},
-					warn: notes.warn
+					warn: (label, value, display) => {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						notes.warn(
+							display?.humanMessage ?? label,
+							display?.humanMessage === undefined ? value : undefined
+						);
+					}
 				});
 
 				bar.stop(
@@ -754,7 +842,8 @@ function clackReporter(
 			}
 		},
 
-		async steps(label, body) {
+		async steps(machineLabel, body, display) {
+			const label = display?.humanLabel ?? machineLabel;
 			const task = taskLog({ title: label, output, signal });
 
 			const notes = unitNotes(output, (message) => {
@@ -764,25 +853,45 @@ function clackReporter(
 
 			try {
 				const value = await body({
-					message(message) {
-						task.message(message);
+					message(message, display) {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						task.message(display?.humanMessage ?? message);
 					},
-					group(name) {
-						const group = task.group(name);
+					group(name, display) {
+						const group = task.group(display?.humanLabel ?? name);
 
 						return {
-							message: (message) => {
-								group.message(message);
+							message: (message, display) => {
+								if (!shouldDisplay(presentation, display?.level)) {
+									return;
+								}
+								group.message(display?.humanMessage ?? message);
 							},
-							success: (message) => {
-								group.success(message);
+							success: (message, display) => {
+								if (!shouldDisplay(presentation, display?.level)) {
+									return;
+								}
+								group.success(display?.humanMessage ?? message);
 							},
-							error: (message) => {
-								group.error(message);
+							error: (message, display) => {
+								if (!shouldDisplay(presentation, display?.level)) {
+									return;
+								}
+								group.error(display?.humanMessage ?? message);
 							}
 						};
 					},
-					warn: notes.warn
+					warn: (label, value, display) => {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						notes.warn(
+							display?.humanMessage ?? label,
+							display?.humanMessage === undefined ? value : undefined
+						);
+					}
 				});
 
 				task.success(withElapsed(label, startedAt, colours));
@@ -812,33 +921,58 @@ function clackReporter(
 				return;
 			}
 
-			box(formatRows(payload.rows, colours), resultTitle(payload.kind), {
-				output
-			});
+			if (payload.rows.some((row) => row.raw === true)) {
+				writeRows(
+					output,
+					payload.title ?? resultTitle(payload.kind),
+					payload.rows,
+					colours
+				);
+				return;
+			}
+			box(
+				formatRows(payload.rows, colours, getColumns(output) - 8),
+				payload.title ?? resultTitle(payload.kind),
+				{
+					output
+				}
+			);
 		},
 
 		data(text) {
 			out.write(`${text}\n`);
 		},
 
-		warn(label, value) {
-			log.warn(warnText(label, value), { output });
+		warn(label, value, display) {
+			if (!shouldDisplay(presentation, display?.level)) {
+				return;
+			}
+			log.warn(display?.humanMessage ?? warnText(label, value), { output });
 		},
 
-		info(message) {
-			log.info(message, { output });
+		info(message, display) {
+			if (!shouldDisplay(presentation, display?.level)) {
+				return;
+			}
+			log.info(display?.humanMessage ?? message, { output });
 		},
 
-		success(message) {
-			log.success(message, { output });
+		success(message, display) {
+			if (!shouldDisplay(presentation, display?.level)) {
+				return;
+			}
+			log.success(display?.humanMessage ?? message, { output });
 		},
 
-		step(message) {
-			log.step(message, { output });
+		step(message, display) {
+			if (!shouldDisplay(presentation, display?.level)) {
+				return;
+			}
+			log.step(display?.humanMessage ?? message, { output });
 		},
 
 		error(error) {
-			log.error(errorText(error, colours), { output });
+			log.error(formatError?.(error) ?? errorText(error, colours), { output });
 		}
 	};
 }

@@ -176,13 +176,15 @@ attestation attachment are separate operations.
 When attachment fails, the CLI waits for attachment requests already in progress
 and reports their validated outcomes before returning the original failure. The
 `attestation-attach-partial` result records every requested path and bundle pair
-as `attached`, `reused`, `unservable`, `unconfirmed` or `unattempted`. Its
-counts refer to pairs, not whole paths. An `unconfirmed` pair had an attachment
-request but no validated response, so the server may have recorded the
-attachment. An `unattempted` pair had no attachment request. The report appears
-in terminal and JSON output and in the existing `--result-file`, including
-attachments during publication. After resolving the reported error, retry with
-the same bundle files. Existing attachments will be reused.
+as attached, already attached, unavailable, outcome unknown or not attempted.
+The JSON values remain `attached`, `reused`, `unservable`, `unconfirmed` and
+`unattempted`. Add `--details` to identify each bundle by its digest. The report
+counts bundle/path pairs, not whole paths. An `unconfirmed` pair had an
+attachment request but no validated response, so the server may have recorded
+the attachment. An `unattempted` pair had no attachment request. The report
+appears in terminal and JSON output and in the existing `--result-file`,
+including attachments during publication. After resolving the reported error,
+retry with the same bundle files. Existing attachments will be reused.
 
 To sign, the action requests a certificate from Fulcio, and contacts a timestamp
 authority, Rekor, or both. The Sigstore client sends each of these requests up
@@ -342,6 +344,10 @@ So think of each change to the defaults as a decision about what to disclose:
   others in the same bundle.
 
 ## Verifying a bundle
+
+Verification reports the signer, source and trust policy. Add `--details` to
+include transparency-log indices and the counts required by the verification
+policy. `attest status` reports stored evidence without verifying it.
 
 `cupboard attest verify` checks a bundle against a Sigstore trust root. You can
 give it a bundle file, or ask it to fetch the bundles that a cache has for a

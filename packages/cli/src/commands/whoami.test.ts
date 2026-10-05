@@ -75,7 +75,8 @@ const tenantIdentity = {
 };
 const tenantRow = {
 	label: tenant,
-	value: `user-1 · tenant · rule owner · access token expires ${formatTimestamp(expiryIso)} · refresh token cached`
+	value:
+		'user-1 · tenant sign-in · saved sign-in current · automatic renewal available'
 };
 
 function dependencies(
@@ -201,7 +202,7 @@ describe('runWhoami', () => {
 			expect(captured.warnings).toStrictEqual([
 				...unreadableFiles.map(
 					(file) =>
-						`Could not read cached Cupboard session file ${file}: EISDIR: illegal operation on a directory, read. Check that the file is readable and retry.`
+						`Could not read the saved sign-in at ${file}. Check that the file is readable and retry.`
 				),
 				...(grantState === 'grant-unreadable'
 					? [
@@ -212,6 +213,7 @@ describe('runWhoami', () => {
 			expect(captured.results).toStrictEqual([
 				{
 					kind: 'whoami',
+					title: 'Saved sign-ins (server access not checked)',
 					data: {
 						sessions: [tenantIdentity],
 						...(grantState === 'grant-readable' && {
@@ -263,12 +265,13 @@ describe('runWhoami', () => {
 				error: failure,
 				status,
 				warnings: [
-					`Could not read cached Cupboard session file /tmp/session-a: ${failure.message}. Check that the file is readable and retry.`,
-					'Could not read cached Cupboard session file /tmp/session-b: permission denied. Check that the file is readable and retry.'
+					'Could not read the saved sign-in at /tmp/session-a. Check that the file is readable and retry.',
+					'Could not read the saved sign-in at /tmp/session-b. Check that the file is readable and retry.'
 				],
 				results: [
 					{
 						kind: 'whoami',
+						title: 'Saved sign-ins (server access not checked)',
 						data: {
 							sessions: [tenantIdentity],
 							cloudflareSignIn: { subject: 'user-1' }
@@ -280,6 +283,31 @@ describe('runWhoami', () => {
 			});
 		}
 	);
+
+	it('shows saved credential metadata only with details', async () => {
+		const { ui, captured } = fakeCliUi({ presentation: 'details' });
+		await runWhoami(
+			{ kind: 'sessions' },
+			ui.reporter(),
+			dependencies({
+				listSessions: () => Promise.resolve([tenantSession]),
+				readGrant: () => Promise.resolve(undefined)
+			})
+		);
+		expect(captured.results).toStrictEqual([
+			{
+				kind: 'whoami',
+				title: 'Saved sign-ins (server access not checked)',
+				data: { sessions: [tenantIdentity] },
+				rows: [
+					tenantRow,
+					{ label: 'Trust rule', value: tenantIdentity.rule },
+					{ label: 'Credential expiry', value: formatTimestamp(expiryIso) }
+				],
+				empty: emptyMessage
+			}
+		]);
+	});
 
 	it.each(['grant', 'sessions'] as const)(
 		'reports independently readable identity fields when %s cannot be read',
@@ -305,6 +333,7 @@ describe('runWhoami', () => {
 			expect(captured.results).toStrictEqual([
 				{
 					kind: 'whoami',
+					title: 'Saved sign-ins (server access not checked)',
 					data:
 						unreadable === 'grant'
 							? { sessions: [tenantIdentity] }
@@ -331,6 +360,7 @@ describe('runWhoami', () => {
 		expect(captured.results).toStrictEqual([
 			{
 				kind: 'whoami',
+				title: 'Saved sign-ins (server access not checked)',
 				data: {
 					sessions: [
 						tenantIdentity,
@@ -347,7 +377,8 @@ describe('runWhoami', () => {
 					tenantRow,
 					{
 						label: deployment,
-						value: 'user-1 · deployment · no refresh token'
+						value:
+							'user-1 · deployment sign-in · expiry unknown · sign in again when needed'
 					},
 					{ label: 'Cloudflare sign-in', value: 'user-1' }
 				],
@@ -382,7 +413,13 @@ describe('runWhoami', () => {
 		);
 
 		expect(captured.results).toStrictEqual([
-			{ kind: 'whoami', data, rows, empty: emptyMessage }
+			{
+				kind: 'whoami',
+				title: 'Saved sign-ins (server access not checked)',
+				data,
+				rows,
+				empty: emptyMessage
+			}
 		]);
 	});
 
@@ -392,12 +429,16 @@ describe('runWhoami', () => {
 		await runWhoami(
 			{ kind: 'sessions', url: new URL(tenant) },
 			ui.reporter(),
-			dependencies({ readGrant: () => Promise.resolve(undefined) })
+			dependencies({
+				listSessions: () => Promise.resolve([tenantSession]),
+				readGrant: () => Promise.resolve(undefined)
+			})
 		);
 
 		expect(captured.results).toStrictEqual([
 			{
 				kind: 'whoami',
+				title: 'Saved sign-ins (server access not checked)',
 				data: { sessions: [tenantIdentity] },
 				rows: [tenantRow],
 				empty: emptyMessage
@@ -452,6 +493,7 @@ describe('runWhoami', () => {
 			results: [
 				{
 					kind: 'whoami-provider',
+					title: 'Identity provider claims (not verified)',
 					data: {
 						issuer: 'https://idp.example.com',
 						audience: 'client-id',

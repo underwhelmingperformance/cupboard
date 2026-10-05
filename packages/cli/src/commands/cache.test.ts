@@ -178,7 +178,7 @@ describe('isRetirementEnabled', () => {
 });
 
 describe('runCacheList', () => {
-	it('directs readers to inspect compact cache entries for retention overrides', async () => {
+	it('keeps compact cache entries focused on contents and read settings', async () => {
 		const results: ResultRow[][] = [];
 		const { rootRetentionOverrides: _overrides, ...compact } = cacheSummary({
 			scope: { kind: 'named', name: 'builds' },
@@ -195,8 +195,7 @@ describe('runCacheList', () => {
 			[
 				{
 					label: 'builds',
-					value:
-						'public; priority 30; 0 path(s); default root retention permanent; grace none; root retention overrides: use cache inspect'
+					value: 'public; 0 store paths; Nix priority 30'
 				}
 			]
 		]);
@@ -288,17 +287,17 @@ describe('runCacheList', () => {
 				{
 					label: '(default)',
 					value:
-						'private; priority 40; 0 path(s); default root retention permanent; grace none; 0 root retention override(s)'
+						'private; 0 store paths; Nix priority 40; Cleanup keeps paths if none are retained, except when a root has just expired'
 				},
 				{
 					label: 'builds',
 					value:
-						'public; priority 30; 5 path(s); default root retention 1,209,600s; grace 86,400s; 1 root retention override(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC; retire when empty; retirement eligible after 2026-03-02 00:00 UTC'
+						'public; 5 store paths; Nix priority 30; remove when empty; May be deleted after their grace periods expire'
 				},
 				{
 					label: 'drained',
 					value:
-						'private; priority 45; 0 path(s); default root retention permanent; grace none; 0 root retention override(s); grace-managed'
+						'private; 0 store paths; Nix priority 45; May be deleted at the next cleanup; clearing grace does not disable cleanup'
 				}
 			]
 		]);
@@ -331,13 +330,11 @@ describe('runCacheList', () => {
 			[
 				{
 					label: 'release',
-					value:
-						'private; priority 30; 5 path(s); default root retention permanent; grace none; 0 root retention override(s)'
+					value: 'private; 5 store paths; Nix priority 30'
 				},
 				{
 					label: 'builds',
-					value:
-						'public; priority 40; 1 path(s); default root retention permanent; grace none; 0 root retention override(s)'
+					value: 'public; 1 store path; Nix priority 40'
 				}
 			]
 		]);
@@ -408,7 +405,7 @@ describe('runCacheCreate', () => {
 					{ label: 'Store paths', value: '0' },
 					{ label: 'Default root retention', value: 'permanent' },
 					{ label: 'Grace', value: 'none' },
-					{ label: 'Root retention overrides', value: 'none' }
+					{ label: 'Retention by root prefix', value: 'none' }
 				]
 			]
 		});
@@ -461,7 +458,7 @@ describe('runCacheCreate', () => {
 					{ label: 'Store paths', value: '4' },
 					{ label: 'Default root retention', value: 'permanent' },
 					{ label: 'Grace', value: 'none' },
-					{ label: 'Root retention overrides', value: 'none' }
+					{ label: 'Retention by root prefix', value: 'none' }
 				]
 			]
 		});
@@ -573,9 +570,9 @@ describe('cache property updates', () => {
 						{ label: 'Store paths', value: '0' },
 						{ label: 'Default root retention', value: 'permanent' },
 						{ label: 'Grace', value: 'none' },
-						{ label: 'Root retention overrides', value: 'none' },
+						{ label: 'Retention by root prefix', value: 'none' },
 						{
-							label: 'Retire when empty',
+							label: 'Remove when empty',
 							value: retireWhenEmpty ? 'yes' : 'no'
 						}
 					]
@@ -811,6 +808,7 @@ describe('runCacheRemove', () => {
 			results: [
 				{
 					kind: 'cache',
+					title: 'Cache',
 					data: response,
 					rows: [
 						{ label: 'Cache', value: 'builds' },
@@ -838,6 +836,68 @@ describe('runCacheRemove', () => {
 });
 
 describe('runCacheInspect', () => {
+	it.each(['summary', 'details', 'debug'] as const)(
+		'explains cleanup after grace is cleared without promising a deletion time (%s)',
+		async (presentation) => {
+			const rows: ResultRow[][] = [];
+			const response = cacheSummary({
+				scope: { kind: 'named', name: 'builds' },
+				access: 'public',
+				priority: 30,
+				storePaths: 5,
+				graceManaged: true,
+				retireWhenEmpty: true,
+				retirementStartedAt: '2026-03-01T00:00:00.000Z',
+				retirementEligibleAfter: '2026-03-01T00:00:00.000Z',
+				earliestGraceDeadline: '2026-03-02T00:00:00.000Z'
+			});
+
+			await runCacheInspect(
+				{ kind: 'named', name: cacheName('builds') },
+				{ ...reporter(rows), presentation },
+				{
+					get: {
+						inDefaultCache: () => Promise.resolve(response),
+						inNamedCache: () => Promise.resolve(response)
+					}
+				}
+			);
+
+			expect(rows).toStrictEqual([
+				[
+					{ label: 'Cache', value: 'builds' },
+					{ label: 'Access', value: 'public' },
+					{ label: 'Priority', value: '30' },
+					{ label: 'Store paths', value: '5' },
+					{ label: 'Default root retention', value: 'permanent' },
+					{ label: 'Grace', value: 'none' },
+					{ label: 'Retention by root prefix', value: 'none' },
+					{
+						label: 'Unretained paths',
+						value:
+							'May be deleted at the next cleanup; clearing grace does not disable cleanup'
+					},
+					{ label: 'Publication', value: 'Closed since 2026-03-01 00:00 UTC' },
+					{ label: 'Remove when empty', value: 'yes' },
+					{
+						label: 'Automatic removal',
+						value: 'May be removed after 2026-03-01 00:00 UTC, when empty'
+					},
+					...(presentation === 'summary'
+						? []
+						: [
+								{
+									label: 'Earliest grace expiry',
+									value: '2026-03-02 00:00 UTC'
+								}
+							]),
+					...(presentation === 'debug'
+						? [{ label: 'Grace managed', value: 'yes' }]
+						: [])
+				]
+			]);
+		}
+	);
 	it('reports the summary of a named cache', async () => {
 		const results: ResultRow[][] = [];
 		const summary = cacheSummary({
@@ -879,7 +939,7 @@ describe('runCacheInspect', () => {
 				{ label: 'Default root retention', value: '1,209,600s' },
 				{ label: 'Grace', value: '86,400s' },
 				{
-					label: 'Root retention overrides',
+					label: 'Retention by root prefix',
 					value: 'github:acme/ = 604,800s; release: = permanent'
 				}
 			]
@@ -916,11 +976,11 @@ describe('runCacheInspect', () => {
 				{ label: 'Store paths', value: '5' },
 				{ label: 'Default root retention', value: 'permanent' },
 				{ label: 'Grace', value: 'none' },
-				{ label: 'Root retention overrides', value: 'none' },
-				{ label: 'Grace managed', value: 'yes' },
+				{ label: 'Retention by root prefix', value: 'none' },
 				{
-					label: 'Earliest grace deadline',
-					value: '2026-03-01 00:00 UTC'
+					label: 'Unretained paths',
+					value:
+						'May be deleted at the next cleanup; clearing grace does not disable cleanup'
 				}
 			]
 		]);

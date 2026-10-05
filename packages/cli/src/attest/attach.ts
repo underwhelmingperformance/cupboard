@@ -30,6 +30,7 @@ import {
 	formatCount,
 	type Reporter,
 	type ResultRow,
+	shouldShowDetails,
 	type StepLog
 } from '@cupboard/reporter';
 import { chunk } from '@cupboard/shared/collections';
@@ -435,7 +436,9 @@ async function attachWithProgress(
 		}
 	}
 
-	const negotiateStep = log.group('negotiate');
+	const negotiateStep = log.group('negotiate', {
+		humanLabel: 'Checking existing attestations'
+	});
 	const decisions: AttestationDecisionInput[] = [];
 	const preparedByIdentity = new Map(
 		prepared.map((bundle) => [attestationBundleIdentityKey(bundle), bundle])
@@ -470,10 +473,13 @@ async function attachWithProgress(
 		isAttestationSkip(decision)
 	).length;
 	negotiateStep.success(
-		`${formatCount(toUpload.length)} to upload, ${formatCount(reused)} reused`
+		`${formatCount(toUpload.length)} to upload, ${formatCount(reused)} reused`,
+		{
+			humanMessage: `${formatCount(toUpload.length)} to upload, ${formatCount(reused)} already attached`
+		}
 	);
 
-	const uploadStep = log.group('upload');
+	const uploadStep = log.group('upload', { humanLabel: 'Uploading bundles' });
 	let uploadedBytes = 0;
 
 	await mapWithConcurrency(toUpload, bundleConcurrency, async (decision) => {
@@ -492,7 +498,9 @@ async function attachWithProgress(
 
 	uploadStep.success(formatBytes(uploadedBytes));
 
-	const attachStep = log.group('attach');
+	const attachStep = log.group('attach', {
+		humanLabel: 'Attaching attestations'
+	});
 	let attached = 0;
 	const unservableStorePathHashes = new Set<StorePathHash>();
 	const bundles: AttestationBundleOutcome[] = decisions
@@ -619,7 +627,7 @@ export async function runAttestAttach(
 	const { prepared, outcome } = await reporter.steps(
 		'Attestations',
 		async (log) => {
-			const readStep = log.group('read');
+			const readStep = log.group('read', { humanLabel: 'Reading bundles' });
 			const bundles = await prepareAttestationBundles(pathInfos, {
 				sources: dependencies.attestations,
 				readBundle,
@@ -627,7 +635,10 @@ export async function runAttestAttach(
 			});
 			const bundleCount = new Set(bundles.map((bundle) => bundle.digest)).size;
 			readStep.success(
-				`${formatCount(bundleCount)} ${bundleCount === 1 ? 'bundle' : 'bundles'} for ${formatCount(bundles.length)} path references`
+				`${formatCount(bundleCount)} ${bundleCount === 1 ? 'bundle' : 'bundles'} for ${formatCount(bundles.length)} path references`,
+				{
+					humanMessage: `${formatCount(bundleCount)} ${bundleCount === 1 ? 'bundle' : 'bundles'} covering ${formatCount(bundles.length)} paths`
+				}
 			);
 
 			return {
@@ -655,7 +666,10 @@ export async function runAttestAttach(
 
 		reporter.warn(
 			'unservable',
-			`${path.storePath === undefined ? path.storePathHash : StorePath.basename(path.storePath)}: the committed path disappeared or the pending attachment was no longer available; attachment not recorded`
+			`${path.storePath === undefined ? path.storePathHash : StorePath.basename(path.storePath)}: the committed path disappeared or the pending attachment was no longer available; attachment not recorded`,
+			{
+				humanMessage: `${path.storePath === undefined ? path.storePathHash : StorePath.basename(path.storePath)}: attestation not attached because the path or attachment request is no longer available. Retry with the same bundles.`
+			}
 		);
 	}
 
@@ -672,21 +686,27 @@ export async function runAttestAttach(
 
 	reporter.result({
 		kind: attestationAttachSummaryResultKind,
+		title: 'Attestation attachment',
 		data: validated.success ? validated.data : summary,
 		rows: [
 			{
 				label: 'Attestations',
 				value:
 					`${formatCount(outcome.attached)} attached, ` +
-					`${formatCount(outcome.reused)} reused, ` +
-					`${formatCount(summary.unservable)} unservable`
+					`${formatCount(outcome.reused)} already attached, ` +
+					`${formatCount(summary.unservable)} unavailable`
 			},
 			{
 				label: 'Attestation upload',
 				value: formatBytes(outcome.uploadedBytes)
 			},
 			...summaryPaths.map((path): ResultRow => ({
-				label: path.storePathHash,
+				label:
+					path.storePath === undefined
+						? path.storePathHash
+						: shouldShowDetails(reporter)
+							? path.storePath
+							: StorePath.basename(path.storePath),
 				value: attachPathRow(path.outcome)
 			}))
 		]
@@ -704,7 +724,7 @@ function attachPathRow(outcome: AttestationAttachPathInput['outcome']): string {
 		}
 
 		case 'unservable': {
-			return 'attachment no longer available; not recorded';
+			return 'not attached; path or attachment request unavailable';
 		}
 	}
 }
@@ -751,22 +771,29 @@ export function reportPartialAttestationAttachment(
 	const validated = attestationAttachPartialSchema.safeParse(summary);
 	reporter.result({
 		kind: attestationAttachPartialResultKind,
+		title: 'Incomplete attestation attachment',
 		data: validated.success ? validated.data : summary,
 		rows: [
 			{
 				label: 'Partial attestations',
-				value: `${formatCount(summary.attached)} attached, ${formatCount(summary.reused)} reused, ${formatCount(summary.unservable)} unservable, ${formatCount(summary.unconfirmed)} unconfirmed, ${formatCount(summary.unattempted)} unattempted`
+				value: `${formatCount(summary.attached)} attached, ${formatCount(summary.reused)} already attached, ${formatCount(summary.unservable)} unavailable, ${formatCount(summary.unconfirmed)} outcome unknown, ${formatCount(summary.unattempted)} not attempted`
 			},
 			{
 				label: 'Attestation upload',
 				value: formatBytes(summary.uploadedBytes)
 			},
 			...bundles.map((bundle): ResultRow => ({
-				label: `${bundle.storePathHash} ${bundle.digest}`,
+				label: shouldShowDetails(reporter)
+					? `${bundle.storePath ?? bundle.storePathHash} ${bundle.digest}`
+					: bundle.storePath === undefined
+						? bundle.storePathHash
+						: StorePath.basename(bundle.storePath),
 				value:
-					bundle.outcome === 'unconfirmed' || bundle.outcome === 'unattempted'
-						? bundle.outcome
-						: attachPathRow(bundle.outcome)
+					bundle.outcome === 'unconfirmed'
+						? 'attachment outcome unknown'
+						: bundle.outcome === 'unattempted'
+							? 'not attempted'
+							: attachPathRow(bundle.outcome)
 			})),
 			{
 				label: 'Next step',

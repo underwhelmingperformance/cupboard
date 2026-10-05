@@ -101,7 +101,7 @@ describe('executeDeploy result file', () => {
 				)
 			).rejects.toBe(failure);
 			expect(uiFactory.mock.calls).toStrictEqual([
-				[{ ...runtime, signal: undefined }]
+				[{ ...runtime, signal: undefined, presentation: undefined }]
 			]);
 		} finally {
 			vi.restoreAllMocks();
@@ -475,7 +475,7 @@ describe('planMenuEntries', () => {
 			{ value: 'database:cupboard', label: 'D1 database', hint: 'cupboard' },
 			{
 				value: 'queue:cupboard-maintenance',
-				label: 'Queue',
+				label: 'Maintenance queue',
 				hint: 'cupboard-maintenance'
 			},
 			{ value: 'crons', label: 'Cron triggers', hint: '0 * * * *' },
@@ -2185,7 +2185,7 @@ describe('endBeforeReady', () => {
 			name: 'succeeds for an update',
 			authority: updateAuthority,
 			result: undefined,
-			outros: ['Deployed.']
+			outros: ['Uploaded; deployment availability has not been confirmed.']
 		}
 	])('$name', ({ authority, result, outros: expectedOutros }) => {
 		const outros: string[] = [];

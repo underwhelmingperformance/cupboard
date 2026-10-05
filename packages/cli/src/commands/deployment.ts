@@ -9,7 +9,9 @@ import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	formatTimestamp,
 	type Reporter,
-	type ResultRow
+	type ResultRow,
+	shouldShowDebug,
+	shouldShowDetails
 } from '@cupboard/reporter';
 import { type Command } from 'commander';
 
@@ -37,7 +39,9 @@ export interface DeploymentClient {
 	readonly localStep: SettlementClient;
 }
 
-export type DeploymentResumeOptions = SettlementOptions;
+export interface DeploymentResumeOptions extends SettlementOptions {
+	readonly url?: URL;
+}
 
 interface DeploymentAuthOptions {
 	readonly githubOidc?: boolean;
@@ -46,6 +50,7 @@ interface DeploymentAuthOptions {
 
 interface DeploymentStatusOptions {
 	readonly details?: boolean;
+	readonly url?: URL;
 }
 
 const requiredTransitionIds = new Set(transitionIds);
@@ -63,7 +68,8 @@ function tenantSummary(status: LocalStepStatus): string {
 
 function readinessRows(
 	status: LocalStepStatus,
-	transitions: ParsedDeploymentTransitionsResponse
+	transitions: ParsedDeploymentTransitionsResponse,
+	url?: URL
 ): ResultRow[] {
 	const isIncompatible = transitions.unrecognised.some(
 		(row) => readStoredTransition(transitionIds, row).kind === 'refused'
@@ -78,26 +84,25 @@ function readinessRows(
 
 	const isIncomplete = !completed.isSupersetOf(requiredTransitionIds);
 
-	let readiness = 'Ready';
+	let readiness = 'Schema and data ready';
 	let next: string | undefined;
+	const target = url?.href ?? '<deployment-url>';
 
 	if (status.pending > 0) {
 		readiness =
 			status.working > 0 ? 'Updating tenants' : 'Waiting for tenant updates';
-		next =
-			'Use deployment resume with this deployment URL to wake pending tenants and wait for completion.';
+		next = `Run \`cupboard deployment resume ${target}\` to retry pending tenant updates and wait for completion.`;
 	}
 
 	if (status.stalled > 0) {
 		readiness = 'Tenant updates need attention';
-		next =
-			'Check the tenant errors below, then use deployment resume to retry.';
+		next = `Inspect \`cupboard deployment status ${target} --debug\`, then retry with \`cupboard deployment resume ${target}\`.`;
 	}
 
 	if (isIncomplete) {
 		readiness = 'Deployment incomplete';
 		next =
-			'Re-run cupboard init with the same release and source to finish the deployment.';
+			'Rerun `cupboard deploy` with the same release and source to finish the deployment.';
 	}
 
 	if (isIncompatible) {
@@ -109,7 +114,9 @@ function readinessRows(
 	return [
 		{ label: 'Deployment', value: readiness },
 		{ label: 'Tenants', value: tenantSummary(status) },
-		...(next === undefined ? [] : [{ label: 'Next step', value: next }])
+		...(next === undefined
+			? []
+			: [{ label: 'Next step', value: next, raw: true }])
 	];
 }
 
@@ -143,7 +150,7 @@ function unrecognisedRows(
 	}));
 }
 
-function sampleRows(status: LocalStepStatus, isDetailed = false): ResultRow[] {
+function sampleRows(status: LocalStepStatus, isDebug = false): ResultRow[] {
 	const workingSample = status.workingSample ?? [];
 	const sampled =
 		workingSample.length +
@@ -158,7 +165,7 @@ function sampleRows(status: LocalStepStatus, isDetailed = false): ResultRow[] {
 					: `last progress ${formatTimestamp(tenant.progressedAt)}`;
 
 			const migration =
-				isDetailed && tenant.migration !== undefined
+				isDebug && tenant.migration !== undefined
 					? `; ${tenant.migration.migration}, ${tenant.migration.stage}, cursor ${String(tenant.migration.cursor)}`
 					: '';
 
@@ -168,11 +175,13 @@ function sampleRows(status: LocalStepStatus, isDetailed = false): ResultRow[] {
 			};
 		}),
 		...status.stalledSample.map((tenant) => ({
-			label: isDetailed ? 'Stalled' : 'Needs attention',
-			value: stalledTenantText(tenant)
+			label: isDebug ? 'Stalled' : 'Needs attention',
+			value: stalledTenantText(
+				isDebug ? tenant : { ...tenant, error: undefined }
+			)
 		})),
 		...status.unwokenSample.map((tenant) => ({
-			label: isDetailed ? 'Not yet woken' : 'Waiting to start',
+			label: isDebug ? 'Not yet woken' : 'Waiting to start',
 			value: unwokenTenantText(tenant)
 		})),
 		...(status.pending > sampled
@@ -186,9 +195,19 @@ function sampleRows(status: LocalStepStatus, isDetailed = false): ResultRow[] {
 	];
 }
 
+function tenantCountRows(status: LocalStepStatus): ResultRow[] {
+	return [
+		{ label: 'Ready tenants', value: String(status.ready) },
+		{ label: 'Pending tenants', value: String(status.pending) },
+		{ label: 'Updating tenants', value: String(status.working) },
+		{ label: 'Tenants needing attention', value: String(status.stalled) },
+		{ label: 'Tenants waiting to start', value: String(status.unwoken) }
+	];
+}
+
 /**
  * Shows deployment readiness, tenant migration progress and the next operator
- * action. Detailed output includes schema transitions and migration identifiers.
+ * action. Debug output includes schema transitions and migration diagnostics.
  */
 export async function runDeploymentStatus(
 	reporter: Reporter,
@@ -206,28 +225,29 @@ export async function runDeploymentStatus(
 				}));
 	reporter.result({
 		kind: 'deployment-status',
+		title: 'Deployment readiness',
 		data: { transitions, unrecognised, ...status },
 		rows: [
-			...(options.details === true
+			...readinessRows(status, { transitions, unrecognised }, options.url),
+			...(shouldShowDetails(reporter) || options.details === true
+				? tenantCountRows(status)
+				: []),
+			...(shouldShowDebug(reporter)
 				? [
 						...transitionRows,
 						...unrecognisedRows(unrecognised),
 						{ label: 'Required local step', value: String(status.required) },
-						{ label: 'Ready tenants', value: String(status.ready) },
-						{ label: 'Pending tenants', value: pendingText(status) }
+						{ label: 'Pending tenant diagnostics', value: pendingText(status) }
 					]
-				: readinessRows(status, { transitions, unrecognised })),
-			...sampleRows(status, options.details)
+				: []),
+			...sampleRows(status, shouldShowDebug(reporter))
 		]
 	});
 }
 
 /**
  * Wakes the pending tenants and waits until each has recorded the required
- * local step, as the deploy does, then reports whether a schema transition is
- * still incomplete and needs another `cupboard init`. A recorded row that this
- * build does not define is listed with what this build's deploy does with it,
- * and is left out of the transitions to complete.
+ * schema and data updates, then reports any remaining deployment work.
  */
 export async function runDeploymentResume(
 	reporter: Reporter,
@@ -238,11 +258,16 @@ export async function runDeploymentResume(
 	const { transitions, unrecognised } = await client.transitions();
 	reporter.result({
 		kind: 'deployment-readiness',
+		title: 'Deployment readiness',
 		data: status,
 		rows: [
 			{ label: 'Ready tenants', value: String(status.ready) },
-			{ label: 'Required local step', value: String(status.required) },
-			...unrecognisedRows(unrecognised)
+			...(shouldShowDebug(reporter)
+				? [
+						{ label: 'Required local step', value: String(status.required) },
+						...unrecognisedRows(unrecognised)
+					]
+				: [])
 		]
 	});
 	const refused = unrecognised
@@ -251,10 +276,15 @@ export async function runDeploymentResume(
 		)
 		.map((row) => row.id);
 	const reached = `Every active or suspended tenant has reached local step ${String(status.required)}.`;
+	const humanReached =
+		'Every active or suspended tenant has completed the required schema and data updates.';
 
 	if (refused.length > 0) {
 		reporter.info(
-			`${reached} This build's cupboard deploy stops on ${refused.join(', ')}, as listed above.`
+			`${reached} This build's cupboard deploy stops on ${refused.join(', ')}, as listed above.`,
+			{
+				humanMessage: `${humanReached} Use a CLI release compatible with this deployment before deploying again. Inspect \`cupboard deployment status ${options.url?.href ?? '<deployment-url>'} --debug\` for the diagnostic.`
+			}
 		);
 		return;
 	}
@@ -269,7 +299,13 @@ export async function runDeploymentResume(
 	reporter.info(
 		incomplete.length === 0
 			? `Every active or suspended tenant has reached local step ${String(status.required)}, and every schema transition is complete.`
-			: `${reached} Re-run cupboard deploy to complete ${incomplete.join(', ')}.`
+			: `${reached} Re-run cupboard deploy to complete ${incomplete.join(', ')}.`,
+		{
+			humanMessage:
+				incomplete.length === 0
+					? `${humanReached} All deployment database changes are complete.`
+					: `${humanReached} Rerun \`cupboard deploy\` with the same release and source to finish the deployment.`
+		}
 	);
 }
 
@@ -279,7 +315,7 @@ export function registerDeploymentCommands(
 ): void {
 	const deployment = program
 		.command('deployment')
-		.description('Inspect and resume tenant migration work.');
+		.description('Check deployment readiness and resume tenant updates.');
 	const client = (
 		url: URL,
 		cliOptions: DeploymentAuthOptions,
@@ -308,8 +344,9 @@ export function registerDeploymentCommands(
 	};
 	deployment
 		.command('status')
-		.description('Show deployment readiness and tenant migration progress.')
-		.option('--details', 'Show schema transitions and migration identifiers.')
+		.description(
+			'Show schema and data readiness and progress for tenant updates.'
+		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.option(
 			'--github-oidc',
@@ -320,28 +357,22 @@ export function registerDeploymentCommands(
 			'OIDC audience to request with --github-oidc (default: the deployment URL)',
 			parseAudience
 		)
-		.action(
-			async (
-				url: URL,
-				cliOptions: DeploymentAuthOptions & DeploymentStatusOptions
-			) => {
-				await runDeploymentStatus(
-					commandUi(program, options).reporter(),
-					client(url, cliOptions, [
-						{
-							type: 'cupboard_control',
-							actions: ['deployment:read', 'local-step:read']
-						}
-					]),
-					cliOptions
-				);
-			}
-		);
+		.action(async (url: URL, cliOptions: DeploymentAuthOptions) => {
+			await runDeploymentStatus(
+				commandUi(program, options).reporter(),
+				client(url, cliOptions, [
+					{
+						type: 'cupboard_control',
+						actions: ['deployment:read', 'local-step:read']
+					}
+				]),
+				{ url }
+			);
+		});
 	deployment
 		.command('resume')
 		.description(
-			'Wake the tenants that are still migrating, wait while they finish, and ' +
-				'report whether the deploy can finish.'
+			'Retry pending tenant updates, wait while they finish, and report any remaining deployment work.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.option(
@@ -363,6 +394,7 @@ export function registerDeploymentCommands(
 					}
 				]),
 				{
+					url,
 					...(options.signal !== undefined && { signal: options.signal })
 				}
 			);

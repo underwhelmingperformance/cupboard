@@ -19,6 +19,8 @@ interface LogoutOptions {
 }
 
 export class LogoutTargetError extends CliUsageError {
+	override readonly humanMessage =
+		'Give the deployment or tenant URL to sign out of, or pass --all for every saved sign-in, or --cloudflare for the Cloudflare sign-in. A URL and --all cannot be combined.';
 	constructor() {
 		super(
 			'Give the deployment or tenant URL to sign out of, or pass --all for ' +
@@ -142,11 +144,11 @@ function sessionsRow(
 		case 'url': {
 			return {
 				label: canonicalHref(sessions.url),
-				value: removed > 0 ? 'session removed' : 'no session was cached'
+				value: removed > 0 ? 'saved sign-in removed' : 'no saved sign-in'
 			};
 		}
 		case 'all': {
-			return { label: 'Sessions removed', value: String(removed) };
+			return { label: 'Saved sign-ins removed', value: String(removed) };
 		}
 		case 'none': {
 			return undefined;
@@ -203,7 +205,16 @@ export async function runLogout(
 		});
 	}
 
-	reporter.result({ kind: 'logout', data: result, rows });
+	reporter.result({
+		kind: 'logout',
+		title: 'Signed out on this machine',
+		data: result,
+		rows
+	});
+	reporter.info('Logout removes local credentials only.', {
+		humanMessage:
+			'Saved sign-ins were removed from this machine. Copies elsewhere remain usable until access expires or a tenant administrator removes the trust rule.'
+	});
 
 	if (cloudflareSignIn === 'kept') {
 		reporter.warn(
@@ -229,7 +240,7 @@ export function registerLogoutCommand(
 	program
 		.command('logout')
 		.description(
-			'Delete the cached session for a tenant or the deployment from this machine.'
+			'Remove a saved sign-in for a tenant or deployment from this machine.'
 		)
 		.argument(
 			'[url]',
@@ -237,7 +248,7 @@ export function registerLogoutCommand(
 				'(e.g. https://cupboard.example.workers.dev or .../t/<slug>)',
 			parseWorkerUrl
 		)
-		.option('--all', 'delete every cached session')
+		.option('--all', 'delete every saved sign-in')
 		.option(
 			'--cloudflare',
 			'also delete the cached Cloudflare sign-in, which `login` and `init` share'
@@ -246,9 +257,8 @@ export function registerLogoutCommand(
 			'after',
 			[
 				'',
-				'Sessions are deleted from this machine only. Logout does not revoke',
-				'anything on the server, because cupboard has no endpoint that revokes',
-				'a refresh token. A copy of a tenant session taken elsewhere can be',
+				'Sign-ins are removed from this machine only. Copies on other machines',
+				'remain usable. A copied tenant sign-in can be',
 				'renewed for up to 30 days after sign-in, unless the server stops',
 				'accepting its refresh token earlier. A deployment session has no',
 				'refresh token, and its access token expires ten minutes after',

@@ -7,6 +7,8 @@
 		"@cupboard/logger": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
+		"fast-string-width": "^3.0.2",
+		"fast-wrap-ansi": "^0.2.2",
 		"picocolors": "catalog:"
 	},
 	"devDependencies": {

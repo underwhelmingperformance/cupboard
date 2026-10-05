@@ -33,14 +33,61 @@ export function wasErrorReported(error: unknown): boolean {
 	);
 }
 
+export type PresentationLevel = 'summary' | 'details' | 'debug';
+
+export interface LabelPresentation {
+	readonly humanLabel?: string;
+}
+
+export interface MessagePresentation {
+	readonly humanMessage?: string;
+	readonly level?: 'details' | 'debug';
+}
+
+export interface FactPresentation extends LabelPresentation {
+	readonly humanValue?: string | number;
+	readonly level?: 'details' | 'debug';
+}
+
+export function shouldShowDetails(
+	reporter: Pick<Reporter, 'presentation'>
+): boolean {
+	return (
+		reporter.presentation === 'details' || reporter.presentation === 'debug'
+	);
+}
+
+export function shouldShowDebug(
+	reporter: Pick<Reporter, 'presentation'>
+): boolean {
+	return reporter.presentation === 'debug';
+}
+
+export function shouldDisplay(
+	presentation: PresentationLevel = 'summary',
+	level?: 'details' | 'debug'
+): boolean {
+	if (level === undefined) {
+		return true;
+	}
+	if (level === 'debug') {
+		return presentation === 'debug';
+	}
+	return presentation !== 'summary';
+}
+
 export interface PhaseContext {
-	fact(label: string, value: string | number): void;
+	fact(
+		label: string,
+		value: string | number,
+		presentation?: FactPresentation
+	): void;
 	/**
 	 * Reports a warning for this unit. JSON and GitHub modes emit it immediately.
 	 * Terminal spinners and progress bars defer it until the animation ends; a
 	 * task log shows it live and repeats it after the task closes.
 	 */
-	warn(label: string, value?: string): void;
+	warn(label: string, value?: string, presentation?: MessagePresentation): void;
 }
 
 export interface ProgressHandle {
@@ -51,35 +98,40 @@ export interface ProgressHandle {
 	/**
 	Adds or replaces a live key/value annotation.
 	*/
-	fact(label: string, value: string | number): void;
+	fact(
+		label: string,
+		value: string | number,
+		presentation?: FactPresentation
+	): void;
 	/**
 	Records a warning for this unit; see {@link PhaseContext.warn}.
 	*/
-	warn(label: string, value?: string): void;
+	warn(label: string, value?: string, presentation?: MessagePresentation): void;
 }
 
-export interface ProgressOptions {
+export interface ProgressOptions extends LabelPresentation {
 	readonly total: number;
 }
 
 export interface StepGroup {
-	message(message: string): void;
-	success(message: string): void;
-	error(message: string): void;
+	message(message: string, presentation?: MessagePresentation): void;
+	success(message: string, presentation?: MessagePresentation): void;
+	error(message: string, presentation?: MessagePresentation): void;
 }
 
 export interface StepLog {
-	message(message: string): void;
-	group(name: string): StepGroup;
+	message(message: string, presentation?: MessagePresentation): void;
+	group(name: string, presentation?: LabelPresentation): StepGroup;
 	/**
 	Records a warning for this task; see {@link PhaseContext.warn}.
 	*/
-	warn(label: string, value?: string): void;
+	warn(label: string, value?: string, presentation?: MessagePresentation): void;
 }
 
 export interface ResultRow {
 	readonly label: string;
 	readonly value: string;
+	readonly raw?: boolean;
 }
 
 /**
@@ -90,6 +142,7 @@ export interface ResultRow {
  */
 export interface ResultPayload<T = unknown> {
 	readonly kind: string;
+	readonly title?: string;
 	readonly data: T;
 	readonly rows: readonly ResultRow[];
 	/**
@@ -100,34 +153,40 @@ export interface ResultPayload<T = unknown> {
 }
 
 export interface Reporter {
+	readonly presentation?: PresentationLevel;
 	phase<T>(
 		label: string,
-		body: (context: PhaseContext) => Promise<T> | T
+		body: (context: PhaseContext) => Promise<T> | T,
+		presentation?: LabelPresentation
 	): Promise<T>;
 	progress<T>(
 		label: string,
 		options: ProgressOptions,
 		body: (bar: ProgressHandle) => Promise<T> | T
 	): Promise<T>;
-	steps<T>(label: string, body: (log: StepLog) => Promise<T> | T): Promise<T>;
+	steps<T>(
+		label: string,
+		body: (log: StepLog) => Promise<T> | T,
+		presentation?: LabelPresentation
+	): Promise<T>;
 	result(payload: ResultPayload): void;
 	/**
 	 * Writes a raw payload followed by a newline to `out`. Every mode keeps `out`
 	 * separate from its progress rendering, so a caller can capture the payload.
 	 */
 	data(text: string): void;
-	warn(label: string, value?: string): void;
-	info(message: string): void;
+	warn(label: string, value?: string, presentation?: MessagePresentation): void;
+	info(message: string, presentation?: MessagePresentation): void;
 	/**
 	 * Reports completed work as a terminal success marker, a JSON `success` event,
 	 * or a GitHub notice when workflow commands are active.
 	 */
-	success(message: string): void;
+	success(message: string, presentation?: MessagePresentation): void;
 	/**
 	 * Reports skipped work as a terminal step marker, a JSON `step` event, or a
 	 * plain GitHub log line.
 	 */
-	step(message: string): void;
+	step(message: string, presentation?: MessagePresentation): void;
 	/**
 	 * Reports a failure with its cause chain. Terminal mode renders an indented
 	 * error, JSON mode emits an `error` event, and GitHub mode uses an annotation
@@ -153,6 +212,7 @@ export const buildPushPhases = {
 export type BuildPushPhase = keyof typeof buildPushPhases;
 
 export interface ReporterOptions {
+	readonly presentation?: PresentationLevel;
 	/**
 	 * Destination for JSON events and GitHub rendering. Defaults to stderr.
 	 */
@@ -278,7 +338,8 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
 		options.stream ?? stderr,
 		options.out ?? stdout,
 		options.now ?? (() => Date.now()),
-		resultAppender(options.resultFile)
+		resultAppender(options.resultFile),
+		options.presentation ?? 'summary'
 	);
 }
 
@@ -304,7 +365,8 @@ function createJsonReporter(
 	stream: NodeJS.WritableStream,
 	out: NodeJS.WritableStream,
 	now: () => number,
-	recordResult: (payload: ResultPayload) => void
+	recordResult: (payload: ResultPayload) => void,
+	presentation: PresentationLevel
 ): Reporter {
 	function emit(event: Record<string, unknown>): void {
 		stream.write(`${JSON.stringify(event)}\n`);
@@ -319,6 +381,7 @@ function createJsonReporter(
 	}
 
 	return {
+		presentation,
 		async phase(label, body) {
 			const facts: Record<string, string> = {};
 			const startedAt = now();
@@ -533,6 +596,7 @@ function describeError(error: unknown): {
 }
 
 function buildGithubReporter(options: ReporterOptions): Reporter {
+	const presentation = options.presentation ?? 'summary';
 	const stream = options.stream ?? stderr;
 	const out = options.out ?? stdout;
 	const now = options.now ?? (() => Date.now());
@@ -548,8 +612,21 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 		stream.write(`${text}\n`);
 	};
 
-	const emitWarn = (label: string, value?: string): void => {
-		commands.warning(warnText(label, value));
+	const emitWarn = (
+		label: string,
+		value?: string,
+		display?: MessagePresentation
+	): void => {
+		if (!shouldDisplay(presentation, display?.level)) {
+			return;
+		}
+		commands.warning(display?.humanMessage ?? warnText(label, value));
+	};
+	const humanLine = (message: string, display?: MessagePresentation): void => {
+		if (!shouldDisplay(presentation, display?.level)) {
+			return;
+		}
+		line(display?.humanMessage ?? message);
 	};
 
 	const emitFacts = (facts: ReadonlyMap<string, string>): void => {
@@ -558,18 +635,27 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 		}
 	};
 
-	const addGroup = (name: string): StepGroup => {
-		line(`${name}:`);
+	const addGroup = (name: string, display?: LabelPresentation): StepGroup => {
+		line(`${display?.humanLabel ?? name}:`);
 
 		return {
-			message: (message) => {
-				line(`  ${message}`);
+			message: (message, display) => {
+				if (!shouldDisplay(presentation, display?.level)) {
+					return;
+				}
+				line(`  ${display?.humanMessage ?? message}`);
 			},
-			success: (message) => {
-				line(`  ${message}`);
+			success: (message, display) => {
+				if (!shouldDisplay(presentation, display?.level)) {
+					return;
+				}
+				line(`  ${display?.humanMessage ?? message}`);
 			},
-			error: (message) => {
-				line(`  ${message}`);
+			error: (message, display) => {
+				if (!shouldDisplay(presentation, display?.level)) {
+					return;
+				}
+				line(`  ${display?.humanMessage ?? message}`);
 			}
 		};
 	};
@@ -589,15 +675,22 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 	};
 
 	return {
-		async phase(label, body) {
-			commands.group(label);
+		presentation,
+		async phase(label, body, display) {
+			commands.group(display?.humanLabel ?? label);
 
 			const facts = new Map<string, string>();
 
 			try {
 				const value = await body({
-					fact(factLabel, factValue) {
-						facts.set(factLabel, String(factValue));
+					fact(factLabel, factValue, display) {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						facts.set(
+							display?.humanLabel ?? factLabel,
+							String(display?.humanValue ?? factValue)
+						);
 					},
 					warn: emitWarn
 				});
@@ -616,7 +709,8 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 		},
 
 		async progress(label, options, body) {
-			commands.group(label);
+			const humanLabel = options.humanLabel ?? label;
+			commands.group(humanLabel);
 
 			const facts = new Map<string, string>();
 			const startedAt = now();
@@ -626,7 +720,7 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 			let completed = 0;
 
 			const summary = (): string =>
-				`${label}: ${String(completed)}/${String(options.total)}`;
+				`${humanLabel}: ${String(completed)}/${String(options.total)}`;
 
 			try {
 				const value = await body({
@@ -642,8 +736,14 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 						lastEmitAt = at;
 						line(summary());
 					},
-					fact(factLabel, factValue) {
-						facts.set(factLabel, String(factValue));
+					fact(factLabel, factValue, display) {
+						if (!shouldDisplay(presentation, display?.level)) {
+							return;
+						}
+						facts.set(
+							display?.humanLabel ?? factLabel,
+							String(display?.humanValue ?? factValue)
+						);
 					},
 					warn: emitWarn
 				});
@@ -662,14 +762,12 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 			}
 		},
 
-		async steps(label, body) {
-			commands.group(label);
+		async steps(label, body, display) {
+			commands.group(display?.humanLabel ?? label);
 
 			try {
 				const value = await body({
-					message: (message) => {
-						line(message);
-					},
+					message: humanLine,
 					group: addGroup,
 					warn: emitWarn
 				});
@@ -686,6 +784,9 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 		},
 
 		result(payload) {
+			if (payload.title !== undefined) {
+				line(payload.title);
+			}
 			if (payload.rows.length === 0) {
 				if (payload.empty !== undefined) {
 					line(payload.empty);
@@ -705,17 +806,16 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 
 		warn: emitWarn,
 
-		info(message) {
-			line(message);
+		info: humanLine,
+
+		success(message, display) {
+			if (!shouldDisplay(presentation, display?.level)) {
+				return;
+			}
+			commands.notice(display?.humanMessage ?? message);
 		},
 
-		success(message) {
-			commands.notice(message);
-		},
-
-		step(message) {
-			line(message);
-		},
+		step: humanLine,
 
 		error(error) {
 			emitError(error);

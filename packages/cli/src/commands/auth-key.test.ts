@@ -88,7 +88,7 @@ describe('runAuthKeyList', () => {
 
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
-			infos: ['No auth keys.']
+			infos: ['No tenant access-token keys.']
 		});
 	});
 });
@@ -128,7 +128,7 @@ describe('runAuthKeyRotate', () => {
 						label: 'Scheduled retirement',
 						value: '2026-01-01 00:20 UTC'
 					},
-					{ label: 'Keys in set', value: '2' }
+					{ label: 'Access-token keys', value: '2' }
 				]
 			],
 			infos: ['New tokens are signed with this key.']
@@ -161,6 +161,7 @@ describe('runAuthKeyRetire', () => {
 			results: [
 				{
 					kind: 'auth-key',
+					title: 'Tenant access-token key',
 					data: response,
 					rows: [
 						{ label: 'Key', value: 'kid-old' },

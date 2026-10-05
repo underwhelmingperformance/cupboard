@@ -385,7 +385,9 @@ export async function onboardDeployment(
 
 	const currentInstance = await ui
 		.reporter()
-		.phase('Reading instance identity', () => client.getInstance(credential));
+		.phase('Reading instance identity', () => client.getInstance(credential), {
+			humanLabel: 'Checking deployment identity'
+		});
 	const instanceName =
 		options.instanceName ??
 		(currentInstance.state === 'configured'
@@ -394,8 +396,10 @@ export async function onboardDeployment(
 
 	await ui
 		.reporter()
-		.phase('Configuring instance identity', () =>
-			client.initialiseInstance(credential, instanceName)
+		.phase(
+			'Configuring instance identity',
+			() => client.initialiseInstance(credential, instanceName),
+			{ humanLabel: 'Configuring deployment identity' }
 		);
 
 	// Read before creating: a re-run against an initialised deployment must
@@ -414,12 +418,14 @@ export async function onboardDeployment(
 	// stay reachable. A fresh deploy has none yet; the create below establishes
 	// the first tenant's gate itself.
 	if (existing.length > 0) {
-		await ui
-			.reporter()
-			.phase('Refreshing tenant membership', async (context) => {
+		await ui.reporter().phase(
+			'Refreshing tenant membership',
+			async (context) => {
 				const { tenants } = await client.rebuildMembership(credential);
 				context.fact('tenants', tenants);
-			});
+			},
+			{ humanLabel: 'Checking tenant access' }
+		);
 	}
 
 	if (existing.length > 0 && options.cacheSlug !== undefined) {
@@ -654,14 +660,16 @@ async function ensureWorkerR2(dependencies: {
 	throwIfAborted(dependencies.signal);
 
 	try {
-		report = await ui
-			.reporter()
-			.phase('Checking the R2 credentials on the Worker', async (context) => {
+		report = await ui.reporter().phase(
+			'Checking the R2 credentials on the Worker',
+			async (context) => {
 				const answered = await client.controlCheck(credential);
 				context.fact('r2', describeR2Check(answered.r2));
 
 				return answered.r2;
-			});
+			},
+			{ humanLabel: 'Checking stored storage credentials' }
+		);
 	} catch (error) {
 		// An older deployment has no check route; the credentials stay
 		// unproven.
@@ -702,15 +710,16 @@ async function ensureWorkerR2(dependencies: {
 			return;
 		}
 
-		const probe = await ui
-			.reporter()
-			.phase('Checking the new pair against R2', () =>
+		const probe = await ui.reporter().phase(
+			'Checking the new pair against R2',
+			() =>
 				dependencies.check({
 					accountId: r2.accountId,
 					bucketName: r2.bucketName,
 					credentials: pair
-				})
-			);
+				}),
+			{ humanLabel: 'Checking replacement storage credentials' }
+		);
 
 		if (probe.kind === 'rejected') {
 			ui.warn(
@@ -736,9 +745,9 @@ async function ensureWorkerR2(dependencies: {
 			return;
 		}
 
-		await ui
-			.reporter()
-			.phase('Setting the new credentials on the Worker', async () => {
+		await ui.reporter().phase(
+			'Setting the new credentials on the Worker',
+			async () => {
 				await dependencies.api.putSecret(dependencies.tenantScriptName, {
 					name: 'R2_ACCESS_KEY_ID',
 					text: pair.accessKeyId
@@ -747,7 +756,9 @@ async function ensureWorkerR2(dependencies: {
 					name: 'R2_SECRET_ACCESS_KEY',
 					text: pair.secretAccessKey
 				});
-			});
+			},
+			{ humanLabel: 'Updating storage credentials' }
+		);
 
 		// The Durable Object keeps its old env until it restarts on the new
 		// Worker version, so the deployment may answer with the old pair for
@@ -878,6 +889,7 @@ function claimFailureAdviceText(url: URL, advice: ClaimFailureAdvice): string {
  * response from `/signup`, when there was one, and `status` selects `advice`.
  */
 export class DeploymentClaimFailedError extends CliError {
+	override readonly humanMessage: string;
 	readonly advice: ClaimFailureAdvice;
 
 	constructor(
@@ -894,6 +906,7 @@ export class DeploymentClaimFailedError extends CliError {
 			options
 		);
 		this.name = 'DeploymentClaimFailedError';
+		this.humanMessage = `Administrator setup failed at ${url.origin}. ${claimFailureAdviceText(url, advice)} Use --debug for the diagnostic.`;
 		this.advice = advice;
 	}
 }
@@ -903,6 +916,7 @@ export class DeploymentClaimFailedError extends CliError {
  * machine, so the steps that need an admin token cannot run.
  */
 export class AdminSessionNotCachedError extends CliError {
+	override readonly humanMessage: string;
 	constructor(
 		public readonly url: URL,
 		public readonly admin: OwnerBinding,
@@ -919,6 +933,7 @@ export class AdminSessionNotCachedError extends CliError {
 			options
 		);
 		this.name = 'AdminSessionNotCachedError';
+		this.humanMessage = `Administrator setup succeeded, but the sign-in could not be saved on this machine. Sign in with \`${adminLoginCommand(url, admin)}\`, then rerun cupboard deploy to finish setup.`;
 	}
 }
 
@@ -927,6 +942,7 @@ export class AdminSessionNotCachedError extends CliError {
  * one that the operator confirmed before the upload.
  */
 export class ClaimantChangedError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor(
 		public readonly confirmed: Claimant,
 		public readonly presented: Principal | undefined
@@ -1006,17 +1022,21 @@ async function claimDeployment(dependencies: {
 		const target = parseWorkerUrl(dependencies.url);
 
 		try {
-			await ui.reporter().phase('Caching the admin session', async () => {
-				const exchanged = await client.tokenExchange(
-					idToken,
-					subjectTokenTypeIdToken
-				);
+			await ui.reporter().phase(
+				'Caching the admin session',
+				async () => {
+					const exchanged = await client.tokenExchange(
+						idToken,
+						subjectTokenTypeIdToken
+					);
 
-				await dependencies.cacheSession(
-					sessionFromTokenResponse(exchanged),
-					target
-				);
-			});
+					await dependencies.cacheSession(
+						sessionFromTokenResponse(exchanged),
+						target
+					);
+				},
+				{ humanLabel: 'Saving administrator sign-in' }
+			);
 		} catch (error) {
 			if (isAbortError(error)) {
 				throw error;
@@ -1159,6 +1179,7 @@ async function presentClaim(
  * needs the audience for its owner trust rule.
  */
 export class OwnerAudienceUnknownError extends CliError {
+	override readonly humanMessage: string;
 	constructor(public readonly owner: OwnerBinding) {
 		super(
 			`The control database records no audience for the admin ` +
@@ -1167,6 +1188,8 @@ export class OwnerAudienceUnknownError extends CliError {
 				'`--owner-issuer`, `--owner-subject` and `--owner-audience`.'
 		);
 		this.name = 'OwnerAudienceUnknownError';
+		this.humanMessage =
+			'The deployment administrator’s sign-in settings are incomplete. Follow the recovery procedure in docs/operator/deploying.md before rerunning deployment.';
 	}
 }
 
@@ -1175,6 +1198,7 @@ export class OwnerAudienceUnknownError extends CliError {
  * another.
  */
 export class FirstCacheSlugTakenError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor(
 		public readonly slug: string,
 		options: { readonly cause: unknown }
@@ -1319,34 +1343,38 @@ async function pollProbe<T>(
 	let lastStatus: number | undefined;
 	let lastRay: string | undefined;
 
-	await ui.reporter().phase(label, async (context) => {
-		for (let attempt = 1; attempt <= attempts; attempt += 1) {
-			throwIfAborted(signal);
+	await ui.reporter().phase(
+		label,
+		async (context) => {
+			for (let attempt = 1; attempt <= attempts; attempt += 1) {
+				throwIfAborted(signal);
 
-			const probed = await attemptProbe(probe);
+				const probed = await attemptProbe(probe);
 
-			if (probed.kind === 'ready') {
-				ready = { value: probed.value };
-				return;
+				if (probed.kind === 'ready') {
+					ready = { value: probed.value };
+					return;
+				}
+
+				lastProbe = probed.detail;
+				lastStatus = probed.status;
+				lastRay = probed.ray;
+
+				if (probed.kind === 'stop') {
+					return;
+				}
+
+				if (!(attempt < attempts)) {
+					continue;
+				}
+
+				context.fact('attempt', attempt, { level: 'debug' });
+				context.fact('last probe', probed.detail, { level: 'debug' });
+				await delayMs(attemptDelayMs, { delay: sleep, signal });
 			}
-
-			lastProbe = probed.detail;
-			lastStatus = probed.status;
-			lastRay = probed.ray;
-
-			if (probed.kind === 'stop') {
-				return;
-			}
-
-			if (!(attempt < attempts)) {
-				continue;
-			}
-
-			context.fact('attempt', attempt);
-			context.fact('last probe', probed.detail);
-			await delayMs(attemptDelayMs, { delay: sleep, signal });
-		}
-	});
+		},
+		{ humanLabel: 'Checking deployment availability' }
+	);
 
 	return ready === undefined
 		? { kind: 'gave-up', lastProbe, lastStatus, lastRay }

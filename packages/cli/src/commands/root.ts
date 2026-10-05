@@ -380,6 +380,7 @@ export async function runRootEnsure(
 
 	reporter.result({
 		kind: 'root-ensure',
+		title: 'Retention root',
 		data: result,
 		rows:
 			result.status === 'retained'
@@ -418,10 +419,11 @@ export async function runRootSet(
 
 	reporter.result({
 		kind: 'root',
+		title: 'Retention root',
 		data: summary,
 		rows: [
 			{ label: 'Root', value: summary.name },
-			{ label: 'Targets', value: String(summary.targets.length) },
+			{ label: 'Store paths', value: String(summary.targets.length) },
 			{ label: 'Expiry', value: describeExpiry(summary) }
 		]
 	});
@@ -450,6 +452,7 @@ export async function runRootList(
 
 	reporter.result({
 		kind: 'roots',
+		title: 'Retention roots',
 		data: roots,
 		rows: roots.map((root) => rootListRow(root)),
 		empty: 'No retention roots.'
@@ -483,6 +486,7 @@ export async function runRootTargets(
 
 	reporter.result({
 		kind: 'root-targets',
+		title: 'Retained store paths',
 		data: targets,
 		rows: targets.map((target) => ({
 			label: target.storePath,
@@ -500,7 +504,8 @@ export async function runRootRemove(
 ): Promise<void> {
 	const outcome = await ui.confirm({
 		message: `Remove retention root ${name}?`,
-		detail: 'Paths kept only by this root become eligible for collection.'
+		detail:
+			'Paths kept only by this root may be deleted after any grace period expires.'
 	});
 
 	if (outcome !== 'yes') {
@@ -515,6 +520,7 @@ export async function runRootRemove(
 
 	reporter.result({
 		kind: 'root',
+		title: 'Retention root',
 		data: result,
 		rows: [
 			{ label: 'Root', value: result.name },
@@ -526,7 +532,7 @@ export async function runRootRemove(
 function rootListRow(root: RootListEntry): ResultRow {
 	return {
 		label: root.name,
-		value: `${String(root.targetCount)} target(s); ${describeExpiry(root)}`
+		value: `${String(root.targetCount)} store ${root.targetCount === 1 ? 'path' : 'paths'}; ${describeExpiry(root)}`
 	};
 }
 

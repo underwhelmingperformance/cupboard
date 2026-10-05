@@ -1253,9 +1253,16 @@ describe('bundle attachment transport', () => {
 });
 
 describe('runAttestAttach', () => {
-	it.each(['terminal', 'json', 'github'] as const)(
-		'records each bundle in %s output and result files, then reuses confirmed attachments on retry',
-		async (mode) => {
+	it.each(
+		(['terminal', 'json', 'github'] as const).flatMap((mode) =>
+			(['summary', 'details'] as const).map((presentation) => ({
+				mode,
+				presentation
+			}))
+		)
+	)(
+		'records each bundle in $mode/$presentation output and result files, then reuses confirmed attachments on retry',
+		async ({ mode, presentation }) => {
 			const directory = await mkdtemp(
 				path.join(tmpdir(), 'cupboard-attach-partial-')
 			);
@@ -1287,6 +1294,7 @@ describe('runAttestAttach', () => {
 				const resultFile = path.join(directory, 'result.jsonl');
 				const ui = createCliUi({
 					mode,
+					presentation,
 					colour: false,
 					stream,
 					out: stream,
@@ -1338,13 +1346,17 @@ describe('runAttestAttach', () => {
 					outputContainsPairs:
 						outputText.includes(firstDigest) &&
 						outputText.includes(secondDigest),
-					recoveryAdviceAfterPairs:
+					recoveryAdviceAfterOutcome:
 						outputText.indexOf(recoveryAdvice) >
-						outputText.indexOf(secondDigest)
+						outputText.indexOf(
+							presentation === 'summary' && mode !== 'json'
+								? 'attachment outcome unknown'
+								: secondDigest
+						)
 				}).toStrictEqual({
 					results: [partial],
-					outputContainsPairs: true,
-					recoveryAdviceAfterPairs: mode !== 'json'
+					outputContainsPairs: mode === 'json' || presentation === 'details',
+					recoveryAdviceAfterOutcome: mode !== 'json'
 				});
 				client.negotiateAttestations = (body) =>
 					Promise.resolve({
@@ -1574,6 +1586,7 @@ describe('runAttestAttach', () => {
 			payloads: [
 				{
 					kind: 'attestation-attach-summary',
+					title: 'Attestation attachment',
 					data: {
 						attached: 1,
 						reused: 1,
@@ -1595,14 +1608,17 @@ describe('runAttestAttach', () => {
 					rows: [
 						{
 							label: 'Attestations',
-							value: '1 attached, 1 reused, 0 unservable'
+							value: '1 attached, 1 already attached, 0 unavailable'
 						},
 						{
 							label: 'Attestation upload',
 							value: expect.any(String) as string
 						},
-						{ label: StorePath.hash(appPath), value: 'attached' },
-						{ label: StorePath.hash(runtimePath), value: 'already attached' }
+						{ label: StorePath.basename(appPath), value: 'attached' },
+						{
+							label: StorePath.basename(runtimePath),
+							value: 'already attached'
+						}
 					]
 				}
 			]

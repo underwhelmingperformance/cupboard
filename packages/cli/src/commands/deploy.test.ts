@@ -14,15 +14,21 @@ vi.mock('../deploy/command.ts', () => ({ executeDeploy: vi.fn() }));
 describe('init result file', () => {
 	it.each(
 		['init', 'deploy'].flatMap((command) =>
-			['--cache', '--tenant'].map((flag) => ({ command, flag }))
+			['--cache', '--tenant'].flatMap((flag) =>
+				[
+					{ options: [], presentation: 'summary' },
+					{ options: ['--details'], presentation: 'details' },
+					{ options: ['--debug'], presentation: 'debug' }
+				].map((selection) => ({ command, flag, ...selection }))
+			)
 		)
 	)(
-		'parses the first tenant through $command $flag',
-		async ({ command, flag }) => {
+		'parses the first tenant through $command $flag with $presentation output',
+		async ({ command, flag, options, presentation }) => {
 			vi.mocked(executeDeploy).mockReset();
 			vi.mocked(executeDeploy).mockResolvedValue();
 			await buildProgram().parseAsync(
-				[command, flag, 'acme', '--access', 'private', '--yes'],
+				[command, flag, 'acme', '--access', 'private', '--yes', ...options],
 				{ from: 'user' }
 			);
 			expect(vi.mocked(executeDeploy).mock.calls).toStrictEqual([
@@ -38,6 +44,7 @@ describe('init result file', () => {
 					{
 						signal: undefined,
 						colour: undefined,
+						presentation,
 						resultFile: undefined
 					}
 				]

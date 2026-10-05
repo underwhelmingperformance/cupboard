@@ -56,7 +56,8 @@ import {
 	buildPushPhases,
 	formatCount,
 	type Reporter,
-	type ResultRow
+	type ResultRow,
+	shouldShowDetails
 } from '@cupboard/reporter';
 import { withCleanups } from '@cupboard/shared/cleanup';
 import { genericExitCode } from '@cupboard/shared/errors';
@@ -79,6 +80,7 @@ import {
 	type UntrustedDaemonError
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
+import { formatHumanError } from '../human-errors.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import {
@@ -270,7 +272,11 @@ export async function runBuildPush(
 		);
 	}
 
-	reporter.info(buildPushModeDescription(mode));
+	reporter.info(buildPushModeDescription(mode), {
+		humanMessage: shouldShowDetails(reporter)
+			? buildPushModeDescription(mode)
+			: 'Publishing outputs as the build finishes.'
+	});
 
 	return runStreamedBuildPush(options, reporter, dependencies, mode.preflight);
 }
@@ -430,7 +436,12 @@ async function runProtectedStreamedBuildPush(
 						? error.cause.message
 						: error.message;
 
-				reporter.warn(label, reason);
+				reporter.warn(label, reason, {
+					humanMessage:
+						error instanceof BuildEventHandlingError
+							? `Completed outputs could not be kept in the local store: ${formatHumanError(error.cause, { debug: reporter.presentation === 'debug' })}`
+							: `Could not identify completed outputs for publication: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
+				});
 			}
 		});
 	} catch (error) {
@@ -1080,7 +1091,14 @@ async function runReconciledLocalBuildPush(
 		throw reason;
 	}
 
-	reporter.info(buildPushModeDescription({ kind: 'reconciled-local', reason }));
+	reporter.info(
+		buildPushModeDescription({ kind: 'reconciled-local', reason }),
+		{
+			humanMessage: shouldShowDetails(reporter)
+				? buildPushModeDescription({ kind: 'reconciled-local', reason })
+				: 'Outputs will be published after the build finishes.'
+		}
+	);
 
 	const { build } = invocation;
 	const directory = planInvocationDirectory({
@@ -1536,16 +1554,32 @@ async function settleRun(
 	const { exit, batcher } = facts;
 
 	try {
-		await reporter.phase(buildPushPhases.queue, (ctx) => {
-			ctx.fact('accepted', formatCount(facts.eventPaths.length));
-			ctx.fact('queue depth', formatCount(facts.maxQueueDepth));
-		});
+		await reporter.phase(
+			buildPushPhases.queue,
+			(ctx) => {
+				ctx.fact('accepted', formatCount(facts.eventPaths.length), {
+					humanLabel: 'completed paths observed'
+				});
+				ctx.fact('queue depth', formatCount(facts.maxQueueDepth), {
+					level: 'debug'
+				});
+			},
+			{ humanLabel: 'Publishing completed outputs' }
+		);
 
-		await reporter.phase(buildPushPhases.upload, async (ctx) => {
-			await batcher.drain();
-			ctx.fact('outcomes', formatCount(batcher.outcomes.size));
-			ctx.fact('remaining', formatCount(batcher.candidates.length));
-		});
+		await reporter.phase(
+			buildPushPhases.upload,
+			async (ctx) => {
+				await batcher.drain();
+				ctx.fact('outcomes', formatCount(batcher.outcomes.size), {
+					level: 'debug'
+				});
+				ctx.fact('remaining', formatCount(batcher.candidates.length), {
+					humanLabel: 'paths still waiting'
+				});
+			},
+			{ humanLabel: 'Uploading missing paths' }
+		);
 
 		const declaredIntermediates = new Set(options.intermediatePaths);
 		const targetPaths =
@@ -1624,11 +1658,14 @@ async function settleRun(
 					})
 				});
 
-				ctx.fact('servable', formatCount(reconciled.receipt.paths.length));
+				ctx.fact('servable', formatCount(reconciled.receipt.paths.length), {
+					humanLabel: 'available paths'
+				});
 				ctx.fact('failed', formatCount(reconciled.receipt.failed?.length ?? 0));
 
 				return reconciled;
-			}
+			},
+			{ humanLabel: 'Checking published outputs' }
 		);
 
 		const clearedRoot =
@@ -1639,14 +1676,20 @@ async function settleRun(
 			clearedRoot === undefined
 				? result
 				: { ...result, roots: [...result.roots, clearedRoot] };
-		await reporter.phase(buildPushPhases.retention, (ctx) => {
-			const applied = settledResult.roots.filter((root) => root.applied).length;
+		await reporter.phase(
+			buildPushPhases.retention,
+			(ctx) => {
+				const applied = settledResult.roots.filter(
+					(root) => root.applied
+				).length;
 
-			ctx.fact(
-				'roots',
-				`${formatCount(applied)}/${formatCount(settledResult.roots.length)} replaced`
-			);
-		});
+				ctx.fact(
+					'roots',
+					`${formatCount(applied)}/${formatCount(settledResult.roots.length)} replaced`
+				);
+			},
+			{ humanLabel: 'Updating retention roots' }
+		);
 
 		await writeReceiptFile(options.receiptFile, {
 			...result.receipt,
@@ -1755,15 +1798,15 @@ function reportBuildSummary(
 		{ label: 'Store', value: summary.store },
 		{ label: 'Targets', value: formatCount(summary.targetPaths) },
 		{ label: 'Uploaded paths', value: formatCount(summary.uploadedPaths) },
-		{ label: 'Skipped', value: formatCount(summary.skipped) },
+		{ label: 'Paths without upload', value: formatCount(summary.skipped) },
 		{
-			label: 'Child exit status',
+			label: 'Build exit status',
 			value: formatCount(summary.childExitStatus)
 		},
 		...(summary.unconfirmedPaths.length > 0
 			? [
 					{
-						label: 'Unconfirmed',
+						label: 'Availability not confirmed',
 						value: formatCount(summary.unconfirmedPaths.length)
 					}
 				]
@@ -1773,6 +1816,7 @@ function reportBuildSummary(
 
 	reporter.result({
 		kind: buildSummaryResultKind,
+		title: 'Build and publication result',
 		data: validated.success ? validated.data : summary,
 		rows
 	});

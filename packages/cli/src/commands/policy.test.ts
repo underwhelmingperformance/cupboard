@@ -64,7 +64,7 @@ describe('runPolicyList', () => {
 
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
-			infos: ['No retention policies.']
+			infos: ['No old retention policies awaiting upgrade.']
 		});
 	});
 });
@@ -94,6 +94,7 @@ describe('runPolicyRemove', () => {
 			results: [
 				{
 					kind: 'retention-policy',
+					title: 'Old retention policy',
 					data: response,
 					rows: [
 						{ label: 'Policy', value: 'p1' },
@@ -162,7 +163,7 @@ describe('runGracePolicyList', () => {
 
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
-			infos: ['No retention grace policies.']
+			infos: ['No old grace policies awaiting upgrade.']
 		});
 	});
 });
@@ -192,6 +193,7 @@ describe('runGracePolicyRemove', () => {
 			results: [
 				{
 					kind: 'grace-policy',
+					title: 'Old grace policy',
 					data: response,
 					rows: [
 						{ label: 'Policy', value: 'g1' },

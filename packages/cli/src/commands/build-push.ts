@@ -181,7 +181,10 @@ export function betweenCohortCollector(
 
 		reporter.warn(
 			'collection failed',
-			`nix store gc exited ${String(childExitCode(exit))}; the next cohort builds with the store as it stands`
+			`nix store gc exited ${String(childExitCode(exit))}; the next cohort builds with the store as it stands`,
+			{
+				humanMessage: `Local store cleanup exited ${String(childExitCode(exit))}; the next build uses the remaining local store paths.`
+			}
 		);
 	};
 }
@@ -477,7 +480,7 @@ export function registerBuildPushCommand(
 		.addOption(
 			new Option(
 				'--publication-scope <scope>',
-				'Control which paths build-push publishes for installable cohorts. `outputs` publishes the selected outputs; `built` also publishes observed build intermediates; `closure` also publishes their runtime references. Publication starts after the build.'
+				'choose which paths to publish for selected installables: `outputs` publishes their outputs; `built` includes intermediates built in this run; `closure` includes runtime dependencies. Publication starts after the build.'
 			)
 				.choices(['outputs', 'built', 'closure'])
 				.conflicts(['closure', 'intermediatePathsFile'])
@@ -521,7 +524,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--receipt-file <path>',
-			'write the build receipt (JSON) to this file. With several cohorts, the file contains {"receipts": [...]}, in cohort order.'
+			'write the build and publication results as a JSON receipt. With several builds, the file contains {"receipts": [...]}, in build order.'
 		)
 		.option(
 			'--aggregate-receipt-v3',
@@ -529,7 +532,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--cohorts-file <path>',
-			'JSON file that lists several builds (cohorts) to run in order, each {"command": [...]} or {"installables": [...]}. Use it instead of a build command after --.'
+			'JSON file of builds to run in order, each {"command": [...]} or {"installables": [...]}. Use it instead of a build command after --.'
 		)
 		.option(
 			'--gc-between-cohorts',
@@ -537,7 +540,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--keep-going-cohorts',
-			'run the remaining cohorts after one fails. The first failure without validated target-build evidence determines the exit status; otherwise the first target build failure does.'
+			'run the remaining builds after one fails. A setup, publishing or command failure takes precedence over a failure to build the requested targets.'
 		)
 		.addHelpText(
 			'after',

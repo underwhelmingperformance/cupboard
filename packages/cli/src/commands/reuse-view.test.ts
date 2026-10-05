@@ -114,7 +114,8 @@ describe('runReuseViewList', () => {
 			[
 				{
 					label: 'reuse',
-					value: 'public; revision 1; priority 50; cache:release, prefix:pr-'
+					value:
+						'public; Nix priority 50; Cache release, Caches starting with pr-'
 				}
 			]
 		]);
@@ -136,7 +137,7 @@ describe('runReuseViewList', () => {
 			[
 				{
 					label: 'reuse',
-					value: 'public; revision 1; priority 50; all'
+					value: 'public; Nix priority 50; All caches'
 				}
 			]
 		]);
@@ -158,21 +159,71 @@ describe('runReuseViewList', () => {
 });
 
 describe('runReuseViewSet', () => {
+	it.each(['summary', 'details', 'debug'] as const)(
+		'prints a usable view URL and reserves revision for debug (%s)',
+		async (presentation) => {
+			const rows: ResultRow[][] = [];
+			const data: unknown[] = [];
+			const capture = reporter(rows);
+
+			await runReuseViewSet(
+				'reuse',
+				'public',
+				summary.selectors,
+				undefined,
+				{
+					...capture,
+					presentation,
+					result(payload) {
+						data.push(payload.data);
+						capture.result(payload);
+					}
+				},
+				{ set: () => Promise.resolve(summary) },
+				new URL('https://cupboard.example.workers.dev/t/acme')
+			);
+
+			expect({ rows, data }).toStrictEqual({
+				data: [summary],
+				rows: [
+					[
+						{ label: 'View', value: 'reuse' },
+						{
+							label: 'View URL',
+							value: 'https://cupboard.example.workers.dev/t/acme/reuse/reuse'
+						},
+						{ label: 'Access', value: 'public' },
+						{ label: 'Priority', value: '50' },
+						{
+							label: 'Included caches',
+							value: 'Cache release, Caches starting with pr-'
+						},
+						...(presentation === 'summary'
+							? []
+							: [{ label: 'Selectors', value: 'cache:release, prefix:pr-' }]),
+						...(presentation === 'debug'
+							? [{ label: 'Revision', value: '1' }]
+							: [])
+					]
+				]
+			});
+		}
+	);
 	it.each([
 		{
 			name: 'named and prefix selectors, explicit priority',
 			selectors: [parseSelector('cache:release'), parseSelector('prefix:pr-')],
 			priority: reuseViewPrioritySchema.parse(10),
 			row: {
-				label: 'Selectors',
-				value: 'cache:release, prefix:pr-'
+				label: 'Included caches',
+				value: 'Cache release, Caches starting with pr-'
 			}
 		},
 		{
 			name: 'the all selector',
 			selectors: [parseSelector('all')],
 			priority: undefined,
-			row: { label: 'Selectors', value: 'all' }
+			row: { label: 'Included caches', value: 'All caches' }
 		}
 	])(
 		'passes the selectors and priority through, reporting the summary for $name',
@@ -217,7 +268,6 @@ describe('runReuseViewSet', () => {
 					[
 						{ label: 'View', value: 'reuse' },
 						{ label: 'Access', value: 'public' },
-						{ label: 'Revision', value: String(response.revision) },
 						{ label: 'Priority', value: String(response.priority) },
 						row
 					]
@@ -248,6 +298,7 @@ describe('runReuseViewRemove', () => {
 			results: [
 				{
 					kind: 'reuse-view',
+					title: 'Reuse view',
 					data: response,
 					rows: [
 						{ label: 'View', value: 'reuse' },
@@ -272,6 +323,7 @@ describe('runReuseViewRemove', () => {
 		expect(captured.results).toStrictEqual([
 			{
 				kind: 'reuse-view',
+				title: 'Reuse view',
 				data: response,
 				rows: [
 					{ label: 'View', value: 'reuse' },
@@ -330,9 +382,8 @@ describe('a private view summary', () => {
 				[
 					{ label: 'View', value: 'reuse' },
 					{ label: 'Access', value: 'private' },
-					{ label: 'Revision', value: '1' },
 					{ label: 'Priority', value: '50' },
-					{ label: 'Selectors', value: 'prefix:pr-' }
+					{ label: 'Included caches', value: 'Caches starting with pr-' }
 				]
 			]
 		});

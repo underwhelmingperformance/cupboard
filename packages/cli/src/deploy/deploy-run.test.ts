@@ -23,6 +23,7 @@ import type { WorkerConfig } from './config.ts';
 import type { DeployDependencies } from './deploy-run.ts';
 import {
 	collectResources,
+	deploymentReviewRows,
 	hasMatchingBindings,
 	runDeploy as runPlannedDeploy
 } from './deploy-run.ts';
@@ -2167,5 +2168,84 @@ describe('reviewed deployment plan', () => {
 				}
 			]
 		});
+	});
+});
+
+describe('deployment review for operators', () => {
+	it('marks an offline preview as unchecked and excludes implementation facts', () => {
+		const rows = deploymentReviewRows(
+			planDeployment(artifact, { kind: 'offline' }, undefined, testTransitions),
+			{ control: [], tenant: [] },
+			undefined
+		);
+		expect(rows).toContainEqual({
+			label: 'Checks',
+			value:
+				'Account, existing resources, credentials and tenant readiness have not been checked.'
+		});
+		expect(rows.map((row) => row.label)).not.toContain('D1 migrations');
+		expect(rows.some((row) => row.label.startsWith('Transition '))).toBe(false);
+	});
+	it('does not mistake the data-step preflight for complete tenant readiness', () => {
+		const plan = planDeployment(
+			artifact,
+			{
+				kind: 'existing',
+				transitions: new Map(),
+				readiness: { pending: 0, stragglers: [] },
+				blocked: undefined,
+				unrecognised: []
+			},
+			undefined,
+			testTransitions
+		);
+		const rows = deploymentReviewRows(
+			plan,
+			{ control: [], tenant: [] },
+			undefined
+		);
+		expect(rows).toContainEqual({
+			label: 'Tenant readiness',
+			value:
+				'No pending data updates in the preflight check. Full readiness will be checked during deployment.'
+		});
+		expect(rows).toContainEqual({
+			label: 'Recovery',
+			value:
+				'Deploying an older release will not undo this upgrade. If deployment stops partway through, fix the reported problem and rerun it with the same release and source.'
+		});
+	});
+	it('disambiguates maintenance and failed-message queues in details', () => {
+		const planned = {
+			...artifact,
+			config: {
+				...artifact.config,
+				control: {
+					...artifact.config.control,
+					queueProducers: [],
+					queueConsumers: [
+						{
+							queue: 'maintenance',
+							deadLetterQueue: 'failed',
+							maxBatchSize: 1,
+							maxBatchTimeout: 1,
+							maxRetries: 1,
+							maxConcurrency: 1
+						}
+					]
+				}
+			}
+		};
+		const rows = deploymentReviewRows(
+			planDeployment(planned, { kind: 'offline' }, undefined, testTransitions),
+			{ control: [], tenant: [] },
+			undefined,
+			[],
+			'details'
+		);
+		expect(rows.filter((row) => row.label.includes('queue'))).toStrictEqual([
+			{ label: 'Dead-letter queue', value: 'failed' },
+			{ label: 'Maintenance queue', value: 'maintenance' }
+		]);
 	});
 });

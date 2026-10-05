@@ -105,9 +105,10 @@ describe('runKeyList', () => {
 			[
 				{
 					label: 'active',
+					raw: true,
 					value: 'signing and published; cupboard-acme-1:k1'
 				},
-				{ label: uuid, value: 'published only; cupboard-acme-2:k2' }
+				{ label: uuid, raw: true, value: 'published only; cupboard-acme-2:k2' }
 			]
 		]);
 	});
@@ -129,40 +130,137 @@ describe('runKeyList', () => {
 });
 
 describe('runKeyRotate', () => {
-	it('reports the new key and the background backfill', async () => {
-		const results: ResultRow[][] = [];
-		const infos: string[] = [];
-		const response = keyRotateResponseSchema.parse({
-			rotated: {
-				...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
-				backfill: runningBackfill
-			},
-			keys: [entry(), entry(uuid, 'signing', 'cupboard-acme-2:k2')]
-		});
+	it.each([
+		{ tenantUrl: undefined, statusTarget: '<tenant-url>' },
+		{
+			tenantUrl: new URL('https://cupboard.example.workers.dev/t/acme'),
+			statusTarget: 'https://cupboard.example.workers.dev/t/acme'
+		}
+	])(
+		'reports signature updates and a status command for $statusTarget',
+		async ({ tenantUrl, statusTarget }) => {
+			const results: ResultRow[][] = [];
+			const infos: string[] = [];
+			const response = keyRotateResponseSchema.parse({
+				rotated: {
+					...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+					backfill: runningBackfill
+				},
+				keys: [entry(), entry(uuid, 'signing', 'cupboard-acme-2:k2')]
+			});
 
-		await runKeyRotate(reporter(results, infos), {
-			rotate: () => Promise.resolve(response)
-		});
+			await runKeyRotate(
+				reporter(results, infos),
+				{ rotate: () => Promise.resolve(response) },
+				tenantUrl
+			);
 
-		expect({ results, infos }).toStrictEqual({
-			results: [
-				[
-					{ label: 'New key', value: uuid },
-					{ label: 'Public key', value: 'cupboard-acme-2:k2' },
-					{ label: 'Published keys', value: '2' }
+			expect({ results, infos }).toStrictEqual({
+				results: [
+					[
+						{ label: 'New key', value: uuid },
+						{ label: 'Public key', raw: true, value: 'cupboard-acme-2:k2' },
+						{ label: 'Published keys', value: '2' }
+					]
+				],
+				infos: [
+					"Add the new public key to every client's `trusted-public-keys` now. " +
+						'The server is updating signatures on existing store paths. Check ' +
+						`\`cupboard key status ${statusTarget}\` before retiring the old key once to stop it signing.`
 				]
-			],
-			infos: [
-				"Add the new public key to every client's `trusted-public-keys` now. " +
-					'The server is re-signing existing narinfos in the background. Use ' +
-					'`cupboard key status` to wait for completion before retiring the old ' +
-					'key once to stop it signing.'
-			]
-		});
-	});
+			});
+		}
+	);
 });
 
 describe('runKeyStatus', () => {
+	it('reports completed signature updates', async () => {
+		const { ui, captured } = fakeCliUi();
+		const response = keyListResponseSchema.parse({
+			keys: [
+				{
+					...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+					backfill: {
+						state: 'complete',
+						startedAt: '2026-01-01T00:00:00.000Z',
+						completedAt: '2026-01-01T00:01:00.000Z',
+						resigned: 12
+					}
+				}
+			]
+		});
+
+		await runKeyStatus(
+			ui.reporter(),
+			{ list: () => Promise.resolve(response) },
+			uuid
+		);
+
+		expect(captured.results).toStrictEqual([
+			{
+				kind: 'key-status',
+				title: 'Signing-key status',
+				data: response.keys,
+				rows: [
+					{ label: 'Key', value: uuid },
+					{ label: 'State', value: 'signing and published' },
+					{ label: 'Public key', raw: true, value: 'cupboard-acme-2:k2' },
+					{ label: 'Signature update', value: 'Signature update complete' },
+					{ label: 'Store paths updated', value: '12' }
+				],
+				empty: 'No signing keys.'
+			}
+		]);
+	});
+	it.each(['summary', 'details', 'debug'] as const)(
+		'shows retry progress without exposing cache-purge mechanics (%s)',
+		async (presentation) => {
+			const rows: ResultRow[][] = [];
+			const response = keyListResponseSchema.parse({
+				keys: [
+					{
+						...entry(uuid, 'signing', 'cupboard-acme-2:k2'),
+						backfill: {
+							...runningBackfill,
+							state: 'retrying',
+							resigned: 12,
+							remaining: 3,
+							failure: {
+								operation: 'cache-purge',
+								message: 'provider error',
+								failedAt: '2026-01-01T00:01:00.000Z'
+							}
+						}
+					}
+				]
+			});
+
+			await runKeyStatus(
+				{ ...reporter(rows), presentation },
+				{
+					list: () => Promise.resolve(response)
+				},
+				uuid
+			);
+
+			expect(rows).toStrictEqual([
+				[
+					{ label: 'Key', value: uuid },
+					{ label: 'State', value: 'signing and published' },
+					{ label: 'Public key', raw: true, value: 'cupboard-acme-2:k2' },
+					{ label: 'Signature update', value: 'Retrying signature updates' },
+					{ label: 'Store paths updated', value: '12' },
+					{ label: 'Remaining', value: '3' },
+					...(presentation === 'debug'
+						? [
+								{ label: 'Failed operation', value: 'cache-purge' },
+								{ label: 'Server error', value: 'provider error' }
+							]
+						: [])
+				]
+			]);
+		}
+	);
 	it('reports backfill progress for one selected key', async () => {
 		const results: ResultRow[][] = [];
 		const response = keyListResponseSchema.parse({
@@ -189,12 +287,12 @@ describe('runKeyStatus', () => {
 
 		expect(results).toStrictEqual([
 			[
-				{
-					label: uuid,
-					value:
-						'signing and published; cupboard-acme-2:k2; ' +
-						'backfill running (12 re-signed, 3 remaining)'
-				}
+				{ label: 'Key', value: uuid },
+				{ label: 'State', value: 'signing and published' },
+				{ label: 'Public key', raw: true, value: 'cupboard-acme-2:k2' },
+				{ label: 'Signature update', value: 'Updating signatures' },
+				{ label: 'Store paths updated', value: '12' },
+				{ label: 'Remaining', value: '3' }
 			]
 		]);
 	});
@@ -241,6 +339,7 @@ describe('runKeyRetire', () => {
 				results: [
 					{
 						kind: 'key',
+						title: 'Signing key',
 						data: response,
 						rows: [
 							{ label: 'Key', value: 'active' },
@@ -293,6 +392,7 @@ describe('runKeyAbort', () => {
 			results: [
 				{
 					kind: 'key',
+					title: 'Signing key',
 					data: response,
 					rows: [
 						{ label: 'Key', value: uuid },

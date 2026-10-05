@@ -17,6 +17,7 @@ export interface SettlementClient {
 
 export interface SettlementOptions {
 	readonly signal?: AbortSignal;
+	readonly url?: URL;
 	readonly delay?: Delay;
 	readonly now?: () => number;
 }
@@ -54,8 +55,10 @@ export async function settleTenants(
 		return initial;
 	}
 
-	return reporter.steps('Advancing tenant migrations', (log) =>
-		waitForTenants(client, log, options)
+	return reporter.steps(
+		'Advancing tenant migrations',
+		(log) => waitForTenants(client, log, options),
+		{ humanLabel: 'Updating tenants' }
 	);
 }
 
@@ -73,7 +76,8 @@ async function waitForTenants(
 	let previous: LocalStepStatus | undefined;
 
 	log.message(
-		`Enqueued wakes for ${String(woken.enqueued)} of ${String(woken.pending)} pending tenants`
+		`Enqueued wakes for ${String(woken.enqueued)} of ${String(woken.pending)} pending tenants`,
+		{ level: 'debug' }
 	);
 	log.message(
 		'Cancelling this command stops only the wait; tenant migrations continue on the server.'
@@ -95,7 +99,9 @@ async function waitForTenants(
 			}
 
 			warned.add(tenant.tenant);
-			log.warn('Stalled', stalledTenantText(tenant));
+			log.warn('Stalled', stalledTenantText(tenant), {
+				humanMessage: `${tenant.tenant}: tenant updates need attention. Inspect deployment status with --debug for the diagnostic.`
+			});
 		}
 
 		previous = status;
@@ -105,7 +111,10 @@ async function waitForTenants(
 		}
 
 		if (status.working === 0 && now() - wokenAt >= localStepStallWindowMs) {
-			throw new LocalStepUnreachedError({ kind: 'stalled', status });
+			throw new LocalStepUnreachedError(
+				{ kind: 'stalled', status },
+				options.url
+			);
 		}
 
 		await delayMs(localStepPollIntervalMs, {

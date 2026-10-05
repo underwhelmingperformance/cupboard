@@ -799,7 +799,7 @@ it('shows that a repair retains a matching rule with insufficient grants', async
 		ruleIds: ['stale', 'new-rule'],
 		added: 1,
 		preview:
-			'Keep existing rule\tstale does not grant every operation that the discovered jobs request. The repair adds a planned rule that grants them and has more claims than stale. stale stays active, but the server selects the planned rule for the runs that both rules match.'
+			'Keep existing rule\tstale does not allow all actions needed by the discovered jobs. The repair adds a more specific rule for those jobs. stale remains active for other matching runs. Review the new permissions below.'
 	});
 });
 
@@ -850,6 +850,11 @@ jobs:
 	});
 });
 
+const grantLines = (number: number): string[] => [
+	`Grant ${String(number)}.1\tCache packages: request publication of paths, check publication status, complete publication of uploaded paths, confirm paths and extend their retention, request attestation attachment, attach attestations, set retention roots, list retention roots`,
+	'Root restriction\tbuilds/ (root and descendants)'
+];
+
 it('shows the claims, cache, root and actions before confirmation', async () => {
 	const workflowContent = `
 on:
@@ -877,29 +882,6 @@ jobs:
 		dependencies,
 		check
 	);
-	const grantFields = `actions:
-  - upload:negotiate
-  - upload:status
-  - upload:commit
-  - upload:confirm
-  - attestation:negotiate
-  - attestation:attach
-  - root:set
-  - root:list
-resources:
-  cache:
-    kind: named
-    exact: packages
-    validate: cacheName
-  root:
-    exact: builds/
-    validate: rootName`
-		.split('\n')
-		.map((line) => `\t${line}`);
-	const grantLines = (number: number): string[] => [
-		`Grant ${String(number)}.1\tcupboard_cache`,
-		...grantFields
-	];
 
 	expect(captured.notes).toStrictEqual([
 		{
@@ -1032,7 +1014,7 @@ jobs:
 });
 
 it('reports a failed post-write check as a verification failure', async () => {
-	const { ui, client, dependencies, check } = await fixture();
+	const { ui, captured, client, dependencies, check } = await fixture();
 	const staleClient = {
 		...client,
 		oidcTrust: {
@@ -1063,12 +1045,16 @@ it('reports a failed post-write check as a verification failure', async () => {
 		error instanceof GithubRepairPartialError
 			? {
 					step: error.step,
+					title: captured.results.find(
+						(payload) => payload.kind === 'github-check-verified'
+					)?.title,
 					applied: error.applied,
 					isCheckFailure: error.cause instanceof GithubCheckFailedError
 				}
 			: error
 	).toStrictEqual({
 		step: 'verify the tenant after writing',
+		title: 'GitHub publishing access check',
 		applied: ['trust rule unavailable'],
 		isCheckFailure: true
 	});
@@ -2214,7 +2200,7 @@ it('previews preserved claims and grants before extending an existing rule', asy
 	);
 
 	expect(captured.notes[0]?.body).toContain(
-		'Extend existing rule\texisting: keep its claims, resources and existing grants; add the following grants atomically'
+		'Extend existing rule\texisting: keep its identity restrictions and existing permissions; add the permissions below'
 	);
 	expect(captured.notes[0]?.body).toContain('Claim repository_owner_id\t5678');
 	expect(captured.notes[0]?.body).toContain('systems');
@@ -3337,7 +3323,7 @@ it('reports an unconfirmed extension after cancellation and preserves exit statu
 });
 
 it('reports unverified jobs after the writes as an incomplete check', async () => {
-	const { ui, client, dependencies, check } = await fixture();
+	const { ui, captured, client, dependencies, check } = await fixture();
 	const guarded = content.replaceAll(
 		'    uses:',
 		"    if: inputs.publish == 'outputs'\n    uses:"
@@ -3368,12 +3354,16 @@ it('reports unverified jobs after the writes as an incomplete check', async () =
 		error instanceof GithubRepairPartialError
 			? {
 					step: error.step,
+					title: captured.results.find(
+						(payload) => payload.kind === 'github-check-verified'
+					)?.title,
 					applied: error.applied,
 					isIncomplete: error.cause instanceof GithubCheckIncompleteError
 				}
 			: error
 	).toStrictEqual({
 		step: 'verify the tenant after writing',
+		title: 'GitHub publishing access check',
 		applied: ['trust rule new-rule'],
 		isIncomplete: true
 	});

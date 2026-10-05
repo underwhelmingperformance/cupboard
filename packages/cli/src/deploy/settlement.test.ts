@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 import { isAbortError } from '../abort.ts';
 import { LocalStepUnreachedError } from '../errors.ts';
+import { formatHumanError } from '../human-errors.ts';
 
 import {
 	localStepPollIntervalMs,
@@ -325,4 +326,21 @@ describe('tenant settlement', () => {
 			calls: ['status', 'wake', 'status']
 		});
 	});
+});
+
+it('uses the known deployment URL in failed-wait recovery commands', async () => {
+	const clock = fakeClock();
+	const url = new URL('https://cupboard.example.workers.dev');
+	const initial = status({ ready: 0, unwoken: 1 });
+	const client = scriptedClient([initial], []);
+	const failure = await caughtFrom(
+		settleTenants(client, recordingReporter([]), {
+			now: clock.now,
+			delay: clock.delay,
+			url
+		})
+	);
+	expect(formatHumanError(failure)).toContain(
+		'cupboard deployment resume https://cupboard.example.workers.dev'
+	);
 });

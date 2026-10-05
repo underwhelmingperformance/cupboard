@@ -24,7 +24,7 @@ describe('describeNarOutcome', () => {
 		{
 			deleted: true,
 			narScheduledForDeletion: false,
-			expected: 'retained (still referenced)'
+			expected: 'cleanup status unknown; data may still be in use'
 		},
 		{ deleted: false, narScheduledForDeletion: false, expected: 'n/a' }
 	])(
@@ -77,15 +77,19 @@ describe('runDelete', () => {
 			results: [
 				{
 					kind: 'deleted-path',
+					title: 'Path removal',
 					data: {
 						storePathHash,
 						deleted: true,
 						narScheduledForDeletion: false
 					},
 					rows: [
-						{ label: 'Store path hash', value: storePathHash },
-						{ label: 'Deleted', value: 'yes' },
-						{ label: 'NAR', value: 'retained (still referenced)' }
+						{ label: 'Store path', value: `${storePathHash}-app` },
+						{ label: 'Availability', value: 'removed from this cache' },
+						{
+							label: 'Storage cleanup',
+							value: 'cleanup status unknown; data may still be in use'
+						}
 					]
 				}
 			]

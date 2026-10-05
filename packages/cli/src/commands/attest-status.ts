@@ -198,6 +198,7 @@ export function registerAttestStatusCommand(
 			const missing = entries.filter((entry) => entry.status === 'missing');
 			reporter.result({
 				kind: 'attestation-status',
+				title: 'Stored attestations (not verified)',
 				data: {
 					entries,
 					covered: covered.map((entry) => entry.storePathHash),

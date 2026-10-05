@@ -294,15 +294,13 @@ export function registerPlanCommands(
 	programOptions: ProgramOptions = {}
 ): void {
 	const plan = program
-		.command('plan')
-		.description(
-			"Internal steps of cupboard's flake publish workflow, not for direct use."
-		);
+		.command('plan', { hidden: true })
+		.description('Automation helpers used by the flake publish workflow.');
 
 	plan
 		.command('cohort')
 		.description(
-			'Internal step of the flake publish workflow, not for direct use. ' +
+			'Plan builds for a group of targets in the flake publish workflow. ' +
 				"Decide which of a cohort's targets to build and which the cache " +
 				'already has, and check that the store has room for the build.'
 		)
@@ -652,7 +650,8 @@ export async function runPlanCohort(
 					requeryUnknown: dependencies.requeryUnknown,
 					confirmUpstreamAvailability: dependencies.confirmUpstreamAvailability,
 					ceiling: options.ceiling
-				})
+				}),
+			{ humanLabel: 'Checking which targets need a build' }
 		);
 	} catch (error) {
 		if (error instanceof UnknownPathsCeilingError) {
@@ -721,6 +720,7 @@ export async function runPlanCohort(
 
 	reporter.result({
 		kind: 'plan-cohort',
+		title: 'Build plan',
 		data: result,
 		rows: [
 			{

@@ -219,7 +219,7 @@ describe('runRootSet', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Root', value: 'github:owner/repo/main' },
-				{ label: 'Targets', value: '1' },
+				{ label: 'Store paths', value: '1' },
 				{ label: 'Expiry', value: 'expires 2026-01-08 00:00 UTC' }
 			]
 		]);
@@ -361,10 +361,10 @@ describe('runRootList', () => {
 			],
 			results: [
 				[
-					{ label: 'main', value: '1 target(s); permanent' },
+					{ label: 'main', value: '1 store path; permanent' },
 					{
 						label: 'pr-123',
-						value: '3 target(s); expires 2026-01-08 00:00 UTC'
+						value: '3 store paths; expires 2026-01-08 00:00 UTC'
 					}
 				]
 			]
@@ -466,6 +466,7 @@ describe('runRootRemove', () => {
 			results: [
 				{
 					kind: 'root',
+					title: 'Retention root',
 					data: response,
 					rows: [
 						{ label: 'Root', value: 'pr-123' },

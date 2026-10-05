@@ -36,13 +36,13 @@ export function registerControlKeyCommands(
 	const controlKey = program
 		.command('control-key')
 		.description(
-			'Manage and rotate the keys that sign operator tokens (operator only).'
+			'Manage and rotate the keys that sign operator access tokens (operator only).'
 		);
 
 	controlKey
 		.command('list')
 		.description(
-			"List the deployment's control keys and any scheduled retirements."
+			"List the deployment's operator access-token keys and scheduled retirements."
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -58,7 +58,7 @@ export function registerControlKeyCommands(
 	controlKey
 		.command('rotate')
 		.description(
-			'Add a new control key, and schedule the old one to retire once its tokens have expired.'
+			'Add a new operator access-token key, and retire the old one after its tokens expire.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -74,10 +74,10 @@ export function registerControlKeyCommands(
 	controlKey
 		.command('retire')
 		.description(
-			'Retire an old control key now. Tokens that it signed stop working immediately.'
+			'Retire an old operator access-token key now. Tokens that it signed stop working immediately.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.argument('<kid>', 'control key ID')
+		.argument('<kid>', 'operator access-token key ID')
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: URL, kid: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -94,15 +94,18 @@ export async function runControlKeyList(
 	reporter: Reporter,
 	client: Pick<ControlKeyClient, 'list'>
 ): Promise<void> {
-	const { keys } = await reporter.phase('Listing control keys', () =>
-		client.list()
+	const { keys } = await reporter.phase(
+		'Listing control keys',
+		() => client.list(),
+		{ humanLabel: 'Listing operator access-token keys' }
 	);
 
 	reporter.result({
 		kind: 'control-keys',
+		title: 'Operator access-token keys',
 		data: keys,
 		rows: keys.map((key) => controlKeyRow(key)),
-		empty: 'No control keys.'
+		empty: 'No operator access-token keys.'
 	});
 }
 
@@ -110,12 +113,15 @@ export async function runControlKeyRotate(
 	reporter: Reporter,
 	client: Pick<ControlKeyClient, 'rotate'>
 ): Promise<void> {
-	const { kid, retiring } = await reporter.phase('Rotating control key', () =>
-		client.rotate()
+	const { kid, retiring } = await reporter.phase(
+		'Rotating control key',
+		() => client.rotate(),
+		{ humanLabel: 'Rotating operator access-token key' }
 	);
 
 	reporter.result({
 		kind: 'control-key-rotation',
+		title: 'Operator access-token key rotation',
 		data: { kid, retiring },
 		rows: [
 			{ label: 'New key', value: kid },
@@ -130,7 +136,9 @@ export async function runControlKeyRotate(
 					])
 		]
 	});
-	reporter.info('New control tokens are signed with this key.');
+	reporter.info('New control tokens are signed with this key.', {
+		humanMessage: 'New operator access tokens are signed with this key.'
+	});
 }
 
 export async function runControlKeyRetire(
@@ -139,8 +147,9 @@ export async function runControlKeyRetire(
 	client: ControlKeyClient
 ): Promise<void> {
 	const outcome = await ui.confirm({
-		message: `Retire control key ${kid}?`,
-		detail: 'Control tokens still signed by this key can no longer be verified.'
+		message: `Retire operator access-token key ${kid}?`,
+		detail:
+			'Existing operator access tokens signed with this key stop working immediately.'
 	});
 
 	if (outcome !== 'yes') {
@@ -149,12 +158,15 @@ export async function runControlKeyRetire(
 	}
 
 	const reporter = ui.reporter();
-	const result = await reporter.phase('Retiring control key', () =>
-		client.retire({ kid })
+	const result = await reporter.phase(
+		'Retiring control key',
+		() => client.retire({ kid }),
+		{ humanLabel: 'Retiring operator access-token key' }
 	);
 
 	reporter.result({
 		kind: 'control-key',
+		title: 'Operator access-token key',
 		data: result,
 		rows: [
 			{ label: 'Key', value: result.kid },

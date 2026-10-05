@@ -14,6 +14,27 @@ import {
 	trustSelectionFinding
 } from './trust-selection.ts';
 
+it('keeps machine findings unchanged while rendering operator permissions', () => {
+	const finding = new TrustRuleGrantMissingFinding(
+		'trust rule',
+		[rule],
+		refusedDetail
+	);
+	expect({
+		rendered: finding.render(),
+		serialised: finding.toJSON()
+	}).toStrictEqual({
+		rendered:
+			'failed: rule branch matches the job identity but does not permit complete publication of uploaded paths on cache private; add a rule with the required grant, or add a corrected rule and remove this one',
+		serialised: {
+			check: 'trust rule',
+			status: 'failed',
+			detail:
+				'rule branch matches the modelled claims but does not permit upload:commit on cache private; add a rule with the required grant, or add a corrected rule and remove this one'
+		}
+	});
+});
+
 it('describes an exact view read grant', () => {
 	const detail = authorizationDetailSchema.parse({
 		type: 'cupboard_view',
@@ -101,7 +122,7 @@ describe('trustSelectionFinding', () => {
 				refused
 			),
 			rendered:
-				'failed: rules branch, other match the modelled claims but implicit authority requires one rule; request explicit grants or distinguish their claims'
+				'failed: rules branch, other match this job identity, so the job must request specific permissions or the rules must use different identity restrictions'
 		},
 		{
 			name: 'missing grant on the sole matching rule',
@@ -117,8 +138,8 @@ describe('trustSelectionFinding', () => {
 				refusedDetail
 			),
 			rendered:
-				'failed: rule branch matches the modelled claims but does not permit ' +
-				'upload:commit on cache private; add a rule with the required grant, or add a corrected rule and remove this one'
+				'failed: rule branch matches the job identity but does not permit ' +
+				'complete publication of uploaded paths on cache private; add a rule with the required grant, or add a corrected rule and remove this one'
 		},
 		{
 			name: 'grant no tied rule permits',
@@ -134,8 +155,8 @@ describe('trustSelectionFinding', () => {
 				refusedDetail
 			),
 			rendered:
-				'failed: rules branch, other match the modelled claims but none permits ' +
-				'upload:commit on cache private; add the grant to one rule'
+				'failed: rules branch, other match the job identity but none permits ' +
+				'complete publication of uploaded paths on cache private; add the grant to one rule'
 		},
 		{
 			name: 'interactive rule',
@@ -146,8 +167,8 @@ describe('trustSelectionFinding', () => {
 				interactiveRule
 			),
 			rendered:
-				'failed: interactive rule owner matches the modelled claims; workflows must ' +
-				'use a scoped CI rule'
+				'failed: rule owner grants access for a person, but matches this job identity; workflows must ' +
+				'use a rule with specific CI permissions'
 		},
 		{
 			name: 'permitted selection',

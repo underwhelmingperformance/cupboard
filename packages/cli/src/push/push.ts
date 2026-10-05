@@ -50,7 +50,8 @@ import {
 	formatTimestamp,
 	type PhaseContext,
 	type Reporter,
-	type ResultRow
+	type ResultRow,
+	shouldShowDetails
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { genericExitCode, UsageError } from '@cupboard/shared/errors';
@@ -91,6 +92,7 @@ import {
 	UploadVerificationFailedError
 } from '../errors.ts';
 import { classifyFailures } from '../exit-code.ts';
+import { formatHumanError } from '../human-errors.ts';
 import { countingByteStream } from '../io/byte-stream.ts';
 import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
@@ -730,7 +732,9 @@ async function runPushFlow(
 			? 'Resolving store closure'
 			: 'Resolving store paths',
 		async (ctx) => {
-			ctx.fact('roots', formatCount(publication.entries.length));
+			ctx.fact('roots', formatCount(publication.entries.length), {
+				humanLabel: 'requested paths'
+			});
 			const localPaths = publication.localEntries.map(
 				(entry) => entry.storePath
 			);
@@ -765,7 +769,10 @@ async function runPushFlow(
 				});
 				ctx.warn(
 					'vanished target',
-					`${StorePath.basename(storePath)}: ${failureReason(vanished)}`
+					`${StorePath.basename(storePath)}: ${failureReason(vanished)}`,
+					{
+						humanMessage: `${StorePath.basename(storePath)}: ${formatHumanError(vanished, { debug: reporter.presentation === 'debug' })}`
+					}
 				);
 			}
 
@@ -783,7 +790,9 @@ async function runPushFlow(
 			ctx.fact('paths', formatCount(paths.length));
 
 			if (collected.length > 0) {
-				ctx.fact('collected', formatCount(collected.length));
+				ctx.fact('collected', formatCount(collected.length), {
+					humanLabel: 'no longer in the local store'
+				});
 			}
 
 			return paths;
@@ -811,19 +820,23 @@ async function runPushFlow(
 				isUpload(decision)
 			).length;
 
-			ctx.fact('upload', formatCount(uploadCount));
+			ctx.fact('upload', formatCount(uploadCount), {
+				humanLabel: 'need uploading'
+			});
 			ctx.fact(
 				'skip',
 				formatCount(
 					response.uploads.filter((decision) => isSkip(decision)).length
-				)
+				),
+				{ humanLabel: 'already available' }
 			);
 
 			return {
 				response,
 				hasGraceFacts: client.hasUploadGraceFacts?.() ?? true
 			};
-		}
+		},
+		{ humanLabel: 'Checking which paths need uploading' }
 	);
 
 	const divergent = divergentSkips(resolved, negotiation.uploads);
@@ -853,15 +866,20 @@ async function runPushFlow(
 		onBytes
 	};
 	const uploaded: UploadDecisionOf<'upload'>[] = [];
+	const completedUploads = new Set<StorePathHash>();
 
 	await reporter.progress(
 		'Uploading missing NARs',
-		{ total: uploadDecisions.length },
+		{
+			total: uploadDecisions.length,
+			humanLabel: 'Uploading missing path contents'
+		},
 		async (bar) => {
 			let done = 0;
 			bar.fact(
 				'nars',
-				`${formatCount(done)}/${formatCount(uploadDecisions.length)}`
+				`${formatCount(done)}/${formatCount(uploadDecisions.length)}`,
+				{ humanLabel: 'uploaded paths' }
 			);
 
 			await mapWithConcurrency(
@@ -871,6 +889,7 @@ async function runPushFlow(
 					try {
 						await streamNarUpload(decision, uploadContext);
 						uploaded.push(decision);
+						completedUploads.add(decision.storePathHash);
 						done += 1;
 					} catch (error) {
 						if (isAbortError(error)) {
@@ -893,7 +912,9 @@ async function runPushFlow(
 								storePathHash: decision.storePathHash,
 								storePath
 							});
-							bar.fact('collected', formatCount(collected.length));
+							bar.fact('collected', formatCount(collected.length), {
+								humanLabel: 'no longer in the local store'
+							});
 							return;
 						}
 
@@ -906,13 +927,17 @@ async function runPushFlow(
 						});
 						bar.warn(
 							'upload failed',
-							`${StorePath.basename(storePath)}: ${reason}`
+							`${StorePath.basename(storePath)}: ${reason}`,
+							{
+								humanMessage: `${StorePath.basename(storePath)}: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
+							}
 						);
 					} finally {
 						bar.advance(1);
 						bar.fact(
 							'nars',
-							`${formatCount(done)}/${formatCount(uploadDecisions.length)}`
+							`${formatCount(done)}/${formatCount(uploadDecisions.length)}`,
+							{ humanLabel: 'uploaded paths' }
 						);
 					}
 				}
@@ -962,6 +987,9 @@ async function runPushFlow(
 			runRoot: dependencies.runRoot
 		}),
 		onBytes,
+		onUploaded: (storePathHash) => {
+			completedUploads.add(storePathHash);
+		},
 		onRedriven: (fresh) => {
 			effectiveActions.set(fresh.storePathHash, fresh.action);
 		}
@@ -970,7 +998,10 @@ async function runPushFlow(
 	try {
 		const commit = await reporter.progress(
 			'Committing metadata',
-			{ total: commitDecisions.length },
+			{
+				total: commitDecisions.length,
+				humanLabel: 'Submitting paths to the cache'
+			},
 			async (bar) => {
 				const settled = await Promise.allSettled(
 					commitDecisions.map(async (decision) => {
@@ -1017,7 +1048,10 @@ async function runPushFlow(
 						});
 						bar.warn(
 							'commit failed',
-							`${StorePath.basename(storePath)}: ${reason}`
+							`${StorePath.basename(storePath)}: ${reason}`,
+							{
+								humanMessage: `${StorePath.basename(storePath)}: path submission failed: ${formatHumanError(result.reason, { debug: reporter.presentation === 'debug' })}`
+							}
 						);
 						continue;
 					}
@@ -1035,7 +1069,9 @@ async function runPushFlow(
 					}
 				}
 
-				bar.fact('committed', formatCount(committed));
+				bar.fact('committed', formatCount(committed), {
+					humanLabel: 'accepted'
+				});
 
 				return { pending };
 			}
@@ -1103,7 +1139,10 @@ async function runPushFlow(
 						});
 						bar.warn(
 							'verification failed',
-							`${StorePath.basename(storePath)}: ${reason}`
+							`${StorePath.basename(storePath)}: ${reason}`,
+							{
+								humanMessage: `${StorePath.basename(storePath)}: ${formatHumanError(result.reason, { debug: reporter.presentation === 'debug' })}`
+							}
 						);
 					}
 				}
@@ -1188,18 +1227,45 @@ async function runPushFlow(
 
 		reporter.result({
 			kind: pushSummaryResultKind,
+			title: 'Publication result',
 			data: validated.success ? validated.data : summary,
 			rows: [
-				{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
-				{ label: 'Already cached', value: formatCount(reusedBlobs) },
-				{ label: 'Skipped', value: formatCount(skipped) },
+				{ label: 'Uploaded paths', value: formatCount(completedUploads.size) },
+				{
+					label: 'Available paths',
+					value: formatCount(
+						summaryPaths.filter(
+							(path) =>
+								path.outcome === 'committed' ||
+								path.outcome === 'already-present'
+						).length
+					)
+				},
+				...(summaryPaths.some((path) => path.outcome === 'pending')
+					? [
+							{
+								label: 'Waiting for verification',
+								value: formatCount(
+									summaryPaths.filter((path) => path.outcome === 'pending')
+										.length
+								)
+							}
+						]
+					: []),
+				{ label: 'Reused stored content', value: formatCount(reusedBlobs) },
+				{ label: 'Already available', value: formatCount(skipped) },
 				{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
 				...(collected.length > 0
-					? [{ label: 'Collected', value: formatCount(collected.length) }]
+					? [
+							{
+								label: 'No longer in the local store',
+								value: formatCount(collected.length)
+							}
+						]
 					: []),
 				...attestationRows,
 				...retentionRows,
-				...pushSummaryPathRows(summaryPaths, retention),
+				...pushSummaryPathRows(summaryPaths, retention, reporter),
 				...(failures.length > 0
 					? [{ label: 'Failed', value: formatCount(failures.length) }]
 					: [])
@@ -1266,14 +1332,16 @@ async function reportDryRun(
 				formatCount(
 					response.uploads.filter((decision) => decision.action === 'upload')
 						.length
-				)
+				),
+				{ humanLabel: 'would upload' }
 			);
 			ctx.fact(
 				'skip',
 				formatCount(
 					response.uploads.filter((decision) => decision.action === 'skip')
 						.length
-				)
+				),
+				{ humanLabel: 'already available' }
 			);
 
 			return response;
@@ -1296,13 +1364,14 @@ async function reportDryRun(
 
 	reporter.result({
 		kind: 'push-plan',
+		title: 'Publication preview',
 		data: { wouldUpload, reusedBlobs, skipped, paths: preview.uploads },
 		rows: [
 			{ label: 'Would upload', value: formatCount(wouldUpload) },
-			{ label: 'Already cached', value: formatCount(reusedBlobs) },
-			{ label: 'Skipped', value: formatCount(skipped) },
+			{ label: 'Reused stored content', value: formatCount(reusedBlobs) },
+			{ label: 'Already available', value: formatCount(skipped) },
 			...retentionPlanRows(retention),
-			...previewPathRows(preview.uploads, retention)
+			...previewPathRows(preview.uploads, retention, resolved, reporter)
 		]
 	});
 	unretainedUngracedWarning(reporter, retention, preview.uploads);
@@ -1314,60 +1383,67 @@ function graceRetainUntilRow(retainUntil: string): string {
 	return `kept until ${formatTimestamp(retainUntil)}`;
 }
 
-function pushSummaryPathRow(path: PushSummaryPathInput): ResultRow {
+function pushSummaryPathRow(
+	path: PushSummaryPathInput,
+	reporter: Reporter
+): ResultRow {
+	const label =
+		path.storePath === undefined
+			? path.storePathHash
+			: shouldShowDetails(reporter)
+				? path.storePath
+				: StorePath.basename(path.storePath);
 	if (path.outcome === 'collected') {
 		return {
-			label: path.storePathHash,
-			value: 'collected from the store before publication; not published'
+			label,
+			value: 'removed from the local store before publication; not published'
 		};
 	}
 
+	const availability =
+		path.outcome === 'pending' ? 'accepted; verification pending' : 'available';
 	if (path.grace?.retainUntil !== undefined) {
 		return {
-			label: path.storePathHash,
-			value: graceRetainUntilRow(path.grace.retainUntil)
+			label,
+			value: `${availability}; ${graceRetainUntilRow(path.grace.retainUntil)}`
 		};
 	}
 
 	const graceSeconds = path.grace?.graceSeconds;
-
 	if (graceSeconds !== undefined && graceSeconds > 0) {
 		return {
-			label: path.storePathHash,
-			value:
-				path.outcome === 'pending'
-					? `pending (grace ${formatCount(graceSeconds)}s)`
-					: `captured grace ${formatCount(graceSeconds)}s`
+			label,
+			value: `${availability}; retention grace period ${formatCount(graceSeconds)}s`
 		};
 	}
 
-	if (graceSeconds === 0) {
-		return { label: path.storePathHash, value: zeroGraceRow };
-	}
-
-	return {
-		label: path.storePathHash,
-		value: 'no cache retention grace configured'
-	};
+	const retention =
+		path.grace === undefined
+			? 'retention grace not reported'
+			: graceSeconds === 0 && shouldShowDetails(reporter)
+				? 'configured zero retention grace'
+				: 'no retention grace period';
+	return { label, value: `${availability}; ${retention}` };
 }
 
-// Rooted and pinned pushes omit these rows unless the server returned at least
-// one grace fact. Otherwise the human report would repeat, for every path,
-// that the cache has no grace. An unretained push always shows the rows
-// because grace is its only possible retention. JSON output always includes
-// every path fact.
 function pushSummaryPathRows(
 	paths: readonly PushSummaryPathInput[],
-	retention: RetentionPlan
+	retention: RetentionPlan,
+	reporter: Reporter
 ): readonly ResultRow[] {
 	if (
 		retention.kind !== 'none' &&
-		paths.every((path) => !hasGraceFact(path.grace))
+		!shouldShowDetails(reporter) &&
+		paths.every(
+			(path) => !hasGraceFact(path.grace) && path.outcome !== 'pending'
+		)
 	) {
 		return [];
 	}
 
-	return cappedPathRows(paths.map((path) => pushSummaryPathRow(path)));
+	return cappedPathRows(
+		paths.map((path) => pushSummaryPathRow(path, reporter))
+	);
 }
 
 // The human report caps the per-path rows; the JSON output always lists
@@ -1388,8 +1464,7 @@ function cappedPathRows(rows: readonly ResultRow[]): readonly ResultRow[] {
 	];
 }
 
-// Distinguish zero grace from a cache without configured grace.
-const zeroGraceRow = 'configured zero grace; no grace period applies';
+const zeroGraceRow = 'no retention grace period';
 
 // An unretained push needs a positive grace fact to survive collection. Keep a
 // zero-grace configuration distinct from a cache without configured grace in the
@@ -1421,7 +1496,11 @@ function unretainedUngracedWarning(
 		'unretained',
 		isZeroMatched
 			? 'the cache has zero retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
-			: 'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
+			: 'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them',
+		{
+			humanMessage:
+				'These paths are not retained and may be removed during the next cache cleanup.'
+		}
 	);
 }
 
@@ -1435,10 +1514,21 @@ function hasGraceFact(
 // capture. A `skip` refers to a path already in the cache, so it can report the
 // current stored deadline. It does not include the extension that a real push
 // would apply.
-function previewPathRow(decision: UploadPreviewDecision): ResultRow {
+function previewPathRow(
+	decision: UploadPreviewDecision,
+	paths: ReadonlyMap<StorePathHash, string>,
+	reporter: Reporter
+): ResultRow {
+	const storePath = paths.get(decision.storePathHash);
+	const label =
+		storePath === undefined
+			? decision.storePathHash
+			: shouldShowDetails(reporter)
+				? storePath
+				: StorePath.basename(storePath);
 	if (decision.grace?.retainUntil !== undefined) {
 		return {
-			label: decision.storePathHash,
+			label,
 			value: graceRetainUntilRow(decision.grace.retainUntil)
 		};
 	}
@@ -1447,28 +1537,38 @@ function previewPathRow(decision: UploadPreviewDecision): ResultRow {
 
 	if (graceSeconds !== undefined && graceSeconds > 0) {
 		return {
-			label: decision.storePathHash,
+			label,
 			value:
 				decision.action === 'skip'
-					? `a push would extend its grace ${formatCount(graceSeconds)}s`
-					: `would capture grace ${formatCount(graceSeconds)}s`
+					? `would refresh the retention grace period (${formatCount(graceSeconds)}s)`
+					: `would apply a retention grace period of ${formatCount(graceSeconds)}s`
 		};
 	}
 
 	if (graceSeconds === 0) {
-		return { label: decision.storePathHash, value: zeroGraceRow };
+		return {
+			label,
+			value: shouldShowDetails(reporter)
+				? 'configured zero retention grace'
+				: zeroGraceRow
+		};
 	}
 
 	return {
-		label: decision.storePathHash,
-		value: 'no cache retention grace configured'
+		label,
+		value:
+			decision.grace === undefined
+				? 'retention grace not reported'
+				: 'no retention grace period'
 	};
 }
 
 // An unretained plan always shows per-path grace results.
 function previewPathRows(
 	decisions: readonly UploadPreviewDecision[],
-	retention: RetentionPlan
+	retention: RetentionPlan,
+	resolved: readonly ResolvedPushPath[],
+	reporter: Reporter
 ): readonly ResultRow[] {
 	if (
 		retention.kind !== 'none' &&
@@ -1477,7 +1577,15 @@ function previewPathRows(
 		return [];
 	}
 
-	return cappedPathRows(decisions.map((decision) => previewPathRow(decision)));
+	const paths = new Map(
+		resolved.map((path) => [
+			StorePath.hash(resolvedStorePath(path)),
+			resolvedStorePath(path)
+		])
+	);
+	return cappedPathRows(
+		decisions.map((decision) => previewPathRow(decision, paths, reporter))
+	);
 }
 
 // Deferred verification produces a final deadline only after the wait phase
@@ -1569,7 +1677,7 @@ async function attachPushedAttestations(
 	}
 
 	return reporter.steps('Attestations', async (log) => {
-		const readStep = log.group('read');
+		const readStep = log.group('read', { humanLabel: 'Reading bundles' });
 		const prepared = await prepareAttestationBundles(pathInfos, {
 			sources: dependencies.sources,
 			readBundle: dependencies.readBundle,
@@ -1585,7 +1693,10 @@ async function attachPushedAttestations(
 		if (deferred > 0) {
 			log.warn(
 				'pending verification',
-				`${formatCount(deferred)} attestation bundle(s) describe path(s) still awaiting server-side verification; the push did not attach them`
+				`${formatCount(deferred)} attestation bundle(s) describe path(s) still awaiting server-side verification; the push did not attach them`,
+				{
+					humanMessage: `${formatCount(deferred)} attestation bundle(s) were not attached because their paths are still waiting for verification.`
+				}
 			);
 		}
 
@@ -1624,8 +1735,8 @@ function attestationResultRows(
 ): readonly ResultRow[] {
 	const status = [
 		`${formatCount(summary.uploaded)} attached`,
-		`${formatCount(summary.reused)} reused`,
-		`${formatCount(summary.deferred)} deferred`
+		`${formatCount(summary.reused)} already attached`,
+		`${formatCount(summary.deferred)} awaiting verification`
 	].join(', ');
 
 	return [
@@ -1828,6 +1939,7 @@ interface CommitContext {
 	// Re-drives must attach the replacement pending row to the same run root.
 	readonly runRoot?: UploadAttachRootInput;
 	readonly onBytes: (count: number) => void;
+	readonly onUploaded: (storePathHash: StorePathHash) => void;
 	readonly onRedriven: (fresh: UploadDecision) => void;
 }
 
@@ -1962,6 +2074,7 @@ async function redriveExpiredCommit(
 		countingByteStream(upload.body, context.onBytes)
 	);
 	verifyNarMetadata(pathInfo, upload.digest());
+	context.onUploaded(fresh.storePathHash);
 
 	return commitVia(context, commitTarget(fresh, context.hasGraceFacts));
 }
@@ -2055,7 +2168,13 @@ function warnDivergentSkips(
 			'divergent',
 			`${StorePath.basename(skip.storePath)}: local NAR ${skip.localNarHash} ` +
 				`differs from the cached copy ${skip.cacheNarHash}; the cache keeps ` +
-				`its copy`
+				`its copy`,
+			{
+				humanMessage:
+					reporter.presentation === 'debug'
+						? `${StorePath.basename(skip.storePath)}: local NAR ${skip.localNarHash} differs from the cached copy ${skip.cacheNarHash}; the cache keeps its copy`
+						: `${StorePath.basename(skip.storePath)}: local contents differ from the cached copy. The cached copy is unchanged.`
+			}
 		);
 	}
 }

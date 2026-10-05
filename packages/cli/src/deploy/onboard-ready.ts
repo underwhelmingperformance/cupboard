@@ -21,9 +21,7 @@ export function showReadyCache(
 		ui.info(
 			`The deployment is ready, but this identity cannot inspect the cache. Sign in as its tenant administrator, run cupboard cache inspect ${cacheUrl}, and configure Nix for the reported access. If the cache is private and its read password is unavailable, ask the deployment administrator to rotate the credential.`
 		);
-		ui.outro(
-			'Deployed and initialised. Inspect the cache before configuring Nix.'
-		);
+		ui.outro('Deployment verified. Inspect the cache before configuring Nix.');
 		return;
 	}
 
@@ -40,18 +38,16 @@ export function showReadyCache(
 			.render()
 			.trimEnd()
 			.split('\n')
-			.map((line) => ({ label: '', value: line }))
+			.map((line) => ({ label: '', value: line, raw: true }))
 	]);
 
 	if (access === 'private' && created === undefined) {
 		ui.info(
-			'Use the existing read credential in /etc/nix/netrc. If you no longer have it, run `cupboard tenant rotate-credential` to issue a replacement; existing clients will need the new password.'
+			`Use the existing read credential in /etc/nix/netrc. If you no longer have it, run \`cupboard tenant rotate-credential ${cacheUrl}\` to issue a replacement; existing clients will need the new password.`
 		);
 	}
 
-	ui.outro(
-		`Deployed and initialised. Next: cupboard push ${cacheUrl} ./result`
-	);
+	ui.outro(`Deployment verified. Next: cupboard push ${cacheUrl} ./result`);
 }
 
 /**
@@ -68,8 +64,8 @@ export function showCacheCredential(
 			? 'Read credential'
 			: 'Unconfirmed read credential';
 	ui.note(`${label} for ${canonicalHref(cacheUrl)}`, [
-		{ label: 'Read user', value: created.read.user },
-		{ label: 'Read password', value: created.read.password }
+		{ label: 'Read user', value: created.read.user, raw: true },
+		{ label: 'Read password', value: created.read.password, raw: true }
 	]);
 	if (creation === 'unconfirmed') {
 		ui.info(
@@ -88,6 +84,7 @@ export function showCacheCredential(
 	ui.note(`Add to ${netrcFile}`, [
 		{
 			label: '',
+			raw: true,
 			value: renderNetrc(
 				cacheUrl,
 				created.read.user,

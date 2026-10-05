@@ -2198,8 +2198,8 @@ describe('onboardDeployment', () => {
 				title:
 					'Unconfirmed read credential for https://cache.example.com/t/builds',
 				rows: [
-					{ label: 'Read user', value: read.user },
-					{ label: 'Read password', value: read.password }
+					{ label: 'Read user', value: read.user, raw: true },
+					{ label: 'Read password', value: read.password, raw: true }
 				]
 			}
 		]);
@@ -2229,8 +2229,8 @@ describe('onboardDeployment', () => {
 		expect(notes).toContainEqual({
 			title: 'Read credential for https://cache.example.com/t/builds',
 			rows: [
-				{ label: 'Read user', value: read.user },
-				{ label: 'Read password', value: read.password }
+				{ label: 'Read user', value: read.user, raw: true },
+				{ label: 'Read password', value: read.password, raw: true }
 			]
 		});
 	});

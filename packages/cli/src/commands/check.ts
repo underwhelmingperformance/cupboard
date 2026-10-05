@@ -1,4 +1,8 @@
-import type { CheckDiscrepancy, CheckReport } from '@cupboard/protocol/reports';
+import type {
+	CheckDiscrepancy,
+	CheckDiscrepancyKind,
+	CheckReport
+} from '@cupboard/protocol/reports';
 import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
@@ -80,30 +84,33 @@ export async function runCheck(
 
 	reporter.result({
 		kind: 'check-report',
+		title: 'Cache integrity',
 		data: { narInfosChecked, narBlobsChecked, discrepancies },
 		rows: [
 			{
-				label: 'Narinfos checked',
+				label: 'Cache metadata checked',
 				value: formatCount(narInfosChecked)
 			},
 			{
-				label: 'NAR blobs checked',
+				label: 'Stored archives checked',
 				value: formatCount(narBlobsChecked)
 			},
 			{
-				label: 'Discrepancies',
+				label: 'Problems found',
 				value: formatCount(discrepancies.length)
 			}
 		]
 	});
 
 	if (discrepancies.length === 0) {
-		reporter.info('No discrepancies.');
+		reporter.info('No discrepancies.', { humanMessage: 'No problems found.' });
 		return;
 	}
 
 	for (const discrepancy of discrepancies) {
-		reporter.warn(discrepancy.kind, describeDiscrepancy(discrepancy));
+		reporter.warn(discrepancy.kind, describeDiscrepancy(discrepancy), {
+			humanMessage: `${discrepancyLabels[discrepancy.kind]}: ${describeDiscrepancy(discrepancy)}. Ask the tenant administrator to investigate and restore the published path.`
+		});
 	}
 
 	throw new CheckDiscrepanciesError(discrepancies.length);
@@ -112,3 +119,12 @@ export async function runCheck(
 function describeDiscrepancy(discrepancy: CheckDiscrepancy): string {
 	return `${cacheLabel(discrepancy.cache)} ${discrepancy.storePathHash}`;
 }
+
+const discrepancyLabels: Readonly<Record<CheckDiscrepancyKind, string>> = {
+	'missing-nar': 'Stored archive is missing',
+	'missing-narinfo-object': 'Cache metadata file is missing',
+	'file-hash-mismatch': 'Stored archive checksum does not match',
+	'nar-hash-mismatch': 'Unpacked archive checksum does not match',
+	'nar-size-mismatch': 'Unpacked archive size does not match',
+	undecodable: 'Stored archive cannot be unpacked'
+};

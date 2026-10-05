@@ -64,11 +64,13 @@ For each store path, `push` does one of three things:
 
 When it finishes, `push` prints a summary that counts each case:
 
-| Summary label  | Meaning                                                             |
-| -------------- | ------------------------------------------------------------------- |
-| Uploaded paths | Store paths whose NARs were uploaded.                               |
-| Already cached | Store paths published by reusing a NAR that the tenant already had. |
-| Skipped        | Store paths that were already in this cache.                        |
+| Summary label            | Meaning                                                             |
+| ------------------------ | ------------------------------------------------------------------- |
+| Uploaded paths           | Store paths whose NARs were uploaded.                               |
+| Available paths          | Store paths that the cache can serve after this push.               |
+| Waiting for verification | Accepted store paths whose availability is not yet confirmed.       |
+| Reused stored content    | Store paths published by reusing a NAR that the tenant already had. |
+| Already available        | Store paths that were already in this cache.                        |
 
 ### Publishing captured cache metadata
 
@@ -89,8 +91,14 @@ The JSON file contains `version: 1` and a `paths` array. Each entry contains:
 
 The manifest can include paths from several sources. Every path must appear
 once. `--reference-receipt-file` records each path's source URL and NAR hash as
-republished metadata. The receipt does not claim that the run built or copied
-NAR bytes.
+republished metadata. The receipt records republished paths, not a build or
+download.
+
+### Compatibility with older callers
+
+`push` still accepts `--already-held`, `--no-already-held`, `--claimable` and
+`--no-claimable`, but ordinary help omits them. These options do not change
+publication receipts or establish that this run built a path.
 
 ## Choosing how long store paths are kept
 
@@ -144,7 +152,7 @@ push, then it waits for verification. Each wait has a limit of ten minutes. To
 change the limit, use `--wait-timeout`.
 
 To return sooner, add `--no-wait`. `push` then returns once every store path is
-reserved and its root or pin is set, without waiting for verification. If a
+accepted and its root or pin is set, without waiting for verification. If a
 store path later fails verification, it's removed from its roots.
 
 ## Other options for `push`
@@ -193,8 +201,9 @@ runs. Because of this:
   Otherwise `build-push` stops before the build starts, with exit status 77. For
   a list of installables in `--cohorts-file`, `build-push` doesn't stop. It runs
   the build and then publishes the outputs that were built, after the build
-  finishes. It prints `Publication mode: after the build` when it does this. See
-  [Running several builds](#running-several-builds).
+  finishes. It reports that outputs will be published after the build finishes.
+  Add `--details` to see the Nix configuration that prevented publication during
+  the build. See [Running several builds](#running-several-builds).
 - No other `post-build-hook` can be configured.
 - Your command must use the same Nix store as `build-push`. Don't pass `--store`
   to a Nix command that your command runs, and don't change `NIX_REMOTE`.
@@ -255,9 +264,11 @@ store path. The CLI validates the file before requesting credentials. An invalid
 store path in an argument or file exits with usage status 2. For a file entry,
 the error identifies the file and line number.
 
-It also refreshes each store path's grace period, as a new push would. It
-doesn't add the store paths to a root. It fails if any store path is missing, or
-is still being verified.
+Each result reports whether the path is available, followed by its retention
+grace deadline when the cache reports one. Add `--details` to show complete
+store paths. Confirmation also refreshes each store path's grace period, as a
+new push would. It doesn't add the store paths to a root. It fails if any store
+path is missing, or is still being verified.
 
 ## Deleting a store path
 
@@ -270,6 +281,12 @@ cupboard delete https://cupboard.example.workers.dev/t/acme /nix/store/<hash>-ap
 
 Give it the store path itself, not a symlink to it. The command asks you to
 confirm. In a script, add `--yes` to skip the question.
+
+The result distinguishes removal from the cache from storage cleanup. Removal
+stops new downloads from this cache. The underlying data may still be needed by
+other paths or caches. A scheduled cleanup is not confirmation that the bytes
+have been deleted; an unknown cleanup status does not prove that another path
+retains the data.
 
 Deleting a store path can leave gaps. Any root that kept it still lists it, as a
 missing target. Any store path that depends on it loses part of its closure. So

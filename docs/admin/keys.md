@@ -72,11 +72,12 @@ the outgoing key and the new one the incoming key.
    cupboard key status https://cupboard.example.workers.dev/t/acme
    ```
 
-   The incoming key's row shows `backfill running` while the re-signing is in
-   progress, and `backfill complete` when it has finished. If re-signing or
-   cache purging fails, it shows `backfill retrying`, the failed operation,
-   progress counts and the error message. The tenant retries automatically. Wait
-   for `backfill complete` before retiring the outgoing key.
+   The incoming key shows `Updating signatures` while the update is in progress,
+   and `Signature update complete` when it has finished. If an update fails, it
+   shows `Retrying signature updates` and the progress counts. The tenant
+   retries automatically. Wait for `Signature update complete` before retiring
+   the outgoing key. Use `--debug` to include the failed operation and the
+   server's error message.
 
 4. Retire the outgoing key. Identify it by the ID that `cupboard key list`
    shows. The tenant's first key has the ID `active`. Later keys have UUIDs.

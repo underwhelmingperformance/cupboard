@@ -13,11 +13,12 @@ import {
 } from '@cupboard/logger';
 import { jsonLinesSink } from '@cupboard/logger/sinks';
 import {
+	type PresentationLevel,
 	type Reporter,
 	type ReporterMode,
 	wasErrorReported
 } from '@cupboard/reporter';
-import { formatErrorWithCauses, usageExitCode } from '@cupboard/shared/errors';
+import { usageExitCode } from '@cupboard/shared/errors';
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import pc from 'picocolors';
 import { z } from 'zod';
@@ -54,12 +55,15 @@ import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
 import { registerWhoamiCommand } from './commands/whoami.ts';
 import { errorExitCode } from './exit-code.ts';
+import { formatHumanError, type HumanErrorOptions } from './human-errors.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {
 	readonly outputMode?: ReporterMode;
 	readonly colour?: boolean;
 	readonly resultFile?: string;
+	readonly details?: boolean;
+	readonly debug?: boolean;
 }
 
 const reporterModeSchema = z.enum([
@@ -99,6 +103,7 @@ function loggingSink(mode: ReporterMode, colour: boolean | undefined): Sink {
 // hook can replace the field. Before the first command begins, callers fall
 // back to the bare root logger.
 const commandLoggerState: { logger?: Logger } = {};
+const errorContexts = new WeakMap<Command, HumanErrorOptions>();
 
 /**
  * The logger for the running command: the application root logger tagged with
@@ -129,6 +134,8 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 			'choose the output format: terminal (interactive, with progress), json (one JSON object per line) or github (GitHub Actions workflow commands)',
 			parseOutputMode
 		)
+		.option('--details', 'show additional configuration and domain information')
+		.option('--debug', 'include details and internal diagnostics')
 		.option('--colour', 'force ANSI colour output')
 		.option('--no-colour', 'disable ANSI colour output')
 		.option(
@@ -157,7 +164,23 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 		.hook('preAction', (_thisCommand, actionCommand) => {
 			const mode = reporterModeFromGlobals(command);
 
-			configureLogging({ sink: loggingSink(mode, colourFromGlobals(command)) });
+			configureLogging({
+				sink: loggingSink(mode, colourFromGlobals(command)),
+				lowestLevel:
+					presentationFromGlobals(command) === 'debug' ? 'debug' : 'warning'
+			});
+			const path: string[] = [];
+			let current: Command | null = actionCommand;
+			while (current !== null && current !== command) {
+				path.unshift(current.name());
+				current = current.parent;
+			}
+			errorContexts.set(command, {
+				action: `run cupboard ${path.join(' ')}`,
+				target: actionCommand.processedArgs.find(
+					(value: unknown) => value instanceof URL
+				)
+			});
 			commandLoggerState.logger = rootLogger().with({
 				command: actionCommand.name()
 			});
@@ -198,6 +221,24 @@ function reporterModeFromGlobals(program: Command): ReporterMode {
 	return resolveReporterMode(program.opts<GlobalOptions>().outputMode);
 }
 
+export function presentationFromGlobals(program: Command): PresentationLevel {
+	const globals = program.opts<GlobalOptions>();
+	if (globals.debug === true) {
+		return 'debug';
+	}
+	return globals.details === true ? 'details' : 'summary';
+}
+
+export function humanErrorFormatter(
+	program: Command
+): (error: unknown) => string {
+	return (error) =>
+		formatHumanError(translateRpcError(error, { keepAuthCause: true }), {
+			...errorContexts.get(program),
+			debug: presentationFromGlobals(program) === 'debug'
+		});
+}
+
 export function colourFromGlobals(program: Command): boolean | undefined {
 	return program.opts<GlobalOptions>().colour;
 }
@@ -219,8 +260,8 @@ export function commandUi(
 	extra: { readonly assumeYes?: boolean } = {}
 ): CliUi {
 	return createCliUi({
-		formatError: (error) =>
-			formatErrorWithCauses(translateRpcError(error, { keepAuthCause: true })),
+		formatError: humanErrorFormatter(program),
+		presentation: presentationFromGlobals(program),
 		mode: reporterModeFromGlobals(program),
 		colour: colourFromGlobals(program),
 		resultFile: resultFileFromGlobals(program),

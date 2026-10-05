@@ -941,18 +941,19 @@ function defaultDependencies(
 }
 
 function expectedRuleLines(audience: string): ResultRow[] {
-	return String.raw`issuer: https://token.actions.githubusercontent.com
-audience: ${audience}
-claims:
-  repository_id: "1234"
-  repository_owner_id: "5678"
-  ref: refs/heads/main
-  job_workflow_ref:
-    pattern: ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$
-permittedGrants:
-  - type: cupboard_wildcard`
-		.split('\n')
-		.map((value) => ({ label: '', value }));
+	return [
+		{ label: 'Issuer', value: 'https://token.actions.githubusercontent.com' },
+		{ label: 'Audience', value: audience },
+		{ label: 'Claims', value: 'repository_id=1234' },
+		{ label: '', value: 'repository_owner_id=5678' },
+		{ label: '', value: 'ref=refs/heads/main' },
+		{
+			label: '',
+			value: String.raw`job_workflow_ref matches ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`
+		},
+		{ label: 'Access', value: 'Every operation on every resource' },
+		{ label: 'State', value: 'enabled' }
+	];
 }
 
 it('reports every matching publishing job', async () => {
@@ -1011,6 +1012,7 @@ it('reports every matching publishing job', async () => {
 				},
 				{
 					label: 'Review a repair',
+					raw: true,
 					value: `cupboard github check ${tenant.href.replace(/\/$/u, '')} --repo ${repository} --branch main --fix`
 				}
 			]
@@ -1543,6 +1545,7 @@ jobs:
 		],
 		rules: {
 			kind: 'github-check-trust-rules',
+			title: 'GitHub trust rules',
 			data: [matching, otherAudience],
 			rows: [
 				{
@@ -2562,6 +2565,7 @@ it.each([
 		rows: [
 			{
 				label: 'Review a repair',
+				raw: true,
 				value: `cupboard github check ${tenant.href.replace(/\/$/u, '')} --repo ${repository} --branch main --read-user <user> --read-password <password> --fix`
 			}
 		]

@@ -3,7 +3,8 @@ import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	formatTimestamp,
 	type Reporter,
-	type ResultRow
+	type ResultRow,
+	shouldShowDetails
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
@@ -36,11 +37,13 @@ export interface WhoamiOptions extends IdentityLoginOptions {
 }
 
 export class NoCachedSessionError extends CliError {
+	override readonly humanMessage: string;
 	constructor(public readonly url: string) {
 		super(
 			`No session is cached for ${url}. Sign in with \`cupboard login ${url}\`.`
 		);
 		this.name = 'NoCachedSessionError';
+		this.humanMessage = `No saved sign-in for ${url}. Run \`cupboard login ${url}\` to sign in.`;
 	}
 
 	override get exitCode(): number {
@@ -90,20 +93,35 @@ function sessionSummary(session: SessionIdentity, now: number): string {
 	const expiry = session.accessTokenExpiresAt;
 	const accessState =
 		expiry === undefined
-			? undefined
+			? 'expiry unknown'
 			: Date.parse(expiry) <= now
-				? `access token expired ${formatTimestamp(expiry)}`
-				: `access token expires ${formatTimestamp(expiry)}`;
+				? 'saved sign-in expired'
+				: 'saved sign-in current';
 
 	return [
-		session.subject ?? 'unknown subject',
-		session.kind,
-		session.rule === undefined ? undefined : `rule ${session.rule}`,
+		session.subject ?? 'identity unknown',
+		`${session.kind} sign-in`,
 		accessState,
-		session.refreshTokenCached ? 'refresh token cached' : 'no refresh token'
-	]
-		.filter((part) => part !== undefined)
-		.join(' · ');
+		session.refreshTokenCached
+			? 'automatic renewal available'
+			: 'sign in again when needed'
+	].join(' · ');
+}
+
+function sessionDetailRows(session: SessionIdentity): ResultRow[] {
+	return [
+		...(session.rule === undefined
+			? []
+			: [{ label: 'Trust rule', value: session.rule }]),
+		...(session.accessTokenExpiresAt === undefined
+			? []
+			: [
+					{
+						label: 'Credential expiry',
+						value: formatTimestamp(session.accessTokenExpiresAt)
+					}
+				])
+	];
 }
 
 async function reportSessions(
@@ -139,10 +157,10 @@ async function reportSessions(
 		.filter((session) => session !== undefined);
 	const grant = grantRead.status === 'fulfilled' ? grantRead.value : undefined;
 	const now = dependencies.now();
-	const rows: ResultRow[] = (sessions ?? []).map((session) => ({
-		label: session.url,
-		value: sessionSummary(session, now)
-	}));
+	const rows: ResultRow[] = (sessions ?? []).flatMap((session) => [
+		{ label: session.url, value: sessionSummary(session, now) },
+		...(shouldShowDetails(reporter) ? sessionDetailRows(session) : [])
+	]);
 
 	for (const failure of sessionFailures) {
 		const detail =
@@ -150,7 +168,11 @@ async function reportSessions(
 				? failure.cause.message
 				: String(failure.cause);
 		reporter.warn(
-			`Could not read cached Cupboard session file ${failure.file}: ${detail}. Check that the file is readable and retry.`
+			`Could not read cached Cupboard session file ${failure.file}: ${detail}. Check that the file is readable and retry.`,
+			undefined,
+			{
+				humanMessage: `Could not read the saved sign-in at ${failure.file}. Check that the file is readable and retry.`
+			}
 		);
 	}
 
@@ -183,6 +205,7 @@ async function reportSessions(
 
 	reporter.result({
 		kind: 'whoami',
+		title: 'Saved sign-ins (server access not checked)',
 		data,
 		rows,
 		empty:
@@ -235,6 +258,7 @@ async function reportProvider(
 
 	reporter.result({
 		kind: 'whoami-provider',
+		title: 'Identity provider claims (not verified)',
 		data: identity,
 		rows: providerRows(identity)
 	});
@@ -242,7 +266,7 @@ async function reportProvider(
 		'Send the issuer, audience and subject to the administrator of the ' +
 			'tenant or deployment that you need: a tenant administrator adds a ' +
 			'rule with `cupboard oidc-trust add`, and an operator adds a ' +
-			'control-plane rule with `cupboard control-oidc-trust add`. The claims ' +
+			'deployment rule with `cupboard control-oidc-trust add`. The claims ' +
 			'were decoded locally without checking the signature, and nothing was ' +
 			'sent to cupboard.'
 	);

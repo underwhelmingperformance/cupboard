@@ -68,6 +68,7 @@ const recordedUrlSchema = z.url({ protocol: /^https$/ });
  * deploy sends admin credentials to that URL, so it refuses the value.
  */
 export class RecordedDeploymentUrlInvalidError extends CliError {
+	override readonly humanMessage: string;
 	constructor(public readonly value: string) {
 		super(
 			`The control Worker records ${deploymentUrlVariable} as ` +
@@ -77,6 +78,8 @@ export class RecordedDeploymentUrlInvalidError extends CliError {
 				'changed.'
 		);
 		this.name = 'RecordedDeploymentUrlInvalidError';
+		this.humanMessage =
+			'The recorded deployment URL is invalid. In the Cloudflare dashboard, correct or remove CUPBOARD_DEPLOYMENT_URL in the deployment settings, then rerun cupboard deploy. Nothing was changed.';
 	}
 }
 

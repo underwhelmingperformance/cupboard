@@ -66,7 +66,9 @@ const tooManyRequestsStatusCode: number = StatusCodes.TOO_MANY_REQUESTS;
 const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
-export abstract class CliError extends CodedError {}
+export abstract class CliError extends CodedError {
+	readonly humanMessage?: string;
+}
 
 abstract class CliCausedError extends CliError {
 	override get exitCode(): number {
@@ -275,7 +277,10 @@ export class LocalStepUnreachedError extends CliError {
 	 */
 	readonly stragglers: readonly string[];
 
-	constructor(readonly shortfall: LocalStepShortfall) {
+	constructor(
+		readonly shortfall: LocalStepShortfall,
+		readonly url?: URL
+	) {
 		const reading = readShortfall(shortfall);
 
 		super(reading.message);

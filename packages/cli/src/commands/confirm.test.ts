@@ -128,17 +128,26 @@ describe('runConfirm', () => {
 				confirmed: true,
 				grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
 			},
-			row: { label: appHash, value: 'kept until 2026-01-02 00:00 UTC' }
+			row: {
+				label: StorePath.basename(appPath),
+				value: 'available; kept until 2026-01-02 00:00 UTC'
+			}
 		},
 		{
 			name: 'a confirmed path without cache grace',
 			path: { storePathHash: appHash, confirmed: true, grace: {} },
-			row: { label: appHash, value: 'no cache retention grace configured' }
+			row: {
+				label: StorePath.basename(appPath),
+				value: 'available; no retention grace period'
+			}
 		},
 		{
 			name: 'an unconfirmed path',
 			path: { storePathHash: appHash, confirmed: false },
-			row: { label: appHash, value: 'not present' }
+			row: {
+				label: StorePath.basename(appPath),
+				value: 'availability not confirmed'
+			}
 		}
 	])('reports a row for $name', async ({ path, row }) => {
 		const { ui, captured } = fakeCliUi();
@@ -158,7 +167,12 @@ describe('runConfirm', () => {
 		}
 
 		expect(captured.results).toStrictEqual([
-			{ kind: 'confirm-paths', data: response, rows: [row] }
+			{
+				kind: 'confirm-paths',
+				title: 'Published paths',
+				data: response,
+				rows: [row]
+			}
 		]);
 	});
 
@@ -272,6 +286,7 @@ describe('runConfirm', () => {
 				results: [
 					{
 						kind: 'confirm-paths',
+						title: 'Published paths',
 						data: {
 							paths: storePaths
 								.slice(0, uploadConfirmMaxPaths)
@@ -284,8 +299,8 @@ describe('runConfirm', () => {
 						rows: storePaths
 							.slice(0, uploadConfirmMaxPaths)
 							.map((storePath) => ({
-								label: StorePath.hash(storePath),
-								value: 'no cache retention grace configured'
+								label: StorePath.basename(storePath),
+								value: 'available; no retention grace period'
 							}))
 					}
 				]

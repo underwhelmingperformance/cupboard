@@ -65,6 +65,12 @@ separate sign-in, so the token doesn't decide who becomes the admin.
    triggers before you confirm. See
    [Resource names and cron triggers](#resource-names-and-cron-triggers).
 
+   The default plan shows the release, deployment URL, intended changes, storage
+   credentials, tenant readiness and recovery instructions. Add `--details` for
+   the resource names and maintenance schedule. The maintenance queue and its
+   dead-letter queue have separate labels. Add `--debug` for database migration
+   identifiers and other implementation diagnostics.
+
 5. Confirm who becomes the admin. `init` signs you in for the claim, shows the
    identity from your sign-in, and asks:
 
@@ -108,11 +114,29 @@ separate sign-in, so the token doesn't decide who becomes the admin.
 `init` finishes with:
 
 ```
-Deployed and initialised. Next: cupboard push <url> ./result
+Deployment verified. Next: cupboard push https://cupboard.example.workers.dev/t/acme ./result
 ```
 
 Push something to the new tenant, then set up your Nix clients as described in
 [Using a cache](../use/nix-clients.md).
+
+## Checking the final outcome
+
+Read the final deployment message as well as the exit status.
+`Deployment verified` means the deployment answered the availability checks.
+`Uploaded; deployment availability has not been confirmed` means the upload
+completed, but the deployment did not pass those checks. Complete any reported
+setup steps before using a new deployment.
+
+For an update to a deployment that already has an administrator, the command can
+exit with status zero while availability remains unconfirmed. That exit policy
+is unchanged. A zero status alone does not prove that the deployment is usable.
+Check the deployment URL and the final outcome before treating the update as
+ready. A first deployment that stops before administrator setup exits non-zero.
+
+`cupboard deployment status <deployment-url>` checks tenant schema and data
+readiness. The status command does not check public availability or repeat every
+step of deployment.
 
 ## What to keep
 
