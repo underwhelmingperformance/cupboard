@@ -1,9 +1,10 @@
-import { type ChildProcess, spawn } from 'node:child_process';
+import { ChildProcess, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { rename, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
 import path from 'node:path';
+import { setImmediate as waitForTurn } from 'node:timers/promises';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -291,6 +292,10 @@ async function inheritedDaemonProcess(
 		stdio: ['ignore', 'ignore', 'pipe', 'ipc']
 	});
 	const closed = once(child, 'close');
+	const completionState = { isClosed: false };
+	child.once('close', () => {
+		completionState.isClosed = true;
+	});
 	const exited = once(child, 'exit');
 	const daemon = RunningCiNixDaemon.observe(
 		child,
@@ -302,7 +307,7 @@ async function inheritedDaemonProcess(
 		await exited;
 	}
 
-	return { child, closed, daemon };
+	return { child, closed, completionState, daemon };
 }
 
 function killTestProcessGroup(child: ChildProcess): void {
@@ -322,6 +327,180 @@ function killTestProcessGroup(child: ChildProcess): void {
 }
 
 describe('owned daemon process groups', () => {
+	it('observes a failed spawn after already-cancelled readiness releases its listeners', async () => {
+		await withTemporaryDirectory(
+			'cupboard-cancelled-spawn-',
+			async (directory) => {
+				const child = new ChildProcess();
+				const daemon = RunningCiNixDaemon.observe(
+					child,
+					path.join(directory, 'daemon.sock')
+				);
+				const controller = new AbortController();
+				const cancellation = new Error('cancelled startup');
+				controller.abort(cancellation);
+				const spawnError = Object.assign(new Error('spawn nix-daemon ENOENT'), {
+					code: 'ENOENT'
+				});
+				const startup = daemon.waitUntilReady(controller.signal);
+				const rejected = expect(startup).rejects.toBe(cancellation);
+
+				try {
+					await waitForTurn();
+					expect(() => child.emit('error', spawnError)).not.toThrow();
+					child.emit('close');
+					await rejected;
+					expect({
+						diagnostics: daemon.diagnostics(),
+						errorListeners: child.listenerCount('error'),
+						closeListeners: child.listenerCount('close')
+					}).toStrictEqual({
+						diagnostics: spawnError.message,
+						errorListeners: 0,
+						closeListeners: 0
+					});
+				} finally {
+					child.emit('close');
+					await rejected;
+				}
+			}
+		);
+	});
+
+	it.each(['SIGTERM', 'SIGKILL'] as const)(
+		'rejects cancelled startup when %s fails before the child closes',
+		async (failedSignal) => {
+			await withTemporaryDirectory(
+				'cupboard-denied-startup-',
+				async (directory) => {
+					const child = Object.assign(new ChildProcess(), { pid: 888_888 });
+					const daemon = RunningCiNixDaemon.observe(
+						child,
+						path.join(directory, 'daemon.sock')
+					);
+					const permissionError = Object.assign(new Error('kill EPERM'), {
+						code: 'EPERM'
+					});
+					const kill = vi
+						.spyOn(process, 'kill')
+						.mockImplementation((_pid, signal) => {
+							if (signal === failedSignal) {
+								throw permissionError;
+							}
+							return true;
+						});
+					vi.useFakeTimers({
+						toFake: [
+							'setTimeout',
+							'clearTimeout',
+							'setInterval',
+							'clearInterval'
+						]
+					});
+					const controller = new AbortController();
+					const outcome: { hasSettled: boolean; error: unknown } = {
+						hasSettled: false,
+						error: undefined
+					};
+					const observeStartup = async (): Promise<void> => {
+						try {
+							await daemon.waitUntilReady(controller.signal);
+						} catch (error) {
+							outcome.error = error;
+						} finally {
+							outcome.hasSettled = true;
+						}
+					};
+					const startup = observeStartup();
+
+					try {
+						await vi.waitFor(() => {
+							expect(vi.getTimerCount()).toBe(1);
+						});
+						controller.abort(new Error('cancelled startup'));
+						await vi.advanceTimersByTimeAsync(5000);
+						await expect(daemon.stop()).rejects.toBe(permissionError);
+						await waitForTurn();
+						expect({
+							outcome: { ...outcome },
+							timers: vi.getTimerCount(),
+							errorListeners: child.listenerCount('error'),
+							closeListeners: child.listenerCount('close')
+						}).toStrictEqual({
+							outcome: { hasSettled: true, error: permissionError },
+							timers: 0,
+							errorListeners: 1,
+							closeListeners: 1
+						});
+					} finally {
+						child.emit('close');
+						await startup;
+						kill.mockRestore();
+						vi.useRealTimers();
+					}
+				}
+			);
+		}
+	);
+
+	it('rejects failed deadline escalation and removes its socket before the child closes', async () => {
+		await withTemporaryDirectory(
+			'cupboard-denied-daemon-',
+			async (directory) => {
+				const socketPath = path.join(directory, 'daemon.sock');
+				const server = await listen(socketPath);
+				const child = Object.assign(new ChildProcess(), { pid: 888_888 });
+				const daemon = RunningCiNixDaemon.observe(child, socketPath);
+				const permissionError = Object.assign(new Error('kill EPERM'), {
+					code: 'EPERM'
+				});
+				const kill = vi
+					.spyOn(process, 'kill')
+					.mockImplementation((_pid, signal) => {
+						if (signal === 'SIGKILL') {
+							throw permissionError;
+						}
+
+						return true;
+					});
+				vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+				try {
+					await daemon.waitUntilReady(new AbortController().signal);
+					const stopping = daemon.stop();
+					const rejected = expect(stopping).rejects.toBe(permissionError);
+					expect(vi.getTimerCount()).toBe(1);
+					await vi.advanceTimersByTimeAsync(5000);
+					await rejected;
+					expect({
+						signals: kill.mock.calls,
+						timers: vi.getTimerCount(),
+						socketExists: existsSync(socketPath),
+						isRunning: child.exitCode === null && child.signalCode === null
+					}).toStrictEqual({
+						signals: [
+							[-888_888, 'SIGTERM'],
+							[-888_888, 'SIGKILL']
+						],
+						timers: 0,
+						socketExists: false,
+						isRunning: true
+					});
+				} finally {
+					child.emit('close');
+					try {
+						await daemon.stop();
+					} catch (error) {
+						expect(error).toBe(permissionError);
+					}
+					kill.mockRestore();
+					vi.useRealTimers();
+					await close(server);
+				}
+			}
+		);
+	});
+
 	it.each([false, true])(
 		'removes a socket discovered after startup failure (already stopped: %s)',
 		async (isAlreadyStopped) => {
@@ -352,10 +531,8 @@ describe('owned daemon process groups', () => {
 		await withTemporaryDirectory(
 			'cupboard-exited-daemon-',
 			async (directory) => {
-				const { child, closed, daemon } = await inheritedDaemonProcess(
-					directory,
-					true
-				);
+				const { child, closed, completionState, daemon } =
+					await inheritedDaemonProcess(directory, true);
 				const kill = vi.spyOn(process, 'kill');
 				const stopping = daemon.stop();
 
@@ -365,7 +542,9 @@ describe('owned daemon process groups', () => {
 					await stopping;
 				} finally {
 					kill.mockRestore();
-					killTestProcessGroup(child);
+					if (!completionState.isClosed) {
+						killTestProcessGroup(child);
+					}
 					await closed;
 					await stopping;
 				}
@@ -373,35 +552,58 @@ describe('owned daemon process groups', () => {
 		);
 	});
 
-	it('escalates a cancelled startup even while its process group ignores termination', async () => {
-		await withTemporaryDirectory(
-			'cupboard-stubborn-daemon-',
-			async (directory) => {
-				const { child, closed, daemon } = await inheritedDaemonProcess(
-					directory,
-					false
-				);
-				const kill = vi.spyOn(process, 'kill');
-				vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-				const controller = new AbortController();
-				const startup = daemon.waitUntilReady(controller.signal);
-				const rejected = expect(startup).rejects.toThrow('cancelled startup');
-				controller.abort(new Error('cancelled startup'));
+	it.each([false, true])(
+		'escalates a cancelled startup even while its process group ignores termination (closed group rejects signals: %s)',
+		async (rejectClosedGroup) => {
+			await withTemporaryDirectory(
+				'cupboard-stubborn-daemon-',
+				async (directory) => {
+					const { child, closed, completionState, daemon } =
+						await inheritedDaemonProcess(directory, false);
+					const realKill = process.kill.bind(process);
+					const closedGroupError = Object.assign(new Error('kill EPERM'), {
+						code: 'EPERM'
+					});
+					const kill = vi
+						.spyOn(process, 'kill')
+						.mockImplementation((pid, signal) => {
+							if (
+								rejectClosedGroup &&
+								completionState.isClosed &&
+								pid === -(child.pid ?? 0)
+							) {
+								throw closedGroupError;
+							}
 
-				try {
-					expect(vi.getTimerCount()).toBe(1);
-					await vi.advanceTimersByTimeAsync(5000);
-					expect(kill).toHaveBeenCalledWith(-(child.pid ?? 0), 'SIGKILL');
-					await rejected;
-					expect(vi.getTimerCount()).toBe(0);
-				} finally {
-					kill.mockRestore();
-					killTestProcessGroup(child);
-					await closed;
-					await rejected;
-					vi.useRealTimers();
+							return realKill(pid, signal);
+						});
+					vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+					const controller = new AbortController();
+					const startup = daemon.waitUntilReady(controller.signal);
+					const rejected = expect(startup).rejects.toThrow('cancelled startup');
+					controller.abort(new Error('cancelled startup'));
+
+					try {
+						expect(vi.getTimerCount()).toBe(1);
+						await vi.advanceTimersByTimeAsync(5000);
+						expect(kill).toHaveBeenCalledWith(-(child.pid ?? 0), 'SIGKILL');
+						await rejected;
+						expect(vi.getTimerCount()).toBe(0);
+						expect(kill.mock.calls).toStrictEqual([
+							[-(child.pid ?? 0), 'SIGTERM'],
+							[-(child.pid ?? 0), 'SIGKILL']
+						]);
+					} finally {
+						kill.mockRestore();
+						if (!completionState.isClosed) {
+							killTestProcessGroup(child);
+						}
+						await closed;
+						await rejected;
+						vi.useRealTimers();
+					}
 				}
-			}
-		);
-	});
+			);
+		}
+	);
 });

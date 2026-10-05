@@ -216,7 +216,8 @@ export class DivertedNixDaemon {
 export async function waitForDaemonSocket(
 	child: ChildProcess,
 	socketPath: string,
-	stderr: () => string
+	stderr: () => string,
+	signal?: AbortSignal
 ): Promise<void> {
 	const socketWait = new AbortController();
 	const processClose = Promise.withResolvers<'closed'>();
@@ -241,7 +242,12 @@ export async function waitForDaemonSocket(
 
 	try {
 		const outcome = await Promise.race([
-			waitForFile(socketPath, socketWait.signal),
+			waitForFile(
+				socketPath,
+				signal === undefined
+					? socketWait.signal
+					: AbortSignal.any([signal, socketWait.signal])
+			),
 			processClose.promise
 		]);
 
