@@ -7,7 +7,11 @@ import type {
 	KeyRotateResponse,
 	SigningKeyEntry
 } from '@cupboard/protocol/keys';
-import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import {
+	type Reporter,
+	type ResultRow,
+	shouldShowDebug
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -34,7 +38,9 @@ export function registerKeyCommands(
 ): void {
 	const key = program
 		.command('key')
-		.description("Manage and rotate the keys that sign the tenant's narinfos.");
+		.description(
+			"Manage and rotate the keys that sign the tenant's Nix cache metadata."
+		);
 
 	key
 		.command('list')
@@ -53,7 +59,7 @@ export function registerKeyCommands(
 	key
 		.command('rotate')
 		.description(
-			'Start a signing key rotation: add an incoming key and re-sign existing narinfos with it.'
+			'Start a signing key rotation: add a new key and update signatures for existing store paths.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -63,7 +69,7 @@ export function registerKeyCommands(
 				signal: programOptions.signal
 			});
 
-			await runKeyRotate(reporter, rpc.keys.signing);
+			await runKeyRotate(reporter, rpc.keys.signing, url);
 		});
 
 	key
@@ -87,7 +93,7 @@ export function registerKeyCommands(
 	key
 		.command('status')
 		.description(
-			'Show the signing keys and the progress of re-signing existing narinfos.'
+			'Show signing keys and progress while signatures are updated for existing store paths.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[id]', 'show only the signing key with this ID')
@@ -133,6 +139,7 @@ export async function runKeyList(
 
 	reporter.result({
 		kind: 'keys',
+		title: 'Signing keys',
 		data: keys,
 		rows: keys.map((key) => keyRow(key)),
 		empty: 'No signing keys.'
@@ -141,7 +148,8 @@ export async function runKeyList(
 
 export async function runKeyRotate(
 	reporter: Reporter,
-	client: Pick<KeyClient, 'rotate'>
+	client: Pick<KeyClient, 'rotate'>,
+	tenantUrl?: URL
 ): Promise<void> {
 	const { rotated, keys } = await reporter.phase('Rotating signing key', () =>
 		client.rotate()
@@ -149,10 +157,11 @@ export async function runKeyRotate(
 
 	reporter.result({
 		kind: 'key-rotation',
+		title: 'Signing-key rotation',
 		data: { rotated, keys },
 		rows: [
 			{ label: 'New key', value: rotated.key.id },
-			{ label: 'Public key', value: rotated.key.publicKey },
+			{ label: 'Public key', raw: true, value: rotated.key.publicKey },
 			{ label: 'Published keys', value: String(keys.length) }
 		]
 	});
@@ -160,7 +169,13 @@ export async function runKeyRotate(
 		"Add the new public key to every client's `trusted-public-keys` now. " +
 			'The server is re-signing existing narinfos in the background. Use ' +
 			'`cupboard key status` to wait for completion before retiring the old ' +
-			'key once to stop it signing.'
+			'key once to stop it signing.',
+		{
+			humanMessage:
+				"Add the new public key to every client's `trusted-public-keys` now. " +
+				'The server is updating signatures on existing store paths. Check ' +
+				`\`cupboard key status ${tenantUrl?.href ?? '<tenant-url>'}\` before retiring the old key once to stop it signing.`
+		}
 	);
 }
 
@@ -181,8 +196,9 @@ export async function runKeyStatus(
 
 	reporter.result({
 		kind: 'key-status',
+		title: 'Signing-key status',
 		data: selected,
-		rows: selected.map((entry) => keyStatusRow(entry)),
+		rows: selected.flatMap((entry) => keyStatusRows(entry, reporter)),
 		empty: 'No signing keys.'
 	});
 }
@@ -196,7 +212,7 @@ export async function runKeyRetire(
 		message: `Retire signing key ${id}?`,
 		detail:
 			'The first retirement stops the key signing. A client that trusts only ' +
-			'this key will then reject newly committed narinfos. The second ' +
+			'this key will then reject newly published store paths. The second ' +
 			"retirement removes the key from /pubkey. Keep the key in each client's " +
 			'`trusted-public-keys` until its positive narinfo cache has expired.'
 	});
@@ -213,6 +229,7 @@ export async function runKeyRetire(
 
 	reporter.result({
 		kind: 'key',
+		title: 'Signing key',
 		data: result,
 		rows: [
 			{ label: 'Key', value: result.id },
@@ -239,8 +256,7 @@ export async function runKeyAbort(
 	const outcome = await ui.confirm({
 		message: `Abort signing-key rotation ${id}?`,
 		detail:
-			'The incomplete incoming key will be unpublished and its background ' +
-			'work will be discarded. The previous signing key remains active.'
+			'The new key will be removed and its signature updates will stop. The previous signing key remains active.'
 	});
 
 	if (outcome !== 'yes') {
@@ -255,6 +271,7 @@ export async function runKeyAbort(
 
 	reporter.result({
 		kind: 'key',
+		title: 'Signing key',
 		data: result,
 		rows: [
 			{ label: 'Key', value: result.id },
@@ -266,35 +283,50 @@ export async function runKeyAbort(
 function keyRow(entry: SigningKeyEntry): ResultRow {
 	return {
 		label: entry.key.id,
+		raw: true,
 		value: `${describeState(entry.state)}; ${entry.key.publicKey}`
 	};
 }
 
-function keyStatusRow(entry: SigningKeyEntry): ResultRow {
+function keyStatusRows(
+	entry: SigningKeyEntry,
+	reporter: Reporter
+): ResultRow[] {
 	const backfill = entry.state === 'signing' ? entry.backfill : undefined;
 
-	return {
-		label: entry.key.id,
-		value: [
-			describeState(entry.state),
-			entry.key.publicKey,
-			...(backfill === undefined ? [] : [describeBackfill(backfill)])
-		].join('; ')
-	};
+	return [
+		{ label: 'Key', value: entry.key.id },
+		{ label: 'State', value: describeState(entry.state) },
+		{ label: 'Public key', raw: true, value: entry.key.publicKey },
+		...(backfill === undefined ? [] : signatureUpdateRows(backfill, reporter))
+	];
 }
 
-function describeBackfill(status: BackfillStatus): string {
-	if (status.state === 'complete') {
-		return `backfill complete (${String(status.resigned)} re-signed)`;
-	}
-
-	const progress = `${String(status.resigned)} re-signed, ${String(status.remaining)} remaining`;
-
-	if (status.state === 'retrying') {
-		return `backfill retrying ${status.failure.operation} (${progress}): ${status.failure.message}`;
-	}
-
-	return `backfill running (${progress})`;
+function signatureUpdateRows(
+	status: BackfillStatus,
+	reporter: Reporter
+): ResultRow[] {
+	return [
+		{
+			label: 'Signature update',
+			value:
+				status.state === 'complete'
+					? 'Signature update complete'
+					: status.state === 'retrying'
+						? 'Retrying signature updates'
+						: 'Updating signatures'
+		},
+		{ label: 'Store paths updated', value: String(status.resigned) },
+		...(status.state === 'complete'
+			? []
+			: [{ label: 'Remaining', value: String(status.remaining) }]),
+		...(status.state === 'retrying' && shouldShowDebug(reporter)
+			? [
+					{ label: 'Failed operation', value: status.failure.operation },
+					{ label: 'Server error', value: status.failure.message }
+				]
+			: [])
+	];
 }
 
 export function describeState(

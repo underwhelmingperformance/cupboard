@@ -1265,6 +1265,8 @@ describe('githubWorkflowSource', () => {
 			isBranchNotFound: true,
 			fields: {
 				name: 'WorkflowBranchNotFoundError',
+				humanMessage:
+					'GitHub repository iainlane/dotfiles has no branch trunk.',
 				repository,
 				branch: 'trunk'
 			}
@@ -1312,6 +1314,7 @@ describe('githubWorkflowSource', () => {
 			type: GithubPermissionError,
 			fields: {
 				name: 'GithubPermissionError',
+				humanMessage: undefined,
 				resource: `${repository}/.github/workflows/publish.yml@${revision}`
 			}
 		},
@@ -1323,13 +1326,17 @@ describe('githubWorkflowSource', () => {
 					headers: { 'x-ratelimit-remaining': '0' }
 				}),
 			type: GithubRateLimitError,
-			fields: { name: 'GithubRateLimitError' }
+			fields: { name: 'GithubRateLimitError', humanMessage: undefined }
 		},
 		{
 			name: 'a directory in place of a file',
 			response: () => Response.json([]),
 			type: WorkflowDiscoveryError,
-			fields: { name: 'WorkflowDiscoveryError' }
+			fields: {
+				name: 'WorkflowDiscoveryError',
+				humanMessage:
+					'The GitHub workflow could not be inspected. Check the repository reference, workflow file and GitHub access. Use --debug for diagnostic information.'
+			}
 		}
 	])('maps $name to a typed error', async ({ response, type, fields }) => {
 		const workflows = githubWorkflowSource({

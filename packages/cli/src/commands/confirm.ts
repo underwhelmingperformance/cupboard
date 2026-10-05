@@ -14,7 +14,8 @@ import {
 import {
 	formatTimestamp,
 	type Reporter,
-	type ResultRow
+	type ResultRow,
+	shouldShowDetails
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
@@ -234,7 +235,7 @@ export async function runConfirm(
 			throw error;
 		}
 
-		reportConfirmedPaths(reporter, paths);
+		reportConfirmedPaths(reporter, paths, storePathsByHash);
 
 		if (isAbortError(error)) {
 			throw error;
@@ -247,7 +248,7 @@ export async function runConfirm(
 		);
 	}
 
-	reportConfirmedPaths(reporter, paths);
+	reportConfirmedPaths(reporter, paths, storePathsByHash);
 
 	const unconfirmed = paths.filter((path) => !path.confirmed);
 
@@ -262,29 +263,41 @@ export async function runConfirm(
 
 function reportConfirmedPaths(
 	reporter: Reporter,
-	paths: UploadConfirmResponse['paths']
+	paths: UploadConfirmResponse['paths'],
+	storePathsByHash: ReadonlyMap<StorePathHash, string>
 ): void {
 	reporter.result({
 		kind: 'confirm-paths',
+		title: 'Published paths',
 		data: { paths },
-		rows: paths.map((path) => confirmRow(path))
+		rows: paths.map((path) => {
+			const storePath = storePathsByHash.get(path.storePathHash);
+			return confirmRow(
+				path,
+				storePath === undefined
+					? path.storePathHash
+					: shouldShowDetails(reporter)
+						? storePath
+						: StorePath.basename(storePath)
+			);
+		})
 	});
 }
 
-function confirmRow(path: UploadConfirmedPath): ResultRow {
+function confirmRow(path: UploadConfirmedPath, label: string): ResultRow {
 	if (!path.confirmed) {
-		return { label: path.storePathHash, value: 'not present' };
+		return { label, value: 'availability not confirmed' };
 	}
 
 	if (path.grace?.retainUntil !== undefined) {
 		return {
-			label: path.storePathHash,
-			value: `kept until ${formatTimestamp(path.grace.retainUntil)}`
+			label,
+			value: `available; kept until ${formatTimestamp(path.grace.retainUntil)}`
 		};
 	}
 
 	return {
-		label: path.storePathHash,
-		value: 'no cache retention grace configured'
+		label,
+		value: 'available; no retention grace period'
 	};
 }

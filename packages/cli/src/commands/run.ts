@@ -504,7 +504,7 @@ export function registerRunCommand(
 		.argument('<command...>', 'command to run after --')
 		.option(
 			'--github-oidc',
-			'acquire read access even for public resources; requires id-token: write and overrides incidental netrc credentials'
+			'use temporary GitHub Actions read access even if the cache is public or saved read credentials are present; requires id-token: write'
 		)
 		.option(
 			'--audience <audience>',
@@ -513,7 +513,7 @@ export function registerRunCommand(
 		)
 		.option(
 			'--cache-metadata',
-			'acquire only cache metadata for setup when content uses a static credential'
+			'request access to cache configuration while using an existing credential to download paths'
 		)
 		.option(
 			'--read-cache <cache-url>',
@@ -523,7 +523,7 @@ export function registerRunCommand(
 		)
 		.option(
 			'--read-cache-metadata <cache-url>',
-			'additional cache in this tenant whose metadata setup requires (repeatable)',
+			'additional cache in this tenant whose configuration the command needs (repeatable)',
 			collectReadCache,
 			[]
 		)

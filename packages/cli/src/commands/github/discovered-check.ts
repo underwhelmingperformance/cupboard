@@ -265,7 +265,7 @@ export function isRepairOffered(
 
 function findingDetails(findings: readonly PublishingJobFinding[]): string[] {
 	return findings.flatMap(({ trigger, finding }) => {
-		const detail = finding.detail();
+		const detail = finding.humanDetail();
 
 		if (detail === undefined) {
 			return [];
@@ -846,6 +846,7 @@ export async function inspectDiscoveredGithubCheck(
 			? [
 					{
 						label: 'Review a repair',
+						raw: true,
 						value: `cupboard github check ${canonicalHref(tenant)} --repo ${identity.fullName} --branch ${branch}${readCredential} --fix`
 					}
 				]
@@ -857,6 +858,10 @@ export async function inspectDiscoveredGithubCheck(
 			options.isVerification === true
 				? 'github-check-verified'
 				: 'github-check-discovered',
+		title:
+			options.isVerification === true
+				? 'GitHub publishing access check'
+				: 'GitHub publishing jobs',
 		data: {
 			revision: discovery.revision,
 			jobs,
@@ -875,6 +880,7 @@ export async function inspectDiscoveredGithubCheck(
 
 		reporter.result({
 			kind: 'github-check-trust-rules',
+			title: 'GitHub trust rules',
 			data: candidates,
 			rows: [
 				{

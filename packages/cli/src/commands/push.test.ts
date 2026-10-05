@@ -1074,3 +1074,41 @@ describe('push command', () => {
 		}
 	);
 });
+
+describe('push compatibility options', () => {
+	it('accepts obsolete options without listing them in ordinary help', () => {
+		const program = new Command();
+		registerPushCommand(program);
+		const command = program.commands.find((entry) => entry.name() === 'push');
+		expect(command).toBeDefined();
+		if (command === undefined) {
+			throw new Error('The push command must be registered');
+		}
+		const flags = [
+			'--already-held',
+			'--no-already-held',
+			'--claimable',
+			'--no-claimable'
+		];
+		const help = command.helpInformation();
+		command.parseOptions([
+			'--already-held',
+			'/nix/store/a',
+			'--claimable',
+			'/nix/store/b'
+		]);
+		const { alreadyHeld, claimable } = command.opts<{
+			alreadyHeld: string[];
+			claimable: string[];
+		}>();
+		expect({
+			visible: flags.map((flag) => help.includes(flag)),
+			alreadyHeld,
+			claimable
+		}).toStrictEqual({
+			visible: [false, false, false, false],
+			alreadyHeld: ['/nix/store/a'],
+			claimable: ['/nix/store/b']
+		});
+	});
+});

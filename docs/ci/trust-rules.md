@@ -21,6 +21,13 @@ A trust rule says two things:
 
 Each permission that a rule gives is called a **grant**.
 
+Rule inspection and permission previews describe each allowed action and its
+resource. Review every root restriction, cache pattern, template and claim
+substitution before authorising a change. These restrictions appear in the
+normal output because they determine what the rule permits. The issuer,
+audience, claim keys and workflow references remain exact protocol values.
+`--json` preserves the machine-readable rule and grant schemas.
+
 Administrators sign in the same way. A tenant administrator is someone whose
 identity matches a rule that gives full access. See
 [Who can use your tenant](../admin/access.md).

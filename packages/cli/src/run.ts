@@ -6,6 +6,8 @@ import {
 	cliExitCode,
 	failureColour,
 	failureReporterMode,
+	humanErrorFormatter,
+	presentationFromGlobals,
 	reportCliFailure
 } from './cli.ts';
 import { translateRpcError } from './client/rpc-errors.ts';
@@ -50,6 +52,8 @@ export async function runCli(argv?: readonly string[]): Promise<number> {
 
 		const reporter = createCliUi({
 			mode: failureReporterMode(program),
+			presentation: presentationFromGlobals(program),
+			formatError: humanErrorFormatter(program),
 			colour: failureColour(program)
 		}).reporter();
 

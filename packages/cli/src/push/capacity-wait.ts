@@ -29,7 +29,9 @@ export function capacityWaitReporter(
 
 		announcement = setTimeout(() => {
 			announcement = undefined;
-			reporter.info('Waiting for the cache to grant capacity to commit');
+			reporter.info('Waiting for the cache to grant capacity to commit', {
+				humanMessage: 'Waiting for the cache to accept more paths'
+			});
 		}, sustainedCapacityWaitMs);
 		announcement.unref();
 	};

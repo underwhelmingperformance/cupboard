@@ -123,12 +123,15 @@ export type GithubRepairProblem =
 	| 'existing-rule';
 
 export class GithubRepairUnavailableError extends CliError {
+	override readonly humanMessage: string;
+
 	constructor(
 		public readonly problem: GithubRepairProblem,
 		public readonly reason: string
 	) {
 		super(`Cannot repair this configuration automatically: ${reason}`);
 		this.name = 'GithubRepairUnavailableError';
+		this.humanMessage = this.message;
 	}
 }
 
@@ -167,7 +170,25 @@ function shadowReason(
  * The server selects the matching rule with the most claims. A planned rule
  * can therefore replace the rule that another job currently uses.
  */
+function humanShadowReason(
+	shadow: GithubRepairShadow,
+	job: string,
+	trigger: string | undefined,
+	rules: readonly string[]
+): string {
+	const existing = rules.join(', ');
+	if (shadow === 'ungranted') {
+		return `The proposed permissions would prevent ${job} from accessing Cupboard for ${trigger ?? 'its'} runs. Existing rules: ${existing}. Review the job permissions and change the configuration by hand.`;
+	}
+	if (shadow === 'ambiguous') {
+		return `The proposed rule would conflict with existing rules ${existing} for ${job}. Review their identity restrictions and permissions, then change the configuration by hand.`;
+	}
+	return `The check could not verify ${job}. The proposed rule might replace access from existing rules ${existing}. Inspect the job and change the configuration by hand.`;
+}
+
 export class GithubRepairShadowsRuleError extends CliError {
+	override readonly humanMessage: string;
+
 	constructor(
 		public readonly shadow: GithubRepairShadow,
 		public readonly job: string,
@@ -178,19 +199,25 @@ export class GithubRepairShadowsRuleError extends CliError {
 			`Cannot repair this configuration automatically: ${shadowReason(shadow, job, trigger, rules)} Change the configuration by hand.`
 		);
 		this.name = 'GithubRepairShadowsRuleError';
+		this.humanMessage = humanShadowReason(shadow, job, trigger, rules);
 	}
 }
 
 export class GithubRepairStateChangedError extends CliError {
+	override readonly humanMessage: string;
+
 	constructor() {
 		super(
 			'The repository or tenant configuration changed during review. Run cupboard github check again to review a new repair.'
 		);
 		this.name = 'GithubRepairStateChangedError';
+		this.humanMessage = this.message;
 	}
 }
 
 export class GithubRepairPartialError extends CliError {
+	override readonly humanMessage: string;
+
 	constructor(
 		public readonly step: string,
 		public readonly applied: readonly string[],
@@ -209,6 +236,7 @@ export class GithubRepairPartialError extends CliError {
 			{ cause }
 		);
 		this.name = 'GithubRepairPartialError';
+		this.humanMessage = this.message;
 	}
 
 	override get exitCode(): number {
@@ -1475,12 +1503,12 @@ export async function runDiscoveredGithubRepair(
 	const rows = [
 		...[...retainedGrantMissingRules].map((id) => ({
 			label: 'Keep existing rule',
-			value: `${id} does not grant every operation that the discovered jobs request. The repair adds a planned rule that grants them and has more claims than ${id}. ${id} stays active, but the server selects the planned rule for the runs that both rules match.`
+			value: `${id} does not allow all actions needed by the discovered jobs. The repair adds a more specific rule for those jobs. ${id} remains active for other matching runs. Review the new permissions below.`
 		})),
 		...extensions.flatMap(({ expected, permittedGrants }) => [
 			{
 				label: 'Extend existing rule',
-				value: `${expected.id}: keep its claims, resources and existing grants; add the following grants atomically`
+				value: `${expected.id}: keep its identity restrictions and existing permissions; add the permissions below`
 			},
 			...Object.entries(expected.claims).map(([claim, value]) => ({
 				label: `Claim ${claim}`,
@@ -1571,6 +1599,7 @@ export async function runDiscoveredGithubRepair(
 	} else {
 		ui.reporter().result({
 			kind: 'github-repair-plan',
+			title: 'Planned GitHub repair',
 			data: {
 				rules: additions,
 				extensions: extensions.map(({ expected, permittedGrants }) => ({

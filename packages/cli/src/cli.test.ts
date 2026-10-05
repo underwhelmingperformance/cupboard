@@ -10,7 +10,12 @@ import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
-import { buildProgram, cliExitCode, reportCliFailure } from './cli.ts';
+import {
+	buildProgram,
+	cliExitCode,
+	presentationFromGlobals,
+	reportCliFailure
+} from './cli.ts';
 import { translateRpcError } from './client/rpc-errors.ts';
 import { GithubRateLimitError } from './commands/oidc-trust/github.ts';
 import {
@@ -795,5 +800,40 @@ describe('command help', () => {
 		const help = helpFor(['reuse-view', 'remove']);
 
 		expect(help).toContain('-y, --yes');
+	});
+});
+
+describe('global presentation flags', () => {
+	it.each([
+		['--details', 'details'],
+		['--debug', 'debug']
+	])('accepts %s before and after a command', async (flag, expected) => {
+		for (const arguments_ of [
+			[flag, 'version-test'],
+			['version-test', flag]
+		]) {
+			const program = buildProgram();
+			let level: unknown;
+			program.command('version-test').action(() => {
+				level = presentationFromGlobals(program);
+			});
+			await program.parseAsync(['node', 'cupboard', ...arguments_]);
+			expect(level).toBe(expected);
+		}
+	});
+	it('debug includes details regardless of flag order', async () => {
+		const program = buildProgram();
+		let selected: unknown;
+		program.command('version-test').action(() => {
+			selected = presentationFromGlobals(program);
+		});
+		await program.parseAsync([
+			'node',
+			'cupboard',
+			'--debug',
+			'version-test',
+			'--details'
+		]);
+		expect(selected).toBe('debug');
 	});
 });

@@ -83,7 +83,7 @@ describe('runControlKeyList', () => {
 
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
-			infos: ['No control keys.']
+			infos: ['No operator access-token keys.']
 		});
 	});
 });
@@ -120,7 +120,7 @@ describe('runControlKeyRotate', () => {
 					}
 				]
 			],
-			infos: ['New control tokens are signed with this key.']
+			infos: ['New operator access tokens are signed with this key.']
 		});
 	});
 });
@@ -150,6 +150,7 @@ describe('runControlKeyRetire', () => {
 			results: [
 				{
 					kind: 'control-key',
+					title: 'Operator access-token key',
 					data: response,
 					rows: [
 						{ label: 'Key', value: 'kid-old' },

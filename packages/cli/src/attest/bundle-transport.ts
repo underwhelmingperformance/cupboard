@@ -154,7 +154,9 @@ export async function runBundleAttachment(
 		readonly skipUnservable?: boolean;
 	}
 ): Promise<AttestationAttachOutcome> {
-	const negotiateStep = log.group('negotiate');
+	const negotiateStep = log.group('negotiate', {
+		humanLabel: 'Checking existing attestations'
+	});
 	let hasNegotiatedBundles = false;
 	const negotiate = async (
 		batch: readonly BundleGroup[]
@@ -179,8 +181,10 @@ export async function runBundleAttachment(
 		hasNegotiatedBundles = true;
 		return exactBundleDecisions(batch, response.bundles);
 	};
-	const uploadStep = log.group('upload');
-	const attachStep = log.group('attach');
+	const uploadStep = log.group('upload', { humanLabel: 'Uploading bundles' });
+	const attachStep = log.group('attach', {
+		humanLabel: 'Attaching attestations'
+	});
 	let uploadedBytes = 0;
 	const upload = async (
 		group: BundleGroup,

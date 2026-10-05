@@ -132,10 +132,10 @@ grant.
 
 A quota limits how much storage a tenant can use. Each distinct NAR and
 attestation bundle is counted once per tenant, however many store paths or
-caches refer to it. NARs are charged by compressed file size. Attestation
-bundles are charged by their stored byte length.
+caches refer to it. NARs count by compressed file size. Attestation bundles
+count by their stored byte length.
 
-To inspect the quota and charged bytes without changing either value:
+To inspect the quota and storage usage without changing either value:
 
 ```sh
 cupboard tenant quota https://cupboard.example.workers.dev acme
@@ -143,9 +143,8 @@ cupboard tenant quota https://cupboard.example.workers.dev acme
 
 The command uses the control API. A control token without the wildcard grant
 needs a `cupboard_tenant` grant with `tenant:read-quota` for `acme`. The command
-can read the quota of a suspended tenant or a tenant in offboarding. Once
-removal finishes, the tenant's usage row is deleted and the command reports that
-the tenant has been retired.
+can read the quota of a suspended tenant or a tenant whose removal is in
+progress. After removal finishes, the quota and usage are no longer available.
 
 To set a quota of 50 GB on the `acme` tenant:
 
@@ -195,6 +194,10 @@ cupboard tenant resume https://cupboard.example.workers.dev acme
 ```sh
 cupboard tenant remove https://cupboard.example.workers.dev acme
 ```
+
+Removal cannot be undone. `cupboard tenant list` shows `Removal in progress`
+until removal finishes, then `Removed`. Configuration versions appear only with
+`--debug`.
 
 Reads and writes stop immediately. After that, an hourly job deletes the
 tenant's caches, keys, credentials and trust rules, working through a few

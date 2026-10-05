@@ -540,6 +540,54 @@ describe('createReporter', () => {
 });
 
 describe('createGithubReporter', () => {
+	it('projects human labels and hides diagnostic facts without changing JSON', async () => {
+		const human = captureStream();
+		const machine = captureStream();
+		const github = createGithubReporter({ stream: human.stream });
+		const json = createReporter({ stream: machine.stream });
+
+		for (const reporter of [github, json]) {
+			await reporter.phase(
+				'Negotiating',
+				(phase) => {
+					phase.fact('credits', 5, { level: 'debug' });
+					phase.fact('servable', 3, { humanLabel: 'Available paths' });
+				},
+				{ humanLabel: 'Checking paths' }
+			);
+			reporter.info('internal continuation', {
+				humanMessage: 'Work continues'
+			});
+			reporter.info('cursor 42', { level: 'debug' });
+		}
+
+		expect(human.lines().join('')).toContain('Checking paths');
+		expect(human.lines().join('')).toContain('Available paths: 3');
+		expect(human.lines().join('')).toContain('Work continues');
+		expect(human.lines().join('')).not.toMatch(
+			/credits|cursor|internal continuation/
+		);
+		expect(
+			withoutDurations(
+				machine
+					.lines()
+					.join('')
+					.trim()
+					.split('\n')
+					.map((line): unknown => JSON.parse(line))
+			)
+		).toStrictEqual([
+			{
+				event: 'phase',
+				label: 'Negotiating',
+				status: 'ok',
+				durationMs: 'number',
+				facts: { credits: '5', servable: '3' }
+			},
+			{ event: 'info', message: 'internal continuation' },
+			{ event: 'info', message: 'cursor 42' }
+		]);
+	});
 	let written: string[];
 	let captured: string[];
 

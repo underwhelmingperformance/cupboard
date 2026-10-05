@@ -91,11 +91,14 @@ const tenantColumnsQuery = "SELECT name FROM pragma_table_info('tenant');";
 const tenantCountQuery = 'SELECT CAST(count(*) AS TEXT) FROM tenant;';
 
 export class InvalidTenantReadinessCountError extends CliError {
+	override readonly humanMessage: string;
 	constructor() {
 		super(
 			'Invalid tenant readiness count returned by D1. Retry the deployment after checking the D1 response.'
 		);
 		this.name = 'InvalidTenantReadinessCountError';
+		this.humanMessage =
+			'Tenant readiness could not be read. Stop deployment and inspect the deployment with --debug before making changes.';
 	}
 }
 
@@ -104,11 +107,14 @@ D1 returned a tenant count that is not a count when the deploy checked whether
 the deployment is fresh.
 */
 export class InvalidTenantCountError extends CliError {
+	override readonly humanMessage: string;
 	constructor() {
 		super(
 			'Invalid tenant count returned by D1 while checking whether the deployment is fresh. Retry the deployment after checking the D1 response.'
 		);
 		this.name = 'InvalidTenantCountError';
+		this.humanMessage =
+			'The deployment tenant list could not be read. Stop deployment and inspect the deployment with --debug before making changes.';
 	}
 }
 
@@ -179,6 +185,7 @@ export async function readLocalStepReadiness(
  * stored id and state.
  */
 export class UnknownDeploymentTransitionError extends CliError {
+	override readonly humanMessage: string;
 	constructor(
 		public readonly transition: string,
 		public readonly state: string,
@@ -190,6 +197,8 @@ export class UnknownDeploymentTransitionError extends CliError {
 				: `The deployment records transition '${transition}' in state '${state}'. This cupboard build defines neither the transition nor the state. Deploy a build that defines both.`
 		);
 		this.name = 'UnknownDeploymentTransitionError';
+		this.humanMessage =
+			'This CLI cannot safely upgrade the recorded deployment state. Use a CLI release compatible with the deployed release. Use --debug for the recorded upgrade state.';
 	}
 }
 
@@ -200,6 +209,7 @@ export class UnknownDeploymentTransitionError extends CliError {
  * build reads, so this build's deploy stops before it changes anything.
  */
 export class UnrecognisedTransitionContractedError extends CliError {
+	override readonly humanMessage: string;
 	constructor(
 		public readonly transition: string,
 		public readonly databaseName: string
@@ -208,6 +218,8 @@ export class UnrecognisedTransitionContractedError extends CliError {
 			`The deployment records that the contract migrations of transition '${transition}' have started, and this cupboard build does not define that transition. Those migrations may have removed schema that this build needs. Stay on the deployed release, and use its cupboard deployment status and cupboard deployment resume. To roll back to this build anyway, first confirm that those contract migrations remove nothing that this build reads, then clear the row's contracted_at in the D1 database '${databaseName}' as described under "Deploying an older release over a newer one" in docs/operator/upgrading.md, and deploy again.`
 		);
 		this.name = 'UnrecognisedTransitionContractedError';
+		this.humanMessage =
+			'An upgrade has changed the deployment data format. This older release cannot safely be deployed. Complete the upgrade with the deployed release; deploying an older release will not undo the change.';
 	}
 }
 
@@ -216,11 +228,14 @@ export class UnrecognisedTransitionContractedError extends CliError {
  * field contains the separator that the query puts between them.
  */
 export class InvalidTransitionRowError extends CliError {
+	override readonly humanMessage: string;
 	constructor(public readonly row: string) {
 		super(
 			`D1 returned a deployment_transition row that cannot be read: ${row}. Check the row in the deployment_transition table.`
 		);
 		this.name = 'InvalidTransitionRowError';
+		this.humanMessage =
+			'The recorded upgrade state could not be read. Stop deployment and investigate with --debug before changing the database.';
 	}
 }
 

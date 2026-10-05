@@ -45,7 +45,7 @@ export function registerPlanReprobeCommand(
 	plan
 		.command('reprobe')
 		.description(
-			'Internal step of the flake publish workflow, not for direct use. Just before the build starts, check which planned targets still need to be built.'
+			'Automation helper for the flake publish workflow. Just before the build starts, check which planned targets still need to be built.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[cache]', 'cache name, if the URL is a tenant URL')
@@ -130,7 +130,9 @@ export async function runPlanReprobe(
 				destinationProbes: dependencies.destinationProbes
 			});
 
-			context.fact('withdrawn', formatCount(answer.withdrawn.length));
+			context.fact('withdrawn', formatCount(answer.withdrawn.length), {
+				humanLabel: 'Now available in the cache'
+			});
 			context.fact('still to build', formatCount(answer.buildSet.length));
 
 			return answer;
@@ -139,9 +141,13 @@ export async function runPlanReprobe(
 
 	reporter.result({
 		kind: planReprobeResultKind,
+		title: 'Build plan refresh',
 		data: reprobe,
 		rows: [
-			{ label: 'Withdrawn', value: String(reprobe.withdrawn.length) },
+			{
+				label: 'Now available in the cache',
+				value: String(reprobe.withdrawn.length)
+			},
 			{ label: 'To build', value: String(reprobe.buildSet.length) }
 		]
 	});

@@ -156,6 +156,7 @@ const ciUpdateAdvice =
 	'docs/operator/upgrading.md)';
 
 export class AdminTokenRequiredError extends CliError {
+	override readonly humanMessage: string;
 	/**
 	 * True when the run logged in as the admin at a terminal before this
 	 * refusal.
@@ -195,6 +196,7 @@ export class AdminTokenRequiredError extends CliError {
 			{ cause: options.cause }
 		);
 		this.name = 'AdminTokenRequiredError';
+		this.humanMessage = `Updating this deployment requires its administrator. Sign in with \`${adminLoginCommand(url, admin)}\`. If access is still refused, restore the administrator’s permissions as described in docs/operator/operators.md, then rerun cupboard deploy. Nothing was changed.`;
 		this.isAfterLogin = options.isAfterLogin === true;
 	}
 
@@ -208,6 +210,7 @@ export class AdminTokenRequiredError extends CliError {
  * custom domain on an account without a workers.dev subdomain.
  */
 export class AdminNewUrlMissingError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor(public readonly admin: OwnerBinding) {
 		super(
 			`This deployment is administered by ${principalLabel(admin)}, and the ` +
@@ -225,13 +228,17 @@ export class AdminNewUrlMissingError extends CliError {
  * A session stored for a URL was issued by a different deployment.
  */
 export class StoredSessionMismatchError extends CliError {
+	override readonly humanMessage: string;
 	constructor() {
 		super('the stored session was issued by a different deployment');
 		this.name = 'StoredSessionMismatchError';
+		this.humanMessage =
+			'The saved sign-in belongs to a different deployment. Sign in to this deployment again.';
 	}
 }
 
 export class AdminDeploymentUrlMissingError extends CliError {
+	override readonly humanMessage: string;
 	constructor(public readonly admin: OwnerBinding) {
 		super(
 			`This deployment is administered by ${principalLabel(admin)}, but it ` +
@@ -241,6 +248,8 @@ export class AdminDeploymentUrlMissingError extends CliError {
 				're-run `cupboard init`. Nothing was changed.'
 		);
 		this.name = 'AdminDeploymentUrlMissingError';
+		this.humanMessage =
+			'This deployment has an administrator but no reachable URL for checking administrator access. Register a workers.dev subdomain or configure a custom domain in Cloudflare, then rerun cupboard deploy. Nothing was changed.';
 	}
 }
 
@@ -257,6 +266,7 @@ export type AdminRecordedIn = 'bound' | 'planned' | 'both';
  * the admin in a database that the Workers are no longer bound to.
  */
 export class AdminDatabaseMismatchError extends CliError {
+	override readonly humanMessage: string;
 	constructor(
 		public readonly boundDatabase: string,
 		public readonly plannedDatabase: string | undefined,
@@ -280,6 +290,7 @@ export class AdminDatabaseMismatchError extends CliError {
 				'Nothing was changed.'
 		);
 		this.name = 'AdminDatabaseMismatchError';
+		this.humanMessage = `The plan selects ${plannedDatabase ?? 'no database'}, but this deployment uses ${boundDatabase}. Select ${boundDatabase} in the plan, or follow the database-change procedure in docs/operator/deploying.md. Nothing was changed.`;
 	}
 }
 
@@ -289,6 +300,7 @@ export class AdminDatabaseMismatchError extends CliError {
  * deployment until the control Worker is redeployed.
  */
 export class AdminControlWorkerMissingError extends CliError {
+	override readonly humanMessage: string;
 	constructor(
 		public readonly admin: OwnerBinding,
 		public readonly controlScriptName: string,
@@ -308,6 +320,7 @@ export class AdminControlWorkerMissingError extends CliError {
 				'`cupboard init`. Nothing was changed.'
 		);
 		this.name = 'AdminControlWorkerMissingError';
+		this.humanMessage = `The deployment service ${controlScriptName} was deleted. Restore the service with its existing database using the recovery procedure in docs/operator/deploying.md, then rerun cupboard deploy. Nothing was changed.`;
 	}
 }
 
@@ -318,6 +331,7 @@ export class AdminControlWorkerMissingError extends CliError {
  * token from the new URL beforehand.
  */
 export class AdminTokenForNewUrlRequiredError extends CliError {
+	override readonly humanMessage = this.message;
 	/**
 	 * False for a run with `--github-oidc`, which never reads a stored session.
 	 */
@@ -500,6 +514,7 @@ function adminCheckFailureText(
  * has no `instance.get` procedure.
  */
 export class AdminCheckFailedError extends CliError {
+	override readonly humanMessage: string;
 	constructor(
 		public readonly url: URL,
 		public readonly admin: OwnerBinding,
@@ -515,6 +530,7 @@ export class AdminCheckFailedError extends CliError {
 			options
 		);
 		this.name = 'AdminCheckFailedError';
+		this.humanMessage = `Administrator access could not be checked at ${url.origin}. Check that the deployment is reachable and compatible with this CLI, then rerun cupboard deploy. Nothing was changed. Use --debug for the diagnostic.`;
 	}
 
 	override get exitCode(): number {
@@ -528,6 +544,7 @@ export class AdminCheckFailedError extends CliError {
  * The login as the admin returned an identity other than the admin.
  */
 export class AdminLoginMismatchError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor(
 		public readonly admin: OwnerBinding,
 		public readonly presented: Principal | undefined
@@ -608,9 +625,12 @@ export function adminLogin(dependencies: {
 }
 
 export class AdminGrantMissingError extends CliError {
+	override readonly humanMessage: string;
 	constructor() {
 		super('the token does not include the wildcard grant');
 		this.name = 'AdminGrantMissingError';
+		this.humanMessage =
+			'The sign-in does not grant deployment administrator access. Restore the administrator’s permissions before deploying.';
 	}
 }
 
@@ -973,12 +993,15 @@ const globalAdminRowSchema = z.tuple([
 ]);
 
 export class GlobalAdminRowInvalidError extends CliError {
+	override readonly humanMessage: string;
 	constructor(options?: { readonly cause?: unknown }) {
 		super(
 			'The global_admin row in D1 has an unexpected shape. Check the control database before retrying.',
 			options
 		);
 		this.name = 'GlobalAdminRowInvalidError';
+		this.humanMessage =
+			'The recorded deployment administrator could not be read. Investigate with --debug before changing administrator access.';
 	}
 }
 

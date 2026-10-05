@@ -285,7 +285,7 @@ describe('runTenantCreate', () => {
 		expect(rows).toStrictEqual([
 			[
 				{ label: 'Tenant', value: 'acme' },
-				{ label: 'Status', value: 'active' },
+				{ label: 'Status', value: 'Active' },
 				{ label: 'Default cache access', value: 'private' },
 				{
 					label: 'Warning',
@@ -317,16 +317,52 @@ describe('runTenantCreate', () => {
 		expect(rows).toStrictEqual([
 			[
 				{ label: 'Tenant', value: 'acme' },
-				{ label: 'Status', value: 'active' },
+				{ label: 'Status', value: 'Active' },
 				{ label: 'Default cache access', value: 'public' },
-				{ label: 'Read user', value: 'alice' },
-				{ label: 'Read password', value: password }
+				{ label: 'Read user', raw: true, value: 'alice' },
+				{ label: 'Read password', raw: true, value: password }
 			]
 		]);
 	});
 });
 
 describe('runTenantList', () => {
+	it.each(['summary', 'details', 'debug'] as const)(
+		'keeps lifecycle versions in debug output only (%s)',
+		async (presentation) => {
+			const rows: ResultRow[][] = [];
+			const response = tenantListResponseSchema.parse({
+				tenants: [
+					{ ...summary(), status: 'offboarding' },
+					{ ...summary(), status: 'offboarded' }
+				]
+			});
+
+			await runTenantList(
+				{ ...reporter(rows), presentation },
+				{
+					list: () => Promise.resolve(response)
+				}
+			);
+
+			expect(rows).toStrictEqual([
+				[
+					{
+						label: 'acme',
+						value:
+							presentation === 'debug'
+								? 'Removal in progress; config v3'
+								: 'Removal in progress'
+					},
+					{
+						label: 'acme',
+						value: presentation === 'debug' ? 'Removed; config v3' : 'Removed'
+					}
+				]
+			]);
+		}
+	);
+
 	it('reports each tenant', async () => {
 		const rows: ResultRow[][] = [];
 		const response = tenantListResponseSchema.parse({
@@ -339,14 +375,27 @@ describe('runTenantList', () => {
 
 		expect(rows).toStrictEqual([
 			[
-				{ label: 'acme', value: 'active; config v3' },
-				{ label: 'acme', value: 'suspended; config v3' }
+				{ label: 'acme', value: 'Active' },
+				{ label: 'acme', value: 'Suspended' }
 			]
 		]);
 	});
 });
 
 describe('tenant state changes', () => {
+	it('explains irreversible tenant removal before confirming', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+		await runTenantRemove(acme, ui, tenantClient({}));
+
+		expect(captured.confirms).toStrictEqual([
+			{
+				message: 'Remove tenant acme?',
+				detail:
+					"New reads and writes stop immediately. The tenant's data is deleted over the following hours. Removal cannot be undone."
+			}
+		]);
+	});
 	const suspendMethod: 'suspend' | 'remove' = 'suspend';
 	const offboardingOperation: 'suspend' | 'remove' = 'remove';
 
@@ -389,8 +438,17 @@ describe('tenant state changes', () => {
 			results: [
 				{
 					kind: 'tenant',
+					title: 'Tenant',
 					data: result,
-					rows: [{ label: acme, value: result.status }]
+					rows: [
+						{
+							label: acme,
+							value:
+								result.status === 'offboarding'
+									? 'Removal in progress'
+									: 'Suspended'
+						}
+					]
 				}
 			]
 		});
@@ -417,7 +475,7 @@ describe('tenant state changes', () => {
 			resume: () => Promise.resolve(result)
 		});
 
-		expect(rows).toStrictEqual([[{ label: 'acme', value: 'active' }]]);
+		expect(rows).toStrictEqual([[{ label: 'acme', value: 'Active' }]]);
 	});
 });
 
@@ -517,8 +575,8 @@ describe('tenant fallback credential', () => {
 		expect(rows).toStrictEqual([
 			[
 				{ label: 'Tenant', value: 'acme' },
-				{ label: 'Read user', value: 'alice' },
-				{ label: 'Read password', value: call?.read.password }
+				{ label: 'Read user', raw: true, value: 'alice' },
+				{ label: 'Read password', raw: true, value: call?.read.password }
 			]
 		]);
 	});
@@ -614,8 +672,8 @@ describe('cache read credentials', () => {
 				[
 					{ label: 'Tenant', value: 'acme' },
 					{ label: 'Cache', value: label },
-					{ label: 'Read user', value: 'alice' },
-					{ label: 'Read password', value: sent }
+					{ label: 'Read user', raw: true, value: 'alice' },
+					{ label: 'Read password', raw: true, value: sent }
 				]
 			]);
 		}

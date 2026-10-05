@@ -20,6 +20,7 @@ import {
 	CupboardHttpError,
 	UnreachableHostError
 } from '../errors.ts';
+import { formatHumanError } from '../human-errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
 import {
@@ -55,10 +56,10 @@ import {
 	resourceNameProblem
 } from './config.ts';
 import {
-	choicePlanRows,
 	collectResources,
+	deploymentReviewRows,
 	type DeployOptions,
-	derivedPlanRows,
+	queueRole,
 	runDeploy
 } from './deploy-run.ts';
 import { deploymentUrl, withDeploymentUrl } from './deployment-url.ts';
@@ -111,8 +112,7 @@ import {
 	observeDeployment,
 	planBlockedError,
 	planDeployment,
-	planOfflineDeployment,
-	transitionPlanRows
+	planOfflineDeployment
 } from './transition.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
 import {
@@ -122,6 +122,7 @@ import {
 } from './workers-plan.ts';
 
 export class DeploymentSettlementUrlMissingError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor() {
 		super(
 			'Tenant work needs a reachable deployment URL. Configure a domain, then resume the deployment.'
@@ -131,6 +132,7 @@ export class DeploymentSettlementUrlMissingError extends CliError {
 }
 
 export class DeployCancelledError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor() {
 		super('Deploy cancelled');
 		this.name = 'DeployCancelledError';
@@ -155,6 +157,7 @@ export class AccountOptionRequiredError extends CliUsageError {
 }
 
 export class R2CredentialsRequiredError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor() {
 		super(
 			'R2 credentials are required: set R2_ACCESS_KEY_ID and ' +
@@ -166,6 +169,7 @@ export class R2CredentialsRequiredError extends CliError {
 }
 
 export class R2UnreachableError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor(options: { readonly cause: unknown }) {
 		super('Could not reach R2 to check the credentials', options);
 		this.name = 'R2UnreachableError';
@@ -173,6 +177,7 @@ export class R2UnreachableError extends CliError {
 }
 
 export class R2CredentialsRejectedError extends CliError {
+	override readonly humanMessage = this.message;
 	constructor(public readonly status: number) {
 		super(
 			`R2 rejected the credentials (HTTP ${String(status)}). ` +
@@ -237,6 +242,7 @@ export interface DeployRuntimeOptions {
 	readonly resultFile?: string;
 	readonly signal?: AbortSignal;
 	readonly colour?: boolean;
+	readonly presentation?: import('@cupboard/reporter').PresentationLevel;
 }
 
 function bucketNameOf(config: DeploymentConfig): string {
@@ -263,6 +269,12 @@ async function showServerFault(dependencies: {
 	readonly lead: string;
 }): Promise<void> {
 	const { ui, ray, worker, lead } = dependencies;
+	if (ui.reporter().presentation !== 'debug') {
+		ui.warn(
+			`${lead} Fix the reported problem and rerun cupboard deploy with the same release and source. Use --debug to inspect the server diagnostic.`
+		);
+		return;
+	}
 
 	const logged =
 		ray === undefined
@@ -384,7 +396,8 @@ export function planMenuEntries(
 	): MenuEntry<PlanChoice>[] =>
 		names.map((name) => ({
 			value: `${kind}:${name}`,
-			label: resourceLabels[kind],
+			label:
+				kind === 'queue' ? queueRole(state.config, name) : resourceLabels[kind],
 			hint: name
 		}));
 
@@ -553,7 +566,7 @@ async function applyPlanEdit(
 	const name = choice.slice(separator + 1);
 
 	const edit = await ui.editText({
-		message: `Rename ${resourceLabels[kind]} ${name} to`,
+		message: `Rename ${kind === 'queue' ? queueRole(state.config, name) : resourceLabels[kind]} ${name} to`,
 		initial: name,
 		problem: (value) => resourceNameProblem(kind, value)
 	});
@@ -964,7 +977,8 @@ export async function executeDeploy(
 	const ui = createDeployUi({
 		signal: runtimeOptions.signal,
 		colour: runtimeOptions.colour,
-		resultFile: runtimeOptions.resultFile
+		resultFile: runtimeOptions.resultFile,
+		presentation: runtimeOptions.presentation
 	});
 	const isInteractive = ui.interactive;
 
@@ -975,12 +989,11 @@ export async function executeDeploy(
 			throw error;
 		}
 
-		// The SDK error's own message is the raw response body; surface just
-		// the human-readable details Cloudflare provided.
-		const detail =
-			error.errors.map((item) => item.message).join('; ') ||
-			`HTTP ${String(error.status)}`;
-		ui.cancelled(`Cloudflare rejected the deploy: ${detail}`);
+		ui.cancelled(
+			formatHumanError(error, {
+				debug: runtimeOptions.presentation === 'debug'
+			})
+		);
 		process.exitCode = 1;
 	}
 }
@@ -1010,8 +1023,10 @@ async function deployFlow(
 
 	const { artifact, notice } = await ui
 		.reporter()
-		.phase('Building Workers', () =>
-			resolveArtifact(cliOptions.fromTree ?? false)
+		.phase(
+			'Building Workers',
+			() => resolveArtifact(cliOptions.fromTree ?? false),
+			{ humanLabel: 'Preparing deployment' }
 		);
 
 	if (notice !== undefined) {
@@ -1029,7 +1044,6 @@ async function deployFlow(
 
 	if (cliOptions.dryRun === true) {
 		const offlinePlan = planOfflineDeployment(artifact, cliOptions.workersPlan);
-		const offlineArtifact = offlinePlan.artifact;
 		const assembled = assembleSecrets({
 			env: process.env,
 			accountId: '',
@@ -1037,17 +1051,21 @@ async function deployFlow(
 		});
 		const r2Names = new Set(['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']);
 
-		ui.note('Deployment plan', [
-			...derivedPlanRows(
-				offlineArtifact,
+		ui.note('Deployment preview', [
+			{
+				label: 'Source',
+				value:
+					cliOptions.fromTree === true || !isSea()
+						? 'Working tree'
+						: 'Released binary'
+			},
+			...deploymentReviewRows(
+				offlinePlan,
 				assembled.secrets,
-				assembled.missing
-					.filter((name) => r2Names.has(name))
-					.map((name) => `${name} (pending)`)
-			),
-			...transitionPlanRows(offlinePlan),
-			{ label: '', value: '' },
-			...choicePlanRows(offlineArtifact.config, initialDomain)
+				initialDomain,
+				[],
+				runtimeOptions.presentation
+			)
 		]);
 		warnMissing(assembled.missing.filter((name) => !r2Names.has(name)));
 		ui.outro('Dry run: nothing was changed.');
@@ -1204,13 +1222,14 @@ async function deployFlow(
 							{
 								label: 'What',
 								value:
-									'the key that encrypts control-plane signing keys at rest'
+									'Protects the deployment signing keys stored on the server'
 							},
 							{
 								label: 'Why',
-								value: 'a different wrapping secret cannot unwrap existing data'
+								value:
+									'Keep this value for recovery. Replacing it prevents the deployment from reading its existing signing keys.'
 							},
-							{ label: 'Value', value: generatedWrapSecret }
+							{ label: 'Value', value: generatedWrapSecret, raw: true }
 						]
 					});
 				}
@@ -1244,16 +1263,16 @@ async function deployFlow(
 						rows: [
 							{
 								label: 'What',
-								value: 'the key that signs per-push upload-credential ids'
+								value: 'Protects upload credentials during publication'
 							},
 							{
 								label: 'Why',
 								value:
 									settlement === 'rotate'
-										? 'both Workers verify push ids and the applied value cannot be read back; a push in flight needs re-running'
-										: 'a different one invalidates in-flight pushes'
+										? 'The upload key has changed. Publications already in progress need to be retried.'
+										: 'Replacing this value invalidates publications already in progress.'
 							},
-							{ label: 'Value', value: generatedPushIdSigningKey }
+							{ label: 'Value', value: generatedPushIdSigningKey, raw: true }
 						]
 					});
 				}
@@ -1329,11 +1348,21 @@ async function deployFlow(
 				);
 
 				ui.note('Deployment plan', [
-					...derivedPlanRows(reviewedPlan.artifact, options.secrets, annotated),
-					{ label: '', value: '' },
-					...transitionPlanRows(reviewedPlan),
 					{ label: 'Account', value: state.accountId },
-					...choicePlanRows(state.config, state.domain)
+					{
+						label: 'Source',
+						value:
+							cliOptions.fromTree === true || !isSea()
+								? 'Working tree'
+								: 'Released binary'
+					},
+					...deploymentReviewRows(
+						reviewedPlan,
+						options.secrets,
+						state.domain,
+						annotated,
+						runtimeOptions.presentation
+					)
 				]);
 				warnMissing(missing);
 
@@ -1463,7 +1492,7 @@ async function deployFlow(
 		if (r2Key.kind === 'keep') {
 			// The values cannot be read back. Once a cache exists, onboarding has
 			// the Worker test its stored pair.
-			ui.info('Keeping the R2 credentials already set on the Worker.');
+			ui.info('Keeping the existing storage credentials.');
 		} else if (isInteractive) {
 			const settlement = await obtainR2Credentials({
 				ui,
@@ -1560,6 +1589,7 @@ async function deployFlow(
 			}).localStep,
 			ui.reporter(),
 			{
+				url: parsed,
 				...(runtimeOptions.signal !== undefined && {
 					signal: runtimeOptions.signal
 				})
@@ -1673,7 +1703,7 @@ async function deployFlow(
 					ray: outcome.lastRay,
 					worker: outcome.worker,
 					signal: runtimeOptions.signal,
-					lead: `Deployed, but ${outcome.url} is returning a server error (HTTP ${String(outcome.lastStatus)}).`
+					lead: `Uploaded, but ${outcome.url} is returning a server error (HTTP ${String(outcome.lastStatus)}).`
 				});
 				endBeforeReady(ui, authority, outcome.url);
 				return;
@@ -1687,8 +1717,8 @@ async function deployFlow(
 					: '';
 
 			ui.warn(
-				`Deployed, but ${outcome.url} did not come online in time ` +
-					`(last probe: ${outcome.lastProbe}).${dnsNote} Once it responds, ` +
+				`Uploaded, but ${outcome.url} did not come online in time ` +
+					`${runtimeOptions.presentation === 'debug' ? `(last probe: ${outcome.lastProbe}).` : 'Availability has not been confirmed.'}${dnsNote} Once it responds, ` +
 					're-run `cupboard init` to finish setting up.'
 			);
 			endBeforeReady(ui, authority, outcome.url);
@@ -1703,7 +1733,7 @@ async function deployFlow(
 					: 'No first tenant was requested. Re-run `cupboard init` with ' +
 							'--cache and --access to create one.'
 			);
-			ui.outro('Deployed; the admin can create caches.');
+			ui.outro('Deployment verified; first-tenant setup remains.');
 			return;
 		}
 
@@ -1715,9 +1745,7 @@ async function deployFlow(
 					value: `${outcome.url}/t/${slug}`
 				}))
 			);
-			ui.outro(
-				'Deployed; the caches are untouched. Manage them with `cupboard tenant`.'
-			);
+			ui.outro('Deployment verified. Manage tenants with `cupboard tenant`.');
 			return;
 		}
 
@@ -1790,7 +1818,7 @@ export function endBeforeReady(
 		throw new DeploymentUnclaimedError(url, 'stopped-before-claim');
 	}
 
-	ui.outro('Deployed.');
+	ui.outro('Uploaded; deployment availability has not been confirmed.');
 }
 
 type ClaimedOnboardOutcome = Exclude<
@@ -1857,6 +1885,7 @@ export type UnclaimedReason =
  * although the Workers were deployed.
  */
 export class DeploymentUnclaimedError extends CliError {
+	override readonly humanMessage: string;
 	constructor(
 		public readonly url: string | undefined,
 		public readonly reason: UnclaimedReason,
@@ -1880,6 +1909,8 @@ export class DeploymentUnclaimedError extends CliError {
 
 		super(`Deployed, but ${deployment} has no admin: ${explanation}`, options);
 		this.name = 'DeploymentUnclaimedError';
+		this.humanMessage =
+			'Uploaded; setup is incomplete because the deployment has no administrator. Fix the reported problem, then run cupboard deploy from a terminal with the same release and source to finish setup.';
 	}
 }
 

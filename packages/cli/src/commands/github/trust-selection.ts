@@ -10,6 +10,7 @@ import {
 import { type OidcTrustSelection } from '@cupboard/protocol/oidc-trust-selection';
 
 import { cacheLabel } from '../../client/client.ts';
+import { humanOperation } from '../../human-permissions.ts';
 
 import { type CheckFinding, FailedCheckFinding } from './finding.ts';
 
@@ -28,6 +29,21 @@ export function describeAuthorizationDetail(
 	const cache = cacheLabel(detail.cache);
 
 	return `${detail.actions.join(', ')} on cache ${cache}${root}`;
+}
+
+function humanAuthorizationDetail(detail: AuthorizationDetail): string {
+	if (detail.type === 'cupboard_view') {
+		return `${detail.actions.map((operation) => humanOperation(operation)).join(', ')} on view ${detail.view}`;
+	}
+
+	if (detail.type !== 'cupboard_cache') {
+		return detail.type;
+	}
+
+	const root = detail.root === undefined ? '' : ` with root ${detail.root}`;
+	const cache = cacheLabel(detail.cache);
+
+	return `${detail.actions.map((operation) => humanOperation(operation)).join(', ')} on cache ${cache}${root}`;
 }
 
 export class RepositoryTrustRuleMissingFinding extends FailedCheckFinding {
@@ -92,6 +108,10 @@ export class AmbiguousTrustRulesFinding extends FailedCheckFinding {
 		super(check);
 	}
 
+	override humanDetail(): string {
+		const ids = this.rules.map(({ id }) => id).join(', ');
+		return `rules ${ids} match this job identity, so the job must request specific permissions or the rules must use different identity restrictions`;
+	}
 	detail(): string {
 		const ids = this.rules.map(({ id }) => id).join(', ');
 		return `rules ${ids} match the modelled claims but implicit authority requires one rule; request explicit grants or distinguish their claims`;
@@ -107,6 +127,18 @@ export class TrustRuleGrantMissingFinding extends FailedCheckFinding {
 		super(check);
 	}
 
+	override humanDetail(): string {
+		const [rule, ...rest] = this.rules;
+		const grant = humanAuthorizationDetail(this.refused);
+
+		if (rest.length === 0) {
+			return `rule ${rule.id} matches the job identity but does not permit ${grant}; add a rule with the required grant, or add a corrected rule and remove this one`;
+		}
+
+		const ids = this.rules.map(({ id }) => id).join(', ');
+
+		return `rules ${ids} match the job identity but none permits ${grant}; add the grant to one rule`;
+	}
 	detail(): string {
 		const [rule, ...rest] = this.rules;
 		const grant = describeAuthorizationDetail(this.refused);
@@ -129,6 +161,9 @@ export class InteractiveTrustRuleFinding extends FailedCheckFinding {
 		super(check);
 	}
 
+	override humanDetail(): string {
+		return `rule ${this.rule.id} grants access for a person, but matches this job identity; workflows must use a rule with specific CI permissions`;
+	}
 	detail(): string {
 		return `interactive rule ${this.rule.id} matches the modelled claims; workflows must use a scoped CI rule`;
 	}

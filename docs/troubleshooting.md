@@ -259,9 +259,9 @@ There are four usual causes:
   expires.
 - No root keeps them. If you pushed a path with `--no-retain`, or a root stopped
   keeping it, the path only lasts for the cache's grace period.
-- The cache is grace-managed. When all of its roots and grace periods have run
-  out, garbage collection empties the cache. `cupboard cache inspect` shows
-  whether a cache is grace-managed.
+- Automatic cleanup can empty the cache when all roots and grace periods have
+  expired. `cupboard cache inspect` describes what happens to unretained paths,
+  including after a grace period is cleared.
 - Someone deleted them. `cupboard delete` removes paths even if a root keeps
   them.
 

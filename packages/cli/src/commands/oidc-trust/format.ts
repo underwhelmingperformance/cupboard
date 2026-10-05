@@ -1,112 +1,165 @@
-import { type PermittedGrant } from '@cupboard/protocol/grants';
+import {
+	type PermittedGrant,
+	type Substitution
+} from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { type ResultRow } from '@cupboard/reporter';
-import { stringify } from 'yaml';
 
-function detailRows(details: object): ResultRow[] {
-	if (Object.keys(details).length === 0) {
-		return [];
-	}
+import { humanOperation } from '../../human-permissions.ts';
 
-	return stringify(details, { lineWidth: 0 })
-		.trimEnd()
-		.split('\n')
-		.map((value) => ({ label: '', value }));
-}
-
-export function trustRuleRows(
-	rule: OidcTrustSummary,
-	label = 'Rule'
-): ResultRow[] {
-	const { id, issuer, audience, claims, permittedGrants, display } = rule;
-	const details = { issuer, audience, claims, permittedGrants, display };
-
-	return [{ label, value: id }, ...detailRows(details)];
+interface Binding {
+	readonly exact?: string;
+	readonly equalsTemplate?: string;
+	readonly substitutions?: Readonly<Record<string, Substitution>>;
 }
 
 function claimRows(claims: Readonly<Record<string, ClaimMatch>>): ResultRow[] {
 	const entries = Object.entries(claims);
 
 	if (entries.length === 0) {
-		return [{ label: 'Claims', value: '(none)' }];
+		return [{ label: 'Claims', value: 'No claim restrictions' }];
 	}
 
 	return entries.map(([key, match], index) => ({
 		label: index === 0 ? 'Claims' : '',
 		value:
-			typeof match === 'string' ? `${key}=${match}` : `${key}=~${match.pattern}`
+			typeof match === 'string'
+				? `${key}=${match}`
+				: `${key} matches ${match.pattern}`
 	}));
 }
 
-function cacheBinding(
-	binding: Extract<
-		PermittedGrant,
-		{ type: 'cupboard_cache' }
-	>['resources']['cache']
-): string {
-	if (binding.kind === 'default') {
-		return '(default)';
-	}
-
+function bindingDescription(binding: Binding): string {
 	return (
 		binding.exact ??
-		binding.equalsTemplate ??
-		(binding.pattern === undefined ? '?' : `pattern ${binding.pattern}`)
+		`from template ${binding.equalsTemplate ?? '(unspecified)'}`
 	);
 }
 
-function grantSummary(grant: PermittedGrant): string {
-	if (grant.type === 'cupboard_wildcard') {
-		return 'wildcard (every operation)';
+function substitutionRows(binding: Binding, resource: string): ResultRow[] {
+	return Object.entries(binding.substitutions ?? {}).map(
+		([variable, substitution]) => ({
+			label: `${resource} variable {${variable}}`,
+			value: substitutionDescription(substitution)
+		})
+	);
+}
+
+function substitutionDescription(substitution: Substitution): string {
+	if (substitution.capture !== undefined) {
+		return `group ${substitution.capture.group} from claim ${substitution.claim} matching ${substitution.capture.pattern}`;
 	}
 
+	if (substitution.slug === true) {
+		return `claim ${substitution.claim}, lowercased; each run of characters outside a-z, 0-9, dot, underscore and hyphen becomes one hyphen`;
+	}
+
+	return `claim ${substitution.claim}`;
+}
+
+function rootDescription(root: Binding): string {
+	if (root.equalsTemplate !== undefined) {
+		return `From template ${root.equalsTemplate} (a resolved value ending in / allows that root and descendants; otherwise only that exact root)`;
+	}
+	return `${root.exact ?? '(unspecified)'}${root.exact?.endsWith('/') === true ? ' (root and descendants)' : ' (exact root)'}`;
+}
+
+function resourceRows(
+	grant: Exclude<PermittedGrant, { type: 'cupboard_wildcard' }>
+): ResultRow[] {
 	if (grant.type === 'cupboard_cache') {
-		return `cache ${cacheBinding(grant.resources.cache)}: ${grant.actions.join(', ')}`;
+		const root = grant.resources.root;
+		return [
+			...(root === undefined
+				? []
+				: [{ label: 'Root restriction', value: rootDescription(root) }]),
+			...(grant.resources.cache.kind === 'named'
+				? substitutionRows(grant.resources.cache, 'Cache')
+				: []),
+			...(root === undefined ? [] : substitutionRows(root, 'Root'))
+		];
 	}
 
 	if (grant.type === 'cupboard_view') {
-		const view =
-			grant.resources.view.exact ?? grant.resources.view.equalsTemplate;
-
-		return `view ${view ?? '?'}: ${grant.actions.join(', ')}`;
+		return substitutionRows(grant.resources.view, 'View');
 	}
 
 	if (grant.type === 'cupboard_tenant') {
-		const tenant =
-			grant.resources.tenant.exact ?? grant.resources.tenant.equalsTemplate;
-
-		return `tenant ${tenant ?? '?'}: ${grant.actions.join(', ')}`;
+		return substitutionRows(grant.resources.tenant, 'Tenant');
 	}
 
-	return `${grant.type}: ${grant.actions.join(', ')}`;
+	return [];
 }
 
-export function trustRuleSummaryRows(rule: OidcTrustSummary): ResultRow[] {
-	return [
-		{ label: 'Rule', value: rule.id },
-		{ label: 'Issuer', value: rule.issuer },
-		{ label: 'Audience', value: rule.audience },
-		...claimRows(rule.claims),
-		...(rule.permittedGrants.length === 0
-			? [{ label: 'Grants', value: '(none)' }]
-			: rule.permittedGrants.map((grant, index) => ({
-					label: index === 0 ? 'Grants' : '',
-					value: grantSummary(grant)
-				}))),
-		...(rule.display?.repository === undefined
-			? []
-			: [{ label: 'Repository', value: rule.display.repository }])
-	];
+function resourceDescription(
+	grant: Exclude<PermittedGrant, { type: 'cupboard_wildcard' }>
+): string {
+	if (grant.type === 'cupboard_cache') {
+		const cache = grant.resources.cache;
+		if (cache.kind === 'default') {
+			return "Tenant's default cache";
+		}
+
+		return cache.pattern === undefined
+			? `Cache ${bindingDescription(cache)}`
+			: `Caches matching ${cache.pattern}`;
+	}
+
+	if (grant.type === 'cupboard_view') {
+		return `View ${bindingDescription(grant.resources.view)}`;
+	}
+
+	if (grant.type === 'cupboard_tenant') {
+		return `Tenant ${bindingDescription(grant.resources.tenant)}`;
+	}
+
+	return grant.type === 'cupboard_control' ? 'Deployment' : 'Tenant';
 }
 
 export function trustGrantRows(
 	grant: PermittedGrant,
 	label: string
 ): ResultRow[] {
-	const { type, ...details } = grant;
+	if (grant.type === 'cupboard_wildcard') {
+		return [{ label, value: 'Every operation on every resource' }];
+	}
 
-	return [{ label, value: type }, ...detailRows(details)];
+	return [
+		{
+			label,
+			value: `${resourceDescription(grant)}: ${grant.actions.map((operation) => humanOperation(operation)).join(', ')}`
+		},
+		...resourceRows(grant)
+	];
+}
+
+export function trustRuleSummaryRows(
+	rule: OidcTrustSummary,
+	label = 'Rule'
+): ResultRow[] {
+	return [
+		{ label, value: rule.id },
+		{ label: 'Issuer', value: rule.issuer },
+		{ label: 'Audience', value: rule.audience },
+		...claimRows(rule.claims),
+		...(rule.permittedGrants.length === 0
+			? [{ label: 'Access', value: 'No permissions' }]
+			: rule.permittedGrants.flatMap((grant, index) =>
+					trustGrantRows(grant, index === 0 ? 'Access' : '')
+				)),
+		{ label: 'State', value: rule.disabled ? 'disabled' : 'enabled' },
+		...(rule.display?.repository === undefined
+			? []
+			: [{ label: 'Repository', value: rule.display.repository }])
+	];
+}
+
+export function trustRuleRows(
+	rule: OidcTrustSummary,
+	label = 'Rule'
+): ResultRow[] {
+	return trustRuleSummaryRows(rule, label);
 }

@@ -94,15 +94,18 @@ export async function runAuthKeyList(
 	reporter: Reporter,
 	client: Pick<AuthKeyClient, 'list'>
 ): Promise<void> {
-	const { keys } = await reporter.phase('Listing auth keys', () =>
-		client.list()
+	const { keys } = await reporter.phase(
+		'Listing auth keys',
+		() => client.list(),
+		{ humanLabel: 'Listing tenant access-token keys' }
 	);
 
 	reporter.result({
 		kind: 'auth-keys',
+		title: 'Tenant access-token keys',
 		data: keys,
 		rows: keys.map((key) => authKeyRow(key)),
-		empty: 'No auth keys.'
+		empty: 'No tenant access-token keys.'
 	});
 }
 
@@ -112,11 +115,13 @@ export async function runAuthKeyRotate(
 ): Promise<void> {
 	const { rotated, retiring, keys } = await reporter.phase(
 		'Rotating auth key',
-		() => client.rotate()
+		() => client.rotate(),
+		{ humanLabel: 'Rotating tenant access-token key' }
 	);
 
 	reporter.result({
 		kind: 'auth-key-rotation',
+		title: 'Tenant access-token key rotation',
 		data: { rotated, retiring, keys },
 		rows: [
 			{ label: 'New key', value: rotated },
@@ -129,7 +134,7 @@ export async function runAuthKeyRotate(
 							value: formatTimestamp(retiring.scheduledRetireAt)
 						}
 					]),
-			{ label: 'Keys in set', value: String(keys.length) }
+			{ label: 'Access-token keys', value: String(keys.length) }
 		]
 	});
 	reporter.info('New tokens are signed with this key.');
@@ -141,8 +146,9 @@ export async function runAuthKeyRetire(
 	client: AuthKeyClient
 ): Promise<void> {
 	const outcome = await ui.confirm({
-		message: `Retire auth key ${kid}?`,
-		detail: 'Tokens still signed by this key can no longer be verified.'
+		message: `Retire tenant access-token key ${kid}?`,
+		detail:
+			'Existing tenant access tokens signed with this key stop working immediately.'
 	});
 
 	if (outcome !== 'yes') {
@@ -151,12 +157,15 @@ export async function runAuthKeyRetire(
 	}
 
 	const reporter = ui.reporter();
-	const result = await reporter.phase('Retiring auth key', () =>
-		client.retire({ kid })
+	const result = await reporter.phase(
+		'Retiring auth key',
+		() => client.retire({ kid }),
+		{ humanLabel: 'Retiring tenant access-token key' }
 	);
 
 	reporter.result({
 		kind: 'auth-key',
+		title: 'Tenant access-token key',
 		data: result,
 		rows: [
 			{ label: 'Key', value: result.kid },

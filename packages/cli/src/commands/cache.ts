@@ -26,7 +26,9 @@ import {
 	formatCount,
 	formatTimestamp,
 	type Reporter,
-	type ResultRow
+	type ResultRow,
+	shouldShowDebug,
+	shouldShowDetails
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
@@ -661,8 +663,9 @@ export async function runCacheList(
 
 	reporter.result({
 		kind: 'caches',
+		title: 'Caches',
 		data: caches,
-		rows: caches.map((summary) => cacheRow(summary)),
+		rows: caches.map((summary) => cacheRow(summary, reporter)),
 		empty: 'No caches.'
 	});
 }
@@ -706,7 +709,12 @@ export async function runCacheCreate(
 		}
 	});
 
-	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+	reporter.result({
+		kind: 'cache',
+		title: 'Cache',
+		data: summary,
+		rows: summaryRows(summary, reporter)
+	});
 }
 
 export interface CacheCreationDefaultsClient {
@@ -728,6 +736,7 @@ export async function runCacheCreationDefaults(
 	);
 	reporter.result({
 		kind: 'cache-defaults',
+		title: 'New cache defaults',
 		data: defaults,
 		rows: [{ label: 'New cache grace', value: graceLabel(defaults.grace) }]
 	});
@@ -743,7 +752,12 @@ export async function runCacheSetAccess(
 		callInCache(client.update, cache, { kind: 'access', access })
 	);
 
-	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+	reporter.result({
+		kind: 'cache',
+		title: 'Cache',
+		data: summary,
+		rows: summaryRows(summary, reporter)
+	});
 }
 
 export async function runCacheSetPriority(
@@ -756,7 +770,12 @@ export async function runCacheSetPriority(
 		callInCache(client.update, cache, { kind: 'priority', priority })
 	);
 
-	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+	reporter.result({
+		kind: 'cache',
+		title: 'Cache',
+		data: summary,
+		rows: summaryRows(summary, reporter)
+	});
 }
 
 export async function runCacheLifecycle(
@@ -772,6 +791,7 @@ export async function runCacheLifecycle(
 	if ('closed' in result) {
 		reporter.result({
 			kind: 'cache-close',
+			title: 'Cache publication',
 			data: result,
 			rows: [
 				{ label: 'Cache', value: cacheLabel(result.scope) },
@@ -788,7 +808,12 @@ export async function runCacheLifecycle(
 		});
 		return;
 	}
-	reporter.result({ kind: 'cache', data: result, rows: summaryRows(result) });
+	reporter.result({
+		kind: 'cache',
+		title: 'Cache',
+		data: result,
+		rows: summaryRows(result, reporter)
+	});
 }
 
 export async function runCacheSetRetirement(
@@ -797,8 +822,11 @@ export async function runCacheSetRetirement(
 	reporter: Reporter,
 	client: Pick<CacheClient, 'retirement'>
 ): Promise<void> {
-	const summary = await reporter.phase('Setting cache retirement', () =>
-		client.retirement({ cacheName, retireWhenEmpty: shouldRetireWhenEmpty })
+	const summary = await reporter.phase(
+		'Setting cache retirement',
+		() =>
+			client.retirement({ cacheName, retireWhenEmpty: shouldRetireWhenEmpty }),
+		{ humanLabel: 'Setting automatic cache removal' }
 	);
 
 	const result = {
@@ -806,7 +834,12 @@ export async function runCacheSetRetirement(
 		retireWhenEmpty: summary.retireWhenEmpty ?? shouldRetireWhenEmpty
 	};
 
-	reporter.result({ kind: 'cache', data: result, rows: summaryRows(result) });
+	reporter.result({
+		kind: 'cache',
+		title: 'Cache',
+		data: result,
+		rows: summaryRows(result, reporter)
+	});
 }
 
 export async function runCacheSetRootTtl(
@@ -884,7 +917,12 @@ async function runCacheUpdate(
 		callInCache(client.update, cache, body)
 	);
 
-	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+	reporter.result({
+		kind: 'cache',
+		title: 'Cache',
+		data: summary,
+		rows: summaryRows(summary, reporter)
+	});
 }
 
 export async function runCacheRemove(
@@ -896,8 +934,8 @@ export async function runCacheRemove(
 	const outcome = await ui.confirm({
 		message: `Remove cache ${name}?`,
 		detail: shouldForce
-			? 'With --force this removes the cache and every store path it holds.'
-			: 'The cache must be empty; pass --force to remove one that still holds paths.'
+			? 'With --force this removes the cache and all its store paths. Background storage cleanup continues after removal.'
+			: 'The cache must be empty; pass --force to remove one that still has store paths. Background storage cleanup continues after removal.'
 	});
 
 	if (outcome !== 'yes') {
@@ -915,6 +953,7 @@ export async function runCacheRemove(
 
 	reporter.result({
 		kind: 'cache',
+		title: 'Cache',
 		data: result,
 		rows: [
 			{ label: 'Cache', value: cacheLabel(result.scope) },
@@ -945,7 +984,12 @@ export async function runCacheInspect(
 		return;
 	}
 
-	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+	reporter.result({
+		kind: 'cache',
+		title: 'Cache',
+		data: summary,
+		rows: summaryRows(summary, reporter)
+	});
 }
 
 async function exactCache(
@@ -963,42 +1007,49 @@ async function exactCache(
 	}
 }
 
-function cacheRow(summary: CacheListEntry): ResultRow {
+function cacheRow(summary: CacheListEntry, reporter: Reporter): ResultRow {
 	const parts = [
 		summary.access,
-		`priority ${String(summary.priority)}`,
-		`${formatCount(summary.storePaths)} path(s)`,
-		`default root retention ${rootRetentionLabel(summary.defaultRootRetention)}`,
-		`grace ${graceLabel(summary.grace)}`,
-		summary.rootRetentionOverrides === undefined
-			? 'root retention overrides: use cache inspect'
-			: `${formatCount(summary.rootRetentionOverrides.length)} root retention override(s)`,
-		...(summary.graceManaged === true ? ['grace-managed'] : []),
-		...(summary.earliestGraceDeadline === undefined
+		`${formatCount(summary.storePaths)} store ${summary.storePaths === 1 ? 'path' : 'paths'}`,
+		`Nix priority ${String(summary.priority)}`,
+		...(summary.retirementStartedAt === undefined
 			? []
-			: [
-					`earliest deadline ${formatTimestamp(summary.earliestGraceDeadline)}`
-				]),
+			: ['closed to publication']),
 		...(summary.retireWhenEmpty === undefined
 			? []
-			: [summary.retireWhenEmpty ? 'retire when empty' : 'keep when empty']),
-		...(summary.retirementEligibleAfter === undefined
+			: [summary.retireWhenEmpty ? 'remove when empty' : 'keep when empty']),
+		...(summary.graceManaged === undefined
 			? []
-			: [
-					`retirement eligible after ${formatTimestamp(summary.retirementEligibleAfter)}`
-				])
+			: [cleanupConsequence(summary)]),
+		...(shouldShowDetails(reporter)
+			? [
+					`default root retention ${rootRetentionLabel(summary.defaultRootRetention)}`,
+					`grace ${graceLabel(summary.grace)}`,
+					summary.rootRetentionOverrides === undefined
+						? 'retention by root prefix: use cache inspect'
+						: `${formatCount(summary.rootRetentionOverrides.length)} root-prefix rules`,
+					...(summary.earliestGraceDeadline === undefined
+						? []
+						: [
+								`earliest grace expiry ${formatTimestamp(summary.earliestGraceDeadline)}`
+							]),
+					...(summary.retirementEligibleAfter === undefined
+						? []
+						: [
+								`may be removed after ${formatTimestamp(summary.retirementEligibleAfter)}, when empty`
+							])
+				]
+			: []),
+		...(shouldShowDebug(reporter) && summary.graceManaged !== undefined
+			? [`grace-managed ${String(summary.graceManaged)}`]
+			: [])
 	];
 
-	return {
-		label: cacheLabel(summary.scope),
-		value: parts.join('; ')
-	};
+	return { label: cacheLabel(summary.scope), value: parts.join('; ') };
 }
 
-// The grace rows only render when the server reports grace state, so a summary
-// from a server that predates it lists without them.
-function summaryRows(summary: CacheSummary): ResultRow[] {
-	const rows: ResultRow[] = [
+function summaryRows(summary: CacheSummary, reporter: Reporter): ResultRow[] {
+	return [
 		{ label: 'Cache', value: cacheLabel(summary.scope) },
 		{ label: 'Access', value: summary.access },
 		{ label: 'Priority', value: String(summary.priority) },
@@ -1009,7 +1060,7 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 		},
 		{ label: 'Grace', value: graceLabel(summary.grace) },
 		{
-			label: 'Root retention overrides',
+			label: 'Retention by root prefix',
 			value:
 				summary.rootRetentionOverrides.length === 0
 					? 'none'
@@ -1022,22 +1073,20 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 		},
 		...(summary.graceManaged === undefined
 			? []
-			: [
-					{ label: 'Grace managed', value: summary.graceManaged ? 'yes' : 'no' }
-				]),
-		...(summary.earliestGraceDeadline === undefined
+			: [{ label: 'Unretained paths', value: cleanupConsequence(summary) }]),
+		...(summary.retirementStartedAt === undefined
 			? []
 			: [
 					{
-						label: 'Earliest grace deadline',
-						value: formatTimestamp(summary.earliestGraceDeadline)
+						label: 'Publication',
+						value: `Closed since ${formatTimestamp(summary.retirementStartedAt)}`
 					}
 				]),
 		...(summary.retireWhenEmpty === undefined
 			? []
 			: [
 					{
-						label: 'Retire when empty',
+						label: 'Remove when empty',
 						value: summary.retireWhenEmpty ? 'yes' : 'no'
 					}
 				]),
@@ -1045,13 +1094,37 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 			? []
 			: [
 					{
-						label: 'Retirement eligible after',
-						value: formatTimestamp(summary.retirementEligibleAfter)
+						label: 'Automatic removal',
+						value: `May be removed after ${formatTimestamp(summary.retirementEligibleAfter)}, when empty`
 					}
-				])
+				]),
+		...(shouldShowDetails(reporter) &&
+		summary.earliestGraceDeadline !== undefined
+			? [
+					{
+						label: 'Earliest grace expiry',
+						value: formatTimestamp(summary.earliestGraceDeadline)
+					}
+				]
+			: []),
+		...(shouldShowDebug(reporter) && summary.graceManaged !== undefined
+			? [{ label: 'Grace managed', value: summary.graceManaged ? 'yes' : 'no' }]
+			: [])
 	];
+}
 
-	return rows;
+function cleanupConsequence(
+	summary: Pick<CacheSummary, 'graceManaged' | 'grace'>
+): string {
+	if (summary.graceManaged !== true) {
+		return 'Cleanup keeps paths if none are retained, except when a root has just expired';
+	}
+
+	if (summary.grace.kind === 'none') {
+		return 'May be deleted at the next cleanup; clearing grace does not disable cleanup';
+	}
+
+	return 'May be deleted after their grace periods expire';
 }
 
 function rootRetentionLabel(retention: CacheRootRetention): string {

@@ -117,6 +117,8 @@ Workers. Push store paths, manage tenants and keys, and configure Nix clients.
 Options:
   -V, --version                                   output the version number
   --output-mode <mode>                            choose the output format: terminal (interactive, with progress), json (one JSON object per line) or github (GitHub Actions workflow commands)
+  --details                                       show additional configuration and domain information
+  --debug                                         include details and internal diagnostics
   --colour                                        force ANSI colour output
   --no-colour                                     disable ANSI colour output
   --result-file <path>                            append the command's results to this file, one JSON object per line
@@ -124,9 +126,9 @@ Options:
 
 Commands:
   init|deploy [options]                           Deploy cupboard to a Cloudflare account, or upgrade an existing deployment.
-  deployment                                      Inspect and resume tenant migration work.
-  login [options] <url>                           Sign in to a tenant or the deployment, and save the session on this machine.
-  logout [options] [url]                          Delete the cached session for a tenant or the deployment from this machine.
+  deployment                                      Check deployment readiness and resume tenant updates.
+  login [options] <url>                           Sign in to a tenant or deployment and save the sign-in on this machine.
+  logout [options] [url]                          Remove a saved sign-in for a tenant or deployment from this machine.
   whoami [options] [url]                          Show who the cached sessions sign in as or, with --provider, the identity a trust rule must match to admit you.
   attest                                          Attach Sigstore attestations to published store paths, and verify them.
   push [options] <url> [paths...]                 Publish store paths to a cache.
@@ -135,22 +137,21 @@ Commands:
   config [options] <url> <pubkey> [caches...]     Print the nix.conf lines that add a tenant's caches as Nix substituters.
   pubkey <url>                                    Print the tenant's public signing keys, one per line (more than one during a key rotation).
   stats <url> [cache]                             Show how many store paths a cache has and how much storage they use.
-  usage <url>                                     Show how much storage the tenant is charged for, across all its caches.
+  usage <url>                                     Show the tenant's storage usage and quota across all its caches.
   delete [options] <url> <arguments...>           Delete one store path from a cache immediately, even if a root keeps it.
   root                                            Manage retention roots, which keep named sets of store paths in a cache.
   confirm [options] <url> [arguments...]          Check that store paths are already in a cache and refresh their grace period, without uploading anything.
-  key                                             Manage and rotate the keys that sign the tenant's narinfos.
+  key                                             Manage and rotate the keys that sign the tenant's Nix cache metadata.
   auth-key                                        Manage and rotate the keys that sign the tenant's access tokens.
-  control-key                                     Manage and rotate the keys that sign operator tokens (operator only).
-  control-oidc-trust                              Manage the rules that admit OIDC tokens to the control plane, for CI jobs and for other operators (operator only).
+  control-key                                     Manage and rotate the keys that sign operator access tokens (operator only).
+  control-oidc-trust                              Manage the trust rules that let other operators and CI jobs manage the deployment (operator only).
   tenant                                          Create, suspend and remove tenants, and manage their quotas and read credentials (operator only).
   cache                                           Create, inspect, configure and remove a tenant's caches.
-  policy                                          List and remove old retention policies that an upgrade hasn't imported yet.
+  policy                                          List and skip old retention policies awaiting an upgrade.
   reuse-view                                      Manage reuse views, which let Nix read from several of a tenant's caches through one URL.
   oidc-trust                                      Manage the trust rules that let administrators and CI jobs sign in to the tenant with OIDC identity tokens.
   github                                          Set up and check a tenant for cupboard's GitHub flake publish workflow.
   check [options] <url>                           Check that every store path in the tenant still has all of its stored files.
-  plan                                            Internal steps of cupboard's flake publish workflow, not for direct use.
   help [command]                                  display help for command
 
 Most commands need you to sign in first with `cupboard login <url>`.
@@ -212,16 +213,16 @@ Options:
 ```text
 Usage: cupboard deployment [options] [command]
 
-Inspect and resume tenant migration work.
+Check deployment readiness and resume tenant updates.
 
 Options:
   -h, --help              display help for command
 
 Commands:
-  status [options] <url>  Show deployment readiness and tenant migration
-                          progress.
-  resume [options] <url>  Wake the tenants that are still migrating, wait while
-                          they finish, and report whether the deploy can finish.
+  status [options] <url>  Show schema and data readiness and progress for tenant
+                          updates.
+  resume [options] <url>  Retry pending tenant updates, wait while they finish,
+                          and report any remaining deployment work.
   help [command]          display help for command
 ```
 
@@ -230,14 +231,13 @@ Commands:
 ```text
 Usage: cupboard deployment status [options] <url>
 
-Show deployment readiness and tenant migration progress.
+Show schema and data readiness and progress for tenant updates.
 
 Arguments:
   url                    deployment URL (e.g.
                          https://cupboard.example.workers.dev)
 
 Options:
-  --details              Show schema transitions and migration identifiers.
   --github-oidc          authorise with the workflow's GitHub Actions OIDC token
                          through a control trust rule
   --audience <audience>  OIDC audience to request with --github-oidc (default:
@@ -250,8 +250,8 @@ Options:
 ```text
 Usage: cupboard deployment resume [options] <url>
 
-Wake the tenants that are still migrating, wait while they finish, and report
-whether the deploy can finish.
+Retry pending tenant updates, wait while they finish, and report any remaining
+deployment work.
 
 Arguments:
   url                    deployment URL (e.g.
@@ -270,7 +270,7 @@ Options:
 ```text
 Usage: cupboard login [options] <url>
 
-Sign in to a tenant or the deployment, and save the session on this machine.
+Sign in to a tenant or deployment and save the sign-in on this machine.
 
 Arguments:
   url                     deployment or tenant URL to sign in to (e.g.
@@ -292,21 +292,20 @@ Options:
 ```text
 Usage: cupboard logout [options] [url]
 
-Delete the cached session for a tenant or the deployment from this machine.
+Remove a saved sign-in for a tenant or deployment from this machine.
 
 Arguments:
   url           deployment or tenant URL to sign out of (e.g.
                 https://cupboard.example.workers.dev or .../t/<slug>)
 
 Options:
-  --all         delete every cached session
+  --all         delete every saved sign-in
   --cloudflare  also delete the cached Cloudflare sign-in, which `login` and
                 `init` share
   -h, --help    display help for command
 
-Sessions are deleted from this machine only. Logout does not revoke
-anything on the server, because cupboard has no endpoint that revokes
-a refresh token. A copy of a tenant session taken elsewhere can be
+Sign-ins are removed from this machine only. Copies on other machines
+remain usable. A copied tenant sign-in can be
 renewed for up to 30 days after sign-in, unless the server stops
 accepting its refresh token earlier. A deployment session has no
 refresh token, and its access token expires ten minutes after
@@ -541,15 +540,14 @@ Options:
                                     publish without adding them to the root
   --reference-paths-file <path>     file of store paths, one per line, to
                                     publish by reference from
-                                    --reference-source. The tenant must already
-                                    store their NARs, so nothing is read from
-                                    the local store or uploaded.
-  --reference-manifest <path>       JSON manifest of reference paths with their
-                                    target or intermediate kind, source URL and
-                                    captured narinfo. Publish this metadata
-                                    without reading the source cache or local
-                                    store.
-  --reference-source <url>          cache URL to read narinfos for
+                                    --reference-source. Their content must
+                                    already exist in this tenant; the command
+                                    does not upload it from the local store.
+  --reference-manifest <path>       JSON file of paths to republish from another
+                                    cache without downloading them. See the
+                                    reference manifest format in the Pushing
+                                    guide.
+  --reference-source <url>          source cache URL for the paths in
                                     --reference-paths-file (required with
                                     --reference-paths-file)
   --read-user <user>                user name of the read credential for a
@@ -566,27 +564,15 @@ Options:
   --store <uri>                     read paths from auto or a remote ssh-ng
                                     store (default: the store that Nix uses)
   --receipt-file <path>             write a publication receipt (JSON) from the
-                                    selected store metadata. Requires --store. A
-                                    push does not claim that this run built any
-                                    path.
+                                    selected store metadata. Requires --store.
+                                    The receipt records publication, not a
+                                    build.
   --reference-receipt-file <path>   write a receipt for successfully published
                                     reference paths only. Requires
                                     --reference-manifest or both
                                     --reference-paths-file and
-                                    --reference-source. The receipt does not
-                                    claim that this run built or copied NAR
-                                    bytes.
-  --already-held <path>             accepted for compatibility with older
-                                    callers (repeatable); does not affect
-                                    receipt origins.
-  --no-already-held                 accepted for compatibility with older
-                                    callers; does not affect receipt origins
-  --claimable <path>                accepted for compatibility with older
-                                    callers (repeatable); cannot authorise a
-                                    current-run build claim.
-  --no-claimable                    accepted for compatibility with older
-                                    callers; a push never records current-run
-                                    build claims
+                                    --reference-source. The receipt records
+                                    republished paths, not a build or download.
   --copied-from-file <path>         JSON file, written by the build, that lists
                                     the stores each path was copied from
   --bundle, --attestation <bundle>  a Sigstore bundle file to attach to the
@@ -679,13 +665,13 @@ Options:
                                     cache's grace period keeps the paths
   --closure                         publish the whole closure of the built
                                     outputs (by default, only the built outputs)
-  --publication-scope <scope>       Control which paths build-push publishes for
-                                    installable cohorts. `outputs` publishes the
-                                    selected outputs; `built` also publishes
-                                    observed build intermediates; `closure` also
-                                    publishes their runtime references.
-                                    Publication starts after the build.
-                                    (choices: "outputs", "built", "closure")
+  --publication-scope <scope>       choose which paths to publish for selected
+                                    installables: `outputs` publishes their
+                                    outputs; `built` includes intermediates
+                                    built in this run; `closure` includes
+                                    runtime dependencies. Publication starts
+                                    after the build. (choices: "outputs",
+                                    "built", "closure")
   --substituter <mode>              Control whether to publish outputs available
                                     from external substituters. `copy` selects
                                     them for publication. `leave` keeps them
@@ -711,27 +697,27 @@ Options:
                                     1h; default 10m)
   --upload-concurrency <n>          number of NAR uploads to run in parallel
                                     (default 6)
-  --receipt-file <path>             write the build receipt (JSON) to this file.
-                                    With several cohorts, the file contains
-                                    {"receipts": [...]}, in cohort order.
+  --receipt-file <path>             write the build and publication results as a
+                                    JSON receipt. With several builds, the file
+                                    contains {"receipts": [...]}, in build
+                                    order.
   --aggregate-receipt-v3            with several cohorts, write one combined
                                     version 3 receipt instead of {"receipts":
                                     [...]}
-  --cohorts-file <path>             JSON file that lists several builds
-                                    (cohorts) to run in order, each {"command":
-                                    [...]} or {"installables": [...]}. Use it
-                                    instead of a build command after --.
+  --cohorts-file <path>             JSON file of builds to run in order, each
+                                    {"command": [...]} or {"installables":
+                                    [...]}. Use it instead of a build command
+                                    after --.
   --gc-between-cohorts              run garbage collection on the local Nix
                                     store between cohorts, so that a later
                                     cohort downloads shared outputs of earlier
                                     cohorts from the cache (off by default;
                                     there is no collection after the last
                                     cohort)
-  --keep-going-cohorts              run the remaining cohorts after one fails.
-                                    The first failure without validated
-                                    target-build evidence determines the exit
-                                    status; otherwise the first target build
-                                    failure does.
+  --keep-going-cohorts              run the remaining builds after one fails. A
+                                    setup, publishing or command failure takes
+                                    precedence over a failure to build the
+                                    requested targets.
   -h, --help                        display help for command
 
 The build command must use the same Nix store as build-push. Do not
@@ -773,18 +759,20 @@ Arguments:
   command                            command to run after --
 
 Options:
-  --github-oidc                      acquire read access even for public
-                                     resources; requires id-token: write and
-                                     overrides incidental netrc credentials
+  --github-oidc                      use temporary GitHub Actions read access
+                                     even if the cache is public or saved read
+                                     credentials are present; requires id-token:
+                                     write
   --audience <audience>              OIDC audience (default: the tenant URL)
-  --cache-metadata                   acquire only cache metadata for setup when
-                                     content uses a static credential
+  --cache-metadata                   request access to cache configuration while
+                                     using an existing credential to download
+                                     paths
   --read-cache <cache-url>           additional cache in this tenant to include
                                      in the OIDC read session (repeatable)
                                      (default: [])
   --read-cache-metadata <cache-url>  additional cache in this tenant whose
-                                     metadata setup requires (repeatable)
-                                     (default: [])
+                                     configuration the command needs
+                                     (repeatable) (default: [])
   --reuse-view <name>                reuse view whose private cache content the
                                      command will read
   -h, --help                         display help for command
@@ -855,7 +843,7 @@ Options:
 ```text
 Usage: cupboard usage [options] <url>
 
-Show how much storage the tenant is charged for, across all its caches.
+Show the tenant's storage usage and quota across all its caches.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1039,20 +1027,20 @@ Example:
 ```text
 Usage: cupboard key [options] [command]
 
-Manage and rotate the keys that sign the tenant's narinfos.
+Manage and rotate the keys that sign the tenant's Nix cache metadata.
 
 Options:
   -h, --help                   display help for command
 
 Commands:
   list <url>                   List the tenant's signing keys and their states.
-  rotate <url>                 Start a signing key rotation: add an incoming key
-                               and re-sign existing narinfos with it.
+  rotate <url>                 Start a signing key rotation: add a new key and
+                               update signatures for existing store paths.
   abort [options] <url> <id>   Abandon a signing key rotation before its
                                re-signing has finished, and remove the incoming
                                key.
-  status <url> [id]            Show the signing keys and the progress of
-                               re-signing existing narinfos.
+  status <url> [id]            Show signing keys and progress while signatures
+                               are updated for existing store paths.
   retire [options] <url> <id>  Retire a signing key. Run it once to stop signing
                                with the key, and again to stop publishing it at
                                /pubkey.
@@ -1078,8 +1066,8 @@ Options:
 ```text
 Usage: cupboard key rotate [options] <url>
 
-Start a signing key rotation: add an incoming key and re-sign existing narinfos
-with it.
+Start a signing key rotation: add a new key and update signatures for existing
+store paths.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1110,7 +1098,8 @@ Options:
 ```text
 Usage: cupboard key status [options] <url> [id]
 
-Show the signing keys and the progress of re-signing existing narinfos.
+Show signing keys and progress while signatures are updated for existing store
+paths.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1208,18 +1197,18 @@ Options:
 ```text
 Usage: cupboard control-key [options] [command]
 
-Manage and rotate the keys that sign operator tokens (operator only).
+Manage and rotate the keys that sign operator access tokens (operator only).
 
 Options:
   -h, --help                    display help for command
 
 Commands:
-  list <url>                    List the deployment's control keys and any
-                                scheduled retirements.
-  rotate <url>                  Add a new control key, and schedule the old one
-                                to retire once its tokens have expired.
-  retire [options] <url> <kid>  Retire an old control key now. Tokens that it
-                                signed stop working immediately.
+  list <url>                    List the deployment's operator access-token keys
+                                and scheduled retirements.
+  rotate <url>                  Add a new operator access-token key, and retire
+                                the old one after its tokens expire.
+  retire [options] <url> <kid>  Retire an old operator access-token key now.
+                                Tokens that it signed stop working immediately.
   help [command]                display help for command
 ```
 
@@ -1228,7 +1217,7 @@ Commands:
 ```text
 Usage: cupboard control-key list [options] <url>
 
-List the deployment's control keys and any scheduled retirements.
+List the deployment's operator access-token keys and scheduled retirements.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
@@ -1242,8 +1231,8 @@ Options:
 ```text
 Usage: cupboard control-key rotate [options] <url>
 
-Add a new control key, and schedule the old one to retire once its tokens have
-expired.
+Add a new operator access-token key, and retire the old one after its tokens
+expire.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
@@ -1257,11 +1246,12 @@ Options:
 ```text
 Usage: cupboard control-key retire [options] <url> <kid>
 
-Retire an old control key now. Tokens that it signed stop working immediately.
+Retire an old operator access-token key now. Tokens that it signed stop working
+immediately.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
-  kid         control key ID
+  kid         operator access-token key ID
 
 Options:
   -y, --yes   retire without the confirmation prompt
@@ -1273,8 +1263,8 @@ Options:
 ```text
 Usage: cupboard control-oidc-trust [options] [command]
 
-Manage the rules that admit OIDC tokens to the control plane, for CI jobs and
-for other operators (operator only).
+Manage the trust rules that let other operators and CI jobs manage the
+deployment (operator only).
 
 Options:
   -h, --help                   display help for command
@@ -1390,7 +1380,7 @@ Commands:
   list <url>                                            List every tenant and its state, including removed tenants.
   suspend [options] <url> <id>                          Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.
   resume <url> <id>                                     Resume a suspended tenant.
-  quota <url> <id>                                      Show a tenant's storage quota and charged bytes.
+  quota <url> <id>                                      Show a tenant's storage quota and storage usage.
   set-quota [options] <url> <id> [bytes]                Set a tenant's storage quota. It can't be less than the tenant already stores.
   clear-quota <url> <id>                                Remove a tenant's storage quota, leaving it unlimited.
   rotate-credential [options] <url> <id>                Replace the tenant read credential, and print the new password.
@@ -1478,7 +1468,7 @@ Options:
 ```text
 Usage: cupboard tenant quota [options] <url> <id>
 
-Show a tenant's storage quota and charged bytes.
+Show a tenant's storage quota and storage usage.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
@@ -1927,18 +1917,18 @@ Options:
 ```text
 Usage: cupboard policy [options] [command]
 
-List and remove old retention policies that an upgrade hasn't imported yet.
+List and skip old retention policies awaiting an upgrade.
 
 Options:
   -h, --help                         display help for command
 
 Commands:
-  list <url>                         List the old retention and grace policies
-                                     that haven't been imported yet.
-  remove [options] <url> <id>        Remove an old retention policy, so that the
-                                     import can continue without it.
-  remove-grace [options] <url> <id>  Remove an old grace policy, so that the
-                                     import can continue without it.
+  list <url>                         List old retention and grace policies
+                                     awaiting an upgrade.
+  remove [options] <url> <id>        Skip an old retention policy so the upgrade
+                                     can continue without applying it.
+  remove-grace [options] <url> <id>  Skip an old grace policy so the upgrade can
+                                     continue without applying it.
   help [command]                     display help for command
 ```
 
@@ -1947,7 +1937,7 @@ Commands:
 ```text
 Usage: cupboard policy list [options] <url>
 
-List the old retention and grace policies that haven't been imported yet.
+List old retention and grace policies awaiting an upgrade.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1961,7 +1951,7 @@ Options:
 ```text
 Usage: cupboard policy remove [options] <url> <id>
 
-Remove an old retention policy, so that the import can continue without it.
+Skip an old retention policy so the upgrade can continue without applying it.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1977,7 +1967,7 @@ Options:
 ```text
 Usage: cupboard policy remove-grace [options] <url> <id>
 
-Remove an old grace policy, so that the import can continue without it.
+Skip an old grace policy so the upgrade can continue without applying it.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -2397,25 +2387,23 @@ Exits 1 if any path has a discrepancy, after printing the report.
 ```text
 Usage: cupboard plan [options] [command]
 
-Internal steps of cupboard's flake publish workflow, not for direct use.
+Automation helpers used by the flake publish workflow.
 
 Options:
   -h, --help                       display help for command
 
 Commands:
-  cohort [options] <url> [cache]   Internal step of the flake publish workflow,
-                                   not for direct use. Decide which of a
+  cohort [options] <url> [cache]   Plan builds for a group of targets in the
+                                   flake publish workflow. Decide which of a
                                    cohort's targets to build and which the cache
                                    already has, and check that the store has
                                    room for the build.
-  measure [options]                Internal step of the flake publish workflow,
-                                   not for direct use. Measure how much this
-                                   store must download to build or fetch each
-                                   target.
-  reprobe [options] <url> [cache]  Internal step of the flake publish workflow,
-                                   not for direct use. Just before the build
-                                   starts, check which planned targets still
-                                   need to be built.
+  measure [options]                Automation helper for the flake publish
+                                   workflow. Measure how much this store must
+                                   download to build or fetch each target.
+  reprobe [options] <url> [cache]  Automation helper for the flake publish
+                                   workflow. Just before the build starts, check
+                                   which planned targets still need to be built.
   help [command]                   display help for command
 ```
 
@@ -2424,9 +2412,9 @@ Commands:
 ```text
 Usage: cupboard plan cohort [options] <url> [cache]
 
-Internal step of the flake publish workflow, not for direct use. Decide which of
-a cohort's targets to build and which the cache already has, and check that the
-store has room for the build.
+Plan builds for a group of targets in the flake publish workflow. Decide which
+of a cohort's targets to build and which the cache already has, and check that
+the store has room for the build.
 
 Arguments:
   url                                           tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -2464,8 +2452,8 @@ Options:
 ```text
 Usage: cupboard plan measure [options]
 
-Internal step of the flake publish workflow, not for direct use. Measure how
-much this store must download to build or fetch each target.
+Automation helper for the flake publish workflow. Measure how much this store
+must download to build or fetch each target.
 
 Options:
   --targets-file <path>  JSON file that lists each target and its installable
@@ -2480,8 +2468,8 @@ Options:
 ```text
 Usage: cupboard plan reprobe [options] <url> [cache]
 
-Internal step of the flake publish workflow, not for direct use. Just before the
-build starts, check which planned targets still need to be built.
+Automation helper for the flake publish workflow. Just before the build starts,
+check which planned targets still need to be built.
 
 Arguments:
   url                              tenant URL (e.g.

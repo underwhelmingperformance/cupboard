@@ -119,6 +119,9 @@ export interface WorkflowDiscovery {
 }
 
 export class WorkflowDiscoveryError extends CliError {
+	override readonly humanMessage: string =
+		'The GitHub workflow could not be inspected. Check the repository reference, workflow file and GitHub access. Use --debug for diagnostic information.';
+
 	constructor(message: string, options?: ErrorOptions) {
 		super(message, options);
 		this.name = 'WorkflowDiscoveryError';
@@ -133,16 +136,21 @@ export class WorkflowParseError extends WorkflowDiscoveryError {
 }
 
 export class WorkflowBranchNotFoundError extends WorkflowDiscoveryError {
+	override readonly humanMessage: string;
+
 	constructor(
 		public readonly repository: string,
 		public readonly branch: string
 	) {
 		super(`GitHub repository ${repository} has no branch ${branch}.`);
 		this.name = 'WorkflowBranchNotFoundError';
+		this.humanMessage = this.message;
 	}
 }
 
 export class WorkflowReferenceMissingError extends WorkflowDiscoveryError {
+	override readonly humanMessage: string;
+
 	constructor(
 		public readonly repository: string,
 		public readonly reference: string
@@ -151,6 +159,7 @@ export class WorkflowReferenceMissingError extends WorkflowDiscoveryError {
 			`GitHub could not find a tag or branch for ${repository}@${reference}`
 		);
 		this.name = 'WorkflowReferenceMissingError';
+		this.humanMessage = this.message;
 	}
 }
 

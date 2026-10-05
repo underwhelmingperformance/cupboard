@@ -7,7 +7,11 @@ import { type Command, InvalidArgumentError } from 'commander';
 
 import { parseAudience } from '../audience.ts';
 import { parseCacheAccess } from '../cache-access.ts';
-import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
+import {
+	colourFromGlobals,
+	presentationFromGlobals,
+	type ProgramOptions
+} from '../cli.ts';
 import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
@@ -127,6 +131,7 @@ export function registerDeployCommand(
 			await executeDeploy(cliOptions, {
 				signal: programOptions.signal,
 				colour: colourFromGlobals(program),
+				presentation: presentationFromGlobals(program),
 				resultFile: program.opts<{ resultFile?: string }>().resultFile
 			});
 		});

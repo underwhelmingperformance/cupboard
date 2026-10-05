@@ -6,7 +6,12 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
-import { formatCount, type ResultRow } from '@cupboard/reporter';
+import {
+	formatCount,
+	type Reporter,
+	type ResultRow,
+	shouldShowDetails
+} from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import {
 	defaultVerifierThreshold,
@@ -578,6 +583,7 @@ export function registerAttestCommands(
 
 			reporter.result({
 				kind: 'attestation-verification',
+				title: 'Verified attestations',
 				data: results,
 				rows: [
 					{ label: 'Verified bundles', value: formatCount(results.length) },
@@ -587,7 +593,7 @@ export function registerAttestCommands(
 					},
 					...results.flatMap((result) => [
 						{ label: '', value: '' },
-						...bundleRows(result, options)
+						...bundleRows(result, options, reporter)
 					])
 				]
 			});
@@ -598,7 +604,11 @@ function optionalRow(label: string, value: string | undefined): ResultRow[] {
 	return value === undefined ? [] : [{ label, value }];
 }
 
-function bundleRows(result: VerifyResult, options: VerifyOptions): ResultRow[] {
+function bundleRows(
+	result: VerifyResult,
+	options: VerifyOptions,
+	reporter: Reporter
+): ResultRow[] {
 	return [
 		{ label: 'Bundle', value: result.bundle },
 		{ label: 'Predicate', value: result.predicateType },
@@ -607,7 +617,12 @@ function bundleRows(result: VerifyResult, options: VerifyOptions): ResultRow[] {
 		...optionalRow('Issuer', result.signerIssuer),
 		...provenanceRows(result.provenance),
 		...originRows(result),
-		...trustRows(result.trust, options)
+		...trustRows(result.trust, options).filter(
+			(row) =>
+				shouldShowDetails(reporter) ||
+				row.label === 'Trusted root' ||
+				row.label === 'Rekor integration'
+		)
 	];
 }
 

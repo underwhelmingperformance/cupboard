@@ -272,7 +272,8 @@ but not the mark. After that, store paths published without a root are deleted
 at the next garbage collection. The only way to clear the mark is to remove the
 cache.
 
-`cupboard cache inspect` shows whether a cache is grace-managed.
+`cupboard cache inspect` describes what happens to unretained paths. The
+`Grace managed` flag appears only with `--debug`.
 
 ## Garbage collection
 

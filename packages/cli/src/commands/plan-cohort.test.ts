@@ -238,6 +238,16 @@ function reporter(payloads: ResultPayload[]): Reporter {
 	};
 }
 
+it('keeps automation helpers accessible without promoting them in root help', () => {
+	const program = new Command('cupboard');
+	registerPlanCommands(program);
+	const plan = program.commands.find((command) => command.name() === 'plan');
+	expect({
+		rootHelp: program.helpInformation().includes('plan'),
+		explicitHelp: plan?.helpInformation().includes('cohort')
+	}).toStrictEqual({ rootHelp: false, explicitHelp: true });
+});
+
 describe('runPlanCohort', () => {
 	it('ensures the publication root with explicit permanent retention', async () => {
 		const rootClient = recordingRootClient(buildRequired([]));
@@ -334,6 +344,7 @@ describe('runPlanCohort', () => {
 			expect(payloads).toStrictEqual([
 				{
 					kind: 'plan-cohort',
+					title: 'Build plan',
 					data: expectedResult,
 					rows: [
 						{ label: 'Already served by the cache', value: '2' },
@@ -541,6 +552,7 @@ describe('runPlanCohort', () => {
 				payloads: [
 					{
 						kind: 'plan-cohort',
+						title: 'Build plan',
 						data: expectedResult,
 						rows: [
 							{ label: 'Already served by the cache', value: '0' },
@@ -974,6 +986,7 @@ describe('runPlanCohort', () => {
 			expect(payloads).toStrictEqual([
 				{
 					kind: 'plan-cohort',
+					title: 'Build plan',
 					data: expectedResult,
 					rows: [
 						{ label: 'Already served by the cache', value: '1' },

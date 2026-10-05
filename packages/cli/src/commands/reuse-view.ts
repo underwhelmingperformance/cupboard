@@ -1,4 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
+import { reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import type { CacheAccessMode } from '@cupboard/nix-store/scalars';
 import {
 	type ReuseViewListResponse,
@@ -9,7 +10,12 @@ import {
 	reuseViewSelectorSchema,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
-import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import {
+	type Reporter,
+	type ResultRow,
+	shouldShowDebug,
+	shouldShowDetails
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -182,7 +188,8 @@ export function registerReuseViewCommands(
 				selectorsFromOptions(options),
 				options.priority,
 				reporter,
-				rpc.reuseViews
+				rpc.reuseViews,
+				url
 			);
 		});
 
@@ -213,8 +220,9 @@ export async function runReuseViewList(
 
 	reporter.result({
 		kind: 'reuse-views',
+		title: 'Reuse views',
 		data: views,
-		rows: views.map((view) => reuseViewRow(view)),
+		rows: views.map((view) => reuseViewRow(view, reporter)),
 		empty: 'No reuse views.'
 	});
 }
@@ -225,7 +233,8 @@ export async function runReuseViewSet(
 	selectors: readonly ReuseViewSelector[],
 	priority: ReuseViewPriority | undefined,
 	reporter: Reporter,
-	client: Pick<ReuseViewClient, 'set'>
+	client: Pick<ReuseViewClient, 'set'>,
+	tenantUrl?: URL
 ): Promise<void> {
 	const summary = await reporter.phase('Setting reuse view', () =>
 		client.set({
@@ -238,18 +247,39 @@ export async function runReuseViewSet(
 
 	reporter.result({
 		kind: 'reuse-view',
+		title: 'Reuse view',
 		data: summary,
 		rows: [
 			{ label: 'View', value: summary.name },
+			...(tenantUrl === undefined
+				? []
+				: [
+						{
+							label: 'View URL',
+							value: reuseViewUrl(tenantUrl, summary.name).href
+						}
+					]),
 			{ label: 'Access', value: summary.access },
-			{ label: 'Revision', value: String(summary.revision) },
 			{ label: 'Priority', value: String(summary.priority) },
 			{
-				label: 'Selectors',
+				label: 'Included caches',
 				value: summary.selectors
-					.map((selector) => selectorLabel(selector))
+					.map((selector) => selectorDescription(selector))
 					.join(', ')
-			}
+			},
+			...(shouldShowDetails(reporter)
+				? [
+						{
+							label: 'Selectors',
+							value: summary.selectors
+								.map((selector) => selectorLabel(selector))
+								.join(', ')
+						}
+					]
+				: []),
+			...(shouldShowDebug(reporter)
+				? [{ label: 'Revision', value: String(summary.revision) }]
+				: [])
 		]
 	});
 }
@@ -277,6 +307,7 @@ export async function runReuseViewRemove(
 
 	reporter.result({
 		kind: 'reuse-view',
+		title: 'Reuse view',
 		data: result,
 		rows: [
 			{ label: 'View', value: result.name },
@@ -285,14 +316,19 @@ export async function runReuseViewRemove(
 	});
 }
 
-function reuseViewRow(view: ReuseViewSummary): ResultRow {
+function reuseViewRow(view: ReuseViewSummary, reporter: Reporter): ResultRow {
 	const selectors = view.selectors
-		.map((selector) => selectorLabel(selector))
+		.map((selector) => selectorDescription(selector))
 		.join(', ');
 
 	return {
 		label: view.name,
-		value: `${view.access}; revision ${String(view.revision)}; priority ${String(view.priority)}; ${selectors}`
+		value:
+			`${view.access}; Nix priority ${String(view.priority)}; ${selectors}` +
+			(shouldShowDetails(reporter)
+				? `; selectors ${view.selectors.map((selector) => selectorLabel(selector)).join(', ')}`
+				: '') +
+			(shouldShowDebug(reporter) ? `; revision ${String(view.revision)}` : '')
 	};
 }
 
@@ -314,4 +350,24 @@ function selectorLabel(selector: ReuseViewSelector): string {
 	}
 
 	return 'all-named';
+}
+
+function selectorDescription(selector: ReuseViewSelector): string {
+	if (selector.kind === 'default') {
+		return 'Default cache';
+	}
+
+	if (selector.kind === 'all') {
+		return 'All caches';
+	}
+
+	if (selector.kind === 'named') {
+		return `Cache ${selector.name}`;
+	}
+
+	if (selector.kind === 'prefix') {
+		return `Caches starting with ${selector.prefix}`;
+	}
+
+	return 'All named caches';
 }

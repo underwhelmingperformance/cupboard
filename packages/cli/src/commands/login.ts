@@ -4,6 +4,7 @@ import {
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import { shouldShowDetails } from '@cupboard/reporter';
 import { type Command, Option } from 'commander';
 
 import {
@@ -96,6 +97,8 @@ function deviceLoginInstruction(verification: {
 }
 
 export class LoginIdTokenMissingError extends CliError {
+	override readonly humanMessage =
+		'Cloudflare did not provide a sign-in identity. Ask the operator to enable ID-token support for the Cupboard OAuth client.';
 	constructor() {
 		super(
 			'The Cloudflare login returned no id token. Check that ID token ' +
@@ -324,7 +327,7 @@ export function registerLoginCommand(
 	const command = program
 		.command('login')
 		.description(
-			'Sign in to a tenant or the deployment, and save the session on this machine.'
+			'Sign in to a tenant or deployment and save the sign-in on this machine.'
 		)
 		.argument(
 			'<url>',
@@ -369,11 +372,14 @@ export function registerLoginCommand(
 
 		reporter.result({
 			kind: 'login',
+			title: 'Signed in',
 			data: { url: target, scope, storedIn },
 			rows: [
 				{ label: 'URL', value: target },
-				{ label: 'Session', value: 'saved' },
-				{ label: 'Stored', value: storedIn }
+				{ label: 'Sign-in', value: 'saved on this machine' },
+				...(shouldShowDetails(reporter)
+					? [{ label: 'Saved in', value: storedIn }]
+					: [])
 			]
 		});
 	});

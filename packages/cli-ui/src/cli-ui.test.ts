@@ -48,6 +48,86 @@ function withoutDurations(events: readonly unknown[]): readonly unknown[] {
 }
 
 describe('formatRows', () => {
+	it.each([40, 60, 80, 120])(
+		'keeps wrapped values in their column at %i columns',
+		(columns) => {
+			const formatted = formatRows(
+				[
+					{
+						label: 'Recovery',
+						value:
+							'Deploying an older release will not undo this upgrade. Fix the reported problem and rerun it with the same release and source.'
+					}
+				],
+				plain,
+				columns - 8
+			);
+
+			const lines = formatted.split('\n');
+			expect(lines.length).toBeGreaterThan(1);
+			expect(lines.every((line) => line.length <= columns - 8)).toBe(true);
+			expect(
+				lines
+					.slice(1)
+					.every((line) =>
+						line.startsWith(' '.repeat(columns - 18 < 24 ? 2 : 10))
+					)
+			).toBe(true);
+		}
+	);
+
+	it('stacks rows when values would have less than 24 columns', () => {
+		expect(
+			formatRows(
+				[{ label: 'Storage credentials', value: 'Already configured' }],
+				plain,
+				32
+			)
+		).toBe('Storage credentials\n  Already configured');
+	});
+
+	it('preserves blank separators and explicit value lines', () => {
+		expect(
+			formatRows(
+				[
+					{
+						label: 'Includes',
+						value: 'Cache release\nCaches starting with gh-'
+					},
+					{ label: '', value: '' },
+					{ label: 'Access', value: 'Private' }
+				],
+				plain,
+				60
+			)
+		).toBe(
+			'Includes  Cache release\n          Caches starting with gh-\n\nAccess    Private'
+		);
+	});
+
+	it('aligns labels by display width and keeps coloured values intact', () => {
+		const coloured = pc.createColors(true);
+		expect(
+			formatRows(
+				[
+					{ label: '界', value: coloured.green('Ready') },
+					{ label: 'Key', value: 'abc' }
+				],
+				plain,
+				60
+			)
+		).toBe(`界   ${coloured.green('Ready')}\nKey  abc`);
+	});
+
+	it('hard-wraps long values and returns empty text for no rows', () => {
+		expect({
+			long: formatRows([{ label: 'Key', value: 'a'.repeat(60) }], plain, 40),
+			empty: formatRows([], plain, 40)
+		}).toStrictEqual({
+			long: `Key  ${'a'.repeat(35)}\n     ${'a'.repeat(25)}`,
+			empty: ''
+		});
+	});
 	it('aligns values to the widest label', () => {
 		const formatted = formatRows(
 			[
@@ -553,4 +633,35 @@ describe('fakeCliUi', () => {
 			}
 		});
 	});
+});
+
+describe('terminal error presentation', () => {
+	it('uses the supplied formatter without changing the reported error', () => {
+		const output = captureStream();
+		const failure = new Error('internal cursor 42');
+		const formatError = vi.fn(() => 'The cache could not be updated.');
+		createCliUi({
+			mode: 'terminal',
+			colour: false,
+			stream: output.stream,
+			formatError
+		})
+			.reporter()
+			.error(failure);
+		expect(formatError).toHaveBeenCalledWith(failure);
+		expect(output.written()).toContain('The cache could not be updated.');
+		expect(output.written()).not.toContain('cursor');
+	});
+});
+
+it('keeps a copyable configuration line intact in a narrow terminal', () => {
+	const captured = captureStream();
+	Object.defineProperty(captured.stream, 'columns', { value: 40 });
+	const config = 'trusted-public-keys = cupboard-acme-1:' + 'a'.repeat(64);
+	createCliUi({
+		mode: 'terminal',
+		colour: false,
+		stream: captured.stream
+	}).note('Nix configuration', [{ label: '', value: config, raw: true }]);
+	expect(captured.written()).toContain(config);
 });

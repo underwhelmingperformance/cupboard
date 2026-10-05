@@ -474,8 +474,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '1' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
+				{ label: 'Available paths', value: '2' },
+				{ label: 'Reused stored content', value: '0' },
+				{ label: 'Already available', value: '1' },
 				{ label: 'Bytes uploaded', value: '14 B' },
 				{ label: 'Pinned paths', value: '1' },
 				{ label: 'Pin expiry', value: 'permanent' }
@@ -698,10 +699,11 @@ describe('runPush', () => {
 	it('re-negotiates and uploads when a reuse commit finds its blob gone', async () => {
 		let negotiations = 0;
 		const uploadedKeys: string[] = [];
+		const rows: ResultRow[][] = [];
 		const commitAttempts: string[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		await runPush(publication([appPath]), reporter([]), {
+		await runPush(publication([appPath]), reporter(rows), {
 			command: 'cupboard push',
 			credential: 'cupboard-login',
 			client: {
@@ -771,11 +773,23 @@ describe('runPush', () => {
 		expect({
 			negotiations,
 			uploadedKeys,
-			commitAttempts
+			commitAttempts,
+			rows
 		}).toStrictEqual({
 			negotiations: 2,
 			uploadedKeys: [r2Key],
-			commitAttempts: ['reuse-gone', 'upload-fresh']
+			commitAttempts: ['reuse-gone', 'upload-fresh'],
+			rows: [
+				[
+					{ label: 'Uploaded paths', value: '1' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '0' },
+					{ label: 'Bytes uploaded', value: '14 B' },
+					{ label: 'Pinned paths', value: '1' },
+					{ label: 'Pin expiry', value: 'permanent' }
+				]
+			]
 		});
 	});
 
@@ -1066,8 +1080,8 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Would upload', value: '1' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Would pin paths', value: '1' },
 					{ label: 'Pin expiry', value: 'inherits cache retention' }
 				]
@@ -1142,11 +1156,18 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '1' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '0' },
+					{ label: 'Available paths', value: '0' },
+					{ label: 'Waiting for verification', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '0' },
 					{ label: 'Bytes uploaded', value: '14 B' },
 					{ label: 'Pinned paths', value: '1' },
-					{ label: 'Pin expiry', value: 'permanent' }
+					{ label: 'Pin expiry', value: 'permanent' },
+					{
+						label: StorePath.basename(appPath),
+						value:
+							'accepted; verification pending; retention grace not reported'
+					}
 				]
 			],
 			warnings: []
@@ -1229,8 +1250,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '1' },
-					{ label: 'Skipped', value: '0' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '1' },
+					{ label: 'Already available', value: '0' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Pinned paths', value: '1' },
 					{ label: 'Pin expiry', value: 'permanent' }
@@ -1342,12 +1364,13 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
+				{ label: 'Available paths', value: '1' },
+				{ label: 'Reused stored content', value: '0' },
+				{ label: 'Already available', value: '1' },
 				{ label: 'Bytes uploaded', value: '0 B' },
 				{
 					label: 'Attestations',
-					value: '1 attached, 0 reused, 0 deferred'
+					value: '1 attached, 0 already attached, 0 awaiting verification'
 				},
 				{
 					label: 'Attestation upload',
@@ -1511,12 +1534,13 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '2' },
+				{ label: 'Available paths', value: '2' },
+				{ label: 'Reused stored content', value: '0' },
+				{ label: 'Already available', value: '2' },
 				{ label: 'Bytes uploaded', value: '0 B' },
 				{
 					label: 'Attestations',
-					value: '2 attached, 0 reused, 0 deferred'
+					value: '2 attached, 0 already attached, 0 awaiting verification'
 				},
 				{
 					label: 'Attestation upload',
@@ -1557,8 +1581,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Pinned paths', value: '1' },
 					{ label: 'Pin expiry', value: 'permanent' }
@@ -1631,46 +1656,64 @@ describe('runPush', () => {
 		});
 	});
 
-	it('warns when the cache holds a different NAR for a skipped path', async () => {
-		const cacheDigest = digest(9, 999);
-		const warnings: { label: string; value?: string }[] = [];
-		const results: ResultRow[][] = [];
-		const clientCalls: unknown[] = [];
+	it.each(['summary', 'details', 'debug'] as const)(
+		'describes different cached contents in %s presentation',
+		async (presentation) => {
+			const cacheDigest = digest(9, 999);
+			const warnings: { label: string; value?: string }[] = [];
+			const results: ResultRow[][] = [];
+			const clientCalls: unknown[] = [];
+			const humanWarnings: string[] = [];
+			const baseReporter = reporter(results, warnings);
+			const output: Reporter = {
+				...baseReporter,
+				presentation,
+				warn(label, value, options) {
+					baseReporter.warn(label, value, options);
+					humanWarnings.push(options?.humanMessage ?? '');
+				}
+			};
 
-		await runPush(publication([appPath]), reporter(results, warnings), {
-			command: 'cupboard push',
-			credential: 'cupboard-login',
-			client: divergentSkipClient(
-				cacheDigest.narHash.toString(),
-				[],
-				clientCalls
-			),
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
-		});
+			await runPush(publication([appPath]), output, {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				client: divergentSkipClient(
+					cacheDigest.narHash.toString(),
+					[],
+					clientCalls
+				),
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+			});
 
-		expect({ clientCalls, warnings }).toStrictEqual({
-			clientCalls: [
-				{ method: 'negotiate', paths: [appPath] },
-				{
-					method: 'setRoot',
-					fields: {
-						name: `pin:${StorePath.hash(appPath)}`,
-						retention: { kind: 'inherit' },
-						targets: [appPath]
+			expect({ clientCalls, warnings, humanWarnings }).toStrictEqual({
+				clientCalls: [
+					{ method: 'negotiate', paths: [appPath] },
+					{
+						method: 'setRoot',
+						fields: {
+							name: `pin:${StorePath.hash(appPath)}`,
+							retention: { kind: 'inherit' },
+							targets: [appPath]
+						}
 					}
-				}
-			],
-			warnings: [
-				{
-					label: 'divergent',
-					value:
-						`${StorePath.basename(appPath)}: local NAR ` +
-						`${appDigest.narHash.toString()} differs from the cached copy ` +
-						`${cacheDigest.narHash.toString()}; the cache keeps its copy`
-				}
-			]
-		});
-	});
+				],
+				humanWarnings: [
+					presentation === 'debug'
+						? `${StorePath.basename(appPath)}: local NAR ${appDigest.narHash.toString()} differs from the cached copy ${cacheDigest.narHash.toString()}; the cache keeps its copy`
+						: `${StorePath.basename(appPath)}: local contents differ from the cached copy. The cached copy is unchanged.`
+				],
+				warnings: [
+					{
+						label: 'divergent',
+						value:
+							`${StorePath.basename(appPath)}: local NAR ` +
+							`${appDigest.narHash.toString()} differs from the cached copy ` +
+							`${cacheDigest.narHash.toString()}; the cache keeps its copy`
+					}
+				]
+			});
+		}
+	);
 
 	it('rejects attaching an attestation for a path whose cached NAR differs', async () => {
 		const cacheDigest = digest(9, 999);
@@ -2121,8 +2164,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Root', value: 'main' },
 					{ label: 'Root expiry', value: 'permanent' }
@@ -2326,8 +2370,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '2' },
+					{ label: 'Available paths', value: '2' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '2' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Root', value: 'main' },
 					{ label: 'Root expiry', value: 'permanent' }
@@ -3223,8 +3268,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Root', value: 'main' },
 					{
@@ -3290,8 +3336,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '2' },
+					{ label: 'Available paths', value: '2' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '2' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Pinned paths', value: '2' },
 					{ label: 'Pin expiry', value: 'permanent' }
@@ -3340,8 +3387,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Pinned paths', value: '1' },
 					{ label: 'Pin expiry', value: 'expires 2026-01-15 00:00 UTC' }
@@ -3372,13 +3420,14 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Available paths', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Retention', value: 'none (--no-retain)' },
 					{
-						label: StorePath.hash(appPath),
-						value: 'no cache retention grace configured'
+						label: StorePath.basename(appPath),
+						value: 'available; retention grace not reported'
 					}
 				]
 			],
@@ -3419,13 +3468,14 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '22' },
+				{ label: 'Available paths', value: '22' },
+				{ label: 'Reused stored content', value: '0' },
+				{ label: 'Already available', value: '22' },
 				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Retention', value: 'none (--no-retain)' },
 				...storePaths.slice(0, 20).map((storePath) => ({
-					label: StorePath.hash(storePath),
-					value: 'no cache retention grace configured'
+					label: StorePath.basename(storePath),
+					value: 'available; retention grace not reported'
 				})),
 				{
 					label: '…',
@@ -3530,12 +3580,12 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Would upload', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Retention', value: 'none (--no-retain)' },
 					{
-						label: StorePath.hash(appPath),
-						value: 'no cache retention grace configured'
+						label: StorePath.basename(appPath),
+						value: 'retention grace not reported'
 					}
 				]
 			]
@@ -3574,13 +3624,20 @@ describe('runPush', () => {
 				results: [
 					[
 						{ label: 'Uploaded paths', value: '1' },
-						{ label: 'Already cached', value: '0' },
-						{ label: 'Skipped', value: '0' },
+						{ label: 'Available paths', value: wait === false ? '0' : '1' },
+						...(wait === false
+							? [{ label: 'Waiting for verification', value: '1' }]
+							: []),
+						{ label: 'Reused stored content', value: '0' },
+						{ label: 'Already available', value: '0' },
 						{ label: 'Bytes uploaded', value: '14 B' },
 						{ label: 'Retention', value: 'none (--no-retain)' },
 						{
-							label: StorePath.hash(appPath),
-							value: 'no cache retention grace configured'
+							label: StorePath.basename(appPath),
+							value:
+								wait === false
+									? 'accepted; verification pending; retention grace not reported'
+									: 'available; retention grace not reported'
 						}
 					]
 				]
@@ -3780,8 +3837,9 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '2' },
+					{ label: 'Available paths', value: '2' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '2' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Pinned paths', value: '2' },
 					{
@@ -3986,6 +4044,8 @@ describe('runPush', () => {
 		const uploaded: string[] = [];
 		const committed: string[] = [];
 		const roots: RootSetBodyInput[] = [];
+		const results: ResultRow[][] = [];
+		const payloads: ResultPayload[] = [];
 
 		const options = {
 			command: 'cupboard push',
@@ -4052,7 +4112,7 @@ describe('runPush', () => {
 			try {
 				await runPush(
 					publication([appPath, runtimePath]),
-					reporter([]),
+					reporter(results, [], payloads),
 					options
 				);
 				return { pushed: true };
@@ -4072,7 +4132,13 @@ describe('runPush', () => {
 			}
 		})();
 
-		expect({ outcome, uploaded, committed, roots }).toStrictEqual({
+		expect({
+			outcome,
+			uploaded,
+			committed,
+			roots,
+			report: { rows: results, data: payloads.at(-1)?.data }
+		}).toStrictEqual({
 			outcome: {
 				error: {
 					name: PushIncompleteError.name,
@@ -4081,7 +4147,40 @@ describe('runPush', () => {
 			},
 			uploaded: [`nar/${appDigest.narHash.toString()}.nar.zst`],
 			committed: ['upload-app'],
-			roots: []
+			roots: [],
+			report: {
+				rows: [
+					[
+						{ label: 'Uploaded paths', value: '1' },
+						{ label: 'Available paths', value: '1' },
+						{ label: 'Reused stored content', value: '0' },
+						{ label: 'Already available', value: '0' },
+						{ label: 'Bytes uploaded', value: '28 B' },
+						{ label: 'Failed', value: '1' }
+					]
+				],
+				data: {
+					uploadedPaths: 2,
+					reusedBlobs: 0,
+					skipped: 0,
+					uploadedBytes: 28,
+					failures: [
+						{
+							storePathHash: StorePath.hash(runtimePath),
+							storePath: runtimePath,
+							stage: 'upload',
+							reason: 'boom'
+						}
+					],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: 'committed'
+						}
+					]
+				}
+			}
 		});
 	});
 
@@ -4148,13 +4247,20 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '1' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
+					{ label: 'Available paths', value: '2' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '1' },
 					{ label: 'Bytes uploaded', value: '14 B' },
 					{ label: 'Pinned paths', value: '2' },
 					{ label: 'Pin expiry', value: 'permanent' },
-					{ label: appHash, value: 'kept until 2026-02-01 00:00 UTC' },
-					{ label: runtimeHash, value: 'no cache retention grace configured' }
+					{
+						label: StorePath.basename(appPath),
+						value: 'available; kept until 2026-02-01 00:00 UTC'
+					},
+					{
+						label: StorePath.basename(runtimePath),
+						value: 'available; retention grace not reported'
+					}
 				]
 			],
 			data: {
@@ -4229,12 +4335,17 @@ describe('runPush', () => {
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '1' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '0' },
+					{ label: 'Available paths', value: '0' },
+					{ label: 'Waiting for verification', value: '1' },
+					{ label: 'Reused stored content', value: '0' },
+					{ label: 'Already available', value: '0' },
 					{ label: 'Bytes uploaded', value: '14 B' },
 					{ label: 'Pinned paths', value: '1' },
 					{ label: 'Pin expiry', value: 'permanent' },
-					{ label: appHash, value: 'pending (grace 900s)' }
+					{
+						label: StorePath.basename(appPath),
+						value: 'accepted; verification pending; retention grace period 900s'
+					}
 				]
 			],
 			data: {
@@ -4598,60 +4709,73 @@ describe('runPush', () => {
 			warns: [],
 			pathRows: [
 				{
-					label: StorePath.hash(appPath),
-					value: 'a push would extend its grace 86,400s'
+					label: StorePath.basename(appPath),
+					value: 'would refresh the retention grace period (86,400s)'
 				}
 			]
 		});
 	});
 
-	it('with --dry-run --no-retain, distinguishes a zero-grace match in the row and warning', async () => {
-		const results: ResultRow[][] = [];
-		const warns: { label: string; value?: string }[] = [];
+	it.each(['summary', 'details', 'debug'] as const)(
+		'with --dry-run --no-retain, describes zero grace in %s presentation',
+		async (presentation) => {
+			const results: ResultRow[][] = [];
+			const warns: { label: string; value?: string }[] = [];
 
-		await runPush(publication([appPath]), reporter(results, warns), {
-			command: 'cupboard push',
-			credential: 'cupboard-login',
-			dryRun: true,
-			retain: false,
-			client: {
-				negotiate: unexpectedNegotiateCall,
-				preview: () =>
-					Promise.resolve(
-						uploadPreviewResponseSchema.parse({
-							uploads: [
-								{
-									action: 'skip' as const,
-									storePathHash: StorePath.hash(appPath),
-									narHash: appDigest.narHash.toString(),
-									grace: { graceSeconds: 0 }
-								}
-							]
-						})
-					),
-				uploadNar: unexpectedUploadNarCall,
-				commit: unexpectedCommitCall,
-				setRoot: unexpectedSetRootCall
-			} satisfies PushClient,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
-		});
+			await runPush(
+				publication([appPath]),
+				{ ...reporter(results, warns), presentation },
+				{
+					command: 'cupboard push',
+					credential: 'cupboard-login',
+					dryRun: true,
+					retain: false,
+					client: {
+						negotiate: unexpectedNegotiateCall,
+						preview: () =>
+							Promise.resolve(
+								uploadPreviewResponseSchema.parse({
+									uploads: [
+										{
+											action: 'skip' as const,
+											storePathHash: StorePath.hash(appPath),
+											narHash: appDigest.narHash.toString(),
+											grace: { graceSeconds: 0 }
+										}
+									]
+								})
+							),
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+				}
+			);
 
-		expect({ warns, pathRows: results[0]?.slice(-1) }).toStrictEqual({
-			warns: [
-				{
-					label: 'unretained',
-					value:
-						'the cache has zero retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
-				}
-			],
-			pathRows: [
-				{
-					label: StorePath.hash(appPath),
-					value: 'configured zero grace; no grace period applies'
-				}
-			]
-		});
-	});
+			expect({ warns, pathRows: results[0]?.slice(-1) }).toStrictEqual({
+				warns: [
+					{
+						label: 'unretained',
+						value:
+							'the cache has zero retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
+					}
+				],
+				pathRows: [
+					{
+						label:
+							presentation === 'summary'
+								? StorePath.basename(appPath)
+								: appPath,
+						value:
+							presentation === 'summary'
+								? 'no retention grace period'
+								: 'configured zero retention grace'
+					}
+				]
+			});
+		}
+	);
 
 	it('with --dry-run, warns when the cache holds a different NAR for a skipped path', async () => {
 		const cacheDigest = digest(9, 999);

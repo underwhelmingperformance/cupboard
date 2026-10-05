@@ -925,8 +925,8 @@ describe('runGithubCheck', () => {
 				{
 					label: 'pull-request trust rule',
 					value:
-						'failed: interactive rule owner matches the modelled claims; ' +
-						'workflows must use a scoped CI rule'
+						'failed: rule owner grants access for a person, but matches this job identity; ' +
+						'workflows must use a rule with specific CI permissions'
 				},
 				{ label: 'main trust rule', value: 'ok' }
 			]
@@ -973,8 +973,8 @@ describe('runGithubCheck', () => {
 			row: {
 				label: 'main trust rule',
 				value:
-					'failed: rule branch matches the modelled claims but does not permit ' +
-					'root:set on cache ' +
+					'failed: rule branch matches the job identity but does not permit ' +
+					'set retention roots on cache ' +
 					'(default) with root github:acme/app/main/target; add a rule ' +
 					'with the required grant, or add a corrected rule and remove this one'
 			}
@@ -988,7 +988,7 @@ describe('runGithubCheck', () => {
 			rules: [withoutOperation(prRule, 'cache:create'), branchRule],
 			check: 'pull-request trust rule',
 			row: 0,
-			detail: 'cache:create on cache gh-1234-pr-1'
+			detail: 'create caches on cache gh-1234-pr-1'
 		},
 		{
 			name: 'pull-request cache deletion',
@@ -996,7 +996,7 @@ describe('runGithubCheck', () => {
 			rules: [withoutOperation(prRule, 'cache:close'), branchRule],
 			check: 'pull-request trust rule',
 			row: 0,
-			detail: 'cache:close on cache gh-1234-pr-1'
+			detail: 'close caches on cache gh-1234-pr-1'
 		},
 		{
 			name: 'pull-request root listing',
@@ -1005,7 +1005,7 @@ describe('runGithubCheck', () => {
 			check: 'pull-request trust rule',
 			row: 0,
 			detail:
-				'root:list on cache gh-1234-pr-1 with root github:acme/app/pr-1/target'
+				'list retention roots on cache gh-1234-pr-1 with root github:acme/app/pr-1/target'
 		},
 		{
 			name: 'pull-request run-root attachment',
@@ -1014,7 +1014,7 @@ describe('runGithubCheck', () => {
 			check: 'pull-request trust rule',
 			row: 0,
 			detail:
-				'root:attach on cache gh-1234-pr-1 with root ' +
+				'add paths to retention roots on cache gh-1234-pr-1 with root ' +
 				'github:acme/app/pr-1/_cupboard-run/1'
 		},
 		{
@@ -1024,7 +1024,7 @@ describe('runGithubCheck', () => {
 			check: 'main trust rule',
 			row: 1,
 			detail:
-				'root:list on cache (default) with root github:acme/app/main/target'
+				'list retention roots on cache (default) with root github:acme/app/main/target'
 		},
 		{
 			name: 'branch run-root attachment',
@@ -1033,7 +1033,7 @@ describe('runGithubCheck', () => {
 			check: 'main trust rule',
 			row: 1,
 			detail:
-				'root:attach on cache (default) with root ' +
+				'add paths to retention roots on cache (default) with root ' +
 				'github:acme/app/main/_cupboard-run/1'
 		}
 	] as const)(
@@ -1066,7 +1066,7 @@ describe('runGithubCheck', () => {
 					label: check,
 					value:
 						`failed: rule ${check.startsWith('pull-request') ? 'pr' : 'branch'} ` +
-						`matches the modelled claims but does not permit ${detail}; ` +
+						`matches the job identity but does not permit ${detail}; ` +
 						'add a rule with the required grant, or add a corrected rule and remove this one'
 				}
 			});
@@ -1160,6 +1160,6 @@ it('reports missing merged-close authority separately from ordinary PR publicati
 	expect(findings(results).at(-1)).toStrictEqual({
 		label: 'merged pull-request closure trust rule',
 		value:
-			'failed: rules branch, pr match the modelled claims but none permits cache:close on cache gh-1234-pr-1; add the grant to one rule'
+			'failed: rules branch, pr match the job identity but none permits close caches on cache gh-1234-pr-1; add the grant to one rule'
 	});
 });

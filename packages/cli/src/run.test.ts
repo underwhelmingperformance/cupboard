@@ -56,7 +56,7 @@ describe('runCli', () => {
 			exitCode: 77,
 			requests: 1,
 			annotation:
-				"Your token lacks the scope this command needs. A tenant command needs that tenant's admin token; a control-plane command (tenant, control-key) needs the operator token.%0A  Error: fixture refused"
+				'You do not have permission to run cupboard key list for <target>. Ask the tenant administrator or deployment operator to grant this access.'
 		},
 		{
 			code: 'SERVICE_UNAVAILABLE',
@@ -64,21 +64,22 @@ describe('runCli', () => {
 			exitCode: 75,
 			requests: maxTransientRetries + 1,
 			annotation:
-				'The admin API responded with 503 (SERVICE_UNAVAILABLE). Run the command again later.%0A  Error: fixture refused'
+				'The server is temporarily unavailable or busy. Wait a moment, then retry the command.'
 		},
 		{
 			code: 'INSUFFICIENT_STORAGE',
 			status: 507,
 			exitCode: 1,
 			requests: 1,
-			annotation: `fixture refused. ${overQuotaAdvice}`
+			annotation: `The tenant has insufficient storage for this request. ${overQuotaAdvice}`
 		},
 		{
 			code: 'BAD_REQUEST',
 			status: 400,
 			exitCode: 1,
 			requests: 1,
-			annotation: 'fixture refused'
+			annotation:
+				'The deployment rejected the command options. Check the command help and supplied values. Use --debug for diagnostic information.'
 		}
 	])(
 		'reports $code once in a GitHub CLI process and preserves its exit status',
@@ -179,7 +180,7 @@ describe('runCli', () => {
 				expect({ status: actualStatus, stdout, stderr, calls }).toStrictEqual({
 					status: exitCode,
 					stdout: '',
-					stderr: `::group::Listing signing keys\n::error::${annotation}\n::endgroup::\n`,
+					stderr: `::group::Listing signing keys\n::error::${annotation.replace('<target>', () => target)}\n::endgroup::\n`,
 					calls: Array.from({ length: requests }, () => ({
 						method: 'GET',
 						url: '/t/acme/keys'

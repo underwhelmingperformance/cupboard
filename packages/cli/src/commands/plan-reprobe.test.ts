@@ -88,7 +88,7 @@ describe('runPlanReprobe', () => {
 				withdrawn: []
 			},
 			rows: [
-				{ label: 'Withdrawn', value: '0' },
+				{ label: 'Now available in the cache', value: '0' },
 				{ label: 'To build', value: '2' }
 			]
 		},
@@ -106,7 +106,7 @@ describe('runPlanReprobe', () => {
 				]
 			},
 			rows: [
-				{ label: 'Withdrawn', value: '1' },
+				{ label: 'Now available in the cache', value: '1' },
 				{ label: 'To build', value: '1' }
 			]
 		}
@@ -120,7 +120,12 @@ describe('runPlanReprobe', () => {
 
 		expect(reprobe).toStrictEqual(expected);
 		expect(payloads).toStrictEqual([
-			{ kind: 'plan-reprobe', data: expected, rows }
+			{
+				kind: 'plan-reprobe',
+				title: 'Build plan refresh',
+				data: expected,
+				rows
+			}
 		]);
 	});
 });

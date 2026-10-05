@@ -17,9 +17,15 @@ import {
 	type TenantQuota,
 	type TenantQuotaResponse,
 	type TenantReadCredentialResponse,
+	type TenantStatus,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
-import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
+import {
+	formatBytes,
+	type Reporter,
+	type ResultRow,
+	shouldShowDebug
+} from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
@@ -274,7 +280,7 @@ export function registerTenantCommands(
 
 	tenant
 		.command('quota')
-		.description("Show a tenant's storage quota and charged bytes.")
+		.description("Show a tenant's storage quota and storage usage.")
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: URL, id: string) => {
@@ -473,7 +479,7 @@ export async function runTenantCreate(
 	);
 	const rows: ResultRow[] = [
 		{ label: 'Tenant', value: summary.id },
-		{ label: 'Status', value: summary.status },
+		{ label: 'Status', value: tenantStatusLabel(summary.status) },
 		{ label: 'Default cache access', value: body.defaultCacheAccess },
 		...(body.defaultCacheAccess === 'private' && body.read === undefined
 			? [
@@ -486,14 +492,15 @@ export async function runTenantCreate(
 			: []),
 		...(generatedReadPassword !== undefined && body.read !== undefined
 			? [
-					{ label: 'Read user', value: body.read.user },
-					{ label: 'Read password', value: generatedReadPassword }
+					{ label: 'Read user', raw: true, value: body.read.user },
+					{ label: 'Read password', raw: true, value: generatedReadPassword }
 				]
 			: [])
 	];
 
 	reporter.result({
 		kind: 'tenant',
+		title: 'Tenant',
 		data: { ...summary, generatedReadPassword },
 		rows
 	});
@@ -509,8 +516,9 @@ export async function runTenantList(
 
 	reporter.result({
 		kind: 'tenants',
+		title: 'Tenants',
 		data: tenants,
-		rows: tenants.map((summary) => tenantRow(summary)),
+		rows: tenants.map((summary) => tenantRow(summary, reporter)),
 		empty: 'No tenants.'
 	});
 }
@@ -537,8 +545,9 @@ export async function runTenantSuspend(
 
 	reporter.result({
 		kind: 'tenant',
+		title: 'Tenant',
 		data: result,
-		rows: [{ label: result.id, value: result.status }]
+		rows: [{ label: result.id, value: tenantStatusLabel(result.status) }]
 	});
 }
 
@@ -553,8 +562,9 @@ export async function runTenantResume(
 
 	reporter.result({
 		kind: 'tenant',
+		title: 'Tenant',
 		data: result,
-		rows: [{ label: result.id, value: result.status }]
+		rows: [{ label: result.id, value: tenantStatusLabel(result.status) }]
 	});
 }
 
@@ -595,6 +605,7 @@ function reportTenantQuota(
 ): void {
 	reporter.result({
 		kind: 'tenant-quota',
+		title: 'Tenant storage quota',
 		data: result,
 		rows: [
 			{ label: 'Tenant', value: result.id },
@@ -622,11 +633,12 @@ export async function runTenantRotateCredential(
 
 	reporter.result({
 		kind: 'tenant',
+		title: 'Tenant',
 		data: { ...result, readUser: user, generatedReadPassword: password },
 		rows: [
 			{ label: 'Tenant', value: result.id },
-			{ label: 'Read user', value: user },
-			{ label: 'Read password', value: password }
+			{ label: 'Read user', raw: true, value: user },
+			{ label: 'Read password', raw: true, value: password }
 		]
 	});
 }
@@ -642,6 +654,7 @@ export async function runTenantClearCredential(
 
 	reporter.result({
 		kind: 'tenant',
+		title: 'Tenant',
 		data: result,
 		rows: [
 			{ label: 'Tenant', value: result.id },
@@ -680,12 +693,13 @@ export async function runTenantRotateCacheCredential(
 
 	reporter.result({
 		kind: 'cache-credential',
+		title: 'Cache read credential',
 		data: { ...result, readUser: user, generatedReadPassword: password },
 		rows: [
 			{ label: 'Tenant', value: result.id },
 			{ label: 'Cache', value: cacheLabel(result.cache) },
-			{ label: 'Read user', value: user },
-			{ label: 'Read password', value: password }
+			{ label: 'Read user', raw: true, value: user },
+			{ label: 'Read password', raw: true, value: password }
 		]
 	});
 }
@@ -707,6 +721,7 @@ export async function runTenantClearCacheCredential(
 
 	reporter.result({
 		kind: 'cache-credential',
+		title: 'Cache read credential',
 		data: result,
 		rows: [
 			{ label: 'Tenant', value: result.id },
@@ -725,9 +740,9 @@ export async function runTenantRemove(
 	client: Pick<TenantClient, 'remove'>
 ): Promise<void> {
 	const outcome = await ui.confirm({
-		message: `Begin offboarding tenant ${id}?`,
+		message: `Remove tenant ${id}?`,
 		detail:
-			'Writes stop at once and the tenant drains its data in the background.'
+			"New reads and writes stop immediately. The tenant's data is deleted over the following hours. Removal cannot be undone."
 	});
 
 	if (outcome !== 'yes') {
@@ -736,20 +751,38 @@ export async function runTenantRemove(
 	}
 
 	const reporter = ui.reporter();
-	const result = await reporter.phase('Offboarding tenant', () =>
-		client.remove({ id })
+	const result = await reporter.phase(
+		'Offboarding tenant',
+		() => client.remove({ id }),
+		{ humanLabel: 'Removing tenant' }
 	);
 
 	reporter.result({
 		kind: 'tenant',
+		title: 'Tenant',
 		data: result,
-		rows: [{ label: result.id, value: result.status }]
+		rows: [{ label: result.id, value: tenantStatusLabel(result.status) }]
 	});
 }
 
-function tenantRow(summary: TenantSummary): ResultRow {
+function tenantRow(summary: TenantSummary, reporter: Reporter): ResultRow {
 	return {
 		label: summary.id,
-		value: `${summary.status}; config v${String(summary.configVersion)}`
+		value:
+			tenantStatusLabel(summary.status) +
+			(shouldShowDebug(reporter)
+				? `; config v${String(summary.configVersion)}`
+				: '')
 	};
+}
+
+function tenantStatusLabel(status: TenantStatus): string {
+	const labels: Record<TenantStatus, string> = {
+		active: 'Active',
+		suspended: 'Suspended',
+		offboarding: 'Removal in progress',
+		offboarded: 'Removed'
+	};
+
+	return labels[status];
 }

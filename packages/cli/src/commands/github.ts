@@ -808,7 +808,12 @@ function reportSetupResult(
 				: `${step.outcome}: ${step.detail}`
 	}));
 
-	reporter.result({ kind: 'github-setup', data: { steps }, rows });
+	reporter.result({
+		kind: 'github-setup',
+		title: 'GitHub publishing setup',
+		data: { steps },
+		rows
+	});
 }
 
 export async function runGithubSetup(

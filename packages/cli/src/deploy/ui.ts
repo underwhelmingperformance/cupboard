@@ -1,4 +1,7 @@
 import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { PresentationLevel } from '@cupboard/reporter';
+
+import { formatHumanError } from '../human-errors.ts';
 
 import type { AccountSummary } from './cloudflare-api.ts';
 import type { CloudflareAccountId } from './identifiers.ts';
@@ -15,11 +18,15 @@ export interface DeployUiOptions {
 	readonly resultFile?: string;
 	readonly signal?: AbortSignal;
 	readonly colour?: boolean;
+	readonly presentation?: PresentationLevel;
 }
 
 export function createDeployUi(options: DeployUiOptions = {}): DeployUi {
 	const ui = createCliUi({
 		mode: 'terminal',
+		presentation: options.presentation,
+		formatError: (error) =>
+			formatHumanError(error, { debug: options.presentation === 'debug' }),
 		colour: options.colour,
 		signal: options.signal,
 		resultFile: options.resultFile

@@ -163,14 +163,14 @@ minutes.
 cupboard whoami
 ```
 
-This lists the sessions kept on this machine. For each one, it shows:
+This lists saved sign-ins on this machine. For each one, the summary shows the
+URL, the signed-in identity, whether the saved sign-in has expired and whether
+Cupboard can renew it automatically. The result describes local credentials; it
+does not check whether the server still accepts them.
 
-- the URL
-- the subject that you signed in as
-- the trust rule that accepted you, if the access token records it (a tenant's
-  tokens do, and the deployment's don't)
-- when the access token expires
-- whether a refresh token is saved with the session
+Pass `--details` to include the expiry time and the trust rule that accepted the
+sign-in, when available. After `cupboard login`, `--details` also shows where
+the CLI saved the sign-in.
 
 It also shows the saved Cloudflare sign-in, if there is one, even when there are
 no sessions. If a cached session or the Cloudflare sign-in cannot be read, the
@@ -215,13 +215,15 @@ cupboard logout --all --cloudflare
 Cloudflare sign-in. Afterwards, `cupboard login` and `cupboard init` ask you to
 sign in to Cloudflare again.
 
-Signing out only affects this machine. It doesn't revoke anything on the server,
-because cupboard has no endpoint that revokes a refresh token. If someone has
-copied a tenant session to another machine, they can renew it for up to 30 days
-after you signed in, unless the server stops accepting its refresh token
-earlier. To take away an administrator's access, another administrator
-[removes their trust rule](./access.md#removing-an-administrator). The server
-then refuses to renew the administrator's sessions.
+Signing out removes saved credentials from this machine. Copies on other
+machines remain usable. If someone has copied a tenant session to another
+machine, they can renew it for up to 30 days after you signed in, unless the
+server stops accepting its refresh token earlier. To take away an
+administrator's access, another administrator [removes their trust
+rule][remove-access]. The server then refuses to renew the administrator's
+sessions.
+
+[remove-access]: ./access.md#removing-an-administrator
 
 ## Where sessions are stored
 

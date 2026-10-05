@@ -157,9 +157,11 @@ const ciRuleRows: ResultRow[] = [
 	{ label: 'Claims', value: 'repository_owner_id=5678' },
 	{ label: '', value: 'repository_id=1234' },
 	{
-		label: 'Grants',
-		value: 'cache owner-ci: upload:negotiate, upload:status, upload:commit'
-	}
+		label: 'Access',
+		value:
+			'Cache owner-ci: request publication of paths, check publication status, complete publication of uploaded paths'
+	},
+	{ label: 'State', value: 'enabled' }
 ];
 
 function summary(overrides: Partial<OidcTrustSummaryInput>) {
@@ -216,16 +218,14 @@ describe('runOidcTrustList', () => {
 		);
 
 		const rows = [
-			{
-				label: 'owner',
-				value:
-					'wildcard https://idp.example.test/realms/a · owner-1 aud=https://cache.example.workers.dev'
-			},
-			{
-				label: 'rule-1',
-				value:
-					'1 grant(s) https://token.actions.githubusercontent.com aud=https://cache.example.workers.dev (disabled)'
-			}
+			{ label: 'Rule', value: 'owner' },
+			{ label: 'Issuer', value: 'https://idp.example.test/realms/a' },
+			{ label: 'Audience', value: 'https://cache.example.workers.dev' },
+			{ label: 'Claims', value: 'sub=owner-1' },
+			{ label: 'Access', value: 'Every operation on every resource' },
+			{ label: 'State', value: 'enabled' },
+			...ciRuleRows.filter((row) => row.label !== '' && row.label !== 'State'),
+			{ label: 'State', value: 'disabled' }
 		];
 
 		expect({ results, payloads }).toStrictEqual({
@@ -233,6 +233,7 @@ describe('runOidcTrustList', () => {
 			payloads: [
 				{
 					kind: 'oidc-trust-rules',
+					title: 'Trust rules',
 					data: response.rules,
 					rows,
 					empty: 'No OIDC trust rules.'
@@ -258,20 +259,37 @@ describe('runOidcTrustList', () => {
 		});
 
 		expect({ results, infos, warns }).toStrictEqual({
-			results: [
-				[
-					{
-						label: 'rule-1',
-						value:
-							'1 grant(s) https://token.actions.githubusercontent.com aud=https://cache.example.workers.dev'
-					}
-				]
-			],
+			results: [ciRuleRows.filter((row) => row.label !== '')],
 			infos: [
 				'The server cannot read trust rule rule-3. The rule is disabled and remains only as a record.'
 			],
 			warns: [
-				'The server cannot read trust rule rule-2, which is enabled: ID token exchanges fail until you remove the rule'
+				'Trust rule rule-2 cannot authorise new sign-ins. Repair or remove the rule. Other readable rules can still authorise access.'
+			]
+		});
+	});
+
+	it('warns that an unreadable operator rule blocks operator sign-ins', async () => {
+		const results: ResultRow[][] = [];
+		const warns: string[] = [];
+		await runOidcTrustList(
+			reporter(results, [], warns),
+			{
+				list: () =>
+					Promise.resolve({
+						rules: [],
+						unreadable: [
+							{ id: trustRuleIdSchema.parse('broken'), disabled: false }
+						]
+					})
+			},
+			'control',
+			new URL('https://cache.example.workers.dev')
+		);
+		expect({ results, warns }).toStrictEqual({
+			results: [[]],
+			warns: [
+				'Operator sign-ins are blocked by unreadable trust rule broken. Repair or remove it with `cupboard control-oidc-trust remove https://cache.example.workers.dev broken`.'
 			]
 		});
 	});
@@ -307,6 +325,7 @@ describe('runOidcTrustList', () => {
 			payloads: [
 				{
 					kind: 'oidc-trust-rules',
+					title: 'Trust rules',
 					data: [{ id: 'rule-2', disabled: false, unreadable: true }],
 					rows: [],
 					empty: undefined
@@ -314,7 +333,7 @@ describe('runOidcTrustList', () => {
 			],
 			infos: [],
 			warns: [
-				'The server cannot read trust rule rule-2, which is enabled: ID token exchanges fail until you remove the rule'
+				'Trust rule rule-2 cannot authorise new sign-ins. Repair or remove the rule. Other readable rules can still authorise access.'
 			]
 		});
 	});
@@ -506,6 +525,7 @@ describe('runOidcTrustRemove', () => {
 		expect(captured.results).toStrictEqual([
 			{
 				kind: 'oidc-trust-rule',
+				title: 'Trust rule',
 				data: response,
 				rows: [
 					{ label: 'Rule', value: 'rule-1' },
@@ -877,12 +897,13 @@ describe('claim rendering', () => {
 				},
 				{ label: 'Audience', value: 'https://cache.example.workers.dev' },
 				{ label: 'Claims', value: 'repository_id=1234' },
-				{ label: '', value: 'job_workflow_ref=~^acme/infra/.+@.+$' },
+				{ label: '', value: 'job_workflow_ref matches ^acme/infra/.+@.+$' },
 				{
-					label: 'Grants',
+					label: 'Access',
 					value:
-						'cache owner-ci: upload:negotiate, upload:status, upload:commit'
-				}
+						'Cache owner-ci: request publication of paths, check publication status, complete publication of uploaded paths'
+				},
+				{ label: 'State', value: 'enabled' }
 			]
 		]);
 	});

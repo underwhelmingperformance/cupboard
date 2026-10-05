@@ -141,6 +141,108 @@ function payloadReporter(
 
 const since = 'since 2026-01-01 00:20 UTC';
 
+it.each(['summary', 'details'] as const)(
+	'keeps private tenant diagnostics out of operator status (%s)',
+	async (presentation) => {
+		const payloads: ResultPayload[] = [];
+		const status: LocalStepStatus = {
+			...statusFor(currentLocalStep, 1),
+			unwoken: 0,
+			unwokenSample: [],
+			stalled: 1,
+			stalledSample: [
+				{
+					tenant,
+					attemptedAt: recorded,
+					progressedAt: recorded,
+					error: 'InjectedPageFault'
+				}
+			]
+		};
+		await runDeploymentStatus(
+			{ ...payloadReporter(payloads), presentation },
+			{
+				...client(complete, [], { count: 0 }),
+				localStep: { status: () => Promise.resolve(status), wake: vi.fn() }
+			}
+		);
+		expect(payloads).toStrictEqual([
+			{
+				kind: 'deployment-status',
+				title: 'Deployment readiness',
+				data: { ...complete, ...status },
+				rows: [
+					{ label: 'Deployment', value: 'Tenant updates need attention' },
+					{ label: 'Tenants', value: '1 ready, 1 need attention' },
+					{
+						label: 'Next step',
+						raw: true,
+						value:
+							'Inspect `cupboard deployment status <deployment-url> --debug`, then retry with `cupboard deployment resume <deployment-url>`.'
+					},
+					...(presentation === 'details'
+						? [
+								{ label: 'Ready tenants', value: '1' },
+								{ label: 'Pending tenants', value: '1' },
+								{ label: 'Updating tenants', value: '0' },
+								{ label: 'Tenants needing attention', value: '1' },
+								{ label: 'Tenants waiting to start', value: '0' }
+							]
+						: []),
+					{
+						label: 'Needs attention',
+						value:
+							'acme: attempted 2026-01-01 00:20 UTC, last progress 2026-01-01 00:20 UTC'
+					}
+				]
+			}
+		]);
+	}
+);
+
+it('keeps the old details option within operator information', async () => {
+	const results: ResultRow[][] = [];
+	await runDeploymentStatus(
+		reporter(results),
+		client(complete, [], { count: 0 }),
+		{ details: true }
+	);
+	expect(results).toStrictEqual([
+		[
+			{ label: 'Deployment', value: 'Schema and data ready' },
+			{ label: 'Tenants', value: '1 ready' },
+			{ label: 'Ready tenants', value: '1' },
+			{ label: 'Pending tenants', value: '0' },
+			{ label: 'Updating tenants', value: '0' },
+			{ label: 'Tenants needing attention', value: '0' },
+			{ label: 'Tenants waiting to start', value: '0' }
+		]
+	]);
+});
+
+it('reports schema and data readiness after resuming without claiming deployment success', async () => {
+	const payloads: ResultPayload[] = [];
+	const infos: string[] = [];
+	await runDeploymentResume(
+		payloadReporter(payloads, infos),
+		client(complete, [], { count: 1 }),
+		{}
+	);
+	expect({ payloads, infos }).toStrictEqual({
+		payloads: [
+			{
+				kind: 'deployment-readiness',
+				title: 'Deployment readiness',
+				data: statusFor(currentLocalStep, 0),
+				rows: [{ label: 'Ready tenants', value: '1' }]
+			}
+		],
+		infos: [
+			'Every active or suspended tenant has completed the required schema and data updates. All deployment database changes are complete.'
+		]
+	});
+});
+
 it('shows readiness without completed transitions or numeric migration steps by default', async () => {
 	const results: ResultRow[][] = [];
 	await runDeploymentStatus(
@@ -149,13 +251,13 @@ it('shows readiness without completed transitions or numeric migration steps by 
 	);
 	expect(results).toStrictEqual([
 		[
-			{ label: 'Deployment', value: 'Ready' },
+			{ label: 'Deployment', value: 'Schema and data ready' },
 			{ label: 'Tenants', value: '1 ready' }
 		]
 	]);
 });
 
-it('directs the operator to init when schema transitions are incomplete', async () => {
+it('directs the operator to deploy when schema transitions are incomplete', async () => {
 	const results: ResultRow[][] = [];
 
 	await runDeploymentStatus(
@@ -169,8 +271,9 @@ it('directs the operator to init when schema transitions are incomplete', async 
 			{ label: 'Tenants', value: '1 ready, 1 waiting to start' },
 			{
 				label: 'Next step',
+				raw: true,
 				value:
-					'Re-run cupboard init with the same release and source to finish the deployment.'
+					'Rerun `cupboard deploy` with the same release and source to finish the deployment.'
 			},
 			{
 				label: 'Waiting to start',
@@ -204,15 +307,18 @@ it('shows active schema migration progress by default', async () => {
 		...client(complete, [], { count: 1 }),
 		localStep: { status: () => Promise.resolve(status), wake: vi.fn() }
 	};
-	await runDeploymentStatus(reporter(results), deploymentClient);
+	await runDeploymentStatus(reporter(results), deploymentClient, {
+		url: new URL('https://cupboard.example.workers.dev')
+	});
 	expect(results).toStrictEqual([
 		[
 			{ label: 'Deployment', value: 'Updating tenants' },
 			{ label: 'Tenants', value: '1 ready, 1 migrating' },
 			{
 				label: 'Next step',
+				raw: true,
 				value:
-					'Use deployment resume with this deployment URL to wake pending tenants and wait for completion.'
+					'Run `cupboard deployment resume https://cupboard.example.workers.dev/` to retry pending tenant updates and wait for completion.'
 			},
 			{ label: 'Migrating', value: 'acme: last progress 2026-01-01 00:20 UTC' }
 		]
@@ -267,19 +373,35 @@ const unrecognisedCases = [
 	}
 ];
 
-function runDetailedDeploymentStatus(
+function runDebugDeploymentStatus(
 	reporter: Reporter,
 	client: DeploymentClient
 ): Promise<void> {
-	return runDeploymentStatus(reporter, client, { details: true });
+	return runDeploymentStatus({ ...reporter, presentation: 'debug' }, client);
 }
+
+const expandedOperatorRows: ResultRow[] = [
+	{ label: 'Deployment', value: 'Deployment incomplete' },
+	{ label: 'Tenants', value: '1 ready, 1 waiting to start' },
+	{
+		label: 'Next step',
+		raw: true,
+		value:
+			'Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+	},
+	{ label: 'Ready tenants', value: '1' },
+	{ label: 'Pending tenants', value: '1' },
+	{ label: 'Updating tenants', value: '0' },
+	{ label: 'Tenants needing attention', value: '0' },
+	{ label: 'Tenants waiting to start', value: '1' }
+];
 
 describe('runDeploymentStatus', () => {
 	it('reports each transition and the readiness at the required local step', async () => {
 		const payloads: ResultPayload[] = [];
 		const calls: unknown[] = [];
 
-		await runDetailedDeploymentStatus(
+		await runDebugDeploymentStatus(
 			payloadReporter(payloads),
 			client(expanded, calls, { count: 1 })
 		);
@@ -288,12 +410,14 @@ describe('runDeploymentStatus', () => {
 			payloads: [
 				{
 					kind: 'deployment-status',
+					title: 'Deployment readiness',
 					data: {
 						transitions: expanded.transitions,
 						unrecognised: [],
 						...statusFor(expansionLocalStep, 1)
 					},
 					rows: [
+						...expandedOperatorRows,
 						{
 							label: 'Transition cache-identity',
 							value: `expanded ${since}`
@@ -319,9 +443,8 @@ describe('runDeploymentStatus', () => {
 							value: `expanded ${since}`
 						},
 						{ label: 'Required local step', value: '4' },
-						{ label: 'Ready tenants', value: '1' },
 						{
-							label: 'Pending tenants',
+							label: 'Pending tenant diagnostics',
 							value: '1 (working 0, stalled 0, unwoken 1)'
 						},
 						{
@@ -335,72 +458,97 @@ describe('runDeploymentStatus', () => {
 		});
 	});
 
-	it.each(unrecognisedCases)('lists $name', async ({ row, value }) => {
-		const payloads: ResultPayload[] = [];
-		const unrecognised = [{ ...row, updatedAt: recorded }];
+	it.each(unrecognisedCases)(
+		'lists $name',
+		async ({ row, value, isRefused }) => {
+			const payloads: ResultPayload[] = [];
+			const unrecognised = [{ ...row, updatedAt: recorded }];
 
-		await runDetailedDeploymentStatus(
-			payloadReporter(payloads),
-			client({ ...complete, unrecognised }, [], { count: 0 })
-		);
+			await runDebugDeploymentStatus(
+				payloadReporter(payloads),
+				client({ ...complete, unrecognised }, [], { count: 0 })
+			);
 
-		expect(payloads).toStrictEqual([
-			{
-				kind: 'deployment-status',
-				data: {
-					transitions: complete.transitions,
-					unrecognised,
-					...statusFor(currentLocalStep, 0)
-				},
-				rows: [
-					{
-						label: 'Transition cache-identity',
-						value: `complete ${since}`
+			expect(payloads).toStrictEqual([
+				{
+					kind: 'deployment-status',
+					title: 'Deployment readiness',
+					data: {
+						transitions: complete.transitions,
+						unrecognised,
+						...statusFor(currentLocalStep, 0)
 					},
-					{
-						label: 'Transition deployment-transitions',
-						value: `complete ${since}`
-					},
-					{
-						label: 'Transition attestation-path-index',
-						value: `complete ${since}`
-					},
-					{
-						label: 'Transition local-step-attempts',
-						value: `complete ${since}`
-					},
-					{
-						label: 'Transition publication-identity',
-						value: `complete ${since}`
-					},
-					{
-						label: 'Transition blob-reference-read-authority',
-						value: `complete ${since}`
-					},
-					{
-						label: 'Transition tenant-retry-clock',
-						value: `complete ${since}`
-					},
-					{
-						label: 'Transition tenant-schema-progress',
-						value: `complete ${since}`
-					},
-					{ label: `Transition ${row.id}`, value },
-					{ label: 'Required local step', value: '5' },
-					{ label: 'Ready tenants', value: '1' },
-					{
-						label: 'Pending tenants',
-						value: '0 (working 0, stalled 0, unwoken 0)'
-					}
-				]
-			}
-		]);
-	});
+					rows: [
+						{
+							label: 'Deployment',
+							value: isRefused
+								? 'CLI upgrade required'
+								: 'Schema and data ready'
+						},
+						{ label: 'Tenants', value: '1 ready' },
+						...(isRefused
+							? [
+									{
+										label: 'Next step',
+										raw: true,
+										value:
+											'Use a CLI release compatible with this deployment before deploying again.'
+									}
+								]
+							: []),
+						{ label: 'Ready tenants', value: '1' },
+						{ label: 'Pending tenants', value: '0' },
+						{ label: 'Updating tenants', value: '0' },
+						{ label: 'Tenants needing attention', value: '0' },
+						{ label: 'Tenants waiting to start', value: '0' },
+						{
+							label: 'Transition cache-identity',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition deployment-transitions',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition attestation-path-index',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition local-step-attempts',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition publication-identity',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition blob-reference-read-authority',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition tenant-retry-clock',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition tenant-schema-progress',
+							value: `complete ${since}`
+						},
+						{ label: `Transition ${row.id}`, value },
+						{ label: 'Required local step', value: '5' },
+						{
+							label: 'Pending tenant diagnostics',
+							value: '0 (working 0, stalled 0, unwoken 0)'
+						}
+					]
+				}
+			]);
+		}
+	);
 
 	it("reports 'none recorded' when no transition has been recorded", async () => {
 		const results: ResultRow[][] = [];
 
-		await runDetailedDeploymentStatus(
+		await runDebugDeploymentStatus(
 			reporter(results),
 			client({ transitions: [], unrecognised: [] }, [], {
 				count: 0
@@ -409,11 +557,23 @@ describe('runDeploymentStatus', () => {
 
 		expect(results).toStrictEqual([
 			[
+				{ label: 'Deployment', value: 'Deployment incomplete' },
+				{ label: 'Tenants', value: '1 ready' },
+				{
+					label: 'Next step',
+					raw: true,
+					value:
+						'Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+				},
+				{ label: 'Ready tenants', value: '1' },
+				{ label: 'Pending tenants', value: '0' },
+				{ label: 'Updating tenants', value: '0' },
+				{ label: 'Tenants needing attention', value: '0' },
+				{ label: 'Tenants waiting to start', value: '0' },
 				{ label: 'Transitions', value: 'none recorded' },
 				{ label: 'Required local step', value: '4' },
-				{ label: 'Ready tenants', value: '1' },
 				{
-					label: 'Pending tenants',
+					label: 'Pending tenant diagnostics',
 					value: '0 (working 0, stalled 0, unwoken 0)'
 				}
 			]
@@ -452,7 +612,7 @@ describe('runDeploymentStatus', () => {
 			unwokenSample: [{ tenant: 'gamma' }]
 		};
 
-		await runDetailedDeploymentStatus(reporter(results), {
+		await runDebugDeploymentStatus(reporter(results), {
 			...client(expanded, [], { count: 0 }),
 			localStep: {
 				status: () => Promise.resolve(status),
@@ -462,6 +622,22 @@ describe('runDeploymentStatus', () => {
 
 		expect(results).toStrictEqual([
 			[
+				{ label: 'Deployment', value: 'Deployment incomplete' },
+				{
+					label: 'Tenants',
+					value: '4 ready, 1 migrating, 2 need attention, 1 waiting to start'
+				},
+				{
+					label: 'Next step',
+					raw: true,
+					value:
+						'Rerun `cupboard deploy` with the same release and source to finish the deployment.'
+				},
+				{ label: 'Ready tenants', value: '4' },
+				{ label: 'Pending tenants', value: '4' },
+				{ label: 'Updating tenants', value: '1' },
+				{ label: 'Tenants needing attention', value: '2' },
+				{ label: 'Tenants waiting to start', value: '1' },
 				{ label: 'Transition cache-identity', value: `expanded ${since}` },
 				{
 					label: 'Transition deployment-transitions',
@@ -481,9 +657,8 @@ describe('runDeploymentStatus', () => {
 					value: `expanded ${since}`
 				},
 				{ label: 'Required local step', value: '4' },
-				{ label: 'Ready tenants', value: '4' },
 				{
-					label: 'Pending tenants',
+					label: 'Pending tenant diagnostics',
 					value: '4 (working 1, stalled 2, unwoken 1)'
 				},
 				{
@@ -512,13 +687,13 @@ describe('runDeploymentResume', () => {
 			name: 'every transition is complete',
 			transitions: complete,
 			step: currentLocalStep,
-			info: 'Every active or suspended tenant has reached local step 5, and every schema transition is complete.'
+			info: 'Every active or suspended tenant has completed the required schema and data updates. All deployment database changes are complete.'
 		},
 		{
 			name: 'cache-identity is still expanded',
 			transitions: expanded,
 			step: expansionLocalStep,
-			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index, blob-reference-read-authority, tenant-retry-clock, tenant-schema-progress.'
+			info: 'Every active or suspended tenant has completed the required schema and data updates. Rerun `cupboard deploy` with the same release and source to finish the deployment.'
 		}
 	])(
 		'wakes tenants to the required local step and reports the next action when $name',
@@ -528,7 +703,7 @@ describe('runDeploymentResume', () => {
 			const calls: unknown[] = [];
 
 			await runDeploymentResume(
-				payloadReporter(payloads, infos),
+				{ ...payloadReporter(payloads, infos), presentation: 'debug' },
 				client(transitions, calls, { count: 1 }),
 				{}
 			);
@@ -537,6 +712,7 @@ describe('runDeploymentResume', () => {
 				payloads: [
 					{
 						kind: 'deployment-readiness',
+						title: 'Deployment readiness',
 						data: statusFor(step, 0),
 						rows: [
 							{ label: 'Ready tenants', value: '1' },
@@ -564,7 +740,7 @@ describe('runDeploymentResume', () => {
 			const step = requiredStepOf(transitions);
 
 			await runDeploymentResume(
-				payloadReporter(payloads, infos),
+				{ ...payloadReporter(payloads, infos), presentation: 'debug' },
 				client(transitions, [], { count: 0 }),
 				{}
 			);
@@ -573,6 +749,7 @@ describe('runDeploymentResume', () => {
 				payloads: [
 					{
 						kind: 'deployment-readiness',
+						title: 'Deployment readiness',
 						data: statusFor(step, 0),
 						rows: [
 							{ label: 'Ready tenants', value: '1' },
@@ -583,8 +760,8 @@ describe('runDeploymentResume', () => {
 				],
 				infos: [
 					isRefused
-						? `Every active or suspended tenant has reached local step ${String(step)}. This build's cupboard deploy stops on ${row.id}, as listed above.`
-						: `Every active or suspended tenant has reached local step ${String(step)}, and every schema transition is complete.`
+						? 'Every active or suspended tenant has completed the required schema and data updates. Use a CLI release compatible with this deployment before deploying again. Inspect `cupboard deployment status <deployment-url> --debug` for the diagnostic.'
+						: 'Every active or suspended tenant has completed the required schema and data updates. All deployment database changes are complete.'
 				]
 			});
 		}

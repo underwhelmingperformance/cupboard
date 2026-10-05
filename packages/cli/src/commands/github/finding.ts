@@ -13,8 +13,12 @@ export abstract class CheckFinding {
 
 	abstract detail(): string | undefined;
 
+	humanDetail(): string | undefined {
+		return this.detail();
+	}
+
 	render(): string {
-		const detail = this.detail();
+		const detail = this.humanDetail();
 
 		return detail === undefined ? this.status : `${this.status}: ${detail}`;
 	}

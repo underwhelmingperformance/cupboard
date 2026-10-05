@@ -18,7 +18,7 @@ import {
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import type { ReadUser } from '@cupboard/shared/http';
-import type { Command } from 'commander';
+import { type Command, Option } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
@@ -384,15 +384,15 @@ export function registerPushCommand(
 		)
 		.option(
 			'--reference-paths-file <path>',
-			'file of store paths, one per line, to publish by reference from --reference-source. The tenant must already store their NARs, so nothing is read from the local store or uploaded.'
+			'file of store paths, one per line, to publish by reference from --reference-source. Their content must already exist in this tenant; the command does not upload it from the local store.'
 		)
 		.option(
 			'--reference-manifest <path>',
-			'JSON manifest of reference paths with their target or intermediate kind, source URL and captured narinfo. Publish this metadata without reading the source cache or local store.'
+			'JSON file of paths to republish from another cache without downloading them. See the reference manifest format in the Pushing guide.'
 		)
 		.option(
 			'--reference-source <url>',
-			'cache URL to read narinfos for --reference-paths-file (required with --reference-paths-file)',
+			'source cache URL for the paths in --reference-paths-file (required with --reference-paths-file)',
 			parseWorkerUrl
 		)
 		.option(
@@ -422,29 +422,39 @@ export function registerPushCommand(
 		)
 		.option(
 			'--receipt-file <path>',
-			'write a publication receipt (JSON) from the selected store metadata. Requires --store. A push does not claim that this run built any path.'
+			'write a publication receipt (JSON) from the selected store metadata. Requires --store. The receipt records publication, not a build.'
 		)
 		.option(
 			'--reference-receipt-file <path>',
-			'write a receipt for successfully published reference paths only. Requires --reference-manifest or both --reference-paths-file and --reference-source. The receipt does not claim that this run built or copied NAR bytes.'
+			'write a receipt for successfully published reference paths only. Requires --reference-manifest or both --reference-paths-file and --reference-source. The receipt records republished paths, not a build or download.'
 		)
-		.option(
-			'--already-held <path>',
-			'accepted for compatibility with older callers (repeatable); does not affect receipt origins.',
-			collect
+		.addOption(
+			new Option(
+				'--already-held <path>',
+				'accepted for compatibility with older callers (repeatable); does not affect receipt origins.'
+			)
+				.argParser(collect)
+				.hideHelp()
 		)
-		.option(
-			'--no-already-held',
-			'accepted for compatibility with older callers; does not affect receipt origins'
+		.addOption(
+			new Option(
+				'--no-already-held',
+				'accepted for compatibility with older callers; does not affect receipt origins'
+			).hideHelp()
 		)
-		.option(
-			'--claimable <path>',
-			'accepted for compatibility with older callers (repeatable); cannot authorise a current-run build claim.',
-			collect
+		.addOption(
+			new Option(
+				'--claimable <path>',
+				'accepted for compatibility with older callers (repeatable); cannot authorise a current-run build claim.'
+			)
+				.argParser(collect)
+				.hideHelp()
 		)
-		.option(
-			'--no-claimable',
-			'accepted for compatibility with older callers; a push never records current-run build claims'
+		.addOption(
+			new Option(
+				'--no-claimable',
+				'accepted for compatibility with older callers; a push never records current-run build claims'
+			).hideHelp()
 		)
 		.option(
 			'--copied-from-file <path>',

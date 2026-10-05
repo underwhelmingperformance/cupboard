@@ -57,7 +57,7 @@ describe('cache setup instructions', () => {
 			expect(captured.infos).toStrictEqual(
 				access === 'private'
 					? [
-							'Use the existing read credential in /etc/nix/netrc. If you no longer have it, run `cupboard tenant rotate-credential` to issue a replacement; existing clients will need the new password.'
+							'Use the existing read credential in /etc/nix/netrc. If you no longer have it, run `cupboard tenant rotate-credential https://cache.example/t/builds` to issue a replacement; existing clients will need the new password.'
 						]
 					: []
 			);

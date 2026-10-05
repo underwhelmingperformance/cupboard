@@ -7,6 +7,7 @@ import type { Command } from 'commander';
 
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { InvalidMeasureTargetsFileError } from '../errors.ts';
+import { formatHumanError } from '../human-errors.ts';
 import { reportUnknownSettings } from '../nix/settings.ts';
 import {
 	measurePlanInputSchema,
@@ -53,7 +54,7 @@ export function registerPlanMeasureCommand(
 	plan
 		.command('measure')
 		.description(
-			'Internal step of the flake publish workflow, not for direct use. Measure how much this store must download to build or fetch each target.'
+			'Automation helper for the flake publish workflow. Measure how much this store must download to build or fetch each target.'
 		)
 		.requiredOption(
 			'--targets-file <path>',
@@ -128,13 +129,17 @@ export async function runPlanMeasure(
 					} catch (error) {
 						phase.warn(
 							`Leaving ${target.attr} unmeasured`,
-							error instanceof Error ? error.message : String(error)
+							error instanceof Error ? error.message : String(error),
+							{
+								humanMessage: `Could not estimate download size for ${target.attr}. ${formatHumanError(error, { debug: reporter.presentation === 'debug', action: 'estimate the download size' })}`
+							}
 						);
 
 						return undefined;
 					}
 				}
-			)
+			),
+		{ humanLabel: 'Estimating download sizes' }
 	);
 	const measured = entries.filter((entry) => entry !== undefined);
 	const result: PlanMeasureResult = {
@@ -148,6 +153,7 @@ export async function runPlanMeasure(
 
 	reporter.result({
 		kind: 'plan-measure',
+		title: 'Download estimates',
 		data: result,
 		rows: [
 			{ label: 'Measured', value: String(measured.length) },

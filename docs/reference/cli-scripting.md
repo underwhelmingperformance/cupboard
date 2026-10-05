@@ -49,6 +49,36 @@ The CLI picks the first of these that applies:
 `cupboard init` is the exception. It always reports its progress in `terminal`
 mode.
 
+### Human summaries and diagnostics
+
+Terminal and GitHub output focus on the target, the outcome, progress and the
+next action. Pass `--details` to include domain settings and storage accounting.
+Pass `--debug` to include details, internal identifiers and diagnostic messages.
+Both options work before or after a command:
+
+```sh
+cupboard --details cache inspect https://cupboard.example.workers.dev/t/acme
+cupboard deployment status https://cupboard.example.workers.dev --debug
+```
+
+Human output uses operator terms. For example, a deployment status can report:
+
+```text
+Deployment  Tenant updates need attention
+Tenants     8 ready, 1 updating, 1 need attention
+Next step   cupboard deployment status https://cupboard.example.workers.dev --debug
+```
+
+The command reports only progress that the server provides. A command that
+starts work in the background does not necessarily wait for completion. Check
+its help for the available status and wait options. Cancelling a wait does not
+cancel work already running on the server.
+
+The CLI logs warnings by default. `--debug` also enables diagnostic logging.
+These presentation options do not change JSON event fields, result files,
+automation manifests, exit statuses or how commands wait. Copyable public keys,
+credentials and configuration lines remain intact in narrow terminals.
+
 ### Reading results as JSON
 
 In `json` mode, a command reports its result as an event with

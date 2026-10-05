@@ -180,6 +180,7 @@ describe('runPlanMeasure', () => {
 				expect(payloads).toStrictEqual([
 					{
 						kind: 'plan-measure',
+						title: 'Download estimates',
 						data: expected,
 						rows: [...rows, { label: 'Measure file', value: measureFile }]
 					}

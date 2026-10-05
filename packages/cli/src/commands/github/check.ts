@@ -490,7 +490,12 @@ export async function runGithubCheck(
 		value: finding.render()
 	}));
 
-	reporter.result({ kind: 'github-check', data: { findings }, rows });
+	reporter.result({
+		kind: 'github-check',
+		title: 'GitHub publishing access',
+		data: { findings },
+		rows
+	});
 
 	const failed = findings.filter((finding) => finding.status === 'failed');
 	const unverified = findings.filter(

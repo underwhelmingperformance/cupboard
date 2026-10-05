@@ -176,19 +176,25 @@ A named cache can also be set up to remove itself once it's empty. See
 
 ## Seeing what's stored
 
-| Command                               | What it shows                                                                      |
-| ------------------------------------- | ---------------------------------------------------------------------------------- |
-| `cupboard cache list <url>`           | All your caches and their settings.                                                |
-| `cupboard cache inspect <url> [name]` | One cache in detail: access, priority, number of store paths, retention settings.  |
-| `cupboard stats <url> [name]`         | How many store paths a cache has, pending uploads, and the size of what it stores. |
-| `cupboard usage <url>`                | How much storage the tenant is using, and its quota if it has one.                 |
-| `cupboard root list <url> [name]`     | The cache's retention roots. See [Retention](./retention.md).                      |
+| Command                               | What it shows                                                                             |
+| ------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `cupboard cache list <url>`           | Your caches, store-path counts and read settings. Use `--details` for retention settings. |
+| `cupboard cache inspect <url> [name]` | One cache in detail: access, priority, number of store paths, retention settings.         |
+| `cupboard stats <url> [name]`         | How many store paths a cache has, pending uploads, and the size of what it stores.        |
+| `cupboard usage <url>`                | How much storage the tenant is using, and its quota if it has one.                        |
+| `cupboard root list <url> [name]`     | The cache's retention roots. See [Retention](./retention.md).                             |
 
 ### How storage is counted
 
 Storage is counted once per tenant. If the same NAR or attestation bundle is
-used by several store paths or caches, you're charged for it once. NARs use
-their compressed file size; attestation bundles use their stored byte length.
+used by several store paths or caches, its storage counts once. NARs use their
+compressed file size; attestation bundles use their stored byte length.
+
+`cupboard stats` reports the unique NAR archives and attestation bundles used by
+one cache. `cupboard usage` reports storage across the tenant, with its quota
+and remaining space. Add `--details` to see the archive and bundle counts and
+sizes in `usage`. Shared storage can appear in several cache totals, so adding
+those totals does not give the tenant's usage.
 
 If your tenant has a quota, an upload that would take it over the quota fails.
 The command exits with status 1, or 74 for `build-push`, because running it

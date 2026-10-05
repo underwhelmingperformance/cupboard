@@ -1,4 +1,8 @@
-import { formatBytes, formatCount } from '@cupboard/reporter';
+import {
+	formatBytes,
+	formatCount,
+	shouldShowDetails
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -38,20 +42,21 @@ export function registerStatsCommand(
 
 			reporter.result({
 				kind: 'cache-stats',
+				title: 'Cache contents',
 				data: stats,
 				rows: [
 					{ label: 'Store paths', value: formatCount(stats.storePaths) },
-					{ label: 'Referenced NAR blobs', value: formatCount(stats.narBlobs) },
+					{ label: 'NAR archives', value: formatCount(stats.narBlobs) },
 					{
-						label: 'Referenced NAR size',
+						label: 'NAR storage',
 						value: formatBytes(stats.narFileSize)
 					},
 					{
-						label: 'Referenced CAS objects',
+						label: 'Attestation bundles',
 						value: formatCount(stats.casObjects)
 					},
 					{
-						label: 'Referenced CAS size',
+						label: 'Attestation storage',
 						value: formatBytes(stats.casFileSize)
 					},
 					{
@@ -59,7 +64,7 @@ export function registerStatsCommand(
 						value: formatCount(stats.pendingUploads)
 					},
 					{
-						label: 'Referenced total size',
+						label: 'Total referenced storage',
 						value: formatBytes(stats.totalFileSize)
 					}
 				]
@@ -69,7 +74,7 @@ export function registerStatsCommand(
 	program
 		.command('usage')
 		.description(
-			'Show how much storage the tenant is charged for, across all its caches.'
+			"Show the tenant's storage usage and quota across all its caches."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -88,17 +93,11 @@ export function registerStatsCommand(
 
 			reporter.result({
 				kind: 'tenant-usage',
+				title: 'Tenant storage usage',
 				data: usage,
 				rows: [
-					{ label: 'Charged NAR blobs', value: formatCount(usage.narBlobs) },
-					{ label: 'Charged NAR size', value: formatBytes(usage.narFileSize) },
 					{
-						label: 'Charged CAS objects',
-						value: formatCount(usage.casObjects)
-					},
-					{ label: 'Charged CAS size', value: formatBytes(usage.casFileSize) },
-					{
-						label: 'Charged total size',
+						label: 'Tenant storage used',
 						value: formatBytes(usage.totalFileSize)
 					},
 					...(usage.quotaBytes === undefined
@@ -112,8 +111,25 @@ export function registerStatsCommand(
 									label: 'Remaining quota',
 									value: formatBytes(usage.remainingQuotaBytes ?? 0)
 								}
-							])
+							]),
+					...(shouldShowDetails(reporter)
+						? [
+								{ label: 'NAR archives', value: formatCount(usage.narBlobs) },
+								{ label: 'NAR storage', value: formatBytes(usage.narFileSize) },
+								{
+									label: 'Attestation bundles',
+									value: formatCount(usage.casObjects)
+								},
+								{
+									label: 'Attestation storage',
+									value: formatBytes(usage.casFileSize)
+								}
+							]
+						: [])
 				]
 			});
+			reporter.info(
+				'Storage shared by several store paths or caches counts once for this tenant.'
+			);
 		});
 }
