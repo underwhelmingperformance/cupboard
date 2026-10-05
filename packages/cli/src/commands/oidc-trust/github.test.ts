@@ -457,7 +457,7 @@ const temporaryRequestCallers = [
 
 describe('GitHub request failure diagnostics', () => {
 	beforeAll(() => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 	});
 	afterAll(() => {
 		vi.useRealTimers();
@@ -726,6 +726,7 @@ describe('GitHub request failure diagnostics', () => {
 				headers: { accept: 'application/vnd.github.v3+json' }
 			});
 			expect(await response.text()).toBe(body);
+			await vi.advanceTimersByTimeAsync(3_600_001);
 			const digest = createHash('sha512').update(body).digest('hex');
 			const content = path.join(
 				cachePath,
