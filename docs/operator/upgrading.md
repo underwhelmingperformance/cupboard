@@ -173,8 +173,15 @@ to the other. One `cupboard init` run does this:
    has finished, so the deploy only checks progress every five seconds. Then it
    applies the transition's contract migrations and records the transition
    complete.
-5. Wakes the tenants again and waits until every one has reached the final local
-   step.
+5. Checks tenant readiness after every upload, wakes pending tenants and waits
+   until every active or suspended tenant has completed the required schema and
+   data work.
+
+The migration journal in the deployed build defines the required tenant schema.
+A tenant remains pending until its object has applied that schema and recorded
+completion, even if it finished the previous release's data work. A request or
+RPC call that starts a pending migration also schedules its continuation on the
+object's alarm.
 
 Requests that were already in progress on the old Workers when the contract
 migrations run can fail. Clients need to retry them against the new Workers.
@@ -206,6 +213,10 @@ been woken yet:
 them is classified as working. Stalled: acme: attempted …, last progress …, …
 ```
 
+Press Ctrl-C during this wait to quit `init`. The queued wakes and tenant alarms
+continue on the server. Use `deployment status` to check progress, or
+`deployment resume` to wait again.
+
 The tenants don't depend on the deploy. A tenant that is making progress keeps
 going after the deploy stops. A tenant that has made no progress for ten minutes
 stops, with the error `gave up after 10 minutes without progress` if nothing
@@ -219,19 +230,21 @@ To see how far the migration has got:
 cupboard deployment status https://cupboard.example.workers.dev
 ```
 
-This shows each schema transition and its state, the local step that tenants
-must reach now, how many tenants are ready, and how many are pending. It divides
-the pending tenants into three groups, measured over the last ten minutes:
+This shows deployment readiness, tenant counts, progress for pending tenants and
+the next action if the deployment needs attention. Use `--details` to include
+schema transitions, data-step numbers and migration stages and cursors. The
+pending tenants are divided into three groups, measured over the last ten
+minutes:
 
-- **Working**: the tenant has made progress recently, or has started and hasn't
-  failed yet.
-- **Stalled**: the tenant hasn't made progress for ten minutes, or its last
-  attempt failed without any progress. `status` lists up to 20 of them, with
-  when each last tried, when it last made progress, and its error.
-- **Not yet woken**: nothing has tried the tenant's outstanding work recently.
-  Its wake may still be waiting in the maintenance queue. If a tenant stays in
-  this group after a wake and an hourly run, check the maintenance queue, its
-  dead-letter queue and the control Worker's logs.
+- **Migrating**: the tenant has made progress recently, or has started and
+  hasn't failed yet.
+- **Needs attention**: the tenant hasn't made progress for ten minutes, or its
+  last attempt failed without any progress. `status` lists up to 20 of them,
+  with when each last tried, when it last made progress, and its error.
+- **Waiting to start**: no recent attempt at the tenant's outstanding work has
+  been recorded. Its wake may still be waiting in the maintenance queue. If a
+  tenant stays in this group after a wake and an hourly run, check the
+  maintenance queue, its dead-letter queue and the control Worker's logs.
 
 A stalled tenant with an error has a fault that the error describes. A tenant
 that shows `TenantNotConfiguredError` needs its creation repeated. To wake the
@@ -346,8 +359,9 @@ deploy sets just before the first contract migration runs:
   release that knows the transition and the state.
 
 A row for a transition that the release knows, but in a state that it doesn't,
-also stops the deploy. `cupboard deployment status` lists every row that its own
-release doesn't recognise, and says what that release's deploy would do with it.
+also stops the deploy. `cupboard deployment status --details` lists every row
+that its own release doesn't recognise, and says what that release's deploy
+would do with it.
 
 v0.0.34 and v0.0.35 don't read `deployment_transition`. They read the
 `deployment_phase` row, which later releases keep up to date for them, so a

@@ -56,7 +56,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			state: 'complete',
 			updatedAt: recorded
 		},
-		{ id: 'tenant-retry-clock', state: 'complete', updatedAt: recorded }
+		{ id: 'tenant-retry-clock', state: 'complete', updatedAt: recorded },
+		{ id: 'tenant-schema-progress', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -140,6 +141,84 @@ function payloadReporter(
 
 const since = 'since 2026-01-01 00:20 UTC';
 
+it('shows readiness without completed transitions or numeric migration steps by default', async () => {
+	const results: ResultRow[][] = [];
+	await runDeploymentStatus(
+		reporter(results),
+		client(complete, [], { count: 0 })
+	);
+	expect(results).toStrictEqual([
+		[
+			{ label: 'Deployment', value: 'Ready' },
+			{ label: 'Tenants', value: '1 ready' }
+		]
+	]);
+});
+
+it('directs the operator to init when schema transitions are incomplete', async () => {
+	const results: ResultRow[][] = [];
+
+	await runDeploymentStatus(
+		reporter(results),
+		client(expanded, [], { count: 1 })
+	);
+
+	expect(results).toStrictEqual([
+		[
+			{ label: 'Deployment', value: 'Deployment incomplete' },
+			{ label: 'Tenants', value: '1 ready, 1 waiting to start' },
+			{
+				label: 'Next step',
+				value:
+					'Re-run cupboard init with the same release and source to finish the deployment.'
+			},
+			{
+				label: 'Waiting to start',
+				value: 'acme: no attempt at the outstanding work'
+			}
+		]
+	]);
+});
+
+it('shows active schema migration progress by default', async () => {
+	const results: ResultRow[][] = [];
+	const status: LocalStepStatus = {
+		...statusFor(currentLocalStep, 1),
+		working: 1,
+		unwoken: 0,
+		unwokenSample: [],
+		workingSample: [
+			{
+				tenant,
+				attemptedAt: recorded,
+				progressedAt: recorded,
+				migration: {
+					migration: '0066_publication_recovery',
+					stage: 'copy-narinfo',
+					cursor: 1000
+				}
+			}
+		]
+	};
+	const deploymentClient: DeploymentClient = {
+		...client(complete, [], { count: 1 }),
+		localStep: { status: () => Promise.resolve(status), wake: vi.fn() }
+	};
+	await runDeploymentStatus(reporter(results), deploymentClient);
+	expect(results).toStrictEqual([
+		[
+			{ label: 'Deployment', value: 'Updating tenants' },
+			{ label: 'Tenants', value: '1 ready, 1 migrating' },
+			{
+				label: 'Next step',
+				value:
+					'Use deployment resume with this deployment URL to wake pending tenants and wait for completion.'
+			},
+			{ label: 'Migrating', value: 'acme: last progress 2026-01-01 00:20 UTC' }
+		]
+	]);
+});
+
 // Rows that this build does not define, and what each command prints for them.
 const unrecognisedCases = [
 	{
@@ -188,12 +267,19 @@ const unrecognisedCases = [
 	}
 ];
 
+function runDetailedDeploymentStatus(
+	reporter: Reporter,
+	client: DeploymentClient
+): Promise<void> {
+	return runDeploymentStatus(reporter, client, { details: true });
+}
+
 describe('runDeploymentStatus', () => {
 	it('reports each transition and the readiness at the required local step', async () => {
 		const payloads: ResultPayload[] = [];
 		const calls: unknown[] = [];
 
-		await runDeploymentStatus(
+		await runDetailedDeploymentStatus(
 			payloadReporter(payloads),
 			client(expanded, calls, { count: 1 })
 		);
@@ -253,7 +339,7 @@ describe('runDeploymentStatus', () => {
 		const payloads: ResultPayload[] = [];
 		const unrecognised = [{ ...row, updatedAt: recorded }];
 
-		await runDeploymentStatus(
+		await runDetailedDeploymentStatus(
 			payloadReporter(payloads),
 			client({ ...complete, unrecognised }, [], { count: 0 })
 		);
@@ -295,6 +381,10 @@ describe('runDeploymentStatus', () => {
 						label: 'Transition tenant-retry-clock',
 						value: `complete ${since}`
 					},
+					{
+						label: 'Transition tenant-schema-progress',
+						value: `complete ${since}`
+					},
 					{ label: `Transition ${row.id}`, value },
 					{ label: 'Required local step', value: '5' },
 					{ label: 'Ready tenants', value: '1' },
@@ -310,7 +400,7 @@ describe('runDeploymentStatus', () => {
 	it("reports 'none recorded' when no transition has been recorded", async () => {
 		const results: ResultRow[][] = [];
 
-		await runDeploymentStatus(
+		await runDetailedDeploymentStatus(
 			reporter(results),
 			client({ transitions: [], unrecognised: [] }, [], {
 				count: 0
@@ -330,7 +420,7 @@ describe('runDeploymentStatus', () => {
 		]);
 	});
 
-	it('lists the sampled stalled and unwoken tenants and counts the others', async () => {
+	it('lists sampled migration progress, stalled and unwoken tenants and counts the others', async () => {
 		const results: ResultRow[][] = [];
 		const status: LocalStepStatus = {
 			current: currentLocalStep,
@@ -348,10 +438,21 @@ describe('runDeploymentStatus', () => {
 					error: 'InjectedPageFault'
 				}
 			],
+			workingSample: [
+				{
+					tenant: 'beta',
+					progressedAt: recorded,
+					migration: {
+						migration: '0066_publication_recovery',
+						stage: 'copy-narinfo',
+						cursor: 1000
+					}
+				}
+			],
 			unwokenSample: [{ tenant: 'gamma' }]
 		};
 
-		await runDeploymentStatus(reporter(results), {
+		await runDetailedDeploymentStatus(reporter(results), {
 			...client(expanded, [], { count: 0 }),
 			localStep: {
 				status: () => Promise.resolve(status),
@@ -386,6 +487,11 @@ describe('runDeploymentStatus', () => {
 					value: '4 (working 1, stalled 2, unwoken 1)'
 				},
 				{
+					label: 'Migrating',
+					value:
+						'beta: last progress 2026-01-01 00:20 UTC; 0066_publication_recovery, copy-narinfo, cursor 1000'
+				},
+				{
 					label: 'Stalled',
 					value:
 						'acme: attempted 2026-01-01 00:31 UTC, last progress 2026-01-01 00:02 UTC, InjectedPageFault'
@@ -394,7 +500,7 @@ describe('runDeploymentStatus', () => {
 					label: 'Not yet woken',
 					value: 'gamma: no attempt at the outstanding work'
 				},
-				{ label: 'Not listed', value: '1 more stalled or unwoken tenants' }
+				{ label: 'Not listed', value: '1 more pending tenants' }
 			]
 		]);
 	});
@@ -412,7 +518,7 @@ describe('runDeploymentResume', () => {
 			name: 'cache-identity is still expanded',
 			transitions: expanded,
 			step: expansionLocalStep,
-			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index, blob-reference-read-authority, tenant-retry-clock.'
+			info: 'Every active or suspended tenant has reached local step 4. Re-run cupboard deploy to complete cache-identity, attestation-path-index, blob-reference-read-authority, tenant-retry-clock, tenant-schema-progress.'
 		}
 	])(
 		'wakes tenants to the required local step and reports the next action when $name',

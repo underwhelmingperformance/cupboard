@@ -8,7 +8,7 @@ import type { Reporter, StepLog } from '@cupboard/reporter';
 import { type Delay, delayMs, throwIfAborted } from '../abort.ts';
 import { LocalStepUnreachedError } from '../errors.ts';
 
-import { pendingText, stalledTenantText } from './local-step-samples.ts';
+import { stalledTenantText } from './local-step-samples.ts';
 
 export interface SettlementClient {
 	status(): Promise<LocalStepStatus>;
@@ -27,8 +27,8 @@ export interface SettlementOptions {
 export const localStepPollIntervalMs = 5000;
 
 /**
- * Waits until every active or suspended tenant has recorded the server's
- * required local step. When tenants are pending, the settlement calls
+ * Waits until every active or suspended tenant has completed the server's
+ * required schema and data work. When tenants are pending, the settlement calls
  * `localStep.wake` once, which enqueues a wake for every pending tenant that
  * is not working. Each woken tenant object then continues its own work on its
  * alarm. The settlement reads `localStep.status` every
@@ -75,6 +75,9 @@ async function waitForTenants(
 	log.message(
 		`Enqueued wakes for ${String(woken.enqueued)} of ${String(woken.pending)} pending tenants`
 	);
+	log.message(
+		'Cancelling this command stops only the wait; tenant migrations continue on the server.'
+	);
 
 	for (;;) {
 		throwIfAborted(options.signal);
@@ -82,7 +85,7 @@ async function waitForTenants(
 
 		if (previous === undefined || haveCountsChanged(previous, status)) {
 			log.message(
-				`Local step ${String(status.required)}: ${String(status.ready)} ready, ${pendingText(status)} pending`
+				`Tenants: ${String(status.ready)} ready, ${String(status.working)} migrating, ${String(status.stalled)} need attention, ${String(status.unwoken)} waiting to start`
 			);
 		}
 

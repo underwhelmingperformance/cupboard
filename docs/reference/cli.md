@@ -218,7 +218,8 @@ Options:
   -h, --help              display help for command
 
 Commands:
-  status [options] <url>  Show the schema transitions and pending tenant work.
+  status [options] <url>  Show deployment readiness and tenant migration
+                          progress.
   resume [options] <url>  Wake the tenants that are still migrating, wait while
                           they finish, and report whether the deploy can finish.
   help [command]          display help for command
@@ -229,13 +230,14 @@ Commands:
 ```text
 Usage: cupboard deployment status [options] <url>
 
-Show the schema transitions and pending tenant work.
+Show deployment readiness and tenant migration progress.
 
 Arguments:
   url                    deployment URL (e.g.
                          https://cupboard.example.workers.dev)
 
 Options:
+  --details              Show schema transitions and migration identifiers.
   --github-oidc          authorise with the workflow's GitHub Actions OIDC token
                          through a control trust rule
   --audience <audience>  OIDC audience to request with --github-oidc (default:

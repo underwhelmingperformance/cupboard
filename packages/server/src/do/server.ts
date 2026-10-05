@@ -181,6 +181,7 @@ import {
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { LegacyRetentionService } from './legacy-retention-service.ts';
+import { LocalSchemaRun } from './local-schema-run.ts';
 import {
 	type LocalStepOutcome,
 	readRecordedLocalStep,
@@ -524,6 +525,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly maintenanceEligibility: MaintenanceEligibilityService;
 	private readonly maintenanceRetry: MaintenanceRetrySchedule;
 	private readonly localStepRun: LocalStepRun;
+	private readonly localSchemaRun: LocalSchemaRun;
 	readonly context: ServerContext;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
@@ -531,6 +533,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.context = new ServerContext(ctx, env);
 		this.maintenanceRetry = new MaintenanceRetrySchedule(ctx.storage);
 		this.localStepRun = new LocalStepRun(this.context);
+		this.localSchemaRun = new LocalSchemaRun(this.context);
 		this.cacheListingProjection = new CacheListingProjection(this.context);
 
 		this.tenantIdentity = new TenantIdentityService(this.context);
@@ -1661,6 +1664,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await this.migrateAndSeed(tenant);
 		} catch (error: unknown) {
 			this.migrationPromise = undefined;
+
+			if (
+				error instanceof LocalSchemaMigrationPendingError ||
+				error instanceof CacheCatalogueMigrationPendingError
+			) {
+				await armAlarmNoLaterThan(
+					this.ctx.storage,
+					Date.now() + error.retryAfterSeconds * 1000
+				);
+			}
+
+			try {
+				await this.localSchemaRun.reportError(
+					error,
+					tenant ?? this.tenantIdentity.current()?.tenant
+				);
+			} catch (reportError) {
+				rootLogger().warn('tenant schema progress was not recorded', {
+					error: reportError
+				});
+			}
+
 			throw error;
 		}
 	}
@@ -1768,6 +1793,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.oidcTrust.seedOwnerRule();
 		await this.uploadState.migratePendingNarRefreshMarkers();
+		await this.localSchemaRun.complete(tenant);
 
 		this.context.dbCost.recordOutstanding();
 		logMethodFinished(rootLogger().with({ method: 'initialise' }), {
@@ -2799,9 +2825,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				throw error;
 			}
 
-			await this.ctx.storage.setAlarm(
-				Date.now() + error.retryAfterSeconds * 1000
-			);
 			await this.recordLocalStepMigration(error);
 			return;
 		}

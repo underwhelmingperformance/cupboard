@@ -7,6 +7,7 @@ import {
 	currentLocalStep,
 	expansionLocalStep,
 	type LocalStep,
+	localStep,
 	localStepStallWindowMs
 } from '@cupboard/protocol/deployment';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -16,11 +17,14 @@ import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it, vi } from 'vitest';
 
+import { controlLocalStepStatus } from '../control/local-step.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { LocalSchemaMigrationPendingError } from '../errors.ts';
 import {
 	asOneInvocation,
 	bootstrap,
 	currentServer,
+	latestMigrationIndex,
 	migrateThrough,
 	recordTransition,
 	takeStalledMaintenancePasses,
@@ -31,6 +35,7 @@ import {
 
 import { noProgressRetryMs } from './alarm.ts';
 import { maxCachesProjectedPerRun } from './cache-lifecycle-projection.ts';
+import { currentLocalSchemaVersion } from './local-schema-run.ts';
 import {
 	type LocalStepOutcome,
 	localStepPendingKey,
@@ -261,7 +266,195 @@ function at(ms: number): string {
 	return new Date(ms).toISOString();
 }
 
+async function serverBeforePublicationRecovery(name: string) {
+	const tenant = tenantIdSchema.parse(name);
+	const createdAt = isoTimestamp(testBase);
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	await database.insert(d1Schema.tenant).values({
+		id: tenant,
+		status: 'active',
+		ownerIssuer: 'https://idp.test',
+		ownerSubject: 'owner',
+		ownerAudience: 'cupboard',
+		configVersion: 1,
+		localStep: localStep(5),
+		createdAt
+	});
+
+	await database.insert(d1Schema.cacheLifecycle).values({
+		tenant,
+		cacheKind: 'default',
+		cacheName: sql`null`,
+		access: 'public',
+		generation: cacheGenerationSchema.parse(1),
+		updatedAt: createdAt
+	});
+
+	await recordTransition('cache-identity', 'complete');
+	const server = testServerFor(tenant);
+
+	await runInDurableObject(server, async (_instance, state) => {
+		await migrateThrough(state, 65);
+		state.storage.sql.exec(
+			"INSERT INTO tenant_identity (id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version) VALUES ('singleton', ?, 'https://idp.test', 'cupboard', 'https://idp.test', 'owner', 'cupboard', 1)",
+			tenant
+		);
+		state.storage.sql.exec(
+			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) SELECT 1, printf('%032d', value), '/nix/store/migration', 'sha256:migration', 10, '[]', ? FROM json_each(?)",
+			createdAt,
+			JSON.stringify(Array.from({ length: 1001 }, (_, index) => index))
+		);
+	});
+
+	return server;
+}
+
 describe('local-step work on the alarm', () => {
+	it('reports schema progress and finishes after one wake when the data step is already recorded', async () => {
+		const server = await serverBeforePublicationRecovery('schema-wake');
+
+		await withRecordedAlarm(async (alarm) => {
+			const first = await wake(currentLocalStep, server);
+			const status = await controlLocalStepStatus(env);
+
+			expect({ first, status }).toStrictEqual({
+				first: { kind: 'incomplete', projected: 0, progressed: true },
+				status: {
+					current: currentLocalStep,
+					required: currentLocalStep,
+					ready: 0,
+					pending: 1,
+					working: 1,
+					stalled: 0,
+					unwoken: 0,
+					stalledSample: [],
+					unwokenSample: [],
+					workingSample: [
+						{
+							tenant: tenantIdSchema.parse('schema-wake'),
+							attemptedAt: isoTimestamp(testBase),
+							progressedAt: isoTimestamp(testBase),
+							migration: {
+								migration: '0066_publication_recovery',
+								stage: 'copy-narinfo',
+								cursor: 1000
+							}
+						}
+					]
+				}
+			});
+
+			for (let page = 0; page < 100 && (await readPending(server)); page++) {
+				await alarm.deliverAfterRestart();
+			}
+
+			const finished = await controlLocalStepStatus(env);
+			const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+				.select({
+					step: d1Schema.tenant.localStep,
+					schema: d1Schema.tenant.localSchemaVersion
+				})
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('schema-wake')))
+				.get();
+
+			expect({
+				finished,
+				row,
+				pending: await readPending(server)
+			}).toStrictEqual({
+				finished: {
+					current: currentLocalStep,
+					required: currentLocalStep,
+					ready: 1,
+					pending: 0,
+					working: 0,
+					stalled: 0,
+					unwoken: 0,
+					stalledSample: [],
+					unwokenSample: [],
+					workingSample: []
+				},
+				row: { step: localStep(5), schema: currentLocalSchemaVersion },
+				pending: false
+			});
+		}, server);
+	});
+
+	it.each(['fetch', 'rpc'] as const)(
+		'continues schema migrations on alarms after one %s without a wake',
+		async (trigger) => {
+			const server = await serverBeforePublicationRecovery(
+				`migration-${trigger}`
+			);
+			await withRecordedAlarm(async (alarm) => {
+				const response = await runInDurableObject(server, async (instance) => {
+					if (trigger === 'fetch') {
+						const response = await instance.fetch(
+							new Request('https://cupboard.test/nix-cache-info')
+						);
+						return {
+							status: response.status,
+							retryAfter: response.headers.get('retry-after')
+						};
+					}
+					try {
+						await instance.runGarbageCollection();
+					} catch (error) {
+						if (!(error instanceof LocalSchemaMigrationPendingError)) {
+							throw error;
+						}
+						return { migration: error.migration, stage: error.stage };
+					}
+					throw new Error('The RPC must report pending schema migrations.');
+				});
+
+				expect({ response, armed: alarm.armed }).toStrictEqual({
+					response:
+						trigger === 'fetch'
+							? { status: 503, retryAfter: '1' }
+							: {
+									migration: '0066_publication_recovery',
+									stage: 'copy-narinfo'
+								},
+					armed: [start + 1000]
+				});
+
+				let isFinished = false;
+
+				for (let page = 0; !isFinished && page < 100; page++) {
+					await alarm.deliverAfterRestart();
+					isFinished = await runInDurableObject(
+						server,
+						(_instance, state) =>
+							state.storage.sql
+								.exec('SELECT count(*) AS count FROM __drizzle_migrations')
+								.one().count ===
+							latestMigrationIndex + 1
+					);
+				}
+
+				const state = await runInDurableObject(
+					server,
+					async (_instance, state) => ({
+						finished: isFinished,
+						pending: await state.storage.get(localStepPendingKey),
+						rows: state.storage.sql
+							.exec('SELECT count(*) AS count FROM narinfo')
+							.one().count
+					})
+				);
+
+				expect(state).toStrictEqual({
+					finished: true,
+					pending: undefined,
+					rows: 1001
+				});
+			}, server);
+		}
+	);
+
 	it('records the step of a tenant with more caches than one page after one wake', async () => {
 		await useServerWithCaches('local-step-alarm', maxCachesProjectedPerRun + 5);
 
@@ -354,7 +547,7 @@ describe('local-step work on the alarm', () => {
 			row: {
 				localStep: undefined,
 				attemptedAt: at(start + localStepStallWindowMs),
-				progressedAt: undefined,
+				progressedAt: at(start),
 				error: 'InjectedPageFault'
 			},
 			// The wake and every retry but the last arm the next retry.
@@ -664,7 +857,7 @@ describe('local-step work on the alarm', () => {
 			row: {
 				localStep: undefined,
 				attemptedAt: at(rewakeAt + localStepStallWindowMs),
-				progressedAt: undefined,
+				progressedAt: at(start),
 				error: 'InjectedPageFault'
 			},
 			stalled: []
@@ -704,7 +897,7 @@ describe('local-step work on the alarm', () => {
 			row: {
 				localStep: undefined,
 				attemptedAt: at(start + localStepStallWindowMs),
-				progressedAt: undefined,
+				progressedAt: at(start),
 				error: localStepGaveUpError
 			}
 		});

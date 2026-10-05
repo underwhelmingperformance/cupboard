@@ -16,6 +16,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { currentLocalSchemaVersion } from '../do/local-schema-run.ts';
 import { recordLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 import {
@@ -49,6 +50,7 @@ class InjectedWakeFault extends Error {
 
 interface LocalStepFacts {
 	readonly localStep?: LocalStep;
+	readonly schemaVersion?: number;
 	readonly attemptedAt?: IsoTimestamp;
 	readonly progressedAt?: IsoTimestamp;
 	readonly error?: string;
@@ -71,6 +73,7 @@ function writeFacts(name: string, facts: LocalStepFacts): Promise<unknown> {
 		.update(d1Schema.tenant)
 		.set({
 			localStep: facts.localStep,
+			localSchemaVersion: facts.schemaVersion ?? currentLocalSchemaVersion,
 			localStepAttemptedAt: facts.attemptedAt,
 			localStepProgressedAt: facts.progressedAt,
 			localStepError: facts.error
@@ -168,6 +171,33 @@ describe('required local step', () => {
 });
 
 describe('local step status', () => {
+	it('reports and wakes a tenant that recorded step 5 before the new schema migrations', async () => {
+		await recordTransition('cache-identity', 'complete');
+		await pendingTenant('previous-final-step', {
+			localStep: localStep(5),
+			schemaVersion: 65
+		});
+		const sent: LocalStepWakeMessage[][] = [];
+		const status = await controlLocalStepStatus(env);
+		const response = await enqueueLocalStepWakes(env, queueCollector(sent));
+		expect({ status, response, sent }).toStrictEqual({
+			status: {
+				current: currentLocalStep,
+				required: currentLocalStep,
+				ready: 0,
+				pending: 1,
+				working: 0,
+				stalled: 0,
+				unwoken: 1,
+				stalledSample: [],
+				workingSample: [],
+				unwokenSample: [{ tenant: tenant('previous-final-step') }]
+			},
+			response: { required: currentLocalStep, enqueued: 1, pending: 1 },
+			sent: [[{ kind: 'local-step', tenants: [tenant('previous-final-step')] }]]
+		});
+	});
+
 	// A tenant with an attempt at the outstanding work is working while its
 	// last progress is inside the window, even after a failed page, and while
 	// it has not failed before its first progress. Without such an attempt it
@@ -217,6 +247,19 @@ describe('local step status', () => {
 			ready: 1,
 			pending: 10,
 			working: 3,
+			workingSample: [
+				{
+					tenant: tenant('working'),
+					attemptedAt: at(windowStart),
+					progressedAt: at(windowStart)
+				},
+				{
+					tenant: tenant('working-after-failure'),
+					attemptedAt: recent,
+					progressedAt: recent
+				},
+				{ tenant: tenant('working-before-progress'), attemptedAt: recent }
+			],
 			stalled: 3,
 			unwoken: 4,
 			stalledSample: [
@@ -279,6 +322,23 @@ describe('local step wake', () => {
 });
 
 describe('local step wake message', () => {
+	it('records a failed wake when only the tenant schema is pending', async () => {
+		await pendingTenant('schema-rejects', {
+			localStep: expansionLocalStep,
+			schemaVersion: currentLocalSchemaVersion - 1
+		});
+
+		await wakeLocalStepTenants(logger, env, [tenant('schema-rejects')], () =>
+			Promise.reject(new InjectedWakeFault())
+		);
+
+		await expect(factsOf('schema-rejects')).resolves.toStrictEqual({
+			localStep: expansionLocalStep,
+			attemptedAt: at(now),
+			error: 'InjectedWakeFault'
+		});
+	});
+
 	it('lets a woken object record its step and its attempt', async () => {
 		await recordTransition('cache-identity', 'complete');
 		await provisionNamedTenant('woken');
@@ -443,7 +503,7 @@ describe('local step wake message', () => {
 		expect({ wake, page, facts: await factsOf(id) }).toStrictEqual({
 			wake: { kind: 'recorded', step: laterStep, progressed: false },
 			page: { kind: 'recorded', step: currentLocalStep, progressed: false },
-			facts: { localStep: laterStep }
+			facts: { localStep: laterStep, progressedAt: at(now) }
 		});
 	});
 });

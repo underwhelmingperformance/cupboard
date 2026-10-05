@@ -839,7 +839,8 @@ One `cupboard init` run applies the transitions in list order:
    [Local steps](#local-steps)). For `cache-identity` only, write `native-reads`
    to the `deployment_phase` row. Then apply the contract migrations and record
    the transition `complete`.
-6. Wake the tenants again and wait until they reach local step 5.
+6. Check server readiness after every upload, wake pending tenants and wait
+   until they have completed the required schema and data work.
 
 A failed serving check, or tenants that haven't recorded the contract step, stop
 the run in step 5. The contract migrations of the incomplete transition stay
@@ -881,6 +882,15 @@ columns that describe the object's last attempt at its local-step work:
 `local_step_attempted_at`, `local_step_progressed_at` and `local_step_error`.
 Migration `0033` adds them.
 
+Migration `0038` adds `local_schema_version` and `local_schema_migration`. The
+version is the highest journal index of the tenant schema that the object has
+completed. The object reports this version once per schema upgrade and never
+lowers a newer receipt. Readiness requires both the current schema and the
+required data step, so adding a schema migration does not require a new
+local-step number. Pending schema pages report their migration, stage and cursor
+alongside the attempt times. A pending migration schedules an alarm from every
+initialisation trigger, including HTTP requests and RPC calls.
+
 A wake starts an object's local-step work, and the object then continues by
 itself on its alarm:
 
@@ -898,7 +908,8 @@ itself on its alarm:
    made progress for ten minutes. The next wake starts it again, so with the
    default hourly cron trigger an object that has stopped retries for ten
    minutes each hour. When the object finds that its tenant row already records
-   the requested step, it runs no page.
+   the requested step, it still completes and reports any outstanding schema
+   migrations before skipping the data page.
 
 A page is one bounded interval of the object's schema migrations, or one bounded
 call of its data work. A page made progress when it recorded a higher step,
@@ -923,11 +934,12 @@ fails, or finds that the control plane never configured the object, the queue
 consumer writes the error, unless the row's attempt time has changed since the
 consumer read it before the wake.
 
-`localStep.status` counts the active or suspended tenants that have reached the
-required local step, and puts each pending tenant in one class, measured over
-the ten minutes before the request. A tenant is **unwoken** when no attempt at
-the outstanding work has been made in those ten minutes and the last attempt
-didn't fail. Otherwise its object has attempted the work, and the tenant is:
+`localStep.status` counts the active or suspended tenants that have completed
+the required data step and tenant schema, and puts each pending tenant in one
+class, measured over the ten minutes before the request. A tenant is **unwoken**
+when no attempt at the outstanding work has been made in those ten minutes and
+the last attempt didn't fail. Otherwise its object has attempted the work, and
+the tenant is:
 
 - **working**, when its last progress is within the ten minutes, even if its
   last attempt failed, or when it hasn't made progress yet and hasn't failed;
@@ -936,11 +948,13 @@ didn't fail. Otherwise its object has attempted the work, and the tenant is:
 
 The status lists up to 20 stalled tenants in `stalledSample`, each with the time
 of its last attempt, its last progress and its error, and up to 20 unwoken
-tenants in `unwokenSample`, with the time of their last attempt. Both
-`localStep.status` and `localStep.wake` report the required local step as
-`required`; the status also reports the build's `current` step, and the wake
-reports how many tenants are pending and how many it `enqueued`. The wake and
-the cron trigger select the tenants below the required local step.
+tenants in `unwokenSample`, with the time of their last attempt. It also lists
+up to 20 working tenants in `workingSample`, with their last attempt, last
+progress and any pending schema migration. Both `localStep.status` and
+`localStep.wake` report the required local step as `required`; the status also
+reports the build's `current` step, and the wake reports how many tenants are
+pending and how many it `enqueued`. The wake and the cron trigger select tenants
+with outstanding schema or data work.
 
 The deploy, and `cupboard deployment resume`, call `localStep.wake` once and
 then read `localStep.status` every five seconds until no tenant is pending, with

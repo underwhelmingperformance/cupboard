@@ -508,7 +508,8 @@ describe('v0.0.35 path authority rollout', () => {
 							['local-step-attempts', 'complete'],
 							['publication-identity', 'complete'],
 							['blob-reference-read-authority', 'expanded'],
-							['tenant-retry-clock', 'complete']
+							['tenant-retry-clock', 'complete'],
+							['tenant-schema-progress', 'complete']
 						],
 						applied: actualMigrations
 							.filter(
@@ -526,7 +527,8 @@ describe('v0.0.35 path authority rollout', () => {
 						'local-step-attempts': 'complete',
 						'publication-identity': 'complete',
 						'blob-reference-read-authority': 'complete',
-						'tenant-retry-clock': 'complete'
+						'tenant-retry-clock': 'complete',
+						'tenant-schema-progress': 'complete'
 					},
 					applied: actualMigrations.map((migration) => migration.name),
 					journal: [
@@ -563,6 +565,48 @@ describe('v0.0.35 path authority rollout', () => {
 });
 
 describe('transition walk', () => {
+	it('checks server readiness before contraction even when every tenant recorded the data step', async () => {
+		const world = fixture();
+
+		await seedApplied(world.api, '0000_base.sql', world.writes);
+		seedTenants(world.database, 2);
+		await prepareTransitions(world.walk([cacheIdentity, independent]), false);
+		world.database
+			.prepare('UPDATE tenant SET local_step = ?')
+			.run(expansionLocalStep);
+
+		const walk = world.walk([cacheIdentity, independent]);
+		const steps: LocalStep[] = [];
+		const failure = new InterruptedWriteError();
+		let caught: unknown;
+
+		try {
+			await completeTransitions({
+				...walk,
+				hooks: {
+					...walk.hooks,
+					wakeTenants: (step) => {
+						steps.push(step);
+						return Promise.reject(failure);
+					}
+				}
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		expect({ caught, steps, applied: applied(world.database) }).toStrictEqual({
+			caught: failure,
+			steps: [expansionLocalStep],
+			applied: [
+				'0000_base.sql',
+				'0001_phase.sql',
+				'0002_expand.sql',
+				'0004_independent.sql'
+			]
+		});
+	});
+
 	it.each(['contract-started', 'complete'])(
 		'refuses the preceding deployment after path authority is %s',
 		async (stage) => {
@@ -579,6 +623,7 @@ describe('transition walk', () => {
 				statements: ['SELECT 1;']
 			}));
 			const world = fixture();
+
 			await prepareTransitions(world.walk([cacheIdentity, independent]), true);
 			await completeTransitions(world.walk([cacheIdentity, independent]));
 			const laterWalk = world.walk([cacheIdentity, independent, later], {

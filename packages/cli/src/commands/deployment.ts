@@ -44,6 +44,75 @@ interface DeploymentAuthOptions {
 	readonly audience?: Audience;
 }
 
+interface DeploymentStatusOptions {
+	readonly details?: boolean;
+}
+
+const requiredTransitionIds = new Set(transitionIds);
+
+function tenantSummary(status: LocalStepStatus): string {
+	return [
+		`${String(status.ready)} ready`,
+		...(status.working > 0 ? [`${String(status.working)} migrating`] : []),
+		...(status.stalled > 0 ? [`${String(status.stalled)} need attention`] : []),
+		...(status.unwoken > 0
+			? [`${String(status.unwoken)} waiting to start`]
+			: [])
+	].join(', ');
+}
+
+function readinessRows(
+	status: LocalStepStatus,
+	transitions: ParsedDeploymentTransitionsResponse
+): ResultRow[] {
+	const isIncompatible = transitions.unrecognised.some(
+		(row) => readStoredTransition(transitionIds, row).kind === 'refused'
+	);
+
+	const completed = new Set(
+		transitions.transitions
+			.values()
+			.filter((transition) => transition.state === 'complete')
+			.map((transition) => transition.id)
+	);
+
+	const isIncomplete = !completed.isSupersetOf(requiredTransitionIds);
+
+	let readiness = 'Ready';
+	let next: string | undefined;
+
+	if (status.pending > 0) {
+		readiness =
+			status.working > 0 ? 'Updating tenants' : 'Waiting for tenant updates';
+		next =
+			'Use deployment resume with this deployment URL to wake pending tenants and wait for completion.';
+	}
+
+	if (status.stalled > 0) {
+		readiness = 'Tenant updates need attention';
+		next =
+			'Check the tenant errors below, then use deployment resume to retry.';
+	}
+
+	if (isIncomplete) {
+		readiness = 'Deployment incomplete';
+		next =
+			'Re-run cupboard init with the same release and source to finish the deployment.';
+	}
+
+	if (isIncompatible) {
+		readiness = 'CLI upgrade required';
+		next =
+			'Use a CLI release compatible with this deployment before deploying again.';
+	}
+
+	return [
+		{ label: 'Deployment', value: readiness },
+		{ label: 'Tenants', value: tenantSummary(status) },
+		...(next === undefined ? [] : [{ label: 'Next step', value: next }])
+	];
+}
+
 // What this build's `cupboard deploy` does with a row that the server lists
 // under `unrecognised`.
 function unrecognisedRowText(row: StoredTransitionRow): string {
@@ -74,25 +143,43 @@ function unrecognisedRows(
 	}));
 }
 
-// A row for each tenant in the stalled and unwoken samples, and a row for the
-// pending tenants that the samples leave out.
-function sampleRows(status: LocalStepStatus): ResultRow[] {
-	const sampled = status.stalledSample.length + status.unwokenSample.length;
+function sampleRows(status: LocalStepStatus, isDetailed = false): ResultRow[] {
+	const workingSample = status.workingSample ?? [];
+	const sampled =
+		workingSample.length +
+		status.stalledSample.length +
+		status.unwokenSample.length;
 
 	return [
+		...workingSample.map((tenant) => {
+			const progress =
+				tenant.progressedAt === undefined
+					? 'started'
+					: `last progress ${formatTimestamp(tenant.progressedAt)}`;
+
+			const migration =
+				isDetailed && tenant.migration !== undefined
+					? `; ${tenant.migration.migration}, ${tenant.migration.stage}, cursor ${String(tenant.migration.cursor)}`
+					: '';
+
+			return {
+				label: 'Migrating',
+				value: `${tenant.tenant}: ${progress}${migration}`
+			};
+		}),
 		...status.stalledSample.map((tenant) => ({
-			label: 'Stalled',
+			label: isDetailed ? 'Stalled' : 'Needs attention',
 			value: stalledTenantText(tenant)
 		})),
 		...status.unwokenSample.map((tenant) => ({
-			label: 'Not yet woken',
+			label: isDetailed ? 'Not yet woken' : 'Waiting to start',
 			value: unwokenTenantText(tenant)
 		})),
-		...(status.stalled + status.unwoken > sampled
+		...(status.pending > sampled
 			? [
 					{
 						label: 'Not listed',
-						value: `${String(status.stalled + status.unwoken - sampled)} more stalled or unwoken tenants`
+						value: `${String(status.pending - sampled)} more pending tenants`
 					}
 				]
 			: [])
@@ -100,15 +187,13 @@ function sampleRows(status: LocalStepStatus): ResultRow[] {
 }
 
 /**
- * Shows each recorded schema transition, any recorded row that this build does
- * not define, the required local step, how many tenants have reached it, and
- * the pending tenants by class with a sample of the stalled and unwoken ones.
- * The step comes from the same response as the counts, so the two always
- * agree.
+ * Shows deployment readiness, tenant migration progress and the next operator
+ * action. Detailed output includes schema transitions and migration identifiers.
  */
 export async function runDeploymentStatus(
 	reporter: Reporter,
-	client: DeploymentClient
+	client: DeploymentClient,
+	options: DeploymentStatusOptions = {}
 ): Promise<void> {
 	const { transitions, unrecognised } = await client.transitions();
 	const status = await client.localStep.status();
@@ -123,12 +208,16 @@ export async function runDeploymentStatus(
 		kind: 'deployment-status',
 		data: { transitions, unrecognised, ...status },
 		rows: [
-			...transitionRows,
-			...unrecognisedRows(unrecognised),
-			{ label: 'Required local step', value: String(status.required) },
-			{ label: 'Ready tenants', value: String(status.ready) },
-			{ label: 'Pending tenants', value: pendingText(status) },
-			...sampleRows(status)
+			...(options.details === true
+				? [
+						...transitionRows,
+						...unrecognisedRows(unrecognised),
+						{ label: 'Required local step', value: String(status.required) },
+						{ label: 'Ready tenants', value: String(status.ready) },
+						{ label: 'Pending tenants', value: pendingText(status) }
+					]
+				: readinessRows(status, { transitions, unrecognised })),
+			...sampleRows(status, options.details)
 		]
 	});
 }
@@ -219,7 +308,8 @@ export function registerDeploymentCommands(
 	};
 	deployment
 		.command('status')
-		.description('Show the schema transitions and pending tenant work.')
+		.description('Show deployment readiness and tenant migration progress.')
+		.option('--details', 'Show schema transitions and migration identifiers.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.option(
 			'--github-oidc',
@@ -230,17 +320,23 @@ export function registerDeploymentCommands(
 			'OIDC audience to request with --github-oidc (default: the deployment URL)',
 			parseAudience
 		)
-		.action(async (url: URL, cliOptions: DeploymentAuthOptions) => {
-			await runDeploymentStatus(
-				commandUi(program, options).reporter(),
-				client(url, cliOptions, [
-					{
-						type: 'cupboard_control',
-						actions: ['deployment:read', 'local-step:read']
-					}
-				])
-			);
-		});
+		.action(
+			async (
+				url: URL,
+				cliOptions: DeploymentAuthOptions & DeploymentStatusOptions
+			) => {
+				await runDeploymentStatus(
+					commandUi(program, options).reporter(),
+					client(url, cliOptions, [
+						{
+							type: 'cupboard_control',
+							actions: ['deployment:read', 'local-step:read']
+						}
+					]),
+					cliOptions
+				);
+			}
+		);
 	deployment
 		.command('resume')
 		.description(

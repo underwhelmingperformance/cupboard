@@ -177,9 +177,10 @@ describe('tenant settlement', () => {
 			],
 			lines: [
 				'Enqueued wakes for 2 of 2 pending tenants',
-				'Local step 4: 0 ready, 2 (working 2, stalled 0, unwoken 0) pending',
-				'Local step 4: 1 ready, 1 (working 1, stalled 0, unwoken 0) pending',
-				'Local step 4: 2 ready, 0 (working 0, stalled 0, unwoken 0) pending'
+				'Cancelling this command stops only the wait; tenant migrations continue on the server.',
+				'Tenants: 0 ready, 2 migrating, 0 need attention, 0 waiting to start',
+				'Tenants: 1 ready, 1 migrating, 0 need attention, 0 waiting to start',
+				'Tenants: 2 ready, 0 migrating, 0 need attention, 0 waiting to start'
 			]
 		});
 	});
@@ -300,6 +301,28 @@ describe('tenant settlement', () => {
 		expect({ isAbort: isAbortError(caught), calls }).toStrictEqual({
 			isAbort: true,
 			calls: ['status']
+		});
+	});
+
+	it('stops polling after cancellation once the server has accepted the wake', async () => {
+		const controller = new AbortController();
+		const calls: string[] = [];
+		const client = scriptedClient(
+			[status({ ready: 0, unwoken: 1 }), status({ ready: 0, working: 1 })],
+			calls
+		);
+		const caught = await caughtFrom(
+			settleTenants(client, capturingReporter([]), {
+				signal: controller.signal,
+				delay: () => {
+					controller.abort();
+					return Promise.resolve();
+				}
+			})
+		);
+		expect({ isAbort: isAbortError(caught), calls }).toStrictEqual({
+			isAbort: true,
+			calls: ['status', 'wake', 'status']
 		});
 	});
 });

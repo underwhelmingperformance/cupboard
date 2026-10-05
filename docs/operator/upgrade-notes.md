@@ -9,6 +9,21 @@ procedure is enough.
 
 These notes apply to the first release after v0.0.35.
 
+### Tenant migration readiness
+
+`init` now checks the tenant schema after every upload, even when the tenants
+already completed the previous release's data work. This upgrade adds schema
+progress to the control database and verifies every active or suspended tenant
+before reporting readiness. Existing tenants initially appear as waiting to
+start until their objects run the verification.
+
+`init` waits for pending tenants and shows progress. Press Ctrl-C to quit the
+wait; the queued wakes and tenant alarms continue on the server. Use
+`cupboard deployment status <deployment URL>` to check progress and
+`cupboard deployment resume <deployment URL>` to wait again. The status command
+shows readiness and tenant progress by default. Pass `--details` for schema
+transition states and migration identifiers.
+
 ### Attestation discovery
 
 The legacy `POST /api/v1/attested-paths` endpoint is removed from default and

@@ -267,6 +267,13 @@
 			"when": 1790946562316,
 			"tag": "0037_tenant_retry_clock",
 			"breakpoints": true
+		},
+		{
+			"idx": 38,
+			"version": "6",
+			"when": 1791185784059,
+			"tag": "0038_tenant_schema_progress",
+			"breakpoints": true
 		}
 	]
 }

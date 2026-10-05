@@ -267,7 +267,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'local-step-attempts', independent: true },
 		{ id: 'publication-identity', independent: true },
 		{ id: 'blob-reference-read-authority', independent: false },
-		{ id: 'tenant-retry-clock', independent: true }
+		{ id: 'tenant-retry-clock', independent: true },
+		{ id: 'tenant-schema-progress', independent: true }
 	]);
 });
 
@@ -334,6 +335,7 @@ it('upgrades a populated predecessor deployment', async () => {
 				current: currentLocalStep,
 				required: currentLocalStep,
 				ready: resumableFixtureTenants,
+				workingSample: [],
 				...noTenantPending
 			},
 			recorded: completedTransitions,
@@ -457,6 +459,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 				current: currentLocalStep,
 				required: currentLocalStep,
 				ready: resumableFixtureTenants,
+				workingSample: [],
 				...noTenantPending
 			}
 		});
