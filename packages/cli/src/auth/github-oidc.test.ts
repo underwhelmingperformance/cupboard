@@ -1,5 +1,6 @@
 import { CodedError } from '@cupboard/shared/errors';
-import { describe, expect, it } from 'vitest';
+import { maxTransientRetries } from '@cupboard/shared/retry';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	fetchGithubOidcToken,
@@ -34,6 +35,69 @@ async function failureOf(operation: Promise<unknown>): Promise<unknown> {
 }
 
 describe('fetchGithubOidcToken', () => {
+	it('retries a transient response from the supplied transport', async () => {
+		let attempts = 0;
+		const token = await fetchGithubOidcToken({
+			audience: 'aud',
+			environment,
+			fetcher: () => {
+				attempts += 1;
+
+				return Promise.resolve(
+					attempts === 1
+						? new Response('upstream connection timeout', {
+								status: 503,
+								headers: { 'retry-after': '0' }
+							})
+						: Response.json({ value: 'github.oidc.jwt' })
+				);
+			}
+		});
+
+		expect({ token, attempts }).toStrictEqual({
+			token: 'github.oidc.jwt',
+			attempts: 2
+		});
+	});
+
+	it('cancels transient retry backoff without another request', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const controller = new AbortController();
+			const reason = new Error('cancel OIDC acquisition');
+			let attempts = 0;
+			const pending = failureOf(
+				fetchGithubOidcToken({
+					audience: 'aud',
+					environment,
+					signal: controller.signal,
+					fetcher: () => {
+						attempts += 1;
+
+						return Promise.resolve(
+							new Response('temporarily unavailable', {
+								status: 503,
+								headers: { 'retry-after': '60' }
+							})
+						);
+					}
+				})
+			);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(vi.getTimerCount()).toBe(1);
+			controller.abort(reason);
+
+			expect({ failure: await pending, attempts }).toStrictEqual({
+				failure: reason,
+				attempts: 1
+			});
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('requests a token for the audience and returns its value', async () => {
 		const requests: { url: string; authorization: string | undefined }[] = [];
 		const fetcher: typeof fetch = (input, init) => {
@@ -177,13 +241,22 @@ describe('fetchGithubOidcToken', () => {
 	])(
 		'classifies a token request failure with status $status',
 		async ({ status, exitCode }) => {
+			let attempts = 0;
 			const outcome = await (async () => {
 				try {
 					const token = await fetchGithubOidcToken({
 						audience: 'aud',
 						environment,
-						fetcher: () =>
-							Promise.resolve(new Response('request failed', { status }))
+						fetcher: () => {
+							attempts += 1;
+
+							return Promise.resolve(
+								new Response('request failed', {
+									status,
+									headers: { 'retry-after': '0' }
+								})
+							);
+						}
 					});
 					return { token };
 				} catch (error_: unknown) {
@@ -203,12 +276,15 @@ describe('fetchGithubOidcToken', () => {
 				}
 			})();
 
-			expect(outcome).toStrictEqual({
-				error: {
-					name: GithubOidcRequestError.name,
-					status,
-					exitCode
-				}
+			expect({ outcome, attempts }).toStrictEqual({
+				outcome: {
+					error: {
+						name: GithubOidcRequestError.name,
+						status,
+						exitCode
+					}
+				},
+				attempts: status === 401 || status === 403 ? 1 : maxTransientRetries + 1
 			});
 		}
 	);

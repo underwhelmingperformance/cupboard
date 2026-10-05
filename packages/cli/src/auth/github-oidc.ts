@@ -129,7 +129,7 @@ export async function fetchGithubOidcToken(options: {
 	const url = new URL(requestUrl);
 	url.searchParams.set('audience', options.audience);
 
-	const fetcher = options.fetcher ?? resilientFetcher('replay-safe');
+	const fetcher = resilientFetcher('replay-safe', options.fetcher ?? fetch);
 	let response: Response;
 	try {
 		response = await fetcher(url, {

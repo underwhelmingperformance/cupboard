@@ -125,6 +125,49 @@ function jwt(claims: Record<string, unknown>): string {
 }
 
 describe('authenticateGithubOidc', () => {
+	it('recovers a transient GitHub token response through the client transport', async () => {
+		const requests: string[] = [];
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			(input) => {
+				const url = requestUrl(input);
+				requests.push(url);
+
+				if (new URL(url).origin === 'https://actions.example.com') {
+					return Promise.resolve(
+						requests.length === 1
+							? new Response('upstream connection timeout', {
+									status: 503,
+									headers: { 'retry-after': '0' }
+								})
+							: Response.json({ value: 'github-subject' })
+					);
+				}
+
+				return Promise.resolve(
+					Response.json({
+						access_token: 'write-token',
+						token_type: 'Bearer',
+						expires_in: 900
+					} satisfies TokenResponseInput)
+				);
+			},
+			{ kind: 'default' }
+		);
+		const provider = await authenticateGithubOidc(client, audience, {
+			environment: githubEnvironment
+		});
+
+		expect({ token: await provider.get(), requests }).toStrictEqual({
+			token: 'write-token',
+			requests: [
+				'https://actions.example.com/token?audience=https%3A%2F%2Fcache.example.workers.dev',
+				'https://actions.example.com/token?audience=https%3A%2F%2Fcache.example.workers.dev',
+				'https://cupboard.test/token'
+			]
+		});
+	});
+
 	it('federates a subject token into a write token, caching and refreshing it', async () => {
 		const provider = await authenticateGithubOidc(
 			federatingClient(),

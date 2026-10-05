@@ -156,6 +156,7 @@ it.each([
 			const pathname = new URL(request.url ?? '/', 'http://localhost').pathname;
 			requests.push(`${request.method ?? ''} ${pathname}`);
 			response.setHeader('content-type', 'application/json');
+			response.setHeader('retry-after', '0');
 			if (pathname === '/id-token') {
 				if (oversizedIdentity) {
 					response.statusCode = status;
@@ -259,8 +260,9 @@ it.each([
 				hasRefusal: !oversizedIdentity,
 				requests: [
 					...(oversizedIdentity ? [] : ['GET /id-token']),
-					...Array.from({ length: status === 503 ? 5 : 1 }, () =>
-						oversizedIdentity ? 'GET /id-token' : 'POST /t/acme/token'
+					...Array.from(
+						{ length: status === 503 && oversizedIdentity ? 5 : 1 },
+						() => (oversizedIdentity ? 'GET /id-token' : 'POST /t/acme/token')
 					)
 				]
 			});
