@@ -64,9 +64,11 @@ This is a pnpm workspace.
 ## Documentation
 
 - User and operator docs describe the current release. Steps an operator must
-  take for one particular upgrade go in
-  [docs/operator/upgrade-notes.md](./docs/operator/upgrade-notes.md), not in the
-  guides.
+  take for one particular upgrade go in descriptive files under
+  `docs/operator/upgrade-notes/`, alongside the changes that require them.
+  Release tooling includes new or changed files in the release metadata.
+  [Upgrade notes][upgrade-notes] describes this process and preserves older
+  guidance.
 - `docs/reference/cli.md` and `docs/reference/actions.md` are generated from the
   command definitions and the action and workflow YAML. After changing either,
   run `pnpm update:cli-reference` or `pnpm update:actions-reference`; tests fail
@@ -84,6 +86,8 @@ This is a pnpm workspace.
 - Reference cupboard's actions and workflows as
   `underwhelmingperformance/cupboard/...`, never as a copy in the caller's
   repository.
+
+[upgrade-notes]: ./docs/operator/upgrade-notes.md
 
 ## Coding Standards
 

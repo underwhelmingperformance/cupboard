@@ -4,86 +4,55 @@ This page is for maintainers who publish cupboard releases.
 
 ## Publishing a release
 
-1. Select the actual canonical release tag, `v<major>.<minor>.<patch>`. If
-   upgrading needs anything beyond running `cupboard deploy`, add the
-   instructions under `Next release` in [the upgrade notes][upgrade-notes].
-   Replace `vX.Y.Z` below with the selected tag, then run:
+1. Add any new upgrade instructions in `docs/operator/upgrade-notes/*.md`
+   alongside the changes that require them. Use descriptive filenames without
+   release versions. Each draft includes files added or changed since the
+   preceding published release on its source history. An updated file is
+   included in full, so it should describe one related set of upgrade steps.
+   Unchanged files are not repeated. The first release includes all files.
 
-   ```sh
-   VERSION=vX.Y.Z node --experimental-transform-types \
-     --disable-warning=ExperimentalWarning scripts/release.ts prepare
-   ```
-
-   Preparation pins the release-cache reusable workflow to that exact tag,
-   removes its separate CLI version override, and versions pending upgrade
-   notes. Commit both preparation files before dispatching the release workflow
-   with the same version. The release workflow checks this preparation before
-   any platform build begins; draft publication checks it again before making
-   GitHub API requests. The checked-in `@main` reference is an unprepared state,
-   not a release pin. The main-branch dogfood workflow continues to use `@main`.
-
-   Preparation changes the current checkout. Older tags retain their original
-   workflows and trust requirements; the command does not rewrite them.
-
-2. Prepare the matching release trust rule before publishing the draft. The
-   preparation command prints the exact `job_workflow_ref` selector:
-   `underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@refs/tags/vX.Y.Z`.
-   Set `RELEASE_TENANT_URL` to the tenant URL in `release-cache.yml`, and obtain
-   `PRECEDING_RELEASE_RULE_ID` from the rule list:
-
-   ```sh
-   cupboard oidc-trust list "$RELEASE_TENANT_URL"
-   cupboard oidc-trust show "$RELEASE_TENANT_URL" "$PRECEDING_RELEASE_RULE_ID"
-   ```
-
-   Prepare `release-trust-rule.json` from that rule's `issuer`, `audience`,
-   `claims`, `permittedGrants` and optional `display`. Change only
-   `claims.job_workflow_ref` to the exact selector printed for the selected tag.
-   Preserve the repository IDs, `event_name=release`, `ref_type=tag`, other
-   claims, actions, release-cache binding and retention-root binding. Do not
-   copy server-generated fields such as the rule ID or timestamps into the add
-   body. Review the complete replacement before adding it:
-
-   ```sh
-   cupboard oidc-trust add "$RELEASE_TENANT_URL" --from-file release-trust-rule.json
-   ```
-
-   Use the returned ID as `REPLACEMENT_RELEASE_RULE_ID`, inspect the added rule,
-   then disable the preceding release rule:
-
-   ```sh
-   cupboard oidc-trust show "$RELEASE_TENANT_URL" "$REPLACEMENT_RELEASE_RULE_ID"
-   cupboard oidc-trust remove "$RELEASE_TENANT_URL" "$PRECEDING_RELEASE_RULE_ID"
-   ```
-
-   Disabling the preceding rule stops authorisation through its old selector.
-   Reruns of older releases need a reviewed rule for their original workflow
-   reference. Leave the main-branch dogfood rule unchanged. The preparation
-   command does not add, disable or otherwise change trust rules.
-
-3. Run the `release` workflow from the Actions tab, and give it the version
-   number, such as `1.4.0`. The workflow builds the CLI for every platform and
-   signs attestations for the archives. It then creates a draft GitHub release,
-   or updates the existing draft, with the archives, a `checksums.txt` file and
-   generated release notes.
+2. Run the `release` workflow from the Actions tab and enter the version, with
+   or without the lowercase `v` prefix. The workflow builds the CLI for every
+   platform and signs attestations for the archives. It creates or updates a
+   draft GitHub release with the archives, a `checksums.txt` file, generated
+   release notes and the upgrade instructions. No source preparation or
+   versioning commit is needed.
 
    The release notes include the `nix.conf` lines for using the release cache.
    All of the cache's public keys go on one `extra-trusted-public-keys` line, so
    the lines still work while the cache's signing key is being rotated.
 
-   New and updated drafts also link to the upgrade notes at the release tag. The
-   link resolves after publishing creates the tag. Draft updates keep existing
-   release notes and add the link if it is missing.
+   Draft updates preserve text outside the generated upgrade section. Review
+   that section after a rerun because the workflow refreshes it from the
+   selected source revision. Relative links in upgrade instructions point at the
+   tagged source and resolve when the release is published.
 
    Each platform job first checks the flake's reproducibility as described
    below. All four checks must pass before the workflow can assemble the draft.
 
-4. Review the draft and publish it. Publishing creates the tag. That starts the
+3. Review the draft and publish it. Publishing creates the tag. That starts the
    `release cache` workflow, which builds the tagged flake on every supported
    system, pushes the results to the release cache, and publishes the flake to
    FlakeHub.
 
-[upgrade-notes]: ../operator/upgrade-notes.md
+The release-cache workflow calls `cupboard-publish.yml@main` and leaves
+`cupboard-version` unset. The resolver selects the CLI from the exact commit of
+that workflow. The workflow builds the tagged release source; the publishing
+tool follows main. Re-running all jobs resolves the current workflow on main.
+Re-running failed jobs or a specific job uses the workflow commit from the first
+attempt. After a publication fix on main, re-run all jobs to use that fix. See
+[GitHub's rerun behaviour][workflow-reruns].
+
+[workflow-reruns]:
+  https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#behavior-of-reusable-workflows-when-re-running-jobs
+
+The tenant's release trust rule permits that workflow at `refs/heads/main`, with
+release events, repository identity and grants scoped to the release cache and
+release roots. The rule applies to future releases without per-release rotation.
+[Guided trust checks][trust-checks] inspect and repair the workflow's required
+grants.
+
+[trust-checks]: ../ci/github-check.md
 
 When a repository calls one of the reusable workflows, the workflow's
 `resolve-cupboard` step looks for a release that was published from the same

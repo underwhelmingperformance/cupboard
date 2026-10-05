@@ -152,7 +152,8 @@ merged-close rule. See [PR cache closure][pr-cache-closure-upgrade]. GitHub
 explains the ref change in [Pull request events][github-pr-events]; the [OIDC
 issuer metadata][github-oidc-metadata] lists the available signed claims.
 
-[pr-cache-closure-upgrade]: ../operator/upgrade-notes.md#pr-cache-closure
+[pr-cache-closure-upgrade]:
+  ../operator/upgrade-notes/release-repairs.md#pr-cache-closure
 [github-pr-events]:
   https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
 [github-oidc-metadata]:
