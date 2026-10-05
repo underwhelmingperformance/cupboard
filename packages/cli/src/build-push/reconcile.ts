@@ -34,7 +34,10 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import type { CommitOptions } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
-import { PushNarMetadataMismatchError } from '../errors.ts';
+import {
+	PushNarMetadataMismatchError,
+	UploadVerificationFailedError
+} from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
@@ -321,6 +324,22 @@ type PublishableDecision = Extract<
 	{ action: 'upload' | 'commit' }
 >;
 
+async function isBuildOutputServed(
+	info: NixValidPathInfo,
+	client: PushClient
+): Promise<boolean> {
+	const paths = [prepareStorePathNegotiation(info)];
+	const preview = await client.preview({ paths });
+	const [decision] = exactUploadDecisions(paths, preview.uploads);
+
+	if (decision?.action !== 'skip') {
+		return false;
+	}
+
+	requireMatchingBuildOutput(info, { ...decision, action: 'skip' });
+	return true;
+}
+
 // Complete one negotiated decision. Uploads verify streamed NAR metadata before
 // commit. If the path is collected during the read, preserve any destination
 // confirmation or report the missing target or intermediate. Upload and verdict
@@ -374,6 +393,27 @@ async function publishDecision(
 		ledger.servable.add(info.storePath);
 	} catch (error) {
 		ledger.published.delete(info.storePath);
+
+		if (
+			error instanceof UploadVerificationFailedError &&
+			error.status === 'absent'
+		) {
+			try {
+				if (await isBuildOutputServed(info, options.client)) {
+					ledger.servable.add(info.storePath);
+					return;
+				}
+			} catch (confirmationError) {
+				recordFailure(
+					ledger,
+					info.storePath,
+					'verification',
+					confirmationError
+				);
+				return;
+			}
+		}
+
 		recordFailure(ledger, info.storePath, 'verification', error);
 	}
 }

@@ -24,8 +24,12 @@ import {
 	type UploadDecisionInput,
 	uploadDecisionSchema,
 	uploadNegotiateMaxPaths,
-	type UploadNegotiateResponse
+	type UploadNegotiateResponse,
+	type UploadPreviewRequestInput,
+	type UploadPreviewResponse,
+	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
+import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
 import type {
@@ -34,6 +38,7 @@ import type {
 	CommitSessionTarget
 } from '../client/commit-socket.ts';
 import {
+	BuildOutputDivergedError,
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
@@ -252,7 +257,16 @@ function harness(options: HarnessOptions = {}): Harness {
 					})
 			});
 		},
-		preview: () => Promise.resolve({ uploads: [] }),
+		preview: (body) =>
+			Promise.resolve(
+				uploadPreviewResponseSchema.parse({
+					uploads: body.paths.map((path) => ({
+						action: 'upload' as const,
+						storePathHash: path.storePathHash,
+						narHash: path.narHash
+					}))
+				})
+			),
 		uploadNar: (r2Key) => {
 			uploadedKeys.push(r2Key);
 			const isFailed = [...(options.failUploads ?? [])].some(
@@ -1119,6 +1133,285 @@ describe('reconcileBuild', () => {
 });
 
 describe('reconcileBuild over a shared commit session', () => {
+	const absent = new UploadVerificationFailedError('losing-upload', 'absent');
+	const refusal = new ORPCError('FORBIDDEN');
+	const confirmationCases: readonly {
+		readonly name: string;
+		readonly preview: () => Promise<UploadPreviewResponse>;
+		readonly cause: Error;
+	}[] = [
+		...(['upload', 'commit'] as const).map((action) => ({
+			name: `an unconfirmed ${action} decision`,
+			preview: () =>
+				Promise.resolve({
+					uploads: [
+						{
+							action,
+							storePathHash: StorePath.hash(pathA),
+							narHash: narHash.toString()
+						}
+					]
+				}),
+			cause: absent
+		})),
+		{
+			name: 'a different destination NAR',
+			preview: () =>
+				Promise.resolve({
+					uploads: [
+						{
+							action: 'skip',
+							storePathHash: StorePath.hash(pathA),
+							narHash: divergentNarHash.toString()
+						}
+					]
+				}),
+			cause: new BuildOutputDivergedError(
+				pathA,
+				narHash.toString(),
+				divergentNarHash.toString()
+			)
+		},
+		{
+			name: 'an unrelated destination path',
+			preview: () => Promise.resolve({ uploads: [decisionFor(pathB, 'skip')] }),
+			cause: new UploadNegotiationMismatchError(
+				'unexpected',
+				StorePath.hash(pathB),
+				narHash.toString()
+			)
+		},
+		{
+			name: 'a missing destination decision',
+			preview: () => Promise.resolve({ uploads: [] }),
+			cause: new UploadNegotiationMismatchError(
+				'missing',
+				StorePath.hash(pathA),
+				narHash.toString()
+			)
+		},
+		{
+			name: 'an authentication refusal',
+			preview: () => Promise.reject(refusal),
+			cause: refusal
+		}
+	];
+
+	it.each(confirmationCases)(
+		'preserves failure for $name after an absent verdict',
+		async ({ preview, cause }) => {
+			const fixture = harness({
+				valid: [pathA],
+				actions: new Map([[pathA, 'commit' as const]])
+			});
+			let previewCalls = 0;
+			let commitCalls = 0;
+			const result = await reconcileWith(fixture, {
+				targets: [target(pathA, rootOne)],
+				client: {
+					...fixture.client,
+					commit: () => {
+						commitCalls++;
+						return Promise.reject(absent);
+					},
+					preview: () => {
+						previewCalls++;
+						return preview();
+					}
+				}
+			});
+
+			expect({
+				result,
+				previewCalls,
+				commitCalls,
+				negotiations: fixture.negotiatedPaths,
+				uploads: fixture.uploadedKeys,
+				roots: fixture.rootReplacements
+			}).toStrictEqual({
+				result: {
+					receipt: {
+						version: 3,
+						paths: [],
+						subjects: [],
+						outcomes: [
+							{ outcome: 'failed', storePath: pathA, reason: 'verification' }
+						],
+						uploaded: [],
+						failed: [pathA],
+						collected: []
+					},
+					roots: [{ root: rootOne, applied: false, targets: [pathA] }],
+					failures: [{ storePath: pathA, reason: 'verification', cause }]
+				},
+				previewCalls: 1,
+				commitCalls: 1,
+				negotiations: [[pathA]],
+				uploads: [],
+				roots: []
+			});
+		}
+	);
+
+	it.each(['mismatch', 'over-quota'] as const)(
+		'does not confirm or retry a %s verdict',
+		async (status) => {
+			const fixture = harness({
+				valid: [pathA],
+				actions: new Map([[pathA, 'commit' as const]])
+			});
+			const failure = new UploadVerificationFailedError(
+				'refused-upload',
+				status
+			);
+			let previewCalls = 0;
+			let commitCalls = 0;
+			const result = await reconcileWith(fixture, {
+				targets: [target(pathA, rootOne)],
+				client: {
+					...fixture.client,
+					commit: () => {
+						commitCalls++;
+						return Promise.reject(failure);
+					},
+					preview: () => {
+						previewCalls++;
+						return Promise.resolve({ uploads: [decisionFor(pathA, 'skip')] });
+					}
+				}
+			});
+			expect({
+				result,
+				previewCalls,
+				commitCalls,
+				roots: fixture.rootReplacements
+			}).toStrictEqual({
+				result: {
+					receipt: {
+						version: 3,
+						paths: [],
+						subjects: [],
+						outcomes: [
+							{ outcome: 'failed', storePath: pathA, reason: 'verification' }
+						],
+						uploaded: [],
+						failed: [pathA],
+						collected: []
+					},
+					roots: [{ root: rootOne, applied: false, targets: [pathA] }],
+					failures: [
+						{ storePath: pathA, reason: 'verification', cause: failure }
+					]
+				},
+				previewCalls: 0,
+				commitCalls: 1,
+				roots: []
+			});
+		}
+	);
+
+	it.each(['acknowledgement', 'deferred verdict'] as const)(
+		'confirms a matching destination copy after an absent %s without retrying publication',
+		async (failurePhase) => {
+			const fixture = harness({
+				valid: [pathA],
+				actions: new Map([[pathA, 'upload' as const]])
+			});
+			const previewRequests: UploadPreviewRequestInput[] = [];
+			const sessionCommits: CommitSessionTarget[] = [];
+			const failure = new UploadVerificationFailedError(
+				'losing-upload',
+				'absent'
+			);
+			const client: PushClient = {
+				...fixture.client,
+				preview: (body) => {
+					previewRequests.push(body);
+					return Promise.resolve({ uploads: [decisionFor(pathA, 'skip')] });
+				}
+			};
+			const session: CommitSession = {
+				commit: (commitTarget) => {
+					sessionCommits.push(commitTarget);
+					if (failurePhase === 'acknowledgement') {
+						return Promise.reject(failure);
+					}
+					return Promise.resolve({
+						storePathHash: commitTarget.storePathHash,
+						narHash: commitTarget.narHash,
+						status: 'pending',
+						settled: Promise.reject(failure)
+					});
+				},
+				close: () => {
+					throw new Error(
+						'reconciliation must not close the shared run session'
+					);
+				}
+			};
+			const result = await reconcileWith(fixture, {
+				targets: [target(pathA, rootOne)],
+				client,
+				session
+			});
+
+			expect({
+				result,
+				previewRequests,
+				negotiations: fixture.negotiatedPaths,
+				uploadedKeys: fixture.uploadedKeys,
+				sessionCommits,
+				clientCommits: fixture.clientCommits,
+				rootReplacements: fixture.rootReplacements
+			}).toStrictEqual({
+				result: {
+					receipt: {
+						version: 3,
+						paths: [pathA],
+						subjects: heldSubjects([pathA]),
+						outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+						uploaded: [],
+						failed: [],
+						collected: []
+					},
+					roots: [{ root: rootOne, applied: true, targets: [pathA] }],
+					failures: []
+				},
+				previewRequests: [
+					{
+						paths: [
+							{
+								storePath: pathA,
+								narSize: 4,
+								references: [],
+								deriver: undefined,
+								ca: undefined,
+								storePathHash: StorePath.hash(pathA),
+								narHash: narHash.toString()
+							}
+						]
+					}
+				],
+				negotiations: [[pathA]],
+				uploadedKeys: [`staging/${StorePath.basename(pathA)}`],
+				sessionCommits: [
+					{
+						uploadId: `upload-${StorePath.basename(pathA)}`,
+						storePathHash: StorePath.hash(pathA),
+						narHash: narHash.toString()
+					}
+				],
+				clientCommits: [],
+				rootReplacements: [
+					{
+						name: rootOne,
+						body: { targets: [pathA], retention: { kind: 'inherit' } }
+					}
+				]
+			});
+		}
+	);
+
 	it('commits over the session and never through the client', async () => {
 		const sessionCommits: CommitSessionTarget[] = [];
 		const session: CommitSession = {
