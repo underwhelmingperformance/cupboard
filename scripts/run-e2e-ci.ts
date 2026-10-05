@@ -187,18 +187,27 @@ export class RunningCiNixDaemon implements CiEndToEndDaemon {
 	readonly #closed: Promise<void>;
 	#socket: OwnedNixDaemonSocket | undefined;
 	#stopping: Promise<void> | undefined;
-	readonly diagnostics = (): string =>
-		Buffer.concat(this.#stderr).toString('utf8');
+	#hasEscalated = false;
+	#processError: Error | undefined;
+	readonly diagnostics = (): string => {
+		const stderr = Buffer.concat(this.#stderr).toString('utf8');
+		return stderr === '' ? (this.#processError?.message ?? '') : stderr;
+	};
 
 	private constructor(
 		private readonly child: ChildProcess,
 		private readonly socketPath: string
 	) {
+		const onError = (error: Error): void => {
+			this.#processError = error;
+		};
+		child.on('error', onError);
 		child.stderr?.on('data', (chunk: Buffer) => {
 			this.#stderr.push(chunk);
 		});
 		this.#closed = new Promise((resolve) => {
 			child.once('close', () => {
+				child.removeListener('error', onError);
 				resolve();
 			});
 		});
@@ -216,16 +225,25 @@ export class RunningCiNixDaemon implements CiEndToEndDaemon {
 		}
 
 		terminateProcessGroup(this.child, 'SIGTERM');
+		const escalationFailure = Promise.withResolvers<never>();
 		const deadline = setTimeout(() => {
-			terminateProcessGroup(this.child, 'SIGKILL');
+			try {
+				terminateProcessGroup(this.child, 'SIGKILL');
+				this.#hasEscalated = true;
+			} catch (error) {
+				escalationFailure.reject(error);
+			}
 		}, 5000);
 		deadline.unref();
 
 		try {
-			await this.#closed;
+			await Promise.race([this.#closed, escalationFailure.promise]);
+
+			if (!this.#hasEscalated) {
+				terminateProcessGroup(this.child, 'SIGKILL');
+			}
 		} finally {
 			clearTimeout(deadline);
-			terminateProcessGroup(this.child, 'SIGKILL');
 		}
 	}
 
@@ -266,7 +284,12 @@ export class RunningCiNixDaemon implements CiEndToEndDaemon {
 		}
 
 		try {
-			await waitForDaemonSocket(this.child, this.socketPath, this.diagnostics);
+			await waitForDaemonSocket(
+				this.child,
+				this.socketPath,
+				this.diagnostics,
+				startupSignal
+			);
 			this.rememberSocket();
 			startupSignal.throwIfAborted();
 
