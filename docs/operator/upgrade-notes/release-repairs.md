@@ -10,7 +10,7 @@ start until their objects run the verification.
 wait; the queued wakes and tenant alarms continue on the server. Use
 `cupboard deployment status <deployment URL>` to check progress and
 `cupboard deployment resume <deployment URL>` to wait again. The status command
-shows readiness and tenant progress by default. Pass `--details` for schema
+shows readiness and tenant progress by default. Pass `--debug` for schema
 transition states and migration identifiers.
 
 ### Attestation discovery
