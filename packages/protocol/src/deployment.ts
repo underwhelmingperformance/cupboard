@@ -62,7 +62,8 @@ export const transitionIdSchema = z.enum([
 	'local-step-attempts',
 	'publication-identity',
 	'blob-reference-read-authority',
-	'tenant-retry-clock'
+	'tenant-retry-clock',
+	'tenant-schema-progress'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -314,6 +315,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0037_tenant_retry_clock.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'tenant-schema-progress',
+		expand: ['0038_tenant_schema_progress.sql'],
+		contract: [],
+		independent: true
 	}
 ];
 
@@ -524,6 +531,13 @@ export const localStepSampleSize = 20;
 
 const tenantCountSchema = z.number().int().nonnegative();
 
+export const tenantSchemaMigrationSchema = z.strictObject({
+	migration: z.string(),
+	stage: z.string(),
+	cursor: z.number().int().nonnegative()
+});
+export type TenantSchemaMigration = z.infer<typeof tenantSchemaMigrationSchema>;
+
 // A stalled pending tenant. `progressedAt` is absent when the object has never
 // made progress. `error` is the error of the last attempt, or the reason that
 // the object gave up, and is absent when the last attempt made no progress
@@ -532,7 +546,8 @@ export const localStepStalledTenantSchema = z.strictObject({
 	tenant: tenantIdSchema,
 	attemptedAt: isoTimestampSchema.optional(),
 	progressedAt: isoTimestampSchema.optional(),
-	error: z.string().max(localStepErrorMaxLength).optional()
+	error: z.string().max(localStepErrorMaxLength).optional(),
+	migration: tenantSchemaMigrationSchema.optional()
 });
 export type ParsedLocalStepStalledTenant = z.output<
 	typeof localStepStalledTenantSchema
@@ -550,9 +565,9 @@ export type ParsedLocalStepUnwokenTenant = z.output<
 >;
 
 /**
- * How far the active and suspended tenants have come towards the required
- * local step. Every pending tenant is in exactly one class, measured against
- * the `localStepStallWindowMs` before the request. A tenant is unwoken when
+ * Readiness of active and suspended tenants for the required data step and
+ * the deployed tenant schema. Every pending tenant is in one class, measured
+ * against the `localStepStallWindowMs` before the request. A tenant is unwoken when
  * no attempt at the outstanding work has been made within the window and the
  * last attempt did not fail. Otherwise the object has attempted the work, and
  * the tenant is:
@@ -565,12 +580,11 @@ export type ParsedLocalStepUnwokenTenant = z.output<
 export const localStepStatusSchema = z.strictObject({
 	// This build's final local step (`currentLocalStep`).
 	current: localStepSchema,
-	// The required local step, which `ready` and `pending` are counted against.
+	// The required step for tenant data work.
 	required: localStepSchema,
-	// Active or suspended tenants that have recorded `required` or later.
+	// Active or suspended tenants with the required data step and tenant schema.
 	ready: tenantCountSchema,
-	// Active or suspended tenants that have not, whether they recorded an
-	// earlier step or have not recorded one since the column was added.
+	// Active or suspended tenants with outstanding schema or data work.
 	pending: tenantCountSchema,
 	working: tenantCountSchema,
 	stalled: tenantCountSchema,
@@ -578,7 +592,11 @@ export const localStepStatusSchema = z.strictObject({
 	// Up to `localStepSampleSize` of the stalled and of the unwoken tenants, in
 	// slug order.
 	stalledSample: z.array(localStepStalledTenantSchema).max(localStepSampleSize),
-	unwokenSample: z.array(localStepUnwokenTenantSchema).max(localStepSampleSize)
+	unwokenSample: z.array(localStepUnwokenTenantSchema).max(localStepSampleSize),
+	workingSample: z
+		.array(localStepStalledTenantSchema)
+		.max(localStepSampleSize)
+		.optional()
 });
 export type ParsedLocalStepStatus = z.output<typeof localStepStatusSchema>;
 export type LocalStepStatus = z.input<typeof localStepStatusSchema>;

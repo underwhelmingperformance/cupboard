@@ -415,6 +415,8 @@ export const tenant = sqliteTable(
 		// The highest local step this tenant's Durable Object has reported. Null
 		// means the control Worker has not woken it since the column was added.
 		localStep: integer('local_step').$type<LocalStep>(),
+		localSchemaVersion: integer('local_schema_version'),
+		localSchemaMigration: text('local_schema_migration'),
 		// When a page of this tenant's local-step work last ran, or when a wake
 		// last failed to reach its object. Each write replaces the last one. A
 		// page that records the step clears it.

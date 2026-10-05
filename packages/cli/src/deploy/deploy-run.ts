@@ -21,8 +21,7 @@ import type { DeploymentConfig } from './config.ts';
 import type { D1QueryApi } from './d1-query.ts';
 import {
 	type DeploymentDatabase,
-	isFreshDeployment,
-	readLocalStepReadiness
+	isFreshDeployment
 } from './deployment-state.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
@@ -592,14 +591,7 @@ async function performDeploy(
 			completeTransitions(transitionWalk(dependencies, d1Database, context))
 		);
 		if (dependencies.settleTenants !== undefined) {
-			const readiness = await readLocalStepReadiness(
-				d1QueryApiOf(api),
-				d1Database.id,
-				currentLocalStep
-			);
-			if (readiness.pending > 0) {
-				await dependencies.settleTenants(currentLocalStep);
-			}
+			await dependencies.settleTenants(currentLocalStep);
 		}
 	}
 

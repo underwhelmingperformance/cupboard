@@ -7,7 +7,8 @@ import {
 	localStepStallWindowMs,
 	type LocalStepStatus,
 	type LocalStepWakeResponse,
-	requiredLocalStepFrom
+	requiredLocalStepFrom,
+	tenantSchemaMigrationSchema
 } from '@cupboard/protocol/deployment';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { chunk } from '@cupboard/shared/collections';
@@ -21,6 +22,7 @@ import { readRecordedTransitions } from '../db/deployment-transitions.ts';
 import { summariseLocalStepError } from '../db/local-step-attempts.ts';
 import { batchNonEmpty } from '../do/bulk.ts';
 import { jsonValueLists } from '../do/json-list.ts';
+import { belowLocalSchema } from '../do/local-schema-run.ts';
 import { belowLocalStep, type LocalStepOutcome } from '../do/local-step.ts';
 import { TenantNotConfiguredError } from '../errors.ts';
 import { queueSendBatchSize } from '../policy/queues.ts';
@@ -64,6 +66,10 @@ export type ReportLocalStep = (
 ) => Promise<LocalStepOutcome>;
 
 const { tenant } = d1Schema;
+
+function pendingTenantWork(required: LocalStep): SQL {
+	return sql`(${belowLocalStep(required)} OR ${belowLocalSchema()})`;
+}
 
 const resumableTenant = or(
 	eq(tenant.status, 'active'),
@@ -116,11 +122,9 @@ export async function requiredLocalStep(env: Env): Promise<LocalStep> {
 }
 
 /**
- * Reports how many active or suspended tenants have reached the required local
- * step, and classifies the pending tenants against the stall window before
- * `now`. It reads the transitions and then runs one D1 batch of three
- * statements: the counts, and a sample of the stalled and of the unwoken
- * tenants.
+ * Reports readiness for the required data step and this build's tenant schema.
+ * It classifies pending tenants against the stall window before `now`, with
+ * counts and samples for each class from one D1 batch.
  */
 export async function controlLocalStepStatus(
 	env: Env,
@@ -128,7 +132,7 @@ export async function controlLocalStepStatus(
 ): Promise<LocalStepStatus> {
 	const database = controlDatabase(env);
 	const required = await requiredLocalStep(env);
-	const pending = belowLocalStep(required);
+	const pending = pendingTenantWork(required);
 	const classes = pendingClasses(windowStart(now));
 	const counted = (condition: SQL): SQL<number> =>
 		sql<number>`count(case when ${condition} then 1 end)`;
@@ -159,16 +163,32 @@ export async function controlLocalStepStatus(
 		.where(and(resumableTenant, pending, classes.unwoken))
 		.orderBy(asc(tenant.id))
 		.limit(localStepSampleSize);
-	const [countRows, stalledRows, unwokenRows] = await database.batch([
-		counts,
-		stalledSample,
-		unwokenSample
-	]);
+	const workingSample = database
+		.select({
+			tenant: tenant.id,
+			attemptedAt: tenant.localStepAttemptedAt,
+			progressedAt: tenant.localStepProgressedAt,
+			migration: tenant.localSchemaMigration
+		})
+		.from(tenant)
+		.where(and(resumableTenant, pending, classes.working))
+		.orderBy(asc(tenant.id))
+		.limit(localStepSampleSize);
+	const [countRows, stalledRows, unwokenRows, workingRows] =
+		await database.batch([counts, stalledSample, unwokenSample, workingSample]);
 
 	return {
 		current: currentLocalStep,
 		required,
 		...statusCountsSchema.parse(countRows[0]),
+		workingSample: workingRows.map((row) => ({
+			tenant: row.tenant,
+			...(row.attemptedAt !== null && { attemptedAt: row.attemptedAt }),
+			...(row.progressedAt !== null && { progressedAt: row.progressedAt }),
+			...(row.migration !== null && {
+				migration: tenantSchemaMigrationSchema.parse(JSON.parse(row.migration))
+			})
+		})),
 		stalledSample: stalledRows.map((row) => ({
 			tenant: row.tenant,
 			...(row.attemptedAt !== null && { attemptedAt: row.attemptedAt }),
@@ -200,7 +220,7 @@ export async function selectLocalStepWakes(
 			wake: sql<number>`case when ${working} then 0 else 1 end`
 		})
 		.from(tenant)
-		.where(and(resumableTenant, belowLocalStep(required)))
+		.where(and(resumableTenant, pendingTenantWork(required)))
 		.orderBy(asc(tenant.id))
 		.all();
 
@@ -279,7 +299,7 @@ export async function wakeLocalStepTenants(
 					and(
 						inArray(tenant.id, list),
 						resumableTenant,
-						belowLocalStep(required)
+						pendingTenantWork(required)
 					)
 				)
 				.orderBy(asc(tenant.id))
@@ -320,7 +340,7 @@ async function recordWakeFailure(
 			localStepError: error
 		})
 		.where(
-			and(eq(tenant.id, row.id), belowLocalStep(required), unchangedAttempt)
+			and(eq(tenant.id, row.id), pendingTenantWork(required), unchangedAttempt)
 		)
 		.run();
 }

@@ -313,12 +313,11 @@ async function reachContractStep<Id extends string>(
 	const { api, hooks } = walk;
 	const databaseId = walk.database.id;
 	const { id } = planned.transition;
-	let readiness = await readLocalStepReadiness(api, databaseId, step);
-
-	if (readiness.pending > 0 && hooks.wakeTenants !== undefined) {
+	if (hooks.wakeTenants !== undefined) {
 		await hooks.wakeTenants(step);
-		readiness = await readLocalStepReadiness(api, databaseId, step);
 	}
+
+	const readiness = await readLocalStepReadiness(api, databaseId, step);
 
 	if (readiness.pending > 0) {
 		throw new LocalStepUnreachedError({

@@ -1840,6 +1840,34 @@ describe('contract migrations within a deploy', () => {
 });
 
 describe('automatic tenant wakes', () => {
+	it('checks tenant schema readiness even when every tenant recorded the final data step', async () => {
+		const recording = recordingApi();
+		await seedApplied(recording, [
+			expandMigration,
+			contractMigration,
+			independentMigration
+		]);
+		recording.database.exec(
+			"INSERT INTO deployment_phase VALUES ('current', 'contracted', 5, '2026-01-01T00:00:00.000Z')"
+		);
+		insertTenants(recording.database, [
+			{ id: 'alpha', localStep: currentLocalStep }
+		]);
+		const steps: number[] = [];
+		await runDeploy({
+			artifact,
+			api: recording.api,
+			settleTenants: (requiredStep) => {
+				steps.push(requiredStep);
+				return Promise.resolve();
+			},
+			now: fixedNow,
+			reporter: silentReporter,
+			options: { domain: undefined, secrets: { control: [], tenant: [] } }
+		});
+		expect(steps).toStrictEqual([currentLocalStep]);
+	});
+
 	it('wakes tenants to the required local step before the contract and to the current step afterwards', async () => {
 		const recording = recordingApi();
 		await seedApplied(recording, [expandMigration]);
