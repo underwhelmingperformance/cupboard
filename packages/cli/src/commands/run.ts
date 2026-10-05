@@ -42,7 +42,7 @@ import {
 import type { CacheTarget } from '../cache-target.ts';
 import { cacheTargetFromUrl } from '../cache-target.ts';
 import type { ProgramOptions } from '../cli.ts';
-import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { CliError, CliUsageError } from '../errors.ts';
 
 interface RunOptions {
@@ -196,7 +196,6 @@ export async function runWithReadAccess(
 			);
 		}
 	}
-	const fetcher = resilientFetcher('replay-safe', dependencies.fetcher);
 	const cache = 'cache' in target ? target.cache : undefined;
 	const targetUrl =
 		cache === undefined ? undefined : cacheUrl(target.tenantUrl, cache);
@@ -319,7 +318,7 @@ export async function runWithReadAccess(
 					...(cache !== undefined && { cache }),
 					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
 					resources,
-					fetcher,
+					fetcher: dependencies.fetcher,
 					environment: {
 						requestUrl: environment.ACTIONS_ID_TOKEN_REQUEST_URL,
 						requestToken: environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN
