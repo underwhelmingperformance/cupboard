@@ -2692,7 +2692,7 @@ export async function attemptPushToTenant(
 		await completeCommitSession(
 			commitSessionFromResponse(upgraded),
 			decision.uploadId,
-			() => verifyTenant(rootLogger(), env, tenant),
+			() => verifyUploadPass(tenant, decision.uploadId),
 			{}
 		);
 	} catch (error) {
@@ -2979,30 +2979,43 @@ function waitForCommitFixturePhase<T>(
 	);
 }
 
-const verificationRetryDelayMs = 100;
 const maxVerificationPasses = 100;
+type VerificationPassAcknowledgement = 'pending' | 'complete';
+
+async function verifyUploadPass(
+	tenant: TenantId,
+	uploadId: UploadId
+): Promise<VerificationPassAcknowledgement> {
+	await verifyTenant(rootLogger(), env, tenant);
+	const verdict = await pendingUploadVerdictAt(
+		tenantServer(env, tenant),
+		uploadId
+	);
+	const pendingVerdicts: readonly (string | null | undefined)[] = [
+		'pending',
+		'committing'
+	];
+
+	return pendingVerdicts.includes(verdict) ? 'pending' : 'complete';
+}
 
 /**
- * Runs verification passes until `frame` arrives, at most
- * `maxVerificationPasses` times, then returns `frame`.
- *
- * A pass can leave a deferred upload pending without a verdict, for example
- * when a concurrent promotion of the same NAR defers it again. Production then
- * runs another pass from the queue or the verification backstop alarm. The test
- * pool delivers neither, and an alarm fence also disables the backstop, so the
- * fixture runs the next pass itself. `scheduler.wait` keeps the pause real
- * while a test fakes timers.
+ * Concurrent promotion can leave an upload pending after verification. The
+ * test pool does not deliver verification queue messages, and alarm fences
+ * disable the backstop. This fixture therefore runs another pass while the
+ * stored verdict is pending.
  */
 async function verifyUntilFrame(
 	frame: Promise<CommitSessionFrame>,
-	runVerification: () => Promise<void>
+	runVerification: () => Promise<VerificationPassAcknowledgement>
 ): Promise<CommitSessionFrame> {
-	const arrival = frameArrival(frame);
+	const arrival = { isSettled: false };
+	void frameArrival(frame).then(() => {
+		arrival.isSettled = true;
+	});
 
 	for (let pass = 0; pass < maxVerificationPasses; pass += 1) {
-		await runVerification();
-
-		if ((await Promise.race([arrival, verificationRetryPause()])) === 'frame') {
+		if (arrival.isSettled || (await runVerification()) === 'complete') {
 			break;
 		}
 	}
@@ -3014,22 +3027,12 @@ async function verifyUntilFrame(
  * Resolves once `frame` settles. The caller of {@link verifyUntilFrame}
  * receives a rejected frame, so this promise does not reject.
  */
-async function frameArrival(
-	frame: Promise<CommitSessionFrame>
-): Promise<'frame'> {
+async function frameArrival(frame: Promise<CommitSessionFrame>): Promise<void> {
 	try {
 		await frame;
 	} catch {
 		// The caller awaits `frame` and receives the rejection.
 	}
-
-	return 'frame';
-}
-
-async function verificationRetryPause(): Promise<'pause'> {
-	await scheduler.wait(verificationRetryDelayMs);
-
-	return 'pause';
 }
 
 // Sends a commit operation and waits for its response. For a deferred upload,
@@ -3039,7 +3042,7 @@ async function verificationRetryPause(): Promise<'pause'> {
 export async function completeCommitSession(
 	conversation: CommitConversation,
 	uploadId: UploadId,
-	runVerification: () => Promise<void>,
+	runVerification: () => Promise<VerificationPassAcknowledgement>,
 	options: { readonly wait?: boolean }
 ): Promise<CommitResponseInput> {
 	const { socket, send, nextFrame } = conversation;
@@ -3120,7 +3123,7 @@ export async function commitUpload(
 	return completeCommitSession(
 		conversation,
 		uploadId,
-		() => verifyTenant(rootLogger(), env, currentServerTenant()),
+		() => verifyUploadPass(currentServerTenant(), uploadId),
 		options
 	);
 }
@@ -3188,7 +3191,7 @@ export async function commitUploadViaWorker(
 	return completeCommitSession(
 		commitSessionFromResponse(response),
 		uploadId,
-		() => verifyTenant(rootLogger(), env, tenant),
+		() => verifyUploadPass(tenant, uploadId),
 		options
 	);
 }
@@ -3841,7 +3844,14 @@ export async function verifiableNarStored(
 export async function pendingUploadVerdict(
 	uploadId: UploadId
 ): Promise<string | null | undefined> {
-	return runInDurableObject(currentServer(), (_instance, state) => {
+	return pendingUploadVerdictAt(currentServer(), uploadId);
+}
+
+async function pendingUploadVerdictAt(
+	server: DurableObjectStub<CupboardServer>,
+	uploadId: UploadId
+): Promise<string | null | undefined> {
+	return runInDurableObject(server, (_instance, state) => {
 		const row = drizzle(state.storage, { schema: { pendingUploads } })
 			.select({ verdict: pendingUploads.verdict })
 			.from(pendingUploads)

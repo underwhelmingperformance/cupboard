@@ -2,6 +2,8 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
 	test: {
+		globalSetup: ['tests/support/e2e-artifacts.global-setup.ts'],
+		setupFiles: ['tests/support/e2e-artifacts.setup.ts'],
 		fileParallelism: false,
 		include: ['tests/e2e/publish-pipeline.test.ts'],
 		// Each case runs a whole publication job: real evaluation, a real build,

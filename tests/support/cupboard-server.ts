@@ -33,6 +33,11 @@ import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { fixtureTenant } from '../../packages/server/src/routing/tenant-routing.test-support.ts';
 
+import { sharedWorkerBundle, type TestWorkerBundle } from './e2e-artifacts.ts';
+import {
+	type ManualAlarmControl,
+	withManualAlarmControl
+} from './manual-alarms.ts';
 import { StubOidcIssuer } from './oidc-issuer.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
@@ -69,6 +74,23 @@ export const r2Credentials = {
 type MiniflareRequestInit = NonNullable<
 	Parameters<Miniflare['dispatchFetch']>[1]
 >;
+
+type TestDurableObjectNamespace = Awaited<
+	ReturnType<Miniflare['getDurableObjectNamespace']>
+>;
+
+interface ManualAlarmStub extends ManualAlarmControl {
+	isManualAlarmFenceOpen(): Promise<boolean>;
+}
+
+interface ManualAlarmBindings {
+	readonly CUPBOARD_DO: {
+		readonly idFromName: TestDurableObjectNamespace['idFromName'];
+		readonly get: (
+			id: ReturnType<TestDurableObjectNamespace['idFromName']>
+		) => ManualAlarmStub;
+	};
+}
 
 /**
  * What the commit sessions of a run did, as counted at the socket the worker
@@ -130,7 +152,9 @@ export class CupboardTestServer {
 			readonly onAbandonedUpgrade?: () => void;
 		} = {}
 	): Promise<CupboardTestServer> {
-		const bundle = await bundleWorker(directory);
+		const bundle =
+			(await sharedWorkerBundle(root)) ??
+			(await buildTestWorkerBundle(root, directory));
 		const issuer = await StubOidcIssuer.start();
 
 		// The Durable Object runs in its own `cupboard-tenant` script, so its
@@ -348,6 +372,26 @@ export class CupboardTestServer {
 		url.pathname = `${url.pathname}${path}`;
 
 		return url;
+	}
+
+	async withManualAlarms<T>(
+		use: (runAlarmPass: () => Promise<void>) => Promise<T>
+	): Promise<T> {
+		const bindings =
+			await this.worker.getBindings<ManualAlarmBindings>('cupboard');
+		const stub = bindings.CUPBOARD_DO.get(
+			bindings.CUPBOARD_DO.idFromName(fixtureTenant)
+		);
+		return withManualAlarmControl(stub, use);
+	}
+
+	async isManualAlarmFenceOpen(): Promise<boolean> {
+		const bindings =
+			await this.worker.getBindings<ManualAlarmBindings>('cupboard');
+		const stub = bindings.CUPBOARD_DO.get(
+			bindings.CUPBOARD_DO.idFromName(fixtureTenant)
+		);
+		return stub.isManualAlarmFenceOpen();
 	}
 
 	/**
@@ -588,26 +632,25 @@ async function applyD1Migrations(
 	}
 }
 
-interface WorkerBundle {
-	readonly directory: string;
-	readonly controlEntrypoint: string;
-	readonly tenantEntrypoint: string;
-}
-
 // Bundles both Worker scripts into standalone modules. The e2e tenant entrypoint
 // differs only in treating cache-tag purges as delivered because Miniflare does
 // not implement the Worker cache purge API. The two-worker layout and the
 // cross-script Durable Object binding otherwise match production.
-async function bundleWorker(directory: string): Promise<WorkerBundle> {
+export async function buildTestWorkerBundle(
+	checkoutRoot: string,
+	directory: string
+): Promise<TestWorkerBundle> {
 	const outputDirectory = path.join(directory, 'worker-bundle');
 
 	await bundleEntry(
+		checkoutRoot,
 		outputDirectory,
 		'packages/server/src/worker.ts',
 		'worker',
 		true
 	);
 	await bundleEntry(
+		checkoutRoot,
 		outputDirectory,
 		'packages/server/src/test-worker.ts',
 		'tenant',
@@ -622,6 +665,7 @@ async function bundleWorker(directory: string): Promise<WorkerBundle> {
 }
 
 async function bundleEntry(
+	checkoutRoot: string,
 	outputDirectory: string,
 	entry: string,
 	name: string,
@@ -631,7 +675,7 @@ async function bundleEntry(
 		build: {
 			emptyOutDir: shouldEmptyOutDirectory,
 			lib: {
-				entry: path.join(root, entry),
+				entry: path.join(checkoutRoot, entry),
 				fileName: name,
 				formats: ['es']
 			},
@@ -651,7 +695,7 @@ async function bundleEntry(
 		configFile: false,
 		logLevel: 'silent',
 		plugins: [sqlTextPlugin()],
-		root
+		root: checkoutRoot
 	});
 }
 

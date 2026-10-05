@@ -28,7 +28,7 @@ import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { discoverNixStoreConfig, Nix } from '../../packages/nix/src/index.ts';
 import { defaultNixConfigEnvironment } from '../../packages/nix/src/store-config.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
-import { temporaryRoot } from '../support/filesystem.ts';
+import { temporaryRoot, waitForFile } from '../support/filesystem.ts';
 import { runCommand } from '../support/process.ts';
 
 /**
@@ -581,9 +581,7 @@ describe('build-push without a Nix daemon', () => {
 			...recorded,
 			async uploadNar(r2Key, body) {
 				if (r2Key === `staging/${StorePath.hash(dependency)}`) {
-					await expect
-						.poll(() => existsSync(outLink), { timeout: 30_000 })
-						.toBe(true);
+					await waitForFile(outLink, AbortSignal.timeout(30_000));
 					await runCommand('nix-store', ['--gc'], { env: environment });
 					isSurvivedCollection = existsSync(dependency);
 				}
@@ -627,7 +625,11 @@ describe('build-push without a Nix daemon', () => {
 	// case. The private-store cases above cover daemonless streaming.
 	it('publishes a host-store build through reconciled mode', async (context) => {
 		if (!existsSync('/nix/var/nix/daemon-socket/socket')) {
-			context.skip();
+			if (process.env.CI === undefined) {
+				context.skip();
+			}
+
+			throw new Error('The host-store end-to-end case requires a Nix daemon');
 		}
 
 		const workspace = store().workspace;
@@ -675,7 +677,11 @@ describe('build-push without a Nix daemon', () => {
 
 		// A child failure here is the platform refusing to build the trivial
 		// derivation at all; the publication contract is covered above.
-		if (thrown instanceof BuildCommandFailedError) {
+		if (
+			process.platform === 'darwin' &&
+			process.env.CI === undefined &&
+			thrown instanceof BuildCommandFailedError
+		) {
 			context.skip();
 		}
 

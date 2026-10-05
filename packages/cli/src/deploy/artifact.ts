@@ -1,6 +1,7 @@
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { writeBuildInfo } from './build-info.ts';
 import { resolveBuildVersion } from './build-version.ts';
 import type { Bundler, WorkerBundle } from './bundle.ts';
 import { type DeploymentConfig, parseDeploymentConfig } from './config.ts';
@@ -61,10 +62,7 @@ async function ensureBuildInfo(checkoutRoot: string): Promise<string> {
 	const outputPath = path.join(checkoutRoot, buildInfoPath);
 	const version = await resolveBuildVersion(checkoutRoot);
 
-	await writeFile(
-		outputPath,
-		`export const buildVersion = ${JSON.stringify(version)};\n`
-	);
+	await writeBuildInfo(outputPath, version);
 
 	return version;
 }

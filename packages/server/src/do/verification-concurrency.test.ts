@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { maxOutgoingConnections } from './bulk.ts';
 import { mapVerificationProbes } from './verification-service.ts';
@@ -7,6 +7,9 @@ describe('verification probes', () => {
 	it('uses the shared outgoing-connection limit', async () => {
 		let active = 0;
 		let maximum = 0;
+		const firstWave = Promise.withResolvers<undefined>();
+		const secondWave = Promise.withResolvers<undefined>();
+		let started = 0;
 		const gates = Array.from({ length: maxOutgoingConnections + 2 }, () =>
 			Promise.withResolvers<undefined>()
 		);
@@ -15,6 +18,13 @@ describe('verification probes', () => {
 			async (item) => {
 				active += 1;
 				maximum = Math.max(maximum, active);
+				started += 1;
+				if (started === maxOutgoingConnections) {
+					firstWave.resolve(undefined);
+				}
+				if (started === maxOutgoingConnections + 2) {
+					secondWave.resolve(undefined);
+				}
 
 				try {
 					await gates[item]?.promise;
@@ -26,17 +36,15 @@ describe('verification probes', () => {
 			}
 		);
 
-		await vi.waitFor(() => {
-			expect(active).toBe(maxOutgoingConnections);
-		});
+		await firstWave.promise;
+		expect(active).toBe(maxOutgoingConnections);
 
 		for (const gate of gates.slice(0, maxOutgoingConnections)) {
 			gate.resolve(undefined);
 		}
 
-		await vi.waitFor(() => {
-			expect(active).toBe(2);
-		});
+		await secondWave.promise;
+		expect(active).toBe(2);
 		gates.at(-2)?.resolve(undefined);
 		gates.at(-1)?.resolve(undefined);
 

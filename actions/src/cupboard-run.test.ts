@@ -65,7 +65,7 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		`  process.stderr.write(${JSON.stringify(legacyPayload)});`,
 		'}',
 		options.holdOpen
-			? 'setInterval(() => undefined, 1000);'
+			? "require('node:net').createServer().listen(0, '127.0.0.1');"
 			: `process.exit(${String(options.exitCode)});`,
 		''
 	].join('\n');

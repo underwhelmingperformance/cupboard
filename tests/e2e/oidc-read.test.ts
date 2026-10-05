@@ -353,7 +353,11 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 				try {
 					const session = runWithReadAccess(
 						target,
-						[process.execPath, '-e', 'setInterval(() => {}, 1000)'],
+						[
+							process.execPath,
+							'-e',
+							"require('node:net').createServer().listen(0, '127.0.0.1')"
+						],
 						{ githubOidc: true, audience: audienceSchema.parse(audience) },
 						{
 							environment: {

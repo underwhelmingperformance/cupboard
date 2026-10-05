@@ -723,13 +723,11 @@ describe('the probe-to-charge window', () => {
 								if (!hasPaused) {
 									hasPaused = true;
 									await env.BLOBS.put(pausedKey, JSON.stringify(result));
-									while (
-										!isReleased &&
-										(await originalHead(releaseKey)) === null
-									) {
-										await new Promise<void>((resolve) =>
-											setTimeout(resolve, 0)
-										);
+									while (!isReleased) {
+										if ((await originalHead(releaseKey)) !== null) {
+											break;
+										}
+										await scheduler.wait(0);
 									}
 								}
 								return result;
@@ -806,7 +804,7 @@ describe('the probe-to-charge window', () => {
 						'Verification completed before the advisory account read paused.'
 					);
 				}
-				await new Promise<void>((resolve) => setTimeout(resolve, 0));
+				await scheduler.wait(0);
 				paused = await env.BLOBS.get(pausedKey);
 			}
 			expect(await paused.json()).toStrictEqual([

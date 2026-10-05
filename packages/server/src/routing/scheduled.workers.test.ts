@@ -1018,8 +1018,10 @@ describe('scheduled tenant pass failure records', () => {
 		let active = 0;
 		let maxActive = 0;
 		const seen: string[] = [];
+		const started = Promise.withResolvers<undefined>();
+		const release = Promise.withResolvers<undefined>();
 
-		await runMaintenanceBatch(
+		const running = runMaintenanceBatch(
 			rootLogger(),
 			env,
 			5,
@@ -1027,10 +1029,16 @@ describe('scheduled tenant pass failure records', () => {
 				seen.push(id);
 				active += 1;
 				maxActive = Math.max(maxActive, active);
-				await new Promise((resolve) => setTimeout(resolve, 0));
+				if (active === 4) {
+					started.resolve(undefined);
+				}
+				await release.promise;
 				active -= 1;
 			}
 		);
+		await started.promise;
+		release.resolve(undefined);
+		await running;
 
 		expect({ seen, maxActive }).toStrictEqual({
 			seen: ['acme', 'beta', 'delta', 'epsilon', 'gamma'],

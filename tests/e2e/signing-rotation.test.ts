@@ -34,121 +34,118 @@ describe('Nix substitution through a signing-key rotation', () => {
 				const server = await CupboardTestServer.start(directory);
 
 				try {
-					const client = new CupboardClient(server.tenantUrl, fetch, {
-						kind: 'default'
-					});
-					const token = await server.ownerAdminToken();
-					const rpc = tenantRpc(server.tenantUrl, {
-						credential: token
-					});
-					const oldKey = await client.publicKey();
-					const source = await NixStore.host(
-						path.join(directory, 'source-home')
-					);
-					const push = (storePath: string): Promise<unknown> =>
-						pushStorePaths(
-							{ client: server.pushClient(token), store: source },
-							[storePath]
+					await server.withManualAlarms(async (runAlarmPass) => {
+						const client = new CupboardClient(server.tenantUrl, fetch, {
+							kind: 'default'
+						});
+						const token = await server.ownerAdminToken();
+						const rpc = tenantRpc(server.tenantUrl, {
+							credential: token
+						});
+						const oldKey = await client.publicKey();
+						const source = await NixStore.host(
+							path.join(directory, 'source-home')
 						);
-					const trusting = (keys: readonly string[]): RealiseOptions => ({
-						substituter: server.tenantUrl.href,
-						trustedPublicKeys: keys,
-						requireSigs: true
-					});
+						const push = (storePath: string): Promise<unknown> =>
+							pushStorePaths(
+								{ client: server.pushClient(token), store: source },
+								[storePath]
+							);
+						const trusting = (keys: readonly string[]): RealiseOptions => ({
+							substituter: server.tenantUrl.href,
+							trustedPublicKeys: keys,
+							requireSigs: true
+						});
 
-					const targetOld = await NixStore.chroot(
-						path.join(directory, 'target-old'),
-						path.join(directory, 'target-old-home')
-					);
-					const targetNew = await NixStore.chroot(
-						path.join(directory, 'target-new'),
-						path.join(directory, 'target-new-home')
-					);
+						const targetOld = await NixStore.chroot(
+							path.join(directory, 'target-old'),
+							path.join(directory, 'target-old-home')
+						);
+						const targetNew = await NixStore.chroot(
+							path.join(directory, 'target-new'),
+							path.join(directory, 'target-new-home')
+						);
 
-					// Single-key golden path: a path pushed before any rotation carries
-					// one signature and substitutes under the original key.
-					const before = await source.build(rotationDerivation('before'));
-					await push(before);
-					const beforeInfo = await fetchNarInfo(server, before);
-					await targetOld.realise(before, trusting([oldKey]));
+						const before = await source.build(rotationDerivation('before'));
+						await push(before);
+						const beforeInfo = await fetchNarInfo(server, before);
+						await targetOld.realise(before, trusting([oldKey]));
 
-					// Open the window. A path pushed now is signed by both keys.
-					const { rotated, keys } = await rpc.keys.signing.rotate();
-					const newKey = rotated.key.publicKey;
+						const { rotated, keys } = await rpc.keys.signing.rotate();
+						const newKey = rotated.key.publicKey;
 
-					const windowPath = await source.build(rotationDerivation('window'));
-					await push(windowPath);
-					const windowInfo = await fetchNarInfo(server, windowPath);
-					const publishedInWindow = await publishedKeys(server);
+						const windowPath = await source.build(rotationDerivation('window'));
+						await push(windowPath);
+						const windowInfo = await fetchNarInfo(server, windowPath);
+						const publishedInWindow = await publishedKeys(server);
 
-					// The window path substitutes under the old key alone and under the
-					// new key alone, which is the rotation guarantee.
-					await targetOld.realise(windowPath, trusting([oldKey]));
-					await targetNew.realise(windowPath, trusting([newKey]));
-					await expect
-						.poll(
-							async () => {
-								const listed = await rpc.keys.signing.list();
-								const entry = listed.keys.find(
-									(candidate) => candidate.key.id === rotated.key.id
-								);
+						await targetOld.realise(windowPath, trusting([oldKey]));
+						await targetNew.realise(windowPath, trusting([newKey]));
+						const backfillState = async (): Promise<string | undefined> => {
+							const listed = await rpc.keys.signing.list();
+							const entry = listed.keys.find(
+								(candidate) => candidate.key.id === rotated.key.id
+							);
+							return entry?.state === 'signing'
+								? entry.backfill?.state
+								: undefined;
+						};
+						for (
+							let pass = 0;
+							pass < 32 && (await backfillState()) !== 'complete';
+							pass += 1
+						) {
+							await runAlarmPass();
+						}
+						expect(await backfillState()).toBe('complete');
+						await targetNew.realise(before, trusting([newKey]));
 
-								return entry?.state === 'signing'
-									? entry.backfill?.state
-									: undefined;
-							},
-							{ interval: 100, timeout: 30_000 }
-						)
-						.toBe('complete');
-					await targetNew.realise(before, trusting([newKey]));
+						await rpc.keys.signing.retire({ id: 'active' });
+						await rpc.keys.signing.retire({ id: 'active' });
+						const publishedAfterRetire = await publishedKeys(server);
 
-					// Retire the old key fully; a path pushed afterwards is signed by the
-					// new key only and still substitutes under it.
-					await rpc.keys.signing.retire({ id: 'active' });
-					await rpc.keys.signing.retire({ id: 'active' });
-					const publishedAfterRetire = await publishedKeys(server);
+						const postPath = await source.build(rotationDerivation('post'));
+						await push(postPath);
+						const postInfo = await fetchNarInfo(server, postPath);
+						await targetNew.realise(postPath, trusting([newKey]));
 
-					const postPath = await source.build(rotationDerivation('post'));
-					await push(postPath);
-					const postInfo = await fetchNarInfo(server, postPath);
-					await targetNew.realise(postPath, trusting([newKey]));
-
-					expect({
-						beforeSigs: beforeInfo.sigs.length,
-						windowSigs: windowInfo.sigs.length,
-						postSigs: postInfo.sigs.length,
-						rotatedKeyCount: keys.length,
-						publishedInWindow,
-						publishedAfterRetire,
-						before: await readFile(targetOld.physicalPath(before), 'utf8'),
-						beforeUnderNewKey: await readFile(
-							targetNew.physicalPath(before),
-							'utf8'
-						),
-						windowUnderOldKey: await readFile(
-							targetOld.physicalPath(windowPath),
-							'utf8'
-						),
-						windowUnderNewKey: await readFile(
-							targetNew.physicalPath(windowPath),
-							'utf8'
-						),
-						postUnderNewKey: await readFile(
-							targetNew.physicalPath(postPath),
-							'utf8'
-						)
-					}).toStrictEqual({
-						beforeSigs: 1,
-						windowSigs: 2,
-						postSigs: 1,
-						rotatedKeyCount: 2,
-						publishedInWindow: [oldKey, newKey].toSorted(byCodeUnit),
-						publishedAfterRetire: [newKey],
-						before: 'before',
-						beforeUnderNewKey: 'before',
-						windowUnderOldKey: 'window',
-						windowUnderNewKey: 'window',
-						postUnderNewKey: 'post'
+						expect({
+							beforeSigs: beforeInfo.sigs.length,
+							windowSigs: windowInfo.sigs.length,
+							postSigs: postInfo.sigs.length,
+							rotatedKeyCount: keys.length,
+							publishedInWindow,
+							publishedAfterRetire,
+							before: await readFile(targetOld.physicalPath(before), 'utf8'),
+							beforeUnderNewKey: await readFile(
+								targetNew.physicalPath(before),
+								'utf8'
+							),
+							windowUnderOldKey: await readFile(
+								targetOld.physicalPath(windowPath),
+								'utf8'
+							),
+							windowUnderNewKey: await readFile(
+								targetNew.physicalPath(windowPath),
+								'utf8'
+							),
+							postUnderNewKey: await readFile(
+								targetNew.physicalPath(postPath),
+								'utf8'
+							)
+						}).toStrictEqual({
+							beforeSigs: 1,
+							windowSigs: 2,
+							postSigs: 1,
+							rotatedKeyCount: 2,
+							publishedInWindow: [oldKey, newKey].toSorted(byCodeUnit),
+							publishedAfterRetire: [newKey],
+							before: 'before',
+							beforeUnderNewKey: 'before',
+							windowUnderOldKey: 'window',
+							windowUnderNewKey: 'window',
+							postUnderNewKey: 'post'
+						});
 					});
 				} finally {
 					await server.stop();

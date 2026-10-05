@@ -17,11 +17,15 @@ describe('VerdictRecorder', () => {
 	it('coalesces verdicts added while a flush is in flight', async () => {
 		const batches: VerificationResult[][] = [];
 		const resolvers: ((applied: number) => void)[] = [];
+		const secondBatch = Promise.withResolvers<undefined>();
 		const recorder = new VerdictRecorder(rootLogger(), (results) => {
 			batches.push([...results]);
 
 			return new Promise((resolve) => {
 				resolvers.push(resolve);
+				if (resolvers.length === 2) {
+					secondBatch.resolve(undefined);
+				}
 			});
 		});
 
@@ -32,9 +36,7 @@ describe('VerdictRecorder', () => {
 		recorder.add(verdict('c'));
 
 		resolvers.at(0)?.(1);
-		await vi.waitFor(() => {
-			expect(resolvers.length).toBe(2);
-		});
+		await secondBatch.promise;
 		resolvers.at(1)?.(2);
 
 		const applied = await recorder.finishRecording();
@@ -110,7 +112,11 @@ describe('VerdictRecorder', () => {
 		vi.useFakeTimers();
 		const controller = new AbortController();
 		const failure = new Error('consumer deadline');
-		const record = vi.fn(() => Promise.reject(new Error('record outage')));
+		const started = Promise.withResolvers<undefined>();
+		const record = vi.fn(() => {
+			started.resolve(undefined);
+			return Promise.reject(new Error('record outage'));
+		});
 		const recorder = new VerdictRecorder(
 			rootLogger(),
 			record,
@@ -120,9 +126,7 @@ describe('VerdictRecorder', () => {
 		);
 
 		recorder.add(verdict('a'));
-		await vi.waitFor(() => {
-			expect(record).toHaveBeenCalledTimes(1);
-		});
+		await started.promise;
 		controller.abort(failure);
 
 		await expect(recorder.finishRecording()).rejects.toBe(failure);

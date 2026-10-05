@@ -213,9 +213,15 @@ contain placeholder resource IDs, and `cupboard deploy` never edits them.
 
 ## Checking your change
 
-`pnpm check` runs every script whose name starts with `check:`, one after
-another. CI runs it on every pull request. You need Nix and Docker to run all of
-it.
+`pnpm check` schedules all checks defined by the `check:*` scripts. It starts
+the server and end-to-end suites first and runs at most two checks at a time,
+with explicit CPU budgets for test workers. Each check reports its duration;
+failures do not prevent the remaining checks from running. You need Nix and
+Docker to run the full gate.
+
+CI runs the source checks in separate jobs. The required `check` context
+succeeds only when all source jobs and every conformance platform succeed. A
+failed, cancelled or skipped prerequisite prevents success.
 
 | Script                            | What it does                                                                                                                                                                                       | What it needs                                                        |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
@@ -230,7 +236,7 @@ it.
 | `check:types:conformance`         | Runs `tsc` for `tests/conformance`.                                                                                                                                                                |                                                                      |
 | `check:types:perf`                | Runs `tsc` for `tests/perf`.                                                                                                                                                                       |                                                                      |
 | `check:types:predecessor-fixture` | Runs `tsc` for the fixture that imitates an earlier release.                                                                                                                                       |                                                                      |
-| `check:test`                      | Runs every package's unit tests, including the Workers tests, then `test:actions` and `test:scripts`.                                                                                              |                                                                      |
+| `check:test`                      | Runs workspace unit tests, Workers tests, action tests and script tests with bounded concurrency.                                                                                                  |                                                                      |
 | `check:migrations`                | Replays the D1 migrations in SQLite in every order that a deploy can apply them, and checks the drizzle journal's order. See [Checking the migrations](./architecture.md#checking-the-migrations). |                                                                      |
 | `check:flake-deps`                | Checks that `pnpm-deps-hash.json` was recorded from the current `pnpm-lock.yaml`.                                                                                                                  |                                                                      |
 | `check:conformance-oracle`        | Checks that each recorded oracle Nix version matches its generated settings table.                                                                                                                 |                                                                      |
@@ -238,10 +244,12 @@ it.
 | `check:e2e`                       | Runs the end-to-end suites.                                                                                                                                                                        | Nix. Some cases also need Linux, the daemon socket and a C compiler. |
 | `check:e2e-remote-store`          | Runs the remote Nix store suite, against an `ssh-ng` store in a container.                                                                                                                         | Nix and Docker.                                                      |
 
-If your machine doesn't have the Nix daemon socket, a C compiler or Linux, the
-end-to-end cases that need them skip themselves. The conformance suite is
-different. If it can't build its reference copy of Nix, it fails rather than
-skipping.
+Locally, end-to-end cases skip when a required daemon, compiler or platform is
+unavailable. Linux CI starts a trusted Nix daemon and rejects all
+collection-time and runtime skips in the general end-to-end suite. The isolated
+GC suite starts its own daemon and does not require a host daemon or compiler.
+The conformance suite is different. If it can't build its reference copy of Nix,
+it fails rather than skipping.
 
 Two more test tiers aren't part of `pnpm check`. `pnpm e2e:pipeline` runs a
 consumer repository's whole publication job, and `pnpm bench:push` runs the
@@ -260,6 +268,7 @@ pnpm test:actions
 pnpm test:scripts
 pnpm check:lint
 pnpm check:types
+pnpm check --group server --concurrency 1
 ```
 
 The pre-commit hooks also catch a lot. When you commit, they run `check:deps`,
@@ -269,8 +278,8 @@ the flake lock or the oracle data, they also run the conformance oracle test,
 which needs Nix. They run some standard file-hygiene checks too, and lint the
 workflows and actions with `actionlint` and `zizmor`.
 
-Run the full `pnpm check` before you push. CI runs it as well, along with a few
-things that `pnpm check` doesn't cover:
+Run the full `pnpm check` before you push. CI runs each required source suite
+once and also checks:
 
 - the conformance suite on four systems;
 - a build of the flake;

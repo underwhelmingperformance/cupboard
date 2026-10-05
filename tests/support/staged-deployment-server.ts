@@ -47,6 +47,7 @@ import {
 	predecessorVersionTag
 } from '../fixtures/cache-deployment-predecessor/constants.ts';
 
+import { sharedStagedDeployment } from './e2e-artifacts.ts';
 import {
 	intermediateArtifact,
 	intermediateTransitions
@@ -294,7 +295,9 @@ function commonBindings() {
 	};
 }
 
-async function fixtureBundles(root: string): Promise<FixtureBundles> {
+export async function buildPredecessorBundles(
+	root: string
+): Promise<FixtureBundles> {
 	const bundler = createEsbuildBundler();
 	const directory = path.join(
 		root,
@@ -462,10 +465,12 @@ async function persistencePaths(): Promise<StagedDeploymentPaths> {
 
 export class StagedDeploymentServer {
 	static async start(checkoutRoot: string): Promise<StagedDeploymentServer> {
+		const shared = await sharedStagedDeployment(checkoutRoot);
 		const [paths, bundles, artifact] = await Promise.all([
 			persistencePaths(),
-			fixtureBundles(checkoutRoot),
-			buildArtifactFromTree(checkoutRoot, createEsbuildBundler())
+			shared?.bundles ?? buildPredecessorBundles(checkoutRoot),
+			shared?.artifact ??
+				buildArtifactFromTree(checkoutRoot, createEsbuildBundler())
 		]);
 		const issuer = await StubOidcIssuer.start();
 		const miniflare = new Miniflare(predecessorOptions(paths, bundles));

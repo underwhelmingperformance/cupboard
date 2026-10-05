@@ -1,13 +1,19 @@
 import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
 import process from 'node:process';
 
-import {
-	storePathSchema,
-	type StorePathString
-} from '@cupboard/nix-store/scalars';
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
-import { describe, expect, it, type TestContext } from 'vitest';
+import {
+	afterAll,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	type TestContext
+} from 'vitest';
 
 import { Nix } from '../../packages/nix/src/nix.ts';
 import {
@@ -15,6 +21,11 @@ import {
 	NixDaemonStoreClient
 } from '../../packages/nix/src/nix-daemon.ts';
 import { NixStorePathNotFoundError } from '../../packages/nix/src/nix-store.ts';
+import { temporaryRoot } from '../support/filesystem.ts';
+import {
+	addKnownStorePath,
+	type KnownStorePath
+} from '../support/known-store-path.ts';
 import { runCommand } from '../support/process.ts';
 import { FakeSubstituter, servedNarSize } from '../support/substituter.ts';
 
@@ -24,7 +35,6 @@ const storeDirectory = storeDirectorySchema.parse('/nix/store');
 const absentPath = storePathSchema.parse(
 	'/nix/store/00000000000000000000000000000000-cupboard-missing'
 );
-const executableStorePath = /^\/nix\/store\/[^/]+/u.exec(process.execPath)?.[0];
 
 // Connecting to the daemon socket needs a peer the daemon accepts; outside CI
 // a sandboxed process may be refused with EPERM, which is a limitation of the
@@ -71,22 +81,15 @@ async function requireTrustedDaemon(
 	context: Pick<TestContext, 'skip'>,
 	daemon: NixDaemonStoreClient
 ): Promise<void> {
-	if ((await daemon.daemonTrust()) !== 'trusted') {
-		context.skip();
-	}
-}
-
-// The test process itself has to run from the store for its own store path to
-// be a known-valid query subject; anywhere else the case skips.
-function requireExecutableStorePath(
-	context: Pick<TestContext, 'skip'>
-): StorePathString {
-	if (executableStorePath === undefined) {
-		context.skip();
-		throw new Error('unreachable: skip does not return');
+	if ((await daemon.daemonTrust()) === 'trusted') {
+		return;
 	}
 
-	return storePathSchema.parse(executableStorePath);
+	if (process.env.CI === undefined) {
+		context.skip();
+	}
+
+	throw new Error('The end-to-end Nix daemon must trust its test client');
 }
 
 // A derivation this Nix writes, with the given attributes folded in. It is
@@ -107,6 +110,20 @@ async function instantiate(attributes: string): Promise<string> {
 }
 
 describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
+	let workspace: string | undefined;
+	let knownPath: KnownStorePath;
+
+	beforeAll(async () => {
+		workspace = await mkdtemp(path.join(temporaryRoot, 'cupboard-daemon-e2e-'));
+		knownPath = await addKnownStorePath(workspace);
+	});
+
+	afterAll(async () => {
+		if (workspace !== undefined) {
+			await rm(workspace, { recursive: true, force: true });
+		}
+	});
+
 	it('answers empty batched queries with empty sets', async (context) => {
 		const answers = await withDaemon(context, async (daemon) => ({
 			valid: await daemon.queryValidPaths([]),
@@ -117,7 +134,7 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 	});
 
 	it('filters an absent path from a valid-path-info batch', async (context) => {
-		const executable = requireExecutableStorePath(context);
+		const executable = knownPath.root;
 		const infos = await withDaemon(context, (daemon) =>
 			daemon.queryValidPathsInfo([executable, absentPath])
 		);
@@ -127,20 +144,20 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 				storePath: info.storePath,
 				narHashPrefix: info.narHash.toString().slice(0, 'sha256:'.length),
 				narSizeAboveZero: info.narSize > 0,
-				referencesListed: Array.isArray(info.references)
+				references: info.references
 			}))
 		).toStrictEqual([
 			{
 				storePath: executable,
 				narHashPrefix: 'sha256:',
 				narSizeAboveZero: true,
-				referencesListed: true
+				references: [knownPath.dependency]
 			}
 		]);
 	});
 
 	it('reads a valid path through the per-path fallback', async (context) => {
-		const executable = requireExecutableStorePath(context);
+		const executable = knownPath.root;
 		const infos = await withDaemon(context, (daemon) =>
 			daemon.queryPathsInfo([executable])
 		);
@@ -236,7 +253,7 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 	// substituter list a connection sets decides the answer, so a connection
 	// that permits none can offer nothing, however much this machine holds.
 	it('offers nothing when the connection permits no substituters', async (context) => {
-		const executable = requireExecutableStorePath(context);
+		const executable = knownPath.root;
 		const infos = await withDaemon(
 			context,
 			(daemon) => daemon.querySubstitutablePathInfos([executable]),
@@ -251,7 +268,7 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 	// daemon answers for what this machine holds while the walk asks the
 	// permitted substituters itself, which here are none.
 	it('refuses a closure whose root no permitted substituter offers', async (context) => {
-		const executable = requireExecutableStorePath(context);
+		const executable = knownPath.root;
 		const nix = Nix.openForAvailability(undefined, {
 			overrides: { substituters: '' }
 		});

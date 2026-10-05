@@ -1,7 +1,3 @@
-import { buildAction } from '../commands/build.ts';
+import { runNativeBuildWorker } from './native-worker.ts';
 
-import { buildPathInputs, runNativeBuild } from './native.ts';
-
-void runNativeBuild(async (environment, signal) => {
-	await buildAction(buildPathInputs(environment), environment, { signal });
-});
+void runNativeBuildWorker();
