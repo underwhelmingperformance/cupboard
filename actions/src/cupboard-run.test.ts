@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -76,6 +77,34 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 }
 
 describe('commandOptionsFromHelp', () => {
+	it.each([
+		{
+			flags: '--bundles-file, --attestations-file <path>',
+			options: ['--bundles-file', '--attestations-file', '--help']
+		},
+		{
+			flags: '--bundle, --attestation <bundle>',
+			options: ['--bundle', '--attestation', '--help']
+		},
+		{
+			flags: '--primary, --alias [value]',
+			options: ['--primary', '--alias', '--help']
+		},
+		{
+			flags: '--primary, --alias',
+			options: ['--primary', '--alias', '--help']
+		}
+	])('collects both long aliases from $flags', ({ flags, options }) => {
+		const command = new Command('cupboard').option(
+			flags,
+			'accepts a value; see --unsupported for other commands'
+		);
+
+		expect([
+			...commandOptionsFromHelp(command.helpInformation())
+		]).toStrictEqual(options);
+	});
+
 	it('collects the long options that commander lists, however they are flagged', () => {
 		const help = [
 			'Usage: cupboard push [options] <url> [paths...]',
