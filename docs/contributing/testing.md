@@ -109,6 +109,18 @@ the error. `workerd` also prints alarm and exception messages, but some tests
 cause failures on purpose and print the same messages. These messages only help
 once you've connected them to the failing test and Durable Object.
 
+The Worker project defaults to four workers. `CUPBOARD_TEST_WORKERS` supplies an
+explicit project budget, for example:
+
+```sh
+CUPBOARD_TEST_WORKERS=2 pnpm --filter @cupboard/server test
+```
+
+`pnpm check` divides the available CPUs between at most two top-level tasks and
+passes a budget to each test process. Vitest hides console output from passing
+server tests and prints it for failed tests. The runtime still formats Worker
+logs, and Vitest still captures them.
+
 ## Actions tests
 
 `pnpm test:actions` runs `actions/src/**/*.test.ts`. Many of these tests run the
@@ -143,8 +155,22 @@ commits, verification and retention, runs as it does in production.
 The end-to-end tests cover substitution, signing key rotation, private reads,
 named caches, reuse views, sign-up, the control plane, OIDC federation,
 `build-push`, garbage collection and staged upgrades. They need a working Nix
-installation. Tests that need the Nix daemon's socket, a C compiler (`cc`) or
-Linux skip themselves if those aren't available.
+installation. Tests that need a daemon, a C compiler (`cc`) or Linux skip
+locally when those prerequisites are unavailable. Linux CI starts a trusted
+daemon and fails on any skipped general end-to-end case. The GC fixture uses its
+own diverted daemon, and private daemonless fixtures remain daemonless.
+
+Each end-to-end Vitest invocation builds the production and test Worker bundles,
+plus the predecessor fixture, once from the working tree. Watch reruns rebuild
+those artifacts. The fixtures continue to create fresh Miniflare instances,
+issuers and storage; stopping a fixture does not remove shared artifacts. When
+called outside these test suites, the support helpers build from the working
+tree on each invocation.
+
+The [check runtime report][check-runtime] records timings, coverage and
+remaining bootstrap costs.
+
+[check-runtime]: ./check-runtime.md
 
 ### The staged upgrade test
 

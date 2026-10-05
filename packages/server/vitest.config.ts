@@ -8,7 +8,12 @@ import {
 import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { defineConfig } from 'vitest/config';
 
+import { resolveTestWorkerBudget } from './src/test-worker-budget.ts';
+
 export default defineConfig(async () => {
+	const workerBudget = resolveTestWorkerBudget(
+		process.env.CUPBOARD_TEST_WORKERS
+	);
 	// The D1 migrations production applies through `wrangler d1 migrations apply`,
 	// handed to the workers pool as a binding the setup file replays into D1.
 	const here = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +21,7 @@ export default defineConfig(async () => {
 
 	return {
 		test: {
+			silent: 'passed-only' as const,
 			projects: [
 				{
 					test: {
@@ -78,7 +84,7 @@ export default defineConfig(async () => {
 						name: 'workers',
 						testTimeout: 30_000,
 						fileParallelism: true,
-						maxWorkers: 4,
+						maxWorkers: workerBudget,
 						sequence: { groupOrder: 1 },
 						include: ['src/**/*.workers.test.ts'],
 						setupFiles: ['./src/d1-test-setup.ts']

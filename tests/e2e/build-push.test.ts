@@ -54,6 +54,10 @@ const helperSource = path.resolve(
 	import.meta.dirname,
 	'../../packages/cli/hook-helper/cupboard-hook-relay.c'
 );
+const clockHelperSource = path.resolve(
+	import.meta.dirname,
+	'../fixtures/hook-relay-clock.c'
+);
 const fakeDrvPath = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-e2e.drv';
 
 function waitForChildClose(child: ChildProcess): Promise<number | null> {
@@ -260,6 +264,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 	() => {
 		let workspace: string;
 		let helperPath: string;
+		let clockHelperPath: string;
 		let server: CupboardTestServer;
 		let client: PushClient;
 		let store: NixStore;
@@ -275,6 +280,8 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 			workspace = await mkdtemp(path.join(tmpdir(), 'cupboard-bp-e2e-'));
 			helperPath = path.join(workspace, 'cupboard-hook-relay');
 			await run('cc', ['-O2', '-o', helperPath, helperSource]);
+			clockHelperPath = path.join(workspace, 'cupboard-hook-relay-clock');
+			await run('cc', ['-O2', '-o', clockHelperPath, clockHelperSource]);
 
 			server = await CupboardTestServer.start(path.join(workspace, 'server'));
 			client = server.pushClient(await server.ownerAdminToken());
@@ -461,35 +468,50 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 		it('stops waiting when the listener does not confirm an event', async () => {
 			const socketPath = path.join(workspace, 'stall.sock');
 			let accepted: Socket | undefined;
+			const delivered = Promise.withResolvers<string>();
 			const listener: Server = createServer(
 				{ allowHalfOpen: true },
 				(connection) => {
 					accepted = connection;
-					connection.resume();
+					const event: string[] = [];
+					connection.setEncoding('utf8');
+					connection.on('data', (chunk: string) => {
+						event.push(chunk);
+					});
+					connection.once('end', () => {
+						delivered.resolve(event.join(''));
+					});
 				}
 			);
 			await listenOnSocket(listener, socketPath);
 
 			try {
-				const started = performance.now();
-				const helper = spawn(helperPath, [socketPath]);
+				const helper = spawn(clockHelperPath, [socketPath]);
 				let stderr = '';
+				let stdout = '';
+				helper.stdout.setEncoding('utf8');
+				helper.stdout.on('data', (chunk: string) => {
+					stdout += chunk;
+				});
 				helper.stderr.setEncoding('utf8');
 				helper.stderr.on('data', (chunk: string) => {
 					stderr += chunk;
 				});
 				helper.stdin.end('event\n');
 				const status = await waitForChildClose(helper);
-				const elapsedMs = performance.now() - started;
+				const timeout: unknown = JSON.parse(stdout);
 
 				expect({
 					status,
-					warned: stderr !== '',
-					releasedAfterTimeout: elapsedMs >= 2500
+					stderr,
+					timeout,
+					delivered: await delivered.promise
 				}).toStrictEqual({
 					status: 0,
-					warned: true,
-					releasedAfterTimeout: true
+					stderr:
+						'cupboard-hook-relay: delivery failed: the listener did not confirm the event\n',
+					timeout: { timeoutMs: 3000 },
+					delivered: 'event\n'
 				});
 			} finally {
 				accepted?.destroy();
@@ -721,7 +743,11 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 
 		it('publishes the outputs of a real multi-output nix build', async (context) => {
 			if (!isDaemonTrusted) {
-				context.skip();
+				if (process.env.CI === undefined) {
+					context.skip();
+				}
+
+				throw new Error('The end-to-end Nix daemon must trust its test client');
 			}
 
 			const seed = randomUUID().replaceAll('-', '');
@@ -748,7 +774,11 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 
 			// Some macOS sandbox and store policies cannot build this fixture.
 			// The preceding test covers the child-process exit contract.
-			if (outcome.error instanceof BuildCommandFailedError) {
+			if (
+				process.platform === 'darwin' &&
+				process.env.CI === undefined &&
+				outcome.error instanceof BuildCommandFailedError
+			) {
 				context.skip();
 			}
 

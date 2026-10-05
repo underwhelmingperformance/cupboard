@@ -33,7 +33,7 @@ import {
 } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	AttestationAttachResponseMismatchError,
@@ -463,6 +463,12 @@ function transportFixture(paths = 1, bundleCount = 1) {
 }
 
 describe('bundle attachment transport', () => {
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
 	it('stops renewal work after a sibling fails and preserves the failure if reporting throws', async () => {
 		const { prepared, client, log, expiry } = transportFixture(1, 2);
 		const started = Promise.withResolvers<undefined>();
@@ -501,7 +507,7 @@ describe('bundle attachment transport', () => {
 		});
 		const rejected = expect(pending).rejects.toBe(failure);
 		await failed.promise;
-		await new Promise<void>((resolve) => setTimeout(resolve, 1));
+		await vi.advanceTimersByTimeAsync(1);
 		renewal.resolve(undefined);
 		await rejected;
 		expect({
@@ -542,9 +548,11 @@ describe('bundle attachment transport', () => {
 			await new Promise<void>((resolve) => setTimeout(resolve, 1));
 			return response;
 		});
-		await expect(
+		const rejected = expect(
 			runAttestationAttachment(prepared, log, { client, onPartial: partial })
 		).rejects.toBeInstanceOf(AttestationPathUnservableError);
+		await vi.runAllTimersAsync();
+		await rejected;
 		expect(partial.mock.calls).toStrictEqual([
 			[
 				{
@@ -646,7 +654,7 @@ describe('bundle attachment transport', () => {
 								: AttestationAttachResponseMismatchError
 						);
 			await failed.promise;
-			await new Promise<void>((resolve) => setTimeout(resolve, 1));
+			await vi.advanceTimersByTimeAsync(1);
 			expect(partial.mock.calls).toStrictEqual([]);
 			siblings.resolve(undefined);
 			await rejection;
@@ -688,12 +696,14 @@ describe('bundle attachment transport', () => {
 			await new Promise<void>((resolve) => setTimeout(resolve, 1));
 			return responseFor(digest, body.storePathHashes);
 		});
-		await expect(
+		const rejected = expect(
 			runAttestationAttachment(prepared, log, {
 				client,
 				onPartial: partial
 			})
 		).rejects.toBe(failure);
+		await vi.runAllTimersAsync();
+		await rejected;
 		expect(partial.mock.calls).toStrictEqual([
 			[
 				{

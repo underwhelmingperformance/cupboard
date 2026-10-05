@@ -6,23 +6,12 @@ import process from 'node:process';
 import { describe, expect, it } from 'vitest';
 
 import { temporaryRoot, withTemporaryDirectory } from './filesystem.ts';
+import { withInheritedStream } from './inherited-stream.ts';
 import {
 	isolatedEnvironment,
 	NixDaemonStartError,
 	waitForDaemonSocket
 } from './nix.ts';
-
-const delayedInheritedError = [
-	"const { spawn } = require('node:child_process');",
-	`const descendant = spawn(${JSON.stringify(process.execPath)}, [`,
-	"\t'-e',",
-	`\t${JSON.stringify("setTimeout(() => process.stderr.write('late daemon error'), 250)")}`,
-	'], {',
-	'\tdetached: true,',
-	"\tstdio: ['ignore', 'ignore', process.stderr]",
-	'});',
-	'descendant.unref();'
-].join('\n');
 
 function waitForClose(child: ChildProcess): Promise<void> {
 	if (
@@ -91,20 +80,24 @@ describe('waitForDaemonSocket', () => {
 			'cupboard-daemon-diagnostics-',
 			async (directory) => {
 				const socketPath = path.join(directory, 'socket');
-				const child = spawn(process.execPath, ['-e', delayedInheritedError], {
-					stdio: ['ignore', 'ignore', 'pipe']
-				});
-				const stderr: Buffer[] = [];
-				child.stderr.on('data', (chunk: Buffer) => {
-					stderr.push(chunk);
-				});
-
-				await expect(
-					waitForDaemonSocket(child, socketPath, () =>
-						Buffer.concat(stderr).toString('utf8')
-					)
-				).rejects.toStrictEqual(
-					new NixDaemonStartError(socketPath, 'late daemon error')
+				await withInheritedStream(
+					'stderr',
+					'late daemon error',
+					async (fixture) => {
+						const stderr: Buffer[] = [];
+						fixture.child.stderr.on('data', (chunk: Buffer) => {
+							stderr.push(chunk);
+						});
+						const rejected = expect(
+							waitForDaemonSocket(fixture.child, socketPath, () =>
+								Buffer.concat(stderr).toString('utf8')
+							)
+						).rejects.toStrictEqual(
+							new NixDaemonStartError(socketPath, 'late daemon error')
+						);
+						await fixture.releaseAfterParentExit();
+						await rejected;
+					}
 				);
 			}
 		);

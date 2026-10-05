@@ -6,6 +6,7 @@ import { buildReceiptV3Schema } from '@cupboard/protocol/build';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { renderActionBundle } from '../../scripts/action-bundles.ts';
 import {
 	type NixSshStoreFixture,
 	startNixSshStore
@@ -20,6 +21,7 @@ interface ActionRun {
 	readonly intermediates: readonly string[];
 	readonly built: readonly string[];
 	readonly receipt: z.infer<typeof buildReceiptV3Schema>;
+	readonly retryClock: readonly { delayMs: number; afterMs: number }[];
 }
 
 const fixture: {
@@ -29,6 +31,9 @@ const fixture: {
 const bundlesDirectory = path.resolve('actions/build-paths/dist');
 const rootStateKey = 'cupboard-job-roots';
 const pathsSchema = z.array(z.string());
+const retryClockSchema = z.array(
+	z.object({ delayMs: z.number(), afterMs: z.number() })
+);
 const nixpkgsLockSchema = z.object({
 	locked: z.object({ rev: z.string() })
 });
@@ -93,6 +98,13 @@ beforeAll(async () => {
 	await readFile(path.join(bundlesDirectory, 'post.cjs'));
 	fixture.store = await startNixSshStore();
 	await store().copyDirectory(bundlesDirectory, '/tmp/action/dist');
+	await store().copyDirectory(bundlesDirectory, '/tmp/clock-action/dist');
+	await store().writeFile(
+		'/tmp/clock-action/dist/worker.cjs',
+		await renderActionBundle(
+			path.resolve('tests/support/build-paths-clock-worker.ts')
+		)
+	);
 	const lock: unknown = JSON.parse(await readFile('flake.lock', 'utf8'));
 	const revision = nixpkgsLockSchema.parse(
 		flakeLockSchema.parse(lock).nodes.nixpkgs
@@ -247,7 +259,9 @@ async function runAction(
 		'env',
 		...environment,
 		node(),
-		'/tmp/action/dist/main.cjs'
+		isAllowFailure
+			? '/tmp/clock-action/dist/main.cjs'
+			: '/tmp/action/dist/main.cjs'
 	]);
 	const outputFile = await store().exec(['cat', `${directory}/outputs`]);
 	const outputs = Object.fromEntries(
@@ -284,6 +298,14 @@ async function runAction(
 		z.string().parse(outputs['built-receipt-file'])
 	]);
 	const builtReceipt: unknown = JSON.parse(builtEncoded);
+	const retryClockText = isAllowFailure
+		? await store().exec(['cat', `${directory}/retry-clock.jsonl`])
+		: undefined;
+	const retryClock: unknown =
+		retryClockText
+			?.trim()
+			.split('\n')
+			.map((line): unknown => JSON.parse(line)) ?? [];
 
 	return {
 		environment,
@@ -291,7 +313,8 @@ async function runAction(
 		requested: await readPaths('publish-paths-file'),
 		intermediates: await readPaths('intermediate-paths-file'),
 		built: buildReceiptV3Schema.parse(builtReceipt).paths,
-		receipt: buildReceiptV3Schema.parse(receipt)
+		receipt: buildReceiptV3Schema.parse(receipt),
+		retryClock: retryClockSchema.parse(retryClock)
 	};
 }
 
@@ -426,6 +449,7 @@ describe('native build-paths action with real Nix', () => {
 			await exportPaths(kind, action.intermediates);
 
 			expect({
+				retryClock: action.retryClock,
 				requested: action.requested,
 				intermediates: sorted(action.intermediates),
 				built: action.built,
@@ -433,6 +457,12 @@ describe('native build-paths action with real Nix', () => {
 				origins: action.receipt.subjects.map((subject) => subject.origin),
 				invalid: await invalidPaths(kind, intermediates)
 			}).toStrictEqual({
+				retryClock: [
+					{ delayMs: 15_000, afterMs: 15_000 },
+					{ delayMs: 30_000, afterMs: 45_000 },
+					{ delayMs: 45_000, afterMs: 90_000 },
+					{ delayMs: 60_000, afterMs: 150_000 }
+				],
 				requested: [],
 				intermediates,
 				built: [],

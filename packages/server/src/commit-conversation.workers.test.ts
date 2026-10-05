@@ -69,32 +69,129 @@ describe('commit conversation frame reader', () => {
 		});
 		let passes = 0;
 
-		const result = await completeCommitSession(
-			conversation,
-			uploadId,
-			() => {
-				passes += 1;
+		const pause = vi
+			.spyOn(scheduler, 'wait')
+			.mockRejectedValue(
+				new Error('Verification must not wait for elapsed time')
+			);
 
-				// The first pass leaves the upload pending; the second records it.
-				if (passes === 2) {
-					server.send(
-						JSON.stringify({ ev: 'verdict', uploadId, status: 'servable' })
-					);
-				}
+		try {
+			const result = await completeCommitSession(
+				conversation,
+				uploadId,
+				() => {
+					passes += 1;
 
-				return Promise.resolve();
-			},
-			{}
+					if (passes === 2) {
+						server.send(
+							JSON.stringify({ ev: 'verdict', uploadId, status: 'servable' })
+						);
+					}
+
+					return Promise.resolve(passes === 2 ? 'complete' : 'pending');
+				},
+				{}
+			);
+
+			expect({ result, passes, pauses: pause.mock.calls }).toStrictEqual({
+				result: {
+					storePathHash: 'a'.repeat(32),
+					narHash:
+						'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347',
+					status: 'committed'
+				},
+				passes: 2,
+				pauses: []
+			});
+		} finally {
+			pause.mockRestore();
+		}
+	});
+
+	it('waits for the verdict frame after a completed pass without running another pass', async () => {
+		const { server, conversation } = openConversation();
+		server.addEventListener('message', () => {
+			server.send(
+				JSON.stringify({
+					ev: 'deferred',
+					uploadId,
+					storePathHash: 'a'.repeat(32),
+					narHash: 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+				})
+			);
+		});
+		const started = Promise.withResolvers<undefined>();
+		const verify = vi.fn(() => {
+			started.resolve(undefined);
+			return Promise.resolve('complete' as const);
+		});
+		const pending = completeCommitSession(conversation, uploadId, verify, {});
+		await started.promise;
+		server.send(
+			JSON.stringify({ ev: 'verdict', uploadId, status: 'servable' })
 		);
+		const result = await pending;
 
-		expect({ result, passes }).toStrictEqual({
+		expect({ result, passes: verify.mock.calls }).toStrictEqual({
 			result: {
 				storePathHash: 'a'.repeat(32),
 				narHash: 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347',
 				status: 'committed'
 			},
-			passes: 2
+			passes: [[]]
 		});
+	});
+
+	it('bounds pending verification passes and reports a missing verdict frame', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const { server, conversation } = openConversation();
+			server.addEventListener('message', () => {
+				server.send(
+					JSON.stringify({
+						ev: 'deferred',
+						uploadId,
+						storePathHash: 'a'.repeat(32),
+						narHash:
+							'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+					})
+				);
+			});
+			const finalPass = Promise.withResolvers<undefined>();
+			let passes = 0;
+			const pending = completeCommitSession(
+				conversation,
+				uploadId,
+				() => {
+					passes += 1;
+					if (passes === 100) {
+						finalPass.resolve(undefined);
+					}
+					return Promise.resolve('pending');
+				},
+				{}
+			);
+			const rejected = expect(pending).rejects.toMatchObject({
+				name: 'CommitFixturePhaseTimeoutError',
+				phase: 'verdict',
+				uploadId
+			});
+			await finalPass.promise;
+			await vi.advanceTimersByTimeAsync(commitFixturePhaseDeadlineMs);
+			await rejected;
+			expect({
+				passes,
+				socketState: conversation.socket.readyState
+			}).toStrictEqual({
+				passes: 100,
+				socketState: WebSocket.READY_STATE_CLOSED
+			});
+		} finally {
+			vi.useRealTimers();
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(testBase);
+		}
 	});
 
 	it('rejects a frame read started after the socket has closed', async () => {
@@ -146,7 +243,7 @@ describe('commit conversation frame reader', () => {
 			const pending = completeCommitSession(
 				conversation,
 				uploadId,
-				() => Promise.resolve(),
+				() => Promise.resolve('pending'),
 				{}
 			);
 			const rejected = expect(pending).rejects.toMatchObject({

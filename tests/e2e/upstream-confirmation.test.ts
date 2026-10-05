@@ -1,12 +1,17 @@
 import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
 import process from 'node:process';
 
-import {
-	storePathSchema,
-	type StorePathString
-} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import { describe, expect, it, type TestContext } from 'vitest';
+import {
+	afterAll,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	type TestContext
+} from 'vitest';
 
 import { isReachableElsewhere } from '../../packages/cli/src/plan/substituter-reach.ts';
 import {
@@ -23,6 +28,11 @@ import {
 	discoverNixStoreConfig,
 	type NixSubstitutionSettings
 } from '../../packages/nix/src/store-config.ts';
+import { temporaryRoot } from '../support/filesystem.ts';
+import {
+	addKnownStorePath,
+	type KnownStorePath
+} from '../support/known-store-path.ts';
 import { FakeSubstituter } from '../support/substituter.ts';
 
 /**
@@ -35,21 +45,6 @@ const readNoKeyFile = (filePath: string): string | undefined =>
 const socketPath =
 	process.env.NIX_DAEMON_SOCKET_PATH ?? '/nix/var/nix/daemon-socket/socket';
 const tenantUrl = new URL('https://cupboard.example.workers.dev/t/acme');
-const executableStorePath = /^\/nix\/store\/[^/]+/u.exec(process.execPath)?.[0];
-
-// The confirmation walks the closure this store holds, so the candidate has to
-// be a path it really holds. The test process's own store path is one whenever
-// this Node came from the store, and the case skips anywhere else.
-function requireExecutableStorePath(
-	context: Pick<TestContext, 'skip'>
-): StorePathString {
-	if (executableStorePath === undefined) {
-		context.skip();
-		throw new Error('unreachable: skip does not return');
-	}
-
-	return storePathSchema.parse(executableStorePath);
-}
 
 // Connecting to the daemon socket needs a peer the daemon accepts; outside CI
 // a sandboxed process may be refused with EPERM, which is a limitation of the
@@ -70,12 +65,34 @@ async function requireTrustedDaemon(
 	context: Pick<TestContext, 'skip'>,
 	client: NixDaemonStoreClient
 ): Promise<void> {
-	if ((await client.daemonTrust()) !== 'trusted') {
+	if ((await client.daemonTrust()) === 'trusted') {
+		return;
+	}
+
+	if (process.env.CI === undefined) {
 		context.skip();
 	}
+
+	throw new Error('The end-to-end Nix daemon must trust its test client');
 }
 
 describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
+	let workspace: string | undefined;
+	let knownPath: KnownStorePath;
+
+	beforeAll(async () => {
+		workspace = await mkdtemp(
+			path.join(temporaryRoot, 'cupboard-upstream-e2e-')
+		);
+		knownPath = await addKnownStorePath(workspace);
+	});
+
+	afterAll(async () => {
+		if (workspace !== undefined) {
+			await rm(workspace, { recursive: true, force: true });
+		}
+	});
+
 	// The daemon holds a positive narinfo answer for a month by default, long
 	// enough for an upstream to have dropped the path since. A confirmation
 	// leaves a target out of a build on the strength of that answer, so it
@@ -85,7 +102,7 @@ describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
 		const substituter = await FakeSubstituter.start(config.storeDirectory);
 
 		try {
-			const storePath = requireExecutableStorePath(context);
+			const storePath = knownPath.root;
 			substituter.servePath(storePath);
 			const permitted = { substituters: substituter.url };
 			const substitution: NixSubstitutionSettings = {

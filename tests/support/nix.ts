@@ -71,6 +71,18 @@ export class NixStore {
 		return stdout.trim();
 	}
 
+	async addReference(name: string, reference: string): Promise<string> {
+		const { stdout } = await this.run('nix', [
+			'eval',
+			'--raw',
+			'--impure',
+			'--expr',
+			`builtins.toFile ${JSON.stringify(name)} (builtins.storePath ${JSON.stringify(reference)})`
+		]);
+
+		return stdout.trim();
+	}
+
 	async build(expression: string): Promise<string> {
 		const { stdout } = await this.run('nix-build', [
 			'--expr',

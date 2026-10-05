@@ -52,6 +52,10 @@ export function applyAlarmFence(state: DurableObjectState): void {
 	}
 }
 
+export function isAlarmFenceOpen(state: DurableObjectState): boolean {
+	return fenceDepths.has(state.id.toString());
+}
+
 /**
  * Opens a fence for the object. Overlapping fences share a count, and arming
  * stays disabled until the last of them closes.

@@ -1824,7 +1824,9 @@ process.stdin.on('end', () => {
 		const requested: string[] = [];
 		let active = 0;
 		let peak = 0;
-		const result = await materialiseCachedClosure({
+		const started = Promise.withResolvers<undefined>();
+		const release = Promise.withResolvers<undefined>();
+		const pending = materialiseCachedClosure({
 			sources: [{ url: destination, paths: [target] }],
 			store: '',
 			localStore: 'daemon',
@@ -1833,13 +1835,18 @@ process.stdin.on('end', () => {
 			fetch: async (input) => {
 				const url = input instanceof Request ? input.url : input.toString();
 				requested.push(url);
-				active += 1;
-				peak = Math.max(peak, active);
-				await new Promise((resolve) => setTimeout(resolve, 0));
-				active -= 1;
 				const storePath =
 					references.find((entry) => narInfoUrl(destination, entry) === url) ??
 					target;
+				active += 1;
+				peak = Math.max(peak, active);
+				if (active === 6) {
+					started.resolve(undefined);
+				}
+				if (storePath !== target) {
+					await release.promise;
+				}
+				active -= 1;
 				return new Response(
 					narInfo(
 						storePath,
@@ -1850,6 +1857,9 @@ process.stdin.on('end', () => {
 				);
 			}
 		});
+		await started.promise;
+		release.resolve(undefined);
+		const result = await pending;
 		expect({
 			result,
 			peak,
