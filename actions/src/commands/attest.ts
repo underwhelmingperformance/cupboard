@@ -42,7 +42,6 @@ import {
 	MissingInputError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
-	SubjectDeriverMovedError,
 	SubjectNarHashMovedError,
 	SubjectNotHeldError
 } from '../errors.ts';
@@ -89,7 +88,6 @@ export interface AttestInputs {
 export interface CommittedPathInfo {
 	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
-	readonly deriver?: string;
 }
 
 interface AttestationSubjects {
@@ -147,7 +145,7 @@ export function attestationSubjects(
 		if (built === undefined) {
 			continue;
 		}
-		requireUnmoved(info, built.narHash, built.derivation);
+		requireMatchingNarHash(info, built.narHash);
 
 		subjects.push({
 			storePath: info.storePath,
@@ -162,10 +160,10 @@ export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
 
 /**
  * A subject is signed under this repository's identity, so the destination
- * cache must have committed narinfo for every subject. The narinfo must contain
- * the NAR hash and any deriver recorded in the receipt. An absent path fails
- * the run, as does one whose hash or deriver has changed since the receipt was
- * written.
+ * cache must have committed narinfo for every subject with the recorded NAR
+ * hash. An absent path or a different hash fails the run. The receipt supplies
+ * the build provenance; a cache's deriver can refer to another derivation of
+ * the same fixed-output path.
  *
  * The build store may have garbage-collected the path since the build, so
  * the check reads the committed metadata from the destination cache rather
@@ -222,28 +220,17 @@ function requireBacked(
 		throw new SubjectNotHeldError(subject.storePath, subject.origin);
 	}
 
-	requireUnmoved(info, subject.narHash, subject.derivation);
+	requireMatchingNarHash(info, subject.narHash);
 }
 
-// A subject with no recorded deriver leaves the destination deriver unchecked
-// because there is no receipt value to compare it with.
-function requireUnmoved(
+function requireMatchingNarHash(
 	info: CommittedPathInfo,
-	narHash: string,
-	derivation: string | undefined
+	narHash: string
 ): void {
 	const held = info.narHash.digestHex();
 
 	if (held !== narHash) {
 		throw new SubjectNarHashMovedError(info.storePath, narHash, held);
-	}
-
-	if (derivation !== undefined && info.deriver !== derivation) {
-		throw new SubjectDeriverMovedError(
-			info.storePath,
-			derivation,
-			info.deriver
-		);
 	}
 }
 
@@ -446,10 +433,7 @@ async function fetchCommittedPathInfo(
 
 	return {
 		storePath,
-		narHash: narInfo.narHash,
-		...(narInfo.deriver !== undefined && {
-			deriver: `${narInfo.storePath.storeDirectory}/${narInfo.deriver}`
-		})
+		narHash: narInfo.narHash
 	};
 }
 

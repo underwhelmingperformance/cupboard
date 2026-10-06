@@ -1,8 +1,8 @@
 name: Attest cupboard store paths
 description:
   Signs SLSA provenance for paths built on the runner in this run. Before
-  signing, the action checks each path's NAR hash and any recorded deriver
-  against the destination narinfo.
+  signing, the action checks each path and NAR hash against the destination
+  narinfo. Build provenance comes from the current job's receipt.
 inputs:
   inline-bundles:
     description:
