@@ -877,7 +877,7 @@ describe('deployment command authentication', () => {
 				'https://actions.example.com/token'
 			);
 			vi.stubEnv('ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'request-bearer');
-			server.listen({ onUnhandledRequest: 'error' });
+			server.listen({ onUnhandledFrame: 'error' });
 			try {
 				await program.parseAsync(
 					[

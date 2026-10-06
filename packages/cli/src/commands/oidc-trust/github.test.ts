@@ -124,7 +124,7 @@ describe('lookupRepository', () => {
 		vi.stubEnv('XDG_CACHE_HOME', directory);
 		vi.stubEnv('GH_TOKEN', '');
 		vi.stubEnv('GITHUB_TOKEN', '');
-		server.listen({ onUnhandledRequest: 'error' });
+		server.listen({ onUnhandledFrame: 'error' });
 
 		try {
 			const original = await lookupRepository('iainlane/cupboard');
@@ -718,7 +718,7 @@ describe('GitHub request failure diagnostics', () => {
 			networkAttempts += 1;
 			throw new Error('Unexpected network request after cache preparation');
 		};
-		server.listen({ onUnhandledRequest: 'error' });
+		server.listen({ onUnhandledFrame: 'error' });
 		try {
 			const response = await makeFetchHappen(url, {
 				agent: new nodeHttps.Agent(),
