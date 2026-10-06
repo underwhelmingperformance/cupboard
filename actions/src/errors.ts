@@ -906,19 +906,6 @@ export class SubjectNarHashMovedError extends CodedError {
 	}
 }
 
-export class SubjectDeriverMovedError extends CodedError {
-	constructor(
-		public readonly storePath: string,
-		public readonly recorded: string,
-		public readonly held: string | undefined
-	) {
-		super(
-			`${storePath} was recorded with deriver ${recorded}, but the destination cache serves ${held ?? 'none'}`
-		);
-		this.name = 'SubjectDeriverMovedError';
-	}
-}
-
 export class SubjectNotHeldError extends CodedError {
 	constructor(
 		public readonly storePath: string,

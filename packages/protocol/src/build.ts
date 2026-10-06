@@ -37,7 +37,7 @@ export type BuildEvent = z.output<typeof buildEventSchema>;
 
 // A version 2 subject links a path built during this run to the attempt that
 // produced it. Before emitting a checksum, the attestation step verifies the
-// subject's NAR hash and deriver against the live store.
+// subject's path and NAR hash against the destination cache.
 export const buildSubjectV2Schema = z.strictObject({
 	storePath: storePathSchema,
 	narHash: sha256HexDigestSchema,

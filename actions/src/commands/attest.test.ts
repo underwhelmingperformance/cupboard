@@ -23,7 +23,6 @@ import {
 	MissingInputError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
-	SubjectDeriverMovedError,
 	SubjectNarHashMovedError,
 	SubjectNotHeldError
 } from '../errors.ts';
@@ -69,20 +68,17 @@ describe('renderChecksums', () => {
 function attestPathInfo(storePath: StorePathString, digestByte: number) {
 	return {
 		storePath,
-		deriver: `${storePath}.drv`,
-		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte)),
-		narSize: 1,
-		references: [],
-		signatures: [],
-		ultimate: false
+		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte))
 	};
 }
 
 function committedNarInfo(
 	storePath: StorePathString,
 	digestByte: number,
-	deriver = path.basename(`${storePath}.drv`)
+	options?: { readonly deriver?: string }
 ): string {
+	const deriver =
+		options === undefined ? path.basename(`${storePath}.drv`) : options.deriver;
 	const hash = NixSha256Hash.fromDigest(
 		Buffer.alloc(32, digestByte)
 	).toString();
@@ -96,10 +92,18 @@ function committedNarInfo(
 		`NarHash: ${hash}`,
 		'NarSize: 1',
 		'References: ',
-		`Deriver: ${deriver}`,
+		...(deriver === undefined ? [] : [`Deriver: ${deriver}`]),
 		''
 	].join('\n');
 }
+
+const alternateDerivers = [
+	{
+		name: 'another deriver',
+		options: { deriver: '4123456789abcdfghijklmnpqrsvwxyz-older.drv' }
+	},
+	{ name: 'no deriver', options: {} }
+];
 
 function requestUrl(input: Parameters<typeof fetch>[0]): string {
 	if (input instanceof URL) {
@@ -255,6 +259,67 @@ describe('provenancedSubjects', () => {
 		}
 	);
 
+	it.each([
+		{
+			name: 'local build',
+			subject: provenancedSubject(builtPath, 'aa', 'local')
+		},
+		{
+			name: 'local reproduction',
+			subject: provenancedSubject(builtPath, 'aa', 'local', true)
+		},
+		{
+			name: 'store build',
+			subject: provenancedSubject(builtPath, 'aa', 'build-store')
+		},
+		{
+			name: 'store-held path',
+			subject: {
+				origin: 'store-held' as const,
+				storePath: builtPath,
+				narHash: 'aa'.repeat(32),
+				derivation: `${builtPath}.drv`,
+				buildStore: 'auto'
+			}
+		},
+		{ name: 'copied path', subject: copiedSubject(builtPath, 'aa') },
+		{
+			name: 'republished path',
+			subject: {
+				...copiedSubject(builtPath, 'aa'),
+				origin: 'republished' as const,
+				metadataSource: 'https://cache.example.test/t/acme'
+			}
+		}
+	])('accepts identical destination content for $name', ({ subject }) => {
+		const digest = { storePath: builtPath, sha256: 'aa'.repeat(32) };
+		const isLocal =
+			subject.origin === 'built' && subject.verification === 'local';
+		const held: SelectedPathInfos = new Map([
+			[
+				builtPath,
+				{
+					storePath: builtPath,
+					narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa))
+				}
+			]
+		]);
+		expect(
+			provenancedSubjects(
+				{ version: 3, paths: [builtPath], subjects: [subject] },
+				held
+			)
+		).toStrictEqual({
+			subjects: [digest],
+			built: isLocal ? [digest] : [],
+			reproduced:
+				subject.origin === 'built' && subject.reproduced === true
+					? [{ ...digest, derivation: subject.derivation }]
+					: [],
+			skipped: []
+		});
+	});
+
 	it.each(realisedHere)(
 		'refuses $name absent from the committed destination',
 		({ verification }) => {
@@ -288,29 +353,17 @@ describe('provenancedSubjects', () => {
 		{
 			name: 'a NAR hash that moved since the receipt was written',
 			digestByte: 0xcc,
-			deriver: `${builtPath}.drv`,
 			expected: SubjectNarHashMovedError
-		},
-		{
-			name: 'a deriver that moved since the receipt was written',
-			digestByte: 0xaa,
-			deriver: `${remotePath}.drv`,
-			expected: SubjectDeriverMovedError
 		}
 	])(
 		'refuses attestation when destination metadata contains $name',
-		({ digestByte, deriver, expected }) => {
+		({ digestByte, expected }) => {
 			const held: SelectedPathInfos = new Map([
 				[
 					builtPath,
 					{
 						storePath: builtPath,
-						narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte)),
-						narSize: 1,
-						references: [],
-						deriver,
-						signatures: [],
-						ultimate: true
+						narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte))
 					}
 				]
 			]);
@@ -423,7 +476,7 @@ describe('provenancedSubjects', () => {
 		});
 	});
 
-	it('leaves the deriver unchecked for a subject that records no deriver', () => {
+	it('accepts a copied subject without a recorded derivation', () => {
 		const held: SelectedPathInfos = new Map([
 			[substitutedPath, attestPathInfo(substitutedPath, 0xdd)]
 		]);
@@ -852,9 +905,16 @@ describe('attestAction committed cache verification', () => {
 		}
 	});
 
-	it.each([false, true])(
-		'writes a SCAI reproduction report with additional accepted subjects: %s',
-		async (hasAdditionalSubject) => {
+	it.each(
+		[false, true].flatMap((hasAdditionalSubject) =>
+			alternateDerivers.map((metadata) => ({
+				hasAdditionalSubject,
+				...metadata
+			}))
+		)
+	)(
+		'preserves the reproduced derivation with $name and additional subject $hasAdditionalSubject',
+		async ({ hasAdditionalSubject, options }) => {
 			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 			const additionalPath = storePathSchema.parse(
 				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -897,7 +957,7 @@ describe('attestAction committed cache verification', () => {
 												'0123456789abcdfghijklmnpqrsvwxyz'
 											)
 												? committedNarInfo(additionalPath, 0xcc)
-												: committedNarInfo(remotePath, 0xbb)
+												: committedNarInfo(remotePath, 0xbb, options)
 										)
 							)
 					}
@@ -1093,59 +1153,62 @@ describe('attestAction committed cache verification', () => {
 		}
 	});
 
-	it('reports no predicate file for a receipt that records no origin', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
-		const receiptFile = path.join(directory, 'receipt.json');
-		const predicateFile = path.join(directory, 'attribute-report.json');
-		const outputFile = path.join(directory, 'output');
-		await writeFile(
-			receiptFile,
-			JSON.stringify({
-				version: 2,
-				paths: [remotePath],
-				subjects: [
-					{
-						storePath: remotePath,
-						narHash: 'bb'.repeat(32),
-						derivation: `${remotePath}.drv`,
-						attempt: 1,
-						attemptId: 'attempt-1'
-					}
-				]
-			})
-		);
-
-		try {
-			await attestAction(
-				{
-					receiptFile,
-					checksumsFile: path.join(directory, 'subjects.txt'),
-					url: 'https://cache.example.test/t/acme'
-				},
-				{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
-				createGithubReporter(),
-				{
-					fetch: (input) =>
-						Promise.resolve(
-							requestUrl(input).includes('/attestations/')
-								? new Response(undefined, { status: StatusCodes.NOT_FOUND })
-								: new Response(committedNarInfo(remotePath, 0xbb))
-						)
-				}
+	it.each(alternateDerivers)(
+		'accepts a version 2 receipt with $name without a reproduction report',
+		async ({ options }) => {
+			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+			const receiptFile = path.join(directory, 'receipt.json');
+			const predicateFile = path.join(directory, 'attribute-report.json');
+			const outputFile = path.join(directory, 'output');
+			await writeFile(
+				receiptFile,
+				JSON.stringify({
+					version: 2,
+					paths: [remotePath],
+					subjects: [
+						{
+							storePath: remotePath,
+							narHash: 'bb'.repeat(32),
+							derivation: `${remotePath}.drv`,
+							attempt: 1,
+							attemptId: 'attempt-1'
+						}
+					]
+				})
 			);
 
-			const outputs = await readFile(outputFile, 'utf8');
+			try {
+				await attestAction(
+					{
+						receiptFile,
+						checksumsFile: path.join(directory, 'subjects.txt'),
+						url: 'https://cache.example.test/t/acme'
+					},
+					{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+					createGithubReporter(),
+					{
+						fetch: (input) =>
+							Promise.resolve(
+								requestUrl(input).includes('/attestations/')
+									? new Response(undefined, { status: StatusCodes.NOT_FOUND })
+									: new Response(committedNarInfo(remotePath, 0xbb, options))
+							)
+					}
+				);
 
-			expect({
-				predicateLine: outputs
-					.split('\n')
-					.find((line) => line.startsWith('predicate-file=')),
-				written: existsSync(predicateFile)
-			}).toStrictEqual({ predicateLine: 'predicate-file=', written: false });
-		} finally {
-			await rm(directory, { recursive: true, force: true });
+				const outputs = await readFile(outputFile, 'utf8');
+
+				expect({
+					predicateLine: outputs
+						.split('\n')
+						.find((line) => line.startsWith('predicate-file=')),
+					written: existsSync(predicateFile)
+				}).toStrictEqual({ predicateLine: 'predicate-file=', written: false });
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
 		}
-	});
+	);
 
 	it('refuses a subject absent from the committed destination', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
@@ -1245,15 +1308,6 @@ describe('attestAction committed cache verification', () => {
 			name: 'a moved NAR hash',
 			body: committedNarInfo(remotePath, 0xaa),
 			expected: SubjectNarHashMovedError
-		},
-		{
-			name: 'a moved deriver',
-			body: committedNarInfo(
-				remotePath,
-				0xbb,
-				'4123456789abcdfghijklmnpqrsvwxyz-other.drv'
-			),
-			expected: SubjectDeriverMovedError
 		}
 	])('refuses $name from the destination cache', async ({ body, expected }) => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));

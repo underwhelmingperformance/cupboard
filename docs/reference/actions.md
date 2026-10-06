@@ -278,7 +278,7 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 
 ### actions/attest
 
-Signs SLSA provenance for paths built on the runner in this run. Before signing, the action checks each path's NAR hash and any recorded deriver against the destination narinfo.
+Signs SLSA provenance for paths built on the runner in this run. Before signing, the action checks each path and NAR hash against the destination narinfo. Build provenance comes from the current job's receipt.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
