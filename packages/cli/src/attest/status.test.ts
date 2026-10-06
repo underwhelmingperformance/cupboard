@@ -8,10 +8,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
 import { cacheMetadataCapabilityHeader } from '@cupboard/protocol/cache-metadata';
-import { discardResponseBody } from '@cupboard/shared/cleanup';
-import { http, HttpResponse } from 'msw';
-import { setupServer } from 'msw/node';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { getResponse, http, type HttpHandler, HttpResponse } from 'msw';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { cliExitCode } from '../cli.ts';
 import { CupboardHttpError } from '../errors.ts';
@@ -20,13 +18,6 @@ import {
 	InvalidAttestationDiscoveryError,
 	readAttestationInfo
 } from './status.ts';
-
-const server = setupServer();
-
-// MSW's observer clone keeps response-body cancellation pending.
-server.events.on('response:mocked', ({ response }) => {
-	void discardResponseBody(response);
-});
 
 const url = new URL('https://cache.example.test/t/acme');
 const hash = storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz');
@@ -45,18 +36,32 @@ const options = {
 };
 const narinfo = `StorePath: /nix/store/${hash}-app\nURL: nar/app.nar\nCompression: zstd\nFileHash: ${narHash}\nFileSize: 1\nNarHash: ${narHash}\nNarSize: 1\nReferences: \n`;
 
-beforeAll(() => {
-	server.listen({ onUnhandledFrame: 'error' });
-});
+// The client reads through a fetcher that answers from these handlers in
+// process, without opening a socket. MSW 3 intercepts Node's fetch at the
+// socket level, where Undici opens an idle connection after the client cancels
+// a body it has not finished receiving, and MSW passes that connection through
+// to the real host.
+const handlers: HttpHandler[] = [];
+
+function use(...next: HttpHandler[]): void {
+	handlers.unshift(...next);
+}
+
+const mockedFetch: typeof fetch = async (input, init) => {
+	const request = new Request(input, init);
+	const response = await getResponse(handlers, request);
+	if (response === undefined) {
+		throw new Error(`No handler matches ${request.method} ${request.url}.`);
+	}
+	return response;
+};
+
 afterEach(() => {
-	server.resetHandlers();
-});
-afterAll(() => {
-	server.close();
+	handlers.length = 0;
 });
 
 function capability(value?: string): void {
-	server.use(
+	use(
 		http.get(
 			`${url.href}/nix-cache-info`,
 			() =>
@@ -83,7 +88,7 @@ describe('attestation discovery client', () => {
 				{ mode: 0o600 }
 			);
 			const authorizations: (string | null)[] = [];
-			server.use(
+			use(
 				http.get(`${url.href}/nix-cache-info`, ({ request }) => {
 					authorizations.push(request.headers.get('authorization'));
 					return new HttpResponse('', {
@@ -101,7 +106,7 @@ describe('attestation discovery client', () => {
 				})
 			);
 			const input = { ...options, netrcFile };
-			const entries = await readAttestationInfo(input, fetch);
+			const entries = await readAttestationInfo(input, mockedFetch);
 			expect({ entries, authorizations }).toStrictEqual({
 				entries: [{ storePathHash: hash, status: 'missing' }],
 				authorizations: Array.from(
@@ -118,7 +123,7 @@ describe('attestation discovery client', () => {
 	it('uses the advertised batch capability and preserves its ordered results', async () => {
 		capability(`path-info-v1 ${attestationInfoCapability}`);
 		const requests: unknown[] = [];
-		server.use(
+		use(
 			http.post(`${url.href}/api/v1/attestation-info`, async ({ request }) => {
 				requests.push(await request.json());
 				return HttpResponse.json({
@@ -134,7 +139,7 @@ describe('attestation discovery client', () => {
 				});
 			})
 		);
-		const entries = await readAttestationInfo(options, fetch);
+		const entries = await readAttestationInfo(options, mockedFetch);
 		expect({ requests, entries }).toStrictEqual({
 			requests: [{ storePathHashes: [hash] }],
 			entries: [
@@ -150,13 +155,13 @@ describe('attestation discovery client', () => {
 
 	it('falls back to bounded individual lists only when the capability is absent', async () => {
 		capability('path-info-v1');
-		server.use(
+		use(
 			http.get(`${url.href}/${hash}.narinfo`, () => new HttpResponse(narinfo)),
 			http.get(`${url.href}/attestations/${hash}`, () =>
 				HttpResponse.json({ attestations: [descriptor] })
 			)
 		);
-		expect(await readAttestationInfo(options, fetch)).toStrictEqual([
+		expect(await readAttestationInfo(options, mockedFetch)).toStrictEqual([
 			{
 				storePathHash: hash,
 				status: 'found',
@@ -170,15 +175,15 @@ describe('attestation discovery client', () => {
 		'does not fall back after HTTP %s from discovery',
 		async (status) => {
 			capability(attestationInfoCapability);
-			server.use(
+			use(
 				http.post(
 					`${url.href}/api/v1/attestation-info`,
 					() => new HttpResponse('refused', { status })
 				)
 			);
-			await expect(readAttestationInfo(options, fetch)).rejects.toBeInstanceOf(
-				CupboardHttpError
-			);
+			await expect(
+				readAttestationInfo(options, mockedFetch)
+			).rejects.toBeInstanceOf(CupboardHttpError);
 		}
 	);
 
@@ -191,7 +196,7 @@ describe('attestation discovery client', () => {
 		'preserves HTTP $status classification when the error body is oversized',
 		async ({ status, expected }) => {
 			capability(attestationInfoCapability);
-			server.use(
+			use(
 				http.post(
 					`${url.href}/api/v1/attestation-info`,
 					() => new HttpResponse('x'.repeat(8193), { status })
@@ -199,7 +204,7 @@ describe('attestation discovery client', () => {
 			);
 			let failure: unknown;
 			try {
-				await readAttestationInfo(options, fetch);
+				await readAttestationInfo(options, mockedFetch);
 			} catch (error) {
 				failure = error;
 			}
@@ -215,7 +220,7 @@ describe('attestation discovery client', () => {
 		'classifies discovery $code as exit $expected',
 		async ({ status, code, expected }) => {
 			capability(attestationInfoCapability);
-			server.use(
+			use(
 				http.post(`${url.href}/api/v1/attestation-info`, () =>
 					HttpResponse.json(
 						{ code, message: 'Discovery limit exceeded.', storePathHash: hash },
@@ -225,7 +230,7 @@ describe('attestation discovery client', () => {
 			);
 			let failure: unknown;
 			try {
-				await readAttestationInfo(options, fetch);
+				await readAttestationInfo(options, mockedFetch);
 			} catch (error) {
 				failure = error;
 			}
@@ -235,7 +240,7 @@ describe('attestation discovery client', () => {
 
 	it('classifies an oversized fallback narinfo as invalid service metadata', async () => {
 		capability('path-info-v1');
-		server.use(
+		use(
 			http.get(
 				`${url.href}/${hash}.narinfo`,
 				() => new HttpResponse('x'.repeat(1024 * 1024 + 1))
@@ -243,7 +248,7 @@ describe('attestation discovery client', () => {
 		);
 		let failure: unknown;
 		try {
-			await readAttestationInfo(options, fetch);
+			await readAttestationInfo(options, mockedFetch);
 		} catch (error) {
 			failure = error;
 		}
@@ -259,7 +264,7 @@ describe('attestation discovery client', () => {
 			storePathHashSchema.parse(index.toString(2).padStart(32, '0'))
 		);
 		const requests: unknown[] = [];
-		server.use(
+		use(
 			http.post(`${url.href}/api/v1/attestation-info`, async ({ request }) => {
 				const body: unknown = await request.json();
 				requests.push(body);
@@ -276,7 +281,7 @@ describe('attestation discovery client', () => {
 		);
 		const entries = await readAttestationInfo(
 			{ ...options, storePathHashes: hashes },
-			fetch
+			mockedFetch
 		);
 		expect({ requests, entries }).toStrictEqual({
 			requests: [
@@ -294,7 +299,7 @@ describe('attestation discovery client', () => {
 		capability(attestationInfoCapability);
 		const second = storePathHashSchema.parse('0'.repeat(32));
 		const requests: unknown[] = [];
-		server.use(
+		use(
 			http.post(`${url.href}/api/v1/attestation-info`, async ({ request }) => {
 				requests.push(await request.json());
 				const isFirst = requests.length === 1;
@@ -309,7 +314,7 @@ describe('attestation discovery client', () => {
 		);
 		const entries = await readAttestationInfo(
 			{ ...options, storePathHashes: [hash, second] },
-			fetch
+			mockedFetch
 		);
 		expect({ requests, entries }).toStrictEqual({
 			requests: [
@@ -329,14 +334,14 @@ describe('attestation discovery client', () => {
 		{ entries: [], nextIndex: undefined }
 	])('rejects malformed discovery pages %j', async (page) => {
 		capability(attestationInfoCapability);
-		server.use(
+		use(
 			http.post(`${url.href}/api/v1/attestation-info`, () =>
 				HttpResponse.json({ scopeVersion: 'current', ...page })
 			)
 		);
-		await expect(readAttestationInfo(options, fetch)).rejects.toBeInstanceOf(
-			InvalidAttestationDiscoveryError
-		);
+		await expect(
+			readAttestationInfo(options, mockedFetch)
+		).rejects.toBeInstanceOf(InvalidAttestationDiscoveryError);
 	});
 
 	it('does not silently repair malformed UTF-8 in an old-server list', async () => {
@@ -347,12 +352,12 @@ describe('attestation discovery client', () => {
 		);
 		const suffix = encoder.encode('","size":1}]}');
 		const body = new Uint8Array([...prefix, 255, ...suffix]);
-		server.use(
+		use(
 			http.get(`${url.href}/${hash}.narinfo`, () => new HttpResponse(narinfo)),
 			http.get(`${url.href}/attestations/${hash}`, () => new HttpResponse(body))
 		);
-		await expect(readAttestationInfo(options, fetch)).rejects.toBeInstanceOf(
-			InvalidAttestationDiscoveryError
-		);
+		await expect(
+			readAttestationInfo(options, mockedFetch)
+		).rejects.toBeInstanceOf(InvalidAttestationDiscoveryError);
 	});
 });
