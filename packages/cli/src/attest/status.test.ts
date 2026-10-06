@@ -46,7 +46,7 @@ const options = {
 const narinfo = `StorePath: /nix/store/${hash}-app\nURL: nar/app.nar\nCompression: zstd\nFileHash: ${narHash}\nFileSize: 1\nNarHash: ${narHash}\nNarSize: 1\nReferences: \n`;
 
 beforeAll(() => {
-	server.listen({ onUnhandledRequest: 'error' });
+	server.listen({ onUnhandledFrame: 'error' });
 });
 afterEach(() => {
 	server.resetHandlers();

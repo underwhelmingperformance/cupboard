@@ -680,7 +680,7 @@ describe('confirm command', () => {
 				}
 			}
 		);
-		server.listen({ onUnhandledRequest: 'error' });
+		server.listen({ onUnhandledFrame: 'error' });
 		try {
 			await writeFile(manifest, `\n ${runtimePath} \r\n\n`);
 			await program.parseAsync(
