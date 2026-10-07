@@ -11,7 +11,10 @@ import {
 	subrequestsAvailable,
 	withSubrequestSlice
 } from '../do/subrequest-slice.ts';
-import { UploadedObjectNotFoundError } from '../errors.ts';
+import {
+	StagedObjectDigestMismatchError,
+	UploadedObjectNotFoundError
+} from '../errors.ts';
 import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import {
 	clearBlobStorage,
@@ -489,5 +492,47 @@ describe('promoteVerifiedBlob', () => {
 		} finally {
 			head.mockRestore();
 		}
+	});
+
+	it('reports a digest mismatch when the staged bytes changed after verification', async () => {
+		const verified = await verifiableNar('promote-verified');
+		const replaced = await verifiableNar('promote-replaced');
+		const stagingKey = r2ObjectKeySchema.parse(
+			'staging/promote-replaced/upload'
+		);
+
+		await env.BLOBS.put(stagingKey, replaced.narBytes);
+
+		let failure: unknown;
+
+		try {
+			await promoteVerifiedBlob(
+				drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+				env.BLOBS,
+				stagingKey,
+				{ narHash: verified.narHash, narSize: verified.narSize },
+				{
+					fileHash: verified.fileHash,
+					fileSize: verified.narBytes.byteLength
+				}
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		const stored = await env.BLOBS.list();
+
+		expect({
+			isDigestMismatch: failure instanceof StagedObjectDigestMismatchError,
+			stagingKey:
+				failure instanceof StagedObjectDigestMismatchError
+					? failure.stagingKey
+					: undefined,
+			storedKeys: stored.objects.map((object) => object.key)
+		}).toStrictEqual({
+			isDigestMismatch: true,
+			stagingKey,
+			storedKeys: [stagingKey]
+		});
 	});
 });

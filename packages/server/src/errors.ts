@@ -1329,6 +1329,21 @@ export class UploadedObjectNotFoundError extends ServerHttpError {
 	}
 }
 
+/**
+ * R2 refused to copy a staging object to its canonical key because the bytes
+ * did not match the file hash that verification computed. The staging object
+ * changed after verification read it, so the verified bytes no longer exist.
+ */
+export class StagedObjectDigestMismatchError extends Error {
+	constructor(
+		public readonly stagingKey: R2ObjectKey,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super('Staged object does not match its verified file hash', options);
+		this.name = 'StagedObjectDigestMismatchError';
+	}
+}
+
 export class TenantAdmissionUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
