@@ -402,6 +402,10 @@ If a template uses a capture's variables and the claim doesn't match the
 expression, the token is refused. A capture that no template uses is ignored.
 The name that a template produces must be a valid cache or root name.
 
+A root template produces a prefix only when the template itself ends in `/`. If
+a claim value makes the root end in `/`, for example a workflow named `release/`
+in the template `ci/{workflow}`, the token is refused.
+
 ### Writing a rule as JSON
 
 Some rules can't be written with flags, such as patterns on arbitrary claims, or

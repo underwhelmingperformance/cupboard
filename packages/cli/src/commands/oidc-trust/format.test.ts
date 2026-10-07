@@ -102,7 +102,7 @@ it('shows a claim-bound cache grant as structured fields', () => {
 		{
 			label: 'Root restriction',
 			value:
-				'From template github:iainlane/dotfiles/pr-{pr}/ (a resolved value ending in / allows that root and descendants; otherwise only that exact root)'
+				'From template github:iainlane/dotfiles/pr-{pr}/ (resolved root and descendants)'
 		},
 		{ label: 'Cache variable {repository_id}', value: 'claim repository_id' },
 		{
@@ -145,7 +145,7 @@ it('shows the same complete restrictions in inspection and consent', () => {
 	]);
 });
 
-it('describes root templates according to the resolved trailing slash', () => {
+it('describes a root template by its own trailing slash', () => {
 	const grant = permittedGrantSchema.parse({
 		type: 'cupboard_cache',
 		actions: ['root:remove'],
@@ -169,7 +169,7 @@ it('describes root templates according to the resolved trailing slash', () => {
 		permitted: isGrantPermittedByRule([grant], requested, claims),
 		rows: trustGrantRows(grant, 'Access')
 	}).toStrictEqual({
-		permitted: true,
+		permitted: false,
 		rows: [
 			{
 				label: 'Access',
@@ -177,8 +177,7 @@ it('describes root templates according to the resolved trailing slash', () => {
 			},
 			{
 				label: 'Root restriction',
-				value:
-					'From template {scope} (a resolved value ending in / allows that root and descendants; otherwise only that exact root)'
+				value: 'From template {scope} (exact resolved root)'
 			},
 			{ label: 'Root variable {scope}', value: 'claim root_scope' }
 		]

@@ -135,6 +135,14 @@ function renderRoot(
 		return undefined;
 	}
 
+	if (
+		binding.equalsTemplate !== undefined &&
+		raw.endsWith('/') &&
+		!binding.equalsTemplate.endsWith('/')
+	) {
+		return undefined;
+	}
+
 	return rootNameSchema.safeParse(raw).data;
 }
 
