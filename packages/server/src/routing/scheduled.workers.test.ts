@@ -141,6 +141,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
+				{ kind: 'control-session-pruning' },
 				{
 					kind: 'local-step',
 					tenants: ['acme', 'beta', 'current', fixtureTenant]
@@ -156,6 +157,7 @@ describe('scheduled tenant pass failure records', () => {
 					{ kind: 'blob-demote' },
 					{ kind: 'cas-demote' },
 					{ kind: 'control-key-retirement' },
+					{ kind: 'control-session-pruning' },
 					{
 						kind: 'local-step',
 						tenants: ['acme', 'beta', 'current', fixtureTenant]
@@ -346,6 +348,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
 				{ kind: 'control-key-retirement' },
+				{ kind: 'control-session-pruning' },
 				{ kind: 'local-step', tenants: ['acme', 'current', fixtureTenant] }
 			],
 			acmeOutcome: undefined,
@@ -376,6 +379,34 @@ describe('scheduled tenant pass failure records', () => {
 			decision: { action: 'ack' },
 			acme: currentLocalStep,
 			beta: currentLocalStep
+		});
+	});
+
+	it('prunes expired operator sessions from the queue', async () => {
+		await env.CUPBOARD_DB.batch([
+			env.CUPBOARD_DB.prepare(
+				"INSERT INTO control_refresh_session_family (id, active_member_id, generation, created_at, expires_at, issuer, subject) VALUES ('expired', 'expired-member', 0, '2020-01-01T00:00:00.000Z', '2020-01-31T00:00:00.000Z', 'https://idp.example.test', 'global-admin')"
+			),
+			env.CUPBOARD_DB.prepare(
+				"INSERT INTO control_refresh_session_member (id, family_id, generation, credential_hash, created_at) VALUES ('expired-member', 'expired', 0, 'hash', '2020-01-01T00:00:00.000Z')"
+			)
+		]);
+
+		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			{
+				kind: 'control-session-pruning'
+			}
+		);
+		const remaining = await env.CUPBOARD_DB.prepare(
+			'SELECT (SELECT count(*) FROM control_refresh_session_family) AS families, (SELECT count(*) FROM control_refresh_session_member) AS members'
+		).first();
+
+		expect({ decision, remaining }).toStrictEqual({
+			decision: { action: 'ack' },
+			remaining: { families: 0, members: 0 }
 		});
 	});
 
@@ -429,7 +460,8 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-reaper' },
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
-				{ kind: 'control-key-retirement' }
+				{ kind: 'control-key-retirement' },
+				{ kind: 'control-session-pruning' }
 			]
 		});
 	});
@@ -768,6 +800,7 @@ describe('scheduled tenant pass failure records', () => {
 									'narinfo-refresh-tenant',
 									'cas-demote',
 									'control-key-retirement',
+									'control-session-pruning',
 									'local-step',
 									'local-step-sweep'
 								],

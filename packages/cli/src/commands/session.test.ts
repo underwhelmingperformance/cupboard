@@ -55,9 +55,11 @@ describe('runSessionList', () => {
 			]
 		};
 
-		await runSessionList(reporter(results), {
-			list: () => Promise.resolve(response)
-		});
+		await runSessionList(
+			reporter(results),
+			{ list: () => Promise.resolve(response) },
+			'tenant'
+		);
 
 		expect(results).toStrictEqual([
 			[
@@ -79,7 +81,7 @@ describe('runSessionList', () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 
-		await runSessionList(reporter(results, infos), sessionClient({}));
+		await runSessionList(reporter(results, infos), sessionClient({}), 'tenant');
 
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
@@ -90,39 +92,67 @@ describe('runSessionList', () => {
 
 describe('runSessionRevoke', () => {
 	it.each([
-		{ revoked: true, value: 'session revoked' },
-		{ revoked: false, value: 'session not found' }
-	])('reports revoked=$revoked once confirmed', async ({ revoked, value }) => {
-		const calls: { id: string }[] = [];
-		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response = { id: sessionId, revoked };
+		{
+			scope: 'tenant' as const,
+			revoked: true,
+			value: 'session revoked',
+			noun: 'tenant sign-in session',
+			title: 'Tenant sign-in session'
+		},
+		{
+			scope: 'tenant' as const,
+			revoked: false,
+			value: 'session not found',
+			noun: 'tenant sign-in session',
+			title: 'Tenant sign-in session'
+		},
+		{
+			scope: 'operator' as const,
+			revoked: true,
+			value: 'session revoked',
+			noun: 'operator sign-in session',
+			title: 'Operator sign-in session'
+		}
+	])(
+		'reports revoked=$revoked for a $scope session once confirmed',
+		async ({ scope, revoked, value, noun, title }) => {
+			const calls: { id: string }[] = [];
+			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
+			const response = { id: sessionId, revoked };
 
-		await runSessionRevoke(
-			sessionId,
-			ui,
-			sessionClient({
-				revoke(input) {
-					calls.push(input);
-					return Promise.resolve(response);
-				}
-			})
-		);
+			await runSessionRevoke(
+				sessionId,
+				ui,
+				sessionClient({
+					revoke(input) {
+						calls.push(input);
+						return Promise.resolve(response);
+					}
+				}),
+				scope
+			);
 
-		expect({ calls, results: captured.results }).toStrictEqual({
-			calls: [{ id: sessionId }],
-			results: [
-				{
-					kind: 'session',
-					title: 'Tenant sign-in session',
-					data: response,
-					rows: [
-						{ label: 'Session', value: sessionId },
-						{ label: 'Outcome', value }
-					]
-				}
-			]
-		});
-	});
+			expect({
+				calls,
+				confirms: captured.confirms.map((confirm) => confirm.message),
+				results: captured.results
+			}).toStrictEqual({
+				calls: [{ id: sessionId }],
+				confirms: [`Revoke ${noun} ${sessionId}?`],
+				results: [
+					{
+						kind: 'session',
+						title,
+						data: response,
+						rows: [
+							{ label: 'Session', value: sessionId },
+							{ label: 'Outcome', value }
+						]
+					}
+				]
+			});
+		}
+	);
 
 	it('leaves the session in place when the confirmation is declined', async () => {
 		const calls: { id: string }[] = [];
@@ -136,7 +166,8 @@ describe('runSessionRevoke', () => {
 					calls.push(input);
 					return Promise.resolve({ id: input.id, revoked: true });
 				}
-			})
+			}),
+			'tenant'
 		);
 
 		expect({

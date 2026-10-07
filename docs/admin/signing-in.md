@@ -109,7 +109,7 @@ That session is used for operator commands such as `cupboard tenant` and
 
 ## How long a session lasts
 
-A tenant session has two parts:
+A session for a tenant or for the deployment has two parts:
 
 - An access token, which the CLI sends with each command. It's valid for ten
   minutes.
@@ -145,8 +145,10 @@ refresh request. A later retry revokes that refresh-token family. The CLI can
 establish a new session from a saved Cloudflare sign-in when it is still valid;
 otherwise, sign in again.
 
-A deployment session has only an access token, which is also valid for ten
-minutes. It has no refresh token.
+A deployment session renews in the same way, and each renewal checks the
+deployment's control-plane trust rules. The control plane issues no refresh
+token when the sign-in token's audience is the deployment URL, as for a GitHub
+Actions job.
 
 If the CLI has saved a Cloudflare sign-in on the machine, it can also start a
 new session from that sign-in, for a tenant URL or the deployment URL.
@@ -213,6 +215,25 @@ Its refresh token stops working at once. Its current access token remains valid
 until it expires, within ten minutes. The commands need the `session:list` and
 `session:revoke` permissions, which a wildcard grant includes.
 
+## Listing and revoking operator sessions
+
+An operator can list the deployment's sessions in the same way, with the
+deployment URL:
+
+```sh
+cupboard deployment session list https://cupboard.example.workers.dev
+```
+
+To end one of them, give its ID:
+
+```sh
+cupboard deployment session revoke https://cupboard.example.workers.dev <id>
+```
+
+These commands need the `control-session:list` and `control-session:revoke`
+permissions, which a wildcard grant includes. The rule is `unknown` when several
+control-plane trust rules together permit the session's authority.
+
 ## Signing out
 
 To sign out of a tenant, run:
@@ -240,20 +261,22 @@ cupboard logout --all --cloudflare
 Cloudflare sign-in. Afterwards, `cupboard login` and `cupboard init` ask you to
 sign in to Cloudflare again.
 
-Signing out also sends a revocation request for the refresh token of each tenant
+Signing out also sends a revocation request for the refresh token of each
 session that it deletes. With `--cloudflare`, it sends Cloudflare a revocation
 request for the Cloudflare refresh token as well. A copy of a revoked session on
 another machine cannot be renewed. A copy of a cupboard access token remains
 valid for up to ten minutes, and a copy of a Cloudflare access token until it
-expires. A deployment session has no refresh token to revoke.
+expires.
 
 `logout` deletes the saved files even when a revocation fails, and the result
 shows the outcome for each one. If someone has copied a session whose revocation
 failed, they can renew it for up to 30 days after you signed in. A tenant
 administrator can end that session with
-[`cupboard session revoke`](#listing-and-revoking-a-tenants-sessions). To take
-away an administrator's access, another administrator [removes their trust
-rule][remove-access]. The server then refuses to renew the administrator's
+[`cupboard session revoke`](#listing-and-revoking-a-tenants-sessions), and an
+operator can end a deployment session with
+[`cupboard deployment session revoke`](#listing-and-revoking-operator-sessions).
+To take away an administrator's access, another administrator [removes their
+trust rule][remove-access]. The server then refuses to renew the administrator's
 sessions.
 
 [remove-access]: ./access.md#removing-an-administrator

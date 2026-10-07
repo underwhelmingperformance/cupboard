@@ -90,7 +90,7 @@ describe('transport security', () => {
 	it('sends an HSTS header with an HTTPS error response', async () => {
 		const { body: _body, ...observed } = await fetchWorker(
 			'https://cupboard.test/token',
-			refreshRequest,
+			{ ...refreshRequest, body: 'grant_type=authorization_code' },
 			''
 		);
 

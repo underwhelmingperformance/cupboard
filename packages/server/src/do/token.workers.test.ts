@@ -1828,6 +1828,7 @@ const revoked = {
 
 function refreshKeys(context: ServerContext): RefreshKeyContext {
 	return {
+		kind: 'tenant',
 		signingKey: pushIdSigningKey(context.env),
 		tenant: context.requireTenant()
 	};

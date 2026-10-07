@@ -9,6 +9,7 @@ import { controlOrpcHandler } from '../orpc/handler.ts';
 import {
 	controlAsMetadata,
 	controlJwks,
+	controlRevoke,
 	controlTokenExchange
 } from './control-plane.ts';
 import { handleSignup } from './signup.ts';
@@ -52,7 +53,10 @@ function buildControlApp() {
 	});
 
 	app.post('/token', (context) =>
-		controlTokenExchange(context.req.raw, context.env)
+		controlTokenExchange(context.req.raw, context.env, context.get('logger'))
+	);
+	app.post('/revoke', (context) =>
+		controlRevoke(context.req.raw, context.env, context.get('logger'))
 	);
 	app.post('/signup', (context) => handleSignup(context.req.raw, context.env));
 	// Served uncached so a key rotation is visible across colos at once.

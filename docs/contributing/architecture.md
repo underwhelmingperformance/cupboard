@@ -679,6 +679,25 @@ whether the token existed. The Worker refuses other writes to a suspended
 tenant, but it still forwards `/revoke` to the tenant object, so a session
 revoked during a suspension stays revoked when the tenant resumes.
 
+The control plane issues and revokes operator refresh tokens in the same way, at
+`POST /token` and `POST /revoke` on the deployment URL. An exchange whose
+verified audience is the deployment URL, as for a CI job, gets no refresh token.
+The families are in D1, in `control_refresh_session_family` and
+`control_refresh_session_member`. A control credential has the purpose
+`cupboard-control-refresh` and no tenant. HKDF derives its keys from
+`CONTROL_KEY_WRAP_SECRET`, which the tenant Worker never has, with `info` labels
+of their own. A tenant credential therefore never authenticates at the control
+plane, and a control credential never authenticates at a tenant.
+
+D1 has no interactive transactions, so a rotation is one batch. Its first
+statement moves the family to the successor only while the presented member is
+still active, and the other statements apply only once the successor is active.
+When another rotation has won, the batch changes nothing and the request takes
+the retry path. The control plane cannot evaluate its trust rules inside the
+batch, so it evaluates them again after the batch and revokes the family when
+they no longer select the identity. Each cron tick deletes expired families and
+clears expired successor envelopes, a bounded page at a time.
+
 A client can also exchange a cupboard access token for one with fewer grants.
 
 CI read acquisition uses the extension grant

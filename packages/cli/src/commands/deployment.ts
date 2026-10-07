@@ -34,6 +34,8 @@ import {
 } from '../deploy/settlement.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
+import { registerOperatorSessionCommands } from './session.ts';
+
 export interface DeploymentClient {
 	transitions(): Promise<ParsedDeploymentTransitionsResponse>;
 	readonly localStep: SettlementClient;
@@ -315,7 +317,9 @@ export function registerDeploymentCommands(
 ): void {
 	const deployment = program
 		.command('deployment')
-		.description('Check deployment readiness and resume tenant updates.');
+		.description(
+			'Check deployment readiness, resume tenant updates, and list or revoke operator sign-in sessions.'
+		);
 	const client = (
 		url: URL,
 		cliOptions: DeploymentAuthOptions,
@@ -399,4 +403,5 @@ export function registerDeploymentCommands(
 				}
 			);
 		});
+	registerOperatorSessionCommands(deployment, program, options);
 }

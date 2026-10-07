@@ -3040,6 +3040,11 @@ re-reads the trust rule and reissues the grants it currently permits, so a rule
 change takes effect on the next refresh, and a refresh may present narrower
 `authorization_details` to step down just as attenuation does.
 
+Operator sign-ins at the control plane also receive a 30-day refresh family,
+which the control plane keeps in D1 and re-checks against the control trust
+rules on every rotation. An exchange whose subject token has the deployment URL
+as its audience, as a CI job's token does, receives none.
+
 ### CLI UX
 
 The stored grant-and-binding document is the authority model. The normal CLI

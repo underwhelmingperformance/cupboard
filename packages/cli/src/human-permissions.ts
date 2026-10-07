@@ -52,6 +52,8 @@ const operationLabels: Readonly<Record<Operation, string>> = {
 	'control-key:list': 'list operator sign-in keys',
 	'control-key:rotate': 'rotate operator sign-in keys',
 	'control-key:retire': 'retire operator sign-in keys',
+	'control-session:list': 'list operator sign-in sessions',
+	'control-session:revoke': 'revoke operator sign-in sessions',
 	'tenant:list': 'list tenants',
 	'tenant:create': 'create tenants',
 	'tenant:suspend': 'suspend tenants',

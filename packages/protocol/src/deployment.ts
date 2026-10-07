@@ -63,7 +63,8 @@ export const transitionIdSchema = z.enum([
 	'publication-identity',
 	'blob-reference-read-authority',
 	'tenant-retry-clock',
-	'tenant-schema-progress'
+	'tenant-schema-progress',
+	'control-refresh-sessions'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -319,6 +320,12 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 	{
 		id: 'tenant-schema-progress',
 		expand: ['0038_tenant_schema_progress.sql'],
+		contract: [],
+		independent: true
+	},
+	{
+		id: 'control-refresh-sessions',
+		expand: ['0039_control_refresh_sessions.sql'],
 		contract: [],
 		independent: true
 	}

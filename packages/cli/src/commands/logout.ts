@@ -3,6 +3,7 @@ import type { Reporter, ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
+import { type SessionIdentity, sessionIdentity } from '../auth/identity.ts';
 import { decodeJwtPayload } from '../auth/jwt.ts';
 import {
 	type RevocationOutcome,
@@ -216,17 +217,58 @@ async function revokeSession(
 	};
 }
 
+interface RevokedSession {
+	readonly revocation: SessionRevocation;
+	readonly kind: SessionIdentity['kind'] | undefined;
+}
+
 async function revokeSessions(
 	removed: readonly RemovedTarget[],
 	dependencies: LogoutDependencies
-): Promise<readonly SessionRevocation[]> {
-	const revocations: SessionRevocation[] = [];
+): Promise<readonly RevokedSession[]> {
+	const revoked: RevokedSession[] = [];
 
 	for (const entry of removed) {
-		revocations.push(await revokeSession(entry, dependencies));
+		revoked.push({
+			revocation: await revokeSession(entry, dependencies),
+			kind:
+				entry.session === undefined
+					? undefined
+					: sessionIdentity(entry.session)?.kind
+		});
 	}
 
-	return revocations;
+	return revoked;
+}
+
+const sessionKinds: readonly SessionIdentity['kind'][] = [
+	'tenant',
+	'deployment'
+];
+
+const sessionRevokeHints: Readonly<Record<SessionIdentity['kind'], string>> = {
+	tenant:
+		'A tenant administrator can end a tenant session with ' +
+		'`cupboard session revoke`.',
+	deployment:
+		'An operator can end a deployment session with ' +
+		'`cupboard deployment session revoke`.'
+};
+
+function failedRevocationHints(
+	revoked: readonly RevokedSession[]
+): readonly string[] {
+	const kinds = new Set(
+		revoked
+			.filter((entry) => entry.revocation.revocation === 'failed')
+			.flatMap((entry) =>
+				entry.kind === undefined ? sessionKinds : [entry.kind]
+			)
+	);
+
+	return sessionKinds
+		.filter((kind) => kinds.has(kind))
+		.map((kind) => sessionRevokeHints[kind]);
 }
 
 interface CloudflareSignInResolution {
@@ -340,7 +382,8 @@ export async function runLogout(
 		dependencies
 	);
 	const removed = await removeSessions(input.sessions, dependencies);
-	const revocations = await revokeSessions(removed, dependencies);
+	const revoked = await revokeSessions(removed, dependencies);
+	const revocations = revoked.map((entry) => entry.revocation);
 	const result: LogoutResult = {
 		...(input.sessions.kind === 'url' && {
 			url: canonicalHref(input.sessions.url)
@@ -392,9 +435,11 @@ export async function runLogout(
 
 	if (hasFailedRevocation) {
 		reporter.warn(
-			'Could not confirm revocation of some refresh tokens. A copied token ' +
-				'might remain usable. A tenant administrator can end a tenant session ' +
-				'with `cupboard session revoke`.'
+			[
+				'Could not confirm revocation of some refresh tokens. A copied token ' +
+					'might remain usable.',
+				...failedRevocationHints(revoked)
+			].join(' ')
 		);
 	}
 
@@ -442,14 +487,15 @@ export function registerLogoutCommand(
 				'Logout sends a revocation request for the refresh token of each saved',
 				'sign-in that it deletes. With --cloudflare, it also sends Cloudflare a',
 				'revocation request for the Cloudflare refresh token. The saved files',
-				'are deleted even when a revocation fails. A copy of a revoked tenant',
-				'sign-in cannot be renewed. A copy of a cupboard access token remains',
-				'valid for up to ten minutes, and a copy of a Cloudflare access token',
-				'until it expires. A deployment session has no refresh token.',
+				'are deleted even when a revocation fails. A copy of a revoked sign-in',
+				'cannot be renewed. A copy of a cupboard access token remains valid for',
+				'up to ten minutes, and a copy of a Cloudflare access token until it',
+				'expires.',
 				'',
 				'If a revocation fails, a copy of that sign-in on another machine',
 				'can be renewed for up to 30 days after sign-in. A tenant',
-				'administrator can end it with `cupboard session revoke`.',
+				'administrator can end it with `cupboard session revoke`, and an',
+				'operator with `cupboard deployment session revoke`.',
 				'',
 				'While a Cloudflare sign-in is cached, later commands can use it to',
 				'start a new session without a browser; pass --cloudflare to remove it.',
