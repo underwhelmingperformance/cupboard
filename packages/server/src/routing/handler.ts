@@ -591,11 +591,25 @@ async function dispatchTenant(
 
 	const status = admittedStatus ?? (await tenantStatus(env, tenant));
 
-	if (status !== 'active') {
+	if (status !== 'active' && !isRevocationWhileSuspended(inner, status)) {
 		throw new TenantWritesStoppedError(tenant, status);
 	}
 
 	return tenantServer(env, tenant).fetch(inner);
+}
+
+// A suspended tenant can resume, so a refresh token revoked during the
+// suspension must not work again afterwards. Suspension changes only the D1
+// status, and the tenant object can still revoke the family.
+function isRevocationWhileSuspended(
+	inner: Request,
+	status: TenantStatus | undefined
+): boolean {
+	return (
+		status === 'suspended' &&
+		inner.method === 'POST' &&
+		new URL(inner.url).pathname === '/revoke'
+	);
 }
 
 // Returns the admitted status only when it came from this request's D1 read.

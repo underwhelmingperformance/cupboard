@@ -70,12 +70,14 @@ import {
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	adminGrants,
 	authorisedFetch,
 	currentOrigin,
 	currentServer,
 	fetchPath,
+	handlerFetch,
 	issueServerSignedToken,
 	latestMigrationIndex,
 	migrateThrough,
@@ -83,10 +85,12 @@ import {
 	putTestCache,
 	readFetch,
 	resetTestServer,
+	suspendTenant,
 	testPushId,
 	underOneUnitOfWork,
 	uploadMetadata,
-	uploadPathNegotiation
+	uploadPathNegotiation,
+	useTestServer
 } from '../test-support.ts';
 
 import { AuthKeysService } from './auth-keys-service.ts';
@@ -130,7 +134,9 @@ const authorizationServerMetadataSchema = z.strictObject({
 	response_types_supported: z.array(z.string()),
 	grant_types_supported: z.array(z.string()),
 	authorization_details_types_supported: z.array(z.string()),
-	token_endpoint_auth_methods_supported: z.array(z.string())
+	token_endpoint_auth_methods_supported: z.array(z.string()),
+	revocation_endpoint: z.string(),
+	revocation_endpoint_auth_methods_supported: z.array(z.string())
 });
 
 function postToken(form: Record<string, string>): Promise<Response> {
@@ -1791,6 +1797,34 @@ function negotiateFor(token: string, cache: string): Promise<Response> {
 		method: 'POST'
 	});
 }
+
+function postRevoke(form: Record<string, string>): Promise<Response> {
+	return fetchPath('/revoke', {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams(form).toString()
+	});
+}
+
+async function revocationOutcome(form: Record<string, string>): Promise<{
+	readonly status: number;
+	readonly cacheControl: string | null;
+	readonly body: string;
+}> {
+	const response = await postRevoke(form);
+
+	return {
+		status: response.status,
+		cacheControl: response.headers.get('cache-control'),
+		body: await response.text()
+	};
+}
+
+const revoked = {
+	status: StatusCodes.OK,
+	cacheControl: 'no-store',
+	body: ''
+};
 
 function refreshKeys(context: ServerContext): RefreshKeyContext {
 	return {
@@ -4308,6 +4342,177 @@ async function exchangeWith(
 	return { status: response.status, body: await response.json() };
 }
 
+describe('token revocation', () => {
+	beforeEach(resetTestServer);
+
+	it.each([undefined, 'refresh_token', 'access_token'])(
+		'revokes the family of a refresh token with the hint %s',
+		async (hint) => {
+			const exchanged = await exchange(await installTrustedIdp('admin'));
+			const refreshToken = exchanged.refresh_token ?? '';
+			const outcome = await revocationOutcome({
+				token: refreshToken,
+				...(hint !== undefined && { token_type_hint: hint })
+			});
+			const renewal = await staleRefreshOutcome(refreshToken);
+
+			expect({
+				outcome,
+				renewal,
+				families: await refreshTokenRows(),
+				members: await refreshTokenMemberRows()
+			}).toStrictEqual({
+				outcome: revoked,
+				renewal: {
+					status: StatusCodes.BAD_REQUEST,
+					error: 'invalid_grant',
+					problem: 'stale-refresh-token'
+				},
+				families: [],
+				members: []
+			});
+		}
+	);
+
+	it('revokes the family when a spent refresh token is presented', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const original = exchanged.refresh_token ?? '';
+		const rotated = await refresh(original);
+		const successor = tokenResponseSchema.parse(await rotated.json());
+		const outcome = await revocationOutcome({ token: original });
+		const renewal = await staleRefreshOutcome(successor.refresh_token ?? '');
+
+		expect({
+			outcome,
+			renewal,
+			families: await refreshTokenRows()
+		}).toStrictEqual({
+			outcome: revoked,
+			renewal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			families: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'an unknown refresh credential',
+			token: () =>
+				Promise.resolve(`${crypto.randomUUID()}.${'a'.repeat(64)}.e30.e30`)
+		},
+		{
+			name: 'a refresh credential with a forged secret',
+			token: (live: string) =>
+				Promise.resolve(
+					live.replace(/\.[\da-f]{64}\./u, () => `.${'0'.repeat(64)}.`)
+				)
+		},
+		{ name: 'an opaque string', token: () => Promise.resolve('not-a-token') },
+		{ name: 'an untrusted JWT', token: untrustedToken }
+	])(
+		'returns the same empty response for $name and keeps the family',
+		async ({ token }) => {
+			const exchanged = await exchange(await installTrustedIdp('admin'));
+			const live = exchanged.refresh_token ?? '';
+			const before = await refreshTokenRows();
+			const outcome = await revocationOutcome({ token: await token(live) });
+
+			expect({
+				outcome,
+				families: await refreshTokenRows()
+			}).toStrictEqual({ outcome: revoked, families: before });
+		}
+	);
+
+	it('returns the same empty response for a token that is already revoked', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const refreshToken = exchanged.refresh_token ?? '';
+		const first = await revocationOutcome({ token: refreshToken });
+		const second = await revocationOutcome({ token: refreshToken });
+
+		expect({ first, second }).toStrictEqual({
+			first: revoked,
+			second: revoked
+		});
+	});
+
+	it('revokes the family while the tenant is suspended and still refuses its refresh', async () => {
+		await useTestServer(fixtureTenant);
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const refreshToken = exchanged.refresh_token ?? '';
+		await suspendTenant(fixtureTenant);
+		const response = await handlerFetch(`/t/${fixtureTenant}/revoke`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: refreshToken }).toString()
+		});
+		const renewal = await handlerFetch(`/t/${fixtureTenant}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: refreshTokenGrantType,
+				refresh_token: refreshToken
+			}).toString()
+		});
+
+		expect({
+			outcome: {
+				status: response.status,
+				cacheControl: response.headers.get('cache-control'),
+				body: await response.text()
+			},
+			renewalStatus: renewal.status,
+			families: await refreshTokenRows()
+		}).toStrictEqual({
+			outcome: revoked,
+			renewalStatus: StatusCodes.FORBIDDEN,
+			families: []
+		});
+	});
+
+	it('refuses to revoke a cupboard access token', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const response = await postRevoke({
+			token: exchanged.access_token,
+			token_type_hint: 'access_token'
+		});
+		const body = oauthErrorShape(await response.json());
+		const families = await refreshTokenRows();
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			error: body.error,
+			problem: body.problem,
+			generations: families.map((row) => row.generation)
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			cacheControl: 'no-store',
+			error: 'unsupported_token_type',
+			problem: undefined,
+			generations: [0]
+		});
+	});
+
+	it('refuses a revocation request without a token', async () => {
+		const response = await postRevoke({ token_type_hint: 'refresh_token' });
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem: 'schema-mismatch'
+		});
+	});
+});
+
 describe('requested grants', () => {
 	beforeEach(resetTestServer);
 
@@ -5193,7 +5398,9 @@ describe('auth discovery endpoints', () => {
 					'cupboard_domain',
 					'cupboard_wildcard'
 				],
-				token_endpoint_auth_methods_supported: ['none']
+				token_endpoint_auth_methods_supported: ['none'],
+				revocation_endpoint: `${origin}/t/v1/revoke`,
+				revocation_endpoint_auth_methods_supported: ['none']
 			}
 		});
 	});

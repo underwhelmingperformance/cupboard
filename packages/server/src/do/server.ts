@@ -798,10 +798,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.use('/reuse/*', uncachedReuseErrors);
 		this.registerReuseViewRoutes();
 
-		// `/token` uses the subject token as its credential. The Worker proxies the
-		// JWKS route to this Durable Object.
+		// `/token` and `/revoke` use the presented token as their credential. The
+		// Worker proxies the JWKS route to this Durable Object.
 		this.app.post('/token', (context) =>
 			this.tokenExchange.handleToken(context.get('logger'), context.req.raw)
+		);
+		this.app.post('/revoke', (context) =>
+			this.tokenExchange.handleRevoke(context.get('logger'), context.req.raw)
 		);
 		// Both key documents are served uncached so a rotation is visible across
 		// colos at once.

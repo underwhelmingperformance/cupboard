@@ -148,6 +148,13 @@ export type RefreshTokenGrantRequest = z.output<
 export const tokenExchangeRequestSchema = tokenExchangeGrantRequestSchema;
 export type TokenExchangeRequest = z.output<typeof tokenExchangeRequestSchema>;
 
+// An RFC 7009 revocation request. The server identifies the token itself, so
+// it accepts `token_type_hint` and ignores it.
+export const tokenRevocationRequestSchema = z.object({
+	token: z.string().min(1),
+	token_type_hint: z.string().min(1).optional()
+});
+
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the Cupboard JWT; `issued_token_type` is present for the
 // token-exchange grant. A tenant's interactive session receives a refresh token,

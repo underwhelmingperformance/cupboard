@@ -173,10 +173,12 @@ being removed.
 
 ## Suspending a tenant
 
-Suspending a tenant stops it completely, straight away:
+Suspending a tenant blocks most access immediately:
 
 - Reads return 404.
 - Pushes, sign-in and administration are refused.
+- Refresh tokens can still be revoked, so `cupboard logout` still ends a
+  session. The session remains ended after the tenant is resumed.
 - Scheduled maintenance, including garbage collection, pauses.
 
 ```sh
