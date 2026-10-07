@@ -38,19 +38,38 @@ const identitySchema = z
 		);
 	});
 
-const authoritySchema = z.strictObject({
-	purpose: z.literal('cupboard-refresh'),
-	version: z.union([z.literal(1), z.literal(2)]),
-	tenant: tenantIdSchema,
+const authorityClaimsShape = {
 	familyId: z.uuid(),
 	memberId: z.uuid(),
 	generation: z.number().int().nonnegative(),
 	expiresAt: z.iso.datetime().pipe(isoTimestampSchema),
 	identity: identitySchema,
 	grants: authorizationDetailsSchema.min(1)
+};
+
+const tenantAuthoritySchema = z.strictObject({
+	purpose: z.literal('cupboard-refresh'),
+	version: z.union([z.literal(1), z.literal(2)]),
+	tenant: tenantIdSchema,
+	...authorityClaimsShape
 });
 
-export type RefreshAuthority = z.output<typeof authoritySchema>;
+const controlAuthoritySchema = z.strictObject({
+	purpose: z.literal('cupboard-control-refresh'),
+	version: z.literal(2),
+	...authorityClaimsShape
+});
+
+/**
+The claims that every refresh credential seals, whichever authority issued it.
+*/
+export type RefreshAuthorityClaims = Omit<
+	z.output<typeof controlAuthoritySchema>,
+	'purpose' | 'version'
+>;
+export type RefreshAuthority =
+	| z.output<typeof tenantAuthoritySchema>
+	| z.output<typeof controlAuthoritySchema>;
 type RefreshCredentialVersion = RefreshAuthority['version'];
 
 const credentialPattern =
@@ -63,10 +82,17 @@ export type AuthenticatedRefreshAuthority = Omit<
 	readonly identity: VerifiedOidcClaims;
 };
 
-export interface RefreshKeyContext {
-	readonly signingKey: PushIdSigningKey;
-	readonly tenant: TenantId;
-}
+/**
+ * The control plane derives its keys from `CONTROL_KEY_WRAP_SECRET`, which the
+ * tenant Worker never has.
+ */
+export type RefreshKeyContext =
+	| {
+			readonly kind: 'tenant';
+			readonly signingKey: PushIdSigningKey;
+			readonly tenant: TenantId;
+	  }
+	| { readonly kind: 'control'; readonly wrappingSecret: string };
 
 /**
  * A bounded opaque credential whose complete value is authenticated by member
@@ -76,10 +102,10 @@ export interface RefreshKeyContext {
  */
 export class RefreshCredential {
 	static async issue(
-		authority: Omit<RefreshAuthority, 'version'>,
+		authority: RefreshAuthorityClaims,
 		context: RefreshKeyContext
 	): Promise<RefreshCredential> {
-		const validated = authoritySchema.parse({ ...authority, version: 2 });
+		const validated = boundAuthority(authority, context);
 		const json = JSON.stringify(validated);
 
 		if (json.length > refreshCredentialMaxBytes) {
@@ -181,27 +207,64 @@ export class RefreshCredential {
 			return undefined;
 		}
 
-		const parsed = authoritySchema.safeParse(authority);
+		const parsed = parseBoundAuthority(authority, context);
 
-		if (
-			!parsed.success ||
-			parsed.data.version !== this.version ||
-			parsed.data.tenant !== context.tenant ||
-			parsed.data.memberId !== this.id
-		) {
+		if (parsed?.version !== this.version || parsed.memberId !== this.id) {
 			return undefined;
 		}
 
 		return {
-			...parsed.data,
-			identity: parsed.data.identity as unknown as VerifiedOidcClaims
+			...parsed,
+			identity: parsed.identity as unknown as VerifiedOidcClaims
 		};
 	}
 }
 
+function boundAuthority(
+	authority: RefreshAuthorityClaims,
+	context: RefreshKeyContext
+): RefreshAuthority {
+	const claims = {
+		familyId: authority.familyId,
+		memberId: authority.memberId,
+		generation: authority.generation,
+		expiresAt: authority.expiresAt,
+		identity: authority.identity,
+		grants: authority.grants
+	};
+
+	if (context.kind === 'control') {
+		return controlAuthoritySchema.parse({
+			purpose: 'cupboard-control-refresh',
+			version: 2,
+			...claims
+		});
+	}
+
+	return tenantAuthoritySchema.parse({
+		purpose: 'cupboard-refresh',
+		version: 2,
+		tenant: context.tenant,
+		...claims
+	});
+}
+
+function parseBoundAuthority(
+	value: unknown,
+	context: RefreshKeyContext
+): RefreshAuthority | undefined {
+	if (context.kind === 'control') {
+		return controlAuthoritySchema.safeParse(value).data;
+	}
+
+	const parsed = tenantAuthoritySchema.safeParse(value);
+
+	return parsed.data?.tenant === context.tenant ? parsed.data : undefined;
+}
+
 export function refreshPolicyIdentity(
 	claims: VerifiedOidcClaims
-): RefreshAuthority['identity'] {
+): RefreshAuthorityClaims['identity'] {
 	return identitySchema.parse(
 		Object.fromEntries(
 			Object.entries(claims).filter(
@@ -227,7 +290,9 @@ async function deriveRefreshKey(
 	const encoder = new TextEncoder();
 	const material = await crypto.subtle.importKey(
 		'raw',
-		encoder.encode(context.signingKey),
+		encoder.encode(
+			context.kind === 'tenant' ? context.signingKey : context.wrappingSecret
+		),
 		'HKDF',
 		false,
 		['deriveKey']
@@ -252,11 +317,13 @@ function refreshAuthorityKey(
 	memberId: string,
 	secret: string
 ): Promise<CryptoKey> {
-	return deriveRefreshKey(context, secret, [
-		'cupboard/refresh-authority/v1',
-		context.tenant,
-		memberId
-	]);
+	return deriveRefreshKey(
+		context,
+		secret,
+		context.kind === 'tenant'
+			? ['cupboard/refresh-authority/v1', context.tenant, memberId]
+			: ['cupboard/control-refresh-authority/v1', memberId]
+	);
 }
 
 function refreshEnvelopeKey(
@@ -264,12 +331,18 @@ function refreshEnvelopeKey(
 	presented: RefreshCredential,
 	successorId: string
 ): Promise<CryptoKey> {
-	return deriveRefreshKey(context, presented.secret, [
-		'cupboard/refresh-envelope/v3',
-		context.tenant,
-		presented.id,
-		successorId
-	]);
+	return deriveRefreshKey(
+		context,
+		presented.secret,
+		context.kind === 'tenant'
+			? [
+					'cupboard/refresh-envelope/v3',
+					context.tenant,
+					presented.id,
+					successorId
+				]
+			: ['cupboard/control-refresh-envelope/v1', presented.id, successorId]
+	);
 }
 
 async function decryptOrUndefined(

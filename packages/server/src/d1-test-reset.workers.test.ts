@@ -18,6 +18,12 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO local_step_wake_cursor (id, after_tenant) VALUES (1, 'reset-tenant')"
 		),
 		env.CUPBOARD_DB.prepare(
+			"INSERT INTO control_refresh_session_family (id, active_member_id, generation, created_at, expires_at, issuer, subject) VALUES ('reset-family', 'reset-member', 0, '2025-01-01T00:00:00.000Z', '2025-01-31T00:00:00.000Z', 'https://issuer.example', 'subject')"
+		),
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO control_refresh_session_member (id, family_id, generation, credential_hash, created_at) VALUES ('reset-member', 'reset-family', 0, 'hash', '2025-01-01T00:00:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO object_incarnation (kind, object_id, incarnation, state) VALUES ('nar', 'reset-object', 1, 'absent')"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -59,6 +65,8 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		cache_lifecycle_storage: 0,
 		control_auth_key: 0,
 		control_trust: 0,
+		control_refresh_session_family: 0,
+		control_refresh_session_member: 0,
 		tenant: 0,
 		tenant_cache_read_credential: 0,
 		tenant_maintenance_failure: 0,

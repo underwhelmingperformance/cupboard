@@ -1363,3 +1363,42 @@ describe('session operations', () => {
 		}
 	);
 });
+
+describe('control session operations', () => {
+	const otherControlOperations = controlOperations.filter(
+		(operation) => !operation.startsWith('control-session:')
+	);
+
+	it.each(['control-session:list', 'control-session:revoke'] as const)(
+		'grants %s only through a wildcard or an explicit control grant',
+		(operation) => {
+			expect({
+				wildcard: isCoveredByToken(
+					[{ type: 'cupboard_wildcard' }],
+					operation,
+					{}
+				),
+				explicit: isCoveredByToken(
+					[{ type: 'cupboard_control', actions: [operation] }],
+					operation,
+					{}
+				),
+				otherControl: isCoveredByToken(
+					[{ type: 'cupboard_control', actions: otherControlOperations }],
+					operation,
+					{}
+				),
+				domain: isCoveredByToken(
+					[{ type: 'cupboard_domain', actions: [...domainOperations] }],
+					operation,
+					{}
+				)
+			}).toStrictEqual({
+				wildcard: true,
+				explicit: true,
+				otherControl: false,
+				domain: false
+			});
+		}
+	);
+});

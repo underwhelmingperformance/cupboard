@@ -1,8 +1,12 @@
 import { InvalidCacheUrlBaseError } from './errors.ts';
 
+/**
+ * Returns `value` without its trailing slashes, as {@link canonicalHref} removes
+ * them from a URL.
+ */
 // An anchored `/+$` expression can rescan a long suffix from every trailing
 // slash. Scan backwards once so trimming remains linear in the path length.
-function withoutTrailingSlashes(value: string): string {
+export function withoutTrailingSlashes(value: string): string {
 	let end = value.length;
 
 	while (end > 0 && value.codePointAt(end - 1) === 0x2f) {

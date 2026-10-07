@@ -1,8 +1,10 @@
+import { type Logger } from '@cupboard/logger';
 import {
 	type AuthKeyId,
 	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	type ConfiguredInstanceSummary,
 	type InstanceName,
@@ -14,12 +16,16 @@ import {
 	oidcAudienceSchema,
 	type OidcIssuer,
 	oidcIssuerSchema,
+	type OidcSubject,
 	oidcSubjectSchema,
+	refreshTokenGrantRequestSchema,
+	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantRequestSchema,
 	tokenExchangeGrantType,
 	tokenRequestSchema,
-	type TokenResponse
+	type TokenResponse,
+	tokenRevocationRequestSchema
 } from '@cupboard/protocol/oidc';
 import {
 	type OidcTrustAddBody,
@@ -30,12 +36,22 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	hasMatchingOidcTrustIdentity,
+	type OidcTrustRule,
 	oidcTrustVerificationTarget,
-	trustedAudiences
+	trustedAudiences,
+	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
-import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
+import {
+	type OidcTrustSelection,
+	selectOidcTrust
+} from '@cupboard/protocol/oidc-trust-selection';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import {
+	type RefreshSessionId,
+	type RefreshSessionListResponseInput,
+	type RefreshSessionRevokeResponseInput
+} from '@cupboard/protocol/sessions';
 import {
 	type CacheReadCredentialResponse,
 	type MembershipRebuildResponse,
@@ -57,6 +73,7 @@ import {
 	issueAccessJwt,
 	verifyAccessJwt
 } from '../auth/auth.ts';
+import { RefreshCredential } from '../auth/refresh-credential.ts';
 import {
 	issueAttenuatedAccessToken,
 	parseRequestedGrants,
@@ -70,15 +87,21 @@ import {
 	InvalidAccessTokenError,
 	InvalidAuthorizationDetailsError,
 	OidcIssuerTransportRequiredError,
+	RefreshTokenRequiredError,
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
 	SubjectTokenVerificationFailedError,
 	UnauthenticatedError,
 	UnsupportedGrantTypeError,
-	UnsupportedSubjectTokenTypeError
+	UnsupportedSubjectTokenTypeError,
+	UnsupportedTokenTypeError
 } from '../errors.ts';
-import { oauthJsonResponse } from '../http/oauth-response.ts';
+import {
+	oauthEmptyResponse,
+	oauthJsonResponse
+} from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
+import { isAudienceBound } from '../oidc/audience-binding.ts';
 import { InboundTokenVerifier } from '../oidc/inbound-verifier.ts';
 import {
 	canUseLoopbackHttp,
@@ -97,6 +120,7 @@ import {
 	ensureControlKey,
 	rotateControlKey
 } from './control-key-store.ts';
+import { ControlRefreshSessions } from './control-refresh-sessions.ts';
 import {
 	addControlTrust,
 	controlTrustRuleSnapshots,
@@ -160,14 +184,31 @@ export function controlInstanceInitialise(
 // external OIDC ID token choose a configured issuer and audience, the
 // signature is checked against that issuer's JWKS, a control trust rule is
 // selected from the verified claims and requested grants, and only then is a
-// global-admin token issued with the control signing key. A subject token
-// whose signature does not verify against the configured issuer is refused,
-// whatever claims it carries.
+// global-admin token issued with the control signing key. An exchange
+// receives a refresh token unless its verified audience is the deployment URL.
+// A subject token whose signature does not verify against the configured issuer
+// is refused, whatever its claims are.
+// The refresh grant renews a session while the control trust rules still
+// select its identity.
 export async function controlTokenExchange(
 	request: Request,
-	env: Env
+	env: Env,
+	logger: Logger
 ): Promise<Response> {
 	const body = await parseFormBody(tokenRequestSchema, request);
+
+	if (body.grant_type === refreshTokenGrantType) {
+		if (body.refresh_token === undefined) {
+			throw new RefreshTokenRequiredError();
+		}
+
+		return oauthJsonResponse(
+			await controlRefreshSessions(request, env).refresh(
+				logger,
+				parseFormValue(refreshTokenGrantRequestSchema, body)
+			)
+		);
+	}
 
 	if (body.grant_type !== tokenExchangeGrantType) {
 		throw new UnsupportedGrantTypeError(body.grant_type);
@@ -279,44 +320,38 @@ export async function controlTokenExchange(
 		throw new SubjectTokenVerificationFailedError();
 	}
 
-	const subject = oidcSubjectSchema.parse(verifiedSubject);
-
-	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
-	const active = await activeControlKey(database, wrappingSecret);
 	if (selection.grants === undefined && selection.rule === undefined) {
 		throw new ControlSubjectTokenUntrustedError();
 	}
+
+	const subject = oidcSubjectSchema.parse(verifiedSubject);
 	const grants =
 		selection.grants ??
 		(selection.rule === undefined
 			? []
 			: resolveRequestedGrants(selection.rule, verified, requested));
-	const accessToken = await issueAccessJwt(
-		active.privateJwk,
-		{
-			issuer: controlIssuer(request),
-			audience,
-			subject,
-			grants,
-			kid: active.kid,
-			ttlSeconds: adminJwtTtlSeconds,
-			auditClaims:
-				selection.rule === undefined ? {} : { cb_rule: selection.rule.id }
-		},
-		now
+	const accessToken = await issueControlAccessToken(
+		request,
+		env,
+		selection.rule,
+		subject,
+		grants
 	);
+	// A CI job exchanges a new token from its provider whenever it needs one,
+	// so only an exchange that is not bound to this deployment's URL starts a
+	// session.
+	const sessions = controlRefreshSessions(request, env);
+	const session = isAudienceBound(verified, controlIssuer(request))
+		? undefined
+		: await sessions.create(verified, subject, selection.rule, grants);
 
-	const current = await controlTrustRuleSnapshots(
-		database,
-		canUseLoopbackHttp(env)
-	);
-	if (
-		selectOidcTrust(
-			current.map(({ rule }) => rule),
-			verified,
-			grants
-		).outcome !== 'selected'
-	) {
+	const current = await selectControlTrust(env, verified, grants);
+
+	if (current.outcome !== 'selected') {
+		if (session !== undefined) {
+			await sessions.revoke(session.familyId);
+		}
+
 		throw new ControlSubjectTokenUntrustedError();
 	}
 
@@ -325,8 +360,109 @@ export async function controlTokenExchange(
 		token_type: 'Bearer',
 		expires_in: adminJwtTtlSeconds,
 		issued_token_type: issuedAccessTokenType,
+		...(session !== undefined && { refresh_token: session.refreshToken }),
 		authorization_details: grants
 	} satisfies TokenResponse);
+}
+
+export async function controlRevoke(
+	request: Request,
+	env: Env,
+	logger: Logger
+): Promise<Response> {
+	const body = await parseFormBody(tokenRevocationRequestSchema, request);
+	const presented = RefreshCredential.parse(body.token);
+
+	if (presented !== undefined) {
+		await controlRefreshSessions(request, env).revokePresented(
+			logger,
+			presented
+		);
+		return oauthEmptyResponse();
+	}
+
+	if ((await verifyControlSelfIssued(request, env, body.token)) !== undefined) {
+		throw new UnsupportedTokenTypeError();
+	}
+
+	return oauthEmptyResponse();
+}
+
+export function controlSessionList(
+	request: Request,
+	env: Env
+): Promise<RefreshSessionListResponseInput> {
+	return controlRefreshSessions(request, env).list();
+}
+
+export function controlSessionRevoke(
+	request: Request,
+	env: Env,
+	id: RefreshSessionId
+): Promise<RefreshSessionRevokeResponseInput> {
+	return controlRefreshSessions(request, env).revoke(id);
+}
+
+function controlRefreshSessions(
+	request: Request,
+	env: Env
+): ControlRefreshSessions {
+	const database = controlDatabase(env);
+
+	return new ControlRefreshSessions({
+		database,
+		keys: { kind: 'control', wrappingSecret: controlWrappingSecret(env) },
+		selectPolicy: (identity, grants) =>
+			selectControlTrust(env, identity, grants),
+		issueAccessToken: (rule, subject, grants) =>
+			issueControlAccessToken(request, env, rule, subject, grants)
+	});
+}
+
+async function selectControlTrust(
+	env: Env,
+	identity: VerifiedOidcClaims,
+	grants: AuthorizationDetails
+): Promise<OidcTrustSelection> {
+	const snapshots = await controlTrustRuleSnapshots(
+		controlDatabase(env),
+		canUseLoopbackHttp(env)
+	);
+
+	return selectOidcTrust(
+		snapshots.map(({ rule }) => rule),
+		identity,
+		grants
+	);
+}
+
+async function issueControlAccessToken(
+	request: Request,
+	env: Env,
+	rule: OidcTrustRule | undefined,
+	subject: OidcSubject,
+	grants: AuthorizationDetails
+): Promise<string> {
+	const database = controlDatabase(env);
+	const wrappingSecret = controlWrappingSecret(env);
+	const now = new Date();
+
+	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
+	const active = await activeControlKey(database, wrappingSecret);
+
+	return issueAccessJwt(
+		active.privateJwk,
+		{
+			issuer: controlIssuer(request),
+			audience: controlAudience(env),
+			subject,
+			grants,
+			kid: active.kid,
+			ttlSeconds: adminJwtTtlSeconds,
+			auditClaims: rule === undefined ? {} : { cb_rule: rule.id }
+		},
+		now
+	);
 }
 
 // Verifies a subject token against the control plane's own keys. A token that
@@ -387,13 +523,15 @@ export function controlAsMetadata(
 		token_endpoint: `${origin}/token`,
 		jwks_uri: `${origin}/.well-known/jwks.json`,
 		response_types_supported: [],
-		grant_types_supported: [tokenExchangeGrantType],
+		grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 		authorization_details_types_supported: [
 			'cupboard_tenant',
 			'cupboard_control',
 			'cupboard_wildcard'
 		],
-		token_endpoint_auth_methods_supported: ['none']
+		token_endpoint_auth_methods_supported: ['none'],
+		revocation_endpoint: `${origin}/revoke`,
+		revocation_endpoint_auth_methods_supported: ['none']
 	};
 }
 

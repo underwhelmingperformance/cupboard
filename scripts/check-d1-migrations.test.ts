@@ -109,7 +109,8 @@ describe('checkD1Migrations', () => {
 				'publication-identity',
 				'blob-reference-read-authority',
 				'tenant-retry-clock',
-				'tenant-schema-progress'
+				'tenant-schema-progress',
+				'control-refresh-sessions'
 			]
 		});
 	});
@@ -126,6 +127,7 @@ describe('checkD1Migrations', () => {
 				'0035_blob_reference_read_authority.sql',
 				'0037_tenant_retry_clock.sql',
 				'0038_tenant_schema_progress.sql',
+				'0039_control_refresh_sessions.sql',
 				'0032_attestation_ref_path_index.sql',
 				'0036_path_read_authority_contract.sql'
 			],
@@ -134,7 +136,8 @@ describe('checkD1Migrations', () => {
 				'publication-identity',
 				'blob-reference-read-authority',
 				'tenant-retry-clock',
-				'tenant-schema-progress'
+				'tenant-schema-progress',
+				'control-refresh-sessions'
 			]
 		});
 	});

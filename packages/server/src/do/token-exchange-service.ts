@@ -1,10 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { type TtlSeconds } from '@cupboard/nix-store/scalars';
-import {
-	type AuthorizationDetails,
-	isAuthorizationDetailCovered
-} from '@cupboard/protocol/grants';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	oidcIssuerSchema,
@@ -43,7 +40,7 @@ import {
 	readResourceStateSchema,
 	selectReadTrust
 } from '@cupboard/protocol/read-access';
-import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, sql } from 'drizzle-orm';
 
 import {
@@ -64,6 +61,12 @@ import {
 	refreshPolicyIdentity,
 	sealRefreshSuccessor
 } from '../auth/refresh-credential.ts';
+import {
+	hasSameAuthority,
+	isRefreshStateMatching,
+	isWithinRefreshRetryGrace,
+	unknownMemberCredentialHash
+} from '../auth/refresh-rotation.ts';
 import {
 	attenuatedGrants,
 	issueAttenuatedAccessToken,
@@ -131,11 +134,6 @@ type RefreshTokenMember = typeof schema.refreshTokenMembers.$inferSelect;
 type RefreshTokenDatabase = SchemaWriter;
 type RefreshTokenRotationOutcome =
 	'rotated' | 'policy-changed' | 'stale-member';
-
-// Authenticating against this hash always fails. A presented credential with an
-// unknown member ID is hashed like one with a known ID, so the response time
-// does not show whether the member exists.
-const unknownMemberCredentialHash = '0'.repeat(64);
 
 export class TokenExchangeService {
 	constructor(
@@ -894,8 +892,6 @@ export class TokenExchangeService {
 		const policyIdentity = refreshPolicyIdentity(identity);
 		const credential = await RefreshCredential.issue(
 			{
-				purpose: 'cupboard-refresh',
-				tenant: this.context.requireTenant(),
 				familyId,
 				memberId: id,
 				generation,
@@ -1048,6 +1044,7 @@ export class TokenExchangeService {
 
 	private refreshKeyContext(): RefreshKeyContext {
 		return {
+			kind: 'tenant',
 			signingKey: pushIdSigningKey(this.context.env),
 			tenant: this.context.requireTenant()
 		};
@@ -1127,37 +1124,4 @@ export class TokenExchangeService {
 
 		return oauthEmptyResponse();
 	}
-}
-
-function hasSameAuthority(
-	left: AuthorizationDetails,
-	right: AuthorizationDetails
-): boolean {
-	return (
-		left.every((detail) => isAuthorizationDetailCovered(right, detail)) &&
-		right.every((detail) => isAuthorizationDetailCovered(left, detail))
-	);
-}
-
-function isWithinRefreshRetryGrace(
-	createdAt: IsoTimestamp,
-	now: IsoTimestamp
-): boolean {
-	const elapsedMs = Date.parse(now) - Date.parse(createdAt);
-
-	return elapsedMs >= 0 && elapsedMs <= refreshTokenRetryGraceMs;
-}
-
-function isRefreshStateMatching(
-	authority: AuthenticatedRefreshAuthority,
-	family: RefreshTokenFamily,
-	member: RefreshTokenMember
-): boolean {
-	return (
-		authority.familyId === family.id &&
-		member.familyId === family.id &&
-		authority.memberId === member.id &&
-		authority.generation === member.generation &&
-		authority.expiresAt === family.expiresAt
-	);
 }

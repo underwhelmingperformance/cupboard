@@ -5,7 +5,12 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
-import { type TrustRuleId, trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import {
+	oidcIssuerSchema,
+	oidcSubjectSchema,
+	type TrustRuleId,
+	trustRuleIdSchema
+} from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
@@ -166,6 +171,118 @@ describe('control contract round trip', () => {
 				{ kid: rotated.kid, retired: false }
 			].toSorted((left, right) => byCodeUnit(left.kid, right.kid)),
 			retired: { kid: retiring.kid, retired: true }
+		});
+	});
+
+	it('lists and revokes operator sessions through the derived client', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const live = '00000000-0000-4000-8000-000000000001';
+		const composed = '00000000-0000-4000-8000-000000000002';
+		const expired = '00000000-0000-4000-8000-000000000003';
+		const createdAt = isoTimestampSchema.parse('2019-01-01T00:00:00.000Z');
+		const expiresAt = isoTimestampSchema.parse('2099-01-01T00:00:00.000Z');
+		const owner = {
+			issuer: oidcIssuerSchema.parse('https://idp.example'),
+			subject: oidcSubjectSchema.parse('global-admin')
+		};
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await database.batch([
+			database.insert(d1Schema.controlRefreshSessionFamily).values([
+				{
+					id: live,
+					activeMemberId: 'live-member',
+					generation: 0,
+					createdAt,
+					expiresAt,
+					...owner,
+					rule: trustRuleIdSchema.parse('signup')
+				},
+				{
+					id: composed,
+					activeMemberId: 'composed-member',
+					generation: 3,
+					createdAt,
+					expiresAt,
+					...owner
+				},
+				{
+					id: expired,
+					activeMemberId: 'expired-member',
+					generation: 0,
+					createdAt,
+					expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z'),
+					...owner
+				}
+			]),
+			database.insert(d1Schema.controlRefreshSessionMember).values({
+				id: 'live-member',
+				familyId: live,
+				generation: 0,
+				credentialHash: '0'.repeat(64),
+				createdAt
+			})
+		]);
+
+		const listed = await client.sessions.list();
+		const revoked = await client.sessions.revoke({ id: live });
+		const repeated = await client.sessions.revoke({ id: live });
+		const remaining = await client.sessions.list();
+		const members = await database
+			.select()
+			.from(d1Schema.controlRefreshSessionMember)
+			.all();
+		const composedSession = {
+			id: composed,
+			issuer: 'https://idp.example',
+			subject: 'global-admin',
+			createdAt,
+			expiresAt
+		};
+
+		expect({ listed, revoked, repeated, remaining, members }).toStrictEqual({
+			listed: {
+				sessions: [
+					{
+						id: live,
+						issuer: 'https://idp.example',
+						subject: 'global-admin',
+						rule: 'signup',
+						createdAt,
+						expiresAt
+					},
+					composedSession
+				]
+			},
+			revoked: { id: live, revoked: true },
+			repeated: { id: live, revoked: false },
+			remaining: { sessions: [composedSession] },
+			members: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'list operator sessions with only control-session:revoke',
+			action: 'control-session:revoke' as const,
+			call: (client: ControlClient): Promise<unknown> => client.sessions.list()
+		},
+		{
+			name: 'revoke an operator session with only control-session:list',
+			action: 'control-session:list' as const,
+			call: (client: ControlClient): Promise<unknown> =>
+				client.sessions.revoke({ id: '00000000-0000-4000-8000-000000000001' })
+		}
+	])('refuses to $name', async ({ action, call }) => {
+		const client = controlClient(
+			await issueControlAdminToken('global-admin', [
+				{ type: 'cupboard_control', actions: [action] }
+			])
+		);
+
+		await expect(call(client)).rejects.toMatchObject({
+			defined: true,
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN
 		});
 	});
 

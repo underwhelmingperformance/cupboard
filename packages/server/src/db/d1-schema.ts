@@ -13,7 +13,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { LocalStep } from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
-import type { TrustRuleId } from '@cupboard/protocol/oidc';
+import type {
+	OidcIssuer,
+	OidcSubject,
+	TrustRuleId
+} from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
 import type { ReadUser } from '@cupboard/shared/http';
@@ -376,6 +380,56 @@ export const controlTrust = sqliteTable('control_trust', {
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 	disabledAt: text('disabled_at').$type<IsoTimestamp>()
 });
+
+// An operator's sign-in session: a refresh-token family issued by a control
+// token exchange. It has the shape of the tenant object's
+// `refresh_session_family`. Rotation advances the active member with a
+// conditional update, and spent members remain until the family expires so a
+// replay can revoke the family.
+export const controlRefreshSessionFamily = sqliteTable(
+	'control_refresh_session_family',
+	{
+		id: text('id').primaryKey(),
+		activeMemberId: text('active_member_id').notNull(),
+		generation: integer('generation').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		issuer: text('issuer').$type<OidcIssuer>().notNull(),
+		subject: text('subject').$type<OidcSubject>().notNull(),
+		rule: text('rule').$type<TrustRuleId>()
+	},
+	(table) => [
+		uniqueIndex('control_refresh_session_family_active_member_unique').on(
+			table.activeMemberId
+		),
+		index('control_refresh_session_family_expires_at_idx').on(
+			table.expiresAt,
+			table.id
+		)
+	]
+);
+
+export const controlRefreshSessionMember = sqliteTable(
+	'control_refresh_session_member',
+	{
+		id: text('id').primaryKey(),
+		familyId: text('family_id').notNull(),
+		generation: integer('generation').notNull(),
+		credentialHash: text('credential_hash').notNull(),
+		successorEnvelope: text('successor_envelope'),
+		successorExpiresAt: text('successor_expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		uniqueIndex('control_refresh_session_member_family_generation_unique').on(
+			table.familyId,
+			table.generation
+		),
+		index('control_refresh_session_member_successor_expiry_idx')
+			.on(table.successorExpiresAt, table.id)
+			.where(sql`${table.successorExpiresAt} IS NOT NULL`)
+	]
+);
 
 // Each provisioned cache has one authoritative tenant row. `status` gates every
 // request: `active` serves reads and accepts writes, `suspended` refuses both,

@@ -1,21 +1,43 @@
+import { rootLogger } from '@cupboard/logger';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
+	oidcIssuerSchema,
+	oidcSubjectSchema,
+	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
+	type TokenResponse,
 	tokenResponseSchema,
 	type TrustRuleId
 } from '@cupboard/protocol/oidc';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
+import { asc } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { maxRefreshTokenFamilyMembers } from '../auth/auth.ts';
+import {
+	RefreshCredential,
+	type RefreshKeyContext,
+	refreshPolicyIdentity
+} from '../auth/refresh-credential.ts';
+import { pushIdSigningKeySchema } from '../blob/push-id.ts';
 import {
 	controlOidcTrustRemove,
 	controlTokenExchange
 } from '../control/control-plane.ts';
+import {
+	controlRefreshPrunePageSize,
+	pruneControlRefreshSessions
+} from '../control/control-refresh-sessions.ts';
+import { sha256Hex } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import {
 	ControlSubjectTokenUntrustedError,
 	StoredControlTrustInvalidError,
@@ -65,7 +87,9 @@ const authorizationServerMetadataSchema = z.strictObject({
 	response_types_supported: z.array(z.string()),
 	grant_types_supported: z.array(z.string()),
 	authorization_details_types_supported: z.array(z.string()),
-	token_endpoint_auth_methods_supported: z.array(z.string())
+	token_endpoint_auth_methods_supported: z.array(z.string()),
+	revocation_endpoint: z.string(),
+	revocation_endpoint_auth_methods_supported: z.array(z.string())
 });
 
 function postToken(
@@ -107,7 +131,8 @@ async function tokenExchangeError(
 	try {
 		return await controlTokenExchange(
 			tokenExchangeRequest(form),
-			Object.assign({}, env, testControlEnv)
+			Object.assign({}, env, testControlEnv),
+			rootLogger()
 		);
 	} catch (error: unknown) {
 		return error;
@@ -142,10 +167,10 @@ interface TrustedControlIdentity {
 async function trustedControlIdentity(
 	protectedType: string,
 	permittedGrants?: readonly PermittedGrant[],
-	additionalAudiences: readonly string[] = []
+	additionalAudiences: readonly string[] = [],
+	audience = 'cupboard-control'
 ): Promise<TrustedControlIdentity> {
 	const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
-	const audience = 'cupboard-control';
 	const { publicKey, privateKey } = await generateKeyPair('RS256', {
 		extractable: true
 	});
@@ -199,6 +224,105 @@ async function trustedControlIdentity(
 		.sign(privateKey);
 
 	return { token, rule, issuer, audience };
+}
+
+const controlRefreshKeys: RefreshKeyContext = {
+	kind: 'control',
+	wrappingSecret: testControlEnv.CONTROL_KEY_WRAP_SECRET
+};
+
+const staleRefresh = {
+	status: StatusCodes.BAD_REQUEST,
+	error: 'invalid_grant',
+	problem: 'stale-refresh-token'
+};
+
+const emptyRevocation = {
+	status: StatusCodes.OK,
+	cacheControl: 'no-store',
+	body: ''
+};
+
+function controlDatabase() {
+	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+}
+
+async function controlRefreshRows() {
+	const database = controlDatabase();
+
+	return {
+		families: await database
+			.select()
+			.from(d1Schema.controlRefreshSessionFamily)
+			.orderBy(asc(d1Schema.controlRefreshSessionFamily.id))
+			.all(),
+		members: await database
+			.select()
+			.from(d1Schema.controlRefreshSessionMember)
+			.orderBy(asc(d1Schema.controlRefreshSessionMember.generation))
+			.all()
+	};
+}
+
+async function exchangeControlIdentity(
+	identity: TrustedControlIdentity
+): Promise<TokenResponse> {
+	const response = await postToken({
+		grant_type: tokenExchangeGrantType,
+		subject_token: identity.token,
+		subject_token_type: subjectTokenTypeIdToken
+	});
+
+	return tokenResponseSchema.parse(await response.json());
+}
+
+function refreshControl(refreshToken: string): Promise<Response> {
+	return postToken({
+		grant_type: refreshTokenGrantType,
+		refresh_token: refreshToken
+	});
+}
+
+async function refreshedControl(refreshToken: string): Promise<TokenResponse> {
+	const response = await refreshControl(refreshToken);
+
+	return tokenResponseSchema.parse(await response.json());
+}
+
+async function refusalOf(
+	response: Response
+): Promise<{ status: number; error: string; problem: string | undefined }> {
+	const body = oauthErrorShape(await response.json());
+
+	return { status: response.status, error: body.error, problem: body.problem };
+}
+
+function postRevoke(form: Record<string, string>): Promise<Response> {
+	return controlFetch('/revoke', {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams(form).toString()
+	});
+}
+
+async function revocationOutcome(
+	form: Record<string, string>
+): Promise<{ status: number; cacheControl: string | null; body: string }> {
+	const response = await postRevoke(form);
+
+	return {
+		status: response.status,
+		cacheControl: response.headers.get('cache-control'),
+		body: await response.text()
+	};
+}
+
+function memberIdOf(refreshToken: string | undefined): string {
+	const [memberId] = z
+		.tuple([z.uuid(), z.string(), z.string(), z.string()])
+		.parse((refreshToken ?? '').split('.'));
+
+	return memberId;
 }
 
 describe('control plane POST /token', () => {
@@ -637,18 +761,24 @@ describe('control plane POST /token', () => {
 		expect(response.status).toBe(StatusCodes.OK);
 		const result = tokenResponseSchema.parse(await response.json());
 		const claims = decodeJwt(result.access_token);
+		const rows = await controlRefreshRows();
 		expect({
 			grants: result.authorization_details,
 			tokenGrants: claims.authorization_details,
-			refresh: result.refresh_token,
+			refresh: typeof result.refresh_token,
 			rule: claims.cb_rule,
-			rules: claims.cb_rules
+			rules: claims.cb_rules,
+			families: rows.families.map((family) => ({
+				subject: family.subject,
+				rule: family.rule ?? undefined
+			}))
 		}).toStrictEqual({
 			grants: requested,
 			tokenGrants: requested,
-			refresh: undefined,
+			refresh: 'string',
 			rule: undefined,
-			rules: undefined
+			rules: undefined,
+			families: [{ subject: 'global-admin', rule: undefined }]
 		});
 	});
 
@@ -864,8 +994,15 @@ describe('control plane POST /token', () => {
 			ruleId
 		);
 		releaseDiscovery(undefined);
+		const refused = await exchange;
 
-		expect(await exchange).toBeInstanceOf(ControlSubjectTokenUntrustedError);
+		expect({
+			isUntrusted: refused instanceof ControlSubjectTokenUntrustedError,
+			rows: await controlRefreshRows()
+		}).toStrictEqual({
+			isUntrusted: true,
+			rows: { families: [], members: [] }
+		});
 	});
 
 	it('refuses an existing loopback HTTP control trust row in production', async () => {
@@ -989,13 +1126,528 @@ describe('control plane POST /token', () => {
 				token_endpoint: `${origin}/token`,
 				jwks_uri: `${origin}/.well-known/jwks.json`,
 				response_types_supported: [],
-				grant_types_supported: [tokenExchangeGrantType],
+				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				authorization_details_types_supported: [
 					'cupboard_tenant',
 					'cupboard_control',
 					'cupboard_wildcard'
 				],
-				token_endpoint_auth_methods_supported: ['none']
+				token_endpoint_auth_methods_supported: ['none'],
+				revocation_endpoint: `${origin}/revoke`,
+				revocation_endpoint_auth_methods_supported: ['none']
+			}
+		});
+	});
+});
+
+describe('control plane refresh sessions', () => {
+	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('issues a session with an ID token exchange and rotates it', async () => {
+		const identity = await trustedControlIdentity('JWT');
+		const exchanged = await exchangeControlIdentity(identity);
+		const issued = await controlRefreshRows();
+		const response = await refreshControl(exchanged.refresh_token ?? '');
+		const refreshed = tokenResponseSchema.parse(await response.json());
+		const claims = decodeJwt(refreshed.access_token);
+		const rotated = await controlRefreshRows();
+		const [family] = issued.families;
+
+		if (family === undefined) {
+			throw new Error('Expected a control refresh family');
+		}
+
+		expect({
+			issued: issued.families,
+			lifetimeDays:
+				(Date.parse(family.expiresAt) - Date.parse(family.createdAt)) /
+				(24 * 60 * 60 * 1000),
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			expiresIn: refreshed.expires_in,
+			grants: refreshed.authorization_details,
+			claims: {
+				iss: claims.iss,
+				aud: claims.aud,
+				sub: claims.sub,
+				rule: claims.cb_rule
+			},
+			families: rotated.families,
+			memberGenerations: rotated.members.map((member) => member.generation)
+		}).toStrictEqual({
+			issued: [
+				{
+					id: family.id,
+					activeMemberId: memberIdOf(exchanged.refresh_token),
+					generation: 0,
+					createdAt: family.createdAt,
+					expiresAt: family.expiresAt,
+					issuer: identity.issuer,
+					subject: 'global-admin',
+					rule: identity.rule
+				}
+			],
+			lifetimeDays: 30,
+			status: StatusCodes.OK,
+			cacheControl: 'no-store',
+			expiresIn: 600,
+			grants: [{ type: 'cupboard_wildcard' }],
+			claims: {
+				iss: currentOrigin(),
+				aud: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
+				sub: 'global-admin',
+				rule: identity.rule
+			},
+			families: [
+				{
+					...family,
+					activeMemberId: memberIdOf(refreshed.refresh_token),
+					generation: 1
+				}
+			],
+			memberGenerations: [0, 1]
+		});
+	});
+
+	it.each([
+		{ name: 'the deployment URL', audience: () => currentOrigin() },
+		{
+			name: 'the deployment URL with a trailing slash',
+			audience: () => `${currentOrigin()}/`
+		}
+	])(
+		'starts no session for a token whose audience is $name',
+		async ({ audience }) => {
+			const exchanged = await exchangeControlIdentity(
+				await trustedControlIdentity('JWT', undefined, [], audience())
+			);
+
+			expect({
+				refreshToken: exchanged.refresh_token,
+				rows: await controlRefreshRows()
+			}).toStrictEqual({
+				refreshToken: undefined,
+				rows: { families: [], members: [] }
+			});
+		}
+	);
+
+	it('returns the same successor to a retry within the grace period', async () => {
+		const exchanged = await exchangeControlIdentity(
+			await trustedControlIdentity('JWT')
+		);
+		const original = exchanged.refresh_token ?? '';
+		const first = await refreshedControl(original);
+		const retry = await refreshedControl(original);
+		const rows = await controlRefreshRows();
+
+		expect({
+			sameSuccessor: retry.refresh_token === first.refresh_token,
+			generations: rows.families.map((family) => family.generation),
+			memberGenerations: rows.members.map((member) => member.generation)
+		}).toStrictEqual({
+			sameSuccessor: true,
+			generations: [1],
+			memberGenerations: [0, 1]
+		});
+	});
+
+	it('returns one successor to concurrent presentations of a refresh token', async () => {
+		const exchanged = await exchangeControlIdentity(
+			await trustedControlIdentity('JWT')
+		);
+		const original = exchanged.refresh_token ?? '';
+		const responses = await Promise.all([
+			refreshControl(original),
+			refreshControl(original)
+		]);
+		const [first, second] = await Promise.all(
+			responses.map(async (response) =>
+				tokenResponseSchema.parse(await response.json())
+			)
+		);
+		const rows = await controlRefreshRows();
+
+		expect({
+			statuses: responses.map((response) => response.status),
+			sameSuccessor: first?.refresh_token === second?.refresh_token,
+			families: rows.families.map((family) => ({
+				activeMemberId: family.activeMemberId,
+				generation: family.generation
+			})),
+			memberGenerations: rows.members.map((member) => member.generation)
+		}).toStrictEqual({
+			statuses: [StatusCodes.OK, StatusCodes.OK],
+			sameSuccessor: true,
+			families: [
+				{ activeMemberId: memberIdOf(first?.refresh_token), generation: 1 }
+			],
+			memberGenerations: [0, 1]
+		});
+	});
+
+	it('revokes the session when an earlier generation is replayed', async () => {
+		const exchanged = await exchangeControlIdentity(
+			await trustedControlIdentity('JWT')
+		);
+		const original = exchanged.refresh_token ?? '';
+		const second = await refreshedControl(original);
+		const third = await refreshedControl(second.refresh_token ?? '');
+		const replay = await refusalOf(await refreshControl(original));
+		const current = await refusalOf(
+			await refreshControl(third.refresh_token ?? '')
+		);
+
+		expect({
+			replay,
+			current,
+			rows: await controlRefreshRows()
+		}).toStrictEqual({
+			replay: staleRefresh,
+			current: staleRefresh,
+			rows: { families: [], members: [] }
+		});
+	});
+
+	it('revokes the session when its control trust rule is removed', async () => {
+		const identity = await trustedControlIdentity('JWT');
+		const exchanged = await exchangeControlIdentity(identity);
+		await controlOidcTrustRemove(
+			Object.assign({}, env, testControlEnv),
+			identity.rule
+		);
+
+		expect({
+			refusal: await refusalOf(
+				await refreshControl(exchanged.refresh_token ?? '')
+			),
+			rows: await controlRefreshRows()
+		}).toStrictEqual({
+			refusal: staleRefresh,
+			rows: { families: [], members: [] }
+		});
+	});
+
+	it('ends a session at its expiry', async () => {
+		const exchanged = await exchangeControlIdentity(
+			await trustedControlIdentity('JWT')
+		);
+		const expired = isoTimestamp(new Date(Date.now() - 1000));
+		await env.CUPBOARD_DB.prepare(
+			'UPDATE control_refresh_session_family SET expires_at = ?'
+		)
+			.bind(expired)
+			.run();
+
+		expect({
+			refusal: await refusalOf(
+				await refreshControl(exchanged.refresh_token ?? '')
+			),
+			rows: await controlRefreshRows()
+		}).toStrictEqual({
+			refusal: staleRefresh,
+			rows: { families: [], members: [] }
+		});
+	});
+
+	it('ends a session when its refresh-token family reaches the member limit', async () => {
+		const exchanged = await exchangeControlIdentity(
+			await trustedControlIdentity('JWT')
+		);
+		const original = exchanged.refresh_token ?? '';
+		const issued = await controlRefreshRows();
+		const [member] = issued.members;
+		const credential = RefreshCredential.parse(original);
+		const authority =
+			member === undefined
+				? undefined
+				: await credential?.authenticate(
+						member.credentialHash,
+						controlRefreshKeys
+					);
+
+		if (member === undefined || authority === undefined) {
+			throw new Error('Expected an authenticated control refresh member');
+		}
+
+		const activeGeneration = maxRefreshTokenFamilyMembers - 2;
+		const nearBound = await RefreshCredential.issue(
+			{
+				...authority,
+				identity: refreshPolicyIdentity(authority.identity),
+				generation: activeGeneration
+			},
+			controlRefreshKeys
+		);
+		await env.CUPBOARD_DB.batch([
+			env.CUPBOARD_DB.prepare(
+				'UPDATE control_refresh_session_family SET generation = ?'
+			).bind(activeGeneration),
+			env.CUPBOARD_DB.prepare(
+				'UPDATE control_refresh_session_member SET generation = ?, credential_hash = ?'
+			).bind(activeGeneration, await sha256Hex(nearBound.value))
+		]);
+		const lastAllowed = await refreshControl(nearBound.value);
+		const lastAllowedBody = tokenResponseSchema.parse(await lastAllowed.json());
+		const atBound = await controlRefreshRows();
+		const beyondBound = await refusalOf(
+			await refreshControl(lastAllowedBody.refresh_token ?? '')
+		);
+
+		expect({
+			lastAllowed: lastAllowed.status,
+			atBound: atBound.families.map((family) => family.generation),
+			beyondBound,
+			rows: await controlRefreshRows()
+		}).toStrictEqual({
+			lastAllowed: StatusCodes.OK,
+			atBound: [maxRefreshTokenFamilyMembers - 1],
+			beyondBound: staleRefresh,
+			rows: { families: [], members: [] }
+		});
+	});
+
+	// The stored member matches the credential's hash in both cases, so only
+	// the credential's binding decides the outcome.
+	it.each([
+		{
+			name: 'refuses a tenant credential',
+			keys: {
+				kind: 'tenant',
+				signingKey: pushIdSigningKeySchema.parse(
+					testControlEnv.CONTROL_KEY_WRAP_SECRET
+				),
+				tenant: tenantIdSchema.parse('acme')
+			} satisfies RefreshKeyContext,
+			status: StatusCodes.BAD_REQUEST
+		},
+		{
+			name: 'accepts a control credential',
+			keys: controlRefreshKeys,
+			status: StatusCodes.OK
+		}
+	])(
+		'$name presented against a stored control member',
+		async ({ keys, status }) => {
+			const identity = await trustedControlIdentity('JWT');
+			const familyId = crypto.randomUUID();
+			const memberId = crypto.randomUUID();
+			const createdAt = isoTimestamp(new Date());
+			const expiresAt = isoTimestamp(new Date(Date.now() + 60 * 60 * 1000));
+			const credential = await RefreshCredential.issue(
+				{
+					familyId,
+					memberId,
+					generation: 0,
+					expiresAt,
+					identity: {
+						iss: identity.issuer,
+						sub: 'global-admin',
+						aud: identity.audience
+					},
+					grants: [{ type: 'cupboard_wildcard' }]
+				},
+				keys
+			);
+			const database = controlDatabase();
+			await database.batch([
+				database.insert(d1Schema.controlRefreshSessionFamily).values({
+					id: familyId,
+					activeMemberId: memberId,
+					generation: 0,
+					createdAt,
+					expiresAt,
+					issuer: oidcIssuerSchema.parse(identity.issuer),
+					subject: oidcSubjectSchema.parse('global-admin')
+				}),
+				database.insert(d1Schema.controlRefreshSessionMember).values({
+					id: memberId,
+					familyId,
+					generation: 0,
+					credentialHash: await sha256Hex(credential.value),
+					createdAt
+				})
+			]);
+			const response = await refreshControl(credential.value);
+			await response.text();
+
+			expect(response.status).toBe(status);
+		}
+	);
+});
+
+describe('control plane token revocation', () => {
+	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('revokes the session of a refresh token', async () => {
+		const exchanged = await exchangeControlIdentity(
+			await trustedControlIdentity('JWT')
+		);
+		const refreshToken = exchanged.refresh_token ?? '';
+		const outcome = await revocationOutcome({
+			token: refreshToken,
+			token_type_hint: 'refresh_token'
+		});
+
+		expect({
+			outcome,
+			renewal: await refusalOf(await refreshControl(refreshToken)),
+			rows: await controlRefreshRows()
+		}).toStrictEqual({
+			outcome: emptyRevocation,
+			renewal: staleRefresh,
+			rows: { families: [], members: [] }
+		});
+	});
+
+	it.each([
+		{
+			name: 'an unknown refresh credential',
+			token: () => `${crypto.randomUUID()}.${'a'.repeat(64)}.e30.e30`
+		},
+		{
+			name: 'a refresh credential with a forged secret',
+			token: (live: string) =>
+				live.replace(/\.[\da-f]{64}\./u, () => `.${'0'.repeat(64)}.`)
+		},
+		{ name: 'an opaque string', token: () => 'not-a-token' }
+	])(
+		'returns the same empty response for $name and keeps the session',
+		async ({ token }) => {
+			const exchanged = await exchangeControlIdentity(
+				await trustedControlIdentity('JWT')
+			);
+			const before = await controlRefreshRows();
+			const outcome = await revocationOutcome({
+				token: token(exchanged.refresh_token ?? '')
+			});
+
+			expect({ outcome, rows: await controlRefreshRows() }).toStrictEqual({
+				outcome: emptyRevocation,
+				rows: before
+			});
+		}
+	);
+
+	it('refuses to revoke a control access token', async () => {
+		const exchanged = await exchangeControlIdentity(
+			await trustedControlIdentity('JWT')
+		);
+		const before = await controlRefreshRows();
+		const response = await postRevoke({ token: exchanged.access_token });
+		const cacheControl = response.headers.get('cache-control');
+
+		expect({
+			refusal: await refusalOf(response),
+			cacheControl,
+			rows: await controlRefreshRows()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'unsupported_token_type',
+				problem: undefined
+			},
+			cacheControl: 'no-store',
+			rows: before
+		});
+	});
+});
+
+// Inserts a family with `members` members. With `successorExpiresAt`, every
+// member also has a successor envelope that expires then.
+async function insertControlRefreshFamily(
+	id: string,
+	expiresAt: Date,
+	members: number,
+	successorExpiresAt?: Date
+): Promise<void> {
+	const createdAt = isoTimestamp(new Date(expiresAt.getTime() - 1000));
+	const memberRows = `WITH RECURSIVE generations(value) AS (
+	   SELECT 0 UNION ALL SELECT value + 1 FROM generations WHERE value + 1 < ?
+	 )
+	 INSERT INTO control_refresh_session_member (id, family_id, generation, credential_hash, created_at)
+	 SELECT ? || '-' || value, ?, value, 'hash', ? FROM generations`;
+
+	await env.CUPBOARD_DB.batch([
+		env.CUPBOARD_DB.prepare(
+			"INSERT INTO control_refresh_session_family (id, active_member_id, generation, created_at, expires_at, issuer, subject) VALUES (?, ? || '-0', ?, ?, ?, 'https://idp.example.test', 'global-admin')"
+		).bind(id, id, members - 1, createdAt, isoTimestamp(expiresAt)),
+		env.CUPBOARD_DB.prepare(memberRows).bind(members, id, id, createdAt)
+	]);
+
+	if (successorExpiresAt !== undefined) {
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE control_refresh_session_member SET successor_envelope = 'envelope', successor_expires_at = ? WHERE family_id = ?"
+		)
+			.bind(isoTimestamp(successorExpiresAt), id)
+			.run();
+	}
+}
+
+describe('control refresh session pruning', () => {
+	beforeEach(resetTestServer);
+
+	it('deletes expired sessions a page at a time and clears expired successor envelopes', async () => {
+		const now = new Date();
+		await insertControlRefreshFamily(
+			'expired',
+			new Date(now.getTime() - 1000),
+			controlRefreshPrunePageSize + 1
+		);
+		await insertControlRefreshFamily(
+			'live',
+			new Date(now.getTime() + 60 * 60 * 1000),
+			1,
+			new Date(now.getTime() - 1000)
+		);
+		const first = await pruneControlRefreshSessions(
+			controlDatabase(),
+			isoTimestamp(now)
+		);
+		const afterFirst = await controlRefreshRows();
+		const second = await pruneControlRefreshSessions(
+			controlDatabase(),
+			isoTimestamp(now)
+		);
+		const afterSecond = await controlRefreshRows();
+
+		expect({
+			first,
+			afterFirst: {
+				families: afterFirst.families.map((family) => family.id),
+				members: afterFirst.members.length
+			},
+			second,
+			afterSecond: {
+				families: afterSecond.families.map((family) => family.id),
+				members: afterSecond.members.map((member) => ({
+					id: member.id,
+					successorEnvelope: member.successorEnvelope ?? undefined,
+					successorExpiresAt: member.successorExpiresAt ?? undefined
+				}))
+			}
+		}).toStrictEqual({
+			first: {
+				membersDeleted: controlRefreshPrunePageSize,
+				familiesDeleted: 0
+			},
+			afterFirst: { families: ['expired', 'live'], members: 2 },
+			second: { membersDeleted: 1, familiesDeleted: 1 },
+			afterSecond: {
+				families: ['live'],
+				members: [
+					{
+						id: 'live-0',
+						successorEnvelope: undefined,
+						successorExpiresAt: undefined
+					}
+				]
 			}
 		});
 	});

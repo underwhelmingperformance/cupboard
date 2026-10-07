@@ -268,7 +268,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'publication-identity', independent: true },
 		{ id: 'blob-reference-read-authority', independent: false },
 		{ id: 'tenant-retry-clock', independent: true },
-		{ id: 'tenant-schema-progress', independent: true }
+		{ id: 'tenant-schema-progress', independent: true },
+		{ id: 'control-refresh-sessions', independent: true }
 	]);
 });
 

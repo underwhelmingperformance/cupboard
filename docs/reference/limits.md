@@ -65,13 +65,13 @@ See [Pushing store paths](../admin/pushing.md).
 See [Signing in](../admin/signing-in.md) and
 [Trust rules](../ci/trust-rules.md).
 
-| Token                                                | Lifetime                          |
-| ---------------------------------------------------- | --------------------------------- |
-| Tenant access token for an administrator             | 10 minutes. The CLI renews it.    |
-| Tenant access token for a CI job                     | 15 minutes. It can't be renewed.  |
-| Session, which the CLI uses to renew tokens          | 30 days from when you signed in   |
-| Operator access token                                | 10 minutes, with no refresh token |
-| Old access-token key or control key after a rotation | Retired after about 20 minutes    |
+| Token                                                | Lifetime                         |
+| ---------------------------------------------------- | -------------------------------- |
+| Tenant access token for an administrator             | 10 minutes. The CLI renews it.   |
+| Tenant access token for a CI job                     | 15 minutes. It can't be renewed. |
+| Session, which the CLI uses to renew tokens          | 30 days from when you signed in  |
+| Operator access token                                | 10 minutes. The CLI renews it.   |
+| Old access-token key or control key after a rotation | Retired after about 20 minutes   |
 
 ## Trust rules
 

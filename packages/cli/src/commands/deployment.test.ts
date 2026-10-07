@@ -57,7 +57,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 			updatedAt: recorded
 		},
 		{ id: 'tenant-retry-clock', state: 'complete', updatedAt: recorded },
-		{ id: 'tenant-schema-progress', state: 'complete', updatedAt: recorded }
+		{ id: 'tenant-schema-progress', state: 'complete', updatedAt: recorded },
+		{ id: 'control-refresh-sessions', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -533,6 +534,10 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition tenant-schema-progress',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition control-refresh-sessions',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
 						{ label: 'Required local step', value: '5' },
 						{
@@ -937,6 +942,75 @@ describe('deployment command authentication', () => {
 							controlCall('/control/local-step'),
 							controlCall('/control/deployment/transitions')
 						])
+			]);
+		}
+	);
+});
+
+describe('deployment session commands', () => {
+	testWithConfigHome(
+		'lists and revokes operator sessions through the control API',
+		async () => {
+			const origin = 'https://cupboard.example.workers.dev';
+			const sessionId = '00000000-0000-4000-8000-000000000001';
+			const payload = JSON.stringify({
+				iss: origin,
+				aud: 'cupboard-control',
+				exp: Math.floor(Date.now() / 1000) + 3600
+			});
+			const cachedToken = `e30.${Buffer.from(payload).toString('base64url')}.signature`;
+			await writeCachedSession({ accessToken: cachedToken }, new URL(origin));
+			const calls: unknown[] = [];
+			const server = setupServer(
+				http.get(`${origin}/control/sessions`, ({ request }) => {
+					calls.push({
+						method: request.method,
+						pathname: new URL(request.url).pathname,
+						authorization: request.headers.get('authorization')
+					});
+					return HttpResponse.json({ sessions: [] });
+				}),
+				http.delete(`${origin}/control/sessions/:id`, ({ request }) => {
+					calls.push({
+						method: request.method,
+						pathname: new URL(request.url).pathname,
+						authorization: request.headers.get('authorization')
+					});
+					return HttpResponse.json({ id: sessionId, revoked: true });
+				})
+			);
+			const program = new Command()
+				.exitOverride()
+				.configureOutput({ writeErr: vi.fn() });
+			registerDeploymentCommands(program);
+			server.listen({ onUnhandledFrame: 'error' });
+			const stdout = vi
+				.spyOn(process.stdout, 'write')
+				.mockImplementation(() => true);
+			try {
+				await program.parseAsync(['deployment', 'session', 'list', origin], {
+					from: 'user'
+				});
+				await program.parseAsync(
+					['deployment', 'session', 'revoke', origin, sessionId, '--yes'],
+					{ from: 'user' }
+				);
+			} finally {
+				stdout.mockRestore();
+				server.close();
+			}
+
+			expect(calls).toStrictEqual([
+				{
+					method: 'GET',
+					pathname: '/control/sessions',
+					authorization: `Bearer ${cachedToken}`
+				},
+				{
+					method: 'DELETE',
+					pathname: `/control/sessions/${sessionId}`,
+					authorization: `Bearer ${cachedToken}`
+				}
 			]);
 		}
 	);

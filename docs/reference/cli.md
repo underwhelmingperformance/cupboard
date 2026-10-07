@@ -9,6 +9,9 @@ under [docs/](../README.md) explain when to use each one.
 - [`cupboard deployment`](#cupboard-deployment)
   - [`cupboard deployment status`](#cupboard-deployment-status)
   - [`cupboard deployment resume`](#cupboard-deployment-resume)
+  - [`cupboard deployment session`](#cupboard-deployment-session)
+    - [`cupboard deployment session list`](#cupboard-deployment-session-list)
+    - [`cupboard deployment session revoke`](#cupboard-deployment-session-revoke)
 - [`cupboard login`](#cupboard-login)
 - [`cupboard logout`](#cupboard-logout)
 - [`cupboard whoami`](#cupboard-whoami)
@@ -129,7 +132,7 @@ Options:
 
 Commands:
   init|deploy [options]                           Deploy cupboard to a Cloudflare account, or upgrade an existing deployment.
-  deployment                                      Check deployment readiness and resume tenant updates.
+  deployment                                      Check deployment readiness, resume tenant updates, and list or revoke operator sign-in sessions.
   login [options] <url>                           Sign in to a tenant or deployment and save the sign-in on this machine.
   logout [options] [url]                          Remove a saved sign-in for a tenant or deployment from this machine, and revoke its refresh token.
   whoami [options] [url]                          Show who the cached sessions sign in as or, with --provider, the identity a trust rule must match to admit you.
@@ -217,7 +220,8 @@ Options:
 ```text
 Usage: cupboard deployment [options] [command]
 
-Check deployment readiness and resume tenant updates.
+Check deployment readiness, resume tenant updates, and list or revoke operator
+sign-in sessions.
 
 Options:
   -h, --help              display help for command
@@ -227,6 +231,8 @@ Commands:
                           updates.
   resume [options] <url>  Retry pending tenant updates, wait while they finish,
                           and report any remaining deployment work.
+  session                 List and revoke the operators' sign-in sessions, which
+                          renew access tokens for up to 30 days.
   help [command]          display help for command
 ```
 
@@ -267,6 +273,58 @@ Options:
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the deployment URL)
   -h, --help             display help for command
+```
+
+#### cupboard deployment session
+
+```text
+Usage: cupboard deployment session [options] [command]
+
+List and revoke the operators' sign-in sessions, which renew access tokens for
+up to 30 days.
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  list <url>                   List unexpired operator sign-in sessions, with
+                               each identity and any recorded trust rule.
+  revoke [options] <url> <id>  Revoke an operator sign-in session. Its refresh
+                               token stops working immediately, and its last
+                               access token expires within ten minutes.
+  help [command]               display help for command
+```
+
+##### cupboard deployment session list
+
+```text
+Usage: cupboard deployment session list [options] <url>
+
+List unexpired operator sign-in sessions, with each identity and any recorded
+trust rule.
+
+Arguments:
+  url         deployment URL (e.g. https://cupboard.example.workers.dev)
+
+Options:
+  -h, --help  display help for command
+```
+
+##### cupboard deployment session revoke
+
+```text
+Usage: cupboard deployment session revoke [options] <url> <id>
+
+Revoke an operator sign-in session. Its refresh token stops working immediately,
+and its last access token expires within ten minutes.
+
+Arguments:
+  url         deployment URL (e.g. https://cupboard.example.workers.dev)
+  id          session ID, as `cupboard deployment session list` shows it
+
+Options:
+  -y, --yes   revoke without the confirmation prompt
+  -h, --help  display help for command
 ```
 
 ### cupboard login
@@ -312,14 +370,15 @@ Options:
 Logout sends a revocation request for the refresh token of each saved
 sign-in that it deletes. With --cloudflare, it also sends Cloudflare a
 revocation request for the Cloudflare refresh token. The saved files
-are deleted even when a revocation fails. A copy of a revoked tenant
-sign-in cannot be renewed. A copy of a cupboard access token remains
-valid for up to ten minutes, and a copy of a Cloudflare access token
-until it expires. A deployment session has no refresh token.
+are deleted even when a revocation fails. A copy of a revoked sign-in
+cannot be renewed. A copy of a cupboard access token remains valid for
+up to ten minutes, and a copy of a Cloudflare access token until it
+expires.
 
 If a revocation fails, a copy of that sign-in on another machine
 can be renewed for up to 30 days after sign-in. A tenant
-administrator can end it with `cupboard session revoke`.
+administrator can end it with `cupboard session revoke`, and an
+operator with `cupboard deployment session revoke`.
 
 While a Cloudflare sign-in is cached, later commands can use it to
 start a new session without a browser; pass --cloudflare to remove it.

@@ -15,6 +15,8 @@ import {
 	controlOidcTrustGet,
 	controlOidcTrustList,
 	controlOidcTrustRemove,
+	controlSessionList,
+	controlSessionRevoke,
 	controlTenantClearCacheReadCredential,
 	controlTenantClearReadCredential,
 	controlTenantCreate,
@@ -83,6 +85,14 @@ export const controlRouter = os.router({
 		),
 		retire: os.keys.retire.handler(({ input, context }) =>
 			controlKeyRetire(context.env, input.kid)
+		)
+	},
+	sessions: {
+		list: os.sessions.list.handler(({ context }) =>
+			controlSessionList(context.request, context.env)
+		),
+		revoke: os.sessions.revoke.handler(({ input, context }) =>
+			controlSessionRevoke(context.request, context.env, input.id)
 		)
 	},
 	tenants: {

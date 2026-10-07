@@ -34,6 +34,7 @@ import {
 
 const tenant = 'https://cupboard.example.workers.dev/t/acme';
 const other = 'https://cupboard.example.workers.dev/t/beta';
+const deployment = 'https://cupboard.example.workers.dev';
 const cloudflareRevocationEndpoint =
 	'https://dash.cloudflare.com/oauth2/revoke';
 
@@ -132,7 +133,7 @@ function fakeDependencies(
 	};
 }
 
-function tenantRevocation(target: string, token: string): RecordedRequest {
+function cupboardRevocation(target: string, token: string): RecordedRequest {
 	return {
 		url: `${target}/revoke`,
 		redirect: 'manual',
@@ -204,7 +205,7 @@ describe('runLogout', () => {
 					sessions: [{ target: tenant, revocation: 'revoked' }]
 				}
 			},
-			requests: [tenantRevocation(tenant, 'refresh-acme')],
+			requests: [cupboardRevocation(tenant, 'refresh-acme')],
 			remaining: [other],
 			results: [
 				{
@@ -269,10 +270,52 @@ describe('runLogout', () => {
 				warnings: captured.warnings.length
 			}).toStrictEqual({
 				revoked: { sessions: [{ target: tenant, revocation: 'failed' }] },
-				requests: [tenantRevocation(tenant, 'refresh-acme')],
+				requests: [cupboardRevocation(tenant, 'refresh-acme')],
 				remaining: 0,
 				warnings: 1
 			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'a tenant session',
+			target: tenant,
+			session: sessionFor(tenant, 'refresh-acme'),
+			hint: ' A tenant administrator can end a tenant session with `cupboard session revoke`.'
+		},
+		{
+			name: 'a deployment session',
+			target: deployment,
+			session: {
+				accessToken: jwt({ iss: deployment, aud: 'cupboard-control' }),
+				refreshToken: 'refresh-operator'
+			},
+			hint: ' An operator can end a deployment session with `cupboard deployment session revoke`.'
+		}
+	])(
+		'names the revoke command for $name when its revocation fails',
+		async ({ target, session, hint }) => {
+			const state: FakeState = {
+				sessions: new Map([[new URL(target).href, session]]),
+				grant: undefined
+			};
+			const { fetcher } = recordingFetcher(() =>
+				Promise.resolve(
+					new Response(undefined, { status: StatusCodes.SERVICE_UNAVAILABLE })
+				)
+			);
+			const { ui, captured } = fakeCliUi();
+
+			await runLogout(
+				logoutInput(new URL(target), {}),
+				ui.reporter(),
+				fakeDependencies(state, fetcher)
+			);
+
+			expect(captured.warnings).toStrictEqual([
+				`Could not confirm revocation of some refresh tokens. A copied token might remain usable.${hint}`
+			]);
 		}
 	);
 
@@ -374,7 +417,14 @@ describe('runLogout', () => {
 		const state: FakeState = {
 			sessions: new Map([
 				[tenant, sessionFor(tenant, 'refresh-acme')],
-				[other, sessionFor(other, 'refresh-beta')]
+				[other, sessionFor(other, 'refresh-beta')],
+				[
+					deployment,
+					{
+						accessToken: jwt({ iss: deployment, aud: 'cupboard-control' }),
+						refreshToken: 'refresh-operator'
+					}
+				]
 			]),
 			grant
 		};
@@ -395,12 +445,13 @@ describe('runLogout', () => {
 			warnings: captured.warnings.length
 		}).toStrictEqual({
 			result: {
-				sessionsRemoved: 2,
+				sessionsRemoved: 3,
 				cloudflareSignIn: 'removed',
 				revoked: {
 					sessions: [
 						{ target: tenant, revocation: 'revoked' },
-						{ target: other, revocation: 'revoked' }
+						{ target: other, revocation: 'revoked' },
+						{ target: deployment, revocation: 'revoked' }
 					],
 					cloudflareSignIn: 'revoked'
 				}
@@ -415,8 +466,9 @@ describe('runLogout', () => {
 						client_id: cloudflareOauthClientId
 					}
 				},
-				tenantRevocation(tenant, 'refresh-acme'),
-				tenantRevocation(other, 'refresh-beta')
+				cupboardRevocation(tenant, 'refresh-acme'),
+				cupboardRevocation(other, 'refresh-beta'),
+				cupboardRevocation(deployment, 'refresh-operator')
 			],
 			state: { sessions: 0, grant: undefined },
 			results: [
@@ -425,9 +477,10 @@ describe('runLogout', () => {
 					title: 'Signed out on this machine',
 					data: result,
 					rows: [
-						{ label: 'Saved sign-ins removed', value: '2' },
+						{ label: 'Saved sign-ins removed', value: '3' },
 						{ label: tenant, value: 'refresh token revoked' },
 						{ label: other, value: 'refresh token revoked' },
+						{ label: deployment, value: 'refresh token revoked' },
 						{
 							label: 'Cloudflare sign-in',
 							value: 'removed; refresh token revoked'

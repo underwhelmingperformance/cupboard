@@ -31,6 +31,10 @@ import {
 } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
+	controlRefreshPrunePageSize,
+	pruneControlRefreshSessions
+} from '../control/control-refresh-sessions.ts';
+import {
 	enqueueLocalStepWakes,
 	localStepWakeBatchSize,
 	type LocalStepWakeMessage,
@@ -142,6 +146,10 @@ interface ExecuteMaintenanceQueueOptions {
 		logger: Logger,
 		env: Env
 	) => Promise<unknown>;
+	readonly runControlSessionPruning?: (
+		logger: Logger,
+		env: Env
+	) => Promise<unknown>;
 	readonly wakeLocalStepTenants?: (
 		logger: Logger,
 		env: Env,
@@ -192,6 +200,7 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	}),
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') }),
+	z.object({ kind: z.literal('control-session-pruning') }),
 	z.object({
 		kind: z.literal('local-step'),
 		tenants: z.array(tenantIdSchema).min(1).max(localStepWakeBatchSize)
@@ -227,6 +236,7 @@ export type MaintenanceQueueMessage =
 	  }
 	| { readonly kind: 'cas-demote' }
 	| { readonly kind: 'control-key-retirement' }
+	| { readonly kind: 'control-session-pruning' }
 	| { readonly kind: 'local-step-sweep' };
 
 /**
@@ -245,6 +255,7 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 		() => runReaperDemote(logger, env),
 		() => runCasReaperDemote(logger, env),
 		() => runControlKeyRetirement(logger, env),
+		() => runControlSessionPruning(logger, env),
 		() => enqueueLocalStepWakes(env)
 	]) {
 		try {
@@ -302,6 +313,7 @@ export async function enqueueMaintenanceJobs(
 		{ kind: 'blob-demote' },
 		{ kind: 'cas-demote' },
 		{ kind: 'control-key-retirement' },
+		{ kind: 'control-session-pruning' },
 		...(localStepWakes.kind === 'selected' ? localStepWakes.messages : [])
 	];
 
@@ -503,6 +515,13 @@ export async function executeMaintenanceQueueMessage(
 			}
 			case 'control-key-retirement': {
 				await (options.runControlKeyRetirement ?? runControlKeyRetirement)(
+					logger,
+					env
+				);
+				return { action: 'ack' };
+			}
+			case 'control-session-pruning': {
+				await (options.runControlSessionPruning ?? runControlSessionPruning)(
 					logger,
 					env
 				);
@@ -1591,6 +1610,22 @@ function runControlKeyRetirement(logger: Logger, env: Env): Promise<number> {
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 		isoTimestamp(new Date())
 	);
+}
+
+async function runControlSessionPruning(
+	logger: Logger,
+	env: Env
+): Promise<void> {
+	const pruned = await pruneControlRefreshSessions(
+		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		isoTimestamp(new Date())
+	);
+
+	if (pruned.membersDeleted >= controlRefreshPrunePageSize) {
+		logger.warn('control refresh-session backlog may remain after pruning', {
+			...pruned
+		});
+	}
 }
 
 async function recordTenantPassOutcomes(

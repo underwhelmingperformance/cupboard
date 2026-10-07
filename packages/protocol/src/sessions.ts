@@ -11,10 +11,10 @@ export const refreshSessionIdSchema = z.uuid().brand('RefreshSessionId');
 export type RefreshSessionId = z.output<typeof refreshSessionIdSchema>;
 
 /**
- * A tenant sign-in session whose refresh-token family has not expired. A
- * session created before the server recorded owners has no issuer, subject or
- * rule until its next renewal. A session also has no rule when several trust
- * rules together cover its authority.
+ * A tenant or control-plane sign-in session whose refresh-token family has not
+ * expired. A tenant session created before the server recorded owners has no
+ * issuer, subject or rule until its next renewal. A session also has no rule
+ * when several trust rules together cover its authority.
  */
 export const refreshSessionSummarySchema = z.strictObject({
 	id: refreshSessionIdSchema,

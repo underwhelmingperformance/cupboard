@@ -15,8 +15,14 @@ import {
 
 const tenant = tenantIdSchema.parse('acme');
 const keys: RefreshKeyContext = {
+	kind: 'tenant',
 	signingKey: pushIdSigningKeySchema.parse('test-push-id-signing-key'),
 	tenant
+};
+// The same secret as the tenant keys, so only the binding tells them apart.
+const controlKeys: RefreshKeyContext = {
+	kind: 'control',
+	wrappingSecret: 'test-push-id-signing-key'
 };
 const payload = {
 	purpose: 'cupboard-refresh' as const,
@@ -43,6 +49,58 @@ describe('RefreshCredential', () => {
 		expect(
 			await parsed?.authenticate(await sha256Hex(credential.value), keys)
 		).toStrictEqual({ ...payload, version: 2 });
+	});
+
+	it('binds a control credential to the control plane', async () => {
+		const credential = await RefreshCredential.issue(payload, controlKeys);
+		const hash = await sha256Hex(credential.value);
+		const { tenant: _tenant, ...claims } = payload;
+
+		expect({
+			control: await RefreshCredential.parse(credential.value)?.authenticate(
+				hash,
+				controlKeys
+			),
+			tenant: await RefreshCredential.parse(credential.value)?.authenticate(
+				hash,
+				keys
+			)
+		}).toStrictEqual({
+			control: {
+				...claims,
+				purpose: 'cupboard-control-refresh',
+				version: 2
+			},
+			tenant: undefined
+		});
+	});
+
+	it('rejects a tenant credential at the control plane', async () => {
+		const credential = await RefreshCredential.issue(payload, keys);
+
+		expect(
+			await RefreshCredential.parse(credential.value)?.authenticate(
+				await sha256Hex(credential.value),
+				controlKeys
+			)
+		).toBeUndefined();
+	});
+
+	it('rejects a readable version 1 authority at the control plane', async () => {
+		const { tenant: _tenant, ...claims } = payload;
+		const encoded = bytesToBase64Url(
+			new TextEncoder().encode(
+				JSON.stringify({ ...claims, purpose: 'cupboard-control-refresh' })
+			)
+		);
+		const value = `${payload.memberId}.${'a'.repeat(64)}.${encoded}`;
+
+		expect(
+			await RefreshCredential.parse(value)?.authenticate(
+				await sha256Hex(value),
+				controlKeys
+			)
+		).toBeUndefined();
 	});
 
 	it('accepts a version 1 credential with a readable authority', async () => {

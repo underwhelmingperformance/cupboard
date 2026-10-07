@@ -31,6 +31,11 @@ import {
 } from '../oidc.ts';
 import { controlCheckReportSchema } from '../reports.ts';
 import {
+	refreshSessionIdSchema,
+	refreshSessionListResponseSchema,
+	refreshSessionRevokeResponseSchema
+} from '../sessions.ts';
+import {
 	cacheReadCredentialResponseSchema,
 	membershipRebuildResponseSchema,
 	tenantCreateBodySchema,
@@ -103,6 +108,19 @@ export const controlContract = {
 			.route({ method: 'POST', path: '/keys/retire/{kid}' })
 			.input(z.strictObject({ kid: authKeyIdSchema }))
 			.output(controlKeyRetireResponseSchema)
+	},
+
+	sessions: {
+		list: controlProcedure
+			.meta({ requires: 'control-session:list', replaySafety: 'replay-safe' })
+			.route({ method: 'GET', path: '/sessions' })
+			.output(refreshSessionListResponseSchema),
+
+		revoke: controlProcedure
+			.meta({ requires: 'control-session:revoke' })
+			.route({ method: 'DELETE', path: '/sessions/{id}' })
+			.input(z.strictObject({ id: refreshSessionIdSchema }))
+			.output(refreshSessionRevokeResponseSchema)
 	},
 
 	tenants: {

@@ -15,13 +15,24 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { tenantUrlArgument } from '../url-argument.ts';
+import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 interface RevokeOptions {
 	readonly yes?: boolean;
 }
+
+/**
+ * The owner of the sign-in sessions that a command lists or revokes: one
+ * tenant, or the operators at the control plane.
+ */
+export type SessionScope = 'tenant' | 'operator';
+
+const sessionNouns: Readonly<Record<SessionScope, string>> = {
+	tenant: 'tenant sign-in session',
+	operator: 'operator sign-in session'
+};
 
 export interface SessionClient {
 	list(): Promise<RefreshSessionListResponse>;
@@ -53,7 +64,7 @@ export function registerSessionCommands(
 				signal: programOptions.signal
 			});
 
-			await runSessionList(reporter, rpc.sessions);
+			await runSessionList(reporter, rpc.sessions, 'tenant');
 		});
 
 	session
@@ -74,24 +85,85 @@ export function registerSessionCommands(
 			await runSessionRevoke(
 				refreshSessionIdSchema.parse(id),
 				ui,
-				rpc.sessions
+				rpc.sessions,
+				'tenant'
+			);
+		});
+}
+
+/**
+ * Registers `session list` and `session revoke` under `deployment`, for the
+ * operators' sessions at the control plane.
+ */
+export function registerOperatorSessionCommands(
+	deployment: Command,
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
+	const session = deployment
+		.command('session')
+		.description(
+			"List and revoke the operators' sign-in sessions, which renew access tokens for up to 30 days."
+		);
+
+	session
+		.command('list')
+		.description(
+			'List unexpired operator sign-in sessions, with each identity and any recorded trust rule.'
+		)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				signal: programOptions.signal
+			});
+
+			await runSessionList(reporter, rpc.sessions, 'operator');
+		});
+
+	session
+		.command('revoke')
+		.description(
+			'Revoke an operator sign-in session. Its refresh token stops working immediately, and its last access token expires within ten minutes.'
+		)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.argument(
+			'<id>',
+			'session ID, as `cupboard deployment session list` shows it'
+		)
+		.option('-y, --yes', 'revoke without the confirmation prompt')
+		.action(async (url: URL, id: string, options: RevokeOptions) => {
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				signal: programOptions.signal
+			});
+
+			await runSessionRevoke(
+				refreshSessionIdSchema.parse(id),
+				ui,
+				rpc.sessions,
+				'operator'
 			);
 		});
 }
 
 export async function runSessionList(
 	reporter: Reporter,
-	client: Pick<SessionClient, 'list'>
+	client: Pick<SessionClient, 'list'>,
+	scope: SessionScope
 ): Promise<void> {
+	const noun = sessionNouns[scope];
 	const { sessions } = await reporter.phase(
 		'Listing sessions',
 		() => client.list(),
-		{ humanLabel: 'Listing tenant sign-in sessions' }
+		{ humanLabel: `Listing ${noun}s` }
 	);
 
 	reporter.result({
 		kind: 'sessions',
-		title: 'Tenant sign-in sessions',
+		title: capitalised(`${noun}s`),
 		data: sessions,
 		rows: sessions.map((entry) => sessionRow(entry)),
 		empty: 'No sign-in sessions.'
@@ -101,10 +173,12 @@ export async function runSessionList(
 export async function runSessionRevoke(
 	id: RefreshSessionId,
 	ui: CliUi,
-	client: Pick<SessionClient, 'revoke'>
+	client: Pick<SessionClient, 'revoke'>,
+	scope: SessionScope
 ): Promise<void> {
+	const noun = sessionNouns[scope];
 	const outcome = await ui.confirm({
-		message: `Revoke tenant sign-in session ${id}?`,
+		message: `Revoke ${noun} ${id}?`,
 		detail:
 			'Its refresh token stops working immediately. Its last access token remains valid until it expires, within ten minutes.'
 	});
@@ -118,12 +192,12 @@ export async function runSessionRevoke(
 	const result = await reporter.phase(
 		'Revoking session',
 		() => client.revoke({ id }),
-		{ humanLabel: 'Revoking tenant sign-in session' }
+		{ humanLabel: `Revoking ${noun}` }
 	);
 
 	reporter.result({
 		kind: 'session',
-		title: 'Tenant sign-in session',
+		title: capitalised(noun),
 		data: result,
 		rows: [
 			{ label: 'Session', value: result.id },
@@ -146,4 +220,8 @@ function sessionRow(session: RefreshSessionSummary): ResultRow {
 			`expires ${formatTimestamp(session.expiresAt)}`
 		].join('; ')
 	};
+}
+
+function capitalised(text: string): string {
+	return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 }
