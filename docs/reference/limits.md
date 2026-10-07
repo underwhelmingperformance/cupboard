@@ -73,6 +73,21 @@ See [Signing in](../admin/signing-in.md) and
 | Operator access token                                | 10 minutes, with no refresh token |
 | Old access-token key or control key after a rotation | Retired after about 20 minutes    |
 
+## Trust rules
+
+See [Trust rules](../ci/trust-rules.md).
+
+| Limit                          | Value          |
+| ------------------------------ | -------------- |
+| Claims in one rule             | 1 to 32        |
+| Length of a claim name         | 128 characters |
+| Length of an exact claim value | 256 characters |
+| Length of a claim pattern      | 512 characters |
+
+The claim-count, claim-name and exact-value limits apply when you add a rule.
+Existing rules remain readable. The 512-character pattern limit also applies to
+stored rules.
+
 ## Deployment
 
 See [Deploying cupboard](../operator/deploying.md) and
