@@ -240,11 +240,19 @@ cupboard logout --all --cloudflare
 Cloudflare sign-in. Afterwards, `cupboard login` and `cupboard init` ask you to
 sign in to Cloudflare again.
 
-Signing out removes saved credentials from this machine. Copies on other
-machines remain usable. If someone has copied a tenant session to another
-machine, they can renew it for up to 30 days after you signed in, unless the
-server stops accepting its refresh token earlier. To take away an
-administrator's access, another administrator [removes their trust
+Signing out also sends a revocation request for the refresh token of each tenant
+session that it deletes. With `--cloudflare`, it sends Cloudflare a revocation
+request for the Cloudflare refresh token as well. A copy of a revoked session on
+another machine cannot be renewed. A copy of a cupboard access token remains
+valid for up to ten minutes, and a copy of a Cloudflare access token until it
+expires. A deployment session has no refresh token to revoke.
+
+`logout` deletes the saved files even when a revocation fails, and the result
+shows the outcome for each one. If someone has copied a session whose revocation
+failed, they can renew it for up to 30 days after you signed in. A tenant
+administrator can end that session with
+[`cupboard session revoke`](#listing-and-revoking-a-tenants-sessions). To take
+away an administrator's access, another administrator [removes their trust
 rule][remove-access]. The server then refuses to renew the administrator's
 sessions.
 

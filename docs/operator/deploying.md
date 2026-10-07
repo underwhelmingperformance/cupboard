@@ -640,5 +640,7 @@ There's no command to remove a deployment. To remove one:
    saved sessions. `cupboard logout <url>` deletes the session for one
    deployment or tenant URL. If the machine uses no other cupboard deployment,
    `cupboard logout --all --cloudflare` deletes every saved session and the
-   Cloudflare sign-in. The CLI keeps them in `$XDG_CONFIG_HOME/cupboard`, or
-   `~/.config/cupboard` when `XDG_CONFIG_HOME` isn't set.
+   Cloudflare sign-in. Logout cannot revoke the sessions of a deployment that no
+   longer exists, but it still deletes them. The CLI keeps them in
+   `$XDG_CONFIG_HOME/cupboard`, or `~/.config/cupboard` when `XDG_CONFIG_HOME`
+   isn't set.

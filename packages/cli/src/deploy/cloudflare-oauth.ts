@@ -14,6 +14,7 @@ import {
 	obtainAuthorizationCode,
 	postForm
 } from '../auth/oidc-login.ts';
+import { postRevocation, type RevocationOutcome } from '../auth/revocation.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
@@ -60,6 +61,7 @@ export const cloudflareOauthClientId = '6c915db1f16ece47255821ee6ca1d538';
 
 const authorizationEndpoint = 'https://dash.cloudflare.com/oauth2/auth';
 const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
+const revocationEndpoint = 'https://dash.cloudflare.com/oauth2/revoke';
 
 // The client's pre-registered redirect URLs are exact-match, so the loopback
 // server must bind one of these ports and the redirect URI must use the
@@ -229,6 +231,31 @@ export async function refreshCloudflareGrant(
 
 		throw error;
 	}
+}
+
+/**
+ * Sends Cloudflare a revocation request for a grant's refresh token (RFC 7009).
+ * Cupboard is a public client, so the request includes its client ID.
+ */
+export function revokeCloudflareGrant(
+	grant: CloudflareGrant,
+	fetcher: typeof fetch,
+	signal?: AbortSignal
+): Promise<RevocationOutcome> {
+	if (grant.refreshToken === undefined) {
+		return Promise.resolve('no-refresh-token');
+	}
+
+	return postRevocation(
+		revocationEndpoint,
+		{
+			token: grant.refreshToken,
+			token_type_hint: 'refresh_token',
+			client_id: cloudflareOauthClientId
+		},
+		fetcher,
+		signal
+	);
 }
 
 const maximumTokenResponseBytes = 64 * 1024;

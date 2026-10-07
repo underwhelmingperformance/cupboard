@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { z } from 'zod';
 
+import type { RevocationOutcome } from '../auth/revocation.ts';
 import {
 	configDirectory,
 	readSecretFile,
@@ -91,13 +92,45 @@ export async function writeCachedGrant(
 }
 
 /**
- * Deletes the cached Cloudflare grant under its renewal lock, so a concurrent
- * refresh cannot write it back.
+ * The result of deleting the cached grant. `revocation` is present when the
+ * file contained a grant, and is `failed` when the file could not be read.
+ */
+export interface GrantRemoval {
+	readonly removal: Removal;
+	readonly revocation?: RevocationOutcome;
+}
+
+/**
+ * Revokes and deletes the cached Cloudflare grant under its renewal lock, so a
+ * concurrent refresh cannot write it back or rotate the token that `revoke`
+ * receives. The file is deleted whatever the revocation's outcome.
  */
 export async function removeCachedGrant(
+	revoke: (grant: CloudflareGrant) => Promise<RevocationOutcome>,
 	signal?: AbortSignal
-): Promise<Removal> {
+): Promise<GrantRemoval> {
 	const file = grantFilePath();
 
-	return withCachedGrantLock(() => removeSecretFile(file), signal);
+	return withCachedGrantLock(async () => {
+		const revocation = await revokeReadableGrant(revoke);
+		const removal = await removeSecretFile(file);
+
+		return removal === 'removed' && revocation !== undefined
+			? { removal, revocation }
+			: { removal };
+	}, signal);
+}
+
+async function revokeReadableGrant(
+	revoke: (grant: CloudflareGrant) => Promise<RevocationOutcome>
+): Promise<RevocationOutcome | undefined> {
+	let grant: CloudflareGrant | undefined;
+
+	try {
+		grant = await readCachedGrant();
+	} catch {
+		return 'failed';
+	}
+
+	return grant === undefined ? undefined : revoke(grant);
 }

@@ -10,7 +10,6 @@ import {
 	configDirectory,
 	listSecretDirectory,
 	readSecretFile,
-	type Removal,
 	removeSecretFile,
 	writeSecretFile
 } from './secret-file.ts';
@@ -107,18 +106,48 @@ export async function writeCachedSession(
 }
 
 /**
+ * What a removal found. A removed file whose contents could not be read or
+ * parsed has no session.
+ */
+export type RemovedSession =
+	| { readonly removal: 'absent' }
+	| {
+			readonly removal: 'removed';
+			readonly session: CachedSession | undefined;
+	  };
+
+/**
  * Deletes the cached session for a target under the lock that guards its
- * renewal, so a renewal in progress finishes before the deletion. A renewal
- * that starts later can still create a session from the Cloudflare sign-in
- * while that sign-in is cached.
+ * renewal, so a renewal in progress finishes before the deletion, and returns
+ * the session that it deleted. A renewal that starts later can still create a
+ * session from the Cloudflare sign-in while that sign-in is cached.
  */
 export async function removeCachedSession(
 	target: URL,
 	signal?: AbortSignal
-): Promise<Removal> {
+): Promise<RemovedSession> {
 	const file = tokenFilePath(canonicalHref(target));
 
-	return withSecretFileLock(file, () => removeSecretFile(file), signal);
+	return withSecretFileLock(file, () => takeSessionFile(file), signal);
+}
+
+async function takeSessionFile(file: string): Promise<RemovedSession> {
+	const session = await readSessionFile(file);
+	const removal = await removeSecretFile(file);
+
+	return removal === 'removed' ? { removal, session } : { removal };
+}
+
+async function readSessionFile(
+	file: string
+): Promise<CachedSession | undefined> {
+	try {
+		const contents = await readSecretFile(file);
+
+		return contents === undefined ? undefined : parseSession(contents);
+	} catch {
+		return undefined;
+	}
 }
 
 // A session file is named by the SHA-256 of its target; anything else in the
@@ -176,24 +205,24 @@ export async function listCachedSessions(
 }
 
 /**
- * Deletes every cached session, each under its own lock. Returns how many were
- * removed.
+ * Deletes every cached session, each under its own lock. Returns the contents
+ * of each removed file, or undefined for a file that could not be read.
  */
 export async function removeAllCachedSessions(
 	signal?: AbortSignal
-): Promise<number> {
-	let removed = 0;
+): Promise<readonly (CachedSession | undefined)[]> {
+	const removed: (CachedSession | undefined)[] = [];
 	const files = await sessionFiles();
 
 	for (const file of files) {
-		const removal = await withSecretFileLock(
+		const taken = await withSecretFileLock(
 			file,
-			() => removeSecretFile(file),
+			() => takeSessionFile(file),
 			signal
 		);
 
-		if (removal === 'removed') {
-			removed += 1;
+		if (taken.removal === 'removed') {
+			removed.push(taken.session);
 		}
 	}
 
