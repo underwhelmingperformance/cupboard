@@ -874,7 +874,8 @@ export type OAuthErrorCode =
 	| 'invalid_request'
 	| 'invalid_grant'
 	| 'invalid_authorization_details'
-	| 'unsupported_grant_type';
+	| 'unsupported_grant_type'
+	| 'unsupported_token_type';
 
 /**
  * An OAuth 2.0 error (RFC 6749 §5.2). The JSON response uses the error code and
@@ -1148,6 +1149,16 @@ export class UnsupportedGrantTypeError extends OAuthError {
 	constructor(public readonly grantType: string) {
 		super(`Unsupported grant type: ${grantType}`);
 		this.name = 'UnsupportedGrantTypeError';
+	}
+}
+
+export class UnsupportedTokenTypeError extends OAuthError {
+	readonly status = StatusCodes.BAD_REQUEST;
+	readonly error = 'unsupported_token_type';
+
+	constructor() {
+		super('Only refresh tokens can be revoked');
+		this.name = 'UnsupportedTokenTypeError';
 	}
 }
 

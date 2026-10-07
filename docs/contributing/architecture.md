@@ -669,6 +669,16 @@ grace window remains one minute. Indexed bounded maintenance clears expired
 envelopes; physical ciphertext removal occurs when maintenance runs. Existing
 legacy refresh tables receive no new sessions and are retired in bounded pages.
 
+A client revokes a refresh token with an RFC 7009 request to
+`POST /t/<tenant>/revoke`. The tenant's authorisation-server metadata advertises
+it as `revocation_endpoint`. A refresh credential that authenticates against its
+member's stored hash revokes its whole family, and a spent member's credential
+does the same. A cupboard access token receives `unsupported_token_type`. Every
+other token receives the same empty 200 response, so the response does not show
+whether the token existed. The Worker refuses other writes to a suspended
+tenant, but it still forwards `/revoke` to the tenant object, so a session
+revoked during a suspension stays revoked when the tenant resumes.
+
 A client can also exchange a cupboard access token for one with fewer grants.
 
 CI read acquisition uses the extension grant

@@ -47,6 +47,8 @@ export interface AuthorizationServerMetadata {
 	grant_types_supported: string[];
 	authorization_details_types_supported: string[];
 	token_endpoint_auth_methods_supported: string[];
+	revocation_endpoint?: string;
+	revocation_endpoint_auth_methods_supported?: string[];
 }
 
 export class AuthKeysService {
@@ -182,7 +184,9 @@ export class AuthKeysService {
 				'cupboard_domain',
 				'cupboard_wildcard'
 			],
-			token_endpoint_auth_methods_supported: ['none']
+			token_endpoint_auth_methods_supported: ['none'],
+			revocation_endpoint: `${base}/revoke`,
+			revocation_endpoint_auth_methods_supported: ['none']
 		};
 	}
 

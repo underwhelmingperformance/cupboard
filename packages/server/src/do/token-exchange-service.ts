@@ -18,7 +18,8 @@ import {
 	tokenExchangeGrantRequestSchema,
 	tokenExchangeGrantType,
 	tokenRequestSchema,
-	type TokenResponse
+	type TokenResponse,
+	tokenRevocationRequestSchema
 } from '@cupboard/protocol/oidc';
 import {
 	firstClaimMismatch,
@@ -84,9 +85,13 @@ import {
 	TenantSubjectTokenClaimMismatchError,
 	TenantSubjectTokenUntrustedError,
 	UnsupportedGrantTypeError,
-	UnsupportedSubjectTokenTypeError
+	UnsupportedSubjectTokenTypeError,
+	UnsupportedTokenTypeError
 } from '../errors.ts';
-import { oauthJsonResponse } from '../http/oauth-response.ts';
+import {
+	oauthEmptyResponse,
+	oauthJsonResponse
+} from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
@@ -125,6 +130,11 @@ type RefreshTokenMember = typeof schema.refreshTokenMembers.$inferSelect;
 type RefreshTokenDatabase = SchemaWriter;
 type RefreshTokenRotationOutcome =
 	'rotated' | 'policy-changed' | 'stale-member';
+
+// Authenticating against this hash always fails. A presented credential with an
+// unknown member ID is hashed like one with a known ID, so the response time
+// does not show whether the member exists.
+const unknownMemberCredentialHash = '0'.repeat(64);
 
 export class TokenExchangeService {
 	constructor(
@@ -1049,6 +1059,30 @@ export class TokenExchangeService {
 		};
 	}
 
+	private async revokePresented(
+		logger: Logger,
+		presented: RefreshCredential
+	): Promise<void> {
+		const member = this.context.db
+			.select()
+			.from(schema.refreshTokenMembers)
+			.where(eq(schema.refreshTokenMembers.id, presented.id))
+			.get();
+		const authority = await presented.authenticate(
+			member?.credentialHash ?? unknownMemberCredentialHash,
+			this.refreshKeyContext()
+		);
+
+		if (member === undefined || authority?.familyId !== member.familyId) {
+			return;
+		}
+
+		this.revokeFamily(member.familyId);
+		logger.info('refresh-token family revoked', {
+			reason: 'revocation-request'
+		});
+	}
+
 	async handleToken(logger: Logger, request: Request): Promise<Response> {
 		const body = await parseFormBody(tokenRequestSchema, request);
 
@@ -1082,6 +1116,22 @@ export class TokenExchangeService {
 		}
 
 		throw new UnsupportedGrantTypeError(body.grant_type);
+	}
+
+	async handleRevoke(logger: Logger, request: Request): Promise<Response> {
+		const body = await parseFormBody(tokenRevocationRequestSchema, request);
+		const presented = RefreshCredential.parse(body.token);
+
+		if (presented !== undefined) {
+			await this.revokePresented(logger, presented);
+			return oauthEmptyResponse();
+		}
+
+		if ((await this.verifySelfIssued(body.token)) !== undefined) {
+			throw new UnsupportedTokenTypeError();
+		}
+
+		return oauthEmptyResponse();
 	}
 }
 

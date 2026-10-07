@@ -144,7 +144,9 @@ const authorizationServerMetadataSchema = z.strictObject({
 	response_types_supported: z.array(z.string()),
 	grant_types_supported: z.array(z.string()),
 	authorization_details_types_supported: z.array(z.string()),
-	token_endpoint_auth_methods_supported: z.array(z.string())
+	token_endpoint_auth_methods_supported: z.array(z.string()),
+	revocation_endpoint: z.string(),
+	revocation_endpoint_auth_methods_supported: z.array(z.string())
 });
 
 describe('tenant routing', () => {
@@ -179,7 +181,9 @@ describe('tenant routing', () => {
 					'cupboard_domain',
 					'cupboard_wildcard'
 				],
-				token_endpoint_auth_methods_supported: ['none']
+				token_endpoint_auth_methods_supported: ['none'],
+				revocation_endpoint: `${base}/revoke`,
+				revocation_endpoint_auth_methods_supported: ['none']
 			}
 		});
 	});
@@ -209,7 +213,9 @@ describe('tenant routing', () => {
 					'cupboard_domain',
 					'cupboard_wildcard'
 				],
-				token_endpoint_auth_methods_supported: ['none']
+				token_endpoint_auth_methods_supported: ['none'],
+				revocation_endpoint: `${issuer}/revoke`,
+				revocation_endpoint_auth_methods_supported: ['none']
 			}
 		});
 	});
@@ -338,7 +344,19 @@ describe('tenant routing', () => {
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
 	});
 
-	it('refuses token exchange and refresh for a suspended tenant without rotating the family', async () => {
+	it('routes a revocation request to the tenant object', async () => {
+		const response = await handlerFetch(
+			`/t/${fixtureTenant}/revoke`,
+			tokenRequest({ token: 'not-a-token' })
+		);
+
+		expect({
+			status: response.status,
+			body: await response.text()
+		}).toStrictEqual({ status: StatusCodes.OK, body: '' });
+	});
+
+	it('refuses token exchange and refresh for a suspended tenant without changing the family', async () => {
 		const issuer = oidcIssuerSchema.parse(
 			`${currentOrigin()}/t/${fixtureTenant}`
 		);
