@@ -2612,7 +2612,8 @@ export class VerificationService {
 
 	private heldVerdictPage(
 		after: ReadinessCursor | undefined,
-		limit: number
+		limit: number,
+		through?: ReadinessCursor
 	): ReadyPendingUploadRow[] {
 		const now = isoTimestamp(new Date());
 		const readyAt = sql<string>`COALESCE(${schema.pendingUploads.settleRetryAfter}, '')`;
@@ -2622,7 +2623,10 @@ export class VerificationService {
 			lte(readyAt, now),
 			after === undefined
 				? undefined
-				: sql`(${readyAt}, ${schema.pendingUploads.id}) > (${after.readyAt}, ${after.id})`
+				: sql`(${readyAt}, ${schema.pendingUploads.id}) > (${after.readyAt}, ${after.id})`,
+			through === undefined
+				? undefined
+				: sql`(${readyAt}, ${schema.pendingUploads.id}) <= (${through.readyAt}, ${through.id})`
 		);
 		return this.context.db
 			.select({ ...getTableColumns(schema.pendingUploads), readyAt })
@@ -2635,7 +2639,9 @@ export class VerificationService {
 
 	/**
 	 * Reads the upload rows for the verdicts that this pass will apply. The page
-	 * starts after the cursor saved by the previous pass.
+	 * starts after the cursor saved by the previous pass. The page must include
+	 * ready verdicts before the cursor when capacity remains. Otherwise those
+	 * verdicts wait for another drain although they fit in this pass.
 	 *
 	 * A pass reads far fewer rows than a batch can contain. The rotating cursor
 	 * prevents a repeatedly failing verdict from blocking every later verdict.
@@ -2650,9 +2656,12 @@ export class VerificationService {
 	): HeldVerdictPage {
 		const page = this.heldVerdictPage(after, limit);
 		const rows =
-			after === undefined || page.length > 0
+			after === undefined || page.length === limit
 				? page
-				: this.heldVerdictPage(undefined, limit);
+				: [
+						...page,
+						...this.heldVerdictPage(undefined, limit - page.length, after)
+					];
 		const held: HeldVerdictRow[] = [];
 		let discarded = 0;
 
@@ -3592,7 +3601,13 @@ export class VerificationService {
 					if (prepared.kind === 'ignored') {
 						if (!this.clearRecordedVerdict(pending)) {
 							unresolved += 1;
+							return;
 						}
+
+						// An ignored result can leave a pending upload with no recorded
+						// verdict but an active claim. Other passes cannot claim it until
+						// the lease expires.
+						this.releaseLease(pending.id, owner);
 						return;
 					}
 

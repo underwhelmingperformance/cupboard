@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { subrequestSafetyReserve } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
@@ -643,6 +644,107 @@ describe('recorded verdict durability', () => {
 				},
 				continued: 1,
 				remaining: undefined
+			});
+		});
+	});
+
+	it('applies verdicts before the cursor when the page after it is short', async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const uploads = [
+				await deferFreshUpload(token, 'before-cursor', 'd'.repeat(32)),
+				await deferFreshUpload(token, 'after-cursor', 'g'.repeat(32))
+			];
+			const remaining = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const claim = await instance.claimVerificationBatch(
+						uploads.length,
+						Number.MAX_SAFE_INTEGER
+					);
+					const [earlierId] = claim.claims
+						.map((pending) => pending.uploadId)
+						.toSorted(byCodeUnit);
+					await state.storage.put(recordedVerdictCursorKey, {
+						id: earlierId,
+						readyAt: ''
+					});
+					await instance.recordVerifications(
+						claim.owner,
+						verifiedResults(claim.claims, uploads)
+					);
+
+					return instance.context.db
+						.select({
+							id: pendingUploads.id,
+							recorded: pendingUploads.recordedVerdictJson
+						})
+						.from(pendingUploads)
+						.all();
+				}
+			);
+
+			expect(remaining).toStrictEqual([]);
+		});
+	});
+
+	it("releases the pending upload's claim when its NAR promotion loses the race", async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const uploads = [
+				await deferFreshUpload(token, 'same-nar', 'c'.repeat(32)),
+				await deferFreshUpload(token, 'same-nar', 'c'.repeat(32))
+			];
+			const measured = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const first = await instance.claimVerificationBatch(
+						1,
+						Number.MAX_SAFE_INTEGER
+					);
+					const second = await instance.claimVerificationBatch(
+						1,
+						Number.MAX_SAFE_INTEGER
+					);
+					const pendingRows = () =>
+						instance.context.db
+							.select({
+								verdict: pendingUploads.verdict,
+								claimOwner: pendingUploads.claimOwner,
+								recorded: pendingUploads.recordedVerdictJson
+							})
+							.from(pendingUploads)
+							.all()
+							.map((row) => ({
+								verdict: row.verdict,
+								claimOwner: row.claimOwner ?? undefined,
+								recorded: row.recorded ?? undefined
+							}));
+
+					// Each call records its verdict before its first await. Keep the
+					// calls concurrent so one verdict drain attempts both promotions.
+					await Promise.all([
+						instance.recordVerifications(
+							first.owner,
+							verifiedResults(first.claims, uploads)
+						),
+						instance.recordVerifications(
+							second.owner,
+							verifiedResults(second.claims, uploads)
+						)
+					]);
+					const afterRecording = pendingRows();
+					await instance.claimVerificationBatch(1, Number.MAX_SAFE_INTEGER);
+
+					return { afterRecording, afterNextClaim: pendingRows() };
+				}
+			);
+
+			expect(measured).toStrictEqual({
+				afterRecording: [
+					{ verdict: 'pending', claimOwner: undefined, recorded: undefined }
+				],
+				afterNextClaim: []
 			});
 		});
 	});
