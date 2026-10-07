@@ -105,7 +105,11 @@ function derivedClient<C extends AnyContractRouter>(
 
 			for (;;) {
 				throwIfAborted(signal);
-				const response = await transport(current.clone(), { ...init, signal });
+				const response = await transport(current.clone(), {
+					...init,
+					redirect: 'manual',
+					signal
+				});
 
 				if (
 					canRefresh &&
@@ -156,6 +160,7 @@ function replaySafetyFor(
 	return metadata.replaySafety ?? 'replay-unsafe';
 }
 
+const firstErrorStatus: number = StatusCodes.BAD_REQUEST;
 const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const insufficientStorageStatus: number = StatusCodes.INSUFFICIENT_STORAGE;
 
@@ -181,6 +186,12 @@ async function checkResponse(
 	}
 
 	const buffered = await bufferedErrorResponse(request, response);
+
+	// oRPC decodes a response below 400 as a result, so a redirect would
+	// otherwise fail as a response that does not match the contract.
+	if (buffered.status < firstErrorStatus) {
+		throw statusError(request, buffered, textPreview(await buffered.text()));
+	}
 
 	if (
 		buffered.status < serverErrorThreshold ||

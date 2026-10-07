@@ -1,15 +1,18 @@
 import { createHash } from 'node:crypto';
 
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
-import { describe, expect, it } from 'vitest';
+import { StatusCodes } from 'http-status-codes';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { CliAbortError } from '../errors.ts';
+import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
 import {
 	createPkce,
 	deviceLogin,
 	discoverOidcLogin,
+	isRedirectStatus,
 	LoginTimeoutError,
 	loopbackLogin,
 	type OidcLoginEndpoints,
@@ -1049,5 +1052,123 @@ describe('deviceLogin', () => {
 			requests: [endpoints.deviceAuthorizationEndpoint],
 			aborted: true
 		});
+	});
+});
+
+describe('token endpoint redirects', () => {
+	let origin: RedirectingOrigin | undefined;
+
+	afterEach(async () => {
+		await origin?.close();
+		origin = undefined;
+	});
+
+	const deviceAuthorization = {
+		device_code: 'device-1',
+		user_code: 'WXYZ-1234',
+		verification_uri: 'https://idp.example.com/activate'
+	};
+
+	it.each([
+		{
+			name: 'the authorisation code exchange',
+			redirects: ['/token'],
+			responses: {},
+			login: (redirecting: OidcLoginEndpoints) =>
+				loopbackLogin({
+					endpoints: redirecting,
+					clientId: 'client-123',
+					openBrowser: approveLoopbackBrowser,
+					fetcher: fetch
+				}),
+			error: {
+				name: 'OidcLoginError',
+				kind: 'token-http',
+				status: StatusCodes.TEMPORARY_REDIRECT
+			},
+			requests: ['/token']
+		},
+		{
+			name: 'the device authorisation request',
+			redirects: ['/device'],
+			responses: {},
+			login: (redirecting: OidcLoginEndpoints) =>
+				deviceLogin({
+					endpoints: redirecting,
+					clientId: 'client-123',
+					prompt: vi.fn(),
+					fetcher: fetch,
+					sleep: () => Promise.resolve()
+				}),
+			error: {
+				name: 'DeviceAuthorizationRequestError',
+				kind: 'device-authorization-http',
+				status: StatusCodes.TEMPORARY_REDIRECT
+			},
+			requests: ['/device']
+		},
+		{
+			name: 'the device token poll',
+			redirects: ['/token'],
+			responses: { '/device': deviceAuthorization },
+			login: (redirecting: OidcLoginEndpoints) =>
+				deviceLogin({
+					endpoints: redirecting,
+					clientId: 'client-123',
+					prompt: vi.fn(),
+					fetcher: fetch,
+					sleep: () => Promise.resolve()
+				}),
+			error: {
+				name: 'OidcLoginError',
+				kind: 'token-http',
+				status: StatusCodes.TEMPORARY_REDIRECT
+			},
+			requests: ['/device', '/token']
+		}
+	])(
+		'fails on a redirect from $name without following it',
+		async ({ redirects, responses, login, error, requests }) => {
+			const started = await RedirectingOrigin.start(redirects, responses);
+			origin = started;
+
+			const caught = await rejectedBy(() =>
+				login({
+					...endpoints,
+					tokenEndpoint: started.url('/token'),
+					deviceAuthorizationEndpoint: started.url('/device')
+				})
+			);
+
+			expect(caught).toBeInstanceOf(OidcLoginError);
+
+			if (!(caught instanceof OidcLoginError)) {
+				return;
+			}
+
+			expect({
+				error: {
+					name: caught.name,
+					kind: caught.kind,
+					status: caught.status
+				},
+				requests: started.requests
+			}).toStrictEqual({ error, requests });
+		}
+	);
+});
+
+describe('isRedirectStatus', () => {
+	it.each([
+		{ status: StatusCodes.MOVED_PERMANENTLY, redirect: true },
+		{ status: StatusCodes.MOVED_TEMPORARILY, redirect: true },
+		{ status: StatusCodes.SEE_OTHER, redirect: true },
+		{ status: StatusCodes.TEMPORARY_REDIRECT, redirect: true },
+		{ status: StatusCodes.PERMANENT_REDIRECT, redirect: true },
+		{ status: StatusCodes.MULTIPLE_CHOICES, redirect: false },
+		{ status: StatusCodes.NOT_MODIFIED, redirect: false },
+		{ status: StatusCodes.OK, redirect: false }
+	])('returns $redirect for $status', ({ status, redirect }) => {
+		expect(isRedirectStatus(status)).toBe(redirect);
 	});
 });

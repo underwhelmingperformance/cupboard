@@ -25,6 +25,7 @@ import {
 } from '../errors.ts';
 import { errorExitCode } from '../exit-code.ts';
 import { byteStream } from '../io/byte-stream.ts';
+import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
 import type { TokenProvider } from './credentials.ts';
 import { controlRpc, tenantRpc } from './orpc.ts';
@@ -1366,4 +1367,78 @@ describe('controlRpc', () => {
 			}
 		}
 	);
+});
+
+describe('admin API redirects', () => {
+	it.each([
+		{
+			name: 'a tenant procedure',
+			method: 'GET',
+			path: '/t/acme/oidc-trust',
+			request: (origin: RedirectingOrigin) =>
+				tenantRpc(new URL(origin.url('/t/acme')), {
+					credential: 'admin-token'
+				}).oidcTrust.list()
+		},
+		{
+			name: 'a control procedure with a read password in its body',
+			method: 'POST',
+			path: '/control/tenants/acme/read-credential',
+			request: (origin: RedirectingOrigin) =>
+				controlRpc(new URL(origin.origin), {
+					credential: 'admin-token'
+				}).tenants.rotateReadCredential({
+					id: tenantIdSchema.parse('acme'),
+					read: { user: 'cupboard', password: 'A'.repeat(43) }
+				})
+		}
+	])(
+		'fails on a redirect from $name without following it',
+		async ({ method, path, request }) => {
+			const origin = await RedirectingOrigin.start([path]);
+
+			try {
+				const error = await rejectedBy(() => request(origin));
+
+				expect({
+					error:
+						error instanceof CupboardHttpError
+							? { method: error.method, path: error.path, status: error.status }
+							: error,
+					requests: origin.requests
+				}).toStrictEqual({
+					error: { method, path, status: StatusCodes.TEMPORARY_REDIRECT },
+					requests: [path]
+				});
+			} finally {
+				await origin.close();
+			}
+		}
+	);
+
+	it('reports a redirect without a body as an HTTP error', async () => {
+		const { fetcher } = capturingFetcher([
+			() =>
+				new Response(undefined, {
+					status: StatusCodes.TEMPORARY_REDIRECT,
+					headers: { location: 'https://elsewhere.test/tenants' }
+				})
+		]);
+		const error = await rejectedBy(() =>
+			controlRpc(parseWorkerUrl('https://cupboard.test'), {
+				credential: 'admin-token',
+				fetcher
+			}).tenants.list()
+		);
+
+		expect(
+			error instanceof CupboardHttpError
+				? { method: error.method, path: error.path, status: error.status }
+				: error
+		).toStrictEqual({
+			method: 'GET',
+			path: '/control/tenants',
+			status: StatusCodes.TEMPORARY_REDIRECT
+		});
+	});
 });
