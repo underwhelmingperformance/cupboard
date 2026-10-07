@@ -1,6 +1,6 @@
 import { withReadAuthentication } from '@cupboard/nix';
 import { InvalidCacheUrlBaseError } from '@cupboard/nix-store/errors';
-import { parseBaseUrl } from '@cupboard/nix-store/url';
+import { isHttpsOrLoopbackHttp, parseBaseUrl } from '@cupboard/nix-store/url';
 import {
 	reachableFetcher as sharedReachableFetcher,
 	type ReplaySafety,
@@ -8,6 +8,7 @@ import {
 } from '@cupboard/shared/retry';
 
 import {
+	InsecureWorkerUrlError,
 	InvalidWorkerUrlBaseError,
 	InvalidWorkerUrlError,
 	UnreachableHostError
@@ -42,11 +43,13 @@ export function cacheReadFetcher(
 }
 
 /**
- * Parses and canonicalises a Worker URL. It accepts only HTTP or HTTPS without
- * credentials, a query or a fragment, and removes trailing path slashes except
- * for the root slash. A malformed URL throws {@link InvalidWorkerUrlError}; an
- * invalid base throws {@link InvalidWorkerUrlBaseError}. The returned URL is a
- * copy, so a URL supplied by the caller remains unchanged.
+ * Parses and canonicalises a Worker URL. It accepts only HTTPS, or HTTP to a
+ * loopback host, without credentials, a query or a fragment, and removes
+ * trailing path slashes except for the root slash. A malformed URL throws
+ * {@link InvalidWorkerUrlError}; an invalid base throws
+ * {@link InvalidWorkerUrlBaseError}; plain HTTP to another host throws
+ * {@link InsecureWorkerUrlError}. The returned URL is a copy, so a URL
+ * supplied by the caller remains unchanged.
  */
 export function parseWorkerUrl(value: string | URL): URL {
 	let url: URL;
@@ -56,8 +59,9 @@ export function parseWorkerUrl(value: string | URL): URL {
 		throw new InvalidWorkerUrlError(String(value));
 	}
 
+	let base: URL;
 	try {
-		return parseBaseUrl(url);
+		base = parseBaseUrl(url);
 	} catch (error: unknown) {
 		if (error instanceof InvalidCacheUrlBaseError) {
 			throw new InvalidWorkerUrlBaseError();
@@ -65,6 +69,12 @@ export function parseWorkerUrl(value: string | URL): URL {
 
 		throw error;
 	}
+
+	if (!isHttpsOrLoopbackHttp(base)) {
+		throw new InsecureWorkerUrlError(url.href);
+	}
+
+	return base;
 }
 
 /**

@@ -33,6 +33,13 @@ export class UrlInputInvalidError extends UsageError {
 	}
 }
 
+export class UrlInputInsecureError extends UsageError {
+	constructor(public readonly input: UrlInputName | 'private-substituters') {
+		super(`${input} must use HTTPS, or HTTP to a loopback host`);
+		this.name = 'UrlInputInsecureError';
+	}
+}
+
 export class PrivateSubstituterInvalidError extends UsageError {
 	constructor(public readonly entry: number) {
 		super(

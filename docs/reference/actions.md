@@ -140,12 +140,12 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 | `install-dir` |  | Directory to install cupboard into. Defaults to cupboard-bin under RUNNER_TEMP. |
 | `add-to-path` | `true` | Add the directory that contains the cupboard binary to PATH. |
 | `audience` |  | Audience of the GitHub OIDC token. Defaults to the tenant URL. |
-| `cache-url` |  | Tenant URL whose caches setup adds to Nix's substituters. |
+| `cache-url` |  | Tenant URL whose caches setup adds to Nix's substituters. It must use HTTPS, or HTTP to a loopback host. |
 | `cache` |  | Named caches to use, one per line or separated by commas. Leave empty to use the tenant's default cache. |
 | `include-default-cache` |  | When true, use the tenant's default cache as well as the named caches in cache. The cache input cannot refer to the default cache, because a named cache can be called default. |
 | `cache-credentials` |  | JSON array with one entry for each cache that has its own cache read credential, in the form {"cache": {"kind": "named", "name": ...}, "credential": {"user": ..., "password": ...}}. Pass it from a secret. A cache without an entry is read with read-user and read-password. |
 | `read-caches` |  | Additional canonical cache URLs from the selected tenant, one per line. Adds runner substituters and OIDC read resources without changing the destination cache. Cannot use credentials for these caches. |
-| `private-substituters` |  | URLs of other private caches to read from, one per line, with the user name and password in each URL. Pass this value from a secret. setup adds these URLs to Nix's substituters, and Nix still needs each cache's public key. |
+| `private-substituters` |  | URLs of other private caches to read from, one per line, with the user name and password in each URL. Each URL must use HTTPS, or HTTP to a loopback host. Pass this value from a secret. setup adds these URLs to Nix's substituters, and Nix still needs each cache's public key. |
 | `destination-read-user` |  | User name of the cache read credential for the selected cache. When you select several caches, use cache-credentials instead. |
 | `destination-read-password` |  | Password of the cache read credential for the selected cache. |
 | `provision-cache` |  | Named cache to create with the job's OIDC token before Nix is configured. cache-access-mode and provision-cache-ttl set its access and default root TTL. If the cache already exists, setup keeps its settings. An explicit public or private access requirement must match that cache. |

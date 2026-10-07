@@ -3,7 +3,7 @@ import {
 	type CacheScope,
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
-import { parseBaseUrl } from '@cupboard/nix-store/url';
+import { isHttpsOrLoopbackHttp, parseBaseUrl } from '@cupboard/nix-store/url';
 import {
 	type CacheCredentials,
 	cacheCredentialsSchema
@@ -18,6 +18,7 @@ import {
 	PrivateSubstituterInvalidError,
 	ReadUserInvalidError,
 	UnknownCacheCredentialError,
+	UrlInputInsecureError,
 	UrlInputInvalidError,
 	type UrlInputName
 } from './errors.ts';
@@ -131,9 +132,10 @@ export function providedCacheCredentials(
 
 /**
  * Accept an HTTP(S) base URL containing only an origin and path. Reject a
- * query, fragment or embedded credential before making a request. The error
- * includes only the input name because the rejected value may contain a secret.
- * Return `undefined` for an absent or blank input.
+ * query, fragment or embedded credential before making a request, and reject
+ * plain HTTP to a host other than loopback. The error includes only the input
+ * name because the rejected value may contain a secret. Return `undefined` for
+ * an absent or blank input.
  */
 export function providedUrl(
 	name: UrlInputName,
@@ -145,21 +147,32 @@ export function providedUrl(
 		return undefined;
 	}
 
+	let url: URL;
+
 	try {
-		return parseBaseUrl(new URL(trimmed));
+		url = parseBaseUrl(new URL(trimmed));
 	} catch {
 		throw new UrlInputInvalidError(name);
 	}
+
+	if (!isHttpsOrLoopbackHttp(url)) {
+		throw new UrlInputInsecureError(name);
+	}
+
+	return url;
 }
 
 /**
- * Parses one authenticated substituter URL per line. Error messages omit the
- * URL because it contains a password.
+ * Parses one authenticated substituter URL per line, and refuses plain HTTP to
+ * a host other than loopback. Error messages omit the URL because it contains a
+ * password.
  */
 export function providedPrivateSubstituters(value: string | undefined): URL[] {
 	return parseLines(value ?? '').map((entry, index) => {
+		let url: URL;
+
 		try {
-			const url = new URL(entry);
+			url = new URL(entry);
 
 			if (
 				(url.protocol !== 'http:' && url.protocol !== 'https:') ||
@@ -178,11 +191,15 @@ export function providedPrivateSubstituters(value: string | undefined): URL[] {
 			) {
 				throw new PrivateSubstituterInvalidError(index + 1);
 			}
-
-			return url;
 		} catch {
 			throw new PrivateSubstituterInvalidError(index + 1);
 		}
+
+		if (!isHttpsOrLoopbackHttp(url)) {
+			throw new UrlInputInsecureError('private-substituters');
+		}
+
+		return url;
 	});
 }
 

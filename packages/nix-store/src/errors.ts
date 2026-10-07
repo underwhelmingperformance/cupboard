@@ -64,6 +64,17 @@ export class InvalidCacheUrlBaseError extends ProtocolError {
 	}
 }
 
+// Requests to a tenant cache URL can contain tokens and read credentials, so
+// plain HTTP is accepted only for a loopback host.
+export class InsecureCacheUrlError extends ProtocolError {
+	constructor(public readonly url: string) {
+		super(
+			'Tenant cache URL must use https://, or http:// with localhost, 127.0.0.1 or [::1]'
+		);
+		this.name = 'InsecureCacheUrlError';
+	}
+}
+
 export class InvalidTenantCacheUrlError extends ProtocolError {
 	constructor(
 		public readonly url: string,

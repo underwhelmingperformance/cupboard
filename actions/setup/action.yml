@@ -48,7 +48,9 @@ inputs:
     description: Audience of the GitHub OIDC token. Defaults to the tenant URL.
     required: false
   cache-url:
-    description: Tenant URL whose caches setup adds to Nix's substituters.
+    description:
+      Tenant URL whose caches setup adds to Nix's substituters. It must use
+      HTTPS, or HTTP to a loopback host.
     required: false
   cache:
     description:
@@ -77,9 +79,9 @@ inputs:
   private-substituters:
     description:
       URLs of other private caches to read from, one per line, with the user
-      name and password in each URL. Pass this value from a secret. setup adds
-      these URLs to Nix's substituters, and Nix still needs each cache's public
-      key.
+      name and password in each URL. Each URL must use HTTPS, or HTTP to a
+      loopback host. Pass this value from a secret. setup adds these URLs to
+      Nix's substituters, and Nix still needs each cache's public key.
     required: false
   destination-read-user:
     description:

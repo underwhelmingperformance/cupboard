@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	InsecureWorkerUrlError,
 	InvalidWorkerUrlBaseError,
 	InvalidWorkerUrlError,
 	UnreachableHostError
@@ -25,6 +26,33 @@ describe('parseWorkerUrl', () => {
 		]
 	])('removes redundant trailing slashes from %s', (_name, value, pathname) => {
 		expect(parseWorkerUrl(value).pathname).toBe(pathname);
+	});
+
+	it.each([
+		['localhost', 'http://localhost:8787/t/acme'],
+		['127.0.0.1', 'http://127.0.0.1:8787/t/acme'],
+		['the IPv6 loopback address', 'http://[::1]:8787/t/acme']
+	])('accepts plain HTTP to %s', (_name, value) => {
+		expect(parseWorkerUrl(value).href).toBe(value);
+	});
+
+	it.each([
+		['a public host', 'http://cupboard.example.workers.dev/t/acme'],
+		[
+			'a host that starts with localhost',
+			'http://localhost.example.test/t/acme'
+		],
+		['a private address', 'http://10.0.0.1:8787/t/acme']
+	])('rejects plain HTTP to %s', (_name, value) => {
+		let thrown: unknown;
+
+		try {
+			parseWorkerUrl(value);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toStrictEqual(new InsecureWorkerUrlError(value));
 	});
 
 	it('rejects a malformed URL with a typed usage error', () => {

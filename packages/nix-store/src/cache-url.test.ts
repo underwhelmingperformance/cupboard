@@ -9,6 +9,7 @@ import {
 	urlWithCredential
 } from './cache-url.ts';
 import {
+	InsecureCacheUrlError,
 	InvalidCacheUrlSegmentError,
 	InvalidTenantCacheUrlError
 } from './errors.ts';
@@ -130,6 +131,14 @@ describe('parseTenantCacheUrl', () => {
 				tenantUrl: 'https://example.test/cupboard/t/acme',
 				cache: { kind: 'named', name: 'builds' }
 			}
+		},
+		{
+			name: 'plain HTTP to a loopback host is accepted',
+			value: 'http://127.0.0.1:8787/t/acme',
+			expected: {
+				tenantUrl: 'http://127.0.0.1:8787/t/acme',
+				cache: { kind: 'default' }
+			}
 		}
 	])('$name', ({ value, expected }) => {
 		const parsed = parseTenantCacheUrl(new URL(value));
@@ -153,6 +162,22 @@ describe('parseTenantCacheUrl', () => {
 		expect(() => parseTenantCacheUrl(new URL(value))).toThrow(
 			InvalidTenantCacheUrlError
 		);
+	});
+
+	it.each([
+		'http://cupboard.example.workers.dev/t/acme',
+		'http://cupboard.example.workers.dev/t/acme/cache/builds',
+		'http://localhost.example.test/t/acme'
+	])('refuses the plain HTTP tenant cache URL %s', (value) => {
+		let thrown: unknown;
+
+		try {
+			parseTenantCacheUrl(new URL(value));
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toStrictEqual(new InsecureCacheUrlError(value));
 	});
 });
 
