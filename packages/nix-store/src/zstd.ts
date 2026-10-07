@@ -1,5 +1,10 @@
 import type { Transform } from 'node:stream';
-import { constants, createZstdCompress, createZstdDecompress } from 'node:zlib';
+import {
+	constants,
+	createZstdCompress,
+	createZstdDecompress,
+	type ZstdDecompress
+} from 'node:zlib';
 
 import { ZstdDecodeError } from './errors.ts';
 
@@ -113,6 +118,162 @@ function zstdTransformStream(
 	}
 
 	return { readable, writable };
+}
+
+export interface ZstdDecoderOptions {
+	/**
+	 * The largest size of a chunk of decompressed output.
+	 */
+	readonly chunkSize: number;
+	/**
+	 * The base-2 logarithm of the largest window that a frame may require.
+	 */
+	readonly windowLogMax: number;
+	/**
+	 * Receives each chunk of decompressed output. When it returns a promise, the
+	 * decoder produces no more output until the promise settles.
+	 */
+	readonly onOutput: (chunk: Uint8Array) => Promise<void> | undefined;
+}
+
+interface ZstdRun {
+	readonly zstd: ZstdDecompress;
+	readonly ended: Promise<undefined>;
+}
+
+interface ZstdFailure {
+	readonly error: unknown;
+}
+
+/**
+ * Decompresses concatenated zstd frames that the caller writes one chunk at a
+ * time. `write` and `end` reject with `ZstdDecodeError` when the bytes do not
+ * decode, and with `onOutput`'s rejection reason when the promise from
+ * `onOutput` rejects.
+ */
+export class ZstdDecoder {
+	private readonly failure = Promise.withResolvers<ZstdFailure>();
+	private run: ZstdRun;
+
+	constructor(private readonly options: ZstdDecoderOptions) {
+		this.run = this.startRun();
+	}
+
+	private startRun(): ZstdRun {
+		const zstd = createZstdDecompress({
+			chunkSize: this.options.chunkSize,
+			params: { [constants.ZSTD_d_windowLogMax]: this.options.windowLogMax }
+		});
+		const ended = Promise.withResolvers<undefined>();
+
+		zstd.on('data', (chunk: Uint8Array) => {
+			const handled = this.options.onOutput(chunk);
+
+			if (handled === undefined) {
+				return;
+			}
+
+			zstd.pause();
+			void this.resumeAfter(zstd, handled);
+		});
+		zstd.once('error', (error) => {
+			this.failure.resolve({ error: new ZstdDecodeError({ cause: error }) });
+		});
+		zstd.once('end', () => {
+			ended.resolve(undefined);
+		});
+
+		return { zstd, ended: ended.promise };
+	}
+
+	private async resumeAfter(
+		zstd: ZstdDecompress,
+		handled: Promise<void>
+	): Promise<void> {
+		try {
+			await handled;
+			zstd.resume();
+		} catch (error) {
+			this.failure.resolve({ error });
+		}
+	}
+
+	private async unlessFailed(operation: Promise<unknown>): Promise<void> {
+		const failure = await Promise.race([
+			this.failure.promise,
+			completion(operation)
+		]);
+
+		if (failure === undefined) {
+			return;
+		}
+
+		throw failure.error;
+	}
+
+	/**
+	 * Resolves once the decoder has consumed the whole chunk.
+	 */
+	async write(chunk: Uint8Array): Promise<void> {
+		let input = chunk;
+
+		for (;;) {
+			const { zstd, ended } = this.run;
+			const consumedBefore = zstd.bytesWritten;
+			// workerd's zlib ends the stream when a frame ends before the end of a
+			// write, and drops the rest of that write. If the output is paused at
+			// that point, zlib never calls the write callback, so treat the stream's
+			// `end` event as completing the write too.
+			await this.unlessFailed(Promise.race([processed(zstd, input), ended]));
+			const consumed = zstd.bytesWritten - consumedBefore;
+
+			if (consumed === input.byteLength) {
+				return;
+			}
+
+			// A decoder that consumes nothing cannot make progress on this input.
+			if (consumed === 0) {
+				throw new ZstdDecodeError();
+			}
+
+			// The ended stream never completes a later write. Let it deliver its
+			// output, then start a new decoder at the first byte that it did not
+			// consume.
+			await this.unlessFailed(ended);
+			zstd.destroy();
+			input = input.subarray(consumed);
+			this.run = this.startRun();
+		}
+	}
+
+	/**
+	 * Resolves once the decoder has delivered all of its output.
+	 */
+	async end(): Promise<void> {
+		this.run.zstd.end();
+		await this.unlessFailed(this.run.ended);
+	}
+
+	destroy(): void {
+		this.run.zstd.destroy();
+	}
+}
+
+async function completion(operation: Promise<unknown>): Promise<undefined> {
+	await operation;
+}
+
+function processed(stream: Transform, chunk: Uint8Array): Promise<void> {
+	return new Promise((resolve, reject) => {
+		stream.write(chunk, (error?: Error | null) => {
+			if (error !== undefined && error !== null) {
+				reject(new ZstdDecodeError({ cause: error }));
+				return;
+			}
+
+			resolve();
+		});
+	});
 }
 
 function writeChunk(stream: Transform, chunk: Uint8Array): Promise<void> {

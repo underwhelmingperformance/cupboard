@@ -83,13 +83,16 @@ wrangler d1 execute cupboard --remote \
 If a tenant keeps failing, the last error and the Worker logs from around that
 time are the place to start.
 
-The tenant Worker records failed upload verification and publication attempts in
-`pending_upload.settle_failures`. `last_settle_error` contains a controlled
-failure category. Retries start after 30 seconds and double up to ten minutes.
-The `pending upload verification failed` log includes the upload ID, category,
-phase and failure count. Provider messages and URLs are not recorded. A stored
-decode verdict remains available while publication retries, so the next attempt
-does not decode the NAR again.
+A verification attempt for a newly uploaded NAR fails when R2 returns an error.
+It also fails when the R2 get, or a single read of up to 1 MiB from the staged
+object, takes longer than 60 seconds. The tenant Worker records failed upload
+verification and publication attempts in `pending_upload.settle_failures`.
+`last_settle_error` contains a controlled failure category. Retries start after
+30 seconds and double up to ten minutes. The
+`pending upload verification failed` log includes the upload ID, category, phase
+and failure count. Provider messages and URLs are not recorded. A stored decode
+verdict remains available while publication retries, so the next attempt does
+not decode the NAR again.
 
 Upload verification and attestation inheritance stop after twelve failed
 attempts or 24 hours of eligible time. Eligible time starts with the first

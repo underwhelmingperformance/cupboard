@@ -504,11 +504,18 @@ requests below are all under the tenant URL.
 
 5. The object records the upload as pending, and adds a `tenant-verify` job to
    the queue. The queue consumer verifies the bytes. It claims a batch of up to
-   32 uploads, totalling at most 4 GiB of declared NAR size, and streams each
-   staged object through native zstd decompression and SHA-256. It compares the
-   result with the NAR hash and size that the CLI declared. The same pass hashes
-   and measures the compressed bytes. This means that the stored file hash and
-   file size come from the server, not from the client.
+   32 uploads, totalling at most 4 GiB of declared NAR size. It reads each
+   staged object from R2 in 1 MiB chunks and passes them through native zstd
+   decompression and SHA-256. It compares the result with the NAR hash and size
+   that the CLI declared. The same pass hashes and measures the compressed
+   bytes. This means that the stored file hash and file size come from the
+   server, not from the client. A frame that needs a decoding window larger than
+   8 MiB counts as undecodable.
+
+   The consumer abandons an upload when the R2 get, or one read of the staged
+   object, takes longer than 60 seconds, and a later pass retries it. There is
+   no limit on the total time for one upload, but the whole pass stops when its
+   14-minute budget ends.
 
 6. If the bytes match, the object promotes them. It copies them to
    `nar/<narHash>.nar.zst`, and asks R2 to check the SHA-256 again and to write

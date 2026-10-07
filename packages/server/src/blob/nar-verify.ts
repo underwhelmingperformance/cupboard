@@ -1,16 +1,28 @@
 import { ZstdDecodeError } from '@cupboard/nix-store/errors';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
-import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
+import { ZstdDecoder } from '@cupboard/nix-store/zstd';
 
+import { raceVerificationOperation } from '../do/verification-claim-lease.ts';
 import {
 	SubrequestTimeoutError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
-import { verifiableMaxBytes } from '../http/http.ts';
-import { type R2ObjectKey } from '../http/http.ts';
+import { type R2ObjectKey, verifiableMaxBytes } from '../http/http.ts';
 
-export const narVerifyBudgetMs = 5 * 60 * 1000;
+/**
+ * How long the R2 get, or one read of the stored NAR's body, may take before
+ * verification fails with `SubrequestTimeoutError('nar.verify')`.
+ */
+const narVerifyStallMs = 60 * 1000;
+
+const readSize = 1024 * 1024;
+
+// libzstd allocates the decoding window outside the isolate's memory limit.
+// Without a maximum window log, a frame header can make libzstd allocate
+// 128 MiB. The CLI compresses at zstd's default level, which uses a window log
+// of 21 for inputs over 256 KiB.
+const maxWindowLog = 23;
 
 /**
  * Verification accepts decompressed bytes only when both values match the
@@ -41,141 +53,330 @@ export type NarVerification =
 	  }
 	| { readonly ok: false; readonly reason: 'undecodable' };
 
+type DecodeHalt = Extract<
+	NarVerification,
+	{ readonly reason: 'nar-size-mismatch' | 'undecodable' }
+>;
+
+const undecodable: DecodeHalt = { ok: false, reason: 'undecodable' };
+
 /**
- * Streams a stored `.nar.zst` body through native zstd decompression and a
- * running SHA-256, recomputing the uncompressed NAR hash and size and comparing
- * them to what the narinfo commits to. The same pass hashes and counts the
- * compressed input, so successful verification also yields the object's file
- * hash and size without a second read. Verification streams the body and
- * rejects decompressed data beyond the declared size or the server limit.
+ * The step that a verification is performing: fetching the object from R2,
+ * waiting for a read of its body, or decoding the bytes read so far.
  */
-export async function verifyDecompressedNar(
-	body: ReadableStream<Uint8Array>,
-	expected: ExpectedNar
-): Promise<NarVerification> {
-	// Stop after the declared size or the server limit, whichever is smaller. A
-	// highly expanding frame cannot make this pass process an unbounded NAR.
-	const limit = Math.min(expected.narSize, verifiableMaxBytes);
+export type NarVerifyStage = 'fetch' | 'read' | 'decode';
 
-	// Hash and count the compressed bytes as they arrive, before decompression,
-	// so a successful pass reports the stored object's own file hash and size.
-	const fileDigestStream = new crypto.DigestStream('SHA-256');
-	const fileDigestComplete = fileDigestStream.digest;
-	const fileWriter = fileDigestStream.getWriter();
-	let fileSize = 0;
+/**
+ * The work that one verification has done so far. The verifier updates this
+ * object during verification, so the caller can still read the counts and the
+ * last stage after verification throws.
+ */
+export interface NarVerifyProgress {
+	stage: NarVerifyStage;
+	reads: number;
+	compressedBytes: number;
+	narBytes: number;
+}
 
-	const compressed = body.pipeThrough(
-		new TransformStream<Uint8Array, Uint8Array>({
-			async transform(chunk, controller) {
-				fileSize += chunk.byteLength;
-				await fileWriter.write(chunk);
-				controller.enqueue(chunk);
-			},
-			async flush() {
-				await fileWriter.close();
-			}
-		})
-	);
+export function narVerifyProgress(): NarVerifyProgress {
+	return { stage: 'fetch', reads: 0, compressedBytes: 0, narBytes: 0 };
+}
 
-	const reader = compressed.pipeThrough(zstdDecompressionStream()).getReader();
-	const digestStream = new crypto.DigestStream('SHA-256');
-	const digestComplete = digestStream.digest;
-	const writer = digestStream.getWriter();
-	let narSize = 0;
+export interface NarVerifyOptions {
+	readonly progress?: NarVerifyProgress;
+}
 
-	// Cancel every end and discard the (now-rejecting) digests so an early exit
-	// never leaves an unhandled rejection or a dangling decompression.
-	const teardown = async (): Promise<void> => {
-		await Promise.allSettled([
-			reader.cancel(),
-			writer.abort(),
-			fileWriter.abort(),
-			digestComplete,
-			fileDigestComplete
-		]);
-	};
+export interface StoredNarVerifyOptions extends NarVerifyOptions {
+	/**
+	 * Stops verification, for example when the verification pass ends.
+	 */
+	readonly signal?: AbortSignal;
+	readonly stallMs?: number;
+}
 
+/**
+ * A running SHA-256 of the bytes written to it.
+ */
+class Sha256Stream {
+	private readonly stream = new crypto.DigestStream('SHA-256');
+	private readonly writer = this.stream.getWriter();
+
+	write(chunk: Uint8Array): Promise<void> {
+		return this.writer.write(chunk);
+	}
+
+	async digest(): Promise<NixSha256Hash> {
+		await this.writer.close();
+
+		return NixSha256Hash.fromDigest(new Uint8Array(await this.stream.digest));
+	}
+
+	async abort(): Promise<void> {
+		await Promise.allSettled([this.writer.abort(), this.stream.digest]);
+	}
+}
+
+async function decoded(
+	operation: Promise<void>
+): Promise<DecodeHalt | undefined> {
 	try {
-		for (;;) {
-			const result = await reader.read();
-
-			if (result.done) {
-				break;
-			}
-
-			narSize += result.value.byteLength;
-
-			if (narSize > limit) {
-				await teardown();
-
-				return {
-					ok: false,
-					reason: 'nar-size-mismatch',
-					actualNarSize: narSize
-				};
-			}
-
-			await writer.write(result.value);
-		}
-
-		await writer.close();
+		await operation;
 	} catch (error) {
-		await teardown();
-
-		// Bytes that are not a valid zstd frame can never decode to the claimed
-		// hash, so this is a definitive verification failure. Any other error (a
-		// source read fault) propagates for the caller to treat as transient.
 		if (error instanceof ZstdDecodeError) {
-			return { ok: false, reason: 'undecodable' };
+			return undecodable;
 		}
 
 		throw error;
 	}
+}
 
-	const digest = new Uint8Array(await digestComplete);
-	const actualNarHash = NixSha256Hash.fromDigest(digest).toString();
+/**
+ * Decompresses zstd frames and hashes the output, stopping as soon as the
+ * output exceeds `limit` bytes.
+ */
+class NarDecoder {
+	private readonly hash = new Sha256Stream();
+	private readonly halted = Promise.withResolvers<DecodeHalt>();
+	private readonly zstd: ZstdDecoder;
+
+	constructor(
+		private readonly limit: number,
+		private readonly progress: NarVerifyProgress
+	) {
+		this.zstd = new ZstdDecoder({
+			chunkSize: readSize,
+			windowLogMax: maxWindowLog,
+			onOutput: (chunk) => this.accept(chunk)
+		});
+	}
+
+	private accept(chunk: Uint8Array): Promise<void> | undefined {
+		this.progress.narBytes += chunk.byteLength;
+
+		if (this.progress.narBytes > this.limit) {
+			this.halted.resolve({
+				ok: false,
+				reason: 'nar-size-mismatch',
+				actualNarSize: this.progress.narBytes
+			});
+			this.zstd.destroy();
+			return undefined;
+		}
+
+		return this.hash.write(chunk);
+	}
+
+	/**
+	 * Resolves when the decoder has consumed the whole chunk, or with the
+	 * verdict that stopped decoding.
+	 */
+	write(chunk: Uint8Array): Promise<DecodeHalt | undefined> {
+		return Promise.race([this.halted.promise, decoded(this.zstd.write(chunk))]);
+	}
+
+	/**
+	 * Resolves when the decoder has hashed all of its output, or with the
+	 * verdict that stopped decoding.
+	 */
+	end(): Promise<DecodeHalt | undefined> {
+		return Promise.race([this.halted.promise, decoded(this.zstd.end())]);
+	}
+
+	async narHash(): Promise<string> {
+		const digest = await this.hash.digest();
+
+		return digest.toString();
+	}
+
+	async destroy(): Promise<void> {
+		this.zstd.destroy();
+		await this.hash.abort();
+	}
+}
+
+/**
+ * Provides a signal that aborts with the outer signal's reason, or with
+ * `SubrequestTimeoutError('nar.verify')` when the source makes no progress for
+ * `stallMs`.
+ */
+class StallWatchdog {
+	private readonly controller = new AbortController();
+	private timer: ReturnType<typeof setTimeout> | undefined;
+	private readonly onOuterAbort = (): void => {
+		this.controller.abort(this.outer?.reason);
+	};
+
+	constructor(
+		private readonly stallMs: number,
+		private readonly outer?: AbortSignal
+	) {
+		if (outer?.aborted === true) {
+			this.onOuterAbort();
+			return;
+		}
+
+		outer?.addEventListener('abort', this.onOuterAbort, { once: true });
+		this.restart();
+	}
+
+	get signal(): AbortSignal {
+		return this.controller.signal;
+	}
+
+	/**
+	 * Starts a new stall interval after the source makes progress.
+	 */
+	restart(): void {
+		clearTimeout(this.timer);
+
+		if (this.signal.aborted) {
+			return;
+		}
+
+		this.timer = setTimeout(() => {
+			this.controller.abort(new SubrequestTimeoutError('nar.verify'));
+		}, this.stallMs);
+	}
+
+	/**
+	 * Stops the stall interval once the source has ended.
+	 */
+	stop(): void {
+		clearTimeout(this.timer);
+	}
+
+	dispose(): void {
+		this.stop();
+		this.outer?.removeEventListener('abort', this.onOuterAbort);
+	}
+}
+
+async function readChunk(
+	reader: ReadableStreamBYOBReader,
+	watchdog: StallWatchdog | undefined
+): Promise<Uint8Array | undefined> {
+	// The decoder can still be processing the previous chunk while this read
+	// runs, so every read gets a new buffer.
+	const { done, value } = await reader.readAtLeast(
+		readSize,
+		new Uint8Array(readSize)
+	);
+
+	if (done) {
+		watchdog?.stop();
+		return undefined;
+	}
+
+	watchdog?.restart();
+
+	return value;
+}
+
+async function verifyNarBody(
+	body: ReadableStream,
+	expected: ExpectedNar,
+	progress: NarVerifyProgress,
+	watchdog?: StallWatchdog
+): Promise<NarVerification> {
+	const signal = watchdog?.signal;
+	const reader = body.getReader({ mode: 'byob' });
+	// Stop after the declared size or the server limit, whichever is smaller. A
+	// highly expanding frame cannot make this pass process an unbounded NAR.
+	const decoder = new NarDecoder(
+		Math.min(expected.narSize, verifiableMaxBytes),
+		progress
+	);
+	const fileHash = new Sha256Stream();
+	let next = readChunk(reader, watchdog);
+	let isDecoded = false;
+
+	try {
+		for (;;) {
+			progress.stage = 'read';
+			const chunk = await raceVerificationOperation(next, signal);
+
+			if (chunk === undefined) {
+				break;
+			}
+
+			// Start the next read before decoding, so the wait for R2 overlaps the
+			// decoding work.
+			next = readChunk(reader, watchdog);
+			progress.reads += 1;
+			progress.compressedBytes += chunk.byteLength;
+			progress.stage = 'decode';
+			await fileHash.write(chunk);
+			const halt = await raceVerificationOperation(
+				decoder.write(chunk),
+				signal
+			);
+
+			if (halt !== undefined) {
+				return halt;
+			}
+		}
+
+		progress.stage = 'decode';
+		const halt = await raceVerificationOperation(decoder.end(), signal);
+
+		if (halt !== undefined) {
+			return halt;
+		}
+
+		isDecoded = true;
+	} finally {
+		if (!isDecoded) {
+			await Promise.allSettled([
+				reader.cancel(signal?.reason),
+				next,
+				decoder.destroy(),
+				fileHash.abort()
+			]);
+		}
+	}
+
+	const actualNarHash = await decoder.narHash();
 
 	if (actualNarHash !== expected.narHash) {
 		return { ok: false, reason: 'nar-hash-mismatch', actualNarHash };
 	}
 
-	if (narSize !== expected.narSize) {
-		return { ok: false, reason: 'nar-size-mismatch', actualNarSize: narSize };
+	if (progress.narBytes !== expected.narSize) {
+		return {
+			ok: false,
+			reason: 'nar-size-mismatch',
+			actualNarSize: progress.narBytes
+		};
 	}
 
-	const fileDigest = new Uint8Array(await fileDigestComplete);
+	const fileDigest = await fileHash.digest();
 
 	return {
 		ok: true,
-		fileHash: NixSha256Hash.fromDigest(fileDigest).value,
-		fileSize
+		fileHash: fileDigest.value,
+		fileSize: progress.compressedBytes
 	};
 }
 
-// The verifier locks its input stream. Keep the R2 reader outside that stream
-// so timeout cancellation can still reach the underlying R2 body.
-function cancellableNarBody(body: ReadableStream<Uint8Array>): {
-	readonly stream: ReadableStream<Uint8Array>;
-	readonly cancel: (reason?: unknown) => Promise<void>;
-} {
-	const reader = body.getReader();
-	const stream = new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			const { done, value } = await reader.read();
-
-			if (done) {
-				controller.close();
-				return;
-			}
-
-			controller.enqueue(value);
-		},
-		cancel(reason) {
-			return reader.cancel(reason);
-		}
-	});
-
-	return { stream, cancel: (reason) => reader.cancel(reason) };
+/**
+ * Reads a stored `.nar.zst` body in 1 MiB pieces, decompresses it with native
+ * zstd and hashes the output, then compares the NAR hash and size with what the
+ * narinfo declares. The same pass hashes and counts the compressed input, so
+ * successful verification also yields the object's file hash and size without
+ * fetching the object again. Verification stops reading once the decompressed
+ * data exceeds the declared size or the server limit, and on every early exit
+ * it cancels the body.
+ *
+ * When the bytes do not decode, it returns
+ * `{ ok: false, reason: 'undecodable' }`. An error from reading the body
+ * propagates for the caller to treat as transient.
+ */
+export async function verifyDecompressedNar(
+	body: ReadableStream,
+	expected: ExpectedNar,
+	{ progress = narVerifyProgress() }: NarVerifyOptions = {}
+): Promise<NarVerification> {
+	return verifyNarBody(body, expected, progress);
 }
 
 function abortReason(signal: AbortSignal): unknown {
@@ -234,83 +435,44 @@ async function getStoredNar(
 	}
 }
 
-function verificationSignal(
-	budgetMs: number,
-	outer?: AbortSignal
-): { readonly signal: AbortSignal; readonly dispose: () => void } {
-	const controller = new AbortController();
-	const onOuterAbort = (): void => {
-		if (outer !== undefined) {
-			controller.abort(abortReason(outer));
-		}
-	};
-
-	if (outer?.aborted === true) {
-		onOuterAbort();
-	} else {
-		outer?.addEventListener('abort', onOuterAbort, { once: true });
-	}
-
-	const timer = setTimeout(() => {
-		controller.abort(new SubrequestTimeoutError('nar.verify'));
-	}, budgetMs);
-
-	return {
-		signal: controller.signal,
-		dispose: () => {
-			clearTimeout(timer);
-			outer?.removeEventListener('abort', onOuterAbort);
-		}
-	};
-}
-
 /**
- * Fetches and verifies one staged NAR within a fixed wall-clock budget. An
- * outer consumer signal can shorten that budget. If the R2 get finishes after
- * cancellation, the verifier cancels the returned body without decoding it.
+ * Fetches and verifies one staged NAR. It fails with
+ * `SubrequestTimeoutError('nar.verify')` when the R2 get or a read of the body
+ * takes longer than `stallMs`. When the outer signal aborts, it cancels the
+ * body and rejects with the signal's reason. If the R2 get finishes after a
+ * timeout or an abort, the verifier cancels the returned body without decoding
+ * it.
  */
 export async function verifyStoredNar(
 	blobs: R2Bucket,
 	r2Key: R2ObjectKey,
 	expected: ExpectedNar,
-	budgetMs: number = narVerifyBudgetMs,
-	outerSignal?: AbortSignal
+	{
+		signal: outerSignal,
+		stallMs = narVerifyStallMs,
+		progress = narVerifyProgress()
+	}: StoredNarVerifyOptions = {}
 ): Promise<NarVerification> {
-	const { signal, dispose } = verificationSignal(budgetMs, outerSignal);
-	let cancelBody: ((reason?: unknown) => Promise<void>) | undefined;
-	let cancellation: Promise<void> | undefined;
-	const cancel = (): void => {
-		cancellation ??= cancelBody?.(abortReason(signal));
-	};
-	signal.addEventListener('abort', cancel, { once: true });
+	const watchdog = new StallWatchdog(stallMs, outerSignal);
 
 	try {
-		const object = await getStoredNar(blobs, r2Key, signal);
+		progress.stage = 'fetch';
+		const object = await getStoredNar(blobs, r2Key, watchdog.signal);
 
 		if (object === null) {
 			throw new UploadedObjectNotFoundError(r2Key);
 		}
 
-		const body = object.body as ReadableStream<Uint8Array>;
-		const cancellable = cancellableNarBody(body);
-		cancelBody = cancellable.cancel;
-		signal.throwIfAborted();
-		const verification = await verifyDecompressedNar(
-			cancellable.stream,
-			expected
+		const verification = await verifyNarBody(
+			object.body,
+			expected,
+			progress,
+			watchdog
 		);
-
-		if (signal.aborted) {
-			throw abortReason(signal);
-		}
+		watchdog.signal.throwIfAborted();
 
 		return verification;
-	} catch (error) {
-		await Promise.allSettled([cancellation]);
-
-		throw signal.aborted ? abortReason(signal) : error;
 	} finally {
-		signal.removeEventListener('abort', cancel);
-		dispose();
+		watchdog.dispose();
 	}
 }
