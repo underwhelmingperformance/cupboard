@@ -6,7 +6,9 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -14,15 +16,21 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { UploadExpiredError } from '../errors.ts';
 import {
 	commitPath,
 	currentNarObjectKey,
 	currentServer,
 	drivenDirectly,
 	expectSingleCommitDecision,
+	expectSingleUploadDecision,
 	flakyD1,
 	initialise,
+	markUploadCommitting,
+	markUploadPendingVerification,
 	negotiateUploads,
+	pendingUploadSnapshot,
+	putNarBytes,
 	resetTestServer,
 	resolvedCache,
 	seedReservedNarInfo,
@@ -276,6 +284,113 @@ describe('when a commit resumes its existing reservation', () => {
 			}
 		});
 	});
+});
+
+const pastExpiry = isoTimestampSchema.parse('2000-01-01T00:00:00.000Z');
+
+async function expireUpload(uploadId: UploadId): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.update(schema.pendingUploads)
+			.set({ expiresAt: pastExpiry })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	});
+}
+
+describe('when a commit arrives after its upload expired', () => {
+	beforeEach(resetTestServer);
+
+	it('clears an uncommitted upload and refuses the commit', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('expired-uncommitted');
+		const metadata = uploadMetadata({
+			name: 'expired',
+			storePathHash: 'g'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await putNarBytes(upload.r2Key, nar);
+		await expireUpload(upload.uploadId);
+
+		const commit = runInDurableObject(currentServer(), async (instance) =>
+			pipelineFor(instance.context).commit(
+				rootLogger(),
+				resolvedCache(instance.context),
+				upload.uploadId
+			)
+		);
+
+		await expect(commit).rejects.toBeInstanceOf(UploadExpiredError);
+
+		const staged = await env.BLOBS.head(upload.r2Key);
+
+		expect({
+			row: await pendingUploadSnapshot(upload.uploadId),
+			isStaged: staged !== null
+		}).toStrictEqual({ row: undefined, isStaged: false });
+	});
+
+	it.each([
+		{ verdict: 'committing', mark: markUploadCommitting },
+		{ verdict: 'pending', mark: markUploadPendingVerification }
+	] as const)(
+		'defers a resent commit for a $verdict upload and keeps its row',
+		async ({ verdict, mark }) => {
+			const token = await initialise();
+			const nar = await verifiableNar(`expired-${verdict}`);
+			const metadata = uploadMetadata({
+				name: verdict,
+				storePathHash: 'h'.repeat(32),
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				narSize: nar.narSize
+			});
+			const upload = expectSingleUploadDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
+
+			await putNarBytes(upload.r2Key, nar);
+			await seedReservedNarInfo(metadata);
+			await mark(upload.uploadId);
+			await expireUpload(upload.uploadId);
+
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance) =>
+					pipelineFor(instance.context).commit(
+						rootLogger(),
+						resolvedCache(instance.context),
+						upload.uploadId
+					)
+			);
+			const row = await pendingUploadSnapshot(upload.uploadId);
+			const staged = await env.BLOBS.head(upload.r2Key);
+
+			expect({
+				outcome,
+				verdict: row?.verdict,
+				isStaged: staged !== null
+			}).toStrictEqual({
+				outcome: {
+					kind: 'deferred',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				},
+				verdict,
+				isStaged: true
+			});
+		}
+	);
 });
 
 describe('when another commit holds the reservation', () => {

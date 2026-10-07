@@ -1528,7 +1528,13 @@ export class CommitPipelineService {
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 		const nowIso = isoTimestamp(new Date());
 
-		if (pending.expiresAt < nowIso) {
+		// A `committing` or `pending` upload stays live after expiry, as in the
+		// garbage-collection sweep. Verification may still be resuming it, and a
+		// resent commit must not delete its row and staged bytes.
+		const isLiveCommit =
+			pending.verdict === 'committing' || pending.verdict === 'pending';
+
+		if (!isLiveCommit && pending.expiresAt < nowIso) {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
 				pending.r2Key,
