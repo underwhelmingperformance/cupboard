@@ -101,10 +101,10 @@ export class IntegrityCheckService {
 			return 'missing-nar';
 		}
 
-		const verification = await verifyDecompressedNar(
-			blob.body as ReadableStream<Uint8Array>,
-			{ narHash: row.narHash, narSize: row.narSize }
-		);
+		const verification = await verifyDecompressedNar(blob.body, {
+			narHash: row.narHash,
+			narSize: row.narSize
+		});
 
 		if (!verification.ok) {
 			return verification.reason;

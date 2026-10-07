@@ -23,7 +23,7 @@ import {
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
-import { narVerifyBudgetMs, verifyStoredNar } from '../blob/nar-verify.ts';
+import { verifyStoredNar } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	enqueueLocalStepWakes,
@@ -1217,8 +1217,7 @@ export async function verifyTenant(
 									narHash: claim.narHash,
 									narSize: claim.narSize
 								},
-								narVerifyBudgetMs,
-								signal
+								{ signal }
 							);
 							signal.throwIfAborted();
 
