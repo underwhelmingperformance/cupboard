@@ -128,13 +128,14 @@ later rotation is limited to those grants.
 
 The refresh credential contains the verified issuer, subject, audiences and
 string claims needed for policy matching, together with its authority and
-absolute expiry. The server authenticates the complete credential against a
-stored hash before using those claims. The server keeps rotation and replay
-metadata, and the issuer, subject and trust rule of each session, but does not
-store its other claims or its grants. An encrypted successor credential is
-temporarily stored for retry recovery. Bounded maintenance clears that
-ciphertext after the grace window; ciphertext can remain until the relevant
-maintenance pass runs, but expired ciphertext cannot recover a response.
+absolute expiry. The server encrypts these contents, so the CLI cannot read
+them. The server authenticates the complete credential against a stored hash
+before using those claims. The server keeps rotation and replay metadata, and
+the issuer, subject and trust rule of each session, but does not store its other
+claims or its grants. An encrypted successor credential is temporarily stored
+for retry recovery. Bounded maintenance clears that ciphertext after the grace
+window; ciphertext can remain until the relevant maintenance pass runs, but
+expired ciphertext cannot recover a response.
 
 If a refresh response is lost, retry the command within one minute. The CLI
 keeps the consumed refresh token until it receives a response. The server then

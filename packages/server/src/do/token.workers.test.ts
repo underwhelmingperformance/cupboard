@@ -1,6 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
-import { base64ToBytes } from '@cupboard/nix-store/encoding';
+import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import {
 	cacheNameSchema,
 	type CacheScope,
@@ -45,8 +45,10 @@ import {
 import {
 	RefreshCredential,
 	refreshCredentialMaxBytes,
+	type RefreshKeyContext,
 	refreshPolicyIdentity
 } from '../auth/refresh-credential.ts';
+import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
 	cacheIdentities,
@@ -88,7 +90,7 @@ import {
 } from '../test-support.ts';
 
 import { AuthKeysService } from './auth-keys-service.ts';
-import { ownerRuleId } from './context.ts';
+import { ownerRuleId, type ServerContext } from './context.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { gcContinuationKey } from './server.ts';
@@ -1790,6 +1792,13 @@ function negotiateFor(token: string, cache: string): Promise<Response> {
 	});
 }
 
+function refreshKeys(context: ServerContext): RefreshKeyContext {
+	return {
+		signingKey: pushIdSigningKey(context.env),
+		tenant: context.requireTenant()
+	};
+}
+
 function refreshTokenRows(): Promise<
 	{
 		id: string;
@@ -1888,25 +1897,41 @@ async function staleRefreshOutcome(refreshToken: string): Promise<{
 describe('refresh grant', () => {
 	beforeEach(resetTestServer);
 
-	it('issues client-contained refresh authority with only replay and owner metadata in active storage', async () => {
+	it('issues sealed client-contained refresh authority with only replay and owner metadata in active storage', async () => {
 		const subject = await installTrustedIdp('admin');
 		const response = await exchange(subject);
 		const parts = response.refresh_token?.split('.') ?? [];
 		expect(parts).toEqual([
 			expect.any(String),
 			expect.any(String),
+			expect.any(String),
 			expect.any(String)
 		]);
-		const encodedPayload = (parts[2] ?? '')
-			.replaceAll('-', '+')
-			.replaceAll('_', '/');
-		const payloadJson = new TextDecoder().decode(base64ToBytes(encodedPayload));
-		const payload: unknown = JSON.parse(payloadJson);
-		const stored = await runInDurableObject(currentServer(), (instance) => ({
-			tenant: instance.context.requireTenant(),
-			families: instance.context.db.select().from(refreshTokenFamilies).all(),
-			members: instance.context.db.select().from(refreshTokenMembers).all()
-		}));
+		const stored = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const members = instance.context.db
+					.select()
+					.from(refreshTokenMembers)
+					.all();
+
+				return {
+					tenant: instance.context.requireTenant(),
+					families: instance.context.db
+						.select()
+						.from(refreshTokenFamilies)
+						.all(),
+					members,
+					payload: await RefreshCredential.parse(
+						response.refresh_token ?? ''
+					)?.authenticate(
+						members[0]?.credentialHash ?? '',
+						refreshKeys(instance.context)
+					)
+				};
+			}
+		);
+		const payload = stored.payload;
 		const family = stored.families[0];
 		if (family === undefined) {
 			throw new Error('Expected a refresh family');
@@ -1923,7 +1948,7 @@ describe('refresh grant', () => {
 		}).toStrictEqual({
 			payload: {
 				purpose: 'cupboard-refresh',
-				version: 1,
+				version: 2,
 				tenant: stored.tenant,
 				familyId: family.id,
 				memberId: family.activeMemberId,
@@ -2172,6 +2197,55 @@ describe('refresh grant', () => {
 		});
 	});
 
+	it('rotates a version 1 credential into a sealed version 2 credential', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const legacy = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const credential = RefreshCredential.parse(
+					exchanged.refresh_token ?? ''
+				);
+				const member = instance.context.db
+					.select()
+					.from(refreshTokenMembers)
+					.get();
+				const authority = await credential?.authenticate(
+					member?.credentialHash ?? '',
+					refreshKeys(instance.context)
+				);
+				if (member === undefined || authority === undefined) {
+					throw new Error('Expected authenticated authority');
+				}
+				const json = JSON.stringify({
+					...authority,
+					version: 1,
+					identity: refreshPolicyIdentity(authority.identity)
+				});
+				const readable = bytesToBase64Url(new TextEncoder().encode(json));
+				const value = `${member.id}.${'a'.repeat(64)}.${readable}`;
+				instance.context.db
+					.update(refreshTokenMembers)
+					.set({ credentialHash: await sha256Hex(value) })
+					.where(eq(refreshTokenMembers.id, member.id))
+					.run();
+				return value;
+			}
+		);
+		const response = await refresh(legacy);
+		const result = tokenResponseSchema.parse(await response.json());
+		const families = await refreshTokenRows();
+
+		expect({
+			status: response.status,
+			successorSegments: result.refresh_token?.split('.').length,
+			generations: families.map((row) => row.generation)
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			successorSegments: 4,
+			generations: [1]
+		});
+	});
+
 	it('redeems and rotates an issued credential near the request size limit', async () => {
 		const exchanged = await exchange(await installTrustedIdp('admin'));
 		const large = await runInDurableObject(
@@ -2193,18 +2267,21 @@ describe('refresh grant', () => {
 				}
 				const authority = await credential.authenticate(
 					member.credentialHash,
-					instance.context.requireTenant()
+					refreshKeys(instance.context)
 				);
 				if (authority === undefined) {
 					throw new Error('Expected authenticated authority');
 				}
-				const large = RefreshCredential.issue({
-					...authority,
-					identity: {
-						...refreshPolicyIdentity(authority.identity),
-						extraClaim: 'x'.repeat(48_000)
-					}
-				});
+				const large = await RefreshCredential.issue(
+					{
+						...authority,
+						identity: {
+							...refreshPolicyIdentity(authority.identity),
+							extraClaim: 'x'.repeat(48_000)
+						}
+					},
+					refreshKeys(instance.context)
+				);
 				instance.context.db
 					.update(refreshTokenMembers)
 					.set({ credentialHash: await sha256Hex(large.value) })
@@ -2220,11 +2297,13 @@ describe('refresh grant', () => {
 			nearLimit: large.length > refreshCredentialMaxBytes - 1500,
 			withinLimit:
 				(result.refresh_token?.length ?? Infinity) <= refreshCredentialMaxBytes,
+			successorSegments: result.refresh_token?.split('.').length,
 			grants: result.authorization_details
 		}).toStrictEqual({
 			status: 200,
 			nearLimit: true,
 			withinLimit: true,
+			successorSegments: 4,
 			grants: [{ type: 'cupboard_wildcard' }]
 		});
 	});
@@ -2442,7 +2521,7 @@ describe('refresh grant', () => {
 		const firstResponse = await refresh(original);
 		const first = tokenResponseSchema.parse(await firstResponse.json());
 		const [originalId] = z
-			.tuple([z.uuid(), z.string(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -2481,7 +2560,7 @@ describe('refresh grant', () => {
 		const firstResponse = await refresh(original);
 		const first = tokenResponseSchema.parse(await firstResponse.json());
 		const [originalId] = z
-			.tuple([z.uuid(), z.string(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -2514,60 +2593,73 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('keeps the family when successor decryption fails internally', async () => {
-		const exchanged = await exchange(await installTrustedIdp('admin'));
-		const original = exchanged.refresh_token ?? '';
-		const firstResponse = await refresh(original);
-		const first = tokenResponseSchema.parse(await firstResponse.json());
-		const failure = new TypeError('Web Crypto is unavailable');
-		const result = await runInDurableObject(
-			currentServer(),
-			async (instance) => {
-				const identity = new TenantIdentityService(instance.context);
-				const service = new TokenExchangeService(
-					instance.context,
-					new AuthKeysService(instance.context, identity),
-					new OidcTrustService(instance.context, identity)
-				);
-				const request = new Request(new URL('/token', currentOrigin()), {
-					method: 'POST',
-					headers: { 'content-type': 'application/x-www-form-urlencoded' },
-					body: new URLSearchParams({
-						grant_type: refreshTokenGrantType,
-						refresh_token: original
-					}).toString()
-				});
-				const spy = vi
-					.spyOn(crypto.subtle, 'decrypt')
-					.mockRejectedValueOnce(failure);
+	it.each([
+		{ failing: 'authority', successfulDecryptions: 0 },
+		{ failing: 'successor envelope', successfulDecryptions: 1 }
+	])(
+		'keeps the family when $failing decryption fails internally',
+		async ({ successfulDecryptions }) => {
+			const exchanged = await exchange(await installTrustedIdp('admin'));
+			const original = exchanged.refresh_token ?? '';
+			const firstResponse = await refresh(original);
+			const first = tokenResponseSchema.parse(await firstResponse.json());
+			const failure = new TypeError('Web Crypto is unavailable');
+			const result = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const identity = new TenantIdentityService(instance.context);
+					const service = new TokenExchangeService(
+						instance.context,
+						new AuthKeysService(instance.context, identity),
+						new OidcTrustService(instance.context, identity)
+					);
+					const request = new Request(new URL('/token', currentOrigin()), {
+						method: 'POST',
+						headers: { 'content-type': 'application/x-www-form-urlencoded' },
+						body: new URLSearchParams({
+							grant_type: refreshTokenGrantType,
+							refresh_token: original
+						}).toString()
+					});
+					const decrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+					const spy = vi.spyOn(crypto.subtle, 'decrypt');
 
-				try {
-					return await service.handleToken(rootLogger(), request);
-				} catch (error) {
-					return error;
-				} finally {
-					spy.mockRestore();
+					for (let call = 0; call < successfulDecryptions; call += 1) {
+						spy.mockImplementationOnce(decrypt);
+					}
+
+					spy.mockRejectedValueOnce(failure);
+
+					try {
+						return await service.handleToken(rootLogger(), request);
+					} catch (error) {
+						return error;
+					} finally {
+						spy.mockRestore();
+					}
 				}
-			}
-		);
-		const successorResponse = await refresh(first.refresh_token ?? '');
-		const successor = tokenResponseSchema.parse(await successorResponse.json());
-		const families = await refreshTokenRows();
+			);
+			const successorResponse = await refresh(first.refresh_token ?? '');
+			const successor = tokenResponseSchema.parse(
+				await successorResponse.json()
+			);
+			const families = await refreshTokenRows();
 
-		expect({
-			internalFailure: result instanceof TypeError,
-			successorStatus: successorResponse.status,
-			successorRotated: successor.refresh_token !== first.refresh_token,
-			familyGenerations: families.map((family) => family.generation)
-		}).toStrictEqual({
-			internalFailure: true,
-			successorStatus: StatusCodes.OK,
-			successorRotated: true,
-			familyGenerations: [2]
-		});
-	});
+			expect({
+				internalFailure: result instanceof TypeError,
+				successorStatus: successorResponse.status,
+				successorRotated: successor.refresh_token !== first.refresh_token,
+				familyGenerations: families.map((family) => family.generation)
+			}).toStrictEqual({
+				internalFailure: true,
+				successorStatus: StatusCodes.OK,
+				successorRotated: true,
+				familyGenerations: [2]
+			});
+		}
+	);
 
-	it('keeps the current successor usable after the deployment key changes', async () => {
+	it('ends the refresh session when the deployment key changes', async () => {
 		const exchanged = await exchange(await installTrustedIdp('admin'));
 		const original = exchanged.refresh_token ?? '';
 		const firstResponse = await refresh(original);
@@ -2608,17 +2700,17 @@ describe('refresh grant', () => {
 						recoveryError = error;
 					}
 
-					const successorResponse = await refreshWithChangedKey(
-						first.refresh_token ?? ''
-					);
-					const rotated = tokenResponseSchema.parse(
-						await successorResponse.json()
-					);
+					let successorError: unknown;
+
+					try {
+						await refreshWithChangedKey(first.refresh_token ?? '');
+					} catch (error) {
+						successorError = error;
+					}
 
 					return {
 						recoveryRejected: recoveryError instanceof StaleRefreshTokenError,
-						successorStatus: successorResponse.status,
-						successorRotated: rotated.refresh_token !== first.refresh_token
+						successorRejected: successorError instanceof StaleRefreshTokenError
 					};
 				} finally {
 					instance.context.env = originalEnv;
@@ -2633,9 +2725,8 @@ describe('refresh grant', () => {
 			generations: families.map((row) => row.generation)
 		}).toStrictEqual({
 			recoveryRejected: true,
-			successorStatus: StatusCodes.OK,
-			successorRotated: true,
-			generations: [2]
+			successorRejected: true,
+			generations: [1]
 		});
 	});
 
@@ -2786,7 +2877,7 @@ describe('refresh grant', () => {
 		const second = tokenResponseSchema.parse(await secondResponse.json());
 		const active = second.refresh_token ?? '';
 		const [activeMemberId] = z
-			.tuple([z.uuid(), z.string(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string(), z.string()])
 			.parse(active.split('.'));
 		const beforeReplay = {
 			families: await refreshTokenRows(),
@@ -2926,10 +3017,10 @@ describe('refresh grant', () => {
 			);
 			const successor = refreshed.refresh_token ?? '';
 			const [originalId, originalSecret] = z
-				.tuple([z.uuid(), z.string().min(1), z.string()])
+				.tuple([z.uuid(), z.string().min(1), z.string(), z.string()])
 				.parse(original.split('.'));
 			const [successorId, successorSecret] = z
-				.tuple([z.uuid(), z.string().min(1), z.string()])
+				.tuple([z.uuid(), z.string().min(1), z.string(), z.string()])
 				.parse(successor.split('.'));
 			const hash = async (secret: string): Promise<string> =>
 				[
@@ -3081,7 +3172,7 @@ describe('refresh grant', () => {
 		const exchanged = await exchange(subjectToken);
 		let original = exchanged.refresh_token ?? '';
 		const [originalMemberId] = z
-			.tuple([z.uuid(), z.string(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string(), z.string()])
 			.parse(original.split('.'));
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
@@ -3136,16 +3227,19 @@ describe('refresh grant', () => {
 			}
 			const authority = await credential.authenticate(
 				member.credentialHash,
-				instance.context.requireTenant()
+				refreshKeys(instance.context)
 			);
 			if (authority === undefined) {
 				throw new Error('Expected authenticated refresh authority');
 			}
-			const updated = RefreshCredential.issue({
-				...authority,
-				identity: refreshPolicyIdentity(authority.identity),
-				generation: maxRefreshTokenFamilyMembers - 2
-			});
+			const updated = await RefreshCredential.issue(
+				{
+					...authority,
+					identity: refreshPolicyIdentity(authority.identity),
+					generation: maxRefreshTokenFamilyMembers - 2
+				},
+				refreshKeys(instance.context)
+			);
 			instance.context.db
 				.update(refreshTokenMembers)
 				.set({ credentialHash: await sha256Hex(updated.value) })
@@ -3251,7 +3345,7 @@ describe('refresh grant', () => {
 			])
 			.parse(outcomes);
 		const [firstId] = z
-			.tuple([z.uuid(), z.string(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string(), z.string()])
 			.parse(first.refreshToken.split('.'));
 		const families = await refreshTokenRows();
 		const members = await refreshTokenMemberRows();
@@ -3925,7 +4019,7 @@ describe('refresh grant', () => {
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
 		const [memberId] = z
-			.tuple([z.uuid(), z.string(), z.string()])
+			.tuple([z.uuid(), z.string(), z.string(), z.string()])
 			.parse(refreshToken.split('.'));
 		const forged = await staleRefreshOutcome(`${memberId}.deadbeef`);
 		const valid = await refresh(refreshToken);

@@ -99,9 +99,12 @@ Attestations record where published store paths came from. See
 | Control keys, which sign operator tokens | D1                                               | Encrypted with `CONTROL_KEY_WRAP_SECRET`.                                                                                     |
 | `CONTROL_KEY_WRAP_SECRET`                | Only the control Worker, and the operator's copy | The tenant Worker never has it.                                                                                               |
 | R2 access key                            | The tenant Worker                                | It gives access to every tenant's stored objects.                                                                             |
-| `PUSH_ID_SIGNING_KEY`                    | Both Workers                                     | It signs push IDs and derives refresh recovery keys.                                                                          |
+| `PUSH_ID_SIGNING_KEY`                    | Both Workers                                     | It signs push IDs and derives the keys that encrypt refresh tokens.                                                           |
 | Static read credentials                  | D1, as salted SHA-256 hashes                     | The CLI generates each password from 32 random bytes, and the server accepts only that format. The plaintext is never stored. |
 | CLI sessions and Cloudflare sign-in      | `~/.config/cupboard` on each machine             | File permissions. The Cloudflare sign-in can deploy to the account.                                                           |
+
+Changing `PUSH_ID_SIGNING_KEY` ends every refresh session issued by this
+release, and tenant administrators with such a session have to sign in again.
 
 When a client uploads to R2, it gets a temporary credential. That credential can
 only write to its own push's staging area, and lasts at most six hours.

@@ -1,7 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { bytesToHex, hexToBytes } from '@cupboard/nix-store/encoding';
-import { type TenantId, type TtlSeconds } from '@cupboard/nix-store/scalars';
+import { type TtlSeconds } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	isAuthorizationDetailCovered
@@ -58,9 +57,11 @@ import {
 } from '../auth/auth.ts';
 import {
 	type AuthenticatedRefreshAuthority,
+	openRefreshSuccessor,
 	RefreshCredential,
-	refreshCredentialMaxBytes,
-	refreshPolicyIdentity
+	type RefreshKeyContext,
+	refreshPolicyIdentity,
+	sealRefreshSuccessor
 } from '../auth/refresh-credential.ts';
 import {
 	attenuatedGrants,
@@ -69,7 +70,6 @@ import {
 	resolveRequestedGrants
 } from '../authz/issuance.ts';
 import { pushIdSigningKey } from '../blob/push-credential.ts';
-import { type PushIdSigningKey } from '../blob/push-id.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -105,11 +105,6 @@ interface PreparedRefreshToken {
 interface PreparedIssuedResponse {
 	readonly body: TokenResponse;
 	readonly refreshToken?: PreparedRefreshToken;
-}
-
-interface RefreshEnvelopeContext {
-	readonly signingKey: PushIdSigningKey;
-	readonly tenant: TenantId;
 }
 
 type IssuanceAuthority =
@@ -558,7 +553,7 @@ export class TokenExchangeService {
 		}
 		const authority = await presented.authenticate(
 			member.credentialHash,
-			this.context.requireTenant()
+			this.refreshKeyContext()
 		);
 		const family = this.context.db
 			.select()
@@ -611,7 +606,7 @@ export class TokenExchangeService {
 			throw new StaleRefreshTokenError();
 		}
 		const envelope = await sealRefreshSuccessor(
-			this.refreshEnvelopeContext(),
+			this.refreshKeyContext(),
 			presented,
 			successor
 		);
@@ -673,7 +668,7 @@ export class TokenExchangeService {
 			throw new StaleRefreshTokenError();
 		}
 		const value = await openRefreshSuccessor(
-			this.refreshEnvelopeContext(),
+			this.refreshKeyContext(),
 			presented,
 			successor.id,
 			spent.successorEnvelope
@@ -682,7 +677,7 @@ export class TokenExchangeService {
 			value === undefined ? undefined : RefreshCredential.parse(value);
 		const authority = await credential?.authenticate(
 			successor.credentialHash,
-			this.context.requireTenant()
+			this.refreshKeyContext()
 		);
 		if (
 			authority === undefined ||
@@ -886,17 +881,19 @@ export class TokenExchangeService {
 			);
 
 		const policyIdentity = refreshPolicyIdentity(identity);
-		const credential = RefreshCredential.issue({
-			purpose: 'cupboard-refresh',
-			version: 1,
-			tenant: this.context.requireTenant(),
-			familyId,
-			memberId: id,
-			generation,
-			expiresAt,
-			identity: policyIdentity,
-			grants
-		});
+		const credential = await RefreshCredential.issue(
+			{
+				purpose: 'cupboard-refresh',
+				tenant: this.context.requireTenant(),
+				familyId,
+				memberId: id,
+				generation,
+				expiresAt,
+				identity: policyIdentity,
+				grants
+			},
+			this.refreshKeyContext()
+		);
 		return {
 			token: credential.value,
 			family: {
@@ -1045,7 +1042,7 @@ export class TokenExchangeService {
 		);
 	}
 
-	private refreshEnvelopeContext(): RefreshEnvelopeContext {
+	private refreshKeyContext(): RefreshKeyContext {
 		return {
 			signingKey: pushIdSigningKey(this.context.env),
 			tenant: this.context.requireTenant()
@@ -1119,98 +1116,4 @@ function isRefreshStateMatching(
 		authority.generation === member.generation &&
 		authority.expiresAt === family.expiresAt
 	);
-}
-
-async function refreshEnvelopeKey(
-	context: RefreshEnvelopeContext,
-	presented: RefreshCredential,
-	successorId: string
-): Promise<CryptoKey> {
-	const encoder = new TextEncoder();
-	const material = await crypto.subtle.importKey(
-		'raw',
-		encoder.encode(context.signingKey),
-		'HKDF',
-		false,
-		['deriveKey']
-	);
-
-	return crypto.subtle.deriveKey(
-		{
-			name: 'HKDF',
-			hash: 'SHA-256',
-			salt: encoder.encode(presented.secret),
-			info: encoder.encode(
-				JSON.stringify([
-					'cupboard/refresh-envelope/v3',
-					context.tenant,
-					presented.id,
-					successorId
-				])
-			)
-		},
-		material,
-		{ name: 'AES-GCM', length: 256 },
-		false,
-		['encrypt', 'decrypt']
-	);
-}
-
-async function sealRefreshSuccessor(
-	context: RefreshEnvelopeContext,
-	presented: RefreshCredential,
-	successor: RefreshCredential
-): Promise<string> {
-	const iv = crypto.getRandomValues(new Uint8Array(12));
-	const key = await refreshEnvelopeKey(context, presented, successor.id);
-	const ciphertext = await crypto.subtle.encrypt(
-		{ name: 'AES-GCM', iv },
-		key,
-		new TextEncoder().encode(successor.value)
-	);
-
-	return `${bytesToHex(iv)}.${bytesToHex(new Uint8Array(ciphertext))}`;
-}
-
-async function openRefreshSuccessor(
-	context: RefreshEnvelopeContext,
-	presented: RefreshCredential,
-	successorId: string,
-	envelope: string | null
-): Promise<string | undefined> {
-	if (envelope === null) {
-		return undefined;
-	}
-
-	const [ivHex, ciphertextHex, extra] = envelope.split('.', 3);
-
-	if (
-		ivHex === undefined ||
-		ciphertextHex === undefined ||
-		extra !== undefined ||
-		!/^[\da-f]{24}$/iu.test(ivHex) ||
-		ciphertextHex.length > (refreshCredentialMaxBytes + 16) * 2 ||
-		!/^(?:[\da-f]{2}){17,}$/u.test(ciphertextHex)
-	) {
-		return undefined;
-	}
-
-	const key = await refreshEnvelopeKey(context, presented, successorId);
-	let secret: ArrayBuffer;
-
-	try {
-		secret = await crypto.subtle.decrypt(
-			{ name: 'AES-GCM', iv: hexToBytes(ivHex) },
-			key,
-			hexToBytes(ciphertextHex)
-		);
-	} catch (error) {
-		if (error instanceof DOMException && error.name === 'OperationError') {
-			return undefined;
-		}
-
-		throw error;
-	}
-
-	return new TextDecoder().decode(secret);
 }
