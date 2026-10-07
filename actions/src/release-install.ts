@@ -573,7 +573,12 @@ export async function installCupboard(
 						options,
 						archivePath,
 						release.tagName,
-						{ subjectDigest: downloaded.sha256 }
+						{
+							subjectDigest: downloaded.sha256,
+							...(dependencies.fetch !== undefined && {
+								fetch: dependencies.fetch
+							})
+						}
 					);
 					assertExpectedSourceCommit(
 						release.tagName,

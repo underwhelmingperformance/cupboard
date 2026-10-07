@@ -255,6 +255,73 @@ describe('installCupboard compatibility', () => {
 			{ url: checksumsUrl, authorization: 'Bearer secret-token' }
 		]);
 	});
+
+	it('looks up release attestations through the injected fetch', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archiveName = assetNameFor();
+		const archiveUrl =
+			'https://api.github.com/repos/owner/repo/releases/assets/1';
+		const checksumsUrl =
+			'https://api.github.com/repos/owner/repo/releases/assets/2';
+		const archiveDigest = createHash('sha256').update('archive').digest('hex');
+		const requests: string[] = [];
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+			requests.push(request.url);
+
+			if (request.url.endsWith('/releases/tags/v0.0.19')) {
+				return Promise.resolve(
+					Response.json({
+						tag_name: 'v0.0.19',
+						assets: [
+							{ name: archiveName, url: archiveUrl },
+							{ name: 'checksums.txt', url: checksumsUrl }
+						]
+					})
+				);
+			}
+
+			if (request.url.includes('/attestations/')) {
+				return Promise.resolve(Response.json({ attestations: [] }));
+			}
+
+			return Promise.resolve(
+				new Response(
+					request.url === archiveUrl
+						? 'archive'
+						: `${archiveDigest}  ${archiveName}\n`
+				)
+			);
+		};
+
+		try {
+			await expect(
+				installCupboard(
+					{
+						installDirectory,
+						releaseRepository: 'owner/repo',
+						version: 'v0.0.19',
+						includePrereleases: false,
+						githubToken: '',
+						environment: {}
+					},
+					createGithubReporter(),
+					{ fetch: fetcher }
+				)
+			).rejects.toBeInstanceOf(AttestationNotFoundError);
+		} finally {
+			await rm(installDirectory, { recursive: true, force: true });
+		}
+
+		expect(requests).toStrictEqual([
+			'https://api.github.com/repos/owner/repo/releases/tags/v0.0.19',
+			archiveUrl,
+			checksumsUrl,
+			`https://api.github.com/repos/owner/repo/attestations/sha256%3A${archiveDigest}?predicate_type=https%3A%2F%2Fslsa.dev%2Fprovenance%2Fv1&per_page=10`
+		]);
+	});
 });
 
 describe('prepareReleaseExecutable', () => {
