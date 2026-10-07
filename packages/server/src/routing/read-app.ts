@@ -1,4 +1,5 @@
 import {
+	cacheAvailabilityMaxRequestBytes,
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse
 } from '@cupboard/protocol/cache-availability';
@@ -161,7 +162,8 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 
 		const request = await parseRequestBody(
 			cacheAvailabilityRequestSchema,
-			context.req.raw
+			context.req.raw,
+			cacheAvailabilityMaxRequestBytes
 		);
 
 		// A deleted cache cannot satisfy an availability request, even while its

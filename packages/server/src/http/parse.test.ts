@@ -7,6 +7,7 @@ import { z } from 'zod';
 import {
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
+	RequestBodyTooLargeError,
 	StoredUploadMetadataInvalidError,
 	TokenRequestBodyInvalidError,
 	TokenRequestBodyTooLargeError
@@ -22,6 +23,7 @@ import {
 } from './parse.ts';
 
 const schema = z.strictObject({ name: z.string() });
+const jsonBodyMaxBytes = 1024;
 
 function jsonRequest(body: string): Request {
 	return new Request('https://cupboard.test', { method: 'POST', body });
@@ -58,26 +60,96 @@ describe('parseRequestBody', () => {
 	it('parses a well-formed body', async () => {
 		const parsed = await parseRequestBody(
 			schema,
-			jsonRequest(JSON.stringify({ name: 'a' }))
+			jsonRequest(JSON.stringify({ name: 'a' })),
+			jsonBodyMaxBytes
 		);
 
 		expect(parsed).toStrictEqual({ name: 'a' });
 	});
 
 	it('rejects a malformed JSON body', async () => {
-		await expect(parseRequestBody(schema, jsonRequest('{'))).rejects.toThrow(
-			MalformedRequestBodyError
-		);
+		await expect(
+			parseRequestBody(schema, jsonRequest('{'), jsonBodyMaxBytes)
+		).rejects.toThrow(MalformedRequestBodyError);
 	});
 
 	it.each([
 		{ name: 'a field of the wrong type', body: JSON.stringify({ name: 1 }) },
 		{ name: 'an unknown key', body: JSON.stringify({ name: 'a', extra: 1 }) }
 	])('rejects $name', async ({ body }) => {
-		await expect(parseRequestBody(schema, jsonRequest(body))).rejects.toThrow(
-			RequestBodySchemaMismatchError
-		);
+		await expect(
+			parseRequestBody(schema, jsonRequest(body), jsonBodyMaxBytes)
+		).rejects.toThrow(RequestBodySchemaMismatchError);
 	});
+
+	it.each<{
+		readonly name: string;
+		readonly headers: Readonly<Record<string, string>>;
+		readonly chunkBytes: number;
+		readonly chunks: number;
+	}>([
+		{
+			name: 'Content-Length',
+			headers: { 'Content-Length': String(jsonBodyMaxBytes + 1) },
+			chunkBytes: 1,
+			chunks: 1
+		},
+		{
+			name: 'the streamed body',
+			headers: {},
+			chunkBytes: jsonBodyMaxBytes / 2,
+			chunks: 4
+		}
+	])(
+		'returns HTTP 413 when $name exceeds the byte limit',
+		async ({ headers, chunkBytes, chunks }) => {
+			let sent = 0;
+			let isCancelled = false;
+			const app = new Hono();
+			app.onError(serverErrorHandler);
+			app.post('/missing-paths', async (context) =>
+				context.json(
+					await parseRequestBody(schema, context.req.raw, jsonBodyMaxBytes)
+				)
+			);
+
+			const init = {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', ...headers },
+				duplex: 'half',
+				body: new ReadableStream({
+					pull(controller) {
+						controller.enqueue(
+							new TextEncoder().encode(' '.repeat(chunkBytes))
+						);
+						sent += 1;
+
+						if (sent === chunks) {
+							controller.close();
+						}
+					},
+					cancel() {
+						isCancelled = true;
+					}
+				})
+			};
+			const response = await app.request(
+				new Request('https://cupboard.test/missing-paths', init)
+			);
+
+			expect({
+				status: response.status,
+				headers: Object.fromEntries(response.headers),
+				body: await response.text(),
+				isCancelled
+			}).toStrictEqual({
+				status: StatusCodes.REQUEST_TOO_LONG,
+				headers: { 'content-type': 'text/plain;charset=UTF-8' },
+				body: `${new RequestBodyTooLargeError(jsonBodyMaxBytes).message}\n`,
+				isCancelled: true
+			});
+		}
+	);
 });
 
 describe('parseFormBody', () => {

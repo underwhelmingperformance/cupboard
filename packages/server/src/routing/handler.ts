@@ -5,7 +5,10 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { attestationInfoCapability } from '@cupboard/protocol/attestations';
-import { reuseViewAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
+import {
+	reuseViewAvailabilityMaxRequestBytes,
+	reuseViewAvailabilityRequestSchema
+} from '@cupboard/protocol/cache-availability';
 import {
 	cacheMetadataCapability,
 	cacheMetadataCapabilityHeader
@@ -560,7 +563,8 @@ async function answerReuseViewAvailability(
 ): Promise<Response> {
 	const request = await parseRequestBody(
 		reuseViewAvailabilityRequestSchema,
-		context.req.raw
+		context.req.raw,
+		reuseViewAvailabilityMaxRequestBytes
 	);
 
 	return answerAvailabilityInChunks(

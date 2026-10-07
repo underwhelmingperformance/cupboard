@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	cacheAvailabilityMaxPaths,
+	cacheAvailabilityMaxRequestBytes,
 	cacheAvailabilityRequestSchema,
 	cacheAvailabilityResponseSchema,
 	reuseViewAvailabilityMaxPaths,
+	reuseViewAvailabilityMaxRequestBytes,
 	reuseViewAvailabilityRequestSchema
 } from './cache-availability.ts';
 
@@ -61,4 +63,26 @@ describe('cache availability protocol', () => {
 				reuseViewAvailabilityRequestSchema.safeParse(aboveBound).success
 		}).toStrictEqual({ bounded: true, aboveBound: false });
 	});
+
+	it.each([
+		{
+			name: 'cache',
+			maxPaths: cacheAvailabilityMaxPaths,
+			maxRequestBytes: cacheAvailabilityMaxRequestBytes
+		},
+		{
+			name: 'reuse-view',
+			maxPaths: reuseViewAvailabilityMaxPaths,
+			maxRequestBytes: reuseViewAvailabilityMaxRequestBytes
+		}
+	])(
+		'limits a $name request to twice the compact JSON of a full page',
+		({ maxPaths, maxRequestBytes }) => {
+			const fullPage = JSON.stringify({
+				storePathHashes: Array.from({ length: maxPaths }, () => storePathHash)
+			});
+
+			expect(maxRequestBytes).toBe(2 * fullPage.length);
+		}
+	);
 });
