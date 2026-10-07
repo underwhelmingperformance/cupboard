@@ -27,6 +27,9 @@ async function fixture() {
 	await git('config', 'user.name', 'Release fixture');
 	await git('config', 'commit.gpgsign', 'false');
 	await git('config', 'tag.gpgsign', 'false');
+	// `git commit` can start a background repack, which moves loose objects
+	// into a pack while a test reads or deletes them.
+	await git('config', 'maintenance.auto', 'false');
 	await mkdir(path.join(directory, prefix), { recursive: true });
 	const note = (name: string, body: string) =>
 		writeFile(path.join(directory, prefix, name), body);
