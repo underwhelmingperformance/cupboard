@@ -1,4 +1,6 @@
 import { uploadIdSchema } from '@cupboard/protocol/upload';
+import { Hono } from 'hono';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -6,10 +8,13 @@ import {
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
 	StoredUploadMetadataInvalidError,
-	TokenRequestBodyInvalidError
+	TokenRequestBodyInvalidError,
+	TokenRequestBodyTooLargeError
 } from '../errors.ts';
 
+import { serverErrorHandler } from './error-response.ts';
 import {
+	formBodyMaxBytes,
 	parseFormBody,
 	parseRequestBody,
 	parseRequestValue,
@@ -145,6 +150,82 @@ describe('parseFormBody', () => {
 			TokenRequestBodyInvalidError
 		);
 	});
+
+	it.each<{
+		readonly name: string;
+		readonly headers: Readonly<Record<string, string>>;
+		readonly chunkBytes: number;
+		readonly chunks: number;
+	}>([
+		{
+			name: 'Content-Length',
+			headers: { 'Content-Length': String(formBodyMaxBytes + 1) },
+			chunkBytes: 1,
+			chunks: 1
+		},
+		{
+			name: 'the streamed body',
+			headers: {},
+			chunkBytes: formBodyMaxBytes / 2,
+			chunks: 4
+		}
+	])(
+		'returns a no-store OAuth 413 when $name exceeds the byte limit',
+		async ({ headers, chunkBytes, chunks }) => {
+			let sent = 0;
+			let isCancelled = false;
+			const app = new Hono();
+			app.onError(serverErrorHandler);
+			app.post('/token', async (context) =>
+				context.json(await parseFormBody(grant, context.req.raw))
+			);
+
+			const init = {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded',
+					...headers
+				},
+				duplex: 'half',
+				body: new ReadableStream({
+					pull(controller) {
+						controller.enqueue(new Uint8Array(chunkBytes));
+						sent += 1;
+
+						if (sent === chunks) {
+							controller.close();
+						}
+					},
+					cancel() {
+						isCancelled = true;
+					}
+				})
+			};
+			const response = await app.request(
+				new Request('https://cupboard.test/token', init)
+			);
+
+			expect({
+				status: response.status,
+				headers: Object.fromEntries(response.headers),
+				body: await response.json(),
+				isCancelled
+			}).toStrictEqual({
+				status: StatusCodes.REQUEST_TOO_LONG,
+				headers: {
+					'cache-control': 'no-store',
+					'content-type': 'application/json',
+					pragma: 'no-cache'
+				},
+				body: {
+					error: 'invalid_request',
+					error_description: new TokenRequestBodyTooLargeError().message,
+					problem: 'request-body-too-large'
+				},
+				isCancelled: true
+			});
+		}
+	);
 });
 
 describe('parseStored', () => {
