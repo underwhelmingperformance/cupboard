@@ -1,16 +1,31 @@
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
+import { z } from 'zod';
 
+import { decodeJwtPayload } from '../auth/jwt.ts';
+import {
+	type RevocationOutcome,
+	revokeRefreshToken
+} from '../auth/revocation.ts';
 import type { Removal } from '../auth/secret-file.ts';
 import {
+	type CachedSession,
 	removeAllCachedSessions,
-	removeCachedSession
+	removeCachedSession,
+	type RemovedSession
 } from '../auth/token-store.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { parseWorkerUrl } from '../client/transport.ts';
-import type { CloudflareGrant } from '../deploy/cloudflare-oauth.ts';
-import { readCachedGrant, removeCachedGrant } from '../deploy/grant-store.ts';
+import { parseWorkerUrl, resilientFetcher } from '../client/transport.ts';
+import {
+	type CloudflareGrant,
+	revokeCloudflareGrant
+} from '../deploy/cloudflare-oauth.ts';
+import {
+	type GrantRemoval,
+	readCachedGrant,
+	removeCachedGrant
+} from '../deploy/grant-store.ts';
 import { CliUsageError } from '../errors.ts';
 
 interface LogoutOptions {
@@ -75,14 +90,32 @@ export function logoutInput(
 }
 
 export interface LogoutDependencies {
-	readonly removeSession: (url: URL, signal?: AbortSignal) => Promise<Removal>;
-	readonly removeAllSessions: (signal?: AbortSignal) => Promise<number>;
+	readonly removeSession: (
+		url: URL,
+		signal?: AbortSignal
+	) => Promise<RemovedSession>;
+	readonly removeAllSessions: (
+		signal?: AbortSignal
+	) => Promise<readonly (CachedSession | undefined)[]>;
 	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
-	readonly removeGrant: (signal?: AbortSignal) => Promise<Removal>;
+	readonly removeGrant: (
+		revoke: (grant: CloudflareGrant) => Promise<RevocationOutcome>,
+		signal?: AbortSignal
+	) => Promise<GrantRemoval>;
+	readonly fetcher: typeof fetch;
 	readonly signal?: AbortSignal;
 }
 
 type CloudflareSignInOutcome = Removal | 'kept' | 'unreadable';
+
+/**
+ * The revocation of one deleted session. `target` is the tenant or deployment
+ * URL of the session, when the command line or the saved session shows it.
+ */
+export interface SessionRevocation {
+	readonly target?: string;
+	readonly revocation: RevocationOutcome;
+}
 
 export interface LogoutResult {
 	/**
@@ -91,67 +124,182 @@ export interface LogoutResult {
 	readonly url?: string;
 	readonly sessionsRemoved: number;
 	readonly cloudflareSignIn: CloudflareSignInOutcome;
-	/**
-	Always false: cupboard has no endpoint that revokes a refresh token.
-	*/
-	readonly revoked: false;
+	readonly revoked: {
+		readonly sessions: readonly SessionRevocation[];
+		/**
+		Present when the command deleted a Cloudflare sign-in.
+		*/
+		readonly cloudflareSignIn?: RevocationOutcome;
+	};
+}
+
+interface RemovedTarget {
+	readonly target: URL | undefined;
+	readonly session: CachedSession | undefined;
+}
+
+const issuerClaimSchema = z.object({ iss: z.string() });
+
+// The access token's issuer is the tenant or deployment URL of the session.
+// Its signature is not checked here: the token only selects where the
+// matching refresh token is sent, and both came from the same saved file.
+function sessionTarget(session: CachedSession | undefined): URL | undefined {
+	const claims = issuerClaimSchema.safeParse(
+		session === undefined ? undefined : decodeJwtPayload(session.accessToken)
+	);
+
+	if (!claims.success) {
+		return undefined;
+	}
+
+	try {
+		return parseWorkerUrl(claims.data.iss);
+	} catch {
+		return undefined;
+	}
 }
 
 async function removeSessions(
 	sessions: LogoutSessions,
 	dependencies: LogoutDependencies
-): Promise<number> {
+): Promise<readonly RemovedTarget[]> {
 	switch (sessions.kind) {
 		case 'url': {
-			const removal = await dependencies.removeSession(
+			const removed = await dependencies.removeSession(
 				sessions.url,
 				dependencies.signal
 			);
 
-			return removal === 'removed' ? 1 : 0;
+			return removed.removal === 'removed'
+				? [{ target: sessions.url, session: removed.session }]
+				: [];
 		}
 		case 'all': {
-			return dependencies.removeAllSessions(dependencies.signal);
+			const removed = await dependencies.removeAllSessions(dependencies.signal);
+
+			return removed.map((session) => ({
+				target: sessionTarget(session),
+				session
+			}));
 		}
 		case 'none': {
-			return 0;
+			return [];
 		}
 	}
+}
+
+async function revokeSession(
+	removed: RemovedTarget,
+	dependencies: LogoutDependencies
+): Promise<SessionRevocation> {
+	const target =
+		removed.target === undefined
+			? {}
+			: { target: canonicalHref(removed.target) };
+
+	if (removed.session === undefined || removed.target === undefined) {
+		return { ...target, revocation: 'failed' };
+	}
+
+	if (removed.session.refreshToken === undefined) {
+		return { ...target, revocation: 'no-refresh-token' };
+	}
+
+	return {
+		...target,
+		revocation: await revokeRefreshToken(
+			removed.target,
+			removed.session.refreshToken,
+			dependencies.fetcher,
+			dependencies.signal
+		)
+	};
+}
+
+async function revokeSessions(
+	removed: readonly RemovedTarget[],
+	dependencies: LogoutDependencies
+): Promise<readonly SessionRevocation[]> {
+	const revocations: SessionRevocation[] = [];
+
+	for (const entry of removed) {
+		revocations.push(await revokeSession(entry, dependencies));
+	}
+
+	return revocations;
+}
+
+interface CloudflareSignInResolution {
+	readonly outcome: CloudflareSignInOutcome;
+	readonly revocation?: RevocationOutcome;
 }
 
 async function resolveCloudflareSignIn(
 	intent: LogoutInput['cloudflareSignIn'],
 	dependencies: LogoutDependencies
-): Promise<CloudflareSignInOutcome> {
+): Promise<CloudflareSignInResolution> {
 	if (intent === 'remove') {
-		return dependencies.removeGrant(dependencies.signal);
+		const removed = await dependencies.removeGrant(
+			(grant) =>
+				revokeCloudflareGrant(grant, dependencies.fetcher, dependencies.signal),
+			dependencies.signal
+		);
+
+		return {
+			outcome: removed.removal,
+			...(removed.revocation !== undefined && {
+				revocation: removed.revocation
+			})
+		};
 	}
 
 	try {
 		const grant = await dependencies.readGrant();
 
-		return grant === undefined ? 'absent' : 'kept';
+		return { outcome: grant === undefined ? 'absent' : 'kept' };
 	} catch {
-		return 'unreadable';
+		return { outcome: 'unreadable' };
 	}
 }
 
-function sessionsRow(
+const revocationLabels: Readonly<Record<RevocationOutcome, string>> = {
+	revoked: 'refresh token revoked',
+	failed: 'revocation could not be confirmed',
+	'no-refresh-token': 'no refresh token to revoke'
+};
+
+function sessionRows(
 	sessions: LogoutSessions,
-	removed: number
-): ResultRow | undefined {
+	revocations: readonly SessionRevocation[]
+): ResultRow[] {
 	switch (sessions.kind) {
 		case 'url': {
-			return {
-				label: canonicalHref(sessions.url),
-				value: removed > 0 ? 'saved sign-in removed' : 'no saved sign-in'
-			};
+			const [revocation] = revocations;
+
+			return [
+				{
+					label: canonicalHref(sessions.url),
+					value:
+						revocation === undefined
+							? 'no saved sign-in'
+							: `saved sign-in removed; ${revocationLabels[revocation.revocation]}`
+				}
+			];
 		}
 		case 'all': {
-			return { label: 'Saved sign-ins removed', value: String(removed) };
+			return [
+				{
+					label: 'Saved sign-ins removed',
+					value: String(revocations.length)
+				},
+				...revocations.map((revocation) => ({
+					label: revocation.target ?? 'Unreadable saved sign-in',
+					value: revocationLabels[revocation.revocation]
+				}))
+			];
 		}
 		case 'none': {
-			return undefined;
+			return [];
 		}
 	}
 }
@@ -165,9 +313,18 @@ const cloudflareSignInLabels: Readonly<
 	unreadable: 'could not be checked'
 };
 
+function cloudflareSignInLabel(resolution: CloudflareSignInResolution): string {
+	const label = cloudflareSignInLabels[resolution.outcome];
+
+	return resolution.revocation === undefined
+		? label
+		: `${label}; ${revocationLabels[resolution.revocation]}`;
+}
+
 /**
- * Deletes cached sessions, and the Cloudflare sign-in when asked. Logout does
- * not revoke anything on the server: cupboard has no revocation endpoint.
+ * Deletes cached sessions, and the Cloudflare sign-in when asked, and sends
+ * revocation requests for their refresh tokens to the servers. The local files
+ * are deleted whether or not a revocation succeeds.
  *
  * The Cloudflare sign-in goes first. A renewal that falls back to it keeps the
  * grant lock until it has written its session, so once the grant is removed no
@@ -182,26 +339,31 @@ export async function runLogout(
 		input.cloudflareSignIn,
 		dependencies
 	);
-	const sessionsRemoved = await removeSessions(input.sessions, dependencies);
+	const removed = await removeSessions(input.sessions, dependencies);
+	const revocations = await revokeSessions(removed, dependencies);
 	const result: LogoutResult = {
 		...(input.sessions.kind === 'url' && {
 			url: canonicalHref(input.sessions.url)
 		}),
-		sessionsRemoved,
-		cloudflareSignIn,
-		revoked: false
+		sessionsRemoved: removed.length,
+		cloudflareSignIn: cloudflareSignIn.outcome,
+		revoked: {
+			sessions: revocations,
+			...(cloudflareSignIn.revocation !== undefined && {
+				cloudflareSignIn: cloudflareSignIn.revocation
+			})
+		}
 	};
-	const sessions = sessionsRow(input.sessions, sessionsRemoved);
-	const rows: ResultRow[] = sessions === undefined ? [] : [sessions];
+	const rows = sessionRows(input.sessions, revocations);
 
 	if (
-		cloudflareSignIn === 'kept' ||
-		cloudflareSignIn === 'unreadable' ||
+		cloudflareSignIn.outcome === 'kept' ||
+		cloudflareSignIn.outcome === 'unreadable' ||
 		input.cloudflareSignIn === 'remove'
 	) {
 		rows.push({
 			label: 'Cloudflare sign-in',
-			value: cloudflareSignInLabels[cloudflareSignIn]
+			value: cloudflareSignInLabel(cloudflareSignIn)
 		});
 	}
 
@@ -211,19 +373,39 @@ export async function runLogout(
 		data: result,
 		rows
 	});
-	reporter.info('Logout removes local credentials only.', {
-		humanMessage:
-			'Saved sign-ins were removed from this machine. Copies elsewhere remain usable until access expires or a tenant administrator removes the trust rule.'
-	});
 
-	if (cloudflareSignIn === 'kept') {
+	const hasRevoked =
+		revocations.some((revocation) => revocation.revocation === 'revoked') ||
+		cloudflareSignIn.revocation === 'revoked';
+
+	if (hasRevoked) {
+		reporter.info(
+			'A revoked refresh token cannot renew its sign-in. A copy of a cupboard ' +
+				'access token remains valid for up to ten minutes, and a copy of a ' +
+				'Cloudflare access token until it expires.'
+		);
+	}
+
+	const hasFailedRevocation =
+		revocations.some((revocation) => revocation.revocation === 'failed') ||
+		cloudflareSignIn.revocation === 'failed';
+
+	if (hasFailedRevocation) {
+		reporter.warn(
+			'Could not confirm revocation of some refresh tokens. A copied token ' +
+				'might remain usable. A tenant administrator can end a tenant session ' +
+				'with `cupboard session revoke`.'
+		);
+	}
+
+	if (cloudflareSignIn.outcome === 'kept') {
 		reporter.warn(
 			'Your Cloudflare sign-in is still cached, and later commands can use it ' +
 				'to start a new session without a browser. Run `cupboard logout ' +
 				'--cloudflare` to remove it. `cupboard login` and `cupboard init` will ' +
 				'then ask you to sign in to Cloudflare again.'
 		);
-	} else if (cloudflareSignIn === 'unreadable') {
+	} else if (cloudflareSignIn.outcome === 'unreadable') {
 		reporter.warn(
 			'Could not check the cached Cloudflare sign-in. Run `cupboard logout ' +
 				'--cloudflare` to remove the sign-in.'
@@ -240,7 +422,7 @@ export function registerLogoutCommand(
 	program
 		.command('logout')
 		.description(
-			'Remove a saved sign-in for a tenant or deployment from this machine.'
+			'Remove a saved sign-in for a tenant or deployment from this machine, and revoke its refresh token.'
 		)
 		.argument(
 			'[url]',
@@ -257,16 +439,17 @@ export function registerLogoutCommand(
 			'after',
 			[
 				'',
-				'Sign-ins are removed from this machine only. Copies on other machines',
-				'remain usable. A copied tenant sign-in can be',
-				'renewed for up to 30 days after sign-in, unless the server stops',
-				'accepting its refresh token earlier. A deployment session has no',
-				'refresh token, and its access token expires ten minutes after',
-				'sign-in.',
+				'Logout sends a revocation request for the refresh token of each saved',
+				'sign-in that it deletes. With --cloudflare, it also sends Cloudflare a',
+				'revocation request for the Cloudflare refresh token. The saved files',
+				'are deleted even when a revocation fails. A copy of a revoked tenant',
+				'sign-in cannot be renewed. A copy of a cupboard access token remains',
+				'valid for up to ten minutes, and a copy of a Cloudflare access token',
+				'until it expires. A deployment session has no refresh token.',
 				'',
-				'To end your access to a tenant on the server, a tenant administrator',
-				'removes the trust rule that admits you. Renewal then stops, and the',
-				'current access token expires within ten minutes.',
+				'If a revocation fails, a copy of that sign-in on another machine',
+				'can be renewed for up to 30 days after sign-in. A tenant',
+				'administrator can end it with `cupboard session revoke`.',
 				'',
 				'While a Cloudflare sign-in is cached, later commands can use it to',
 				'start a new session without a browser; pass --cloudflare to remove it.',
@@ -285,6 +468,7 @@ export function registerLogoutCommand(
 				removeAllSessions: removeAllCachedSessions,
 				readGrant: readCachedGrant,
 				removeGrant: removeCachedGrant,
+				fetcher: resilientFetcher('replay-safe'),
 				signal: programOptions.signal
 			});
 		});

@@ -131,7 +131,7 @@ Commands:
   init|deploy [options]                           Deploy cupboard to a Cloudflare account, or upgrade an existing deployment.
   deployment                                      Check deployment readiness and resume tenant updates.
   login [options] <url>                           Sign in to a tenant or deployment and save the sign-in on this machine.
-  logout [options] [url]                          Remove a saved sign-in for a tenant or deployment from this machine.
+  logout [options] [url]                          Remove a saved sign-in for a tenant or deployment from this machine, and revoke its refresh token.
   whoami [options] [url]                          Show who the cached sessions sign in as or, with --provider, the identity a trust rule must match to admit you.
   attest                                          Attach Sigstore attestations to published store paths, and verify them.
   push [options] <url> [paths...]                 Publish store paths to a cache.
@@ -296,7 +296,8 @@ Options:
 ```text
 Usage: cupboard logout [options] [url]
 
-Remove a saved sign-in for a tenant or deployment from this machine.
+Remove a saved sign-in for a tenant or deployment from this machine, and revoke
+its refresh token.
 
 Arguments:
   url           deployment or tenant URL to sign out of (e.g.
@@ -308,16 +309,17 @@ Options:
                 `init` share
   -h, --help    display help for command
 
-Sign-ins are removed from this machine only. Copies on other machines
-remain usable. A copied tenant sign-in can be
-renewed for up to 30 days after sign-in, unless the server stops
-accepting its refresh token earlier. A deployment session has no
-refresh token, and its access token expires ten minutes after
-sign-in.
+Logout sends a revocation request for the refresh token of each saved
+sign-in that it deletes. With --cloudflare, it also sends Cloudflare a
+revocation request for the Cloudflare refresh token. The saved files
+are deleted even when a revocation fails. A copy of a revoked tenant
+sign-in cannot be renewed. A copy of a cupboard access token remains
+valid for up to ten minutes, and a copy of a Cloudflare access token
+until it expires. A deployment session has no refresh token.
 
-To end your access to a tenant on the server, a tenant administrator
-removes the trust rule that admits you. Renewal then stops, and the
-current access token expires within ten minutes.
+If a revocation fails, a copy of that sign-in on another machine
+can be renewed for up to 30 days after sign-in. A tenant
+administrator can end it with `cupboard session revoke`.
 
 While a Cloudflare sign-in is cached, later commands can use it to
 start a new session without a browser; pass --cloudflare to remove it.

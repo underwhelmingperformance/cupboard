@@ -7,6 +7,7 @@ import { describe, expect } from 'vitest';
 import { testWithConfigHome } from '../test-support.ts';
 
 import {
+	type CachedSession,
 	listCachedSessions,
 	readCachedSession,
 	removeAllCachedSessions,
@@ -20,6 +21,13 @@ const host = 'https://cupboard.test';
 const tenantTarget = new URL(tenant);
 const otherTarget = new URL(other);
 const hostTarget = new URL(host);
+
+function byToken(
+	left: CachedSession | undefined,
+	right: CachedSession | undefined
+): number {
+	return (left?.accessToken ?? '').localeCompare(right?.accessToken ?? '');
+}
 
 function encodeJwtSegment(value: object): string {
 	return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -250,7 +258,7 @@ describe('session listing and removal', () => {
 	);
 
 	testWithConfigHome(
-		'removes one target session and leaves the others',
+		'removes one target session, returns it, and leaves the others',
 		async () => {
 			await writeCachedSession(tenantSession, tenantTarget);
 			await writeCachedSession(otherSession, otherTarget);
@@ -261,8 +269,8 @@ describe('session listing and removal', () => {
 				tenant: await readCachedSession(tenantTarget),
 				other: await readCachedSession(otherTarget)
 			}).toStrictEqual({
-				first: 'removed',
-				second: 'absent',
+				first: { removal: 'removed', session: tenantSession },
+				second: { removal: 'absent' },
 				tenant: undefined,
 				other: otherSession
 			});
@@ -270,16 +278,20 @@ describe('session listing and removal', () => {
 	);
 
 	testWithConfigHome(
-		'removes every cached session and counts them',
+		'removes every cached session and returns what each one contained',
 		async () => {
 			await writeCachedSession(tenantSession, tenantTarget);
 			await writeCachedSession(otherSession, otherTarget);
 			await writeCachedSession(hostSession, hostTarget);
+			const removed = await removeAllCachedSessions();
 
 			expect({
-				removed: await removeAllCachedSessions(),
+				removed: removed.toSorted(byToken),
 				remaining: await listCachedSessions()
-			}).toStrictEqual({ removed: 3, remaining: [] });
+			}).toStrictEqual({
+				removed: [tenantSession, otherSession, hostSession].toSorted(byToken),
+				remaining: []
+			});
 		}
 	);
 });

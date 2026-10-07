@@ -125,9 +125,13 @@ read credential when its runner or remote daemon needs one.
 | A compromised signing key       | [Rotate it](./admin/keys.md#rotating-the-signing-key), and remove it from clients.         | As clients are updated.                             |
 
 `cupboard logout` deletes the sessions saved on one machine, and with
-`--cloudflare` the saved Cloudflare sign-in too. It doesn't revoke anything on
-the server, so a copy of a session taken from that machine keeps working until
-it expires or one of the steps above revokes it.
+`--cloudflare` the saved Cloudflare sign-in too. It also sends the server, or
+Cloudflare, a revocation request for the refresh token of each one. A copy of a
+revoked session taken from that machine then cannot be renewed. A copy of a
+cupboard access token remains valid for up to ten minutes, and a copy of a
+Cloudflare access token until it expires. If a revocation fails, logout still
+deletes the local copy and reports the failure. A copy of that session keeps
+working until it expires or one of the steps above revokes it.
 
 ## Who else you're trusting
 
