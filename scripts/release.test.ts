@@ -361,6 +361,9 @@ it('publishes without preparation from the exact commit and preserves draft edit
 	await git('config', 'user.email', 'test@example.com');
 	await git('config', 'user.name', 'Release fixture');
 	await git('config', 'commit.gpgsign', 'false');
+	// `git commit` can start a background repack, which writes to the
+	// repository while the cleanup removes it.
+	await git('config', 'maintenance.auto', 'false');
 	await mkdir(path.join(directory, '.github/workflows'), { recursive: true });
 	await mkdir(path.join(directory, 'docs/operator/upgrade-notes'), {
 		recursive: true
