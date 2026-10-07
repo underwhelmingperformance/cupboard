@@ -4,6 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { readResponseJson } from '@cupboard/shared/response-body';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import { abortable, delayMs, throwIfAborted } from '../abort.ts';
@@ -833,6 +834,15 @@ async function pollDeviceToken(
 		endpoints.tokenEndpoint,
 		postForm(form, signal)
 	);
+
+	if (isRedirectStatus(response.status)) {
+		await discardResponseBody(response);
+		throw new OidcLoginError(
+			`Device token request failed with HTTP ${String(response.status)}`,
+			{ kind: 'token-http', status: response.status }
+		);
+	}
+
 	const payload = await readJson(response, 'device-token-non-json', signal);
 
 	if (response.ok) {
@@ -921,6 +931,22 @@ async function exchangeCode(
 	return parsed.data.id_token;
 }
 
+const redirectStatuses: ReadonlySet<number> = new Set([
+	StatusCodes.MOVED_PERMANENTLY,
+	StatusCodes.MOVED_TEMPORARILY,
+	StatusCodes.SEE_OTHER,
+	StatusCodes.TEMPORARY_REDIRECT,
+	StatusCodes.PERMANENT_REDIRECT
+]);
+
+export function isRedirectStatus(status: number): boolean {
+	return redirectStatuses.has(status);
+}
+
+/**
+ * Builds a URL-encoded POST for a token endpoint. Following a 307 or 308 would
+ * send the form, with its code or refresh token, to the redirect target.
+ */
 export function postForm(
 	form: Readonly<Record<string, string>>,
 	signal?: AbortSignal
@@ -931,6 +957,7 @@ export function postForm(
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: parameters.toString(),
+		redirect: 'manual',
 		signal
 	};
 }

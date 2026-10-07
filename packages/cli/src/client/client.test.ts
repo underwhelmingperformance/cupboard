@@ -28,6 +28,7 @@ import {
 	QuotaExceededError,
 	ResponseSchemaMismatchError
 } from '../errors.ts';
+import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
 import { cacheNameFor, CupboardClient, type TokenProvider } from './client.ts';
 import {
@@ -389,6 +390,69 @@ describe('CupboardClient.signup', () => {
 			client.signup({ subject_token: 'subject.jwt' })
 		).rejects.toBeInstanceOf(RemoteBodyTooLargeError);
 	});
+});
+
+describe('CupboardClient token endpoint redirects', () => {
+	it.each([
+		{
+			name: 'a token exchange',
+			path: '/token',
+			request: (client: CupboardClient) => exchange(client)
+		},
+		{
+			name: 'a refresh',
+			path: '/token',
+			request: (client: CupboardClient) => client.tokenRefresh('refresh-1')
+		},
+		{
+			name: 'a read access request',
+			path: '/token',
+			request: (client: CupboardClient) =>
+				client.acquireReadAccess('subject.jwt', [
+					{
+						type: 'cupboard_cache',
+						cache: { kind: 'default' },
+						mode: 'content'
+					}
+				])
+		},
+		{
+			name: 'a signup',
+			path: '/signup',
+			request: (client: CupboardClient) =>
+				client.signup({
+					subject_token: 'subject.jwt',
+					claim_secret: 'secret-1'
+				})
+		}
+	])(
+		'fails on a redirect from $name without following it',
+		async ({ path, request }) => {
+			const origin = await RedirectingOrigin.start([path]);
+
+			try {
+				const client = new CupboardClient(new URL(origin.origin), fetch, {
+					kind: 'default'
+				});
+				const error = await rejectedBy(() => request(client));
+
+				expectCupboardHttpError(error);
+				expect({
+					method: error.method,
+					path: error.path,
+					status: error.status,
+					requests: origin.requests
+				}).toStrictEqual({
+					method: 'POST',
+					path,
+					status: StatusCodes.TEMPORARY_REDIRECT,
+					requests: [path]
+				});
+			} finally {
+				await origin.close();
+			}
+		}
+	);
 });
 
 interface CapturedConnection {

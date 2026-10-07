@@ -192,6 +192,7 @@ export class CupboardClient {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body,
+			redirect: 'manual',
 			signal: this.signal
 		});
 
@@ -341,6 +342,7 @@ export class CupboardClient {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: body.toString(),
+			redirect: 'manual',
 			signal: this.signal
 		});
 

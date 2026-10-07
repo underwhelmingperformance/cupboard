@@ -1,7 +1,9 @@
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { AuthorizationAccessDeniedError } from '../auth/oidc-login.ts';
 import { UnreachableHostError } from '../errors.ts';
+import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
 import {
 	type CloudflareGrant,
@@ -430,4 +432,61 @@ describe('refreshCloudflareGrant', () => {
 			refreshCloudflareGrant(previous, fetch, Date.now, controller.signal)
 		).rejects.toThrow('cancelled by test');
 	});
+});
+
+describe('Cloudflare token request redirects', () => {
+	it.each([
+		{
+			name: 'the authorisation code exchange',
+			request: (fetcher: typeof fetch) =>
+				cloudflareLogin({
+					openBrowser: approvingBrowser('code-1'),
+					fetcher,
+					ports: [0]
+				})
+		},
+		{
+			name: 'a refresh',
+			request: (fetcher: typeof fetch) =>
+				refreshCloudflareGrant(
+					{
+						accessToken: 'access-old',
+						refreshToken: 'refresh-old',
+						expiresAt: 0,
+						subject: undefined,
+						idToken: undefined
+					},
+					fetcher
+				)
+		}
+	])(
+		'fails on a redirect from $name without following it',
+		async ({ request }) => {
+			const origin = await RedirectingOrigin.start(['/oauth2/token']);
+			const fetcher: typeof fetch = (input, init) => {
+				expect(input).toBe(tokenEndpoint);
+
+				return fetch(origin.url('/oauth2/token'), init);
+			};
+
+			try {
+				const error = await rejectedBy(
+					request(fetcher),
+					CloudflareTokenRequestError
+				);
+
+				expect({
+					status: error.status,
+					oauthError: error.oauthError,
+					requests: origin.requests
+				}).toStrictEqual({
+					status: StatusCodes.TEMPORARY_REDIRECT,
+					oauthError: undefined,
+					requests: ['/oauth2/token']
+				});
+			} finally {
+				await origin.close();
+			}
+		}
+	);
 });

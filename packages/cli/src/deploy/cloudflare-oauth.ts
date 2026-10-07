@@ -1,3 +1,4 @@
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { readResponseJson } from '@cupboard/shared/response-body';
 import { z } from 'zod';
 
@@ -8,7 +9,11 @@ import {
 	type OAuthErrorResponse,
 	parseOAuthErrorResponse
 } from '../auth/oauth-error.ts';
-import { obtainAuthorizationCode, postForm } from '../auth/oidc-login.ts';
+import {
+	isRedirectStatus,
+	obtainAuthorizationCode,
+	postForm
+} from '../auth/oidc-login.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
@@ -251,6 +256,12 @@ async function exchangeForGrant(
 	signal?: AbortSignal
 ): Promise<CloudflareGrant> {
 	const response = await fetcher(tokenEndpoint, postForm(form, signal));
+
+	if (isRedirectStatus(response.status)) {
+		await discardResponseBody(response);
+		throw new CloudflareTokenRequestError(response.status, undefined);
+	}
+
 	const payload = await tokenResponsePayload(response);
 
 	if (!response.ok) {
