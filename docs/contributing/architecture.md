@@ -650,6 +650,12 @@ re-evaluates current trust policy and its current preferred identity tier. The
 response preserves or narrows the credential's authority and its original 30-day
 deadline. Rule IDs are not session dependencies.
 
+Version 2 credentials encrypt the identity and grant set with AES-GCM, under a
+key that HKDF derives from `PUSH_ID_SIGNING_KEY`, the tenant and the member, so
+a client cannot read them. The server still accepts version 1 credentials, which
+contain both as readable JSON, but every rotation issues version 2. Changing
+`PUSH_ID_SIGNING_KEY` therefore ends every version 2 session.
+
 `refresh_session_family` records the active member, generation and timestamps.
 It also records who the family belongs to: the verified issuer and subject, and
 the trust rule that issued its latest access token when a single rule covers
