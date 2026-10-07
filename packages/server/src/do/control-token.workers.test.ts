@@ -20,6 +20,7 @@ import {
 	ControlSubjectTokenUntrustedError,
 	StoredControlTrustInvalidError,
 	SubjectTokenNotJwtError,
+	SubjectTokenVerificationFailedError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
@@ -140,7 +141,8 @@ interface TrustedControlIdentity {
 
 async function trustedControlIdentity(
 	protectedType: string,
-	permittedGrants?: readonly PermittedGrant[]
+	permittedGrants?: readonly PermittedGrant[],
+	additionalAudiences: readonly string[] = []
 ): Promise<TrustedControlIdentity> {
 	const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
 	const audience = 'cupboard-control';
@@ -181,10 +183,16 @@ async function trustedControlIdentity(
 		);
 	});
 
-	const token = await new SignJWT({})
+	const token = await new SignJWT(
+		additionalAudiences.length === 0 ? {} : { azp: audience }
+	)
 		.setProtectedHeader({ alg: 'RS256', kid: 'idp', typ: protectedType })
 		.setIssuer(issuer)
-		.setAudience(audience)
+		.setAudience(
+			additionalAudiences.length === 0
+				? audience
+				: [audience, ...additionalAudiences]
+		)
 		.setSubject('global-admin')
 		.setIssuedAt()
 		.setExpirationTime('5m')
@@ -642,6 +650,41 @@ describe('control plane POST /token', () => {
 			rule: undefined,
 			rules: undefined
 		});
+	});
+
+	it.each([
+		{
+			name: "accepts an extra audience configured for the token's issuer",
+			otherIssuer: false,
+			accepted: true
+		},
+		{
+			name: 'refuses an extra audience configured for another issuer',
+			otherIssuer: true,
+			accepted: false
+		}
+	])('$name', async ({ otherIssuer, accepted }) => {
+		const identity = await trustedControlIdentity('JWT', undefined, [
+			'cupboard-control-2'
+		]);
+		await seedControlTrust({
+			issuer: otherIssuer
+				? `https://idp-${crypto.randomUUID()}.example.test`
+				: identity.issuer,
+			audience: 'cupboard-control-2',
+			claims: { sub: 'someone-else' }
+		});
+
+		const outcome = await tokenExchangeError({
+			grant_type: tokenExchangeGrantType,
+			subject_token: identity.token,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+
+		expect({
+			exchanged: outcome instanceof Response && outcome.ok,
+			refused: outcome instanceof SubjectTokenVerificationFailedError
+		}).toStrictEqual({ exchanged: accepted, refused: !accepted });
 	});
 
 	it('retries one issuer fetch failure and completes the exchange', async () => {

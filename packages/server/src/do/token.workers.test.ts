@@ -63,6 +63,7 @@ import {
 	StoredOidcTrustInvalidError,
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
+	SubjectTokenVerificationFailedError,
 	TenantSubjectTokenUntrustedError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
@@ -1699,14 +1700,18 @@ async function installTrustedIdp(
 async function installAdditionalTrustRule(
 	id: string,
 	permittedGrants: readonly PermittedGrant[],
-	options: { audience?: string; claims?: Record<string, string> } = {}
+	options: {
+		issuer?: string;
+		audience?: string;
+		claims?: Record<string, string>;
+	} = {}
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { oidcTrust } })
 			.insert(oidcTrust)
 			.values({
 				id: trustRuleIdSchema.parse(id),
-				issuer: 'https://idp.test',
+				issuer: options.issuer ?? 'https://idp.test',
 				audience: options.audience ?? 'cupboard-aud',
 				claimsJson: JSON.stringify(options.claims ?? { sub: 'alice' }),
 				permittedGrantsJson: JSON.stringify(permittedGrants),
@@ -5283,6 +5288,27 @@ describe('multi-audience subject tokens', () => {
 			status: StatusCodes.BAD_REQUEST,
 			problem: 'subject-token-invalid'
 		});
+	});
+
+	it('refuses an extra audience configured only for another issuer', async () => {
+		const subjectToken = await installTrustedIdp('write', {
+			tokenAudience: ['cupboard-aud', 'cupboard-aud-2'],
+			azp: 'cupboard-aud'
+		});
+		await installAdditionalTrustRule(
+			'other-issuer-rule',
+			[secondAudienceGrant],
+			{ issuer: 'https://other-idp.test', audience: 'cupboard-aud-2' }
+		);
+
+		const error = await tokenExchangeError({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken,
+			authorization_details: JSON.stringify(ciRequest)
+		});
+
+		expect(error).toBeInstanceOf(SubjectTokenVerificationFailedError);
 	});
 
 	it('refuses a token with an unconfigured audience', async () => {
