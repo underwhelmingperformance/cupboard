@@ -1558,6 +1558,28 @@ describe('reconcileBuild over a shared commit session', () => {
 		}
 	});
 
+	it('reports how long each upload took', async () => {
+		const fixture = harness({
+			valid: [pathA],
+			actions: new Map([[pathA, 'upload' as const]])
+		});
+		const times = [1000, 4000];
+		const uploads: { storePath: string; durationMs: number }[] = [];
+
+		await reconcileWith(fixture, {
+			targets: [target(pathA)],
+			uploadClock: {
+				now: () => times.shift() ?? 0,
+				schedule: scheduleNothing
+			},
+			onUploaded: (storePath, durationMs) => {
+				uploads.push({ storePath, durationMs });
+			}
+		});
+
+		expect(uploads).toStrictEqual([{ storePath: pathA, durationMs: 3000 }]);
+	});
+
 	it('commits over the session and never through the client', async () => {
 		const sessionCommits: CommitSessionTarget[] = [];
 		const session: CommitSession = {
@@ -1611,4 +1633,13 @@ async function flushMicrotasks(): Promise<void> {
 	for (let iteration = 0; iteration < 50; iteration += 1) {
 		await Promise.resolve();
 	}
+}
+
+// The duration tests send no renewals.
+function scheduleNothing(): () => void {
+	return cancelNothing;
+}
+
+function cancelNothing(): void {
+	return;
 }

@@ -1,4 +1,5 @@
 import type { UploadId } from '@cupboard/protocol/upload';
+import { formatDuration, type Reporter } from '@cupboard/reporter';
 
 import type { CommitSession } from '../client/commit-socket.ts';
 
@@ -17,39 +18,57 @@ export type RenewalSchedule = (
 	intervalMs: number
 ) => () => void;
 
-const intervalSchedule: RenewalSchedule = (tick, intervalMs) => {
-	const timer = setInterval(tick, intervalMs);
-	timer.unref();
+/**
+ * Times uploads and schedules their renewals. Tests replace it to drive both
+ * without a real clock.
+ */
+export interface UploadClock {
+	/**
+	Returns milliseconds from an arbitrary origin.
+	*/
+	readonly now: () => number;
+	readonly schedule: RenewalSchedule;
+}
 
-	return () => {
-		clearInterval(timer);
-	};
+export const systemUploadClock: UploadClock = {
+	now: () => performance.now(),
+	schedule: (tick, intervalMs) => {
+		const timer = setInterval(tick, intervalMs);
+		timer.unref();
+
+		return () => {
+			clearInterval(timer);
+		};
+	}
 };
 
 /**
- * Runs `transfer`, which sends the bytes of one upload, and renews the upload
- * over `session` at every interval until the transfer finishes or fails.
- * Without a session that supports renewal, it only runs the transfer.
+ * Runs `transfer`, which sends the bytes of one upload, and returns how long
+ * it took in milliseconds. Until the transfer finishes or fails, the upload is
+ * renewed over `session` at every interval. Without a session that supports
+ * renewal, the transfer is only timed.
  */
-export async function whileRenewingUpload<T>(
+export async function sendUpload(
 	session: CommitSession | undefined,
 	uploadId: UploadId,
-	transfer: () => Promise<T>,
-	schedule: RenewalSchedule = intervalSchedule
-): Promise<T> {
-	if (session?.renewUploads === undefined) {
-		return transfer();
-	}
-
-	const cancel = schedule(() => {
-		void renewQuietly(session, uploadId);
-	}, uploadRenewalIntervalMs);
+	transfer: () => Promise<void>,
+	clock: UploadClock = systemUploadClock
+): Promise<number> {
+	const startedAt = clock.now();
+	const cancel =
+		session?.renewUploads === undefined
+			? undefined
+			: clock.schedule(() => {
+					void renewQuietly(session, uploadId);
+				}, uploadRenewalIntervalMs);
 
 	try {
-		return await transfer();
+		await transfer();
 	} finally {
-		cancel();
+		cancel?.();
 	}
+
+	return clock.now() - startedAt;
 }
 
 // A renewal is advisory: the next tick sends another, and the commit decides
@@ -63,4 +82,18 @@ async function renewQuietly(
 	} catch {
 		return;
 	}
+}
+
+/**
+ * Reports how long one path's upload took. The message appears with `--debug`
+ * and in every JSON event stream, so a slow upload is visible after a run.
+ */
+export function reportUploadDuration(
+	reporter: Pick<Reporter, 'info'>,
+	storePathName: string,
+	durationMs: number
+): void {
+	reporter.info(`${storePathName}: uploaded in ${formatDuration(durationMs)}`, {
+		level: 'debug'
+	});
 }

@@ -23,7 +23,7 @@ import {
 	type PushClient,
 	type PushNarArchive
 } from '../push/push.ts';
-import { whileRenewingUpload } from '../push/upload-transfer.ts';
+import { sendUpload, type UploadClock } from '../push/upload-transfer.ts';
 
 import { requireMatchingBuildOutput } from './divergence.ts';
 
@@ -81,6 +81,14 @@ export interface BuildOutputBatcherOptions {
 	readonly maxEntries?: number;
 	readonly maxWaitMs?: number;
 	readonly uploadConcurrency?: number;
+	/**
+	Times uploads and schedules their renewals. Defaults to the system clock.
+	*/
+	readonly uploadClock?: UploadClock;
+	readonly onUploaded?: (
+		storePath: StorePathString,
+		durationMs: number
+	) => void;
 	readonly onOutcome?: (outcome: BatchPathOutcome) => void;
 	readonly onFailure?: (failure: BatchPathFailure) => void;
 }
@@ -300,10 +308,14 @@ export class BuildOutputBatcher {
 				((storePath: string) => new NarArchive(storePath));
 			const upload = compressNar(createNarArchive(info.storePath));
 
-			await whileRenewingUpload(this.options.session, decision.uploadId, () =>
-				this.options.client.uploadNar(decision.r2Key, upload.body)
+			const durationMs = await sendUpload(
+				this.options.session,
+				decision.uploadId,
+				() => this.options.client.uploadNar(decision.r2Key, upload.body),
+				this.options.uploadClock
 			);
 			assertNarMetadata(info, upload.digest());
+			this.options.onUploaded?.(info.storePath, durationMs);
 		}
 
 		await commitOverSession(this.options, {

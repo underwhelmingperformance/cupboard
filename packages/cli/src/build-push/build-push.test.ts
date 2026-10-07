@@ -62,6 +62,7 @@ import {
 	UploadRequestLimitExceededError
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
+import { formatHumanError } from '../human-errors.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import type { PushClient } from '../push/push.ts';
 
@@ -3282,6 +3283,27 @@ describe('runBuildPush', () => {
 			isExpectedType: error instanceof expected.type,
 			exitCode
 		}).toStrictEqual({ isExpectedType: true, exitCode: expected.exitCode });
+	});
+
+	it('lists the failed paths by reason with the first cause in the summary', async () => {
+		const cause = new UnavailableTestError();
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			action: 'upload',
+			uploadFailure: cause
+		});
+		const rows =
+			run.results.find((result) => result.kind === 'build-summary')?.rows ?? [];
+		const unconfirmed = rows.findIndex(
+			(row) => row.label === 'Availability not confirmed'
+		);
+
+		expect(rows.slice(unconfirmed)).toStrictEqual([
+			{ label: 'Availability not confirmed', value: '1' },
+			{ label: 'Upload failed', value: StorePath.basename(pathA) },
+			{ label: 'First upload failure', value: formatHumanError(cause) }
+		]);
 	});
 
 	it('preserves the cause of a publication failure', async () => {

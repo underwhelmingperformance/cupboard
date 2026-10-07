@@ -39,6 +39,7 @@ import {
 import {
 	createReporter,
 	formatBytes,
+	formatDuration,
 	type Reporter,
 	type ResultPayload,
 	type ResultRow
@@ -751,6 +752,66 @@ describe('runPush', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it('reports how long each upload took at debug level', async () => {
+		const times = [1000, 4000];
+		const infos: { message: string; level?: string }[] = [];
+
+		await runPush(
+			publication([appPath]),
+			{
+				...reporter([]),
+				info: (message, presentation) => {
+					infos.push({
+						message,
+						...(presentation?.level !== undefined && {
+							level: presentation.level
+						})
+					});
+				}
+			},
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				uploadClock: {
+					now: () => times.shift() ?? 0,
+					schedule: scheduleNothing
+				},
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: (body) =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: 'upload-app',
+									r2Key: 'nar/app.nar.zst',
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}))
+							})
+						),
+					async uploadNar(_r2Key, body) {
+						await collectReadableStream(body);
+					},
+					commit: () => Promise.resolve(fallbackCommitResponse()),
+					setRoot: (rootName, body) =>
+						Promise.resolve(rootSummary({ name: rootName, ...body }))
+				} satisfies PushClient,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: (nar) => fakeNarUpload(nar, appDigest)
+			}
+		);
+
+		expect(infos).toStrictEqual([
+			{
+				message: `${StorePath.basename(appPath)}: uploaded in ${formatDuration(3000)}`,
+				level: 'debug'
+			}
+		]);
 	});
 
 	it('marks each commit for retention from its own negotiation', async () => {
@@ -6157,6 +6218,15 @@ function reporter(
 			return;
 		}
 	};
+}
+
+// The duration tests send no renewals.
+function scheduleNothing(): () => void {
+	return cancelNothing;
+}
+
+function cancelNothing(): void {
+	return;
 }
 
 async function flushMicrotasks(): Promise<void> {
