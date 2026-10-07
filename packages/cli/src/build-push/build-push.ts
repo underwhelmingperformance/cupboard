@@ -35,6 +35,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	autoBuildStore,
 	type BuildReceiptV3,
@@ -43,6 +44,7 @@ import {
 	type InvocationId,
 	type NixStoreUri,
 	nixStoreUriSchema,
+	type TargetFailureReason,
 	type TerminalBuildFailureInput
 } from '@cupboard/protocol/build';
 import {
@@ -90,12 +92,14 @@ import {
 	type PushStore,
 	runPush
 } from '../push/push.ts';
+import { reportUploadDuration } from '../push/upload-transfer.ts';
 
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
 import { buildPushModeDescription, selectBuildPushMode } from './mode.ts';
 import type { BuildPushPreflight } from './preflight.ts';
 import {
 	reconcileBuild,
+	type ReconcileFailure,
 	type ReconcileOptions,
 	type ReconcileResult,
 	type ReconcileTarget
@@ -408,7 +412,14 @@ async function runProtectedStreamedBuildPush(
 			}),
 			...(options.uploadConcurrency !== undefined && {
 				uploadConcurrency: options.uploadConcurrency
-			})
+			}),
+			onUploaded: (storePath, durationMs) => {
+				reportUploadDuration(
+					reporter,
+					StorePath.basename(storePath),
+					durationMs
+				);
+			}
 		});
 		listener = await BuildEventListener.listen({
 			socketPath: plan.socketPath,
@@ -1184,17 +1195,21 @@ async function runReconciledLocalBuildPush(
 		}
 
 		const uploaded = receipt.uploaded?.length ?? 0;
-		reportBuildSummary(reporter, {
-			mode: 'reconciled-local',
-			store: dependencies.storeDirectory,
-			targetPaths: realised.length,
-			intermediatePaths: options.intermediatePaths?.length ?? 0,
-			queueDepth: 0,
-			uploadedPaths: uploaded,
-			skipped: Math.max(receipt.paths.length - uploaded, 0),
-			childExitStatus: childExitCode(exit),
-			unconfirmedPaths: []
-		});
+		reportBuildSummary(
+			reporter,
+			{
+				mode: 'reconciled-local',
+				store: dependencies.storeDirectory,
+				targetPaths: realised.length,
+				intermediatePaths: options.intermediatePaths?.length ?? 0,
+				queueDepth: 0,
+				uploadedPaths: uploaded,
+				skipped: Math.max(receipt.paths.length - uploaded, 0),
+				childExitStatus: childExitCode(exit),
+				unconfirmedPaths: []
+			},
+			[]
+		);
 
 		if (exit.status !== 0) {
 			throw childFailure(exit);
@@ -1654,6 +1669,13 @@ async function settleRun(
 						compressNar: dependencies.compressNar
 					}),
 					...(facts.subjects.length > 0 && { subjects: facts.subjects }),
+					onUploaded: (storePath, durationMs) => {
+						reportUploadDuration(
+							reporter,
+							StorePath.basename(storePath),
+							durationMs
+						);
+					},
 					copiedFrom: facts.copiedFrom,
 					childExitStatus: childExitCode(exit),
 					...(facts.terminalFailure !== undefined && {
@@ -1780,22 +1802,102 @@ function reportSummary(
 	const { receipt } = result;
 	const uploaded = receipt.uploaded?.length ?? 0;
 
-	reportBuildSummary(reporter, {
-		mode: facts.mode,
-		store: dependencies.storeDirectory,
-		targetPaths: targetCount,
-		intermediatePaths: facts.eventPaths.length - targetCount,
-		queueDepth: facts.maxQueueDepth,
-		uploadedPaths: uploaded,
-		skipped: Math.max(receipt.paths.length - uploaded, 0),
-		childExitStatus: childExitCode(facts.exit),
-		unconfirmedPaths: [...(receipt.failed ?? [])]
+	reportBuildSummary(
+		reporter,
+		{
+			mode: facts.mode,
+			store: dependencies.storeDirectory,
+			targetPaths: targetCount,
+			intermediatePaths: facts.eventPaths.length - targetCount,
+			queueDepth: facts.maxQueueDepth,
+			uploadedPaths: uploaded,
+			skipped: Math.max(receipt.paths.length - uploaded, 0),
+			childExitStatus: childExitCode(facts.exit),
+			unconfirmedPaths: [...(receipt.failed ?? [])]
+		},
+		result.failures
+	);
+}
+
+const failureRowLabels: Readonly<
+	Record<
+		TargetFailureReason,
+		{ readonly paths: string; readonly cause: string }
+	>
+> = {
+	build: { paths: 'Build failed', cause: 'First build failure' },
+	upload: { paths: 'Upload failed', cause: 'First upload failure' },
+	verification: {
+		paths: 'Verification failed',
+		cause: 'First verification failure'
+	},
+	collected: {
+		paths: 'Removed from the local store',
+		cause: 'First removal error'
+	},
+	retention: {
+		paths: 'Retention not recorded',
+		cause: 'First retention failure'
+	}
+};
+
+const maxFailedPathsPerReason = 10;
+
+// Lists the failed paths for each reason, in a fixed order, with the cause of
+// the first failure. The rows appear without `--debug`, so a failed run shows
+// what failed and why.
+function failureRows(
+	reporter: Reporter,
+	failures: readonly ReconcileFailure[]
+): readonly ResultRow[] {
+	const reasons: readonly TargetFailureReason[] = [
+		'build',
+		'upload',
+		'verification',
+		'collected',
+		'retention'
+	];
+
+	return reasons.flatMap((reason) => {
+		const group = failures.filter((failure) => failure.reason === reason);
+		const [first] = group;
+
+		if (first === undefined) {
+			return [];
+		}
+
+		const labels = failureRowLabels[reason];
+		const names = group
+			.slice(0, maxFailedPathsPerReason)
+			.map((failure) => StorePath.basename(failure.storePath));
+		const hidden = group.length - names.length;
+
+		return [
+			{
+				label: labels.paths,
+				value:
+					hidden > 0
+						? `${names.join(', ')} and ${formatCount(hidden)} more`
+						: names.join(', ')
+			},
+			...(first.cause === undefined
+				? []
+				: [
+						{
+							label: labels.cause,
+							value: formatHumanError(first.cause, {
+								debug: reporter.presentation === 'debug'
+							})
+						}
+					])
+		];
 	});
 }
 
 function reportBuildSummary(
 	reporter: Reporter,
-	summary: BuildSummaryInput
+	summary: BuildSummaryInput,
+	failures: readonly ReconcileFailure[]
 ): void {
 	const rows: ResultRow[] = [
 		{ label: 'Store', value: summary.store },
@@ -1813,7 +1915,8 @@ function reportBuildSummary(
 						value: formatCount(summary.unconfirmedPaths.length)
 					}
 				]
-			: [])
+			: []),
+		...failureRows(reporter, failures)
 	];
 	const validated = buildSummarySchema.safeParse(summary);
 

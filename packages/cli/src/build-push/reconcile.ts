@@ -51,7 +51,7 @@ import {
 	type PushClient,
 	type PushNarArchive
 } from '../push/push.ts';
-import { whileRenewingUpload } from '../push/upload-transfer.ts';
+import { sendUpload, type UploadClock } from '../push/upload-transfer.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
 import { requireMatchingBuildOutput } from './divergence.ts';
@@ -114,6 +114,14 @@ export interface ReconcileOptions {
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
+	/**
+	Times uploads and schedules their renewals. Defaults to the system clock.
+	*/
+	readonly uploadClock?: UploadClock;
+	readonly onUploaded?: (
+		storePath: StorePathString,
+		durationMs: number
+	) => void;
 	readonly childExitStatus?: number;
 	readonly terminalFailure?: TerminalBuildFailureInput;
 	/**
@@ -386,10 +394,14 @@ async function uploadAndAcknowledge(
 		try {
 			const upload = compressNar(createNarArchive(info.storePath));
 
-			await whileRenewingUpload(options.session, decision.uploadId, () =>
-				options.client.uploadNar(decision.r2Key, upload.body)
+			const durationMs = await sendUpload(
+				options.session,
+				decision.uploadId,
+				() => options.client.uploadNar(decision.r2Key, upload.body),
+				options.uploadClock
 			);
 			assertNarMetadata(info, upload.digest());
+			options.onUploaded?.(info.storePath, durationMs);
 		} catch (error) {
 			if (isVanishedPathError(error)) {
 				settleLocallyMissing(info.storePath, isTarget, options, ledger);

@@ -117,7 +117,12 @@ import {
 	type ReferenceSource
 } from './reference.ts';
 import { ReferenceSnapshotDivergedError } from './reference-manifest.ts';
-import { whileRenewingUpload } from './upload-transfer.ts';
+import {
+	reportUploadDuration,
+	sendUpload,
+	systemUploadClock,
+	type UploadClock
+} from './upload-transfer.ts';
 
 export type PushStore = Pick<
 	Nix,
@@ -165,6 +170,10 @@ export interface PushDependencies {
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
+	/**
+	Times uploads and schedules their renewals. Defaults to the system clock.
+	*/
+	readonly uploadClock?: UploadClock;
 	readonly dryRun?: boolean;
 	/**
 	 * The command that `PushIncompleteError` tells the user to run again.
@@ -451,6 +460,7 @@ interface PushRuntimeDependencies {
 	readonly attestations?: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly uploadConcurrency?: number;
+	readonly uploadClock?: UploadClock;
 	readonly dryRun?: boolean;
 	readonly buildStore?: string;
 	readonly referenceReceipt?: boolean;
@@ -870,12 +880,14 @@ async function runPushFlow(
 	const onBytes = (count: number): void => {
 		uploadedBytes += count;
 	};
+	const uploadClock = dependencies.uploadClock ?? systemUploadClock;
 	const uploadContext: UploadContext = {
 		client,
 		session,
 		negotiated,
 		createNarArchive,
 		compressNar,
+		clock: uploadClock,
 		onBytes
 	};
 	const completedUploads = new Set<StorePathHash>();
@@ -892,9 +904,15 @@ async function runPushFlow(
 		...(dependencies.runRoot !== undefined && {
 			runRoot: dependencies.runRoot
 		}),
+		clock: uploadClock,
 		onBytes,
-		onUploaded: (storePathHash) => {
+		onUploaded: (storePathHash, durationMs) => {
 			completedUploads.add(storePathHash);
+			reportUploadDuration(
+				reporter,
+				StorePath.basename(storePathByHash.get(storePathHash) ?? storePathHash),
+				durationMs
+			);
 		},
 		onRedriven: (fresh) => {
 			effectiveActions.set(fresh.storePathHash, fresh.action);
@@ -981,9 +999,14 @@ async function runPushFlow(
 
 					if (isUpload(decision)) {
 						try {
-							await streamNarUpload(decision, uploadContext);
+							const durationMs = await streamNarUpload(decision, uploadContext);
 							completedUploads.add(decision.storePathHash);
 							uploaded += 1;
+							reportUploadDuration(
+								reporter,
+								StorePath.basename(storePath),
+								durationMs
+							);
 						} catch (error) {
 							if (isAbortError(error)) {
 								throw error;
@@ -1939,17 +1962,18 @@ interface UploadContext {
 	readonly negotiated: NegotiatedPaths;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
+	readonly clock: UploadClock;
 	readonly onBytes: (count: number) => void;
 }
 
 // Stream compression keeps large closures out of the runner's temporary
 // storage. Once the stream ends, compare its uncompressed hash and size with
 // the negotiated metadata so changed source bytes cannot be committed under
-// stale path metadata.
+// stale path metadata. Returns how long the bytes took to send.
 async function streamNarUpload(
 	decision: UploadDecisionOf<'upload'>,
 	context: UploadContext
-): Promise<void> {
+): Promise<number> {
 	const pathInfo = requireLocalPathInfo(
 		findNegotiatedPath(context.negotiated, decision)
 	);
@@ -1957,13 +1981,19 @@ async function streamNarUpload(
 		context.createNarArchive(pathInfo.storePath)
 	);
 
-	await whileRenewingUpload(context.session, decision.uploadId, () =>
-		context.client.uploadNar(
-			decision.r2Key,
-			countingByteStream(upload.body, context.onBytes)
-		)
+	const durationMs = await sendUpload(
+		context.session,
+		decision.uploadId,
+		() =>
+			context.client.uploadNar(
+				decision.r2Key,
+				countingByteStream(upload.body, context.onBytes)
+			),
+		context.clock
 	);
 	verifyNarMetadata(pathInfo, upload.digest());
+
+	return durationMs;
 }
 
 interface CommitContext {
@@ -1975,8 +2005,12 @@ interface CommitContext {
 	readonly options: CommitOptions;
 	// Re-drives must attach the replacement pending row to the same run root.
 	readonly runRoot?: UploadAttachRootInput;
+	readonly clock: UploadClock;
 	readonly onBytes: (count: number) => void;
-	readonly onUploaded: (storePathHash: StorePathHash) => void;
+	readonly onUploaded: (
+		storePathHash: StorePathHash,
+		durationMs: number
+	) => void;
 	readonly onRedriven: (fresh: UploadDecision) => void;
 }
 
@@ -2110,14 +2144,18 @@ async function redriveExpiredCommit(
 		context.createNarArchive(pathInfo.storePath)
 	);
 
-	await whileRenewingUpload(context.session, fresh.uploadId, () =>
-		context.client.uploadNar(
-			fresh.r2Key,
-			countingByteStream(upload.body, context.onBytes)
-		)
+	const durationMs = await sendUpload(
+		context.session,
+		fresh.uploadId,
+		() =>
+			context.client.uploadNar(
+				fresh.r2Key,
+				countingByteStream(upload.body, context.onBytes)
+			),
+		context.clock
 	);
 	verifyNarMetadata(pathInfo, upload.digest());
-	context.onUploaded(fresh.storePathHash);
+	context.onUploaded(fresh.storePathHash, durationMs);
 
 	return commitVia(context, commitTarget(fresh, hasGraceFacts));
 }

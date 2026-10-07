@@ -3,30 +3,36 @@ import { describe, expect, it } from 'vitest';
 
 import type { CommitSession } from '../client/commit-socket.ts';
 
-import {
-	type RenewalSchedule,
-	whileRenewingUpload
-} from './upload-transfer.ts';
+import { sendUpload, type UploadClock } from './upload-transfer.ts';
 
 const uploadId = uploadIdSchema.parse('upload-1');
 
-// Runs each scheduled tick only when the test calls `tick`, and records when
-// the schedule is cancelled.
-function manualSchedule(events: string[]): {
-	readonly schedule: RenewalSchedule;
-	readonly tick: () => void;
-} {
+// Runs each scheduled tick only when the test calls `tick`, records when the
+// schedule is cancelled, and reads the time from `times` in order.
+function manualClock(
+	events: string[],
+	times: readonly number[]
+): { readonly clock: UploadClock; readonly tick: () => void } {
 	let scheduled: (() => void) | undefined;
+	let reads = 0;
 
 	return {
-		schedule: (tick, intervalMs) => {
-			events.push(`schedule ${String(intervalMs)}`);
-			scheduled = tick;
+		clock: {
+			now: () => {
+				const time = times[reads] ?? 0;
+				reads += 1;
 
-			return () => {
-				events.push('cancel');
-				scheduled = undefined;
-			};
+				return time;
+			},
+			schedule: (tick, intervalMs) => {
+				events.push(`schedule ${String(intervalMs)}`);
+				scheduled = tick;
+
+				return () => {
+					events.push('cancel');
+					scheduled = undefined;
+				};
+			}
 		},
 		tick: () => {
 			scheduled?.();
@@ -48,45 +54,46 @@ function renewingSession(events: string[]): CommitSession {
 	};
 }
 
-describe('whileRenewingUpload', () => {
-	it.each([
-		{ name: 'completes', outcome: 'resolve' },
-		{ name: 'fails', outcome: 'reject' }
-	] as const)(
-		'renews while the transfer runs and stops when it $name',
-		async ({ outcome }) => {
-			const events: string[] = [];
-			const { schedule, tick } = manualSchedule(events);
-			const transfer = Promise.withResolvers<undefined>();
-			const failure = new Error('transfer failed');
-			const running = whileRenewingUpload(
-				renewingSession(events),
-				uploadId,
-				() => transfer.promise,
-				schedule
-			);
+describe('sendUpload', () => {
+	it('renews while the transfer runs, stops when it ends and reports its duration', async () => {
+		const events: string[] = [];
+		const { clock, tick } = manualClock(events, [1000, 4000]);
+		const transfer = Promise.withResolvers<undefined>();
+		const sending = sendUpload(
+			renewingSession(events),
+			uploadId,
+			() => transfer.promise,
+			clock
+		);
 
-			tick();
-			tick();
+		tick();
+		tick();
+		transfer.resolve(undefined);
+		const durationMs = await sending;
+		tick();
 
-			if (outcome === 'resolve') {
-				transfer.resolve(undefined);
-				await running;
-			} else {
-				transfer.reject(failure);
-				await expect(running).rejects.toBe(failure);
-			}
+		expect({ durationMs, events }).toStrictEqual({
+			durationMs: 3000,
+			events: ['schedule 300000', 'renew upload-1', 'renew upload-1', 'cancel']
+		});
+	});
 
-			tick();
+	it('stops renewing when the transfer fails', async () => {
+		const events: string[] = [];
+		const { clock, tick } = manualClock(events, [0]);
+		const failure = new Error('transfer failed');
+		const sending = sendUpload(
+			renewingSession(events),
+			uploadId,
+			() => Promise.reject(failure),
+			clock
+		);
 
-			expect(events).toStrictEqual([
-				'schedule 300000',
-				'renew upload-1',
-				'renew upload-1',
-				'cancel'
-			]);
-		}
-	);
+		await expect(sending).rejects.toBe(failure);
+		tick();
+
+		expect(events).toStrictEqual(['schedule 300000', 'cancel']);
+	});
 
 	it.each([
 		{ name: 'no session', session: undefined },
@@ -99,18 +106,13 @@ describe('whileRenewingUpload', () => {
 				}
 			}
 		}
-	])('schedules nothing for $name', async ({ session }) => {
+	])('only times the transfer for $name', async ({ session }) => {
 		const events: string[] = [];
-		const { schedule } = manualSchedule(events);
+		const { clock } = manualClock(events, [500, 2500]);
 
 		await expect(
-			whileRenewingUpload(
-				session,
-				uploadId,
-				() => Promise.resolve('sent'),
-				schedule
-			)
-		).resolves.toBe('sent');
+			sendUpload(session, uploadId, () => Promise.resolve(), clock)
+		).resolves.toBe(2000);
 		expect(events).toStrictEqual([]);
 	});
 });
