@@ -4,7 +4,7 @@ import {
 	type RootName,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type PushCredentialInput,
 	type PushId,
@@ -24,7 +24,10 @@ import {
 } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 
-import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
+import {
+	pushCredentialMaxTtlSeconds,
+	pushCredentialTtlSeconds
+} from '../blob/push-credential.ts';
 import { type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -49,7 +52,7 @@ import {
 	serialiseGraceDecision,
 	storedGraceDeadlines
 } from './grace-decision.ts';
-import { jsonValueLists } from './json-list.ts';
+import { jsonValueList, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	factsFromHints,
@@ -77,6 +80,51 @@ type ReusableBlob = Pick<
 import { WorkSequenceService } from './work-sequence-service.ts';
 
 const uploadTtlMs = 15 * 60 * 1000;
+
+type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
+
+/**
+ * The result of a `renew-uploads` request: the uploads with a new expiry and
+ * the uploads that the server refused to extend.
+ */
+export interface UploadRenewal {
+	readonly renewed: UploadId[];
+	readonly refused: UploadId[];
+}
+
+// Returns the new expiry for an upload, or `undefined` if the server refuses to
+// renew it. The upload must belong to this cache and push, have no verdict and
+// still be live. A renewal never sets the expiry later than six hours after
+// negotiation, the longest lifetime of a push credential, so an abandoned
+// upload still expires.
+function renewedExpiry(
+	row: Pick<
+		PendingUploadRow,
+		'id' | 'cacheId' | 'r2Key' | 'verdict' | 'createdAt' | 'expiresAt'
+	>,
+	cache: ResolvedCache,
+	pushId: PushId,
+	now: Date
+): IsoTimestamp | undefined {
+	if (
+		row.cacheId !== cache.id ||
+		row.verdict !== null ||
+		row.r2Key !== stagingObjectKey(pushId, row.id) ||
+		row.expiresAt < isoTimestamp(now)
+	) {
+		return undefined;
+	}
+
+	const limit = new Date(
+		new Date(row.createdAt).getTime() + pushCredentialMaxTtlSeconds * 1000
+	);
+	const extended = new Date(
+		Math.min(now.getTime() + uploadTtlMs, limit.getTime())
+	);
+	const expiresAt = isoTimestamp(extended);
+
+	return expiresAt > row.expiresAt ? expiresAt : undefined;
+}
 
 interface ClosureClassification {
 	readonly facts: NegotiateFacts | undefined;
@@ -338,6 +386,57 @@ export class UploadsService {
 			.get();
 
 		return { status: uploadStatusOf(pending) };
+	}
+
+	/**
+	 * Extends uploads whose bytes are still being sent. Each renewed upload
+	 * expires 15 minutes from `now`, up to the limit in {@link renewedExpiry}.
+	 * If the push ID does not verify, every upload is refused.
+	 */
+	async renewUploads(
+		cache: ResolvedCache,
+		pushId: PushId,
+		uploadIds: readonly UploadId[],
+		now: Date
+	): Promise<UploadRenewal> {
+		if (!(await this.context.pushCredentials().verify(pushId))) {
+			return { renewed: [], refused: [...uploadIds] };
+		}
+
+		const rows = this.context.db
+			.select({
+				id: schema.pendingUploads.id,
+				cacheId: schema.pendingUploads.cacheId,
+				r2Key: schema.pendingUploads.r2Key,
+				verdict: schema.pendingUploads.verdict,
+				createdAt: schema.pendingUploads.createdAt,
+				expiresAt: schema.pendingUploads.expiresAt
+			})
+			.from(schema.pendingUploads)
+			.where(inArray(schema.pendingUploads.id, jsonValueList(uploadIds)))
+			.all();
+		const rowById = new Map(rows.map((row) => [row.id, row]));
+		const renewal: UploadRenewal = { renewed: [], refused: [] };
+
+		for (const uploadId of uploadIds) {
+			const row = rowById.get(uploadId);
+			const expiresAt =
+				row === undefined ? undefined : renewedExpiry(row, cache, pushId, now);
+
+			if (expiresAt === undefined) {
+				renewal.refused.push(uploadId);
+				continue;
+			}
+
+			this.context.db
+				.update(schema.pendingUploads)
+				.set({ expiresAt })
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.run();
+			renewal.renewed.push(uploadId);
+		}
+
+		return renewal;
 	}
 
 	async negotiate(

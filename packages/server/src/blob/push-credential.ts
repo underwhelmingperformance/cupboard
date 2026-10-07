@@ -26,7 +26,7 @@ import {
 	r2CredentialTtlSecondsSchema
 } from './temporary-credentials.ts';
 
-const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
+export const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
 // R2 removes staged bytes after one day. A push ID remains valid for that
 // period so a fresh access token can renew the credential for the same staging
 // prefix.

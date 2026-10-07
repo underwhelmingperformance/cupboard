@@ -29,7 +29,7 @@ import {
 	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type {
 	CommitOutcome,
@@ -1502,6 +1502,61 @@ describe('reconcileBuild over a shared commit session', () => {
 			});
 		}
 	);
+
+	it('renews an upload while its bytes are sent and stops when the upload ends', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+
+		try {
+			const fixture = harness({
+				valid: [pathA],
+				actions: new Map([[pathA, 'upload' as const]])
+			});
+			const transfer = Promise.withResolvers<undefined>();
+			const renewals: string[][] = [];
+			const client: PushClient = {
+				...fixture.client,
+				uploadNar: () => transfer.promise
+			};
+			const session: CommitSession = {
+				commit: (commitTarget) =>
+					Promise.resolve({
+						storePathHash: commitTarget.storePathHash,
+						narHash: commitTarget.narHash,
+						status: 'committed',
+						settled: Promise.resolve()
+					}),
+				renewUploads: (uploadIds) => {
+					renewals.push([...uploadIds]);
+
+					return Promise.resolve();
+				},
+				close() {
+					return;
+				}
+			};
+			const reconciled = reconcileWith(fixture, {
+				targets: [target(pathA)],
+				client,
+				session
+			});
+
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+			const whileSending = [...renewals];
+
+			transfer.resolve(undefined);
+			await reconciled;
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+			const uploadId = `upload-${StorePath.basename(pathA)}`;
+
+			expect({ whileSending, afterwards: renewals }).toStrictEqual({
+				whileSending: [[uploadId], [uploadId]],
+				afterwards: [[uploadId], [uploadId]]
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
 	it('commits over the session and never through the client', async () => {
 		const sessionCommits: CommitSessionTarget[] = [];

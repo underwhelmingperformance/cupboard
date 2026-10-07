@@ -8,6 +8,8 @@ import {
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
 	type CommitSessionFrameInput,
+	type PushId,
+	pushIdSchema,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -103,6 +105,7 @@ interface SessionTestOptions {
 	readonly reconnectBackoffMs?: number;
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
+	readonly pushId?: () => Promise<PushId>;
 	// Record each connection time so tests can measure reconnect delays.
 	readonly connectedAt?: number[];
 }
@@ -153,7 +156,8 @@ function openSessionOver(
 			maxReconnects: options.maxReconnects,
 			reconnectBackoffMs: options.reconnectBackoffMs,
 			onCapabilities: options.onCapabilities,
-			onWaiting: options.onWaiting
+			onWaiting: options.onWaiting,
+			pushId: options.pushId
 		}
 	);
 }
@@ -1591,6 +1595,78 @@ describe('unknown frame ev tolerance', () => {
 		expect({ name: error.name, path: error.path }).toStrictEqual({
 			name: 'CommitSocketProtocolError',
 			path
+		});
+	});
+});
+
+describe('upload renewal', () => {
+	const pushId = pushIdSchema.parse('a'.repeat(104));
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it.each([
+		{
+			name: 'sends renew-uploads with the push id when the server advertises it',
+			capabilities: commitCapabilitiesValue,
+			sent: [
+				JSON.stringify({ op: 'renew-uploads', pushId, uploadIds: [uploadId] })
+			]
+		},
+		{
+			name: 'sends nothing when the server does not advertise renew-uploads',
+			capabilities: 'commit-batch;max=100,subscribe-identity',
+			sent: []
+		}
+	])('$name', async ({ capabilities, sent }) => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket, {
+			pushId: () => Promise.resolve(pushId)
+		});
+
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': capabilities }
+		});
+		socket.emit('open');
+		await session.renewUploads?.([uploadId]);
+
+		expect(socket.sent).toStrictEqual(sent);
+	});
+
+	it('keeps the session open after a renewed frame that refuses an upload', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket, {
+			pushId: () => Promise.resolve(pushId)
+		});
+		const commit = session.commit(target);
+
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+		});
+		socket.emit('open');
+		await session.renewUploads?.([uploadId]);
+		socket.emit(
+			'message',
+			frame({ ev: 'renewed', renewed: [], refused: [uploadId] })
+		);
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(ackOf(commit)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
 		});
 	});
 });

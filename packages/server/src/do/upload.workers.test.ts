@@ -92,6 +92,7 @@ import {
 	negotiateViaWorker,
 	nixSha256Hash,
 	openCommitSession,
+	pendingUploadSnapshot,
 	pendingUploadVerdict,
 	provisionNamedTenant,
 	pushPath,
@@ -114,6 +115,7 @@ import {
 	syntheticNarHash,
 	testBase,
 	testPushId,
+	testPushIdFor,
 	uploadMetadata,
 	uploadPathNegotiation,
 	verifiableNar,
@@ -1833,6 +1835,113 @@ describe('upload flow', () => {
 		expect({ reply, replayed: frameIdentity(replay) }).toStrictEqual({
 			reply: { ev: 'unsupported', op: 'compress-all' },
 			replayed: { ev: 'verdict', uploadId: upload.uploadId }
+		});
+	});
+
+	it.each([
+		{
+			name: 'renews an uncommitted upload for 15 minutes',
+			now: '2026-01-01T00:10:00.000Z',
+			row: {},
+			push: 'own',
+			expected: { renewed: true, expiresAt: '2026-01-01T00:25:00.000Z' }
+		},
+		{
+			name: 'caps a renewal at six hours after negotiation',
+			now: '2026-01-01T05:50:00.000Z',
+			row: { expiresAt: '2026-01-01T05:58:00.000Z' },
+			push: 'own',
+			expected: { renewed: true, expiresAt: '2026-01-01T06:00:00.000Z' }
+		},
+		{
+			name: 'refuses a renewal at the six-hour cap',
+			now: '2026-01-01T05:55:00.000Z',
+			row: { expiresAt: '2026-01-01T06:00:00.000Z' },
+			push: 'own',
+			expected: { renewed: false, expiresAt: '2026-01-01T06:00:00.000Z' }
+		},
+		{
+			name: 'refuses an upload whose commit has started',
+			now: '2026-01-01T00:10:00.000Z',
+			row: { verdict: 'committing' },
+			push: 'own',
+			expected: { renewed: false, expiresAt: '2026-01-01T00:15:00.000Z' }
+		},
+		{
+			name: 'refuses an expired upload',
+			now: '2026-01-01T00:16:00.000Z',
+			row: {},
+			push: 'own',
+			expected: { renewed: false, expiresAt: '2026-01-01T00:15:00.000Z' }
+		},
+		{
+			name: 'refuses an upload of another push',
+			now: '2026-01-01T00:10:00.000Z',
+			row: {},
+			push: 'other',
+			expected: { renewed: false, expiresAt: '2026-01-01T00:15:00.000Z' }
+		},
+		{
+			name: 'refuses a push id that does not verify',
+			now: '2026-01-01T00:10:00.000Z',
+			row: {},
+			push: 'forged',
+			expected: { renewed: false, expiresAt: '2026-01-01T00:15:00.000Z' }
+		}
+	] as const)('$name', async ({ now, row, push, expected }) => {
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(await initialise(), [metadata]),
+			metadata
+		);
+
+		if ('expiresAt' in row || 'verdict' in row) {
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.pendingUploads)
+					.set({
+						...('expiresAt' in row && {
+							expiresAt: isoTimestampSchema.parse(row.expiresAt)
+						}),
+						...('verdict' in row && { verdict: row.verdict })
+					})
+					.where(eq(schema.pendingUploads.id, upload.uploadId))
+					.run();
+			});
+		}
+
+		vi.setSystemTime(new Date(now));
+
+		const pushIds = {
+			own: testPushId,
+			other: await testPushIdFor(fixtureTenant, 1),
+			forged: `${testPushId.slice(0, -1)}${testPushId.endsWith('0') ? '1' : '0'}`
+		};
+		const session = await openCommitSession(await initialise());
+		session.socket.send(
+			JSON.stringify({
+				op: 'renew-uploads',
+				pushId: pushIds[push],
+				uploadIds: [upload.uploadId]
+			})
+		);
+		const reply = await session.nextFrame();
+		const isOpen = session.socket.readyState === WebSocket.READY_STATE_OPEN;
+		session.socket.close();
+		const snapshot = await pendingUploadSnapshot(upload.uploadId);
+
+		expect({
+			reply,
+			isOpen,
+			expiresAt: snapshot?.expiresAt
+		}).toStrictEqual({
+			reply: {
+				ev: 'renewed',
+				renewed: expected.renewed ? [upload.uploadId] : [],
+				refused: expected.renewed ? [] : [upload.uploadId]
+			},
+			isOpen: true,
+			expiresAt: expected.expiresAt
 		});
 	});
 

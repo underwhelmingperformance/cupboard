@@ -13,11 +13,13 @@ import {
 	commitCreditGrantAttribute,
 	commitSessionFrameSchema,
 	type CommitSessionRequestInput,
+	type PushId,
 	retentionMarkerAttribute,
 	retentionMarkerAttributeValue,
 	subscribeIdentityCapability,
 	type UploadGraceFact,
-	type UploadId
+	type UploadId,
+	uploadRenewalCapability
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
 import { BoundedBodyCollector } from '@cupboard/shared/response-body';
@@ -140,6 +142,11 @@ export interface CommitSessionOptions {
 	 * client has no stable position or completion estimate.
 	 */
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
+	/**
+	 * Returns the push ID to send with each `renew-uploads` request. Without it,
+	 * the session sends no renewals.
+	 */
+	readonly pushId?: () => Promise<PushId>;
 }
 
 /**
@@ -164,6 +171,14 @@ export interface CommitOutcome {
 
 export interface CommitSession {
 	commit(target: CommitSessionTarget): Promise<CommitOutcome>;
+	/**
+	 * Asks the server to extend uploads whose bytes are still being sent. The
+	 * session sends nothing unless the current connection advertises
+	 * `renew-uploads` and the session knows its push. The server reports
+	 * refusals in a `renewed` frame without ending the session, so the returned
+	 * promise resolves once the request is sent, without waiting for that frame.
+	 */
+	renewUploads?(uploadIds: readonly UploadId[]): Promise<void>;
 	/**
 	Closes the socket; safe once every commit has settled.
 	*/
@@ -250,7 +265,8 @@ const knownEvs = new Set([
 	'error',
 	'unsupported',
 	'credit',
-	'queued'
+	'queued',
+	'renewed'
 ]);
 
 // Observe `settled` when the caller chooses not to wait, preventing a later
@@ -456,6 +472,8 @@ export function runCommitSession(
 	// reconnect, the server can then return the stored grace fact.
 	let hasBatchRetentionMarker = false;
 	let hasIdentityRetentionMarker = false;
+	// Send `renew-uploads` only when the current connection advertises it.
+	let hasUploadRenewal = false;
 	// Credit and declared demand belong to one connection. A new 101 supplies a
 	// new grant, and closing the old connection clears its demand on the server.
 	// `undefined` selects the client-side batch window instead of server pacing.
@@ -1208,6 +1226,12 @@ export function runCommitSession(
 				return;
 			}
 
+			case 'renewed': {
+				// A refused renewal leaves the upload's expiry unchanged. Its commit
+				// still decides the outcome, so the frame needs no action.
+				return;
+			}
+
 			case 'unsupported': {
 				// The client declares `request-credit` in the upgrade request, so it
 				// may receive `unsupported` from an older server. Disable server pacing
@@ -1563,6 +1587,7 @@ export function runCommitSession(
 		hasSubscribeIdentity = false;
 		hasBatchRetentionMarker = false;
 		hasIdentityRetentionMarker = false;
+		hasUploadRenewal = false;
 		// Window state from the previous connection is stale; replayOutstanding
 		// sends all outstanding work afresh through the new window.
 		inFlightChunks.clear();
@@ -1605,6 +1630,7 @@ export function runCommitSession(
 				connectionCaps,
 				subscribeIdentityCapability
 			);
+			hasUploadRenewal = connectionCaps.has(uploadRenewalCapability);
 			// The server enforces the capability from the request. If an intermediary
 			// strips it from the response, start with zero credit and request a grant.
 			creditAvailable =
@@ -1809,6 +1835,34 @@ export function runCommitSession(
 		});
 	};
 
+	const canRenew = (): boolean => hasUploadRenewal && isOpened && !isClosed;
+
+	// A renewal that cannot be sent now is skipped. The caller sends another
+	// before the upload expires.
+	const renewUploads = async (
+		uploadIds: readonly UploadId[]
+	): Promise<void> => {
+		if (options.pushId === undefined || !canRenew()) {
+			return;
+		}
+
+		let pushId: PushId;
+
+		try {
+			pushId = await options.pushId();
+		} catch {
+			return;
+		}
+
+		if (!canRenew()) {
+			return;
+		}
+
+		for (const batch of chunk(uploadIds, commitBatchMaxEntries)) {
+			sendNow({ op: 'renew-uploads', pushId, uploadIds: [...batch] });
+		}
+	};
+
 	const close = (): void => {
 		if (isClosed) {
 			return;
@@ -1818,7 +1872,7 @@ export function runCommitSession(
 		teardown();
 	};
 
-	return { commit, close };
+	return { commit, renewUploads, close };
 }
 
 function asError(value: unknown): Error {

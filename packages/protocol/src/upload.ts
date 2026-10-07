@@ -366,6 +366,12 @@ export const subscribeIdentityCapability = 'subscribe-identity';
 // `commit-batch` op ever having been.
 export const subscribeIdentityCapabilityToken = `${subscribeIdentityCapability};${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`;
 
+// The capability for `renew-uploads`. A client sends the op only when the server
+// advertises this token. The op extends the expiry of uploads whose bytes are
+// still being sent, and the server answers it with one `renewed` frame. Any
+// change to the op or frame shape needs a new capability token.
+export const uploadRenewalCapability = 'renew-uploads';
+
 // The capability name for credit-based admission. A client looks this up in the
 // parsed capability map; the server advertises it with the connection's opening
 // grant as an attribute. Advertised, it tells the client that this server bounds
@@ -386,7 +392,7 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 	return `${commitCreditCapability};${commitCreditGrantAttribute}=${String(openingGrant)}`;
 }
 
-export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken}`;
+export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken},${uploadRenewalCapability}`;
 
 export function commitCapabilitiesValueWithCredit(
 	openingGrant: number
@@ -437,6 +443,14 @@ export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 	z.strictObject({
 		op: z.literal('request-credit'),
 		entries: positiveIntSchema
+	}),
+	// Every upload in `uploadIds` must belong to the push that `pushId`
+	// identifies.
+	// Clients send this op only after the server advertises `renew-uploads`.
+	z.strictObject({
+		op: z.literal('renew-uploads'),
+		pushId: pushIdSchema,
+		uploadIds: z.array(uploadIdSchema).min(1).max(commitBatchMaxEntries)
 	})
 ]);
 export type CommitSessionRequest = z.output<typeof commitSessionRequestSchema>;
@@ -499,6 +513,16 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 	z.strictObject({
 		ev: z.literal('queued'),
 		ahead: countSchema
+	}),
+	// Answers `renew-uploads`. `refused` lists the uploads that the server did
+	// not extend: an unknown upload, one from another cache or push, one whose
+	// commit has started, an expired one, or one at its renewal limit. If
+	// `pushId` does not verify, every upload is refused. A refusal does not end
+	// the session.
+	z.strictObject({
+		ev: z.literal('renewed'),
+		renewed: uploadIdsSchema,
+		refused: uploadIdsSchema
 	})
 ]);
 export type CommitSessionFrame = z.output<typeof commitSessionFrameSchema>;

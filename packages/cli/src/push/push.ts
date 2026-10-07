@@ -117,6 +117,7 @@ import {
 	type ReferenceSource
 } from './reference.ts';
 import { ReferenceSnapshotDivergedError } from './reference-manifest.ts';
+import { whileRenewingUpload } from './upload-transfer.ts';
 
 export type PushStore = Pick<
 	Nix,
@@ -860,23 +861,24 @@ async function runPushFlow(
 		return { uploads: response.uploads, hasUploadGraceFacts };
 	};
 
+	const commitOptions: CommitOptions = {
+		timeoutSeconds: waitTimeoutSeconds,
+		onWaiting: capacityWaitReporter(reporter)
+	};
+	const session = await client.openCommitSession?.(commitOptions);
 	let uploadedBytes = 0;
 	const onBytes = (count: number): void => {
 		uploadedBytes += count;
 	};
 	const uploadContext: UploadContext = {
 		client,
+		session,
 		negotiated,
 		createNarArchive,
 		compressNar,
 		onBytes
 	};
 	const completedUploads = new Set<StorePathHash>();
-	const commitOptions: CommitOptions = {
-		timeoutSeconds: waitTimeoutSeconds,
-		onWaiting: capacityWaitReporter(reporter)
-	};
-	const session = await client.openCommitSession?.(commitOptions);
 	// A re-drive replaces the original outcome for the same store path. The
 	// summary therefore reports only the latest commit attempt.
 	const outcomes = new Map<StorePathHash, CommitOutcome>();
@@ -1933,6 +1935,7 @@ function describePinExpiry(summaries: readonly RootSummaryInput[]): string {
 
 interface UploadContext {
 	readonly client: PushClient;
+	readonly session: CommitSession | undefined;
 	readonly negotiated: NegotiatedPaths;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
@@ -1954,9 +1957,11 @@ async function streamNarUpload(
 		context.createNarArchive(pathInfo.storePath)
 	);
 
-	await context.client.uploadNar(
-		decision.r2Key,
-		countingByteStream(upload.body, context.onBytes)
+	await whileRenewingUpload(context.session, decision.uploadId, () =>
+		context.client.uploadNar(
+			decision.r2Key,
+			countingByteStream(upload.body, context.onBytes)
+		)
 	);
 	verifyNarMetadata(pathInfo, upload.digest());
 }
@@ -2105,9 +2110,11 @@ async function redriveExpiredCommit(
 		context.createNarArchive(pathInfo.storePath)
 	);
 
-	await context.client.uploadNar(
-		fresh.r2Key,
-		countingByteStream(upload.body, context.onBytes)
+	await whileRenewingUpload(context.session, fresh.uploadId, () =>
+		context.client.uploadNar(
+			fresh.r2Key,
+			countingByteStream(upload.body, context.onBytes)
+		)
 	);
 	verifyNarMetadata(pathInfo, upload.digest());
 	context.onUploaded(fresh.storePathHash);
