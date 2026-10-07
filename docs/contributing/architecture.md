@@ -483,7 +483,11 @@ requests below are all under the tenant URL.
    only under `staging/<pushId>/`. It can't read or list objects. It lasts at
    most six hours, and never longer than the CLI's access token.
 
-2. The CLI asks what to upload by calling `POST /uploads` with the store path,
+2. The CLI opens the commit WebSocket with `GET /commit`. This is a hibernatable
+   socket on the tenant's object. The server sends credit frames to control how
+   fast the CLI can send commits.
+
+3. The CLI asks what to upload by calling `POST /uploads` with the store path,
    NAR hash, NAR size and references of each path. The control Worker first
    reads shared facts from D1, as hints. The tenant's object then decides what
    happens to each path:
@@ -493,24 +497,38 @@ requests below are all under the tenant URL.
    - `upload`: the CLI must upload the NAR, and the response gives it a staging
      key.
 
-3. The CLI compresses each NAR with zstd and uploads it straight to R2, using an
-   S3 client. NAR bytes never pass through a Worker.
+   A pending upload expires 15 minutes after negotiation unless a commit or a
+   renewal extends it. The CLI therefore negotiates a small group of paths only
+   when an upload worker is free, with one negotiate request in flight at a
+   time. The first group has as many paths as there are upload workers. Later
+   groups grow when most decisions are `skip`.
 
-4. The CLI opens the commit WebSocket with `GET /commit`. This is a hibernatable
-   socket on the tenant's object. The CLI commits uploads one at a time or in
-   batches of up to 100. The server sends credit frames to control how fast the
-   CLI can send. If a declared NAR size is over 4 GiB, the server refuses it
-   with 413.
+4. Each upload worker compresses one NAR with zstd and uploads it straight to
+   R2, using an S3 client. NAR bytes never pass through a Worker.
+
+   While the bytes are being sent, the CLI sends a `renew-uploads` message over
+   the commit WebSocket every five minutes, if the server advertises that
+   capability. For an upload of the same push that has no verdict and has not
+   expired, the server sets the expiry to 15 minutes after the renewal, but
+   never later than six hours after negotiation.
+
+   When the upload finishes, the upload worker commits it and waits for the
+   server's acknowledgement before it takes another path. The CLI sends commits
+   one at a time or in batches of up to 100. It waits for verdicts after every
+   path has been acknowledged. If a declared NAR size is over 4 GiB, the server
+   refuses the commit with 413.
 
 5. The object records the upload as pending, and adds a `tenant-verify` job to
-   the queue. The queue consumer verifies the bytes. It claims a batch of up to
-   32 uploads, totalling at most 4 GiB of declared NAR size, and verifies two
-   uploads at a time. It reads each staged object from R2 in 1 MiB chunks and
-   passes them through native zstd decompression and SHA-256. It compares the
-   result with the NAR hash and size that the CLI declared. The same pass hashes
-   and measures the compressed bytes. This means that the stored file hash and
-   file size come from the server, not from the client. A frame that needs a
-   decoding window larger than 8 MiB counts as undecodable.
+   the queue. A committed upload whose verdict is still `committing` or
+   `pending` remains after its expiry, and a resent commit for it waits for the
+   same verification. The queue consumer verifies the bytes. It claims a batch
+   of up to 32 uploads, totalling at most 4 GiB of declared NAR size, and
+   verifies two uploads at a time. It reads each staged object from R2 in 1 MiB
+   chunks and passes them through native zstd decompression and SHA-256. It
+   compares the result with the NAR hash and size that the CLI declared. The
+   same pass hashes and measures the compressed bytes. This means that the
+   stored file hash and file size come from the server, not from the client. A
+   frame that needs a decoding window larger than 8 MiB counts as undecodable.
 
    The consumer abandons an upload when the R2 get, or one read of the staged
    object, takes longer than 60 seconds, and a later pass retries it. There is
@@ -525,8 +543,9 @@ requests below are all under the tenant URL.
    to R2, and sends the result to the CLI over the waiting WebSocket.
 
    If the bytes don't match, the object deletes the staged object and records a
-   final `mismatch` result. If the charge would take the tenant over its quota,
-   the result is `over-quota`.
+   final `mismatch` result. The same happens when R2 refuses the copy because
+   the staged object changed after verification read it. If the charge would
+   take the tenant over its quota, the result is `over-quota`.
 
 7. The push decides how long the paths are kept. It can specify a retention root
    with `--root`, pin each path with its own `pin:<hash>` root, or publish into

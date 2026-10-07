@@ -147,9 +147,19 @@ After you upload a NAR, the cache checks it before it serves the store path. By
 default, `push` waits until the cache has verified every uploaded NAR and can
 serve every store path.
 
-`push` waits for two things in turn. First it waits for the server to accept the
-push, then it waits for verification. Each wait has a limit of ten minutes. To
-change the limit, use `--wait-timeout`.
+`push` asks the cache about a few store paths at a time, as each of its parallel
+uploads (`--upload-concurrency`) finishes, and submits each store path as soon
+as its NAR is uploaded. If the cache does not receive a store path's submission
+within 15 minutes of `push` asking about it, the cache discards the upload.
+While a NAR is being sent, `push` renews the upload every five minutes, up to
+six hours after it first asked about the store path. An upload that takes less
+than six hours therefore does not expire while it is being sent.
+
+`push` waits for two things in turn. First it waits for the cache to accept each
+store path. After every store path is accepted, it waits for verification. Each
+wait has a limit of ten minutes. To change the limit, use `--wait-timeout`.
+
+With `--debug`, `push` and `build-push` report how long each NAR took to upload.
 
 To return sooner, add `--no-wait`. `push` then returns once every store path is
 accepted and its root or pin is set, without waiting for verification. If a
@@ -208,6 +218,13 @@ runs. Because of this:
 - Your command must use the same Nix store as `build-push`. Don't pass `--store`
   to a Nix command that your command runs, and don't change `NIX_REMOTE`.
   `build-push` can't see or publish outputs in a different store.
+
+### When publishing fails
+
+If `build-push` can't publish some store paths, its summary lists them by
+reason: the build, the upload, verification, removal from the local store, or
+the retention root. Each reason shows up to ten store paths and the first error,
+so you don't need `--debug` to see what failed.
 
 ### Exit statuses
 
