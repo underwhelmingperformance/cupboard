@@ -248,6 +248,10 @@ function reporter(
 	const recordWarn = (label: string, value?: string): void => {
 		warnings.push({ label, value });
 	};
+	const recordResult = (payload: ResultPayload): void => {
+		results.push([...payload.rows]);
+		payloads.push(payload);
+	};
 
 	return {
 		phase: (_label, body) =>
@@ -256,7 +260,8 @@ function reporter(
 					fact() {
 						return;
 					},
-					warn: recordWarn
+					warn: recordWarn,
+					result: recordResult
 				})
 			),
 		progress: (_label, _options, body) =>
@@ -291,10 +296,7 @@ function reporter(
 					warn: recordWarn
 				})
 			),
-		result(payload) {
-			results.push([...payload.rows]);
-			payloads.push(payload);
-		},
+		result: recordResult,
 		data() {
 			return;
 		},

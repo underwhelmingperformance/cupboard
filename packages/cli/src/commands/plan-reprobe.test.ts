@@ -2,13 +2,18 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 
 import {
 	rootNameSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import {
+	createGithubReporter,
+	type Reporter,
+	type ResultPayload
+} from '@cupboard/reporter';
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
@@ -54,8 +59,13 @@ function answers(served: readonly StorePathString[] = []): DestinationProbes {
 }
 
 function reporter(payloads: ResultPayload[]): Reporter {
+	const record = (payload: ResultPayload): void => {
+		payloads.push(payload);
+	};
+
 	return {
-		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: noop, warn: noop, result: record })),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
 		steps: (_label, body) =>
@@ -66,9 +76,7 @@ function reporter(payloads: ResultPayload[]): Reporter {
 					warn: noop
 				})
 			),
-		result(payload) {
-			payloads.push(payload);
-		},
+		result: record,
 		data: noop,
 		warn: noop,
 		info: noop,
@@ -126,6 +134,33 @@ describe('runPlanReprobe', () => {
 				data: expected,
 				rows
 			}
+		]);
+	});
+
+	it('writes the refreshed plan inside the confirmation group in GitHub mode', async () => {
+		const written: string[] = [];
+
+		await runPlanReprobe(
+			{ targets: [appTarget, otherTarget] },
+			createGithubReporter({
+				stream: new Writable({
+					write(chunk: Buffer | string, _encoding, callback) {
+						written.push(String(chunk));
+						callback();
+					}
+				})
+			}),
+			{ destinationProbes: answers([appPath]) }
+		);
+
+		expect(written).toStrictEqual([
+			'::group::Confirming the build set\n',
+			'Now available in the cache: 1\n',
+			'still to build: 1\n',
+			'Build plan refresh\n',
+			'Now available in the cache: 1\n',
+			'To build: 1\n',
+			'::endgroup::\n'
 		]);
 	});
 });

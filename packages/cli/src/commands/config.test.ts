@@ -56,6 +56,9 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 					},
 					warn() {
 						return;
+					},
+					result() {
+						return;
 					}
 				})
 			),

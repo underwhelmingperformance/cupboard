@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 
 import type {
 	Nix,
@@ -20,7 +21,11 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import type { RootEnsureResponse } from '@cupboard/protocol/retention';
-import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import {
+	createGithubReporter,
+	type Reporter,
+	type ResultPayload
+} from '@cupboard/reporter';
 import { Command } from 'commander';
 import { fetch as undiciFetch, Response } from 'undici';
 import { describe, expect, it, vi } from 'vitest';
@@ -214,8 +219,13 @@ function dependencies(
 }
 
 function reporter(payloads: ResultPayload[]): Reporter {
+	const record = (payload: ResultPayload): void => {
+		payloads.push(payload);
+	};
+
 	return {
-		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: noop, warn: noop, result: record })),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
 		steps: (_label, body) =>
@@ -226,9 +236,7 @@ function reporter(payloads: ResultPayload[]): Reporter {
 					warn: noop
 				})
 			),
-		result(payload) {
-			payloads.push(payload);
-		},
+		result: record,
 		data: noop,
 		warn: noop,
 		info: noop,
@@ -354,6 +362,61 @@ describe('runPlanCohort', () => {
 						{ label: 'Plan file', value: planFile }
 					]
 				}
+			]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('writes an outcome inside each phase group in GitHub mode', async () => {
+		const written: string[] = [];
+		const github = createGithubReporter({
+			stream: new Writable({
+				write(chunk: Buffer | string, _encoding, callback) {
+					written.push(String(chunk));
+					callback();
+				}
+			})
+		});
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const otherTarget = target({
+			attr: 'packages.x86_64-linux.other',
+			installable: otherPath,
+			expectedPath: otherPath
+		});
+		const rootClient = recordingRootClient(buildRequired([otherPath]));
+
+		try {
+			await runPlanCohort(
+				runOptions({ targets: [target(), otherTarget], planFile }),
+				github,
+				dependencies({
+					rootClient,
+					destinationServed: () => Promise.resolve(new Set([appPath]))
+				})
+			);
+
+			expect(written).toStrictEqual([
+				'::group::Checking retention roots\n',
+				'Roots retained: 0\n',
+				'Roots not yet retained: 1\n',
+				'::endgroup::\n',
+				'::group::Checking which targets need a build\n',
+				'To build: 1\n',
+				'Download size: 0 B\n',
+				'::endgroup::\n',
+				'::group::Checking store capacity\n',
+				'Substitutable NAR size: 0 B\n',
+				'Space available: 10 GB\n',
+				'Headroom: 5.37 GB\n',
+				'::endgroup::\n',
+				'Build plan\n',
+				'Already served by the cache: 1\n',
+				'Reused from the tenant: 0\n',
+				'Left to upstream caches: 0\n',
+				'To build: 1\n',
+				`Plan file: ${planFile}\n`
 			]);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });

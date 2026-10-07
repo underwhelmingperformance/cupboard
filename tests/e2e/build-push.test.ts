@@ -131,7 +131,15 @@ function recordingReporter(record: RecordedRun): Reporter {
 	};
 
 	return {
-		phase: (_label, body) => Promise.resolve(body(facts)),
+		phase: (_label, body) =>
+			Promise.resolve(
+				body({
+					...facts,
+					result() {
+						return;
+					}
+				})
+			),
 		progress: (_label, _options, body) =>
 			Promise.resolve(
 				body({

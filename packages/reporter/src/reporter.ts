@@ -1,8 +1,11 @@
 import { appendFileSync } from 'node:fs';
-import { stderr, stdout } from 'node:process';
+import { env, stderr, stdout } from 'node:process';
 
 import { errorCauses, formatErrorWithCauses } from '@cupboard/shared/errors';
-import { workflowCommands } from '@cupboard/shared/github-actions';
+import {
+	type CommandStream,
+	workflowCommands
+} from '@cupboard/shared/github-actions';
 import { z } from 'zod';
 
 const reportedErrors = new WeakSet<object>();
@@ -88,6 +91,13 @@ export interface PhaseContext {
 	 * task log shows it live and repeats it after the task closes.
 	 */
 	warn(label: string, value?: string, presentation?: MessagePresentation): void;
+	/**
+	 * Reports a result of this phase. Each mode outputs it when the phase ends,
+	 * whether the phase succeeds or fails. GitHub mode writes it inside the
+	 * phase's group after the facts. Terminal mode renders it after the spinner
+	 * stops, and JSON mode emits it after the phase event.
+	 */
+	result(payload: ResultPayload): void;
 }
 
 export interface ProgressHandle {
@@ -134,22 +144,88 @@ export interface ResultRow {
 	readonly raw?: boolean;
 }
 
+export interface ResultColumn<K extends string> {
+	readonly key: K;
+	readonly label: string;
+}
+
+/**
+ * A display-only table with one cell in each row for every column, in column
+ * order. Build one with {@link ResultTable.of}.
+ */
+export class ResultTable {
+	/**
+	 * Builds a table from rows keyed by the columns' keys. The columns specify
+	 * the keys read from each row. Every row must provide those keys, and other
+	 * properties are ignored.
+	 */
+	static of<const K extends string>(
+		columns: readonly ResultColumn<K>[],
+		rows: readonly Readonly<Record<NoInfer<K>, string>>[]
+	): ResultTable {
+		return new ResultTable(
+			columns.map((column) => column.label),
+			rows.map((row) => columns.map((column) => row[column.key]))
+		);
+	}
+
+	private constructor(
+		readonly columns: readonly string[],
+		readonly rows: readonly (readonly string[])[]
+	) {}
+
+	/**
+	 * Returns the column labels and then each row as plain text, with the cells
+	 * padded to align the columns. `measure` gives a cell's display width.
+	 */
+	lines(measure: (text: string) => number = (text) => text.length): string[] {
+		const widths = this.columns.map((label, index) =>
+			Math.max(
+				measure(label),
+				...this.rows.map((row) => measure(row[index] ?? ''))
+			)
+		);
+
+		return [this.columns, ...this.rows].map((cells) =>
+			cells
+				.map(
+					(cell, index) =>
+						`${cell}${' '.repeat((widths[index] ?? 0) - measure(cell))}`
+				)
+				.join('  ')
+				.trimEnd()
+		);
+	}
+}
+
 /**
  * `kind` and `data` are the stable machine result. JSON mode emits them as a
  * result event, and every mode appends them to `resultFile` when configured.
- * Terminal mode renders `rows` as a card; GitHub mode writes them as plain
- * `label: value` lines. Rows and `empty` are display-only.
+ * The other fields are display-only.
+ *
+ * Terminal mode renders `rows` and `table` as a card. GitHub mode writes the
+ * title, then `rows` as `label: value` lines, then `table` as aligned columns.
+ * When a phase reports the result through {@link PhaseContext.result}, GitHub
+ * mode writes it inside the phase's group.
  */
 export interface ResultPayload<T = unknown> {
 	readonly kind: string;
 	readonly title?: string;
 	readonly data: T;
 	readonly rows: readonly ResultRow[];
+	readonly table?: ResultTable;
 	/**
-	 * Terminal and GitHub modes render this text when `rows` is empty. JSON mode
-	 * still emits the empty `data` value.
+	 * Terminal and GitHub modes render this text when neither `rows` nor
+	 * `table` has a row. JSON mode still emits the empty `data` value.
 	 */
 	readonly empty?: string;
+	/**
+	 * When this is true and `GITHUB_STEP_SUMMARY` is set, GitHub mode also
+	 * appends the result to that file as markdown: a heading from the title, a
+	 * two-column table for `rows`, followed by a table for `table`. The other
+	 * modes ignore it.
+	 */
+	readonly jobSummary?: boolean;
 }
 
 export interface Reporter {
@@ -235,6 +311,16 @@ export interface ReporterOptions {
 	 * Defaults to the error message and its causes.
 	 */
 	readonly formatError?: (error: unknown) => string;
+	/**
+	 * The environment from which GitHub mode reads `GITHUB_STEP_SUMMARY`.
+	 * Defaults to `process.env`.
+	 */
+	readonly environment?: Readonly<Record<string, string | undefined>>;
+	/**
+	 * Appends text to a file. Every mode uses it for `resultFile`, and GitHub
+	 * mode also uses it for the job summary. Defaults to `appendFileSync`.
+	 */
+	readonly appendFile?: (path: string, text: string) => void;
 }
 
 export const reporterResultEventSchema = z.strictObject({
@@ -301,15 +387,20 @@ function parseResultLine(line: string): ReporterResultEvent | undefined {
  */
 export function appendResultEvent(
 	resultFile: string,
-	payload: ResultPayload
+	payload: ResultPayload,
+	appendFile: (path: string, text: string) => void = appendFileSync
 ): void {
-	appendFileSync(
+	appendFile(
 		resultFile,
 		`${JSON.stringify({ kind: payload.kind, data: payload.data })}\n`
 	);
 }
 
-function resultAppender(resultFile?: string): (payload: ResultPayload) => void {
+function resultAppender(
+	options: Pick<ReporterOptions, 'resultFile' | 'appendFile'>
+): (payload: ResultPayload) => void {
+	const { resultFile, appendFile } = options;
+
 	if (resultFile === undefined) {
 		return () => {
 			// Intentionally empty result appender.
@@ -317,7 +408,7 @@ function resultAppender(resultFile?: string): (payload: ResultPayload) => void {
 	}
 
 	return (payload) => {
-		appendResultEvent(resultFile, payload);
+		appendResultEvent(resultFile, payload, appendFile);
 	};
 }
 
@@ -338,7 +429,7 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
 		options.stream ?? stderr,
 		options.out ?? stdout,
 		options.now ?? (() => Date.now()),
-		resultAppender(options.resultFile),
+		resultAppender(options),
 		options.presentation ?? 'summary'
 	);
 }
@@ -349,7 +440,8 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
  * both streams. When `GITHUB_ACTIONS=true`, phases and tasks use workflow
  * groups and warnings, successes and failures use command annotations.
  * Otherwise the shared command emitter degrades them to plain lines. Results
- * use `label: value` lines in either environment.
+ * use `label: value` lines and aligned table columns in either environment,
+ * and a result marked with `jobSummary` is also appended to the job summary.
  */
 export function createGithubReporter(options: ReporterOptions = {}): Reporter {
 	return buildGithubReporter(options);
@@ -380,10 +472,16 @@ function createJsonReporter(
 		);
 	}
 
+	function emitResult(payload: ResultPayload): void {
+		emit({ event: 'result', kind: payload.kind, data: payload.data });
+		recordResult(payload);
+	}
+
 	return {
 		presentation,
 		async phase(label, body) {
 			const facts: Record<string, string> = {};
+			const results: ResultPayload[] = [];
 			const startedAt = now();
 			// Start the interval clock with the phase, so short phases emit only the
 			// final event.
@@ -408,7 +506,10 @@ function createJsonReporter(
 							facts
 						});
 					},
-					warn: emitWarn
+					warn: emitWarn,
+					result(payload) {
+						results.push(payload);
+					}
 				});
 
 				emit({
@@ -430,6 +531,10 @@ function createJsonReporter(
 				});
 
 				throw error;
+			} finally {
+				for (const payload of results) {
+					emitResult(payload);
+				}
 			}
 		},
 
@@ -552,10 +657,7 @@ function createJsonReporter(
 			}
 		},
 
-		result(payload) {
-			emit({ event: 'result', kind: payload.kind, data: payload.data });
-			recordResult(payload);
-		},
+		result: emitResult,
 
 		data(text) {
 			out.write(`${text}\n`);
@@ -600,16 +702,26 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 	const stream = options.stream ?? stderr;
 	const out = options.out ?? stdout;
 	const now = options.now ?? (() => Date.now());
-	const recordResult = resultAppender(options.resultFile);
+	const recordResult = resultAppender(options);
+	const appendJobSummary = jobSummaryAppender(options);
 	const formatError = options.formatError ?? formatErrorWithCauses;
 
+	// Write through `counted` so `endGroup` can tell whether anything appeared
+	// in a group.
+	let writes = 0;
+	const counted: CommandStream = {
+		write(chunk) {
+			writes += 1;
+			return stream.write(chunk);
+		}
+	};
 	const commands = workflowCommands({
-		stdout: stream,
-		stderr: stream,
+		stdout: counted,
+		stderr: counted,
 		rendering: 'workflow'
 	});
 	const line = (text: string): void => {
-		stream.write(`${text}\n`);
+		counted.write(`${text}\n`);
 	};
 
 	const emitWarn = (
@@ -633,6 +745,39 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 		for (const [label, value] of facts) {
 			line(`${label}: ${value}`);
 		}
+	};
+
+	const writeResult = (payload: ResultPayload): void => {
+		if (payload.title !== undefined) {
+			line(payload.title);
+		}
+
+		const lines = [
+			...payload.rows.map((row) => `${row.label}: ${row.value}`),
+			...(payload.table === undefined || payload.table.rows.length === 0
+				? []
+				: payload.table.lines())
+		];
+
+		if (lines.length === 0 && payload.empty !== undefined) {
+			line(payload.empty);
+		}
+		for (const text of lines) {
+			line(text);
+		}
+
+		recordResult(payload);
+		appendJobSummary(payload);
+	};
+
+	// Writes a duration line into a successful group that would otherwise be
+	// empty. A failed group closes with `commands.endGroup` instead, because a
+	// duration line there would read as success.
+	const endGroup = (openedAtWrite: number, startedAt: number): void => {
+		if (writes === openedAtWrite) {
+			line(`Completed in ${formatDuration(now() - startedAt)}`);
+		}
+		commands.endGroup();
 	};
 
 	const addGroup = (name: string, display?: LabelPresentation): StepGroup => {
@@ -676,13 +821,28 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 
 	return {
 		presentation,
-		async phase(label, body, display) {
+		async phase<T>(
+			label: string,
+			body: (context: PhaseContext) => Promise<T> | T,
+			display?: LabelPresentation
+		): Promise<T> {
 			commands.group(display?.humanLabel ?? label);
 
+			const openedAtWrite = writes;
+			const startedAt = now();
 			const facts = new Map<string, string>();
+			const results: ResultPayload[] = [];
+			const writeOutcome = (): void => {
+				emitFacts(facts);
+				for (const payload of results) {
+					writeResult(payload);
+				}
+			};
+
+			let value: T;
 
 			try {
-				const value = await body({
+				value = await body({
 					fact(factLabel, factValue, display) {
 						if (!shouldDisplay(presentation, display?.level)) {
 							return;
@@ -692,20 +852,23 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 							String(display?.humanValue ?? factValue)
 						);
 					},
-					warn: emitWarn
+					warn: emitWarn,
+					result(payload) {
+						results.push(payload);
+					}
 				});
-
-				emitFacts(facts);
-				commands.endGroup();
-
-				return value;
 			} catch (error) {
-				emitFacts(facts);
+				writeOutcome();
 				const reportedError = emitError(error);
 				commands.endGroup();
 
 				throw reportedError;
 			}
+
+			writeOutcome();
+			endGroup(openedAtWrite, startedAt);
+
+			return value;
 		},
 
 		async progress(label, options, body) {
@@ -765,6 +928,9 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 		async steps(label, body, display) {
 			commands.group(display?.humanLabel ?? label);
 
+			const openedAtWrite = writes;
+			const startedAt = now();
+
 			try {
 				const value = await body({
 					message: humanLine,
@@ -772,7 +938,7 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 					warn: emitWarn
 				});
 
-				commands.endGroup();
+				endGroup(openedAtWrite, startedAt);
 
 				return value;
 			} catch (error) {
@@ -783,24 +949,10 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 			}
 		},
 
-		result(payload) {
-			if (payload.title !== undefined) {
-				line(payload.title);
-			}
-			if (payload.rows.length === 0) {
-				if (payload.empty !== undefined) {
-					line(payload.empty);
-				}
-			} else {
-				for (const row of payload.rows) {
-					line(`${row.label}: ${row.value}`);
-				}
-			}
-
-			recordResult(payload);
-		},
+		result: writeResult,
 
 		data(text) {
+			writes += 1;
 			out.write(`${text}\n`);
 		},
 
@@ -821,6 +973,80 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 			emitError(error);
 		}
 	};
+}
+
+function jobSummaryAppender(
+	options: Pick<ReporterOptions, 'environment' | 'appendFile'>
+): (payload: ResultPayload) => void {
+	const summaryFile = (options.environment ?? env).GITHUB_STEP_SUMMARY;
+
+	if (summaryFile === undefined || summaryFile === '') {
+		return () => {
+			// Intentionally empty job summary appender.
+		};
+	}
+
+	const appendFile = options.appendFile ?? appendFileSync;
+
+	return (payload) => {
+		if (payload.jobSummary !== true) {
+			return;
+		}
+
+		appendFile(summaryFile, jobSummaryMarkdown(payload));
+	};
+}
+
+function jobSummaryMarkdown(payload: ResultPayload): string {
+	const rows = payload.rows.filter(
+		(row) => row.label !== '' || row.value !== ''
+	);
+	const tables = [
+		...(rows.length === 0
+			? []
+			: [
+					markdownTable(
+						['', ''],
+						rows.map((row) => [row.label, row.value])
+					)
+				]),
+		...(payload.table === undefined || payload.table.rows.length === 0
+			? []
+			: [markdownTable(payload.table.columns, payload.table.rows)])
+	];
+	const body =
+		tables.length === 0 && payload.empty !== undefined
+			? [markdownText(payload.empty)]
+			: tables;
+
+	return [`### ${markdownText(payload.title ?? payload.kind)}`, ...body]
+		.map((block) => `${block}\n\n`)
+		.join('');
+}
+
+function markdownTable(
+	columns: readonly string[],
+	rows: readonly (readonly string[])[]
+): string {
+	return [
+		markdownTableRow(columns.map((column) => markdownText(column))),
+		markdownTableRow(columns.map(() => '---')),
+		...rows.map((cells) =>
+			markdownTableRow(cells.map((cell) => markdownText(cell)))
+		)
+	].join('\n');
+}
+
+function markdownTableRow(cells: readonly string[]): string {
+	return `| ${cells.join(' | ')} |`;
+}
+
+// Escape the characters that start markdown inline syntax or end a table cell.
+// A table cell must stay on one line, so line breaks become `<br>`.
+function markdownText(text: string): string {
+	return text
+		.replaceAll(/[\\`*_[\]<>|~&]/g, String.raw`\$&`)
+		.replaceAll(/\r\n|\r|\n/g, '<br>');
 }
 
 export function formatDuration(milliseconds: number): string {

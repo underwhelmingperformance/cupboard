@@ -6903,6 +6903,113 @@ negotiates again.
 - For each behaviour, write a failing test first, and require `pnpm check` to
   pass after the change.
 
+## Publication run output
+
+Release this after access-checked blob reuse.
+
+### Context
+
+The logs of a publication run record each mechanism but rarely say what the run
+built, where it published, what failed, or why. The run summary page shows two
+lines from the plan job. A cohort job's log on a real flake runs to between
+12,000 and 26,000 lines, most of them Nix fetch and build output.
+
+Specific faults seen on a dotfiles pull-request run:
+
+- A best-effort target failed, and the job finished green with a `failure`
+  annotation, "The build command failed with status 1". The accompanying warning
+  gave a `.drv` path, not the target. The failing derivation's error appeared
+  about 3,600 lines earlier.
+- Each target's build and publication groups and its result block omit the
+  target's attribute and root. The x86_64 cohort printed fifteen blocks that
+  look the same.
+- Several groups are empty, because the reporter prints phase results after
+  `::endgroup::`.
+- The counts measure different things without saying so. A target that the run
+  downloaded from the tenant's cache reports "Uploaded paths: 1". The build
+  phase of a target reports 1,968 uploaded paths, and the root phase for the
+  same target then reports "Uploaded paths: 0". `attest-status` reports 586
+  paths with matching attestations against 458 signed in this run and 288 signed
+  earlier.
+- Each path line says "kept until" the next day, next to a root that expires in
+  two weeks.
+- The signing step prints eleven fixed lines about the Sigstore services for
+  both Sigstore instances, but neither the attestation URL nor the log entry.
+- Three attestation steps run for two to three and a half minutes each without
+  printing anything.
+
+### Decisions
+
+- Every job writes a job summary. The configure job lists the publication
+  settings and the `nix.conf` lines for the cache. The plan job lists each
+  cohort's targets and what the plan decided for each. Each cohort job has one
+  row per target.
+- Phase results appear inside their groups, and a successful group with no other
+  output prints its duration.
+- A best-effort failure is a warning that identifies the target, the root and
+  the first derivation that failed. A job that succeeds emits no error
+  annotation.
+- The log prints what the configure job decided and what the attestation steps
+  did. Fixed explanations go into the documentation.
+
+### Implementation sequence
+
+1. [x] In the GitHub reporter, print each phase's result inside the phase's
+       group, and add job-summary output that writes results as markdown tables
+       to `GITHUB_STEP_SUMMARY`. Terminal results still appear after the spinner
+       stops, and JSON result events still follow the phase event.
+2. [ ] Write the job summaries: the configure job's settings and `nix.conf`
+       lines, the plan job's cohorts and targets with each decision, and one row
+       per target in each cohort job. A cohort row gives the attribute, root,
+       outcome, paths and bytes uploaded, duration, root expiry and attestation
+       link.
+3. [ ] Print the configure job's settings, the release or source that
+       `resolve-cupboard` chose, and the operation that "select cache operation"
+       chose. Remove the notice that a reuse view applies only to branch runs.
+4. [ ] Give cohort jobs readable names, such as
+       `x86_64-linux on nixbuild.net (8 targets)`. The matrix key remains the
+       job's identity.
+5. [ ] In `build-push` and `build-cohort`, give each target's attribute and root
+       in its group and result titles. Drop the "Store" and "Targets" rows and
+       "roots: 0/0 replaced". Count only uploads as uploaded, give the reasons
+       for paths without an upload, and add bytes and duration. Print one result
+       for each target that combines build-time publication and the root update.
+6. [ ] In the push result, show the root's expiry for a path that a root
+       retains, list the target outputs first, and upload the full JSON result
+       as a workflow artifact whose name the truncation line gives.
+7. [ ] Report each failed best-effort target as one warning with its attribute,
+       root, first failing derivation and the `nix log` command for that
+       derivation. Take the derivation from the `json-log-path` activity log.
+       Emit no error annotation from a job that succeeds, and add a summary row
+       for the failure.
+8. [ ] Replace the Sigstore disclosure with the instance used, the number of
+       subjects, the GitHub attestation URL and the Rekor log index, and move
+       the explanation to the attestation guide. Summarise `attest-attach` and
+       `attest-status` by category, cap their path lists inside collapsed
+       groups, fix the overlapping counts and the plural, and print progress in
+       the subject, attach and status phases.
+9. [ ] Group the Nix output when the setup action builds cupboard from source,
+       and print the outcome on one line. Fill the release groups with the
+       version, archive size, checksum and attestation signer. In the cache
+       result, print durations in days and hours, say whether the cache was
+       created or already existed, and remove the repeated heading.
+10. [ ] Share or group the toolchain, pnpm, Node and install steps that eight
+        actions repeat, and move long inline `run:` scripts into script files so
+        that the log echoes one line for each.
+11. [ ] Group the manifest evaluation and each cohort's evaluation. Stop Git
+        fetch progress inside Nix fetchers, collapse "copying 0 paths", and find
+        out why `build-paths` evaluates its installable twice.
+12. [ ] Print each push progress line once, explain the zero count of accepted
+        paths before submission, and add duration and throughput.
+
+### Verification
+
+- Each behaviour has a test written to fail first, and `pnpm check` and the
+  pipeline tier pass.
+- A dotfiles pull-request run and a `main` run show the job summaries, the
+  readable job names, and a best-effort failure as one warning with its target
+  and failing derivation.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.

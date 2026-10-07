@@ -115,19 +115,22 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 			options
 		);
 	};
+	const recordResult = (payload: ResultPayload): void => {
+		captured.results.push(payload);
+	};
 	let multiSelectIndex = 0;
 
 	const reporter: Reporter = {
 		presentation,
 		phase: (_label, body) =>
-			Promise.resolve(body({ fact: noop, warn: recordWarn })),
+			Promise.resolve(
+				body({ fact: noop, warn: recordWarn, result: recordResult })
+			),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: noop, fact: noop, warn: recordWarn })),
 		steps: (_label, body) =>
 			Promise.resolve(body({ ...silentStepLog, warn: recordWarn })),
-		result: (payload) => {
-			captured.results.push(payload);
-		},
+		result: recordResult,
 		data: (text) => {
 			captured.data.push(text);
 		},
@@ -246,20 +249,23 @@ export function capturingReporter(
 	infos: string[] = [],
 	warns: string[] = []
 ): Reporter {
+	const recordResult = (payload: ResultPayload): void => {
+		results.push([...payload.rows]);
+
+		// Match terminal rendering by recording an empty result's message with
+		// other informational lines.
+		if (payload.rows.length === 0 && payload.empty !== undefined) {
+			infos.push(payload.empty);
+		}
+	};
+
 	return {
-		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: noop, warn: noop, result: recordResult })),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
 		steps: (_label, body) => Promise.resolve(body(silentStepLog)),
-		result: (payload) => {
-			results.push([...payload.rows]);
-
-			// Match terminal rendering by recording an empty result's message with
-			// other informational lines.
-			if (payload.rows.length === 0 && payload.empty !== undefined) {
-				infos.push(payload.empty);
-			}
-		},
+		result: recordResult,
 		data: noop,
 		warn: (label, value, options) => {
 			if (!shouldDisplay('summary', options?.level)) {

@@ -289,6 +289,9 @@ function recordingReporter(record: RecordedRun): Reporter {
 	const recordWarn = (label: string, value?: string): void => {
 		record.warnings.push({ label, value });
 	};
+	const recordResult = (payload: ResultPayload): void => {
+		record.results.push(payload);
+	};
 
 	return {
 		phase: (label, body) => {
@@ -299,7 +302,8 @@ function recordingReporter(record: RecordedRun): Reporter {
 					fact() {
 						return;
 					},
-					warn: recordWarn
+					warn: recordWarn,
+					result: recordResult
 				})
 			);
 		},
@@ -335,9 +339,7 @@ function recordingReporter(record: RecordedRun): Reporter {
 					warn: recordWarn
 				})
 			),
-		result(payload) {
-			record.results.push(payload);
-		},
+		result: recordResult,
 		data() {
 			return;
 		},
@@ -1057,7 +1059,7 @@ function ignore(): void {
 function infoReporter(info: { lines: number }): Reporter {
 	return {
 		phase: (_label, body) =>
-			Promise.resolve(body({ fact: ignore, warn: ignore })),
+			Promise.resolve(body({ fact: ignore, warn: ignore, result: ignore })),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: ignore, fact: ignore, warn: ignore })),
 		steps: (_label, body) =>

@@ -229,7 +229,10 @@ function recordingReporter(warnings: string[]): Reporter {
 					fact() {
 						return;
 					},
-					warn: recordWarn
+					warn: recordWarn,
+					result() {
+						return;
+					}
 				})
 			),
 		progress: (_label, _options, body) =>

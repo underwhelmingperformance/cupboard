@@ -250,6 +250,9 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 						warn: (label, value) => {
 							uiCalls.push({ method: 'reporter.warn' });
 							warnings.push(value === undefined ? label : `${label}: ${value}`);
+						},
+						result: () => {
+							unscriptedInteractiveCalls.push({ method: 'result' });
 						}
 					})
 				),

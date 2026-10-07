@@ -191,7 +191,7 @@ async function runDeploy(
 
 const silentReporter: Reporter = {
 	phase: (_label, body) =>
-		Promise.resolve(body({ fact: vi.fn(), warn: vi.fn() })),
+		Promise.resolve(body({ fact: vi.fn(), warn: vi.fn(), result: vi.fn() })),
 	progress: (_label, _options, body) =>
 		Promise.resolve(body({ advance: vi.fn(), fact: vi.fn(), warn: vi.fn() })),
 	steps: (_label, body) =>
@@ -221,7 +221,8 @@ function factReporter(facts: [string, unknown][]): Reporter {
 					fact: (label, value) => {
 						facts.push([label, value]);
 					},
-					warn: vi.fn()
+					warn: vi.fn(),
+					result: vi.fn()
 				})
 			)
 	};
@@ -1267,7 +1268,8 @@ describe('runDeploy', () => {
 							fact: vi.fn(),
 							warn: (label, value) => {
 								warnings.push(`${label}: ${value ?? ''}`);
-							}
+							},
+							result: vi.fn()
 						})
 					)
 			},

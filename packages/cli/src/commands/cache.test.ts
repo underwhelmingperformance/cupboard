@@ -1,3 +1,5 @@
+import { Writable } from 'node:stream';
+
 import {
 	capturingReporter as reporter,
 	fakeCliUi
@@ -15,7 +17,7 @@ import {
 	type CacheSummaryInput,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
-import type { ResultRow } from '@cupboard/reporter';
+import { createGithubReporter, type ResultRow } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
@@ -462,6 +464,40 @@ describe('runCacheCreate', () => {
 				]
 			]
 		});
+	});
+
+	it('writes the cache inside the creation group in GitHub mode', async () => {
+		const written: string[] = [];
+
+		await runCacheCreate(
+			{
+				cache: { kind: 'named', name: cacheName('pr-454') },
+				access: 'private',
+				priority: cachePrioritySchema.parse(30)
+			},
+			createGithubReporter({
+				stream: new Writable({
+					write(chunk: Buffer | string, _encoding, callback) {
+						written.push(String(chunk));
+						callback();
+					}
+				})
+			}),
+			cacheClient({})
+		);
+
+		expect(written).toStrictEqual([
+			'::group::Creating cache\n',
+			'Cache\n',
+			'Cache: pr-454\n',
+			'Access: private\n',
+			'Priority: 30\n',
+			'Store paths: 0\n',
+			'Default root retention: permanent\n',
+			'Grace: none\n',
+			'Retention by root prefix: none\n',
+			'::endgroup::\n'
+		]);
 	});
 
 	it('refuses an existing cache without --if-absent', async () => {

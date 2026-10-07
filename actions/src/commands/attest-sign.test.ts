@@ -269,7 +269,7 @@ const oversizedSigner: NonNullable<AttestSignDependencies['signerFor']> = () =>
 function recordingReporter(reported: string[]): Reporter {
 	return {
 		phase: (_label, body) =>
-			Promise.resolve(body({ fact: ignore, warn: ignore })),
+			Promise.resolve(body({ fact: ignore, warn: ignore, result: ignore })),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: ignore, fact: ignore, warn: ignore })),
 		steps: (_label, body) =>

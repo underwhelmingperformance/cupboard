@@ -24,7 +24,7 @@ import type {
 	RootEnsureResponse,
 	RootRetentionRequest
 } from '@cupboard/protocol/retention';
-import type { Reporter } from '@cupboard/reporter';
+import { formatBytes, formatCount, type Reporter } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import type { ReadUser } from '@cupboard/shared/http';
 import { type Command, InvalidArgumentError } from 'commander';
@@ -585,14 +585,25 @@ export async function runPlanCohort(
 			throw new TypeError('A root client is required when publishing paths');
 		}
 
-		await reporter.phase('Checking retention roots', () =>
-			ensureCohortRoots(
+		await reporter.phase('Checking retention roots', async (phase) => {
+			const roots = await ensureCohortRoots(
 				options.targets,
 				options.cache,
 				options.retention,
 				rootClient
-			)
-		);
+			);
+			const responses = roots.values().toArray();
+			const retained = responses.filter(
+				(response) => response.status === 'retained'
+			).length;
+
+			phase.fact('retained', formatCount(retained), {
+				humanLabel: 'Roots retained'
+			});
+			phase.fact('build required', formatCount(responses.length - retained), {
+				humanLabel: 'Roots not yet retained'
+			});
+		});
 	}
 	const availabilityTargets: AvailabilityTarget[] = options.targets.map(
 		(target) => ({
@@ -613,8 +624,8 @@ export async function runPlanCohort(
 	try {
 		partition = await reporter.phase(
 			'Computing the availability partition',
-			() =>
-				partitionAvailability({
+			async (phase) => {
+				const computed = await partitionAvailability({
 					targets: availabilityTargets,
 					build: options.build ?? 'missing',
 					substituter: options.substituter ?? 'leave',
@@ -650,7 +661,17 @@ export async function runPlanCohort(
 					requeryUnknown: dependencies.requeryUnknown,
 					confirmUpstreamAvailability: dependencies.confirmUpstreamAvailability,
 					ceiling: options.ceiling
-				}),
+				});
+
+				phase.fact('to build', formatCount(computed.buildSet.length), {
+					humanLabel: 'To build'
+				});
+				phase.fact('download size', formatBytes(computed.downloadSize), {
+					humanLabel: 'Download size'
+				});
+
+				return computed;
+			},
 			{ humanLabel: 'Checking which targets need a build' }
 		);
 	} catch (error) {
@@ -769,8 +790,8 @@ async function checkLocalCapacity(
 	dependencies: PlanCohortDependencies
 ): Promise<CapacityCheckResult> {
 	try {
-		return await reporter.phase('Checking store capacity', () =>
-			checkStoreCapacity({
+		return await reporter.phase('Checking store capacity', async (phase) => {
+			const capacity = await checkStoreCapacity({
 				measurement: {
 					downloadSize: partition.downloadSize,
 					narSize: partition.narSize,
@@ -780,8 +801,20 @@ async function checkLocalCapacity(
 				probe: dependencies.capacityProbe,
 				detected: options.detected,
 				...(options.headroom !== undefined && { headroom: options.headroom })
-			})
-		);
+			});
+
+			phase.fact('needed', formatBytes(partition.narSize), {
+				humanLabel: 'Substitutable NAR size'
+			});
+			phase.fact('available', formatBytes(capacity.available), {
+				humanLabel: 'Space available'
+			});
+			phase.fact('headroom', formatBytes(capacity.headroom), {
+				humanLabel: 'Headroom'
+			});
+
+			return capacity;
+		});
 	} catch (error) {
 		if (error instanceof StoreCapacityError) {
 			const refusal: PlanCohortRefusal = {
