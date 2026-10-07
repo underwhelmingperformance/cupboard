@@ -62,7 +62,7 @@ function substitutionDescription(substitution: Substitution): string {
 
 function rootDescription(root: Binding): string {
 	if (root.equalsTemplate !== undefined) {
-		return `From template ${root.equalsTemplate} (a resolved value ending in / allows that root and descendants; otherwise only that exact root)`;
+		return `From template ${root.equalsTemplate}${root.equalsTemplate.endsWith('/') ? ' (resolved root and descendants)' : ' (exact resolved root)'}`;
 	}
 	return `${root.exact ?? '(unspecified)'}${root.exact?.endsWith('/') === true ? ' (root and descendants)' : ' (exact root)'}`;
 }

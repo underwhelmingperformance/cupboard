@@ -400,6 +400,62 @@ describe('root selectors at issuance', () => {
 			)
 		).toBe(expected);
 	});
+
+	it.each([
+		{
+			equalsTemplate: 'ci/{w}',
+			workflow: 'release',
+			root: 'ci/release',
+			expected: true
+		},
+		{
+			equalsTemplate: 'ci/{w}',
+			workflow: 'release/',
+			root: 'ci/release/',
+			expected: false
+		},
+		{
+			equalsTemplate: 'ci/{w}',
+			workflow: 'release/',
+			root: 'ci/release/result',
+			expected: false
+		},
+		{
+			equalsTemplate: 'ci/{w}/',
+			workflow: 'release',
+			root: 'ci/release/result',
+			expected: true
+		}
+	])(
+		'returns $expected for root $root with template $equalsTemplate and workflow claim $workflow',
+		({ equalsTemplate, workflow, root, expected }) => {
+			const permitted = grant({
+				type: 'cupboard_cache',
+				actions: ['root:set'],
+				resources: {
+					cache: { kind: 'default' },
+					root: {
+						equalsTemplate,
+						substitutions: { w: { claim: 'workflow' } },
+						validate: 'rootName'
+					}
+				}
+			});
+
+			expect(
+				isGrantPermittedByRule(
+					[permitted],
+					request({
+						type: 'cupboard_cache',
+						actions: ['root:set'],
+						cache: { kind: 'default' },
+						root
+					}),
+					{ workflow }
+				)
+			).toBe(expected);
+		}
+	);
 });
 
 describe('view content-read issuance', () => {
