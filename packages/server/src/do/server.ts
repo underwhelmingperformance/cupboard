@@ -208,6 +208,7 @@ import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
+import { RefreshSessionsService } from './refresh-sessions-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RetryClockService } from './retry-clock-service.ts';
 import {
@@ -519,6 +520,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly cacheRegistration: CacheRegistrationService;
 	private readonly garbageCollection: GarbageCollectionService;
 	private readonly tokenExchange: TokenExchangeService;
+	private readonly refreshSessions: RefreshSessionsService;
 	private readonly uploads: UploadsService;
 	private readonly commitPipeline: CommitPipelineService;
 	private readonly verification: VerificationService;
@@ -586,6 +588,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.oidcTrust,
 			() => this.reconcileMaintenanceEligibility()
 		);
+		this.refreshSessions = new RefreshSessionsService(this.context);
 		this.roots = new RootsService(
 			this.context,
 			this.cacheRegistration,
@@ -1492,6 +1495,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			cacheAdmin: this.cacheAdmin,
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
+			refreshSessions: this.refreshSessions,
 			retention: this.retention,
 			legacyRetention: this.legacyRetention,
 			reuseViews: this.reuseViews,

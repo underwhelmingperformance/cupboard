@@ -51,6 +51,7 @@ import { registerPushCommand } from './commands/push.ts';
 import { registerReuseViewCommands } from './commands/reuse-view.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerRunCommand } from './commands/run.ts';
+import { registerSessionCommands } from './commands/session.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
 import { registerWhoamiCommand } from './commands/whoami.ts';
@@ -203,6 +204,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerConfirmCommand(program, options);
 	registerKeyCommands(program, options);
 	registerAuthKeyCommands(program, options);
+	registerSessionCommands(program, options);
 	registerControlKeyCommands(program, options);
 	registerControlOidcTrustCommands(program, options);
 	registerTenantCommands(program, options);

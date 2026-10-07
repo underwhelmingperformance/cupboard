@@ -14,6 +14,11 @@ import {
 } from '@cupboard/protocol/attestations';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
+import {
+	oidcIssuerSchema,
+	oidcSubjectSchema,
+	trustRuleIdSchema
+} from '@cupboard/protocol/oidc';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { uploadActionDecisionSchema } from '@cupboard/protocol/upload';
 import { createORPCClient, ORPCError, safe } from '@orpc/client';
@@ -1789,6 +1794,134 @@ describe('tenant contract round trip', () => {
 
 		expect(error).toBeInstanceOf(ORPCError);
 		expect(error).toMatchObject({
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN
+		});
+	});
+
+	it('lists and revokes refresh sessions through the derived client', async () => {
+		await useTestServer('contract-sessions');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const owned = '00000000-0000-4000-8000-000000000001';
+		const unknown = '00000000-0000-4000-8000-000000000002';
+		const expired = '00000000-0000-4000-8000-000000000003';
+		const createdAt = isoTimestamp(new Date('2019-01-01T00:00:00.000Z'));
+		const expiresAt = isoTimestamp(new Date('2099-01-01T00:00:00.000Z'));
+
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db.transaction((transaction) => {
+				transaction
+					.insert(schema.refreshTokenFamilies)
+					.values([
+						{
+							id: owned,
+							activeMemberId: 'owned-member',
+							generation: 0,
+							createdAt,
+							expiresAt,
+							issuer: oidcIssuerSchema.parse('https://idp.example'),
+							subject: oidcSubjectSchema.parse('alice'),
+							rule: trustRuleIdSchema.parse('admin')
+						},
+						{
+							id: unknown,
+							activeMemberId: 'unknown-member',
+							generation: 2,
+							createdAt,
+							expiresAt
+						},
+						{
+							id: expired,
+							activeMemberId: 'expired-member',
+							generation: 0,
+							createdAt,
+							expiresAt: isoTimestamp(new Date('2020-01-01T00:00:00.000Z'))
+						}
+					])
+					.run();
+				transaction
+					.insert(schema.refreshTokenMembers)
+					.values({
+						id: 'owned-member',
+						familyId: owned,
+						generation: 0,
+						credentialHash: '0'.repeat(64),
+						createdAt
+					})
+					.run();
+			});
+		});
+
+		const listed = await client.sessions.list();
+		const revoked = await client.sessions.revoke({ id: owned });
+		const repeated = await client.sessions.revoke({ id: owned });
+		const remaining = await client.sessions.list();
+		const members = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db.select().from(schema.refreshTokenMembers).all()
+		);
+		const unknownSession = {
+			id: unknown,
+			createdAt,
+			expiresAt
+		};
+
+		expect({ listed, revoked, repeated, remaining, members }).toStrictEqual({
+			listed: {
+				sessions: [
+					{
+						id: owned,
+						issuer: 'https://idp.example',
+						subject: 'alice',
+						rule: 'admin',
+						createdAt,
+						expiresAt
+					},
+					unknownSession
+				]
+			},
+			revoked: { id: owned, revoked: true },
+			repeated: { id: owned, revoked: false },
+			remaining: { sessions: [unknownSession] },
+			members: []
+		});
+	});
+
+	it('lists sessions with only session:list', async () => {
+		await useTestServer('contract-session-list-scope');
+		await bootstrap();
+		const client = tenantClient(
+			await issueServerSignedToken([
+				{ type: 'cupboard_domain', actions: ['session:list'] }
+			])
+		);
+
+		expect(await client.sessions.list()).toStrictEqual({ sessions: [] });
+	});
+
+	it.each([
+		{
+			name: 'revoke a session with only session:list',
+			action: 'session:list' as const,
+			call: (client: TenantClient): Promise<unknown> =>
+				client.sessions.revoke({ id: '00000000-0000-4000-8000-000000000001' })
+		},
+		{
+			name: 'list sessions with only session:revoke',
+			action: 'session:revoke' as const,
+			call: (client: TenantClient): Promise<unknown> => client.sessions.list()
+		}
+	])('refuses to $name', async ({ action, call }) => {
+		await useTestServer('contract-session-scope');
+		await bootstrap();
+		const client = tenantClient(
+			await issueServerSignedToken([
+				{ type: 'cupboard_domain', actions: [action] }
+			])
+		);
+
+		await expect(call(client)).rejects.toMatchObject({
+			defined: true,
 			code: 'FORBIDDEN',
 			status: StatusCodes.FORBIDDEN
 		});

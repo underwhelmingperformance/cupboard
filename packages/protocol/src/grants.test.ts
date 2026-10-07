@@ -12,6 +12,9 @@ import {
 	authorizationDetailSchema,
 	authorizationDetailsInSelectorSpelling,
 	type CacheAccessLookup,
+	cacheOperations,
+	controlOperations,
+	domainOperations,
 	isAuthorizationDetailCovered,
 	isCoveredByToken,
 	isOperationPermittedAtIssuance,
@@ -23,7 +26,8 @@ import {
 	type ResourceRequest,
 	SelectorTemplateUnrepresentableError,
 	storedAuthorizationDetailsSchema,
-	storedPermittedGrantsSchema
+	storedPermittedGrantsSchema,
+	tenantOperations
 } from './grants.ts';
 import { reuseViewNameSchema } from './reuse-views.ts';
 
@@ -1295,3 +1299,67 @@ it.each([
 		});
 	}
 );
+
+describe('session operations', () => {
+	const otherDomainOperations = domainOperations.filter(
+		(operation) => !operation.startsWith('session:')
+	);
+	const acme = tenantIdSchema.parse('acme');
+
+	it.each(['session:list', 'session:revoke'] as const)(
+		'grants %s only through a wildcard or an explicit domain grant',
+		(operation) => {
+			expect({
+				wildcard: isCoveredByToken(
+					[{ type: 'cupboard_wildcard' }],
+					operation,
+					{}
+				),
+				explicit: isCoveredByToken(
+					[{ type: 'cupboard_domain', actions: [operation] }],
+					operation,
+					{}
+				),
+				otherDomain: isCoveredByToken(
+					[{ type: 'cupboard_domain', actions: otherDomainOperations }],
+					operation,
+					{}
+				),
+				cache: isCoveredByToken(
+					[
+						{
+							type: 'cupboard_cache',
+							actions: [...cacheOperations],
+							cache: { kind: 'default' }
+						}
+					],
+					operation,
+					{ cache: { kind: 'default' } }
+				),
+				tenant: isCoveredByToken(
+					[
+						{
+							type: 'cupboard_tenant',
+							actions: [...tenantOperations],
+							tenant: acme
+						}
+					],
+					operation,
+					{ tenant: acme }
+				),
+				control: isCoveredByToken(
+					[{ type: 'cupboard_control', actions: [...controlOperations] }],
+					operation,
+					{}
+				)
+			}).toStrictEqual({
+				wildcard: true,
+				explicit: true,
+				otherDomain: false,
+				cache: false,
+				tenant: false,
+				control: false
+			});
+		}
+	);
+});

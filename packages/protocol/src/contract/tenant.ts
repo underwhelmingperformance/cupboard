@@ -8,6 +8,7 @@ import { policiesContract } from './policies.ts';
 import { checkContract } from './reports.ts';
 import { reuseViewsContract } from './reuse-views.ts';
 import { rootsContract } from './roots.ts';
+import { sessionsContract } from './sessions.ts';
 import { statsContract } from './stats.ts';
 import { uploadsContract } from './uploads.ts';
 import { verifyContract } from './verify.ts';
@@ -21,6 +22,7 @@ export const tenantContract = {
 	policies: policiesContract,
 	caches: cachesContract,
 	keys: keysContract,
+	sessions: sessionsContract,
 	reuseViews: reuseViewsContract,
 	oidcTrust: oidcTrustContract,
 	stats: statsContract,

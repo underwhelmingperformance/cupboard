@@ -179,6 +179,14 @@ export const tenantRouter = os.router({
 			)
 		}
 	},
+	sessions: {
+		list: os.sessions.list.handler(({ context }) =>
+			context.services.refreshSessions.list()
+		),
+		revoke: os.sessions.revoke.handler(({ input, context }) =>
+			context.services.refreshSessions.revoke(input.id)
+		)
+	},
 	reuseViews: {
 		list: os.reuseViews.list.handler(({ context }) =>
 			context.services.reuseViews.listViews()
