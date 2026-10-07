@@ -7,9 +7,12 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { Nix } from '../../packages/nix/src/nix.ts';
+import type { NixDerivedPathString } from '../../packages/nix/src/nix-store.ts';
+import type { LocalStoreQueries } from '../../packages/nix/src/store-client.ts';
 import { defaultNixConfigEnvironment } from '../../packages/nix/src/store-config.ts';
 import { makeWritable, temporaryRoot } from '../support/filesystem.ts';
 import { runCommand } from '../support/process.ts';
@@ -355,5 +358,152 @@ describe('planning against a store with no daemon', () => {
 			willSubstitute: missing.willSubstitute,
 			unknown: missing.unknown
 		}).toStrictEqual({ willSubstitute: [], unknown: [absent] });
+	});
+});
+
+function nixEnvironment(cacheHome: string): Record<string, string> {
+	const prepared = store();
+
+	return {
+		PATH: process.env.PATH ?? '',
+		HOME: prepared.root,
+		XDG_CACHE_HOME: cacheHome,
+		NIX_CONF_DIR: path.join(prepared.root, 'no-configuration'),
+		NIX_USER_CONF_FILES: '',
+		NIX_STORE_DIR: prepared.storeDirectory,
+		NIX_STATE_DIR: prepared.stateDirectory,
+		NIX_CONFIG: [
+			'experimental-features = nix-command',
+			`substituters = ${prepared.substituter.url}`
+		].join('\n')
+	};
+}
+
+function openPlanningStore(queries: LocalStoreQueries, cacheHome: string): Nix {
+	return Nix.openForAvailability(
+		{
+			env: nixEnvironment(cacheHome),
+			readFile: noConfigFile,
+			homeDirectory: noConfigFile,
+			workingDirectory: () => process.cwd(),
+			currentSystem: () => nixSystem(),
+			probes: {
+				canReadWrite: () => false,
+				isFilePresent: () => false,
+				hasHardwareVirtualisation: () => false,
+				isWsl1: () => false,
+				microarchitectureLevels: () => []
+			},
+			canWriteStateDirectory: () => true,
+			socketExists: () => false,
+			directoryExists: () => true,
+			isSuperuser: () => false,
+			createDirectory: () => true,
+			realpath: (value) => value
+		},
+		{ localStoreQueries: queries }
+	);
+}
+
+describe('planning through a scoped daemon', () => {
+	// A daemon that reads no cached narinfo asks about an output again whenever
+	// its walk reaches that output, so the check compares the paths asked about,
+	// not the number of requests.
+	it.each<{
+		readonly name: string;
+		readonly queries: LocalStoreQueries;
+		readonly isCached: boolean;
+	}>([
+		{
+			name: 'queries the substituter again after a direct availability check',
+			queries: 'direct',
+			isCached: false
+		},
+		{
+			name: 'uses cached narinfo after a scoped-daemon availability check',
+			queries: 'scoped-daemon',
+			isCached: true
+		}
+	])('$name', async ({ queries, isCached }) => {
+		const prepared = store();
+		const cacheHome = await mkdtemp(path.join(prepared.root, 'cache-'));
+		const target: NixDerivedPathString = `${prepared.derivationPath}^out`;
+		const outputHash = StorePath.hash(prepared.offeredOutput);
+		prepared.substituter.forgetRequests();
+
+		const missing = await openPlanningStore(queries, cacheHome).queryMissing([
+			target
+		]);
+		const checked = new Set(prepared.substituter.narInfoRequests);
+		prepared.substituter.forgetRequests();
+		await runCommand('nix', ['build', '--dry-run', '--no-link', target], {
+			env: nixEnvironment(cacheHome)
+		});
+
+		expect({
+			willBuild: missing.willBuild,
+			willSubstitute: missing.willSubstitute,
+			unknown: missing.unknown,
+			checked,
+			buildRequests: prepared.substituter.narInfoRequests
+		}).toStrictEqual({
+			willBuild: [],
+			willSubstitute: [prepared.offeredOutput],
+			unknown: [],
+			checked: new Set([outputHash]),
+			buildRequests: isCached ? [] : [outputHash]
+		});
+	});
+
+	it.each([
+		{
+			name: 'plans to build an output removed after the first check',
+			servedFirst: true,
+			expected: (prepared: DaemonlessStore) => ({
+				willBuild: [prepared.derivationPath],
+				willSubstitute: []
+			})
+		},
+		{
+			name: 'plans to substitute an output added after the first check',
+			servedFirst: false,
+			expected: (prepared: DaemonlessStore) => ({
+				willBuild: [],
+				willSubstitute: [prepared.offeredOutput]
+			})
+		}
+	])('$name', async ({ servedFirst, expected }) => {
+		const prepared = store();
+		const cacheHome = await mkdtemp(path.join(prepared.root, 'cache-'));
+		const target: NixDerivedPathString = `${prepared.derivationPath}^out`;
+		const nix = openPlanningStore('scoped-daemon', cacheHome);
+		const serve = (isServed: boolean): void => {
+			if (isServed) {
+				prepared.substituter.servePath(prepared.offeredOutput);
+				return;
+			}
+
+			prepared.substituter.withdraw(prepared.offeredOutput);
+		};
+
+		try {
+			serve(servedFirst);
+			await nix.queryMissing([target]);
+			serve(!servedFirst);
+			prepared.substituter.forgetRequests();
+
+			const missing = await nix.queryMissing([target]);
+
+			expect({
+				willBuild: missing.willBuild,
+				willSubstitute: missing.willSubstitute,
+				asked: new Set(prepared.substituter.narInfoRequests)
+			}).toStrictEqual({
+				...expected(prepared),
+				asked: new Set([StorePath.hash(prepared.offeredOutput)])
+			});
+		} finally {
+			prepared.substituter.servePath(prepared.offeredOutput);
+		}
 	});
 });

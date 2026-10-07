@@ -459,7 +459,10 @@ export function registerPlanCommands(
 						signal: programOptions.signal
 					})
 				};
-				const nix = Nix.openForAvailability(undefined, storeSelection);
+				const nix = Nix.openForAvailability(undefined, {
+					...storeSelection,
+					localStoreQueries: 'scoped-daemon'
+				});
 
 				reportUnknownSettings(reporter, nix.unknownSettings);
 				const probes = tenantProbesFor({
