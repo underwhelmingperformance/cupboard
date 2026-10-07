@@ -179,6 +179,17 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
+export class RequestBodyTooLargeError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(readonly maximumBytes: number) {
+		super(
+			`Request body exceeds the ${String(maximumBytes)}-byte limit, or Content-Length declares a larger size`
+		);
+		this.name = 'RequestBodyTooLargeError';
+	}
+}
+
 export type CacheCatalogueMigrationProblem =
 	'tenant-missing' | 'lifecycle-incomplete' | 'lifecycle-invalid';
 

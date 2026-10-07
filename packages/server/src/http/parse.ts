@@ -1,5 +1,6 @@
 import {
 	readResponseBytes,
+	readResponseText,
 	RemoteBodyTooLargeError
 } from '@cupboard/shared/response-body';
 import { z } from 'zod';
@@ -7,6 +8,7 @@ import { z } from 'zod';
 import {
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
+	RequestBodyTooLargeError,
 	type ServerHttpError,
 	TokenRequestBodyInvalidError,
 	TokenRequestBodyTooLargeError
@@ -15,16 +17,19 @@ import {
 /**
  * Parses a JSON request body and validates it against `schema`. Invalid JSON
  * and schema mismatches become HTTP 400 errors; schema failures retain Zod's
- * diagnostics.
+ * diagnostics. A body larger than `maximumBytes` is refused with HTTP 413
+ * before it is parsed.
  */
 export async function parseRequestBody<S extends z.ZodType>(
 	schema: S,
-	request: Request
+	request: Request,
+	maximumBytes: number
 ): Promise<z.output<S>> {
+	const text = await readJsonText(request, maximumBytes);
 	let json: unknown;
 
 	try {
-		json = await request.json();
+		json = JSON.parse(text);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
 			throw new MalformedRequestBodyError(error);
@@ -34,6 +39,24 @@ export async function parseRequestBody<S extends z.ZodType>(
 	}
 
 	return parseRequestValue(schema, json);
+}
+
+async function readJsonText(
+	request: Request,
+	maximumBytes: number
+): Promise<string> {
+	try {
+		return await readResponseText(request, {
+			description: 'JSON request body',
+			maximumBytes
+		});
+	} catch (error) {
+		if (error instanceof RemoteBodyTooLargeError) {
+			throw new RequestBodyTooLargeError(maximumBytes);
+		}
+
+		throw error;
+	}
 }
 
 export const formBodyMaxBytes = 128 * 1024;

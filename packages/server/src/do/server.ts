@@ -10,8 +10,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import {
+	cacheAvailabilityMaxRequestBytes,
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse,
+	reuseViewAvailabilityMaxRequestBytes,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
 import { tenantContract } from '@cupboard/protocol/contract';
@@ -752,7 +754,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			async (context) => {
 				const request = await parseRequestBody(
 					cacheAvailabilityRequestSchema,
-					context.req.raw
+					context.req.raw,
+					cacheAvailabilityMaxRequestBytes
 				);
 				const response: CacheAvailabilityResponse = {
 					missingStorePathHashes: await missingStorePathHashes(
@@ -958,7 +961,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.post('/reuse/:view/api/v1/missing-paths', async (context) => {
 			const request = await parseRequestBody(
 				reuseViewAvailabilityRequestSchema,
-				context.req.raw
+				context.req.raw,
+				reuseViewAvailabilityMaxRequestBytes
 			);
 			const view = requestedView(context);
 

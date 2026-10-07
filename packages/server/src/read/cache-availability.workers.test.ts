@@ -6,7 +6,9 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	cacheAvailabilityMaxPaths,
-	cacheAvailabilityResponseSchema
+	cacheAvailabilityMaxRequestBytes,
+	cacheAvailabilityResponseSchema,
+	reuseViewAvailabilityMaxRequestBytes
 } from '@cupboard/protocol/cache-availability';
 import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -21,7 +23,10 @@ import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { NarInfoObjectsService } from '../do/narinfo-objects-service.ts';
 import { withSubrequestSlice } from '../do/subrequest-slice.ts';
-import { SubrequestSliceExceededError } from '../errors.ts';
+import {
+	RequestBodyTooLargeError,
+	SubrequestSliceExceededError
+} from '../errors.ts';
 import { narInfoCacheTag } from '../http/cache-tags.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -29,6 +34,7 @@ import {
 	asOneInvocation,
 	bootstrap,
 	currentNarObjectKey,
+	currentOrigin,
 	currentServer,
 	defaultCache,
 	handlerFetch,
@@ -429,6 +435,73 @@ describe('cache availability query', () => {
 			objectRequests: 3
 		});
 	});
+
+	it.each<{
+		readonly name: string;
+		readonly path: string;
+		readonly maximumBytes: number;
+		readonly send: (path: string, init: RequestInit) => Promise<Response>;
+		readonly objectRequests: number;
+	}>([
+		{
+			name: 'the Worker for a cache',
+			path: '/api/v1/missing-paths',
+			maximumBytes: cacheAvailabilityMaxRequestBytes,
+			send: (path, init) => handlerFetch(`/t/${fixtureTenant}${path}`, init),
+			objectRequests: 0
+		},
+		{
+			name: 'the Worker for a reuse view',
+			path: '/reuse/reuse/api/v1/missing-paths',
+			maximumBytes: reuseViewAvailabilityMaxRequestBytes,
+			send: (path, init) => handlerFetch(`/t/${fixtureTenant}${path}`, init),
+			objectRequests: 0
+		},
+		{
+			name: 'the object for a cache',
+			path: '/api/v1/missing-paths',
+			maximumBytes: cacheAvailabilityMaxRequestBytes,
+			send: (path, init) =>
+				currentServer().fetch(new Request(`${currentOrigin()}${path}`, init)),
+			objectRequests: 1
+		},
+		{
+			name: 'the object for a reuse view',
+			path: '/reuse/reuse/api/v1/missing-paths',
+			maximumBytes: reuseViewAvailabilityMaxRequestBytes,
+			send: (path, init) =>
+				currentServer().fetch(new Request(`${currentOrigin()}${path}`, init)),
+			objectRequests: 1
+		}
+	])(
+		'refuses a request body over the limit at $name',
+		async ({ path, maximumBytes, send, objectRequests }) => {
+			await bootstrap();
+			const body = JSON.stringify({ storePathHashes: [] }).padEnd(
+				maximumBytes + 1,
+				' '
+			);
+
+			const { result, objectRequests: observed } = await objectRequestsAt(
+				path,
+				async () => {
+					const response = await send(path, {
+						body,
+						headers: { 'content-type': 'application/json' },
+						method: 'POST'
+					});
+
+					return { status: response.status, body: await response.text() };
+				}
+			);
+
+			expect({ ...result, objectRequests: observed }).toStrictEqual({
+				status: StatusCodes.REQUEST_TOO_LONG,
+				body: `${new RequestBodyTooLargeError(maximumBytes).message}\n`,
+				objectRequests
+			});
+		}
+	);
 
 	// The Worker sizes a chunk to the object's slice, so a chunk the slice
 	// cannot afford is a sizing defect and the object refuses it instead of

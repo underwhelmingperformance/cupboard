@@ -21,6 +21,20 @@ export const cacheAvailabilityMaxPaths = 900;
 // changes both.
 export const reuseViewAvailabilityMaxPaths = cacheAvailabilityMaxPaths;
 
+// In compact JSON, a full page is the 22-byte `{"storePathHashes":[]}`, 34
+// bytes for each quoted 32-character hash, and a comma between hashes. The
+// limit is twice that, so a client may also send whitespace.
+function availabilityMaxRequestBytes(maxPaths: number): number {
+	return 2 * (22 + 35 * maxPaths - 1);
+}
+
+export const cacheAvailabilityMaxRequestBytes = availabilityMaxRequestBytes(
+	cacheAvailabilityMaxPaths
+);
+export const reuseViewAvailabilityMaxRequestBytes = availabilityMaxRequestBytes(
+	reuseViewAvailabilityMaxPaths
+);
+
 export const cacheAvailabilityRequestSchema = z.strictObject({
 	storePathHashes: z.array(storePathHashSchema).max(cacheAvailabilityMaxPaths)
 });
