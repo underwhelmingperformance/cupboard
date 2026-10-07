@@ -9,7 +9,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { StorePath } from '@cupboard/nix-store/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { invocationIdSchema } from '@cupboard/protocol/build';
 import { uploadDecisionSchema } from '@cupboard/protocol/upload';
 import type { Reporter } from '@cupboard/reporter';
@@ -610,10 +610,13 @@ describe('build-push without a Nix daemon', () => {
 
 		expect({
 			survivedCollection: isSurvivedCollection,
-			committed: record.committed
+			committed: record.committed.toSorted(byCodeUnit)
 		}).toStrictEqual({
 			survivedCollection: true,
-			committed: [StorePath.hash(dependency), StorePath.hash(targetOutput)]
+			committed: [
+				StorePath.hash(dependency),
+				StorePath.hash(targetOutput)
+			].toSorted(byCodeUnit)
 		});
 
 		await runCommand('nix-store', ['--gc'], { env: environment });

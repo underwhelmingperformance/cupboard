@@ -51,39 +51,50 @@ export function pushClientFor(
 ): PushClient {
 	const cache = options.cache;
 	const baseFetcher = options.fetcher ?? fetch;
-	let hasUploadGraceFacts = false;
 	let pageSize = negotiationPageSize;
-	const uploadFetcher: typeof fetch = async (input, init) => {
-		const request = new Request(input, init);
-		const headers = new Headers(request.headers);
-		headers.set(acceptCapabilitiesHeader, uploadGraceFactsCapability);
-		const response = await baseFetcher(new Request(request, { headers }));
-		hasUploadGraceFacts =
-			response.headers
-				.get(uploadCapabilitiesHeader)
-				?.split(',')
-				.some(
-					(capability) => capability.trim() === uploadGraceFactsCapability
-				) ?? false;
+	// Each call gets its own fetcher, so concurrent negotiations cannot read
+	// each other's grace-facts acknowledgement.
+	const acknowledgingRpc = (): {
+		readonly rpc: ReturnType<typeof tenantRpc>;
+		readonly hasUploadGraceFacts: () => boolean;
+	} => {
+		let hasUploadGraceFacts = false;
+		const fetcher: typeof fetch = async (input, init) => {
+			const request = new Request(input, init);
+			const headers = new Headers(request.headers);
+			headers.set(acceptCapabilitiesHeader, uploadGraceFactsCapability);
+			const response = await baseFetcher(new Request(request, { headers }));
+			hasUploadGraceFacts =
+				response.headers
+					.get(uploadCapabilitiesHeader)
+					?.split(',')
+					.some(
+						(capability) => capability.trim() === uploadGraceFactsCapability
+					) ?? false;
 
-		const advertised = Number(
-			response.headers.get(uploadRequestMaxPathsHeader)
-		);
-		if (response.ok && Number.isSafeInteger(advertised) && advertised > 0) {
-			pageSize = Math.min(advertised, uploadNegotiateMaxPaths);
-		}
+			const advertised = Number(
+				response.headers.get(uploadRequestMaxPathsHeader)
+			);
+			if (response.ok && Number.isSafeInteger(advertised) && advertised > 0) {
+				pageSize = Math.min(advertised, uploadNegotiateMaxPaths);
+			}
 
-		return response;
+			return response;
+		};
+
+		return {
+			rpc: tenantRpc(url, {
+				credential,
+				signal: options.signal,
+				fetcher
+			}),
+			hasUploadGraceFacts: () => hasUploadGraceFacts
+		};
 	};
 	const rpc = tenantRpc(url, {
 		credential,
 		signal: options.signal,
 		fetcher: options.fetcher
-	});
-	const uploadRpc = tenantRpc(url, {
-		credential,
-		signal: options.signal,
-		fetcher: uploadFetcher
 	});
 	const raw = new CupboardClient(
 		new URL(url),
@@ -111,15 +122,15 @@ export function pushClientFor(
 
 	return {
 		negotiate: async (body) => {
-			hasUploadGraceFacts = false;
 			const pushId = await session.pushId();
+			const call = acknowledgingRpc();
 			const uploads: UploadNegotiateResponse['uploads'] = [];
 			let hasGraceFactsForEveryPage = true;
 
 			let offset = 0;
 			do {
 				const paths = body.paths.slice(offset, offset + pageSize);
-				const response = await callInCache(uploadRpc.uploads.negotiate, cache, {
+				const response = await callInCache(call.rpc.uploads.negotiate, cache, {
 					pushId,
 					paths,
 					...(body.attachRoot !== undefined && {
@@ -127,51 +138,46 @@ export function pushClientFor(
 					})
 				});
 				uploads.push(...response.uploads);
-				hasGraceFactsForEveryPage &&= hasUploadGraceFacts;
+				hasGraceFactsForEveryPage &&= call.hasUploadGraceFacts();
 				offset += paths.length;
 			} while (offset < body.paths.length);
 
-			hasUploadGraceFacts = hasGraceFactsForEveryPage;
-
-			return { uploads };
+			return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
 		},
 		// Never touches the credential session: a dry run requests no upload
 		// credential, so preview must not negotiate a pushId to get one.
 		preview: async (body) => {
-			hasUploadGraceFacts = false;
+			const call = acknowledgingRpc();
 			const uploads: UploadPreviewResponse['uploads'] = [];
 			let hasGraceFactsForEveryPage = true;
 
 			let offset = 0;
 			do {
 				const paths = body.paths.slice(offset, offset + pageSize);
-				const response = await callInCache(uploadRpc.uploads.preview, cache, {
+				const response = await callInCache(call.rpc.uploads.preview, cache, {
 					paths
 				});
 				uploads.push(...response.uploads);
-				hasGraceFactsForEveryPage &&= hasUploadGraceFacts;
+				hasGraceFactsForEveryPage &&= call.hasUploadGraceFacts();
 				offset += paths.length;
 			} while (offset < body.paths.length);
 
-			hasUploadGraceFacts = hasGraceFactsForEveryPage;
-
-			return { uploads };
+			return { uploads, hasUploadGraceFacts: hasGraceFactsForEveryPage };
 		},
 		probeUploadGraceFacts: async (kind) => {
-			hasUploadGraceFacts = false;
+			const call = acknowledgingRpc();
 
 			if (kind === 'preview') {
-				await callInCache(uploadRpc.uploads.preview, cache, { paths: [] });
+				await callInCache(call.rpc.uploads.preview, cache, { paths: [] });
 			} else {
-				await callInCache(uploadRpc.uploads.negotiate, cache, {
+				await callInCache(call.rpc.uploads.negotiate, cache, {
 					pushId: await session.pushId(),
 					paths: []
 				});
 			}
 
-			return hasUploadGraceFacts;
+			return call.hasUploadGraceFacts();
 		},
-		hasUploadGraceFacts: () => hasUploadGraceFacts,
 		// Every server version implements nix-cache-info. A private default cache
 		// returns 401, so only a routing 404 means that the tenant does not exist.
 		tenantServes: async () => {

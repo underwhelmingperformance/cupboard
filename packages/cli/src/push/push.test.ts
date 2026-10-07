@@ -11,6 +11,7 @@ import {
 	graceSecondsSchema,
 	rootNameSchema,
 	storeDirectorySchema,
+	storePathHashSchema,
 	storePathSchema,
 	type StorePathString,
 	ttlSecondsSchema
@@ -44,7 +45,7 @@ import {
 } from '@cupboard/reporter';
 import { genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
@@ -613,6 +614,285 @@ describe('runPush', () => {
 			peak: limit,
 			uploaded: paths.length
 		});
+	});
+
+	it('commits each upload before starting the next with one upload worker', async () => {
+		const events: string[] = [];
+		const name = (storePathHash: string): string =>
+			storePathHash === StorePath.hash(appPath) ? 'app' : 'runtime';
+
+		await runPush(publication([appPath, runtimePath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
+			uploadConcurrency: 1,
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate(body) {
+					events.push(
+						`negotiate ${body.paths.map((path) => name(path.storePathHash)).join(',')}`
+					);
+
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: body.paths.map((path) => ({
+								action: 'upload',
+								storePathHash: path.storePathHash,
+								narHash: path.narHash,
+								uploadId: `upload-${name(path.storePathHash)}`,
+								r2Key: `nar/${name(path.storePathHash)}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}))
+						})
+					);
+				},
+				async uploadNar(r2Key, body) {
+					await collectReadableStream(body);
+					events.push(`upload ${r2Key}`);
+				},
+				commit(target) {
+					events.push(`commit ${target.uploadId}`);
+
+					return Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'committed',
+						settled: Promise.resolve()
+					});
+				},
+				setRoot: (rootName, body) =>
+					Promise.resolve(rootSummary({ name: rootName, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createNarArchive: (storePath) =>
+				new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		expect(events).toStrictEqual([
+			'negotiate app',
+			'upload nar/app.nar.zst',
+			'commit upload-app',
+			'negotiate runtime',
+			'upload nar/runtime.nar.zst',
+			'commit upload-runtime'
+		]);
+	});
+
+	it('marks each commit for retention from its own negotiation', async () => {
+		const commits: { uploadId: string; retention?: true }[] = [];
+		let negotiations = 0;
+
+		await runPush(publication([appPath, runtimePath]), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
+			uploadConcurrency: 1,
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate(body) {
+					negotiations += 1;
+
+					return Promise.resolve({
+						...uploadNegotiateResponseSchema.parse({
+							uploads: body.paths.map((path) => ({
+								action: 'commit',
+								storePathHash: path.storePathHash,
+								narHash: path.narHash,
+								uploadId: `reuse-${path.storePathHash}`
+							}))
+						}),
+						hasUploadGraceFacts: negotiations === 1
+					});
+				},
+				uploadNar: unexpectedUploadNarCall,
+				commit(target) {
+					commits.push({
+						uploadId: target.uploadId,
+						...(target.retention === true && { retention: true as const })
+					});
+
+					return Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'committed',
+						settled: Promise.resolve()
+					});
+				},
+				setRoot: (rootName, body) =>
+					Promise.resolve(rootSummary({ name: rootName, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect(commits).toStrictEqual([
+			{ uploadId: `reuse-${StorePath.hash(appPath)}`, retention: true },
+			{ uploadId: `reuse-${StorePath.hash(runtimePath)}` }
+		]);
+	});
+
+	it('keeps the acknowledgement of each negotiation when a re-drive and a new group interleave', async () => {
+		const paths = ['1', '2', '3'].map((n) =>
+			storePathSchema.parse(
+				`/nix/store/${n}123456789abcdfghijklmnpqrsvwxyz-p${n}`
+			)
+		);
+		const first = storePathHashSchema.parse('1123456789abcdfghijklmnpqrsvwxyz');
+		const second = storePathHashSchema.parse(
+			'2123456789abcdfghijklmnpqrsvwxyz'
+		);
+		const third = storePathHashSchema.parse('3123456789abcdfghijklmnpqrsvwxyz');
+		const digests = new Map(
+			paths.map((path, index) => [path, digest(20 + index, 200 + index)])
+		);
+		// The re-drive's negotiation does not acknowledge grace facts; every
+		// other negotiation does. Each response arrives and is then read in two
+		// steps, so the test can interleave the two negotiations.
+		const gates = new Map<
+			string,
+			{
+				readonly arrived: PromiseWithResolvers<undefined>;
+				readonly read: PromiseWithResolvers<undefined>;
+			}
+		>();
+		let negotiations = 0;
+		const commits: { uploadId: string; retention?: true }[] = [];
+		const store = Object.fromEntries(
+			paths.map((path) => [
+				path,
+				pathInfo(path, knownDigest(digests, path), [])
+			])
+		);
+
+		const pushed = runPush(publication(paths), reporter([]), {
+			command: 'cupboard push',
+			credential: 'cupboard-login',
+			uploadConcurrency: 2,
+			client: {
+				preview: unexpectedPreviewCall,
+				async negotiate(body) {
+					negotiations += 1;
+					const isRedrive =
+						negotiations > 1 && body.paths[0]?.storePathHash === first;
+					const name = isRedrive ? 'redrive' : `group-${String(negotiations)}`;
+					const hasGraceFacts = !isRedrive;
+					const uploads = uploadNegotiateResponseSchema.parse({
+						uploads: body.paths.map((path) => ({
+							action: 'commit',
+							storePathHash: path.storePathHash,
+							narHash: path.narHash,
+							uploadId: `${name}-${path.storePathHash}`
+						}))
+					}).uploads;
+
+					if (negotiations > 1) {
+						const gate = {
+							arrived: Promise.withResolvers<undefined>(),
+							read: Promise.withResolvers<undefined>()
+						};
+						gates.set(isRedrive ? 'redrive' : 'group', gate);
+						await gate.arrived.promise;
+						await gate.read.promise;
+					}
+
+					return { uploads, hasUploadGraceFacts: hasGraceFacts };
+				},
+				uploadNar: unexpectedUploadNarCall,
+				commit(target) {
+					commits.push({
+						uploadId: target.uploadId,
+						...(target.retention === true && { retention: true as const })
+					});
+
+					if (target.uploadId === `group-1-${first}`) {
+						return Promise.reject(
+							new CupboardHttpError('POST', '/commit', 404, '')
+						);
+					}
+
+					return Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'committed',
+						settled: Promise.resolve()
+					});
+				},
+				setRoot: (rootName, body) =>
+					Promise.resolve(rootSummary({ name: rootName, ...body }))
+			} satisfies PushClient,
+			nix: nixStore(store)
+		});
+
+		await vi.waitFor(() => {
+			expect(gates.size).toBe(2);
+		});
+		gates.get('group')?.arrived.resolve(undefined);
+		await flushMicrotasks();
+		gates.get('redrive')?.arrived.resolve(undefined);
+		await flushMicrotasks();
+		gates.get('group')?.read.resolve(undefined);
+		gates.get('redrive')?.read.resolve(undefined);
+		await pushed;
+
+		expect(
+			commits.toSorted((left, right) =>
+				left.uploadId.localeCompare(right.uploadId)
+			)
+		).toStrictEqual([
+			{ uploadId: `group-1-${first}`, retention: true },
+			{ uploadId: `group-1-${second}`, retention: true },
+			{ uploadId: `group-3-${third}`, retention: true },
+			{ uploadId: `redrive-${first}` }
+		]);
+	});
+
+	it('negotiates reference entries in their own group before local paths', async () => {
+		const negotiated: string[][] = [];
+
+		await runPush(
+			PublicationCollection.of({
+				targets: [runtimePath],
+				referencePaths: [appPath]
+			}),
+			reporter([]),
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				referenceSource: {
+					url: new URL('https://cache.example.workers.dev/t/acme')
+				},
+				fetchReferenceMetadata: () => Promise.resolve(referenceMetadata()),
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate(body) {
+						negotiated.push(body.paths.map((path) => path.storePath));
+
+						return Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'skip',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash
+								}))
+							})
+						);
+					},
+					uploadNar: unexpectedUploadNarCall,
+					commit: unexpectedCommitCall,
+					setRoot: (rootName, body) =>
+						Promise.resolve(rootSummary({ name: rootName, ...body }))
+				} satisfies PushClient,
+				nix: nixStore({
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				})
+			}
+		);
+
+		expect(negotiated).toStrictEqual([[appPath], [runtimePath]]);
 	});
 
 	it('re-negotiates and re-uploads when a commit slot expired', async () => {
@@ -2188,7 +2468,6 @@ describe('runPush', () => {
 
 		expect({ clientCalls, roots }).toStrictEqual({
 			clientCalls: [
-				{ method: 'negotiate', paths: [] },
 				{
 					method: 'setRoot',
 					fields: { name: 'main', retention: { kind: 'inherit' }, targets: [] }
@@ -4381,12 +4660,11 @@ describe('runPush', () => {
 
 					return Promise.resolve(false);
 				},
-				hasUploadGraceFacts: () => false,
 				negotiate(body) {
 					bodies.push({ pushId: 'push-1', ...body });
 
-					return Promise.resolve(
-						uploadNegotiateResponseSchema.parse({
+					return Promise.resolve({
+						...uploadNegotiateResponseSchema.parse({
 							uploads: [
 								{
 									action: 'commit',
@@ -4395,8 +4673,9 @@ describe('runPush', () => {
 									uploadId: 'reuse-app'
 								}
 							]
-						})
-					);
+						}),
+						hasUploadGraceFacts: false
+					});
 				},
 				commit(target) {
 					commitTargets.push(target);
@@ -5152,21 +5431,14 @@ describe('the build receipt a push writes', () => {
 				fetchReferenceMetadata: () => Promise.resolve(referenceMetadata()),
 				client: {
 					preview: unexpectedPreviewCall,
-					negotiate: () =>
+					negotiate: (body) =>
 						Promise.resolve(
 							uploadNegotiateResponseSchema.parse({
-								uploads: [
-									{
-										action: 'skip',
-										storePathHash: StorePath.hash(appPath),
-										narHash: appDigest.narHash.toString()
-									},
-									{
-										action: 'skip',
-										storePathHash: StorePath.hash(runtimePath),
-										narHash: runtimeDigest.narHash.toString()
-									}
-								]
+								uploads: body.paths.map((path) => ({
+									action: 'skip',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash
+								}))
 							})
 						),
 					uploadNar: unexpectedUploadNarCall,
@@ -5813,4 +6085,10 @@ function reporter(
 			return;
 		}
 	};
+}
+
+async function flushMicrotasks(): Promise<void> {
+	for (let iteration = 0; iteration < 50; iteration += 1) {
+		await Promise.resolve();
+	}
 }

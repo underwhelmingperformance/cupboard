@@ -3,7 +3,6 @@ import {
 	type NixValidPathInfo
 } from '@cupboard/nix';
 import type { StorePathString } from '@cupboard/nix-store/scalars';
-import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	commitBatchMaxEntries,
 	type UploadAttachRootInput,
@@ -17,8 +16,13 @@ import { PushNarMetadataMismatchError } from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
-import { exactUploadDecisions } from '../push/negotiation.ts';
-import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
+import { type NegotiatedPath, publishJustInTime } from '../push/negotiation.ts';
+import {
+	type CompressNar,
+	defaultUploadConcurrency,
+	type PushClient,
+	type PushNarArchive
+} from '../push/push.ts';
 
 import { requireMatchingBuildOutput } from './divergence.ts';
 
@@ -75,6 +79,7 @@ export interface BuildOutputBatcherOptions {
 	readonly compressNar?: CompressNar;
 	readonly maxEntries?: number;
 	readonly maxWaitMs?: number;
+	readonly uploadConcurrency?: number;
 	readonly onOutcome?: (outcome: BatchPathOutcome) => void;
 	readonly onFailure?: (failure: BatchPathFailure) => void;
 }
@@ -83,11 +88,6 @@ type PublishableDecision = Extract<
 	UploadDecision,
 	{ action: 'upload' | 'commit' }
 >;
-
-interface CommitCandidate {
-	readonly decision: PublishableDecision;
-	readonly info: NixValidPathInfo;
-}
 
 function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
 	const expected = info.narHash.toString();
@@ -110,7 +110,9 @@ function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
  * Debounces accepted build outputs into streamed publication. Accepted paths
  * accumulate in an unbounded candidate set and flush in bounded batches. Each
  * flush protects its paths before checking their validity, resolves metadata,
- * then negotiates, uploads and commits through the ordinary push client. The
+ * then negotiates, uploads and commits through the ordinary push client. Paths
+ * are negotiated in small groups as upload workers become free, and each upload
+ * worker waits for its commit acknowledgement before taking another path. The
  * store implementation controls how long protection remains in place.
  *
  * The batcher records only terminal outcomes. If publication fails, the path
@@ -191,123 +193,121 @@ export class BuildOutputBatcher {
 
 	private async flushBatch(batch: readonly StorePathString[]): Promise<void> {
 		const remaining = new Set(batch);
-		const compressNar = this.options.compressNar ?? compressNarToStream;
-		const createNarArchive =
-			this.options.createNarArchive ??
-			((storePath: string) => new NarArchive(storePath));
 
 		try {
-			const commits = await this.options.store.withProtectedPaths(
-				async (session) => {
-					// Protect each path before checking validity. Checking first would
-					// leave time for garbage collection before the NAR read begins.
-					for (const storePath of batch) {
-						await session.protectPath(storePath);
+			await this.options.store.withProtectedPaths(async (session) => {
+				// Protect each path before checking validity. Checking first would
+				// leave time for garbage collection before the NAR read begins.
+				for (const storePath of batch) {
+					await session.protectPath(storePath);
+				}
+
+				const infos: NixValidPathInfo[] = [];
+
+				// Settling deletes only the path under iteration, which a Set
+				// iterator tolerates.
+				for (const storePath of remaining) {
+					try {
+						infos.push(await session.queryPathInfo(storePath));
+					} catch (error) {
+						this.settlePath(storePath, error, remaining);
 					}
+				}
 
-					const infos: NixValidPathInfo[] = [];
-
-					// Settling deletes only the path under iteration, which a Set
-					// iterator tolerates.
-					for (const storePath of remaining) {
-						try {
-							infos.push(await session.queryPathInfo(storePath));
-						} catch (error) {
-							this.settlePath(storePath, error, remaining);
-						}
-					}
-
-					if (infos.length === 0) {
-						return [];
-					}
-
-					const paths = infos.map((info) => prepareStorePathNegotiation(info));
-					const negotiation = await this.options.client.negotiate({
-						paths,
-						...(this.options.runRoot !== undefined && {
-							attachRoot: this.options.runRoot
-						})
-					});
-					const decisions = exactUploadDecisions(paths, negotiation.uploads);
-					const infoByHash = new Map(
-						infos.map((info) => [StorePath.hash(info.storePath), info])
-					);
-					const candidates: CommitCandidate[] = [];
-
-					for (const decision of decisions) {
-						const info = infoByHash.get(decision.storePathHash);
-
-						if (info === undefined) {
-							continue;
-						}
-
-						if (decision.action === 'skip') {
-							try {
-								requireMatchingBuildOutput(info, decision);
-							} catch (error) {
-								this.settlePath(info.storePath, error, remaining);
-								continue;
-							}
-
-							remaining.delete(info.storePath);
-							this.recordOutcome({
-								outcome: 'destination-served',
-								storePath: info.storePath
+				// The NAR reads stream into the uploads inside the protected session,
+				// so each path remains available until all its bytes have been sent.
+				await publishJustInTime(
+					{
+						paths: infos,
+						concurrency:
+							this.options.uploadConcurrency ?? defaultUploadConcurrency,
+						negotiationOf: (info) => prepareStorePathNegotiation(info),
+						negotiate: async (paths) => {
+							const negotiation = await this.options.client.negotiate({
+								paths: [...paths],
+								...(this.options.runRoot !== undefined && {
+									attachRoot: this.options.runRoot
+								})
 							});
-							continue;
+
+							return {
+								uploads: negotiation.uploads,
+								hasUploadGraceFacts: negotiation.hasUploadGraceFacts ?? true
+							};
 						}
-
-						if (decision.action === 'commit') {
-							candidates.push({ decision, info });
-							continue;
-						}
-
-						// The NAR read streams into the upload inside the protected
-						// session, so the path remains available until all its bytes
-						// have been sent.
-						try {
-							const upload = compressNar(createNarArchive(info.storePath));
-
-							await this.options.client.uploadNar(decision.r2Key, upload.body);
-							assertNarMetadata(info, upload.digest());
-							candidates.push({ decision, info });
-						} catch (error) {
-							this.settlePath(info.storePath, error, remaining);
-						}
-					}
-
-					return candidates;
-				}
-			);
-
-			// The callback has finished reading the paths. The cache commit below
-			// uses upload metadata and does not read the store path.
-			for (const { decision, info } of commits) {
-				try {
-					await commitOverSession(this.options, {
-						uploadId: decision.uploadId,
-						storePathHash: decision.storePathHash,
-						narHash: decision.narHash
-					});
-					remaining.delete(info.storePath);
-					this.recordOutcome({
-						outcome: 'published',
-						storePath: info.storePath
-					});
-				} catch (error) {
-					this.settlePath(info.storePath, error, remaining);
-				}
-			}
+					},
+					(item) => this.publishNegotiated(item, remaining)
+				);
+			});
 		} catch (error) {
-			// A batch-level failure (the connection, the negotiation): every path
-			// not settled individually returns to the candidate set for the next
-			// flush.
+			// A batch-level failure (the connection, the protected session): every
+			// path not settled individually returns to the candidate set for the
+			// next flush.
 			for (const storePath of remaining) {
 				this.recordFailure(storePath, error);
 			}
 
 			remaining.clear();
 		}
+	}
+
+	private async publishNegotiated(
+		item: NegotiatedPath<NixValidPathInfo, UploadDecision>,
+		remaining: Set<StorePathString>
+	): Promise<void> {
+		const { storePath } = item.path;
+
+		if (item.kind === 'refused') {
+			this.settlePath(storePath, item.error, remaining);
+			return;
+		}
+
+		const { decision } = item;
+
+		if (decision.action === 'skip') {
+			try {
+				requireMatchingBuildOutput(item.path, decision);
+			} catch (error) {
+				this.settlePath(storePath, error, remaining);
+				return;
+			}
+
+			remaining.delete(storePath);
+			this.recordOutcome({ outcome: 'destination-served', storePath });
+			return;
+		}
+
+		try {
+			await this.uploadAndCommit(decision, item.path);
+		} catch (error) {
+			this.settlePath(storePath, error, remaining);
+			return;
+		}
+
+		remaining.delete(storePath);
+		this.recordOutcome({ outcome: 'published', storePath });
+	}
+
+	private async uploadAndCommit(
+		decision: PublishableDecision,
+		info: NixValidPathInfo
+	): Promise<void> {
+		if (decision.action === 'upload') {
+			const compressNar = this.options.compressNar ?? compressNarToStream;
+			const createNarArchive =
+				this.options.createNarArchive ??
+				((storePath: string) => new NarArchive(storePath));
+			const upload = compressNar(createNarArchive(info.storePath));
+
+			await this.options.client.uploadNar(decision.r2Key, upload.body);
+			assertNarMetadata(info, upload.digest());
+		}
+
+		await commitOverSession(this.options, {
+			uploadId: decision.uploadId,
+			storePathHash: decision.storePathHash,
+			narHash: decision.narHash
+		});
 	}
 
 	get outcomes(): ReadonlyMap<StorePathString, BatchPathOutcome> {

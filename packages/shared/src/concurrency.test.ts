@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { mapWithConcurrency } from './concurrency.ts';
+import { drainWithConcurrency, mapWithConcurrency } from './concurrency.ts';
 
 describe('mapWithConcurrency', () => {
 	it('resolves each value in input order, even when the first settles last', async () => {
@@ -158,6 +158,140 @@ describe('mapWithConcurrency', () => {
 		expect(hasSettled).toBe(true);
 	});
 });
+
+describe('drainWithConcurrency', () => {
+	it('pulls the next value only when a worker becomes free', async () => {
+		const events: string[] = [];
+		const runs = [
+			deferred<undefined>(),
+			deferred<undefined>(),
+			deferred<undefined>()
+		];
+
+		async function* source(): AsyncGenerator<number> {
+			for (const value of [0, 1, 2]) {
+				await Promise.resolve();
+				events.push(`pull ${String(value)}`);
+				yield value;
+			}
+		}
+
+		const drained = drainWithConcurrency(source(), 2, async (value) => {
+			events.push(`start ${String(value)}`);
+			await runs[value]?.promise;
+			events.push(`end ${String(value)}`);
+		});
+
+		await flushMicrotasks();
+		const whileBothRun = events
+			.splice(0)
+			.toSorted((left, right) => left.localeCompare(right));
+
+		runs[1]?.resolve(undefined);
+		await flushMicrotasks();
+		const afterOneEnds = events.splice(0);
+
+		runs[0]?.resolve(undefined);
+		runs[2]?.resolve(undefined);
+		await drained;
+
+		expect({ whileBothRun, afterOneEnds, atEnd: events }).toStrictEqual({
+			whileBothRun: ['pull 0', 'pull 1', 'start 0', 'start 1'],
+			afterOneEnds: ['end 1', 'pull 2', 'start 2'],
+			atEnd: ['end 0', 'end 2']
+		});
+	});
+
+	it('never runs more than `concurrency` calls at once', async () => {
+		let inFlight = 0;
+		let maxInFlight = 0;
+
+		await drainWithConcurrency(values([1, 2, 3, 4, 5]), 2, async () => {
+			inFlight += 1;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await flushMicrotasks();
+			inFlight -= 1;
+		});
+
+		expect(maxInFlight).toBe(2);
+	});
+
+	it.each([0, -1, 1.5, NaN, Infinity])(
+		'refuses an invalid concurrency of %s',
+		async (concurrency) => {
+			await expect(
+				drainWithConcurrency(values([1]), concurrency, () => Promise.resolve())
+			).rejects.toBeInstanceOf(RangeError);
+		}
+	);
+
+	it('stops pulling after a call rejects, finishes started calls and closes the source', async () => {
+		const failure = new Error('boom');
+		const events: string[] = [];
+		const failing = deferred<undefined>();
+		const blocked = deferred<undefined>();
+
+		async function* source(): AsyncGenerator<number> {
+			try {
+				for (const value of [1, 2, 3]) {
+					await Promise.resolve();
+					events.push(`pull ${String(value)}`);
+					yield value;
+				}
+			} finally {
+				events.push('closed');
+			}
+		}
+
+		const drained = drainWithConcurrency(source(), 2, async (value) => {
+			if (value === 1) {
+				await failing.promise;
+				throw failure;
+			}
+
+			await blocked.promise;
+			events.push(`end ${String(value)}`);
+		});
+
+		await flushMicrotasks();
+		failing.resolve(undefined);
+		await flushMicrotasks();
+		blocked.resolve(undefined);
+
+		await expect(drained).rejects.toBe(failure);
+		expect(events).toStrictEqual(['pull 1', 'pull 2', 'end 2', 'closed']);
+	});
+
+	it('rejects with a source failure once started calls finish', async () => {
+		const failure = new Error('source');
+		const blocked = deferred<undefined>();
+		const ended: number[] = [];
+
+		async function* source(): AsyncGenerator<number> {
+			yield 1;
+			await Promise.resolve();
+			throw failure;
+		}
+
+		const drained = drainWithConcurrency(source(), 2, async (value) => {
+			await blocked.promise;
+			ended.push(value);
+		});
+
+		await flushMicrotasks();
+		blocked.resolve(undefined);
+
+		await expect(drained).rejects.toBe(failure);
+		expect(ended).toStrictEqual([1]);
+	});
+});
+
+async function* values<T>(items: readonly T[]): AsyncGenerator<T> {
+	for (const item of items) {
+		await Promise.resolve();
+		yield item;
+	}
+}
 
 function deferred<T>(): {
 	readonly promise: Promise<T>;
