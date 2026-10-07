@@ -134,6 +134,7 @@ export async function fetchGithubOidcToken(options: {
 	try {
 		response = await fetcher(url, {
 			headers: { authorization: `Bearer ${requestToken}` },
+			redirect: 'manual',
 			signal: options.signal
 		});
 	} catch (error) {

@@ -1,6 +1,9 @@
 import { CodedError } from '@cupboard/shared/errors';
 import { maxTransientRetries } from '@cupboard/shared/retry';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
+
+import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
 import {
 	fetchGithubOidcToken,
@@ -95,6 +98,40 @@ describe('fetchGithubOidcToken', () => {
 			expect(vi.getTimerCount()).toBe(0);
 		} finally {
 			vi.useRealTimers();
+		}
+	});
+
+	it('rejects a redirect without following it or retrying the token request', async () => {
+		const origin = await RedirectingOrigin.start([
+			'/token?api-version=2.0&audience=aud'
+		]);
+
+		try {
+			const failure = await failureOf(
+				fetchGithubOidcToken({
+					audience: 'aud',
+					environment: {
+						...environment,
+						requestUrl: origin.url('/token?api-version=2.0')
+					},
+					fetcher: fetch
+				})
+			);
+
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				status:
+					failure instanceof GithubOidcRequestError
+						? failure.status
+						: undefined,
+				requests: origin.requests
+			}).toStrictEqual({
+				name: GithubOidcRequestError.name,
+				status: StatusCodes.TEMPORARY_REDIRECT,
+				requests: ['/token?api-version=2.0&audience=aud']
+			});
+		} finally {
+			await origin.close();
 		}
 	});
 
