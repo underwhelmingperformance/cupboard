@@ -2,7 +2,9 @@ import {
 	cacheNameSchema,
 	type CacheScope,
 	isSameCacheScope,
-	rootNameSchema
+	rootNameSchema,
+	type TenantId,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 
 import { applyTransform, isPatternMatch } from './capture.ts';
@@ -149,8 +151,10 @@ function renderRoot(
 function renderTenant(
 	binding: TenantBinding,
 	claims: Record<string, string>
-): string | undefined {
-	return renderBindingValue(binding, claims);
+): TenantId | undefined {
+	const raw = renderBindingValue(binding, claims);
+
+	return raw === undefined ? undefined : tenantIdSchema.safeParse(raw).data;
 }
 
 function renderView(
