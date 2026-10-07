@@ -927,6 +927,19 @@ export class TokenRequestBodyInvalidError extends InvalidRequestError {
 	}
 }
 
+export class TokenRequestBodyTooLargeError extends OAuthError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+	readonly error = 'invalid_request';
+	readonly problem = 'request-body-too-large';
+
+	constructor() {
+		super(
+			'Form body exceeds 131072 bytes, or Content-Length declares more than 131072 bytes'
+		);
+		this.name = 'TokenRequestBodyTooLargeError';
+	}
+}
+
 /**
  * A rule without wildcard authority must receive explicit
  * `authorization_details`. Wildcard-permitting interactive rules may omit the

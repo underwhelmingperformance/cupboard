@@ -1,10 +1,15 @@
+import {
+	readResponseBytes,
+	RemoteBodyTooLargeError
+} from '@cupboard/shared/response-body';
 import { z } from 'zod';
 
 import {
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
 	type ServerHttpError,
-	TokenRequestBodyInvalidError
+	TokenRequestBodyInvalidError,
+	TokenRequestBodyTooLargeError
 } from '../errors.ts';
 
 /**
@@ -31,13 +36,16 @@ export async function parseRequestBody<S extends z.ZodType>(
 	return parseRequestValue(schema, json);
 }
 
+export const formBodyMaxBytes = 128 * 1024;
+
 /**
  * Validates an `application/x-www-form-urlencoded` request body against a
  * schema, returning the parsed (branded) value. The form boundary rejects every
- * repeated parameter before the schema can strip an unknown extension. A body
- * the schema rejects becomes an OAuth `invalid_request` with the schema's
- * diagnostics, so the `/token` endpoint reports it in the RFC 6749 §5.2
- * envelope.
+ * repeated parameter before the schema can strip an unknown extension. When the
+ * schema rejects the body, the error is an OAuth `invalid_request` with the
+ * schema's diagnostics, so the `/token` endpoint reports it in the RFC 6749
+ * §5.2 envelope. A body larger than {@link formBodyMaxBytes} is refused with
+ * HTTP 413 before it is decoded.
  */
 export async function parseFormBody<S extends z.ZodType>(
 	schema: S,
@@ -52,9 +60,7 @@ export async function parseFormBody<S extends z.ZodType>(
 		throw invalidForm('Content-Type must be application/x-www-form-urlencoded');
 	}
 
-	// Decode the raw bytes directly: the runtime warns when
-	// `.text()` is called on a body whose type is not `text/*`, and a urlencoded
-	// body parses identically from its UTF-8 bytes.
+	const bytes = await readFormBytes(request);
 	const decoder = new TextDecoder('utf-8', {
 		fatal: true,
 		ignoreBOM: false
@@ -62,7 +68,7 @@ export async function parseFormBody<S extends z.ZodType>(
 	let body: string;
 
 	try {
-		body = decoder.decode(await request.arrayBuffer());
+		body = decoder.decode(bytes);
 	} catch {
 		throw invalidForm('Form body is not valid UTF-8');
 	}
@@ -97,6 +103,21 @@ export function parseFormValue<S extends z.ZodType>(
 	}
 
 	return result.data;
+}
+
+async function readFormBytes(request: Request): Promise<Uint8Array> {
+	try {
+		return await readResponseBytes(request, {
+			description: 'Form body',
+			maximumBytes: formBodyMaxBytes
+		});
+	} catch (error) {
+		if (error instanceof RemoteBodyTooLargeError) {
+			throw new TokenRequestBodyTooLargeError();
+		}
+
+		throw error;
+	}
 }
 
 function invalidForm(message: string): TokenRequestBodyInvalidError {
