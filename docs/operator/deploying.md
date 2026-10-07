@@ -282,6 +282,31 @@ be administered at the custom domain.
 [Moving to a new URL](#moving-to-a-new-url) says what that means for an existing
 deployment.
 
+### HTTPS for a custom domain
+
+The Worker refuses every plain HTTP request with status 403, and adds
+`Strict-Transport-Security: max-age=31536000` to HTTPS responses other than
+WebSocket upgrades. This works on workers.dev and on a custom domain.
+
+For a custom domain, you can also turn on two zone settings in the Cloudflare
+dashboard, under **SSL/TLS** > **Edge Certificates**. **Always Use HTTPS**
+redirects plain HTTP requests to HTTPS before they reach the Worker, so a
+browser that follows an `http://` link still reaches the deployment. **HTTP
+Strict Transport Security (HSTS)** adds an HSTS header at Cloudflare's edge, and
+you choose its `max-age` and options.
+
+Both settings apply to every host in the zone, not only to the deployment's
+domain, so check that the zone's other hosts work over HTTPS first. A browser
+remembers an HSTS header for its `max-age`, and the `includeSubDomains` option
+extends it to every subdomain. `init` doesn't change these settings.
+
+A redirect doesn't protect a client that sends a token or a read credential in
+its first request, because the credential crosses the network before the
+redirect arrives. The CLI refuses `http://` URLs except to loopback hosts. Nix
+and other clients still send such a request, and the Worker refuses it only
+after the credential has been sent. Use `https://` URLs in every Nix
+configuration.
+
 ### Moving to a new URL
 
 Changing the custom domain later moves the deployment to a new URL, and so does

@@ -30,6 +30,7 @@ import {
 	withSubrequestSlice
 } from '../do/subrequest-slice.ts';
 import {
+	InsecureTransportError,
 	MetadataScopeChangedError,
 	TenantAdmissionUnavailableError,
 	TenantWritesStoppedError
@@ -43,6 +44,7 @@ import {
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
+import { canUseLoopbackHttp } from '../oidc/issuer-policy.ts';
 import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import { uploadRequestSubrequestsFor } from '../policy/upload-pages.ts';
 import { parseCacheMetadataRequest } from '../read/metadata-page.ts';
@@ -82,6 +84,34 @@ const attestationInfoPathPattern =
 const cacheMetadataPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/path-info$/u;
 
+const strictTransportSecurity = 'max-age=31536000';
+
+const httpsOnly = createMiddleware<WorkerHonoEnv>(async (context, next) => {
+	if (new URL(context.req.url).protocol !== 'https:') {
+		if (!canUseLoopbackHttp(context.env)) {
+			throw new InsecureTransportError();
+		}
+
+		await next();
+		return;
+	}
+
+	await next();
+
+	// Do not rebuild a WebSocket upgrade response: that detaches its socket.
+	if (context.res.webSocket !== null) {
+		return;
+	}
+
+	const headers = new Headers(context.res.headers);
+	headers.set('strict-transport-security', strictTransportSecurity);
+	context.res = new Response(context.res.body, {
+		status: context.res.status,
+		statusText: context.res.statusText,
+		headers
+	});
+});
+
 function buildApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
 
@@ -91,6 +121,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// Initialise logging before admission so early refusals include request fields.
 	// Add the tenant field only after the slug is admitted.
 	app.use(loggerMiddleware);
+	app.use(httpsOnly);
 	app.use('/t/:tenant/*', async (context, next) => {
 		await next();
 		if (

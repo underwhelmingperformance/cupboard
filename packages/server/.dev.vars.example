@@ -24,8 +24,8 @@ CONTROL_KEY_WRAP_SECRET=
 
 # The secret that `/signup` requires for the first-admin claim. Set it to claim
 # a local deployment: without it the claim is refused, including when
-# `CUPBOARD_LOCAL_DEV` is set. `CUPBOARD_LOCAL_DEV=1` allows a loopback HTTP
-# OIDC issuer.
+# `CUPBOARD_LOCAL_DEV` is set. `CUPBOARD_LOCAL_DEV=1` allows plain HTTP
+# requests, which `wrangler dev` serves, and a loopback HTTP OIDC issuer.
 CUPBOARD_SIGNUP_SECRET=
 CUPBOARD_LOCAL_DEV=
 
