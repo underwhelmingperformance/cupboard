@@ -15,6 +15,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import {
+	hasMatchingIssuerAndAudience,
 	type OidcClaims,
 	type OidcTrustRule,
 	type OidcTrustVerificationTarget,
@@ -30,6 +31,7 @@ import {
 	OidcTrustRuleNotFoundError,
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
+	StoredOidcTrustInvalidError,
 	SubjectTokenNotJwtError
 } from '../errors.ts';
 import { InboundTokenVerifier } from '../oidc/inbound-verifier.ts';
@@ -53,6 +55,43 @@ import { type TenantIdentityService } from './tenant-identity-service.ts';
 export interface OidcTrustRuleSnapshot {
 	readonly rule: OidcTrustRule;
 	readonly row: typeof schema.oidcTrust.$inferSelect;
+}
+
+interface UnreadableOidcTrustRow {
+	readonly issuer: string;
+	readonly audience: string;
+	readonly error: StoredOidcTrustInvalidError;
+}
+
+/**
+ * The enabled trust rules that the server can read, together with the stored
+ * issuer and audience of each enabled row that it cannot read.
+ */
+export class EnabledOidcTrustRules {
+	constructor(
+		readonly snapshots: readonly OidcTrustRuleSnapshot[],
+		private readonly unreadable: readonly UnreadableOidcTrustRow[]
+	) {}
+
+	get rules(): OidcTrustRule[] {
+		return this.snapshots.map(({ rule }) => rule);
+	}
+
+	/**
+	 * Throws the `StoredOidcTrustInvalidError` of an unreadable row whose issuer
+	 * and audience match `claims`. Rule selection uses only the most specific
+	 * matching rules. Without the unreadable row, a broader readable rule could
+	 * therefore give the token more authority than the row would have allowed.
+	 */
+	requireReadableFor(claims: OidcClaims): void {
+		const match = this.unreadable.find((row) =>
+			hasMatchingIssuerAndAudience(row, claims)
+		);
+
+		if (match !== undefined) {
+			throw match.error;
+		}
+	}
 }
 
 export class OidcTrustService {
@@ -276,43 +315,68 @@ export class OidcTrustService {
 	}
 
 	enabledOidcTrustRules(logger: Logger): OidcTrustRule[] {
-		return this.enabledOidcTrustRuleSnapshots(logger).map(({ rule }) => rule);
+		return this.enabledOidcTrustRuleSnapshots(logger).rules;
 	}
 
 	/**
-	 * Every enabled rule the server can read. A row it cannot read is left out and
-	 * logged: a token exchange then finds no rule and refuses the request, rather
-	 * than failing the whole exchange over a rule that was not going to match.
-	 * `oidcTrust.get` and `oidcTrust.list` still report the fault, so an
-	 * administrator can find the row.
+	 * The enabled rules to evaluate for `claims`, which are a verified token's
+	 * claims or a refresh family's stored identity. Throws
+	 * `StoredOidcTrustInvalidError` when an enabled row that the server cannot
+	 * read has the same issuer and audience.
 	 */
-	enabledOidcTrustRuleSnapshots(logger: Logger): OidcTrustRuleSnapshot[] {
-		return this.context.db
+	enabledOidcTrustRulesFor(
+		logger: Logger,
+		claims: OidcClaims
+	): OidcTrustRule[] {
+		const enabled = this.enabledOidcTrustRuleSnapshots(logger);
+		enabled.requireReadableFor(claims);
+
+		return enabled.rules;
+	}
+
+	/**
+	 * Returns readable enabled rules and the stored issuer and audience of
+	 * unreadable enabled rows. Logs each unreadable row.
+	 */
+	enabledOidcTrustRuleSnapshots(logger: Logger): EnabledOidcTrustRules {
+		const snapshots: OidcTrustRuleSnapshot[] = [];
+		const unreadable: UnreadableOidcTrustRow[] = [];
+		const rows = this.context.db
 			.select()
 			.from(schema.oidcTrust)
 			.where(isNull(schema.oidcTrust.disabledAt))
 			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
-			.all()
-			.flatMap((row) => {
-				try {
-					return [
-						{
-							rule: oidcTrustRuleFromRow(
-								row,
-								canUseLoopbackHttp(this.context.env)
-							),
-							row
-						}
-					];
-				} catch (error: unknown) {
-					logger.error('stored OIDC trust rule skipped', {
-						rule: row.id,
-						reason: error instanceof Error ? error.message : String(error)
-					});
+			.all();
 
-					return [];
-				}
-			});
+		for (const row of rows) {
+			try {
+				snapshots.push({
+					rule: oidcTrustRuleFromRow(row, canUseLoopbackHttp(this.context.env)),
+					row
+				});
+			} catch (error: unknown) {
+				const fault =
+					error instanceof StoredOidcTrustInvalidError
+						? error
+						: new StoredOidcTrustInvalidError(
+								row.id,
+								error instanceof Error ? error : new Error(String(error))
+							);
+
+				logger.error('stored OIDC trust rule skipped', {
+					rule: row.id,
+					reason: fault.message,
+					cause: fault.cause
+				});
+				unreadable.push({
+					issuer: row.issuer,
+					audience: row.audience,
+					error: fault
+				});
+			}
+		}
+
+		return new EnabledOidcTrustRules(snapshots, unreadable);
 	}
 
 	isEnabledSnapshotCurrent(

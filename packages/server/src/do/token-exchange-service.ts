@@ -177,8 +177,8 @@ export class TokenExchangeService {
 		// and to refuse a token when its claims match no rule. Policy selection
 		// below uses only verified claims.
 		const decoded = this.oidcTrust.decodeInbound(body.subject_token);
-		const snapshots = this.oidcTrust.enabledOidcTrustRuleSnapshots(logger);
-		const rules = snapshots.map((snapshot) => snapshot.rule);
+		const enabled = this.oidcTrust.enabledOidcTrustRuleSnapshots(logger);
+		const rules = enabled.rules;
 		const target = oidcTrustVerificationTarget(rules, decoded);
 
 		if (target === undefined || !hasMatchingOidcTrustIdentity(rules, decoded)) {
@@ -209,8 +209,10 @@ export class TokenExchangeService {
 			throw error;
 		}
 
+		enabled.requireReadableFor(verified);
+
 		if (body.grant_type === readAccessGrantType) {
-			return this.readAccessResponse(logger, snapshots, verified, body);
+			return this.readAccessResponse(logger, enabled.snapshots, verified, body);
 		}
 
 		const requested = parseRequestedGrants(body.authorization_details);
@@ -360,9 +362,10 @@ export class TokenExchangeService {
 			writeJwtTtlSeconds
 		);
 
-		const currentRules = this.oidcTrust
-			.enabledOidcTrustRuleSnapshots(logger)
-			.map(({ rule }) => rule);
+		const currentRules = this.oidcTrust.enabledOidcTrustRulesFor(
+			logger,
+			verified
+		);
 		const currentFacts = resources.map((resource) =>
 			this.resourceState(resource)
 		);
@@ -530,9 +533,7 @@ export class TokenExchangeService {
 		grants: AuthorizationDetails
 	) {
 		return selectOidcTrust(
-			this.oidcTrust
-				.enabledOidcTrustRuleSnapshots(logger)
-				.map(({ rule }) => rule),
+			this.oidcTrust.enabledOidcTrustRulesFor(logger, authority.identity),
 			authority.identity,
 			grants
 		);
@@ -765,9 +766,10 @@ export class TokenExchangeService {
 		);
 
 		const hasIssuedRefresh = this.context.db.transaction((transaction) => {
-			const currentRules = this.oidcTrust
-				.enabledOidcTrustRuleSnapshots(logger)
-				.map(({ rule }) => rule);
+			const currentRules = this.oidcTrust.enabledOidcTrustRulesFor(
+				logger,
+				verified
+			);
 			const current = selectOidcTrust(currentRules, verified, grants);
 			if (current.outcome !== 'selected') {
 				throw new TenantSubjectTokenUntrustedError();
