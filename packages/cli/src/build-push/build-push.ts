@@ -405,6 +405,9 @@ async function runProtectedStreamedBuildPush(
 			}),
 			...(dependencies.compressNar !== undefined && {
 				compressNar: dependencies.compressNar
+			}),
+			...(options.uploadConcurrency !== undefined && {
+				uploadConcurrency: options.uploadConcurrency
 			})
 		});
 		listener = await BuildEventListener.listen({

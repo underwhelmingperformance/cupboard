@@ -243,23 +243,23 @@ describe('pushClientFor', () => {
 			expect({
 				negotiated,
 				preview,
-				requests,
-				hasGraceFacts: client.hasUploadGraceFacts?.()
+				requests
 			}).toStrictEqual({
-				hasGraceFacts: true,
 				negotiated: {
 					uploads: paths.map((entry) => ({
 						action: 'skip',
 						storePathHash: entry.storePathHash,
 						narHash: entry.narHash
-					}))
+					})),
+					hasUploadGraceFacts: true
 				},
 				preview: {
 					uploads: paths.map((entry) => ({
 						action: 'skip',
 						storePathHash: entry.storePathHash,
 						narHash: entry.narHash
-					}))
+					})),
+					hasUploadGraceFacts: true
 				},
 				requests: [
 					{ path: '/t/acme/uploads/credential', count: 0 },

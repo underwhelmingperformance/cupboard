@@ -90,6 +90,7 @@ interface Harness {
 	readonly negotiations: NegotiateBody[];
 	readonly outcomes: BatchPathOutcome[];
 	readonly failures: BatchPathFailure[];
+	readonly expired: string[];
 }
 
 function emptyStream(): ReadableStream<Uint8Array> {
@@ -112,6 +113,13 @@ interface HarnessOptions {
 		paths: NegotiateBody['paths']
 	) => UploadNegotiateResponse['uploads'];
 	readonly maxEntries?: number;
+	readonly uploadConcurrency?: number;
+	/**
+	 * Advances a fake clock by this many minutes for each upload. Negotiation
+	 * gives each upload 15 minutes, and the harness refuses a commit that
+	 * arrives after that.
+	 */
+	readonly uploadMinutes?: number;
 	/**
 	Use this shared session for every flush instead of opening another socket.
 	*/
@@ -123,7 +131,10 @@ function harness(options: HarnessOptions = {}): Harness {
 	const negotiations: NegotiateBody[] = [];
 	const outcomes: BatchPathOutcome[] = [];
 	const failures: BatchPathFailure[] = [];
+	const expired: string[] = [];
 	const commitFailuresLeft = new Set(options.failCommitsOnce);
+	const expiresAt = new Map<string, number>();
+	let minutes = 0;
 
 	const session: BatchSession = {
 		protectPath: (storePath) => {
@@ -159,6 +170,10 @@ function harness(options: HarnessOptions = {}): Harness {
 			events.push('negotiate');
 			negotiations.push(body);
 
+			for (const path of body.paths) {
+				expiresAt.set(path.storePathHash, minutes + 15);
+			}
+
 			if (options.failNegotiate === true) {
 				return Promise.reject(new Error('negotiate refused'));
 			}
@@ -179,6 +194,7 @@ function harness(options: HarnessOptions = {}): Harness {
 		preview: () => Promise.resolve({ uploads: [] }),
 		uploadNar: (r2Key) => {
 			events.push(`upload:${r2Key}`);
+			minutes += options.uploadMinutes ?? 0;
 
 			return Promise.resolve();
 		},
@@ -187,6 +203,12 @@ function harness(options: HarnessOptions = {}): Harness {
 			const basename =
 				storePath === undefined ? '?' : StorePath.basename(storePath);
 			events.push(`commit:${basename}`);
+
+			if (minutes > (expiresAt.get(target.storePathHash) ?? 0)) {
+				expired.push(basename);
+
+				return Promise.reject(new Error('upload expired'));
+			}
 
 			if (storePath !== undefined && commitFailuresLeft.has(storePath)) {
 				commitFailuresLeft.delete(storePath);
@@ -216,6 +238,9 @@ function harness(options: HarnessOptions = {}): Harness {
 			digest: () => ({ narHash, narSize: 4 })
 		}),
 		...(options.maxEntries !== undefined && { maxEntries: options.maxEntries }),
+		...(options.uploadConcurrency !== undefined && {
+			uploadConcurrency: options.uploadConcurrency
+		}),
 		...(options.commitSession !== undefined && {
 			session: options.commitSession
 		}),
@@ -227,7 +252,7 @@ function harness(options: HarnessOptions = {}): Harness {
 		}
 	});
 
-	return { batcher, events, negotiations, outcomes, failures };
+	return { batcher, events, negotiations, outcomes, failures, expired };
 }
 
 beforeEach(() => {
@@ -303,8 +328,8 @@ describe('BuildOutputBatcher', () => {
 				`info:${StorePath.basename(pathB)}`,
 				'negotiate',
 				`upload:staging/${StorePath.basename(pathA)}`,
-				'close',
-				`commit:${StorePath.basename(pathA)}`
+				`commit:${StorePath.basename(pathA)}`,
+				'close'
 			],
 			negotiations: [
 				{
@@ -339,6 +364,52 @@ describe('BuildOutputBatcher', () => {
 			recorded: [
 				{ outcome: 'destination-served', storePath: pathB },
 				{ outcome: 'published', storePath: pathA }
+			]
+		});
+	});
+
+	it('commits each upload before starting the next with one upload worker', async () => {
+		const { batcher, events } = harness({ uploadConcurrency: 1 });
+
+		batcher.enqueue(pathA);
+		batcher.enqueue(pathB);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.drain();
+
+		expect(
+			events.filter(
+				(event) =>
+					event !== 'open' &&
+					!event.startsWith('root:') &&
+					!event.startsWith('info:')
+			)
+		).toStrictEqual([
+			'negotiate',
+			`upload:staging/${StorePath.basename(pathA)}`,
+			`commit:${StorePath.basename(pathA)}`,
+			'negotiate',
+			`upload:staging/${StorePath.basename(pathB)}`,
+			`commit:${StorePath.basename(pathB)}`,
+			'close'
+		]);
+	});
+
+	it('commits every upload before it expires when each upload takes ten minutes', async () => {
+		const { batcher, expired, outcomes } = harness({
+			uploadConcurrency: 1,
+			uploadMinutes: 10
+		});
+
+		batcher.enqueue(pathA);
+		batcher.enqueue(pathB);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.drain();
+
+		expect({ expired, outcomes }).toStrictEqual({
+			expired: [],
+			outcomes: [
+				{ outcome: 'published', storePath: pathA },
+				{ outcome: 'published', storePath: pathB }
 			]
 		});
 	});

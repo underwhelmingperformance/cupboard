@@ -100,7 +100,11 @@ import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { capacityWaitReporter } from './capacity-wait.ts';
 import { narDivergence } from './divergence.ts';
-import { exactUploadDecisions } from './negotiation.ts';
+import {
+	exactUploadDecisions,
+	type NegotiatedGroup,
+	publishJustInTime
+} from './negotiation.ts';
 import { publishedSubjects, republishedSubject } from './origin.ts';
 import {
 	type PublicationCollection,
@@ -190,17 +194,25 @@ export const defaultUploadConcurrency = 6;
  * and WebSocket commit remain raw protocol operations because they stream bytes
  * or use temporary upload credentials.
  */
+/**
+ * A negotiate or preview response and whether the server acknowledged
+ * grace-aware reporting for it. A client without transport metadata leaves
+ * `hasUploadGraceFacts` out and is treated as capable.
+ */
+export type Acknowledged<Response> = Response & {
+	readonly hasUploadGraceFacts?: boolean;
+};
+
 export interface PushClient extends Partial<AttestationBundleClient> {
 	negotiate(
 		body: Omit<UploadNegotiateRequestInput, 'pushId'>
-	): Promise<UploadNegotiateResponse>;
+	): Promise<Acknowledged<UploadNegotiateResponse>>;
 	// Preview creates no upload state or credentials.
-	preview(body: UploadPreviewRequestInput): Promise<UploadPreviewResponse>;
+	preview(
+		body: UploadPreviewRequestInput
+	): Promise<Acknowledged<UploadPreviewResponse>>;
 	// The no-path probe creates no upload state.
 	probeUploadGraceFacts?(kind: 'negotiate' | 'preview'): Promise<boolean>;
-	// Whether the most recent upload response acknowledged grace-aware
-	// reporting. Clients without transport metadata are treated as capable.
-	hasUploadGraceFacts?(): boolean;
 	// Checks a route supported by every server version. This distinguishes an
 	// unknown tenant from an old server without the preview route.
 	tenantServes?(): Promise<boolean>;
@@ -298,7 +310,7 @@ async function negotiateUpload(
 	client: PushClient,
 	paths: Omit<UploadNegotiateRequestInput, 'pushId'>['paths'],
 	attachRoot?: UploadAttachRootInput
-): Promise<UploadNegotiateResponse> {
+): Promise<Acknowledged<UploadNegotiateResponse>> {
 	const response = await client.negotiate({
 		paths,
 		...(attachRoot !== undefined && { attachRoot })
@@ -804,48 +816,10 @@ async function runPushFlow(
 		return undefined;
 	}
 
-	const { response: negotiation, hasGraceFacts } = await reporter.phase(
-		'Negotiating with cache',
-		async (ctx) => {
-			if (retention.kind === 'none') {
-				await requireUploadGraceFacts(client, 'negotiate');
-			}
+	if (retention.kind === 'none') {
+		await requireUploadGraceFacts(client, 'negotiate');
+	}
 
-			const response = await negotiateUpload(
-				client,
-				resolved.map((path) => negotiationOf(path)),
-				dependencies.runRoot
-			);
-			const uploadCount = response.uploads.filter((decision) =>
-				isUpload(decision)
-			).length;
-
-			ctx.fact('upload', formatCount(uploadCount), {
-				humanLabel: 'need uploading'
-			});
-			ctx.fact(
-				'skip',
-				formatCount(
-					response.uploads.filter((decision) => isSkip(decision)).length
-				),
-				{ humanLabel: 'already available' }
-			);
-
-			return {
-				response,
-				hasGraceFacts: client.hasUploadGraceFacts?.() ?? true
-			};
-		},
-		{ humanLabel: 'Checking which paths need uploading' }
-	);
-
-	const divergent = divergentSkips(resolved, negotiation.uploads);
-
-	requireReferenceSnapshotIdentity(resolved, divergent);
-	warnDivergentSkips(reporter, divergent);
-
-	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
-	const failedUploadIds = new Set<string>();
 	const negotiated = indexNegotiatedPaths(resolved);
 	const storePathByHash = new Map<StorePathHash, string>(
 		resolved.map((path) => [
@@ -853,6 +827,38 @@ async function runPushFlow(
 			resolvedStorePath(path)
 		])
 	);
+	const decisions: UploadDecision[] = [];
+	const divergent = new Map<StorePathHash, DivergentSkip>();
+	// A re-drive can change the action, for example when a reused blob is
+	// collected and the next negotiation requests an upload. Keep only the
+	// latest action for the summary counts.
+	const effectiveActions = new Map<string, UploadDecision['action']>();
+
+	const negotiateGroup = async (
+		paths: readonly UploadPathNegotiationFields[]
+	): Promise<NegotiatedGroup<UploadDecision>> => {
+		const response = await negotiateUpload(
+			client,
+			[...paths],
+			dependencies.runRoot
+		);
+		const hasUploadGraceFacts = response.hasUploadGraceFacts ?? true;
+		const groupDivergent = divergentSkips(resolved, response.uploads);
+
+		requireReferenceSnapshotIdentity(resolved, groupDivergent);
+		warnDivergentSkips(reporter, groupDivergent);
+
+		for (const [storePathHash, skip] of groupDivergent) {
+			divergent.set(storePathHash, skip);
+		}
+
+		for (const decision of response.uploads) {
+			decisions.push(decision);
+			effectiveActions.set(decision.storePathHash, decision.action);
+		}
+
+		return { uploads: response.uploads, hasUploadGraceFacts };
+	};
 
 	let uploadedBytes = 0;
 	const onBytes = (count: number): void => {
@@ -865,94 +871,7 @@ async function runPushFlow(
 		compressNar,
 		onBytes
 	};
-	const uploaded: UploadDecisionOf<'upload'>[] = [];
 	const completedUploads = new Set<StorePathHash>();
-
-	await reporter.progress(
-		'Uploading missing NARs',
-		{
-			total: uploadDecisions.length,
-			humanLabel: 'Uploading missing path contents'
-		},
-		async (bar) => {
-			let done = 0;
-			bar.fact(
-				'nars',
-				`${formatCount(done)}/${formatCount(uploadDecisions.length)}`,
-				{ humanLabel: 'uploaded paths' }
-			);
-
-			await mapWithConcurrency(
-				uploadDecisions,
-				dependencies.uploadConcurrency ?? defaultUploadConcurrency,
-				async (decision) => {
-					try {
-						await streamNarUpload(decision, uploadContext);
-						uploaded.push(decision);
-						completedUploads.add(decision.storePathHash);
-						done += 1;
-					} catch (error) {
-						if (isAbortError(error)) {
-							throw error;
-						}
-
-						const storePath =
-							storePathByHash.get(decision.storePathHash) ??
-							decision.storePathHash;
-						failedUploadIds.add(decision.uploadId);
-
-						// An intermediate whose path vanished before its NAR read is
-						// recorded as collected and the run continues; a vanished
-						// target, and every other loss, joins the failures.
-						if (
-							isVanishedPathError(error) &&
-							kindOfDecision(negotiated, decision) === 'intermediate'
-						) {
-							collected.push({
-								storePathHash: decision.storePathHash,
-								storePath
-							});
-							bar.fact('collected', formatCount(collected.length), {
-								humanLabel: 'no longer in the local store'
-							});
-							return;
-						}
-
-						const reason = failureReason(error);
-						failures.push({
-							storePathHash: decision.storePathHash,
-							storePath,
-							stage: 'upload',
-							cause: error
-						});
-						bar.warn(
-							'upload failed',
-							`${StorePath.basename(storePath)}: ${reason}`,
-							{
-								humanMessage: `${StorePath.basename(storePath)}: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
-							}
-						);
-					} finally {
-						bar.advance(1);
-						bar.fact(
-							'nars',
-							`${formatCount(done)}/${formatCount(uploadDecisions.length)}`,
-							{ humanLabel: 'uploaded paths' }
-						);
-					}
-				}
-			);
-		}
-	);
-
-	// Start every commit before awaiting deferred verification. The server can
-	// verify those paths in one pass; serial commits could require a separate
-	// pass for each path. With `--no-wait`, a deferred commit returns `pending`
-	// once the server has stored its metadata.
-	const commitDecisions = [
-		...uploaded,
-		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision))
-	].filter((decision) => !failedUploadIds.has(decision.uploadId));
 	const commitOptions: CommitOptions = {
 		timeoutSeconds: waitTimeoutSeconds,
 		onWaiting: capacityWaitReporter(reporter)
@@ -961,20 +880,6 @@ async function runPushFlow(
 	// A re-drive replaces the original outcome for the same store path. The
 	// summary therefore reports only the latest commit attempt.
 	const outcomes = new Map<StorePathHash, CommitOutcome>();
-	// A re-drive can change the action, for example when a reused blob is
-	// collected and the next negotiation requests an upload. Keep only the
-	// latest action for the summary counts.
-	const effectiveActions = new Map<string, UploadDecision['action']>(
-		negotiation.uploads.map((decision) => [
-			decision.storePathHash,
-			decision.action
-		])
-	);
-	// Exclude collected intermediates because publication did not complete their
-	// negotiated actions.
-	for (const path of collected) {
-		effectiveActions.delete(path.storePathHash);
-	}
 	const commitContext: CommitContext = {
 		client,
 		session,
@@ -982,7 +887,6 @@ async function runPushFlow(
 		createNarArchive,
 		compressNar,
 		options: commitOptions,
-		hasGraceFacts,
 		...(dependencies.runRoot !== undefined && {
 			runRoot: dependencies.runRoot
 		}),
@@ -994,88 +898,217 @@ async function runPushFlow(
 			effectiveActions.set(fresh.storePathHash, fresh.action);
 		}
 	};
+	const concurrency =
+		dependencies.uploadConcurrency ?? defaultUploadConcurrency;
 
 	try {
+		// Reference entries publish content that is already in the cache, so
+		// they need no upload. Negotiate them first, as one group, so a captured
+		// snapshot that no longer matches the cache stops the push before any
+		// local upload starts.
+		const referenceEntries = resolved.filter(
+			(path) => path.source === 'reference'
+		);
+		const referenceGroup =
+			referenceEntries.length === 0
+				? undefined
+				: await reporter.phase(
+						'Negotiating with cache',
+						async (ctx) => {
+							const group = await negotiateGroup(
+								referenceEntries.map((path) => negotiationOf(path))
+							);
+
+							ctx.fact(
+								'skip',
+								formatCount(
+									group.uploads.filter((decision) => isSkip(decision)).length
+								),
+								{ humanLabel: 'already available' }
+							);
+
+							return group;
+						},
+						{ humanLabel: 'Checking which reference paths need publishing' }
+					);
+
+		// Each upload worker uploads one path and waits for the server to
+		// acknowledge its commit before taking another. Verdicts are awaited
+		// after every path has been acknowledged, so slow verification does not
+		// keep an upload worker busy. With `--no-wait`, a deferred commit returns
+		// `pending` once the server has stored its metadata.
 		const commit = await reporter.progress(
-			'Committing metadata',
+			'Publishing paths',
 			{
-				total: commitDecisions.length,
-				humanLabel: 'Submitting paths to the cache'
+				total: resolved.length,
+				humanLabel: 'Uploading and submitting paths'
 			},
 			async (bar) => {
-				const settled = await Promise.allSettled(
-					commitDecisions.map(async (decision) => {
-						try {
-							return await commitNegotiated(decision, commitContext);
-						} finally {
-							bar.advance(1);
-						}
-					})
-				);
-
-				// A pending outcome means the server reserved the row but has not made
-				// the path servable. Preserve the decision so an `absent` verdict can
-				// be negotiated again. Identify the outcome by store-path hash because
-				// a re-drive receives a new upload ID.
-				const pending: {
-					decision: UploadDecisionOf<'upload' | 'commit'>;
-					storePathHash: StorePathHash;
-					settled: Promise<void>;
-				}[] = [];
+				// A pending outcome means the server reserved the row but has not
+				// made the path servable. Preserve the decision so an `absent` verdict
+				// can be negotiated again. Identify the outcome by store-path hash
+				// because a re-drive receives a new upload ID.
+				const pending: PendingCommit[] = [];
+				let uploaded = 0;
 				let committed = 0;
+				let skipped = 0;
+				const reportCounts = (): void => {
+					bar.fact('uploaded', formatCount(uploaded), {
+						humanLabel: 'uploaded'
+					});
+					bar.fact('committed', formatCount(committed), {
+						humanLabel: 'accepted'
+					});
+					bar.fact('skip', formatCount(skipped), {
+						humanLabel: 'already available'
+					});
+				};
 
-				for (const [index, result] of settled.entries()) {
-					const decision = commitDecisions[index];
-
-					if (decision === undefined) {
-						continue;
+				const publishDecision = async (
+					decision: UploadDecision,
+					hasGraceFacts: boolean
+				): Promise<void> => {
+					if (isSkip(decision)) {
+						skipped += 1;
+						return;
 					}
 
-					if (result.status === 'rejected') {
-						if (isAbortError(result.reason)) {
-							throw result.reason;
+					const storePath =
+						storePathByHash.get(decision.storePathHash) ??
+						decision.storePathHash;
+
+					if (isUpload(decision)) {
+						try {
+							await streamNarUpload(decision, uploadContext);
+							completedUploads.add(decision.storePathHash);
+							uploaded += 1;
+						} catch (error) {
+							if (isAbortError(error)) {
+								throw error;
+							}
+
+							// An intermediate whose path vanished before its NAR read is
+							// recorded as collected and the run continues; a vanished
+							// target, and every other loss, joins the failures.
+							if (
+								isVanishedPathError(error) &&
+								kindOfDecision(negotiated, decision) === 'intermediate'
+							) {
+								collected.push({
+									storePathHash: decision.storePathHash,
+									storePath
+								});
+								bar.fact('collected', formatCount(collected.length), {
+									humanLabel: 'no longer in the local store'
+								});
+								return;
+							}
+
+							failures.push({
+								storePathHash: decision.storePathHash,
+								storePath,
+								stage: 'upload',
+								cause: error
+							});
+							bar.warn(
+								'upload failed',
+								`${StorePath.basename(storePath)}: ${failureReason(error)}`,
+								{
+									humanMessage: `${StorePath.basename(storePath)}: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
+								}
+							);
+							return;
+						}
+					}
+
+					let outcome: CommitOutcome;
+
+					try {
+						outcome = await commitNegotiated(
+							decision,
+							commitContext,
+							hasGraceFacts
+						);
+					} catch (error) {
+						if (isAbortError(error)) {
+							throw error;
 						}
 
-						const storePath =
-							storePathByHash.get(decision.storePathHash) ??
-							decision.storePathHash;
-						const reason = failureReason(result.reason);
 						failures.push({
 							storePathHash: decision.storePathHash,
 							storePath,
 							stage: 'commit',
-							cause: result.reason
+							cause: error
 						});
 						bar.warn(
 							'commit failed',
-							`${StorePath.basename(storePath)}: ${reason}`,
+							`${StorePath.basename(storePath)}: ${failureReason(error)}`,
 							{
-								humanMessage: `${StorePath.basename(storePath)}: path submission failed: ${formatHumanError(result.reason, { debug: reporter.presentation === 'debug' })}`
+								humanMessage: `${StorePath.basename(storePath)}: path submission failed: ${formatHumanError(error, { debug: reporter.presentation === 'debug' })}`
 							}
 						);
-						continue;
+						return;
 					}
 
-					outcomes.set(result.value.storePathHash, result.value);
+					outcomes.set(outcome.storePathHash, outcome);
 
-					if (result.value.status === 'pending') {
+					if (outcome.status === 'pending') {
 						pending.push({
 							decision,
-							storePathHash: result.value.storePathHash,
-							settled: result.value.settled
+							storePathHash: outcome.storePathHash,
+							settled: outcome.settled
 						});
-					} else {
-						committed += 1;
+						return;
 					}
+
+					committed += 1;
+				};
+				const publishCounted = async (
+					decision: UploadDecision,
+					hasGraceFacts: boolean
+				): Promise<void> => {
+					try {
+						await publishDecision(decision, hasGraceFacts);
+					} finally {
+						bar.advance(1);
+						reportCounts();
+					}
+				};
+
+				if (referenceGroup !== undefined) {
+					await mapWithConcurrency(
+						referenceGroup.uploads,
+						concurrency,
+						(decision) =>
+							publishCounted(decision, referenceGroup.hasUploadGraceFacts)
+					);
 				}
 
-				bar.fact('committed', formatCount(committed), {
-					humanLabel: 'accepted'
-				});
+				await publishJustInTime(
+					{
+						paths: resolved.filter((path) => path.source === 'local'),
+						concurrency,
+						negotiationOf: (path) => negotiationOf(path),
+						negotiate: negotiateGroup
+					},
+					async (item) => {
+						if (item.kind === 'refused') {
+							throw item.error;
+						}
+
+						await publishCounted(item.decision, item.hasUploadGraceFacts);
+					}
+				);
 
 				return { pending };
 			}
 		);
+
+		// Exclude collected intermediates because publication did not complete
+		// their negotiated actions.
+		for (const path of collected) {
+			effectiveActions.delete(path.storePathHash);
+		}
 
 		// A reserved row is enough for a root to refer to the path, even while
 		// verification is pending. Record retention before waiting so it survives
@@ -1186,7 +1219,7 @@ async function runPushFlow(
 			failures.map((failure) => failure.storePathHash)
 		);
 		const summaryPaths: PushSummaryPathInput[] = [
-			...negotiation.uploads
+			...decisions
 				.filter((decision) => isSkip(decision))
 				.map((decision) => ({
 					storePathHash: decision.storePathHash,
@@ -1935,7 +1968,6 @@ interface CommitContext {
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly options: CommitOptions;
-	readonly hasGraceFacts: boolean;
 	// Re-drives must attach the replacement pending row to the same run root.
 	readonly runRoot?: UploadAttachRootInput;
 	readonly onBytes: (count: number) => void;
@@ -1982,13 +2014,11 @@ function isAbsentVerdict(error: unknown): boolean {
 // so a second loss propagates.
 async function commitNegotiated(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
-	context: CommitContext
+	context: CommitContext,
+	hasGraceFacts: boolean
 ): Promise<CommitOutcome> {
 	try {
-		return await commitVia(
-			context,
-			commitTarget(decision, context.hasGraceFacts)
-		);
+		return await commitVia(context, commitTarget(decision, hasGraceFacts));
 	} catch (error) {
 		if (!isStaleUploadError(error) && !isAbsentVerdict(error)) {
 			throw error;
@@ -1998,14 +2028,18 @@ async function commitNegotiated(
 	}
 }
 
+// A commit that the server acknowledged as pending.
+interface PendingCommit {
+	readonly decision: UploadDecisionOf<'upload' | 'commit'>;
+	readonly storePathHash: StorePathHash;
+	readonly settled: Promise<void>;
+}
+
 // After an `absent` verdict, replace the expired commit and wait for its new
 // verdict. Retention already refers to the store path, so the replacement row
 // needs no additional root update. A second loss propagates to the wait phase.
 async function awaitDeferredVerdict(
-	entry: {
-		readonly decision: UploadDecisionOf<'upload' | 'commit'>;
-		readonly settled: Promise<void>;
-	},
+	entry: PendingCommit,
 	context: CommitContext,
 	outcomes: Map<StorePathHash, CommitOutcome>
 ): Promise<void> {
@@ -2045,10 +2079,12 @@ async function redriveExpiredCommit(
 		);
 	}
 
+	const hasGraceFacts = renegotiation.hasUploadGraceFacts ?? true;
+
 	context.onRedriven(fresh);
 
 	if (isReusedBlobCommit(fresh)) {
-		return commitVia(context, commitTarget(fresh, context.hasGraceFacts));
+		return commitVia(context, commitTarget(fresh, hasGraceFacts));
 	}
 
 	if (isSkip(fresh)) {
@@ -2076,7 +2112,7 @@ async function redriveExpiredCommit(
 	verifyNarMetadata(pathInfo, upload.digest());
 	context.onUploaded(fresh.storePathHash);
 
-	return commitVia(context, commitTarget(fresh, context.hasGraceFacts));
+	return commitVia(context, commitTarget(fresh, hasGraceFacts));
 }
 
 function verifyNarMetadata(

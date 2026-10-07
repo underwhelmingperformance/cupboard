@@ -23,7 +23,6 @@ import {
 	commitBatchMaxEntries,
 	type UploadDecisionInput,
 	uploadDecisionSchema,
-	uploadNegotiateMaxPaths,
 	type UploadNegotiateResponse,
 	type UploadPreviewRequestInput,
 	type UploadPreviewResponse,
@@ -186,6 +185,8 @@ interface HarnessOptions {
 }
 
 class NegotiationTestError extends Error {}
+
+class UploadExpiredTestError extends Error {}
 
 interface Harness {
 	readonly negotiatedPaths: string[][];
@@ -880,17 +881,16 @@ describe('reconcileBuild', () => {
 		}).toStrictEqual(expected);
 	});
 
-	it('does not apply the commit batch limit to negotiation', async () => {
-		const paths = Array.from(
-			{ length: commitBatchMaxEntries + 1 },
-			(_, index) =>
-				storePathSchema.parse(
-					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
-				)
+	it('negotiates groups larger than the commit batch limit', async () => {
+		const paths = Array.from({ length: 300 }, (_, index) =>
+			storePathSchema.parse(
+				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+			)
 		);
 		const harnessed = harness({ valid: paths });
 		const result = await reconcileWith(harnessed, {
-			targets: paths.map((storePath) => target(storePath))
+			targets: paths.map((storePath) => target(storePath)),
+			uploadConcurrency: 1
 		});
 
 		expect({
@@ -899,80 +899,171 @@ describe('reconcileBuild', () => {
 			),
 			failed: result.receipt.failed
 		}).toStrictEqual({
-			negotiatedBatchSizes: [commitBatchMaxEntries + 1],
+			negotiatedBatchSizes: [1, 2, 4, 8, 16, 32, 64, 128, 45],
+			failed: []
+		});
+		expect(commitBatchMaxEntries).toBeLessThan(128);
+	});
+
+	it('continues with later groups after one negotiation fails', async () => {
+		const harnessed = harness({
+			valid: [pathA, pathB, pathC],
+			failNegotiationFor: new Set([pathA])
+		});
+		const result = await reconcileWith(harnessed, {
+			targets: [target(pathA, rootOne), target(pathB, rootTwo), target(pathC)],
+			uploadConcurrency: 1
+		});
+
+		expect({
+			negotiatedBatchSizes: harnessed.negotiatedPaths.map(
+				(batch) => batch.length
+			),
+			failed: result.receipt.failed,
+			published: result.receipt.paths,
+			roots: result.roots,
+			failureTypes: result.failures.map((failure) =>
+				failure.cause instanceof Error ? failure.cause.constructor : undefined
+			)
+		}).toStrictEqual({
+			negotiatedBatchSizes: [1, 1, 1],
+			failed: [pathA],
+			published: [pathB, pathC],
+			roots: [
+				{ root: rootOne, applied: false, targets: [pathA] },
+				{ root: rootTwo, applied: true, targets: [pathB] }
+			],
+			failureTypes: [NegotiationTestError]
+		});
+	});
+
+	it('commits every upload before it expires when each upload takes five minutes', async () => {
+		const paths = [pathA, pathB, pathC, pathD, pathG];
+		const fixture = harness({
+			valid: paths,
+			actions: new Map(paths.map((path) => [path, 'upload' as const]))
+		});
+		let minutes = 0;
+		const expiresAt = new Map<string, number>();
+		const expired: string[] = [];
+		const client: PushClient = {
+			...fixture.client,
+			negotiate: (body) => {
+				for (const path of body.paths) {
+					expiresAt.set(path.storePathHash, minutes + 15);
+				}
+
+				return fixture.client.negotiate(body);
+			},
+			uploadNar: (r2Key, body) => {
+				minutes += 5;
+
+				return fixture.client.uploadNar(r2Key, body);
+			},
+			commit: (commitTarget, options) => {
+				const deadline = expiresAt.get(commitTarget.storePathHash) ?? 0;
+
+				if (minutes > deadline) {
+					expired.push(commitTarget.storePathHash);
+
+					return Promise.reject(new UploadExpiredTestError());
+				}
+
+				return fixture.client.commit(commitTarget, options);
+			}
+		};
+		const result = await reconcileWith(fixture, {
+			targets: paths.map((storePath) => target(storePath)),
+			client,
+			uploadConcurrency: 1
+		});
+
+		expect({ expired, failed: result.receipt.failed }).toStrictEqual({
+			expired: [],
 			failed: []
 		});
 	});
 
-	// `uploadNegotiateMaxPaths` is fixed by the protocol, so reaching a second
-	// batch requires a large fixture. Allow extra time on loaded runners.
-	it(
-		'continues with later batches after one negotiation fails',
-		{ timeout: 30_000 },
-		async () => {
-			const paths = Array.from(
-				{ length: uploadNegotiateMaxPaths + 1 },
-				(_, index) =>
-					storePathSchema.parse(
-						`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
-					)
-			);
-			const first = storePathSchema.parse(paths[0]);
-			const last = storePathSchema.parse(paths.at(-1));
-			const failedPaths = paths.slice(0, uploadNegotiateMaxPaths);
+	it("starts the next upload after an acknowledgement without waiting for the acknowledged path's verdict", async () => {
+		const fixture = harness({
+			valid: [pathA, pathB],
+			actions: new Map([
+				[pathA, 'upload' as const],
+				[pathB, 'upload' as const]
+			])
+		});
+		const events: string[] = [];
+		const acknowledgements = new Map<string, PromiseWithResolvers<undefined>>();
+		const verdicts = new Map<string, PromiseWithResolvers<undefined>>();
+		const nameOf = (storePathHash: string): string =>
+			storePathHash === StorePath.hash(pathA) ? 'A' : 'B';
+		const client: PushClient = {
+			...fixture.client,
+			negotiate: (body) => {
+				events.push(
+					`negotiate ${body.paths.map((path) => nameOf(path.storePathHash)).join(',')}`
+				);
 
-			const harnessed = harness({
-				valid: paths,
-				failNegotiationFor: new Set([first])
-			});
-			const result = await reconcileWith(harnessed, {
-				targets: [
-					...failedPaths.map((storePath) => target(storePath, rootOne)),
-					target(last, rootTwo)
-				]
-			});
+				return fixture.client.negotiate(body);
+			},
+			uploadNar: (r2Key, body) => {
+				events.push(
+					`upload ${r2Key === `staging/${StorePath.basename(pathA)}` ? 'A' : 'B'}`
+				);
 
-			expect({
-				negotiatedBatchSizes: harnessed.negotiatedPaths.map(
-					(batch) => batch.length
-				),
-				failed: result.receipt.failed,
-				published: result.receipt.paths,
-				outcomes: result.receipt.outcomes,
-				roots: result.roots,
-				rootReplacements: harnessed.rootReplacements,
-				failureTypes: result.failures.map((failure) =>
-					failure.cause instanceof Error ? failure.cause.constructor : undefined
-				)
-			}).toStrictEqual({
-				negotiatedBatchSizes: [uploadNegotiateMaxPaths, 1],
-				failed: failedPaths,
-				published: [last],
-				outcomes: [
-					...failedPaths.map((storePath) => ({
-						outcome: 'failed' as const,
-						storePath,
-						reason: 'upload' as const
-					})),
-					{ outcome: 'destination-served', storePath: last }
-				],
-				roots: [
-					{ root: rootOne, applied: false, targets: failedPaths },
-					{ root: rootTwo, applied: true, targets: [last] }
-				],
-				rootReplacements: [
-					{
-						name: rootTwo,
-						body: { retention: { kind: 'inherit' }, targets: [last] }
-					}
-				],
-				failureTypes: Array.from(
-					{ length: uploadNegotiateMaxPaths },
-					() => NegotiationTestError
-				)
-			});
-		}
-	);
+				return fixture.client.uploadNar(r2Key, body);
+			}
+		};
+		const session: CommitSession = {
+			commit: async (commitTarget) => {
+				const name = nameOf(commitTarget.storePathHash);
+				const acknowledgement = Promise.withResolvers<undefined>();
+				const verdict = Promise.withResolvers<undefined>();
+				acknowledgements.set(name, acknowledgement);
+				verdicts.set(name, verdict);
+				events.push(`commit ${name}`);
+				await acknowledgement.promise;
+
+				return {
+					storePathHash: commitTarget.storePathHash,
+					narHash: commitTarget.narHash,
+					status: 'pending',
+					settled: verdict.promise
+				};
+			},
+			close() {
+				return;
+			}
+		};
+		const reconciled = reconcileWith(fixture, {
+			targets: [target(pathA), target(pathB)],
+			client,
+			session,
+			uploadConcurrency: 1
+		});
+
+		await flushMicrotasks();
+		const beforeAcknowledgement = events.splice(0);
+
+		acknowledgements.get('A')?.resolve(undefined);
+		await flushMicrotasks();
+		const afterAcknowledgement = events.splice(0);
+
+		acknowledgements.get('B')?.resolve(undefined);
+		verdicts.get('A')?.resolve(undefined);
+		verdicts.get('B')?.resolve(undefined);
+		const result = await reconciled;
+
+		expect({
+			beforeAcknowledgement,
+			afterAcknowledgement,
+			servable: result.receipt.paths
+		}).toStrictEqual({
+			beforeAcknowledgement: ['negotiate A', 'upload A', 'commit A'],
+			afterAcknowledgement: ['negotiate B', 'upload B', 'commit B'],
+			servable: [pathA, pathB]
+		});
+	});
 
 	it('applies the declared TTL when it replaces a root', async () => {
 		const harnessed = harness({ valid: [pathA] });
@@ -1460,3 +1551,9 @@ describe('reconcileBuild over a shared commit session', () => {
 		});
 	});
 });
+
+async function flushMicrotasks(): Promise<void> {
+	for (let iteration = 0; iteration < 50; iteration += 1) {
+		await Promise.resolve();
+	}
+}

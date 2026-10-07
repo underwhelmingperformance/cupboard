@@ -10,7 +10,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	autoBuildStore,
 	type BuildReceiptV3,
@@ -25,14 +25,12 @@ import {
 import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import {
 	type UploadAttachRootInput,
-	type UploadDecision,
-	uploadNegotiateMaxPaths
+	type UploadDecision
 } from '@cupboard/protocol/upload';
-import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import type { CommitOptions } from '../client/client.ts';
-import type { CommitSession } from '../client/commit-socket.ts';
+import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
 import {
 	PushNarMetadataMismatchError,
@@ -41,7 +39,11 @@ import {
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
-import { exactUploadDecisions } from '../push/negotiation.ts';
+import {
+	exactUploadDecisions,
+	type NegotiatedPath,
+	publishJustInTime
+} from '../push/negotiation.ts';
 import { publishedSubjects } from '../push/origin.ts';
 import {
 	type CompressNar,
@@ -340,17 +342,40 @@ async function isBuildOutputServed(
 	return true;
 }
 
-// Complete one negotiated decision. Uploads verify streamed NAR metadata before
-// commit. If the path is collected during the read, preserve any destination
-// confirmation or report the missing target or intermediate. Upload and verdict
-// failures retain distinct receipt reasons.
-async function publishDecision(
+// The verdict for an acknowledged commit, or the error that refused the
+// commit itself.
+type Verdict =
+	| { readonly kind: 'servable' }
+	| { readonly kind: 'failed'; readonly error: unknown };
+
+interface AcknowledgedPath {
+	readonly info: NixValidPathInfo;
+	readonly verdict: Promise<Verdict>;
+}
+
+async function verdictOf(outcome: CommitOutcome): Promise<Verdict> {
+	try {
+		await outcome.settled;
+	} catch (error) {
+		return { kind: 'failed', error };
+	}
+
+	return { kind: 'servable' };
+}
+
+// Upload and commit one negotiated decision, returning once the server has
+// acknowledged the commit. Uploads verify streamed NAR metadata before commit.
+// If the path is collected during the read, preserve any destination
+// confirmation or report the missing target or intermediate. The verdict is
+// awaited later, so a slow verification does not keep this upload worker
+// busy.
+async function uploadAndAcknowledge(
 	decision: PublishableDecision,
 	info: NixValidPathInfo,
 	isTarget: boolean,
 	options: ReconcileOptions,
 	ledger: PublicationLedger
-): Promise<void> {
+): Promise<AcknowledgedPath | undefined> {
 	const compressNar = options.compressNar ?? compressNarToStream;
 	const createNarArchive =
 		options.createNarArchive ??
@@ -365,132 +390,124 @@ async function publishDecision(
 		} catch (error) {
 			if (isVanishedPathError(error)) {
 				settleLocallyMissing(info.storePath, isTarget, options, ledger);
-				return;
+				return undefined;
 			}
 
 			ledger.published.delete(info.storePath);
 			recordFailure(ledger, info.storePath, 'upload', error);
-			return;
+			return undefined;
 		}
 	}
 
+	let outcome: CommitOutcome;
+
 	try {
-		const outcome = await commitOverSession(options, {
+		outcome = await commitOverSession(options, {
 			uploadId: decision.uploadId,
 			storePathHash: decision.storePathHash,
 			narHash: decision.narHash
 		});
-
-		if (outcome.status !== 'already-present') {
-			ledger.published.add(info.storePath);
-		}
-
-		if (outcome.status === 'pending' && options.wait === false) {
-			return;
-		}
-
-		await outcome.settled;
-		ledger.servable.add(info.storePath);
 	} catch (error) {
-		ledger.published.delete(info.storePath);
-
-		if (
-			error instanceof UploadVerificationFailedError &&
-			error.status === 'absent'
-		) {
-			try {
-				if (await isBuildOutputServed(info, options.client)) {
-					ledger.servable.add(info.storePath);
-					return;
-				}
-			} catch (confirmationError) {
-				recordFailure(
-					ledger,
-					info.storePath,
-					'verification',
-					confirmationError
-				);
-				return;
-			}
-		}
-
-		recordFailure(ledger, info.storePath, 'verification', error);
+		return { info, verdict: Promise.resolve({ kind: 'failed', error }) };
 	}
+
+	if (outcome.status !== 'already-present') {
+		ledger.published.add(info.storePath);
+	}
+
+	if (outcome.status === 'pending' && options.wait === false) {
+		return undefined;
+	}
+
+	return { info, verdict: verdictOf(outcome) };
 }
 
-async function publishInfoBatch(
-	infos: readonly NixValidPathInfo[],
-	required: ReadonlyMap<StorePathString, boolean>,
+// Record an acknowledged path's verdict. An absent verdict can mean that
+// another upload of the same path won publication, so confirm it against the
+// destination before reporting a failure.
+async function recordVerdict(
+	acknowledged: AcknowledgedPath,
 	options: ReconcileOptions,
 	ledger: PublicationLedger
 ): Promise<void> {
-	const paths = infos.map((info) => prepareStorePathNegotiation(info));
-	let decisions: readonly UploadDecision[];
+	const { info } = acknowledged;
+	const verdict = await acknowledged.verdict;
 
-	try {
-		const negotiation = await options.client.negotiate({
-			paths,
-			...(options.runRoot !== undefined && { attachRoot: options.runRoot })
-		});
-
-		decisions = exactUploadDecisions(paths, negotiation.uploads);
-	} catch (error) {
-		for (const info of infos) {
-			recordFailure(ledger, info.storePath, 'upload', error);
-		}
-
+	if (verdict.kind === 'servable') {
+		ledger.servable.add(info.storePath);
 		return;
 	}
 
-	const infoByHash = new Map(
-		infos.map((info) => [StorePath.hash(info.storePath), info])
-	);
-	const publishable: {
-		readonly decision: PublishableDecision;
-		readonly info: NixValidPathInfo;
-	}[] = [];
+	ledger.published.delete(info.storePath);
 
-	for (const decision of decisions) {
-		const info = infoByHash.get(decision.storePathHash);
-
-		if (info === undefined) {
-			continue;
-		}
-
-		if (decision.action === 'skip') {
-			try {
-				requireMatchingBuildOutput(info, decision);
-			} catch (error) {
-				recordFailure(ledger, info.storePath, 'verification', error);
-				continue;
+	if (
+		verdict.error instanceof UploadVerificationFailedError &&
+		verdict.error.status === 'absent'
+	) {
+		try {
+			if (await isBuildOutputServed(info, options.client)) {
+				ledger.servable.add(info.storePath);
+				return;
 			}
-
-			ledger.servable.add(info.storePath);
-			continue;
+		} catch (confirmationError) {
+			recordFailure(ledger, info.storePath, 'verification', confirmationError);
+			return;
 		}
-
-		publishable.push({ decision, info });
 	}
 
-	await mapWithConcurrency(
-		publishable,
-		options.uploadConcurrency ?? defaultUploadConcurrency,
-		({ decision, info }) =>
-			publishDecision(
-				decision,
-				info,
-				required.get(info.storePath) === true,
-				options,
-				ledger
-			)
+	recordFailure(ledger, info.storePath, 'verification', verdict.error);
+}
+
+// Handle one path from just-in-time negotiation. A refused negotiation is an
+// upload failure for every path in its group.
+async function publishNegotiated(
+	item: NegotiatedPath<NixValidPathInfo, UploadDecision>,
+	required: ReadonlyMap<StorePathString, boolean>,
+	options: ReconcileOptions,
+	ledger: PublicationLedger,
+	acknowledged: AcknowledgedPath[]
+): Promise<void> {
+	const info = item.path;
+
+	if (item.kind === 'refused') {
+		recordFailure(ledger, info.storePath, 'upload', item.error);
+		return;
+	}
+
+	const { decision } = item;
+
+	if (decision.action === 'skip') {
+		try {
+			requireMatchingBuildOutput(info, decision);
+		} catch (error) {
+			recordFailure(ledger, info.storePath, 'verification', error);
+			return;
+		}
+
+		ledger.servable.add(info.storePath);
+		return;
+	}
+
+	const acknowledgement = await uploadAndAcknowledge(
+		decision,
+		info,
+		required.get(info.storePath) === true,
+		options,
+		ledger
 	);
+
+	if (acknowledgement !== undefined) {
+		acknowledged.push(acknowledgement);
+	}
 }
 
 // Read current store metadata for every path required after streaming, then
 // renegotiate each path with the destination. Existing destination paths become
 // skip decisions, while failed streaming publications retry the normal upload
-// and commit flow. Bound negotiation batches so one rejection does not block
-// later batches. Return the same store metadata for receipt provenance.
+// and commit flow. Paths are negotiated in small groups as upload workers
+// become free. A rejected negotiation refuses only the paths of its group, and
+// later groups continue. Verdicts are awaited after every upload has been
+// acknowledged. Return the same store metadata for receipt provenance.
 async function publishRequired(
 	required: ReadonlyMap<StorePathString, boolean>,
 	options: ReconcileOptions,
@@ -520,9 +537,32 @@ async function publishRequired(
 		}
 	}
 
-	for (const batch of chunk(infos, uploadNegotiateMaxPaths)) {
-		await publishInfoBatch(batch, required, options, ledger);
-	}
+	const concurrency = options.uploadConcurrency ?? defaultUploadConcurrency;
+	const acknowledged: AcknowledgedPath[] = [];
+
+	await publishJustInTime(
+		{
+			paths: infos,
+			concurrency,
+			negotiationOf: (info) => prepareStorePathNegotiation(info),
+			negotiate: async (paths) => {
+				const negotiation = await options.client.negotiate({
+					paths: [...paths],
+					...(options.runRoot !== undefined && { attachRoot: options.runRoot })
+				});
+
+				return {
+					uploads: negotiation.uploads,
+					hasUploadGraceFacts: negotiation.hasUploadGraceFacts ?? true
+				};
+			}
+		},
+		(item) => publishNegotiated(item, required, options, ledger, acknowledged)
+	);
+
+	await mapWithConcurrency(acknowledged, concurrency, (path) =>
+		recordVerdict(path, options, ledger)
+	);
 
 	return infos;
 }
