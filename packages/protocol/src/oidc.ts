@@ -5,8 +5,10 @@ import { isAnchoredRe2 } from './capture.ts';
 import {
 	authorizationDetailsSchema,
 	capturePatternMaxLength,
+	claimNameMaxLength,
 	oidcTrustDisplaySchema,
-	permittedGrantSchema
+	permittedGrantSchema,
+	templateMaxLength
 } from './grants.ts';
 import { IssuerUrl } from './oidc-issuer.ts';
 
@@ -34,16 +36,15 @@ export type TrustRuleId = z.infer<typeof trustRuleIdSchema>;
 // string) or against an anchored RE2 pattern (the claim must match it in full).
 // The pattern form lets a rule pin part of a claim and leave the rest open, for
 // example a workflow file at any ref.
-export const claimMatchSchema = z.union([
-	z.string(),
-	z.strictObject({
-		pattern: z
-			.string()
-			.min(1)
-			.max(capturePatternMaxLength)
-			.refine(isAnchoredRe2, 'pattern must be an anchored RE2 expression')
-	})
-]);
+const claimPatternSchema = z.strictObject({
+	pattern: z
+		.string()
+		.min(1)
+		.max(capturePatternMaxLength)
+		.refine(isAnchoredRe2, 'pattern must be an anchored RE2 expression')
+});
+
+export const claimMatchSchema = z.union([z.string(), claimPatternSchema]);
 export type ClaimMatch = z.infer<typeof claimMatchSchema>;
 
 // RFC 8693 token exchange issues the first Cupboard token in a session from an
@@ -185,14 +186,32 @@ export const oidcTrustIssuerInputSchema = z
 	})
 	.brand('OidcIssuer');
 
+export const trustRuleClaimsMaxCount = 32;
+
+// Only a request to add a rule applies these limits. A stored rule that fails
+// to parse refuses every exchange that it could match, so stored rules and
+// summaries keep `claimMatchSchema`, and rules stored before the limits stay
+// readable.
+const requestedClaimMatchSchema = z.union([
+	z.string().max(templateMaxLength),
+	claimPatternSchema
+]);
+
 export const oidcTrustAddBodySchema = z.strictObject({
 	issuer: oidcTrustIssuerInputSchema,
 	audience: z.string().min(1).brand('OidcAudience'),
 	claims: z
-		.record(z.string().min(1), claimMatchSchema)
+		.record(
+			z.string().min(1).max(claimNameMaxLength),
+			requestedClaimMatchSchema
+		)
 		.refine(
 			(value) => Object.keys(value).length > 0,
 			'at least one claim is required'
+		)
+		.refine(
+			(value) => Object.keys(value).length <= trustRuleClaimsMaxCount,
+			`at most ${String(trustRuleClaimsMaxCount)} claims are allowed`
 		),
 	permittedGrants: z.array(permittedGrantSchema).min(1),
 	display: oidcTrustDisplaySchema.optional()

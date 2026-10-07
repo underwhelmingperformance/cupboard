@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { claimNameMaxLength, templateMaxLength } from './grants.ts';
 import {
 	controlOidcTrustAddBodySchema,
 	oidcTrustAddBodySchema,
@@ -13,7 +14,8 @@ import {
 	tokenExchangeGrantRequestSchema,
 	tokenExchangeRequestSchema,
 	tokenRequestSchema,
-	tokenResponseSchema
+	tokenResponseSchema,
+	trustRuleClaimsMaxCount
 } from './oidc.ts';
 
 describe('tokenExchangeRequestSchema', () => {
@@ -306,6 +308,24 @@ describe('oidc trust schemas', () => {
 		],
 		display: { provider: 'github', repository: 'owner/repo' }
 	};
+	const claimsAtLimit = Object.fromEntries(
+		Array.from({ length: trustRuleClaimsMaxCount }, (_, index) => [
+			String(index).padEnd(claimNameMaxLength, 'c'),
+			'v'.repeat(templateMaxLength)
+		])
+	);
+	const claimsAboveCountLimit = Object.fromEntries(
+		Array.from({ length: trustRuleClaimsMaxCount + 1 }, (_, index) => [
+			`claim_${String(index)}`,
+			'value'
+		])
+	);
+	const claimNameAboveLimit = {
+		['c'.repeat(claimNameMaxLength + 1)]: 'value'
+	};
+	const claimValueAboveLimit = {
+		repository_id: 'v'.repeat(templateMaxLength + 1)
+	};
 	const summary = {
 		id: 'r1',
 		issuer: additionBody.issuer,
@@ -337,6 +357,11 @@ describe('oidc trust schemas', () => {
 				...additionBody,
 				claims: { job_workflow_ref: { pattern: '^owner/repo/.+@.+$' } }
 			}
+		},
+		{
+			name: 'an add body at every claim limit',
+			value: { ...additionBody, claims: claimsAtLimit },
+			expected: { ...additionBody, claims: claimsAtLimit }
 		}
 	])('accepts add body: $name', ({ value, expected }) => {
 		expect(oidcTrustAddBodySchema.parse(value)).toStrictEqual(expected);
@@ -407,6 +432,18 @@ describe('oidc trust schemas', () => {
 				...additionBody,
 				claims: { job_workflow_ref: { pattern: 'owner/repo/.+@.+' } }
 			}
+		},
+		{
+			name: 'more claims than the limit',
+			value: { ...additionBody, claims: claimsAboveCountLimit }
+		},
+		{
+			name: 'a claim name longer than the limit',
+			value: { ...additionBody, claims: claimNameAboveLimit }
+		},
+		{
+			name: 'an exact claim value longer than the limit',
+			value: { ...additionBody, claims: claimValueAboveLimit }
 		}
 	])('rejects add body: $name', ({ value }) => {
 		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(false);
@@ -446,6 +483,20 @@ describe('oidc trust schemas', () => {
 			summary,
 			list: { rules: [summary] },
 			remove
+		});
+	});
+
+	it.each([
+		{ name: 'more claims than the limit', claims: claimsAboveCountLimit },
+		{ name: 'a claim name longer than the limit', claims: claimNameAboveLimit },
+		{
+			name: 'an exact claim value longer than the limit',
+			claims: claimValueAboveLimit
+		}
+	])('accepts a summary of a stored rule with $name', ({ claims }) => {
+		expect(oidcTrustSummarySchema.parse({ ...summary, claims })).toStrictEqual({
+			...summary,
+			claims
 		});
 	});
 
