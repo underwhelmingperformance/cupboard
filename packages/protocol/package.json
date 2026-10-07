@@ -44,6 +44,7 @@
 		"./reuse-views": "./src/reuse-views.ts",
 		"./scai": "./src/scai.ts",
 		"./scalars": "./src/scalars.ts",
+		"./sessions": "./src/sessions.ts",
 		"./signup": "./src/signup.ts",
 		"./tenants": "./src/tenants.ts",
 		"./upload": "./src/upload.ts"

@@ -41,6 +41,9 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard auth-key list`](#cupboard-auth-key-list)
   - [`cupboard auth-key rotate`](#cupboard-auth-key-rotate)
   - [`cupboard auth-key retire`](#cupboard-auth-key-retire)
+- [`cupboard session`](#cupboard-session)
+  - [`cupboard session list`](#cupboard-session-list)
+  - [`cupboard session revoke`](#cupboard-session-revoke)
 - [`cupboard control-key`](#cupboard-control-key)
   - [`cupboard control-key list`](#cupboard-control-key-list)
   - [`cupboard control-key rotate`](#cupboard-control-key-rotate)
@@ -143,6 +146,7 @@ Commands:
   confirm [options] <url> [arguments...]          Check that store paths are already in a cache and refresh their grace period, without uploading anything.
   key                                             Manage and rotate the keys that sign the tenant's Nix cache metadata.
   auth-key                                        Manage and rotate the keys that sign the tenant's access tokens.
+  session                                         List and revoke the tenant's sign-in sessions, which renew access tokens for up to 30 days.
   control-key                                     Manage and rotate the keys that sign operator access tokens (operator only).
   control-oidc-trust                              Manage the trust rules that let other operators and CI jobs manage the deployment (operator only).
   tenant                                          Create, suspend and remove tenants, and manage their quotas and read credentials (operator only).
@@ -1189,6 +1193,57 @@ Arguments:
 
 Options:
   -y, --yes   retire without the confirmation prompt
+  -h, --help  display help for command
+```
+
+### cupboard session
+
+```text
+Usage: cupboard session [options] [command]
+
+List and revoke the tenant's sign-in sessions, which renew access tokens for up
+to 30 days.
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  list <url>                   List unexpired sign-in sessions with their
+                               recorded identity and trust rule.
+  revoke [options] <url> <id>  Revoke a sign-in session. Its refresh token stops
+                               working immediately, and its last access token
+                               expires within ten minutes.
+  help [command]               display help for command
+```
+
+#### cupboard session list
+
+```text
+Usage: cupboard session list [options] <url>
+
+List unexpired sign-in sessions with their recorded identity and trust rule.
+
+Arguments:
+  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+
+Options:
+  -h, --help  display help for command
+```
+
+#### cupboard session revoke
+
+```text
+Usage: cupboard session revoke [options] <url> <id>
+
+Revoke a sign-in session. Its refresh token stops working immediately, and its
+last access token expires within ten minutes.
+
+Arguments:
+  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+  id          session ID, as `cupboard session list` shows it
+
+Options:
+  -y, --yes   revoke without the confirmation prompt
   -h, --help  display help for command
 ```
 

@@ -189,6 +189,30 @@ If there's no session for that URL, the command exits with status 77.
 
 `cupboard whoami` only reads files on your machine. It doesn't contact cupboard.
 
+## Listing and revoking a tenant's sessions
+
+A tenant administrator can list the tenant's unexpired sign-in sessions:
+
+```sh
+cupboard session list https://cupboard.example.workers.dev/t/acme
+```
+
+Each session shows its ID, the issuer and subject of the identity that signed
+in, the trust rule that issued its latest access token, and when it was created
+and when it expires. A session that started before cupboard recorded these
+details shows them as `unknown` until its next renewal. The rule is also
+`unknown` when several trust rules together permit the session's authority.
+
+To end a session, give its ID:
+
+```sh
+cupboard session revoke https://cupboard.example.workers.dev/t/acme <id>
+```
+
+Its refresh token stops working at once. Its current access token remains valid
+until it expires, within ten minutes. The commands need the `session:list` and
+`session:revoke` permissions, which a wildcard grant includes.
+
 ## Signing out
 
 To sign out of a tenant, run:

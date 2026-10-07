@@ -119,6 +119,7 @@ read credential when its runner or remote daemon needs one.
 | ------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------- |
 | An administrator                | Remove every matching trust rule that permits their authority.                             | Within 10 minutes, when their access token expires. |
 | A CI job                        | Remove its trust rule.                                                                     | Within 15 minutes.                                  |
+| A sign-in session               | List it with `cupboard session list`, then run `cupboard session revoke`.                  | Within 10 minutes; renewal stops at once.           |
 | A leaked access token           | [Rotate the access-token key](./admin/keys.md#access-token-keys), then retire the old one. | Immediately.                                        |
 | A leaked static read credential | Rotate it with `cupboard tenant rotate-credential` or `rotate-cache-credential`.           | Immediately.                                        |
 | A compromised signing key       | [Rotate it](./admin/keys.md#rotating-the-signing-key), and remove it from clients.         | As clients are updated.                             |

@@ -100,6 +100,7 @@ import {
 	type OidcTrustRuleSnapshot,
 	type OidcTrustService
 } from './oidc-trust-service.ts';
+import { deleteRefreshFamily } from './refresh-sessions-service.ts';
 
 interface PreparedRefreshToken {
 	readonly token: string;
@@ -1004,14 +1005,7 @@ export class TokenExchangeService {
 		database?: RefreshTokenDatabase
 	): void {
 		const revoke = (transaction: RefreshTokenDatabase): void => {
-			transaction
-				.delete(schema.refreshTokenMembers)
-				.where(eq(schema.refreshTokenMembers.familyId, familyId))
-				.run();
-			transaction
-				.delete(schema.refreshTokenFamilies)
-				.where(eq(schema.refreshTokenFamilies.id, familyId))
-				.run();
+			deleteRefreshFamily(transaction, familyId);
 		};
 
 		if (database !== undefined) {
