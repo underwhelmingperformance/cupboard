@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { InvalidCacheUrlBaseError } from './errors.ts';
-import { canonicalHref, parseBaseUrl } from './url.ts';
+import { canonicalHref, isHttpsOrLoopbackHttp, parseBaseUrl } from './url.ts';
 
 describe('parseBaseUrl', () => {
 	it.each([
@@ -89,5 +89,48 @@ describe('canonicalHref', () => {
 		]
 	])('%s', (_name, value, expected) => {
 		expect(canonicalHref(new URL(value))).toBe(expected);
+	});
+});
+
+describe('isHttpsOrLoopbackHttp', () => {
+	it.each([
+		{
+			name: 'an HTTPS URL',
+			value: 'https://cupboard.example.workers.dev',
+			allowed: true
+		},
+		{
+			name: 'HTTP to localhost',
+			value: 'http://localhost:8787',
+			allowed: true
+		},
+		{
+			name: 'HTTP to 127.0.0.1',
+			value: 'http://127.0.0.1:8787',
+			allowed: true
+		},
+		{
+			name: 'HTTP to the IPv6 loopback',
+			value: 'http://[::1]:8787',
+			allowed: true
+		},
+		{
+			name: 'HTTP to a public host',
+			value: 'http://cupboard.example.workers.dev',
+			allowed: false
+		},
+		{
+			name: 'HTTP to a host that starts with localhost',
+			value: 'http://localhost.example.test',
+			allowed: false
+		},
+		{
+			name: 'HTTP to another loopback address',
+			value: 'http://127.0.0.2:8787',
+			allowed: false
+		},
+		{ name: 'an FTP URL', value: 'ftp://localhost', allowed: false }
+	])('returns $allowed for $name', ({ value, allowed }) => {
+		expect(isHttpsOrLoopbackHttp(new URL(value))).toBe(allowed);
 	});
 });

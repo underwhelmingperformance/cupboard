@@ -46,6 +46,7 @@ import {
 	ReadUserRequiredError,
 	ReuseViewPriorityError,
 	StaticReadCredentialRejectedError,
+	UrlInputInsecureError,
 	UrlInputInvalidError
 } from '../errors.ts';
 
@@ -492,6 +493,11 @@ describe('resolveSetupInputs', () => {
 			'cache-url is not an http(s) URL',
 			{ ...baseOptions, cacheUrl: 'not a url' },
 			UrlInputInvalidError
+		],
+		[
+			'cache-url uses plain HTTP to a host other than loopback',
+			{ ...baseOptions, cacheUrl: 'http://cache.example.test/t/acme' },
+			UrlInputInsecureError
 		],
 		[
 			'include-prereleases is not true or false',

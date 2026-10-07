@@ -1,4 +1,4 @@
-const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+import { isHttpsOrLoopbackHttp } from '@cupboard/nix-store/url';
 
 /**
  * Whether a URL uses HTTPS.
@@ -26,11 +26,7 @@ export function isAllowedIssuerUrl(value: string): boolean {
 		return false;
 	}
 
-	if (url.protocol === 'https:') {
-		return true;
-	}
-
-	return url.protocol === 'http:' && loopbackHosts.has(url.hostname);
+	return isHttpsOrLoopbackHttp(url);
 }
 
 /**

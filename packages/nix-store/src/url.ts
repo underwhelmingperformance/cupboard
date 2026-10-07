@@ -12,6 +12,22 @@ function withoutTrailingSlashes(value: string): string {
 	return value.slice(0, end);
 }
 
+const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/**
+ * Whether a URL uses HTTPS, or plain HTTP to a loopback host. Callers use this
+ * predicate to validate issuer and cupboard URLs before sending credentials.
+ * The loopback exception lets local development and tests run without a
+ * certificate.
+ */
+export function isHttpsOrLoopbackHttp(url: URL): boolean {
+	if (url.protocol === 'https:') {
+		return true;
+	}
+
+	return url.protocol === 'http:' && loopbackHosts.has(url.hostname);
+}
+
 /**
  * Validates and canonicalises a base URL for cache requests. It accepts only
  * HTTP and HTTPS URLs without credentials, a query or a fragment. The returned

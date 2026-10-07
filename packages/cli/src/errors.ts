@@ -638,6 +638,20 @@ export class InvalidWorkerUrlBaseError extends CliUsageError {
 	}
 }
 
+/**
+ * A Worker URL that uses plain HTTP to a host other than a loopback address.
+ * Requests to a cupboard URL can contain tokens and read credentials, which an
+ * on-path observer could read over plain HTTP.
+ */
+export class InsecureWorkerUrlError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`Worker URL must use https://. http:// is allowed only for localhost, 127.0.0.1 and [::1]: ${value}`
+		);
+		this.name = 'InsecureWorkerUrlError';
+	}
+}
+
 export class UnreachableHostError extends CliError {
 	constructor(
 		public readonly host: string,

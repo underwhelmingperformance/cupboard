@@ -9,6 +9,7 @@ import {
 	PrivateSubstituterInvalidError,
 	ReadUserInvalidError,
 	UnknownCacheCredentialError,
+	UrlInputInsecureError,
 	UrlInputInvalidError
 } from './errors.ts';
 import {
@@ -105,6 +106,24 @@ describe('providedUrl', () => {
 		expect(() => providedUrl('cache-url', value)).toThrow(UrlInputInvalidError);
 	});
 
+	it.each([
+		['plain HTTP to a remote host', 'http://cache.example.test/t/acme'],
+		['plain HTTP to a loopback-looking name', 'http://localhost.example.test']
+	])('refuses %s', (_name, value) => {
+		expect(() => providedUrl('cache-url', value)).toThrow(
+			UrlInputInsecureError
+		);
+	});
+
+	it.each([
+		['HTTPS', 'https://cache.example.test/t/acme'],
+		['plain HTTP to 127.0.0.1', 'http://127.0.0.1:8787/t/acme'],
+		['plain HTTP to localhost', 'http://localhost:8787/t/acme'],
+		['plain HTTP to ::1', 'http://[::1]:8787/t/acme']
+	])('accepts %s', (_name, value) => {
+		expect(providedUrl('cache-url', value)?.href).toBe(value);
+	});
+
 	it('records the input name without storing its value', () => {
 		const error = new UrlInputInvalidError('cache-url');
 
@@ -148,6 +167,31 @@ describe('providedPrivateSubstituters', () => {
 		expect(() => providedPrivateSubstituters(value)).toThrow(
 			'private-substituters entry 1 must be an authenticated HTTP(S) URL without a query or fragment'
 		);
+	});
+
+	it.each([
+		[
+			'plain HTTP to a remote host',
+			'http://ci:secret@cache.example.test/cache'
+		],
+		[
+			'plain HTTP to a loopback-looking name',
+			'http://ci:secret@localhost.example.test/cache'
+		]
+	])('refuses %s', (_name, value) => {
+		expect(() => providedPrivateSubstituters(value)).toThrow(
+			UrlInputInsecureError
+		);
+	});
+
+	it.each([
+		['plain HTTP to 127.0.0.1', 'http://ci:secret@127.0.0.1:8787/cache'],
+		['plain HTTP to localhost', 'http://ci:secret@localhost:8787/cache'],
+		['plain HTTP to ::1', 'http://ci:secret@[::1]:8787/cache']
+	])('accepts %s', (_name, value) => {
+		expect(
+			providedPrivateSubstituters(value).map((url) => url.href)
+		).toStrictEqual([value]);
 	});
 });
 

@@ -368,8 +368,8 @@ reading:
 
 - To read from private caches that the job doesn't publish to, pass them in
   `private-substituters`, one URL per line, with the username and password in
-  each URL. Pass the value from a secret. Nix still needs each cache's public
-  key.
+  each URL. Each URL must use HTTPS, or HTTP to a loopback host. Pass the value
+  from a secret. Nix still needs each cache's public key.
 
 `setup` hides every password, and every URL that contains one, in the job log.
 Pass `read-password` from a secret too, so that the runner hides it. This only

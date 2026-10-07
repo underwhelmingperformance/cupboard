@@ -1,9 +1,10 @@
 import {
+	InsecureCacheUrlError,
 	InvalidCacheUrlSegmentError,
 	InvalidTenantCacheUrlError
 } from './errors.ts';
 import { cacheNameSchema, type CacheScope, tenantIdSchema } from './scalars.ts';
-import { parseBaseUrl } from './url.ts';
+import { isHttpsOrLoopbackHttp, parseBaseUrl } from './url.ts';
 
 export interface TenantCacheUrl {
 	readonly tenantUrl: URL;
@@ -30,13 +31,19 @@ export function cacheUrl(baseUrl: URL, cache: CacheScope): URL {
 
 /**
  * Separates a tenant cache URL into its tenant URL and cache scope. Only the
- * canonical tenant path and its named-cache child are accepted.
+ * canonical tenant path and its named-cache child are accepted. Plain HTTP to
+ * a host other than a loopback address throws {@link InsecureCacheUrlError}.
  */
 export function parseTenantCacheUrl(value: URL): TenantCacheUrl {
 	const href = value.href;
 
 	try {
 		const url = parseBaseUrl(value);
+
+		if (!isHttpsOrLoopbackHttp(url)) {
+			throw new InsecureCacheUrlError(href);
+		}
+
 		const segments = url.pathname.split('/');
 		const tenantMarker = segments.at(-2);
 		const encodedTenant = segments.at(-1);
@@ -68,7 +75,10 @@ export function parseTenantCacheUrl(value: URL): TenantCacheUrl {
 
 		return { tenantUrl, cache: { kind: 'named', name } };
 	} catch (error) {
-		if (error instanceof InvalidTenantCacheUrlError) {
+		if (
+			error instanceof InvalidTenantCacheUrlError ||
+			error instanceof InsecureCacheUrlError
+		) {
 			throw error;
 		}
 
