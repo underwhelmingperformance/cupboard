@@ -113,9 +113,11 @@ export class Nix {
 	 * directory is writable, and a local reader with no substituters cannot
 	 * report external paths.
 	 *
-	 * A daemon provides these queries whenever its socket is available. Without
-	 * an available daemon, this process queries the substituters directly. Options
-	 * passed to this method override the discovered value for the same setting.
+	 * For an automatic store, an available daemon socket provides these queries.
+	 * A local store queries substituters from this process by default, or
+	 * through a scoped `nix daemon --stdio` child when `localStoreQueries` is
+	 * `scoped-daemon`. Options passed to this method override discovered
+	 * settings for the same key.
 	 * `storeUri` selects the store, an `ssh-ng` URI reaches that remote's daemon
 	 * over SSH, and a `substituters` override selects which substituters are
 	 * queried in either case.
@@ -346,10 +348,10 @@ export class Nix {
 	}
 
 	/**
-	 * Whether availability may reflect the daemon's narinfo cache. A daemon can
-	 * repeat an earlier negative result without contacting a substituter. A store
-	 * driven by this process queries its configured substituters for each
-	 * operation.
+	 * Whether availability may reflect the daemon's narinfo cache. A daemon
+	 * reached through its socket can repeat an earlier negative result without
+	 * contacting a substituter. Direct local queries and scoped-daemon queries
+	 * read no cached narinfo.
 	 */
 	get cachesSubstituterQueries(): boolean {
 		return this.storeKind !== 'local-filesystem';

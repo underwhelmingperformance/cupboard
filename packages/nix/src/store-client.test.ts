@@ -17,6 +17,8 @@ import {
 	UnsupportedNixStoreError
 } from './nix-store.ts';
 import {
+	type AvailabilityRoute,
+	availabilityRoute,
 	type AvailabilityStore,
 	createAvailabilityStoreClient,
 	createNixDaemonStoreClient,
@@ -581,6 +583,165 @@ function openForAvailability(
 		options
 	);
 }
+
+describe('availabilityRoute', () => {
+	const freshNarinfoArguments = [
+		'--option',
+		'narinfo-cache-positive-ttl',
+		'0',
+		'--option',
+		'narinfo-cache-negative-ttl',
+		'0'
+	];
+	const config: NixStoreConfig = {
+		...baseConfig,
+		daemonOverrides: { 'narinfo-cache-positive-ttl': '86400' }
+	};
+
+	it.each<{
+		readonly name: string;
+		readonly storeUri: string;
+		readonly probes: Probes;
+		readonly options: NixDaemonClientOptions;
+		readonly expected: AvailabilityRoute;
+	}>([
+		{
+			name: 'starts a scoped daemon for an automatic store with no daemon socket',
+			storeUri: 'auto',
+			probes: { canWrite: true, socket: false },
+			options: {
+				localStoreQueries: 'scoped-daemon',
+				overrides: { 'netrc-file': '/caller/netrc' }
+			},
+			expected: {
+				kind: 'local-filesystem',
+				queries: 'scoped-daemon',
+				daemon: {
+					command: 'nix',
+					commandArguments: [
+						'daemon',
+						'--stdio',
+						'--store',
+						'auto',
+						...freshNarinfoArguments
+					],
+					overrides: {
+						'narinfo-cache-positive-ttl': '0',
+						'narinfo-cache-negative-ttl': '0',
+						'netrc-file': '/caller/netrc'
+					}
+				}
+			}
+		},
+		{
+			name: 'starts a scoped daemon on an explicitly local store',
+			storeUri: 'local?root=/rooted',
+			probes: { canWrite: true, socket: true },
+			options: { localStoreQueries: 'scoped-daemon' },
+			expected: {
+				kind: 'local-filesystem',
+				queries: 'scoped-daemon',
+				daemon: {
+					command: 'nix',
+					commandArguments: [
+						'daemon',
+						'--stdio',
+						'--store',
+						'local?root=/rooted',
+						...freshNarinfoArguments
+					],
+					overrides: {
+						'narinfo-cache-positive-ttl': '0',
+						'narinfo-cache-negative-ttl': '0'
+					}
+				}
+			}
+		},
+		{
+			name: 'queries substituters directly from a local store by default',
+			storeUri: 'auto',
+			probes: { canWrite: true, socket: false },
+			options: {},
+			expected: { kind: 'local-filesystem', queries: 'direct' }
+		},
+		{
+			name: 'uses the daemon socket for an automatic store',
+			storeUri: 'auto',
+			probes: { canWrite: true, socket: true },
+			options: { localStoreQueries: 'scoped-daemon' },
+			expected: {
+				kind: 'daemon',
+				socketPath: '/nix/var/nix/daemon-socket/socket'
+			}
+		},
+		{
+			name: 'uses the daemon socket for an explicit daemon store',
+			storeUri: 'daemon',
+			probes: { canWrite: true, socket: true },
+			options: { localStoreQueries: 'scoped-daemon' },
+			expected: {
+				kind: 'daemon',
+				socketPath: '/nix/var/nix/daemon-socket/socket'
+			}
+		},
+		{
+			name: 'uses the remote daemon for an ssh-ng store',
+			storeUri: 'ssh-ng://build@example.test',
+			probes: { canWrite: true, socket: false },
+			options: { localStoreQueries: 'scoped-daemon' },
+			expected: { kind: 'ssh-ng', storeUri: 'ssh-ng://build@example.test' }
+		}
+	])('$name', ({ storeUri, probes, options, expected }) => {
+		const environment = daemonEnvironment(probes);
+		const selected = { ...config, storeUri };
+
+		expect(
+			availabilityRoute(
+				resolveStoreBackend(selected, environment),
+				selected,
+				environment,
+				options
+			)
+		).toStrictEqual(expected);
+	});
+
+	it('sends zero narinfo lifetimes to the scoped daemon after the discovered settings', async () => {
+		const storePath = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+		);
+		const store = createAvailabilityStoreClient(
+			daemonEnvironment({ canWrite: true, socket: false }),
+			config,
+			{
+				localStoreQueries: 'scoped-daemon',
+				connect: () =>
+					Promise.resolve(
+						new FakeDaemonTransport(
+							{
+								[storePath]: {
+									hash: '11'.repeat(32),
+									narSize: 123,
+									references: [],
+									signatures: []
+								}
+							},
+							{
+								expectedOverrides: {
+									'narinfo-cache-positive-ttl': '0',
+									'narinfo-cache-negative-ttl': '0'
+								}
+							}
+						)
+					)
+			}
+		);
+
+		expect({
+			kind: store.kind,
+			valid: await store.client.queryValidPaths([storePath])
+		}).toStrictEqual({ kind: 'local-filesystem', valid: [storePath] });
+	});
+});
 
 describe('overriddenSubstitution', () => {
 	const discovered: NixSubstitutionSettings = {

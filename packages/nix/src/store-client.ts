@@ -9,6 +9,10 @@ import {
 } from './local-store-uri.ts';
 import { type NixDaemonConnector, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
+	createProcessNixDaemonConnector,
+	daemonProcessRunner
+} from './nix-daemon-process.ts';
+import {
 	createSshNixDaemonConnector,
 	type NixSshStoreSpec,
 	parseSshNgStoreUri
@@ -292,6 +296,106 @@ export interface NixDaemonClientOptions {
 	 * Aborts the client's work with the signal's reason.
 	 */
 	readonly signal?: AbortSignal;
+	/**
+	 * Selects how an availability store queries substituters when availability
+	 * selection uses a local store. Defaults to `direct`.
+	 */
+	readonly localStoreQueries?: LocalStoreQueries;
+}
+
+/**
+ * How an availability store queries substituters when availability selection
+ * uses a local store. `direct` sends narinfo requests from this process.
+ * `scoped-daemon` starts `nix daemon --stdio` as the current user for each
+ * connection, so Nix records the answers in its narinfo disk cache for later
+ * Nix commands.
+ */
+export type LocalStoreQueries = 'direct' | 'scoped-daemon';
+
+/**
+ * The command that starts a scoped daemon, and the settings that its client
+ * sends after the handshake.
+ */
+export interface ScopedDaemonCommand {
+	readonly command: string;
+	readonly commandArguments: readonly string[];
+	readonly overrides: NixDaemonOverrides;
+}
+
+/**
+ * Where an availability store sends its queries.
+ */
+export type AvailabilityRoute =
+	| { readonly kind: 'ssh-ng'; readonly storeUri: string }
+	| { readonly kind: 'daemon'; readonly socketPath: string }
+	| { readonly kind: 'local-filesystem'; readonly queries: 'direct' }
+	| {
+			readonly kind: 'local-filesystem';
+			readonly queries: 'scoped-daemon';
+			readonly daemon: ScopedDaemonCommand;
+	  };
+
+// The daemon applies SetOptions after its command-line options. Send zero
+// lifetimes in both places so that SetOptions cannot restore cached reads.
+const freshNarinfoSettings: NixDaemonOverrides = {
+	'narinfo-cache-positive-ttl': '0',
+	'narinfo-cache-negative-ttl': '0'
+};
+
+/**
+ * For an automatic store, selects an existing daemon socket before local
+ * queries. An explicitly selected local store can use a scoped daemon even when
+ * the socket exists.
+ */
+export function availabilityRoute(
+	backend: StoreBackend,
+	config: NixStoreConfig,
+	dependencies: StoreClientEnvironment,
+	options: NixDaemonClientOptions = {}
+): AvailabilityRoute {
+	const { storeUri } = config;
+
+	if (backend.backend === 'ssh-ng') {
+		return { kind: 'ssh-ng', storeUri };
+	}
+
+	if (backend.backend === 'daemon') {
+		return { kind: 'daemon', socketPath: backend.socketPath };
+	}
+
+	const isAutomatic = storeUri === 'auto' || storeUri === '';
+
+	if (isAutomatic && dependencies.socketExists(config.daemonSocketPath)) {
+		return { kind: 'daemon', socketPath: config.daemonSocketPath };
+	}
+
+	if (options.localStoreQueries !== 'scoped-daemon') {
+		return { kind: 'local-filesystem', queries: 'direct' };
+	}
+
+	return {
+		kind: 'local-filesystem',
+		queries: 'scoped-daemon',
+		daemon: {
+			command: 'nix',
+			commandArguments: [
+				'daemon',
+				'--stdio',
+				'--store',
+				isAutomatic ? 'auto' : storeUri,
+				...Object.entries(freshNarinfoSettings).flatMap(([name, value]) => [
+					'--option',
+					name,
+					value
+				])
+			],
+			overrides: {
+				...config.daemonOverrides,
+				...options.overrides,
+				...freshNarinfoSettings
+			}
+		}
+	};
 }
 
 /**
@@ -379,7 +483,11 @@ export interface AvailabilityStore {
  *
  * The result also provides direct substituter queries with effective overrides
  * for callers that need NAR hashes and signatures. A local backend reads path
- * metadata from the store database and queries substituters from this process.
+ * metadata from the store database. By default it also queries substituters
+ * from this process. With `localStoreQueries: 'scoped-daemon'`, it sends its
+ * store operations to a `nix daemon --stdio` child instead, which reads no
+ * cached narinfo but records its answers in Nix's narinfo disk cache. The
+ * child exits when its connection closes.
  *
  * A selected local daemon without a socket throws
  * {@link NixDaemonUnavailableError}. An unsupported store throws
@@ -398,7 +506,8 @@ export function createAvailabilityStoreClient(
 		...config.daemonOverrides,
 		...options.overrides
 	});
-	const backend = resolveStoreBackend({ ...config, storeUri }, dependencies);
+	const selected = { ...config, storeUri };
+	const backend = resolveStoreBackend(selected, dependencies);
 	const directories = storeDirectoriesOf(backend, config);
 	const substituters = substituterClientOver(
 		directories,
@@ -408,65 +517,67 @@ export function createAvailabilityStoreClient(
 		options.signal,
 		options.requirePublicNar
 	);
-
-	if (backend.backend === 'ssh-ng') {
-		return {
-			client: createNixDaemonStoreClient(dependencies, config, options),
-			kind: 'ssh-ng',
-			storeDirectory: directories.storeDirectory,
-			stateDirectory: directories.stateDirectory,
-			...(directories.realStoreDirectory !== undefined && {
-				realStoreDirectory: directories.realStoreDirectory
-			}),
-			substituters
-		};
-	}
-
-	if (
-		backend.backend === 'local' &&
-		(storeUri === 'auto' || storeUri === '') &&
-		dependencies.socketExists(config.daemonSocketPath)
-	) {
-		return {
-			client: createNixDaemonStoreClient(dependencies, config, options),
-			kind: 'daemon',
-			storeDirectory: directories.storeDirectory,
-			stateDirectory: directories.stateDirectory,
-			...(directories.realStoreDirectory !== undefined && {
-				realStoreDirectory: directories.realStoreDirectory
-			}),
-			substituters
-		};
-	}
-
-	if (backend.backend === 'daemon') {
-		const { socketPath } = backend;
-
-		if (!dependencies.socketExists(socketPath)) {
-			throw new NixDaemonUnavailableError(socketPath);
-		}
-
-		return {
-			client: createNixDaemonStoreClient(dependencies, config, options),
-			kind: 'daemon',
-			storeDirectory: directories.storeDirectory,
-			stateDirectory: directories.stateDirectory,
-			...(directories.realStoreDirectory !== undefined && {
-				realStoreDirectory: directories.realStoreDirectory
-			}),
-			substituters
-		};
-	}
-
-	return {
-		client: localStoreOver(backend, substituters, substitution, options.signal),
-		kind: 'local-filesystem',
+	const route = availabilityRoute(backend, selected, dependencies, options);
+	const located = {
 		storeDirectory: directories.storeDirectory,
 		stateDirectory: directories.stateDirectory,
 		...(directories.realStoreDirectory !== undefined && {
 			realStoreDirectory: directories.realStoreDirectory
 		}),
 		substituters
+	};
+
+	if (route.kind === 'ssh-ng') {
+		return {
+			client: createNixDaemonStoreClient(dependencies, config, options),
+			kind: 'ssh-ng',
+			...located
+		};
+	}
+
+	if (route.kind === 'daemon') {
+		if (!dependencies.socketExists(route.socketPath)) {
+			throw new NixDaemonUnavailableError(route.socketPath);
+		}
+
+		return {
+			client: createNixDaemonStoreClient(dependencies, config, options),
+			kind: 'daemon',
+			...located
+		};
+	}
+
+	if (route.queries === 'direct') {
+		return {
+			client: localStoreOver(
+				directories,
+				substituters,
+				substitution,
+				options.signal
+			),
+			kind: 'local-filesystem',
+			...located
+		};
+	}
+
+	const { daemon } = route;
+
+	return {
+		client: new NixDaemonStoreClient({
+			connect:
+				options.connect ??
+				createProcessNixDaemonConnector(
+					daemon.command,
+					daemon.commandArguments,
+					daemonProcessRunner(dependencies.env)
+				),
+			storeDirectory: directories.storeDirectory,
+			setOptions: { ...config.daemonSetOptions, ...options.setOptions },
+			overrides: daemon.overrides,
+			signal: options.signal
+		}),
+		kind: 'local-filesystem',
+		...located
 	};
 }
 

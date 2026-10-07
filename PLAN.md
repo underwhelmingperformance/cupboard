@@ -7002,13 +7002,71 @@ Specific faults seen on a dotfiles pull-request run:
 12. [ ] Print each push progress line once, explain the zero count of accepted
         paths before submission, and add duration and throughput.
 
+## Publication planning cost
+
+### Context
+
+In the dotfiles publication workflow, the jobs spend several minutes evaluating
+and checking availability before `nix build` starts, and little of that time is
+builder time. Import from derivation during evaluation reaches nixbuild.net,
+which already has those outputs and returns each one in under a second. The
+measured delays are:
+
+- The plan job evaluates the target manifest in 5 minutes 40 seconds.
+- Each cohort job evaluates its targets again to check that they still match the
+  plan's derivations, which takes 2.5 to 4.5 minutes.
+- Each cohort then checks which targets need a build, which takes 5 to 7
+  minutes.
+- `nix build` spent another 0.13 to 0.17 seconds per derivation to be built
+  before it started building: 71 seconds for 533 derivations and about 4 minutes
+  for 1,502. On a runner with a single-user Nix installation, the availability
+  check opened the store as `local-filesystem` and queried substituters directly
+  from TypeScript (`packages/nix/src/store-client.ts`, `SubstituterClient` in
+  `packages/nix/src/substituter.ts`). Nix's narinfo disk cache was still empty
+  when `nix build` started, so `nix build` repeated every substituter query.
+- On the dotfiles repository's `main` branch, every target of the x86_64-linux
+  and aarch64-darwin cohorts was already in a pull request's cache. Both cohort
+  jobs started, evaluated for about four minutes, and published their targets by
+  reference. The darwin job used a macOS runner for seven minutes to publish two
+  paths.
+
+### Decisions
+
+- Cohorts keep their drift check, which is their own check that the commit's
+  evaluation produces the plan's derivations. Shipping the derivation closure
+  from the plan job would remove that check, so step 21 of the build-time
+  publication sequence is superseded.
+- The plan job publishes by reference each target that the run's reuse source
+  serves, sets its root, and removes it from its cohort. A cohort left with no
+  targets doesn't start. If this advisory step fails, the plan job leaves the
+  cohorts unchanged, and each cohort that starts computes its own build set.
+- On a single-user installation, the availability check queries substituters
+  through a scoped `nix daemon --stdio` that ignores cached narinfo results. The
+  daemon writes Nix's disk cache, so `nix build` reads its answers from there.
+
+### Implementation sequence
+
+1. [ ] In the plan job, probe the reuse source for each target's expected path,
+       publish each match by reference, set its root, and drop cohorts that have
+       no targets left. Record the publications and the pruned cohorts in the
+       receipt and in the plan job's summary.
+2. [x] When the availability store would be `local-filesystem`, open a scoped
+       stdio daemon for the query, with `narinfo-cache-positive-ttl` and
+       `narinfo-cache-negative-ttl` set to zero so that the check never reads a
+       cached answer. Confirm that Nix still writes the disk cache when both
+       values are zero, and measure the time that `nix build` spends before its
+       first build.
+3. [ ] Measure parallel evaluation of the manifest on the plan job, for example
+       with `nix-eval-jobs` or one evaluation per target, and adopt it if it
+       shortens the plan job materially.
+
 ### Verification
 
-- Each behaviour has a test written to fail first, and `pnpm check` and the
-  pipeline tier pass.
-- A dotfiles pull-request run and a `main` run show the job summaries, the
-  readable job names, and a best-effort failure as one warning with its target
-  and failing derivation.
+- For each implementation step, write a failing test first, and require
+  `pnpm check` and the pipeline tier to pass after the change.
+- Verify that a dotfiles `main` run in which every target is reused starts no
+  cohort job, and that on a pull-request run `nix build` prints its build plan
+  within seconds of starting.
 
 ## Later features
 

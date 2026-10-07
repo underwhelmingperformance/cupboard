@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import process from 'node:process';
 
 import {
 	ByteStreamReader,
@@ -49,13 +50,24 @@ const scheduleDaemonProcessKill: ScheduleDaemonProcessKill = (
 	};
 };
 
-export const spawnDaemonProcess: DaemonCommandRunner = (
-	command,
-	commandArguments
-) =>
-	spawn(command, [...commandArguments], {
-		stdio: ['pipe', 'pipe', 'inherit']
-	});
+/**
+ * Returns a runner whose children receive `env` as their whole environment.
+ * Nix reads its configuration, store and cache directories from that
+ * environment.
+ */
+export function daemonProcessRunner(
+	env: Readonly<Record<string, string | undefined>>
+): DaemonCommandRunner {
+	return (command, commandArguments) =>
+		spawn(command, [...commandArguments], {
+			stdio: ['pipe', 'pipe', 'inherit'],
+			env
+		});
+}
+
+export const spawnDaemonProcess: DaemonCommandRunner = daemonProcessRunner(
+	process.env
+);
 
 /**
  * Runs one daemon child for each connection and exchanges the worker protocol
