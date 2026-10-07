@@ -569,10 +569,6 @@ describe('POST /token', () => {
 		});
 	});
 
-	// A rule the server cannot read is left out of the enumeration a token
-	// exchange selects from, so it can never authorise anything, and the
-	// exchange still answers with its ordinary refusal. The administrative read
-	// reports the fault so the row can be found and corrected.
 	it('leaves an existing loopback HTTP trust row out of issuance', async () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
@@ -616,7 +612,10 @@ describe('POST /token', () => {
 						.filter(
 							(entry) => entry.message === 'stored OIDC trust rule skipped'
 						)
-						.map((entry) => entry.level),
+						.map((entry) => ({
+							level: entry.level,
+							hasCause: entry.properties.cause instanceof Error
+						})),
 					readRefused: readError instanceof StoredOidcTrustInvalidError
 				};
 			}
@@ -625,7 +624,7 @@ describe('POST /token', () => {
 		expect(outcome).toStrictEqual({
 			// The tenant's own owner rule remains; only the unreadable row is left out.
 			enabled: [{ id: 'owner' }],
-			skipped: ['error'],
+			skipped: [{ level: 'error', hasCause: true }],
 			readRefused: true
 		});
 	});
@@ -5326,5 +5325,134 @@ describe('multi-audience subject tokens', () => {
 			status: StatusCodes.BAD_REQUEST,
 			problem: 'subject-token-invalid'
 		});
+	});
+});
+
+function unreadableRuleOutcome(outcome: unknown): unknown {
+	if (outcome instanceof StoredOidcTrustInvalidError) {
+		return { refused: outcome.id };
+	}
+
+	if (outcome instanceof Response) {
+		return { status: outcome.status };
+	}
+
+	return outcome;
+}
+
+interface UnreadableRuleCase {
+	readonly name: string;
+	readonly scope: 'write' | 'read';
+	readonly narrowAudience: string;
+	readonly form: Readonly<Record<string, string>>;
+	readonly expected: unknown;
+}
+
+describe('unreadable trust rules', () => {
+	beforeEach(resetTestServer);
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	const mainClaims = { ref: 'refs/heads/main' };
+
+	const narrowGrant: PermittedGrant = {
+		type: 'cupboard_cache',
+		actions: ['upload:commit'],
+		resources: {
+			cache: { kind: 'named', exact: 'main', validate: 'cacheName' }
+		}
+	};
+
+	function installNarrowRule(audience: string): Promise<void> {
+		return installAdditionalTrustRule('narrow-rule', [narrowGrant], {
+			audience,
+			claims: { sub: 'alice', ...mainClaims }
+		});
+	}
+
+	function makeNarrowRuleUnreadable(state: DurableObjectState): void {
+		drizzle(state.storage, { schema: { oidcTrust } })
+			.update(oidcTrust)
+			.set({
+				permittedGrantsJson: JSON.stringify([{ type: 'cupboard_unknown' }])
+			})
+			.where(eq(oidcTrust.id, trustRuleIdSchema.parse('narrow-rule')))
+			.run();
+	}
+
+	const exchangeForm = {
+		grant_type: tokenExchangeGrantType,
+		authorization_details: JSON.stringify(ciRequest)
+	};
+
+	it.each<UnreadableRuleCase>([
+		{
+			name: 'refuses an exchange when an unreadable rule matches its audience',
+			scope: 'write',
+			narrowAudience: 'cupboard-aud',
+			form: exchangeForm,
+			expected: { refused: 'narrow-rule' }
+		},
+		{
+			name: 'refuses a read access request when an unreadable rule matches its audience',
+			scope: 'read',
+			narrowAudience: 'cupboard-aud',
+			form: {
+				grant_type: readAccessGrantType,
+				read_resources: JSON.stringify([
+					{
+						type: 'cupboard_cache',
+						cache: { kind: 'default' },
+						mode: 'content'
+					}
+				])
+			},
+			expected: { refused: 'narrow-rule' }
+		},
+		{
+			name: 'accepts an exchange when the unreadable rule has another audience',
+			scope: 'write',
+			narrowAudience: 'other-aud',
+			form: exchangeForm,
+			expected: { status: StatusCodes.OK }
+		}
+	])('$name', async ({ scope, narrowAudience, form, expected }) => {
+		const subjectToken = await installTrustedIdp(scope, {
+			claims: mainClaims
+		});
+		await installNarrowRule(narrowAudience);
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			makeNarrowRuleUnreadable(state);
+		});
+
+		const outcome = await tokenExchangeError({
+			...form,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+
+		expect(unreadableRuleOutcome(outcome)).toStrictEqual(expected);
+	});
+
+	it('refuses to rotate a refresh family when an unreadable rule matches its identity', async () => {
+		const original = await exchange(
+			await installTrustedIdp('admin', { claims: mainClaims })
+		);
+		await installNarrowRule('cupboard-aud');
+		const families = await refreshTokenRows();
+
+		const outcome = await refreshWithFault(
+			original.refresh_token ?? '',
+			(_authKeys, state) => {
+				makeNarrowRuleUnreadable(state);
+			}
+		);
+
+		expect({
+			outcome: unreadableRuleOutcome(outcome),
+			families: await refreshTokenRows()
+		}).toStrictEqual({ outcome: { refused: 'narrow-rule' }, families });
 	});
 });

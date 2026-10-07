@@ -42,21 +42,28 @@ export type VerifiedOidcClaims = OidcClaims & {
 	readonly [verifiedOidcClaimsBrand]: true;
 };
 
-// Issuer identifiers use the exact, case-sensitive value configured at ingress.
-// A malformed `iss` fails validation and never matches.
-function hasMatchingIssuer(rule: OidcTrustRule, claims: OidcClaims): boolean {
-	return (
-		typeof claims.iss === 'string' &&
-		IssuerUrl.parse(claims.iss)?.value === rule.issuer
-	);
-}
-
-function hasMatchingAudience(rule: OidcTrustRule, claims: OidcClaims): boolean {
+/**
+ * Whether the claims match the expected issuer and include the expected
+ * audience.
+ *
+ * Issuer identifiers use the exact, case-sensitive value configured at
+ * ingress. A malformed `iss` fails validation and never matches.
+ */
+export function hasMatchingIssuerAndAudience(
+	expected: { readonly issuer: string; readonly audience: string },
+	claims: OidcClaims
+): boolean {
 	const { aud } = claims;
+	const hasAudience =
+		typeof aud === 'string'
+			? aud === expected.audience
+			: Array.isArray(aud) && aud.includes(expected.audience);
 
-	return typeof aud === 'string'
-		? aud === rule.audience
-		: Array.isArray(aud) && aud.includes(rule.audience);
+	return (
+		hasAudience &&
+		typeof claims.iss === 'string' &&
+		IssuerUrl.parse(claims.iss)?.value === expected.issuer
+	);
 }
 
 // A configured claim is satisfied only by a string claim matching its exact
@@ -111,10 +118,7 @@ export function oidcTrustVerificationTarget(
 	claims: OidcClaims
 ): OidcTrustVerificationTarget | undefined {
 	const targets = rules
-		.filter(
-			(rule) =>
-				hasMatchingIssuer(rule, claims) && hasMatchingAudience(rule, claims)
-		)
+		.filter((rule) => hasMatchingIssuerAndAudience(rule, claims))
 		.map(({ issuer, audience }) => ({ issuer, audience }))
 		.toSorted((left, right) => left.audience.localeCompare(right.audience));
 	const authorisedParty = claims.azp;
@@ -153,8 +157,7 @@ export function hasMatchingOidcTrustIdentity(
 ): boolean {
 	return rules.some(
 		(rule) =>
-			hasMatchingIssuer(rule, claims) &&
-			hasMatchingAudience(rule, claims) &&
+			hasMatchingIssuerAndAudience(rule, claims) &&
 			hasMatchingClaims(rule, claims)
 	);
 }
@@ -175,8 +178,7 @@ export function preferredModelledOidcTrustRules(
 	const matches = rules
 		.filter(
 			(rule) =>
-				hasMatchingIssuer(rule, claims) &&
-				hasMatchingAudience(rule, claims) &&
+				hasMatchingIssuerAndAudience(rule, claims) &&
 				hasMatchingClaims(rule, claims)
 		)
 		.toSorted(
