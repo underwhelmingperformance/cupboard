@@ -19,6 +19,7 @@ import {
 	parseReporterResults,
 	type Reporter,
 	type ReporterMode,
+	ResultTable,
 	wasErrorReported
 } from './reporter.ts';
 
@@ -32,6 +33,15 @@ function expectReporterTestError(
 	error: unknown
 ): asserts error is ReporterTestError {
 	expect(error).toBeInstanceOf(ReporterTestError);
+}
+
+// Waits for a phase that either succeeds or fails with a ReporterTestError.
+async function settleWithTestError(phase: Promise<unknown>): Promise<void> {
+	try {
+		await phase;
+	} catch (error) {
+		expectReporterTestError(error);
+	}
 }
 
 function twoLevelFailure(): Error {
@@ -415,6 +425,50 @@ describe('createReporter', () => {
 		]);
 	});
 
+	it.each([
+		{
+			outcome: 'ok',
+			run: () => 'created',
+			phaseEvent: { facts: {} }
+		},
+		{
+			outcome: 'failed',
+			run: () => {
+				throw new ReporterTestError('create-failed');
+			},
+			phaseEvent: { error: expect.any(String) as unknown }
+		}
+	])(
+		'emits the result of a phase that ends $outcome after the phase event',
+		async ({ outcome, run, phaseEvent }) => {
+			const { events, reporter } = jsonReporter();
+
+			await settleWithTestError(
+				reporter.phase('Creating cache', (phase) => {
+					phase.result({
+						kind: 'cache',
+						title: 'Cache',
+						data: { name: 'pr-454' },
+						rows: [{ label: 'Cache', value: 'pr-454' }]
+					});
+
+					return run();
+				})
+			);
+
+			expect(withoutDurations(events())).toStrictEqual([
+				{
+					durationMs: 'number',
+					event: 'phase',
+					label: 'Creating cache',
+					status: outcome,
+					...phaseEvent
+				},
+				{ event: 'result', kind: 'cache', data: { name: 'pr-454' } }
+			]);
+		}
+	);
+
 	const buildPushPhaseCases: readonly {
 		readonly phase: BuildPushPhase;
 		readonly label: string;
@@ -671,6 +725,19 @@ describe('createGithubReporter', () => {
 				});
 			},
 			expected: ['No tenants.\n']
+		},
+		{
+			name: 'writes the empty message for a result whose table has no rows',
+			run: (reporter: Reporter) => {
+				reporter.result({
+					kind: 'cohort',
+					data: [],
+					rows: [],
+					table: ResultTable.of([{ key: 'attribute', label: 'Attribute' }], []),
+					empty: 'No targets.'
+				});
+			},
+			expected: ['No targets.\n']
 		}
 	])('$name', ({ run, expected }) => {
 		run(createGithubReporter());
@@ -705,6 +772,112 @@ describe('createGithubReporter', () => {
 			'::group::Building\n',
 			'files: 3\n',
 			'::endgroup::\n'
+		]);
+	});
+
+	it.each([
+		{
+			outcome: 'ok',
+			run: () => 'created',
+			annotations: []
+		},
+		{
+			outcome: 'failed',
+			run: () => {
+				throw new ReporterTestError('create-failed');
+			},
+			annotations: ['::error::\n']
+		}
+	])(
+		'writes the result of a phase that ends $outcome inside its group',
+		async ({ run, annotations }) => {
+			await settleWithTestError(
+				createGithubReporter().phase('Creating cache', (phase) => {
+					phase.fact('access', 'private');
+					phase.result({
+						kind: 'cache',
+						title: 'Cache',
+						data: { name: 'pr-454' },
+						rows: [
+							{ label: 'Cache', value: 'pr-454' },
+							{ label: 'Access', value: 'private' }
+						]
+					});
+
+					return run();
+				})
+			);
+
+			expect(normaliseErrors(written)).toStrictEqual([
+				'::group::Creating cache\n',
+				'access: private\n',
+				'Cache\n',
+				'Cache: pr-454\n',
+				'Access: private\n',
+				...annotations,
+				'::endgroup::\n'
+			]);
+		}
+	);
+
+	it.each([
+		{
+			name: 'phase',
+			run: (reporter: Reporter, advance: () => void) =>
+				reporter.phase('Checking retention roots', (phase) => {
+					phase.fact('cursor', 42, { level: 'debug' });
+					advance();
+				})
+		},
+		{
+			name: 'steps',
+			run: (reporter: Reporter, advance: () => void) =>
+				reporter.steps('Checking retention roots', (log) => {
+					log.message('cursor 42', { level: 'debug' });
+					advance();
+				})
+		}
+	])(
+		'writes the duration of a $name that has nothing else to show',
+		async ({ run }) => {
+			let clock = 0;
+
+			await run(createGithubReporter({ now: () => clock }), () => {
+				clock = 1500;
+			});
+
+			expect(written).toStrictEqual([
+				'::group::Checking retention roots\n',
+				'Completed in 1.5s\n',
+				'::endgroup::\n'
+			]);
+		}
+	);
+
+	it('writes a result table as aligned columns after the rows', () => {
+		createGithubReporter().result({
+			kind: 'cohort',
+			title: 'Cohort',
+			data: {},
+			rows: [{ label: 'System', value: 'x86_64-linux' }],
+			table: ResultTable.of(
+				[
+					{ key: 'attribute', label: 'Attribute' },
+					{ key: 'outcome', label: 'Outcome' }
+				],
+				[
+					{ attribute: 'hello', outcome: 'published' },
+					{ attribute: 'checks.fmt', outcome: 'failed' }
+				]
+			)
+		});
+
+		expect(written).toStrictEqual([
+			'Cohort\n',
+			'System: x86_64-linux\n',
+			'Attribute   Outcome\n',
+			'hello       published\n',
+			'checks.fmt  failed\n'
 		]);
 	});
 
@@ -877,6 +1050,213 @@ describe('createGithubReporter', () => {
 			'::error::the step failed' +
 				'%0A  RangeError: the value is too big' +
 				'%0A  TypeError: the key has the wrong type\n'
+		]);
+	});
+});
+
+describe('ResultTable', () => {
+	it('orders each row by the columns', () => {
+		const table = ResultTable.of(
+			[
+				{ key: 'outcome', label: 'Outcome' },
+				{ key: 'attribute', label: 'Attribute' }
+			],
+			[
+				{ attribute: 'hello', outcome: 'published' },
+				{ outcome: 'failed', attribute: 'checks.fmt' }
+			]
+		);
+
+		expect({ columns: table.columns, rows: table.rows }).toStrictEqual({
+			columns: ['Outcome', 'Attribute'],
+			rows: [
+				['published', 'hello'],
+				['failed', 'checks.fmt']
+			]
+		});
+	});
+});
+
+const summaryFile = '/runner/_temp/_runner_file_commands/step_summary';
+
+function summaryReporter(
+	environment: Readonly<Record<string, string | undefined>>
+): {
+	readonly appended: { readonly path: string; readonly text: string }[];
+	readonly reporter: Reporter;
+} {
+	const appended: { readonly path: string; readonly text: string }[] = [];
+
+	return {
+		appended,
+		reporter: createGithubReporter({
+			stream: captureStream().stream,
+			environment,
+			appendFile: (file, text) => {
+				appended.push({ path: file, text });
+			}
+		})
+	};
+}
+
+describe('job summary', () => {
+	it('appends a marked result as a heading and markdown tables', () => {
+		const { appended, reporter } = summaryReporter({
+			GITHUB_STEP_SUMMARY: summaryFile
+		});
+
+		reporter.result({
+			kind: 'cohort',
+			title: 'Cohort x86_64-linux',
+			data: {},
+			jobSummary: true,
+			rows: [
+				{ label: 'Runner', value: 'nixbuild.net' },
+				{ label: '', value: '' },
+				{ label: 'Duration', value: '4m 2.0s' }
+			],
+			table: ResultTable.of(
+				[
+					{ key: 'attribute', label: 'Attribute' },
+					{ key: 'outcome', label: 'Outcome' }
+				],
+				[
+					{ attribute: 'hello', outcome: 'published' },
+					{ attribute: 'checks.fmt', outcome: 'failed' }
+				]
+			)
+		});
+
+		expect(appended).toStrictEqual([
+			{
+				path: summaryFile,
+				text: [
+					String.raw`### Cohort x86\_64-linux`,
+					'',
+					'|  |  |',
+					'| --- | --- |',
+					'| Runner | nixbuild.net |',
+					'| Duration | 4m 2.0s |',
+					'',
+					'| Attribute | Outcome |',
+					'| --- | --- |',
+					'| hello | published |',
+					'| checks.fmt | failed |',
+					'',
+					''
+				].join('\n')
+			}
+		]);
+	});
+
+	it('appends the empty message for a marked result without rows', () => {
+		const { appended, reporter } = summaryReporter({
+			GITHUB_STEP_SUMMARY: summaryFile
+		});
+
+		reporter.result({
+			kind: 'cohort',
+			title: 'Cohort',
+			data: [],
+			jobSummary: true,
+			rows: [],
+			empty: 'No targets.'
+		});
+
+		expect(appended).toStrictEqual([
+			{ path: summaryFile, text: '### Cohort\n\nNo targets.\n\n' }
+		]);
+	});
+
+	it.each([
+		{ value: 'github:acme/app|main', cell: String.raw`github:acme/app\|main` },
+		{ value: 'line one\nline two', cell: 'line one<br>line two' },
+		{ value: 'line one\r\nline two', cell: 'line one<br>line two' },
+		{
+			value: '/nix/store/`hash`-name',
+			cell: String.raw`/nix/store/\`hash\`-name`
+		},
+		{ value: String.raw`C:\store`, cell: String.raw`C:\\store` },
+		{ value: '<b>&amp;</b>', cell: String.raw`\<b\>\&amp;\</b\>` },
+		{
+			value: '*a* _b_ [c](d) ~e~',
+			cell: String.raw`\*a\* \_b\_ \[c\](d) \~e\~`
+		}
+	])('escapes $value in a markdown table cell', ({ value, cell }) => {
+		const { appended, reporter } = summaryReporter({
+			GITHUB_STEP_SUMMARY: summaryFile
+		});
+
+		reporter.result({
+			kind: 'paths',
+			title: 'Paths',
+			data: {},
+			jobSummary: true,
+			rows: [],
+			table: ResultTable.of([{ key: 'path', label: 'Path' }], [{ path: value }])
+		});
+
+		expect(appended).toStrictEqual([
+			{
+				path: summaryFile,
+				text: `### Paths\n\n| Path |\n| --- |\n| ${cell} |\n\n`
+			}
+		]);
+	});
+
+	it.each([
+		{
+			name: 'a result that is not marked for it',
+			environment: { GITHUB_STEP_SUMMARY: summaryFile },
+			jobSummary: false
+		},
+		{
+			name: 'a marked result when GITHUB_STEP_SUMMARY is unset',
+			environment: {},
+			jobSummary: true
+		},
+		{
+			name: 'a marked result when GITHUB_STEP_SUMMARY is empty',
+			environment: { GITHUB_STEP_SUMMARY: '' },
+			jobSummary: true
+		}
+	])(
+		'does not append $name to the job summary',
+		({ environment, jobSummary }) => {
+			const { appended, reporter } = summaryReporter(environment);
+
+			reporter.result({
+				kind: 'cache',
+				title: 'Cache',
+				data: {},
+				jobSummary,
+				rows: [{ label: 'Cache', value: 'pr-454' }]
+			});
+
+			expect(appended).toStrictEqual([]);
+		}
+	);
+
+	it('appends a marked result recorded inside a phase', async () => {
+		const { appended, reporter } = summaryReporter({
+			GITHUB_STEP_SUMMARY: summaryFile
+		});
+
+		await reporter.phase('Creating cache', (phase) => {
+			phase.result({
+				kind: 'cache',
+				title: 'Cache',
+				data: {},
+				jobSummary: true,
+				rows: [{ label: 'Cache', value: 'pr-454' }]
+			});
+		});
+
+		expect(appended).toStrictEqual([
+			{
+				path: summaryFile,
+				text: '### Cache\n\n|  |  |\n| --- | --- |\n| Cache | pr-454 |\n\n'
+			}
 		]);
 	});
 });

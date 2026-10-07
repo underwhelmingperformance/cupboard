@@ -24,7 +24,7 @@ import path from 'node:path';
 import process, { arch, platform } from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type { Reporter } from '@cupboard/reporter';
+import { formatBytes, type Reporter } from '@cupboard/reporter';
 import {
 	observeChildProcess,
 	waitForAbortableChildProcess
@@ -486,9 +486,11 @@ const defaultReleaseCommandRunner: ReleaseCommandRunner = async (
 export function releaseWorkflowIdentityRegex(
 	releaseRepository: string
 ): string {
-	const identity = `https://github.com/${releaseRepository}/${releaseWorkflowPath}`;
+	return `^${RegExp.escape(releaseWorkflowIdentity(releaseRepository))}@`;
+}
 
-	return `^${RegExp.escape(identity)}@`;
+function releaseWorkflowIdentity(releaseRepository: string): string {
+	return `https://github.com/${releaseRepository}/${releaseWorkflowPath}`;
 }
 
 export async function installCupboard(
@@ -529,7 +531,7 @@ export async function installCupboard(
 		async () => {
 			const downloaded = await reporter.phase(
 				`Download ${assetName}`,
-				async () => {
+				async (phase) => {
 					const downloadDependencies = {
 						githubApiOrigin: githubApiOrigin(options.environment),
 						...(dependencies.fetch !== undefined && {
@@ -550,12 +552,13 @@ export async function installCupboard(
 						options.githubToken,
 						downloadDependencies
 					);
+					phase.fact('Size', formatBytes(archive.bytes));
 
 					return archive;
 				}
 			);
 
-			await reporter.phase('Checking archive checksum', async () => {
+			await reporter.phase('Checking archive checksum', async (phase) => {
 				const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
 				const expectedChecksum = checksums.get(assetName);
 
@@ -564,6 +567,8 @@ export async function installCupboard(
 				}
 
 				verifyChecksum(assetName, downloaded.sha256, expectedChecksum);
+				phase.fact('Algorithm', 'SHA-256');
+				phase.fact('Digest', downloaded.sha256);
 			});
 
 			const sourceCommit = await reporter.phase(
@@ -585,14 +590,18 @@ export async function installCupboard(
 						builtFrom,
 						expectedSourceCommit
 					);
+					phase.fact(
+						'Signer workflow',
+						releaseWorkflowIdentity(options.releaseRepository)
+					);
 					phase.fact('Built from', builtFrom);
 
 					return builtFrom;
 				}
 			);
 
-			await reporter.phase('Installing cupboard binary', () =>
-				publishReleaseArchive(
+			await reporter.phase('Installing cupboard binary', async (phase) => {
+				await publishReleaseArchive(
 					archivePath,
 					options.installDirectory,
 					release.tagName,
@@ -600,8 +609,10 @@ export async function installCupboard(
 						archiveSha256: downloaded.sha256,
 						...(options.signal !== undefined && { signal: options.signal })
 					}
-				)
-			);
+				);
+				phase.fact('Version', release.tagName);
+				phase.fact('Binary', binaryPath);
+			});
 
 			return {
 				binaryPath,

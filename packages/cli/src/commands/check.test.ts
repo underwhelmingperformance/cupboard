@@ -7,6 +7,7 @@ import {
 import type {
 	MessagePresentation,
 	Reporter,
+	ResultPayload,
 	ResultRow
 } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -38,6 +39,10 @@ function reporter(captured: Captured): Reporter {
 		});
 	};
 
+	const recordResult = (payload: ResultPayload): void => {
+		captured.results.push([...payload.rows]);
+	};
+
 	return {
 		phase: (_label, body) =>
 			Promise.resolve(
@@ -45,7 +50,8 @@ function reporter(captured: Captured): Reporter {
 					fact() {
 						return;
 					},
-					warn: recordWarn
+					warn: recordWarn,
+					result: recordResult
 				})
 			),
 		progress: (_label, _options, body) =>
@@ -80,9 +86,7 @@ function reporter(captured: Captured): Reporter {
 					warn: recordWarn
 				})
 			),
-		result(payload) {
-			captured.results.push([...payload.rows]);
-		},
+		result: recordResult,
 		data() {
 			return;
 		},

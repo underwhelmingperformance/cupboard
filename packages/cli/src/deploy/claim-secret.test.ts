@@ -11,7 +11,7 @@ const controlScriptName = scriptNameSchema.parse('cupboard');
 
 const silentReporter: Reporter = {
 	phase: (_label, body) =>
-		Promise.resolve(body({ fact: vi.fn(), warn: vi.fn() })),
+		Promise.resolve(body({ fact: vi.fn(), warn: vi.fn(), result: vi.fn() })),
 	progress: (_label, _options, body) =>
 		Promise.resolve(body({ advance: vi.fn(), fact: vi.fn(), warn: vi.fn() })),
 	steps: (_label, body) =>

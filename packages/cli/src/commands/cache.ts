@@ -687,34 +687,41 @@ export async function runCacheCreate(
 	reporter: Reporter,
 	client: Pick<CacheClient, 'put' | 'get'>
 ): Promise<void> {
-	const summary = await reporter.phase('Creating cache', async () => {
-		try {
-			return await callInCache(client.put, request.cache, {
-				access: request.access,
-				priority: request.priority,
-				defaultRootRetention:
-					request.rootTtl === undefined
-						? { kind: 'permanent' }
-						: { kind: 'duration', seconds: request.rootTtl },
-				...(request.grace !== undefined && {
-					grace: { kind: 'duration', graceSeconds: request.grace }
-				})
-			});
-		} catch (error) {
-			if (request.ifAbsent !== true || !isRpcCacheAlreadyExistsError(error)) {
-				throw error;
-			}
+	await reporter.phase('Creating cache', async (phase) => {
+		const summary = await createCache(request, client);
 
-			return callInCache(client.get, request.cache, {});
+		phase.result({
+			kind: 'cache',
+			title: 'Cache',
+			data: summary,
+			rows: summaryRows(summary, reporter)
+		});
+	});
+}
+
+async function createCache(
+	request: CacheCreateRequest,
+	client: Pick<CacheClient, 'put' | 'get'>
+): Promise<CacheSummary> {
+	try {
+		return await callInCache(client.put, request.cache, {
+			access: request.access,
+			priority: request.priority,
+			defaultRootRetention:
+				request.rootTtl === undefined
+					? { kind: 'permanent' }
+					: { kind: 'duration', seconds: request.rootTtl },
+			...(request.grace !== undefined && {
+				grace: { kind: 'duration', graceSeconds: request.grace }
+			})
+		});
+	} catch (error) {
+		if (request.ifAbsent !== true || !isRpcCacheAlreadyExistsError(error)) {
+			throw error;
 		}
-	});
 
-	reporter.result({
-		kind: 'cache',
-		title: 'Cache',
-		data: summary,
-		rows: summaryRows(summary, reporter)
-	});
+		return callInCache(client.get, request.cache, {});
+	}
 }
 
 export interface CacheCreationDefaultsClient {

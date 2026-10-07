@@ -134,23 +134,22 @@ export async function runPlanReprobe(
 				humanLabel: 'Now available in the cache'
 			});
 			context.fact('still to build', formatCount(answer.buildSet.length));
+			context.result({
+				kind: planReprobeResultKind,
+				title: 'Build plan refresh',
+				data: answer,
+				rows: [
+					{
+						label: 'Now available in the cache',
+						value: String(answer.withdrawn.length)
+					},
+					{ label: 'To build', value: String(answer.buildSet.length) }
+				]
+			});
 
 			return answer;
 		}
 	);
-
-	reporter.result({
-		kind: planReprobeResultKind,
-		title: 'Build plan refresh',
-		data: reprobe,
-		rows: [
-			{
-				label: 'Now available in the cache',
-				value: String(reprobe.withdrawn.length)
-			},
-			{ label: 'To build', value: String(reprobe.buildSet.length) }
-		]
-	});
 
 	return reprobe;
 }

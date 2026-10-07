@@ -5,7 +5,11 @@ import process from 'node:process';
 import { Writable } from 'node:stream';
 
 import { S_BAR, S_ERROR, S_INFO } from '@clack/prompts';
-import { parseReporterResults, type ReporterMode } from '@cupboard/reporter';
+import {
+	parseReporterResults,
+	type ReporterMode,
+	ResultTable
+} from '@cupboard/reporter';
 import pc from 'picocolors';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -575,7 +579,97 @@ describe('createCliUi terminal streams', () => {
 	});
 });
 
+async function render(
+	body: (reporter: ReturnType<CliUi['reporter']>) => Promise<void> | void
+): Promise<string> {
+	const output = captureStream();
+	const reporter = createCliUi({
+		mode: 'terminal',
+		interactive: false,
+		colour: false,
+		stream: output.stream
+	}).reporter();
+
+	await body(reporter);
+
+	return withoutStyling(output.written()).replaceAll(
+		/\(\d+ms\)/gu,
+		'(elapsed)'
+	);
+}
+
+describe('createCliUi terminal results', () => {
+	const cache = {
+		kind: 'cache',
+		title: 'Cache',
+		data: { name: 'pr-454' },
+		rows: [{ label: 'Cache', value: 'pr-454' }]
+	};
+
+	it('renders a phase result after the spinner with the same layout as a standalone result', async () => {
+		const rendered = {
+			inPhase: await render((reporter) =>
+				reporter.phase('Creating cache', (phase) => {
+					phase.result(cache);
+				})
+			),
+			afterPhase: await render(async (reporter) => {
+				await reporter.phase('Creating cache', () => 'created');
+				reporter.result(cache);
+			})
+		};
+
+		expect(rendered).toStrictEqual({
+			inPhase: rendered.afterPhase,
+			afterPhase: expect.stringContaining('pr-454') as unknown
+		});
+	});
+
+	it('renders a result table below the rows in the card', async () => {
+		const rendered = await render((reporter) => {
+			reporter.result({
+				kind: 'cohort',
+				title: 'Cohort',
+				data: {},
+				rows: [{ label: 'System', value: 'x86_64-linux' }],
+				table: ResultTable.of(
+					[
+						{ key: 'attribute', label: 'Attribute' },
+						{ key: 'outcome', label: 'Outcome' }
+					],
+					[
+						{ attribute: 'hello', outcome: 'published' },
+						{ attribute: 'checks.fmt', outcome: 'failed' }
+					]
+				)
+			});
+		});
+
+		expect(rendered.split('\n')).toStrictEqual([
+			'│ ┌─Cohort─────────────────────────────────────────────────────────────────────┐',
+			'│ │  System  x86_64-linux                                                      │',
+			'│ │                                                                            │',
+			'│ │  Attribute   Outcome                                                       │',
+			'│ │  hello       published                                                     │',
+			'│ │  checks.fmt  failed                                                        │',
+			'│ └────────────────────────────────────────────────────────────────────────────┘',
+			''
+		]);
+	});
+});
+
 describe('fakeCliUi', () => {
+	it('captures a result reported inside a phase', async () => {
+		const { ui, captured } = fakeCliUi();
+		const result = { kind: 'cache', data: {}, rows: [] };
+
+		await ui.reporter().phase('Creating cache', (phase) => {
+			phase.result(result);
+		});
+
+		expect(captured.results).toStrictEqual([result]);
+	});
+
 	it('records narration and answers prompts from its script', async () => {
 		const { ui, captured } = fakeCliUi({
 			interactive: true,

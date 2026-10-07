@@ -1934,7 +1934,8 @@ const neverMeasuresRunner: EnsureRunner = () =>
 
 function warningReporter(warnings: string[]): Reporter {
 	return {
-		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: noop, warn: noop, result: noop })),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
 		steps: (_label, body) =>

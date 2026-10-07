@@ -5,7 +5,8 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import { formatCount } from '@cupboard/reporter';
+import type { AttestationInfoEntry } from '@cupboard/protocol/attestations';
+import { formatCount, type ResultPayload } from '@cupboard/reporter';
 import { type ReadUser } from '@cupboard/shared/http';
 import { type Command } from 'commander';
 
@@ -154,8 +155,8 @@ export function registerAttestStatusCommand(
 			};
 			const entries = await reporter.phase(
 				'Reading stored attestation coverage',
-				() =>
-					options.githubOidc === true
+				async (phase) => {
+					const coverage = await (options.githubOidc === true
 						? withRenewingReadCredential(
 								{
 									url: target.tenantUrl,
@@ -186,54 +187,68 @@ export function registerAttestStatusCommand(
 								...discovery,
 								readUser: credential?.user,
 								readPassword: credential?.password
-							})
+							}));
+					phase.result(coverageResult(coverage, requested));
+
+					return coverage;
+				}
 			);
 
-			const covered = entries.filter(
-				(entry) => entry.status === 'found' && entry.attestations.length > 0
-			);
-			const withoutEvidence = entries.filter(
-				(entry) => entry.status === 'found' && entry.attestations.length === 0
-			);
-			const missing = entries.filter((entry) => entry.status === 'missing');
-			reporter.result({
-				kind: 'attestation-status',
-				title: 'Stored attestations (not verified)',
-				data: {
-					entries,
-					covered: covered.map((entry) => entry.storePathHash),
-					withoutEvidence: withoutEvidence.map((entry) => entry.storePathHash),
-					missing: missing.map((entry) => entry.storePathHash)
-				},
-				rows: [
-					{
-						label: 'Paths with matching stored attestations',
-						value: formatCount(covered.length)
-					},
-					{
-						label: 'Paths without matching evidence',
-						value: formatCount(withoutEvidence.length)
-					},
-					{ label: 'Missing paths', value: formatCount(missing.length) },
-					...entries.map((entry) => ({
-						label:
-							requested.find((path) => path.includes(entry.storePathHash)) ??
-							entry.storePathHash,
-						value:
-							entry.status === 'missing'
-								? 'Missing published path'
-								: entry.attestations.length === 0
-									? 'No matching stored evidence'
-									: `${formatCount(entry.attestations.length)} matching stored attestations`
-					}))
-				]
-			});
+			const covered = entries.filter((entry) => isCovered(entry));
 			if (options.requireAll === true && covered.length !== entries.length) {
 				throw new AttestationCoverageIncompleteError(
 					entries.length - covered.length
 				);
 			}
 		});
+}
+
+function isCovered(entry: AttestationInfoEntry): boolean {
+	return entry.status === 'found' && entry.attestations.length > 0;
+}
+
+function coverageResult(
+	entries: readonly AttestationInfoEntry[],
+	requested: readonly string[]
+): ResultPayload {
+	const covered = entries.filter((entry) => isCovered(entry));
+	const withoutEvidence = entries.filter(
+		(entry) => entry.status === 'found' && entry.attestations.length === 0
+	);
+	const missing = entries.filter((entry) => entry.status === 'missing');
+
+	return {
+		kind: 'attestation-status',
+		title: 'Stored attestations (not verified)',
+		data: {
+			entries,
+			covered: covered.map((entry) => entry.storePathHash),
+			withoutEvidence: withoutEvidence.map((entry) => entry.storePathHash),
+			missing: missing.map((entry) => entry.storePathHash)
+		},
+		rows: [
+			{
+				label: 'Paths with matching stored attestations',
+				value: formatCount(covered.length)
+			},
+			{
+				label: 'Paths without matching evidence',
+				value: formatCount(withoutEvidence.length)
+			},
+			{ label: 'Missing paths', value: formatCount(missing.length) },
+			...entries.map((entry) => ({
+				label:
+					requested.find((path) => path.includes(entry.storePathHash)) ??
+					entry.storePathHash,
+				value:
+					entry.status === 'missing'
+						? 'Missing published path'
+						: entry.attestations.length === 0
+							? 'No matching stored evidence'
+							: `${formatCount(entry.attestations.length)} matching stored attestations`
+			}))
+		]
+	};
 }
 
 async function statusPaths(

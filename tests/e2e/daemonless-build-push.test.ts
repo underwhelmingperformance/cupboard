@@ -162,7 +162,8 @@ function silentReporter(): Reporter {
 	const facts = { fact: ignore, warn: ignore };
 
 	return {
-		phase: (_label, body) => Promise.resolve(body(facts)),
+		phase: (_label, body) =>
+			Promise.resolve(body({ ...facts, result: ignore })),
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: ignore, ...facts })),
 		steps: (_label, body) =>

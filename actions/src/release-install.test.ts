@@ -18,6 +18,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 
 import { createGithubReporter } from '@cupboard/reporter';
 import { createOctokitClient } from '@cupboard/shared/octokit';
@@ -320,6 +321,95 @@ describe('installCupboard compatibility', () => {
 			archiveUrl,
 			checksumsUrl,
 			`https://api.github.com/repos/owner/repo/attestations/sha256%3A${archiveDigest}?predicate_type=https%3A%2F%2Fslsa.dev%2Fprovenance%2Fv1&per_page=10`
+		]);
+	});
+});
+
+describe('installCupboard output', () => {
+	it('reports archive size and the verified checksum, but no signer when attestation verification fails', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archiveName = assetNameFor();
+		const archiveUrl =
+			'https://api.github.com/repos/owner/repo/releases/assets/1';
+		const checksumsUrl =
+			'https://api.github.com/repos/owner/repo/releases/assets/2';
+		const archiveDigest = createHash('sha256').update('archive').digest('hex');
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+
+			if (request.url.endsWith('/releases/tags/v0.0.19')) {
+				return Promise.resolve(
+					Response.json({
+						tag_name: 'v0.0.19',
+						assets: [
+							{ name: archiveName, url: archiveUrl },
+							{ name: 'checksums.txt', url: checksumsUrl }
+						]
+					})
+				);
+			}
+
+			if (request.url.includes('/attestations/')) {
+				return Promise.resolve(Response.json({ attestations: [] }));
+			}
+
+			return Promise.resolve(
+				new Response(
+					request.url === archiveUrl
+						? 'archive'
+						: `${archiveDigest}  ${archiveName}\n`
+				)
+			);
+		};
+		const written: string[] = [];
+		const github = createGithubReporter({
+			stream: new Writable({
+				write(chunk: Buffer | string, _encoding, callback) {
+					written.push(String(chunk));
+					callback();
+				}
+			})
+		});
+
+		try {
+			await expect(
+				installCupboard(
+					{
+						installDirectory,
+						releaseRepository: 'owner/repo',
+						version: 'v0.0.19',
+						includePrereleases: false,
+						githubToken: '',
+						environment: {}
+					},
+					github,
+					{ fetch: fetcher }
+				)
+			).rejects.toBeInstanceOf(AttestationNotFoundError);
+		} finally {
+			await rm(installDirectory, { recursive: true, force: true });
+		}
+
+		expect(
+			written.map((line) =>
+				line.startsWith('::error::') ? '::error::\n' : line
+			)
+		).toStrictEqual([
+			'::group::Resolving cupboard release\n',
+			'Version: v0.0.19\n',
+			'::endgroup::\n',
+			`::group::Download ${archiveName}\n`,
+			'Size: 7 B\n',
+			'::endgroup::\n',
+			'::group::Checking archive checksum\n',
+			'Algorithm: SHA-256\n',
+			`Digest: ${archiveDigest}\n`,
+			'::endgroup::\n',
+			'::group::Checking release attestation\n',
+			'::error::\n',
+			'::endgroup::\n'
 		]);
 	});
 });

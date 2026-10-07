@@ -102,6 +102,53 @@ async function runStatus(
 	return { status, stdout, stderr };
 }
 
+async function withAttestationInfoServer(
+	body: (tenantUrl: string, requests: unknown[]) => Promise<void>
+): Promise<void> {
+	const requests: unknown[] = [];
+	const server = createServer((request, response) => {
+		if (request.url?.endsWith('/nix-cache-info') === true) {
+			response.writeHead(200, {
+				[cacheMetadataCapabilityHeader]: attestationInfoCapability
+			});
+			response.end('StoreDir: /nix/store\n');
+			return;
+		}
+		let body = '';
+		request.setEncoding('utf8').on('data', (chunk: string) => {
+			body += chunk;
+		});
+		request.on('end', () => {
+			requests.push(JSON.parse(body));
+			response.writeHead(200, { 'content-type': 'application/json' });
+			response.end(
+				JSON.stringify({ scopeVersion: 'cache:1:1:public:false', entries })
+			);
+		});
+	});
+	try {
+		await new Promise<void>((resolve) => {
+			server.listen(0, '127.0.0.1', resolve);
+		});
+		const address = server.address();
+		if (address === null || typeof address === 'string') {
+			throw new Error('Expected a TCP test server.');
+		}
+		await body(`http://127.0.0.1:${String(address.port)}/t/acme`, requests);
+	} finally {
+		server.closeAllConnections();
+		await new Promise<void>((resolve, reject) => {
+			server.close((error) => {
+				if (error !== undefined) {
+					reject(error);
+					return;
+				}
+				resolve();
+			});
+		});
+	}
+}
+
 describe('attest status subprocess', () => {
 	it.each([
 		{ mode: 'json', requireAll: false, status: 0 },
@@ -115,103 +162,94 @@ describe('attest status subprocess', () => {
 			const pathsFile = path.join(directory, 'paths.txt');
 			const resultFile = path.join(directory, 'result.jsonl');
 			await writeFile(pathsFile, `${paths.slice(1).join('\n')}\n`);
-			const requests: unknown[] = [];
-			const server = createServer((request, response) => {
-				if (request.url?.endsWith('/nix-cache-info') === true) {
-					response.writeHead(200, {
-						[cacheMetadataCapabilityHeader]: attestationInfoCapability
-					});
-					response.end('StoreDir: /nix/store\n');
-					return;
-				}
-				let body = '';
-				request.setEncoding('utf8').on('data', (chunk: string) => {
-					body += chunk;
-				});
-				request.on('end', () => {
-					requests.push(JSON.parse(body));
-					response.writeHead(200, { 'content-type': 'application/json' });
-					response.end(
-						JSON.stringify({ scopeVersion: 'cache:1:1:public:false', entries })
-					);
-				});
-			});
 			try {
-				await new Promise<void>((resolve) => {
-					server.listen(0, '127.0.0.1', resolve);
-				});
-				const address = server.address();
-				if (address === null || typeof address === 'string') {
-					throw new Error('Expected a TCP test server.');
-				}
-				const result = await runStatus(
-					[
-						`http://127.0.0.1:${String(address.port)}/t/acme`,
-						paths[0] ?? '',
-						'--paths-file',
-						pathsFile,
-						'--result-file',
-						resultFile,
-						...(requireAll ? ['--require-all'] : [])
-					],
-					mode
-				);
-				const events: unknown[] =
-					mode === 'json'
-						? result.stderr
-								.trim()
-								.split('\n')
-								.map((line): unknown => JSON.parse(line))
-						: parseReporterResults(await readFile(resultFile, 'utf8')).map(
-								(result) => ({ event: 'result', ...result })
-							);
-				const coverage = events.find(
-					(event) =>
-						typeof event === 'object' &&
-						event !== null &&
-						'event' in event &&
-						event.event === 'result'
-				);
-				expect({
-					status: result.status,
-					requests,
-					coverage,
-					matchingStoredLabel: result.stderr.includes(
-						'Paths with matching stored attestations'
-					),
-					coveredLabel: result.stderr.includes('Covered paths')
-				}).toStrictEqual({
-					status,
-					requests: [{ storePathHashes: hashes }],
-					coverage: {
-						event: 'result',
-						kind: 'attestation-status',
-						data: {
-							entries,
-							covered: [hashes[0]],
-							withoutEvidence: [hashes[1]],
-							missing: [hashes[2]]
-						}
-					},
-					matchingStoredLabel: mode === 'terminal',
-					coveredLabel: false
+				await withAttestationInfoServer(async (tenantUrl, requests) => {
+					const result = await runStatus(
+						[
+							tenantUrl,
+							paths[0] ?? '',
+							'--paths-file',
+							pathsFile,
+							'--result-file',
+							resultFile,
+							...(requireAll ? ['--require-all'] : [])
+						],
+						mode
+					);
+					const events: unknown[] =
+						mode === 'json'
+							? result.stderr
+									.trim()
+									.split('\n')
+									.map((line): unknown => JSON.parse(line))
+							: parseReporterResults(await readFile(resultFile, 'utf8')).map(
+									(result) => ({ event: 'result', ...result })
+								);
+					const coverage = events.find(
+						(event) =>
+							typeof event === 'object' &&
+							event !== null &&
+							'event' in event &&
+							event.event === 'result'
+					);
+					expect({
+						status: result.status,
+						requests,
+						coverage,
+						matchingStoredLabel: result.stderr.includes(
+							'Paths with matching stored attestations'
+						),
+						coveredLabel: result.stderr.includes('Covered paths')
+					}).toStrictEqual({
+						status,
+						requests: [{ storePathHashes: hashes }],
+						coverage: {
+							event: 'result',
+							kind: 'attestation-status',
+							data: {
+								entries,
+								covered: [hashes[0]],
+								withoutEvidence: [hashes[1]],
+								missing: [hashes[2]]
+							}
+						},
+						matchingStoredLabel: mode === 'terminal',
+						coveredLabel: false
+					});
 				});
 			} finally {
-				server.closeAllConnections();
-				await new Promise<void>((resolve, reject) => {
-					server.close((error) => {
-						if (error !== undefined) {
-							reject(error);
-							return;
-						}
-						resolve();
-					});
-				});
 				await rm(directory, { recursive: true, force: true });
 			}
 		},
 		30_000
 	);
+
+	it('writes the coverage inside the reading group in GitHub mode', async () => {
+		await withAttestationInfoServer(async (tenantUrl) => {
+			const result = await runStatus([tenantUrl, ...paths], 'github');
+
+			expect({
+				status: result.status,
+				stdout: result.stdout,
+				stderr: result.stderr.split('\n')
+			}).toStrictEqual({
+				status: 0,
+				stdout: '',
+				stderr: [
+					'::group::Reading stored attestation coverage',
+					'Stored attestations (not verified)',
+					'Paths with matching stored attestations: 1',
+					'Paths without matching evidence: 1',
+					'Missing paths: 1',
+					`${paths[0] ?? ''}: 1 matching stored attestations`,
+					`${paths[1] ?? ''}: No matching stored evidence`,
+					`${paths[2] ?? ''}: Missing published path`,
+					'::endgroup::',
+					''
+				]
+			});
+		});
+	}, 30_000);
 
 	it.each([
 		{ arguments_: ['invalid-path'] },

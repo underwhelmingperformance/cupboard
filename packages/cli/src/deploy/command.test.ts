@@ -254,7 +254,8 @@ function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 				Promise.resolve(
 					body({
 						fact: recordUiCall(uiCalls, 'fact'),
-						warn: recordUiCall(uiCalls, 'reporter.warn')
+						warn: recordUiCall(uiCalls, 'reporter.warn'),
+						result: recordUiCall(uiCalls, 'result')
 					})
 				),
 			progress: (_label, _options, body) =>
@@ -320,6 +321,9 @@ function scriptedUi(script: ReviewScript): DeployUi {
 						},
 						warn: (label, value) => {
 							warnings.push(value === undefined ? label : `${label}: ${value}`);
+						},
+						result: () => {
+							facts.push('result');
 						}
 					})
 				),

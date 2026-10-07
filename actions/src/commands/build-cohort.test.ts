@@ -3380,7 +3380,8 @@ function recordingReporter(
 	warningMessages: { label: string; message: string | undefined }[] = []
 ): Reporter {
 	return {
-		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: noop, warn: noop, result: noop })),
 		progress: (_label, options, body) => {
 			const recorded = { total: options.total, completed: 0 };
 			progress.push(recorded);

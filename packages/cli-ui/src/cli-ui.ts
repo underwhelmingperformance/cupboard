@@ -34,7 +34,9 @@ import {
 	type Reporter,
 	type ReporterMode,
 	type ReporterOptions,
+	type ResultPayload,
 	type ResultRow,
+	type ResultTable,
 	shouldDisplay
 } from '@cupboard/reporter';
 import { errorCauses } from '@cupboard/shared/errors';
@@ -104,14 +106,37 @@ export function formatRows(
 		.join('\n');
 }
 
+function formatTable(table: ResultTable, colours: Colours): string {
+	if (table.rows.length === 0) {
+		return '';
+	}
+
+	const [header = '', ...rows] = table.lines(stringWidth);
+
+	return [colours.dim(header), ...rows].join('\n');
+}
+
+function formatResult(
+	payload: Pick<ResultPayload, 'rows' | 'table'>,
+	colours: Colours,
+	contentWidth: number
+): string {
+	return [
+		formatRows(payload.rows, colours, contentWidth),
+		payload.table === undefined ? '' : formatTable(payload.table, colours)
+	]
+		.filter((part) => part !== '')
+		.join('\n\n');
+}
+
 function writeRows(
 	output: Writable,
 	title: string,
-	rows: readonly ResultRow[],
+	payload: Pick<ResultPayload, 'rows' | 'table'>,
 	colours: Colours
 ): void {
 	output.write(
-		`\n${colours.bold(title)}\n${formatRows(rows, colours, getColumns(output) - 6)}\n\n`
+		`\n${colours.bold(title)}\n${formatResult(payload, colours, getColumns(output) - 6)}\n\n`
 	);
 }
 
@@ -454,7 +479,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			}
 
 			if (rows.some((row) => row.raw === true)) {
-				writeRows(output, title, rows, colours);
+				writeRows(output, title, { rows }, colours);
 				return;
 			}
 			note(formatRows(rows, colours, getColumns(output) - 6), title, {
@@ -737,6 +762,31 @@ function clackReporter(
 	presentation: PresentationLevel = 'summary',
 	formatError?: ReporterOptions['formatError']
 ): Reporter {
+	const renderResult = (payload: ResultPayload): void => {
+		if (resultFile !== undefined) {
+			appendResultEvent(resultFile, payload);
+		}
+
+		const title = payload.title ?? resultTitle(payload.kind);
+
+		if (payload.rows.length === 0 && (payload.table?.rows.length ?? 0) === 0) {
+			if (payload.empty !== undefined) {
+				log.info(payload.empty, { output });
+			}
+
+			return;
+		}
+
+		if (payload.rows.some((row) => row.raw === true)) {
+			writeRows(output, title, payload, colours);
+			return;
+		}
+
+		box(formatResult(payload, colours, getColumns(output) - 8), title, {
+			output
+		});
+	};
+
 	return {
 		presentation,
 		async phase(machineLabel, body, display) {
@@ -751,6 +801,7 @@ function clackReporter(
 			const notes = unitNotes(output);
 			const startedAt = Date.now();
 			const facts = new Map<string, string>();
+			const results: ResultPayload[] = [];
 
 			try {
 				const value = await body({
@@ -772,6 +823,9 @@ function clackReporter(
 							display?.humanMessage ?? label,
 							display?.humanMessage === undefined ? value : undefined
 						);
+					},
+					result(payload) {
+						results.push(payload);
 					}
 				});
 
@@ -788,6 +842,9 @@ function clackReporter(
 				throw error;
 			} finally {
 				notes.flush();
+				for (const payload of results) {
+					renderResult(payload);
+				}
 			}
 		},
 
@@ -913,36 +970,7 @@ function clackReporter(
 			}
 		},
 
-		result(payload) {
-			if (resultFile !== undefined) {
-				appendResultEvent(resultFile, payload);
-			}
-
-			if (payload.rows.length === 0) {
-				if (payload.empty !== undefined) {
-					log.info(payload.empty, { output });
-				}
-
-				return;
-			}
-
-			if (payload.rows.some((row) => row.raw === true)) {
-				writeRows(
-					output,
-					payload.title ?? resultTitle(payload.kind),
-					payload.rows,
-					colours
-				);
-				return;
-			}
-			box(
-				formatRows(payload.rows, colours, getColumns(output) - 8),
-				payload.title ?? resultTitle(payload.kind),
-				{
-					output
-				}
-			);
-		},
+		result: renderResult,
 
 		data(text) {
 			out.write(`${text}\n`);
