@@ -110,6 +110,7 @@ async function deferUpload(
 	r2Key: string;
 	fileHash: NixSha256HashString;
 	fileSize: number;
+	narSize: number;
 }> {
 	const { metadata, nar } = await verifiablePath(seed, {
 		storePathHash,
@@ -127,7 +128,8 @@ async function deferUpload(
 		narHash: metadata.narHash,
 		r2Key: upload.r2Key,
 		fileHash: nar.fileHash,
-		fileSize: nar.narBytes.byteLength
+		fileSize: nar.narBytes.byteLength,
+		narSize: metadata.narSize
 	};
 }
 
@@ -388,15 +390,16 @@ describe('batched verify fault isolation', () => {
 		});
 	});
 
-	it('logs a fixed classification when fresh verification fails', async () => {
+	it('logs the stage and error when fresh verification fails', async () => {
 		const token = await initialise();
 		const upload = await deferUpload(token, 'cron-failure-log', 'a'.repeat(32));
+		const outage = new Error('simulated staging outage');
 		const originalGet = env.BLOBS.get.bind(env.BLOBS);
 		const get = vi
 			.spyOn(env.BLOBS, 'get')
 			.mockImplementation((key, options) =>
 				key === upload.r2Key
-					? Promise.reject(new Error('simulated staging outage'))
+					? Promise.reject(outage)
 					: originalGet(key, options)
 			);
 		const capture = startCapture();
@@ -422,7 +425,13 @@ describe('batched verify fault isolation', () => {
 			{
 				level: 'warning',
 				message: 'pending upload verification failed',
-				properties: { kind: 'fresh', reason: 'verification-failed' }
+				properties: {
+					uploadId: upload.uploadId,
+					kind: 'fresh',
+					reason: 'verification-failed',
+					stage: 'fetch',
+					error: outage
+				}
 			},
 			{
 				level: 'warning',
@@ -436,6 +445,110 @@ describe('batched verify fault isolation', () => {
 				}
 			}
 		]);
+	});
+
+	it.each([
+		{ outcome: 'verified', isStagingAvailable: true },
+		{ outcome: 'abandoned', isStagingAvailable: false }
+	])(
+		'logs one $outcome event for each fresh verification',
+		async ({ outcome, isStagingAvailable }) => {
+			const token = await initialise();
+			const upload = await deferUpload(
+				token,
+				`verification-event-${outcome}`,
+				'a'.repeat(32)
+			);
+			const originalGet = env.BLOBS.get.bind(env.BLOBS);
+			const get = vi
+				.spyOn(env.BLOBS, 'get')
+				.mockImplementation((key, options) =>
+					!isStagingAvailable && key === upload.r2Key
+						? Promise.reject(new Error('simulated staging outage'))
+						: originalGet(key, options)
+				);
+			const capture = startCapture();
+
+			try {
+				await verifyCurrentTenant();
+			} finally {
+				get.mockRestore();
+				capture.stop();
+			}
+
+			const events = capture.logs
+				.filter(
+					(record) => record.message === 'pending upload verification finished'
+				)
+				.map((record) => ({
+					level: record.level,
+					properties: record.properties
+				}));
+
+			expect(events).toStrictEqual([
+				{
+					level: 'info',
+					properties: {
+						uploadId: upload.uploadId,
+						outcome,
+						compressedBytes: isStagingAvailable ? upload.fileSize : 0,
+						narBytes: isStagingAvailable ? upload.narSize : 0,
+						reads: isStagingAvailable ? 1 : 0,
+						durationMs: 0
+					}
+				}
+			]);
+		}
+	);
+
+	it('decodes at most two staged NARs at a time', async () => {
+		const token = await initialise();
+		const uploads = [
+			await deferUpload(token, 'decode-limit-a', 'a'.repeat(32)),
+			await deferUpload(token, 'decode-limit-b', 'b'.repeat(32)),
+			await deferUpload(token, 'decode-limit-c', 'c'.repeat(32))
+		];
+		const stagedKeys = new Set(uploads.map((upload) => upload.r2Key));
+		const { promise: held, resolve: release } =
+			Promise.withResolvers<undefined>();
+		const { promise: twoStarted, resolve: didStartTwo } =
+			Promise.withResolvers<undefined>();
+		// Promotion reads the staged objects again, so count each key once.
+		const startedKeys = new Set<string>();
+		const originalGet = env.BLOBS.get.bind(env.BLOBS);
+		const get = vi
+			.spyOn(env.BLOBS, 'get')
+			.mockImplementation(async (key, options) => {
+				if (!stagedKeys.has(key)) {
+					return originalGet(key, options);
+				}
+
+				startedKeys.add(key);
+
+				if (startedKeys.size === 2) {
+					didStartTwo(undefined);
+				}
+
+				await held;
+
+				return originalGet(key, options);
+			});
+
+		try {
+			const pass = verifyCurrentTenant();
+			await twoStarted;
+			await scheduler.wait(20);
+			const startedWhileHeld = startedKeys.size;
+			release(undefined);
+			await pass;
+
+			expect({ startedWhileHeld, started: startedKeys.size }).toStrictEqual({
+				startedWhileHeld: 2,
+				started: 3
+			});
+		} finally {
+			get.mockRestore();
+		}
 	});
 
 	it('backs off repeated reuse faults and recovers after the probe succeeds', async () => {
@@ -969,7 +1082,7 @@ describe('batched verify fault isolation', () => {
 
 				started += 1;
 
-				if (started === 4) {
+				if (started === 2) {
 					waveStarted.resolve(undefined);
 				}
 
@@ -1024,7 +1137,7 @@ describe('batched verify fault isolation', () => {
 				first: 'started',
 				outcome: 'rejected',
 				isTimeout: true,
-				started: 4,
+				started: 2,
 				continuations: 0
 			});
 		} finally {

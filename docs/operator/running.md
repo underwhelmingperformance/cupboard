@@ -88,11 +88,23 @@ It also fails when the R2 get, or a single read of up to 1 MiB from the staged
 object, takes longer than 60 seconds. The tenant Worker records failed upload
 verification and publication attempts in `pending_upload.settle_failures`.
 `last_settle_error` contains a controlled failure category. Retries start after
-30 seconds and double up to ten minutes. The
+30 seconds and double up to ten minutes. The tenant Worker's
 `pending upload verification failed` log includes the upload ID, category, phase
-and failure count. Provider messages and URLs are not recorded. A stored decode
-verdict remains available while publication retries, so the next attempt does
-not decode the NAR again.
+and failure count, without provider messages or URLs. A stored decode verdict
+remains available while publication retries, so the next attempt does not decode
+the NAR again.
+
+The queue consumer logs its own `pending upload verification failed` warning
+when it abandons an upload. The warning includes the upload ID, the stage that
+was running (`fetch`, `read` or `decode`), and the error's name, message and
+stack. Unlike the tenant Worker's log, this warning records the error's own
+message, so it can include R2 error text. For every newly uploaded NAR that it
+decodes, the consumer also logs a `pending upload verification finished` event
+with the upload ID, the outcome (`verified`, `nar-hash-mismatch`,
+`nar-size-mismatch`, `undecodable`, `missing`, `abandoned`, or `aborted` when
+the pass budget ends before verification finishes), the number of compressed
+bytes that it read and NAR bytes that it decoded (`compressedBytes` and
+`narBytes`), the number of reads, and the duration in milliseconds.
 
 Upload verification and attestation inheritance stop after twelve failed
 attempts or 24 hours of eligible time. Eligible time starts with the first

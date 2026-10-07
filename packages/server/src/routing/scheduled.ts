@@ -23,7 +23,11 @@ import {
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
-import { verifyStoredNar } from '../blob/nar-verify.ts';
+import {
+	type NarVerification,
+	narVerifyProgress,
+	verifyStoredNar
+} from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	enqueueLocalStepWakes,
@@ -58,6 +62,7 @@ import {
 	withRenewedVerificationClaim
 } from '../do/verification-claim-lease.ts';
 import {
+	type PendingVerification,
 	type PendingVerificationBatch,
 	type VerificationResult
 } from '../do/verification-service.ts';
@@ -926,9 +931,11 @@ function migrateCacheCatalogue(env: Env, id: TenantId): Promise<void> {
 	return tenantServer(env, id).migrateCacheCatalogue(id);
 }
 
-// Bound concurrent decoding so one tenant does not monopolise the queue
-// consumer isolate.
-const verifyDecodeConcurrency = 4;
+// zstd decodes synchronously on the isolate thread, so more concurrent decodes
+// only interleave on that thread. Each extra decode lengthens every
+// verification and adds a read buffer and a decoder window to memory. Two let
+// one verification decode while the other waits for R2.
+const verifyDecodeConcurrency = 2;
 
 // Retry briefly while claim leases are still valid, then fail the queue message
 // so it can be redelivered.
@@ -1087,6 +1094,78 @@ export class VerdictRecorder {
 	}
 }
 
+type FreshVerificationOutcome =
+	| 'verified'
+	| Extract<NarVerification, { readonly ok: false }>['reason']
+	| 'missing'
+	| 'abandoned'
+	| 'aborted';
+
+/**
+ * Verifies the staged object of one upload that is not a reuse, and adds the
+ * verdict to `recorder`. A missing object is terminal. When the pass is
+ * aborted, the error propagates; any other failure abandons the upload for a
+ * later pass. Each call logs one `pending upload verification finished` event
+ * with its outcome and the work that it did.
+ */
+async function verifyFreshClaim(
+	logger: Logger,
+	blobs: R2Bucket,
+	claim: PendingVerification,
+	recorder: VerdictRecorder,
+	signal: AbortSignal
+): Promise<void> {
+	const progress = narVerifyProgress();
+	const startedAt = Date.now();
+	let outcome: FreshVerificationOutcome = 'aborted';
+
+	try {
+		signal.throwIfAborted();
+		const verification = await verifyStoredNar(
+			blobs,
+			claim.r2Key,
+			{ narHash: claim.narHash, narSize: claim.narSize },
+			{ signal, progress }
+		);
+		signal.throwIfAborted();
+		outcome = verification.ok ? 'verified' : verification.reason;
+
+		recorder.add({
+			uploadId: claim.uploadId,
+			verdict: { kind: 'verified', verification }
+		});
+	} catch (error) {
+		if (signal.aborted) {
+			throw error;
+		}
+
+		if (error instanceof UploadedObjectNotFoundError) {
+			outcome = 'missing';
+			recorder.add({ uploadId: claim.uploadId, verdict: { kind: 'missing' } });
+			return;
+		}
+
+		outcome = 'abandoned';
+		logger.warn('pending upload verification failed', {
+			uploadId: claim.uploadId,
+			kind: 'fresh',
+			reason: 'verification-failed',
+			stage: progress.stage,
+			error
+		});
+		recorder.add({ uploadId: claim.uploadId, verdict: { kind: 'abandoned' } });
+	} finally {
+		logger.info('pending upload verification finished', {
+			uploadId: claim.uploadId,
+			outcome,
+			compressedBytes: progress.compressedBytes,
+			narBytes: progress.narBytes,
+			reads: progress.reads,
+			durationMs: Date.now() - startedAt
+		});
+	}
+}
+
 // Claim a bounded batch, then fetch and decode staging objects in the queue
 // consumer so CPU-bound NAR verification does not occupy the Durable Object.
 // The Durable Object applies each verdict only while this pass owns the claim.
@@ -1207,47 +1286,8 @@ export async function verifyTenant(
 				await mapWithConcurrency(
 					freshClaims,
 					verifyDecodeConcurrency,
-					async (claim) => {
-						try {
-							signal.throwIfAborted();
-							const verification = await verifyStoredNar(
-								env.BLOBS,
-								claim.r2Key,
-								{
-									narHash: claim.narHash,
-									narSize: claim.narSize
-								},
-								{ signal }
-							);
-							signal.throwIfAborted();
-
-							recorder.add({
-								uploadId: claim.uploadId,
-								verdict: { kind: 'verified', verification }
-							});
-						} catch (error) {
-							if (signal.aborted) {
-								throw error;
-							}
-							if (error instanceof UploadedObjectNotFoundError) {
-								recorder.add({
-									uploadId: claim.uploadId,
-									verdict: { kind: 'missing' }
-								});
-								return;
-							}
-
-							// Release a transient fetch or decode failure for the next pass.
-							logger.warn('pending upload verification failed', {
-								kind: 'fresh',
-								reason: 'verification-failed'
-							});
-							recorder.add({
-								uploadId: claim.uploadId,
-								verdict: { kind: 'abandoned' }
-							});
-						}
-					}
+					(claim) =>
+						verifyFreshClaim(logger, env.BLOBS, claim, recorder, signal)
 				);
 
 				return recorder.finishRecording();
