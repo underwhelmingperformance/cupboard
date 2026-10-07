@@ -26,6 +26,7 @@ import retrySnapshot from '../../drizzle/meta/0069_snapshot.json' with { type: '
 import creationDefaultsSnapshot from '../../drizzle/meta/0070_snapshot.json' with { type: 'json' };
 import closeSnapshot from '../../drizzle/meta/0071_snapshot.json' with { type: 'json' };
 import stagingCleanupSnapshot from '../../drizzle/meta/0072_snapshot.json' with { type: 'json' };
+import refreshFamilyOwnerSnapshot from '../../drizzle/meta/0073_snapshot.json' with { type: 'json' };
 import migrations from '../../drizzle/migrations.js';
 import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -137,6 +138,61 @@ describe('migrations', () => {
 				...closeSnapshot.tables,
 				cache_teardown: stagingCleanupSnapshot.tables.cache_teardown,
 				staging_cleanup: stagingCleanupSnapshot.tables.staging_cleanup
+			}
+		});
+	});
+	it('leaves owner fields null for refresh families created before migration 0073', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-refresh-family-owner'),
+			async (_instance, state) => {
+				await migrateThrough(state, 72);
+				state.storage.sql.exec(
+					"INSERT INTO refresh_session_family(id,active_member_id,generation,created_at,expires_at) VALUES ('family','member',3,'2026-01-01T00:00:00.000Z','2026-01-31T00:00:00.000Z')"
+				);
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 73)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 73)
+				);
+				return {
+					migrated,
+					repeated,
+					families: state.storage.sql
+						.exec(
+							'SELECT id, active_member_id, generation, created_at, expires_at, issuer IS NULL AS issuer_unknown, subject IS NULL AS subject_unknown, rule IS NULL AS rule_unknown FROM refresh_session_family'
+						)
+						.toArray()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false },
+			families: [
+				{
+					id: 'family',
+					active_member_id: 'member',
+					generation: 3,
+					created_at: '2026-01-01T00:00:00.000Z',
+					expires_at: '2026-01-31T00:00:00.000Z',
+					issuer_unknown: 1,
+					subject_unknown: 1,
+					rule_unknown: 1
+				}
+			]
+		});
+		expect(refreshFamilyOwnerSnapshot).toStrictEqual({
+			...stagingCleanupSnapshot,
+			id: refreshFamilyOwnerSnapshot.id,
+			prevId: stagingCleanupSnapshot.id,
+			tables: {
+				...stagingCleanupSnapshot.tables,
+				refresh_session_family:
+					refreshFamilyOwnerSnapshot.tables.refresh_session_family
 			}
 		});
 	});

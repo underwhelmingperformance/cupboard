@@ -651,6 +651,11 @@ response preserves or narrows the credential's authority and its original 30-day
 deadline. Rule IDs are not session dependencies.
 
 `refresh_session_family` records the active member, generation and timestamps.
+It also records who the family belongs to: the verified issuer and subject, and
+the trust rule that issued its latest access token when a single rule covers
+that token. A family created before migration `0073_refresh_family_owner` has an
+unknown owner until its next rotation.
+
 `refresh_session_member` records credential hashes and replay metadata. A spent
 member briefly includes an encrypted successor credential so a retry can recover
 an explicitly narrowed successor, even when the retry omits the grant field. The

@@ -18,7 +18,11 @@ import {
 	type TenantId,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
-import type { OidcSubject, TrustRuleId } from '@cupboard/protocol/oidc';
+import type {
+	OidcIssuer,
+	OidcSubject,
+	TrustRuleId
+} from '@cupboard/protocol/oidc';
 import type {
 	ReuseViewName,
 	ReuseViewPriority,
@@ -783,7 +787,12 @@ export const refreshTokenFamilies = sqliteTable(
 		activeMemberId: text('active_member_id').notNull(),
 		generation: integer('generation').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		// Families created before these columns existed have no recorded owner
+		// until their next rotation.
+		issuer: text('issuer').$type<OidcIssuer>(),
+		subject: text('subject').$type<OidcSubject>(),
+		rule: text('rule').$type<TrustRuleId>()
 	},
 	(table) => [
 		unique('refresh_session_family_active_member_unique').on(
