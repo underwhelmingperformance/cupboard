@@ -89,7 +89,8 @@
 		// `CONTROL_KEY_WRAP_SECRET` in production with `wrangler secret put`. Tests
 		// supply their own via the pool/Miniflare bindings.
 		"CUPBOARD_CONTROL_AUDIENCE": "cupboard-control",
-		// `1` lets local development use a loopback HTTP OIDC issuer.
+		// `1` lets local development serve plain HTTP requests and use a loopback
+		// HTTP OIDC issuer.
 		"CUPBOARD_LOCAL_DEV": "",
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},

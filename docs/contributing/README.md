@@ -132,9 +132,11 @@ You can run the whole server on your own machine:
    ```
 
    `.dev.vars` is ignored by Git. The example file explains each setting. Set
-   `CUPBOARD_LOCAL_DEV` to `1` or `true` to let a local OIDC issuer work over
-   plain HTTP. To claim the local deployment, also set `CUPBOARD_SIGNUP_SECRET`.
-   The claim is refused without it, even with `CUPBOARD_LOCAL_DEV` set.
+   `CUPBOARD_LOCAL_DEV` to `1` or `true`. `wrangler dev` serves plain HTTP, and
+   without this setting the Worker refuses every plain HTTP request. It also
+   lets a local OIDC issuer work over plain HTTP. To claim the local deployment,
+   also set `CUPBOARD_SIGNUP_SECRET`. The claim is refused without it, even with
+   `CUPBOARD_LOCAL_DEV` set.
 
 2. Stop any local Workers and initialise the local database:
 

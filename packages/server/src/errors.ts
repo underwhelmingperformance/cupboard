@@ -877,6 +877,17 @@ export abstract class OAuthError extends ServerHttpError {
 	readonly detail?: Readonly<Record<string, string>>;
 }
 
+export class InsecureTransportError extends OAuthError {
+	readonly status = StatusCodes.FORBIDDEN;
+	readonly error = 'invalid_request';
+	readonly problem = 'insecure-transport';
+
+	constructor() {
+		super('cupboard accepts only HTTPS requests. Use an https:// URL.');
+		this.name = 'InsecureTransportError';
+	}
+}
+
 export abstract class InvalidRequestError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_request';
