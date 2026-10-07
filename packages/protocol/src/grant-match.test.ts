@@ -316,6 +316,32 @@ describe('isGrantPermittedByRule', () => {
 		).toBe(false);
 	});
 
+	it('refuses a binding that renders an invalid tenant name', () => {
+		const verbatimGrant = grant({
+			type: 'cupboard_tenant',
+			actions: ['tenant:create'],
+			resources: {
+				tenant: {
+					equalsTemplate: '{name}',
+					substitutions: { name: { claim: 'repository' } },
+					validate: 'tenant'
+				}
+			}
+		});
+
+		const requested = request({
+			type: 'cupboard_tenant',
+			actions: ['tenant:create'],
+			tenant: 'bad-name'
+		});
+
+		expect(
+			isGrantPermittedByRule([verbatimGrant], requested, {
+				repository: 'Bad Name'
+			})
+		).toBe(false);
+	});
+
 	it('permits the cache matched by a stored private-cache template', () => {
 		const stored = storedPermittedGrantsSchema.parse([
 			{
