@@ -85,7 +85,7 @@ async function seedRefreshFamily(): Promise<RefreshFixture> {
 		createdAt
 	} as const satisfies typeof schema.refreshTokenMembers.$inferInsert;
 
-	const persistedMember = await runInDurableObject(
+	const persisted = await runInDurableObject(
 		testServerFor(fixtureTenant),
 		(instance) => {
 			instance.context.db.transaction((transaction) => {
@@ -93,22 +93,29 @@ async function seedRefreshFamily(): Promise<RefreshFixture> {
 				transaction.insert(schema.refreshTokenMembers).values(member).run();
 			});
 
-			return instance.context.db
-				.select()
-				.from(schema.refreshTokenMembers)
-				.where(eq(schema.refreshTokenMembers.id, memberId))
-				.get();
+			return {
+				family: instance.context.db
+					.select()
+					.from(schema.refreshTokenFamilies)
+					.where(eq(schema.refreshTokenFamilies.id, familyId))
+					.get(),
+				member: instance.context.db
+					.select()
+					.from(schema.refreshTokenMembers)
+					.where(eq(schema.refreshTokenMembers.id, memberId))
+					.get()
+			};
 		}
 	);
 
-	if (persistedMember === undefined) {
-		throw new Error('The refresh member was not persisted');
+	if (persisted.family === undefined || persisted.member === undefined) {
+		throw new Error('The refresh family was not persisted');
 	}
 
 	return {
 		token: `${memberId}.${secret}`,
-		family: { ...family },
-		member: persistedMember
+		family: persisted.family,
+		member: persisted.member
 	};
 }
 

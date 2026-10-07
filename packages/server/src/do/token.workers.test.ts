@@ -1888,7 +1888,7 @@ async function staleRefreshOutcome(refreshToken: string): Promise<{
 describe('refresh grant', () => {
 	beforeEach(resetTestServer);
 
-	it('issues client-contained refresh authority with only replay metadata in active storage', async () => {
+	it('issues client-contained refresh authority with only replay and owner metadata in active storage', async () => {
 		const subject = await installTrustedIdp('admin');
 		const response = await exchange(subject);
 		const parts = response.refresh_token?.split('.') ?? [];
@@ -1937,7 +1937,10 @@ describe('refresh grant', () => {
 				'createdAt',
 				'expiresAt',
 				'generation',
-				'id'
+				'id',
+				'issuer',
+				'rule',
+				'subject'
 			],
 			memberFields: [
 				'createdAt',
@@ -1948,6 +1951,48 @@ describe('refresh grant', () => {
 				'successorEnvelope',
 				'successorExpiresAt'
 			]
+		});
+	});
+
+	it('records the owner of a family at issue and fills an unknown owner at rotation', async () => {
+		const exchanged = await exchange(await installTrustedIdp('admin'));
+		const familyOwners = (): Promise<unknown> =>
+			runInDurableObject(currentServer(), (instance) =>
+				instance.context.db
+					.select()
+					.from(refreshTokenFamilies)
+					.all()
+					.map((family) => ({
+						issuer: family.issuer ?? undefined,
+						subject: family.subject ?? undefined,
+						rule: family.rule ?? undefined
+					}))
+			);
+		const issued = await familyOwners();
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				'UPDATE refresh_session_family SET issuer = NULL, subject = NULL, rule = NULL'
+			);
+		});
+		const unknown = await familyOwners();
+		const rotated = await refresh(exchanged.refresh_token ?? '');
+		await rotated.text();
+		const owner = {
+			issuer: 'https://idp.test',
+			subject: 'alice',
+			rule: 'admin-rule'
+		};
+
+		expect({
+			issued,
+			unknown,
+			status: rotated.status,
+			rotated: await familyOwners()
+		}).toStrictEqual({
+			issued: [owner],
+			unknown: [{ issuer: undefined, subject: undefined, rule: undefined }],
+			status: StatusCodes.OK,
+			rotated: [owner]
 		});
 	});
 

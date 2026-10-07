@@ -8,6 +8,7 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
+	oidcIssuerSchema,
 	type OidcSubject,
 	oidcSubjectSchema,
 	type RefreshTokenGrantRequest,
@@ -842,7 +843,13 @@ export class TokenExchangeService {
 		// each run with a fresh external subject token. A refresh token would turn one
 		// federated CI exchange into a persistent session.
 		const refreshToken = isInteractive
-			? await this.prepareRefreshToken(authority.identity, granted, family)
+			? await this.prepareRefreshToken(
+					authority.identity,
+					subject,
+					rule,
+					granted,
+					family
+				)
 			: undefined;
 
 		return {
@@ -862,6 +869,8 @@ export class TokenExchangeService {
 
 	private async prepareRefreshToken(
 		identity: VerifiedOidcClaims,
+		subject: OidcSubject,
+		rule: OidcTrustRule | undefined,
 		grants: AuthorizationDetails,
 		current?: RefreshTokenFamily
 	): Promise<PreparedRefreshToken> {
@@ -876,6 +885,7 @@ export class TokenExchangeService {
 				new Date(now.getTime() + refreshTokenFamilyTtlSeconds * 1000)
 			);
 
+		const policyIdentity = refreshPolicyIdentity(identity);
 		const credential = RefreshCredential.issue({
 			purpose: 'cupboard-refresh',
 			version: 1,
@@ -884,7 +894,7 @@ export class TokenExchangeService {
 			memberId: id,
 			generation,
 			expiresAt,
-			identity: refreshPolicyIdentity(identity),
+			identity: policyIdentity,
 			grants
 		});
 		return {
@@ -894,7 +904,10 @@ export class TokenExchangeService {
 				activeMemberId: id,
 				generation,
 				createdAt: current?.createdAt ?? createdAt,
-				expiresAt
+				expiresAt,
+				issuer: oidcIssuerSchema.parse(policyIdentity.iss),
+				subject,
+				...(rule !== undefined && { rule: rule.id })
 			},
 			member: {
 				id,
@@ -929,7 +942,10 @@ export class TokenExchangeService {
 				.update(schema.refreshTokenFamilies)
 				.set({
 					activeMemberId: successor.family.activeMemberId,
-					generation: successor.family.generation
+					generation: successor.family.generation,
+					issuer: successor.family.issuer,
+					subject: successor.family.subject,
+					rule: successor.family.rule ?? sql`NULL`
 				})
 				.where(
 					and(
