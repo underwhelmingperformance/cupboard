@@ -23,6 +23,7 @@ import {
 	type PushClient,
 	type PushNarArchive
 } from '../push/push.ts';
+import { whileRenewingUpload } from '../push/upload-transfer.ts';
 
 import { requireMatchingBuildOutput } from './divergence.ts';
 
@@ -299,7 +300,9 @@ export class BuildOutputBatcher {
 				((storePath: string) => new NarArchive(storePath));
 			const upload = compressNar(createNarArchive(info.storePath));
 
-			await this.options.client.uploadNar(decision.r2Key, upload.body);
+			await whileRenewingUpload(this.options.session, decision.uploadId, () =>
+				this.options.client.uploadNar(decision.r2Key, upload.body)
+			);
 			assertNarMetadata(info, upload.digest());
 		}
 

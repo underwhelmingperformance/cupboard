@@ -3608,6 +3608,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
+		if (request.op === 'renew-uploads') {
+			const renewal = await this.uploads.renewUploads(
+				cache,
+				request.pushId,
+				request.uploadIds,
+				new Date()
+			);
+
+			sendCommitSessionFrame(socket, { ev: 'renewed', ...renewal });
+			return;
+		}
+
 		if (request.op === 'subscribe-identity') {
 			await this.replaySubscribeIdentity(
 				socket,

@@ -51,6 +51,7 @@ import {
 	type PushClient,
 	type PushNarArchive
 } from '../push/push.ts';
+import { whileRenewingUpload } from '../push/upload-transfer.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
 import { requireMatchingBuildOutput } from './divergence.ts';
@@ -385,7 +386,9 @@ async function uploadAndAcknowledge(
 		try {
 			const upload = compressNar(createNarArchive(info.storePath));
 
-			await options.client.uploadNar(decision.r2Key, upload.body);
+			await whileRenewingUpload(options.session, decision.uploadId, () =>
+				options.client.uploadNar(decision.r2Key, upload.body)
+			);
 			assertNarMetadata(info, upload.digest());
 		} catch (error) {
 			if (isVanishedPathError(error)) {

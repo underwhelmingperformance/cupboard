@@ -591,7 +591,7 @@ describe('commit session schemas', () => {
 			capability: 'commit-credit',
 			granted: 'commit-credit;grant=200',
 			saturated: 'commit-credit;grant=0',
-			header: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},commit-credit;grant=200`
+			header: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},renew-uploads,commit-credit;grant=200`
 		});
 	});
 
@@ -642,7 +642,49 @@ describe('commit session schemas', () => {
 		}).toStrictEqual({
 			commitBatchCapabilityToken: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`,
 			subscribeIdentityCapabilityToken: `subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`,
-			commitCapabilitiesValue: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`
+			commitCapabilitiesValue: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},renew-uploads`
 		});
+	});
+
+	it.each([
+		{
+			shape: 'no upload',
+			request: { op: 'renew-uploads', pushId: 'a'.repeat(104), uploadIds: [] }
+		},
+		{
+			shape: 'more uploads than a batch',
+			request: {
+				op: 'renew-uploads',
+				pushId: 'a'.repeat(104),
+				uploadIds: Array.from(
+					{ length: 101 },
+					(_, index) => `u-${String(index)}`
+				)
+			}
+		},
+		{
+			shape: 'no push id',
+			request: { op: 'renew-uploads', uploadIds: ['upload-1'] }
+		}
+	])('rejects a renew-uploads op with $shape', ({ request }) => {
+		expect(commitSessionRequestSchema.safeParse(request).success).toBe(false);
+	});
+
+	it('round-trips a renew-uploads op and its reply', () => {
+		const request = {
+			op: 'renew-uploads',
+			pushId: 'a'.repeat(104),
+			uploadIds: ['upload-1', 'upload-2']
+		};
+		const frame = {
+			ev: 'renewed',
+			renewed: ['upload-1'],
+			refused: ['upload-2']
+		};
+
+		expect({
+			request: commitSessionRequestSchema.parse(request),
+			frame: commitSessionFrameSchema.parse(frame)
+		}).toStrictEqual({ request, frame });
 	});
 });

@@ -49,6 +49,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
+import type { CommitSession } from '../client/commit-socket.ts';
 import { waitTimeoutSecondsSchema } from '../duration.ts';
 import {
 	AttestationDivergedPathError,
@@ -679,6 +680,77 @@ describe('runPush', () => {
 			'upload nar/runtime.nar.zst',
 			'commit upload-runtime'
 		]);
+	});
+
+	it('renews an upload while its bytes are sent and stops when the upload ends', async () => {
+		vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+
+		try {
+			const transfer = Promise.withResolvers<undefined>();
+			const renewals: string[][] = [];
+			const session: CommitSession = {
+				commit: (target) =>
+					Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'committed',
+						settled: Promise.resolve()
+					}),
+				renewUploads: (uploadIds) => {
+					renewals.push([...uploadIds]);
+
+					return Promise.resolve();
+				},
+				close() {
+					return;
+				}
+			};
+			const pushed = runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: (body) =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: 'upload-app',
+									r2Key: 'nar/app.nar.zst',
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}))
+							})
+						),
+					async uploadNar(_r2Key, body) {
+						await transfer.promise;
+						await collectReadableStream(body);
+					},
+					commit: unexpectedCommitCall,
+					openCommitSession: () => Promise.resolve(session),
+					setRoot: (rootName, body) =>
+						Promise.resolve(rootSummary({ name: rootName, ...body }))
+				} satisfies PushClient,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: (nar) => fakeNarUpload(nar, appDigest)
+			});
+
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+			const whileSending = [...renewals];
+
+			transfer.resolve(undefined);
+			await pushed;
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+			expect({ whileSending, afterwards: renewals }).toStrictEqual({
+				whileSending: [['upload-app'], ['upload-app']],
+				afterwards: [['upload-app'], ['upload-app']]
+			});
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('marks each commit for retention from its own negotiation', async () => {

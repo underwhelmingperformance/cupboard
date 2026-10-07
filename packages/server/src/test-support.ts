@@ -2495,12 +2495,17 @@ export function cacheScopedPath(cache: CacheScope, suffix: string): string {
 const testPushIdSigningKey = pushIdSigningKeySchema.parse(
 	'test-push-id-signing-key'
 );
-export async function testPushIdFor(tenant: string): Promise<PushId> {
+// A different `nonceFill` produces the push ID of another push for the same
+// tenant.
+export async function testPushIdFor(
+	tenant: string,
+	nonceFill = 0
+): Promise<PushId> {
 	return issuePushId(
 		testPushIdSigningKey,
 		tenantIdSchema.parse(tenant),
 		0xff_ff_ff_ff,
-		pushIdNonceSchema.parse(new Uint8Array(16))
+		pushIdNonceSchema.parse(new Uint8Array(16).fill(nonceFill))
 	);
 }
 

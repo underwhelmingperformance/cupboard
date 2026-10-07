@@ -31,6 +31,7 @@ import {
 	commitAcceptCapabilitiesHeader,
 	commitBatchCapability,
 	commitCreditCapability,
+	type PushId,
 	type UploadId
 } from '@cupboard/protocol/upload';
 import {
@@ -160,7 +161,8 @@ export class CupboardClient {
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
 				signal: this.signal,
 				onCapabilities: options.onCapabilities,
-				onWaiting: options.onWaiting
+				onWaiting: options.onWaiting,
+				pushId: options.pushId
 			}
 		);
 	}
@@ -474,6 +476,11 @@ export interface CommitOptions {
 	 * it stops, so a progress display can report the fact.
 	 */
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
+	/**
+	Returns the push ID that the commit session sends with each `renew-uploads`
+	request.
+	*/
+	readonly pushId?: () => Promise<PushId>;
 }
 
 const defaultCommitWaitSeconds = 600;

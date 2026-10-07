@@ -194,7 +194,10 @@ export function pushClientFor(
 		commit: (target, commitOptions) =>
 			raw.commit(credential, target, commitOptions),
 		openCommitSession: (commitOptions) =>
-			raw.openCommitSession(credential, commitOptions),
+			raw.openCommitSession(credential, {
+				...commitOptions,
+				pushId: () => session.pushId()
+			}),
 		negotiateAttestations: async (body) =>
 			callInCache(rpc.attestations.negotiate, cache, {
 				pushId: await session.pushId(),
