@@ -1299,6 +1299,52 @@ describe('upload flow', () => {
 		).resolves.toBeNull();
 	});
 
+	it('records a terminal mismatch when promotion finds the staged bytes changed', async () => {
+		const token = await initialise();
+		const verified = await verifiableNar('promotion-verified');
+		const replaced = await verifiableNar('promotion-replaced');
+		const metadata = uploadMetadata({
+			name: 'replaced',
+			storePathHash: 'a'.repeat(32),
+			narHash: verified.narHash,
+			fileHash: verified.fileHash,
+			fileSize: verified.narBytes.byteLength,
+			narSize: verified.narSize
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key, verified);
+		await commitUpload(token, upload.uploadId, defaultCache(), { wait: false });
+
+		// The client replaces the staging object after verification read it, so
+		// R2 refuses the promotion's checksummed copy.
+		await putNarBytes(upload.r2Key, replaced);
+		await recordClaimedVerification(upload.uploadId, {
+			ok: true,
+			fileHash: verified.fileHash,
+			fileSize: verified.narBytes.byteLength
+		});
+
+		const narInfoObject = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
+		);
+		const staged = await env.BLOBS.head(upload.r2Key);
+
+		expect({
+			verdict: await pendingUploadVerdict(upload.uploadId),
+			isNarInfoWritten: narInfoObject !== null,
+			isStaged: staged !== null
+		}).toStrictEqual({
+			verdict: 'mismatch',
+			isNarInfoWritten: false,
+			isStaged: false
+		});
+	});
+
 	it('records a terminal mismatch when the staging object has vanished', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

@@ -43,6 +43,7 @@ import { z } from 'zod';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { recordedNarInfoMetadata } from '../blob/narinfo-object-metadata.ts';
+import { type StagedBlobPromotion } from '../blob/promote-blob.ts';
 import {
 	type CacheId,
 	cacheScopeFromRow,
@@ -52,6 +53,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	ObjectIncarnationReservationContendedError,
+	StagedObjectDigestMismatchError,
 	SubrequestSliceExceededError,
 	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
@@ -1245,13 +1247,31 @@ export class VerificationService {
 				verification.fileSize !== undefined
 					? { fileHash: verification.fileHash, fileSize: verification.fileSize }
 					: undefined;
-			const staged = await this.uploadState.stageStagingBlob(
-				pending.r2Key,
-				metadata,
-				blob,
-				owner,
-				() => this.ownsActiveClaim(owner, pending, signal)
-			);
+			let staged: StagedBlobPromotion | undefined;
+
+			try {
+				staged = await this.uploadState.stageStagingBlob(
+					pending.r2Key,
+					metadata,
+					blob,
+					owner,
+					() => this.ownsActiveClaim(owner, pending, signal)
+				);
+			} catch (error) {
+				if (!(error instanceof StagedObjectDigestMismatchError)) {
+					throw error;
+				}
+
+				const didApply = await this.failReservedUpload(
+					pending,
+					metadata,
+					generation,
+					'mismatch',
+					owner,
+					signal
+				);
+				return didApply ? 'applied' : 'ignored';
+			}
 
 			if (
 				staged === undefined ||

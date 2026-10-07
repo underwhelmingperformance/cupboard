@@ -7,7 +7,10 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { type CanonicalBlob, canonicalBlobOf } from '../do/upload-metadata.ts';
-import { UploadedObjectNotFoundError } from '../errors.ts';
+import {
+	StagedObjectDigestMismatchError,
+	UploadedObjectNotFoundError
+} from '../errors.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 import {
@@ -25,6 +28,30 @@ import {
 export interface PromotionTarget {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
+}
+
+// The R2 binding reports a failed checksum as a plain `Error` whose message
+// ends with R2's BadDigest code.
+function isR2BadDigest(error: unknown): boolean {
+	return error instanceof Error && error.message.endsWith('(10037)');
+}
+
+async function putCanonicalObject(
+	blobs: R2Bucket,
+	canonicalKey: R2ObjectKey,
+	stagingKey: R2ObjectKey,
+	body: ReadableStream,
+	options: R2PutOptions
+): Promise<R2Object | null> {
+	try {
+		return await blobs.put(canonicalKey, body, options);
+	} catch (error) {
+		if (isR2BadDigest(error)) {
+			throw new StagedObjectDigestMismatchError(stagingKey, { cause: error });
+		}
+
+		throw error;
+	}
 }
 
 async function ensureCanonicalObject(
@@ -65,13 +92,19 @@ async function ensureCanonicalObject(
 		throw new UploadedObjectNotFoundError(stagingKey);
 	}
 
-	const written = await blobs.put(canonicalKey, staged.body, {
-		// Verification computed this hash from the staging bytes. Ask R2 to check
-		// the bytes again while it writes the canonical object.
-		sha256: NixSha256Hash.parse(blob.fileHash).digestBytes(),
-		customMetadata: { narSize: String(narSize) },
-		onlyIf: { etagDoesNotMatch: '*' }
-	});
+	const written = await putCanonicalObject(
+		blobs,
+		canonicalKey,
+		stagingKey,
+		staged.body,
+		{
+			// Verification computed this hash from the staging bytes. Ask R2 to check
+			// the bytes again while it writes the canonical object.
+			sha256: NixSha256Hash.parse(blob.fileHash).digestBytes(),
+			customMetadata: { narSize: String(narSize) },
+			onlyIf: { etagDoesNotMatch: '*' }
+		}
+	);
 
 	if (isStillOwned?.() === false) {
 		if (written !== null) {
