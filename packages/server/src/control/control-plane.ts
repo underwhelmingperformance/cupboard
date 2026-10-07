@@ -30,7 +30,8 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	hasMatchingOidcTrustIdentity,
-	oidcTrustVerificationTarget
+	oidcTrustVerificationTarget,
+	trustedAudiences
 } from '@cupboard/protocol/oidc-trust-match';
 import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
@@ -246,14 +247,12 @@ export async function controlTokenExchange(
 		throw new ControlSubjectTokenUntrustedError();
 	}
 
-	// Every configured audience identifies this deployment, so any of them may
-	// appear alongside the verified audience in a token's `aud` array.
 	const verified = await (
 		canUseHttpLoopback ? localDevelopmentVerifier : verifier
 	).verify(
 		target,
 		exchange.subject_token,
-		new Set(rules.map((rule) => rule.audience))
+		trustedAudiences(rules, target.issuer)
 	);
 	const requested = parseRequestedGrants(exchange.authorization_details);
 	const selection = selectOidcTrust(rules, verified, requested);

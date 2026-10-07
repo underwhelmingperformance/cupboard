@@ -125,6 +125,22 @@ export function oidcTrustVerificationTarget(
 }
 
 /**
+ * The audiences of rules for `issuer` that the verifier permits as additional
+ * entries in a token's `aud` array. An audience identifies this deployment
+ * only to the issuer in its rule. The token's issuer might give the same value
+ * to another relying party, so audiences from rules for other issuers are left
+ * out.
+ */
+export function trustedAudiences(
+	rules: readonly OidcTrustRule[],
+	issuer: OidcIssuer
+): ReadonlySet<OidcAudience> {
+	return new Set(
+		rules.filter((rule) => rule.issuer === issuer).map((rule) => rule.audience)
+	);
+}
+
+/**
  * Whether the supplied claims satisfy the issuer, audience and
  * configured-claim constraints of any rule. Verification does not change the
  * token payload, so the caller can refuse a token whose decoded claims

@@ -27,6 +27,7 @@ import {
 	type OidcClaims,
 	type OidcTrustRule,
 	oidcTrustVerificationTarget,
+	trustedAudiences,
 	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
 import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
@@ -190,7 +191,7 @@ export class TokenExchangeService {
 			verified = await this.oidcTrust.verifyInbound(
 				target,
 				body.subject_token,
-				configuredAudiences(rules)
+				trustedAudiences(rules, target.issuer)
 			);
 		} catch (error) {
 			// Expose claim-mismatch diagnostics only after successful verification,
@@ -422,7 +423,7 @@ export class TokenExchangeService {
 			verified = await this.oidcTrust.verifyInbound(
 				candidate,
 				subjectToken,
-				configuredAudiences(rules)
+				trustedAudiences(rules, candidate.issuer)
 			);
 		} catch {
 			// Collapse signature failures and issuer outages to the same generic
@@ -1067,14 +1068,6 @@ export class TokenExchangeService {
 
 		throw new UnsupportedGrantTypeError(body.grant_type);
 	}
-}
-
-// Every configured audience identifies this deployment, so any of them may
-// appear alongside the verified audience in a token's `aud` array.
-function configuredAudiences(
-	rules: readonly OidcTrustRule[]
-): ReadonlySet<string> {
-	return new Set(rules.map((rule) => rule.audience));
 }
 
 function hasSameAuthority(
