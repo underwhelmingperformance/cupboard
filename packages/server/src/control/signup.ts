@@ -1,4 +1,3 @@
-import { type Logger } from '@cupboard/logger';
 import {
 	type OidcAudience,
 	oidcAudienceSchema,
@@ -66,8 +65,7 @@ const localDevelopmentVerifier = new InboundTokenVerifier(
 // ID token is consumed here and `/token` would refuse it.
 export async function handleSignup(
 	request: Request,
-	env: Env,
-	logger: Logger
+	env: Env
 ): Promise<Response> {
 	const body = await parseFormBody(signupRequestSchema, request);
 
@@ -101,7 +99,7 @@ export async function handleSignup(
 		{ issuer, subject, audience },
 		isoTimestamp(now)
 	);
-	const session = await issueControlSession(request, env, logger, {
+	const session = await issueControlSession(request, env, {
 		verified,
 		binding,
 		rules: await controlTrustRules(database, isLoopbackAllowed),

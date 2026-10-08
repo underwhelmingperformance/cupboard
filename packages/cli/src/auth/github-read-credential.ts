@@ -1,5 +1,6 @@
 import { type CacheScope } from '@cupboard/nix-store/scalars';
 import {
+	type ReadAccessResponse,
 	type ReadResource,
 	readTokenBasicUser,
 	readTokenPasswordPrefix
@@ -10,7 +11,8 @@ import { CupboardClient } from '../client/client.ts';
 
 import {
 	fetchGithubOidcToken,
-	type GithubOidcEnvironment
+	type GithubOidcEnvironment,
+	githubOidcExchangeFailure
 } from './github-oidc.ts';
 import { type ReadCredentialLease } from './read-credential-session.ts';
 
@@ -44,7 +46,14 @@ export async function issueGithubReadCredential(
 		fetcher: client.fetcher,
 		...(input.environment !== undefined && { environment: input.environment })
 	});
-	const exchanged = await client.acquireReadAccess(subject, input.resources);
+	let exchanged: ReadAccessResponse;
+
+	try {
+		exchanged = await client.acquireReadAccess(subject, input.resources);
+	} catch (error) {
+		throw githubOidcExchangeFailure(error, input.tenantUrl, input.audience);
+	}
+
 	return {
 		user: readTokenBasicUser,
 		password: `${readTokenPasswordPrefix}${exchanged.access_token}`,

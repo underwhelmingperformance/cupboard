@@ -10,6 +10,7 @@ import { z } from 'zod';
 
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
+import { signBound } from '../support/subject-binding.ts';
 
 // The audience the external IdP stamps into the control subject token (the control
 // OAuth client id), and the audience cupboard stamps into the control token it
@@ -92,14 +93,16 @@ describe('control plane token exchange', () => {
 					claims: { sub: 'global-admin' }
 				});
 
-				const subjectToken = server.issuer.sign({
-					aud: subjectAudience,
-					sub: 'global-admin'
-				});
+				const bound = await signBound(
+					server.issuer,
+					{ aud: subjectAudience, sub: 'global-admin' },
+					server.url
+				);
 				const body = new URLSearchParams({
 					grant_type: tokenExchangeGrantType,
-					subject_token: subjectToken,
-					subject_token_type: subjectTokenTypeIdToken
+					subject_token: bound.token,
+					subject_token_type: subjectTokenTypeIdToken,
+					...bound.form
 				});
 				const response = await fetch(new URL('/token', server.url), {
 					method: 'POST',

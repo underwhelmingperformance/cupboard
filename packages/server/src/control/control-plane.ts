@@ -109,7 +109,6 @@ import {
 } from '../oidc/issuer-policy.ts';
 import { decodeInboundClaims, OidcDiscoveryStore } from '../oidc/oidc.ts';
 import {
-	logUnboundSubjectToken,
 	type SubjectBinding,
 	subjectBinding,
 	subjectTokenLimits
@@ -310,7 +309,7 @@ export async function controlTokenExchange(
 	);
 
 	return oauthJsonResponse(
-		await issueControlSession(request, env, logger, {
+		await issueControlSession(request, env, {
 			verified,
 			binding,
 			rules,
@@ -336,7 +335,6 @@ interface ControlSessionRequest {
 export async function issueControlSession(
 	request: Request,
 	env: Env,
-	logger: Logger,
 	{ verified, binding, rules, requested }: ControlSessionRequest
 ): Promise<TokenResponse> {
 	const selection = selectOidcTrust(rules, verified, requested);
@@ -380,10 +378,6 @@ export async function issueControlSession(
 		subject,
 		grants
 	);
-
-	if (binding.kind === 'unbound') {
-		logUnboundSubjectToken(logger, selection.rule);
-	}
 
 	const nonce = binding.kind === 'nonce-bound' ? binding.nonce : undefined;
 	// A CI job exchanges a new token from its provider whenever it needs one,

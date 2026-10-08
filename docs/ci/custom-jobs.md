@@ -256,8 +256,9 @@ primary cache or view, `read-session-view` adds the view, and
 `audience` so read acquisition and publication use the same audience. Each step
 obtains one read token for all required resources and renews that token while
 its command runs. These reads require `id-token: write` and content-read grants
-in the trust rules that match the job. Set setup's `audience` input when the
-trust rules use a custom audience.
+in the trust rules that match the job. The tenant refuses a job token whose
+audience is not the tenant URL, so leave setup's `audience` input unset or set
+it to the tenant URL.
 
 A tenant read credential can also read a private view. A cache read credential
 only reads its cache; use the destination credential inputs for that pair and

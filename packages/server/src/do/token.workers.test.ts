@@ -1,5 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
-import { type CapturedLog, startCapture } from '@cupboard/logger/testing';
+import { startCapture } from '@cupboard/logger/testing';
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import {
 	cacheNameSchema,
@@ -144,8 +144,38 @@ const authorizationServerMetadataSchema = z.strictObject({
 	revocation_endpoint_auth_methods_supported: z.array(z.string())
 });
 
+// The binding parameters of each token from `installTrustedIdp` with a nonce
+// for the tenant's issuer. `postToken` sends them with the token, as the CLI
+// does, unless the form gives its own.
+const tokenBindings = new Map<string, Readonly<Record<string, string>>>();
+
+// The signer of each token from `installTrustedIdp`. A server accepts a
+// nonce-bound token once, so a test that exchanges the same identity again
+// signs another token with `anotherToken`.
+const tokenSigners = new Map<string, () => Promise<string>>();
+
+function anotherToken(subjectToken: string): Promise<string> {
+	const sign = tokenSigners.get(subjectToken);
+
+	if (sign === undefined) {
+		throw new Error('The token does not come from installTrustedIdp');
+	}
+
+	return sign();
+}
+
+function withBinding(form: Record<string, string>): Record<string, string> {
+	const binding = tokenBindings.get(form.subject_token ?? '');
+
+	return binding === undefined ? form : { ...binding, ...form };
+}
+
+function boundForm(form: Record<string, string>): URLSearchParams {
+	return new URLSearchParams(withBinding(form));
+}
+
 function postToken(form: Record<string, string>): Promise<Response> {
-	const body = new URLSearchParams(form);
+	const body = new URLSearchParams(withBinding(form));
 
 	return fetchPath('/token', {
 		method: 'POST',
@@ -178,7 +208,7 @@ function tokenExchangeError(body: Record<string, string>): Promise<unknown> {
 		);
 
 		const url = new URL('/token', currentOrigin());
-		const parameters = new URLSearchParams(body);
+		const parameters = new URLSearchParams(withBinding(body));
 		const request = new Request(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -500,7 +530,7 @@ describe('POST /token', () => {
 					'content-type': 'application/x-www-form-urlencoded',
 					'cf-ray': 'ray-token-redaction'
 				},
-				body: new URLSearchParams({
+				body: boundForm({
 					grant_type: 'authorization_code',
 					subject_token: subjectMarker,
 					refresh_token: refreshMarker
@@ -1164,7 +1194,7 @@ describe('server-resolved read acquisition', () => {
 					const request = new Request(new URL('/token', currentOrigin()), {
 						method: 'POST',
 						headers: { 'content-type': 'application/x-www-form-urlencoded' },
-						body: new URLSearchParams({
+						body: boundForm({
 							grant_type:
 								kind === 'read' ? readAccessGrantType : tokenExchangeGrantType,
 							subject_token: subject,
@@ -1272,7 +1302,7 @@ describe('server-resolved read acquisition', () => {
 					const request = new Request(new URL('/token', currentOrigin()), {
 						method: 'POST',
 						headers: { 'content-type': 'application/x-www-form-urlencoded' },
-						body: new URLSearchParams({
+						body: boundForm({
 							grant_type: readAccessGrantType,
 							subject_token: subject,
 							subject_token_type: subjectTokenTypeIdToken,
@@ -1635,29 +1665,53 @@ async function installTrustedIdp(
 		issuer?: string;
 		claims?: Readonly<Record<string, unknown>>;
 		issuedAt?: number;
+		/**
+		 * False for a token without the default nonce for the tenant's issuer. A
+		 * token whose audience is the tenant's issuer never has it.
+		 */
+		isNonceBound?: boolean;
 	} = {}
 ): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
 	const jwk = await exportJWK(idp.publicKey);
 	const issuer = options.issuer ?? 'https://idp.test';
-	const signer = new SignJWT({
-		...options.claims,
-		...(options.azp !== undefined && { azp: options.azp })
-	});
-	const subjectToken = await signer
-		.setProtectedHeader({
-			alg: 'RS256',
-			kid: 'idp',
-			...(options.protectedType !== undefined && {
-				typ: options.protectedType
-			})
+	const tokenAudience =
+		options.tokenAudience ?? options.audience ?? 'cupboard-aud';
+	const isNonceBound =
+		options.isNonceBound !== false &&
+		![tokenAudience].flat().includes(tenantTestIssuer);
+	const sign = async (): Promise<string> => {
+		const binding = isNonceBound
+			? await subjectTokenBinding([tenantTestIssuer])
+			: undefined;
+		const signed = await new SignJWT({
+			...(binding !== undefined && { nonce: binding.nonce }),
+			...options.claims,
+			...(options.azp !== undefined && { azp: options.azp })
 		})
-		.setIssuer(issuer)
-		.setAudience(options.tokenAudience ?? options.audience ?? 'cupboard-aud')
-		.setSubject('alice')
-		.setIssuedAt(options.issuedAt)
-		.setExpirationTime('5m')
-		.sign(idp.privateKey);
+			.setProtectedHeader({
+				alg: 'RS256',
+				kid: 'idp',
+				...(options.protectedType !== undefined && {
+					typ: options.protectedType
+				})
+			})
+			.setIssuer(issuer)
+			.setAudience(tokenAudience)
+			.setSubject('alice')
+			.setIssuedAt(options.issuedAt)
+			.setExpirationTime('5m')
+			.sign(idp.privateKey);
+
+		if (binding !== undefined) {
+			tokenBindings.set(signed, binding.form);
+		}
+
+		tokenSigners.set(signed, sign);
+
+		return signed;
+	};
+	const subjectToken = await sign();
 
 	let remainingFailures = options.failFirstFetches ?? 0;
 
@@ -2142,7 +2196,7 @@ describe('refresh grant', () => {
 			);
 			const issuance = await postToken({
 				grant_type: tokenExchangeGrantType,
-				subject_token: subject,
+				subject_token: await anotherToken(subject),
 				subject_token_type: subjectTokenTypeIdToken,
 				authorization_details: JSON.stringify(requested)
 			});
@@ -3612,8 +3666,8 @@ describe('refresh grant', () => {
 		await runInDurableObject(currentServer(), async (instance) => {
 			await instance.configure({
 				tenant: tenantIdSchema.parse('v1'),
-				issuer: oidcIssuerSchema.parse('cupboard'),
-				audience: oidcAudienceSchema.parse('cupboard'),
+				issuer: oidcIssuerSchema.parse(tenantTestIssuer),
+				audience: oidcAudienceSchema.parse(tenantTestIssuer),
 				ownerIssuer: oidcIssuerSchema.parse('https://new-idp.test'),
 				ownerSubject: oidcSubjectSchema.parse('new-owner'),
 				ownerAudience: oidcAudienceSchema.parse('new-audience'),
@@ -3817,7 +3871,7 @@ describe('refresh grant', () => {
 					const request = new Request(new URL('/token', currentOrigin()), {
 						method: 'POST',
 						headers: { 'content-type': 'application/x-www-form-urlencoded' },
-						body: new URLSearchParams({
+						body: boundForm({
 							grant_type: tokenExchangeGrantType,
 							subject_token: subject,
 							subject_token_type: subjectTokenTypeIdToken,
@@ -3982,7 +4036,7 @@ describe('refresh grant', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const parameters = new URLSearchParams({
+				const parameters = boundForm({
 					grant_type: tokenExchangeGrantType,
 					subject_token: subjectToken,
 					subject_token_type: subjectTokenTypeIdToken
@@ -4002,8 +4056,8 @@ describe('refresh grant', () => {
 				try {
 					await instance.configure({
 						tenant: tenantIdSchema.parse('v1'),
-						issuer: oidcIssuerSchema.parse('cupboard'),
-						audience: oidcAudienceSchema.parse('cupboard'),
+						issuer: oidcIssuerSchema.parse(tenantTestIssuer),
+						audience: oidcAudienceSchema.parse(tenantTestIssuer),
 						ownerIssuer: oidcIssuerSchema.parse('https://new-idp.test'),
 						ownerSubject: oidcSubjectSchema.parse('new-owner'),
 						ownerAudience: oidcAudienceSchema.parse('new-audience'),
@@ -4146,7 +4200,7 @@ describe('refresh grant', () => {
 	it('reaps expired refresh tokens in the garbage-collection pass', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const firstExchange = await exchange(subjectToken);
-		const secondExchange = await exchange(subjectToken);
+		const secondExchange = await exchange(await anotherToken(subjectToken));
 
 		const [live] = z
 			.tuple([z.object({ id: z.string(), expiresAt: z.string() })])
@@ -4196,7 +4250,7 @@ describe('refresh grant', () => {
 			vi.setSystemTime(new Date(deadline));
 			const subjectToken = await installTrustedIdp('admin');
 			await exchange(subjectToken);
-			await exchange(subjectToken);
+			await exchange(await anotherToken(subjectToken));
 
 			const firstPass = await runInDurableObject(
 				currentServer(),
@@ -4265,7 +4319,7 @@ describe('refresh grant', () => {
 		const spentMembers = phaseStepSize;
 		const subjectToken = await installTrustedIdp('admin');
 		await exchange(subjectToken);
-		await exchange(subjectToken);
+		await exchange(await anotherToken(subjectToken));
 
 		const capture = startCapture();
 		const firstPass = await runInDurableObject(
@@ -5365,8 +5419,8 @@ describe('owner rule seeding', () => {
 			async (instance, state) => {
 				await instance.configure({
 					tenant: tenantIdSchema.parse('v1'),
-					issuer: oidcIssuerSchema.parse('cupboard'),
-					audience: oidcAudienceSchema.parse('cupboard'),
+					issuer: oidcIssuerSchema.parse(tenantTestIssuer),
+					audience: oidcAudienceSchema.parse(tenantTestIssuer),
 					ownerIssuer: oidcIssuerSchema.parse(''),
 					ownerSubject: oidcSubjectSchema.parse(''),
 					ownerAudience: oidcAudienceSchema.parse(''),
@@ -5392,8 +5446,8 @@ describe('owner rule seeding', () => {
 				try {
 					await instance.configure({
 						tenant: tenantIdSchema.parse('v1'),
-						issuer: oidcIssuerSchema.parse('cupboard'),
-						audience: oidcAudienceSchema.parse('cupboard'),
+						issuer: oidcIssuerSchema.parse(tenantTestIssuer),
+						audience: oidcAudienceSchema.parse(tenantTestIssuer),
 						ownerIssuer: oidcIssuerSchema.parse('not-a-url'),
 						ownerSubject: oidcSubjectSchema.parse('owner'),
 						ownerAudience: oidcAudienceSchema.parse('aud'),
@@ -5888,6 +5942,25 @@ describe('unreadable trust rules', () => {
 	});
 });
 
+interface SubjectTokenBinding {
+	readonly nonce: string;
+	readonly form: Readonly<Record<string, string>>;
+}
+
+async function subjectTokenBinding(
+	targets: readonly string[]
+): Promise<SubjectTokenBinding> {
+	const seed = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+
+	return {
+		nonce: await subjectBindingNonce(targets, seed),
+		form: {
+			cupboard_binding_seed: seed,
+			cupboard_binding_targets: JSON.stringify(targets)
+		}
+	};
+}
+
 interface BoundSubjectToken {
 	readonly token: string;
 	readonly nonce: string;
@@ -5902,6 +5975,7 @@ async function boundSubjectToken(
 	const seed = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
 	const nonce = await subjectBindingNonce(targets, seed);
 	const token = await installTrustedIdp(scope, {
+		isNonceBound: false,
 		...(options.hasNonce !== false && { claims: { nonce } }),
 		...(options.issuedAt !== undefined && { issuedAt: options.issuedAt })
 	});
@@ -5948,14 +6022,6 @@ const nonceConsumedAt = new Date('2026-01-01T00:00:00.000Z');
 const nonceRetainedUntil = new Date(
 	nonceConsumedAt.getTime() + consumedSubjectNonceRetentionSeconds * 1000
 ).toISOString();
-
-function unboundExchangeWarnings(
-	logs: readonly CapturedLog[]
-): { level: string; rule: unknown }[] {
-	return logs
-		.filter((entry) => entry.message === 'unbound subject token accepted')
-		.map((entry) => ({ level: entry.level, rule: entry.properties.rule }));
-}
 
 describe('target-bound subject tokens', () => {
 	let tenantUrl: string;
@@ -6106,50 +6172,78 @@ describe('target-bound subject tokens', () => {
 		});
 	});
 
-	it('accepts an unbound exchange and logs its rule', async () => {
-		const subjectToken = await installTrustedIdp('write');
-		const capture = startCapture();
-		let exchanged: SuccessfulTokenExchange;
-
-		try {
-			exchanged = await exchange(subjectToken, ciRequest);
-		} finally {
-			capture.stop();
+	it.each<{
+		readonly name: string;
+		readonly scope: 'write' | 'read';
+		readonly hasNonce: boolean;
+		readonly form: Readonly<Record<string, string>>;
+	}>([
+		{
+			name: 'an exchange of a nonce-bound token sent without its binding parameters',
+			scope: 'write',
+			hasNonce: true,
+			form: {
+				grant_type: tokenExchangeGrantType,
+				authorization_details: JSON.stringify(ciRequest)
+			}
+		},
+		{
+			name: 'a read acquisition with a nonce-bound token sent without its binding parameters',
+			scope: 'read',
+			hasNonce: true,
+			form: {
+				grant_type: readAccessGrantType,
+				read_resources: JSON.stringify([
+					{ type: 'cupboard_cache', cache: { kind: 'default' } }
+				])
+			}
+		},
+		{
+			name: 'an exchange of a token with neither binding',
+			scope: 'write',
+			hasNonce: false,
+			form: {
+				grant_type: tokenExchangeGrantType,
+				authorization_details: JSON.stringify(ciRequest)
+			}
 		}
+	])('refuses $name', async ({ scope, hasNonce, form }) => {
+		const bound = await boundSubjectToken(scope, [tenantUrl], { hasNonce });
+		const response = await postToken({
+			...form,
+			subject_token: bound.token,
+			subject_token_type: subjectTokenTypeIdToken
+		});
 
 		expect({
-			status: exchanged.status,
-			warnings: unboundExchangeWarnings(capture.logs),
+			refusal: await refusalOf(response),
+			families: await refreshTokenRows(),
 			consumed: await consumedNonceRows()
 		}).toStrictEqual({
-			status: StatusCodes.OK,
-			warnings: [{ level: 'warning', rule: 'write-rule' }],
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-unbound'
+			},
+			families: [],
 			consumed: []
 		});
 	});
 
-	it('accepts an audience-bound exchange without a warning', async () => {
+	it('accepts an audience-bound exchange without a session', async () => {
 		const subjectToken = await installTrustedIdp('write', {
-			audience: tenantUrl
+			audience: tenantUrl,
+			isNonceBound: false
 		});
-		const capture = startCapture();
-		let exchanged: SuccessfulTokenExchange;
-
-		try {
-			exchanged = await exchange(subjectToken, ciRequest);
-		} finally {
-			capture.stop();
-		}
+		const exchanged = await exchange(subjectToken, ciRequest);
 
 		expect({
 			status: exchanged.status,
 			refreshToken: exchanged.refresh_token,
-			warnings: unboundExchangeWarnings(capture.logs),
 			consumed: await consumedNonceRows()
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			refreshToken: undefined,
-			warnings: [],
 			consumed: []
 		});
 	});

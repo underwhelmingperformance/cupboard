@@ -13,6 +13,7 @@ import {
 	signupSecret
 } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
+import { signBound } from '../support/subject-binding.ts';
 
 function postForm(url: URL, form: Record<string, string>): Promise<Response> {
 	const body = new URLSearchParams(form);
@@ -21,6 +22,19 @@ function postForm(url: URL, form: Record<string, string>): Promise<Response> {
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: body.toString()
 	});
+}
+
+async function boundForm(
+	server: CupboardTestServer,
+	subject: string
+): Promise<Record<string, string>> {
+	const bound = await signBound(
+		server.issuer,
+		{ aud: signupAudience, sub: subject },
+		server.url
+	);
+
+	return { subject_token: bound.token, ...bound.form };
 }
 
 describe('control plane signup bootstrap', () => {
@@ -34,29 +48,20 @@ describe('control plane signup bootstrap', () => {
 
 			try {
 				const signup = await postForm(new URL('/signup', server.url), {
-					subject_token: server.issuer.sign({
-						aud: signupAudience,
-						sub: 'founder'
-					}),
+					...(await boundForm(server, 'founder')),
 					claim_secret: signupSecret
 				});
 
 				// A wrong claim secret is refused at the gate, even for the principal that
 				// holds the claim.
 				const badGate = await postForm(new URL('/signup', server.url), {
-					subject_token: server.issuer.sign({
-						aud: signupAudience,
-						sub: 'founder'
-					}),
+					...(await boundForm(server, 'founder')),
 					claim_secret: 'wrong'
 				});
 
 				// A different principal cannot take over the claim.
 				const intruder = await postForm(new URL('/signup', server.url), {
-					subject_token: server.issuer.sign({
-						aud: signupAudience,
-						sub: 'intruder'
-					}),
+					...(await boundForm(server, 'intruder')),
 					claim_secret: signupSecret
 				});
 
@@ -64,10 +69,7 @@ describe('control plane signup bootstrap', () => {
 				// control admin token.
 				const exchange = await postForm(new URL('/token', server.url), {
 					grant_type: tokenExchangeGrantType,
-					subject_token: server.issuer.sign({
-						aud: signupAudience,
-						sub: 'founder'
-					}),
+					...(await boundForm(server, 'founder')),
 					subject_token_type: subjectTokenTypeIdToken
 				});
 				const issued = tokenResponseSchema.parse(await exchange.json());

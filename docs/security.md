@@ -140,8 +140,9 @@ nonce-bound token only within five minutes of the token's issue time. It keeps
 each consumed nonce for 30 days and refuses another token with the same nonce
 while that record remains. A refreshed ID token from Cloudflare repeats the
 nonce of the original sign-in with a new issue time, so the age limit alone
-would not refuse it. The server also accepts tokens without either binding and
-logs a warning with the ID of the trust rule that accepted them.
+would not refuse it. The server refuses every other external subject token with
+the problem `subject-token-unbound`. That includes a token that has a `nonce`
+claim but arrives without the seed and the targets.
 
 The CLI binds browser sign-ins whose ID tokens it exchanges with a cupboard
 server. It chooses a new seed for each sign-in and checks that the returned ID
@@ -185,9 +186,19 @@ Some of cupboard's security depends on people and systems outside cupboard
 itself.
 
 By default, operators and tenant administrators sign in with their Cloudflare
-accounts. Anyone who takes over one of those accounts gets whatever rights that
-account has in cupboard. Anyone who controls the Cloudflare account that hosts
-the deployment controls everything.
+accounts, through an OAuth client that every cupboard deployment shares. A token
+works only at the servers that it is bound to: the nonce of a sign-in token
+commits to the URLs that the CLI signs in to, and the audience of a CI token is
+the tenant or deployment URL. A deployment that receives your token therefore
+can't use it at another deployment, and no server accepts a sign-in token twice.
+See [Sign-in sessions](#sign-in-sessions).
+
+You still trust the accounts that sign in. Anyone who controls your Cloudflare
+account, or your account at another identity provider that a trust rule accepts,
+can sign in as you and then has all of your rights in cupboard. Anyone who
+controls the identity provider itself can do the same for every account that it
+issues. Anyone who controls the Cloudflare account that hosts the deployment
+controls everything.
 
 If you write a trust rule that accepts cupboard's reusable workflow at
 `refs/tags/v*`, you're also trusting the people who publish cupboard's release

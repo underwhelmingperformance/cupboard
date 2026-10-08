@@ -58,8 +58,8 @@ export interface SignInMethod {
 }
 
 /**
- * The form fields that bind a token request to `binding`, or none for an
- * unbound token.
+ * The form fields that bind a token request to `binding`, or none for a token
+ * without a nonce binding, such as a CI token whose audience is its target.
  */
 export function bindingFormFields(
 	binding: SubjectTokenBinding | undefined
@@ -277,9 +277,11 @@ const bindingRefusals: ReadonlySet<string> = new Set<string>(
 
 const badRequestStatus: number = StatusCodes.BAD_REQUEST;
 
-// Whether the server refused the token because of its binding, and, with
-// `only`, with that problem.
-function isBindingRefusal(error: unknown, only?: string): boolean {
+/**
+ * Whether the server refused a subject token because of its binding, and,
+ * with `only`, with that problem.
+ */
+export function isBindingRefusal(error: unknown, only?: string): boolean {
 	if (
 		!(error instanceof CupboardHttpError) ||
 		error.status !== badRequestStatus ||

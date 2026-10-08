@@ -15,7 +15,10 @@ import {
 	transientExitCode
 } from '../errors.ts';
 
-import { GithubOidcRequestError } from './github-oidc.ts';
+import {
+	GithubOidcAudienceRefusedError,
+	GithubOidcRequestError
+} from './github-oidc.ts';
 import { writeSecretFile } from './secret-file.ts';
 
 const defaultRenewalMarginMs = 5 * 60 * 1000;
@@ -71,6 +74,19 @@ export class ReadCredentialPublicationError extends CliError {
 		);
 		this.name = 'ReadCredentialPublicationError';
 	}
+}
+
+type ReadSessionFailure =
+	| ReadCredentialRenewalError
+	| ReadCredentialPublicationError
+	| GithubOidcAudienceRefusedError;
+
+function isReadSessionFailure(error: unknown): error is ReadSessionFailure {
+	return (
+		error instanceof ReadCredentialRenewalError ||
+		error instanceof ReadCredentialPublicationError ||
+		error instanceof GithubOidcAudienceRefusedError
+	);
 }
 
 /**
@@ -131,10 +147,7 @@ export async function withRenewingReadCredential<T>(
 
 					return result;
 				} catch (error) {
-					if (
-						controller.signal.reason instanceof ReadCredentialRenewalError ||
-						controller.signal.reason instanceof ReadCredentialPublicationError
-					) {
+					if (isReadSessionFailure(controller.signal.reason)) {
 						throw controller.signal.reason;
 					}
 
@@ -183,10 +196,7 @@ async function renewWhileRunning(
 	} catch (error) {
 		if (!controller.signal.aborted) {
 			controller.abort(
-				error instanceof ReadCredentialPublicationError ||
-					error instanceof ReadCredentialRenewalError
-					? error
-					: new ReadCredentialRenewalError()
+				isReadSessionFailure(error) ? error : new ReadCredentialRenewalError()
 			);
 		}
 	}
@@ -202,8 +212,7 @@ async function renewBeforeExpiry(
 	safetyMarginMs: number,
 	retryDelayMs: number
 ): Promise<ReadCredentialLease> {
-	let lastFailure: ReadCredentialRenewalError | ReadCredentialPublicationError =
-		new ReadCredentialRenewalError();
+	let lastFailure: ReadSessionFailure = new ReadCredentialRenewalError();
 
 	for (;;) {
 		throwIfAborted(controller.signal);
@@ -241,7 +250,10 @@ async function renewBeforeExpiry(
 			return next;
 		} catch (error) {
 			if (publication === undefined && !controller.signal.aborted) {
-				lastFailure = new ReadCredentialRenewalError(error);
+				lastFailure =
+					error instanceof GithubOidcAudienceRefusedError
+						? error
+						: new ReadCredentialRenewalError(error);
 				if (isPermanentRefusal(error)) {
 					throw lastFailure;
 				}
@@ -305,6 +317,10 @@ async function createTemporaryReadCredentialFile(
 }
 
 function isPermanentRefusal(error: unknown): boolean {
+	if (error instanceof GithubOidcAudienceRefusedError) {
+		return true;
+	}
+
 	return (
 		(error instanceof CupboardHttpError ||
 			error instanceof GithubOidcRequestError) &&

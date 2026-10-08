@@ -43,7 +43,11 @@ import { ManualClock } from '../support/manual-clock.ts';
 import { isolatedEnvironment, NixStore } from '../support/nix.ts';
 import { pushStorePaths } from '../support/push.ts';
 
-const audience = 'cupboard-read-ci';
+// A CI job's token is accepted only with the tenant URL as its audience.
+function ciAudience(server: CupboardTestServer): string {
+	return server.tenantUrl.href;
+}
+
 const named: CacheScope = {
 	kind: 'named',
 	name: cacheNameSchema.parse('builds')
@@ -151,7 +155,7 @@ async function withReadFixture(
 
 				await rpc.oidcTrust.add({
 					issuer: server.issuer.issuer,
-					audience,
+					audience: ciAudience(server),
 					claims: { sub: 'ci' },
 					permittedGrants
 				});
@@ -169,7 +173,10 @@ async function withReadFixture(
 					});
 				}
 
-				const subject = server.issuer.sign({ aud: audience, sub: 'ci' });
+				const subject = server.issuer.sign({
+					aud: ciAudience(server),
+					sub: 'ci'
+				});
 				const source = await NixStore.host(path.join(directory, 'source-home'));
 				const storePath = await source.add(fixture);
 				const client = new CupboardClient(
@@ -276,7 +283,9 @@ async function substitute(
 			{
 				githubOidc: !isAnonymous,
 				...(!isViewOnly && reuse !== undefined && { reuseView: reuse }),
-				...(!isAnonymous && { audience: audienceSchema.parse(audience) })
+				...(!isAnonymous && {
+					audience: audienceSchema.parse(ciAudience(context.server))
+				})
 			},
 			{
 				environment: {
@@ -358,7 +367,10 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 							'-e',
 							"require('node:net').createServer().listen(0, '127.0.0.1')"
 						],
-						{ githubOidc: true, audience: audienceSchema.parse(audience) },
+						{
+							githubOidc: true,
+							audience: audienceSchema.parse(ciAudience(context.server))
+						},
 						{
 							environment: {
 								...environment,
@@ -389,7 +401,7 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 										await rpc.oidcTrust.remove({ id: rule.id });
 										await rpc.oidcTrust.add({
 											issuer: context.server.issuer.issuer,
-											audience,
+											audience: ciAudience(context.server),
 											claims: { sub: 'other-job' },
 											permittedGrants: rule.permittedGrants
 										});
@@ -548,7 +560,7 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 									],
 									{
 										githubOidc: true,
-										audience: audienceSchema.parse(audience),
+										audience: audienceSchema.parse(ciAudience(context.server)),
 										reuseView: reuseViewNameSchema.parse(selectedView)
 									},
 									{
@@ -658,12 +670,12 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 
 				await rpc.oidcTrust.add({
 					issuer: context.server.issuer.issuer,
-					audience,
+					audience: ciAudience(context.server),
 					claims: { sub: 'view-ci' },
 					permittedGrants
 				});
 				const subject = context.server.issuer.sign({
-					aud: audience,
+					aud: ciAudience(context.server),
 					sub: 'view-ci'
 				});
 				const resources = [{ type: 'cupboard_view' as const, view }];
@@ -778,12 +790,12 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 					});
 					await rpc.oidcTrust.add({
 						issuer: context.server.issuer.issuer,
-						audience,
+						audience: ciAudience(context.server),
 						claims: { sub: 'combined' },
 						permittedGrants
 					});
 					const subject = context.server.issuer.sign({
-						aud: audience,
+						aud: ciAudience(context.server),
 						sub: 'combined'
 					});
 
@@ -879,7 +891,7 @@ describe('OIDC read acquisition and real Nix substitution', () => {
 					{
 						...context,
 						subject: context.server.issuer.sign({
-							aud: audience,
+							aud: ciAudience(context.server),
 							sub: 'unregistered'
 						})
 					},

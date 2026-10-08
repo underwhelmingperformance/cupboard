@@ -1,9 +1,5 @@
-import { type Logger } from '@cupboard/logger';
 import { type OidcIssuer } from '@cupboard/protocol/oidc';
-import {
-	type OidcTrustRule,
-	type VerifiedOidcClaims
-} from '@cupboard/protocol/oidc-trust-match';
+import { type VerifiedOidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	isCanonicalTarget,
@@ -38,8 +34,7 @@ export interface SubjectNonce {
 
 export type SubjectBinding =
 	| { readonly kind: 'nonce-bound'; readonly nonce: SubjectNonce }
-	| { readonly kind: 'audience-bound' }
-	| { readonly kind: 'unbound' };
+	| { readonly kind: 'audience-bound' };
 
 /**
  * The verification limit for a request. A request with binding parameters is
@@ -56,10 +51,11 @@ export function subjectTokenLimits(
 
 /**
  * Classifies a verified subject token for the server whose identity is
- * `target`. With binding parameters, every target must be a canonical URL, the
- * targets must include `target`, and the token's `nonce` claim must equal
- * their hash with the seed. A request that fails any of these checks is
- * refused with `SubjectTokenUnboundError`.
+ * `target`, and refuses a token that is not bound to `target` with
+ * `SubjectTokenUnboundError`. Without binding parameters, the token's audience
+ * must be `target`, whether or not the token has a `nonce` claim. With them,
+ * every target must be a canonical URL, the targets must include `target`, and
+ * the token's `nonce` claim must equal their hash with the seed.
  */
 export async function subjectBinding(
 	claims: VerifiedOidcClaims,
@@ -67,9 +63,11 @@ export async function subjectBinding(
 	parameters: SubjectBindingParameters
 ): Promise<SubjectBinding> {
 	if (!hasBindingParameters(parameters)) {
-		return {
-			kind: isAudienceBound(claims, target) ? 'audience-bound' : 'unbound'
-		};
+		if (!isAudienceBound(claims, target)) {
+			throw new SubjectTokenUnboundError();
+		}
+
+		return { kind: 'audience-bound' };
 	}
 
 	const seed = parameters.cupboard_binding_seed;
@@ -95,15 +93,6 @@ export async function subjectBinding(
 			)
 		}
 	};
-}
-
-export function logUnboundSubjectToken(
-	logger: Logger,
-	rule?: OidcTrustRule
-): void {
-	logger.warn('unbound subject token accepted', {
-		...(rule !== undefined && { rule: rule.id })
-	});
 }
 
 function hasBindingParameters(parameters: SubjectBindingParameters): boolean {

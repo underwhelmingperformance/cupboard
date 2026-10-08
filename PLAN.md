@@ -6712,6 +6712,34 @@ CI OIDC session can include several caches in one tenant and coexist with static
 credentials in other substituter URLs. Multiple tenant OIDC sessions within one
 command remain deferred to this work.
 
+## Authentication audit follow-up
+
+An audit of authentication found that an ID token sent to one deployment could
+be exchanged at every other deployment that trusts cupboard's shared Cloudflare
+OAuth client, and that the Worker served requests over plain HTTP. An exchange
+of an external subject token requires an audience or nonce that binds the token
+to the target URL.
+
+- [x] Harden claim rendering, extra audiences, unreadable trust rules, request
+      body limits and trust-rule claim limits.
+- [x] Refuse redirects on requests that contain secrets, and refuse plain-HTTP
+      cupboard URLs except on loopback. The Worker refuses plain HTTP and sends
+      HSTS.
+- [x] Record who each refresh family belongs to, seal the refresh credential's
+      authority, and revoke refresh tokens (RFC 7009). List and revoke a
+      tenant's sessions and the deployment's sessions. `cupboard logout` revokes
+      what it deletes.
+- [x] Issue a 30-day refresh family for every human sign-in, at a tenant and at
+      the control plane. This replaces the earlier policy, which gave refresh
+      tokens only to wildcard interactive rules.
+- [x] Verify target-bound nonces: a five-minute age limit and single use, with
+      consumed nonces kept for 30 days.
+- [x] Bind every CLI sign-in to its targets. `--headless` is a paste mode for
+      the browser sign-in, and the device flow is removed.
+- [x] Refuse every external subject token that is neither audience-bound nor
+      nonce-bound, with the problem `subject-token-unbound`.
+- [x] Rate-limit the token, signup and revoke endpoints.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.

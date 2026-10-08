@@ -1,5 +1,4 @@
 import { rootLogger } from '@cupboard/logger';
-import { type CapturedLog, startCapture } from '@cupboard/logger/testing';
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type PermittedGrant } from '@cupboard/protocol/grants';
@@ -98,11 +97,22 @@ const authorizationServerMetadataSchema = z.strictObject({
 	revocation_endpoint_auth_methods_supported: z.array(z.string())
 });
 
+// The binding parameters of each token from `trustedControlIdentity` with a
+// nonce for the deployment URL. `postToken` sends them with the token, as the
+// CLI does, unless the form gives its own.
+const tokenBindings = new Map<string, Readonly<Record<string, string>>>();
+
+function withBinding(form: Record<string, string>): Record<string, string> {
+	const binding = tokenBindings.get(form.subject_token ?? '');
+
+	return binding === undefined ? form : { ...binding, ...form };
+}
+
 function postToken(
 	form: Record<string, string>,
 	envOverride: Readonly<Record<string, string>> = {}
 ): Promise<Response> {
-	const body = new URLSearchParams(form);
+	const body = new URLSearchParams(withBinding(form));
 	return controlFetch(
 		'/token',
 		{
@@ -123,7 +133,7 @@ function postRawToken(body: string): Promise<Response> {
 }
 
 function tokenExchangeRequest(form: Record<string, string>): Request {
-	const body = new URLSearchParams(form);
+	const body = new URLSearchParams(withBinding(form));
 	return new Request(new URL('/token', currentOrigin()), {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -178,6 +188,11 @@ async function trustedControlIdentity(
 	token: {
 		readonly claims?: Readonly<Record<string, unknown>>;
 		readonly issuedAt?: number;
+		/**
+		 * False for a token without the default nonce for the deployment URL. A
+		 * token whose audience is the deployment URL never has it.
+		 */
+		readonly isNonceBound?: boolean;
 	} = {}
 ): Promise<TrustedControlIdentity> {
 	const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
@@ -218,7 +233,14 @@ async function trustedControlIdentity(
 		);
 	});
 
+	const isNonceBound =
+		token.isNonceBound !== false &&
+		![audience, ...additionalAudiences].includes(currentOrigin());
+	const binding = isNonceBound
+		? await subjectTokenBinding([currentOrigin()])
+		: undefined;
 	const signed = await new SignJWT({
+		...(binding !== undefined && { nonce: binding.nonce }),
 		...token.claims,
 		...(additionalAudiences.length > 0 && { azp: audience })
 	})
@@ -233,6 +255,10 @@ async function trustedControlIdentity(
 		.setIssuedAt(token.issuedAt)
 		.setExpirationTime('5m')
 		.sign(privateKey);
+
+	if (binding !== undefined) {
+		tokenBindings.set(signed, binding.form);
+	}
 
 	return { token: signed, rule, issuer, audience };
 }
@@ -985,7 +1011,8 @@ describe('control plane POST /token', () => {
 			return new Response(undefined, { status: StatusCodes.NOT_FOUND });
 		});
 
-		const subjectToken = await new SignJWT({})
+		const binding = await subjectTokenBinding([currentOrigin()]);
+		const subjectToken = await new SignJWT({ nonce: binding.nonce })
 			.setProtectedHeader({ alg: 'RS256', kid: 'idp', typ: 'JWT' })
 			.setIssuer(issuer)
 			.setAudience(audience)
@@ -996,7 +1023,8 @@ describe('control plane POST /token', () => {
 		const exchange = tokenExchangeError({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
-			subject_token_type: subjectTokenTypeIdToken
+			subject_token_type: subjectTokenTypeIdToken,
+			...binding.form
 		});
 
 		await discoveryRequested;
@@ -1670,6 +1698,25 @@ interface BoundControlIdentity {
 	readonly binding: Readonly<Record<string, string>>;
 }
 
+interface SubjectTokenBinding {
+	readonly nonce: string;
+	readonly form: Readonly<Record<string, string>>;
+}
+
+async function subjectTokenBinding(
+	targets: readonly string[]
+): Promise<SubjectTokenBinding> {
+	const seed = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+
+	return {
+		nonce: await subjectBindingNonce(targets, seed),
+		form: {
+			cupboard_binding_seed: seed,
+			cupboard_binding_targets: JSON.stringify(targets)
+		}
+	};
+}
+
 async function boundControlIdentity(
 	targets: readonly string[],
 	options: {
@@ -1686,6 +1733,7 @@ async function boundControlIdentity(
 		[],
 		options.audience,
 		{
+			isNonceBound: false,
 			...(options.hasNonce !== false && { claims: { nonce } }),
 			...(options.issuedAt !== undefined && { issuedAt: options.issuedAt })
 		}
@@ -1726,14 +1774,6 @@ const nonceConsumedAt = new Date('2026-01-01T00:00:00.000Z');
 const nonceRetainedUntil = new Date(
 	nonceConsumedAt.getTime() + consumedSubjectNonceRetentionSeconds * 1000
 ).toISOString();
-
-function unboundExchangeWarnings(
-	logs: readonly CapturedLog[]
-): { level: string; rule: unknown }[] {
-	return logs
-		.filter((entry) => entry.message === 'unbound subject token accepted')
-		.map((entry) => ({ level: entry.level, rule: entry.properties.rule }));
-}
 
 describe('control plane target-bound subject tokens', () => {
 	beforeEach(async () => {
@@ -1874,40 +1914,55 @@ describe('control plane target-bound subject tokens', () => {
 	});
 
 	it.each([
-		{ name: 'an unbound exchange and logs its rule', isAudienceBound: false },
 		{
-			name: 'an audience-bound exchange without a warning',
-			isAudienceBound: true
-		}
-	])('accepts $name', async ({ isAudienceBound }) => {
+			name: 'a nonce-bound token sent without its binding parameters',
+			hasNonce: true
+		},
+		{ name: 'a token with neither binding', hasNonce: false }
+	])('refuses $name', async ({ hasNonce }) => {
+		const bound = await boundControlIdentity([currentOrigin()], { hasNonce });
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: bound.identity.token,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+
+		expect({
+			refusal: await refusalOf(response),
+			rows: await controlRefreshRows(),
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-unbound'
+			},
+			rows: { families: [], members: [] },
+			consumed: []
+		});
+	});
+
+	it('accepts an audience-bound exchange without a session', async () => {
 		const identity = await trustedControlIdentity(
 			'JWT',
 			undefined,
 			[],
-			isAudienceBound ? currentOrigin() : undefined
+			currentOrigin()
 		);
-		const capture = startCapture();
-		let response: Response;
-
-		try {
-			response = await postToken({
-				grant_type: tokenExchangeGrantType,
-				subject_token: identity.token,
-				subject_token_type: subjectTokenTypeIdToken
-			});
-		} finally {
-			capture.stop();
-		}
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: identity.token,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		const body = tokenResponseSchema.parse(await response.json());
 
 		expect({
 			status: response.status,
-			warnings: unboundExchangeWarnings(capture.logs),
+			refreshToken: body.refresh_token,
 			consumed: await consumedControlNonces()
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			warnings: isAudienceBound
-				? []
-				: [{ level: 'warning', rule: identity.rule }],
+			refreshToken: undefined,
 			consumed: []
 		});
 	});

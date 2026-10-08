@@ -3,6 +3,7 @@ import type {
 	TokenResponse,
 	TokenResponseInput
 } from '@cupboard/protocol/oidc';
+import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -10,7 +11,11 @@ import { abortReason } from '../abort.ts';
 import { audienceSchema } from '../audience.ts';
 import { CupboardClient } from '../client/client.ts';
 import { writeCachedGrant } from '../deploy/grant-store.ts';
-import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
+import {
+	authExitCode,
+	CupboardHttpError,
+	OwnerLoginRequiredError
+} from '../errors.ts';
 import { testWithConfigHome } from '../test-support.ts';
 
 import {
@@ -19,7 +24,10 @@ import {
 	cachedOwnerProvider,
 	type OwnerSessionDependencies
 } from './auth.ts';
-import type { GithubOidcEnvironment } from './github-oidc.ts';
+import {
+	GithubOidcAudienceRefusedError,
+	type GithubOidcEnvironment
+} from './github-oidc.ts';
 import { type CachedSession, writeCachedSession } from './token-store.ts';
 
 const githubEnvironment: GithubOidcEnvironment = {
@@ -106,6 +114,54 @@ function renewingClient(): {
 	);
 
 	return { client, exchanged: () => subjects };
+}
+
+function refusingClient(problem: string): {
+	readonly client: CupboardClient;
+	readonly exchanges: () => number;
+} {
+	let exchanges = 0;
+
+	const client = new CupboardClient(
+		new URL('https://cupboard.test'),
+		(input) => {
+			const url = new URL(requestUrl(input));
+
+			if (url.origin === 'https://actions.example.com') {
+				return Promise.resolve(Response.json({ value: 'github-subject' }));
+			}
+
+			exchanges += 1;
+
+			return Promise.resolve(
+				Response.json(
+					{ error: 'invalid_grant', problem },
+					{ status: StatusCodes.BAD_REQUEST }
+				)
+			);
+		},
+		{ kind: 'default' }
+	);
+
+	return { client, exchanges: () => exchanges };
+}
+
+async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
+	try {
+		await pending;
+	} catch (error) {
+		return error;
+	}
+
+	return undefined;
+}
+
+function httpRefusal(error: unknown): unknown {
+	if (!(error instanceof CupboardHttpError)) {
+		return error;
+	}
+
+	return { status: error.status, oauthError: error.oauthError };
 }
 
 const target = new URL('https://cupboard.test');
@@ -221,6 +277,73 @@ describe('authenticateGithubOidc', () => {
 			expected
 		);
 	});
+
+	it('reports a GitHub token refused as unbound as an audience the server does not accept', async () => {
+		const { client, exchanges } = refusingClient(
+			subjectBindingProblems.unbound
+		);
+
+		const rejected = await rejectionOf(
+			authenticateGithubOidc(client, audience, {
+				environment: githubEnvironment
+			})
+		);
+
+		expect({
+			rejected:
+				rejected instanceof GithubOidcAudienceRefusedError
+					? {
+							name: rejected.name,
+							target: rejected.target,
+							audience: rejected.audience,
+							cause: httpRefusal(rejected.cause),
+							exitCode: rejected.exitCode
+						}
+					: rejected,
+			exchanges: exchanges()
+		}).toStrictEqual({
+			rejected: {
+				name: 'GithubOidcAudienceRefusedError',
+				target: canonicalHref(target),
+				audience,
+				cause: {
+					status: StatusCodes.BAD_REQUEST,
+					oauthError: {
+						error: 'invalid_grant',
+						problem: subjectBindingProblems.unbound
+					}
+				},
+				exitCode: authExitCode
+			},
+			exchanges: 1
+		});
+	});
+
+	it.each([subjectBindingProblems.replayed, subjectBindingProblems.tooOld])(
+		'propagates a %s refusal of the GitHub token unchanged',
+		async (problem) => {
+			const { client, exchanges } = refusingClient(problem);
+
+			const rejected = await rejectionOf(
+				authenticateGithubOidc(client, audience, {
+					environment: githubEnvironment
+				})
+			);
+
+			expect({
+				isHttpError: rejected instanceof CupboardHttpError,
+				rejected: httpRefusal(rejected),
+				exchanges: exchanges()
+			}).toStrictEqual({
+				isHttpError: true,
+				rejected: {
+					status: StatusCodes.BAD_REQUEST,
+					oauthError: { error: 'invalid_grant', problem }
+				},
+				exchanges: 1
+			});
+		}
+	);
 });
 
 describe('authenticateForPush', () => {

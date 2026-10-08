@@ -81,10 +81,11 @@ The grants are explained in [What a rule can grant](#what-a-rule-can-grant).
 Names in braces are filled in from each run's token.
 
 All four commands accept tokens from GitHub Actions only. They pin the
-repository by its numeric IDs, and set the audience to the tenant URL unless you
-choose another. To look up the IDs, they call the GitHub API. For a private
-repository, set `GH_TOKEN` or `GITHUB_TOKEN` so they can. They use `GH_TOKEN` if
-both are set.
+repository by its numeric IDs, and set the audience to the tenant URL. The
+tenant refuses a job's token whose audience is anything else, because a job's
+token is bound to the tenant only by its audience. To look up the IDs, they call
+the GitHub API. For a private repository, set `GH_TOKEN` or `GITHUB_TOKEN` so
+they can. They use `GH_TOKEN` if both are set.
 
 The publication presets also accept these options:
 
@@ -213,8 +214,8 @@ token's.
 - The **issuer** is who signed the token. For GitHub Actions it's
   `https://token.actions.githubusercontent.com`.
 - The **audience** is who the token is meant for. A cupboard job asks for the
-  tenant URL, without a trailing slash, unless it's told to use something else.
-  Write it the same way in the rule.
+  tenant URL, without a trailing slash. Write it the same way in the rule. The
+  tenant refuses a job token whose audience is not the tenant URL.
 
 A rule also lists **claims**: named values that the token must contain, such as
 `repository_id` or `ref`. For each one, the token must have a claim of that name

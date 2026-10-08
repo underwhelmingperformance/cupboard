@@ -40,6 +40,7 @@ import {
 	withManualAlarmControl
 } from './manual-alarms.ts';
 import { StubOidcIssuer } from './oidc-issuer.ts';
+import { signBound } from './subject-binding.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 
@@ -374,14 +375,16 @@ export class CupboardTestServer {
 	// Mints a control admin token at the bare-host `/token`, the control issuer,
 	// exchanging the harness admin's external subject token.
 	private async exchangeControlAdminToken(): Promise<string> {
-		const subjectToken = this.issuer.sign({
-			aud: signupAudience,
-			sub: harnessAdminSubject
-		});
+		const bound = await signBound(
+			this.issuer,
+			{ aud: signupAudience, sub: harnessAdminSubject },
+			this.url
+		);
 		const body = new URLSearchParams({
 			grant_type: tokenExchangeGrantType,
-			subject_token: subjectToken,
-			subject_token_type: subjectTokenTypeIdToken
+			subject_token: bound.token,
+			subject_token_type: subjectTokenTypeIdToken,
+			...bound.form
 		});
 		const response = await fetch(new URL('/token', this.url), {
 			method: 'POST',
@@ -537,20 +540,27 @@ export class CupboardTestServer {
 		});
 	}
 
-	ownerAdminToken(): Promise<string> {
-		return this.exchangeIdToken(
-			this.issuer.sign({ aud: ownerAudience, sub: ownerSubject })
+	async ownerAdminToken(): Promise<string> {
+		const bound = await signBound(
+			this.issuer,
+			{ aud: ownerAudience, sub: ownerSubject },
+			this.tenantUrl
 		);
+
+		return this.exchangeIdToken(bound.token, undefined, bound.form);
 	}
 
 	/**
 	 * Exchanges an issuer-signed id_token for a cupboard access token via
 	 * `/token`. A claim-bound (CI) rule must name the `authorizationDetails` it
 	 * wants; the interactive owner may omit them and receive its wildcard.
+	 * `binding` is the binding parameters of a nonce-bound token, from
+	 * `signBound`. A token whose audience is the tenant URL needs none.
 	 */
 	async exchangeIdToken(
 		idToken: string,
-		authorizationDetails?: unknown
+		authorizationDetails?: unknown,
+		binding: Readonly<Record<string, string>> = {}
 	): Promise<string> {
 		const body = new URLSearchParams({
 			grant_type: tokenExchangeGrantType,
@@ -558,7 +568,8 @@ export class CupboardTestServer {
 			subject_token_type: subjectTokenTypeIdToken,
 			...(authorizationDetails !== undefined && {
 				authorization_details: JSON.stringify(authorizationDetails)
-			})
+			}),
+			...binding
 		});
 		const response = await fetch(
 			new URL(`/t/${fixtureTenant}/token`, this.url),

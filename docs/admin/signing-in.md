@@ -18,9 +18,9 @@ cupboard login https://cupboard.example.workers.dev/t/acme
 
 The CLI opens a browser so you can sign in with Cloudflare. The sign-in returns
 an ID token whose nonce commits to the tenant URL, so only that tenant accepts
-the token, only once and only within five minutes. The CLI exchanges the token
-for a session straight away. It doesn't keep the token or the Cloudflare
-sign-in.
+the token, only once and only within five minutes. The tenant refuses a sign-in
+token that isn't bound to its URL. The CLI exchanges the token for a session
+straight away. It doesn't keep the token or the Cloudflare sign-in.
 
 Signing in only works if the tenant trusts your identity. That means you're
 either the tenant's owner, or an administrator has

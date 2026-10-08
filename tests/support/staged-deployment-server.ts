@@ -53,6 +53,7 @@ import {
 	intermediateTransitions
 } from './intermediate-deployment.ts';
 import { StubOidcIssuer } from './oidc-issuer.ts';
+import { signBound } from './subject-binding.ts';
 
 const controlScript = 'cupboard';
 const tenantScript = 'cupboard-tenant';
@@ -530,20 +531,29 @@ export class StagedDeploymentServer {
 		}
 	}
 
-	private async operatorCredential(tokenPath = '/token'): Promise<string> {
-		const externalToken = this.issuer.sign({
-			aud: operatorAudience,
-			sub: operatorSubject
-		});
-		const response = await this.workerFetch(tokenPath, {
-			method: 'POST',
-			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				grant_type: tokenExchangeGrantType,
-				subject_token: externalToken,
-				subject_token_type: subjectTokenTypeIdToken
-			}).toString()
-		});
+	private async operatorCredential(tenant?: FixtureTenant): Promise<string> {
+		const target =
+			tenant === undefined
+				? new URL('https://cupboard.invalid')
+				: this.tenantUrl(tenant);
+		const bound = await signBound(
+			this.issuer,
+			{ aud: operatorAudience, sub: operatorSubject },
+			target
+		);
+		const response = await this.workerFetch(
+			tenant === undefined ? '/token' : `/t/${tenant}/token`,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({
+					grant_type: tokenExchangeGrantType,
+					subject_token: bound.token,
+					subject_token_type: subjectTokenTypeIdToken,
+					...bound.form
+				}).toString()
+			}
+		);
 
 		if (!response.ok) {
 			throw new DeploymentTokenExchangeError(
@@ -1116,10 +1126,7 @@ export class StagedDeploymentServer {
 	): Promise<ReturnType<typeof tenantRpc>> {
 		await this.announceTenant(tenant);
 
-		return this.tenantRpcAs(
-			tenant,
-			await this.operatorCredential(`/t/${tenant}/token`)
-		);
+		return this.tenantRpcAs(tenant, await this.operatorCredential(tenant));
 	}
 
 	/**

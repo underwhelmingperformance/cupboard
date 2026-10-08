@@ -25,8 +25,8 @@ import {
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
 import { pushStorePaths } from '../support/push.ts';
+import { signBound } from '../support/subject-binding.ts';
 
-const ciAudience = 'https://cache.example.workers.dev';
 const contentAddressedFixture = path.join(
 	path.resolve(import.meta.dirname, '../..'),
 	'tests/fixtures/simple/source'
@@ -65,14 +65,15 @@ describe('OIDC federation', () => {
 			});
 			const { rules } = await rpc.oidcTrust.list();
 
-			const nonOwner = server.issuer.sign({
-				aud: ownerAudience,
-				sub: 'not-the-owner'
-			});
+			const nonOwner = await signBound(
+				server.issuer,
+				{ aud: ownerAudience, sub: 'not-the-owner' },
+				server.tenantUrl
+			);
 
 			let refused: number | string;
 			try {
-				await server.exchangeIdToken(nonOwner);
+				await server.exchangeIdToken(nonOwner.token, undefined, nonOwner.form);
 				refused = 'accepted';
 			} catch (error: unknown) {
 				refused =
@@ -192,7 +193,7 @@ describe('OIDC federation', () => {
 			// prefix; the issued grant carries whatever subset the CI requests.
 			await rpc.oidcTrust.add({
 				issuer: server.issuer.issuer,
-				audience: ciAudience,
+				audience: server.tenantUrl.href,
 				claims: { repository_owner_id: '5678' },
 				permittedGrants: [
 					{
@@ -212,7 +213,7 @@ describe('OIDC federation', () => {
 
 			const ciToken = await server.exchangeIdToken(
 				server.issuer.sign({
-					aud: ciAudience,
+					aud: server.tenantUrl.href,
 					sub: 'repo:owner/repo:ref:refs/heads/main',
 					repository_owner_id: '5678'
 				}),
@@ -283,7 +284,7 @@ describe('OIDC federation', () => {
 			});
 			await rpc.oidcTrust.add({
 				issuer: server.issuer.issuer,
-				audience: ciAudience,
+				audience: server.tenantUrl.href,
 				claims: { repository_owner_id: '5678' },
 				permittedGrants: [
 					{
@@ -297,7 +298,7 @@ describe('OIDC federation', () => {
 			});
 
 			const wrongClaim = server.issuer.sign({
-				aud: ciAudience,
+				aud: server.tenantUrl.href,
 				sub: 'repo:intruder/repo',
 				repository_owner_id: '0000'
 			});
