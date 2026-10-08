@@ -24,6 +24,9 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			"INSERT INTO control_refresh_session_member (id, family_id, generation, credential_hash, created_at) VALUES ('reset-member', 'reset-family', 0, 'hash', '2025-01-01T00:00:00.000Z')"
 		),
 		env.CUPBOARD_DB.prepare(
+			"INSERT INTO control_consumed_subject_nonce (nonce, expires_at) VALUES ('reset-nonce', '2025-01-01T00:05:00.000Z')"
+		),
+		env.CUPBOARD_DB.prepare(
 			"INSERT INTO object_incarnation (kind, object_id, incarnation, state) VALUES ('nar', 'reset-object', 1, 'absent')"
 		),
 		env.CUPBOARD_DB.prepare(
@@ -64,6 +67,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		publication: 0,
 		cache_lifecycle_storage: 0,
 		control_auth_key: 0,
+		control_consumed_subject_nonce: 0,
 		control_trust: 0,
 		control_refresh_session_family: 0,
 		control_refresh_session_member: 0,

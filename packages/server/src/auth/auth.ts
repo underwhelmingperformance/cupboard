@@ -36,11 +36,18 @@ const authorizationDetailsClaim = 'authorization_details';
 
 export const adminJwtTtlSeconds = ttlSecondsSchema.parse(10 * 60);
 export const writeJwtTtlSeconds = ttlSecondsSchema.parse(15 * 60);
+// The oldest target-bound subject token, by its `iat`, that an exchange accepts.
+export const subjectNonceMaxAgeSeconds = 5 * 60;
 // Every refresh token in a family shares its original expiry. Keep each spent
 // token's hash until then so a later replay can revoke the active token.
 export const refreshTokenFamilyTtlSeconds = ttlSecondsSchema.parse(
 	30 * 24 * 60 * 60
 );
+// A refreshed ID token from Cloudflare repeats the original `nonce` with a
+// fresh `iat`, so it passes the age check. Keep a consumed nonce for as long as
+// the session that its sign-in starts.
+export const consumedSubjectNonceRetentionSeconds =
+	refreshTokenFamilyTtlSeconds;
 export const refreshTokenRetryGraceMs = 60_000;
 // A client can rotate twice during each access-token lifetime throughout the
 // complete family lifetime. Reaching the bound ends the family instead of

@@ -35,6 +35,10 @@ import {
 	pruneControlRefreshSessions
 } from '../control/control-refresh-sessions.ts';
 import {
+	controlSubjectNoncePrunePageSize,
+	pruneControlSubjectNonces
+} from '../control/control-subject-nonces.ts';
+import {
 	enqueueLocalStepWakes,
 	localStepWakeBatchSize,
 	type LocalStepWakeMessage,
@@ -1616,14 +1620,20 @@ async function runControlSessionPruning(
 	logger: Logger,
 	env: Env
 ): Promise<void> {
-	const pruned = await pruneControlRefreshSessions(
-		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-		isoTimestamp(new Date())
-	);
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const now = isoTimestamp(new Date());
+	const pruned = await pruneControlRefreshSessions(database, now);
+	const noncesDeleted = await pruneControlSubjectNonces(database, now);
 
 	if (pruned.membersDeleted >= controlRefreshPrunePageSize) {
 		logger.warn('control refresh-session backlog may remain after pruning', {
 			...pruned
+		});
+	}
+
+	if (noncesDeleted >= controlSubjectNoncePrunePageSize) {
+		logger.warn('consumed subject-nonce backlog may remain after pruning', {
+			noncesDeleted
 		});
 	}
 }

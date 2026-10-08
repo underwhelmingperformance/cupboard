@@ -1,5 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
-import { startCapture } from '@cupboard/logger/testing';
+import { type CapturedLog, startCapture } from '@cupboard/logger/testing';
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import {
 	cacheNameSchema,
@@ -30,6 +30,7 @@ import {
 	readResourcesSchema
 } from '@cupboard/protocol/read-access';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -39,6 +40,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+	consumedSubjectNonceRetentionSeconds,
 	maxRefreshTokenFamilyMembers,
 	refreshTokenFamilyTtlSeconds
 } from '../auth/auth.ts';
@@ -52,6 +54,7 @@ import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
 	cacheIdentities,
+	consumedSubjectNonces,
 	oidcTrust,
 	refreshTokenFamilies,
 	refreshTokenMembers
@@ -77,6 +80,7 @@ import {
 	currentOrigin,
 	currentServer,
 	fetchPath,
+	fixtureOwner,
 	handlerFetch,
 	issueServerSignedToken,
 	latestMigrationIndex,
@@ -1630,6 +1634,7 @@ async function installTrustedIdp(
 		azp?: string;
 		issuer?: string;
 		claims?: Readonly<Record<string, unknown>>;
+		issuedAt?: number;
 	} = {}
 ): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
@@ -1650,7 +1655,7 @@ async function installTrustedIdp(
 		.setIssuer(issuer)
 		.setAudience(options.tokenAudience ?? options.audience ?? 'cupboard-aud')
 		.setSubject('alice')
-		.setIssuedAt()
+		.setIssuedAt(options.issuedAt)
 		.setExpirationTime('5m')
 		.sign(idp.privateKey);
 
@@ -5880,5 +5885,306 @@ describe('unreadable trust rules', () => {
 			outcome: unreadableRuleOutcome(outcome),
 			families: await refreshTokenRows()
 		}).toStrictEqual({ outcome: { refused: 'narrow-rule' }, families });
+	});
+});
+
+interface BoundSubjectToken {
+	readonly token: string;
+	readonly nonce: string;
+	readonly binding: Readonly<Record<string, string>>;
+}
+
+async function boundSubjectToken(
+	scope: 'write' | 'read',
+	targets: readonly string[],
+	options: { readonly hasNonce?: boolean; readonly issuedAt?: number } = {}
+): Promise<BoundSubjectToken> {
+	const seed = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+	const nonce = await subjectBindingNonce(targets, seed);
+	const token = await installTrustedIdp(scope, {
+		...(options.hasNonce !== false && { claims: { nonce } }),
+		...(options.issuedAt !== undefined && { issuedAt: options.issuedAt })
+	});
+
+	return {
+		token,
+		nonce,
+		binding: {
+			cupboard_binding_seed: seed,
+			cupboard_binding_targets: JSON.stringify(targets)
+		}
+	};
+}
+
+function boundExchange(bound: BoundSubjectToken): Promise<Response> {
+	return postToken({
+		grant_type: tokenExchangeGrantType,
+		subject_token: bound.token,
+		subject_token_type: subjectTokenTypeIdToken,
+		authorization_details: JSON.stringify(ciRequest),
+		...bound.binding
+	});
+}
+
+async function refusalOf(
+	response: Response
+): Promise<{ status: number; error: string; problem: string | undefined }> {
+	const body = oauthErrorShape(await response.json());
+
+	return { status: response.status, error: body.error, problem: body.problem };
+}
+
+function consumedNonceRows(): Promise<{ nonce: string; expiresAt: string }[]> {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		drizzle(state.storage, { schema: { consumedSubjectNonces } })
+			.select()
+			.from(consumedSubjectNonces)
+			.orderBy(consumedSubjectNonces.nonce)
+			.all()
+	);
+}
+
+const nonceConsumedAt = new Date('2026-01-01T00:00:00.000Z');
+const nonceRetainedUntil = new Date(
+	nonceConsumedAt.getTime() + consumedSubjectNonceRetentionSeconds * 1000
+).toISOString();
+
+function unboundExchangeWarnings(
+	logs: readonly CapturedLog[]
+): { level: string; rule: unknown }[] {
+	return logs
+		.filter((entry) => entry.message === 'unbound subject token accepted')
+		.map((entry) => ({ level: entry.level, rule: entry.properties.rule }));
+}
+
+describe('target-bound subject tokens', () => {
+	let tenantUrl: string;
+
+	beforeEach(async () => {
+		vi.useFakeTimers({ now: nonceConsumedAt, toFake: ['Date'] });
+		await resetTestServer();
+		tenantUrl = `${currentOrigin()}/t/${fixtureTenant}`;
+		await currentServer().configure({
+			tenant: fixtureTenant,
+			issuer: oidcIssuerSchema.parse(tenantUrl),
+			audience: oidcAudienceSchema.parse(tenantUrl),
+			ownerIssuer: fixtureOwner.issuer,
+			ownerSubject: fixtureOwner.subject,
+			ownerAudience: fixtureOwner.audience,
+			configVersion: 2
+		});
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it('exchanges a nonce-bound token and records its nonce', async () => {
+		const bound = await boundSubjectToken('write', [
+			currentOrigin(),
+			tenantUrl
+		]);
+		const response = await boundExchange(bound);
+		const body = tokenResponseSchema.parse(await response.json());
+
+		expect({
+			status: response.status,
+			refreshToken: typeof body.refresh_token,
+			consumed: await consumedNonceRows()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			refreshToken: 'string',
+			consumed: [{ nonce: bound.nonce, expiresAt: nonceRetainedUntil }]
+		});
+	});
+
+	it('refuses a second exchange of the same nonce-bound token', async () => {
+		const bound = await boundSubjectToken('write', [tenantUrl]);
+		const first = await boundExchange(bound);
+		const families = await refreshTokenRows();
+		const replay = await boundExchange(bound);
+
+		expect({
+			first: first.status,
+			replay: await refusalOf(replay),
+			families: await refreshTokenRows(),
+			consumed: await consumedNonceRows()
+		}).toStrictEqual({
+			first: StatusCodes.OK,
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-replayed'
+			},
+			families,
+			consumed: [{ nonce: bound.nonce, expiresAt: nonceRetainedUntil }]
+		});
+	});
+
+	it('refuses a second read acquisition with the same nonce-bound token', async () => {
+		const bound = await boundSubjectToken('read', [tenantUrl]);
+		const acquire = () =>
+			postToken({
+				grant_type: readAccessGrantType,
+				subject_token: bound.token,
+				subject_token_type: subjectTokenTypeIdToken,
+				read_resources: JSON.stringify([
+					{ type: 'cupboard_cache', cache: { kind: 'default' } }
+				]),
+				...bound.binding
+			});
+		const first = await acquire();
+		const replay = await acquire();
+
+		expect({
+			first: first.status,
+			replay: await refusalOf(replay),
+			consumed: await consumedNonceRows()
+		}).toStrictEqual({
+			first: StatusCodes.OK,
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-replayed'
+			},
+			consumed: [{ nonce: bound.nonce, expiresAt: nonceRetainedUntil }]
+		});
+	});
+
+	it.each([
+		{
+			name: "a token bound to another tenant's URL",
+			targets: () => [`${currentOrigin()}/t/other`],
+			hasNonce: true
+		},
+		{
+			name: 'a target that is not in canonical form',
+			targets: () => [`${currentOrigin()}/t/${fixtureTenant}/`],
+			hasNonce: true
+		},
+		{
+			name: 'a token without a nonce claim',
+			targets: () => [`${currentOrigin()}/t/${fixtureTenant}`],
+			hasNonce: false
+		}
+	])('refuses $name', async ({ targets, hasNonce }) => {
+		const bound = await boundSubjectToken('write', targets(), { hasNonce });
+		const response = await boundExchange(bound);
+
+		expect({
+			refusal: await refusalOf(response),
+			families: await refreshTokenRows(),
+			consumed: await consumedNonceRows()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-unbound'
+			},
+			families: [],
+			consumed: []
+		});
+	});
+
+	it('refuses a nonce-bound token issued more than five minutes ago', async () => {
+		const bound = await boundSubjectToken('write', [tenantUrl], {
+			issuedAt: Math.floor(Date.now() / 1000) - 6 * 60
+		});
+		const response = await boundExchange(bound);
+
+		expect({
+			refusal: await refusalOf(response),
+			consumed: await consumedNonceRows()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-too-old'
+			},
+			consumed: []
+		});
+	});
+
+	it('accepts an unbound exchange and logs its rule', async () => {
+		const subjectToken = await installTrustedIdp('write');
+		const capture = startCapture();
+		let exchanged: SuccessfulTokenExchange;
+
+		try {
+			exchanged = await exchange(subjectToken, ciRequest);
+		} finally {
+			capture.stop();
+		}
+
+		expect({
+			status: exchanged.status,
+			warnings: unboundExchangeWarnings(capture.logs),
+			consumed: await consumedNonceRows()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			warnings: [{ level: 'warning', rule: 'write-rule' }],
+			consumed: []
+		});
+	});
+
+	it('accepts an audience-bound exchange without a warning', async () => {
+		const subjectToken = await installTrustedIdp('write', {
+			audience: tenantUrl
+		});
+		const capture = startCapture();
+		let exchanged: SuccessfulTokenExchange;
+
+		try {
+			exchanged = await exchange(subjectToken, ciRequest);
+		} finally {
+			capture.stop();
+		}
+
+		expect({
+			status: exchanged.status,
+			refreshToken: exchanged.refresh_token,
+			warnings: unboundExchangeWarnings(capture.logs),
+			consumed: await consumedNonceRows()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			refreshToken: undefined,
+			warnings: [],
+			consumed: []
+		});
+	});
+
+	it('deletes expired consumed nonces in a collection pass', async () => {
+		const remaining = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const database = drizzle(state.storage, {
+					schema: { consumedSubjectNonces }
+				});
+				database
+					.insert(consumedSubjectNonces)
+					.values([
+						{
+							nonce: 'expired',
+							expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
+						},
+						{
+							nonce: 'live',
+							expiresAt: isoTimestampSchema.parse('2999-01-01T00:00:00.000Z')
+						}
+					])
+					.run();
+
+				await underOneUnitOfWork(() => instance.runGarbageCollection());
+				await state.storage.deleteAlarm();
+
+				return database
+					.select({ nonce: consumedSubjectNonces.nonce })
+					.from(consumedSubjectNonces)
+					.all();
+			}
+		);
+
+		expect(remaining).toStrictEqual([{ nonce: 'live' }]);
 	});
 });

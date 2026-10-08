@@ -11,6 +11,7 @@ import {
 	templateMaxLength
 } from './grants.ts';
 import { IssuerUrl } from './oidc-issuer.ts';
+import { subjectBindingFields } from './subject-binding.ts';
 
 // Issuer, subject, and audience values use separate brands so the compiler
 // rejects arguments in the wrong position. These schemas add brands without
@@ -119,6 +120,7 @@ export type TokenRequest = z.output<typeof tokenRequestSchema>;
  */
 export const tokenExchangeGrantRequestSchema = z.object({
 	...tokenGrantFields,
+	...subjectBindingFields,
 	grant_type: z.literal(tokenExchangeGrantType),
 	subject_token: z.string().min(1),
 	subject_token_type: z.string().min(1),

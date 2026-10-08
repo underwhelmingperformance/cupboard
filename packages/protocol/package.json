@@ -46,6 +46,7 @@
 		"./scalars": "./src/scalars.ts",
 		"./sessions": "./src/sessions.ts",
 		"./signup": "./src/signup.ts",
+		"./subject-binding": "./src/subject-binding.ts",
 		"./tenants": "./src/tenants.ts",
 		"./upload": "./src/upload.ts"
 	},

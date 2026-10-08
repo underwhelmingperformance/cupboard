@@ -510,7 +510,8 @@ describe('v0.0.35 path authority rollout', () => {
 							['blob-reference-read-authority', 'expanded'],
 							['tenant-retry-clock', 'complete'],
 							['tenant-schema-progress', 'complete'],
-							['control-refresh-sessions', 'complete']
+							['control-refresh-sessions', 'complete'],
+							['control-subject-nonces', 'complete']
 						],
 						applied: actualMigrations
 							.filter(
@@ -530,7 +531,8 @@ describe('v0.0.35 path authority rollout', () => {
 						'blob-reference-read-authority': 'complete',
 						'tenant-retry-clock': 'complete',
 						'tenant-schema-progress': 'complete',
-						'control-refresh-sessions': 'complete'
+						'control-refresh-sessions': 'complete',
+						'control-subject-nonces': 'complete'
 					},
 					applied: actualMigrations.map((migration) => migration.name),
 					journal: [

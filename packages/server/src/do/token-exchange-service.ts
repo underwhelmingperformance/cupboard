@@ -81,6 +81,7 @@ import {
 	ReadResourcesNotPermittedError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
+	SubjectTokenReplayedError,
 	SubjectTokenRequiredError,
 	type SubjectTokenUntrustedError,
 	SubjectTokenVerificationFailedError,
@@ -96,6 +97,13 @@ import {
 } from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
 import { isAudienceBound } from '../oidc/audience-binding.ts';
+import {
+	logUnboundSubjectToken,
+	type SubjectBinding,
+	subjectBinding,
+	type SubjectNonce,
+	subjectTokenLimits
+} from '../oidc/subject-binding.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
@@ -140,7 +148,7 @@ export class TokenExchangeService {
 		private readonly context: ServerContext,
 		private readonly authKeys: AuthKeysService,
 		private readonly oidcTrust: OidcTrustService,
-		private readonly refreshStateChanged?: () => Promise<void>
+		private readonly maintenanceStateChanged?: () => Promise<void>
 	) {}
 
 	private async exchange(
@@ -196,7 +204,8 @@ export class TokenExchangeService {
 			verified = await this.oidcTrust.verifyInbound(
 				target,
 				body.subject_token,
-				trustedAudiences(rules, target.issuer)
+				trustedAudiences(rules, target.issuer),
+				subjectTokenLimits(body)
 			);
 		} catch (error) {
 			// Expose claim-mismatch diagnostics only after successful verification,
@@ -216,8 +225,20 @@ export class TokenExchangeService {
 
 		enabled.requireReadableFor(verified);
 
+		const binding = await subjectBinding(
+			verified,
+			this.authKeys.authIssuer(),
+			body
+		);
+
 		if (body.grant_type === readAccessGrantType) {
-			return this.readAccessResponse(logger, enabled.snapshots, verified, body);
+			return this.readAccessResponse(
+				logger,
+				enabled.snapshots,
+				verified,
+				binding,
+				body
+			);
 		}
 
 		const requested = parseRequestedGrants(body.authorization_details);
@@ -250,9 +271,15 @@ export class TokenExchangeService {
 		const grants =
 			selection.grants ??
 			this.implicitGrants(selection.rule, verified, requested);
+
+		if (binding.kind === 'unbound') {
+			logUnboundSubjectToken(logger, selection.rule);
+		}
+
 		return this.issuedResponse(
 			logger,
 			verified,
+			binding,
 			selection.rule,
 			subject,
 			grants,
@@ -331,6 +358,7 @@ export class TokenExchangeService {
 		logger: Logger,
 		snapshots: readonly OidcTrustRuleSnapshot[],
 		verified: VerifiedOidcClaims,
+		binding: SubjectBinding,
 		body: ReadAccessGrantRequest
 	): Promise<Response> {
 		let resources: ReadResource[];
@@ -358,6 +386,10 @@ export class TokenExchangeService {
 
 		if (typeof verified.sub !== 'string' || verified.sub === '') {
 			throw new TenantSubjectTokenUntrustedError();
+		}
+
+		if (binding.kind === 'unbound') {
+			logUnboundSubjectToken(logger, selection.rule);
 		}
 
 		const token = await this.issueRuleToken(
@@ -395,6 +427,11 @@ export class TokenExchangeService {
 		}
 		if (selection.grants.length > 0 && exact.outcome !== 'selected') {
 			throw new TenantSubjectTokenUntrustedError();
+		}
+
+		if (binding.kind === 'nonce-bound') {
+			this.consumeNonce(this.context.db, binding.nonce);
+			await this.maintenanceStateChanged?.();
 		}
 
 		logger.debug('read access acquired', { resources: facts.length });
@@ -634,7 +671,7 @@ export class TokenExchangeService {
 		if (rotation === 'policy-changed') {
 			throw new StaleRefreshTokenError();
 		}
-		await this.refreshStateChanged?.();
+		await this.maintenanceStateChanged?.();
 		return oauthJsonResponse(prepared.body);
 	}
 
@@ -757,6 +794,7 @@ export class TokenExchangeService {
 	private async issuedResponse(
 		logger: Logger,
 		verified: VerifiedOidcClaims,
+		binding: SubjectBinding,
 		rule: OidcTrustRule | undefined,
 		subject: OidcSubject,
 		grants: AuthorizationDetails,
@@ -780,6 +818,10 @@ export class TokenExchangeService {
 				throw new TenantSubjectTokenUntrustedError();
 			}
 
+			if (binding.kind === 'nonce-bound') {
+				this.consumeNonce(transaction, binding.nonce);
+			}
+
 			const refreshToken = prepared.refreshToken;
 
 			if (refreshToken === undefined) {
@@ -797,8 +839,8 @@ export class TokenExchangeService {
 			return true;
 		});
 
-		if (hasIssuedRefresh) {
-			await this.refreshStateChanged?.();
+		if (hasIssuedRefresh || binding.kind === 'nonce-bound') {
+			await this.maintenanceStateChanged?.();
 		}
 		return oauthJsonResponse({
 			...prepared.body,
@@ -992,6 +1034,19 @@ export class TokenExchangeService {
 
 			return 'rotated';
 		});
+	}
+
+	private consumeNonce(database: SchemaWriter, nonce: SubjectNonce): void {
+		const inserted = database
+			.insert(schema.consumedSubjectNonces)
+			.values(nonce)
+			.onConflictDoNothing()
+			.returning({ nonce: schema.consumedSubjectNonces.nonce })
+			.all();
+
+		if (inserted.length === 0) {
+			throw new SubjectTokenReplayedError();
+		}
 	}
 
 	private revokeFamily(

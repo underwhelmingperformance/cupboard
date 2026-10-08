@@ -27,6 +27,7 @@ import creationDefaultsSnapshot from '../../drizzle/meta/0070_snapshot.json' wit
 import closeSnapshot from '../../drizzle/meta/0071_snapshot.json' with { type: 'json' };
 import stagingCleanupSnapshot from '../../drizzle/meta/0072_snapshot.json' with { type: 'json' };
 import refreshFamilyOwnerSnapshot from '../../drizzle/meta/0073_snapshot.json' with { type: 'json' };
+import subjectNoncesSnapshot from '../../drizzle/meta/0074_snapshot.json' with { type: 'json' };
 import migrations from '../../drizzle/migrations.js';
 import { cacheIdSchema, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -193,6 +194,51 @@ describe('migrations', () => {
 				...stagingCleanupSnapshot.tables,
 				refresh_session_family:
 					refreshFamilyOwnerSnapshot.tables.refresh_session_family
+			}
+		});
+	});
+	it('adds an empty consumed-nonce table after migration 0073 without changing refresh families', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-subject-nonces'),
+			async (_instance, state) => {
+				await migrateThrough(state, 73);
+				state.storage.sql.exec(
+					"INSERT INTO refresh_session_family(id,active_member_id,generation,created_at,expires_at) VALUES ('family','member',3,'2026-01-01T00:00:00.000Z','2026-01-31T00:00:00.000Z')"
+				);
+				const database = drizzle(state.storage);
+				const migrated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 74)
+				);
+				const repeated = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 74)
+				);
+				const familyQuery = 'SELECT id, generation FROM refresh_session_family';
+				const nonceQuery =
+					'SELECT nonce, expires_at FROM consumed_subject_nonce';
+				return {
+					migrated,
+					repeated,
+					families: state.storage.sql.exec(familyQuery).toArray(),
+					nonces: state.storage.sql.exec(nonceQuery).toArray()
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			migrated: { kind: 'complete', hasCommitted: true },
+			repeated: { kind: 'complete', hasCommitted: false },
+			families: [{ id: 'family', generation: 3 }],
+			nonces: []
+		});
+		expect(subjectNoncesSnapshot).toStrictEqual({
+			...refreshFamilyOwnerSnapshot,
+			id: subjectNoncesSnapshot.id,
+			prevId: refreshFamilyOwnerSnapshot.id,
+			tables: {
+				...refreshFamilyOwnerSnapshot.tables,
+				consumed_subject_nonce:
+					subjectNoncesSnapshot.tables.consumed_subject_nonce
 			}
 		});
 	});

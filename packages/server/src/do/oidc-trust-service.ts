@@ -34,7 +34,10 @@ import {
 	StoredOidcTrustInvalidError,
 	SubjectTokenNotJwtError
 } from '../errors.ts';
-import { InboundTokenVerifier } from '../oidc/inbound-verifier.ts';
+import {
+	type InboundTokenLimits,
+	InboundTokenVerifier
+} from '../oidc/inbound-verifier.ts';
 import {
 	canUseLoopbackHttp,
 	isAllowedIssuerTransport
@@ -309,9 +312,10 @@ export class OidcTrustService {
 	verifyInbound(
 		target: OidcTrustVerificationTarget,
 		token: string,
-		trustedAudiences: ReadonlySet<string>
+		trustedAudiences: ReadonlySet<string>,
+		limits: InboundTokenLimits = {}
 	): Promise<VerifiedOidcClaims> {
-		return this.verifier.verify(target, token, trustedAudiences);
+		return this.verifier.verify(target, token, trustedAudiences, limits);
 	}
 
 	enabledOidcTrustRules(logger: Logger): OidcTrustRule[] {

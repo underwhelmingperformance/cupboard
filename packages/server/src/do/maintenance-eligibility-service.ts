@@ -173,7 +173,8 @@ export class MaintenanceEligibilityService {
 			this.earliestGraceExpiry(),
 			this.earliestAuthKeyRetirement(),
 			this.earliestManagedCacheRetirement(),
-			this.earliestRefreshMaintenance()
+			this.earliestRefreshMaintenance(),
+			this.earliestSubjectNonceExpiry()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
@@ -203,6 +204,15 @@ export class MaintenanceEligibilityService {
 		return [family, envelope]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
+	}
+
+	private earliestSubjectNonceExpiry(): IsoTimestamp | undefined {
+		return this.context.db
+			.select({ expiresAt: schema.consumedSubjectNonces.expiresAt })
+			.from(schema.consumedSubjectNonces)
+			.orderBy(asc(schema.consumedSubjectNonces.expiresAt))
+			.limit(1)
+			.get()?.expiresAt;
 	}
 
 	private earliestSettleRetry(now: IsoTimestamp): IsoTimestamp | undefined {

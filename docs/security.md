@@ -129,6 +129,20 @@ grants the matching trust rules permit. A token whose audience is the tenant
 URL, as for a CI job, gets only an access token. A tenant also issues no refresh
 token for a request for content-read grants only, such as a read acquisition.
 
+A subject token can be bound to the server that exchanges it in two ways. It is
+audience-bound when its audience is the tenant or deployment URL, as for a
+GitHub Actions job. It is nonce-bound when the token request includes a random
+seed and a list of target URLs, the list includes the server's URL, and the
+token's `nonce` claim matches the list and the seed. The `nonce` claim is the
+unpadded base64url encoding of SHA-256 over the JSON array
+`["cupboard/subject-binding/v1", targets, seed]`. The server accepts a
+nonce-bound token only within five minutes of the token's issue time. It keeps
+each consumed nonce for 30 days and refuses another token with the same nonce
+while that record remains. A refreshed ID token from Cloudflare repeats the
+nonce of the original sign-in with a new issue time, so the age limit alone
+would not refuse it. The server also accepts tokens without either binding and
+logs a warning with the ID of the trust rule that accepted them.
+
 ## Revoking access
 
 | To revoke                       | Do this                                                                                         | It takes effect                                     |

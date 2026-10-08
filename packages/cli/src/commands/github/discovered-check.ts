@@ -28,6 +28,7 @@ import {
 	type RepositoryIdentity
 } from '../oidc-trust/github.ts';
 
+import { warnUnboundAudienceRules } from './audience-binding.ts';
 import {
 	activeMatcherRules,
 	checkPullRequestCacheAccess,
@@ -756,6 +757,9 @@ export async function inspectDiscoveredGithubCheck(
 		client.oidcTrust.list()
 	);
 	const rules = activeMatcherRules(listed.rules);
+
+	warnUnboundAudienceRules(reporter, rules, identity, tenant);
+
 	const jobs: PublishingJobResult[] = discovery.unverified.map((entry) =>
 		publishingJobResult(
 			{

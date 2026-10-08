@@ -382,8 +382,11 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('prunes expired operator sessions from the queue', async () => {
+	it('prunes expired operator sessions and consumed nonces from the queue', async () => {
 		await env.CUPBOARD_DB.batch([
+			env.CUPBOARD_DB.prepare(
+				"INSERT INTO control_consumed_subject_nonce (nonce, expires_at) VALUES ('expired-nonce', '2020-01-01T00:05:30.000Z'), ('live-nonce', '2999-01-01T00:00:00.000Z')"
+			),
 			env.CUPBOARD_DB.prepare(
 				"INSERT INTO control_refresh_session_family (id, active_member_id, generation, created_at, expires_at, issuer, subject) VALUES ('expired', 'expired-member', 0, '2020-01-01T00:00:00.000Z', '2020-01-31T00:00:00.000Z', 'https://idp.example.test', 'global-admin')"
 			),
@@ -401,12 +404,12 @@ describe('scheduled tenant pass failure records', () => {
 			}
 		);
 		const remaining = await env.CUPBOARD_DB.prepare(
-			'SELECT (SELECT count(*) FROM control_refresh_session_family) AS families, (SELECT count(*) FROM control_refresh_session_member) AS members'
+			'SELECT (SELECT count(*) FROM control_refresh_session_family) AS families, (SELECT count(*) FROM control_refresh_session_member) AS members, (SELECT group_concat(nonce) FROM control_consumed_subject_nonce) AS nonces'
 		).first();
 
 		expect({ decision, remaining }).toStrictEqual({
 			decision: { action: 'ack' },
-			remaining: { families: 0, members: 0 }
+			remaining: { families: 0, members: 0, nonces: 'live-nonce' }
 		});
 	});
 
