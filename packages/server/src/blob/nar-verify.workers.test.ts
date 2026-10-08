@@ -361,6 +361,22 @@ function multiFrameNar(): {
 	};
 }
 
+/**
+ * Builds a zstd skippable frame of `size` bytes: the magic number, the length
+ * of the payload, and a payload of zeros. Decoders that follow RFC 8878 skip
+ * it. The CLI pads a streamed part whose compressed bytes end before the part
+ * does.
+ */
+function skippableFrame(size: number): Uint8Array {
+	const frame = new Uint8Array(size);
+	const view = new DataView(frame.buffer);
+
+	view.setUint32(0, 0x18_4d_2a_50, true);
+	view.setUint32(4, size - 8, true);
+
+	return frame;
+}
+
 describe('verifyDecompressedNar', () => {
 	// Keep the payload large enough to cross the bridge in several chunks. The
 	// runtime benchmark covers bounded memory with multi-hundred-megabyte NARs.
@@ -475,6 +491,29 @@ describe('verifyDecompressedNar', () => {
 	});
 
 	it.each([
+		{ name: 'the smallest skippable frame', padding: 8 },
+		{ name: 'a skippable frame within the last read', padding: 1000 },
+		{
+			name: 'a skippable frame that spans several reads',
+			padding: 3 * mebibyte + 5
+		}
+	])('accepts concatenated frames followed by $name', async ({ padding }) => {
+		const { nar, compressed } = multiFrameNar();
+		const padded = concatenated([compressed, skippableFrame(padding)]);
+
+		const result = await verifyDecompressedNar(
+			byteBody(slices(padded, mebibyte)).stream,
+			{ narHash: await nixNarHash(nar), narSize: nar.byteLength }
+		);
+
+		expect(result).toStrictEqual({
+			ok: true,
+			fileHash: await nixNarHash(padded),
+			fileSize: padded.byteLength
+		});
+	});
+
+	it.each([
 		{ windowLog: 23, verdict: 'ok' },
 		{ windowLog: 24, verdict: 'undecodable' }
 	])(
@@ -560,6 +599,39 @@ describe('verifyStoredNar', () => {
 			}
 		});
 	});
+
+	// After the first 8 MiB block, the verifier reads ranges into pooled
+	// buffers ahead of the decoder, so 10 MiB of padding is read by a
+	// prefetched range.
+	it.each([
+		{ name: 'inside the first block', padding: mebibyte, ranges: 0 },
+		{ name: 'in a prefetched range', padding: 10 * mebibyte, ranges: 1 }
+	])(
+		'verifies a stored object that ends with a skippable frame $name',
+		async ({ padding, ranges }) => {
+			const { nar, compressed } = multiFrameNar();
+			const padded = concatenated([compressed, skippableFrame(padding)]);
+			const r2Key = r2ObjectKeySchema.parse('staging/verify-padded-test');
+			await env.BLOBS.put(r2Key, padded);
+			const progress = narVerifyProgress();
+
+			const verification = await verifyStoredNar(
+				env.BLOBS,
+				r2Key,
+				{ narHash: await nixNarHash(nar), narSize: nar.byteLength },
+				{ buffers: new NarReadBufferPool(), progress }
+			);
+
+			expect({ verification, ranges: progress.ranges }).toStrictEqual({
+				verification: {
+					ok: true,
+					fileHash: await nixNarHash(padded),
+					fileSize: padded.byteLength
+				},
+				ranges
+			});
+		}
+	);
 
 	it('times out and cancels a stalled R2 stream', async () => {
 		const r2Key = r2ObjectKeySchema.parse('staging/verify-timeout-test');
