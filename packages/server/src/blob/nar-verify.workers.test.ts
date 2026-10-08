@@ -1,5 +1,9 @@
 import { hexToBytes } from '@cupboard/nix-store/encoding';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import {
+	nixSha256HashSchema,
+	type NixSha256HashString
+} from '@cupboard/nix-store/scalars';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,8 +18,16 @@ import {
 	StoredObjectInconsistentError,
 	SubrequestTimeoutError
 } from '../errors.ts';
-import { type R2ObjectKey, r2ObjectKeySchema } from '../http/http.ts';
-import { resetTestServer } from '../test-support.ts';
+import {
+	narObjectKey,
+	type R2ObjectKey,
+	r2ObjectKeySchema
+} from '../http/http.ts';
+import {
+	clearBlobStorage,
+	nixSha256Hash,
+	resetTestServer
+} from '../test-support.ts';
 
 import {
 	ConnectionLimitedBucket,
@@ -28,9 +40,12 @@ import {
 } from './nar-chunks.ts';
 import { NarReadBufferPool } from './nar-read-buffers.ts';
 import {
+	type CanonicalWriteTarget,
+	type ExpectedNar,
 	type NarVerification,
 	type NarVerifyProgress,
 	narVerifyProgress,
+	verifyAndWriteStoredNar,
 	verifyDecompressedNar,
 	verifyStoredNar
 } from './nar-verify.ts';
@@ -1758,6 +1773,792 @@ describe('openStoredNarChunks', () => {
 			failed: true,
 			reopenedCancelled: true,
 			pool: { free: 1, allocations: 1 }
+		});
+	});
+});
+
+// A store that reads staged objects from R2 and answers every put with `put`.
+function storeWithPut(put: R2ObjectStore['put']): R2ObjectStore {
+	return {
+		get: (key: R2ObjectKey, options?: R2GetOptions) =>
+			options === undefined ? env.BLOBS.get(key) : env.BLOBS.get(key, options),
+		put
+	};
+}
+
+/**
+ * A store over R2 that counts the requests that are waiting for R2's answer:
+ * a get until R2 returns the object, and a put until R2 answers the put. Each
+ * get waits a moment first, so that concurrent requests overlap.
+ */
+function countingStore(): {
+	readonly store: R2ObjectStore;
+	readonly peaks: () => { readonly requests: number; readonly puts: number };
+} {
+	let requests = 0;
+	let puts = 0;
+	let peakRequests = 0;
+	let peakPuts = 0;
+	const open = async <T>(isPut: boolean, request: () => Promise<T>) => {
+		requests += 1;
+		puts += isPut ? 1 : 0;
+		peakRequests = Math.max(peakRequests, requests);
+		peakPuts = Math.max(peakPuts, puts);
+
+		try {
+			await scheduler.wait(5);
+
+			return await request();
+		} finally {
+			requests -= 1;
+			puts -= isPut ? 1 : 0;
+		}
+	};
+
+	return {
+		store: {
+			get: (key: R2ObjectKey, options?: R2GetOptions) =>
+				open(false, () =>
+					options === undefined
+						? env.BLOBS.get(key)
+						: env.BLOBS.get(key, options)
+				),
+			put: (key, value, options) =>
+				open(true, () => env.BLOBS.put(key, value, options))
+		},
+		peaks: () => ({ requests: peakRequests, puts: peakPuts })
+	};
+}
+
+/**
+ * Serves `bytes` in 1 MiB chunks and waits `intervalMs` before each one.
+ */
+function tricklingBody(
+	bytes: Uint8Array,
+	intervalMs: number
+): ReadableStream<Uint8Array> {
+	let offset = 0;
+
+	return new ReadableStream({
+		type: 'bytes',
+		async pull(controller) {
+			await new Promise((resolve) => {
+				setTimeout(resolve, intervalMs);
+			});
+			const chunk = bytes.subarray(offset, offset + mebibyte);
+			offset += chunk.byteLength;
+
+			if (chunk.byteLength === 0) {
+				controller.close();
+				return;
+			}
+
+			controller.enqueue(new Uint8Array(chunk));
+		}
+	});
+}
+
+function neverAnswered(): Promise<R2Object | null> {
+	return Promise.withResolvers<R2Object | null>().promise;
+}
+
+async function realTimeDelay(ms: number): Promise<'still running'> {
+	await scheduler.wait(ms);
+
+	return 'still running';
+}
+
+// R2's answer to a conditional put for a key that already exists.
+async function existingKeyAnswer(): Promise<R2Object | null> {
+	const key = r2ObjectKeySchema.parse('staging/verify-and-write-existing');
+	await env.BLOBS.put(key, new Uint8Array([1]));
+
+	return env.BLOBS.put(key, new Uint8Array([2]), {
+		onlyIf: { etagDoesNotMatch: '*' }
+	});
+}
+
+describe('verifyAndWriteStoredNar', () => {
+	let buffers = new NarReadBufferPool();
+
+	beforeEach(async () => {
+		buffers = new NarReadBufferPool();
+		await resetTestServer();
+		await clearBlobStorage();
+	});
+
+	const stagingKey = r2ObjectKeySchema.parse('staging/verify-and-write-test');
+
+	async function fileHashOf(bytes: Uint8Array): Promise<NixSha256HashString> {
+		const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+
+		return NixSha256Hash.fromDigest(digest).value;
+	}
+
+	async function storedObject(key: R2ObjectKey): Promise<unknown> {
+		const object = await env.BLOBS.head(key);
+
+		if (object === null) {
+			return undefined;
+		}
+
+		const sha256 = object.checksums.sha256;
+
+		return {
+			size: object.size,
+			fileHash:
+				sha256 === undefined
+					? undefined
+					: NixSha256Hash.fromDigest(new Uint8Array(sha256)).value,
+			customMetadata: object.customMetadata
+		};
+	}
+
+	interface StagedNar {
+		readonly nar: Uint8Array;
+		readonly compressed: Uint8Array;
+		readonly expected: ExpectedNar;
+		readonly target: CanonicalWriteTarget;
+	}
+
+	async function stagedNar(): Promise<StagedNar> {
+		const { nar, compressed } = multiFrameNar();
+		await env.BLOBS.put(stagingKey, compressed);
+		const narHash = nixSha256HashSchema.parse(await nixNarHash(nar));
+
+		return {
+			nar,
+			compressed,
+			expected: { narHash, narSize: nar.byteLength },
+			target: {
+				key: narObjectKey(narHash, 2),
+				fileHash: await fileHashOf(compressed),
+				fileSize: compressed.byteLength
+			}
+		};
+	}
+
+	it('writes the canonical object while it verifies the staged one', async () => {
+		const { nar, compressed, expected, target } = await stagedNar();
+		const progress = narVerifyProgress();
+
+		const verification = await verifyAndWriteStoredNar(
+			env.BLOBS,
+			stagingKey,
+			expected,
+			target,
+			{ buffers, progress }
+		);
+
+		expect({
+			verification,
+			progress,
+			stored: await storedObject(target.key)
+		}).toStrictEqual({
+			verification: { ok: true },
+			progress: {
+				stage: 'decode',
+				reads: 5,
+				compressedBytes: compressed.byteLength,
+				narBytes: nar.byteLength,
+				ranges: 0,
+				rangeBufferMisses: 0,
+				rangeBudgetSkips: 0,
+				lostRangeBuffers: 0,
+				peakRangeBuffers: 0
+			},
+			stored: {
+				size: compressed.byteLength,
+				fileHash: target.fileHash,
+				customMetadata: { narSize: String(nar.byteLength) }
+			}
+		});
+	});
+
+	it.each([
+		{
+			mismatch: 'NAR hash',
+			change: (staged: StagedNar) => ({
+				expected: { ...staged.expected, narHash: nixSha256Hash('1') },
+				target: staged.target
+			}),
+			verification: async (staged: StagedNar) => ({
+				ok: false,
+				reason: 'nar-hash-mismatch',
+				actualNarHash: await nixNarHash(staged.nar)
+			})
+		},
+		{
+			mismatch: 'declared file hash',
+			change: (staged: StagedNar) => ({
+				expected: staged.expected,
+				target: { ...staged.target, fileHash: nixSha256Hash('1') }
+			}),
+			verification: () =>
+				Promise.resolve({ ok: false, reason: 'file-hash-mismatch' })
+		},
+		{
+			mismatch: 'declared file size',
+			change: (staged: StagedNar) => ({
+				expected: staged.expected,
+				target: { ...staged.target, fileSize: staged.target.fileSize + 1 }
+			}),
+			verification: (staged: StagedNar) =>
+				Promise.resolve({
+					ok: false,
+					reason: 'file-size-mismatch',
+					actualFileSize: staged.compressed.byteLength
+				})
+		}
+	])(
+		'stores nothing when the $mismatch does not match',
+		async ({ change, verification }) => {
+			const staged = await stagedNar();
+			const { expected, target } = change(staged);
+
+			const result = await verifyAndWriteStoredNar(
+				env.BLOBS,
+				stagingKey,
+				expected,
+				target,
+				{ buffers }
+			);
+
+			expect({
+				result,
+				stored: await storedObject(target.key)
+			}).toStrictEqual({
+				result: await verification(staged),
+				stored: undefined
+			});
+		}
+	);
+
+	it('accepts an object that is already stored at the reserved key', async () => {
+		const { compressed, expected, target } = await stagedNar();
+		const existing = await env.BLOBS.put(target.key, compressed, {
+			sha256: NixSha256Hash.parse(target.fileHash).digestBytes()
+		});
+
+		const verification = await verifyAndWriteStoredNar(
+			env.BLOBS,
+			stagingKey,
+			expected,
+			target,
+			{ buffers }
+		);
+		const stored = await env.BLOBS.head(target.key);
+
+		expect({ verification, etag: stored?.etag }).toStrictEqual({
+			verification: { ok: true },
+			etag: existing.etag
+		});
+	});
+
+	it("stops writing within R2's idle limit when the staged read stalls", async () => {
+		const { stream, wasCancelled } = neverProducingBody();
+		const bucket = await bucketServing(stagingKey, stream);
+		const target = {
+			key: narObjectKey(nixSha256Hash('2'), 2),
+			fileHash: await fileHashOf(new Uint8Array([1, 2, 3])),
+			fileSize: 3
+		};
+		const testBase = new Date();
+		vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+
+		try {
+			const settled = settle(
+				verifyAndWriteStoredNar(
+					bucket,
+					stagingKey,
+					{ narHash: nixSha256Hash('3'), narSize: 1000 },
+					target,
+					{ buffers }
+				)
+			);
+			// R2 keeps a streamed put open across an idle gap of 60 seconds but
+			// not 75 seconds.
+			await vi.advanceTimersByTimeAsync(59 * 1000);
+			const outcome = await settled;
+
+			expect({
+				error:
+					'error' in outcome && outcome.error instanceof SubrequestTimeoutError
+						? outcome.error.subrequest
+						: outcome,
+				cancelled: wasCancelled(),
+				stored: await storedObject(target.key)
+			}).toStrictEqual({
+				error: 'nar.verify',
+				cancelled: true,
+				stored: undefined
+			});
+		} finally {
+			vi.useRealTimers();
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(testBase);
+		}
+	});
+
+	it("stops waiting within R2's idle limit when R2 does not answer the complete put", async () => {
+		const { expected, target } = await stagedNar();
+		const store = storeWithPut(async (_key, value) => {
+			await new Response(value).arrayBuffer();
+
+			return neverAnswered();
+		});
+		const testBase = new Date();
+		vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+
+		try {
+			const verifying = settle(
+				verifyAndWriteStoredNar(store, stagingKey, expected, target, {
+					buffers
+				})
+			);
+			const progress = { isSettled: false };
+			void verifying.then(() => {
+				progress.isSettled = true;
+			});
+
+			for (let second = 0; second < 59; second += 1) {
+				await vi.advanceTimersByTimeAsync(1000);
+				await realTimeDelay(10);
+			}
+
+			const outcome = progress.isSettled ? await verifying : 'still running';
+
+			expect(
+				typeof outcome === 'object' &&
+					'error' in outcome &&
+					outcome.error instanceof SubrequestTimeoutError
+					? outcome.error.subrequest
+					: outcome
+			).toStrictEqual('nar.verify');
+		} finally {
+			vi.useRealTimers();
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(testBase);
+		}
+	});
+
+	it("stops writing within R2's idle limit while a range arrives too slowly for the put", async () => {
+		const { expected, target } = await stagedLargeNar(stagingKey);
+		const { compressed } = compressedNar();
+		const rangeSize = buffers.bufferSize;
+		// Each 1 MiB read of the second block completes within the stall
+		// interval, but the put receives none of the block until all of it has
+		// arrived.
+		const bucket = bucketWithParts(stagingKey, async (offset, get) =>
+			offset === rangeSize
+				? servedPart(
+						get,
+						tricklingBody(
+							compressed.subarray(rangeSize, 2 * rangeSize),
+							20 * 1000
+						)
+					)
+				: get()
+		);
+		const progress = narVerifyProgress();
+		const testBase = new Date();
+		vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+
+		try {
+			const verifying = settle(
+				verifyAndWriteStoredNar(bucket, stagingKey, expected, target, {
+					buffers,
+					progress
+				})
+			);
+			const state = { isSettled: false };
+			void verifying.then(() => {
+				state.isSettled = true;
+			});
+
+			// The first block reaches the put before the clock moves.
+			for (
+				let attempt = 0;
+				attempt < 500 && progress.compressedBytes < rangeSize;
+				attempt += 1
+			) {
+				await realTimeDelay(10);
+			}
+
+			for (let second = 0; second < 35 && !state.isSettled; second += 1) {
+				await vi.advanceTimersByTimeAsync(1000);
+				await realTimeDelay(10);
+			}
+
+			const outcome = state.isSettled ? await verifying : 'still running';
+
+			expect({
+				outcome:
+					typeof outcome === 'object' &&
+					'error' in outcome &&
+					outcome.error instanceof SubrequestTimeoutError
+						? outcome.error.subrequest
+						: outcome,
+				stored: await storedObject(target.key)
+			}).toStrictEqual({ outcome: 'nar.verify', stored: undefined });
+		} finally {
+			vi.useRealTimers();
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(testBase);
+		}
+	});
+
+	it.each(['verified', 'aborted'] as const)(
+		'continues a progressing read after the conditional put has answered until %s',
+		async (ending) => {
+			const { expected, target } = await stagedLargeNar(stagingKey);
+			const { compressed } = compressedNar();
+			const rangeSize = buffers.bufferSize;
+			const reads = bucketWithParts(stagingKey, async (offset, get) =>
+				offset === rangeSize
+					? servedPart(
+							get,
+							tricklingBody(
+								compressed.subarray(rangeSize, 2 * rangeSize),
+								5 * 1000
+							)
+						)
+					: get()
+			);
+			const answer = await existingKeyAnswer();
+			const bucket: R2ObjectStore = {
+				get: reads.get.bind(reads),
+				put: () => Promise.resolve(answer)
+			};
+			const controller = new AbortController();
+			const reason = new SubrequestTimeoutError('nar.verify.batch');
+			const progress = narVerifyProgress();
+			const testBase = new Date();
+			vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+
+			try {
+				if (ending === 'aborted') {
+					setTimeout(() => {
+						controller.abort(reason);
+					}, 35 * 1000);
+				}
+
+				const verifying = settle(
+					verifyAndWriteStoredNar(bucket, stagingKey, expected, target, {
+						buffers,
+						progress,
+						signal: controller.signal
+					})
+				);
+				const state = { isSettled: false };
+				void verifying.then(() => {
+					state.isSettled = true;
+				});
+
+				for (
+					let attempt = 0;
+					attempt < 500 && progress.compressedBytes < rangeSize;
+					attempt += 1
+				) {
+					await realTimeDelay(10);
+				}
+
+				for (let second = 0; second < 60 && !state.isSettled; second += 1) {
+					await vi.advanceTimersByTimeAsync(1000);
+					await realTimeDelay(10);
+				}
+
+				const outcome = state.isSettled ? await verifying : 'still running';
+
+				expect({
+					outcome,
+					compressedBytes: progress.compressedBytes
+				}).toStrictEqual({
+					outcome:
+						ending === 'aborted' ? { error: reason } : { value: { ok: true } },
+					compressedBytes: ending === 'aborted' ? rangeSize : target.fileSize
+				});
+			} finally {
+				vi.useRealTimers();
+				vi.useFakeTimers({ toFake: ['Date'] });
+				vi.setSystemTime(testBase);
+			}
+		}
+	);
+
+	it('returns a mismatch without waiting for R2 to answer the aborted put', async () => {
+		const nar = new Uint8Array(1000).fill(7);
+		const compressed = await compressedBytes(nar);
+		await env.BLOBS.put(stagingKey, compressed);
+		const store = storeWithPut(() => neverAnswered());
+		const target = {
+			key: narObjectKey(nixSha256Hash('4'), 2),
+			fileHash: await fileHashOf(compressed),
+			fileSize: compressed.byteLength
+		};
+		const expected = { narHash: nixSha256Hash('4'), narSize: nar.byteLength };
+
+		const outcome = await Promise.race([
+			verifyAndWriteStoredNar(store, stagingKey, expected, target, {
+				buffers
+			}),
+			realTimeDelay(2000)
+		]);
+
+		expect(outcome).toStrictEqual({
+			ok: false,
+			reason: 'nar-hash-mismatch',
+			actualNarHash: await nixNarHash(nar)
+		});
+	});
+
+	it.each([
+		{ nar: 'matches', verification: { ok: true } },
+		{
+			nar: 'does not match',
+			verification: { ok: false, reason: 'nar-size-mismatch' }
+		}
+	])(
+		'finishes verifying when the put answers before reading its body and the NAR $nar',
+		async ({ nar, verification }) => {
+			const staged = await stagedNar();
+			const expected =
+				nar === 'matches'
+					? staged.expected
+					: { ...staged.expected, narSize: staged.expected.narSize - 1 };
+			const answer = await existingKeyAnswer();
+			const store = storeWithPut(() => Promise.resolve(answer));
+
+			const outcome = await Promise.race([
+				verifyAndWriteStoredNar(store, stagingKey, expected, staged.target, {
+					buffers
+				}),
+				realTimeDelay(5000)
+			]);
+
+			expect(
+				typeof outcome === 'object' && !outcome.ok
+					? { ok: outcome.ok, reason: outcome.reason }
+					: outcome
+			).toStrictEqual(verification);
+		}
+	);
+
+	it('stops reading and stores nothing when the pass is aborted during the write', async () => {
+		const { expected, target } = await stagedNar();
+		const controller = new AbortController();
+		const reason = new SubrequestTimeoutError('nar.verify.batch');
+		const store = storeWithPut((key, value, options) => {
+			controller.abort(reason);
+
+			return env.BLOBS.put(key, value, options);
+		});
+
+		const outcome = await settle(
+			verifyAndWriteStoredNar(store, stagingKey, expected, target, {
+				buffers,
+				signal: controller.signal
+			})
+		);
+
+		expect({
+			outcome,
+			stored: await storedObject(target.key)
+		}).toStrictEqual({ outcome: { error: reason }, stored: undefined });
+	});
+
+	// The compressed NAR from the vitest config, staged under `key`, with the
+	// declaration that matches it.
+	async function stagedLargeNar(
+		key: R2ObjectKey,
+		incarnation = 2
+	): Promise<{
+		readonly expected: ExpectedNar;
+		readonly target: CanonicalWriteTarget;
+	}> {
+		const { compressed, expected } = compressedNar();
+		await env.BLOBS.put(key, compressed);
+		const narHash = nixSha256HashSchema.parse(expected.narHash);
+
+		return {
+			expected: { narHash, narSize: expected.narSize },
+			target: {
+				key: narObjectKey(narHash, incarnation),
+				fileHash: await fileHashOf(compressed),
+				fileSize: compressed.byteLength
+			}
+		};
+	}
+
+	it('writes the canonical object from prefetched ranges', async () => {
+		const { expected, target } = await stagedLargeNar(stagingKey);
+		const progress = narVerifyProgress();
+
+		const verification = await verifyAndWriteStoredNar(
+			env.BLOBS,
+			stagingKey,
+			expected,
+			target,
+			{ buffers, progress }
+		);
+
+		expect({
+			verification,
+			ranges: progress.ranges,
+			pool: buffers.state,
+			stored: await storedObject(target.key)
+		}).toStrictEqual({
+			verification: { ok: true },
+			ranges: 2,
+			pool: { free: 4, allocations: 2 },
+			stored: {
+				size: target.fileSize,
+				fileHash: target.fileHash,
+				customMetadata: { narSize: String(expected.narSize) }
+			}
+		});
+	});
+
+	it.each([
+		{
+			exit: 'a stored object',
+			arrange: (staged: Awaited<ReturnType<typeof stagedLargeNar>>) => ({
+				...staged,
+				store: storeWithPut((key, value, options) =>
+					env.BLOBS.put(key, value, options)
+				)
+			}),
+			outcome: { ok: true }
+		},
+		{
+			exit: 'a NAR hash mismatch',
+			arrange: (staged: Awaited<ReturnType<typeof stagedLargeNar>>) => ({
+				...staged,
+				expected: { ...staged.expected, narHash: nixSha256Hash('5') },
+				store: storeWithPut((key, value, options) =>
+					env.BLOBS.put(key, value, options)
+				)
+			}),
+			outcome: 'nar-hash-mismatch'
+		},
+		{
+			exit: 'a declared hash that R2 refuses',
+			arrange: (staged: Awaited<ReturnType<typeof stagedLargeNar>>) => ({
+				...staged,
+				target: { ...staged.target, fileHash: nixSha256Hash('5') },
+				store: storeWithPut((key, value, options) =>
+					env.BLOBS.put(key, value, options)
+				)
+			}),
+			outcome: 'file-hash-mismatch'
+		},
+		{
+			exit: 'an R2 error on the put',
+			arrange: (staged: Awaited<ReturnType<typeof stagedLargeNar>>) => ({
+				...staged,
+				store: storeWithPut(() =>
+					Promise.reject(new Error('put: internal error (10001)'))
+				)
+			}),
+			outcome: 'error'
+		}
+	])(
+		'returns every pooled buffer after $exit',
+		async ({ arrange, outcome }) => {
+			const { expected, target, store } = arrange(
+				await stagedLargeNar(stagingKey)
+			);
+			const progress = narVerifyProgress();
+
+			const settled = await settle(
+				verifyAndWriteStoredNar(store, stagingKey, expected, target, {
+					buffers,
+					progress
+				})
+			);
+
+			expect({
+				outcome:
+					'error' in settled
+						? 'error'
+						: settled.value.ok
+							? settled.value
+							: settled.value.reason,
+				pool: buffers.state.free,
+				lostRangeBuffers: progress.lostRangeBuffers
+			}).toStrictEqual({ outcome, pool: 4, lostRangeBuffers: 0 });
+		}
+	);
+
+	it('returns every pooled buffer when the pass is aborted during the write', async () => {
+		const { expected, target } = await stagedLargeNar(stagingKey);
+		const controller = new AbortController();
+		const reason = new SubrequestTimeoutError('nar.verify.batch');
+		const store = storeWithPut((key, value, options) => {
+			controller.abort(reason);
+
+			return env.BLOBS.put(key, value, options);
+		});
+		const progress = narVerifyProgress();
+
+		const outcome = await settle(
+			verifyAndWriteStoredNar(store, stagingKey, expected, target, {
+				buffers,
+				progress,
+				signal: controller.signal
+			})
+		);
+
+		expect({
+			outcome,
+			pool: buffers.state.free + progress.lostRangeBuffers,
+			stored: await storedObject(target.key)
+		}).toStrictEqual({
+			outcome: { error: reason },
+			pool: 4,
+			stored: undefined
+		});
+	});
+
+	it('keeps ranged reads and two puts within the connection limit', async () => {
+		const first = r2ObjectKeySchema.parse('staging/verify-and-write-first');
+		const second = r2ObjectKeySchema.parse('staging/verify-and-write-second');
+		const firstNar = await stagedLargeNar(first, 2);
+		const secondNar = await stagedLargeNar(second, 3);
+		const { store, peaks } = countingStore();
+		const limited = new ConnectionLimitedBucket(store, 3);
+		const progresses = [narVerifyProgress(), narVerifyProgress()];
+
+		const verifications = await Promise.all([
+			verifyAndWriteStoredNar(
+				limited,
+				first,
+				firstNar.expected,
+				firstNar.target,
+				{ buffers, progress: progresses[0] }
+			),
+			verifyAndWriteStoredNar(
+				limited,
+				second,
+				secondNar.expected,
+				secondNar.target,
+				{ buffers, progress: progresses[1] }
+			)
+		]);
+
+		expect({
+			verifications,
+			ranges: progresses.reduce(
+				(total, progress) => total + progress.ranges,
+				0
+			),
+			peaks: peaks(),
+			pool: buffers.state.free
+		}).toStrictEqual({
+			verifications: [{ ok: true }, { ok: true }],
+			ranges: 4,
+			peaks: { requests: 3, puts: 2 },
+			pool: 4
 		});
 	});
 });

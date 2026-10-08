@@ -14,13 +14,17 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
+import {
+	lateWriteTombstoneHorizonMs,
+	reserveObjectIncarnation
+} from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { pendingUploads } from '../db/schema.ts';
 import {
 	maxVerificationRpcRows,
 	narInfoObjectKey,
 	narObjectKey,
+	narObjectKeyPrefix,
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -38,7 +42,10 @@ import {
 	seedCanonicalBlob,
 	testBase,
 	type VerifiableNar,
-	verifiablePath
+	verifiableNar,
+	verifiablePath,
+	verifyCurrentTenant,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { type VerificationResult } from './verification-service.ts';
@@ -50,7 +57,12 @@ interface NegotiatedUpload {
 	readonly r2Key: string;
 }
 
-async function stagedUpload(seed: string): Promise<NegotiatedUpload> {
+// Negotiates a path for the seed's NAR and stages `staged` as its bytes, which
+// are the NAR's own unless the test replaces them.
+async function stagedUpload(
+	seed: string,
+	staged?: VerifiableNar
+): Promise<NegotiatedUpload> {
 	const token = await initialise();
 	const { metadata, nar } = await verifiablePath(seed, {
 		storePathHash: 'a'.repeat(32),
@@ -60,7 +72,7 @@ async function stagedUpload(seed: string): Promise<NegotiatedUpload> {
 		await negotiateUploads(token, [metadata]),
 		metadata
 	);
-	await putNarBytes(upload.r2Key, nar);
+	await putNarBytes(upload.r2Key, staged ?? nar);
 
 	return {
 		token,
@@ -379,6 +391,41 @@ async function claimAgain(): Promise<string> {
 	return claim.owner;
 }
 
+const reservationInsert = 'insert into "object_incarnation"';
+
+// Makes the next incarnation reservation for `narHash` contended. Another
+// promoter records the NAR's first incarnation as absent after the
+// reservation has looked for an absent row and before its insert runs.
+function contendNextReservation(narHash: NixSha256HashString): void {
+	const prepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
+	const batch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+	let isCompeting = false;
+	let competing: Promise<unknown> | undefined;
+
+	vi.spyOn(env.CUPBOARD_DB, 'prepare').mockImplementation((query) => {
+		if (!isCompeting && query.startsWith(reservationInsert)) {
+			isCompeting = true;
+			competing = controlDatabase()
+				.insert(d1Schema.objectIncarnation)
+				.values({
+					kind: 'nar',
+					objectId: narHash,
+					incarnation: 2,
+					state: 'absent',
+					updatedAt: isoTimestamp(testBase)
+				})
+				.run();
+		}
+
+		return prepare(query);
+	});
+	vi.spyOn(env.CUPBOARD_DB, 'batch').mockImplementation(async (statements) => {
+		await competing;
+
+		return batch(statements);
+	});
+}
+
 describe('canonical writes during verification', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers({ toFake: ['Date'] });
@@ -440,24 +487,7 @@ describe('canonical writes during verification', () => {
 			result: 'contended',
 			state: 'a registry that changes during the reservation',
 			arrange: (claim: DeclaredClaim) => {
-				// Another promoter retires the first incarnation between the
-				// reservation's update and its insert.
-				const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
-				vi.spyOn(env.CUPBOARD_DB, 'batch').mockImplementationOnce(
-					async (statements) => {
-						await controlDatabase()
-							.insert(d1Schema.objectIncarnation)
-							.values({
-								kind: 'nar',
-								objectId: claim.entry.narHash,
-								incarnation: 2,
-								state: 'absent',
-								updatedAt: isoTimestamp(testBase)
-							});
-
-						return originalBatch(statements);
-					}
-				);
+				contendNextReservation(claim.entry.narHash);
 
 				return Promise.resolve(claim.owner);
 			}
@@ -587,9 +617,11 @@ describe('canonical writes during verification', () => {
 				'another pass claimed the upload and reserved a newer incarnation',
 			arrange: async (claim: DeclaredClaim) => {
 				const owner = await claimAgain();
-				await currentServer().reserveCanonicalWrite(
-					owner,
-					claim.entry.uploadId
+				await reserveObjectIncarnation(
+					controlDatabase(),
+					'nar',
+					claim.entry.narHash,
+					owner
 				);
 
 				return owner;
@@ -650,4 +682,252 @@ describe('canonical writes during verification', () => {
 			});
 		}
 	);
+});
+
+interface R2Traffic {
+	readonly stagedReads: () => number;
+	readonly writtenKeys: () => string[];
+	readonly restore: () => void;
+}
+
+// Records the R2 reads of `stagingKey` and the keys of every put.
+function watchR2(stagingKey: string): R2Traffic {
+	const get = vi.spyOn(env.BLOBS, 'get');
+	const put = vi.spyOn(env.BLOBS, 'put');
+	const readKeys: string[] = [];
+	const putKeys: string[] = [];
+
+	return {
+		stagedReads: () => readKeys.filter((key) => key === stagingKey).length,
+		writtenKeys: () => putKeys,
+		// Restoring a spy clears its calls, so keep them first.
+		restore: () => {
+			readKeys.push(...get.mock.calls.map(([key]) => key));
+			putKeys.push(...put.mock.calls.map(([key]) => key));
+			get.mockRestore();
+			put.mockRestore();
+		}
+	};
+}
+
+describe('verifying a declared upload in the queue consumer', () => {
+	beforeEach(async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(testBase);
+		await resetTestServer();
+	});
+
+	it('reads the staged object once and publishes the object written from it', async () => {
+		const upload = await stagedUpload('consumer-written');
+		await commitEntry(upload.token, {
+			...upload.entry,
+			blob: declarationOf(upload.nar)
+		});
+		const traffic = watchR2(upload.r2Key);
+
+		try {
+			await verifyCurrentTenant();
+		} finally {
+			traffic.restore();
+		}
+
+		expect({
+			verdict: await pendingUploadVerdict(upload.entry.uploadId),
+			stagedReads: traffic.stagedReads(),
+			writtenKeys: traffic.writtenKeys(),
+			blobState: await blobStateRows(upload.entry.narHash)
+		}).toStrictEqual({
+			verdict: undefined,
+			stagedReads: 1,
+			writtenKeys: [
+				narObjectKey(upload.entry.narHash, 2),
+				expect.stringMatching(/narinfo/u)
+			],
+			blobState: [
+				{
+					fileHash: upload.nar.fileHash,
+					fileSize: upload.nar.narBytes.byteLength,
+					narSize: upload.nar.narSize,
+					incarnation: 2
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			mismatch: 'NAR',
+			arrange: async (seed: string) => {
+				const other = await verifiableNar(`${seed}-other`);
+				const upload = await stagedUpload(seed, other);
+
+				return { upload, blob: declarationOf(other) };
+			}
+		},
+		{
+			mismatch: 'declared file hash',
+			arrange: async (seed: string) => {
+				const upload = await stagedUpload(seed);
+
+				return {
+					upload,
+					blob: { ...declarationOf(upload.nar), fileHash: nixSha256Hash('1') }
+				};
+			}
+		},
+		{
+			mismatch: 'declared file size',
+			arrange: async (seed: string) => {
+				const upload = await stagedUpload(seed);
+				const blob = declarationOf(upload.nar);
+
+				return { upload, blob: { ...blob, fileSize: blob.fileSize + 1 } };
+			}
+		}
+	])(
+		'records a mismatch and writes no canonical object when the $mismatch differs',
+		async ({ mismatch, arrange }) => {
+			const { upload, blob } = await arrange(
+				`consumer-${mismatch.replaceAll(' ', '-')}`
+			);
+			await commitEntry(upload.token, { ...upload.entry, blob });
+
+			await verifyCurrentTenant();
+			const listed = await env.BLOBS.list({
+				prefix: `${narObjectKeyPrefix}${upload.entry.narHash}`
+			});
+
+			expect({
+				verdict: await pendingUploadVerdict(upload.entry.uploadId),
+				canonicalKeys: listed.objects.map((object) => object.key),
+				blobState: await blobStateRows(upload.entry.narHash)
+			}).toStrictEqual({
+				verdict: 'mismatch',
+				canonicalKeys: [],
+				blobState: []
+			});
+		}
+	);
+
+	it.each([
+		{
+			upload: 'committed without a declaration',
+			seed: 'copied-undeclared',
+			arrange: async (upload: NegotiatedUpload) => {
+				await commitEntry(upload.token, upload.entry);
+			},
+			stagedReads: 2,
+			incarnation: 2
+		},
+		{
+			upload:
+				'with a wrong declared hash whose NAR already has a canonical object',
+			seed: 'copied-existing',
+			arrange: async (upload: NegotiatedUpload) => {
+				await commitEntry(upload.token, {
+					...upload.entry,
+					blob: { ...declarationOf(upload.nar), fileHash: nixSha256Hash('1') }
+				});
+				await seedCanonicalBlob(upload.nar);
+			},
+			stagedReads: 1,
+			incarnation: 1
+		},
+		{
+			upload: 'with a wrong declared hash whose reservation is contended',
+			seed: 'copied-contended',
+			arrange: async (upload: NegotiatedUpload) => {
+				await commitEntry(upload.token, {
+					...upload.entry,
+					blob: { ...declarationOf(upload.nar), fileHash: nixSha256Hash('1') }
+				});
+				contendNextReservation(upload.entry.narHash);
+			},
+			stagedReads: 2,
+			incarnation: 3
+		}
+	])(
+		'verifies and copies an upload $upload',
+		async ({ seed, arrange, stagedReads, incarnation }) => {
+			const upload = await stagedUpload(seed);
+			await arrange(upload);
+			const traffic = watchR2(upload.r2Key);
+
+			try {
+				await verifyCurrentTenant();
+			} finally {
+				traffic.restore();
+				vi.restoreAllMocks();
+			}
+
+			expect({
+				verdict: await pendingUploadVerdict(upload.entry.uploadId),
+				stagedReads: traffic.stagedReads(),
+				canonicalWrites: traffic
+					.writtenKeys()
+					.filter((key) => key.startsWith(narObjectKeyPrefix)),
+				blobState: await blobStateRows(upload.entry.narHash)
+			}).toStrictEqual({
+				verdict: undefined,
+				stagedReads,
+				canonicalWrites:
+					incarnation === 1
+						? []
+						: [narObjectKey(upload.entry.narHash, incarnation)],
+				blobState: [
+					{
+						fileHash: upload.nar.fileHash,
+						fileSize: upload.nar.narBytes.byteLength,
+						narSize: upload.nar.narSize,
+						incarnation
+					}
+				]
+			});
+		}
+	);
+
+	it('verifies and copies an upload whose earlier write failed', async () => {
+		const upload = await stagedUpload('copied-after-write-failure');
+
+		await withoutAlarmArming(async () => {
+			await commitEntry(upload.token, {
+				...upload.entry,
+				blob: declarationOf(upload.nar)
+			});
+			const originalPut = env.BLOBS.put.bind(env.BLOBS);
+			const failingPut = vi
+				.spyOn(env.BLOBS, 'put')
+				.mockImplementation((key, value, options) =>
+					key.startsWith(narObjectKeyPrefix)
+						? Promise.reject(new Error('put: internal error (10001)'))
+						: originalPut(key, value, options)
+				);
+
+			try {
+				await verifyCurrentTenant();
+			} finally {
+				failingPut.mockRestore();
+			}
+
+			const afterFailure = await pendingUploadVerdict(upload.entry.uploadId);
+			vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+			const traffic = watchR2(upload.r2Key);
+
+			try {
+				await verifyCurrentTenant();
+			} finally {
+				traffic.restore();
+			}
+
+			expect({
+				afterFailure,
+				verdict: await pendingUploadVerdict(upload.entry.uploadId),
+				stagedReads: traffic.stagedReads()
+			}).toStrictEqual({
+				afterFailure: 'committing',
+				verdict: undefined,
+				stagedReads: 2
+			});
+		});
+	});
 });

@@ -23,6 +23,7 @@ import {
 	registeredLiveObjectIncarnation,
 	reserveObjectIncarnation
 } from './object-incarnation.ts';
+import { isR2BadDigest } from './r2-errors.ts';
 
 /**
  * The verified NAR metadata used to promote staged bytes.
@@ -30,12 +31,6 @@ import {
 export interface PromotionTarget {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
-}
-
-// The R2 binding reports a failed checksum as a plain `Error` whose message
-// ends with R2's BadDigest code.
-function isR2BadDigest(error: unknown): boolean {
-	return error instanceof Error && error.message.endsWith('(10037)');
 }
 
 async function putCanonicalObject(
