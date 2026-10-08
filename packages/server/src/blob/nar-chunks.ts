@@ -433,6 +433,13 @@ class RangeRead {
 }
 
 /**
+ * A source for one stored object, which also gives the object's size.
+ */
+export interface StoredNarChunkSource extends NarChunkSource {
+	readonly size: number;
+}
+
+/**
  * Reads a stored object in order. A sequential stream, the head, reads the
  * bytes that are needed next. Before each read, the source starts ranged gets
  * for the following parts of the object into pooled buffers, if the pool has a
@@ -446,7 +453,7 @@ class RangeRead {
  * the source cancelled the head for an earlier range, it first opens a new head
  * at that byte.
  */
-class StoredNarChunks implements NarChunkSource {
+class StoredNarChunks implements StoredNarChunkSource {
 	private position = 0;
 	private head: SequentialBody | undefined;
 	private headGet: SubrequestHold | undefined;
@@ -619,6 +626,10 @@ class StoredNarChunks implements NarChunkSource {
 		await head?.cancel(reason);
 	}
 
+	get size(): number {
+		return this.object.size;
+	}
+
 	read(): Promise<NarChunk | undefined> {
 		const next = this.next();
 		this.reading = next;
@@ -649,7 +660,7 @@ export async function openStoredNarChunks(
 	blobs: R2ObjectStore,
 	r2Key: R2ObjectKey,
 	{ buffers, watch, progress, firstGet }: StoredNarChunksOptions
-): Promise<NarChunkSource> {
+): Promise<StoredNarChunkSource> {
 	firstGet?.release();
 	const object = await abortableGet(() => blobs.get(r2Key), watch.signal);
 

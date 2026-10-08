@@ -86,14 +86,17 @@ time are the place to start.
 A verification attempt for a newly uploaded NAR fails when R2 returns an error,
 or when the staged object changes while the queue consumer reads it. It also
 fails when 60 seconds pass without the consumer completing a read of up to 1 MiB
-from the staged object. The tenant Worker records failed upload verification and
-publication attempts in `pending_upload.settle_failures`. `last_settle_error`
-contains a controlled failure category. Retries start after 30 seconds and
-double up to ten minutes. The tenant Worker's
-`pending upload verification failed` log includes the upload ID, category, phase
-and failure count, without provider messages or URLs. A stored decode verdict
-remains available while publication retries, so the next attempt does not decode
-the NAR again.
+from the staged object. When the commit declared the compressed object's hash
+and size and the attempt also writes the NAR's canonical object, that limit is
+30 seconds. The attempt then also fails when the write receives no bytes for 30
+seconds, which covers the work after the last read and R2's answer to the write.
+The tenant Worker records failed upload verification and publication attempts in
+`pending_upload.settle_failures`. `last_settle_error` contains a controlled
+failure category. Retries start after 30 seconds and double up to ten minutes.
+The tenant Worker's `pending upload verification failed` log includes the upload
+ID, category, phase and failure count, without provider messages or URLs. A
+stored decode verdict remains available while publication retries, so the next
+attempt does not decode the NAR again.
 
 The queue consumer logs its own `pending upload verification failed` warning
 when it abandons an upload. The warning includes the stage that was running
@@ -102,10 +105,12 @@ the tenant Worker's log, this warning records the error's own message, so it can
 include R2 error text. For every newly uploaded NAR that it decodes, the
 consumer also logs a `pending upload verification finished` event with the
 outcome (`verified`, `nar-hash-mismatch`, `nar-size-mismatch`, `undecodable`,
-`missing`, `abandoned`, or `aborted` when the pass budget ends before
-verification finishes), the number of compressed bytes that it read and NAR
-bytes that it decoded (`compressedBytes` and `narBytes`), the number of chunks
-of up to 1 MiB that it decoded (`reads`), and the duration in milliseconds.
+`file-hash-mismatch` or `file-size-mismatch` when the staged object differs from
+the client's declaration, `missing`, `abandoned`, or `aborted` when the pass
+budget ends before verification finishes), the number of compressed bytes that
+it read and NAR bytes that it decoded (`compressedBytes` and `narBytes`), the
+number of chunks of up to 1 MiB that it decoded (`reads`), and the duration in
+milliseconds.
 
 The same event describes how the consumer read the object ahead of the decoder
 with ranged gets into the isolate's pool of 8 MiB buffers:

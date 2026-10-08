@@ -628,6 +628,12 @@ requests below are all under the tenant URL.
    path has been acknowledged. If a declared NAR size is over 4 GiB, the server
    refuses the commit with 413.
 
+   When the server advertises the `blob` attribute on the `commit-batch` and
+   `subscribe-identity` capabilities, a batch entry can also declare the SHA-256
+   and size of the compressed object that the CLI uploaded. The server keeps the
+   first declaration for each upload and refuses a commit that declares
+   different values with 409. The CLI does not send a declaration yet.
+
 5. The object records the upload as pending, and adds a `tenant-verify` job to
    the queue. A committed upload whose verdict is still `committing` or
    `pending` remains after its expiry, and a resent commit for it waits for the
@@ -635,10 +641,11 @@ requests below are all under the tenant URL.
    of up to 32 uploads, totalling at most 4 GiB of declared NAR size, and
    verifies two uploads at a time. It passes each staged object, in order and in
    chunks of up to 1 MiB, through native zstd decompression and SHA-256. It
-   compares the result with the NAR hash and size that the CLI declared. The
-   same pass hashes and measures the compressed bytes. This means that the
-   stored file hash and file size come from the server, not from the client. A
-   frame that needs a decoding window larger than 8 MiB counts as undecodable.
+   compares the result with the NAR hash and size that the CLI declared. Unless
+   the consumer also writes the canonical object (see below), the same pass
+   hashes and measures the compressed bytes, so the stored file hash and file
+   size come from the server, not from the client. A frame that needs a decoding
+   window larger than 8 MiB counts as undecodable.
 
    One R2 stream delivers less than the decoder can consume, so the consumer
    also reads ahead with ranged gets. The object is divided into 8 MiB blocks. A
@@ -677,12 +684,57 @@ requests below are all under the tenant URL.
    later pass retries it. There is no limit on the total time for one upload,
    but the whole pass stops when its 14-minute budget ends.
 
-6. If the bytes match, the object promotes them. It copies them to
-   `nar/<narHash>.nar.zst`, and asks R2 to check the SHA-256 again and to write
-   the object only if the key doesn't already exist. In one D1 batch, it then
-   records the `blob_state` row, the `blob_ref` reference, and the charge to the
-   tenant's usage. Finally it publishes the path: it writes the signed narinfo
-   to R2, and sends the result to the CLI over the waiting WebSocket.
+   When a commit declared the compressed object's SHA-256 and size, and the NAR
+   has no canonical object yet, the consumer promotes the upload in the same
+   read. It asks the tenant's object to reserve the next version of the
+   canonical object, `nar/<narHash>.<n>.nar.zst`, for its claim. It then sends
+   every chunk, from the head or from a prefetched block, both to the decoder
+   and to a conditional R2 put of the declared size. A buffer returns to the
+   pool only once both the decoder and the put have finished with its chunks. R2
+   checks the body against the declared SHA-256 and stores nothing if they
+   differ. The consumer keeps back the last chunk until the NAR hash and size
+   match. For a NAR that fails verification, the put therefore cannot complete,
+   and the consumer aborts it. Both cases record `mismatch`.
+
+   R2 fails a put whose body receives no bytes for about 75 seconds, and keeps
+   one open across a 60-second gap. A block that a ranged get read ahead reaches
+   the put only once all of it has arrived, so reads can complete while the put
+   receives nothing. In this mode the consumer therefore abandons the upload
+   after 30 seconds without a completed read, and also after 30 seconds in which
+   the put receives no bytes. The second limit also covers the work after the
+   last read and R2's answer to the put. When the pass claims a declared upload,
+   it also sets one subrequest aside for the canonical put.
+
+   The consumer uses the declaration only together with this write. An upload is
+   verified as described above, and the tenant's object copies its staged object
+   in step 6, when the commit has no declaration, when the NAR already has a
+   canonical object, when the reservation fails, or when an earlier attempt for
+   the upload failed. The last case keeps a failure that only the write can hit
+   from repeating until the upload is exhausted.
+
+   The consumer has at most six R2 requests waiting for a response at once,
+   which is the Workers limit for one invocation. The first gets, ranged gets,
+   new heads and puts of every verification in the pass share this limit. A get
+   counts until R2 returns the object, and a put waits until R2 has received its
+   whole body, so it counts for the whole write. A put's body needs gets that
+   can start after the put, so puts never take the last connection. A request
+   counts against the invocation's subrequest allowance as soon as the consumer
+   makes it, also while it waits for a connection.
+
+6. If the bytes match, the tenant's object promotes them. If the consumer wrote
+   the canonical object, the tenant's object reads only that object's metadata
+   and copies nothing. Otherwise the tenant's object copies the bytes to
+   `nar/<narHash>.<n>.nar.zst`, and asks R2 to check the SHA-256 again and to
+   write the object only if the key doesn't already exist. In one D1 batch, the
+   tenant's object then records the `blob_state` row, the `blob_ref` reference,
+   and the charge to the tenant's usage. Finally it publishes the path: it
+   writes the signed narinfo to R2, and sends the result to the CLI over the
+   waiting WebSocket.
+
+   If a written object will not be published, for example because another pass
+   has claimed the upload, the tenant's object marks its version absent and
+   queues it for deletion after the late-write horizon. A later pass verifies
+   the upload again.
 
    If the bytes don't match, the object deletes the staged object and records a
    final `mismatch` result. The same happens when R2 refuses the copy because

@@ -29,8 +29,10 @@ import {
 } from '../blob/connection-limited-bucket.ts';
 import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import {
-	type NarVerification,
+	type DeclaredNarVerification,
+	type NarVerifyProgress,
 	narVerifyProgress,
+	verifyAndWriteStoredNar,
 	verifyStoredNar
 } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
@@ -79,6 +81,8 @@ import {
 	withRenewedVerificationClaim
 } from '../do/verification-claim-lease.ts';
 import {
+	type CanonicalWrite,
+	type CanonicalWriteReservation,
 	type PendingVerification,
 	type PendingVerificationBatch,
 	type VerificationResult
@@ -89,6 +93,7 @@ import {
 } from '../errors.ts';
 import {
 	blobReaperBatchSize,
+	narObjectKey,
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
 } from '../http/http.ts';
@@ -1131,45 +1136,138 @@ export class VerdictRecorder {
 
 type FreshVerificationOutcome =
 	| 'verified'
-	| Extract<NarVerification, { readonly ok: false }>['reason']
+	| Extract<DeclaredNarVerification, { readonly ok: false }>['reason']
 	| 'missing'
 	| 'abandoned'
 	| 'aborted';
 
 /**
+ * Asks the tenant's Durable Object to reserve the canonical incarnation for a
+ * declared upload. `undefined` means that the consumer verifies the upload
+ * without writing the canonical object.
+ */
+type CanonicalWriteReserver = (
+	claim: PendingVerification
+) => Promise<CanonicalWriteReservation | undefined>;
+
+interface FreshVerification {
+	readonly verification: DeclaredNarVerification;
+	readonly canonicalWrite?: CanonicalWrite;
+}
+
+/**
+ * What every verification in one pass shares.
+ */
+interface FreshVerificationPass {
+	readonly logger: Logger;
+	readonly blobs: R2ObjectStore;
+	readonly buffers: NarReadBufferPool;
+	readonly reserveCanonicalWrite: CanonicalWriteReserver;
+	readonly recorder: VerdictRecorder;
+	readonly signal: AbortSignal;
+}
+
+/**
+ * One claimed upload and the subrequests that the pass set aside for it: its
+ * first get and, for a declared upload, the canonical put.
+ */
+interface FreshClaim {
+	readonly claim: PendingVerification;
+	readonly firstGet: SubrequestHold;
+	readonly canonicalPut?: SubrequestHold;
+}
+
+// A declared upload whose incarnation is reserved is verified and written in
+// one read. Every other upload is verified alone, and the Durable Object later
+// copies its staged object. The declaration is never used without the write:
+// a copy checks the hash that this verifier computes from the bytes it read.
+async function verifyFreshBytes(
+	pass: FreshVerificationPass,
+	{ claim, firstGet, canonicalPut }: FreshClaim,
+	reservation: CanonicalWriteReservation | undefined,
+	progress: NarVerifyProgress
+): Promise<FreshVerification> {
+	const { blobs, buffers, signal } = pass;
+	const expected = { narHash: claim.narHash, narSize: claim.narSize };
+
+	if (reservation?.kind !== 'reserved' || claim.blob === undefined) {
+		canonicalPut?.release();
+
+		return {
+			verification: await verifyStoredNar(blobs, claim.r2Key, expected, {
+				buffers,
+				firstGet,
+				signal,
+				progress
+			})
+		};
+	}
+
+	const canonicalWrite = { incarnation: reservation.incarnation };
+	const verification = await verifyAndWriteStoredNar(
+		blobs,
+		claim.r2Key,
+		expected,
+		{
+			key: narObjectKey(claim.narHash, reservation.incarnation),
+			fileHash: claim.blob.fileHash,
+			fileSize: claim.blob.fileSize
+		},
+		{ buffers, firstGet, canonicalPut, signal, progress }
+	);
+
+	return verification.ok ? { verification, canonicalWrite } : { verification };
+}
+
+/**
  * Verifies the staged object of one upload that is not a reuse, and adds the
- * verdict to `recorder`. A missing object is terminal. When the pass is
- * aborted, the error propagates; any other failure abandons the upload for a
- * later pass. Each call logs one `pending upload verification finished` event
- * with its outcome and the work that it did.
+ * verdict to the pass's recorder. A missing object is terminal. When the pass
+ * is aborted, the error propagates; any other failure abandons the upload for
+ * a later pass, as does a claim that the pass no longer owns. Each call logs
+ * one `pending upload verification finished` event with its outcome and the
+ * work that it did.
  */
 async function verifyFreshClaim(
-	logger: Logger,
-	blobs: R2ObjectStore,
-	buffers: NarReadBufferPool,
-	claim: PendingVerification,
-	firstGet: SubrequestHold,
-	recorder: VerdictRecorder,
-	signal: AbortSignal
+	pass: FreshVerificationPass,
+	fresh: FreshClaim
 ): Promise<void> {
+	const { logger, buffers, reserveCanonicalWrite, recorder, signal } = pass;
+	const { claim, firstGet, canonicalPut } = fresh;
 	const progress = narVerifyProgress();
 	const startedAt = Date.now();
 	let outcome: FreshVerificationOutcome = 'aborted';
 
 	try {
 		signal.throwIfAborted();
-		const verification = await verifyStoredNar(
-			blobs,
-			claim.r2Key,
-			{ narHash: claim.narHash, narSize: claim.narSize },
-			{ buffers, firstGet, signal, progress }
+		const reservation =
+			claim.blob === undefined ? undefined : await reserveCanonicalWrite(claim);
+		signal.throwIfAborted();
+
+		if (reservation?.kind === 'revoked') {
+			outcome = 'abandoned';
+			recorder.add({
+				uploadId: claim.uploadId,
+				verdict: { kind: 'abandoned' }
+			});
+			return;
+		}
+
+		const { verification, canonicalWrite } = await verifyFreshBytes(
+			pass,
+			fresh,
+			reservation,
+			progress
 		);
 		signal.throwIfAborted();
 		outcome = verification.ok ? 'verified' : verification.reason;
 
 		recorder.add({
 			uploadId: claim.uploadId,
-			verdict: { kind: 'verified', verification }
+			verdict: {
+				kind: 'verified',
+				verification,
+				...(canonicalWrite !== undefined && { canonicalWrite })
+			}
 		});
 	} catch (error) {
 		if (signal.aborted) {
@@ -1196,6 +1294,7 @@ async function verifyFreshClaim(
 		recorder.add({ uploadId: claim.uploadId, verdict: { kind: 'abandoned' } });
 	} finally {
 		firstGet.release();
+		canonicalPut?.release();
 		logger.info('pending upload verification finished', {
 			uploadId: claim.uploadId,
 			storePathHash: claim.storePathHash,
@@ -1327,6 +1426,32 @@ export async function verifyTenant(
 					env.BLOBS,
 					maxOutgoingConnections
 				);
+				// A Durable Object from an earlier build has no reservation RPC. After
+				// any failure the consumer verifies the upload without the write, and
+				// the Durable Object copies its staged object.
+				const reserveCanonicalWrite: CanonicalWriteReserver = async (claim) => {
+					try {
+						const reservation = server.reserveCanonicalWrite(
+							owner,
+							claim.uploadId
+						);
+
+						return await raceVerificationOperation(
+							Promise.resolve<CanonicalWriteReservation>(reservation),
+							signal
+						);
+					} catch (error) {
+						signal.throwIfAborted();
+						logger.warn('canonical write not reserved', {
+							uploadId: claim.uploadId,
+							narHash: claim.narHash,
+							reason: 'reservation-failed',
+							error
+						});
+
+						return;
+					}
+				};
 
 				// Reuse rows need no decode. The Durable Object checks the canonical object
 				// and performs every shared write while it still owns the claim.
@@ -1338,32 +1463,35 @@ export async function verifyTenant(
 					});
 				}
 
-				// Set aside every upload's first get before any verification starts,
-				// so ranged reads for earlier uploads cannot spend the subrequests that
-				// later uploads need.
-				const verifications = freshClaims.map((claim) => ({
+				// Set aside every upload's first get, and the canonical put of every
+				// declared upload, before any verification starts, so ranged reads for
+				// earlier uploads cannot spend the subrequests that later uploads need.
+				const verifications = freshClaims.map((claim): FreshClaim => ({
 					claim,
-					firstGet: holdSubrequests(1)
+					firstGet: holdSubrequests(1),
+					...(claim.blob !== undefined && {
+						canonicalPut: holdSubrequests(1)
+					})
 				}));
+				const pass: FreshVerificationPass = {
+					logger,
+					blobs,
+					buffers,
+					reserveCanonicalWrite,
+					recorder,
+					signal
+				};
 
 				try {
 					await mapWithConcurrency(
 						verifications,
 						verifyDecodeConcurrency,
-						({ claim, firstGet }) =>
-							verifyFreshClaim(
-								logger,
-								blobs,
-								buffers,
-								claim,
-								firstGet,
-								recorder,
-								signal
-							)
+						(fresh) => verifyFreshClaim(pass, fresh)
 					);
 				} finally {
-					for (const { firstGet } of verifications) {
+					for (const { firstGet, canonicalPut } of verifications) {
 						firstGet.release();
+						canonicalPut?.release();
 					}
 				}
 

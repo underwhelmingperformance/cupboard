@@ -42,7 +42,7 @@ import {
 } from 'drizzle-orm';
 import { z } from 'zod';
 
-import { type NarVerification } from '../blob/nar-verify.ts';
+import { type DeclaredNarVerification } from '../blob/nar-verify.ts';
 import { recordedNarInfoMetadata } from '../blob/narinfo-object-metadata.ts';
 import {
 	type CanonicalIncarnation,
@@ -396,7 +396,9 @@ function promotionOf(
 	return { kind: 'written', incarnation: verdict.canonicalWrite.incarnation };
 }
 
-function copiedBlob(verification: NarVerification): CanonicalBlob | undefined {
+function copiedBlob(
+	verification: DeclaredNarVerification
+): CanonicalBlob | undefined {
 	if (
 		!verification.ok ||
 		verification.fileHash === undefined ||
@@ -438,10 +440,13 @@ interface HeldVerdicts {
 /**
  * The answer to a queue consumer that asks to write a declared upload's
  * canonical object itself. `revoked` means that the consumer's pass no longer
- * owns the claim.
+ * owns the claim. `declined` means that an earlier attempt for the upload
+ * failed, so the consumer verifies it and the Durable Object copies it.
  */
 export type CanonicalWriteReservation =
-	CanonicalIncarnation | { readonly kind: 'revoked' };
+	| CanonicalIncarnation
+	| { readonly kind: 'revoked' }
+	| { readonly kind: 'declined' };
 
 // The owner must accompany every later renewal and verdict. `truncated` means
 // that the row or byte limit left work for another pass.
@@ -470,7 +475,7 @@ export interface CanonicalWrite {
 export type VerificationVerdict =
 	| {
 			readonly kind: 'verified';
-			readonly verification: NarVerification;
+			readonly verification: DeclaredNarVerification;
 			readonly canonicalWrite?: CanonicalWrite;
 	  }
 	| { readonly kind: 'promoted' }
@@ -510,7 +515,16 @@ const narVerificationSchema = z.union([
 		reason: z.literal('nar-size-mismatch'),
 		actualNarSize: z.number()
 	}),
-	z.strictObject({ ok: z.literal(false), reason: z.literal('undecodable') })
+	z.strictObject({ ok: z.literal(false), reason: z.literal('undecodable') }),
+	z.strictObject({
+		ok: z.literal(false),
+		reason: z.literal('file-size-mismatch'),
+		actualFileSize: z.number()
+	}),
+	z.strictObject({
+		ok: z.literal(false),
+		reason: z.literal('file-hash-mismatch')
+	})
 ]);
 
 const canonicalWriteSchema = z.strictObject({
@@ -976,7 +990,7 @@ export class VerificationService {
 
 	private async prepareRecordedVerdict(
 		captured: PendingUploadRow,
-		verification: NarVerification,
+		verification: DeclaredNarVerification,
 		promotion: PromotionState,
 		owner: string,
 		signal?: AbortSignal
@@ -1320,7 +1334,7 @@ export class VerificationService {
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
-		verification: NarVerification,
+		verification: DeclaredNarVerification,
 		promotion: PromotionState,
 		owner: string,
 		signal?: AbortSignal
@@ -3521,6 +3535,13 @@ export class VerificationService {
 			return { kind: 'revoked' };
 		}
 
+		// Some failures occur only while writing, such as a stall that the copy
+		// would tolerate or an R2 error on the canonical put. Retrying the write
+		// could repeat the failure until the upload is exhausted.
+		if (pending.settleFailures > 0) {
+			return { kind: 'declined' };
+		}
+
 		return this.uploadState.reserveCanonicalWrite(pending.narHash, owner);
 	}
 
@@ -3781,7 +3802,7 @@ export class VerificationService {
 						return;
 					}
 
-					const verification: NarVerification =
+					const verification: DeclaredNarVerification =
 						verdict.kind === 'promoted' ? { ok: true } : verdict.verification;
 					const promotion = promotionOf(verdict);
 					const prepared = await this.prepareRecordedVerdict(
