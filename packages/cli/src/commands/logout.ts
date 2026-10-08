@@ -445,10 +445,9 @@ export async function runLogout(
 
 	if (cloudflareSignIn.outcome === 'kept') {
 		reporter.warn(
-			'Your Cloudflare sign-in is still cached, and later commands can use it ' +
-				'to start a new session without a browser. Run `cupboard logout ' +
-				'--cloudflare` to remove it. `cupboard login` and `cupboard init` will ' +
-				'then ask you to sign in to Cloudflare again.'
+			'Your Cloudflare sign-in is still cached, and it can deploy to your ' +
+				'Cloudflare account. Run `cupboard logout --cloudflare` to remove it. ' +
+				'`cupboard init` will then ask you to sign in to Cloudflare again.'
 		);
 	} else if (cloudflareSignIn.outcome === 'unreadable') {
 		reporter.warn(
@@ -478,7 +477,7 @@ export function registerLogoutCommand(
 		.option('--all', 'delete every saved sign-in')
 		.option(
 			'--cloudflare',
-			'also delete the cached Cloudflare sign-in, which `login` and `init` share'
+			'also delete the cached Cloudflare sign-in, which `init` keeps for the Cloudflare API'
 		)
 		.addHelpText(
 			'after',
@@ -497,8 +496,8 @@ export function registerLogoutCommand(
 				'administrator can end it with `cupboard session revoke`, and an',
 				'operator with `cupboard deployment session revoke`.',
 				'',
-				'While a Cloudflare sign-in is cached, later commands can use it to',
-				'start a new session without a browser; pass --cloudflare to remove it.',
+				'A cached Cloudflare sign-in can deploy to your Cloudflare account;',
+				'pass --cloudflare to remove it.',
 				'',
 				'Examples:',
 				'  cupboard logout https://cupboard.example.workers.dev/t/acme',

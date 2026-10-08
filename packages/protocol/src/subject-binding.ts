@@ -6,6 +6,16 @@ const subjectBindingVersion = 'cupboard/subject-binding/v1';
 
 export const subjectBindingMaxTargets = 4;
 
+/**
+ * The Cupboard problem subtypes of the `invalid_grant` refusals for a
+ * nonce-bound subject token.
+ */
+export const subjectBindingProblems = {
+	unbound: 'subject-token-unbound',
+	replayed: 'subject-token-replayed',
+	tooOld: 'subject-token-too-old'
+} as const;
+
 // The base64url encoding of 32 random bytes, without padding.
 const subjectBindingSeedSchema = z.string().regex(/^[\w-]{43}$/u);
 

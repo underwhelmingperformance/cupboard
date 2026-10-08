@@ -11,9 +11,15 @@ import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
 import type { Audience } from '../audience.ts';
+import { BoundSignIn } from '../auth/bound-sign-in.ts';
 import { CupboardClient } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
-import { cacheLoginSession, loginIdToken } from '../commands/login.ts';
+import {
+	cacheLoginSession,
+	type IdentityLoginOptions,
+	identitySignIn,
+	isCloudflareSignIn
+} from '../commands/login.ts';
 import {
 	CliError,
 	CliUsageError,
@@ -26,7 +32,6 @@ import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
 import {
 	type CredentialSource,
 	defaultCredentialChain,
-	freshIdToken,
 	resolveCloudflare
 } from './auth.ts';
 import {
@@ -36,7 +41,6 @@ import {
 	type DeployAuthority,
 	establishAuthority,
 	removeLeftoverClaimSecret,
-	renewingIdToken,
 	tenantMigratorFor,
 	withClaimSecret
 } from './authority.ts';
@@ -48,7 +52,6 @@ import {
 	type CloudflareApi,
 	createCloudflareApi
 } from './cloudflare-api.ts';
-import { refreshCloudflareGrant } from './cloudflare-oauth.ts';
 import {
 	cronProblem,
 	type DeploymentConfig,
@@ -69,13 +72,9 @@ import {
 	type StartingPlan,
 	startingPlanLookup
 } from './existing-deployment.ts';
-import {
-	readCachedGrant,
-	withCachedGrantLock,
-	writeCachedGrant
-} from './grant-store.ts';
 import type { CloudflareAccountId } from './identifiers.ts';
 import {
+	askFirstTenantSlug,
 	DeploymentClaimFailedError,
 	onboardDeployment,
 	type OnboardOutcome
@@ -256,9 +255,10 @@ const serverError: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 /**
- * Surface a server-side fault a deploy probe hit: read the exception the Worker
- * logged for the failing request (by its cf-ray) and show it inline, falling
- * back to the exact command that reads the log when it cannot be fetched yet.
+ * Shows a server-side fault that a deploy probe hit. It reads the exception
+ * that the Worker logged for the failing request, found by its cf-ray, and
+ * shows it inline. When the log cannot be fetched yet, it shows the command
+ * that reads the log.
  */
 async function showServerFault(dependencies: {
 	readonly ui: DeployUi;
@@ -1081,21 +1081,28 @@ async function deployFlow(
 	let api: CloudflareApi;
 	let accountId: CloudflareAccountId;
 	let credentialSource: CredentialSource;
+	let loginIdToken: string | undefined;
 
 	try {
-		({ client, clientWithSignal, api, accountId, credentialSource } =
-			await resolveCloudflare(
-				cliOptions.account,
-				(accounts) => chooseDeployAccount(ui, accounts, isInteractive),
-				defaultCredentialChain({
-					openBrowser: (url) => {
-						ui.openBrowser(url);
-					},
-					wrangler: cliOptions.wrangler ?? true,
-					interactive: isInteractive,
-					signal: runtimeOptions.signal
-				})
-			));
+		({
+			client,
+			clientWithSignal,
+			api,
+			accountId,
+			credentialSource,
+			loginIdToken
+		} = await resolveCloudflare(
+			cliOptions.account,
+			(accounts) => chooseDeployAccount(ui, accounts, isInteractive),
+			defaultCredentialChain({
+				openBrowser: (url) => {
+					ui.openBrowser(url);
+				},
+				wrangler: cliOptions.wrangler ?? true,
+				interactive: isInteractive,
+				signal: runtimeOptions.signal
+			})
+		));
 	} catch (error) {
 		if (error instanceof DeployCancelledError) {
 			ui.cancelled('Deploy aborted.');
@@ -1394,6 +1401,17 @@ async function deployFlow(
 		},
 		signal: runtimeOptions.signal
 	};
+	// Without a terminal, the sign-in throws `OwnerLoginRequiredError`, so the
+	// run never opens a browser.
+	const boundSignIn = (options: IdentityLoginOptions): BoundSignIn =>
+		new BoundSignIn(
+			isInteractive ? identitySignIn(options, loginDependencies) : undefined
+		);
+	const claimIdentity: IdentityLoginOptions = {
+		oidcIssuer: cliOptions.oidcIssuer,
+		clientId: cliOptions.clientId,
+		headless: cliOptions.headless
+	};
 
 	const authority = await establishAuthority(
 		{ agreed },
@@ -1410,16 +1428,15 @@ async function deployFlow(
 					signal: runtimeOptions.signal
 				}).instance.get();
 			},
-			idToken: renewingIdToken(() =>
-				loginIdToken(
-					{
-						oidcIssuer: cliOptions.oidcIssuer,
-						clientId: cliOptions.clientId,
-						headless: cliOptions.headless
-					},
-					loginDependencies
-				)
-			),
+			signIn: boundSignIn(claimIdentity),
+			...(loginIdToken !== undefined &&
+				isCloudflareSignIn(claimIdentity) && {
+					cloudflareLoginIdToken: loginIdToken
+				}),
+			...(cliOptions.cache !== undefined && {
+				firstTenantSlug: cliOptions.cache
+			}),
+			chooseFirstTenantSlug: (url) => askFirstTenantSlug(ui, url.origin),
 			servesCupboard: (url) =>
 				isVersionServed(() =>
 					CupboardClient.fromUrl(url, {
@@ -1432,21 +1449,22 @@ async function deployFlow(
 					info: (message) => {
 						ui.info(message);
 					},
-					login: (issuer, clientId) =>
-						loginIdToken(
-							{
-								oidcIssuer: issuer,
-								clientId,
-								headless: cliOptions.headless,
-								reuseCachedGrant: false
-							},
-							loginDependencies
-						),
-					exchange: (url, idToken) =>
+					signInFor: (issuer, clientId) =>
+						boundSignIn({
+							oidcIssuer: issuer,
+							clientId,
+							headless: cliOptions.headless
+						}),
+					exchange: (url, token) =>
 						CupboardClient.fromUrl(url, {
 							cache: { kind: 'default' },
 							signal: runtimeOptions.signal
-						}).tokenExchange(idToken, subjectTokenTypeIdToken),
+						}).tokenExchange(
+							token.idToken,
+							subjectTokenTypeIdToken,
+							undefined,
+							token.binding
+						),
 					cacheSession: (response, url) =>
 						cacheLoginSession(response, url, runtimeOptions.signal),
 					defaultClientId: cliOptions.clientId
@@ -1550,25 +1568,6 @@ async function deployFlow(
 
 	const deployedConfig = reviewedPlan.artifact.config;
 
-	const refreshIdToken =
-		credentialSource === 'cached login' || credentialSource === 'browser login'
-			? () =>
-					freshIdToken({
-						readGrant: readCachedGrant,
-						writeGrant: writeCachedGrant,
-						withGrantLock: withCachedGrantLock,
-						refreshGrant: (previous) =>
-							refreshCloudflareGrant(
-								previous,
-								fetch,
-								Date.now,
-								runtimeOptions.signal
-							),
-						now: Date.now,
-						signal: runtimeOptions.signal
-					})
-			: undefined;
-
 	// The settlement waits for the server's required local step, which is the
 	// step that the walk asks for while its transition is incomplete. The walk
 	// checks the tenants against its own step afterwards.
@@ -1656,7 +1655,6 @@ async function deployFlow(
 									bucketName: agreedBucket
 								}
 							: { kind: 'fresh' },
-					...(refreshIdToken !== undefined && { freshIdToken: refreshIdToken }),
 					removeClaimSecret: removeClaimSecretOnce
 				})
 		});

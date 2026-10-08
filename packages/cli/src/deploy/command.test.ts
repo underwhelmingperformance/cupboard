@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { type Audience, audienceSchema } from '../audience.ts';
+import { BoundSignIn } from '../auth/bound-sign-in.ts';
 import type { TokenProvider } from '../client/credentials.ts';
 import {
 	CupboardHttpError,
@@ -80,6 +81,35 @@ import { claimSecretSchema } from './secrets.ts';
 import type { DeploymentObservation } from './transition.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
 import * as deployUi from './ui.ts';
+
+/**
+ * A sign-in whose ID tokens have `claims` and the requested nonce. `onSignIn`
+ * runs for each sign-in.
+ */
+function signInWith(
+	claims: Record<string, unknown>,
+	onSignIn?: () => void
+): BoundSignIn {
+	return new BoundSignIn({
+		bindsNonce: true,
+		signIn: (nonce) => {
+			onSignIn?.();
+			const json = JSON.stringify({
+				...claims,
+				nonce,
+				iat: Math.floor(Date.now() / 1000)
+			});
+			const payload = Buffer.from(json).toString('base64url');
+
+			return Promise.resolve(`e30.${payload}.signature`);
+		}
+	});
+}
+
+// An update never asks for the first tenant's slug.
+function noSlugPrompt(): Promise<string | undefined> {
+	return Promise.reject(new Error('unexpected slug prompt'));
+}
 
 describe('executeDeploy result file', () => {
 	it('passes the result-file path into the deployment UI', async () => {
@@ -1284,7 +1314,7 @@ describe('withClaimSecret', () => {
 			{
 				kind: 'bootstrap',
 				claimSecret: claimSecretSchema.parse('claim-1'),
-				idToken: () => Promise.resolve('id-token-1'),
+				signIn: new BoundSignIn(undefined),
 				claimant: firstClaimant
 			},
 			{
@@ -1651,10 +1681,10 @@ describe('establishAuthority', () => {
 							calls.push('checkAdmin');
 							return Promise.resolve();
 						},
-						idToken: () => {
+						signIn: signInWith({}, () => {
 							calls.push('login');
-							return Promise.resolve('id-token-1');
-						},
+						}),
+						chooseFirstTenantSlug: noSlugPrompt,
 						servesCupboard: () => Promise.resolve(true),
 						confirmClaim: () => {
 							calls.push('confirmClaim');
@@ -1748,7 +1778,8 @@ describe('establishAuthority', () => {
 						calls.push(`checkAdmin:${url.href}`);
 						return Promise.resolve();
 					},
-					idToken: () => Promise.reject(new Error('no login expected')),
+					signIn: new BoundSignIn(undefined),
+					chooseFirstTenantSlug: noSlugPrompt,
 					servesCupboard: (url) => {
 						calls.push(`servesCupboard:${url.href}`);
 						return Promise.resolve(true);
@@ -1814,10 +1845,10 @@ describe('establishAuthority', () => {
 							calls.push('checkAdmin');
 							return Promise.resolve();
 						},
-						idToken: () => {
+						signIn: signInWith({}, () => {
 							calls.push('login');
-							return Promise.resolve('id-token-1');
-						},
+						}),
+						chooseFirstTenantSlug: noSlugPrompt,
 						servesCupboard: () => Promise.resolve(true),
 						confirmClaim: () => Promise.resolve(true),
 						interactive: true
@@ -1856,7 +1887,7 @@ const updateAuthority: DeployAuthority = {
 const bootstrapAuthority: DeployAuthority = {
 	kind: 'bootstrap',
 	claimSecret: claimSecretSchema.parse('claim-1'),
-	idToken: () => Promise.resolve('id-token-1'),
+	signIn: new BoundSignIn(undefined),
 	claimant: firstClaimant
 };
 const unclaimedAuthority: DeployAuthority = { kind: 'unclaimed' };
@@ -2259,14 +2290,12 @@ describe('establishAuthority on a first deploy', () => {
 			"d1_databases": [{ "binding": "CUPBOARD_DB", "database_name": "cupboard" }]
 		}`
 	);
-	const idToken = `${Buffer.from('{}').toString('base64url')}.${Buffer.from(
-		JSON.stringify({
-			iss: 'https://idp.example.test',
-			sub: 'founder',
-			aud: 'cupboard-cli',
-			name: 'Ada'
-		})
-	).toString('base64url')}.signature`;
+	const claimantClaims = {
+		iss: 'https://idp.example.test',
+		sub: 'founder',
+		aud: 'cupboard-cli',
+		name: 'Ada'
+	};
 
 	it.each([
 		{ name: 'confirmed', isConfirmed: true, kind: 'bootstrap' },
@@ -2300,7 +2329,8 @@ describe('establishAuthority on a first deploy', () => {
 					adminAccess: () => updateAccess,
 					checkAdmin: () => Promise.resolve(),
 					servesCupboard: () => Promise.resolve(true),
-					idToken: () => Promise.resolve(idToken),
+					signIn: signInWith(claimantClaims),
+					chooseFirstTenantSlug: () => Promise.resolve('acme'),
 					confirmClaim: (claimant) => {
 						asked.push(claimant);
 						return Promise.resolve(isConfirmed);

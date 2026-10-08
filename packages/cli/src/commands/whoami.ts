@@ -8,6 +8,7 @@ import {
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
+import { BoundSignIn } from '../auth/bound-sign-in.ts';
 import {
 	type ProviderIdentity,
 	providerIdentity,
@@ -29,7 +30,7 @@ import { authExitCode, CliError, CliUsageError } from '../errors.ts';
 import {
 	type IdentityLoginOptions,
 	identityLoginOptions,
-	loginIdToken
+	identitySignIn
 } from './login.ts';
 
 export interface WhoamiOptions extends IdentityLoginOptions {
@@ -79,7 +80,7 @@ export type WhoamiInput =
 
 /**
  * The cached sessions and, when one is cached, the Cloudflare sign-in that
- * can start new sessions silently.
+ * `cupboard init` keeps for the Cloudflare API.
  */
 interface WhoamiSessions {
 	readonly sessions?: readonly SessionIdentity[];
@@ -377,16 +378,22 @@ export function registerWhoamiCommand(
 				listSessions: listCachedSessions,
 				readSession: readCachedSession,
 				readGrant: readCachedGrant,
-				signIn: (provider) =>
-					loginIdToken(provider, {
-						openBrowser: (target) => {
-							openBrowser(target, reporter);
-						},
-						info: (message) => {
-							reporter.info(message);
-						},
-						signal: programOptions.signal
-					}),
+				signIn: async (provider) => {
+					// The token is only displayed, so it is bound to no server.
+					const { idToken } = await new BoundSignIn(
+						identitySignIn(provider, {
+							openBrowser: (target) => {
+								openBrowser(target, reporter);
+							},
+							info: (message) => {
+								reporter.info(message);
+							},
+							signal: programOptions.signal
+						})
+					).idTokenFor([]);
+
+					return idToken;
+				},
 				now: Date.now
 			});
 		});

@@ -13,13 +13,10 @@ import { decodeJwtPayload } from '../auth/jwt.ts';
 import { CliError } from '../errors.ts';
 import { ownDisplayName } from '../principal.ts';
 
-import { cloudflareOauthClientId } from './cloudflare-oauth.ts';
-
-/**
- * The issuer of the Cloudflare login. `cupboard init` and `cupboard login` use
- * it for the admin's identity unless `--oidc-issuer` specifies another.
- */
-export const cloudflareDashIssuer = 'https://dash.cloudflare.com';
+import {
+	cloudflareDashIssuer,
+	cloudflareOauthClientId
+} from './cloudflare-oauth.ts';
 
 /**
  * An OIDC principal: the issuer and subject that identify it.

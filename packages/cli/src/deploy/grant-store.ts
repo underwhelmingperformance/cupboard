@@ -32,14 +32,14 @@ const storedGrantSchema = z.object({
 	access_token: z.string().min(1),
 	refresh_token: z.string().min(1).optional(),
 	expires_at: z.number().int(),
-	subject: z.string().min(1).optional(),
-	id_token: z.string().min(1).optional()
+	subject: z.string().min(1).optional()
 });
 
 /**
  * Reads the cached Cloudflare grant, or undefined when none is stored or the
  * file does not parse (a corrupt cache reads as absent, so the caller logs in
- * again on parse failure).
+ * again on parse failure). The grant has no ID token: the store never keeps
+ * one, and it drops the `id_token` of a file written by an earlier release.
  */
 export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 	const contents = await readSecretFile(grantFilePath());
@@ -67,7 +67,7 @@ export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 		refreshToken: parsed.data.refresh_token,
 		expiresAt: parsed.data.expires_at,
 		subject: parsed.data.subject,
-		idToken: parsed.data.id_token
+		idToken: undefined
 	};
 }
 
@@ -84,8 +84,7 @@ export async function writeCachedGrant(
 			refresh_token: grant.refreshToken
 		}),
 		expires_at: grant.expiresAt,
-		...(grant.subject !== undefined && { subject: grant.subject }),
-		...(grant.idToken !== undefined && { id_token: grant.idToken })
+		...(grant.subject !== undefined && { subject: grant.subject })
 	};
 
 	await writeSecretFile(grantFilePath(), `${JSON.stringify(stored)}\n`, signal);

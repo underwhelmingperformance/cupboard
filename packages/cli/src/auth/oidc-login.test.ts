@@ -15,6 +15,7 @@ import {
 	isRedirectStatus,
 	LoginTimeoutError,
 	loopbackLogin,
+	obtainAuthorizationCode,
 	type OidcLoginEndpoints,
 	OidcLoginError
 } from './oidc-login.ts';
@@ -437,6 +438,7 @@ describe('loopbackLogin', () => {
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
+				nonce: 'nonce-1',
 				openBrowser: async (target) => {
 					const { redirectUri, state } = authorizeParameters(target);
 					const callback = new URL(redirectUri);
@@ -462,6 +464,7 @@ describe('loopbackLogin', () => {
 			loopbackLogin({
 				endpoints: { ...endpoints, issuer: 'https://idp.example.com' },
 				clientId: 'client-123',
+				nonce: 'nonce-1',
 				openBrowser: async (target) => {
 					const { redirectUri, state } = authorizeParameters(target);
 					const callback = new URL(redirectUri);
@@ -494,6 +497,7 @@ describe('loopbackLogin', () => {
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
+				nonce: 'nonce-1',
 				openBrowser: async (target) => {
 					const { redirectUri, state } = authorizeParameters(target);
 					const callback = new URL(redirectUri);
@@ -524,6 +528,7 @@ describe('loopbackLogin', () => {
 				loopbackLogin({
 					endpoints,
 					clientId: 'client-123',
+					nonce: 'nonce-1',
 					openBrowser: async (target) => {
 						const { redirectUri, state } = authorizeParameters(target);
 						const callback = new URL(redirectUri);
@@ -580,6 +585,7 @@ describe('loopbackLogin', () => {
 		const idToken = await loopbackLogin({
 			endpoints,
 			clientId: 'client-123',
+			nonce: 'nonce-1',
 			openBrowser: approveLoopbackBrowser,
 			fetcher
 		});
@@ -605,6 +611,24 @@ describe('loopbackLogin', () => {
 		});
 	});
 
+	it('requests the nonce in the authorization URL', async () => {
+		const requested: (string | null)[] = [];
+
+		await loopbackLogin({
+			endpoints,
+			clientId: 'client-123',
+			nonce: 'nonce-1',
+			openBrowser: async (target) => {
+				requested.push(new URL(target).searchParams.get('nonce'));
+				await approveLoopbackBrowser(target);
+			},
+			fetcher: () =>
+				Promise.resolve(Response.json({ id_token: 'owner.id.token' }))
+		});
+
+		expect(requested).toStrictEqual(['nonce-1']);
+	});
+
 	it('times out when the browser never completes the login', async () => {
 		const openedBrowsers: string[] = [];
 		const tokenRequests: string[] = [];
@@ -613,6 +637,7 @@ describe('loopbackLogin', () => {
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
+				nonce: 'nonce-1',
 				openBrowser: (target) => {
 					openedBrowsers.push(target);
 					return Promise.resolve();
@@ -655,6 +680,7 @@ describe('loopbackLogin', () => {
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
+				nonce: 'nonce-1',
 				openBrowser: (target) => {
 					openedBrowsers.push(target);
 					controller.abort(new CliAbortError());
@@ -697,6 +723,7 @@ describe('loopbackLogin', () => {
 		await loopbackLogin({
 			endpoints,
 			clientId: 'client-123',
+			nonce: 'nonce-1',
 			openBrowser: async (target) => {
 				const parameters = authorizeParameters(target);
 				redirectUri = parameters.redirectUri;
@@ -740,6 +767,7 @@ describe('loopbackLogin', () => {
 		const idToken = await loopbackLogin({
 			endpoints,
 			clientId: 'client-123',
+			nonce: 'nonce-1',
 			openBrowser,
 			fetcher: () =>
 				Promise.resolve(Response.json({ id_token: 'owner.id.token' }))
@@ -757,6 +785,7 @@ describe('loopbackLogin', () => {
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
+				nonce: 'nonce-1',
 				openBrowser: approveLoopbackBrowser,
 				fetcher: (input) => {
 					tokenRequests.push(requestUrl(input));
@@ -782,6 +811,61 @@ describe('loopbackLogin', () => {
 			tokenRequests: [endpoints.tokenEndpoint]
 		});
 	});
+});
+
+describe('obtainAuthorizationCode', () => {
+	function browserReturning(
+		issuer: string | undefined
+	): (target: string) => Promise<void> {
+		return async (target) => {
+			const { redirectUri, state } = authorizeParameters(target);
+			const callback = new URL(redirectUri);
+			callback.searchParams.set('code', 'auth-code');
+			callback.searchParams.set('state', state);
+
+			if (issuer !== undefined) {
+				callback.searchParams.set('iss', issuer);
+			}
+
+			await fetch(callback);
+		};
+	}
+
+	it.each([
+		{ name: 'without iss', issuer: undefined, outcome: 'auth-code' },
+		{
+			name: 'with the expected iss',
+			issuer: 'https://idp.example.com',
+			outcome: 'auth-code'
+		},
+		{
+			name: 'with another iss',
+			issuer: 'https://evil.example.com',
+			outcome: 'OidcLoginError'
+		}
+	])(
+		'for an issuer without RFC 9207 support, handles a callback $name',
+		async ({ issuer, outcome }) => {
+			let result: string;
+
+			try {
+				const obtained = await obtainAuthorizationCode({
+					expectedIssuer: 'https://idp.example.com',
+					isIssuerParameterOptional: true,
+					authorizationEndpoint: endpoints.authorizationEndpoint,
+					clientId: 'client-123',
+					scope: 'openid',
+					nonce: 'nonce-1',
+					openBrowser: browserReturning(issuer)
+				});
+				result = obtained.code;
+			} catch (error) {
+				result = error instanceof OidcLoginError ? error.name : 'unexpected';
+			}
+
+			expect(result).toBe(outcome);
+		}
+	);
 });
 
 describe('deviceLogin', () => {
@@ -1078,6 +1162,7 @@ describe('token endpoint redirects', () => {
 				loopbackLogin({
 					endpoints: redirecting,
 					clientId: 'client-123',
+					nonce: 'nonce-1',
 					openBrowser: approveLoopbackBrowser,
 					fetcher: fetch
 				}),

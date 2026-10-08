@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 import type {
@@ -15,7 +16,6 @@ import { createCloudflareApi } from './cloudflare-api.ts';
 import {
 	type CloudflareGrant,
 	cloudflareLogin,
-	jwtExpiryMs,
 	refreshCloudflareGrant
 } from './cloudflare-oauth.ts';
 import {
@@ -46,10 +46,10 @@ export interface CloudflareCredential {
 	*/
 	readonly subject: string | undefined;
 	/**
-	 * The grant's raw ID token; `undefined` when the credential has no id_token,
-	 * such as an API token or a wrangler token.
+	 * The ID token from the browser login that produced this credential.
+	 * Absent for every other source.
 	 */
-	readonly idToken: string | undefined;
+	readonly loginIdToken?: string;
 }
 
 /**
@@ -82,8 +82,7 @@ export interface CredentialChain {
 	 * login. A grant issued before the `openid` scope was requested has no
 	 * subject, and refreshing it cannot add one, so only a new login can
 	 * establish who the operator is; with no terminal to log in on, the old
-	 * grant is used as it stands. A grant missing only its id_token is upgraded
-	 * by a refresh first and the browser second.
+	 * grant is used as it stands.
 	 */
 	readonly upgradeLogin: boolean;
 	readonly now: () => number;
@@ -110,6 +109,7 @@ export function defaultCredentialChain(
 		...(options.wrangler && { readWranglerToken }),
 		login: (signal = options.signal) =>
 			cloudflareLogin({
+				nonce: randomBytes(32).toString('base64url'),
 				openBrowser: options.openBrowser,
 				signal
 			}),
@@ -180,12 +180,7 @@ export async function resolveCredential(
 	const fromEnv = chain.env.CLOUDFLARE_API_TOKEN ?? chain.env.CF_API_TOKEN;
 
 	if (fromEnv !== undefined && fromEnv !== '') {
-		return {
-			token: fromEnv,
-			source: 'environment',
-			subject: undefined,
-			idToken: undefined
-		};
+		return { token: fromEnv, source: 'environment', subject: undefined };
 	}
 
 	return chain.withGrantLock(
@@ -204,61 +199,20 @@ async function resolveStoredCredential(
 	throwIfAborted(signal);
 
 	if (cached !== undefined && isUsable(cached, chain.now())) {
-		if (cached.subject !== undefined && cached.idToken !== undefined) {
+		if (cached.subject !== undefined || !chain.upgradeLogin) {
 			return {
 				token: cached.accessToken,
 				source: 'cached login',
-				subject: cached.subject,
-				idToken: cached.idToken
-			};
-		}
-
-		// A grant with a subject but no stored id_token was issued with the
-		// openid scope, so a refresh reissues the id_token without a browser.
-		// Persist the renewal even when it has no ID token. The refresh token can
-		// rotate on use.
-		if (cached.subject !== undefined) {
-			const renewed = await chain.refreshGrant(cached, signal);
-
-			if (renewed !== undefined) {
-				await chain.writeGrant(renewed, signal);
-			}
-
-			const best = renewed ?? cached;
-
-			if (best.idToken !== undefined || !chain.upgradeLogin) {
-				return {
-					token: best.accessToken,
-					source: 'cached login',
-					subject: best.subject,
-					idToken: best.idToken
-				};
-			}
-		}
-
-		// Without a terminal the incomplete grant is used as-is; the deploy
-		// proceeds, it just cannot present an identity.
-		if (!chain.upgradeLogin) {
-			return {
-				token: cached.accessToken,
-				source: 'cached login',
-				subject: cached.subject,
-				idToken: cached.idToken
+				subject: cached.subject
 			};
 		}
 
 		// A grant from before the openid scope cannot learn its identity from a
-		// refresh, and a refresh that did not issue an ID token leaves the identity
-		// unproven; only a fresh login can supply it.
+		// refresh; only a fresh login can supply it.
 		const upgraded = await chain.login(signal);
 		await chain.writeGrant(upgraded, signal);
 
-		return {
-			token: upgraded.accessToken,
-			source: 'browser login',
-			subject: upgraded.subject,
-			idToken: upgraded.idToken
-		};
+		return browserLoginCredential(upgraded);
 	}
 
 	if (cached?.refreshToken !== undefined) {
@@ -270,8 +224,7 @@ async function resolveStoredCredential(
 			return {
 				token: renewed.accessToken,
 				source: 'cached login',
-				subject: renewed.subject,
-				idToken: renewed.idToken
+				subject: renewed.subject
 			};
 		}
 	}
@@ -279,28 +232,23 @@ async function resolveStoredCredential(
 	const wrangler = await chain.readWranglerToken?.();
 
 	if (wrangler !== undefined) {
-		return {
-			token: wrangler,
-			source: 'wrangler',
-			subject: undefined,
-			idToken: undefined
-		};
+		return { token: wrangler, source: 'wrangler', subject: undefined };
 	}
 
 	const grant = await chain.login(signal);
 	await chain.writeGrant(grant, signal);
 
+	return browserLoginCredential(grant);
+}
+
+function browserLoginCredential(grant: CloudflareGrant): CloudflareCredential {
 	return {
 		token: grant.accessToken,
 		source: 'browser login',
 		subject: grant.subject,
-		idToken: grant.idToken
+		...(grant.idToken !== undefined && { loginIdToken: grant.idToken })
 	};
 }
-
-// An id_token within a few minutes of expiry is not worth presenting: the
-// request it authorises may land after the cut-off.
-const idTokenFreshnessMarginMs = 5 * 60 * 1000;
 
 const maximumCloudflareErrorBytes = 64 * 1024;
 const maximumCloudflareResponseBytes = 16 * 1024 * 1024;
@@ -335,89 +283,6 @@ export function createCloudflareClient(
 	});
 }
 
-/**
- * An id_token fit to present as a subject token right now: the cached one
- * while it has time left, otherwise one reissued by refreshing the grant. A
- * deploy can outlive the id_token it logged in with (the tokens live an hour
- * and the claim happens minutes in), so callers fetch one at the moment of
- * use, not from the login snapshot.
- */
-export async function freshIdToken(
-	chain: Pick<
-		CredentialChain,
-		| 'signal'
-		| 'readGrant'
-		| 'writeGrant'
-		| 'withGrantLock'
-		| 'refreshGrant'
-		| 'now'
-	>,
-	signal?: AbortSignal
-): Promise<string | undefined> {
-	const callerSignal = signal ?? chain.signal;
-
-	return chain.withGrantLock(
-		(lockSignal) => freshIdTokenUnderLock(chain, lockSignal),
-		callerSignal
-	);
-}
-
-/**
- * {@link freshIdToken} for a caller that already holds the grant lock.
- */
-export async function freshIdTokenUnderLock(
-	chain: Pick<
-		CredentialChain,
-		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
-	>,
-	signal?: AbortSignal
-): Promise<string | undefined> {
-	throwIfAborted(signal);
-	const cached = await chain.readGrant();
-	throwIfAborted(signal);
-
-	if (cached === undefined) {
-		return undefined;
-	}
-
-	const cachedToken = freshIdTokenFromGrant(cached, chain.now());
-
-	if (cachedToken !== undefined) {
-		return cachedToken;
-	}
-
-	const renewed = await chain.refreshGrant(cached, signal);
-	throwIfAborted(signal);
-
-	if (renewed === undefined) {
-		return undefined;
-	}
-
-	await chain.writeGrant(renewed, signal);
-	throwIfAborted(signal);
-
-	return freshIdTokenFromGrant(renewed, chain.now());
-}
-
-/**
- * Returns a grant's ID token when it remains valid beyond the presentation
- * margin.
- */
-export function freshIdTokenFromGrant(
-	grant: CloudflareGrant,
-	now: number
-): string | undefined {
-	if (grant.idToken === undefined) {
-		return undefined;
-	}
-
-	const expiry = jwtExpiryMs(grant.idToken);
-
-	return expiry !== undefined && expiry > now + idTokenFreshnessMarginMs
-		? grant.idToken
-		: undefined;
-}
-
 export interface ResolvedAccount {
 	readonly client: Cloudflare;
 	/**
@@ -433,10 +298,10 @@ export interface ResolvedAccount {
 	*/
 	readonly subject: string | undefined;
 	/**
-	 * The grant's raw ID token; `undefined` when the credential has no id_token,
-	 * such as an API token or a wrangler token.
+	 * The ID token from the browser login that produced the credential. Absent
+	 * for every other source.
 	 */
-	readonly idToken: string | undefined;
+	readonly loginIdToken?: string;
 }
 
 /**
@@ -452,6 +317,12 @@ export async function resolveCloudflare(
 	chain: CredentialChain
 ): Promise<ResolvedAccount> {
 	const credential = await resolveCredential(chain);
+	const identity = {
+		subject: credential.subject,
+		...(credential.loginIdToken !== undefined && {
+			loginIdToken: credential.loginIdToken
+		})
+	};
 	const clientWithSignal = (signal: AbortSignal): Cloudflare =>
 		createCloudflareClient(
 			credential.token,
@@ -477,8 +348,7 @@ export async function resolveCloudflare(
 			api: createCloudflareApi(client, accountId),
 			accountId,
 			credentialSource: credential.source,
-			subject: credential.subject,
-			idToken: credential.idToken
+			...identity
 		};
 	}
 
@@ -503,7 +373,6 @@ export async function resolveCloudflare(
 		api: createCloudflareApi(client, accountId),
 		accountId,
 		credentialSource: credential.source,
-		subject: credential.subject,
-		idToken: credential.idToken
+		...identity
 	};
 }

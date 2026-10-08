@@ -315,6 +315,10 @@ export interface LoopbackLoginOptions {
 	readonly endpoints: OidcLoginEndpoints;
 	readonly clientId: string;
 	readonly scope?: string;
+	/**
+	The OIDC `nonce` that the returned ID token must contain.
+	*/
+	readonly nonce: string;
 	readonly openBrowser: (url: string) => void | Promise<void>;
 	readonly fetcher?: typeof fetch;
 	readonly timeoutMs?: number;
@@ -343,6 +347,7 @@ export async function loopbackLogin(
 		authorizationEndpoint: options.endpoints.authorizationEndpoint,
 		clientId: options.clientId,
 		scope: options.scope ?? 'openid',
+		nonce: options.nonce,
 		openBrowser: options.openBrowser,
 		timeoutMs: options.timeoutMs,
 		signal: options.signal,
@@ -370,6 +375,7 @@ export interface AuthorizeUrlParameters {
 	readonly state: string;
 	readonly challenge: string;
 	readonly scope: string;
+	readonly nonce: string;
 }
 
 export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
@@ -379,6 +385,7 @@ export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
 	url.searchParams.set('redirect_uri', parameters.redirectUri);
 	url.searchParams.set('scope', parameters.scope);
 	url.searchParams.set('state', parameters.state);
+	url.searchParams.set('nonce', parameters.nonce);
 	url.searchParams.set('code_challenge', parameters.challenge);
 	url.searchParams.set('code_challenge_method', 'S256');
 
@@ -400,9 +407,16 @@ export interface AuthorizationCodeOptions {
 	an exact RFC 9207 `iss` match.
 	*/
 	readonly expectedIssuer?: string;
+	/**
+	 * True for an issuer whose metadata does not advertise RFC 9207 support. A
+	 * callback without `iss` is then accepted, and a callback with `iss` must
+	 * still match `expectedIssuer`.
+	 */
+	readonly isIssuerParameterOptional?: boolean;
 	readonly authorizationEndpoint: string;
 	readonly clientId: string;
 	readonly scope: string;
+	readonly nonce: string;
 	readonly openBrowser: (url: string) => void | Promise<void>;
 	readonly timeoutMs?: number;
 	readonly signal?: AbortSignal;
@@ -439,6 +453,7 @@ export async function obtainAuthorizationCode(
 	const loopback = await startLoopbackServer({
 		expectedState: state,
 		expectedIssuer: options.expectedIssuer,
+		isIssuerParameterOptional: options.isIssuerParameterOptional,
 		ports: options.loopback?.ports,
 		host,
 		path
@@ -453,7 +468,8 @@ export async function obtainAuthorizationCode(
 			redirectUri,
 			state,
 			challenge: pkce.challenge,
-			scope: options.scope
+			scope: options.scope,
+			nonce: options.nonce
 		});
 
 		const timeout = new Promise<never>((_, reject) => {
@@ -493,6 +509,7 @@ interface LoopbackServer {
 interface LoopbackServerOptions {
 	readonly expectedState: string;
 	readonly expectedIssuer?: string;
+	readonly isIssuerParameterOptional?: boolean;
 	readonly ports?: readonly number[];
 	readonly host?: string;
 	readonly path?: string;
@@ -537,11 +554,7 @@ function bindLoopbackServer(
 				return;
 			}
 
-			const outcome = readCallback(
-				url,
-				options.expectedState,
-				options.expectedIssuer
-			);
+			const outcome = readCallback(url, options);
 			response.writeHead(outcome.kind === 'code' ? 200 : 400, {
 				'content-type': 'text/plain; charset=utf-8'
 			});
@@ -613,12 +626,16 @@ function repeatedCallbackParameter(
 
 function readCallback(
 	url: URL,
-	expectedState: string,
-	expectedIssuer?: string
+	expected: Pick<
+		LoopbackServerOptions,
+		'expectedState' | 'expectedIssuer' | 'isIssuerParameterOptional'
+	>
 ): CallbackOutcome {
+	const { expectedIssuer } = expected;
+
 	// Check state before parsing the response. Requests for another login are
 	// ignored.
-	if (!url.searchParams.getAll('state').includes(expectedState)) {
+	if (!url.searchParams.getAll('state').includes(expected.expectedState)) {
 		return { kind: 'ignore', message: 'Unexpected callback; ignoring.' };
 	}
 
@@ -633,9 +650,14 @@ function readCallback(
 		}
 	}
 
+	const issuer = url.searchParams.get('iss');
+	const isIssuerUnchecked =
+		issuer === null && expected.isIssuerParameterOptional === true;
+
 	if (
 		expectedIssuer !== undefined &&
-		url.searchParams.get('iss') !== expectedIssuer
+		!isIssuerUnchecked &&
+		issuer !== expectedIssuer
 	) {
 		return {
 			kind: 'malformed',

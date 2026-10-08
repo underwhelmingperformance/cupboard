@@ -1,4 +1,4 @@
-import { stat, writeFile } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { describe, expect } from 'vitest';
@@ -32,7 +32,7 @@ function abortOnSecondCheck(reason: Error): AbortSignal {
 
 describe('grant store', () => {
 	testWithConfigHome(
-		'round-trips a grant, readable only by the owner',
+		'round-trips a grant without its ID token, readable only by the owner',
 		async ({ configHome }) => {
 			const grant = {
 				accessToken: 'access-1',
@@ -44,11 +44,54 @@ describe('grant store', () => {
 
 			await writeCachedGrant(grant);
 			const stats = await stat(grantFile(configHome));
+			const contents = await readFile(grantFile(configHome), 'utf8');
+			const file: unknown = JSON.parse(contents);
 
 			expect({
 				grant: await readCachedGrant(),
+				file,
 				mode: stats.mode & 0o777
-			}).toStrictEqual({ grant, mode: 0o600 });
+			}).toStrictEqual({
+				grant: { ...grant, idToken: undefined },
+				file: {
+					access_token: 'access-1',
+					refresh_token: 'refresh-1',
+					expires_at: 1_700_000_000_000,
+					subject: 'cf-user-1'
+				},
+				mode: 0o600
+			});
+		}
+	);
+
+	testWithConfigHome(
+		'drops the ID token of a cache from an earlier release',
+		async ({ configHome }) => {
+			await writeCachedGrant({
+				accessToken: 'seed',
+				refreshToken: undefined,
+				expiresAt: 1,
+				subject: undefined,
+				idToken: undefined
+			});
+			await writeFile(
+				grantFile(configHome),
+				JSON.stringify({
+					access_token: 'access-6',
+					refresh_token: 'refresh-6',
+					expires_at: 42,
+					subject: 'cf-user-6',
+					id_token: 'id-token-6'
+				})
+			);
+
+			expect(await readCachedGrant()).toStrictEqual({
+				accessToken: 'access-6',
+				refreshToken: 'refresh-6',
+				expiresAt: 42,
+				subject: 'cf-user-6',
+				idToken: undefined
+			});
 		}
 	);
 
@@ -84,7 +127,7 @@ describe('grant store', () => {
 				refreshToken: 'winner-refresh',
 				expiresAt: 2,
 				subject: 'cf-user',
-				idToken: 'winner-id'
+				idToken: undefined
 			};
 			const reason = new Error('grant lock was lost before commit');
 

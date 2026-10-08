@@ -1,12 +1,25 @@
 import path from 'node:path';
 
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	subjectTokenTypeIdToken,
+	type TokenResponse
+} from '@cupboard/protocol/oidc';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
+import {
+	BoundSignIn,
+	canonicalTarget
+} from '../../packages/cli/src/auth/bound-sign-in.ts';
+import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
+import { signInTo } from '../../packages/cli/src/commands/login.ts';
+import { CupboardHttpError } from '../../packages/cli/src/errors.ts';
 import {
 	CupboardTestServer,
 	ownerAudience,
+	ownerSubject,
 	TokenExchangeFailedError
 } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
@@ -75,6 +88,94 @@ describe('OIDC federation', () => {
 			}).toStrictEqual({
 				ownerRule: [{ id: 'owner', grantTypes: ['cupboard_wildcard'] }],
 				refused: 400
+			});
+		}));
+
+	it('accepts an owner sign-in bound to the tenant once, and refuses a replay and a token bound elsewhere', () =>
+		withFederation('cupboard-e2e-bound-', async ({ server }) => {
+			const signIn = (): BoundSignIn =>
+				new BoundSignIn({
+					bindsNonce: true,
+					signIn: (nonce) =>
+						Promise.resolve(
+							server.issuer.sign({
+								aud: ownerAudience,
+								sub: ownerSubject,
+								nonce
+							})
+						)
+				});
+			const client = CupboardClient.fromUrl(server.tenantUrl, {
+				cache: { kind: 'default' }
+			});
+			const exchanges: Parameters<CupboardClient['tokenExchange']>[] = [];
+			const sessions: TokenResponse[] = [];
+			const refusal = async (
+				pending: Promise<unknown>
+			): Promise<Readonly<Record<string, unknown>>> => {
+				try {
+					await pending;
+
+					return { accepted: true };
+				} catch (error) {
+					return error instanceof CupboardHttpError
+						? { status: error.status, problem: error.oauthError?.problem }
+						: { error: String(error) };
+				}
+			};
+
+			await signInTo(server.tenantUrl, {
+				signIn: signIn(),
+				client: {
+					tokenExchange: (...request) => {
+						exchanges.push(request);
+
+						return client.tokenExchange(...request);
+					}
+				},
+				cacheSession: (response) => {
+					sessions.push(response);
+
+					return Promise.resolve();
+				}
+			});
+
+			const [presented] = exchanges;
+			const replay = await refusal(
+				presented === undefined
+					? Promise.reject(new Error('no exchange was sent'))
+					: client.tokenExchange(...presented)
+			);
+			const elsewhere = await signIn().idTokenFor([
+				canonicalTarget(new URL(server.url))
+			]);
+			const unbound = await refusal(
+				client.tokenExchange(
+					elsewhere.idToken,
+					subjectTokenTypeIdToken,
+					undefined,
+					elsewhere.binding
+				)
+			);
+
+			expect({
+				targets: presented?.[3]?.targets,
+				hasRefreshToken: sessions.map(
+					(session) => session.refresh_token !== undefined
+				),
+				replay,
+				unbound
+			}).toStrictEqual({
+				targets: [canonicalTarget(server.tenantUrl)],
+				hasRefreshToken: [true],
+				replay: {
+					status: StatusCodes.BAD_REQUEST,
+					problem: 'subject-token-replayed'
+				},
+				unbound: {
+					status: StatusCodes.BAD_REQUEST,
+					problem: 'subject-token-unbound'
+				}
 			});
 		}));
 

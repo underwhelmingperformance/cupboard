@@ -12,9 +12,11 @@ import {
 	presentationFromGlobals,
 	type ProgramOptions
 } from '../cli.ts';
-import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
+import {
+	cloudflareDashIssuer,
+	cloudflareOauthClientId
+} from '../deploy/cloudflare-oauth.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
-import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import type { WorkersPlanOverride } from '../deploy/workers-plan.ts';
 
 function parseWorkersPlan(value: string): WorkersPlanOverride {

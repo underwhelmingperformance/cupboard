@@ -11,7 +11,8 @@ import {
 	cloudflareOauthClientId,
 	CloudflareTokenRequestError,
 	deployScopes,
-	refreshCloudflareGrant
+	refreshCloudflareGrant,
+	signInScopes
 } from './cloudflare-oauth.ts';
 
 const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
@@ -115,6 +116,7 @@ describe('cloudflareLogin', () => {
 		let authorizeUrl = '';
 
 		const grant = await cloudflareLogin({
+			nonce: 'nonce-1',
 			openBrowser: async (url) => {
 				authorizeUrl = url;
 				await approvingBrowser('code-1')(url);
@@ -137,6 +139,7 @@ describe('cloudflareLogin', () => {
 		expect({
 			clientId: authorize.searchParams.get('client_id'),
 			scope: authorize.searchParams.get('scope'),
+			nonce: authorize.searchParams.get('nonce'),
 			challengeMethod: authorize.searchParams.get('code_challenge_method'),
 			tokenRequests: tokenRequests.map(({ url, form }) => ({
 				url,
@@ -148,6 +151,7 @@ describe('cloudflareLogin', () => {
 		}).toStrictEqual({
 			clientId: cloudflareOauthClientId,
 			scope: deployScopes.join(' '),
+			nonce: 'nonce-1',
 			challengeMethod: 'S256',
 			tokenRequests: [
 				{
@@ -158,6 +162,81 @@ describe('cloudflareLogin', () => {
 					redirectUri: authorize.searchParams.get('redirect_uri')
 				}
 			]
+		});
+	});
+
+	it.each([
+		{ name: 'without iss', issuer: undefined, outcome: 'granted' },
+		{
+			name: 'with a different iss',
+			issuer: 'https://evil.example.com',
+			outcome: 'OidcLoginError'
+		}
+	])('handles a callback $name', async ({ issuer, outcome }) => {
+		const { fetcher, tokenRequests } = fakeCloudflare({
+			tokenBody: { access_token: 'access-1', expires_in: 3600 }
+		});
+
+		const login = cloudflareLogin({
+			nonce: 'nonce-1',
+			openBrowser: async (url) => {
+				const authorize = new URL(url);
+				const redirect = new URL(
+					authorize.searchParams.get('redirect_uri') ?? ''
+				);
+				redirect.searchParams.set('code', 'code-1');
+				redirect.searchParams.set(
+					'state',
+					authorize.searchParams.get('state') ?? ''
+				);
+
+				if (issuer !== undefined) {
+					redirect.searchParams.set('iss', issuer);
+				}
+
+				await fetch(redirect);
+			},
+			fetcher,
+			ports: [0]
+		});
+
+		let result = 'granted';
+
+		try {
+			await login;
+		} catch (error) {
+			result = error instanceof Error ? error.name : 'unknown';
+		}
+
+		expect({
+			outcome: result,
+			tokenRequests: tokenRequests.length
+		}).toStrictEqual({
+			outcome,
+			tokenRequests: outcome === 'granted' ? 1 : 0
+		});
+	});
+
+	it('requests the scopes it is given', async () => {
+		const { fetcher } = fakeCloudflare({
+			tokenBody: { access_token: 'access-1', expires_in: 3600 }
+		});
+		let scope: string | undefined;
+
+		await cloudflareLogin({
+			nonce: 'nonce-1',
+			scopes: signInScopes,
+			openBrowser: async (url) => {
+				scope = new URL(url).searchParams.get('scope') ?? undefined;
+				await approvingBrowser('code-1')(url);
+			},
+			fetcher,
+			ports: [0]
+		});
+
+		expect({ scope, signInScopes }).toStrictEqual({
+			scope: signInScopes.join(' '),
+			signInScopes: deployScopes.filter((name) => name !== 'offline_access')
 		});
 	});
 
@@ -172,6 +251,7 @@ describe('cloudflareLogin', () => {
 		});
 
 		const grant = await cloudflareLogin({
+			nonce: 'nonce-1',
 			openBrowser: approvingBrowser('code-1'),
 			fetcher,
 			ports: [0],
@@ -210,6 +290,7 @@ describe('cloudflareLogin', () => {
 		});
 
 		const grant = await cloudflareLogin({
+			nonce: 'nonce-1',
 			openBrowser: approvingBrowser('code-1'),
 			fetcher,
 			ports: [0],
@@ -226,6 +307,7 @@ describe('cloudflareLogin', () => {
 		});
 
 		const login = cloudflareLogin({
+			nonce: 'nonce-1',
 			openBrowser: approvingBrowser('code-3'),
 			fetcher,
 			ports: [0]
@@ -243,6 +325,7 @@ describe('cloudflareLogin', () => {
 		const { fetcher } = fakeCloudflare({ tokenBody: {} });
 
 		const login = cloudflareLogin({
+			nonce: 'nonce-1',
 			openBrowser: async (url) => {
 				const authorize = new URL(url);
 				const redirect = new URL(
@@ -440,6 +523,7 @@ describe('Cloudflare token request redirects', () => {
 			name: 'the authorisation code exchange',
 			request: (fetcher: typeof fetch) =>
 				cloudflareLogin({
+					nonce: 'nonce-1',
 					openBrowser: approvingBrowser('code-1'),
 					fetcher,
 					ports: [0]

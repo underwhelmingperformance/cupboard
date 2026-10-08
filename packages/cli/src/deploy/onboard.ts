@@ -13,7 +13,6 @@ import type {
 } from '@cupboard/protocol/instance';
 import { instanceNameSchema } from '@cupboard/protocol/instance';
 import {
-	subjectTokenProblems,
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
@@ -35,6 +34,11 @@ import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
+import {
+	type BoundSignIn,
+	type CanonicalTarget,
+	canonicalTarget
+} from '../auth/bound-sign-in.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
@@ -43,12 +47,13 @@ import { cacheLoginSession } from '../commands/login.ts';
 import {
 	CliError,
 	CupboardHttpError,
+	OwnerLoginRequiredError,
 	UnreachableHostError
 } from '../errors.ts';
 import { ownDisplayName, principalLabel } from '../principal.ts';
 import { generateReadPassword } from '../read-user.ts';
 
-import type { DeployAuthority } from './authority.ts';
+import { claimTargets, type DeployAuthority } from './authority.ts';
 import { removeClaimSecret } from './claim-secret.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import { deploymentUrl } from './deployment-url.ts';
@@ -142,9 +147,15 @@ export type OnboardOutcome =
  */
 export interface OnboardClient extends Pick<
 	CupboardClient,
-	'version' | 'signup' | 'publicKey'
+	'version' | 'signup' | 'publicKey' | 'tokenExchange'
 > {
-	cacheAccess(subjectToken: string): Promise<CacheAccessMode | undefined>;
+	/**
+	 * The access of the default cache, read with a tenant credential.
+	 * Undefined when the credential is missing or refused.
+	 */
+	cacheAccess(
+		credential: AccessCredential
+	): Promise<CacheAccessMode | undefined>;
 	getInstance(credential: AccessCredential): Promise<InstanceSummary>;
 	initialiseInstance(
 		credential: AccessCredential,
@@ -207,29 +218,25 @@ export interface OnboardOptions {
 	readonly buildVersion: string;
 	readonly r2: OnboardR2;
 	readonly signal?: AbortSignal;
-	/**
-	 * An id_token for the operator, fetched at the moment of use, to read the
-	 * access mode of an existing cache. Without one, the outcome does not
-	 * report the cache's access.
-	 */
-	readonly freshIdToken?: () => Promise<string | undefined>;
 	readonly clientFactory?: (url: string) => OnboardClient;
 	/**
 	The `fetch` that the default client factory sends its requests with.
 	*/
 	readonly fetcher?: typeof fetch;
 	/**
-	 * Saves the admin session from the claim for `target`. By default it saves
-	 * the session as `cupboard login` does.
+	 * Saves a session for `target`: the admin session from the claim, or the
+	 * first tenant's session. By default it saves the session as
+	 * `cupboard login` does.
 	 */
 	readonly cacheSession?: (
 		session: TokenResponse,
 		target: URL
 	) => Promise<void>;
 	/**
-	 * The admin credential once a first deploy has claimed the deployment and
-	 * cached its session; by default the cached session, renewed as it nears
-	 * expiry.
+	 * A credential from the session cached for `target`, without a new sign-in:
+	 * the admin credential once a first deploy has claimed the deployment, and
+	 * a tenant credential to read the access of an existing cache. By default
+	 * the cached session, renewed as it nears expiry.
 	 */
 	readonly sessionCredential?: (target: URL) => AccessCredential;
 	/**
@@ -294,13 +301,16 @@ export function slugProblemText(value: string): string | undefined {
  * configuration.
  *
  * Then it is initialised with an admin credential. A first deploy claims the
- * deployment for the operator with the claim secret and their
- * id_token, caches the admin token for the other commands and deletes the
- * secret. An update uses the admin token that the deploy checked before it
- * changed anything. A slug is chosen for the first tenant (the create call
+ * deployment for the operator with the claim secret and an id_token bound to
+ * the deployment and the first tenant. The operator chose the tenant's slug
+ * before the upload. The deploy caches the admin token for the other commands and deletes the
+ * secret. An
+ * update uses the admin token that the deploy checked before it changed
+ * anything, and asks for the slug when there is no tenant. The create call
  * fails with a conflict when the slug is taken, and the deploy then asks for
- * another slug), and the new tenant's `/pubkey` is polled, since the first
- * successful request creates the signing key.
+ * another slug. The new tenant's `/pubkey` is polled, since the first
+ * successful request creates the signing key. After a claim, the deploy
+ * exchanges the id_token at the new tenant and caches that session too.
  */
 export async function onboardDeployment(
 	options: OnboardOptions
@@ -365,15 +375,18 @@ export async function onboardDeployment(
 	const target = parseWorkerUrl(url);
 	let owner: OwnerBinding;
 	let credential: AccessCredential;
-	let identityToken = options.freshIdToken;
+	let firstSlug = options.cacheSlug;
 
 	if (authority.kind === 'bootstrap') {
+		firstSlug ??=
+			authority.firstTenantSlug ?? (await askFirstTenantSlug(ui, url));
 		owner = await claimDeployment({
 			ui,
 			client,
 			url,
 			claimSecret: authority.claimSecret,
-			idToken: authority.idToken,
+			signIn: authority.signIn,
+			targets: claimTargets(target, firstSlug),
 			claimant: authority.claimant,
 			removeClaimSecret:
 				options.removeClaimSecret ??
@@ -385,7 +398,6 @@ export async function onboardDeployment(
 			signal
 		});
 		credential = sessionCredential(target);
-		identityToken = authority.idToken;
 	} else {
 		owner = authority.admin;
 		credential = authority.access.credentialFor(target);
@@ -456,6 +468,10 @@ export async function onboardDeployment(
 	const sole = existing[0];
 
 	if (sole === undefined) {
+		if (firstSlug === undefined && authority.kind === 'bootstrap') {
+			return { kind: 'cancelled', url };
+		}
+
 		const ownerAudience = owner.audience;
 
 		if (ownerAudience === undefined) {
@@ -469,7 +485,7 @@ export async function onboardDeployment(
 			credential,
 			{ ...owner, audience: ownerAudience },
 			{
-				slug: options.cacheSlug,
+				slug: firstSlug,
 				access: options.cacheAccess,
 				read: {
 					user: defaultReadUser,
@@ -482,7 +498,7 @@ export async function onboardDeployment(
 			return { kind: 'cancelled', url };
 		}
 
-		slug = first.tenant.id;
+		slug = first.slug;
 		showCacheCredential(
 			ui,
 			tenantUrl(parseWorkerUrl(url), slug),
@@ -535,13 +551,19 @@ export async function onboardDeployment(
 		};
 	}
 
-	const subjectToken =
-		first === undefined ? await identityToken?.() : undefined;
+	if (first !== undefined && authority.kind === 'bootstrap') {
+		await cacheTenantSession({
+			ui,
+			signIn: authority.signIn,
+			client: cacheClient,
+			cacheUrl,
+			cacheSession
+		});
+	}
+
 	const access =
 		first?.access ??
-		(subjectToken === undefined
-			? undefined
-			: await cacheClient.cacheAccess(subjectToken));
+		(await cacheClient.cacheAccess(sessionCredential(cacheUrl)));
 
 	return {
 		kind: 'ready',
@@ -591,23 +613,16 @@ function onboardClientFor(
 		controlRpc(parsed, { credential, signal, fetcher });
 
 	return {
-		cacheAccess: async (subjectToken) => {
+		cacheAccess: async (credential) => {
 			try {
-				const token = await raw.tokenExchange(
-					subjectToken,
-					subjectTokenTypeIdToken
-				);
 				const cache = await tenantRpc(parsed, {
-					credential: token.access_token,
+					credential,
 					signal,
 					fetcher
 				}).caches.get.inDefaultCache({});
 				return cache.access;
 			} catch (error) {
-				if (
-					error instanceof CupboardHttpError &&
-					error.oauthError?.problem === subjectTokenProblems.untrusted
-				) {
+				if (error instanceof OwnerLoginRequiredError) {
 					return;
 				}
 				const refusedStatuses: readonly number[] = [
@@ -625,7 +640,8 @@ function onboardClientFor(
 		},
 		version: () => raw.version(),
 		publicKey: () => raw.publicKey(),
-		signup: (request) => raw.signup(request),
+		signup: (request, binding) => raw.signup(request, binding),
+		tokenExchange: (...request) => raw.tokenExchange(...request),
 		initialiseInstance: (credential, name) =>
 			control(credential).instance.initialise({ name }),
 		getInstance: (credential) => control(credential).instance.get(),
@@ -976,9 +992,10 @@ const claimSecretPropagationAttempts = 8;
 /**
  * Claims the deployment for the operator by presenting the claim secret and the
  * operator's id_token at `/signup`, and caches the admin session that `/signup`
- * returns. `/signup` consumes a nonce-bound id_token; `/token` refuses a later
- * exchange with that id_token. The id_token must belong to the claimant that
- * the operator confirmed before the upload. The secret is deleted whether or
+ * returns. The id_token is bound to `targets`, which include the deployment.
+ * `/signup` consumes a nonce-bound id_token; `/token` refuses a later exchange
+ * with that id_token. The id_token must belong to the claimant that the
+ * operator confirmed before the upload. The secret is deleted whether or
  * not the claim succeeds, because `/signup` accepts the secret from anyone for
  * as long as it is set. A failed delete produces a warning and leaves the
  * claim's outcome unchanged. A failure to cache the session after a successful
@@ -1000,7 +1017,8 @@ async function claimDeployment(dependencies: {
 	readonly client: OnboardClient;
 	readonly url: string;
 	readonly claimSecret: ClaimSecret;
-	readonly idToken: () => Promise<string>;
+	readonly signIn: BoundSignIn;
+	readonly targets: readonly CanonicalTarget[];
 	readonly claimant: Claimant;
 	readonly removeClaimSecret: () => Promise<void>;
 	readonly buildVersion: string;
@@ -1013,15 +1031,13 @@ async function claimDeployment(dependencies: {
 	let isSecretRemoved = false;
 
 	try {
-		const idToken = await dependencies.idToken();
-		requireConfirmedClaimant(dependencies.claimant, idToken);
+		// A sign-in can wait for the operator's input, so it must finish before the
+		// claim's progress phase starts.
+		await dependencies.signIn.idTokenFor(dependencies.targets);
 		const {
-			issuer,
-			subject,
-			audience,
-			claimed: isClaimed,
-			...session
-		} = await presentClaim(dependencies, idToken);
+			idToken,
+			signup: { issuer, subject, audience, claimed: isClaimed, ...session }
+		} = await presentClaim(dependencies);
 
 		// The secret has no use after `/signup`, so it is removed before the
 		// session is cached.
@@ -1079,12 +1095,21 @@ function claimResponseDetail(error: CupboardHttpError): string {
 		: `HTTP ${String(error.status)}: ${description}`;
 }
 
+interface PresentedClaim {
+	readonly idToken: string;
+	readonly signup: SignupResponse;
+}
+
+// The claim retries a request that received no response with the same
+// id_token. If the deployment accepted that request, the retry is refused as a
+// replay, and `BoundSignIn.present` claims again with a new sign-in. The
+// deployment then returns a session with `claimed` false.
 async function presentClaim(
-	dependencies: Parameters<typeof claimDeployment>[0],
-	idToken: string
-): Promise<SignupResponse> {
+	dependencies: Parameters<typeof claimDeployment>[0]
+): Promise<PresentedClaim> {
 	const { ui, client } = dependencies;
 	const target = parseWorkerUrl(dependencies.url);
+	const deployment = canonicalTarget(target);
 	const refusalsFromThisBuild = Math.min(
 		dependencies.attempts,
 		claimSecretPropagationAttempts
@@ -1113,12 +1138,24 @@ async function presentClaim(
 			dependencies.signal,
 			async () => {
 				try {
-					const signup = await client.signup({
-						subject_token: idToken,
-						claim_secret: dependencies.claimSecret
-					});
+					const presented = await dependencies.signIn.present(
+						dependencies.targets,
+						deployment,
+						async (token) => {
+							requireConfirmedClaimant(dependencies.claimant, token.idToken);
+							const signup = await client.signup(
+								{
+									subject_token: token.idToken,
+									claim_secret: dependencies.claimSecret
+								},
+								token.binding
+							);
 
-					return { kind: 'ready', value: signup };
+							return { idToken: token.idToken, signup };
+						}
+					);
+
+					return { kind: 'ready', value: presented };
 				} catch (error) {
 					// The client reports a network failure as `UnreachableHostError`.
 					// The claim retries it, as DNS or routing may not have settled.
@@ -1214,6 +1251,10 @@ export class FirstCacheSlugTakenError extends CliError {
 }
 
 interface FirstTenant extends CreatedCache {
+	/**
+	The slug that the deploy requested, from `--cache` or the prompt.
+	*/
+	readonly slug: string;
 	readonly tenant: TenantSummary;
 }
 
@@ -1246,13 +1287,7 @@ async function createFirstTenant(
 	let requestedSlug = request.slug;
 
 	for (;;) {
-		const slug =
-			requestedSlug ??
-			(await ui.prefixedText({
-				message: 'Choose a slug for the first tenant',
-				prefix: `${url}/t/`,
-				problem: slugProblemText
-			}));
+		const slug = requestedSlug ?? (await askFirstTenantSlug(ui, url));
 		requestedSlug = undefined;
 
 		if (slug === undefined) {
@@ -1279,7 +1314,7 @@ async function createFirstTenant(
 				})
 			);
 
-			return { tenant, access, read };
+			return { slug, tenant, access, read };
 		} catch (error) {
 			if (error instanceof ORPCError && error.status === conflictStatusCode) {
 				if (!ui.interactive) {
@@ -1305,6 +1340,62 @@ async function createFirstTenant(
 
 			throw error;
 		}
+	}
+}
+
+/**
+ * Asks for the first tenant's slug, shown after the deployment URL `url`.
+ * Returns undefined when the operator cancels the prompt.
+ */
+export function askFirstTenantSlug(
+	ui: DeployUi,
+	url: string
+): Promise<string | undefined> {
+	return ui.prefixedText({
+		message: 'Choose a slug for the first tenant',
+		prefix: `${url}/t/`,
+		problem: slugProblemText
+	});
+}
+
+/**
+ * Exchanges an id_token bound to the new tenant at its token endpoint and
+ * caches the session, so that later commands for the tenant need no browser.
+ * A failure produces a warning, because the cache is already usable.
+ */
+async function cacheTenantSession(dependencies: {
+	readonly ui: DeployUi;
+	readonly signIn: BoundSignIn;
+	readonly client: OnboardClient;
+	readonly cacheUrl: URL;
+	readonly cacheSession: (session: TokenResponse, target: URL) => Promise<void>;
+}): Promise<void> {
+	const { ui, cacheUrl } = dependencies;
+	const tenant = canonicalTarget(cacheUrl);
+
+	try {
+		const session = await dependencies.signIn.present(
+			[tenant],
+			tenant,
+			(token) =>
+				dependencies.client.tokenExchange(
+					token.idToken,
+					subjectTokenTypeIdToken,
+					undefined,
+					token.binding
+				)
+		);
+
+		await dependencies.cacheSession(session, cacheUrl);
+	} catch (error) {
+		if (isAbortError(error) || !(error instanceof CliError)) {
+			throw error;
+		}
+
+		ui.warn(
+			`No tenant session was saved on this machine (${error.message}). ` +
+				`Sign in with \`cupboard login ${tenant}\` before you use the tenant.`
+		);
 	}
 }
 
