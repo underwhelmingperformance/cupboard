@@ -1078,10 +1078,10 @@ function requireWildcardGrant(token: string): void {
 	}
 }
 
-// The claim's id_token only has to remain valid for the `/signup` and
-// `/token` requests. A short margin keeps the id_token from the login before
-// the upload in use, so the claim normally needs no second login, even with
-// an issuer whose id_tokens are valid for only a few minutes.
+// The claim's id_token only has to remain valid for the `/signup` request. A
+// short margin keeps the id_token from the login before the upload in use, so
+// the claim normally needs no second login, even with an issuer whose
+// id_tokens are valid for only a few minutes.
 const claimIdTokenMarginMs = 60 * 1000;
 
 /**

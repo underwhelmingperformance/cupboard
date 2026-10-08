@@ -110,6 +110,7 @@ import {
 import { decodeInboundClaims, OidcDiscoveryStore } from '../oidc/oidc.ts';
 import {
 	logUnboundSubjectToken,
+	type SubjectBinding,
 	subjectBinding,
 	subjectTokenLimits
 } from '../oidc/subject-binding.ts';
@@ -307,7 +308,37 @@ export async function controlTokenExchange(
 		controlIssuer(request),
 		exchange
 	);
-	const requested = parseRequestedGrants(exchange.authorization_details);
+
+	return oauthJsonResponse(
+		await issueControlSession(request, env, logger, {
+			verified,
+			binding,
+			rules,
+			requested: parseRequestedGrants(exchange.authorization_details)
+		})
+	);
+}
+
+interface ControlSessionRequest {
+	readonly verified: VerifiedOidcClaims;
+	readonly binding: SubjectBinding;
+	readonly rules: readonly OidcTrustRule[];
+	readonly requested: AuthorizationDetails | undefined;
+}
+
+/**
+ * Issues a control access token to a verified external identity that the
+ * control trust rules select, with a refresh token unless the verified
+ * audience is the deployment URL. The nonce of a nonce-bound token is recorded
+ * as consumed in the batch that creates the refresh family, or on its own when
+ * there is no family. A later use of the same nonce-bound token is refused.
+ */
+export async function issueControlSession(
+	request: Request,
+	env: Env,
+	logger: Logger,
+	{ verified, binding, rules, requested }: ControlSessionRequest
+): Promise<TokenResponse> {
 	const selection = selectOidcTrust(rules, verified, requested);
 
 	switch (selection.outcome) {
@@ -364,7 +395,7 @@ export async function controlTokenExchange(
 		: await sessions.create(verified, subject, selection.rule, grants, nonce);
 
 	if (session === undefined && nonce !== undefined) {
-		await recordControlSubjectNonce(database, nonce);
+		await recordControlSubjectNonce(controlDatabase(env), nonce);
 	}
 
 	const current = await selectControlTrust(env, verified, grants);
@@ -377,14 +408,14 @@ export async function controlTokenExchange(
 		throw new ControlSubjectTokenUntrustedError();
 	}
 
-	return oauthJsonResponse({
+	return {
 		access_token: accessToken,
 		token_type: 'Bearer',
 		expires_in: adminJwtTtlSeconds,
 		issued_token_type: issuedAccessTokenType,
 		...(session !== undefined && { refresh_token: session.refreshToken }),
 		authorization_details: grants
-	} satisfies TokenResponse);
+	};
 }
 
 export async function controlRevoke(

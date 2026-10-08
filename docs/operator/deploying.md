@@ -407,11 +407,11 @@ issuer that adds further audiences to its ID tokens can't be used for the claim.
 Workers are serving, it:
 
 1. presents the secret and your ID token at `/signup`. The deployment records
-   the token's issuer and subject as the admin, and creates a control trust rule
-   with the ID `signup` that pins the issuer, subject and audience;
+   the token's issuer and subject as the admin, creates a control trust rule
+   with the ID `signup` that pins the issuer, subject and audience, and returns
+   an admin session;
 2. removes the secret from the Worker, whether or not the claim succeeded;
-3. exchanges the same ID token for an admin token and caches it, as
-   `cupboard login` does.
+3. caches the admin session, as `cupboard login` does.
 
 The ID token presented at the claim must belong to the identity that you
 confirmed. `init` keeps the token from the sign-in before the upload, and signs

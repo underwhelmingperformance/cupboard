@@ -3,7 +3,8 @@ import { z } from 'zod';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
-	oidcSubjectSchema
+	oidcSubjectSchema,
+	tokenResponseSchema
 } from './oidc.ts';
 import { subjectBindingFields } from './subject-binding.ts';
 
@@ -18,10 +19,12 @@ export const signupRequestSchema = z.object({
 export type SignupRequest = z.output<typeof signupRequestSchema>;
 export type SignupRequestInput = z.input<typeof signupRequestSchema>;
 
-// The verified principal that the claim seeded. `claimed` is true only when this
-// request establishes the global administrator. A repeat by the same verified
-// principal succeeds with `false`.
+// The verified principal that the claim seeded, with a control session for that
+// principal. The session fields are those of a `POST /token` response.
+// `claimed` is true only when this request establishes the global
+// administrator. A repeat by the same verified principal succeeds with `false`.
 export const signupResponseSchema = z.strictObject({
+	...tokenResponseSchema.shape,
 	issuer: oidcIssuerSchema,
 	subject: oidcSubjectSchema,
 	audience: oidcAudienceSchema,

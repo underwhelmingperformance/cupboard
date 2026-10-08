@@ -309,13 +309,17 @@ describe('CupboardClient token replay', () => {
 
 describe('CupboardClient.signup', () => {
 	const response: SignupResponse = {
+		access_token: 'admin-jwt',
+		token_type: 'Bearer',
+		expires_in: 600,
+		refresh_token: 'refresh-1',
 		issuer: oidcIssuerSchema.parse('https://dash.cloudflare.com'),
 		subject: oidcSubjectSchema.parse('cf-user-1'),
 		audience: oidcAudienceSchema.parse('cupboard-client'),
 		claimed: true
 	};
 
-	it('posts a urlencoded claim and returns the established principal', async () => {
+	it('posts a urlencoded claim and returns the principal and its session', async () => {
 		const { client, captured } = capturingClient(response, {
 			kind: 'default'
 		});

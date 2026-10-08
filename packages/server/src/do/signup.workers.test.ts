@@ -1,15 +1,27 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
+import {
+	issuedAccessTokenType,
+	refreshTokenGrantType,
+	subjectTokenTypeIdToken,
+	tokenExchangeGrantType,
+	tokenResponseSchema
+} from '@cupboard/protocol/oidc';
+import { signupResponseSchema } from '@cupboard/protocol/signup';
 import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { exportJWK, generateKeyPair, SignJWT } from 'jose';
+import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { consumedSubjectNonceRetentionSeconds } from '../auth/auth.ts';
+import {
+	adminJwtTtlSeconds,
+	consumedSubjectNonceRetentionSeconds
+} from '../auth/auth.ts';
+import { controlTokenExchange } from '../control/control-plane.ts';
 import { enforceClaimSecret, handleSignup } from '../control/signup.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -17,6 +29,7 @@ import {
 	SubjectTokenAudienceInvalidError,
 	SubjectTokenIssuerInvalidError,
 	SubjectTokenNotJwtError,
+	SubjectTokenReplayedError,
 	SubjectTokenVerificationFailedError
 } from '../errors.ts';
 import {
@@ -57,9 +70,17 @@ function postSignup(
 	);
 }
 
-function signupRequest(form: Record<string, string>): Request {
+function postToken(form: Record<string, string>): Promise<Response> {
+	return controlFetch('/token', {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams(form).toString()
+	});
+}
+
+function formRequest(path: string, form: Record<string, string>): Request {
 	const body = new URLSearchParams(form);
-	return new Request(new URL('/signup', currentOrigin()), {
+	return new Request(new URL(path, currentOrigin()), {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: body.toString()
@@ -69,7 +90,7 @@ function signupRequest(form: Record<string, string>): Request {
 async function signupError(form: Record<string, string>): Promise<unknown> {
 	try {
 		return await handleSignup(
-			signupRequest(form),
+			formRequest('/signup', form),
 			Object.assign({}, env, testControlEnv, claimEnv),
 			rootLogger()
 		);
@@ -184,6 +205,27 @@ async function stubIssuer(
 				.setIssuedAt(issuedAt)
 				.setExpirationTime('5m')
 				.sign(privateKey)
+	};
+}
+
+const accessClaimsSchema = z.object({
+	iss: z.string(),
+	sub: z.string(),
+	aud: z.string(),
+	cb_rule: z.string()
+});
+
+function signupShape(value: unknown) {
+	const {
+		access_token: accessToken,
+		refresh_token: refreshToken,
+		...rest
+	} = signupResponseSchema.parse(value);
+
+	return {
+		...rest,
+		accessToken: accessClaimsSchema.parse(decodeJwt(accessToken)),
+		hasRefreshToken: refreshToken !== undefined
 	};
 }
 
@@ -342,7 +384,7 @@ describe('control plane POST /signup', () => {
 		expect({
 			status: response.status,
 			cacheControl: response.headers.get('cache-control'),
-			body: await response.json(),
+			body: signupShape(await response.json()),
 			...(await seededAdmin())
 		}).toStrictEqual({
 			status: StatusCodes.OK,
@@ -351,7 +393,18 @@ describe('control plane POST /signup', () => {
 				issuer: idp.issuer,
 				subject: 'founder',
 				audience: 'cupboard-client',
-				claimed: true
+				claimed: true,
+				accessToken: {
+					iss: currentOrigin(),
+					sub: 'founder',
+					aud: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
+					cb_rule: 'signup'
+				},
+				token_type: 'Bearer',
+				expires_in: adminJwtTtlSeconds,
+				issued_token_type: issuedAccessTokenType,
+				hasRefreshToken: true,
+				authorization_details: [{ type: 'cupboard_wildcard' }]
 			},
 			admin: {
 				issuer: idp.issuer,
@@ -734,6 +787,7 @@ describe('control plane POST /signup', () => {
 
 interface BoundSignup {
 	readonly form: Readonly<Record<string, string>>;
+	readonly binding: Readonly<Record<string, string>>;
 	readonly nonce: string;
 	readonly token: string;
 }
@@ -752,13 +806,14 @@ async function boundSignup(
 		...(options.issuedAt !== undefined && { issuedAt: options.issuedAt })
 	});
 
+	const binding = {
+		cupboard_binding_seed: seed,
+		cupboard_binding_targets: JSON.stringify(targets)
+	};
+
 	return {
-		form: {
-			subject_token: token,
-			claim_secret: claimSecret,
-			cupboard_binding_seed: seed,
-			cupboard_binding_targets: JSON.stringify(targets)
-		},
+		form: { subject_token: token, claim_secret: claimSecret, ...binding },
+		binding,
 		nonce,
 		token
 	};
@@ -773,6 +828,15 @@ async function consumedControlNonces(): Promise<
 		.all();
 
 	return rows.map((row) => ({ ...row, familyId: row.familyId ?? undefined }));
+}
+
+function controlRefreshFamilies(): Promise<
+	(typeof d1Schema.controlRefreshSessionFamily.$inferSelect)[]
+> {
+	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select()
+		.from(d1Schema.controlRefreshSessionFamily)
+		.all();
 }
 
 async function refusalOf(
@@ -795,7 +859,7 @@ describe('target-bound signup', () => {
 		vi.unstubAllGlobals();
 	});
 
-	it('claims the admin with a nonce-bound token and records its nonce', async () => {
+	it('claims the admin with a nonce-bound token and records its nonce with the session', async () => {
 		const idp = await stubIssuer();
 		const bound = await boundSignup(idp, [
 			currentOrigin(),
@@ -803,24 +867,96 @@ describe('target-bound signup', () => {
 		]);
 		const response = await postSignup(bound.form);
 		const { admin } = await seededAdmin();
+		const families = await controlRefreshFamilies();
 
 		expect({
 			status: response.status,
 			admin: admin?.subject,
+			families: families.length,
 			consumed: await consumedControlNonces()
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			admin: 'founder',
+			families: 1,
 			consumed: [
 				{
 					nonce: bound.nonce,
-					familyId: undefined,
+					familyId: families[0]?.id,
 					expiresAt: new Date(
 						nonceConsumedAt.getTime() +
 							consumedSubjectNonceRetentionSeconds * 1000
 					).toISOString()
 				}
 			]
+		});
+	});
+
+	it('returns a control session whose refresh token rotates on use', async () => {
+		const idp = await stubIssuer();
+		const bound = await boundSignup(idp, [currentOrigin()]);
+		const response = await postSignup(bound.form);
+		const session = signupResponseSchema.parse(await response.json());
+		const refresh = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: session.refresh_token ?? ''
+		});
+		const refreshed = tokenResponseSchema.parse(await refresh.json());
+		const families = await controlRefreshFamilies();
+
+		expect({
+			signup: response.status,
+			refresh: refresh.status,
+			isRotated:
+				refreshed.refresh_token !== undefined &&
+				refreshed.refresh_token !== session.refresh_token,
+			grants: refreshed.authorization_details,
+			families: families.map(({ generation }) => generation)
+		}).toStrictEqual({
+			signup: StatusCodes.OK,
+			refresh: StatusCodes.OK,
+			isRotated: true,
+			grants: [{ type: 'cupboard_wildcard' }],
+			families: [1]
+		});
+	});
+
+	it('refuses the signup token at /token once signup has consumed its nonce', async () => {
+		const idp = await stubIssuer();
+		const bound = await boundSignup(idp, [currentOrigin()]);
+		const signup = await postSignup(bound.form);
+		await signup.text();
+		const issued = await controlRefreshFamilies();
+		let refusal: unknown;
+
+		try {
+			await controlTokenExchange(
+				formRequest('/token', {
+					grant_type: tokenExchangeGrantType,
+					subject_token: bound.token,
+					subject_token_type: subjectTokenTypeIdToken,
+					...bound.binding
+				}),
+				Object.assign({}, env, testControlEnv),
+				rootLogger()
+			);
+		} catch (error: unknown) {
+			refusal = error;
+		}
+
+		const consumed = await consumedControlNonces();
+
+		expect({
+			signup: signup.status,
+			isReplayed: refusal instanceof SubjectTokenReplayedError,
+			issued: issued.length,
+			families: await controlRefreshFamilies(),
+			consumed: consumed.map(({ nonce }) => nonce)
+		}).toStrictEqual({
+			signup: StatusCodes.OK,
+			isReplayed: true,
+			issued: 1,
+			families: issued,
+			consumed: [bound.nonce]
 		});
 	});
 
@@ -907,9 +1043,12 @@ describe('target-bound signup', () => {
 	});
 
 	it.each([
-		{ name: 'an unbound signup and logs it', isAudienceBound: false },
 		{
-			name: 'an audience-bound signup without a warning',
+			name: 'an unbound signup, logs it and starts a session',
+			isAudienceBound: false
+		},
+		{
+			name: 'an audience-bound signup without a warning or a session',
 			isAudienceBound: true
 		}
 	])('accepts $name', async ({ isAudienceBound }) => {
@@ -930,6 +1069,9 @@ describe('target-bound signup', () => {
 			capture.stop();
 		}
 
+		const { hasRefreshToken } = signupShape(await response.json());
+		const families = await controlRefreshFamilies();
+
 		expect({
 			status: response.status,
 			warnings: capture.logs
@@ -938,10 +1080,14 @@ describe('target-bound signup', () => {
 					level: entry.level,
 					rule: entry.properties.rule
 				})),
+			hasRefreshToken,
+			families: families.length,
 			consumed: await consumedControlNonces()
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			warnings: isAudienceBound ? [] : [{ level: 'warning', rule: undefined }],
+			warnings: isAudienceBound ? [] : [{ level: 'warning', rule: 'signup' }],
+			hasRefreshToken: !isAudienceBound,
+			families: isAudienceBound ? 0 : 1,
 			consumed: []
 		});
 	});

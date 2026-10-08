@@ -1,8 +1,10 @@
 import {
+	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
+import { signupResponseSchema } from '@cupboard/protocol/signup';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -22,7 +24,7 @@ function postForm(url: URL, form: Record<string, string>): Promise<Response> {
 }
 
 describe('control plane signup bootstrap', () => {
-	it('claims global admin, then mints an admin token and provisions a tenant', () =>
+	it('claims global admin with a session, then exchanges a fresh ID token and provisions a tenant', () =>
 		withTemporaryDirectory('cupboard-e2e-signup-', async (directory) => {
 			// This test drives the fresh-deployment bootstrap itself, so the harness
 			// must not pre-provision a tenant or seed the control trust policy.
@@ -98,11 +100,26 @@ describe('control plane signup bootstrap', () => {
 					issuedGrants: [{ type: 'cupboard_wildcard' }],
 					createStatus: 200
 				});
-				expect(await signup.json()).toStrictEqual({
+				const {
+					access_token: accessToken,
+					refresh_token: refreshToken,
+					...claimed
+				} = signupResponseSchema.parse(await signup.json());
+				expect({
+					...claimed,
+					hasAccessToken: accessToken !== '',
+					hasRefreshToken: refreshToken !== undefined
+				}).toStrictEqual({
 					issuer: server.issuer.issuer,
 					subject: 'founder',
 					audience: signupAudience,
-					claimed: true
+					claimed: true,
+					hasAccessToken: true,
+					token_type: 'Bearer',
+					expires_in: 600,
+					issued_token_type: issuedAccessTokenType,
+					hasRefreshToken: true,
+					authorization_details: [{ type: 'cupboard_wildcard' }]
 				});
 				expect(await create.json()).toMatchObject({
 					id: 'acme',

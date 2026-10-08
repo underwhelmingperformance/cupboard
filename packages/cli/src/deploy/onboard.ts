@@ -14,7 +14,8 @@ import type {
 import { instanceNameSchema } from '@cupboard/protocol/instance';
 import {
 	subjectTokenProblems,
-	subjectTokenTypeIdToken
+	subjectTokenTypeIdToken,
+	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import type {
 	ControlCheckReport,
@@ -34,15 +35,11 @@ import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import {
-	type CachedSession,
-	sessionFromTokenResponse,
-	writeCachedSession
-} from '../auth/token-store.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { cacheLoginSession } from '../commands/login.ts';
 import {
 	CliError,
 	CupboardHttpError,
@@ -145,7 +142,7 @@ export type OnboardOutcome =
  */
 export interface OnboardClient extends Pick<
 	CupboardClient,
-	'version' | 'signup' | 'tokenExchange' | 'publicKey'
+	'version' | 'signup' | 'publicKey'
 > {
 	cacheAccess(subjectToken: string): Promise<CacheAccessMode | undefined>;
 	getInstance(credential: AccessCredential): Promise<InstanceSummary>;
@@ -217,8 +214,16 @@ export interface OnboardOptions {
 	 */
 	readonly freshIdToken?: () => Promise<string | undefined>;
 	readonly clientFactory?: (url: string) => OnboardClient;
+	/**
+	The `fetch` that the default client factory sends its requests with.
+	*/
+	readonly fetcher?: typeof fetch;
+	/**
+	 * Saves the admin session from the claim for `target`. By default it saves
+	 * the session as `cupboard login` does.
+	 */
 	readonly cacheSession?: (
-		session: CachedSession,
+		session: TokenResponse,
 		target: URL
 	) => Promise<void>;
 	/**
@@ -303,8 +308,11 @@ export async function onboardDeployment(
 	const { ui, authority } = options;
 	const clientFactory =
 		options.clientFactory ??
-		((url: string) => onboardClientFor(url, options.signal));
-	const cacheSession = options.cacheSession ?? writeCachedSession;
+		((url: string) => onboardClientFor(url, options.signal, options.fetcher));
+	const cacheSession =
+		options.cacheSession ??
+		((session: TokenResponse, target: URL) =>
+			cacheLoginSession(session, target, options.signal));
 	const sessionCredential =
 		options.sessionCredential ??
 		((target: URL) => cachedOwnerProvider(target, { signal: options.signal }));
@@ -572,14 +580,15 @@ async function resolveDeploymentUrl(
 
 // The raw endpoints come from the hand-written client; each control call
 // builds a derived client bound to the token issued earlier in the flow.
-function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
+function onboardClientFor(
+	url: string,
+	signal?: AbortSignal,
+	fetcher: typeof fetch = fetch
+): OnboardClient {
 	const parsed = parseWorkerUrl(url);
-	const raw = CupboardClient.fromUrl(parsed, {
-		cache: { kind: 'default' },
-		signal
-	});
+	const raw = new CupboardClient(parsed, fetcher, { kind: 'default' }, signal);
 	const control = (credential: AccessCredential) =>
-		controlRpc(parsed, { credential, signal });
+		controlRpc(parsed, { credential, signal, fetcher });
 
 	return {
 		cacheAccess: async (subjectToken) => {
@@ -590,7 +599,8 @@ function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
 				);
 				const cache = await tenantRpc(parsed, {
 					credential: token.access_token,
-					signal
+					signal,
+					fetcher
 				}).caches.get.inDefaultCache({});
 				return cache.access;
 			} catch (error) {
@@ -616,8 +626,6 @@ function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
 		version: () => raw.version(),
 		publicKey: () => raw.publicKey(),
 		signup: (request) => raw.signup(request),
-		tokenExchange: (subjectToken, subjectTokenType) =>
-			raw.tokenExchange(subjectToken, subjectTokenType),
 		initialiseInstance: (credential, name) =>
 			control(credential).instance.initialise({ name }),
 		getInstance: (credential) => control(credential).instance.get(),
@@ -966,16 +974,15 @@ export class ClaimantChangedError extends CliError {
 const claimSecretPropagationAttempts = 8;
 
 /**
- * Claims the deployment for the operator: presents the claim secret with the
- * operator's id_token at `/signup`, which seeds the global admin and the
- * control trust rule from the token's issuer, subject and audience; deletes
- * the secret; and exchanges the same id_token for an admin token and caches it
- * for the other commands. The id_token must belong to the claimant that the
- * operator confirmed before the upload. The secret is deleted whether or not
- * the claim succeeds, because `/signup` accepts the secret from anyone for as
- * long as it is set. A failed delete produces a warning and leaves the claim's
- * outcome unchanged. A failure to cache the session after a successful claim is
- * reported with `AdminSessionNotCachedError`, not as a failed claim.
+ * Claims the deployment for the operator by presenting the claim secret and the
+ * operator's id_token at `/signup`, and caches the admin session that `/signup`
+ * returns. `/signup` consumes a nonce-bound id_token; `/token` refuses a later
+ * exchange with that id_token. The id_token must belong to the claimant that
+ * the operator confirmed before the upload. The secret is deleted whether or
+ * not the claim succeeds, because `/signup` accepts the secret from anyone for
+ * as long as it is set. A failed delete produces a warning and leaves the
+ * claim's outcome unchanged. A failure to cache the session after a successful
+ * claim is reported with `AdminSessionNotCachedError`, not as a failed claim.
  *
  * Setting the secret after the upload creates a new Worker version of the same
  * release. Until that version serves, the version without the secret responds
@@ -997,46 +1004,40 @@ async function claimDeployment(dependencies: {
 	readonly claimant: Claimant;
 	readonly removeClaimSecret: () => Promise<void>;
 	readonly buildVersion: string;
-	readonly cacheSession: (session: CachedSession, target: URL) => Promise<void>;
+	readonly cacheSession: (session: TokenResponse, target: URL) => Promise<void>;
 	readonly attempts: number;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly signal?: AbortSignal;
 }): Promise<OwnerBinding> {
-	const { ui, client } = dependencies;
+	const { ui } = dependencies;
 	let isSecretRemoved = false;
 
 	try {
 		const idToken = await dependencies.idToken();
 		requireConfirmedClaimant(dependencies.claimant, idToken);
-		const signup = await presentClaim(dependencies, idToken);
+		const {
+			issuer,
+			subject,
+			audience,
+			claimed: isClaimed,
+			...session
+		} = await presentClaim(dependencies, idToken);
 
 		// The secret has no use after `/signup`, so it is removed before the
 		// session is cached.
 		isSecretRemoved = true;
 		await dependencies.removeClaimSecret();
-		const admin = {
-			issuer: signup.issuer,
-			subject: signup.subject,
-			audience: signup.audience
-		};
+		const admin = { issuer, subject, audience };
 		const target = parseWorkerUrl(dependencies.url);
 
 		try {
-			await ui.reporter().phase(
-				'Caching the admin session',
-				async () => {
-					const exchanged = await client.tokenExchange(
-						idToken,
-						subjectTokenTypeIdToken
-					);
-
-					await dependencies.cacheSession(
-						sessionFromTokenResponse(exchanged),
-						target
-					);
-				},
-				{ humanLabel: 'Saving administrator sign-in' }
-			);
+			await ui
+				.reporter()
+				.phase(
+					'Caching the admin session',
+					() => dependencies.cacheSession(session, target),
+					{ humanLabel: 'Saving administrator sign-in' }
+				);
 		} catch (error) {
 			if (isAbortError(error)) {
 				throw error;
@@ -1045,9 +1046,9 @@ async function claimDeployment(dependencies: {
 			throw new AdminSessionNotCachedError(target, admin, { cause: error });
 		}
 
-		const name = ownDisplayName(idToken) ?? principalLabel(signup);
+		const name = ownDisplayName(idToken) ?? principalLabel(admin);
 		ui.success(
-			signup.claimed
+			isClaimed
 				? `You are now the admin of this deployment (${name}).`
 				: `You are already the admin of this deployment (${name}).`
 		);
