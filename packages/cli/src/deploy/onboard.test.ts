@@ -6,9 +6,11 @@ import {
 	instanceNameSchema
 } from '@cupboard/protocol/instance';
 import {
+	issuedAccessTokenType,
 	oidcAudienceSchema,
 	oidcIssuerSchema,
-	oidcSubjectSchema
+	oidcSubjectSchema,
+	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import type { R2CredentialCheck } from '@cupboard/protocol/reports';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
@@ -24,7 +26,6 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import type { CachedSession } from '../auth/token-store.ts';
 import {
 	type AccessCredential,
 	CupboardClient,
@@ -619,8 +620,8 @@ interface ScriptedClient {
 	readonly controlCheckTokens: string[];
 	readonly cacheAccessTokens: string[];
 	readonly initialisedInstanceNames: InstanceName[];
-	readonly cachedSessions: { session: CachedSession; target: URL }[];
-	readonly cacheSession: (session: CachedSession, target: URL) => Promise<void>;
+	readonly cachedSessions: { session: TokenResponse; target: URL }[];
+	readonly cacheSession: (session: TokenResponse, target: URL) => Promise<void>;
 	/**
 	The claim-relevant calls, in order.
 	*/
@@ -641,7 +642,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const membershipRebuildTokens: string[] = [];
 	const controlCheckTokens: string[] = [];
 	const cacheAccessTokens: string[] = [];
-	const cachedSessions: { session: CachedSession; target: URL }[] = [];
+	const cachedSessions: { session: TokenResponse; target: URL }[] = [];
 	const initialisedInstanceNames: InstanceName[] = [];
 	const events: string[] = [];
 	const currentInstanceName =
@@ -690,18 +691,6 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 				listTenants: async () => ({
 					tenants: await answer(lists, '/control/tenants', orpcRejection)
 				}),
-				tokenExchange: () => {
-					events.push('tokenExchange');
-
-					return Promise.resolve({
-						access_token: 'admin-jwt',
-						token_type: 'Bearer',
-						expires_in: 900,
-						scope: 'admin',
-						issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
-						refresh_token: 'refresh-1'
-					});
-				},
 				createTenant: (_token, body) => {
 					createdBodies.push(body);
 					return answer(creates, '/control/tenants', orpcRejection);
@@ -729,7 +718,20 @@ const unreachableTwice: Scripted<SignupResponse>[] = [
 	'unreachable'
 ];
 
-const claimedSignup = { ...owner, claimed: true };
+const signupSession = {
+	access_token: 'admin-jwt',
+	token_type: 'Bearer',
+	expires_in: 600,
+	issued_token_type: issuedAccessTokenType,
+	refresh_token: 'refresh-1',
+	authorization_details: [{ type: 'cupboard_wildcard' }]
+} satisfies TokenResponse;
+
+const claimedSignup = {
+	...signupSession,
+	...owner,
+	claimed: true
+} satisfies SignupResponse;
 
 /**
 The options every test starts from; spread and override per case.
@@ -874,14 +876,13 @@ describe('onboardDeployment', () => {
 			events: [
 				'signup',
 				'deleteSecret:cupboard:CUPBOARD_SIGNUP_SECRET',
-				'tokenExchange',
 				'cacheSession',
 				'getInstance:session-jwt'
 			],
 			signupBodies: [{ subject_token: claimIdToken, claim_secret: 'claim-1' }],
 			cachedSessions: [
 				{
-					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
+					session: signupSession,
 					target: new URL('https://cache.example.com')
 				}
 			],
@@ -931,80 +932,134 @@ describe('onboardDeployment', () => {
 		]);
 	});
 
-	it.each<{
-		readonly name: string;
-		readonly exchangeFailure?: Error;
-		readonly writeFailure?: Error;
-		readonly cause: abstract new (...parameters: never[]) => Error;
-	}>([
-		{
-			name: 'the token exchange fails',
-			exchangeFailure: new CupboardHttpError('POST', '/token', 500, 'boom'),
-			cause: CupboardHttpError
-		},
-		{
-			name: 'the session cannot be written',
-			writeFailure: new Error('disk full'),
-			cause: Error
-		}
-	])(
-		'reports a successful claim whose session is not cached when $name',
-		async ({ exchangeFailure, writeFailure, cause }) => {
-			const { ui } = scriptedUi();
-			const client = scriptedClient({
-				versions: ['v-new'],
-				signup: [claimedSignup]
+	it('reports a successful claim whose session cannot be written', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup]
+		});
+		const apiCalls: ApiCall[] = [];
+		const writeFailure = new Error('disk full');
+
+		let refusal: unknown;
+
+		try {
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				api: baseApi(apiCalls),
+				authority: bootstrapAuthority(),
+				cacheSession: () => Promise.reject(writeFailure)
 			});
-			const apiCalls: ApiCall[] = [];
-
-			let refusal: unknown;
-
-			try {
-				await onboardDeployment({
-					...baseOptions(ui, client),
-					api: baseApi(apiCalls),
-					authority: bootstrapAuthority(),
-					clientFactory: (url) => ({
-						...client.factory(url),
-						...(exchangeFailure !== undefined && {
-							tokenExchange: () => Promise.reject(exchangeFailure)
-						})
-					}),
-					cacheSession: (session, target) =>
-						writeFailure === undefined
-							? client.cacheSession(session, target)
-							: Promise.reject(writeFailure)
-				});
-			} catch (error) {
-				refusal = error;
-			}
-
-			expect({
-				refusal:
-					refusal instanceof AdminSessionNotCachedError
-						? {
-								url: refusal.url.href,
-								admin: refusal.admin,
-								isExpectedCause: refusal.cause instanceof cause
-							}
-						: refusal,
-				apiCalls
-			}).toStrictEqual({
-				refusal: {
-					url: 'https://cache.example.com/',
-					admin: owner,
-					isExpectedCause: true
-				},
-				apiCalls: [
-					{
-						method: 'deleteSecret',
-						scriptName: 'cupboard',
-						name: 'CUPBOARD_SIGNUP_SECRET'
-					}
-				]
-			});
+		} catch (error) {
+			refusal = error;
 		}
-	);
+
+		expect({
+			refusal:
+				refusal instanceof AdminSessionNotCachedError
+					? {
+							url: refusal.url.href,
+							admin: refusal.admin,
+							isWriteFailure: refusal.cause === writeFailure
+						}
+					: refusal,
+			apiCalls
+		}).toStrictEqual({
+			refusal: {
+				url: 'https://cache.example.com/',
+				admin: owner,
+				isWriteFailure: true
+			},
+			apiCalls: [
+				{
+					method: 'deleteSecret',
+					scriptName: 'cupboard',
+					name: 'CUPBOARD_SIGNUP_SECRET'
+				}
+			]
+		});
+	});
+
+	it('saves the session from /signup and sends the id_token in one request', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'] });
+		const apiCalls: ApiCall[] = [];
+		const requests: {
+			readonly method: string;
+			readonly path: string;
+			readonly hasIdToken: boolean;
+		}[] = [];
+		const cachedSessions: { session: TokenResponse; target: URL }[] = [];
+		const publicKey = `cupboard-builds-1:${Buffer.alloc(32, 1).toString('base64')}`;
+		const responses: Readonly<Record<string, () => Response>> = {
+			'GET /_version': () => new Response('v-new'),
+			'POST /signup': () => Response.json(claimedSignup),
+			'GET /control/instance': () =>
+				Response.json({ state: 'configured', name: 'cupboard' }),
+			'PUT /control/instance': () =>
+				Response.json({ state: 'configured', name: 'cupboard' }),
+			'GET /control/tenants': () => Response.json({ tenants: [] }),
+			'POST /control/tenants': () => Response.json(tenantSummary('builds')),
+			'GET /t/builds/pubkey': () => new Response(`${publicKey}\n`)
+		};
+		const fetcher: typeof fetch = async (input, init) => {
+			const request = new Request(input, init);
+			const path = new URL(request.url).pathname;
+			const body = await request.text();
+
+			requests.push({
+				method: request.method,
+				path,
+				hasIdToken:
+					body.includes(claimIdToken) ||
+					(request.headers.get('authorization') ?? '').includes(claimIdToken)
+			});
+
+			const respond = responses[`${request.method} ${path}`];
+
+			return respond === undefined
+				? new Response(undefined, { status: StatusCodes.NOT_FOUND })
+				: respond();
+		};
+
+		const outcome = await onboardDeployment({
+			api: baseApi(apiCalls),
+			ui,
+			controlScriptName: scriptNameSchema.parse('cupboard'),
+			tenantScriptName: scriptNameSchema.parse('cupboard-tenant'),
+			domain: 'cache.example.com',
+			authority: bootstrapAuthority(),
+			buildVersion: 'v-new',
+			cacheAccess: 'public',
+			r2: { kind: 'fresh' },
+			readPassword: () => readPassword,
+			fetcher,
+			cacheSession: (session, target) => {
+				cachedSessions.push({ session, target });
+				return Promise.resolve();
+			},
+			sessionCredential: () => 'session-jwt',
+			sleep: () => Promise.resolve()
+		});
+
+		expect({ kind: outcome.kind, requests, cachedSessions }).toStrictEqual({
+			kind: 'ready',
+			requests: [
+				{ method: 'GET', path: '/_version', hasIdToken: false },
+				{ method: 'POST', path: '/signup', hasIdToken: true },
+				{ method: 'GET', path: '/control/instance', hasIdToken: false },
+				{ method: 'PUT', path: '/control/instance', hasIdToken: false },
+				{ method: 'GET', path: '/control/tenants', hasIdToken: false },
+				{ method: 'POST', path: '/control/tenants', hasIdToken: false },
+				{ method: 'GET', path: '/t/builds/pubkey', hasIdToken: false }
+			],
+			cachedSessions: [
+				{
+					session: signupSession,
+					target: new URL('https://cache.example.com')
+				}
+			]
+		});
+	});
 
 	it('refuses to claim with an id_token for a different identity from the confirmed one', async () => {
 		const { ui } = scriptedUi();
@@ -1100,13 +1155,7 @@ describe('onboardDeployment', () => {
 
 		expect({ outcome, events: client.events }).toStrictEqual({
 			outcome: { kind: 'cancelled', url: 'https://cache.example.com' },
-			events: [
-				'signup',
-				'signup',
-				'tokenExchange',
-				'cacheSession',
-				'getInstance:session-jwt'
-			]
+			events: ['signup', 'signup', 'cacheSession', 'getInstance:session-jwt']
 		});
 	});
 
@@ -1360,12 +1409,7 @@ describe('onboardDeployment', () => {
 			warningCount: warnings.length
 		}).toStrictEqual({
 			outcome: { kind: 'cancelled', url: 'https://cache.example.com' },
-			events: [
-				'signup',
-				'tokenExchange',
-				'cacheSession',
-				'getInstance:session-jwt'
-			],
+			events: ['signup', 'cacheSession', 'getInstance:session-jwt'],
 			warningCount: 1
 		});
 	});

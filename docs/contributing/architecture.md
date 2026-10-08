@@ -740,9 +740,13 @@ afterwards. The caller also presents an ID token from any OIDC issuer. The
 Worker checks the secret before it decodes the token, so a caller without the
 secret can't make it fetch anything from an issuer. In one D1 batch, it records
 the admin in `global_admin` and creates the control trust rule `signup`, which
-pins the token's issuer, subject and audience. Anyone else who tries to claim
-the deployment afterwards is refused. With `CUPBOARD_LOCAL_DEV` set, the issuer
-can be a loopback HTTP address, but the claim still needs the secret.
+pins the token's issuer, subject and audience. The response also contains a
+control session for the admin, which the Worker issues through that rule in the
+same way as `POST /token`. Signup consumes a nonce-bound ID token, so the CLI
+caches this session and does not present the token at `POST /token`. Anyone else
+who tries to claim the deployment afterwards is refused. With
+`CUPBOARD_LOCAL_DEV` set, the issuer can be a loopback HTTP address, but the
+claim still needs the secret.
 
 The CLI gets ID tokens by signing in through the browser, using PKCE with a
 loopback redirect, or through the device flow. By default it uses Cloudflare's

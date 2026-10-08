@@ -343,15 +343,15 @@ default that is the operator's Cloudflare identity.
   must belong to the confirmed identity. It deletes the secret after the claim
   attempt, whether or not the claim succeeded, and also when the run stops
   before the claim, with a request that does not use the run's aborted signal.
-  It then exchanges the id_token for an admin token and caches the token. Before
-  its own upload, an update or a deploy without a terminal deletes a secret that
-  an interrupted run left. `/signup` checks the secret before it decodes the
-  token. It seeds the admin and the control trust rule from the token's `iss`,
-  `sub` and single `aud`; the token may come from any issuer. Without a
-  terminal, the deploy leaves the deployment without an admin and, without
-  waiting for the new build, exits with an error that says to run `init` from a
-  terminal. A first deploy from a terminal whose deployment does not come online
-  also exits non-zero.
+  It then caches the admin session that `/signup` returns. Before its own
+  upload, an update or a deploy without a terminal deletes a secret that an
+  interrupted run left. `/signup` checks the secret before it decodes the token.
+  It seeds the admin and the control trust rule from the token's `iss`, `sub`
+  and single `aud`; the token may come from any issuer. Without a terminal, the
+  deploy leaves the deployment without an admin and, without waiting for the new
+  build, exits with an error that says to run `init` from a terminal. A first
+  deploy from a terminal whose deployment does not come online also exits
+  non-zero.
 
   Update: when the row contains an admin, the deploy needs an admin token, from
   the `cupboard login` session or with `--github-oidc` through a control trust

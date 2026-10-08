@@ -27,6 +27,7 @@ import {
 	SubjectTokenNotJwtError,
 	SubjectTokenSubjectMissingError
 } from '../errors.ts';
+import { oauthJsonResponse } from '../http/oauth-response.ts';
 import { parseFormBody } from '../http/parse.ts';
 import {
 	type InboundTokenLimits,
@@ -37,14 +38,10 @@ import {
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
 import { decodeInboundClaims, OidcDiscoveryStore } from '../oidc/oidc.ts';
-import {
-	logUnboundSubjectToken,
-	subjectBinding,
-	subjectTokenLimits
-} from '../oidc/subject-binding.ts';
+import { subjectBinding, subjectTokenLimits } from '../oidc/subject-binding.ts';
 
-import { controlIssuer } from './control-plane.ts';
-import { recordControlSubjectNonce } from './control-subject-nonces.ts';
+import { controlIssuer, issueControlSession } from './control-plane.ts';
+import { controlTrustRules } from './control-trust.ts';
 import { claimGlobalAdmin } from './global-admin.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
@@ -64,7 +61,9 @@ const localDevelopmentVerifier = new InboundTokenVerifier(
 //
 // The token's `iss` and `sub` identify the principal, which becomes the global
 // admin. The seeded control trust rule pins `iss`, `sub` and the single `aud`,
-// and lets the principal obtain admin tokens at `/token`.
+// and lets the principal obtain admin tokens at `/token`. The response also
+// includes a control session issued through that rule, because a nonce-bound
+// ID token is consumed here and `/token` would refuse it.
 export async function handleSignup(
 	request: Request,
 	env: Env,
@@ -96,38 +95,26 @@ export async function handleSignup(
 	const binding = await subjectBinding(verified, controlIssuer(request), body);
 	const database = controlDatabase(env);
 
-	switch (binding.kind) {
-		case 'unbound': {
-			logUnboundSubjectToken(logger);
-			break;
-		}
-		case 'nonce-bound': {
-			await recordControlSubjectNonce(database, binding.nonce);
-			break;
-		}
-		case 'audience-bound': {
-			break;
-		}
-	}
-
 	const now = new Date();
 	const { claimed: isClaimed } = await claimGlobalAdmin(
 		database,
 		{ issuer, subject, audience },
 		isoTimestamp(now)
 	);
+	const session = await issueControlSession(request, env, logger, {
+		verified,
+		binding,
+		rules: await controlTrustRules(database, isLoopbackAllowed),
+		requested: undefined
+	});
 
-	return Response.json(
-		{
-			issuer,
-			subject,
-			audience,
-			claimed: isClaimed
-		} satisfies SignupResponseInput,
-		{
-			headers: { 'cache-control': 'no-store' }
-		}
-	);
+	return oauthJsonResponse({
+		...session,
+		issuer,
+		subject,
+		audience,
+		claimed: isClaimed
+	} satisfies SignupResponseInput);
 }
 
 // In a hand-written deployment, the binding can be absent. It then reads as
