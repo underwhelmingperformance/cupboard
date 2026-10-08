@@ -8,7 +8,9 @@ import {
 } from '@cupboard/protocol/oidc';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
+import { BoundSignIn, canonicalTarget } from '../auth/bound-sign-in.ts';
 import type { CachedSession } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import type { TokenProvider } from '../client/credentials.ts';
@@ -38,10 +40,9 @@ import {
 	type AuthorityEffects,
 	type BoundDatabase,
 	decideAuthority,
-	type DeployAuthority,
+	type EstablishedAuthority,
 	GlobalAdminRowInvalidError,
 	readGlobalAdmin,
-	renewingIdToken,
 	StoredSessionMismatchError
 } from './authority.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
@@ -108,12 +109,39 @@ const adminToken = jwt({
 	sub: 'cf-user-1',
 	authorization_details: [{ type: 'cupboard_wildcard' }]
 });
-const claimToken = jwt({
+const claimClaims = {
 	iss: 'https://dash.cloudflare.com',
 	sub: 'cf-user-1',
 	aud: 'cupboard-client'
-});
+};
 const nowMs = Date.parse('2026-09-25T12:00:00Z');
+
+function boundIdToken(claims: Record<string, unknown>, nonce: string): string {
+	return jwt({ ...claims, nonce, iat: Math.floor(nowMs / 1000) });
+}
+
+/**
+ * A sign-in whose ID tokens have `claims`, the requested nonce and the current
+ * time as `iat`. `issued` receives each ID token.
+ */
+function signInReturning(
+	claims: Record<string, unknown>,
+	issued?: (idToken: string) => void
+): BoundSignIn {
+	return new BoundSignIn(
+		{
+			bindsNonce: true,
+			signIn: (nonce) => {
+				const idToken = boundIdToken(claims, nonce);
+				issued?.(idToken);
+
+				return Promise.resolve(idToken);
+			}
+		},
+		() => nowMs
+	);
+}
+
 const newUrlAdminToken = jwt({
 	iss: 'https://cache.example.com',
 	sub: 'cf-user-1',
@@ -214,7 +242,11 @@ function harness(options: {
 	readonly controlWorkerExists?: boolean;
 	readonly servesCupboard?: boolean;
 	readonly newUrlServes?: boolean;
-	readonly idToken?: string;
+	readonly idTokenClaims?: Record<string, unknown>;
+	readonly firstTenantSlug?: string;
+	// The answer to the slug prompt. Undefined is a cancelled prompt.
+	readonly chosenSlug?: string | undefined;
+	readonly cloudflareLoginIdToken?: string;
 	readonly logInAsAdmin?: () => Promise<void>;
 }): Harness {
 	const calls: string[] = [];
@@ -281,9 +313,20 @@ function harness(options: {
 				calls.push(`checkAdmin:${url.href}`);
 				return options.checkAdmin?.() ?? Promise.resolve();
 			},
-			idToken: () => {
+			signIn: signInReturning(options.idTokenClaims ?? claimClaims, () => {
 				calls.push('login');
-				return Promise.resolve(options.idToken ?? claimToken);
+			}),
+			...(options.firstTenantSlug !== undefined && {
+				firstTenantSlug: options.firstTenantSlug
+			}),
+			...(options.cloudflareLoginIdToken !== undefined && {
+				cloudflareLoginIdToken: options.cloudflareLoginIdToken
+			}),
+			chooseFirstTenantSlug: (url) => {
+				calls.push(`chooseFirstTenantSlug:${url.href}`);
+				return Promise.resolve(
+					'chosenSlug' in options ? options.chosenSlug : 'acme'
+				);
 			},
 			generateClaimSecret: () => {
 				calls.push('generateClaimSecret');
@@ -294,19 +337,21 @@ function harness(options: {
 	};
 }
 
-function describeAuthority(authority: DeployAuthority): unknown {
+function describeAuthority(authority: EstablishedAuthority): unknown {
 	switch (authority.kind) {
 		case 'bootstrap': {
 			return {
 				kind: authority.kind,
 				claimSecret: authority.claimSecret,
-				claimant: authority.claimant
+				claimant: authority.claimant,
+				firstTenantSlug: authority.firstTenantSlug
 			};
 		}
 		case 'admin': {
 			return { kind: authority.kind, admin: authority.admin };
 		}
-		case 'unclaimed': {
+		case 'unclaimed':
+		case 'declined': {
 			return { kind: authority.kind };
 		}
 	}
@@ -318,6 +363,12 @@ const claimant = {
 	audience: 'cupboard-client',
 	displayName: 'cf-user-1'
 };
+
+const slugPrompt = `chooseFirstTenantSlug:${deploymentUrl.href}`;
+
+function isSignInCall(call: string): boolean {
+	return call === 'login' || call === slugPrompt;
+}
 
 describe('decideAuthority', () => {
 	it.each([
@@ -355,11 +406,83 @@ describe('decideAuthority', () => {
 				authority: describeAuthority(authority),
 				calls
 			}).toStrictEqual({
-				authority: { kind: 'bootstrap', claimSecret: 'claim-1', claimant },
-				calls: [...reads, 'login', 'generateClaimSecret']
+				authority: {
+					kind: 'bootstrap',
+					claimSecret: 'claim-1',
+					claimant,
+					firstTenantSlug: 'acme'
+				},
+				calls: [
+					...reads,
+					'newUrl',
+					`chooseFirstTenantSlug:${deploymentUrl.href}`,
+					'login',
+					'generateClaimSecret'
+				]
 			});
 		}
 	);
+
+	it.each([
+		{
+			name: 'asks for the slug, then signs in for the deployment and the tenant',
+			options: {},
+			beforeClaim: [slugPrompt, 'login'],
+			atClaim: []
+		},
+		{
+			name: 'takes the --cache slug without asking',
+			options: { firstTenantSlug: 'acme' },
+			beforeClaim: ['login'],
+			atClaim: []
+		},
+		{
+			name: 'reads the claimant from the Cloudflare login for the account',
+			options: { cloudflareLoginIdToken: jwt(claimClaims) },
+			beforeClaim: [slugPrompt],
+			atClaim: ['login']
+		}
+	])('on a first deploy, $name', async ({ options, beforeClaim, atClaim }) => {
+		const { deployment, effects, calls } = harness(options);
+
+		const authority = await decideAuthority(deployment, effects);
+
+		if (authority.kind !== 'bootstrap') {
+			throw new Error('expected a first deploy');
+		}
+
+		const decided = calls.filter((call) => isSignInCall(call));
+		await authority.signIn.idTokenFor([
+			canonicalTarget(deploymentUrl),
+			canonicalTarget(new URL(`${deploymentUrl.origin}/t/acme`))
+		]);
+
+		expect({
+			authority: describeAuthority(authority),
+			beforeClaim: decided,
+			atClaim: calls.filter((call) => isSignInCall(call)).slice(decided.length)
+		}).toStrictEqual({
+			authority: {
+				kind: 'bootstrap',
+				claimSecret: 'claim-1',
+				claimant,
+				firstTenantSlug: 'acme'
+			},
+			beforeClaim,
+			atClaim
+		});
+	});
+
+	it('stops a first deploy before any sign-in when the slug prompt is cancelled', async () => {
+		const { deployment, effects, calls } = harness({ chosenSlug: undefined });
+
+		const authority = await decideAuthority(deployment, effects);
+
+		expect({ authority: describeAuthority(authority), calls }).toStrictEqual({
+			authority: { kind: 'declined' },
+			calls: [...claimedReads, 'newUrl', slugPrompt]
+		});
+	});
 
 	it('leaves a first deploy without a terminal unclaimed, without a login or a secret', async () => {
 		const { deployment, effects, calls } = harness({ interactive: false });
@@ -419,7 +542,7 @@ describe('decideAuthority', () => {
 	])(
 		'refuses to claim with an id_token that has $name, before any change',
 		async ({ claims, problem }) => {
-			const { deployment, effects, calls } = harness({ idToken: jwt(claims) });
+			const { deployment, effects, calls } = harness({ idTokenClaims: claims });
 
 			const refusal = await rejectionOf(decideAuthority(deployment, effects));
 
@@ -734,12 +857,12 @@ describe('decideAuthority', () => {
 
 	it("claims with the identity in the operator's id_token", async () => {
 		const { deployment, effects } = harness({
-			idToken: jwt({
+			idTokenClaims: {
 				iss: 'https://idp.example.test',
 				sub: 'founder',
 				aud: ['cupboard-cli'],
 				email: 'ada@example.com'
-			})
+			}
 		});
 
 		const authority = await decideAuthority(deployment, effects);
@@ -752,7 +875,8 @@ describe('decideAuthority', () => {
 				subject: 'founder',
 				audience: 'cupboard-cli',
 				displayName: 'ada@example.com'
-			}
+			},
+			firstTenantSlug: 'acme'
 		});
 	});
 
@@ -1275,7 +1399,8 @@ describe('decideAuthority with two control databases', () => {
 		expect(await decideWith({ bound: false, planned: false })).toStrictEqual({
 			kind: 'bootstrap',
 			claimSecret: 'claim-1',
-			claimant
+			claimant,
+			firstTenantSlug: 'acme'
 		});
 	});
 });
@@ -1366,62 +1491,6 @@ describe('readGlobalAdmin', () => {
 	});
 });
 
-function expiringIn(minutes: number): string {
-	return jwt({ sub: 'u', exp: Math.floor(nowMs / 1000) + minutes * 60 });
-}
-
-describe('renewingIdToken', () => {
-	it('logs in once while the token stays fresh', async () => {
-		const logins: string[] = [];
-		const token = expiringIn(60);
-		const idToken = renewingIdToken(
-			() => {
-				logins.push('login');
-				return Promise.resolve(token);
-			},
-			() => nowMs
-		);
-
-		expect({
-			first: await idToken(),
-			second: await idToken(),
-			logins
-		}).toStrictEqual({ first: token, second: token, logins: ['login'] });
-	});
-
-	it('keeps a token that expires in four minutes', async () => {
-		let logins = 0;
-		const token = expiringIn(4);
-		const idToken = renewingIdToken(
-			() => {
-				logins += 1;
-				return Promise.resolve(token);
-			},
-			() => nowMs
-		);
-
-		expect({
-			first: await idToken(),
-			second: await idToken(),
-			logins
-		}).toStrictEqual({ first: token, second: token, logins: 1 });
-	});
-
-	it('logs in again once the current token expires within a minute', async () => {
-		const tokens = [expiringIn(0.5), expiringIn(60)];
-		const idToken = renewingIdToken(
-			() => Promise.resolve(tokens.shift() ?? ''),
-			() => nowMs
-		);
-		const first = await idToken();
-
-		expect({ first, second: await idToken() }).toStrictEqual({
-			first,
-			second: expiringIn(60)
-		});
-	});
-});
-
 describe('adminLoginCommand', () => {
 	const url = new URL('https://cache.example.com');
 
@@ -1501,6 +1570,7 @@ describe('adminLogin', () => {
 		'corrects trust-rule advice after admin sign-in and an HTTP $status exchange refusal: $body.error_description',
 		async ({ status, body }) => {
 			const calls: unknown[] = [];
+			const issued: string[] = [];
 			let exchangeError: unknown;
 			const client = new CupboardClient(
 				deploymentUrl,
@@ -1531,15 +1601,19 @@ describe('adminLogin', () => {
 				info: () => {
 					calls.push('info');
 				},
-				login: (issuer, clientId) => {
+				signInFor: (issuer, clientId) => {
 					calls.push({ issuer, clientId });
-					return Promise.resolve(claimToken);
+					return signInReturning(claimClaims, (idToken) => {
+						issued.push(idToken);
+					});
 				},
-				exchange: async (_url, idToken) => {
+				exchange: async (_url, token) => {
 					try {
 						return await client.tokenExchange(
-							idToken,
-							'urn:ietf:params:oauth:token-type:id_token'
+							token.idToken,
+							'urn:ietf:params:oauth:token-type:id_token',
+							undefined,
+							token.binding
 						);
 					} catch (error) {
 						exchangeError = error;
@@ -1562,6 +1636,9 @@ describe('adminLogin', () => {
 			});
 
 			const refusal = await rejectionOf(decideAuthority(deployment, effects));
+			const seed = z
+				.object({ form: z.object({ cupboard_binding_seed: z.string() }) })
+				.parse(calls.at(-1)).form.cupboard_binding_seed;
 
 			expect({
 				refusal:
@@ -1593,8 +1670,10 @@ describe('adminLogin', () => {
 						method: 'POST',
 						form: {
 							grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
-							subject_token: claimToken,
-							subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'
+							subject_token: issued[0],
+							subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
+							cupboard_binding_seed: seed,
+							cupboard_binding_targets: JSON.stringify([deploymentUrl.origin])
 						}
 					}
 				]
@@ -1696,12 +1775,17 @@ describe('adminLogin', () => {
 				info: () => {
 					calls.push('info');
 				},
-				login: () => {
-					calls.push('login');
-					return stage === 'login'
-						? Promise.reject(error)
-						: Promise.resolve(claimToken);
-				},
+				signInFor: () =>
+					new BoundSignIn({
+						bindsNonce: true,
+						signIn: (nonce) => {
+							calls.push('login');
+
+							return stage === 'login'
+								? Promise.reject(error)
+								: Promise.resolve(boundIdToken(claimClaims, nonce));
+						}
+					}),
 				exchange: () => {
 					calls.push('exchange');
 					return Promise.reject(error);
@@ -1751,25 +1835,25 @@ describe('adminLogin', () => {
 	it.each([
 		{
 			name: 'caches a session when the login returns the admin',
-			idToken: jwt({ iss: admin.issuer, sub: admin.subject }),
+			idTokenClaims: { iss: admin.issuer, sub: admin.subject },
 			refusal: undefined,
 			cached: 1
 		},
 		{
 			name: 'refuses a login that returns another Cloudflare user',
-			idToken: jwt({ iss: admin.issuer, sub: 'someone-else' }),
+			idTokenClaims: { iss: admin.issuer, sub: 'someone-else' },
 			refusal: AdminLoginMismatchError,
 			cached: 0
 		}
-	])('$name', async ({ idToken, refusal, cached }) => {
+	])('$name', async ({ idTokenClaims, refusal, cached }) => {
 		const calls: string[] = [];
 		const logIn = adminLogin({
 			info: () => {
 				calls.push('info');
 			},
-			login: (issuer, clientId) => {
+			signInFor: (issuer, clientId) => {
 				calls.push(`login:${issuer}:${clientId}`);
-				return Promise.resolve(idToken);
+				return signInReturning(idTokenClaims);
 			},
 			exchange: () => {
 				calls.push('exchange');

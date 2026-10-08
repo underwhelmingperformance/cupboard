@@ -1,6 +1,5 @@
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
-	subjectTokenProblemSchema,
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
@@ -9,23 +8,14 @@ import { StatusCodes } from 'http-status-codes';
 import { throwIfAborted } from '../abort.ts';
 import { type Audience } from '../audience.ts';
 import { CupboardClient, type TokenProvider } from '../client/client.ts';
-import { type CredentialChain, freshIdTokenUnderLock } from '../deploy/auth.ts';
-import {
-	jwtExpiryMs,
-	refreshCloudflareGrant
-} from '../deploy/cloudflare-oauth.ts';
-import {
-	readCachedGrant,
-	withCachedGrantLock,
-	writeCachedGrant
-} from '../deploy/grant-store.ts';
+import { jwtExpiryMs } from '../deploy/cloudflare-oauth.ts';
 import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 
 import {
 	fetchGithubOidcToken,
 	type GithubOidcEnvironment
 } from './github-oidc.ts';
-import { hasOAuthErrorCode, oauthErrorProblem } from './oauth-error.ts';
+import { hasOAuthErrorCode } from './oauth-error.ts';
 import {
 	type CachedSession,
 	readCachedSession,
@@ -36,20 +26,10 @@ import {
 
 interface SessionTokenClient {
 	tokenRefresh(refreshToken: string): Promise<TokenResponse>;
-	tokenExchange(
-		subjectToken: string,
-		subjectTokenType: string
-	): Promise<TokenResponse>;
 }
-
-type GrantChain = Pick<
-	CredentialChain,
-	'readGrant' | 'writeGrant' | 'withGrantLock' | 'refreshGrant' | 'now'
->;
 
 export interface OwnerSessionDependencies {
 	readonly client?: SessionTokenClient;
-	readonly grantChain?: GrantChain;
 	readonly readSession?: (target: URL) => Promise<CachedSession | undefined>;
 	readonly writeSession?: (
 		session: CachedSession,
@@ -70,13 +50,12 @@ const accessTokenFreshnessMarginMs = 30 * 1000;
 const badRequestStatusCode: number = StatusCodes.BAD_REQUEST;
 
 /**
- * Supplies the owner's admin token to the admin commands, keeping the session
- * alive without a browser. A fresh cached access token is used as is; an
- * expired or refused one is renewed by rotating the cupboard refresh token,
- * falling back to exchanging a fresh `id_token` from the deploy's stored
- * Cloudflare grant. When neither silent path yields a token, the provider
- * throws `OwnerLoginRequiredError`, whose message tells the user to run
- * `cupboard login` again.
+ * Supplies the owner's admin token to the admin commands from the session
+ * cached for `target`, and never opens a browser. A fresh cached access token
+ * is used as is; an expired or refused one is renewed by rotating the cupboard
+ * refresh token. When the session has no refresh token, or the server refuses
+ * it, the provider throws `OwnerLoginRequiredError`, whose message tells the
+ * user to run `cupboard login` again.
  */
 export function cachedOwnerProvider(
 	target: URL,
@@ -85,14 +64,6 @@ export function cachedOwnerProvider(
 	const readSession = dependencies.readSession ?? readCachedSession;
 	const writeSession = dependencies.writeSession ?? writeCachedSession;
 	const withSessionLock = dependencies.withSessionLock ?? withCachedSessionLock;
-	const grantChain = dependencies.grantChain ?? {
-		readGrant: readCachedGrant,
-		writeGrant: writeCachedGrant,
-		withGrantLock: withCachedGrantLock,
-		refreshGrant: (previous, signal = dependencies.signal) =>
-			refreshCloudflareGrant(previous, undefined, Date.now, signal),
-		now: Date.now
-	};
 	const now = dependencies.now ?? Date.now;
 
 	const renew = (observed: CachedSession | undefined): Promise<string> =>
@@ -122,32 +93,15 @@ export function cachedOwnerProvider(
 						? undefined
 						: await rotateSession(client, session.refreshToken);
 
-				if (rotated !== undefined) {
-					throwIfAborted(signal);
-					await writeSession(rotated, target, signal);
-					throwIfAborted(signal);
-
-					return rotated.accessToken;
+				if (rotated === undefined) {
+					throw new OwnerLoginRequiredError();
 				}
 
-				// Keep the grant lock until the session is written. `cupboard logout
-				// --cloudflare` removes the grant under this lock before it removes
-				// sessions, so it cannot run between the exchange and the write and
-				// leave a session behind.
-				return grantChain.withGrantLock(async (grantSignal) => {
-					const established = await establishSession(
-						client,
-						grantChain,
-						now,
-						grantSignal ?? signal
-					);
+				throwIfAborted(signal);
+				await writeSession(rotated, target, signal);
+				throwIfAborted(signal);
 
-					throwIfAborted(signal);
-					await writeSession(established, target, signal);
-					throwIfAborted(signal);
-
-					return established.accessToken;
-				}, signal);
+				return rotated.accessToken;
 			},
 			dependencies.signal
 		);
@@ -221,9 +175,9 @@ export function isAccessTokenExpired(
 	return expiry !== undefined && expiry <= nowMs + accessTokenFreshnessMarginMs;
 }
 
-// Rotates the cupboard refresh token. A refresh token the server refuses
-// outright means the cached session is stale, so this returns undefined and
-// the caller falls back; a transport or server failure propagates.
+// Rotates the cupboard refresh token. When the server refuses the refresh token
+// outright, the cached session is stale, so this returns undefined and the
+// caller throws `OwnerLoginRequiredError`. A transport or server failure propagates.
 async function rotateSession(
 	client: SessionTokenClient,
 	refreshToken: string
@@ -239,54 +193,8 @@ async function rotateSession(
 	}
 }
 
-// Establishes a session from the deploy's stored Cloudflare grant: a fresh
-// `id_token` (renewed through the grant's refresh token when stale) exchanged
-// for cupboard tokens. No grant, an expired token, or a refused exchange all
-// end at `cupboard login`. The caller holds the grant lock.
-async function establishSession(
-	client: SessionTokenClient,
-	chain: GrantChain,
-	now: () => number,
-	signal?: AbortSignal
-): Promise<CachedSession> {
-	const idToken = await freshIdTokenUnderLock(chain, signal);
-	const expiry = idToken === undefined ? undefined : jwtExpiryMs(idToken);
-
-	if (idToken === undefined || (expiry !== undefined && expiry <= now())) {
-		throw new OwnerLoginRequiredError();
-	}
-
-	try {
-		return sessionFromTokenResponse(
-			await client.tokenExchange(idToken, subjectTokenTypeIdToken)
-		);
-	} catch (error) {
-		if (isStaleSubjectToken(error)) {
-			throw new OwnerLoginRequiredError();
-		}
-
-		throw error;
-	}
-}
-
 function isStaleRefreshToken(error: unknown): boolean {
 	return isBadRequest(error) && hasOAuthErrorCode(error, 'invalid_grant');
-}
-
-function isStaleSubjectToken(error: unknown): boolean {
-	if (!isBadRequest(error)) {
-		return false;
-	}
-
-	if (hasOAuthErrorCode(error, 'invalid_grant')) {
-		return true;
-	}
-
-	if (!hasOAuthErrorCode(error, 'invalid_request')) {
-		return false;
-	}
-
-	return subjectTokenProblemSchema.safeParse(oauthErrorProblem(error)).success;
 }
 
 function isBadRequest(error: unknown): error is CupboardHttpError {

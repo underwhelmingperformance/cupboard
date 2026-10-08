@@ -23,6 +23,7 @@ import {
 	tokenRateLimit
 } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
+import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
@@ -1084,7 +1085,7 @@ export class StaleRefreshTokenError extends InvalidGrantError {
  * subject token to this server.
  */
 export class SubjectTokenUnboundError extends InvalidGrantError {
-	readonly problem = 'subject-token-unbound';
+	readonly problem = subjectBindingProblems.unbound;
 
 	constructor() {
 		super('Subject token is not bound to this server');
@@ -1096,7 +1097,7 @@ export class SubjectTokenUnboundError extends InvalidGrantError {
  * The server has already accepted this nonce-bound subject token.
  */
 export class SubjectTokenReplayedError extends InvalidGrantError {
-	readonly problem = 'subject-token-replayed';
+	readonly problem = subjectBindingProblems.replayed;
 
 	constructor() {
 		super('Subject token has already been used');
@@ -1109,7 +1110,7 @@ export class SubjectTokenReplayedError extends InvalidGrantError {
  * issued longer ago than a nonce-bound token may be.
  */
 export class SubjectTokenTooOldError extends InvalidGrantError {
-	readonly problem = 'subject-token-too-old';
+	readonly problem = subjectBindingProblems.tooOld;
 
 	constructor() {
 		super('Subject token is too old for a nonce-bound exchange');

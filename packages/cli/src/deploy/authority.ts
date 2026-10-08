@@ -1,3 +1,4 @@
+import { tenantUrl } from '@cupboard/nix-store/cache-url';
 import type { LocalStep } from '@cupboard/protocol/deployment';
 import {
 	oidcAudienceSchema,
@@ -16,6 +17,12 @@ import {
 	githubOidcTokenProvider,
 	isAccessTokenExpired
 } from '../auth/auth.ts';
+import {
+	type BoundIdToken,
+	type BoundSignIn,
+	type CanonicalTarget,
+	canonicalTarget
+} from '../auth/bound-sign-in.ts';
 import { decodeJwtPayload } from '../auth/jwt.ts';
 import { type CachedSession, readCachedSession } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
@@ -35,7 +42,7 @@ import {
 	liveD1BindingSchema,
 	type ScriptConfiguration
 } from './cloudflare-api.ts';
-import { jwtExpiryMs } from './cloudflare-oauth.ts';
+import { cloudflareDashIssuer } from './cloudflare-oauth.ts';
 import type { DeploymentConfig } from './config.ts';
 import type { DeployOptions } from './deploy-run.ts';
 import {
@@ -49,7 +56,6 @@ import {
 	type Claimant,
 	claimantLabel,
 	claimantOf,
-	cloudflareDashIssuer,
 	isSamePrincipal,
 	type OwnerBinding,
 	type Principal,
@@ -67,8 +73,11 @@ import type { DeployUi } from './ui.ts';
  *
  * - `bootstrap`: the control database has no admin and this run has a
  *   terminal, so this run claims the deployment for the operator with a
- *   claim secret and the operator's id_token. `claimant` is the
- *   identity in that id_token, which becomes the admin;
+ *   claim secret and the operator's id_token. `claimant` is the identity
+ *   that the operator confirmed, which becomes the admin. `firstTenantSlug`
+ *   is the first tenant's slug, chosen before any change. Absent when the
+ *   deployment had no URL at that point. The claim signs in with `signIn`,
+ *   which reuses an earlier sign-in only while {@link BoundSignIn} allows it;
  * - `unclaimed`: no admin and no terminal to log in from, so this run
  *   provisions and uploads but leaves the claim to a run with a terminal;
  * - `admin`: an admin exists, and this run has an admin token for it.
@@ -77,8 +86,9 @@ export type DeployAuthority =
 	| {
 			readonly kind: 'bootstrap';
 			readonly claimSecret: ClaimSecret;
-			readonly idToken: () => Promise<string>;
+			readonly signIn: BoundSignIn;
 			readonly claimant: Claimant;
+			readonly firstTenantSlug?: string;
 	  }
 	| { readonly kind: 'unclaimed' }
 	| {
@@ -88,8 +98,8 @@ export type DeployAuthority =
 	  };
 
 /**
- * The authority for this run, or `declined` when the operator declined the
- * claim at the confirmation prompt.
+ * The authority for this run, or `declined` when the operator cancelled the
+ * first tenant's slug prompt or declined the claim at the confirmation prompt.
  */
 export type EstablishedAuthority =
 	DeployAuthority | { readonly kind: 'declined' };
@@ -570,13 +580,13 @@ export class AdminLoginMismatchError extends CliError {
  * session is cached. It always starts a new login through the admin's issuer,
  * so the operator can complete it as a different identity from the cached
  * Cloudflare login. It refuses an id_token for any identity other than the
- * admin, then exchanges the id_token and caches the session, as
+ * admin, then exchanges an id_token bound to `url` and caches the session, as
  * `cupboard login` does. The admin's audience is the client id of the login.
  */
 export function adminLogin(dependencies: {
 	readonly info: (message: string) => void;
-	readonly login: (issuer: string, clientId: string) => Promise<string>;
-	readonly exchange: (url: URL, idToken: string) => Promise<TokenResponse>;
+	readonly signInFor: (issuer: string, clientId: string) => BoundSignIn;
+	readonly exchange: (url: URL, token: BoundIdToken) => Promise<TokenResponse>;
 	readonly cacheSession: (response: TokenResponse, url: URL) => Promise<void>;
 	readonly defaultClientId: string;
 }): (url: URL, admin: OwnerBinding) => Promise<void> {
@@ -592,23 +602,27 @@ export function adminLogin(dependencies: {
 				`${admin.issuer} as the admin ${principalLabel(admin)}.${separateLogin}`
 		);
 
-		const idToken = await dependencies.login(
+		const signIn = dependencies.signInFor(
 			admin.issuer,
 			admin.audience ?? dependencies.defaultClientId
 		);
-		const presented = principalOf(idToken);
-
-		if (!isSamePrincipal(presented, admin)) {
-			throw new AdminLoginMismatchError(admin, presented);
-		}
-
+		const target = canonicalTarget(url);
 		let session: TokenResponse;
 
 		try {
-			session = await dependencies.exchange(url, idToken);
+			session = await signIn.present([target], target, (token) => {
+				const presented = principalOf(token.idToken);
+
+				if (!isSamePrincipal(presented, admin)) {
+					throw new AdminLoginMismatchError(admin, presented);
+				}
+
+				return dependencies.exchange(url, token);
+			});
 		} catch (error) {
 			if (
 				isAbortError(error) ||
+				error instanceof AdminLoginMismatchError ||
 				classifyAdminCheckError(error).kind !== 'token'
 			) {
 				throw error;
@@ -700,9 +714,30 @@ export interface AuthorityEffects {
 	 */
 	readonly checkAdmin: (url: URL, credential: TokenProvider) => Promise<void>;
 	/**
-	 * An id_token for the operator. The token can be one from an earlier call.
+	 * Signs the operator in for a first deploy. Without
+	 * `cloudflareLoginIdToken`, its first sign-in also shows who the claim makes
+	 * the admin.
 	 */
-	readonly idToken: () => Promise<string>;
+	readonly signIn: BoundSignIn;
+	/**
+	 * The ID token from the Cloudflare browser login that this run opened for
+	 * the Cloudflare API, when the claim signs in with the same issuer and
+	 * client. A first deploy reads the claimant from it and never sends it.
+	 * That login ran before the deployment URL was known, so its nonce does not
+	 * commit to the deployment.
+	 */
+	readonly cloudflareLoginIdToken?: string;
+	/**
+	The first tenant's slug from `--cache`.
+	*/
+	readonly firstTenantSlug?: string;
+	/**
+	 * Asks for the first tenant's slug at the deployment URL. Returns undefined
+	 * when the operator cancels the prompt.
+	 */
+	readonly chooseFirstTenantSlug: (
+		deploymentUrl: URL
+	) => Promise<string | undefined>;
 	readonly generateClaimSecret: () => ClaimSecret;
 	readonly now?: () => number;
 	readonly signal?: AbortSignal;
@@ -724,11 +759,16 @@ export interface AuthorityEffects {
  * uploaded without a claim, or one whose deploy stopped between setting the
  * claim secret and claiming, has Workers but no admin, and the next run from a
  * terminal claims it with a fresh secret.
+ *
+ * A first deploy from a terminal asks for the first tenant's slug before it
+ * reads the claimant, so that a sign-in for the check can cover the deployment
+ * and the tenant. When the operator cancels that prompt, the result is
+ * `declined`.
  */
 export async function decideAuthority(
 	deployment: AuthorityDeployment,
 	effects: AuthorityEffects
-): Promise<DeployAuthority> {
+): Promise<EstablishedAuthority> {
 	throwIfAborted(effects.signal);
 
 	const bound = deployment.boundDatabase;
@@ -832,23 +872,75 @@ async function adminRecordedIn(
 
 async function firstDeployAuthority(
 	deployment: Pick<AuthorityDeployment, 'interactive'>,
-	effects: Pick<AuthorityEffects, 'idToken' | 'generateClaimSecret'>
-): Promise<DeployAuthority> {
+	effects: Pick<
+		AuthorityEffects,
+		| 'signIn'
+		| 'cloudflareLoginIdToken'
+		| 'firstTenantSlug'
+		| 'chooseFirstTenantSlug'
+		| 'newUrl'
+		| 'generateClaimSecret'
+	>
+): Promise<EstablishedAuthority> {
 	if (!deployment.interactive) {
 		return { kind: 'unclaimed' };
 	}
 
+	const url = await effects.newUrl();
+	const firstTenantSlug =
+		url === undefined
+			? effects.firstTenantSlug
+			: (effects.firstTenantSlug ?? (await effects.chooseFirstTenantSlug(url)));
+
+	if (url !== undefined && firstTenantSlug === undefined) {
+		return { kind: 'declined' };
+	}
+
 	// Log in before anything changes, so a refused or cancelled login, or an
 	// id_token that `/signup` would refuse, leaves the account untouched.
-	const idToken = await effects.idToken();
-	const claimant = claimantOf(idToken);
+	const claimant = claimantOf(
+		await claimantIdToken(
+			effects,
+			url === undefined ? [] : claimTargets(url, firstTenantSlug)
+		)
+	);
 
 	return {
 		kind: 'bootstrap',
 		claimSecret: effects.generateClaimSecret(),
-		idToken: effects.idToken,
-		claimant
+		signIn: effects.signIn,
+		claimant,
+		...(firstTenantSlug !== undefined && { firstTenantSlug })
 	};
+}
+
+async function claimantIdToken(
+	effects: Pick<AuthorityEffects, 'signIn' | 'cloudflareLoginIdToken'>,
+	targets: readonly CanonicalTarget[]
+): Promise<string> {
+	if (effects.cloudflareLoginIdToken !== undefined) {
+		return effects.cloudflareLoginIdToken;
+	}
+
+	const { idToken } = await effects.signIn.idTokenFor(targets);
+
+	return idToken;
+}
+
+/**
+ * The targets of the sign-in for a claim: the deployment and, once its slug is
+ * known, the first tenant. The control plane and the tenant keep separate
+ * records of consumed nonces, so each accepts the same ID token once.
+ */
+export function claimTargets(
+	deploymentUrl: URL,
+	firstTenantSlug: string | undefined
+): readonly CanonicalTarget[] {
+	const deployment = canonicalTarget(deploymentUrl);
+
+	return firstTenantSlug === undefined
+		? [deployment]
+		: [deployment, canonicalTarget(tenantUrl(deploymentUrl, firstTenantSlug))];
 }
 
 // Checks the admin token against the deployment at `url`. At a terminal, a
@@ -1078,40 +1170,6 @@ function requireWildcardGrant(token: string): void {
 	}
 }
 
-// The claim's id_token only has to remain valid for the `/signup` request. A
-// short margin keeps the id_token from the login before the upload in use, so
-// the claim normally needs no second login, even with an issuer whose
-// id_tokens are valid for only a few minutes.
-const claimIdTokenMarginMs = 60 * 1000;
-
-/**
- * An id_token source that logs in once, and logs in again only when the
- * current token expires within a minute. A first deploy logs in before
- * provisioning, and the claim can happen minutes later, after the token has
- * expired.
- */
-export function renewingIdToken(
-	login: () => Promise<string>,
-	now: () => number = Date.now
-): () => Promise<string> {
-	let held: string | undefined;
-
-	return async () => {
-		const expiry = held === undefined ? undefined : jwtExpiryMs(held);
-
-		if (
-			held !== undefined &&
-			(expiry === undefined || expiry > now() + claimIdTokenMarginMs)
-		) {
-			return held;
-		}
-
-		held = await login();
-
-		return held;
-	};
-}
-
 /**
  * Adds the claim secret to the control Worker's secrets on a first
  * deploy, so the claim can present it once the new build serves. For an
@@ -1297,7 +1355,12 @@ export interface AuthorityWorld {
 	readonly checkAdmin: (url: URL, credential: TokenProvider) => Promise<void>;
 	readonly servesCupboard: (url: URL) => Promise<boolean>;
 	readonly logInAsAdmin?: (url: URL, admin: OwnerBinding) => Promise<void>;
-	readonly idToken: () => Promise<string>;
+	readonly signIn: BoundSignIn;
+	readonly cloudflareLoginIdToken?: string;
+	readonly firstTenantSlug?: string;
+	readonly chooseFirstTenantSlug: (
+		deploymentUrl: URL
+	) => Promise<string | undefined>;
 	/**
 	 * Asks whether the claim may make `claimant` the admin.
 	 */
@@ -1317,10 +1380,12 @@ export interface AuthorityWorld {
  * update checks its admin token against the current URL. When the plan moves
  * the deployment, the update also needs a token for the new URL: the deploy
  * checks it live if the new URL already serves the deployment, and otherwise
- * reads it from a session stored on this machine. A first deploy logs the
- * operator in with the issuer and client from `--oidc-issuer` and
- * `--client-id`, prints who the claim will make the admin, and asks for
- * confirmation.
+ * reads it from a session stored on this machine. A first deploy asks for the
+ * first tenant's slug and reads the claimant from the Cloudflare login for the
+ * account. When this run opened no such login, or the claim uses another
+ * issuer or client, it signs the operator in with the issuer and client from
+ * `--oidc-issuer` and `--client-id`. It then prints who the claim will make
+ * the admin and asks for confirmation.
  */
 export async function establishAuthority(
 	plans: {
@@ -1408,7 +1473,14 @@ export async function establishAuthority(
 			newUrl: () => urlFor(plans.agreed.domain),
 			adminAccess: world.adminAccess,
 			checkAdmin: world.checkAdmin,
-			idToken: world.idToken,
+			signIn: world.signIn,
+			...(world.cloudflareLoginIdToken !== undefined && {
+				cloudflareLoginIdToken: world.cloudflareLoginIdToken
+			}),
+			...(world.firstTenantSlug !== undefined && {
+				firstTenantSlug: world.firstTenantSlug
+			}),
+			chooseFirstTenantSlug: world.chooseFirstTenantSlug,
 			generateClaimSecret,
 			...(world.signal !== undefined && { signal: world.signal })
 		}
@@ -1441,6 +1513,9 @@ export async function establishAuthority(
 				'This deployment has no admin, and this run has no terminal to log ' +
 					'in from. It will be deployed without an admin.'
 			);
+			break;
+		}
+		case 'declined': {
 			break;
 		}
 	}

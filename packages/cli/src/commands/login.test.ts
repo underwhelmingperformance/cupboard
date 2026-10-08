@@ -1,7 +1,9 @@
 import type { TokenResponse } from '@cupboard/protocol/oidc';
+import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import lockfile from 'proper-lockfile';
 import { describe, expect, it, vi } from 'vitest';
 
+import { BoundSignIn } from '../auth/bound-sign-in.ts';
 import { DeviceAuthorizationRequestError } from '../auth/oidc-login.ts';
 import {
 	type CachedSession,
@@ -9,20 +11,23 @@ import {
 	withCachedSessionLock,
 	writeCachedSession
 } from '../auth/token-store.ts';
+import { CupboardClient } from '../client/client.ts';
 import {
-	type CloudflareGrant,
+	cloudflareDashIssuer,
 	cloudflareOauthClientId,
-	deployScopes
+	signInScopes
 } from '../deploy/cloudflare-oauth.ts';
+import { readCachedGrant } from '../deploy/grant-store.ts';
 import { testWithConfigHome } from '../test-support.ts';
 
 import {
 	cacheLoginSession,
-	cupboardIdToken,
 	DeviceGrantNotEnabledError,
+	identitySignIn,
 	LoginIdTokenMissingError,
 	loginScopeForClient,
-	mapDeviceLoginError
+	mapDeviceLoginError,
+	signInTo
 } from './login.ts';
 
 const sessionTarget = new URL('https://cupboard.test/t/acme');
@@ -117,9 +122,9 @@ describe('mapDeviceLoginError', () => {
 });
 
 describe('loginScopeForClient', () => {
-	it('uses the registered Cloudflare scopes for the built-in client', () => {
+	it('uses the registered Cloudflare scopes without offline_access for the built-in client', () => {
 		expect(loginScopeForClient(cloudflareOauthClientId)).toBe(
-			deployScopes.join(' ')
+			signInScopes.join(' ')
 		);
 	});
 
@@ -128,216 +133,197 @@ describe('loginScopeForClient', () => {
 	});
 });
 
-const now = 1_700_000_000_000;
+const nowSeconds = 1_700_000_000;
 
-function tokenExpiringAt(expSeconds: number): string {
-	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
-		'base64url'
-	);
-	const payload = Buffer.from(
-		JSON.stringify({ sub: 'cf-user-1', exp: expSeconds })
-	).toString('base64url');
+function idToken(claims: Record<string, unknown>): string {
+	const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
 
-	return `${header}.${payload}.signature`;
+	return `e30.${payload}.signature`;
 }
 
-function grantWith(idToken?: string): CloudflareGrant {
-	return {
-		accessToken: 'access-1',
-		refreshToken: 'refresh-1',
-		expiresAt: now + 60 * 60 * 1000,
-		subject: 'cf-user-1',
-		idToken
+function requestUrl(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	return input instanceof URL ? input.href : input.url;
+}
+
+interface RecordedRequest {
+	readonly url: string;
+	readonly form: Readonly<Record<string, string>>;
+}
+
+// Approves each Cloudflare authorisation request at its loopback redirect, and
+// records the request's URL.
+function approvingCloudflareBrowser(
+	authorizeUrls: URL[]
+): (url: string) => void {
+	return (url) => {
+		const authorize = new URL(url);
+		const callback = new URL(authorize.searchParams.get('redirect_uri') ?? '');
+		callback.searchParams.set('code', 'code-1');
+		callback.searchParams.set(
+			'state',
+			authorize.searchParams.get('state') ?? ''
+		);
+		authorizeUrls.push(authorize);
+		void fetch(callback);
 	};
 }
 
-interface IdTokenWorld {
-	readonly storedGrant?: CloudflareGrant;
-	readonly renewedGrant?: CloudflareGrant;
-	readonly loginGrant?: CloudflareGrant;
-}
+describe('signInTo', () => {
+	testWithConfigHome(
+		'exchanges a new ID token bound to the URL and keeps no Cloudflare grant',
+		async () => {
+			const requests: RecordedRequest[] = [];
+			const authorizeUrls: URL[] = [];
+			const infos: string[] = [];
+			const fetcher: typeof fetch = (input, init) => {
+				const url = requestUrl(input);
+				const body = new URLSearchParams(
+					typeof init?.body === 'string' ? init.body : ''
+				);
+				requests.push({ url, form: Object.fromEntries(body) });
 
-function idTokenDependencies(world: IdTokenWorld): {
-	deps: Parameters<typeof cupboardIdToken>[0];
-	calls: { logins: CloudflareGrant[]; written: CloudflareGrant[] };
-} {
-	const defaultLoginGrant = grantWith(tokenExpiringAt(now / 1000 + 7200));
-	const logins: CloudflareGrant[] = [];
-	const written: CloudflareGrant[] = [];
+				if (url === 'https://dash.cloudflare.com/oauth2/token') {
+					const issued = idToken({
+						sub: 'cf-user-1',
+						iat: nowSeconds,
+						nonce: authorizeUrls.at(-1)?.searchParams.get('nonce')
+					});
 
-	return {
-		calls: {
-			logins,
-			written
-		},
-		deps: {
-			chain: {
-				readGrant: () => Promise.resolve(world.storedGrant),
-				writeGrant: (grant) => {
-					written.push(grant);
-					return Promise.resolve();
+					return Promise.resolve(
+						Response.json({
+							access_token: 'cf-access',
+							expires_in: 3600,
+							id_token: issued
+						})
+					);
+				}
+
+				return Promise.resolve(Response.json(tokenResponse('login')));
+			};
+			const signIn = new BoundSignIn(
+				identitySignIn(
+					{
+						oidcIssuer: cloudflareDashIssuer,
+						clientId: cloudflareOauthClientId
+					},
+					{
+						openBrowser: approvingCloudflareBrowser(authorizeUrls),
+						info: (message) => {
+							infos.push(message);
+						},
+						fetcher,
+						loopbackPorts: [0]
+					}
+				),
+				() => nowSeconds * 1000
+			);
+
+			await signInTo(sessionTarget, {
+				signIn,
+				client: new CupboardClient(sessionTarget, fetcher, {
+					kind: 'default'
+				}),
+				cacheSession: (response, target) => cacheLoginSession(response, target)
+			});
+
+			const [authorize] = authorizeUrls;
+			const exchange = requests.at(-1)?.form ?? {};
+			const seed = exchange.cupboard_binding_seed ?? '';
+
+			expect({
+				infos,
+				scope: authorize?.searchParams.get('scope'),
+				nonce: authorize?.searchParams.get('nonce'),
+				requests: requests.map(({ url, form }) => ({
+					url,
+					grantType: form.grant_type
+				})),
+				exchange,
+				grant: await readCachedGrant(),
+				session: await readCachedSession(sessionTarget)
+			}).toStrictEqual({
+				infos: ['Waiting for you to authorise in your browser…'],
+				scope: signInScopes.join(' '),
+				nonce: await subjectBindingNonce(
+					['https://cupboard.test/t/acme'],
+					seed
+				),
+				requests: [
+					{
+						url: 'https://dash.cloudflare.com/oauth2/token',
+						grantType: 'authorization_code'
+					},
+					{
+						url: 'https://cupboard.test/t/acme/token',
+						grantType: 'urn:ietf:params:oauth:grant-type:token-exchange'
+					}
+				],
+				exchange: {
+					grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+					subject_token: idToken({
+						sub: 'cf-user-1',
+						iat: nowSeconds,
+						nonce: authorize?.searchParams.get('nonce')
+					}),
+					subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
+					cupboard_binding_seed: seed,
+					cupboard_binding_targets: '["https://cupboard.test/t/acme"]'
 				},
-				withGrantLock: (action, signal) => action(signal),
-				refreshGrant: () => Promise.resolve(world.renewedGrant),
-				now: () => now
-			},
-			login: () => {
-				const loginGrant = world.loginGrant ?? defaultLoginGrant;
-				logins.push(loginGrant);
-
-				return Promise.resolve(loginGrant);
-			}
+				grant: undefined,
+				session: {
+					accessToken: sessionToken('login'),
+					refreshToken: 'refresh-login'
+				}
+			});
 		}
-	};
-}
+	);
+});
 
-describe('cupboardIdToken', () => {
-	it('returns the ID token from a cached grant without opening a browser', async () => {
-		const idToken = tokenExpiringAt(now / 1000 + 3600);
-		const { deps, calls } = idTokenDependencies({
-			storedGrant: grantWith(idToken)
-		});
+describe('identitySignIn', () => {
+	testWithConfigHome(
+		'rejects a Cloudflare sign-in without an ID token and keeps no grant',
+		async () => {
+			const infos: string[] = [];
+			const method = identitySignIn(
+				{ oidcIssuer: cloudflareDashIssuer, clientId: cloudflareOauthClientId },
+				{
+					openBrowser: approvingCloudflareBrowser([]),
+					info: (message) => {
+						infos.push(message);
+					},
+					fetcher: () =>
+						Promise.resolve(
+							Response.json({ access_token: 'cf-access', expires_in: 3600 })
+						),
+					loopbackPorts: [0]
+				}
+			);
 
-		expect({
-			token: await cupboardIdToken(deps),
-			logins: calls.logins,
-			written: calls.written
-		}).toStrictEqual({
-			token: idToken,
-			logins: [],
-			written: []
-		});
-	});
+			let rejected: unknown;
 
-	it('logs in afresh when the cached token is expired and unrefreshable', async () => {
-		const expired = tokenExpiringAt(now / 1000 - 60);
-		const fresh = tokenExpiringAt(now / 1000 + 3600);
-		const loginGrant = grantWith(fresh);
-		const { deps, calls } = idTokenDependencies({
-			storedGrant: grantWith(expired),
-			loginGrant
-		});
-
-		expect({
-			token: await cupboardIdToken(deps),
-			logins: calls.logins,
-			written: calls.written
-		}).toStrictEqual({
-			token: fresh,
-			logins: [loginGrant],
-			written: [loginGrant]
-		});
-	});
-
-	it('logs in afresh when no grant is cached', async () => {
-		const fresh = tokenExpiringAt(now / 1000 + 3600);
-		const loginGrant = grantWith(fresh);
-		const { deps, calls } = idTokenDependencies({ loginGrant });
-
-		expect({
-			token: await cupboardIdToken(deps),
-			logins: calls.logins,
-			written: calls.written
-		}).toStrictEqual({
-			token: fresh,
-			logins: [loginGrant],
-			written: [loginGrant]
-		});
-	});
-
-	it('reuses a grant written before the fallback login lock', async () => {
-		const winner = grantWith(tokenExpiringAt(now / 1000 + 3600));
-		const login = vi.fn<() => Promise<CloudflareGrant>>(() =>
-			Promise.reject(new Error('browser login was not expected'))
-		);
-		const writeGrant = vi.fn<(grant: CloudflareGrant) => Promise<void>>(() =>
-			Promise.resolve()
-		);
-		let reads = 0;
-		let locks = 0;
-
-		const token = await cupboardIdToken({
-			chain: {
-				readGrant: () => {
-					reads += 1;
-
-					return Promise.resolve(reads === 1 ? undefined : winner);
-				},
-				writeGrant,
-				withGrantLock: (action, signal) => {
-					locks += 1;
-
-					return action(signal);
-				},
-				refreshGrant: () => Promise.resolve(undefined),
-				now: () => now
-			},
-			login
-		});
-
-		expect({
-			token,
-			reads,
-			locks,
-			loginCalls: login.mock.calls.length,
-			writeCalls: writeGrant.mock.calls.length
-		}).toStrictEqual({
-			token: winner.idToken,
-			reads: 2,
-			locks: 2,
-			loginCalls: 0,
-			writeCalls: 0
-		});
-	});
-
-	it('rejects a login response without an id_token', async () => {
-		const { deps, calls } = idTokenDependencies({ loginGrant: grantWith() });
-		const outcome = await (async () => {
 			try {
-				const token = await cupboardIdToken(deps);
-				return { token };
-			} catch (error_: unknown) {
-				expect(error_).toBeInstanceOf(LoginIdTokenMissingError);
-
-				const name =
-					error_ instanceof LoginIdTokenMissingError
-						? error_.name
-						: String(error_);
-
-				return { error: { name } };
+				await method.signIn('nonce-1');
+			} catch (error) {
+				rejected = error;
 			}
-		})();
 
-		expect({
-			outcome,
-			logins: calls.logins,
-			written: calls.written
-		}).toStrictEqual({
-			outcome: {
-				error: {
-					name: LoginIdTokenMissingError.name
-				}
-			},
-			logins: [
-				{
-					accessToken: 'access-1',
-					expiresAt: now + 3_600_000,
-					idToken: undefined,
-					refreshToken: 'refresh-1',
-					subject: 'cf-user-1'
-				}
-			],
-			written: [
-				{
-					accessToken: 'access-1',
-					expiresAt: now + 3_600_000,
-					idToken: undefined,
-					refreshToken: 'refresh-1',
-					subject: 'cf-user-1'
-				}
-			]
-		});
-	});
+			expect({
+				rejected: rejected instanceof LoginIdTokenMissingError,
+				bindsNonce: method.bindsNonce,
+				infos: infos.length,
+				grant: await readCachedGrant()
+			}).toStrictEqual({
+				rejected: true,
+				bindsNonce: true,
+				infos: 1,
+				grant: undefined
+			});
+		}
+	);
 });
 
 describe('login session cache', () => {

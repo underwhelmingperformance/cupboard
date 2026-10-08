@@ -363,8 +363,8 @@ Arguments:
 
 Options:
   --all         delete every saved sign-in
-  --cloudflare  also delete the cached Cloudflare sign-in, which `login` and
-                `init` share
+  --cloudflare  also delete the cached Cloudflare sign-in, which `init` keeps
+                for the Cloudflare API
   -h, --help    display help for command
 
 Logout sends a revocation request for the refresh token of each saved
@@ -380,8 +380,8 @@ can be renewed for up to 30 days after sign-in. A tenant
 administrator can end it with `cupboard session revoke`, and an
 operator with `cupboard deployment session revoke`.
 
-While a Cloudflare sign-in is cached, later commands can use it to
-start a new session without a browser; pass --cloudflare to remove it.
+A cached Cloudflare sign-in can deploy to your Cloudflare account;
+pass --cloudflare to remove it.
 
 Examples:
   cupboard logout https://cupboard.example.workers.dev/t/acme

@@ -27,14 +27,25 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	BoundSignIn,
+	canonicalTarget,
+	reusableSignInAgeSeconds
+} from '../auth/bound-sign-in.ts';
+import {
 	type AccessCredential,
 	CupboardClient,
 	type TokenProvider
 } from '../client/client.ts';
-import { CupboardHttpError, UnreachableHostError } from '../errors.ts';
+import {
+	CupboardHttpError,
+	OwnerLoginRequiredError,
+	UnreachableHostError
+} from '../errors.ts';
 
-import type { DeployAuthority } from './authority.ts';
+import { type CredentialChain, resolveCredential } from './auth.ts';
+import { decideAuthority, type DeployAuthority } from './authority.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
+import type { CloudflareGrant } from './cloudflare-oauth.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
@@ -485,12 +496,50 @@ function idTokenWith(claims: Record<string, unknown>): string {
 	return `e30.${payload}.signature`;
 }
 
-// The operator's id_token for the claimant that `bootstrapAuthority` confirms.
-const claimIdToken = idTokenWith({
+// The claims of the operator's id_token for the claimant that
+// `bootstrapAuthority` confirms.
+const claimClaims = {
 	iss: owner.issuer,
 	sub: owner.subject,
 	aud: owner.audience
-});
+};
+
+interface ScriptedSignIn {
+	readonly signIn: BoundSignIn;
+	/**
+	Every id_token that a sign-in returned, in order.
+	*/
+	readonly issued: string[];
+	readonly clock: { nowMs: number };
+}
+
+// Each sign-in returns an id_token with `claims`, the requested nonce and the
+// clock's time as `iat`.
+function scriptedSignIn(
+	claims: Record<string, unknown> = claimClaims
+): ScriptedSignIn {
+	const issued: string[] = [];
+	const clock = { nowMs: Date.parse('2026-09-25T12:00:00Z') };
+	const signIn = new BoundSignIn(
+		{
+			bindsNonce: true,
+			signIn: (nonce) => {
+				const idToken = idTokenWith({
+					...claims,
+					nonce,
+					iat: Math.floor(clock.nowMs / 1000),
+					sign_in: issued.length + 1
+				});
+				issued.push(idToken);
+
+				return Promise.resolve(idToken);
+			}
+		},
+		() => clock.nowMs
+	);
+
+	return { signIn, issued, clock };
+}
 
 // The admin credential for an update, which the deploy checked before it
 // changed anything.
@@ -511,12 +560,12 @@ const adminAuthority: DeployAuthority = {
 };
 
 function bootstrapAuthority(
-	idToken: () => Promise<string> = () => Promise.resolve(claimIdToken)
+	signIn: BoundSignIn = scriptedSignIn().signIn
 ): DeployAuthority {
 	return {
 		kind: 'bootstrap',
 		claimSecret: claimSecretSchema.parse('claim-1'),
-		idToken,
+		signIn,
 		claimant: { ...owner, displayName: undefined }
 	};
 }
@@ -541,10 +590,10 @@ function tenantSummary(id: string): TenantSummary {
 
 /**
  * One scripted answer: a value, an HTTP status to fail with, a `fetch` that
- * fails before any response, or a network failure as `CupboardClient`
- * reports it.
+ * fails before any response, a network failure as `CupboardClient` reports
+ * it, or an error to fail with.
  */
-type Scripted<T> = T | number | 'offline' | 'unreachable';
+type Scripted<T> = T | number | 'offline' | 'unreachable' | Error;
 
 function answer<T>(
 	remaining: Scripted<T>[],
@@ -558,6 +607,10 @@ function answer<T>(
 
 	if (scripted === 'offline') {
 		return Promise.reject(new TypeError('fetch failed'));
+	}
+
+	if (scripted instanceof Error) {
+		return Promise.reject(scripted);
 	}
 
 	if (scripted === 'unreachable') {
@@ -611,10 +664,23 @@ interface ClientScript {
 	readonly cacheAccess?: 'public' | 'private';
 }
 
+interface SignupBody {
+	readonly subject_token: string;
+	readonly claim_secret?: string;
+	readonly targets?: readonly string[];
+}
+
+interface TenantExchange {
+	readonly url: string;
+	readonly subjectToken: string;
+	readonly targets?: readonly string[];
+}
+
 interface ScriptedClient {
 	readonly factory: (url: string) => OnboardClient;
 	readonly urls: string[];
-	readonly signupBodies: unknown[];
+	readonly signupBodies: SignupBody[];
+	readonly tenantExchanges: TenantExchange[];
 	readonly createdBodies: unknown[];
 	readonly membershipRebuildTokens: string[];
 	readonly controlCheckTokens: string[];
@@ -637,7 +703,8 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const controlChecks = [...(script.controlChecks ?? [])];
 	const publicKeys = [...(script.publicKeys ?? [])];
 	const urls: string[] = [];
-	const signupBodies: unknown[] = [];
+	const signupBodies: SignupBody[] = [];
+	const tenantExchanges: TenantExchange[] = [];
 	const createdBodies: unknown[] = [];
 	const membershipRebuildTokens: string[] = [];
 	const controlCheckTokens: string[] = [];
@@ -651,6 +718,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	return {
 		urls,
 		signupBodies,
+		tenantExchanges,
 		createdBodies,
 		membershipRebuildTokens,
 		controlCheckTokens,
@@ -667,9 +735,18 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 			urls.push(url);
 
 			return {
-				cacheAccess: (subjectToken) => {
-					cacheAccessTokens.push(subjectToken);
-					return Promise.resolve(script.cacheAccess ?? 'public');
+				cacheAccess: async (credential) => {
+					cacheAccessTokens.push(await tokenOf(credential));
+					return script.cacheAccess ?? 'public';
+				},
+				tokenExchange: (subjectToken, _type, _details, binding) => {
+					events.push(`tokenExchange:${url}`);
+					tenantExchanges.push({
+						url,
+						subjectToken,
+						...(binding !== undefined && { targets: binding.targets })
+					});
+					return Promise.resolve(tenantSession);
 				},
 				version: () => answer(versions, '/_version'),
 				getInstance: async (credential) => {
@@ -683,9 +760,12 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					initialisedInstanceNames.push(name);
 					return Promise.resolve({ state: 'configured', name });
 				},
-				signup: (request) => {
+				signup: (request, binding) => {
 					events.push('signup');
-					signupBodies.push(request);
+					signupBodies.push({
+						...request,
+						...(binding !== undefined && { targets: binding.targets })
+					});
 					return answer(signups, '/signup', signupRejection);
 				},
 				listTenants: async () => ({
@@ -733,8 +813,21 @@ const claimedSignup = {
 	claimed: true
 } satisfies SignupResponse;
 
+const tenantSession = {
+	access_token: 'tenant-jwt',
+	token_type: 'Bearer',
+	expires_in: 600,
+	refresh_token: 'tenant-refresh'
+} satisfies TokenResponse;
+
+const claimTargetsWithTenant = [
+	'https://cache.example.com',
+	'https://cache.example.com/t/builds'
+];
+
 /**
-The options every test starts from; spread and override per case.
+The options that each test starts from. A test spreads them and overrides
+some.
 */
 function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 	return {
@@ -830,8 +923,9 @@ describe('slugProblem', () => {
 });
 
 describe('onboardDeployment', () => {
-	it('claims the deployment, then deletes the secret and creates the first cache', async () => {
+	it('claims the deployment, then deletes the secret, creates the first cache and saves its session', async () => {
 		const { ui, successes } = scriptedUi({ slugs: ['builds'] });
+		const signedIn = scriptedSignIn();
 		const client = scriptedClient({
 			versions: ['offline', StatusCodes.NOT_FOUND, 'v-new'],
 			signup: [claimedSignup],
@@ -852,13 +946,15 @@ describe('onboardDeployment', () => {
 		const outcome = await onboardDeployment({
 			...baseOptions(ui, client),
 			api,
-			authority: bootstrapAuthority()
+			authority: bootstrapAuthority(signedIn.signIn)
 		});
 
 		expect({
 			outcome,
 			events: client.events,
+			signIns: signedIn.issued.length,
 			signupBodies: client.signupBodies,
+			tenantExchanges: client.tenantExchanges,
 			cachedSessions: client.cachedSessions,
 			createdBodies: client.createdBodies,
 			apiCalls,
@@ -877,13 +973,33 @@ describe('onboardDeployment', () => {
 				'signup',
 				'deleteSecret:cupboard:CUPBOARD_SIGNUP_SECRET',
 				'cacheSession',
-				'getInstance:session-jwt'
+				'getInstance:session-jwt',
+				'tokenExchange:https://cache.example.com/t/builds',
+				'cacheSession'
 			],
-			signupBodies: [{ subject_token: claimIdToken, claim_secret: 'claim-1' }],
+			signIns: 1,
+			signupBodies: [
+				{
+					subject_token: signedIn.issued[0],
+					claim_secret: 'claim-1',
+					targets: claimTargetsWithTenant
+				}
+			],
+			tenantExchanges: [
+				{
+					url: 'https://cache.example.com/t/builds',
+					subjectToken: signedIn.issued[0],
+					targets: claimTargetsWithTenant
+				}
+			],
 			cachedSessions: [
 				{
 					session: signupSession,
 					target: new URL('https://cache.example.com')
+				},
+				{
+					session: tenantSession,
+					target: new URL('https://cache.example.com/t/builds')
 				}
 			],
 			// The first cache belongs to the principal that the claim seeded.
@@ -915,7 +1031,7 @@ describe('onboardDeployment', () => {
 			signup: [claimedSignup],
 			lists: [[]]
 		});
-		const idToken = idTokenWith({
+		const { signIn } = scriptedSignIn({
 			iss: owner.issuer,
 			sub: owner.subject,
 			email: 'ada@example.com'
@@ -924,7 +1040,7 @@ describe('onboardDeployment', () => {
 		await onboardDeployment({
 			...baseOptions(ui, client),
 			api: baseApi(),
-			authority: bootstrapAuthority(() => Promise.resolve(idToken))
+			authority: bootstrapAuthority(signIn)
 		});
 
 		expect(successes).toStrictEqual([
@@ -933,7 +1049,7 @@ describe('onboardDeployment', () => {
 	});
 
 	it('reports a successful claim whose session cannot be written', async () => {
-		const { ui } = scriptedUi();
+		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({
 			versions: ['v-new'],
 			signup: [claimedSignup]
@@ -980,8 +1096,9 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('saves the session from /signup and sends the id_token in one request', async () => {
+	it('saves the sessions from /signup and the tenant, sending each id_token in one request', async () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
+		const signedIn = scriptedSignIn();
 		const apiCalls: ApiCall[] = [];
 		const requests: {
 			readonly method: string;
@@ -999,7 +1116,8 @@ describe('onboardDeployment', () => {
 				Response.json({ state: 'configured', name: 'cupboard' }),
 			'GET /control/tenants': () => Response.json({ tenants: [] }),
 			'POST /control/tenants': () => Response.json(tenantSummary('builds')),
-			'GET /t/builds/pubkey': () => new Response(`${publicKey}\n`)
+			'GET /t/builds/pubkey': () => new Response(`${publicKey}\n`),
+			'POST /t/builds/token': () => Response.json(tenantSession)
 		};
 		const fetcher: typeof fetch = async (input, init) => {
 			const request = new Request(input, init);
@@ -1009,9 +1127,11 @@ describe('onboardDeployment', () => {
 			requests.push({
 				method: request.method,
 				path,
-				hasIdToken:
-					body.includes(claimIdToken) ||
-					(request.headers.get('authorization') ?? '').includes(claimIdToken)
+				hasIdToken: signedIn.issued.some(
+					(idToken) =>
+						body.includes(idToken) ||
+						(request.headers.get('authorization') ?? '').includes(idToken)
+				)
 			});
 
 			const respond = responses[`${request.method} ${path}`];
@@ -1027,7 +1147,7 @@ describe('onboardDeployment', () => {
 			controlScriptName: scriptNameSchema.parse('cupboard'),
 			tenantScriptName: scriptNameSchema.parse('cupboard-tenant'),
 			domain: 'cache.example.com',
-			authority: bootstrapAuthority(),
+			authority: bootstrapAuthority(signedIn.signIn),
 			buildVersion: 'v-new',
 			cacheAccess: 'public',
 			r2: { kind: 'fresh' },
@@ -1050,19 +1170,24 @@ describe('onboardDeployment', () => {
 				{ method: 'PUT', path: '/control/instance', hasIdToken: false },
 				{ method: 'GET', path: '/control/tenants', hasIdToken: false },
 				{ method: 'POST', path: '/control/tenants', hasIdToken: false },
-				{ method: 'GET', path: '/t/builds/pubkey', hasIdToken: false }
+				{ method: 'GET', path: '/t/builds/pubkey', hasIdToken: false },
+				{ method: 'POST', path: '/t/builds/token', hasIdToken: true }
 			],
 			cachedSessions: [
 				{
 					session: signupSession,
 					target: new URL('https://cache.example.com')
+				},
+				{
+					session: tenantSession,
+					target: new URL('https://cache.example.com/t/builds')
 				}
 			]
 		});
 	});
 
 	it('refuses to claim with an id_token for a different identity from the confirmed one', async () => {
-		const { ui } = scriptedUi();
+		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({ versions: ['v-new'] });
 		const apiCalls: ApiCall[] = [];
 		const confirmed = {
@@ -1071,7 +1196,7 @@ describe('onboardDeployment', () => {
 			audience: oidcAudienceSchema.parse('cupboard-cli'),
 			displayName: undefined
 		};
-		const idToken = idTokenWith({
+		const { signIn } = scriptedSignIn({
 			iss: 'https://idp.example.test',
 			sub: 'intruder'
 		});
@@ -1085,7 +1210,7 @@ describe('onboardDeployment', () => {
 				authority: {
 					kind: 'bootstrap',
 					claimSecret: claimSecretSchema.parse('claim-1'),
-					idToken: () => Promise.resolve(idToken),
+					signIn,
 					claimant: confirmed
 				}
 			});
@@ -1242,7 +1367,7 @@ describe('onboardDeployment', () => {
 			advice,
 			warningCount
 		}) => {
-			const { ui, warnings: shown } = scriptedUi();
+			const { ui, warnings: shown } = scriptedUi({ slugs: [undefined] });
 			const client = scriptedClient({
 				versions: ['v-new', 'v-new', 'v-new'],
 				signup
@@ -1305,7 +1430,7 @@ describe('onboardDeployment', () => {
 			new URL(`http://127.0.0.1:${String(port)}`),
 			{ cache: { kind: 'default' } }
 		);
-		const { ui } = scriptedUi();
+		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({ versions: ['v-new'] });
 
 		let refusal: unknown;
@@ -1318,7 +1443,7 @@ describe('onboardDeployment', () => {
 				attempts: 2,
 				clientFactory: (url) => ({
 					...client.factory(url),
-					signup: (request) => unreachable.signup(request)
+					signup: (request, binding) => unreachable.signup(request, binding)
 				})
 			});
 		} catch (error) {
@@ -1340,11 +1465,95 @@ describe('onboardDeployment', () => {
 		});
 	});
 
+	it('claims again with a new sign-in when a claim request that received no response reached the deployment', async () => {
+		const { ui, successes } = scriptedUi({ slugs: [undefined] });
+		const signedIn = scriptedSignIn();
+		const replayed = new CupboardHttpError(
+			'POST',
+			'/signup',
+			StatusCodes.BAD_REQUEST,
+			JSON.stringify({
+				error: 'invalid_grant',
+				problem: 'subject-token-replayed'
+			})
+		);
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: ['unreachable', replayed, { ...claimedSignup, claimed: false }],
+			lists: [[]]
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			api: baseApi(),
+			authority: bootstrapAuthority(signedIn.signIn)
+		});
+
+		expect({
+			outcome,
+			subjectTokens: client.signupBodies.map((body) => body.subject_token),
+			signIns: signedIn.issued.length,
+			cachedSessions: client.cachedSessions,
+			successes
+		}).toStrictEqual({
+			outcome: { kind: 'cancelled', url: 'https://cache.example.com' },
+			subjectTokens: [
+				signedIn.issued[0],
+				signedIn.issued[0],
+				signedIn.issued[1]
+			],
+			signIns: 2,
+			cachedSessions: [
+				{
+					session: signupSession,
+					target: new URL('https://cache.example.com')
+				}
+			],
+			successes: ['You are already the admin of this deployment (cf-user-1).']
+		});
+	});
+
+	it('signs in again before the claim when the first sign-in is too old', async () => {
+		const { ui } = scriptedUi();
+		const signedIn = scriptedSignIn();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		await signedIn.signIn.idTokenFor(
+			claimTargetsWithTenant.map((target) => canonicalTarget(new URL(target)))
+		);
+		signedIn.clock.nowMs += reusableSignInAgeSeconds * 1000;
+
+		await onboardDeployment({
+			...baseOptions(ui, client),
+			api: baseApi(),
+			authority: bootstrapAuthority(signedIn.signIn),
+			cacheSlug: 'builds'
+		});
+
+		expect({
+			signIns: signedIn.issued.length,
+			claimedWith: client.signupBodies.map((body) => body.subject_token),
+			tenantWith: client.tenantExchanges.map(
+				(exchange) => exchange.subjectToken
+			)
+		}).toStrictEqual({
+			signIns: 2,
+			claimedWith: [signedIn.issued[1]],
+			tenantWith: [signedIn.issued[1]]
+		});
+	});
+
 	it("reports the server's full reason when it rejects the id_token", async () => {
 		const reason =
 			'Subject token issuer must be an HTTPS URL, or loopback HTTP in local ' +
 			'development, without a query or fragment';
-		const { ui } = scriptedUi();
+		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({ versions: ['v-new'] });
 
 		let refusal: unknown;
@@ -1426,7 +1635,7 @@ describe('onboardDeployment', () => {
 			signups: 9
 		}
 	])('$name', async ({ versions, signups }) => {
-		const { ui } = scriptedUi();
+		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({
 			versions: ['v-new', ...versions],
 			signup: Array.from({ length: signups }, () => StatusCodes.FORBIDDEN)
@@ -1845,10 +2054,7 @@ describe('onboardDeployment', () => {
 				publicKeys: ['pk-1']
 			});
 
-			const outcome = await onboardDeployment({
-				...baseOptions(ui, client),
-				freshIdToken: () => Promise.resolve('id-token-1')
-			});
+			const outcome = await onboardDeployment(baseOptions(ui, client));
 
 			expect({
 				outcome,
@@ -1889,7 +2095,7 @@ describe('onboardDeployment', () => {
 		]);
 	});
 
-	it('fetches an id_token only to inspect an existing cache', async () => {
+	it('reads the access of an existing cache with the stored tenant session, without a sign-in', async () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
 			versions: ['v-new'],
@@ -1897,45 +2103,80 @@ describe('onboardDeployment', () => {
 			rebuilds: [{ tenants: 1 }],
 			publicKeys: ['pk-1']
 		});
-		let issued = 0;
+
 		await onboardDeployment({
 			...baseOptions(ui, client),
-			freshIdToken: () => Promise.resolve(`id-token-${String(++issued)}`)
+			sessionCredential: (target) => `session:${target.href}`
 		});
+
 		expect({
 			signupBodies: client.signupBodies,
+			tenantExchanges: client.tenantExchanges,
 			cacheAccessTokens: client.cacheAccessTokens
 		}).toStrictEqual({
 			signupBodies: [],
-			cacheAccessTokens: ['id-token-1']
+			tenantExchanges: [],
+			cacheAccessTokens: ['session:https://cache.example.com/t/laney']
 		});
 	});
 
-	it('leaves the access of an existing cache unread without an id_token', async () => {
+	it('leaves the access of an existing cache unread without a stored tenant session', async () => {
 		const { ui } = scriptedUi();
-		const client = scriptedClient({
-			versions: ['v-new'],
-			lists: [[tenantSummary('laney')]],
-			rebuilds: [{ tenants: 1 }],
-			publicKeys: ['pk-1']
+		const requests: string[] = [];
+		const publicKey = `cupboard-laney-1:${Buffer.alloc(32, 1).toString('base64')}`;
+		const responses: Readonly<Record<string, () => Response>> = {
+			'GET /_version': () => new Response('v-new'),
+			'GET /control/instance': () =>
+				Response.json({ state: 'configured', name: 'cupboard' }),
+			'PUT /control/instance': () =>
+				Response.json({ state: 'configured', name: 'cupboard' }),
+			'GET /control/tenants': () =>
+				Response.json({ tenants: [tenantSummary('laney')] }),
+			'POST /control/membership/rebuild': () => Response.json({ tenants: 1 }),
+			'GET /t/laney/pubkey': () => new Response(`${publicKey}\n`)
+		};
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+			const route = `${request.method} ${new URL(request.url).pathname}`;
+			requests.push(route);
+			const respond = responses[route];
+
+			return Promise.resolve(
+				respond === undefined
+					? new Response(undefined, { status: StatusCodes.NOT_FOUND })
+					: respond()
+			);
+		};
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, scriptedClient({})),
+			clientFactory: undefined,
+			fetcher,
+			sessionCredential: () => ({
+				get: () => Promise.reject(new OwnerLoginRequiredError()),
+				refresh: () => Promise.reject(new OwnerLoginRequiredError())
+			})
 		});
 
-		const outcome = await onboardDeployment(baseOptions(ui, client));
-
-		expect({
-			outcome,
-			cacheAccessTokens: client.cacheAccessTokens
-		}).toStrictEqual({
+		expect({ outcome, requests }).toStrictEqual({
 			outcome: {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'laney',
 				cacheUrl: new URL('https://cache.example.com/t/laney'),
-				publicKey: 'pk-1'
+				publicKey
 			} satisfies OnboardOutcome,
-			cacheAccessTokens: []
+			requests: [
+				'GET /_version',
+				'GET /control/instance',
+				'PUT /control/instance',
+				'GET /control/tenants',
+				'POST /control/membership/rebuild',
+				'GET /t/laney/pubkey'
+			]
 		});
 	});
+
 	it('keeps a custom instance name when a redeploy omits the option', async () => {
 		const { ui } = scriptedUi();
 		const forge = instanceNameSchema.parse('forge');
@@ -2318,4 +2559,130 @@ describe('onboardDeployment', () => {
 			}
 		});
 	});
+});
+
+// A credential chain whose Cloudflare grant is either cached or comes from a
+// browser login, which `logins` counts.
+function credentialChain(isCached: boolean): {
+	readonly chain: CredentialChain;
+	readonly logins: { count: number };
+} {
+	const logins = { count: 0 };
+	const grant: CloudflareGrant = {
+		accessToken: 'cloudflare-access',
+		refreshToken: 'cloudflare-refresh',
+		expiresAt: Date.now() + 3_600_000,
+		subject: owner.subject,
+		idToken: idTokenWith({ ...claimClaims, nonce: 'random' })
+	};
+
+	return {
+		logins,
+		chain: {
+			env: {},
+			readGrant: () =>
+				Promise.resolve(
+					isCached ? { ...grant, idToken: undefined } : undefined
+				),
+			writeGrant: () => Promise.resolve(),
+			withGrantLock: (action) => action(),
+			refreshGrant: () => Promise.resolve(undefined),
+			login: () => {
+				logins.count += 1;
+				return Promise.resolve(grant);
+			},
+			upgradeLogin: true,
+			now: Date.now
+		}
+	};
+}
+
+describe('the sign-ins of a first deploy', () => {
+	it.each([
+		{
+			name: 'a fresh machine, claimed at once',
+			isCached: false,
+			delayMs: 0,
+			expected: { signIns: 2, claimedWith: [0], tenantWith: [0] }
+		},
+		{
+			name: 'a fresh machine, claimed late',
+			isCached: false,
+			delayMs: reusableSignInAgeSeconds * 1000,
+			expected: { signIns: 2, claimedWith: [0], tenantWith: [0] }
+		},
+		{
+			name: 'a cached grant, claimed at once',
+			isCached: true,
+			delayMs: 0,
+			expected: { signIns: 1, claimedWith: [0], tenantWith: [0] }
+		},
+		{
+			name: 'a cached grant, claimed late',
+			isCached: true,
+			delayMs: reusableSignInAgeSeconds * 1000,
+			expected: { signIns: 2, claimedWith: [1], tenantWith: [1] }
+		}
+	])(
+		'counts the sign-ins on $name',
+		async ({ isCached, delayMs, expected }) => {
+			const { ui } = scriptedUi();
+			const signedIn = scriptedSignIn();
+			const { chain, logins } = credentialChain(isCached);
+			const credential = await resolveCredential(chain);
+			const client = scriptedClient({
+				versions: ['v-new'],
+				signup: [claimedSignup],
+				lists: [[]],
+				creates: [tenantSummary('builds')],
+				publicKeys: ['pk-1']
+			});
+
+			const authority = await decideAuthority(
+				{
+					boundDatabase: undefined,
+					plannedDatabaseName: 'cupboard',
+					controlScriptName: scriptNameSchema.parse('cupboard'),
+					isControlDeployed: false,
+					interactive: true
+				},
+				{
+					api: baseApi(),
+					servesCupboard: () => Promise.resolve(false),
+					currentUrl: () => Promise.resolve(undefined),
+					newUrl: () => Promise.resolve(new URL('https://cache.example.com')),
+					adminAccess: () => ({ credentialFor: () => adminProvider() }),
+					checkAdmin: () => Promise.resolve(),
+					signIn: signedIn.signIn,
+					chooseFirstTenantSlug: () => Promise.resolve('builds'),
+					...(credential.loginIdToken !== undefined && {
+						cloudflareLoginIdToken: credential.loginIdToken
+					}),
+					generateClaimSecret: () => claimSecretSchema.parse('claim-1')
+				}
+			);
+
+			if (authority.kind !== 'bootstrap') {
+				throw new Error('expected a first deploy');
+			}
+
+			signedIn.clock.nowMs += delayMs;
+
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				api: baseApi(),
+				authority
+			});
+
+			expect({
+				signIns: logins.count + signedIn.issued.length,
+				claimedWith: client.signupBodies.map((body) =>
+					signedIn.issued.indexOf(body.subject_token)
+				),
+				tenantWith: client.tenantExchanges.map((exchange) =>
+					signedIn.issued.indexOf(exchange.subjectToken)
+				)
+			}).toStrictEqual(expected);
+		}
+	);
 });

@@ -16,9 +16,11 @@ Run `cupboard login` with the tenant URL:
 cupboard login https://cupboard.example.workers.dev/t/acme
 ```
 
-The CLI opens a browser so you can sign in with Cloudflare. If you've signed in
-to Cloudflare through cupboard before, including through `cupboard init`, it
-reuses that sign-in and doesn't open a browser.
+The CLI opens a browser so you can sign in with Cloudflare. The sign-in returns
+an ID token whose nonce commits to the tenant URL, so only that tenant accepts
+the token, only once and only within five minutes. The CLI exchanges the token
+for a session straight away. It doesn't keep the token or the Cloudflare
+sign-in.
 
 Signing in only works if the tenant trusts your identity. That means you're
 either the tenant's owner, or an administrator has
@@ -72,11 +74,10 @@ cupboard login https://cupboard.example.workers.dev/t/acme --headless
 
 The CLI prints a code, which you enter on another device to finish signing in.
 
-A headless sign-in uses the device flow, and doesn't use or save a Cloudflare
-sign-in. The CLI still renews the session with its refresh token. Once the
-refresh token expires, the CLI can only start a new session from a Cloudflare
-sign-in that `cupboard init` or an earlier browser sign-in saved on the machine.
-If there isn't one, the CLI asks you to sign in again.
+A headless sign-in uses the device flow. The device flow can't request a nonce,
+so its ID token isn't bound to the tenant URL. The CLI renews the session with
+its refresh token, as for any other sign-in. Once the refresh token expires, the
+CLI asks you to sign in again.
 
 ## Signing in with another identity provider
 
@@ -141,17 +142,17 @@ If a refresh response is lost, retry the command within one minute. The CLI
 keeps the consumed refresh token until it receives a response. The server then
 returns the same successor refresh token and issues a new access token after
 checking the current trust rules. The CLI does not automatically retry a failed
-refresh request. A later retry revokes that refresh-token family. The CLI can
-establish a new session from a saved Cloudflare sign-in when it is still valid;
-otherwise, sign in again.
+refresh request. A later retry revokes that refresh-token family, and you have
+to sign in again.
 
 A deployment session renews in the same way, and each renewal checks the
 deployment's control-plane trust rules. Neither a tenant nor the control plane
 issues a refresh token when the sign-in token's audience is the tenant or
 deployment URL, as for a GitHub Actions job.
 
-If the CLI has saved a Cloudflare sign-in on the machine, it can also start a
-new session from that sign-in, for a tenant URL or the deployment URL.
+The CLI never starts a session from a saved Cloudflare sign-in. Refreshing a
+Cloudflare sign-in returns an ID token with the nonce of the original sign-in,
+and the server has already accepted that nonce.
 
 When the CLI can't renew the session, the command fails with exit status 77 and
 asks you to run `cupboard login` again.
@@ -249,17 +250,17 @@ use `--all` instead of a URL:
 cupboard logout --all
 ```
 
-While a Cloudflare sign-in is saved, later commands can use it to start a new
-session without opening a browser, and `logout` warns you about it. To delete
-the Cloudflare sign-in too, add `--cloudflare`:
+`cupboard init` saves a Cloudflare sign-in on the machine for the Cloudflare
+API. That sign-in can deploy to your Cloudflare account, and `logout` warns you
+while it's saved. To delete the Cloudflare sign-in too, add `--cloudflare`:
 
 ```sh
 cupboard logout --all --cloudflare
 ```
 
 `cupboard logout --cloudflare`, without a URL or `--all`, deletes only the
-Cloudflare sign-in. Afterwards, `cupboard login` and `cupboard init` ask you to
-sign in to Cloudflare again.
+Cloudflare sign-in. Afterwards, `cupboard init` asks you to sign in to
+Cloudflare again.
 
 Signing out also sends a revocation request for the refresh token of each
 session that it deletes. With `--cloudflare`, it sends Cloudflare a revocation
@@ -287,7 +288,8 @@ The CLI keeps its state in `$XDG_CONFIG_HOME/cupboard/`, which is
 `~/.config/cupboard/` by default. Only you can read it.
 
 - `tokens/` contains one session for each URL.
-- `cloudflare-grant.json` contains your Cloudflare sign-in.
+- `cloudflare-grant.json` contains the Cloudflare sign-in that `cupboard init`
+  uses for the Cloudflare API.
 
 The Cloudflare sign-in can also deploy to your Cloudflare account. Protect this
 directory as carefully as you would any other Cloudflare credential.

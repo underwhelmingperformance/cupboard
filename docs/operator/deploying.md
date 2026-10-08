@@ -71,8 +71,11 @@ separate sign-in, so the token doesn't decide who becomes the admin.
    dead-letter queue have separate labels. Add `--debug` for database migration
    identifiers and other implementation diagnostics.
 
-5. Confirm who becomes the admin. `init` signs you in for the claim, shows the
-   identity from your sign-in, and asks:
+5. Choose the first tenant's slug, and confirm who becomes the admin. `init`
+   asks for a **slug**, the tenant's name in its URL. With the slug `acme`, the
+   tenant URL is `https://cupboard.example.workers.dev/t/acme`. See
+   [Tenant slugs](#tenant-slugs). `init` then shows the identity from your
+   sign-in and asks:
 
    ```
    Claim this deployment as <name> (issuer <issuer>, subject <subject>, audience <audience>)?
@@ -90,21 +93,19 @@ separate sign-in, so the token doesn't decide who becomes the admin.
 
 7. Wait while `init` deploys. It creates the resources, applies the database
    migrations, and uploads and configures both Workers. When the new Workers are
-   serving, it claims the deployment and prints:
+   serving, you may be asked to sign in again. `init` then claims the deployment
+   and prints:
 
    ```
    You are now the admin of this deployment (<name>).
    ```
 
-8. Create the first tenant. `init` asks for:
-   - a **slug**, the tenant's name in its URL. With the slug `acme`, the tenant
-     URL is `https://cupboard.example.workers.dev/t/acme`. See
-     [Tenant slugs](#tenant-slugs).
-   - whether the tenant's default cache is public ("Anyone who learns the URL")
-     or private ("Only clients with a read credential").
+8. Create the first tenant. `init` asks whether the tenant's default cache is
+   public ("Anyone who learns the URL") or private ("Only clients with a read
+   credential").
 
-   You can answer both in advance with `--cache acme` and `--access public` or
-   `--access private`. You become the tenant's owner. See
+   You can answer this and the slug prompt in advance with `--cache acme` and
+   `--access public` or `--access private`. You become the tenant's owner. See
    [The first tenant](#the-first-tenant).
 
 9. Save the tenant read credential. `init` prints it along with the netrc line
@@ -422,13 +423,28 @@ updates the deployment, which needs an admin token. See
 
 ### Signing in for the claim
 
-When there is a terminal, `init` signs you in for the claim. By default it signs
-you in to Cloudflare, reusing cupboard's cached Cloudflare sign-in if there is
-one and opening a browser only if it can't renew it. `--oidc-issuer` and
-`--client-id` select another OIDC issuer and OAuth client, with the same
-defaults as `cupboard login`. With another issuer or client, the sign-in is
-always a new one. `--headless` uses the device flow, without a browser on this
-machine. The Cloudflare sign-in for the account can still open a browser.
+Before it changes anything, `init` asks for the first tenant's slug, unless you
+passed `--cache`, so that one sign-in can cover the deployment and the tenant.
+If you cancel the prompt, `init` stops without changing anything.
+
+When there is a terminal, `init` signs you in for the claim, before it changes
+anything. By default it signs you in to Cloudflare in the browser. This sign-in
+is separate from the Cloudflare sign-in that `init` uses for the account, and it
+is never saved. `--oidc-issuer` and `--client-id` select another OIDC issuer and
+OAuth client, with the same defaults as `cupboard login`. `--headless` uses the
+device flow, without a browser on this machine. The Cloudflare sign-in for the
+account can still open a browser.
+
+The ID token from the sign-in has a nonce that commits to the deployment URL and
+to the first tenant's URL. The deployment and the tenant each accept the token
+once, and only within five minutes of the sign-in.
+
+`init` may have opened a browser in this run to sign you in to Cloudflare for
+the account. With the default issuer and client, `init` then reads your identity
+from the ID token of that sign-in, and doesn't sign you in for the claim until
+after the upload. It never sends the ID token of the account sign-in to
+cupboard. That sign-in happened before the deployment URL was known, so its
+nonce can't commit to the deployment.
 
 `init` then shows who the claim makes the admin: the display name, issuer,
 subject and audience from your ID token. It asks you to confirm, because the
@@ -459,9 +475,21 @@ Workers are serving, it:
 3. caches the admin session, as `cupboard login` does.
 
 The ID token presented at the claim must belong to the identity that you
-confirmed. `init` keeps the token from the sign-in before the upload, and signs
-in again only if that token expires within a minute. If the second sign-in
-returns another identity, `init` stops before the claim.
+confirmed. `init` reuses the token from the sign-in before the upload only if it
+is less than four minutes old. Otherwise `init` signs you in before the claim,
+with a nonce for the deployment and the first tenant. It also signs you in at
+this point when it read your identity from the account sign-in. If the new
+sign-in returns another identity, `init` stops before the claim.
+
+After it creates the first tenant, `init` exchanges the same ID token at the
+tenant and caches that session too, so later commands for the tenant don't open
+a browser. If that exchange fails, `init` prints a warning with the
+`cupboard login` command to run.
+
+If the connection fails after `/signup` accepted the claim, the retry is refused
+because the deployment has already accepted that ID token. `init` then signs you
+in again and repeats the claim. The deployment returns a session for the admin
+who claimed it, and `init` says that you're already the admin.
 
 If the claim succeeds but the admin token can't be cached, `init` stops and says
 that the claim succeeded. Run the `cupboard login` command that it prints, then

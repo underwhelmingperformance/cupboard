@@ -9,12 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { abortReason } from '../abort.ts';
 import { audienceSchema } from '../audience.ts';
 import { CupboardClient } from '../client/client.ts';
-import type { CloudflareGrant } from '../deploy/cloudflare-oauth.ts';
-import {
-	readCachedGrant,
-	withCachedGrantLock,
-	writeCachedGrant
-} from '../deploy/grant-store.ts';
+import { writeCachedGrant } from '../deploy/grant-store.ts';
 import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 import { testWithConfigHome } from '../test-support.ts';
 
@@ -333,33 +328,13 @@ function tokenResponse(name: string): TokenResponse {
 
 interface FakeSessionClient {
 	readonly tokenRefresh: (refreshToken: string) => Promise<TokenResponse>;
-	readonly tokenExchange: (
-		subjectToken: string,
-		subjectTokenType: string
-	) => Promise<TokenResponse>;
-}
-
-interface FakeGrantChain {
-	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
-	readonly writeGrant: (grant: CloudflareGrant) => Promise<void>;
-	readonly withGrantLock: <T>(
-		action: (signal?: AbortSignal) => Promise<T>,
-		signal?: AbortSignal
-	) => Promise<T>;
-	readonly refreshGrant: (
-		previous: CloudflareGrant
-	) => Promise<CloudflareGrant | undefined>;
-	readonly now: () => number;
 }
 
 interface SessionHarness extends OwnerSessionDependencies {
 	readonly client: FakeSessionClient;
-	readonly grantChain: FakeGrantChain;
 	readonly now: () => number;
 }
 
-// An in-memory session store plus a grant chain with no stored grant; tests
-// override the pieces the scenario needs.
 function sessionHarness(initial?: CachedSession): {
 	readonly harness: SessionHarness;
 	readonly clientCalls: () => readonly {
@@ -369,10 +344,7 @@ function sessionHarness(initial?: CachedSession): {
 } {
 	const written: CachedSession[] = [];
 	const clientCalls: { readonly method: keyof FakeSessionClient }[] = [];
-	const stored: {
-		session: CachedSession | undefined;
-		grant: CloudflareGrant | undefined;
-	} = { session: initial, grant: undefined };
+	const stored: { session: CachedSession | undefined } = { session: initial };
 
 	return {
 		harness: {
@@ -381,19 +353,7 @@ function sessionHarness(initial?: CachedSession): {
 					clientCalls.push({ method: 'tokenRefresh' });
 
 					return Promise.reject(new OwnerLoginRequiredError());
-				},
-				tokenExchange: () => {
-					clientCalls.push({ method: 'tokenExchange' });
-
-					return Promise.reject(new OwnerLoginRequiredError());
 				}
-			},
-			grantChain: {
-				readGrant: () => Promise.resolve(stored.grant),
-				writeGrant: () => Promise.resolve(),
-				withGrantLock: (action, signal) => action(signal),
-				refreshGrant: () => Promise.resolve(stored.grant),
-				now: () => past * 1000
 			},
 			readSession: () => Promise.resolve(stored.session),
 			writeSession: (session) => {
@@ -407,16 +367,6 @@ function sessionHarness(initial?: CachedSession): {
 		},
 		clientCalls: () => clientCalls,
 		sessions: () => written
-	};
-}
-
-function cloudflareGrant(idToken: string): CloudflareGrant {
-	return {
-		accessToken: 'cf-access',
-		refreshToken: 'cf-refresh',
-		expiresAt: farFuture * 1000,
-		subject: 'cf-user',
-		idToken
 	};
 }
 
@@ -587,70 +537,6 @@ describe('cachedOwnerProvider', () => {
 		});
 	});
 
-	testWithConfigHome(
-		'serialises one Cloudflare grant refresh across different targets',
-		async () => {
-			const otherTarget = new URL('https://cupboard.test/t/other');
-			const staleGrant = cloudflareGrant(
-				jwt({ sub: 'cf-user', exp: past - 60 })
-			);
-			const renewedGrant = cloudflareGrant(
-				jwt({ sub: 'cf-user', exp: farFuture })
-			);
-			const refresh = Promise.withResolvers<CloudflareGrant | undefined>();
-			const refreshStarted = Promise.withResolvers<undefined>();
-			const refreshedWith: CloudflareGrant[] = [];
-			const sessions = new Map<string, CachedSession>();
-			const { harness } = sessionHarness();
-			const grantChain = {
-				readGrant: readCachedGrant,
-				writeGrant: writeCachedGrant,
-				withGrantLock: withCachedGrantLock,
-				refreshGrant: (previous: CloudflareGrant) => {
-					refreshedWith.push(previous);
-					refreshStarted.resolve(undefined);
-
-					return refresh.promise;
-				},
-				now: harness.now
-			};
-			const dependencies: OwnerSessionDependencies = {
-				client: {
-					tokenRefresh: harness.client.tokenRefresh,
-					tokenExchange: () => Promise.resolve(tokenResponse('exchanged'))
-				},
-				grantChain,
-				readSession: (sessionTarget) =>
-					Promise.resolve(sessions.get(canonicalHref(sessionTarget))),
-				writeSession: (session, sessionTarget) => {
-					sessions.set(canonicalHref(sessionTarget), session);
-
-					return Promise.resolve();
-				},
-				now: harness.now
-			};
-
-			await writeCachedGrant(staleGrant);
-			const first = cachedOwnerProvider(target, dependencies).get();
-			const second = cachedOwnerProvider(otherTarget, dependencies).get();
-			await refreshStarted.promise;
-			refresh.resolve(renewedGrant);
-
-			expect({
-				tokens: await Promise.all([first, second]),
-				refreshedWith,
-				grant: await readCachedGrant()
-			}).toStrictEqual({
-				tokens: [
-					accessToken('exchanged', farFuture),
-					accessToken('exchanged', farFuture)
-				],
-				refreshedWith: [staleGrant],
-				grant: renewedGrant
-			});
-		}
-	);
-
 	it("does not return another process's session after the caller aborts", async () => {
 		const enteredLock = Promise.withResolvers<undefined>();
 		const releaseLock = Promise.withResolvers<undefined>();
@@ -695,20 +581,18 @@ describe('cachedOwnerProvider', () => {
 		expect(lockSignal).toBe(controller.signal);
 	});
 
-	it('cancels Cupboard session establishment when the lock is compromised', async () => {
+	it('cancels Cupboard session renewal when the lock is compromised', async () => {
 		const exchange = heldResponseFetch();
 		const compromise = new AbortController();
 		const reason = new Error('session lock was compromised');
-		const idToken = jwt({ sub: 'cf-user', exp: farFuture });
-		const { harness } = sessionHarness();
+		const { harness } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		});
 
 		vi.stubGlobal('fetch', exchange.fetcher);
 
 		const provider = cachedOwnerProvider(target, {
-			grantChain: {
-				...harness.grantChain,
-				readGrant: () => Promise.resolve(cloudflareGrant(idToken))
-			},
 			readSession: harness.readSession,
 			writeSession: harness.writeSession,
 			withSessionLock: (_target, action) => action(compromise.signal),
@@ -730,47 +614,6 @@ describe('cachedOwnerProvider', () => {
 			vi.unstubAllGlobals();
 		}
 	});
-
-	testWithConfigHome(
-		'cancels Cloudflare grant refresh when the caller aborts',
-		async () => {
-			const refresh = heldResponseFetch();
-			const controller = new AbortController();
-			const reason = new Error('stop refreshing the Cloudflare grant');
-			const { harness } = sessionHarness();
-
-			await writeCachedGrant(
-				cloudflareGrant(jwt({ sub: 'cf-user', exp: past - 60 }))
-			);
-			vi.stubGlobal('fetch', refresh.fetcher);
-
-			const provider = cachedOwnerProvider(target, {
-				client: harness.client,
-				readSession: harness.readSession,
-				writeSession: harness.writeSession,
-				withSessionLock: harness.withSessionLock,
-				now: harness.now,
-				signal: controller.signal
-			});
-			const renewing = provider.get();
-
-			try {
-				const requestSignal = await refresh.started;
-				controller.abort(reason);
-
-				const outcome = await outcomeOf(renewing);
-
-				expect(outcome).toStrictEqual({ kind: 'rejected', error: reason });
-				expect(requestSignal).toMatchObject({ aborted: true });
-			} finally {
-				refresh.resolve(
-					Response.json({ access_token: 'late', expires_in: 3600 })
-				);
-				await outcomeOf(renewing);
-				vi.unstubAllGlobals();
-			}
-		}
-	);
 
 	it('starts a new rotation after a shared renewal fails', async () => {
 		const failed = Promise.withResolvers<TokenResponse>();
@@ -819,50 +662,65 @@ describe('cachedOwnerProvider', () => {
 		});
 	});
 
-	it('falls back to the Cloudflare grant when the refresh token is refused', async () => {
-		const idToken = jwt({ sub: 'cf-user', exp: farFuture });
-		const { harness, sessions } = sessionHarness({
-			accessToken: accessToken('stale', past - 60),
-			refreshToken: 'refresh-spent'
-		});
-		const exchangedWith: string[] = [];
-		const provider = cachedOwnerProvider(target, {
-			...harness,
-			client: {
-				tokenRefresh: () =>
-					Promise.reject(
-						new CupboardHttpError(
-							'POST',
-							'/token',
-							400,
-							JSON.stringify({ error: 'invalid_grant' })
-						)
-					),
-				tokenExchange: (subjectToken) => {
-					exchangedWith.push(subjectToken);
+	testWithConfigHome(
+		'throws OwnerLoginRequiredError when the refresh token is refused, without presenting an ID token',
+		async () => {
+			const requests: string[] = [];
+			const recordingFetch = (
+				input: string | URL | Request,
+				init?: RequestInit
+			): Promise<Response> => {
+				const form = new URLSearchParams(
+					typeof init?.body === 'string' ? init.body : ''
+				);
+				requests.push(`${requestUrl(input)} ${form.get('grant_type') ?? ''}`);
 
-					return Promise.resolve(tokenResponse('exchanged'));
-				}
-			},
-			grantChain: {
-				...harness.grantChain,
-				readGrant: () => Promise.resolve(cloudflareGrant(idToken))
+				return Promise.resolve(
+					Response.json(
+						{ error: 'invalid_grant' },
+						{ status: StatusCodes.BAD_REQUEST }
+					)
+				);
+			};
+			const { harness, sessions } = sessionHarness({
+				accessToken: accessToken('stale', past - 60),
+				refreshToken: 'refresh-spent'
+			});
+
+			await writeCachedGrant({
+				accessToken: 'cf-access',
+				refreshToken: 'cf-refresh',
+				expiresAt: farFuture * 1000,
+				subject: 'cf-user',
+				idToken: jwt({ sub: 'cf-user', exp: farFuture })
+			});
+			vi.stubGlobal('fetch', recordingFetch);
+
+			try {
+				const provider = cachedOwnerProvider(target, {
+					...harness,
+					client: new CupboardClient(target, recordingFetch, {
+						kind: 'default'
+					})
+				});
+				const outcome = await outcomeOf(provider.refresh());
+
+				expect({
+					rejected:
+						outcome.kind === 'rejected' &&
+						outcome.error instanceof OwnerLoginRequiredError,
+					requests,
+					sessions: sessions()
+				}).toStrictEqual({
+					rejected: true,
+					requests: ['https://cupboard.test/token refresh_token'],
+					sessions: []
+				});
+			} finally {
+				vi.unstubAllGlobals();
 			}
-		});
-
-		const token = await provider.refresh();
-
-		expect({ token, exchangedWith, sessions: sessions() }).toStrictEqual({
-			token: accessToken('exchanged', farFuture),
-			exchangedWith: [idToken],
-			sessions: [
-				{
-					accessToken: accessToken('exchanged', farFuture),
-					refreshToken: 'refresh-exchanged'
-				}
-			]
-		});
-	});
+		}
+	);
 
 	it('surfaces an invalid refresh request instead of replacing the session', async () => {
 		const failure = new CupboardHttpError(
@@ -958,164 +816,6 @@ describe('cachedOwnerProvider', () => {
 			clientCalls: [],
 			sessions: []
 		});
-	});
-
-	it.each([
-		{
-			name: 'a preceding server returns invalid_grant',
-			body: { error: 'invalid_grant' }
-		},
-		{
-			name: 'the subject token is invalid',
-			body: {
-				error: 'invalid_request',
-				problem: 'subject-token-invalid'
-			}
-		},
-		{
-			name: 'the subject token is no longer trusted',
-			body: {
-				error: 'invalid_request',
-				problem: 'subject-token-untrusted'
-			}
-		},
-		{
-			name: 'the subject token no longer matches its rule',
-			body: {
-				error: 'invalid_request',
-				problem: 'subject-token-claim-mismatch'
-			}
-		}
-	])('prompts a login when $name', async ({ body }) => {
-		const { harness } = sessionHarness();
-		const provider = cachedOwnerProvider(target, {
-			...harness,
-			client: {
-				...harness.client,
-				tokenExchange: () =>
-					Promise.reject(
-						new CupboardHttpError('POST', '/token', 400, JSON.stringify(body))
-					)
-			},
-			grantChain: {
-				...harness.grantChain,
-				readGrant: () =>
-					Promise.resolve(cloudflareGrant(jwt({ exp: farFuture })))
-			}
-		});
-
-		const outcome = await (async () => {
-			try {
-				const token = await provider.refresh();
-				return { token };
-			} catch (error_: unknown) {
-				expect(error_).toBeInstanceOf(OwnerLoginRequiredError);
-
-				if (!(error_ instanceof OwnerLoginRequiredError)) {
-					return {};
-				}
-
-				return { error: { name: error_.name } };
-			}
-		})();
-
-		expect(outcome).toStrictEqual({
-			error: { name: 'OwnerLoginRequiredError' }
-		});
-	});
-
-	it('surfaces an invalid exchange request instead of requesting a login', async () => {
-		const failure = new CupboardHttpError(
-			'POST',
-			'/token',
-			400,
-			JSON.stringify({ error: 'invalid_request' })
-		);
-		const { harness } = sessionHarness();
-		const provider = cachedOwnerProvider(target, {
-			...harness,
-			client: {
-				...harness.client,
-				tokenExchange: () => Promise.reject(failure)
-			},
-			grantChain: {
-				...harness.grantChain,
-				readGrant: () =>
-					Promise.resolve(cloudflareGrant(jwt({ exp: farFuture })))
-			}
-		});
-
-		await expect(provider.refresh()).rejects.toBe(failure);
-	});
-
-	it.each([
-		{
-			name: 'a recognised problem with the wrong OAuth error',
-			failure: () =>
-				new CupboardHttpError(
-					'POST',
-					'/token',
-					400,
-					JSON.stringify({
-						error: 'server_error',
-						problem: 'subject-token-invalid'
-					})
-				)
-		},
-		{
-			name: 'a recognised problem on a non-400 response',
-			failure: () =>
-				new CupboardHttpError(
-					'POST',
-					'/token',
-					503,
-					JSON.stringify({
-						error: 'invalid_request',
-						problem: 'subject-token-invalid'
-					})
-				)
-		},
-		{
-			name: 'an unrecognised subject-token problem',
-			failure: () =>
-				new CupboardHttpError(
-					'POST',
-					'/token',
-					400,
-					JSON.stringify({
-						error: 'invalid_request',
-						problem: 'subject-token-new-problem'
-					})
-				)
-		},
-		{
-			name: 'an arbitrary OAuth-shaped object',
-			failure: () =>
-				Object.assign(new Error('arbitrary OAuth carrier'), {
-					status: StatusCodes.BAD_REQUEST,
-					oauthError: {
-						error: 'invalid_request',
-						problem: 'subject-token-invalid'
-					}
-				})
-		}
-	])('surfaces $name during subject-token exchange', async ({ failure }) => {
-		const rejected = failure();
-		const { harness } = sessionHarness();
-		const provider = cachedOwnerProvider(target, {
-			...harness,
-			client: {
-				...harness.client,
-				tokenExchange: () => Promise.reject(rejected)
-			},
-			grantChain: {
-				...harness.grantChain,
-				readGrant: () =>
-					Promise.resolve(cloudflareGrant(jwt({ exp: farFuture })))
-			}
-		});
-
-		await expect(provider.refresh()).rejects.toBe(rejected);
 	});
 
 	it('propagates a server failure rather than prompting a login', async () => {

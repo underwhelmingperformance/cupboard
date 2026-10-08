@@ -24,8 +24,10 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
-import { cloudflareDashIssuer } from '../deploy/owner.ts';
+import {
+	cloudflareDashIssuer,
+	cloudflareOauthClientId
+} from '../deploy/cloudflare-oauth.ts';
 import {
 	CliUsageError,
 	InvalidClaimError,

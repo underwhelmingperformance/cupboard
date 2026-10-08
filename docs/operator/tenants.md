@@ -15,8 +15,7 @@ cupboard login https://cupboard.example.workers.dev
 
 Operator tokens last ten minutes. The CLI renews them with the session's refresh
 token for up to 30 days after you signed in. When the session can't be renewed,
-the CLI starts a new one from your cached Cloudflare sign-in, if you signed in
-with Cloudflare. Otherwise, run `cupboard login` again.
+run `cupboard login` again.
 
 ## Creating a tenant
 

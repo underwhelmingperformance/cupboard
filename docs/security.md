@@ -143,6 +143,20 @@ nonce of the original sign-in with a new issue time, so the age limit alone
 would not refuse it. The server also accepts tokens without either binding and
 logs a warning with the ID of the trust rule that accepted them.
 
+The CLI binds browser sign-ins whose ID tokens it exchanges with a cupboard
+server. It chooses a new seed for each sign-in and checks that the returned ID
+token contains the requested nonce before it sends the token anywhere. The
+targets are the URLs that the command contacts: the URL that you gave it, a
+tenant URL built from that URL and a slug that you chose, or, for
+`cupboard init`, the deployment URL from the plan. The CLI never takes a target
+from a server's response or a redirect. It keeps a sign-in in memory only, for
+the rest of the command, and presents its token at most once to each target. It
+never presents a refreshed ID token or a token from disk: `cupboard login`
+requests no Cloudflare refresh token and saves no Cloudflare sign-in, and the
+Cloudflare sign-in that `cupboard init` saves is used only for the Cloudflare
+API. A `--headless` sign-in uses the device flow, which can't request a nonce,
+so its token is unbound.
+
 ## Revoking access
 
 | To revoke                       | Do this                                                                                         | It takes effect                                     |

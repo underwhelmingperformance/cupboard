@@ -8,10 +8,16 @@ import { shouldShowDetails } from '@cupboard/reporter';
 import { type Command, Option } from 'commander';
 
 import {
+	BoundSignIn,
+	canonicalTarget,
+	type SignInMethod
+} from '../auth/bound-sign-in.ts';
+import {
 	DeviceAuthorizationRequestError,
 	deviceLogin,
 	discoverOidcLogin,
-	loopbackLogin
+	loopbackLogin,
+	type LoopbackOptions
 } from '../auth/oidc-login.ts';
 import {
 	sessionFromTokenResponse,
@@ -23,24 +29,12 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
-	type CredentialChain,
-	freshIdToken,
-	freshIdTokenFromGrant
-} from '../deploy/auth.ts';
-import {
-	type CloudflareGrant,
+	cloudflareDashIssuer,
 	cloudflareLogin,
 	cloudflareLoopback,
 	cloudflareOauthClientId,
-	deployScopes,
-	refreshCloudflareGrant
+	signInScopes
 } from '../deploy/cloudflare-oauth.ts';
-import {
-	readCachedGrant,
-	withCachedGrantLock,
-	writeCachedGrant
-} from '../deploy/grant-store.ts';
-import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { CliError } from '../errors.ts';
 
 export class DeviceGrantNotEnabledError extends CliError {
@@ -73,7 +67,7 @@ export function mapDeviceLoginError(error: unknown, clientId: string): unknown {
 
 export function loginScopeForClient(clientId: string): string | undefined {
 	return clientId === cloudflareOauthClientId
-		? deployScopes.join(' ')
+		? signInScopes.join(' ')
 		: undefined;
 }
 
@@ -109,54 +103,6 @@ export class LoginIdTokenMissingError extends CliError {
 }
 
 /**
- * The ID token presented by a Cupboard-client login. The built-in client shares
- * the deploy grant, so it can use or refresh a cached login without opening a
- * browser. A missing, unrefreshable or expired token starts a fresh login with
- * the client's full registered scope set (the dashboard errors on a bare
- * `openid` authorize, and a narrower grant would desynchronise the cache the
- * deploy reuses). A fresh login is persisted for both flows to share.
- */
-export async function cupboardIdToken(dependencies: {
-	readonly chain: Pick<
-		CredentialChain,
-		| 'signal'
-		| 'readGrant'
-		| 'writeGrant'
-		| 'withGrantLock'
-		| 'refreshGrant'
-		| 'now'
-	>;
-	readonly login: (signal?: AbortSignal) => Promise<CloudflareGrant>;
-}): Promise<string> {
-	const cached = await freshIdToken(dependencies.chain);
-
-	if (cached !== undefined) {
-		return cached;
-	}
-
-	return dependencies.chain.withGrantLock(async (signal) => {
-		const successor = await dependencies.chain.readGrant();
-		const successorToken =
-			successor === undefined
-				? undefined
-				: freshIdTokenFromGrant(successor, dependencies.chain.now());
-
-		if (successorToken !== undefined) {
-			return successorToken;
-		}
-
-		const grant = await dependencies.login(signal);
-		await dependencies.chain.writeGrant(grant, signal);
-
-		if (grant.idToken === undefined) {
-			throw new LoginIdTokenMissingError();
-		}
-
-		return grant.idToken;
-	}, dependencies.chain.signal);
-}
-
-/**
  * Options for the OIDC login that identifies the operator. `cupboard login`
  * and `cupboard init` both use it.
  */
@@ -164,104 +110,173 @@ export interface IdentityLoginOptions {
 	readonly oidcIssuer: string;
 	readonly clientId: string;
 	readonly headless?: boolean;
-	/**
-	 * Whether the login may return the id_token of the cached Cloudflare grant.
-	 * False forces a new browser login, which the operator can complete as
-	 * another Cloudflare user; the new grant is not cached.
-	 */
-	readonly reuseCachedGrant?: boolean;
 }
 
 export interface IdentityLoginDependencies {
 	readonly openBrowser: (url: string) => void;
 	readonly info: (message: string) => void;
 	readonly signal?: AbortSignal;
+	/**
+	The `fetch` for the identity provider's endpoints.
+	*/
+	readonly fetcher?: typeof fetch;
+	/**
+	The loopback ports to try for the redirect, in place of the defaults.
+	*/
+	readonly loopbackPorts?: readonly number[];
 }
 
 /**
- * Obtains an id_token for the operator from the issuer. With the built-in
- * client, the Cloudflare issuer and no `headless`, it uses the cached
- * Cloudflare grant that `cupboard init` and `cupboard login` share. It logs in
- * without a prompt while the cached login can be renewed, and opens the browser
- * only when it cannot, or when `reuseCachedGrant` is false. With any other
- * issuer or client, it logs in through the browser. With `headless`, it logs
- * in through the device flow.
+ * Whether `options` select the Cloudflare issuer with cupboard's own client,
+ * the identity of the Cloudflare login for the account.
  */
-export async function loginIdToken(
+export function isCloudflareSignIn(options: IdentityLoginOptions): boolean {
+	return (
+		options.clientId === cloudflareOauthClientId &&
+		options.oidcIssuer === cloudflareDashIssuer
+	);
+}
+
+/**
+ * Returns the sign-in method for the issuer and client in `options`. Each
+ * sign-in opens a browser. With the built-in client and the Cloudflare issuer,
+ * it uses Cloudflare's fixed endpoints, and otherwise it discovers the issuer's
+ * endpoints. With `headless`, it uses the device flow, which cannot request a
+ * nonce. A Cloudflare sign-in does not request `offline_access`, so it receives
+ * no refresh token, and nothing keeps its grant.
+ */
+export function identitySignIn(
 	options: IdentityLoginOptions,
 	dependencies: IdentityLoginDependencies
-): Promise<string> {
+): SignInMethod {
 	const { signal } = dependencies;
-	// cupboard's own client has exact-match registered redirect URLs, so the
-	// loopback server must bind one of them; any other client keeps the
-	// ephemeral-port default.
-	const isCupboardClient = options.clientId === cloudflareOauthClientId;
+	const fetcher = dependencies.fetcher ?? fetch;
 	const scope = loginScopeForClient(options.clientId);
+
+	if (options.headless === true) {
+		return {
+			bindsNonce: false,
+			signIn: async () => {
+				const endpoints = await discoverOidcLogin(
+					options.oidcIssuer,
+					fetcher,
+					signal
+				);
+
+				try {
+					return await deviceLogin({
+						endpoints,
+						clientId: options.clientId,
+						scope,
+						prompt: (verification) => {
+							dependencies.info(deviceLoginInstruction(verification));
+						},
+						signal
+					});
+				} catch (error) {
+					throw mapDeviceLoginError(error, options.clientId);
+				}
+			}
+		};
+	}
+
+	const isCupboardClient = options.clientId === cloudflareOauthClientId;
 	const browserPrompt = (target: string): void => {
 		dependencies.openBrowser(target);
 		dependencies.info('Waiting for you to authorise in your browser…');
 	};
 
-	const isCloudflareBrowserLogin =
-		isCupboardClient &&
-		options.oidcIssuer === cloudflareDashIssuer &&
-		options.headless !== true;
-
-	if (isCloudflareBrowserLogin && options.reuseCachedGrant === false) {
-		const grant = await cloudflareLogin({ openBrowser: browserPrompt, signal });
-
-		if (grant.idToken === undefined) {
-			throw new LoginIdTokenMissingError();
-		}
-
-		return grant.idToken;
-	}
-
-	if (isCloudflareBrowserLogin) {
-		return cupboardIdToken({
-			chain: {
-				readGrant: readCachedGrant,
-				writeGrant: writeCachedGrant,
-				withGrantLock: withCachedGrantLock,
-				refreshGrant: (previous, refreshSignal) =>
-					refreshCloudflareGrant(previous, fetch, Date.now, refreshSignal),
-				signal,
-				now: Date.now
-			},
-			login: (loginSignal) =>
-				cloudflareLogin({
+	if (isCloudflareSignIn(options)) {
+		return {
+			bindsNonce: true,
+			signIn: async (nonce) => {
+				const grant = await cloudflareLogin({
+					nonce,
+					scopes: signInScopes,
 					openBrowser: browserPrompt,
-					signal: loginSignal
-				})
-		});
+					fetcher,
+					...(dependencies.loopbackPorts !== undefined && {
+						ports: dependencies.loopbackPorts
+					}),
+					signal
+				});
+
+				if (grant.idToken === undefined) {
+					throw new LoginIdTokenMissingError();
+				}
+
+				return grant.idToken;
+			}
+		};
 	}
 
-	const endpoints = await discoverOidcLogin(options.oidcIssuer, fetch, signal);
+	return {
+		bindsNonce: true,
+		signIn: async (nonce) => {
+			const endpoints = await discoverOidcLogin(
+				options.oidcIssuer,
+				fetcher,
+				signal
+			);
+			const loopback = loopbackFor(
+				isCupboardClient,
+				dependencies.loopbackPorts
+			);
 
-	if (options.headless === true) {
-		try {
-			return await deviceLogin({
+			return loopbackLogin({
 				endpoints,
 				clientId: options.clientId,
 				scope,
-				prompt: (verification) => {
-					dependencies.info(deviceLoginInstruction(verification));
-				},
+				nonce,
+				openBrowser: browserPrompt,
+				fetcher,
+				...(loopback !== undefined && { loopback }),
 				signal
 			});
-		} catch (error) {
-			throw mapDeviceLoginError(error, options.clientId);
 		}
-	}
+	};
+}
 
-	return loopbackLogin({
-		endpoints,
-		clientId: options.clientId,
-		scope,
-		openBrowser: browserPrompt,
-		loopback: isCupboardClient ? cloudflareLoopback : undefined,
-		signal
-	});
+// cupboard's own client has exact-match registered redirect URLs, so the
+// loopback server must bind one of them; any other client keeps the
+// ephemeral-port default.
+function loopbackFor(
+	isCupboardClient: boolean,
+	ports: readonly number[] | undefined
+): LoopbackOptions | undefined {
+	const registered = isCupboardClient ? cloudflareLoopback : undefined;
+
+	return ports === undefined ? registered : { ...registered, ports };
+}
+
+export interface SignInToDependencies {
+	readonly signIn: BoundSignIn;
+	readonly client: Pick<CupboardClient, 'tokenExchange'>;
+	readonly cacheSession: (
+		response: TokenResponse,
+		target: URL
+	) => Promise<void>;
+}
+
+/**
+ * Signs in for `url`, exchanges an ID token bound to `url` at its token
+ * endpoint, and caches the session for `url`.
+ */
+export async function signInTo(
+	url: URL,
+	dependencies: SignInToDependencies
+): Promise<void> {
+	const target = canonicalTarget(url);
+	const session = await dependencies.signIn.present([target], target, (token) =>
+		dependencies.client.tokenExchange(
+			token.idToken,
+			subjectTokenTypeIdToken,
+			undefined,
+			token.binding
+		)
+	);
+
+	await dependencies.cacheSession(session, url);
 }
 
 interface LoginSessionDependencies {
@@ -348,23 +363,26 @@ export function registerLoginCommand(
 		});
 		const scope = loginScopeForClient(options.clientId);
 
-		// Login is interactive, so its prompts are shown the moment they happen,
-		// not held behind a spinner the user is meant to act on.
-		const idToken = await loginIdToken(options, {
-			openBrowser: (target) => {
-				openBrowser(target, reporter);
-			},
-			info: (message) => {
-				reporter.info(message);
-			},
-			signal: programOptions.signal
-		});
-
-		const exchanged = await client.tokenExchange(
-			idToken,
-			subjectTokenTypeIdToken
+		// Login is interactive, so its prompts are shown as soon as they happen.
+		// A spinner would hide them while the user has to act on them.
+		const signIn = new BoundSignIn(
+			identitySignIn(options, {
+				openBrowser: (target) => {
+					openBrowser(target, reporter);
+				},
+				info: (message) => {
+					reporter.info(message);
+				},
+				signal: programOptions.signal
+			})
 		);
-		await cacheLoginSession(exchanged, url, programOptions.signal);
+
+		await signInTo(url, {
+			signIn,
+			client,
+			cacheSession: (response, target) =>
+				cacheLoginSession(response, target, programOptions.signal)
+		});
 
 		const target = canonicalHref(url);
 

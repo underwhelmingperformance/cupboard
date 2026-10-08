@@ -43,6 +43,10 @@ import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
 import {
+	bindingFormFields,
+	type SubjectTokenBinding
+} from '../auth/bound-sign-in.ts';
+import {
 	CupboardHttpError,
 	InvalidCacheNameError,
 	MalformedResponseError,
@@ -326,10 +330,14 @@ export class CupboardClient {
 	 * Claims (or idempotently re-claims) global admin of the deployment at the
 	 * bootstrap `POST /signup` endpoint. The endpoint takes no bearer token: it
 	 * requires the claim secret, and the external OIDC subject token identifies
-	 * the principal that claims the deployment. It takes a urlencoded body. The
-	 * response includes a control session for the principal.
+	 * the principal that claims the deployment. It takes a urlencoded body,
+	 * with the binding of a nonce-bound subject token. The response includes a
+	 * control session for the principal.
 	 */
-	async signup(request: SignupRequest): Promise<SignupResponse> {
+	async signup(
+		request: Pick<SignupRequest, 'subject_token' | 'claim_secret'>,
+		binding?: SubjectTokenBinding
+	): Promise<SignupResponse> {
 		throwIfAborted(this.signal);
 
 		const url = this.resolve('/signup');
@@ -337,7 +345,8 @@ export class CupboardClient {
 			subject_token: request.subject_token,
 			...(request.claim_secret !== undefined && {
 				claim_secret: request.claim_secret
-			})
+			}),
+			...bindingFormFields(binding)
 		});
 		const response = await this.replayUnsafeFetcher(url, {
 			method: 'POST',
@@ -396,12 +405,14 @@ export class CupboardClient {
 	}
 
 	/**
-	Exchanges an external identity for the requested authority at the OAuth endpoint.
-	*/
+	 * Exchanges an external identity for the requested authority at the OAuth
+	 * endpoint. `binding` is the seed and targets of a nonce-bound ID token.
+	 */
 	async tokenExchange(
 		subjectToken: string,
 		subjectTokenType: string,
-		authorizationDetails?: AuthorizationDetails
+		authorizationDetails?: AuthorizationDetails,
+		binding?: SubjectTokenBinding
 	): Promise<TokenResponse> {
 		const response = await this.postTokenForm({
 			grant_type: tokenExchangeGrantType,
@@ -409,7 +420,8 @@ export class CupboardClient {
 			subject_token_type: subjectTokenType,
 			...(authorizationDetails !== undefined && {
 				authorization_details: JSON.stringify(authorizationDetails)
-			})
+			}),
+			...bindingFormFields(binding)
 		});
 
 		return this.parseJson('/token', tokenResponseSchema, response);

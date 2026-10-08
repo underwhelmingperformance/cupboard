@@ -21,6 +21,7 @@ import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import { canonicalTarget } from '../auth/bound-sign-in.ts';
 import {
 	CupboardHttpError,
 	InvalidCacheNameError,
@@ -142,6 +143,37 @@ describe('CupboardClient.tokenExchange', () => {
 			authorization: undefined,
 			contentType: 'application/x-www-form-urlencoded',
 			body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=subject.jwt&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token'
+		});
+	});
+
+	it('sends the binding seed and targets of a bound ID token', async () => {
+		const { client, captured } = capturingClient(
+			{
+				access_token: 'admin-jwt',
+				token_type: 'Bearer',
+				expires_in: 600
+			},
+			{ kind: 'default' }
+		);
+
+		await client.tokenExchange(
+			'subject.jwt',
+			'urn:ietf:params:oauth:token-type:id_token',
+			undefined,
+			{
+				seed: 'seed-1',
+				targets: [canonicalTarget(new URL('https://cupboard.test/t/acme'))]
+			}
+		);
+
+		const form = new URLSearchParams(String(captured()?.body));
+
+		expect(Object.fromEntries(form)).toStrictEqual({
+			grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+			subject_token: 'subject.jwt',
+			subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
+			cupboard_binding_seed: 'seed-1',
+			cupboard_binding_targets: '["https://cupboard.test/t/acme"]'
 		});
 	});
 
@@ -349,6 +381,33 @@ describe('CupboardClient.signup', () => {
 		expect(captured()?.body).toBe(
 			'subject_token=subject.jwt&claim_secret=secret-1'
 		);
+	});
+
+	it('sends the binding seed and targets of a bound ID token', async () => {
+		const { client, captured } = capturingClient(response, {
+			kind: 'default'
+		});
+
+		await client.signup(
+			{ subject_token: 'subject.jwt', claim_secret: 'secret-1' },
+			{
+				seed: 'seed-1',
+				targets: [
+					canonicalTarget(new URL('https://cupboard.test')),
+					canonicalTarget(new URL('https://cupboard.test/t/acme'))
+				]
+			}
+		);
+
+		const form = new URLSearchParams(String(captured()?.body));
+
+		expect(Object.fromEntries(form)).toStrictEqual({
+			subject_token: 'subject.jwt',
+			claim_secret: 'secret-1',
+			cupboard_binding_seed: 'seed-1',
+			cupboard_binding_targets:
+				'["https://cupboard.test","https://cupboard.test/t/acme"]'
+		});
 	});
 
 	it('throws a CupboardHttpError when the gate declines the claim', async () => {

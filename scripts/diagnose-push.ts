@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { argv, env, exit } from 'node:process';
@@ -1374,6 +1375,7 @@ async function login(clientId: string, ui: CliUi, now: number): Promise<Grant> {
 		authorizationEndpoint,
 		clientId,
 		scope: observabilityScope,
+		nonce: randomBytes(32).toString('base64url'),
 		openBrowser: (url) => {
 			ui.openBrowser(url);
 		},

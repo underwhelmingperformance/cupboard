@@ -59,6 +59,12 @@ export class CloudflareTokenResponseMalformedError extends CloudflareTokenRespon
  */
 export const cloudflareOauthClientId = '6c915db1f16ece47255821ee6ca1d538';
 
+/**
+ * The issuer of the Cloudflare login. `cupboard init` and `cupboard login` use
+ * it for the admin's identity unless `--oidc-issuer` specifies another.
+ */
+export const cloudflareDashIssuer = 'https://dash.cloudflare.com';
+
 const authorizationEndpoint = 'https://dash.cloudflare.com/oauth2/auth';
 const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
 const revocationEndpoint = 'https://dash.cloudflare.com/oauth2/revoke';
@@ -76,7 +82,7 @@ export const cloudflareLoopback = {
 } as const;
 
 /**
- * The scopes every login requests: what the deploy pipeline needs, as
+ * The scopes that a deploy's login requests: what the deploy pipeline needs, as
  * registered on the OAuth client (scope ids correspond to Cloudflare API token
  * permission names), plus `offline_access` so the grant includes a refresh
  * token and repeat deploys do not reopen the browser, and `openid` so the
@@ -95,6 +101,16 @@ export const deployScopes: readonly string[] = [
 	'zone.read'
 ];
 
+/**
+ * The scopes of a sign-in that only needs an ID token. Cloudflare refuses a
+ * request for `openid` alone at the consent step, so this is the deploy's set
+ * without `offline_access`. Without that scope, Cloudflare issues no refresh
+ * token.
+ */
+export const signInScopes: readonly string[] = deployScopes.filter(
+	(scope) => scope !== 'offline_access'
+);
+
 const defaultAccessTokenLifetimeSeconds = 3600;
 
 export interface CloudflareGrant {
@@ -109,12 +125,22 @@ export interface CloudflareGrant {
 	*/
 	readonly subject: string | undefined;
 	/**
-	The raw id_token, presentable as a subject token to a cupboard server.
-	*/
+	 * The raw id_token. Only the token from a browser login can be presented to
+	 * a cupboard server: a refreshed one repeats the nonce of the original
+	 * login.
+	 */
 	readonly idToken: string | undefined;
 }
 
 export interface CloudflareLoginOptions {
+	/**
+	The OIDC `nonce` that the grant's ID token must contain.
+	*/
+	readonly nonce: string;
+	/**
+	The scopes to request. The default is {@link deployScopes}.
+	*/
+	readonly scopes?: readonly string[];
 	readonly openBrowser: (url: string) => void | Promise<void>;
 	readonly fetcher?: typeof fetch;
 	readonly timeoutMs?: number;
@@ -145,7 +171,7 @@ function jwtSubject(idToken: string): string | undefined {
 /**
  * The token's `exp` in epoch milliseconds, or undefined when the token does
  * not parse or has no `exp`. The claim is unverified here: it only decides
- * whether a cached ID token is worth presenting. The server verifies the token.
+ * whether a cached access token needs renewing. The server verifies the token.
  */
 export function jwtExpiryMs(token: string): number | undefined {
 	const parsed = idTokenExpirySchema.safeParse(decodeJwtPayload(token));
@@ -166,9 +192,14 @@ export async function cloudflareLogin(
 	const now = options.now ?? Date.now;
 
 	const obtained = await obtainAuthorizationCode({
+		// Cloudflare's metadata does not advertise RFC 9207 support, so a
+		// callback can arrive without `iss`.
+		expectedIssuer: cloudflareDashIssuer,
+		isIssuerParameterOptional: true,
 		authorizationEndpoint,
 		clientId: cloudflareOauthClientId,
-		scope: deployScopes.join(' '),
+		scope: (options.scopes ?? deployScopes).join(' '),
+		nonce: options.nonce,
 		openBrowser: options.openBrowser,
 		timeoutMs: options.timeoutMs,
 		signal: options.signal,

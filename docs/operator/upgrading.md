@@ -57,16 +57,18 @@ and uses the routed URL.
 
 `init` finds a token in this order:
 
-1. The session cached by `cupboard login <deployment URL>`.
-2. If no session is cached, the cached Cloudflare sign-in, as `cupboard login`
-   uses it. `init` exchanges its ID token at the deployment. This only works if
-   a control trust rule accepts that identity.
-3. If there's still no usable session, or the session lacks the wildcard grant,
-   and there is a terminal, `init` signs you in as the admin and caches the
-   session. It always starts a new sign-in through the admin's issuer for this,
-   so you can complete it as the admin even if your cached Cloudflare sign-in
-   belongs to someone else. `--headless` uses the device flow. If the sign-in
-   returns another identity, `init` stops before it changes anything.
+1. The session cached by `cupboard login <deployment URL>`, renewed with its
+   refresh token when its access token has expired.
+2. If there's no usable session, or the session lacks the wildcard grant, and
+   there is a terminal, `init` signs you in as the admin and caches the session.
+   It always starts a new sign-in through the admin's issuer for this, so you
+   can complete it as the admin even if your cached Cloudflare sign-in belongs
+   to someone else. The ID token from that sign-in is bound to the deployment
+   URL. `--headless` uses the device flow. If the sign-in returns another
+   identity, `init` stops before it changes anything.
+
+`init` never exchanges the ID token of the cached Cloudflare sign-in. That
+sign-in is only for the Cloudflare API.
 
 After a successful admin sign-in, a refused token exchange or a token without
 the wildcard grant stops the update. `init` prints the deployment's refusal or
