@@ -1344,6 +1344,24 @@ export class StagedObjectDigestMismatchError extends Error {
 	}
 }
 
+/**
+ * Verification reads a stored object in several R2 gets, and a later read did
+ * not match the first get. A later get found a different object under the key
+ * (`etag-changed`) or no object (`deleted`), or a body ended before it reached
+ * the object's size (`truncated`). The next verification pass reads the object
+ * again.
+ */
+export class StoredObjectInconsistentError extends Error {
+	constructor(
+		public readonly r2Key: R2ObjectKey,
+		public readonly offset: number,
+		public readonly reason: 'etag-changed' | 'deleted' | 'truncated'
+	) {
+		super("A stored object's bytes did not match its first read");
+		this.name = 'StoredObjectInconsistentError';
+	}
+}
+
 export class TenantAdmissionUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;

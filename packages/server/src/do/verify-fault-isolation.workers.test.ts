@@ -11,6 +11,7 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import * as schema from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
@@ -88,7 +89,13 @@ describe('verification RPC compatibility', () => {
 			CUPBOARD_DO: namespace
 		} as unknown as Env;
 
-		await verifyTenant(rootLogger(), compatibleEnv, currentServerTenant(), 10);
+		await verifyTenant(
+			rootLogger(),
+			compatibleEnv,
+			new NarReadBufferPool(),
+			currentServerTenant(),
+			10
+		);
 
 		expect({
 			budgetedClaims:
@@ -177,7 +184,13 @@ describe('batched verify fault isolation', () => {
 		// its verdict, and the drain retries the application on every alarm, so a
 		// restored object write would settle the row before it could be observed.
 		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 
 			// One invocation applies one verdict, so give the drain a turn for each
 			// upload in the batch. Each pass resumes after the previous row, so the
@@ -232,7 +245,13 @@ describe('batched verify fault isolation', () => {
 		// verdict, and a restored status query would let the drain settle the row
 		// before this assertion could see it pending.
 		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 
 			const isSameInstance = await runInDurableObject(
 				currentServer(),
@@ -304,7 +323,13 @@ describe('batched verify fault isolation', () => {
 		// Read the rows while the outage is still in place, for the reason the
 		// sibling fixture gives: the drain retries a held verdict on every alarm.
 		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 2);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				2
+			);
 
 			expect({
 				sent: sent.length,
@@ -356,6 +381,7 @@ describe('batched verify fault isolation', () => {
 			const stalePass = verifyTenant(
 				rootLogger(),
 				env,
+				new NarReadBufferPool(),
 				currentServerTenant(),
 				1
 			);
@@ -505,6 +531,12 @@ describe('batched verify fault isolation', () => {
 						compressedBytes: isStagingAvailable ? upload.fileSize : 0,
 						narBytes: isStagingAvailable ? upload.narSize : 0,
 						reads: isStagingAvailable ? 1 : 0,
+						ranges: 0,
+						rangeBufferMisses: 0,
+						rangeBudgetSkips: 0,
+						lostRangeBuffers: 0,
+						peakRangeBuffers: 0,
+						rangeBufferAllocations: 0,
 						durationMs: 0
 					}
 				}
@@ -1107,6 +1139,7 @@ describe('batched verify fault isolation', () => {
 		const pass = verifyTenant(
 			rootLogger(),
 			env,
+			new NarReadBufferPool(),
 			currentServerTenant(),
 			5,
 			Number.MAX_SAFE_INTEGER,

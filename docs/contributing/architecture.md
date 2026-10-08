@@ -551,17 +551,49 @@ requests below are all under the tenant URL.
    `pending` remains after its expiry, and a resent commit for it waits for the
    same verification. The queue consumer verifies the bytes. It claims a batch
    of up to 32 uploads, totalling at most 4 GiB of declared NAR size, and
-   verifies two uploads at a time. It reads each staged object from R2 in 1 MiB
-   chunks and passes them through native zstd decompression and SHA-256. It
+   verifies two uploads at a time. It passes each staged object, in order and in
+   chunks of up to 1 MiB, through native zstd decompression and SHA-256. It
    compares the result with the NAR hash and size that the CLI declared. The
    same pass hashes and measures the compressed bytes. This means that the
    stored file hash and file size come from the server, not from the client. A
    frame that needs a decoding window larger than 8 MiB counts as undecodable.
 
-   The consumer abandons an upload when the R2 get, or one read of the staged
-   object, takes longer than 60 seconds, and a later pass retries it. There is
-   no limit on the total time for one upload, but the whole pass stops when its
-   14-minute budget ends.
+   One R2 stream delivers less than the decoder can consume, so the consumer
+   also reads ahead with ranged gets. The object is divided into 8 MiB blocks. A
+   sequential stream, the head, reads the block that the decoder needs next, 1
+   MiB at a time. Before each read, the consumer starts ranged gets for the
+   following blocks, each into an 8 MiB buffer, while a buffer is free. One
+   verification keeps at most four buffers. When the decoder reaches a
+   prefetched block, the consumer cancels the head and passes the block on from
+   its buffer. The buffer returns to the pool once the decoder has consumed it.
+   When the next block has not been prefetched, the head reads it. If the
+   consumer cancelled the head for an earlier prefetched block, it first opens a
+   new head at that block. Every get after the first asks for the first get's
+   ETag. If the object changed or was deleted in between, or a body ended early,
+   the upload is abandoned and a later pass retries it.
+
+   The Worker keeps one pool of four 8 MiB buffers for each isolate, because
+   Cloudflare applies the 128 MB memory limit to the isolate and concurrent
+   queue invocations can run in the same isolate. A verification takes a buffer
+   only when one is free. Otherwise it reads that block from the head, so a
+   verification never waits for memory and two verifications cannot wait for
+   each other. When verification stops early, each range finishes the read in
+   progress before the consumer cancels it, because a read cancelled midway can
+   keep its buffer. A stall or the end of the pass cancels reads at once; the
+   pool then replaces any buffer that a read kept.
+
+   Each ranged get, and each new head, counts against the invocation's
+   subrequest allowance. When a pass claims its uploads, it sets one subrequest
+   aside for the first get of each upload. When a verification starts its first
+   range after the head, it sets one aside for the new head that may follow.
+   Before each ranged get, the consumer checks that the allowance still covers
+   the range and, if none is set aside yet, the new head. If it does not, the
+   head reads that block too.
+
+   The consumer abandons an upload when 60 seconds pass without any read of the
+   staged object completing, whether from the head or from a ranged get, and a
+   later pass retries it. There is no limit on the total time for one upload,
+   but the whole pass stops when its 14-minute budget ends.
 
 6. If the bytes match, the object promotes them. It copies them to
    `nar/<narHash>.nar.zst`, and asks R2 to check the SHA-256 again and to write

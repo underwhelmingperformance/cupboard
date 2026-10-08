@@ -111,6 +111,7 @@ import migrations from '../drizzle/migrations.js';
 
 import { closeAlarmFence, openAlarmFence } from './alarm-fence.test-support.ts';
 import { issueAccessJwt } from './auth/auth.ts';
+import { NarReadBufferPool } from './blob/nar-read-buffers.ts';
 import { type NarVerification } from './blob/nar-verify.ts';
 import {
 	issuePushId,
@@ -899,7 +900,12 @@ export function currentServerTenant(): TenantId {
 Runs the production queue-consumer verification path for the current tenant.
 */
 export function verifyCurrentTenant(): Promise<void> {
-	return verifyTenant(rootLogger(), env, currentServerTenant());
+	return verifyTenant(
+		rootLogger(),
+		env,
+		new NarReadBufferPool(),
+		currentServerTenant()
+	);
 }
 
 export interface InitialisedServer {
@@ -2991,7 +2997,7 @@ async function verifyUploadPass(
 	tenant: TenantId,
 	uploadId: UploadId
 ): Promise<VerificationPassAcknowledgement> {
-	await verifyTenant(rootLogger(), env, tenant);
+	await verifyTenant(rootLogger(), env, new NarReadBufferPool(), tenant);
 	const verdict = await pendingUploadVerdictAt(
 		tenantServer(env, tenant),
 		uploadId

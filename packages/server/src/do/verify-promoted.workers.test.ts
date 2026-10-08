@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoObjectKey, r2ObjectKeySchema } from '../http/http.ts';
@@ -419,7 +420,13 @@ describe('consumer verify pass', () => {
 		await putNarBytes(upload.r2Key, nar);
 		await markUploadPendingVerification(upload.uploadId);
 
-		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+		await verifyTenant(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			currentServerTenant(),
+			10
+		);
 
 		expect({
 			verdict: await pendingUploadVerdict(upload.uploadId),
@@ -456,7 +463,13 @@ describe('consumer verify pass', () => {
 			);
 
 		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 		} finally {
 			get.mockRestore();
 		}
@@ -467,7 +480,13 @@ describe('consumer verify pass', () => {
 		}).toStrictEqual({ first: undefined, second: 'pending' });
 
 		vi.setSystemTime(new Date(Date.now() + 30_000));
-		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+		await verifyTenant(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			currentServerTenant(),
+			10
+		);
 
 		expect({
 			first: await pendingUploadVerdict(first.uploadId),
@@ -508,7 +527,13 @@ describe('consumer verify pass', () => {
 		const get = vi.spyOn(env.BLOBS, 'get');
 
 		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 		} finally {
 			get.mockRestore();
 		}
@@ -565,7 +590,13 @@ describe('consumer verify pass', () => {
 		// record a terminal result and tell the waiter to upload it again.
 		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
 
-		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+		await verifyTenant(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			currentServerTenant(),
+			10
+		);
 
 		expect({
 			verdict: await pendingUploadVerdict(reuse.uploadId),
@@ -625,15 +656,33 @@ describe('consumer verify pass', () => {
 			});
 
 		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 
 			expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
 
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 			expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
 
 			vi.setSystemTime(new Date(Date.now() + 30_000));
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 		} finally {
 			head.mockRestore();
 		}

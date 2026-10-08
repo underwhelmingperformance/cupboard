@@ -18,6 +18,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -466,6 +467,12 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 const app = buildApp();
 
+// Workers apply the memory limit per isolate, and concurrent queue invocations
+// can run in the same isolate. Every verification in the isolate must
+// therefore use this pool, which code below the entrypoint receives as an
+// argument. Module state is per isolate, so each isolate gets its own pool.
+const narReadBuffers = new NarReadBufferPool();
+
 function withUploadRequestLimit(
 	response: Response,
 	maxPaths: number
@@ -508,7 +515,8 @@ export default {
 
 	async queue(batch, env) {
 		await withSubrequestSlice(
-			() => handleMaintenanceQueue(batch, boundedWorkerEnv(env)),
+			() =>
+				handleMaintenanceQueue(batch, boundedWorkerEnv(env), narReadBuffers),
 			{ subrequests: subrequestsPerInvocation(env) }
 		);
 	}

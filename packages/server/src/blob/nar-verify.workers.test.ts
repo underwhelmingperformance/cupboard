@@ -1,14 +1,31 @@
+import { hexToBytes } from '@cupboard/nix-store/encoding';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { SubrequestTimeoutError } from '../errors.ts';
+import { boundedBlobs } from '../do/bounded-io.ts';
+import {
+	holdSubrequests,
+	withSubrequestSlice
+} from '../do/subrequest-slice.ts';
+import {
+	StoredObjectInconsistentError,
+	SubrequestTimeoutError
+} from '../errors.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import { resetTestServer } from '../test-support.ts';
 
 import {
+	type NarChunkSource,
+	openStoredNarChunks,
+	type ReadWatch
+} from './nar-chunks.ts';
+import { NarReadBufferPool } from './nar-read-buffers.ts';
+import {
+	type NarVerification,
+	type NarVerifyProgress,
 	narVerifyProgress,
 	verifyDecompressedNar,
 	verifyStoredNar
@@ -215,14 +232,15 @@ function deferredGetBucket(
 }
 
 /**
- * Stores a three-byte placeholder at `r2Key` and returns a bucket whose `get`
- * returns that object's metadata with `body` as its body.
+ * Stores `stored` at `r2Key` and returns a bucket whose `get` returns that
+ * object's metadata with `body` as its body.
  */
 async function bucketServing(
 	r2Key: string,
-	body: ReadableStream<Uint8Array>
+	body: ReadableStream<Uint8Array>,
+	stored: Uint8Array = new Uint8Array([1, 2, 3])
 ): Promise<R2Bucket> {
-	await env.BLOBS.put(r2Key, new Uint8Array([1, 2, 3]));
+	await env.BLOBS.put(r2Key, stored);
 	const real = await env.BLOBS.get(r2Key);
 
 	if (real === null) {
@@ -520,7 +538,7 @@ describe('verifyStoredNar', () => {
 			env.BLOBS,
 			r2Key,
 			{ narHash: await nixNarHash(nar), narSize: nar.byteLength },
-			{ progress }
+			{ buffers: new NarReadBufferPool(), progress }
 		);
 
 		expect({ verification, progress }).toStrictEqual({
@@ -533,7 +551,12 @@ describe('verifyStoredNar', () => {
 				stage: 'decode',
 				reads: 5,
 				compressedBytes: compressed.byteLength,
-				narBytes: nar.byteLength
+				narBytes: nar.byteLength,
+				ranges: 0,
+				rangeBufferMisses: 0,
+				rangeBudgetSkips: 0,
+				lostRangeBuffers: 0,
+				peakRangeBuffers: 0
 			}
 		});
 	});
@@ -549,7 +572,7 @@ describe('verifyStoredNar', () => {
 				bucket,
 				r2Key,
 				{ narHash: 'sha256:invalid', narSize: 1000 },
-				{ stallMs: 20 }
+				{ buffers: new NarReadBufferPool(), stallMs: 20 }
 			);
 		} catch (error_) {
 			error = error_;
@@ -577,7 +600,7 @@ describe('verifyStoredNar', () => {
 		const chunks = slices(compressed, mebibyte);
 		const r2Key = r2ObjectKeySchema.parse('staging/verify-slow-test');
 		const body = gatedBody(chunks);
-		const bucket = await bucketServing(r2Key, body.stream);
+		const bucket = await bucketServing(r2Key, body.stream, compressed);
 		const testBase = new Date();
 		const stallMs = 1000;
 		vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
@@ -587,7 +610,7 @@ describe('verifyStoredNar', () => {
 				bucket,
 				r2Key,
 				{ narHash: await nixNarHash(nar), narSize: nar.byteLength },
-				{ stallMs }
+				{ buffers: new NarReadBufferPool(), stallMs }
 			);
 			const settled = settle(verifying);
 
@@ -620,7 +643,7 @@ describe('verifyStoredNar', () => {
 		const { nar, compressed } = multiFrameNar();
 		const r2Key = r2ObjectKeySchema.parse('staging/verify-abort-test');
 		const body = gatedBody(slices(compressed, mebibyte));
-		const bucket = await bucketServing(r2Key, body.stream);
+		const bucket = await bucketServing(r2Key, body.stream, compressed);
 		const controller = new AbortController();
 		const reason = new SubrequestTimeoutError('nar.verify.batch');
 
@@ -628,7 +651,7 @@ describe('verifyStoredNar', () => {
 			bucket,
 			r2Key,
 			{ narHash: await nixNarHash(nar), narSize: nar.byteLength },
-			{ signal: controller.signal }
+			{ buffers: new NarReadBufferPool(), signal: controller.signal }
 		);
 		const settled = settle(verifying);
 		await body.requested(0);
@@ -661,7 +684,7 @@ describe('verifyStoredNar', () => {
 				bucket,
 				r2Key,
 				{ narHash: 'sha256:invalid', narSize: 1000 },
-				{ stallMs: 20 }
+				{ buffers: new NarReadBufferPool(), stallMs: 20 }
 			)
 		).rejects.toBeInstanceOf(SubrequestTimeoutError);
 
@@ -669,5 +692,994 @@ describe('verifyStoredNar', () => {
 		await cancelled;
 
 		expect(wasCancelled()).toBe(true);
+	});
+});
+
+interface CompressedNar {
+	readonly compressed: Uint8Array;
+	readonly expected: { readonly narHash: string; readonly narSize: number };
+}
+
+/**
+ * The compressed NAR from the vitest config: about 21 MiB of concatenated zstd
+ * frames, which the default 8 MiB buffer size divides into three blocks.
+ */
+function compressedNar(): CompressedNar {
+	const { narSha256, narSize } = env.TEST_COMPRESSED_NAR;
+
+	return {
+		compressed: new Uint8Array(env.TEST_COMPRESSED_NAR_BYTES),
+		expected: {
+			narHash: NixSha256Hash.fromDigest(hexToBytes(narSha256)).toString(),
+			narSize
+		}
+	};
+}
+
+type GetResult = R2ObjectBody | R2Object | null;
+
+/**
+ * Handles one get of the object under test. `offset` is the start of a ranged
+ * get, or `undefined` for a get of the whole object. `get` performs the real
+ * get.
+ */
+type PartHandler = (
+	offset: number | undefined,
+	get: () => Promise<GetResult>
+) => Promise<GetResult>;
+
+function rangeOffset(options?: R2GetOptions): number | undefined {
+	const range = options?.range;
+
+	if (range === undefined || range instanceof Headers || !('offset' in range)) {
+		return undefined;
+	}
+
+	return range.offset;
+}
+
+function bucketWithParts(
+	r2Key: string,
+	handle: PartHandler,
+	bucket: R2Bucket = env.BLOBS
+): R2Bucket {
+	return new Proxy(bucket, {
+		get(target, property) {
+			if (property === 'get') {
+				return (key: string, options?: R2GetOptions) => {
+					const get = (): Promise<GetResult> => target.get(key, options);
+
+					return key === r2Key ? handle(rangeOffset(options), get) : get();
+				};
+			}
+
+			const value: unknown = Reflect.get(target, property, target);
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			const bound: unknown = value.bind(target);
+
+			return bound;
+		}
+	});
+}
+
+/**
+ * Performs the real get, keeps the returned object's metadata, and replaces
+ * its body with `body`.
+ */
+async function servedPart(
+	get: () => Promise<GetResult>,
+	body: ReadableStream<Uint8Array>
+): Promise<R2ObjectBody> {
+	const real = await get();
+
+	if (real === null || !('body' in real)) {
+		throw new Error('expected the stored object to have a body');
+	}
+
+	await real.body.cancel();
+
+	return withStalledBody(real, body);
+}
+
+/**
+ * Serves `bytes` in 1 MiB chunks and errors the stream as soon as it has
+ * enqueued the last chunk.
+ */
+function erroringBody(
+	bytes: Uint8Array,
+	error: Error
+): { readonly stream: ReadableStream<Uint8Array> } {
+	let offset = 0;
+	const stream = new ReadableStream({
+		type: 'bytes',
+		pull(controller) {
+			const chunk = bytes.subarray(offset, offset + mebibyte);
+			offset += chunk.byteLength;
+			controller.enqueue(new Uint8Array(chunk));
+
+			if (offset >= bytes.byteLength) {
+				controller.error(error);
+			}
+		}
+	});
+
+	return { stream };
+}
+
+/**
+ * Deferreds keyed by a number, created on first use.
+ */
+class Deferreds {
+	private readonly entries = new Map<number, PromiseWithResolvers<undefined>>();
+
+	of(key: number): PromiseWithResolvers<undefined> {
+		const existing = this.entries.get(key);
+
+		if (existing !== undefined) {
+			return existing;
+		}
+
+		const created = Promise.withResolvers<undefined>();
+		this.entries.set(key, created);
+
+		return created;
+	}
+}
+
+/**
+ * Leases every free buffer and returns their sizes. A detached buffer has a
+ * size of 0.
+ */
+function leasedBufferSizes(buffers: NarReadBufferPool): number[] {
+	const leases = Array.from({ length: buffers.state.free }, () =>
+		buffers.tryAcquire()
+	);
+	const sizes = leases.map((lease) => lease?.buffer.byteLength ?? 0);
+
+	for (const lease of leases) {
+		lease?.release();
+	}
+
+	return sizes;
+}
+
+function outcomeOf(
+	settled: Awaited<ReturnType<typeof settle<NarVerification>>>
+): unknown {
+	if ('error' in settled) {
+		return settled.error;
+	}
+
+	return settled.value.ok ? 'ok' : settled.value.reason;
+}
+
+function inconsistency(outcome: unknown): {
+	readonly name: string;
+	readonly offset: number;
+	readonly reason: string;
+} {
+	if (!(outcome instanceof StoredObjectInconsistentError)) {
+		throw new TypeError('expected a StoredObjectInconsistentError', {
+			cause: outcome
+		});
+	}
+
+	return {
+		name: outcome.name,
+		offset: outcome.offset,
+		reason: outcome.reason
+	};
+}
+
+function totals(
+	progresses: readonly NarVerifyProgress[]
+): Pick<
+	NarVerifyProgress,
+	'ranges' | 'rangeBufferMisses' | 'rangeBudgetSkips' | 'lostRangeBuffers'
+> {
+	const sum = (
+		field:
+			'ranges' | 'rangeBufferMisses' | 'rangeBudgetSkips' | 'lostRangeBuffers'
+	): number =>
+		progresses.reduce((total, progress) => total + progress[field], 0);
+
+	return {
+		ranges: sum('ranges'),
+		rangeBufferMisses: sum('rangeBufferMisses'),
+		rangeBudgetSkips: sum('rangeBudgetSkips'),
+		lostRangeBuffers: sum('lostRangeBuffers')
+	};
+}
+
+const noStallTimer: ReadWatch = {
+	signal: new AbortController().signal,
+	restart: () => {
+		// These tests drive the source directly and need no stall timer.
+	},
+	stop: () => {
+		// These tests drive the source directly and need no stall timer.
+	}
+};
+
+describe('verifyStoredNar with ranged reads', () => {
+	beforeEach(resetTestServer);
+
+	it('delivers ranges in order when they complete out of order', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-order-test');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool();
+		const rangeSize = buffers.bufferSize;
+		const requested = new Deferreds();
+		const released = new Deferreds();
+		const filled = new Deferreds();
+		const bucket = bucketWithParts(r2Key, async (offset, get) => {
+			if (offset === undefined) {
+				return get();
+			}
+
+			requested.of(offset).resolve(undefined);
+			await released.of(offset).promise;
+			const body = byteBody([compressed.subarray(offset, offset + rangeSize)]);
+			// The source cancels a range's body once it has read the whole range.
+			void body.cancelled.then(() => {
+				filled.of(offset).resolve(undefined);
+			});
+
+			return servedPart(get, body.stream);
+		});
+		const progress = narVerifyProgress();
+
+		const settled = settle(
+			verifyStoredNar(bucket, r2Key, expected, { buffers, progress })
+		);
+		await requested.of(rangeSize).promise;
+		await requested.of(2 * rangeSize).promise;
+		released.of(2 * rangeSize).resolve(undefined);
+		await filled.of(2 * rangeSize).promise;
+		released.of(rangeSize).resolve(undefined);
+
+		expect({
+			outcome: await settled,
+			progress,
+			pool: buffers.state
+		}).toStrictEqual({
+			outcome: {
+				value: {
+					ok: true,
+					fileHash: await nixNarHash(compressed),
+					fileSize: compressed.byteLength
+				}
+			},
+			progress: {
+				stage: 'decode',
+				reads: Math.ceil(compressed.byteLength / mebibyte),
+				compressedBytes: compressed.byteLength,
+				narBytes: expected.narSize,
+				ranges: 2,
+				rangeBufferMisses: 0,
+				rangeBudgetSkips: 0,
+				lostRangeBuffers: 0,
+				peakRangeBuffers: 2
+			},
+			pool: { free: 4, allocations: 2 }
+		});
+	});
+
+	it('reads sequentially while the pool has no free buffer', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-exhausted');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool({ buffers: 1 });
+		const otherVerification = buffers.tryAcquire();
+		const progress = narVerifyProgress();
+
+		const verification = await verifyStoredNar(env.BLOBS, r2Key, expected, {
+			buffers,
+			progress
+		});
+		otherVerification?.release();
+
+		expect({ verification, progress, pool: buffers.state }).toStrictEqual({
+			verification: {
+				ok: true,
+				fileHash: await nixNarHash(compressed),
+				fileSize: compressed.byteLength
+			},
+			progress: {
+				stage: 'decode',
+				reads: Math.ceil(compressed.byteLength / mebibyte),
+				compressedBytes: compressed.byteLength,
+				narBytes: expected.narSize,
+				ranges: 0,
+				// The two blocks after the first each found the pool empty.
+				rangeBufferMisses: 2,
+				rangeBudgetSkips: 0,
+				lostRangeBuffers: 0,
+				peakRangeBuffers: 0
+			},
+			pool: { free: 1, allocations: 1 }
+		});
+	});
+
+	it('reuses one pooled buffer for several ranges of several reads each', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-reuse');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool({
+			buffers: 1,
+			bufferSize: 3 * mebibyte
+		});
+		const progress = narVerifyProgress();
+
+		const verification = await verifyStoredNar(env.BLOBS, r2Key, expected, {
+			buffers,
+			progress
+		});
+
+		// Each range fills the buffer with three reads. While the buffer is in
+		// use, the block after each range finds the pool empty and the head reads
+		// it, so ranges start at 3, 9, 15 and 21 MiB. The pool allocated the
+		// buffer once, so every later range reused it.
+		expect({
+			verification,
+			progress,
+			pool: buffers.state,
+			bufferSizes: leasedBufferSizes(buffers)
+		}).toStrictEqual({
+			verification: {
+				ok: true,
+				fileHash: await nixNarHash(compressed),
+				fileSize: compressed.byteLength
+			},
+			progress: {
+				stage: 'decode',
+				reads: Math.ceil(compressed.byteLength / mebibyte),
+				compressedBytes: compressed.byteLength,
+				narBytes: expected.narSize,
+				ranges: 4,
+				rangeBufferMisses: 6,
+				rangeBudgetSkips: 0,
+				lostRangeBuffers: 0,
+				peakRangeBuffers: 1
+			},
+			pool: { free: 1, allocations: 1 },
+			bufferSizes: [3 * mebibyte]
+		});
+	});
+
+	// After the first get, a range needs one get of its own and one held back
+	// for the head that reads on after it.
+	it.each([
+		{ subrequests: 1, ranges: 0, rangeBudgetSkips: 2 },
+		{ subrequests: 2, ranges: 0, rangeBudgetSkips: 2 },
+		{ subrequests: 3, ranges: 1, rangeBudgetSkips: 1 }
+	])(
+		'starts $ranges ranges in a slice of $subrequests subrequests',
+		async ({ subrequests, ranges, rangeBudgetSkips }) => {
+			const { compressed, expected } = compressedNar();
+			const r2Key = r2ObjectKeySchema.parse('staging/verify-range-budget');
+			await env.BLOBS.put(r2Key, compressed);
+			const buffers = new NarReadBufferPool();
+			const progress = narVerifyProgress();
+
+			const verification = await withSubrequestSlice(
+				() =>
+					verifyStoredNar(boundedBlobs(env.BLOBS), r2Key, expected, {
+						buffers,
+						progress
+					}),
+				{ subrequests, reserve: 0 }
+			);
+
+			expect({ verification, progress, pool: buffers.state }).toStrictEqual({
+				verification: {
+					ok: true,
+					fileHash: await nixNarHash(compressed),
+					fileSize: compressed.byteLength
+				},
+				progress: {
+					stage: 'decode',
+					reads: Math.ceil(compressed.byteLength / mebibyte),
+					compressedBytes: compressed.byteLength,
+					narBytes: expected.narSize,
+					ranges,
+					rangeBufferMisses: 0,
+					rangeBudgetSkips,
+					lostRangeBuffers: 0,
+					peakRangeBuffers: ranges
+				},
+				pool: { free: 4, allocations: ranges }
+			});
+		}
+	);
+
+	it('keeps the head get of each concurrent verification back from the other', async () => {
+		const { compressed, expected } = compressedNar();
+		const keys = ['staging/verify-budget-a', 'staging/verify-budget-b'].map(
+			(key) => r2ObjectKeySchema.parse(key)
+		);
+		await Promise.all(keys.map((key) => env.BLOBS.put(key, compressed)));
+		const progresses = keys.map(() => narVerifyProgress());
+		const fileHash = await nixNarHash(compressed);
+
+		// Both first gets leave three subrequests. The first verification to
+		// start a range sets one of them aside for its head, so the other cannot
+		// also start one and then need a head get that the slice cannot afford.
+		const verifications = await withSubrequestSlice(
+			() =>
+				Promise.all(
+					keys.map((key, index) =>
+						verifyStoredNar(boundedBlobs(env.BLOBS), key, expected, {
+							buffers: new NarReadBufferPool({ buffers: 1 }),
+							progress: progresses[index]
+						})
+					)
+				),
+			{ subrequests: 5, reserve: 0 }
+		);
+
+		expect({ verifications, totals: totals(progresses) }).toStrictEqual({
+			verifications: keys.map(() => ({
+				ok: true,
+				fileHash,
+				fileSize: compressed.byteLength
+			})),
+			totals: {
+				ranges: 1,
+				rangeBufferMisses: 1,
+				rangeBudgetSkips: 2,
+				lostRangeBuffers: 0
+			}
+		});
+	});
+
+	it('releases a first get that the pass set aside when the verification makes it', async () => {
+		const { compressed, expected } = compressedNar();
+		const keys = ['staging/verify-first-a', 'staging/verify-first-b'].map(
+			(key) => r2ObjectKeySchema.parse(key)
+		);
+		await Promise.all(keys.map((key) => env.BLOBS.put(key, compressed)));
+		const progresses = keys.map(() => narVerifyProgress());
+
+		// The pass sets both first gets aside before it starts. The first
+		// verification releases its own first get, so it can afford one range,
+		// and the second verification's first get is still covered afterwards.
+		const verifications = await withSubrequestSlice(
+			async () => {
+				const firstGets = keys.map(() => holdSubrequests(1));
+				const results: NarVerification[] = [];
+
+				for (const [index, key] of keys.entries()) {
+					results.push(
+						await verifyStoredNar(boundedBlobs(env.BLOBS), key, expected, {
+							buffers: new NarReadBufferPool(),
+							firstGet: firstGets[index],
+							progress: progresses[index]
+						})
+					);
+				}
+
+				return results;
+			},
+			{ subrequests: 4, reserve: 0 }
+		);
+
+		expect({
+			outcomes: verifications.map((verification) => verification.ok),
+			progresses: progresses.map(({ ranges, rangeBudgetSkips }) => ({
+				ranges,
+				rangeBudgetSkips
+			}))
+		}).toStrictEqual({
+			outcomes: [true, true],
+			progresses: [
+				{ ranges: 1, rangeBudgetSkips: 1 },
+				{ ranges: 0, rangeBudgetSkips: 2 }
+			]
+		});
+	});
+
+	it('completes two verifications that share one buffer', async () => {
+		const { compressed, expected } = compressedNar();
+		const keys = ['staging/verify-shared-a', 'staging/verify-shared-b'].map(
+			(key) => r2ObjectKeySchema.parse(key)
+		);
+		await Promise.all(keys.map((key) => env.BLOBS.put(key, compressed)));
+		const buffers = new NarReadBufferPool({
+			buffers: 1,
+			bufferSize: 2 * mebibyte
+		});
+		const progresses = keys.map(() => narVerifyProgress());
+		const fileHash = await nixNarHash(compressed);
+
+		const verifications = await Promise.all(
+			keys.map((key, index) =>
+				verifyStoredNar(env.BLOBS, key, expected, {
+					buffers,
+					progress: progresses[index]
+				})
+			)
+		);
+		const { ranges, lostRangeBuffers } = totals(progresses);
+
+		expect({
+			verifications,
+			hasRanges: ranges > 0,
+			lostRangeBuffers,
+			pool: buffers.state
+		}).toStrictEqual({
+			verifications: keys.map(() => ({
+				ok: true,
+				fileHash,
+				fileSize: compressed.byteLength
+			})),
+			hasRanges: true,
+			lostRangeBuffers: 0,
+			pool: { free: 1, allocations: 1 }
+		});
+	});
+
+	it.each([
+		{ part: 'a range', change: 'replaced', at: 8, reason: 'etag-changed' },
+		{ part: 'a range', change: 'deleted', at: 8, reason: 'deleted' },
+		{
+			part: 'a reopened head',
+			change: 'replaced',
+			at: 16,
+			reason: 'etag-changed'
+		},
+		{ part: 'a reopened head', change: 'deleted', at: 16, reason: 'deleted' }
+	])(
+		'fails with StoredObjectInconsistentError when the object is $change before $part',
+		async ({ change, at, reason }) => {
+			const { compressed, expected } = compressedNar();
+			const r2Key = r2ObjectKeySchema.parse('staging/verify-range-changed');
+			await env.BLOBS.put(r2Key, compressed);
+			// With one buffer, the source gets a range at 8 MiB and reopens the
+			// head at 16 MiB.
+			const buffers = new NarReadBufferPool({ buffers: 1 });
+			const bucket = bucketWithParts(r2Key, async (offset, get) => {
+				if (offset === undefined) {
+					return servedPart(get, byteBody([compressed]).stream);
+				}
+
+				if (offset === at * mebibyte) {
+					await (change === 'deleted'
+						? env.BLOBS.delete(r2Key)
+						: env.BLOBS.put(r2Key, compressed.subarray(1)));
+				}
+
+				return get();
+			});
+			const progress = narVerifyProgress();
+
+			const outcome = outcomeOf(
+				await settle(
+					verifyStoredNar(bucket, r2Key, expected, { buffers, progress })
+				)
+			);
+
+			expect({
+				error: inconsistency(outcome),
+				lostRangeBuffers: progress.lostRangeBuffers,
+				pool: buffers.state
+			}).toStrictEqual({
+				error: {
+					name: 'StoredObjectInconsistentError',
+					offset: at * mebibyte,
+					reason
+				},
+				lostRangeBuffers: 0,
+				pool: { free: 1, allocations: 1 }
+			});
+		}
+	);
+
+	it.each([
+		{ part: 'the head', ends: 5, offset: 5 },
+		{ part: 'a range', ends: 11, offset: 11 }
+	])(
+		'fails with StoredObjectInconsistentError when $part ends early',
+		async ({ part, ends, offset }) => {
+			const { compressed, expected } = compressedNar();
+			const r2Key = r2ObjectKeySchema.parse('staging/verify-range-truncated');
+			await env.BLOBS.put(r2Key, compressed);
+			const buffers = new NarReadBufferPool();
+			const rangeSize = buffers.bufferSize;
+			const bucket = bucketWithParts(r2Key, async (start, get) => {
+				const from = start ?? 0;
+				const to =
+					start === undefined ? compressed.byteLength : from + rangeSize;
+				const isTruncated =
+					start === (part === 'the head' ? undefined : rangeSize);
+				const end = isTruncated ? ends * mebibyte : to;
+
+				return servedPart(
+					get,
+					byteBody([compressed.subarray(from, end)]).stream
+				);
+			});
+			const progress = narVerifyProgress();
+
+			const outcome = outcomeOf(
+				await settle(
+					verifyStoredNar(bucket, r2Key, expected, { buffers, progress })
+				)
+			);
+
+			expect({
+				error: inconsistency(outcome),
+				lostRangeBuffers: progress.lostRangeBuffers,
+				bufferSizes: leasedBufferSizes(buffers),
+				pool: buffers.state
+			}).toStrictEqual({
+				error: {
+					name: 'StoredObjectInconsistentError',
+					offset: offset * mebibyte,
+					reason: 'truncated'
+				},
+				lostRangeBuffers: 0,
+				bufferSizes: Array.from({ length: 4 }, () => rangeSize),
+				pool: { free: 4, allocations: 4 }
+			});
+		}
+	);
+
+	it('ignores an error from a head that it no longer reads', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-head-error');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool();
+		const bucket = bucketWithParts(r2Key, async (offset, get) => {
+			if (offset !== undefined) {
+				return get();
+			}
+
+			// The head errors once it has delivered the block before the first range.
+			return servedPart(
+				get,
+				erroringBody(
+					compressed.subarray(0, buffers.bufferSize),
+					new TypeError('the head failed')
+				).stream
+			);
+		});
+
+		const verification = await verifyStoredNar(bucket, r2Key, expected, {
+			buffers
+		});
+
+		expect(verification).toStrictEqual({
+			ok: true,
+			fileHash: await nixNarHash(compressed),
+			fileSize: compressed.byteLength
+		});
+	});
+
+	const rangeFailure = new TypeError('the ranged get failed');
+
+	it.each([
+		{ name: 'succeeds', fault: 'none', outcome: 'ok' },
+		{
+			name: 'finds a NAR hash mismatch',
+			fault: 'nar-hash',
+			outcome: 'nar-hash-mismatch'
+		},
+		{
+			name: 'stops at the declared NAR size',
+			fault: 'nar-size',
+			outcome: 'nar-size-mismatch'
+		},
+		{
+			name: 'cannot decode the object',
+			fault: 'not-zstd',
+			outcome: 'undecodable'
+		},
+		{ name: 'fails to read a range', fault: 'range', outcome: rangeFailure }
+	])(
+		'returns every buffer to the pool when verification $name',
+		async ({ fault, outcome }) => {
+			const { compressed, expected } = compressedNar();
+			const r2Key = r2ObjectKeySchema.parse('staging/verify-range-exit');
+			await env.BLOBS.put(
+				r2Key,
+				fault === 'not-zstd'
+					? new Uint8Array(compressed.byteLength)
+					: compressed
+			);
+			const buffers = new NarReadBufferPool({ bufferSize: 2 * mebibyte });
+			const otherNarHash = await nixNarHash(new Uint8Array(1));
+			const bucket = bucketWithParts(r2Key, async (offset, get) => {
+				if (fault === 'range' && offset !== undefined) {
+					throw rangeFailure;
+				}
+
+				return get();
+			});
+			const progress = narVerifyProgress();
+
+			const settled = await settle(
+				verifyStoredNar(
+					bucket,
+					r2Key,
+					{
+						narHash: fault === 'nar-hash' ? otherNarHash : expected.narHash,
+						narSize: fault === 'nar-size' ? 3 * mebibyte : expected.narSize
+					},
+					{ buffers, progress }
+				)
+			);
+
+			// Leasing every buffer again allocates a replacement for any buffer
+			// that a cancelled read kept.
+			expect({
+				outcome: outcomeOf(settled),
+				lostRangeBuffers: progress.lostRangeBuffers,
+				bufferSizes: leasedBufferSizes(buffers),
+				pool: buffers.state
+			}).toStrictEqual({
+				outcome,
+				lostRangeBuffers: 0,
+				bufferSizes: Array.from({ length: 4 }, () => 2 * mebibyte),
+				pool: { free: 4, allocations: 4 }
+			});
+		}
+	);
+
+	it('times out a stalled range and returns its buffer', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-stall');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool();
+		const rangeSize = buffers.bufferSize;
+		const head = byteBody([compressed]);
+		const stalled = neverProducingBody();
+		const bucket = bucketWithParts(r2Key, async (offset, get) => {
+			if (offset === undefined) {
+				return servedPart(get, head.stream);
+			}
+
+			if (offset === rangeSize) {
+				return servedPart(get, stalled.stream);
+			}
+
+			return servedPart(
+				get,
+				byteBody([compressed.subarray(offset, offset + rangeSize)]).stream
+			);
+		});
+		const progress = narVerifyProgress();
+		const stallMs = 1000;
+		const testBase = new Date();
+		vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+
+		try {
+			const settled = settle(
+				verifyStoredNar(bucket, r2Key, expected, {
+					buffers,
+					stallMs,
+					progress
+				})
+			);
+			// The source cancels the head when it reaches the first range. From then
+			// on the verifier waits only for the stalled range. The other range can
+			// still restart the stall interval while it finishes, so advance the
+			// clock more than once.
+			await head.cancelled;
+
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				await vi.advanceTimersByTimeAsync(stallMs);
+			}
+
+			const outcome = outcomeOf(await settled);
+
+			if (!(outcome instanceof SubrequestTimeoutError)) {
+				throw new TypeError('expected a SubrequestTimeoutError', {
+					cause: outcome
+				});
+			}
+
+			// How many NAR bytes the decoder produced from the first block depends
+			// on where its frames end, so the assertion checks only that it decoded.
+			const { narBytes, ...counts } = progress;
+
+			expect({
+				subrequest: outcome.subrequest,
+				hasDecoded: narBytes > 0,
+				counts,
+				stalledCancelled: stalled.wasCancelled(),
+				pool: buffers.state,
+				bufferSizes: leasedBufferSizes(buffers)
+			}).toStrictEqual({
+				subrequest: 'nar.verify',
+				hasDecoded: true,
+				counts: {
+					stage: 'read',
+					reads: rangeSize / mebibyte,
+					compressedBytes: rangeSize,
+					ranges: 2,
+					rangeBufferMisses: 0,
+					rangeBudgetSkips: 0,
+					// Cancelling the stalled read returned its buffer.
+					lostRangeBuffers: 0,
+					peakRangeBuffers: 2
+				},
+				stalledCancelled: true,
+				pool: { free: 4, allocations: 2 },
+				bufferSizes: Array.from({ length: 4 }, () => rangeSize)
+			});
+		} finally {
+			vi.useRealTimers();
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(testBase);
+		}
+	});
+
+	it('counts a buffer that a failed read kept, and the pool replaces it', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-lost');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool();
+		const failure = new TypeError('the range body failed');
+		// The body errors while the range's first read is waiting for bytes. The
+		// read rejects and does not return the buffer that it was given.
+		const failing = new ReadableStream({
+			type: 'bytes',
+			pull(controller) {
+				controller.error(failure);
+			}
+		});
+		const bucket = bucketWithParts(r2Key, async (offset, get) =>
+			offset === buffers.bufferSize ? servedPart(get, failing) : get()
+		);
+		const progress = narVerifyProgress();
+
+		const outcome = outcomeOf(
+			await settle(
+				verifyStoredNar(bucket, r2Key, expected, { buffers, progress })
+			)
+		);
+		const pool = buffers.state;
+
+		expect({
+			outcome,
+			lostRangeBuffers: progress.lostRangeBuffers,
+			pool,
+			bufferSizes: leasedBufferSizes(buffers),
+			poolAfterLeasing: buffers.state
+		}).toStrictEqual({
+			outcome: failure,
+			lostRangeBuffers: 1,
+			pool: { free: 4, allocations: 2 },
+			bufferSizes: Array.from({ length: 4 }, () => buffers.bufferSize),
+			// One idle buffer and three new ones, one of them in place of the lost
+			// buffer.
+			poolAfterLeasing: { free: 4, allocations: 5 }
+		});
+	});
+
+	it('cancels its ranges and returns their buffers when the outer signal aborts', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-abort');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool();
+		const rangeSize = buffers.bufferSize;
+		const requested = new Deferreds();
+		const released = Promise.withResolvers<undefined>();
+		const bucket = bucketWithParts(r2Key, async (offset, get) => {
+			if (offset !== undefined) {
+				requested.of(offset).resolve(undefined);
+				await released.promise;
+			}
+
+			return get();
+		});
+		const controller = new AbortController();
+		const reason = new SubrequestTimeoutError('nar.verify.batch');
+		const progress = narVerifyProgress();
+
+		const settled = settle(
+			verifyStoredNar(bucket, r2Key, expected, {
+				buffers,
+				signal: controller.signal,
+				progress
+			})
+		);
+		await requested.of(rangeSize).promise;
+		await requested.of(2 * rangeSize).promise;
+		controller.abort(reason);
+		const outcome = await settled;
+		released.resolve(undefined);
+
+		expect({
+			outcome,
+			ranges: progress.ranges,
+			lostRangeBuffers: progress.lostRangeBuffers,
+			pool: buffers.state
+		}).toStrictEqual({
+			outcome: { error: reason },
+			ranges: 2,
+			lostRangeBuffers: 0,
+			pool: { free: 4, allocations: 2 }
+		});
+	});
+});
+
+describe('openStoredNarChunks', () => {
+	beforeEach(resetTestServer);
+
+	it('cancels a head that a get returns after the source has closed', async () => {
+		const { compressed } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/chunks-late-head');
+		await env.BLOBS.put(r2Key, compressed);
+		// With one 2 MiB buffer, the source reads a range at 2 MiB and then
+		// reopens the head at 4 MiB.
+		const reopenAt = 4 * mebibyte;
+		const buffers = new NarReadBufferPool({
+			buffers: 1,
+			bufferSize: 2 * mebibyte
+		});
+		const reopened = byteBody([compressed.subarray(reopenAt)]);
+		const opened: { source?: NarChunkSource } = {};
+		let closing: Promise<void> | undefined;
+		const bucket = bucketWithParts(r2Key, async (offset, get) => {
+			if (offset !== reopenAt) {
+				return get();
+			}
+
+			const part = await servedPart(get, reopened.stream);
+
+			// Close the source between the get and the moment that the source
+			// starts to use the returned body.
+			return new Proxy(part, {
+				get(target, property) {
+					if (property === 'body') {
+						closing ??= opened.source?.close();
+					}
+
+					const value: unknown = Reflect.get(target, property, target);
+
+					return value;
+				}
+			});
+		});
+		const source = await openStoredNarChunks(bucket, r2Key, {
+			buffers,
+			watch: noStallTimer,
+			progress: narVerifyProgress()
+		});
+		opened.source = source;
+		let failure: unknown;
+
+		try {
+			for (;;) {
+				const chunk = await source.read();
+
+				if (chunk === undefined) {
+					break;
+				}
+
+				chunk.release();
+			}
+		} catch (error) {
+			failure = error;
+		}
+
+		await closing;
+
+		expect({
+			failed: failure !== undefined,
+			reopenedCancelled: reopened.wasCancelled(),
+			pool: buffers.state
+		}).toStrictEqual({
+			failed: true,
+			reopenedCancelled: true,
+			pool: { free: 1, allocations: 1 }
+		});
 	});
 });

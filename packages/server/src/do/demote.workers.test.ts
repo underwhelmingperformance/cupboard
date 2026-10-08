@@ -10,6 +10,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import {
 	enqueueNarInfoRefreshTenants,
@@ -287,6 +288,7 @@ describe('missing blob demotion', () => {
 		const decision = await executeMaintenanceQueueMessage(
 			rootLogger(),
 			env,
+			new NarReadBufferPool(),
 			secondMessage
 		);
 		await runInDurableObject(testServerFor(secondTenant), (instance) =>

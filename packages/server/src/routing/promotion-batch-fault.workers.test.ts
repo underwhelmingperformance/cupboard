@@ -10,6 +10,7 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { pendingUploads } from '../db/schema.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import {
@@ -217,7 +218,13 @@ describe('promotion after a transient D1 batch failure', () => {
 		});
 
 		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 		} finally {
 			fault.restore();
 		}
@@ -278,7 +285,13 @@ describe('promotion followed by a persistent D1 fault', () => {
 				matches: (sql) => !sql.includes(promotionReservation)
 			});
 			try {
-				await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+				await verifyTenant(
+					rootLogger(),
+					env,
+					new NarReadBufferPool(),
+					currentServerTenant(),
+					10
+				);
 			} finally {
 				fault.restore();
 			}
@@ -296,7 +309,13 @@ describe('promotion followed by a persistent D1 fault', () => {
 				blobState: await blobStateNarHashes(),
 				edges: await referenceEdgesFor(fresh.metadata.narHash)
 			};
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			await verifyTenant(
+				rootLogger(),
+				env,
+				new NarReadBufferPool(),
+				currentServerTenant(),
+				10
+			);
 			const afterConsumer = {
 				pending: await pendingState(),
 				edges: await referenceEdgesFor(fresh.metadata.narHash)
@@ -383,7 +402,13 @@ describe('reaper pin for claimed hashes', () => {
 
 		const beforePass = await blobStateArmTimes();
 
-		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+		await verifyTenant(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			currentServerTenant(),
+			10
+		);
 
 		const afterPass = await blobStateArmTimes();
 

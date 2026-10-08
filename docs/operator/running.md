@@ -83,12 +83,13 @@ wrangler d1 execute cupboard --remote \
 If a tenant keeps failing, the last error and the Worker logs from around that
 time are the place to start.
 
-A verification attempt for a newly uploaded NAR fails when R2 returns an error.
-It also fails when the R2 get, or a single read of up to 1 MiB from the staged
-object, takes longer than 60 seconds. The tenant Worker records failed upload
-verification and publication attempts in `pending_upload.settle_failures`.
-`last_settle_error` contains a controlled failure category. Retries start after
-30 seconds and double up to ten minutes. The tenant Worker's
+A verification attempt for a newly uploaded NAR fails when R2 returns an error,
+or when the staged object changes while the queue consumer reads it. It also
+fails when 60 seconds pass without the consumer completing a read of up to 1 MiB
+from the staged object. The tenant Worker records failed upload verification and
+publication attempts in `pending_upload.settle_failures`. `last_settle_error`
+contains a controlled failure category. Retries start after 30 seconds and
+double up to ten minutes. The tenant Worker's
 `pending upload verification failed` log includes the upload ID, category, phase
 and failure count, without provider messages or URLs. A stored decode verdict
 remains available while publication retries, so the next attempt does not decode
@@ -103,8 +104,28 @@ consumer also logs a `pending upload verification finished` event with the
 outcome (`verified`, `nar-hash-mismatch`, `nar-size-mismatch`, `undecodable`,
 `missing`, `abandoned`, or `aborted` when the pass budget ends before
 verification finishes), the number of compressed bytes that it read and NAR
-bytes that it decoded (`compressedBytes` and `narBytes`), the number of reads,
-and the duration in milliseconds.
+bytes that it decoded (`compressedBytes` and `narBytes`), the number of chunks
+of up to 1 MiB that it decoded (`reads`), and the duration in milliseconds.
+
+The same event describes how the consumer read the object ahead of the decoder
+with ranged gets into the isolate's pool of 8 MiB buffers:
+
+- `ranges` is the number of ranged gets.
+- `rangeBufferMisses` is the number of blocks that found every buffer in use at
+  least once. A block can still get a ranged get later, when a buffer becomes
+  free first. A high value means that concurrent verifications in the same
+  isolate were sharing the four buffers.
+- `rangeBudgetSkips` is the number of blocks that found, at least once, that the
+  invocation's subrequest allowance could not cover a ranged get and a new head
+  after it. A high value means that the pass was close to its subrequest
+  allowance.
+- `peakRangeBuffers` is the largest number of buffers that the verification used
+  at once.
+- `lostRangeBuffers` is the number of buffers that a cancelled or failed read
+  kept. The pool allocates a new buffer in place of each one, so the isolate
+  uses more than the pool's 32 MiB until the runtime frees the kept buffer.
+- `rangeBufferAllocations` is the number of buffers that the isolate's pool has
+  allocated so far. It stays at four or less unless reads have kept buffers.
 
 Both log lines identify the upload by its upload ID and store path hash, and
 include the NAR hash and NAR size that the client declared (`uploadId`,
