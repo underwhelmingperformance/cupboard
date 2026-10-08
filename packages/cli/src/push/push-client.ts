@@ -114,7 +114,8 @@ export function pushClientFor(
 		return r2BlobUploader({
 			endpoint: push.endpoint,
 			bucket: push.bucket,
-			provider: session.provider
+			provider: session.provider,
+			...(options.signal !== undefined && { signal: options.signal })
 		});
 	};
 	const blobUploader = (): Promise<BlobUploader> =>
@@ -190,7 +191,16 @@ export function pushClientFor(
 
 			return response.status !== notFoundStatus;
 		},
-		uploadNar: async (r2Key, body) => (await blobUploader())(r2Key, body),
+		uploadNar: async (r2Key, body) => {
+			const uploader = await blobUploader();
+
+			await uploader.uploadBytes(r2Key, body);
+		},
+		uploadCompressedNar: async (r2Key, source, narSize, observer) => {
+			const uploader = await blobUploader();
+
+			return uploader.uploadNar(r2Key, source, narSize, observer);
+		},
 		commit: (target, commitOptions) =>
 			raw.commit(credential, target, commitOptions),
 		openCommitSession: (commitOptions) =>

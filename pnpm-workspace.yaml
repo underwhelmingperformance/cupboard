@@ -25,7 +25,6 @@ minimumReleaseAgeExclude:
 
 catalog:
   '@aws-sdk/client-s3': ^3.1075.0
-  '@aws-sdk/lib-storage': ^3.1075.0
   '@cloudflare/workers-types': ^5.20260705.1
   '@octokit/request-error': ^7.1.1
   '@orpc/client': ^1.15.2

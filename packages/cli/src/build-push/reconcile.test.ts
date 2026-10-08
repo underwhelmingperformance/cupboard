@@ -1606,8 +1606,11 @@ describe('reconcileBuild over a shared commit session', () => {
 				now: () => times.shift() ?? 0,
 				schedule: scheduleNothing
 			},
-			onUploaded: (storePath, durationMs) => {
-				uploads.push({ storePath, durationMs });
+			uploadReport: {
+				observe: () => ({}),
+				completed: (storePath, upload) => {
+					uploads.push({ storePath, durationMs: upload.durationMs });
+				}
 			}
 		});
 

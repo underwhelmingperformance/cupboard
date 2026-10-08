@@ -145,6 +145,30 @@ export const compressionSummarySchema = z.strictObject({
 });
 export type CompressionSummary = z.output<typeof compressionSummarySchema>;
 
+// How the CLI sent the NARs that it uploaded during a run. A NAR that
+// compressed to one part or less was sent with one request, counted in
+// `singleRequestUploads`. Every other NAR was sent as a multipart upload, and
+// `partsSent` counts all of their parts. A buffered part was compressed into
+// memory before its request started, and a streamed part was sent as it was
+// compressed. `retries` counts the requests that were sent again, and
+// `recompressions` the streamed parts that were recompressed from the store
+// for another attempt. `resentBytes` counts the bytes sent beyond the size of
+// the stored objects: the bytes that failed attempts had already sent.
+// `paddingBytes` counts the bytes of the zstd skippable frames that filled
+// streamed parts whose compressed bytes ended early. A CLI that uploaded no
+// NAR, or that predates these facts, omits them.
+export const transferSummarySchema = z.strictObject({
+	singleRequestUploads: countSchema,
+	partsSent: countSchema,
+	bufferedParts: countSchema,
+	streamedParts: countSchema,
+	retries: countSchema,
+	recompressions: countSchema,
+	resentBytes: countSchema,
+	paddingBytes: countSchema
+});
+export type TransferSummary = z.output<typeof transferSummarySchema>;
+
 // The push-summary result data a `cupboard push` emits, parsed back by the
 // actions so they can read uploaded/reused/skipped counts, failures, and each
 // path's retention fact without casting the reporter's untyped JSON.
@@ -155,7 +179,8 @@ export const pushSummarySchema = z.strictObject({
 	uploadedBytes: countSchema,
 	failures: z.array(pushFailureSchema),
 	paths: z.array(pushSummaryPathSchema),
-	compression: compressionSummarySchema.optional()
+	compression: compressionSummarySchema.optional(),
+	transfer: transferSummarySchema.optional()
 });
 export type PushSummary = z.output<typeof pushSummarySchema>;
 
@@ -240,7 +265,8 @@ export const buildSummarySchema = z.strictObject({
 	skipped: countSchema,
 	childExitStatus: z.number().int().nonnegative(),
 	unconfirmedPaths: z.array(storePathSchema),
-	compression: compressionSummarySchema.optional()
+	compression: compressionSummarySchema.optional(),
+	transfer: transferSummarySchema.optional()
 });
 export type BuildSummary = z.output<typeof buildSummarySchema>;
 

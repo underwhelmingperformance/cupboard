@@ -8,7 +8,6 @@ export default {
 			dependencyTypes: ['dev', 'prod'],
 			dependencies: [
 				'@aws-sdk/client-s3',
-				'@aws-sdk/lib-storage',
 				'@cloudflare/workers-types',
 				'@octokit/request-error',
 				'@orpc/**',

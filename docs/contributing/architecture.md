@@ -509,7 +509,7 @@ requests below are all under the tenant URL.
    The compressed NAR has an independent zstd frame for every 16 MiB of NAR,
    with the frame's content size in its header. Every frame starts at a fixed
    position in the NAR and can be decoded on its own. A part of the upload can
-   therefore be regenerated from the store by recompressing only the frames that
+   therefore be recompressed from the store by compressing only the frames that
    it overlaps. Nix 2.35 [writes the same layout][nix-zstd-frames]. The CLI
    compresses at zstd's default level and also adds a content checksum to each
    frame, which Nix does not. Decoders that follow RFC 8878, including Nix's
@@ -521,18 +521,100 @@ requests below are all under the tenant URL.
    stream as it reads them. The frame lengths follow from the NAR size that the
    CLI negotiated, and a NAR with more or fewer bytes fails its upload.
 
-   For each upload worker, compression keeps about C + 2P + 3O in memory:
+   [nix-zstd-frames]: https://github.com/NixOS/nix/pull/15550
 
+   R2 allows at most 10,000 parts in a multipart upload. It requires every part
+   except the last to have the same length, and a part's length is fixed when
+   its request starts. The uploader sends the compressed NAR in parts of S = 8
+   MiB. A NAR whose compressed size could need more than 9,999 parts gets larger
+   parts, rounded up to whole MiB, which keeps one part in reserve for padding.
+   - The first part is compressed into memory. A NAR that ends inside it is sent
+     with one `PutObject` of its exact length.
+   - Otherwise the uploader starts a multipart upload and sends the first part.
+     It then releases the first part's memory.
+   - Before each later part, it estimates the compressed bytes that remain from
+     the NAR's compression ratio so far. While the estimate is at least 2S, the
+     part is streamed: its request starts with a length of S, and its body sends
+     the compressed bytes as they are produced. When the estimate is below 2S,
+     the part is compressed into memory before it is sent, so the last part has
+     its exact length. The estimate is checked again before every part, so a
+     part can be streamed after a buffered part when the ratio rises.
+   - If a streamed part's compressed bytes end before S, because the estimate
+     was too high, a zstd skippable frame fills the rest of the part. A
+     skippable frame has at least 8 bytes, so when fewer than 8 bytes are left,
+     the frame continues into one more part of 1 to 7 bytes. Decoders skip the
+     frame. The narinfo's FileSize and FileHash describe the stored object,
+     padding included.
+
+   R2 resets a request whose body sends nothing for about 15 seconds, so nothing
+   else may delay the body. Once a part's request has started, its body waits
+   only for the compressor and the NAR source.
+
+   The S3 client never retries a request itself, because a streamed body cannot
+   be sent twice. The uploader sends a request again, up to five attempts in
+   all, when the connection failed or R2 returned a server error, timed out or
+   asked the client to slow down. Before each new attempt it waits about 0.5 s,
+   1 s, 2 s and then 4 s, each shortened by a random amount of up to half so
+   that uploads that failed together are unlikely to retry together. Each
+   request also fails when its connection sends and receives nothing for five
+   minutes, so a connection that a NAT or proxy dropped fails and is retried.
+   Five minutes is far longer than R2's reset of a stalled body, and leaves R2
+   time to complete a large multipart upload.
+
+   A buffered part is sent again from memory. A streamed part is recompressed
+   from the store:
+   - As the compressor produces each frame, it records the frame's compressed
+     offset and the SHA-256 digest of its compressed bytes. At the start of each
+     streamed part, it also records the digest of the frame's bytes before the
+     part.
+   - To send the part again, the uploader closes the NAR source and reopens it
+     at the start of the frame that contains the part's first byte. The NAR is
+     never open twice at once, so recompressing needs no second connection to an
+     ssh-ng store. The uploader compresses the NAR from there and discards the
+     bytes before the part once their digest matches. When a recompressed frame
+     ends, it is checked against the digest that the first read recorded. The
+     bytes up to the first read's position are also checked before the last of
+     them is sent. The part then continues with bytes that the first read has
+     not reached, and the compressor continues from there for the remaining
+     parts.
+   - The compressor keeps the state of the NAR hash at the start of each frame.
+     A rewind returns the hash to its state at the start of the reopened frame
+     and hashes the bytes that are read again. The first read hashes NAR bytes
+     ahead of the compressed bytes that it returns, so some of the bytes read
+     again were hashed but not sent. Hashing them again makes the NAR hash
+     describe the NAR that the stored object decodes to, even when those bytes
+     changed between the two reads.
+   - A mismatch means that the store path changed. The uploader aborts the
+     multipart upload, so R2 keeps no object.
+
+   Every other failure also aborts the multipart upload. Before another attempt
+   at a part, the uploader waits for any chunk that the failed attempt was still
+   reading, so the next attempt starts where the first read stopped. When no
+   attempt follows, or the upload is cancelled, it aborts without waiting, and
+   the NAR source closes once its read returns.
+
+   A completion request that fails with a retryable error may still have
+   completed the upload, and the next attempt then fails with `NoSuchUpload`.
+   The uploader then reads the object's size and ETag with `HeadObject`. The
+   upload counts as complete only if the size equals the bytes sent and the ETag
+   equals the multipart ETag of the parts: the MD5 of the parts' binary MD5s, a
+   hyphen and the number of parts. Otherwise it fails with
+   `UnverifiedMultipartUploadError`.
+
+   A local store path is reopened at a NAR offset by walking the tree's
+   metadata. The contents of the files before the offset are not read. An ssh-ng
+   store can only stream a NAR from its start, so recompressing a late part of
+   an ssh-ng NAR streams every byte before it again.
+
+   For each upload worker, the uploader keeps about B + C + 2P + 3O in memory:
+   - B, one part compressed into memory: up to S = 8 MiB;
    - C, the zstd stream: about 4 MiB at the default level, including its 1 MiB
      output buffer;
    - P, a 1 MiB piece of NAR (two at a time);
    - O, a 1 MiB chunk of compressed output (up to three).
 
-   This is about 9 MiB. lib-storage's `Upload` also keeps up to (q + 1) × (S +
-   O) for each upload worker: q = 4 parts in flight and the part being filled,
-   each up to S = 8 MiB plus one output chunk. That is up to 45 MiB.
-
-   [nix-zstd-frames]: https://github.com/NixOS/nix/pull/15550
+   This is about 17 MiB of buffers. In one measurement, with six NARs uploaded
+   at once, each upload worker added 22 to 27 MiB to the peak RSS.
 
    While the bytes are being sent, the CLI sends a `renew-uploads` message over
    the commit WebSocket every five minutes, if the server advertises that

@@ -962,6 +962,167 @@ describe('runPush', () => {
 		});
 	});
 
+	it('uploads through a client that compresses the NAR itself and reports how the parts were sent', async () => {
+		const payloads: ResultPayload[] = [];
+		const warnings: { label: string; value?: string }[] = [];
+		const infos: { message: string; level?: string }[] = [];
+		const uploads: { r2Key: string; narSize: number; firstBytes: number[] }[] =
+			[];
+		const name = StorePath.basename(appPath);
+
+		await runPush(
+			publication([appPath]),
+			{
+				...reporter([], warnings, payloads),
+				info: (message, presentation) => {
+					infos.push({
+						message,
+						...(presentation?.level !== undefined && {
+							level: presentation.level
+						})
+					});
+				}
+			},
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				uploadClock: { now: () => 0, schedule: scheduleNothing },
+				peakRss: () => 300_000_000,
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: (body) =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: 'upload-app',
+									r2Key: 'nar/app.nar.zst',
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}))
+							})
+						),
+					uploadNar: unexpectedUploadNarCall,
+					async uploadCompressedNar(r2Key, source, narSize, observer) {
+						const [first] = await Array.fromAsync(source.open(0));
+						uploads.push({ r2Key, narSize, firstBytes: [...(first ?? [])] });
+						observer.onBytes?.(16_777_216);
+						observer.onPart?.({
+							partNumber: 2,
+							mode: 'streamed',
+							bytes: 8_388_608,
+							attempts: 2,
+							durationMs: 1500,
+							outcome: 'sent'
+						});
+						observer.onRecompression?.({
+							partNumber: 2,
+							reason: 'ECONNRESET',
+							narBytes: 20_000_000,
+							compressedBytes: 4_000_000,
+							durationMs: 250
+						});
+
+						return {
+							digest: appDigest,
+							compression: {
+								narBytes: 64_000_000,
+								compressedBytes: 16_777_216,
+								frames: 4,
+								compressionMs: 500
+							},
+							transfer: {
+								isSingleRequest: false,
+								bufferedParts: 1,
+								streamedParts: 1,
+								retries: 1,
+								recompressions: 1,
+								resentBytes: 4_000_000,
+								paddingBytes: 0
+							}
+						};
+					},
+					commit: () => Promise.resolve(fallbackCommitResponse()),
+					setRoot: (rootName, body) =>
+						Promise.resolve(rootSummary({ name: rootName, ...body }))
+				} satisfies PushClient,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: () => {
+					throw new Error('unexpected compression outside the client');
+				}
+			}
+		);
+
+		const summary = payloads.find(
+			(payload) => payload.kind === pushSummaryResultKind
+		);
+		const data = z
+			.object({ uploadedBytes: z.number(), transfer: z.unknown() })
+			.parse(summary?.data);
+
+		expect({
+			uploads,
+			partInfo: infos.filter((info) => info.message.includes('part')),
+			warnings,
+			uploadedBytes: data.uploadedBytes,
+			transfer: data.transfer,
+			rows: summary?.rows.filter((row) =>
+				[
+					'Single-request uploads',
+					'Parts sent',
+					'Buffered parts',
+					'Streamed parts',
+					'Requests sent again',
+					'Parts recompressed',
+					'Bytes sent again',
+					'Padding bytes'
+				].includes(row.label)
+			)
+		}).toStrictEqual({
+			uploads: [
+				{
+					r2Key: 'nar/app.nar.zst',
+					narSize: appDigest.narSize,
+					firstBytes: [...appDigest.narHash.digestBytes()]
+				}
+			],
+			partInfo: [
+				{
+					message: `${name}: sent part 2 (streamed, ${formatBytes(8_388_608)}) in ${formatDuration(1500)} after 2 attempts`,
+					level: 'debug'
+				}
+			],
+			warnings: [
+				{
+					label: name,
+					value: `part 2 failed (ECONNRESET), so ${formatBytes(20_000_000)} of NAR were recompressed from the store in ${formatDuration(250)} to send ${formatBytes(4_000_000)} again`
+				}
+			],
+			uploadedBytes: 16_777_216,
+			transfer: {
+				singleRequestUploads: 0,
+				partsSent: 2,
+				bufferedParts: 1,
+				streamedParts: 1,
+				retries: 1,
+				recompressions: 1,
+				resentBytes: 4_000_000,
+				paddingBytes: 0
+			},
+			rows: [
+				{ label: 'Single-request uploads', value: '0' },
+				{ label: 'Parts sent', value: '2' },
+				{ label: 'Buffered parts', value: '1' },
+				{ label: 'Streamed parts', value: '1' },
+				{ label: 'Requests sent again', value: '1' },
+				{ label: 'Parts recompressed', value: '1' },
+				{ label: 'Bytes sent again', value: formatBytes(4_000_000) }
+			]
+		});
+	});
+
 	it('marks each commit for retention from its own negotiation', async () => {
 		const commits: { uploadId: string; retention?: true }[] = [];
 		let negotiations = 0;

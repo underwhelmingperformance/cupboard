@@ -67,9 +67,10 @@ export async function pushStorePaths(
 		}
 
 		if (decision.action === 'upload') {
-			await context.client.uploadNar(
+			await uploadNegotiated(
+				context,
 				decision.r2Key,
-				compressedNar(context, findNegotiation(negotiations, decision))
+				findNegotiation(negotiations, decision)
 			);
 		}
 
@@ -139,6 +140,26 @@ async function negotiationFor(
 			ca: info.ca
 		}
 	};
+}
+
+// Uploads through the client's own compressing uploader when it has one, as
+// the CLI does.
+async function uploadNegotiated(
+	context: PushContext,
+	r2Key: string,
+	entry: NegotiatedPath
+): Promise<void> {
+	if (context.client.uploadCompressedNar === undefined) {
+		await context.client.uploadNar(r2Key, compressedNar(context, entry));
+		return;
+	}
+
+	await context.client.uploadCompressedNar(
+		r2Key,
+		new NarArchive(context.store.physicalPath(entry.storePath)),
+		entry.fields.narSize,
+		{}
+	);
 }
 
 function compressedNar(

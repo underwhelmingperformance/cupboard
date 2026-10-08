@@ -141,6 +141,47 @@ describe('Nix substitution', () => {
 			expect(fingerprint(realised)).toStrictEqual(fingerprint(contents));
 		}));
 
+	it('substitutes a path after the uploader pads its last streamed part', () =>
+		withHarness('cupboard-e2e-uploader-padding-', async (harness) => {
+			// The first 9 MiB cannot be compressed, so after the first 8 MiB part
+			// the uploader estimates that about 40 MiB of compressed bytes remain
+			// and streams the second part. The 40 MiB of zeros after them compress
+			// to almost nothing, so the compressed NAR ends early in the second
+			// part, and a skippable frame fills the rest of it.
+			const contents = Buffer.concat([
+				pseudoRandomBytes(9 * 1024 * 1024, 2),
+				Buffer.alloc(40 * 1024 * 1024)
+			]);
+			const storePath = await withTemporaryDirectory(
+				'cupboard-e2e-uploader-padding-source-',
+				async (directory) => {
+					const source = path.join(directory, 'cupboard-padded-part');
+					await mkdir(source);
+					await writeFile(path.join(source, 'payload.bin'), contents);
+
+					return harness.source.add(source);
+				}
+			);
+
+			await pushStorePaths(pushContext(harness), [storePath]);
+			await harness.target.realise(
+				storePath,
+				signedBy(harness, harness.publicKey)
+			);
+			const narInfo = await fetchNarInfo(harness.server, storePath);
+			const realised = await readFile(
+				path.join(harness.target.physicalPath(storePath), 'payload.bin')
+			);
+
+			expect({
+				fileSize: narInfo.fileSize,
+				payload: fingerprint(realised)
+			}).toStrictEqual({
+				fileSize: 2 * 8 * 1024 * 1024,
+				payload: fingerprint(contents)
+			});
+		}));
+
 	it('substitutes a path whose stored object ends with a skippable frame', () =>
 		withHarness('cupboard-e2e-padded-', async (harness) => {
 			// The CLI pads a streamed part with a zstd skippable frame when the

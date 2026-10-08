@@ -13,11 +13,7 @@ import type { CommitOptions } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
 import { PushNarMetadataMismatchError } from '../errors.ts';
-import {
-	compressNarToStream,
-	type NarCompressionFacts,
-	sendCompressedNar
-} from '../nix/blob.ts';
+import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import type { NarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
@@ -27,7 +23,12 @@ import {
 	defaultUploadConcurrency,
 	type PushClient
 } from '../push/push.ts';
-import { sendUpload, type UploadClock } from '../push/upload-transfer.ts';
+import {
+	systemUploadClock,
+	type UploadClock,
+	uploadNarFromSource,
+	type UploadReport
+} from '../push/upload-transfer.ts';
 
 import { requireMatchingBuildOutput } from './divergence.ts';
 
@@ -89,11 +90,7 @@ export interface BuildOutputBatcherOptions {
 	Times uploads and schedules their renewals. Defaults to the system clock.
 	*/
 	readonly uploadClock?: UploadClock;
-	readonly onUploaded?: (
-		storePath: StorePathString,
-		durationMs: number,
-		compression: NarCompressionFacts | undefined
-	) => void;
+	readonly uploadReport?: UploadReport;
 	readonly onOutcome?: (outcome: BatchPathOutcome) => void;
 	readonly onFailure?: (failure: BatchPathFailure) => void;
 }
@@ -311,26 +308,20 @@ export class BuildOutputBatcher {
 			const createNarArchive =
 				this.options.createNarArchive ??
 				((storePath: string) => new NarArchive(storePath));
-			const upload = compressNar(
+			const upload = await uploadNarFromSource(
+				{
+					client: this.options.client,
+					session: this.options.session,
+					clock: this.options.uploadClock ?? systemUploadClock,
+					compressNar,
+					observer: this.options.uploadReport?.observe(info.storePath) ?? {}
+				},
+				decision,
 				createNarArchive(info.storePath),
 				info.narSize
 			);
-
-			const durationMs = await sendUpload(
-				this.options.session,
-				decision.uploadId,
-				() =>
-					sendCompressedNar(upload.body, (body) =>
-						this.options.client.uploadNar(decision.r2Key, body)
-					),
-				this.options.uploadClock
-			);
-			assertNarMetadata(info, upload.digest());
-			this.options.onUploaded?.(
-				info.storePath,
-				durationMs,
-				upload.compression?.()
-			);
+			assertNarMetadata(info, upload.digest);
+			this.options.uploadReport?.completed(info.storePath, upload);
 		}
 
 		await commitOverSession(this.options, {

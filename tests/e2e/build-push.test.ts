@@ -206,7 +206,11 @@ function clientWithFailingUpload(
 		return base;
 	}
 
-	return { ...base, uploadNar: () => Promise.reject(failure) };
+	return {
+		...base,
+		uploadNar: () => Promise.reject(failure),
+		uploadCompressedNar: () => Promise.reject(failure)
+	};
 }
 
 function fireHook(scriptPath: string, outPaths: readonly string[]): string {

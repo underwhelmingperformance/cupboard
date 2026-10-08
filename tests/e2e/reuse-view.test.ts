@@ -201,6 +201,18 @@ describe('Nix substitution through a reuse view', () => {
 									uploads.push(r2Key);
 
 									return destination.uploadNar(r2Key, body);
+								},
+								uploadCompressedNar: (r2Key, source, narSize, observer) => {
+									uploads.push(r2Key);
+
+									return (
+										destination.uploadCompressedNar?.(
+											r2Key,
+											source,
+											narSize,
+											observer
+										) ?? Promise.reject(new Error('unexpected upload'))
+									);
 								}
 							},
 							referenceSource: { url: server.tenantPath('/reuse/reuse') }
