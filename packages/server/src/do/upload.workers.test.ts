@@ -1247,6 +1247,7 @@ describe('upload flow', () => {
 		expect(claim.claims).toStrictEqual([
 			{
 				uploadId: upload.uploadId,
+				storePathHash: metadata.storePathHash,
 				r2Key: upload.r2Key,
 				narHash: metadata.narHash,
 				narSize: metadata.narSize,

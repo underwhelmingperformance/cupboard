@@ -1148,6 +1148,9 @@ async function verifyFreshClaim(
 		outcome = 'abandoned';
 		logger.warn('pending upload verification failed', {
 			uploadId: claim.uploadId,
+			storePathHash: claim.storePathHash,
+			narHash: claim.narHash,
+			narSize: claim.narSize,
 			kind: 'fresh',
 			reason: 'verification-failed',
 			stage: progress.stage,
@@ -1157,6 +1160,9 @@ async function verifyFreshClaim(
 	} finally {
 		logger.info('pending upload verification finished', {
 			uploadId: claim.uploadId,
+			storePathHash: claim.storePathHash,
+			narHash: claim.narHash,
+			narSize: claim.narSize,
 			outcome,
 			compressedBytes: progress.compressedBytes,
 			narBytes: progress.narBytes,

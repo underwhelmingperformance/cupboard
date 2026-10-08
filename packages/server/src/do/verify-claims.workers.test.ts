@@ -53,13 +53,17 @@ function claimOrder(
 	uploads: readonly {
 		uploadId: UploadId;
 		r2Key: string;
-		metadata: { narHash: PendingVerification['narHash']; narSize: number };
+		metadata: Pick<
+			PendingVerification,
+			'storePathHash' | 'narHash' | 'narSize'
+		>;
 	}[]
 ): PendingVerification[] {
 	return uploads
 		.toSorted((left, right) => byCodeUnit(left.uploadId, right.uploadId))
 		.map((upload) => ({
 			uploadId: upload.uploadId,
+			storePathHash: upload.metadata.storePathHash,
 			r2Key: r2ObjectKeySchema.parse(upload.r2Key),
 			narHash: upload.metadata.narHash,
 			narSize: upload.metadata.narSize,

@@ -95,16 +95,20 @@ remains available while publication retries, so the next attempt does not decode
 the NAR again.
 
 The queue consumer logs its own `pending upload verification failed` warning
-when it abandons an upload. The warning includes the upload ID, the stage that
-was running (`fetch`, `read` or `decode`), and the error's name, message and
-stack. Unlike the tenant Worker's log, this warning records the error's own
-message, so it can include R2 error text. For every newly uploaded NAR that it
-decodes, the consumer also logs a `pending upload verification finished` event
-with the upload ID, the outcome (`verified`, `nar-hash-mismatch`,
-`nar-size-mismatch`, `undecodable`, `missing`, `abandoned`, or `aborted` when
-the pass budget ends before verification finishes), the number of compressed
-bytes that it read and NAR bytes that it decoded (`compressedBytes` and
-`narBytes`), the number of reads, and the duration in milliseconds.
+when it abandons an upload. The warning includes the stage that was running
+(`fetch`, `read` or `decode`) and the error's name, message and stack. Unlike
+the tenant Worker's log, this warning records the error's own message, so it can
+include R2 error text. For every newly uploaded NAR that it decodes, the
+consumer also logs a `pending upload verification finished` event with the
+outcome (`verified`, `nar-hash-mismatch`, `nar-size-mismatch`, `undecodable`,
+`missing`, `abandoned`, or `aborted` when the pass budget ends before
+verification finishes), the number of compressed bytes that it read and NAR
+bytes that it decoded (`compressedBytes` and `narBytes`), the number of reads,
+and the duration in milliseconds.
+
+Both log lines identify the upload by its upload ID and store path hash, and
+include the NAR hash and NAR size that the client declared (`uploadId`,
+`storePathHash`, `narHash` and `narSize`).
 
 Upload verification and attestation inheritance stop after twelve failed
 attempts or 24 hours of eligible time. Eligible time starts with the first

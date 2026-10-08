@@ -1,6 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
-import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -111,6 +114,7 @@ async function deferUpload(
 	fileHash: NixSha256HashString;
 	fileSize: number;
 	narSize: number;
+	storePathHash: StorePathHash;
 }> {
 	const { metadata, nar } = await verifiablePath(seed, {
 		storePathHash,
@@ -129,7 +133,8 @@ async function deferUpload(
 		r2Key: upload.r2Key,
 		fileHash: nar.fileHash,
 		fileSize: nar.narBytes.byteLength,
-		narSize: metadata.narSize
+		narSize: metadata.narSize,
+		storePathHash: metadata.storePathHash
 	};
 }
 
@@ -427,6 +432,9 @@ describe('batched verify fault isolation', () => {
 				message: 'pending upload verification failed',
 				properties: {
 					uploadId: upload.uploadId,
+					storePathHash: upload.storePathHash,
+					narHash: upload.narHash,
+					narSize: upload.narSize,
 					kind: 'fresh',
 					reason: 'verification-failed',
 					stage: 'fetch',
@@ -490,6 +498,9 @@ describe('batched verify fault isolation', () => {
 					level: 'info',
 					properties: {
 						uploadId: upload.uploadId,
+						storePathHash: upload.storePathHash,
+						narHash: upload.narHash,
+						narSize: upload.narSize,
 						outcome,
 						compressedBytes: isStagingAvailable ? upload.fileSize : 0,
 						narBytes: isStagingAvailable ? upload.narSize : 0,
