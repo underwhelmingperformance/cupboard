@@ -44,7 +44,10 @@ import { z } from 'zod';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { recordedNarInfoMetadata } from '../blob/narinfo-object-metadata.ts';
-import { type StagedBlobPromotion } from '../blob/promote-blob.ts';
+import {
+	type CanonicalIncarnation,
+	type StagedBlobPromotion
+} from '../blob/promote-blob.ts';
 import {
 	type CacheId,
 	cacheScopeFromRow,
@@ -105,7 +108,10 @@ import {
 	affordableSubrequestOperations,
 	subrequestsAvailable
 } from './subrequest-slice.ts';
-import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
+import {
+	type CanonicalBlob,
+	parseStoredUploadPathMetadata
+} from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 import {
 	raceVerificationOperation,
@@ -376,6 +382,32 @@ export interface PendingVerification {
 	readonly blob?: CommitBlobDeclaration;
 }
 
+function promotionOf(
+	verdict: Extract<HeldVerdict, { readonly kind: 'verified' | 'promoted' }>
+): PromotionState {
+	if (verdict.kind === 'promoted') {
+		return { kind: 'already-promoted' };
+	}
+
+	if (verdict.canonicalWrite === undefined) {
+		return { kind: 'copy' };
+	}
+
+	return { kind: 'written', incarnation: verdict.canonicalWrite.incarnation };
+}
+
+function copiedBlob(verification: NarVerification): CanonicalBlob | undefined {
+	if (
+		!verification.ok ||
+		verification.fileHash === undefined ||
+		verification.fileSize === undefined
+	) {
+		return undefined;
+	}
+
+	return { fileHash: verification.fileHash, fileSize: verification.fileSize };
+}
+
 function declaredBlob(
 	pending: PendingUploadRow
 ): CommitBlobDeclaration | undefined {
@@ -389,6 +421,28 @@ function declaredBlob(
 	};
 }
 
+/**
+ * An object that the queue consumer wrote at a reserved incarnation for an
+ * upload that will not be published from it.
+ */
+interface UnpublishedWrite {
+	readonly narHash: NixSha256HashString;
+	readonly incarnation: number;
+}
+
+interface HeldVerdicts {
+	readonly abandoned: PendingUploadRow[];
+	readonly unownedWrites: UnpublishedWrite[];
+}
+
+/**
+ * The answer to a queue consumer that asks to write a declared upload's
+ * canonical object itself. `revoked` means that the consumer's pass no longer
+ * owns the claim.
+ */
+export type CanonicalWriteReservation =
+	CanonicalIncarnation | { readonly kind: 'revoked' };
+
 // The owner must accompany every later renewal and verdict. `truncated` means
 // that the row or byte limit left work for another pass.
 export interface PendingVerificationBatch {
@@ -399,16 +453,39 @@ export interface PendingVerificationBatch {
 
 type PendingVerificationChunk = Omit<PendingVerificationBatch, 'owner'>;
 
+/**
+ * The canonical object that the queue consumer wrote while it verified a
+ * declared upload. The Durable Object reserved `incarnation` for the claim
+ * owner before the consumer started writing.
+ */
+export interface CanonicalWrite {
+	readonly incarnation: number;
+}
+
 // The queue consumer's verdict for one claimed upload. Older consumers can
 // report `promoted` after writing the canonical object. Current consumers report
-// `verified` and leave shared writes to the Durable Object.
+// `verified`. A `verified` verdict includes `canonicalWrite` when the
+// consumer wrote the canonical object itself; otherwise the Durable Object
+// copies the staged object.
 export type VerificationVerdict =
-	| { readonly kind: 'verified'; readonly verification: NarVerification }
+	| {
+			readonly kind: 'verified';
+			readonly verification: NarVerification;
+			readonly canonicalWrite?: CanonicalWrite;
+	  }
 	| { readonly kind: 'promoted' }
 	| { readonly kind: 'missing' }
 	| { readonly kind: 'abandoned' };
 
-export type PromotionState = 'promote' | 'already-promoted';
+/**
+ * How a verified upload's canonical object comes to exist: the Durable Object
+ * copies the staged object, the consumer has written it at a reserved
+ * incarnation, or it already exists.
+ */
+export type PromotionState =
+	| { readonly kind: 'copy' }
+	| { readonly kind: 'written'; readonly incarnation: number }
+	| { readonly kind: 'already-promoted' };
 
 export interface VerificationResult {
 	readonly uploadId: UploadId;
@@ -436,14 +513,21 @@ const narVerificationSchema = z.union([
 	z.strictObject({ ok: z.literal(false), reason: z.literal('undecodable') })
 ]);
 
+const canonicalWriteSchema = z.strictObject({
+	incarnation: z.number().int().positive()
+});
+
 const heldVerdictSchema = z.discriminatedUnion('kind', [
 	z.strictObject({
 		kind: z.literal('verified'),
-		verification: narVerificationSchema
+		verification: narVerificationSchema,
+		canonicalWrite: canonicalWriteSchema.optional()
 	}),
 	z.strictObject({ kind: z.literal('promoted') }),
 	z.strictObject({ kind: z.literal('missing') })
 ]);
+
+type HeldVerdict = z.output<typeof heldVerdictSchema>;
 
 // The recorded owner fences verdict application. If the current claim owner
 // differs, the verdict is stale and must not be applied.
@@ -922,7 +1006,7 @@ export class VerificationService {
 		);
 		const effectivePromotion: PromotionState =
 			pending.r2Key === narObjectKey(metadata.narHash)
-				? 'already-promoted'
+				? { kind: 'already-promoted' }
 				: promotion;
 		const reservation = await this.reservePendingRow(
 			pending,
@@ -1043,7 +1127,7 @@ export class VerificationService {
 			metadata,
 			reservation.generation,
 			{ ok: true },
-			'already-promoted',
+			{ kind: 'already-promoted' },
 			owner,
 			signal
 		);
@@ -1259,26 +1343,30 @@ export class VerificationService {
 		// a greater object version and cannot adopt bytes from the revoked owner.
 		// Re-enter the gate to check ownership before activating the object and
 		// writing `blob_state`.
-		if (promotion === 'promote') {
+		if (promotion.kind !== 'already-promoted') {
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return 'ignored';
 			}
 
-			const blob =
-				verification.fileHash !== undefined &&
-				verification.fileSize !== undefined
-					? { fileHash: verification.fileHash, fileSize: verification.fileSize }
-					: undefined;
+			const isStillOwned = () => this.ownsActiveClaim(owner, pending, signal);
 			let staged: StagedBlobPromotion | undefined;
 
 			try {
-				staged = await this.uploadState.stageStagingBlob(
-					pending.r2Key,
-					metadata,
-					blob,
-					owner,
-					() => this.ownsActiveClaim(owner, pending, signal)
-				);
+				staged =
+					promotion.kind === 'written'
+						? await this.uploadState.stageWrittenBlob(
+								metadata,
+								promotion.incarnation,
+								owner,
+								isStillOwned
+							)
+						: await this.uploadState.stageStagingBlob(
+								pending.r2Key,
+								metadata,
+								copiedBlob(verification),
+								owner,
+								isStillOwned
+							);
 			} catch (error) {
 				if (!(error instanceof StagedObjectDigestMismatchError)) {
 					throw error;
@@ -2562,10 +2650,16 @@ export class VerificationService {
 	private holdVerdicts(
 		owner: string,
 		results: readonly VerificationResult[]
-	): PendingUploadRow[] {
+	): HeldVerdicts {
 		const abandoned: PendingUploadRow[] = [];
+		const unownedWrites: UnpublishedWrite[] = [];
 		for (const { uploadId, verdict } of results) {
 			if (!this.ownsClaim(owner, uploadId)) {
+				const write = this.unpublishedWrite(uploadId, verdict);
+
+				if (write !== undefined) {
+					unownedWrites.push(write);
+				}
 				continue;
 			}
 
@@ -2599,7 +2693,49 @@ export class VerificationService {
 				.run();
 		}
 
-		return abandoned;
+		return { abandoned, unownedWrites };
+	}
+
+	// A verdict for a written object whose upload this pass will not publish.
+	private unpublishedWrite(
+		uploadId: UploadId,
+		verdict: VerificationVerdict
+	): UnpublishedWrite | undefined {
+		if (
+			verdict.kind !== 'verified' ||
+			!verdict.verification.ok ||
+			verdict.canonicalWrite === undefined
+		) {
+			return undefined;
+		}
+
+		const row = this.context.db
+			.select({ narHash: schema.pendingUploads.narHash })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		if (row === undefined) {
+			return undefined;
+		}
+
+		return {
+			narHash: row.narHash,
+			incarnation: verdict.canonicalWrite.incarnation
+		};
+	}
+
+	private async abandonWrites(
+		owner: string,
+		writes: readonly UnpublishedWrite[]
+	): Promise<void> {
+		for (const write of writes) {
+			await this.uploadState.abandonWrittenBlob(
+				write.narHash,
+				write.incarnation,
+				owner
+			);
+		}
 	}
 
 	private recordedVerdictKey(pending: PendingUploadRow): string {
@@ -3367,6 +3503,28 @@ export class VerificationService {
 	}
 
 	/**
+	 * Reserves the canonical incarnation that the queue consumer writes while it
+	 * verifies a declared upload. The reservation belongs to the claim owner, so
+	 * a pass that later takes over the claim reserves a newer incarnation.
+	 */
+	async reserveCanonicalWrite(
+		owner: string,
+		uploadId: UploadId
+	): Promise<CanonicalWriteReservation> {
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		if (pending === undefined || !this.ownsActiveClaim(owner, pending)) {
+			return { kind: 'revoked' };
+		}
+
+		return this.uploadState.reserveCanonicalWrite(pending.narHash, owner);
+	}
+
+	/**
 	 * Accepts one queue batch. It first stores every verdict in the Durable
 	 * Object's SQLite database. The synchronous local writes preserve the
 	 * consumer's decode results if the remaining subrequest allowance covers only part of
@@ -3386,7 +3544,8 @@ export class VerificationService {
 		signal?: AbortSignal
 	): Promise<number> {
 		signal?.throwIfAborted();
-		const abandoned = this.holdVerdicts(owner, results);
+		const { abandoned, unownedWrites } = this.holdVerdicts(owner, results);
+		await this.abandonWrites(owner, unownedWrites);
 		const clock = await raceVerificationOperation(
 			new RetryClockService(this.context).read(),
 			signal
@@ -3624,8 +3783,7 @@ export class VerificationService {
 
 					const verification: NarVerification =
 						verdict.kind === 'promoted' ? { ok: true } : verdict.verification;
-					const promotion: PromotionState =
-						verdict.kind === 'promoted' ? 'already-promoted' : 'promote';
+					const promotion = promotionOf(verdict);
 					const prepared = await this.prepareRecordedVerdict(
 						pending,
 						verification,
@@ -3641,6 +3799,13 @@ export class VerificationService {
 					}
 
 					if (prepared.kind === 'ignored') {
+						if (promotion.kind === 'written' && verification.ok) {
+							await this.uploadState.abandonWrittenBlob(
+								pending.narHash,
+								promotion.incarnation,
+								owner
+							);
+						}
 						if (!this.clearRecordedVerdict(pending)) {
 							unresolved += 1;
 							return;

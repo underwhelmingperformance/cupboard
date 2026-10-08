@@ -241,6 +241,7 @@ import { UploadRetrySchedule } from './upload-retry-schedule.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
+	type CanonicalWriteReservation,
 	pendingSettlePrefetchSubrequests,
 	type PendingVerification,
 	type PendingVerificationBatch,
@@ -3144,6 +3145,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	/**
+	 * Reserves the canonical object incarnation that the queue consumer writes
+	 * while it verifies a declared upload. See
+	 * {@link VerificationService.reserveCanonicalWrite}.
+	 */
+	async reserveCanonicalWrite(
+		owner: string,
+		uploadId: UploadId
+	): Promise<CanonicalWriteReservation> {
+		const parsedUploadId = uploadIdSchema.parse(uploadId);
+		await this.initialise();
+
+		return this.metered('reserve-canonical-write', () =>
+			this.verification.reserveCanonicalWrite(owner, parsedUploadId)
+		);
+	}
+
 	async recordVerification(
 		_uploadId: UploadId,
 		_verification: NarVerification
@@ -3736,6 +3754,7 @@ type MeteredMethod =
 	| 'record-missing-object'
 	| 'record-verification'
 	| 'record-verifications'
+	| 'reserve-canonical-write'
 	| 'verdict-drain'
 	| 'verification'
 	| 'verify-backstop';
