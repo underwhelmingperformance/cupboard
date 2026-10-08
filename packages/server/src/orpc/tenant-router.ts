@@ -35,7 +35,7 @@ const os = implement(tenantContract)
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {
-		const claims = await context.services.authenticate(context.request);
+		const claims = await context.authenticate();
 
 		const maintenanceCache = await authoriseRequest(
 			claims,

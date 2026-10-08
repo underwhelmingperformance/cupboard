@@ -26,11 +26,10 @@ import type { PendingCacheResolver } from './authorise.ts';
 
 /**
  * The capabilities the contract's procedures need from the Durable Object:
- * authentication, the post-mutation maintenance hook, and the domain services.
+ * the post-mutation maintenance hook and the domain services.
  * The object supplies an instance per request through the handler context.
  */
 export interface TenantRpcServices {
-	authenticate(request: Request): Promise<AccessClaims>;
 	pendingCache: PendingCacheResolver;
 	// Reconcile maintenance eligibility before a mutation returns. Concurrent
 	// calls share one reconciliation, and an unchanged wake time avoids a D1 write.
@@ -76,6 +75,8 @@ export interface TenantRpcServices {
 
 export interface TenantOrpcContext {
 	readonly request: Request;
+	// Verifies the request's bearer token. Every call returns the same result.
+	readonly authenticate: () => Promise<AccessClaims>;
 	readonly services: TenantRpcServices;
 	// The cache the request path selected: the default cache for a bare path,
 	// and the named one for a path under `/cache/<name>`.

@@ -107,6 +107,12 @@ import {
 import { withSpan } from '../observability/span.ts';
 import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
+import {
+	authenticateOnce,
+	ContractRequest,
+	contractRequestMaxBytes,
+	uploadRequestMaxBytes
+} from '../orpc/contract-request.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
 import { commitEntryCreditBudget } from '../policy/commit-credit.ts';
 import {
@@ -677,11 +683,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// handler, because a contract procedure reads the cache its path
 		// selected.
 		this.app.use(async (context, next) => {
-			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
+			const pathname = new URL(context.req.url).pathname;
+			const isUploadGraceEndpoint =
+				context.req.method === 'POST' && uploadGracePathPattern.test(pathname);
+			const authenticate = authenticateOnce(() =>
+				this.authKeys.authenticate(context.req.raw)
+			);
+			const contract = new ContractRequest(
 				context.req.raw,
+				authenticate,
+				isUploadGraceEndpoint ? uploadRequestMaxBytes : contractRequestMaxBytes
+			);
+			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
+				contract.request,
 				{
 					context: {
 						request: context.req.raw,
+						authenticate,
 						services: this.rpcServices(),
 						cache: context.get('cache'),
 						logger: context.get('logger')
@@ -690,10 +708,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			if (isMatched) {
-				const pathname = new URL(context.req.url).pathname;
-				const isUploadGraceEndpoint =
-					context.req.method === 'POST' &&
-					uploadGracePathPattern.test(pathname);
+				contract.refuseOversizeBody();
 
 				if (isUploadGraceEndpoint && !pathname.endsWith('/confirm')) {
 					response.headers.set(
@@ -1482,7 +1497,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private rpcServices(): TenantRpcServices {
 		return {
-			authenticate: (request) => this.authKeys.authenticate(request),
 			pendingCache: (id) => this.pendingCache(id),
 			afterMutation: (scope, body) => this.afterMutation(scope, body),
 			takeNegotiateHints: (request) => {
