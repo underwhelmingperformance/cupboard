@@ -2,9 +2,12 @@ import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+	CommitFixturePassesExhaustedError,
 	commitFixturePhaseDeadlineMs,
+	CommitFixturePhaseTimeoutError,
 	commitSessionFromResponse,
 	completeCommitSession,
+	maxVerificationPasses,
 	testBase
 } from './test-support.ts';
 
@@ -28,6 +31,14 @@ function openConversation() {
 	});
 
 	return { server, conversation, closed };
+}
+
+async function failureOf(operation: Promise<unknown>): Promise<unknown> {
+	try {
+		return await operation;
+	} catch (error) {
+		return error;
+	}
 }
 
 describe('commit conversation frame reader', () => {
@@ -142,7 +153,7 @@ describe('commit conversation frame reader', () => {
 		});
 	});
 
-	it('bounds pending verification passes and reports a missing verdict frame', async () => {
+	it('fails as soon as the verification passes are exhausted without a verdict', async () => {
 		vi.useFakeTimers();
 
 		try {
@@ -158,33 +169,89 @@ describe('commit conversation frame reader', () => {
 					})
 				);
 			});
-			const finalPass = Promise.withResolvers<undefined>();
 			let passes = 0;
 			const pending = completeCommitSession(
 				conversation,
 				uploadId,
 				() => {
 					passes += 1;
-					if (passes === 100) {
-						finalPass.resolve(undefined);
-					}
 					return Promise.resolve('pending');
 				},
 				{}
 			);
-			const rejected = expect(pending).rejects.toMatchObject({
-				name: 'CommitFixturePhaseTimeoutError',
-				phase: 'verdict',
-				uploadId
-			});
-			await finalPass.promise;
-			await vi.advanceTimersByTimeAsync(commitFixturePhaseDeadlineMs);
-			await rejected;
+
+			await expect(pending).rejects.toStrictEqual(
+				new CommitFixturePassesExhaustedError(
+					'verdict',
+					uploadId,
+					'initial',
+					maxVerificationPasses,
+					{
+						socketState: WebSocket.READY_STATE_OPEN,
+						queuedFrames: 0,
+						pendingReaders: 1,
+						closed: false
+					}
+				)
+			);
 			expect({
 				passes,
 				socketState: conversation.socket.readyState
 			}).toStrictEqual({
-				passes: 100,
+				passes: maxVerificationPasses,
+				socketState: WebSocket.READY_STATE_CLOSED
+			});
+		} finally {
+			vi.useRealTimers();
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(testBase);
+		}
+	});
+
+	it('reports a verification pass that does not finish as a phase timeout', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const { server, conversation } = openConversation();
+			server.addEventListener('message', () => {
+				server.send(
+					JSON.stringify({
+						ev: 'deferred',
+						uploadId,
+						storePathHash: 'a'.repeat(32),
+						narHash:
+							'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+					})
+				);
+			});
+			const started = Promise.withResolvers<undefined>();
+			const pending = completeCommitSession(
+				conversation,
+				uploadId,
+				() => {
+					started.resolve(undefined);
+					return Promise.withResolvers<never>().promise;
+				},
+				{}
+			);
+			const failure = failureOf(pending);
+			await started.promise;
+			await vi.advanceTimersByTimeAsync(commitFixturePhaseDeadlineMs);
+			const error = await failure;
+
+			expect(
+				error instanceof CommitFixturePhaseTimeoutError
+					? {
+							name: error.name,
+							phase: error.phase,
+							uploadId: error.uploadId,
+							socketState: conversation.socket.readyState
+						}
+					: error
+			).toStrictEqual({
+				name: 'CommitFixturePhaseTimeoutError',
+				phase: 'verdict',
+				uploadId,
 				socketState: WebSocket.READY_STATE_CLOSED
 			});
 		} finally {

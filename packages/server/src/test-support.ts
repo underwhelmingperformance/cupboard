@@ -2973,6 +2973,21 @@ export class CommitFixturePhaseTimeoutError extends Error {
 	}
 }
 
+export class CommitFixturePassesExhaustedError extends Error {
+	constructor(
+		public readonly phase: CommitFixturePhase,
+		public readonly uploadId: UploadId,
+		public readonly server: string,
+		public readonly passes: number,
+		public readonly conversation: ReturnType<CommitConversation['diagnostics']>
+	) {
+		super(
+			`The commit fixture used all ${String(passes)} verification passes during ${phase} for upload ${uploadId} on ${server} without a verdict. Conversation state: ${JSON.stringify(conversation)}`
+		);
+		this.name = 'CommitFixturePassesExhaustedError';
+	}
+}
+
 function waitForCommitFixturePhase<T>(
 	conversation: CommitConversation,
 	uploadId: UploadId,
@@ -2992,7 +3007,7 @@ function waitForCommitFixturePhase<T>(
 	);
 }
 
-const maxVerificationPasses = 100;
+export const maxVerificationPasses = 100;
 type VerificationPassAcknowledgement = 'pending' | 'complete';
 
 async function verifyUploadPass(
@@ -3016,24 +3031,54 @@ async function verifyUploadPass(
  * Concurrent promotion can leave an upload pending after verification. The
  * test pool does not deliver verification queue messages, and alarm fences
  * disable the backstop. This fixture therefore runs another pass while the
- * stored verdict is pending.
+ * stored verdict is pending. The phase deadline applies to each pass and to the
+ * wait for the frame after a completed pass, not to the whole loop, because
+ * passes that each finish in time can together take longer than one deadline.
  */
 async function verifyUntilFrame(
-	frame: Promise<CommitSessionFrame>,
+	conversation: CommitConversation,
+	uploadId: UploadId,
 	runVerification: () => Promise<VerificationPassAcknowledgement>
 ): Promise<CommitSessionFrame> {
+	const frame = conversation.nextFrame();
 	const arrival = { isSettled: false };
 	void frameArrival(frame).then(() => {
 		arrival.isSettled = true;
 	});
 
 	for (let pass = 0; pass < maxVerificationPasses; pass += 1) {
-		if (arrival.isSettled || (await runVerification()) === 'complete') {
-			break;
+		if (arrival.isSettled) {
+			return frame;
+		}
+
+		const acknowledgement = await waitForCommitFixturePhase(
+			conversation,
+			uploadId,
+			'verdict',
+			runVerification
+		);
+
+		if (acknowledgement === 'complete') {
+			return waitForCommitFixturePhase(
+				conversation,
+				uploadId,
+				'verdict',
+				() => frame
+			);
 		}
 	}
 
-	return frame;
+	if (arrival.isSettled) {
+		return frame;
+	}
+
+	throw new CommitFixturePassesExhaustedError(
+		'verdict',
+		uploadId,
+		harness.serverName,
+		maxVerificationPasses,
+		conversation.diagnostics()
+	);
 }
 
 /**
@@ -3091,11 +3136,10 @@ export async function completeCommitSession(
 			};
 		}
 
-		const verdict = await waitForCommitFixturePhase(
+		const verdict = await verifyUntilFrame(
 			conversation,
 			uploadId,
-			'verdict',
-			() => verifyUntilFrame(nextFrame(), runVerification)
+			runVerification
 		);
 
 		if (verdict.ev !== 'verdict') {
