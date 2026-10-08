@@ -19,6 +19,7 @@ import {
 } from './oidc-grant-composition.ts';
 import { type OidcClaims, type OidcTrustRule } from './oidc-trust-match.ts';
 import { reuseViewNameSchema } from './reuse-views.ts';
+import { subjectBindingFields } from './subject-binding.ts';
 
 export const readTokenBasicUser = readUserInputSchema.parse('cupboard-oidc');
 export const readTokenPasswordPrefix = 'cupboard-access+jwt:';
@@ -127,7 +128,8 @@ export const readAccessGrantRequestSchema = z.strictObject({
 	grant_type: z.literal(readAccessGrantType),
 	subject_token: z.string().min(1),
 	subject_token_type: z.literal(subjectTokenTypeIdToken),
-	read_resources: z.string().min(1)
+	read_resources: z.string().min(1),
+	...subjectBindingFields
 });
 export type ReadAccessGrantRequest = z.output<
 	typeof readAccessGrantRequestSchema

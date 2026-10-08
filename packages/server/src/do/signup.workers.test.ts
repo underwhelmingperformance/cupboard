@@ -1,3 +1,7 @@
+import { rootLogger } from '@cupboard/logger';
+import { startCapture } from '@cupboard/logger/testing';
+import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
+import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -5,6 +9,7 @@ import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { consumedSubjectNonceRetentionSeconds } from '../auth/auth.ts';
 import { enforceClaimSecret, handleSignup } from '../control/signup.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -65,7 +70,8 @@ async function signupError(form: Record<string, string>): Promise<unknown> {
 	try {
 		return await handleSignup(
 			signupRequest(form),
-			Object.assign({}, env, testControlEnv, claimEnv)
+			Object.assign({}, env, testControlEnv, claimEnv),
+			rootLogger()
 		);
 	} catch (error: unknown) {
 		return error;
@@ -123,6 +129,8 @@ interface StubIssuer {
 	sign(claims: {
 		readonly subject: string;
 		readonly audience: string | readonly string[];
+		readonly claims?: Readonly<Record<string, unknown>>;
+		readonly issuedAt?: number;
 	}): Promise<string>;
 }
 
@@ -165,15 +173,15 @@ async function stubIssuer(
 	return {
 		issuer,
 		fetched,
-		sign: ({ subject, audience }) =>
-			new SignJWT({})
+		sign: ({ subject, audience, claims, issuedAt }) =>
+			new SignJWT({ ...claims })
 				.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 				.setIssuer(issuer)
 				.setAudience([
 					...(typeof audience === 'string' ? [audience] : audience)
 				])
 				.setSubject(subject)
-				.setIssuedAt()
+				.setIssuedAt(issuedAt)
 				.setExpirationTime('5m')
 				.sign(privateKey)
 	};
@@ -721,5 +729,220 @@ describe('control plane POST /signup', () => {
 		await response.text();
 
 		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+	});
+});
+
+interface BoundSignup {
+	readonly form: Readonly<Record<string, string>>;
+	readonly nonce: string;
+	readonly token: string;
+}
+
+async function boundSignup(
+	idp: StubIssuer,
+	targets: readonly string[],
+	options: { readonly hasNonce?: boolean; readonly issuedAt?: number } = {}
+): Promise<BoundSignup> {
+	const seed = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+	const nonce = await subjectBindingNonce(targets, seed);
+	const token = await idp.sign({
+		subject: 'founder',
+		audience: 'cupboard-client',
+		...(options.hasNonce !== false && { claims: { nonce } }),
+		...(options.issuedAt !== undefined && { issuedAt: options.issuedAt })
+	});
+
+	return {
+		form: {
+			subject_token: token,
+			claim_secret: claimSecret,
+			cupboard_binding_seed: seed,
+			cupboard_binding_targets: JSON.stringify(targets)
+		},
+		nonce,
+		token
+	};
+}
+
+async function consumedControlNonces(): Promise<
+	{ nonce: string; familyId: string | undefined; expiresAt: string }[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select()
+		.from(d1Schema.controlConsumedSubjectNonce)
+		.all();
+
+	return rows.map((row) => ({ ...row, familyId: row.familyId ?? undefined }));
+}
+
+async function refusalOf(
+	response: Response
+): Promise<{ status: number; error: string; problem: string | undefined }> {
+	const body = oauthErrorShape(await response.json());
+
+	return { status: response.status, error: body.error, problem: body.problem };
+}
+
+const nonceConsumedAt = new Date('2026-01-01T00:00:00.000Z');
+
+describe('target-bound signup', () => {
+	beforeEach(async () => {
+		vi.useFakeTimers({ now: nonceConsumedAt, toFake: ['Date'] });
+		await resetTestServer();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it('claims the admin with a nonce-bound token and records its nonce', async () => {
+		const idp = await stubIssuer();
+		const bound = await boundSignup(idp, [
+			currentOrigin(),
+			`${currentOrigin()}/t/acme`
+		]);
+		const response = await postSignup(bound.form);
+		const { admin } = await seededAdmin();
+
+		expect({
+			status: response.status,
+			admin: admin?.subject,
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			admin: 'founder',
+			consumed: [
+				{
+					nonce: bound.nonce,
+					familyId: undefined,
+					expiresAt: new Date(
+						nonceConsumedAt.getTime() +
+							consumedSubjectNonceRetentionSeconds * 1000
+					).toISOString()
+				}
+			]
+		});
+	});
+
+	it('refuses a second signup with the same nonce-bound token', async () => {
+		const idp = await stubIssuer();
+		const bound = await boundSignup(idp, [currentOrigin()]);
+		const first = await postSignup(bound.form);
+		const replay = await postSignup(bound.form);
+		const consumed = await consumedControlNonces();
+
+		expect({
+			first: first.status,
+			replay: await refusalOf(replay),
+			consumed: consumed.map(({ nonce }) => nonce)
+		}).toStrictEqual({
+			first: StatusCodes.OK,
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-replayed'
+			},
+			consumed: [bound.nonce]
+		});
+	});
+
+	it.each([
+		{
+			name: "a token bound to another deployment's URL",
+			targets: () => ['https://elsewhere.example.test'],
+			hasNonce: true
+		},
+		{
+			name: 'a target that is not in canonical form',
+			targets: () => [`${currentOrigin()}/`],
+			hasNonce: true
+		},
+		{
+			name: 'a token without a nonce claim',
+			targets: () => [currentOrigin()],
+			hasNonce: false
+		}
+	])('refuses $name', async ({ targets, hasNonce }) => {
+		const idp = await stubIssuer();
+		const bound = await boundSignup(idp, targets(), { hasNonce });
+		const response = await postSignup(bound.form);
+
+		expect({
+			refusal: await refusalOf(response),
+			...(await seededAdmin()),
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-unbound'
+			},
+			admin: undefined,
+			trust: [],
+			consumed: []
+		});
+	});
+
+	it('refuses a nonce-bound token issued more than five minutes ago', async () => {
+		const idp = await stubIssuer();
+		const bound = await boundSignup(idp, [currentOrigin()], {
+			issuedAt: Math.floor(Date.now() / 1000) - 6 * 60
+		});
+		const response = await postSignup(bound.form);
+		const { admin } = await seededAdmin();
+
+		expect({
+			refusal: await refusalOf(response),
+			admin,
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-too-old'
+			},
+			admin: undefined,
+			consumed: []
+		});
+	});
+
+	it.each([
+		{ name: 'an unbound signup and logs it', isAudienceBound: false },
+		{
+			name: 'an audience-bound signup without a warning',
+			isAudienceBound: true
+		}
+	])('accepts $name', async ({ isAudienceBound }) => {
+		const idp = await stubIssuer();
+		const subjectToken = await idp.sign({
+			subject: 'founder',
+			audience: isAudienceBound ? currentOrigin() : 'cupboard-client'
+		});
+		const capture = startCapture();
+		let response: Response;
+
+		try {
+			response = await postSignup({
+				subject_token: subjectToken,
+				claim_secret: claimSecret
+			});
+		} finally {
+			capture.stop();
+		}
+
+		expect({
+			status: response.status,
+			warnings: capture.logs
+				.filter((entry) => entry.message === 'unbound subject token accepted')
+				.map((entry) => ({
+					level: entry.level,
+					rule: entry.properties.rule
+				})),
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			warnings: isAudienceBound ? [] : [{ level: 'warning', rule: undefined }],
+			consumed: []
+		});
 	});
 });

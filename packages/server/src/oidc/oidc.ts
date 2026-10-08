@@ -23,7 +23,7 @@ import { isAllowedIssuerTransport } from './issuer-policy.ts';
 // prevents a public key from the issuer's JWKS from being treated as a shared
 // secret.
 export const inboundAlgorithmAllowlist = ['RS256', 'PS256', 'ES256', 'EdDSA'];
-const inboundClockToleranceSeconds = 30;
+export const inboundClockToleranceSeconds = 30;
 
 const jwksCacheMaxAgeMs = 10 * 60 * 1000;
 const jwksCooldownMs = 30 * 1000;
@@ -53,6 +53,16 @@ export class OidcTokenVerificationError extends Error {
 	) {
 		super(message, { cause: options.cause });
 		this.name = 'OidcTokenVerificationError';
+	}
+}
+
+/**
+ * The token's `iat` is older than the maximum token age of the verification.
+ */
+export class OidcTokenTooOldError extends OidcTokenVerificationError {
+	constructor(options: { readonly cause: unknown }) {
+		super(options, 'Subject token is older than the maximum token age');
+		this.name = 'OidcTokenTooOldError';
 	}
 }
 
@@ -133,6 +143,10 @@ export interface InboundVerifyOptions {
 	readonly trustedAudiences: ReadonlySet<string>;
 	readonly algorithms: readonly string[];
 	readonly requireIdTokenClaims?: boolean;
+	/**
+	The maximum token age in seconds, measured from its `iat` claim.
+	*/
+	readonly maxTokenAgeSeconds?: number;
 }
 
 // The jose errors that describe the token: its shape, claims, signature,
@@ -189,7 +203,10 @@ export async function verifyInboundOidcToken(
 				? ['exp', 'sub', 'iat']
 				: ['exp'],
 			clockTolerance: inboundClockToleranceSeconds,
-			currentDate: now
+			currentDate: now,
+			...(options.maxTokenAgeSeconds !== undefined && {
+				maxTokenAge: options.maxTokenAgeSeconds
+			})
 		});
 
 		if (options.requireIdTokenClaims) {
@@ -243,6 +260,11 @@ export async function verifyInboundOidcToken(
 		// `jwtVerify` established the invariant represented by the opaque brand.
 		return verified.payload as VerifiedOidcClaims;
 	} catch (error) {
+		// jose reports an `iat` older than `maxTokenAge` as an expired token.
+		if (error instanceof joseErrors.JWTExpired && error.claim === 'iat') {
+			throw new OidcTokenTooOldError({ cause: error });
+		}
+
 		if (isTokenVerificationFailure(error)) {
 			throw new OidcTokenVerificationError({ cause: error });
 		}

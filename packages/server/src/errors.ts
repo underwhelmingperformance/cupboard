@@ -1057,6 +1057,44 @@ export class StaleRefreshTokenError extends InvalidGrantError {
 	}
 }
 
+/**
+ * The token request includes binding parameters, but they do not bind the
+ * subject token to this server.
+ */
+export class SubjectTokenUnboundError extends InvalidGrantError {
+	readonly problem = 'subject-token-unbound';
+
+	constructor() {
+		super('Subject token is not bound to this server');
+		this.name = 'SubjectTokenUnboundError';
+	}
+}
+
+/**
+ * The server has already accepted this nonce-bound subject token.
+ */
+export class SubjectTokenReplayedError extends InvalidGrantError {
+	readonly problem = 'subject-token-replayed';
+
+	constructor() {
+		super('Subject token has already been used');
+		this.name = 'SubjectTokenReplayedError';
+	}
+}
+
+/**
+ * The token request includes binding parameters, and the subject token was
+ * issued longer ago than a nonce-bound token may be.
+ */
+export class SubjectTokenTooOldError extends InvalidGrantError {
+	readonly problem = 'subject-token-too-old';
+
+	constructor() {
+		super('Subject token is too old for a nonce-bound exchange');
+		this.name = 'SubjectTokenTooOldError';
+	}
+}
+
 export abstract class SubjectTokenInvalidError extends InvalidRequestError {
 	readonly problem = subjectTokenProblems.invalid;
 }

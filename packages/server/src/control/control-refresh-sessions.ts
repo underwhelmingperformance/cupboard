@@ -57,7 +57,13 @@ import {
 import { attenuatedGrants, parseRequestedGrants } from '../authz/issuance.ts';
 import { sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { StaleRefreshTokenError } from '../errors.ts';
+import {
+	StaleRefreshTokenError,
+	SubjectTokenReplayedError
+} from '../errors.ts';
+import { type SubjectNonce } from '../oidc/subject-binding.ts';
+
+import { consumeControlSubjectNonce } from './control-subject-nonces.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 type ControlRefreshFamily =
@@ -67,6 +73,7 @@ type ControlRefreshMember =
 
 const families = d1Schema.controlRefreshSessionFamily;
 const members = d1Schema.controlRefreshSessionMember;
+const nonces = d1Schema.controlConsumedSubjectNonce;
 
 /**
 The most members, families and successor envelopes that one pruning pass changes.
@@ -413,29 +420,90 @@ export class ControlRefreshSessions {
 
 	/**
 	 * Creates a family for a verified external identity and returns its first
-	 * refresh credential.
+	 * refresh credential. With `nonce`, one batch records the nonce as consumed
+	 * and creates the family. When the nonce is already recorded, the batch
+	 * changes nothing and the method throws `SubjectTokenReplayedError`.
 	 */
 	async create(
 		identity: VerifiedOidcClaims,
 		subject: OidcSubject,
 		rule: OidcTrustRule | undefined,
-		grants: AuthorizationDetails
+		grants: AuthorizationDetails,
+		nonce?: SubjectNonce
 	): Promise<{
 		readonly familyId: RefreshSessionId;
 		readonly refreshToken: string;
 	}> {
 		const prepared = await this.prepare(identity, subject, rule, grants);
-		const { database } = this.dependencies;
-
-		await database.batch([
-			database.insert(families).values(prepared.family),
-			database.insert(members).values(prepared.member)
-		]);
-
-		return {
+		const created = {
 			familyId: refreshSessionIdSchema.parse(prepared.family.id),
 			refreshToken: prepared.credential.value
 		};
+		const { database } = this.dependencies;
+
+		if (nonce === undefined) {
+			await database.batch([
+				database.insert(families).values(prepared.family),
+				database.insert(members).values(prepared.member)
+			]);
+
+			return created;
+		}
+
+		// Each insert below selects from the nonce row only when that row has this
+		// family's id. The id is new, so the row has it only when the first
+		// statement inserted the row.
+		const { family, member } = prepared;
+		const consumedForFamily = and(
+			eq(nonces.nonce, nonce.nonce),
+			eq(nonces.familyId, family.id)
+		);
+		const insertFamily = database.insert(families).select(
+			database
+				.select({
+					id: sql<string>`${family.id}`.as('id'),
+					activeMemberId: sql<string>`${family.activeMemberId}`.as(
+						'active_member_id'
+					),
+					generation: sql<number>`${family.generation}`.as('generation'),
+					createdAt: sql<IsoTimestamp>`${family.createdAt}`.as('created_at'),
+					expiresAt: sql<IsoTimestamp>`${family.expiresAt}`.as('expires_at'),
+					issuer: sql<string>`${family.issuer}`.as('issuer'),
+					subject: sql<string>`${family.subject}`.as('subject'),
+					rule: sql<string | null>`${family.rule ?? sql`NULL`}`.as('rule')
+				})
+				.from(nonces)
+				.where(consumedForFamily)
+		);
+		const insertMember = database.insert(members).select(
+			database
+				.select({
+					id: sql<string>`${member.id}`.as('id'),
+					familyId: sql<string>`${member.familyId}`.as('family_id'),
+					generation: sql<number>`${member.generation}`.as('generation'),
+					credentialHash: sql<string>`${member.credentialHash}`.as(
+						'credential_hash'
+					),
+					successorEnvelope: sql<string | null>`NULL`.as('successor_envelope'),
+					successorExpiresAt: sql<IsoTimestamp | null>`NULL`.as(
+						'successor_expires_at'
+					),
+					createdAt: sql<IsoTimestamp>`${member.createdAt}`.as('created_at')
+				})
+				.from(nonces)
+				.where(consumedForFamily)
+		);
+		const [consumed] = await database.batch([
+			consumeControlSubjectNonce(database, nonce, family.id),
+			insertFamily,
+			insertMember
+		]);
+
+		if (consumed.length === 0) {
+			throw new SubjectTokenReplayedError();
+		}
+
+		return created;
 	}
 
 	async refresh(

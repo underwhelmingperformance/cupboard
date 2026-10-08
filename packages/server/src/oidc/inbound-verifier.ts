@@ -5,6 +5,7 @@ import {
 
 import {
 	IssuerUnavailableError,
+	SubjectTokenTooOldError,
 	SubjectTokenVerificationFailedError
 } from '../errors.ts';
 
@@ -12,11 +13,16 @@ import {
 	OidcDiscoveryError,
 	type OidcDiscoveryStore,
 	OidcKeysUnreachableError,
+	OidcTokenTooOldError,
 	OidcTokenVerificationError,
 	verifyInboundOidcToken
 } from './oidc.ts';
 
 const issuerRetryDelayMs = 100;
+
+export interface InboundTokenLimits {
+	readonly maxTokenAgeSeconds?: number;
+}
 
 /**
  * Verifies an inbound ID token against the keys that its issuer publishes. The
@@ -25,8 +31,9 @@ const issuerRetryDelayMs = 100;
  *
  * A failure to fetch the issuer's metadata or keys is an
  * `IssuerUnavailableError`, which the client can retry. The verifier retries it
- * once itself after a short delay. A token that fails verification is a
- * `SubjectTokenVerificationFailedError`. Any other error propagates unchanged
+ * once itself after a short delay. A token older than the maximum token age is
+ * a `SubjectTokenTooOldError`. A token that fails verification in any other way
+ * is a `SubjectTokenVerificationFailedError`. Any other error propagates unchanged
  * and becomes a 500.
  */
 export class InboundTokenVerifier {
@@ -37,7 +44,8 @@ export class InboundTokenVerifier {
 	private async verifyOnce(
 		target: OidcTrustVerificationTarget,
 		token: string,
-		trustedAudiences: ReadonlySet<string>
+		trustedAudiences: ReadonlySet<string>,
+		limits: InboundTokenLimits
 	): Promise<VerifiedOidcClaims> {
 		let issuer;
 
@@ -60,13 +68,18 @@ export class InboundTokenVerifier {
 					audience: target.audience,
 					trustedAudiences,
 					algorithms: issuer.algorithms,
-					requireIdTokenClaims: true
+					requireIdTokenClaims: true,
+					...limits
 				},
 				new Date()
 			);
 		} catch (error) {
 			if (error instanceof OidcKeysUnreachableError) {
 				throw new IssuerUnavailableError(target.issuer, { cause: error });
+			}
+
+			if (error instanceof OidcTokenTooOldError) {
+				throw new SubjectTokenTooOldError();
 			}
 
 			if (error instanceof OidcTokenVerificationError) {
@@ -80,10 +93,11 @@ export class InboundTokenVerifier {
 	async verify(
 		target: OidcTrustVerificationTarget,
 		token: string,
-		trustedAudiences: ReadonlySet<string>
+		trustedAudiences: ReadonlySet<string>,
+		limits: InboundTokenLimits = {}
 	): Promise<VerifiedOidcClaims> {
 		try {
-			return await this.verifyOnce(target, token, trustedAudiences);
+			return await this.verifyOnce(target, token, trustedAudiences, limits);
 		} catch (error) {
 			if (!(error instanceof IssuerUnavailableError)) {
 				throw error;
@@ -91,7 +105,7 @@ export class InboundTokenVerifier {
 
 			await new Promise((resolve) => setTimeout(resolve, issuerRetryDelayMs));
 
-			return this.verifyOnce(target, token, trustedAudiences);
+			return this.verifyOnce(target, token, trustedAudiences, limits);
 		}
 	}
 }

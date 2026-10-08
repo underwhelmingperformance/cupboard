@@ -431,6 +431,22 @@ export const controlRefreshSessionMember = sqliteTable(
 	]
 );
 
+// The nonce of each target-bound subject token that the control plane or
+// `/signup` has accepted. Each row is kept until verification would refuse the
+// token anyway. `family_id` is the refresh family that the same batch creates,
+// and it is NULL when the exchange starts no family.
+export const controlConsumedSubjectNonce = sqliteTable(
+	'control_consumed_subject_nonce',
+	{
+		nonce: text('nonce').primaryKey(),
+		familyId: text('family_id'),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('control_consumed_subject_nonce_expires_at_idx').on(table.expiresAt)
+	]
+);
+
 // Each provisioned cache has one authoritative tenant row. `status` gates every
 // request: `active` serves reads and accepts writes, `suspended` refuses both,
 // `offboarding` drains, and `offboarded` is the terminal scrubbed tombstone. The

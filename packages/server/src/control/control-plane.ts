@@ -108,6 +108,11 @@ import {
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
 import { decodeInboundClaims, OidcDiscoveryStore } from '../oidc/oidc.ts';
+import {
+	logUnboundSubjectToken,
+	subjectBinding,
+	subjectTokenLimits
+} from '../oidc/subject-binding.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 import {
@@ -121,6 +126,7 @@ import {
 	rotateControlKey
 } from './control-key-store.ts';
 import { ControlRefreshSessions } from './control-refresh-sessions.ts';
+import { recordControlSubjectNonce } from './control-subject-nonces.ts';
 import {
 	addControlTrust,
 	controlTrustRuleSnapshots,
@@ -293,7 +299,13 @@ export async function controlTokenExchange(
 	).verify(
 		target,
 		exchange.subject_token,
-		trustedAudiences(rules, target.issuer)
+		trustedAudiences(rules, target.issuer),
+		subjectTokenLimits(exchange)
+	);
+	const binding = await subjectBinding(
+		verified,
+		controlIssuer(request),
+		exchange
 	);
 	const requested = parseRequestedGrants(exchange.authorization_details);
 	const selection = selectOidcTrust(rules, verified, requested);
@@ -337,13 +349,23 @@ export async function controlTokenExchange(
 		subject,
 		grants
 	);
+
+	if (binding.kind === 'unbound') {
+		logUnboundSubjectToken(logger, selection.rule);
+	}
+
+	const nonce = binding.kind === 'nonce-bound' ? binding.nonce : undefined;
 	// A CI job exchanges a new token from its provider whenever it needs one,
 	// so only an exchange that is not bound to this deployment's URL starts a
 	// session.
 	const sessions = controlRefreshSessions(request, env);
 	const session = isAudienceBound(verified, controlIssuer(request))
 		? undefined
-		: await sessions.create(verified, subject, selection.rule, grants);
+		: await sessions.create(verified, subject, selection.rule, grants, nonce);
+
+	if (session === undefined && nonce !== undefined) {
+		await recordControlSubjectNonce(database, nonce);
+	}
 
 	const current = await selectControlTrust(env, verified, grants);
 
@@ -842,7 +864,7 @@ function controlDatabase(env: Env): Database {
 // The control issuer is the bare-host origin: a real URL, distinct from every
 // tenant's path-based issuer, so a control token can never cross-verify as a
 // tenant token or the reverse.
-function controlIssuer(request: Request): OidcIssuer {
+export function controlIssuer(request: Request): OidcIssuer {
 	const url = new URL(request.url);
 	return oidcIssuerSchema.parse(url.origin);
 }

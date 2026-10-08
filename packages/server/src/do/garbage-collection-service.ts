@@ -1328,6 +1328,22 @@ export class GarbageCollectionService {
 		);
 	}
 
+	private collectExpiredSubjectNonces(now: IsoTimestamp): boolean {
+		const expired = this.context.db
+			.select({ nonce: schema.consumedSubjectNonces.nonce })
+			.from(schema.consumedSubjectNonces)
+			.where(lte(schema.consumedSubjectNonces.expiresAt, now))
+			.orderBy(asc(schema.consumedSubjectNonces.expiresAt))
+			.limit(phaseStepSize);
+		const deleted = this.context.db
+			.delete(schema.consumedSubjectNonces)
+			.where(inArray(schema.consumedSubjectNonces.nonce, expired))
+			.returning({ nonce: schema.consumedSubjectNonces.nonce })
+			.all();
+
+		return deleted.length === phaseStepSize;
+	}
+
 	/**
 	 * Deletes expired refresh-token families a step at a time until the budget is
 	 * spent or none is left. A family row is deleted only after its last member,
@@ -1447,6 +1463,7 @@ export class GarbageCollectionService {
 		const hasMoreRefreshCredentialMaintenance =
 			this.collectRefreshCredentialMaintenance(now);
 		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
+		const hasMoreExpiredSubjectNonces = this.collectExpiredSubjectNonces(now);
 
 		if (expiredRefreshFamilies.hasMoreWork) {
 			log.warn(
@@ -1549,6 +1566,7 @@ export class GarbageCollectionService {
 		const hasMoreWork =
 			hasMoreRefreshCredentialMaintenance ||
 			expiredRefreshFamilies.hasMoreWork ||
+			hasMoreExpiredSubjectNonces ||
 			hasMorePendingRows ||
 			hasMoreCollectionWork;
 

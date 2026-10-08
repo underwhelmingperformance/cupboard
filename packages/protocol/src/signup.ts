@@ -5,13 +5,15 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from './oidc.ts';
+import { subjectBindingFields } from './subject-binding.ts';
 
 // Generic OAuth clients may add fields to this form, so the object remains
 // non-strict. `claim_secret` is optional so that a request without it gets the
 // same 403 as a request with a wrong one.
 export const signupRequestSchema = z.object({
 	subject_token: z.string().min(1),
-	claim_secret: z.string().optional()
+	claim_secret: z.string().optional(),
+	...subjectBindingFields
 });
 export type SignupRequest = z.output<typeof signupRequestSchema>;
 export type SignupRequestInput = z.input<typeof signupRequestSchema>;

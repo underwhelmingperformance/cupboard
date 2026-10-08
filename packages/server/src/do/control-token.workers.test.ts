@@ -1,4 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
+import { type CapturedLog, startCapture } from '@cupboard/logger/testing';
+import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type PermittedGrant } from '@cupboard/protocol/grants';
 import {
@@ -13,6 +15,7 @@ import {
 	type TrustRuleId
 } from '@cupboard/protocol/oidc';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import { env } from 'cloudflare:workers';
 import { asc } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -21,7 +24,10 @@ import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { maxRefreshTokenFamilyMembers } from '../auth/auth.ts';
+import {
+	consumedSubjectNonceRetentionSeconds,
+	maxRefreshTokenFamilyMembers
+} from '../auth/auth.ts';
 import {
 	RefreshCredential,
 	type RefreshKeyContext,
@@ -168,7 +174,11 @@ async function trustedControlIdentity(
 	protectedType: string,
 	permittedGrants?: readonly PermittedGrant[],
 	additionalAudiences: readonly string[] = [],
-	audience = 'cupboard-control'
+	audience = 'cupboard-control',
+	token: {
+		readonly claims?: Readonly<Record<string, unknown>>;
+		readonly issuedAt?: number;
+	} = {}
 ): Promise<TrustedControlIdentity> {
 	const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
 	const { publicKey, privateKey } = await generateKeyPair('RS256', {
@@ -208,9 +218,10 @@ async function trustedControlIdentity(
 		);
 	});
 
-	const token = await new SignJWT(
-		additionalAudiences.length === 0 ? {} : { azp: audience }
-	)
+	const signed = await new SignJWT({
+		...token.claims,
+		...(additionalAudiences.length > 0 && { azp: audience })
+	})
 		.setProtectedHeader({ alg: 'RS256', kid: 'idp', typ: protectedType })
 		.setIssuer(issuer)
 		.setAudience(
@@ -219,11 +230,11 @@ async function trustedControlIdentity(
 				: [audience, ...additionalAudiences]
 		)
 		.setSubject('global-admin')
-		.setIssuedAt()
+		.setIssuedAt(token.issuedAt)
 		.setExpirationTime('5m')
 		.sign(privateKey);
 
-	return { token, rule, issuer, audience };
+	return { token: signed, rule, issuer, audience };
 }
 
 const controlRefreshKeys: RefreshKeyContext = {
@@ -1649,6 +1660,255 @@ describe('control refresh session pruning', () => {
 					}
 				]
 			}
+		});
+	});
+});
+
+interface BoundControlIdentity {
+	readonly identity: TrustedControlIdentity;
+	readonly nonce: string;
+	readonly binding: Readonly<Record<string, string>>;
+}
+
+async function boundControlIdentity(
+	targets: readonly string[],
+	options: {
+		readonly hasNonce?: boolean;
+		readonly issuedAt?: number;
+		readonly audience?: string;
+	} = {}
+): Promise<BoundControlIdentity> {
+	const seed = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+	const nonce = await subjectBindingNonce(targets, seed);
+	const identity = await trustedControlIdentity(
+		'JWT',
+		undefined,
+		[],
+		options.audience,
+		{
+			...(options.hasNonce !== false && { claims: { nonce } }),
+			...(options.issuedAt !== undefined && { issuedAt: options.issuedAt })
+		}
+	);
+
+	return {
+		identity,
+		nonce,
+		binding: {
+			cupboard_binding_seed: seed,
+			cupboard_binding_targets: JSON.stringify(targets)
+		}
+	};
+}
+
+function boundControlExchange(bound: BoundControlIdentity): Promise<Response> {
+	return postToken({
+		grant_type: tokenExchangeGrantType,
+		subject_token: bound.identity.token,
+		subject_token_type: subjectTokenTypeIdToken,
+		...bound.binding
+	});
+}
+
+async function consumedControlNonces(): Promise<
+	{ nonce: string; familyId: string | undefined; expiresAt: string }[]
+> {
+	const rows = await controlDatabase()
+		.select()
+		.from(d1Schema.controlConsumedSubjectNonce)
+		.orderBy(asc(d1Schema.controlConsumedSubjectNonce.nonce))
+		.all();
+
+	return rows.map((row) => ({ ...row, familyId: row.familyId ?? undefined }));
+}
+
+const nonceConsumedAt = new Date('2026-01-01T00:00:00.000Z');
+const nonceRetainedUntil = new Date(
+	nonceConsumedAt.getTime() + consumedSubjectNonceRetentionSeconds * 1000
+).toISOString();
+
+function unboundExchangeWarnings(
+	logs: readonly CapturedLog[]
+): { level: string; rule: unknown }[] {
+	return logs
+		.filter((entry) => entry.message === 'unbound subject token accepted')
+		.map((entry) => ({ level: entry.level, rule: entry.properties.rule }));
+}
+
+describe('control plane target-bound subject tokens', () => {
+	beforeEach(async () => {
+		vi.useFakeTimers({ now: nonceConsumedAt, toFake: ['Date'] });
+		await resetTestServer();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it('exchanges a nonce-bound token and records its nonce with the session', async () => {
+		const bound = await boundControlIdentity([
+			currentOrigin(),
+			`${currentOrigin()}/t/acme`
+		]);
+		const response = await boundControlExchange(bound);
+		const body = tokenResponseSchema.parse(await response.json());
+		const { families } = await controlRefreshRows();
+
+		expect({
+			status: response.status,
+			refreshToken: typeof body.refresh_token,
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			refreshToken: 'string',
+			consumed: [
+				{
+					nonce: bound.nonce,
+					familyId: families[0]?.id,
+					expiresAt: nonceRetainedUntil
+				}
+			]
+		});
+	});
+
+	it('records the nonce of an audience-bound exchange that starts no session', async () => {
+		const bound = await boundControlIdentity([currentOrigin()], {
+			audience: currentOrigin()
+		});
+		const response = await boundControlExchange(bound);
+		const body = tokenResponseSchema.parse(await response.json());
+
+		expect({
+			status: response.status,
+			refreshToken: body.refresh_token,
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			refreshToken: undefined,
+			consumed: [
+				{
+					nonce: bound.nonce,
+					familyId: undefined,
+					expiresAt: nonceRetainedUntil
+				}
+			]
+		});
+	});
+
+	it('refuses a second exchange of the same nonce-bound token', async () => {
+		const bound = await boundControlIdentity([currentOrigin()]);
+		const first = await boundControlExchange(bound);
+		const issued = await controlRefreshRows();
+		const replay = await boundControlExchange(bound);
+		const consumed = await consumedControlNonces();
+
+		expect({
+			first: first.status,
+			replay: await refusalOf(replay),
+			rows: await controlRefreshRows(),
+			consumed: consumed.map(({ nonce }) => nonce)
+		}).toStrictEqual({
+			first: StatusCodes.OK,
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-replayed'
+			},
+			rows: issued,
+			consumed: [bound.nonce]
+		});
+	});
+
+	it.each([
+		{
+			name: "a token bound to another deployment's URL",
+			targets: () => ['https://elsewhere.example.test'],
+			hasNonce: true
+		},
+		{
+			name: 'a target that is not in canonical form',
+			targets: () => [`${currentOrigin()}/`],
+			hasNonce: true
+		},
+		{
+			name: 'a token without a nonce claim',
+			targets: () => [currentOrigin()],
+			hasNonce: false
+		}
+	])('refuses $name', async ({ targets, hasNonce }) => {
+		const bound = await boundControlIdentity(targets(), { hasNonce });
+		const response = await boundControlExchange(bound);
+
+		expect({
+			refusal: await refusalOf(response),
+			rows: await controlRefreshRows(),
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-unbound'
+			},
+			rows: { families: [], members: [] },
+			consumed: []
+		});
+	});
+
+	it('refuses a nonce-bound token issued more than five minutes ago', async () => {
+		const bound = await boundControlIdentity([currentOrigin()], {
+			issuedAt: Math.floor(Date.now() / 1000) - 6 * 60
+		});
+		const response = await boundControlExchange(bound);
+
+		expect({
+			refusal: await refusalOf(response),
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-too-old'
+			},
+			consumed: []
+		});
+	});
+
+	it.each([
+		{ name: 'an unbound exchange and logs its rule', isAudienceBound: false },
+		{
+			name: 'an audience-bound exchange without a warning',
+			isAudienceBound: true
+		}
+	])('accepts $name', async ({ isAudienceBound }) => {
+		const identity = await trustedControlIdentity(
+			'JWT',
+			undefined,
+			[],
+			isAudienceBound ? currentOrigin() : undefined
+		);
+		const capture = startCapture();
+		let response: Response;
+
+		try {
+			response = await postToken({
+				grant_type: tokenExchangeGrantType,
+				subject_token: identity.token,
+				subject_token_type: subjectTokenTypeIdToken
+			});
+		} finally {
+			capture.stop();
+		}
+
+		expect({
+			status: response.status,
+			warnings: unboundExchangeWarnings(capture.logs),
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			warnings: isAudienceBound
+				? []
+				: [{ level: 'warning', rule: identity.rule }],
+			consumed: []
 		});
 	});
 });

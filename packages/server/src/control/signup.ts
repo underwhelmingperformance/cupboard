@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import {
 	type OidcAudience,
 	oidcAudienceSchema,
@@ -27,13 +28,23 @@ import {
 	SubjectTokenSubjectMissingError
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
-import { InboundTokenVerifier } from '../oidc/inbound-verifier.ts';
+import {
+	type InboundTokenLimits,
+	InboundTokenVerifier
+} from '../oidc/inbound-verifier.ts';
 import {
 	canUseLoopbackHttp,
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
 import { decodeInboundClaims, OidcDiscoveryStore } from '../oidc/oidc.ts';
+import {
+	logUnboundSubjectToken,
+	subjectBinding,
+	subjectTokenLimits
+} from '../oidc/subject-binding.ts';
 
+import { controlIssuer } from './control-plane.ts';
+import { recordControlSubjectNonce } from './control-subject-nonces.ts';
 import { claimGlobalAdmin } from './global-admin.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
@@ -56,7 +67,8 @@ const localDevelopmentVerifier = new InboundTokenVerifier(
 // and lets the principal obtain admin tokens at `/token`.
 export async function handleSignup(
 	request: Request,
-	env: Env
+	env: Env,
+	logger: Logger
 ): Promise<Response> {
 	const body = await parseFormBody(signupRequestSchema, request);
 
@@ -77,13 +89,30 @@ export async function handleSignup(
 		issuer,
 		audience,
 		body.subject_token,
-		isLoopbackAllowed
+		isLoopbackAllowed,
+		subjectTokenLimits(body)
 	);
 	const subject = verifiedSubject(verified);
+	const binding = await subjectBinding(verified, controlIssuer(request), body);
+	const database = controlDatabase(env);
+
+	switch (binding.kind) {
+		case 'unbound': {
+			logUnboundSubjectToken(logger);
+			break;
+		}
+		case 'nonce-bound': {
+			await recordControlSubjectNonce(database, binding.nonce);
+			break;
+		}
+		case 'audience-bound': {
+			break;
+		}
+	}
 
 	const now = new Date();
 	const { claimed: isClaimed } = await claimGlobalAdmin(
-		controlDatabase(env),
+		database,
 		{ issuer, subject, audience },
 		isoTimestamp(now)
 	);
@@ -176,12 +205,14 @@ async function verifySignupToken(
 	issuer: OidcIssuer,
 	audience: OidcAudience,
 	token: string,
-	canUseHttpLoopback: boolean
+	canUseHttpLoopback: boolean,
+	limits: InboundTokenLimits
 ): Promise<VerifiedOidcClaims> {
 	return (canUseHttpLoopback ? localDevelopmentVerifier : verifier).verify(
 		{ issuer, audience },
 		token,
-		new Set()
+		new Set(),
+		limits
 	);
 }
 

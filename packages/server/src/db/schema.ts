@@ -802,6 +802,20 @@ export const refreshTokenFamilies = sqliteTable(
 	]
 );
 
+// The nonce of each target-bound subject token that the tenant has accepted. The
+// tenant keeps each row until verification would refuse the token anyway, and
+// refuses a replay of the token until then.
+export const consumedSubjectNonces = sqliteTable(
+	'consumed_subject_nonce',
+	{
+		nonce: text('nonce').primaryKey(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('consumed_subject_nonce_expires_at_idx').on(table.expiresAt)
+	]
+);
+
 export const refreshTokenMembers = sqliteTable(
 	'refresh_session_member',
 	{

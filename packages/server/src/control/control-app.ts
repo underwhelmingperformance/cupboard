@@ -58,7 +58,9 @@ function buildControlApp() {
 	app.post('/revoke', (context) =>
 		controlRevoke(context.req.raw, context.env, context.get('logger'))
 	);
-	app.post('/signup', (context) => handleSignup(context.req.raw, context.env));
+	app.post('/signup', (context) =>
+		handleSignup(context.req.raw, context.env, context.get('logger'))
+	);
 	// Served uncached so a key rotation is visible across colos at once.
 	app.get('/.well-known/jwks.json', async (context) =>
 		context.json(await controlJwks(context.env), 200, {

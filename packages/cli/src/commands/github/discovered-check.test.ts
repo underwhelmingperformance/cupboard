@@ -3662,3 +3662,32 @@ it.each([
 		]);
 	}
 );
+
+it('warns about a repository rule whose audience is not the tenant URL', async () => {
+	const rule = oidcTrustSummarySchema.parse({
+		id: 'custom',
+		issuer: 'https://token.actions.githubusercontent.com',
+		audience: 'https://custom.example',
+		claims: { repository_id: '1234', ref: 'refs/heads/main' },
+		permittedGrants: [{ type: 'cupboard_wildcard' }],
+		disabled: false
+	});
+	const otherRepository = oidcTrustSummarySchema.parse({
+		...rule,
+		id: 'other-repository',
+		claims: { repository_id: '9999' }
+	});
+	const warnings: string[] = [];
+
+	await inspectDiscoveredGithubCheck(
+		tenant,
+		{ repo: repository },
+		capturingReporter([], [], warnings),
+		fixture({ rules: [rule, otherRepository] }).client,
+		defaultDependencies()
+	);
+
+	expect(warnings).toStrictEqual([
+		"Trust rule custom expects the audience https://custom.example, which is not the tenant URL. Jobs that request this audience without a target-bound nonce will fail if the tenant refuses unbound subject tokens. To keep these jobs working, set the rule's audience and the audience input or --audience option of each job that uses the rule to https://cupboard.supply/t/laney."
+	]);
+});

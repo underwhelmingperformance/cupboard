@@ -58,7 +58,8 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		},
 		{ id: 'tenant-retry-clock', state: 'complete', updatedAt: recorded },
 		{ id: 'tenant-schema-progress', state: 'complete', updatedAt: recorded },
-		{ id: 'control-refresh-sessions', state: 'complete', updatedAt: recorded }
+		{ id: 'control-refresh-sessions', state: 'complete', updatedAt: recorded },
+		{ id: 'control-subject-nonces', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -536,6 +537,10 @@ describe('runDeploymentStatus', () => {
 						},
 						{
 							label: 'Transition control-refresh-sessions',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition control-subject-nonces',
 							value: `complete ${since}`
 						},
 						{ label: `Transition ${row.id}`, value },

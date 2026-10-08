@@ -521,6 +521,34 @@ describe('maintenance eligibility projection', () => {
 			reconciledAt: now.toISOString()
 		});
 	});
+
+	it('uses the earliest consumed-nonce expiry as deferred work', async () => {
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.consumedSubjectNonces)
+				.values([
+					{
+						nonce: 'later',
+						expiresAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
+					},
+					{
+						nonce: 'sooner',
+						expiresAt: isoTimestampSchema.parse('2026-01-01T00:05:30.000Z')
+					}
+				])
+				.run();
+
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
+		});
+
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: '2026-01-01T00:05:30.000Z',
+			reconciledAt: now.toISOString()
+		});
+	});
 });
 
 describe('maintenance wake conflict resolution', () => {

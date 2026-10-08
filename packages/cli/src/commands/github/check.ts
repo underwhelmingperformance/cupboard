@@ -41,6 +41,7 @@ import {
 } from '../oidc-trust/github.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
 
+import { warnUnboundAudienceRules } from './audience-binding.ts';
 import {
 	githubBranchClaims,
 	githubMergedPullRequestClaims,
@@ -403,6 +404,8 @@ export async function runGithubCheck(
 
 		return activeMatcherRules(listed.rules);
 	});
+
+	warnUnboundAudienceRules(reporter, rules, identity, url);
 
 	// These requests model the quickstart's PR and branch publications. They
 	// cannot verify the arguments that a caller's workflow will actually use.
