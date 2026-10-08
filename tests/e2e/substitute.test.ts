@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { NarInfo } from '@cupboard/nix-store/narinfo';
@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { UploadVerificationFailedError } from '../../packages/cli/src/errors.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
+import { fingerprint, pseudoRandomBytes } from '../support/bytes.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import {
@@ -105,6 +106,37 @@ describe('Nix substitution', () => {
 				message: 'cupboard fixture\n',
 				nested: 'stored through nix-store dump\n'
 			});
+		}));
+
+	it('substitutes a path whose NAR spans several zstd frames', () =>
+		withHarness('cupboard-e2e-frames-', async (harness) => {
+			// A 40 MiB file gives a NAR of three zstd frames: two of 16 MiB and
+			// one of about 8 MiB. zstd cannot compress the bytes, so the upload
+			// also has several 8 MiB parts. Fixed bytes give every run the same
+			// store path, so repeated runs add nothing new to the host's store.
+			const contents = pseudoRandomBytes(40 * 1024 * 1024, 1);
+			const storePath = await withTemporaryDirectory(
+				'cupboard-e2e-frames-source-',
+				async (directory) => {
+					const source = path.join(directory, 'cupboard-multi-frame');
+					await mkdir(source);
+					await writeFile(path.join(source, 'payload.bin'), contents);
+
+					return harness.source.add(source);
+				}
+			);
+
+			await pushStorePaths(pushContext(harness), [storePath]);
+			await harness.target.realise(
+				storePath,
+				signedBy(harness, harness.publicKey)
+			);
+
+			const realised = await readFile(
+				path.join(harness.target.physicalPath(storePath), 'payload.bin')
+			);
+
+			expect(fingerprint(realised)).toStrictEqual(fingerprint(contents));
 		}));
 
 	it('substitutes an input-addressed path and its references under require-sigs', () =>

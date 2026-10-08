@@ -1065,6 +1065,39 @@ describe('reconcileBuild', () => {
 		});
 	});
 
+	it('cancels the NAR body when its upload fails', async () => {
+		const fixture = harness({
+			valid: [pathA],
+			actions: new Map([[pathA, 'upload' as const]])
+		});
+		const failure = new Error('upload refused');
+		const cancellations: unknown[] = [];
+
+		const result = await reconcileWith(fixture, {
+			targets: [target(pathA)],
+			client: {
+				...fixture.client,
+				uploadNar: () => Promise.reject(failure)
+			},
+			compressNar: () => ({
+				body: new ReadableStream<Uint8Array>({
+					cancel: (reason) => {
+						cancellations.push(reason);
+					}
+				}),
+				digest: () => ({ narHash, narSize: 4 })
+			})
+		});
+
+		expect({
+			cancellations,
+			failures: result.failures.map((entry) => entry.reason)
+		}).toStrictEqual({
+			cancellations: [failure],
+			failures: ['upload']
+		});
+	});
+
 	it('applies the declared TTL when it replaces a root', async () => {
 		const harnessed = harness({ valid: [pathA] });
 		const ttlSeconds = ttlSecondsSchema.parse(3600);

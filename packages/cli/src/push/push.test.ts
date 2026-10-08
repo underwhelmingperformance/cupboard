@@ -487,6 +487,55 @@ describe('runPush', () => {
 		]);
 	});
 
+	it('cancels the NAR body when its upload fails', async () => {
+		const failure = new Error('upload refused');
+		const cancellations: unknown[] = [];
+		let rejection: unknown;
+
+		try {
+			await runPush(publication([appPath]), reporter([]), {
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: () =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action: 'upload',
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString(),
+										uploadId: 'upload-app',
+										r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+										expiresAt: '2026-05-18T12:00:00.000Z'
+									}
+								]
+							})
+						),
+					uploadNar: () => Promise.reject(failure),
+					commit: unexpectedCommitCall,
+					setRoot: unexpectedSetRootCall
+				} satisfies PushClient,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: () => ({
+					body: new ReadableStream<Uint8Array>({
+						cancel: (reason) => {
+							cancellations.push(reason);
+						}
+					}),
+					digest: () => appDigest
+				})
+			});
+		} catch (error) {
+			rejection = error;
+		}
+
+		expect(rejection).toBeInstanceOf(PushIncompleteError);
+		expect(cancellations).toStrictEqual([failure]);
+	});
+
 	it('includes the run root in the negotiation request', async () => {
 		const negotiations: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
 
@@ -2435,7 +2484,7 @@ describe('runPush', () => {
 				runtime: { stage: 'upload', error: http(503) },
 				app: { stage: 'commit', error: new QuotaExceededError('over quota') }
 			},
-			failed: [failedPath('runtime', 'upload'), failedPath('app', 'commit')],
+			failed: [failedPath('app', 'commit'), failedPath('runtime', 'upload')],
 			expected: transientExitCode
 		}
 	] satisfies readonly {

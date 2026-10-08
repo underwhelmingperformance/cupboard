@@ -506,6 +506,34 @@ requests below are all under the tenant URL.
 4. Each upload worker compresses one NAR with zstd and uploads it straight to
    R2, using an S3 client. NAR bytes never pass through a Worker.
 
+   The compressed NAR has an independent zstd frame for every 16 MiB of NAR,
+   with the frame's content size in its header. Every frame starts at a fixed
+   position in the NAR and can be decoded on its own. A part of the upload can
+   therefore be regenerated from the store by recompressing only the frames that
+   it overlaps. Nix 2.35 [writes the same layout][nix-zstd-frames]. The CLI
+   compresses at zstd's default level and also adds a content checksum to each
+   frame, which Nix does not. Decoders that follow RFC 8878, including Nix's
+   decoder and the server's verifier, read the concatenated frames as one
+   stream. Node's zstd decompressor stops after the first frame.
+
+   Each upload worker compresses its NAR's frames one after another, each with
+   its own zstd stream, and writes the NAR's bytes into the current frame's
+   stream as it reads them. The frame lengths follow from the NAR size that the
+   CLI negotiated, and a NAR with more or fewer bytes fails its upload.
+
+   For each upload worker, compression keeps about C + 2P + 3O in memory:
+
+   - C, the zstd stream: about 4 MiB at the default level, including its 1 MiB
+     output buffer;
+   - P, a 1 MiB piece of NAR (two at a time);
+   - O, a 1 MiB chunk of compressed output (up to three).
+
+   This is about 9 MiB. lib-storage's `Upload` also keeps up to (q + 1) × (S +
+   O) for each upload worker: q = 4 parts in flight and the part being filled,
+   each up to S = 8 MiB plus one output chunk. That is up to 45 MiB.
+
+   [nix-zstd-frames]: https://github.com/NixOS/nix/pull/15550
+
    While the bytes are being sent, the CLI sends a `renew-uploads` message over
    the commit WebSocket every five minutes, if the server advertises that
    capability. For an upload of the same push that has no verdict and has not

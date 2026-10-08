@@ -36,7 +36,7 @@ import {
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
-import { compressNarToStream } from '../nix/blob.ts';
+import { compressNarToStream, sendCompressedNar } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import {
@@ -392,12 +392,18 @@ async function uploadAndAcknowledge(
 
 	if (decision.action === 'upload') {
 		try {
-			const upload = compressNar(createNarArchive(info.storePath));
+			const upload = compressNar(
+				createNarArchive(info.storePath),
+				info.narSize
+			);
 
 			const durationMs = await sendUpload(
 				options.session,
 				decision.uploadId,
-				() => options.client.uploadNar(decision.r2Key, upload.body),
+				() =>
+					sendCompressedNar(upload.body, (body) =>
+						options.client.uploadNar(decision.r2Key, body)
+					),
 				options.uploadClock
 			);
 			assertNarMetadata(info, upload.digest());

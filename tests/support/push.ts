@@ -146,7 +146,8 @@ function compressedNar(
 	entry: NegotiatedPath
 ): ReadableStream<Uint8Array> {
 	return compressNarToStream(
-		new NarArchive(context.store.physicalPath(entry.storePath))
+		new NarArchive(context.store.physicalPath(entry.storePath)),
+		entry.fields.narSize
 	).body;
 }
 

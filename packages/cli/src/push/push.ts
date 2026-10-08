@@ -94,7 +94,11 @@ import {
 import { classifyFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
 import { countingByteStream } from '../io/byte-stream.ts';
-import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
+import {
+	compressNarToStream,
+	type NarUploadStream,
+	sendCompressedNar
+} from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
@@ -245,7 +249,10 @@ const defaultWaitTimeoutSeconds = waitTimeoutSecondsSchema.parse(600);
 export type PushNarArchive =
 	ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
 
-export type CompressNar = (nar: PushNarArchive) => NarUploadStream;
+export type CompressNar = (
+	nar: PushNarArchive,
+	narSize: number
+) => NarUploadStream;
 
 type UploadDecisionOf<A extends UploadDecision['action']> = Extract<
 	UploadDecision,
@@ -1978,16 +1985,17 @@ async function streamNarUpload(
 		findNegotiatedPath(context.negotiated, decision)
 	);
 	const upload = context.compressNar(
-		context.createNarArchive(pathInfo.storePath)
+		context.createNarArchive(pathInfo.storePath),
+		pathInfo.narSize
 	);
 
 	const durationMs = await sendUpload(
 		context.session,
 		decision.uploadId,
 		() =>
-			context.client.uploadNar(
-				decision.r2Key,
-				countingByteStream(upload.body, context.onBytes)
+			sendCompressedNar(
+				countingByteStream(upload.body, context.onBytes),
+				(body) => context.client.uploadNar(decision.r2Key, body)
 			),
 		context.clock
 	);
@@ -2141,16 +2149,17 @@ async function redriveExpiredCommit(
 	// local NAR source, so `requireLocalPathInfo` rejects this recovery path.
 	const pathInfo = requireLocalPathInfo(resolved);
 	const upload = context.compressNar(
-		context.createNarArchive(pathInfo.storePath)
+		context.createNarArchive(pathInfo.storePath),
+		pathInfo.narSize
 	);
 
 	const durationMs = await sendUpload(
 		context.session,
 		fresh.uploadId,
 		() =>
-			context.client.uploadNar(
-				fresh.r2Key,
-				countingByteStream(upload.body, context.onBytes)
+			sendCompressedNar(
+				countingByteStream(upload.body, context.onBytes),
+				(body) => context.client.uploadNar(fresh.r2Key, body)
 			),
 		context.clock
 	);
