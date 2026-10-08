@@ -1,5 +1,5 @@
 import Cloudflare from 'cloudflare';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { fakeCliUi } from '../packages/cli-ui/src/testing.ts';
@@ -37,6 +37,7 @@ import {
 	summaryRows,
 	type TelemetryQuery,
 	type TimeWindow,
+	traceStartOf,
 	type TraceSummary,
 	triggerGroup,
 	windowForGitHubJob,
@@ -331,6 +332,17 @@ describe('parseTraceSummary', () => {
 			errors: ['boom']
 		});
 	});
+
+	it('labels a trace with no root span name', () => {
+		expect(parseTraceSummary(traceRow(0, 5000, false))).toStrictEqual({
+			traceId: 'trace-0',
+			bucket: '(no root span name)',
+			durationMs: 10,
+			spans: 0,
+			startMs: 5000,
+			errors: []
+		});
+	});
 });
 
 describe('parseSpanEvent', () => {
@@ -375,6 +387,11 @@ const noProgress = (): void => {
 	progress unobserved
 	*/
 };
+const ignoreWarning = (): void => {
+	/*
+	the spy counts the warning
+	*/
+};
 const timestampRowSchema = z.object({ timestamp: z.unknown() });
 const timestampOf = (row: unknown): number | undefined => {
 	const timestamp = timestampRowSchema.safeParse(row).data?.timestamp;
@@ -385,6 +402,73 @@ const timestampOf = (row: unknown): number | undefined => {
 const cursorRowSchema = z.object({ id: z.string() });
 const cursorOf = (row: unknown): string | undefined =>
 	cursorRowSchema.safeParse(row).data?.id;
+
+const traceRowSchema = z.object({
+	traceId: z.string(),
+	traceStartMs: z.number(),
+	traceDurationMs: z.number(),
+	rootSpanName: z.string().nullable(),
+	rootTransactionName: z.string().nullable()
+});
+
+type TraceRow = z.infer<typeof traceRowSchema>;
+
+/**
+ * Builds a row from the JSON that the traces view sends, so the row contains
+ * `null` exactly as the wire does. For a trace with no root span name, the
+ * view sends `null` as both the root transaction name and the root span name.
+ */
+function traceRow(
+	index: number,
+	traceStartMs: number,
+	hasRootSpanName = true
+): TraceRow {
+	const rootName = hasRootSpanName ? '"GET"' : 'null';
+
+	return traceRowSchema.parse(
+		JSON.parse(
+			`{"traceId":"trace-${String(index)}","traceStartMs":${String(traceStartMs)},"traceDurationMs":10,"rootSpanName":${rootName},"rootTransactionName":${rootName}}`
+		)
+	);
+}
+
+const tracesViewPageCap = 500;
+
+/**
+ * A traces view that behaves like Cloudflare's. It returns the rows that start
+ * strictly between `from` and `to`, newest first, and at most 500 of them
+ * whatever the requested limit. It rejects every query after the first
+ * `maxQueries`, so a walk that stops making progress fails instead of running
+ * forever.
+ */
+function fakeTracesView(
+	rows: readonly TraceRow[],
+	maxQueries: number
+): { readonly query: TelemetryQuery; readonly queryCount: () => number } {
+	const newestFirst = rows.toSorted(
+		(left, right) => right.traceStartMs - left.traceStartMs
+	);
+	let queries = 0;
+
+	const query: TelemetryQuery = ({ limit, timeframe }) => {
+		queries += 1;
+
+		if (queries > maxQueries) {
+			return Promise.reject(new RangeError('query budget exhausted'));
+		}
+
+		const page = newestFirst
+			.filter(
+				(row) =>
+					row.traceStartMs > timeframe.from && row.traceStartMs < timeframe.to
+			)
+			.slice(0, Math.min(limit, tracesViewPageCap));
+
+		return Promise.resolve({ traces: page });
+	};
+
+	return { query, queryCount: () => queries };
+}
 
 function tracePage(from: number, count: number): { timestamp: number }[] {
 	return Array.from({ length: count }, (_, index) => ({
@@ -415,9 +499,9 @@ describe('fetchPaged', () => {
 		expect({ rowCount: rows.length, timeframes }).toStrictEqual({
 			rowCount: 600,
 			timeframes: [
-				{ from: 0, to: 1000 },
-				{ from: 0, to: 501 },
-				{ from: 0, to: 401 }
+				{ from: -1, to: 1001 },
+				{ from: -1, to: 502 },
+				{ from: -1, to: 402 }
 			]
 		});
 	});
@@ -463,42 +547,134 @@ describe('fetchPaged', () => {
 				{ timestamp: 650, id: 'e' }
 			],
 			timeframes: [
-				{ from: 0, to: 1000 },
-				{ from: 0, to: 700 },
-				{ from: 0, to: 650 }
+				{ from: -1, to: 1001 },
+				{ from: -1, to: 701 },
+				{ from: -1, to: 651 }
 			]
 		});
 	});
 
-	it('stops on a burst page that yields nothing new', async () => {
-		const timeframes: { from: number; to: number }[] = [];
-		const burst = [
-			{ timestamp: 700, id: 'a' },
-			{ timestamp: 700, id: 'b' }
-		];
-		const query: TelemetryQuery = (parameters) => {
-			timeframes.push({ ...parameters.timeframe });
+	it.each([
+		{
+			label: 'the oldest trace has no root span name',
+			window: { from: 0, to: 20_000 },
+			rows: Array.from({ length: 1200 }, (_, index) =>
+				traceRow(index, 10_000 - index * 5, index !== 1199 && index % 7 !== 0)
+			),
+			queries: 5
+		},
+		{
+			label: 'one millisecond straddles the end of a page',
+			window: { from: 0, to: 20_000 },
+			rows: [
+				...Array.from({ length: 498 }, (_, index) =>
+					traceRow(index, 2000 - index)
+				),
+				...Array.from({ length: 4 }, (_, index) => traceRow(498 + index, 1000)),
+				...Array.from({ length: 10 }, (_, index) =>
+					traceRow(502 + index, 900 - index)
+				)
+			],
+			queries: 4
+		},
+		{
+			label: 'traces start on the first and last millisecond of the window',
+			window: { from: 1000, to: 2000 },
+			rows: [
+				traceRow(0, 2001),
+				traceRow(1, 2000),
+				traceRow(2, 1500),
+				traceRow(3, 1000),
+				traceRow(4, 999)
+			],
+			queries: 2
+		}
+	])(
+		'collects every trace once when $label',
+		async ({ window, rows, queries }) => {
+			const view = fakeTracesView(rows, 20);
 
-			return Promise.resolve({ traces: [...burst] });
-		};
+			const collected = await fetchPaged(
+				view.query,
+				'traces',
+				window,
+				traceStartOf,
+				undefined,
+				noProgress,
+				noSleep
+			);
 
-		const rows = await fetchPaged(
-			query,
+			expect({
+				rows: collected,
+				queries: view.queryCount()
+			}).toStrictEqual({
+				rows: rows
+					.filter(
+						(row) =>
+							row.traceStartMs >= window.from && row.traceStartMs <= window.to
+					)
+					.toSorted((left, right) => right.traceStartMs - left.traceStartMs),
+				queries
+			});
+		}
+	);
+
+	it('collects a trace without a readable start time once', async () => {
+		const unreadable = traceRow(2, 85);
+		const rows = [traceRow(0, 100), traceRow(1, 90), unreadable];
+		const view = fakeTracesView(rows, 20);
+		const startOf = (row: unknown): number | undefined =>
+			traceRowSchema.safeParse(row).data?.traceId === unreadable.traceId
+				? undefined
+				: traceStartOf(row);
+
+		const collected = await fetchPaged(
+			view.query,
 			'traces',
-			{ from: 0, to: 1000 },
-			timestampOf,
+			{ from: 0, to: 200 },
+			startOf,
 			undefined,
 			noProgress,
 			noSleep
 		);
 
-		expect({ rows, timeframes }).toStrictEqual({
-			rows: burst,
-			timeframes: [
-				{ from: 0, to: 1000 },
-				{ from: 0, to: 700 }
-			]
+		expect({ rows: collected, queries: view.queryCount() }).toStrictEqual({
+			rows,
+			queries: 8
 		});
+	});
+
+	it('warns when one millisecond has more traces than fit on one page', async () => {
+		const burst = Array.from({ length: 600 }, (_, index) =>
+			traceRow(index, 700)
+		);
+		const older = traceRow(600, 650);
+		const view = fakeTracesView([...burst, older], 20);
+		const warn = vi.spyOn(console, 'warn').mockImplementation(ignoreWarning);
+
+		try {
+			const rows = await fetchPaged(
+				view.query,
+				'traces',
+				{ from: 0, to: 1000 },
+				traceStartOf,
+				undefined,
+				noProgress,
+				noSleep
+			);
+
+			expect({
+				rows,
+				queries: view.queryCount(),
+				warnings: warn.mock.calls.length
+			}).toStrictEqual({
+				rows: [...burst.slice(0, tracesViewPageCap), older],
+				queries: 5,
+				warnings: 1
+			});
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it('retries a transient telemetry refusal and then succeeds', async () => {
@@ -589,7 +765,7 @@ describe('fetchPaged', () => {
 		const query: TelemetryQuery = (parameters) => {
 			limits.push(parameters.limit);
 
-			if (parameters.limit > 250) {
+			if (parameters.limit > 125) {
 				return Promise.reject(
 					new Error(
 						'invalid json response body reason: Unterminated string in JSON'
@@ -597,7 +773,7 @@ describe('fetchPaged', () => {
 				);
 			}
 
-			const page = parameters.timeframe.to === 1000 ? tracePage(1000, 10) : [];
+			const page = parameters.timeframe.to === 1001 ? tracePage(1000, 10) : [];
 
 			return Promise.resolve({ traces: page });
 		};
@@ -614,7 +790,7 @@ describe('fetchPaged', () => {
 
 		expect({ rowCount: rows.length, limits }).toStrictEqual({
 			rowCount: 10,
-			limits: [1000, 500, 250, 250]
+			limits: [500, 250, 125, 125]
 		});
 	});
 
@@ -641,7 +817,7 @@ describe('fetchPaged', () => {
 				noSleep
 			)
 		).rejects.toThrow('Unterminated string');
-		expect(limits).toStrictEqual([1000, 500, 250, 125, 62, 31, minPageLimit]);
+		expect(limits).toStrictEqual([500, 250, 125, 62, 31, minPageLimit]);
 	});
 
 	it('pages a same-millisecond burst by its smallest id', async () => {
@@ -692,10 +868,10 @@ describe('fetchPaged', () => {
 				{
 					offset: undefined,
 					direction: undefined,
-					timeframe: { from: 0, to: 1000 }
+					timeframe: { from: -1, to: 1001 }
 				},
-				{ offset: 'f', direction: 'next', timeframe: { from: 0, to: 1000 } },
-				{ offset: 'd', direction: 'next', timeframe: { from: 0, to: 1000 } }
+				{ offset: 'f', direction: 'next', timeframe: { from: -1, to: 1001 } },
+				{ offset: 'd', direction: 'next', timeframe: { from: -1, to: 1001 } }
 			]
 		});
 	});
@@ -807,7 +983,7 @@ describe('fetchPaged', () => {
 		const query: TelemetryQuery = (parameters) => {
 			requests.push({ offset: parameters.offset, to: parameters.timeframe.to });
 
-			if (parameters.timeframe.to === 1000) {
+			if (parameters.timeframe.to === 1001) {
 				return Promise.resolve({
 					events: {
 						events: [
@@ -821,7 +997,7 @@ describe('fetchPaged', () => {
 			return Promise.resolve({
 				events: {
 					events:
-						parameters.timeframe.to === 699 && parameters.offset === undefined
+						parameters.timeframe.to === 700 && parameters.offset === undefined
 							? [{ timestamp: 650, id: 'e' }]
 							: []
 				}
@@ -845,10 +1021,10 @@ describe('fetchPaged', () => {
 				{ timestamp: 650, id: 'e' }
 			],
 			requests: [
-				{ offset: undefined, to: 1000 },
-				{ offset: 'f', to: 1000 },
-				{ offset: undefined, to: 699 },
-				{ offset: 'e', to: 699 }
+				{ offset: undefined, to: 1001 },
+				{ offset: 'f', to: 1001 },
+				{ offset: undefined, to: 700 },
+				{ offset: 'e', to: 700 }
 			]
 		});
 	});

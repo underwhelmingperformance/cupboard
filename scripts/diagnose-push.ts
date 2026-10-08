@@ -366,6 +366,11 @@ export function bucketForLog(
 	return message;
 }
 
+// Traces with no root span name, whether the root transaction and span names
+// are `null`, absent or empty, are grouped under this label. The traces view
+// sends `null` for both names on some traces.
+const noRootSpanNameBucket = '(no root span name)';
+
 export function bucketForTrace(rootTransactionName: string): string {
 	const firstSpace = rootTransactionName.indexOf(' ');
 
@@ -429,8 +434,8 @@ const eventSchema = z.object({
 
 const traceSchema = z.object({
 	traceId: z.string(),
-	rootTransactionName: z.string().optional(),
-	rootSpanName: z.string().optional(),
+	rootTransactionName: z.string().nullish(),
+	rootSpanName: z.string().nullish(),
 	traceDurationMs: z.number(),
 	spans: z.number().optional(),
 	traceStartMs: z.number(),
@@ -507,12 +512,12 @@ export function parseTraceSummary(trace: unknown): TraceSummary | undefined {
 		return undefined;
 	}
 
-	const named = parsed.data.rootTransactionName ?? parsed.data.rootSpanName;
-	const transaction = named === undefined || named === '' ? 'unknown' : named;
+	const named =
+		parsed.data.rootTransactionName ?? parsed.data.rootSpanName ?? '';
 
 	return {
 		traceId: parsed.data.traceId,
-		bucket: bucketForTrace(transaction),
+		bucket: named === '' ? noRootSpanNameBucket : bucketForTrace(named),
 		durationMs: parsed.data.traceDurationMs,
 		spans: parsed.data.spans ?? 0,
 		startMs: parsed.data.traceStartMs,
@@ -1556,8 +1561,12 @@ function isTruncatedBodyError(error: unknown): boolean {
 // after a run of clean pages so the sparse remainder of a window is not walked
 // one tiny page at a time once a dense burst is behind it.
 class AdaptivePageLimit {
-	private limit = pageLimit;
+	private limit: number;
 	private cleanPages = 0;
+
+	constructor(private readonly ceiling: number = pageLimit) {
+		this.limit = ceiling;
+	}
 
 	value(): number {
 		return this.limit;
@@ -1578,7 +1587,7 @@ class AdaptivePageLimit {
 
 	// A page parsed cleanly. After a short run of them, ease the limit back up.
 	relax(): void {
-		if (this.limit >= pageLimit) {
+		if (this.limit >= this.ceiling) {
 			return;
 		}
 
@@ -1588,9 +1597,14 @@ class AdaptivePageLimit {
 			return;
 		}
 
-		this.limit = Math.min(pageLimit, this.limit * 2);
+		this.limit = Math.min(this.ceiling, this.limit * 2);
 		this.cleanPages = 0;
 	}
+}
+
+interface FetchedPage {
+	readonly response: TelemetryPageResponse;
+	readonly limit: number;
 }
 
 async function queryPageWithRetry(
@@ -1598,15 +1612,16 @@ async function queryPageWithRetry(
 	parameters: Omit<Parameters<TelemetryQuery>[0], 'limit'>,
 	pageSize: AdaptivePageLimit,
 	sleep: Sleep
-): Promise<TelemetryPageResponse> {
+): Promise<FetchedPage> {
 	let attempt = 0;
 
 	for (;;) {
 		try {
-			const response = await query({ ...parameters, limit: pageSize.value() });
+			const limit = pageSize.value();
+			const response = await query({ ...parameters, limit });
 			pageSize.relax();
 
-			return response;
+			return { response, limit };
 		} catch (error) {
 			// A truncation retry refetches the same page smaller; it is not a
 			// transient refusal, so it does not spend the retry budget.
@@ -1676,6 +1691,22 @@ function oldestTimestamp(
 	return oldest;
 }
 
+// The telemetry API leaves out rows at exactly `from` and at exactly `to`. A
+// `TimeWindow` includes both ends, so the query widens it by a millisecond on
+// each side.
+function apiTimeframe(window: TimeWindow): {
+	readonly from: number;
+	readonly to: number;
+} {
+	return { from: window.from - 1, to: window.to + 1 };
+}
+
+// The traces view returns at most 500 rows a page, whatever the requested
+// limit. This cap was observed and is not documented. The timeframe walk asks
+// for 500, so a page with `limit` rows shows that the view may have had more
+// rows than it returned.
+const timeframePageLimit = 500;
+
 async function fetchByCursor(
 	query: TelemetryQuery,
 	view: 'events' | 'traces',
@@ -1694,11 +1725,11 @@ async function fetchByCursor(
 	let offset: string | undefined;
 
 	for (;;) {
-		const response = await queryPageWithRetry(
+		const { response } = await queryPageWithRetry(
 			query,
 			{
 				view,
-				timeframe: { from: window.from, to: upper },
+				timeframe: apiTimeframe({ from: window.from, to: upper }),
 				...(offset !== undefined && {
 					offset,
 					offsetDirection: 'next' as const
@@ -1768,15 +1799,117 @@ async function fetchByCursor(
 	return rows;
 }
 
-// Walks a telemetry view a page at a time. A view whose rows provide a cursor
-// ID pages by cursor; otherwise the walk steps the timeframe's upper bound
-// back to the oldest row's own millisecond: stepping past it would drop the
-// rows sharing that millisecond which did not fit the page, exactly the
-// bursts a push incident produces. The boundary millisecond is re-read on
-// the next page and its already-collected rows dropped by content. The walk
-// ends on an empty page or one that yields nothing new; the view caps a page
-// below the requested limit, so a short page alone does not mean the window
-// is drained.
+// Pages a view without a cursor by moving the timeframe's upper bound down to
+// the millisecond of the oldest row on each page. The rows in that
+// millisecond may not all fit on the page, so the next page reads the
+// millisecond again and drops the rows that the walk has already collected.
+// After a page with nothing new, the walk moves the bound one millisecond
+// lower. If that page is full, the millisecond had more rows than one page,
+// and the walk warns that some were lost.
+//
+// The walk ends on an empty page, when the bound passes `window.from`, or in
+// session mode at the first gap of `stopAtGapMs`. The 500-row cap is
+// observed, not documented, so the walk does not treat a short page as the
+// end of the window.
+async function fetchByTimeframe(
+	query: TelemetryQuery,
+	view: 'events' | 'traces',
+	window: TimeWindow,
+	timestampOf: (row: unknown) => number | undefined,
+	onPage: PageProgress,
+	sleep: Sleep,
+	stopAtGapMs: number | undefined
+): Promise<unknown[]> {
+	const rows: unknown[] = [];
+	const timestamps: number[] = [];
+	const pageSize = new AdaptivePageLimit(timeframePageLimit);
+	let upper = window.to;
+	let boundary = new Set<string>();
+	// A row without a readable timestamp cannot place the bound, and any later
+	// page may return it again. The walk keeps such rows for its whole length,
+	// so it collects each of them once.
+	const unreadable = new Set<string>();
+
+	while (upper >= window.from) {
+		const { response, limit } = await queryPageWithRetry(
+			query,
+			{
+				view,
+				timeframe: apiTimeframe({ from: window.from, to: upper })
+			},
+			pageSize,
+			sleep
+		);
+
+		const page = pageRowsOf(response, view);
+
+		if (page.length === 0) {
+			break;
+		}
+
+		const fresh = page.filter((row) => {
+			const key = JSON.stringify(row);
+
+			return !boundary.has(key) && !unreadable.has(key);
+		});
+
+		if (fresh.length === 0) {
+			if (page.length >= limit) {
+				// A full page of rows from one millisecond means that the millisecond
+				// has more rows than one page, and the view offers no cursor into it.
+				console.warn(
+					`telemetry ${view} truncated at ${String(upper)}: a same-millisecond burst exceeds one page`
+				);
+			}
+
+			upper -= 1;
+			boundary = new Set();
+			continue;
+		}
+
+		rows.push(...fresh);
+		onPage(fresh.length);
+
+		if (stopAtGapMs !== undefined) {
+			for (const row of fresh) {
+				const at = timestampOf(row);
+
+				if (at !== undefined) {
+					timestamps.push(at);
+				}
+			}
+
+			if (hasSessionBoundary(timestamps, stopAtGapMs)) {
+				break;
+			}
+		}
+
+		for (const row of fresh) {
+			if (timestampOf(row) === undefined) {
+				unreadable.add(JSON.stringify(row));
+			}
+		}
+
+		const oldest = oldestTimestamp(fresh, timestampOf) ?? upper;
+		const atBoundary = fresh
+			.filter((row) => timestampOf(row) === oldest)
+			.map((row) => JSON.stringify(row));
+
+		// At a repeated upper bound the boundary set grows instead of resetting,
+		// so the walk either moves the bound lower or reaches a page with nothing
+		// new.
+		boundary = new Set(
+			oldest === upper ? [...boundary, ...atBoundary] : atBoundary
+		);
+		upper = oldest;
+	}
+
+	return rows;
+}
+
+// Walks a telemetry view a page at a time, newest rows first. A view whose
+// rows have a cursor ID pages by cursor, and any other view pages by
+// timeframe.
 export async function fetchPaged(
 	query: TelemetryQuery,
 	view: 'events' | 'traces',
@@ -1804,80 +1937,15 @@ export async function fetchPaged(
 		);
 	}
 
-	const rows: unknown[] = [];
-	const timestamps: number[] = [];
-	const pageSize = new AdaptivePageLimit();
-	let upper = window.to;
-	let boundary = new Set<string>();
-
-	for (;;) {
-		const response = await queryPageWithRetry(
-			query,
-			{
-				view,
-				timeframe: { from: window.from, to: upper }
-			},
-			pageSize,
-			sleep
-		);
-
-		const page = pageRowsOf(response, view);
-		const fresh = page.filter((row) => !boundary.has(JSON.stringify(row)));
-
-		if (fresh.length === 0) {
-			if (page.length > 0) {
-				// The whole page sits at one already-collected millisecond: a burst
-				// larger than one page, which the view offers no cursor into. Report
-				// so rather than silently presenting the walk as complete.
-				console.warn(
-					`telemetry ${view} truncated at ${String(upper)}: a same-millisecond burst exceeds one page`
-				);
-			}
-
-			break;
-		}
-
-		rows.push(...fresh);
-		onPage(fresh.length);
-
-		if (stopAtGapMs !== undefined) {
-			for (const row of fresh) {
-				const at = timestampOf(row);
-
-				if (at !== undefined) {
-					timestamps.push(at);
-				}
-			}
-
-			if (hasSessionBoundary(timestamps, stopAtGapMs)) {
-				break;
-			}
-		}
-
-		const oldest = Math.min(...fresh.map((row) => timestampOf(row) ?? upper));
-
-		if (!Number.isFinite(oldest)) {
-			break;
-		}
-
-		const atBoundary = fresh
-			.filter((row) => timestampOf(row) === oldest)
-			.map((row) => JSON.stringify(row));
-
-		// At a repeated upper bound the boundary set grows instead of resetting,
-		// so the walk always either moves back in time or converges on the
-		// nothing-new break above.
-		boundary = new Set(
-			oldest === upper ? [...boundary, ...atBoundary] : atBoundary
-		);
-		upper = oldest;
-
-		if (upper <= window.from) {
-			break;
-		}
-	}
-
-	return rows;
+	return fetchByTimeframe(
+		query,
+		view,
+		window,
+		timestampOf,
+		onPage,
+		sleep,
+		stopAtGapMs
+	);
 }
 
 export function sliceWindow(window: TimeWindow): TimeWindow[] {
@@ -1944,10 +2012,18 @@ interface ViewProgress {
 	slicesDone: number;
 }
 
+const traceStartSchema = z.object({ traceStartMs: z.number() });
+
+// The traces walk reads only the start time, so a trace that
+// `parseTraceSummary` rejects still moves the bound below it.
+export function traceStartOf(row: unknown): number | undefined {
+	return traceStartSchema.safeParse(row).data?.traceStartMs;
+}
+
 const timestampOf: Record<TelemetryView, (row: unknown) => number | undefined> =
 	{
 		events: (row) => eventSchema.safeParse(row).data?.timestamp,
-		traces: (row) => traceSchema.safeParse(row).data?.traceStartMs
+		traces: traceStartOf
 	};
 
 const eventCursorSchema = z.object({
