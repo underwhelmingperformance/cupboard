@@ -1,4 +1,4 @@
-import { openBrowser } from '@cupboard/cli-ui';
+import { type CliUi, openBrowser } from '@cupboard/cli-ui';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	subjectTokenTypeIdToken,
@@ -13,11 +13,10 @@ import {
 	type SignInMethod
 } from '../auth/bound-sign-in.ts';
 import {
-	DeviceAuthorizationRequestError,
-	deviceLogin,
 	discoverOidcLogin,
 	loopbackLogin,
-	type LoopbackOptions
+	type LoopbackOptions,
+	type PastedRedirectReader
 } from '../auth/oidc-login.ts';
 import {
 	sessionFromTokenResponse,
@@ -37,57 +36,10 @@ import {
 } from '../deploy/cloudflare-oauth.ts';
 import { CliError } from '../errors.ts';
 
-export class DeviceGrantNotEnabledError extends CliError {
-	constructor(options: { readonly cause: unknown }) {
-		super(
-			'Cloudflare refused to start a device login for cupboard. Enable the ' +
-				'device code grant type on the cupboard OAuth client, or log in ' +
-				'from a machine with a browser.',
-			options
-		);
-		this.name = 'DeviceGrantNotEnabledError';
-	}
-}
-
-/**
- * Translate a refused device authorization into actionable guidance when the
- * built-in Cloudflare client is in use; other clients and errors pass through.
- */
-export function mapDeviceLoginError(error: unknown, clientId: string): unknown {
-	if (
-		clientId === cloudflareOauthClientId &&
-		error instanceof DeviceAuthorizationRequestError &&
-		[400, 401, 403].includes(error.status)
-	) {
-		return new DeviceGrantNotEnabledError({ cause: error });
-	}
-
-	return error;
-}
-
 export function loginScopeForClient(clientId: string): string | undefined {
 	return clientId === cloudflareOauthClientId
 		? signInScopes.join(' ')
 		: undefined;
-}
-
-function deviceLoginInstruction(verification: {
-	readonly userCode: string;
-	readonly verificationUri: string;
-	readonly verificationUriComplete?: string;
-}): string {
-	if (verification.verificationUriComplete !== undefined) {
-		return (
-			`To authorise, open ${verification.verificationUriComplete} ` +
-			`(the code ${verification.userCode} is filled in), then return here. ` +
-			'Waiting for authorisation…'
-		);
-	}
-
-	return (
-		`To authorise, open ${verification.verificationUri} and enter the code ` +
-		`${verification.userCode}, then return here. Waiting for authorisation…`
-	);
 }
 
 export class LoginIdTokenMissingError extends CliError {
@@ -115,6 +67,11 @@ export interface IdentityLoginOptions {
 export interface IdentityLoginDependencies {
 	readonly openBrowser: (url: string) => void;
 	readonly info: (message: string) => void;
+	/**
+	 * The prompt for the redirect URL of a headless sign-in. Without it, a
+	 * headless sign-in completes only from the loopback redirect.
+	 */
+	readonly readPastedRedirect?: PastedRedirectReader;
 	readonly signal?: AbortSignal;
 	/**
 	The `fetch` for the identity provider's endpoints.
@@ -124,6 +81,71 @@ export interface IdentityLoginDependencies {
 	The loopback ports to try for the redirect, in place of the defaults.
 	*/
 	readonly loopbackPorts?: readonly number[];
+}
+
+const waitingMessage = 'Waiting for you to authorise in your browser…';
+
+/**
+ * Returns a redirect-URL reader for an interactive run, or `undefined` when
+ * prompting is unavailable.
+ */
+export function pastedRedirectReader(
+	ui: Pick<CliUi, 'interactive' | 'editText'>
+): PastedRedirectReader | undefined {
+	if (!ui.interactive) {
+		return undefined;
+	}
+
+	return async (signal, refusal) => {
+		const edit = await ui.editText({
+			message:
+				refusal === undefined
+					? "Paste the URL from the browser's address bar"
+					: `That URL is not the redirect for this sign-in (${refusal.problem}). Paste the URL from the browser's address bar after you authorise`,
+			problem: (value) =>
+				URL.canParse(value.trim())
+					? undefined
+					: 'Paste the whole URL, starting with http.',
+			signal
+		});
+
+		return edit.kind === 'set' ? edit.value : undefined;
+	};
+}
+
+interface AuthorizationPrompt {
+	readonly openBrowser: (url: string) => void;
+	readonly readPastedRedirect?: PastedRedirectReader;
+}
+
+function authorizationPrompt(
+	options: IdentityLoginOptions,
+	dependencies: IdentityLoginDependencies
+): AuthorizationPrompt {
+	if (options.headless !== true) {
+		return {
+			openBrowser: (target) => {
+				dependencies.openBrowser(target);
+				dependencies.info(waitingMessage);
+			}
+		};
+	}
+
+	const read = dependencies.readPastedRedirect;
+
+	return {
+		openBrowser: (target) => {
+			dependencies.info(`To sign in, open this URL in a browser: ${target}`);
+			dependencies.info(
+				read === undefined
+					? waitingMessage
+					: 'After you authorise, the browser opens a localhost URL. If ' +
+							'that page does not load, copy the URL from the address bar ' +
+							'and paste it here.'
+			);
+		},
+		readPastedRedirect: read
+	};
 }
 
 /**
@@ -138,12 +160,14 @@ export function isCloudflareSignIn(options: IdentityLoginOptions): boolean {
 }
 
 /**
- * Returns the sign-in method for the issuer and client in `options`. Each
- * sign-in opens a browser. With the built-in client and the Cloudflare issuer,
- * it uses Cloudflare's fixed endpoints, and otherwise it discovers the issuer's
- * endpoints. With `headless`, it uses the device flow, which cannot request a
- * nonce. A Cloudflare sign-in does not request `offline_access`, so it receives
- * no refresh token, and nothing keeps its grant.
+ * Returns the sign-in method for the issuer and client in `options`. With the
+ * built-in client and the Cloudflare issuer, it uses Cloudflare's fixed
+ * endpoints, and otherwise it discovers the issuer's endpoints. By default, a
+ * sign-in opens a browser at the authorisation URL. With `headless`, the CLI
+ * prints that URL instead, and the sign-in completes from the loopback redirect
+ * or from the redirect URL that the user pastes, whichever arrives first. A Cloudflare sign-in does not
+ * request `offline_access`, so it receives no refresh token, and nothing keeps
+ * its grant.
  */
 export function identitySignIn(
 	options: IdentityLoginOptions,
@@ -152,48 +176,16 @@ export function identitySignIn(
 	const { signal } = dependencies;
 	const fetcher = dependencies.fetcher ?? fetch;
 	const scope = loginScopeForClient(options.clientId);
-
-	if (options.headless === true) {
-		return {
-			bindsNonce: false,
-			signIn: async () => {
-				const endpoints = await discoverOidcLogin(
-					options.oidcIssuer,
-					fetcher,
-					signal
-				);
-
-				try {
-					return await deviceLogin({
-						endpoints,
-						clientId: options.clientId,
-						scope,
-						prompt: (verification) => {
-							dependencies.info(deviceLoginInstruction(verification));
-						},
-						signal
-					});
-				} catch (error) {
-					throw mapDeviceLoginError(error, options.clientId);
-				}
-			}
-		};
-	}
-
+	const prompt = authorizationPrompt(options, dependencies);
 	const isCupboardClient = options.clientId === cloudflareOauthClientId;
-	const browserPrompt = (target: string): void => {
-		dependencies.openBrowser(target);
-		dependencies.info('Waiting for you to authorise in your browser…');
-	};
 
 	if (isCloudflareSignIn(options)) {
 		return {
-			bindsNonce: true,
 			signIn: async (nonce) => {
 				const grant = await cloudflareLogin({
 					nonce,
 					scopes: signInScopes,
-					openBrowser: browserPrompt,
+					...prompt,
 					fetcher,
 					...(dependencies.loopbackPorts !== undefined && {
 						ports: dependencies.loopbackPorts
@@ -211,7 +203,6 @@ export function identitySignIn(
 	}
 
 	return {
-		bindsNonce: true,
 		signIn: async (nonce) => {
 			const endpoints = await discoverOidcLogin(
 				options.oidcIssuer,
@@ -228,7 +219,7 @@ export function identitySignIn(
 				clientId: options.clientId,
 				scope,
 				nonce,
-				openBrowser: browserPrompt,
+				...prompt,
 				fetcher,
 				...(loopback !== undefined && { loopback }),
 				signal
@@ -325,8 +316,9 @@ export function identityLoginOptions(
 		).default(cloudflareOauthClientId),
 		new Option(
 			'--headless',
-			'sign in with a code in a browser on another device, instead of opening ' +
-				'one here (for SSH or containers)'
+			'print the sign-in URL instead of opening a browser, and accept the ' +
+				'redirect URL pasted from a browser on another machine (for SSH or ' +
+				'containers)'
 		)
 	];
 
@@ -356,7 +348,8 @@ export function registerLoginCommand(
 	}
 
 	command.action(async (url: URL, options: IdentityLoginOptions) => {
-		const reporter = commandUi(program, programOptions).reporter();
+		const ui = commandUi(program, programOptions);
+		const reporter = ui.reporter();
 		const client = CupboardClient.fromUrl(url, {
 			cache: { kind: 'default' },
 			signal: programOptions.signal
@@ -373,6 +366,7 @@ export function registerLoginCommand(
 				info: (message) => {
 					reporter.info(message);
 				},
+				readPastedRedirect: pastedRedirectReader(ui),
 				signal: programOptions.signal
 			})
 		);

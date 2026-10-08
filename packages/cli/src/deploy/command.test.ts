@@ -91,7 +91,6 @@ function signInWith(
 	onSignIn?: () => void
 ): BoundSignIn {
 	return new BoundSignIn({
-		bindsNonce: true,
 		signIn: (nonce) => {
 			onSignIn?.();
 			const json = JSON.stringify({

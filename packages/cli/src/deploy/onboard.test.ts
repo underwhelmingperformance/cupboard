@@ -522,7 +522,6 @@ function scriptedSignIn(
 	const clock = { nowMs: Date.parse('2026-09-25T12:00:00Z') };
 	const signIn = new BoundSignIn(
 		{
-			bindsNonce: true,
 			signIn: (nonce) => {
 				const idToken = idTokenWith({
 					...claims,

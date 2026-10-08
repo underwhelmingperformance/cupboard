@@ -30,7 +30,8 @@ import { authExitCode, CliError, CliUsageError } from '../errors.ts';
 import {
 	type IdentityLoginOptions,
 	identityLoginOptions,
-	identitySignIn
+	identitySignIn,
+	pastedRedirectReader
 } from './login.ts';
 
 export interface WhoamiOptions extends IdentityLoginOptions {
@@ -372,7 +373,8 @@ export function registerWhoamiCommand(
 		)
 		.action(async (url: URL | undefined, options: WhoamiOptions) => {
 			const input = whoamiInput(url, options);
-			const reporter = commandUi(program, programOptions).reporter();
+			const ui = commandUi(program, programOptions);
+			const reporter = ui.reporter();
 
 			await runWhoami(input, reporter, {
 				listSessions: listCachedSessions,
@@ -388,6 +390,7 @@ export function registerWhoamiCommand(
 							info: (message) => {
 								reporter.info(message);
 							},
+							readPastedRedirect: pastedRedirectReader(ui),
 							signal: programOptions.signal
 						})
 					).idTokenFor([]);

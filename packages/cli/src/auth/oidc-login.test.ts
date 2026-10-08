@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { StatusCodes } from 'http-status-codes';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { CliAbortError } from '../errors.ts';
@@ -10,21 +10,20 @@ import { RedirectingOrigin } from '../redirecting-origin.test-support.ts';
 
 import {
 	createPkce,
-	deviceLogin,
 	discoverOidcLogin,
 	isRedirectStatus,
 	LoginTimeoutError,
 	loopbackLogin,
 	obtainAuthorizationCode,
 	type OidcLoginEndpoints,
-	OidcLoginError
+	OidcLoginError,
+	type PastedRedirectReader
 } from './oidc-login.ts';
 
 const endpoints: OidcLoginEndpoints = {
 	issuer: 'https://idp.example.com',
 	authorizationEndpoint: 'https://idp.example.com/authorize',
-	tokenEndpoint: 'https://idp.example.com/token',
-	deviceAuthorizationEndpoint: 'https://idp.example.com/device'
+	tokenEndpoint: 'https://idp.example.com/token'
 };
 
 const providerCapabilities = {
@@ -37,12 +36,6 @@ const discoveryCapabilities = {
 	...providerCapabilities,
 	authorization_response_iss_parameter_supported: true
 } as const;
-
-function pendingPromise(): Promise<never> {
-	return new Promise<never>(() => {
-		// Intentionally pending.
-	});
-}
 
 function requestBody(init: RequestInit | undefined): URLSearchParams {
 	return new URLSearchParams(typeof init?.body === 'string' ? init.body : '');
@@ -124,15 +117,14 @@ describe('discoverOidcLogin', () => {
 		expect(caught).toBeInstanceOf(RemoteBodyTooLargeError);
 	});
 
-	it('reads the authorization, token and device endpoints', async () => {
+	it('reads the authorization and token endpoints', async () => {
 		const discovered = await discoverOidcLogin('https://idp.example.com/', () =>
 			Promise.resolve(
 				Response.json({
 					issuer: 'https://idp.example.com/',
 					...discoveryCapabilities,
 					authorization_endpoint: endpoints.authorizationEndpoint,
-					token_endpoint: endpoints.tokenEndpoint,
-					device_authorization_endpoint: endpoints.deviceAuthorizationEndpoint
+					token_endpoint: endpoints.tokenEndpoint
 				})
 			)
 		);
@@ -404,8 +396,7 @@ describe('discoverOidcLogin', () => {
 						issuer: 'https://idp.example.com',
 						...discoveryCapabilities,
 						authorization_endpoint: endpoints.authorizationEndpoint,
-						token_endpoint: 'http://idp.example.com/token',
-						device_authorization_endpoint: endpoints.deviceAuthorizationEndpoint
+						token_endpoint: 'http://idp.example.com/token'
 					})
 				);
 			})
@@ -868,274 +859,303 @@ describe('obtainAuthorizationCode', () => {
 	);
 });
 
-describe('deviceLogin', () => {
-	it('polls through pending and slow_down to an id_token', async () => {
-		const prompts: {
-			userCode: string;
-			verificationUri: string;
-			verificationUriComplete?: string;
-		}[] = [];
-		let polls = 0;
-		const fetcher: typeof fetch = (input) => {
-			if (input === endpoints.deviceAuthorizationEndpoint) {
-				return Promise.resolve(
-					Response.json({
-						device_code: 'dev-code',
-						user_code: 'WXYZ-1234',
-						verification_uri: 'https://idp.example.com/activate',
-						interval: 1
-					})
-				);
-			}
+// The redirect URL for the authorisation URL `target`, as the issuer sends it,
+// after `change`.
+function redirectFor(
+	target: string,
+	change?: (callback: URL, state: string) => void
+): string {
+	const { redirectUri, state } = authorizeParameters(target);
+	const callback = new URL(redirectUri);
+	callback.searchParams.set('code', 'pasted-code');
+	callback.searchParams.set('state', state);
+	callback.searchParams.set('iss', endpoints.issuer);
+	change?.(callback, state);
 
-			polls += 1;
+	return callback.href;
+}
 
-			if (polls === 1) {
-				return Promise.resolve(
-					Response.json({ error: 'authorization_pending' }, { status: 400 })
-				);
-			}
+describe('pasted redirect', () => {
+	interface PastingUser {
+		readonly openBrowser: (target: string) => void;
+		readonly readPastedRedirect: PastedRedirectReader;
+		readonly promptSignals: AbortSignal[];
+	}
 
-			if (polls === 2) {
-				return Promise.resolve(
-					Response.json({ error: 'slow_down' }, { status: 400 })
-				);
-			}
+	// Opens no browser. The paste prompt waits for the authorisation URL and
+	// returns what `paste` builds from it, as a user would paste it.
+	function pastingUser(
+		paste: (authorize: string) => Promise<string | undefined>
+	): PastingUser {
+		const opened = Promise.withResolvers<string>();
+		const promptSignals: AbortSignal[] = [];
 
-			return Promise.resolve(Response.json({ id_token: 'owner.id.token' }));
+		return {
+			openBrowser: (target) => {
+				opened.resolve(target);
+			},
+			readPastedRedirect: async (signal) => {
+				promptSignals.push(signal);
+
+				return paste(await opened.promise);
+			},
+			promptSignals
 		};
+	}
 
-		const idToken = await deviceLogin({
+	it('completes the sign-in with a pasted redirect URL', async () => {
+		const user = pastingUser((target) =>
+			Promise.resolve(`  ${redirectFor(target)}\n`)
+		);
+		const codes: (string | null)[] = [];
+
+		const idToken = await loopbackLogin({
 			endpoints,
 			clientId: 'client-123',
-			prompt: (verification) => {
-				prompts.push(verification);
-			},
-			fetcher,
-			sleep: () => Promise.resolve()
+			nonce: 'nonce-1',
+			openBrowser: user.openBrowser,
+			readPastedRedirect: user.readPastedRedirect,
+			fetcher: (_input, init) => {
+				codes.push(requestBody(init).get('code'));
+
+				return Promise.resolve(Response.json({ id_token: 'owner.id.token' }));
+			}
 		});
 
-		expect({ idToken, prompts, polls }).toStrictEqual({
+		expect({
+			idToken,
+			codes,
+			promptsClosed: user.promptSignals.map((signal) => signal.aborted)
+		}).toStrictEqual({
 			idToken: 'owner.id.token',
-			prompts: [
-				{
-					userCode: 'WXYZ-1234',
-					verificationUri: 'https://idp.example.com/activate',
-					verificationUriComplete: undefined
-				}
-			],
-			polls: 3
+			codes: ['pasted-code'],
+			promptsClosed: [true]
 		});
 	});
 
-	it('passes the complete verification URL through when the issuer sends one', async () => {
-		const prompts: {
-			userCode: string;
-			verificationUri: string;
-			verificationUriComplete?: string;
-		}[] = [];
-		const fetcher: typeof fetch = (input) => {
-			if (input === endpoints.deviceAuthorizationEndpoint) {
-				return Promise.resolve(
-					Response.json({
-						device_code: 'dev-code',
-						user_code: 'WXYZ-1234',
-						verification_uri: 'https://idp.example.com/activate',
-						verification_uri_complete:
-							'https://idp.example.com/activate?code=WXYZ-1234',
-						interval: 1
-					})
-				);
-			}
+	it.each([
+		{
+			name: 'the state of another sign-in',
+			paste: (target: string) =>
+				redirectFor(target, (callback) => {
+					callback.searchParams.set('state', 'another-sign-in');
+				}),
+			problem: 'other-sign-in'
+		},
+		{
+			name: 'another issuer',
+			paste: (target: string) =>
+				redirectFor(target, (callback) => {
+					callback.searchParams.set('iss', 'https://evil.example.com');
+				}),
+			problem: 'issuer-mismatch'
+		},
+		{
+			name: 'a repeated state',
+			paste: (target: string) =>
+				redirectFor(target, (callback, state) => {
+					callback.searchParams.append('state', state);
+				}),
+			problem: 'repeated-parameter'
+		},
+		{
+			name: 'a repeated code',
+			paste: (target: string) =>
+				redirectFor(target, (callback) => {
+					callback.searchParams.append('code', 'another-code');
+				}),
+			problem: 'repeated-parameter'
+		},
+		{
+			name: 'no code',
+			paste: (target: string) =>
+				redirectFor(target, (callback) => {
+					callback.searchParams.delete('code');
+				}),
+			problem: 'missing-code'
+		},
+		{
+			name: 'text that is not a URL',
+			paste: () => 'pasted-code',
+			problem: 'not-a-url'
+		}
+	])(
+		'refuses a pasted URL with $name before the token request',
+		async ({ paste, problem }) => {
+			const opened = Promise.withResolvers<string>();
+			const refusals: unknown[] = [];
+			const tokenRequests: string[] = [];
 
-			return Promise.resolve(Response.json({ id_token: 'owner.id.token' }));
-		};
+			// The user pastes once and cancels the prompt that reports the refusal.
+			const caught = await rejectedBy(() =>
+				loopbackLogin({
+					endpoints,
+					clientId: 'client-123',
+					nonce: 'nonce-1',
+					openBrowser: (target) => {
+						opened.resolve(target);
+					},
+					readPastedRedirect: async (_signal, refusal) => {
+						if (refusal !== undefined) {
+							refusals.push({
+								name: refusal.name,
+								kind: refusal.kind,
+								problem: refusal.problem
+							});
 
-		await deviceLogin({
+							return;
+						}
+
+						return paste(await opened.promise);
+					},
+					fetcher: (input) => {
+						tokenRequests.push(requestUrl(input));
+
+						return Promise.resolve(Response.json({ id_token: 'unused' }));
+					}
+				})
+			);
+
+			expect({
+				aborted: caught instanceof CliAbortError,
+				refusals,
+				tokenRequests
+			}).toStrictEqual({
+				aborted: true,
+				refusals: [
+					{
+						name: 'PastedRedirectRefusedError',
+						kind: 'pasted-redirect-refused',
+						problem
+					}
+				],
+				tokenRequests: []
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'a second paste',
+			// The second answer is the redirect itself.
+			second: (target: string) => Promise.resolve(redirectFor(target)),
+			code: 'pasted-code'
+		},
+		{
+			name: 'the loopback redirect',
+			// The browser reaches the loopback server while the second prompt is
+			// open, and the prompt then closes.
+			second: async (target: string, signal: AbortSignal) => {
+				const closed = Promise.withResolvers<undefined>();
+				signal.addEventListener('abort', () => {
+					closed.resolve(undefined);
+				});
+				await approveLoopbackBrowser(target);
+
+				return closed.promise;
+			},
+			code: 'auth-code'
+		}
+	])(
+		'reports a refused paste and completes with $name',
+		async ({ second, code }) => {
+			const opened = Promise.withResolvers<string>();
+			const refusals: (string | undefined)[] = [];
+			const codes: (string | null)[] = [];
+
+			const idToken = await loopbackLogin({
+				endpoints,
+				clientId: 'client-123',
+				nonce: 'nonce-1',
+				openBrowser: (target) => {
+					opened.resolve(target);
+				},
+				readPastedRedirect: async (signal, refusal) => {
+					refusals.push(refusal?.problem);
+					const target = await opened.promise;
+
+					return refusal === undefined
+						? redirectFor(target, (callback) => {
+								callback.searchParams.set('state', 'another-sign-in');
+							})
+						: second(target, signal);
+				},
+				fetcher: (_input, init) => {
+					codes.push(requestBody(init).get('code'));
+
+					return Promise.resolve(Response.json({ id_token: 'owner.id.token' }));
+				}
+			});
+
+			expect({ idToken, refusals, codes }).toStrictEqual({
+				idToken: 'owner.id.token',
+				refusals: [undefined, 'other-sign-in'],
+				codes: [code]
+			});
+		}
+	);
+
+	it('completes on a loopback redirect that arrives before a paste, and closes the prompt', async () => {
+		const promptSignals: AbortSignal[] = [];
+		const codes: (string | null)[] = [];
+
+		const idToken = await loopbackLogin({
 			endpoints,
 			clientId: 'client-123',
-			prompt: (verification) => {
-				prompts.push(verification);
+			nonce: 'nonce-1',
+			openBrowser: approveLoopbackBrowser,
+			// Like a terminal prompt, this resolves without an answer once its
+			// signal aborts.
+			readPastedRedirect: (signal) => {
+				promptSignals.push(signal);
+				const closed = Promise.withResolvers<undefined>();
+				signal.addEventListener('abort', () => {
+					closed.resolve(undefined);
+				});
+
+				return closed.promise;
 			},
-			fetcher,
-			sleep: () => Promise.resolve()
+			fetcher: (_input, init) => {
+				codes.push(requestBody(init).get('code'));
+
+				return Promise.resolve(Response.json({ id_token: 'owner.id.token' }));
+			}
 		});
 
-		expect(prompts).toStrictEqual([
-			{
-				userCode: 'WXYZ-1234',
-				verificationUri: 'https://idp.example.com/activate',
-				verificationUriComplete:
-					'https://idp.example.com/activate?code=WXYZ-1234'
-			}
-		]);
+		expect({
+			idToken,
+			codes,
+			promptsClosed: promptSignals.map((signal) => signal.aborted)
+		}).toStrictEqual({
+			idToken: 'owner.id.token',
+			codes: ['auth-code'],
+			promptsClosed: [true]
+		});
 	});
 
-	it('refuses the device flow when the issuer does not support it', async () => {
-		const prompts: unknown[] = [];
-		const requests: string[] = [];
+	it('aborts the sign-in when the user cancels the paste prompt', async () => {
+		const user = pastingUser(() => Promise.resolve(undefined));
+		const tokenRequests: string[] = [];
+
 		const caught = await rejectedBy(() =>
-			deviceLogin({
-				endpoints: {
-					issuer: endpoints.issuer,
-					authorizationEndpoint: endpoints.authorizationEndpoint,
-					tokenEndpoint: endpoints.tokenEndpoint
-				},
+			loopbackLogin({
+				endpoints,
 				clientId: 'client-123',
-				prompt: (verification) => {
-					prompts.push(verification);
-				},
+				nonce: 'nonce-1',
+				openBrowser: user.openBrowser,
+				readPastedRedirect: user.readPastedRedirect,
 				fetcher: (input) => {
-					requests.push(requestUrl(input));
+					tokenRequests.push(requestUrl(input));
 
 					return Promise.resolve(Response.json({ id_token: 'unused' }));
 				}
 			})
 		);
 
-		expect(caught).toBeInstanceOf(OidcLoginError);
-
-		if (!(caught instanceof OidcLoginError)) {
-			return;
-		}
-
 		expect({
-			error: { name: caught.name, kind: caught.kind },
-			prompts,
-			requests
-		}).toStrictEqual({
-			error: { name: 'OidcLoginError', kind: 'unsupported-device-flow' },
-			prompts: [],
-			requests: []
-		});
-	});
-
-	it('stops polling once the device code has expired', async () => {
-		const requests: string[] = [];
-		const prompts: {
-			readonly userCode: string;
-			readonly verificationUri: string;
-			readonly verificationUriComplete?: string;
-		}[] = [];
-		const fetcher: typeof fetch = (input) => {
-			requests.push(requestUrl(input));
-
-			if (input === endpoints.deviceAuthorizationEndpoint) {
-				return Promise.resolve(
-					Response.json({
-						device_code: 'dev-code',
-						user_code: 'WXYZ-1234',
-						verification_uri: 'https://idp.example.com/activate',
-						expires_in: 1,
-						interval: 1
-					})
-				);
-			}
-
-			return Promise.resolve(
-				Response.json({ error: 'authorization_pending' }, { status: 400 })
-			);
-		};
-		let elapsed = 0;
-
-		const caught = await rejectedBy(() =>
-			deviceLogin({
-				endpoints,
-				clientId: 'client-123',
-				prompt: (verification) => {
-					prompts.push(verification);
-				},
-				fetcher,
-				sleep: () => Promise.resolve(),
-				now: () => {
-					const current = elapsed;
-					elapsed += 2000;
-
-					return current;
-				}
-			})
-		);
-
-		expect(caught).toBeInstanceOf(OidcLoginError);
-
-		if (!(caught instanceof OidcLoginError)) {
-			return;
-		}
-
-		expect({
-			error: { name: caught.name, kind: caught.kind },
-			prompts,
-			requests
-		}).toStrictEqual({
-			error: { name: 'OidcLoginError', kind: 'device-expired' },
-			prompts: [
-				{
-					userCode: 'WXYZ-1234',
-					verificationUri: 'https://idp.example.com/activate',
-					verificationUriComplete: undefined
-				}
-			],
-			requests: [endpoints.deviceAuthorizationEndpoint]
-		});
-	});
-
-	it('aborts while waiting between device token polls', async () => {
-		const controller = new AbortController();
-		const prompts: unknown[] = [];
-		const requests: string[] = [];
-
-		const caught = await rejectedBy(() =>
-			deviceLogin({
-				endpoints,
-				clientId: 'client-123',
-				prompt: (verification) => {
-					prompts.push(verification);
-					controller.abort(new CliAbortError());
-				},
-				fetcher: (input) => {
-					requests.push(requestUrl(input));
-
-					if (input === endpoints.deviceAuthorizationEndpoint) {
-						return Promise.resolve(
-							Response.json({
-								device_code: 'dev-code',
-								user_code: 'WXYZ-1234',
-								verification_uri: 'https://idp.example.com/activate',
-								interval: 1
-							})
-						);
-					}
-
-					return Promise.resolve(Response.json({ id_token: 'unused' }));
-				},
-				sleep: pendingPromise,
-				signal: controller.signal
-			})
-		);
-
-		expect(caught).toBeInstanceOf(CliAbortError);
-
-		if (!(caught instanceof CliAbortError)) {
-			return;
-		}
-
-		expect({
-			error: { name: caught.name },
-			prompts,
-			requests,
-			aborted: controller.signal.aborted
-		}).toStrictEqual({
-			error: { name: 'CliAbortError' },
-			prompts: [
-				{
-					userCode: 'WXYZ-1234',
-					verificationUri: 'https://idp.example.com/activate',
-					verificationUriComplete: undefined
-				}
-			],
-			requests: [endpoints.deviceAuthorizationEndpoint],
-			aborted: true
-		});
+			aborted: caught instanceof CliAbortError,
+			tokenRequests
+		}).toStrictEqual({ aborted: true, tokenRequests: [] });
 	});
 });
 
@@ -1147,100 +1167,42 @@ describe('token endpoint redirects', () => {
 		origin = undefined;
 	});
 
-	const deviceAuthorization = {
-		device_code: 'device-1',
-		user_code: 'WXYZ-1234',
-		verification_uri: 'https://idp.example.com/activate'
-	};
+	it('fails on a redirect from the authorisation code exchange without following it', async () => {
+		const started = await RedirectingOrigin.start(['/token'], {});
+		origin = started;
 
-	it.each([
-		{
-			name: 'the authorisation code exchange',
-			redirects: ['/token'],
-			responses: {},
-			login: (redirecting: OidcLoginEndpoints) =>
-				loopbackLogin({
-					endpoints: redirecting,
-					clientId: 'client-123',
-					nonce: 'nonce-1',
-					openBrowser: approveLoopbackBrowser,
-					fetcher: fetch
-				}),
+		const caught = await rejectedBy(() =>
+			loopbackLogin({
+				endpoints: { ...endpoints, tokenEndpoint: started.url('/token') },
+				clientId: 'client-123',
+				nonce: 'nonce-1',
+				openBrowser: approveLoopbackBrowser,
+				fetcher: fetch
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: {
+				name: caught.name,
+				kind: caught.kind,
+				status: caught.status
+			},
+			requests: started.requests
+		}).toStrictEqual({
 			error: {
 				name: 'OidcLoginError',
 				kind: 'token-http',
 				status: StatusCodes.TEMPORARY_REDIRECT
 			},
 			requests: ['/token']
-		},
-		{
-			name: 'the device authorisation request',
-			redirects: ['/device'],
-			responses: {},
-			login: (redirecting: OidcLoginEndpoints) =>
-				deviceLogin({
-					endpoints: redirecting,
-					clientId: 'client-123',
-					prompt: vi.fn(),
-					fetcher: fetch,
-					sleep: () => Promise.resolve()
-				}),
-			error: {
-				name: 'DeviceAuthorizationRequestError',
-				kind: 'device-authorization-http',
-				status: StatusCodes.TEMPORARY_REDIRECT
-			},
-			requests: ['/device']
-		},
-		{
-			name: 'the device token poll',
-			redirects: ['/token'],
-			responses: { '/device': deviceAuthorization },
-			login: (redirecting: OidcLoginEndpoints) =>
-				deviceLogin({
-					endpoints: redirecting,
-					clientId: 'client-123',
-					prompt: vi.fn(),
-					fetcher: fetch,
-					sleep: () => Promise.resolve()
-				}),
-			error: {
-				name: 'OidcLoginError',
-				kind: 'token-http',
-				status: StatusCodes.TEMPORARY_REDIRECT
-			},
-			requests: ['/device', '/token']
-		}
-	])(
-		'fails on a redirect from $name without following it',
-		async ({ redirects, responses, login, error, requests }) => {
-			const started = await RedirectingOrigin.start(redirects, responses);
-			origin = started;
-
-			const caught = await rejectedBy(() =>
-				login({
-					...endpoints,
-					tokenEndpoint: started.url('/token'),
-					deviceAuthorizationEndpoint: started.url('/device')
-				})
-			);
-
-			expect(caught).toBeInstanceOf(OidcLoginError);
-
-			if (!(caught instanceof OidcLoginError)) {
-				return;
-			}
-
-			expect({
-				error: {
-					name: caught.name,
-					kind: caught.kind,
-					status: caught.status
-				},
-				requests: started.requests
-			}).toStrictEqual({ error, requests });
-		}
-	);
+		});
+	});
 });
 
 describe('isRedirectStatus', () => {

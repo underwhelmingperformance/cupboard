@@ -154,8 +154,9 @@ the rest of the command, and presents its token at most once to each target. It
 never presents a refreshed ID token or a token from disk: `cupboard login`
 requests no Cloudflare refresh token and saves no Cloudflare sign-in, and the
 Cloudflare sign-in that `cupboard init` saves is used only for the Cloudflare
-API. A `--headless` sign-in uses the device flow, which can't request a nonce,
-so its token is unbound.
+API. A `--headless` sign-in uses the same authorisation code flow and receives
+the redirect through the loopback listener or a pasted URL. Its token is bound
+in either case.
 
 ## Revoking access
 

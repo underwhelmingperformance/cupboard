@@ -7,9 +7,9 @@ import { readResponseJson } from '@cupboard/shared/response-body';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
-import { abortable, delayMs, throwIfAborted } from '../abort.ts';
+import { abortable, throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
-import { CliError } from '../errors.ts';
+import { CliAbortError, CliError } from '../errors.ts';
 
 const maximumOidcResponseBytes = 1024 * 1024;
 
@@ -24,13 +24,6 @@ export interface OidcLoginErrorOptions {
 
 export type OidcLoginErrorKind =
 	| 'authorization-declined'
-	| 'device-authorization-http'
-	| 'device-authorization-non-json'
-	| 'device-authorization-schema'
-	| 'device-denied'
-	| 'device-expired'
-	| 'device-token-non-json'
-	| 'device-token-response'
 	| 'discovery-http'
 	| 'discovery-non-json'
 	| 'discovery-request'
@@ -40,10 +33,10 @@ export type OidcLoginErrorKind =
 	| 'issuer-mismatch'
 	| 'loopback-bind'
 	| 'loopback-timeout'
+	| 'pasted-redirect-refused'
 	| 'token-http'
 	| 'token-non-json'
-	| 'token-response'
-	| 'unsupported-device-flow';
+	| 'token-response';
 
 export class OidcLoginError extends CliError {
 	readonly kind: OidcLoginErrorKind;
@@ -126,15 +119,34 @@ export class LoginTimeoutError extends OidcLoginError {
 	}
 }
 
-export class DeviceAuthorizationRequestError extends OidcLoginError {
-	constructor(public readonly status: number) {
-		super(`Device authorization request failed with HTTP ${String(status)}`, {
-			kind: 'device-authorization-http',
-			status
+/**
+ * Why a pasted redirect URL was refused: it is not a URL, its `state` belongs
+ * to another sign-in, or it fails a check that also applies to a loopback
+ * redirect.
+ */
+export type PastedRedirectProblem =
+	CallbackProblem | 'not-a-url' | 'other-sign-in';
+
+export class PastedRedirectRefusedError extends OidcLoginError {
+	constructor(public readonly problem: PastedRedirectProblem) {
+		super(`The pasted URL is not the redirect for this sign-in (${problem})`, {
+			kind: 'pasted-redirect-refused'
 		});
-		this.name = 'DeviceAuthorizationRequestError';
+		this.name = 'PastedRedirectRefusedError';
 	}
 }
+
+/**
+ * Reads the redirect URL pasted from the browser's address bar and resolves to
+ * the pasted text. It resolves to undefined when the user cancels.
+ * The sign-in aborts `signal` once it has a code, and the prompt then closes.
+ * After a refused paste, the sign-in asks again with the `refusal`, which the
+ * prompt reports.
+ */
+export type PastedRedirectReader = (
+	signal: AbortSignal,
+	refusal?: PastedRedirectRefusedError
+) => Promise<string | undefined>;
 
 export class LoopbackBindError extends OidcLoginError {
 	constructor(
@@ -169,19 +181,17 @@ export interface OidcLoginEndpoints {
 	readonly issuer: string;
 	readonly authorizationEndpoint: string;
 	readonly tokenEndpoint: string;
-	readonly deviceAuthorizationEndpoint?: string;
 }
 
-// The client sends the authorization code, PKCE verifier, or device code to
-// these endpoints. Require HTTPS, except on loopback, so a discovery document
-// cannot redirect those credentials to a plain-HTTP server.
+// The client sends the code and the PKCE verifier to these endpoints. Require
+// HTTPS, except on loopback, so a discovery document cannot redirect those
+// credentials to a plain-HTTP server.
 const endpointUrl = z.url().refine(isAllowedIssuerUrl);
 
 const interactiveOidcDiscoverySchema = z.object({
 	issuer: z.url(),
 	authorization_endpoint: endpointUrl,
 	token_endpoint: endpointUrl,
-	device_authorization_endpoint: endpointUrl.optional(),
 	authorization_response_iss_parameter_supported: z.literal(true),
 	response_types_supported: z
 		.array(z.string())
@@ -195,7 +205,7 @@ const interactiveOidcDiscoverySchema = z.object({
 });
 
 /**
- * Reads an issuer's authorization, token and device endpoints from its OIDC
+ * Reads an issuer's `authorization_endpoint` and `token_endpoint` from its OIDC
  * metadata. The issuer must be an HTTPS URL, except on loopback. Cupboard
  * removes one trailing slash before comparing the metadata issuer with the
  * requested issuer, then validates every returned endpoint independently.
@@ -302,8 +312,7 @@ export async function discoverOidcLogin(
 	return {
 		issuer: issuerUrl.value,
 		authorizationEndpoint: parsed.data.authorization_endpoint,
-		tokenEndpoint: parsed.data.token_endpoint,
-		deviceAuthorizationEndpoint: parsed.data.device_authorization_endpoint
+		tokenEndpoint: parsed.data.token_endpoint
 	};
 }
 
@@ -327,14 +336,15 @@ export interface LoopbackLoginOptions {
 	Fixed loopback settings for an exactly registered redirect URI.
 	*/
 	readonly loopback?: LoopbackOptions;
+	readonly readPastedRedirect?: PastedRedirectReader;
 }
 
 /**
  * Starts the default owner-login flow with PKCE and a 127.0.0.1 loopback
  * redirect. It opens the browser to the issuer's authorization endpoint,
- * accepts the redirect only on loopback, and exchanges the code for an
- * `id_token`. The state, response issuer and PKCE verifier bind the response to
- * this login.
+ * accepts the redirect on loopback or, with `readPastedRedirect`, as a pasted
+ * URL, and exchanges the code for an `id_token`. The state, response issuer
+ * and PKCE verifier bind the response to this login.
  */
 export async function loopbackLogin(
 	options: LoopbackLoginOptions
@@ -351,7 +361,8 @@ export async function loopbackLogin(
 		openBrowser: options.openBrowser,
 		timeoutMs: options.timeoutMs,
 		signal: options.signal,
-		loopback: options.loopback
+		loopback: options.loopback,
+		readPastedRedirect: options.readPastedRedirect
 	});
 
 	return exchangeCode(
@@ -421,6 +432,11 @@ export interface AuthorizationCodeOptions {
 	readonly timeoutMs?: number;
 	readonly signal?: AbortSignal;
 	readonly loopback?: LoopbackOptions;
+	/**
+	 * Use this reader when the browser cannot reach the loopback server. The first
+	 * redirect wins. A pasted URL receives the same callback-parameter checks.
+	 */
+	readonly readPastedRedirect?: PastedRedirectReader;
 }
 
 export interface ObtainedAuthorizationCode {
@@ -447,17 +463,24 @@ export async function obtainAuthorizationCode(
 	throwIfAborted(options.signal);
 
 	const pkce = createPkce();
-	const state = randomState();
+	const expected: CallbackExpectation = {
+		expectedState: randomState(),
+		expectedIssuer: options.expectedIssuer,
+		isIssuerParameterOptional: options.isIssuerParameterOptional
+	};
 	const host = options.loopback?.host ?? '127.0.0.1';
 	const path = options.loopback?.path ?? '/callback';
 	const loopback = await startLoopbackServer({
-		expectedState: state,
-		expectedIssuer: options.expectedIssuer,
-		isIssuerParameterOptional: options.isIssuerParameterOptional,
+		...expected,
 		ports: options.loopback?.ports,
 		host,
 		path
 	});
+	const pasteController = new AbortController();
+	const pasteSignal =
+		options.signal === undefined
+			? pasteController.signal
+			: AbortSignal.any([pasteController.signal, options.signal]);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 
 	try {
@@ -466,7 +489,7 @@ export async function obtainAuthorizationCode(
 			endpoint: options.authorizationEndpoint,
 			clientId: options.clientId,
 			redirectUri,
-			state,
+			state: expected.expectedState,
 			challenge: pkce.challenge,
 			scope: options.scope,
 			nonce: options.nonce
@@ -485,9 +508,22 @@ export async function obtainAuthorizationCode(
 
 			return options.openBrowser(authorizeUrl);
 		};
+		const opened = openBrowserDeferred();
+		const read = options.readPastedRedirect;
+		const pastedAfterOpening = async (
+			reader: PastedRedirectReader
+		): Promise<string> => {
+			await opened;
+
+			return pastedCode(reader, expected, pasteSignal);
+		};
+		const pasted = read === undefined ? [] : [pastedAfterOpening(read)];
 		const [, code] = await Promise.all([
-			abortable(openBrowserDeferred(), options.signal),
-			abortable(Promise.race([loopback.code, timeout]), options.signal)
+			abortable(opened, options.signal),
+			abortable(
+				Promise.race([loopback.code, timeout, ...pasted]),
+				options.signal
+			)
 		]);
 
 		return { code, redirectUri, codeVerifier: pkce.verifier };
@@ -496,7 +532,65 @@ export async function obtainAuthorizationCode(
 			clearTimeout(timer);
 		}
 
+		pasteController.abort();
 		loopback.server.close();
+	}
+}
+
+// A refused paste leaves the loopback server waiting, so the user can paste
+// again or complete the sign-in in a browser that reaches it. The prompt ends
+// when the sign-in has a code, times out or is cancelled.
+async function pastedCode(
+	read: PastedRedirectReader,
+	expected: CallbackExpectation,
+	signal: AbortSignal
+): Promise<string> {
+	let refusal: PastedRedirectRefusedError | undefined;
+
+	for (;;) {
+		const pasted = await read(signal, refusal);
+
+		try {
+			return checkedPaste(pasted, expected);
+		} catch (error) {
+			if (!(error instanceof PastedRedirectRefusedError)) {
+				throw error;
+			}
+
+			refusal = error;
+		}
+	}
+}
+
+function checkedPaste(
+	pasted: string | undefined,
+	expected: CallbackExpectation
+): string {
+	if (pasted === undefined) {
+		throw new CliAbortError();
+	}
+
+	const url = URL.parse(pasted.trim());
+
+	if (url === null) {
+		throw new PastedRedirectRefusedError('not-a-url');
+	}
+
+	const outcome = readCallback(url, expected);
+
+	switch (outcome.kind) {
+		case 'code': {
+			return outcome.code;
+		}
+		case 'declined': {
+			throw AuthorizationDeclinedError.fromProviderCode(outcome.providerError);
+		}
+		case 'malformed': {
+			throw new PastedRedirectRefusedError(outcome.problem);
+		}
+		case 'ignore': {
+			throw new PastedRedirectRefusedError('other-sign-in');
+		}
 	}
 }
 
@@ -506,10 +600,13 @@ interface LoopbackServer {
 	readonly code: Promise<string>;
 }
 
-interface LoopbackServerOptions {
+interface CallbackExpectation {
 	readonly expectedState: string;
 	readonly expectedIssuer?: string;
 	readonly isIssuerParameterOptional?: boolean;
+}
+
+interface LoopbackServerOptions extends CallbackExpectation {
 	readonly ports?: readonly number[];
 	readonly host?: string;
 	readonly path?: string;
@@ -605,8 +702,15 @@ type CallbackOutcome =
 			readonly providerError: string;
 			readonly message: string;
 	  }
-	| { readonly kind: 'malformed'; readonly message: string }
+	| {
+			readonly kind: 'malformed';
+			readonly problem: CallbackProblem;
+			readonly message: string;
+	  }
 	| { readonly kind: 'ignore'; readonly message: string };
+
+type CallbackProblem =
+	'issuer-mismatch' | 'missing-code' | 'repeated-parameter';
 
 type CallbackParameter = 'state' | 'iss' | 'error' | 'code';
 
@@ -620,16 +724,14 @@ function repeatedCallbackParameter(
 
 	return {
 		kind: 'malformed',
+		problem: 'repeated-parameter',
 		message: `Authorization response includes repeated ${parameter} parameter`
 	};
 }
 
 function readCallback(
 	url: URL,
-	expected: Pick<
-		LoopbackServerOptions,
-		'expectedState' | 'expectedIssuer' | 'isIssuerParameterOptional'
-	>
+	expected: CallbackExpectation
 ): CallbackOutcome {
 	const { expectedIssuer } = expected;
 
@@ -661,6 +763,7 @@ function readCallback(
 	) {
 		return {
 			kind: 'malformed',
+			problem: 'issuer-mismatch',
 			message: 'Authorization response issuer does not match the login issuer'
 		};
 	}
@@ -680,6 +783,7 @@ function readCallback(
 	if (code === null || code === '') {
 		return {
 			kind: 'malformed',
+			problem: 'missing-code',
 			message: 'Authorization response did not include a code'
 		};
 	}
@@ -688,213 +792,6 @@ function readCallback(
 		kind: 'code',
 		code,
 		message: 'cupboard login complete. You may close this window.'
-	};
-}
-
-export interface DeviceLoginOptions {
-	readonly endpoints: OidcLoginEndpoints;
-	readonly clientId: string;
-	readonly scope?: string;
-	readonly prompt: (verification: {
-		readonly userCode: string;
-		readonly verificationUri: string;
-		/**
-		The issuer's verification URL with the user code already included.
-		*/
-		readonly verificationUriComplete?: string;
-	}) => void;
-	readonly fetcher?: typeof fetch;
-	readonly sleep?: (ms: number) => Promise<void>;
-	readonly now?: () => number;
-	readonly signal?: AbortSignal;
-}
-
-const deviceAuthorizationSchema = z.object({
-	device_code: z.string().min(1),
-	user_code: z.string().min(1),
-	verification_uri: z.string().min(1),
-	verification_uri_complete: z.string().min(1).optional(),
-	expires_in: z.number().int().positive().optional(),
-	interval: z.number().int().positive().optional()
-});
-
-// RFC 8628 makes `expires_in` required; an issuer that omits it still gets a
-// bounded poll.
-const deviceCodeFallbackLifetimeSeconds = 600;
-
-// The poll interval used when the issuer advertises none, and the increment
-// applied on a `slow_down`, both 5 seconds, per the RFC 8628 example.
-const devicePollIntervalSeconds = 5;
-const deviceSlowDownIncrementMs = 5 * 1000;
-
-const deviceErrorSchema = z.object({ error: z.string() });
-
-/**
- * The `--headless` owner-login flow: RFC 8628 device authorization. It requests
- * a code, shows the user where to enter it, and polls the token
- * endpoint, honouring `authorization_pending` and `slow_down`, until an
- * `id_token` is issued.
- */
-export async function deviceLogin(
-	options: DeviceLoginOptions
-): Promise<string> {
-	throwIfAborted(options.signal);
-
-	const endpoint = options.endpoints.deviceAuthorizationEndpoint;
-
-	if (endpoint === undefined) {
-		throw new OidcLoginError('The issuer does not support the device flow', {
-			kind: 'unsupported-device-flow'
-		});
-	}
-
-	const fetcher = options.fetcher ?? resilientFetcher('replay-unsafe');
-	const now = options.now ?? Date.now;
-
-	const authorization = await requestDeviceCode(
-		endpoint,
-		fetcher,
-		{
-			client_id: options.clientId,
-			scope: options.scope ?? 'openid'
-		},
-		options.signal
-	);
-	options.prompt({
-		userCode: authorization.user_code,
-		verificationUri: authorization.verification_uri,
-		verificationUriComplete: authorization.verification_uri_complete
-	});
-
-	let intervalMs = (authorization.interval ?? devicePollIntervalSeconds) * 1000;
-	const deadlineMs =
-		now() +
-		(authorization.expires_in ?? deviceCodeFallbackLifetimeSeconds) * 1000;
-
-	for (;;) {
-		await delayMs(intervalMs, {
-			delay: options.sleep,
-			signal: options.signal
-		});
-
-		if (now() >= deadlineMs) {
-			throw new OidcLoginError(
-				'Device authorization expired before it was approved',
-				{ kind: 'device-expired' }
-			);
-		}
-
-		const outcome = await pollDeviceToken(
-			options.endpoints,
-			fetcher,
-			{
-				grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-				device_code: authorization.device_code,
-				client_id: options.clientId
-			},
-			options.signal
-		);
-
-		if (outcome.kind === 'token') {
-			return outcome.idToken;
-		}
-
-		if (outcome.kind === 'slow_down') {
-			intervalMs += deviceSlowDownIncrementMs;
-		} else if (outcome.kind === 'denied') {
-			throw new OidcLoginError(
-				`Device authorization failed: ${outcome.error}`,
-				{
-					kind: 'device-denied',
-					providerError: outcome.error
-				}
-			);
-		}
-	}
-}
-
-async function requestDeviceCode(
-	endpoint: string,
-	fetcher: typeof fetch,
-	form: Readonly<Record<string, string>>,
-	signal: AbortSignal | undefined
-): Promise<z.infer<typeof deviceAuthorizationSchema>> {
-	const response = await fetcher(endpoint, postForm(form, signal));
-
-	if (!response.ok) {
-		await discardResponseBody(response);
-		throw new DeviceAuthorizationRequestError(response.status);
-	}
-
-	const parsed = deviceAuthorizationSchema.safeParse(
-		await readJson(response, 'device-authorization-non-json', signal)
-	);
-
-	if (!parsed.success) {
-		throw new OidcLoginError('Device authorization response was malformed', {
-			kind: 'device-authorization-schema',
-			cause: parsed.error
-		});
-	}
-
-	return parsed.data;
-}
-
-type PollOutcome =
-	| { readonly kind: 'token'; readonly idToken: string }
-	| { readonly kind: 'pending' }
-	| { readonly kind: 'slow_down' }
-	| { readonly kind: 'denied'; readonly error: string };
-
-async function pollDeviceToken(
-	endpoints: OidcLoginEndpoints,
-	fetcher: typeof fetch,
-	form: Readonly<Record<string, string>>,
-	signal: AbortSignal | undefined
-): Promise<PollOutcome> {
-	const response = await fetcher(
-		endpoints.tokenEndpoint,
-		postForm(form, signal)
-	);
-
-	if (isRedirectStatus(response.status)) {
-		await discardResponseBody(response);
-		throw new OidcLoginError(
-			`Device token request failed with HTTP ${String(response.status)}`,
-			{ kind: 'token-http', status: response.status }
-		);
-	}
-
-	const payload = await readJson(response, 'device-token-non-json', signal);
-
-	if (response.ok) {
-		const parsed = idTokenSchema.safeParse(payload);
-
-		if (!parsed.success) {
-			throw new OidcLoginError(
-				'Device token response did not include id_token',
-				{
-					kind: 'device-token-response'
-				}
-			);
-		}
-
-		return { kind: 'token', idToken: parsed.data.id_token };
-	}
-
-	const error = deviceErrorSchema.safeParse(payload);
-
-	if (error.success && error.data.error === 'authorization_pending') {
-		return { kind: 'pending' };
-	}
-
-	if (error.success && error.data.error === 'slow_down') {
-		return { kind: 'slow_down' };
-	}
-
-	return {
-		kind: 'denied',
-		error: error.success ? error.data.error : 'unknown'
 	};
 }
 

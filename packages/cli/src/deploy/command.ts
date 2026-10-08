@@ -18,7 +18,8 @@ import {
 	cacheLoginSession,
 	type IdentityLoginOptions,
 	identitySignIn,
-	isCloudflareSignIn
+	isCloudflareSignIn,
+	pastedRedirectReader
 } from '../commands/login.ts';
 import {
 	CliError,
@@ -220,8 +221,9 @@ export interface DeployCliOptions {
 	readonly oidcIssuer: string;
 	readonly clientId: string;
 	/**
-	 * Log the operator in through the device flow instead of a browser, for the
-	 * admin login on a first deploy or when an update logs in as the admin.
+	 * Print the sign-in URL and accept a pasted redirect URL, without opening a
+	 * browser, for the admin login on a first deploy or when an update logs in
+	 * as the admin.
 	 */
 	readonly headless?: boolean;
 	/**
@@ -1399,6 +1401,7 @@ async function deployFlow(
 		info: (message: string) => {
 			ui.info(message);
 		},
+		readPastedRedirect: pastedRedirectReader(ui),
 		signal: runtimeOptions.signal
 	};
 	// Without a terminal, the sign-in throws `OwnerLoginRequiredError`, so the

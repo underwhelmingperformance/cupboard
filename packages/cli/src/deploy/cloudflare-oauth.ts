@@ -12,6 +12,7 @@ import {
 import {
 	isRedirectStatus,
 	obtainAuthorizationCode,
+	type PastedRedirectReader,
 	postForm
 } from '../auth/oidc-login.ts';
 import { postRevocation, type RevocationOutcome } from '../auth/revocation.ts';
@@ -142,6 +143,7 @@ export interface CloudflareLoginOptions {
 	*/
 	readonly scopes?: readonly string[];
 	readonly openBrowser: (url: string) => void | Promise<void>;
+	readonly readPastedRedirect?: PastedRedirectReader;
 	readonly fetcher?: typeof fetch;
 	readonly timeoutMs?: number;
 	readonly ports?: readonly number[];
@@ -207,7 +209,8 @@ export async function cloudflareLogin(
 			ports: options.ports ?? callbackPorts,
 			host: 'localhost',
 			path: callbackPath
-		}
+		},
+		readPastedRedirect: options.readPastedRedirect
 	});
 
 	return exchangeForGrant(

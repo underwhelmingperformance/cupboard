@@ -749,7 +749,8 @@ who tries to claim the deployment afterwards is refused. With
 claim still needs the secret.
 
 The CLI gets ID tokens by signing in through the browser, using PKCE with a
-loopback redirect, or through the device flow. By default it uses Cloudflare's
+loopback redirect. With `--headless`, it also accepts the redirect URL that the
+user pastes from a browser on another machine. By default it uses Cloudflare's
 OIDC issuer. CI jobs use the OIDC token that their CI platform gives them.
 
 ## Keys and secrets

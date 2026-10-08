@@ -102,19 +102,14 @@ function oidcLoginError(
 	options: HumanErrorOptions
 ): string {
 	switch (error.kind) {
-		case 'authorization-declined':
-		case 'device-denied': {
+		case 'authorization-declined': {
 			return `Sign-in was declined. Run \`${loginCommand(options)}\` again to authorise access.`;
 		}
 		case 'loopback-bind': {
-			return 'The local sign-in callback could not start. Close another sign-in attempt or use --headless to sign in on another device.';
+			return 'The local sign-in callback could not start. Check whether another process is using its port, then try again.';
 		}
-		case 'loopback-timeout':
-		case 'device-expired': {
+		case 'loopback-timeout': {
 			return `Sign-in timed out. Run \`${loginCommand(options)}\` again and complete the browser instructions.`;
-		}
-		case 'unsupported-device-flow': {
-			return 'This identity provider does not support signing in on another device. Sign in from a machine with a browser.';
 		}
 		default: {
 			return `The identity provider could not complete sign-in. Check the provider and client settings, then run \`${loginCommand(options)}\` again. Use --debug for diagnostic information.`;
