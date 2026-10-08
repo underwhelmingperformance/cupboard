@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
-import { chmod, readFile, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import pathModule from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { pseudoRandomBytes } from '../../../../tests/support/bytes.ts';
 import { withTemporaryDirectory } from '../../../../tests/support/filesystem.ts';
+import { runCommand } from '../../../../tests/support/process.ts';
 
 import {
 	hashNar,
@@ -15,7 +17,8 @@ import {
 	narFromPath,
 	NixSha256Hash,
 	toNixBase32,
-	toNixSha256
+	toNixSha256,
+	UnsupportedNarPathTypeError
 } from './nar.ts';
 
 function thrownBy(run: () => unknown): unknown {
@@ -133,6 +136,79 @@ describe('hashNar', () => {
 });
 
 describe('NarArchive', () => {
+	it('serialises a tree of many small files exactly as nix-store --dump does', async () => {
+		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+			await writeNarTree(directory);
+
+			// `nix-store --dump` of this tree produced these values.
+			await expect(new NarArchive(directory).hash()).resolves.toStrictEqual({
+				narHash: toNixSha256(
+					Buffer.from(
+						'899032f837d452dcfbc9f96f41df87ee00641030b7849ae489bb01238b4e8381',
+						'hex'
+					)
+				),
+				narSize: 11_266_936
+			});
+		});
+	});
+
+	it('lets the event loop run while it reads many small files', async () => {
+		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+			for (let index = 0; index < 400; index += 1) {
+				await writeFile(
+					pathModule.join(directory, `f${String(index)}`),
+					pseudoRandomBytes(100, index + 1)
+				);
+			}
+
+			let turns = 0;
+			let isIterating = true;
+			const countTurn = (): void => {
+				if (!isIterating) {
+					return;
+				}
+
+				turns += 1;
+				setImmediate(countTurn);
+			};
+			setImmediate(countTurn);
+
+			await collect(new NarArchive(directory));
+			isIterating = false;
+
+			// The archive lets the event loop run at least once for every 64
+			// of the 400 files.
+			expect(turns).toBeGreaterThanOrEqual(6);
+		});
+	});
+
+	it('refuses a node that is not a file, directory or symlink', async () => {
+		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+			const fifo = pathModule.join(directory, 'fifo');
+			await runCommand('mkfifo', [fifo]);
+
+			const error = await rejectionOf(collect(new NarArchive(directory)));
+
+			expect(error).toBeInstanceOf(UnsupportedNarPathTypeError);
+			expect(error).toMatchObject({ path: fifo });
+		});
+	});
+
+	it('yields the NAR in 1 MiB pieces', async () => {
+		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+			await writeNarTree(directory);
+
+			const pieces = await collect(new NarArchive(directory));
+			const lengths = pieces.map((piece) => piece.byteLength);
+
+			expect(lengths).toStrictEqual([
+				...Array.from({ length: 10 }, () => 1024 * 1024),
+				11_266_936 - 10 * 1024 * 1024
+			]);
+		});
+	});
+
 	it('is async iterable and hashes its root path', async () => {
 		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
 			await writeFile(pathModule.join(directory, 'file'), 'hello');
@@ -193,6 +269,16 @@ describe('NixSha256Hash', () => {
 		});
 	});
 });
+
+async function rejectionOf(operation: Promise<unknown>): Promise<unknown> {
+	try {
+		await operation;
+	} catch (error) {
+		return error;
+	}
+
+	return undefined;
+}
 
 async function collectNar(path: string): Promise<Buffer[]> {
 	return collect(narFromPath(path));
@@ -277,4 +363,49 @@ class InvalidNarFixtureMetadataError extends Error {
 		super('Invalid NAR fixture metadata');
 		this.name = 'InvalidNarFixtureMetadataError';
 	}
+}
+
+const narTreeFileSizes = [0, 1, 7, 8, 9, 100, 4095, 65_535, 65_536, 65_537];
+
+// Nested directories of small files with sizes on each side of the 8-byte
+// padding boundary and of the 64 KiB synchronous-read limit, executables,
+// symlinks to files and directories, a dangling symlink, an empty directory, a
+// non-ASCII name and a file of several mebibytes.
+async function writeNarTree(directory: string): Promise<void> {
+	for (let index = 0; index < 400; index += 1) {
+		const subdirectory = pathModule.join(
+			directory,
+			`d${String(index % 5)}`,
+			`e${String(index % 3)}`
+		);
+		await mkdir(subdirectory, { recursive: true });
+		const file = pathModule.join(subdirectory, `f${String(index)}`);
+		await writeFile(
+			file,
+			pseudoRandomBytes(
+				narTreeFileSizes[index % narTreeFileSizes.length] ?? 0,
+				index + 1
+			)
+		);
+
+		if (index % 7 === 0) {
+			await chmod(file, 0o755);
+		}
+
+		if (index % 11 === 0) {
+			await symlink(
+				`f${String(index)}`,
+				pathModule.join(subdirectory, `l${String(index)}`)
+			);
+		}
+	}
+
+	await writeFile(
+		pathModule.join(directory, 'large'),
+		pseudoRandomBytes(3 * 1024 * 1024 + 5, 401)
+	);
+	await mkdir(pathModule.join(directory, 'empty'));
+	await symlink('d0', pathModule.join(directory, 'to-directory'));
+	await symlink('missing', pathModule.join(directory, 'dangling'));
+	await writeFile(pathModule.join(directory, 'naïve'), 'unicode name\n');
 }

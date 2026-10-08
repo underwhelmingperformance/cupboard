@@ -1,18 +1,22 @@
 import { createHash } from 'node:crypto';
 import {
-	type FileHandle,
-	lstat,
-	open,
-	readdir,
-	readlink
-} from 'node:fs/promises';
+	closeSync,
+	fstatSync,
+	lstatSync,
+	openSync,
+	readdirSync,
+	readlinkSync,
+	readSync
+} from 'node:fs';
+import { type FileHandle, open } from 'node:fs/promises';
 import pathModule from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 
 import type { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { toNixSha256 } from '@cupboard/nix-store/hash';
 import { withIterableCleanup } from '@cupboard/shared/cleanup';
 
-import { byteStream } from '../io/byte-stream.ts';
+import { ByteAccumulator, byteStream } from '../io/byte-stream.ts';
 
 export {
 	InvalidNixSha256HashError,
@@ -60,7 +64,24 @@ export class NarFileShrankError extends NarError {
 	}
 }
 
+const pieceSize = 1024 * 1024;
+
 const fileChunkSize = 64 * 1024;
+
+// Reading a tree of small files asynchronously costs one thread-pool round
+// trip for each file system call, and that latency, not the bytes, decides how
+// fast the NAR is produced. `lstat`, `readdir` and `readlink` are therefore
+// synchronous, and files up to this size are opened, measured and read
+// synchronously on one descriptor. Each call blocks the event loop until the
+// kernel returns, which is short only when the file is in the page cache.
+const syncReadMaxBytes = fileChunkSize;
+
+// The serialiser lets the event loop run after this many nodes or this many
+// bytes of NAR, whichever comes first, so that reads from a cold page cache
+// cannot stall other uploads for long.
+const nodesBetweenTurns = 64;
+
+const bytesBetweenTurns = pieceSize;
 
 export class NarArchive implements AsyncIterable<Uint8Array> {
 	constructor(public readonly path: string) {}
@@ -79,8 +100,36 @@ export class NarArchive implements AsyncIterable<Uint8Array> {
 }
 
 export async function* narFromPath(path: string): AsyncIterable<Uint8Array> {
-	yield* narString('nix-archive-1');
-	yield* narNode(path);
+	const writer = new NarWriter();
+	const turns = new EventLoopTurns();
+	const directories: OpenDirectory[] = [];
+	let next: string | undefined = path;
+
+	writer.string('nix-archive-1');
+
+	for (;;) {
+		if (next !== undefined) {
+			yield* narNode(writer, next, directories);
+			await turns.afterNode(writer.written);
+		}
+
+		const directory = directories.at(-1);
+
+		if (directory === undefined) {
+			break;
+		}
+
+		next = directory.nextEntry(writer);
+
+		if (next !== undefined) {
+			continue;
+		}
+
+		directories.pop();
+		closeNode(writer, directories);
+	}
+
+	yield* writer.finish();
 }
 
 export async function hashNar(path: string): Promise<NarDigest> {
@@ -98,85 +147,184 @@ export async function hashNar(path: string): Promise<NarDigest> {
 	};
 }
 
-async function* narNode(path: string): AsyncIterable<Uint8Array> {
-	const stats = await lstat(path);
+class EventLoopTurns {
+	private nodes = 0;
+
+	private bytesAtLastTurn = 0;
+
+	async afterNode(bytesWritten: number): Promise<void> {
+		this.nodes += 1;
+
+		if (
+			this.nodes < nodesBetweenTurns &&
+			bytesWritten - this.bytesAtLastTurn < bytesBetweenTurns
+		) {
+			return;
+		}
+
+		this.nodes = 0;
+		this.bytesAtLastTurn = bytesWritten;
+		await setImmediate();
+	}
+}
+
+/**
+ * A directory whose entries are being written, in the byte order of their
+ * names.
+ */
+class OpenDirectory {
+	private index = 0;
+
+	constructor(
+		private readonly path: string,
+		private readonly entries: readonly string[]
+	) {}
+
+	/**
+	 * Writes the start of the next entry and returns the path of its node, or
+	 * returns `undefined` once every entry has been written.
+	 */
+	nextEntry(writer: NarWriter): string | undefined {
+		const entry = this.entries[this.index];
+
+		if (entry === undefined) {
+			return undefined;
+		}
+
+		this.index += 1;
+		writer.strings('entry', '(', 'name', entry, 'node');
+
+		return pathModule.join(this.path, entry);
+	}
+}
+
+// Writes one node. For a directory, this writes only the node's type and
+// pushes the directory onto `directories`; `narFromPath` writes its entries.
+async function* narNode(
+	writer: NarWriter,
+	path: string,
+	directories: OpenDirectory[]
+): AsyncIterable<Uint8Array> {
+	const stats = lstatSync(path);
 
 	if (!stats.isDirectory() && !stats.isFile() && !stats.isSymbolicLink()) {
 		throw new UnsupportedNarPathTypeError(path);
 	}
 
-	yield* narString('(');
+	writer.string('(');
 
 	if (stats.isDirectory()) {
-		yield* narDirectory(path);
-	}
-
-	if (stats.isFile()) {
-		yield* narFile(path, stats.mode);
+		writer.strings('type', 'directory');
+		directories.push(
+			new OpenDirectory(path, readdirSync(path).toSorted(compareNarNames))
+		);
+		return;
 	}
 
 	if (stats.isSymbolicLink()) {
-		yield* narSymlink(path);
+		writer.strings('type', 'symlink', 'target', readlinkSync(path));
+		closeNode(writer, directories);
+		yield* writer.complete();
+		return;
 	}
 
-	yield* narString(')');
+	writer.strings('type', 'regular');
+
+	if ((stats.mode & 0o111) !== 0) {
+		writer.strings('executable', '');
+	}
+
+	writer.string('contents');
+
+	const contents =
+		stats.size <= syncReadMaxBytes ? readSmallFile(path) : undefined;
+
+	if (contents === undefined) {
+		yield* narLargeFile(writer, path);
+	} else {
+		writer.bytes(contents);
+	}
+
+	closeNode(writer, directories);
+	yield* writer.complete();
 }
 
-async function* narDirectory(path: string): AsyncIterable<Uint8Array> {
-	yield* narString('type');
-	yield* narString('directory');
+// Closes a node, and then the directory entry that contains it, if any.
+function closeNode(
+	writer: NarWriter,
+	directories: readonly OpenDirectory[]
+): void {
+	writer.string(')');
 
-	const entries = await readdir(path);
-
-	for (const entry of entries.toSorted(compareNarNames)) {
-		yield* narString('entry');
-		yield* narString('(');
-		yield* narString('name');
-		yield* narString(entry);
-		yield* narString('node');
-		yield* narNode(pathModule.join(path, entry));
-		yield* narString(')');
+	if (directories.length > 0) {
+		writer.string(')');
 	}
 }
 
-async function* narFile(path: string, mode: number): AsyncIterable<Uint8Array> {
-	yield* narString('type');
-	yield* narString('regular');
+// Returns `undefined` when the opened file is larger than `syncReadMaxBytes`.
+function readSmallFile(path: string): Buffer | undefined {
+	// One descriptor for the size and the bytes, so `fstat` measures the file
+	// that is read even if the path is replaced on disk.
+	const descriptor = openSync(path, 'r');
 
-	if ((mode & 0o111) !== 0) {
-		yield* narString('executable');
-		yield* narString('');
+	try {
+		const { size } = fstatSync(descriptor);
+
+		if (size > syncReadMaxBytes) {
+			return undefined;
+		}
+
+		const contents = Buffer.allocUnsafe(size);
+
+		for (let position = 0; position < size;) {
+			const bytesRead = readSync(
+				descriptor,
+				contents,
+				position,
+				size - position,
+				position
+			);
+
+			if (bytesRead === 0) {
+				throw new NarFileShrankError(path, size, position);
+			}
+
+			position += bytesRead;
+		}
+
+		return contents;
+	} finally {
+		closeSync(descriptor);
 	}
-
-	yield* narString('contents');
-
-	// One handle for the size and the bytes, so the length prefix and padding
-	// always describe the content that follows even if the file changes on disk
-	// between framing and reading.
-	const file = await open(path, 'r');
-	const contents = async function* (): AsyncIterable<Uint8Array> {
-		const { size } = await file.stat();
-		yield createLengthPrefix(size);
-		yield* readFileContents(file, path, size);
-		yield* narPadding(size);
-	};
-
-	yield* withIterableCleanup(contents(), () => file.close());
 }
 
-async function* readFileContents(
-	file: FileHandle,
-	path: string,
-	size: number
+async function* narLargeFile(
+	writer: NarWriter,
+	path: string
 ): AsyncIterable<Uint8Array> {
-	let position = 0;
+	// One handle for the size and the bytes, as in `readSmallFile`.
+	const file = await open(path, 'r');
 
-	while (position < size) {
-		const buffer = Buffer.allocUnsafe(Math.min(fileChunkSize, size - position));
+	yield* withIterableCleanup(narFileContents(writer, file, path), () =>
+		file.close()
+	);
+}
+
+async function* narFileContents(
+	writer: NarWriter,
+	file: FileHandle,
+	path: string
+): AsyncIterable<Uint8Array> {
+	const { size } = await file.stat();
+	const buffer = Buffer.allocUnsafe(Math.min(fileChunkSize, size));
+
+	writer.length(size);
+
+	for (let position = 0; position < size;) {
 		const { bytesRead } = await file.read(
 			buffer,
 			0,
-			buffer.byteLength,
+			Math.min(buffer.byteLength, size - position),
 			position
 		);
 
@@ -185,34 +333,62 @@ async function* readFileContents(
 		}
 
 		position += bytesRead;
-		yield buffer.subarray(0, bytesRead);
+		writer.raw(buffer.subarray(0, bytesRead));
+		yield* writer.complete();
+	}
+
+	writer.padding(size);
+}
+
+// Copies the NAR's bytes into pieces of `pieceSize` bytes, so a consumer
+// receives one 1 MiB piece in place of many short length prefixes, strings and
+// paddings.
+class NarWriter {
+	private readonly pieces = new ByteAccumulator(pieceSize);
+
+	get written(): number {
+		return this.pieces.written;
+	}
+
+	// Writes the length, the bytes and the padding of a NAR byte string.
+	bytes(value: Uint8Array): void {
+		this.length(value.byteLength);
+		this.raw(value);
+		this.padding(value.byteLength);
+	}
+
+	string(value: string): void {
+		this.bytes(textEncoder.encode(value));
+	}
+
+	strings(...values: readonly string[]): void {
+		for (const value of values) {
+			this.string(value);
+		}
+	}
+
+	length(length: number): void {
+		this.raw(createLengthPrefix(length));
+	}
+
+	padding(length: number): void {
+		this.raw(zeroPadding.subarray(0, paddingLength(length)));
+	}
+
+	raw(bytes: Uint8Array): void {
+		this.pieces.write(bytes);
+	}
+
+	complete(): Iterable<Uint8Array> {
+		return this.pieces.takeComplete();
+	}
+
+	finish(): Iterable<Uint8Array> {
+		return this.pieces.takeAll();
 	}
 }
 
-async function* narSymlink(path: string): AsyncIterable<Uint8Array> {
-	yield* narString('type');
-	yield* narString('symlink');
-	yield* narString('target');
-	yield* narString(await readlink(path));
-}
-
-function* narString(value: string): Iterable<Uint8Array> {
-	yield* narBytes(textEncoder.encode(value));
-}
-
-function* narBytes(bytes: Uint8Array): Iterable<Uint8Array> {
-	yield createLengthPrefix(bytes.byteLength);
-	yield bytes;
-	yield* narPadding(bytes.byteLength);
-}
-
-function* narPadding(length: number): Iterable<Uint8Array> {
-	const padding = paddingLength(length);
-
-	if (padding > 0) {
-		yield Buffer.alloc(padding);
-	}
-}
+const zeroPadding = new Uint8Array(8);
 
 function createLengthPrefix(length: number): Uint8Array {
 	if (!Number.isSafeInteger(length) || length < 0) {
