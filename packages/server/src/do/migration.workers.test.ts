@@ -2109,6 +2109,41 @@ describe('migrations', () => {
 		expect(migrated).toStrictEqual([{ id: 'u1', hasRecordedVerdict: false }]);
 	});
 
+	it('leaves the blob declaration null for a pending upload created before 0075', async () => {
+		const insertUndeclaredPendingUpload =
+			"INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('u1', 0, 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', 'committing')";
+		const selectDeclarations =
+			'SELECT id, verdict, declared_file_hash, declared_file_size FROM pending_upload';
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-blob-declaration'),
+			async (_instance, state) => {
+				await migrateThrough(state, 74);
+				state.storage.sql.exec(insertUndeclaredPendingUpload);
+
+				await migrateThroughConvertedCatalogue(state);
+
+				const rows = state.storage.sql.exec(selectDeclarations).toArray();
+
+				return rows.map((row) => ({
+					id: row.id,
+					verdict: row.verdict,
+					hasFileHash: row.declared_file_hash !== null,
+					hasFileSize: row.declared_file_size !== null
+				}));
+			}
+		);
+
+		expect(migrated).toStrictEqual([
+			{
+				id: 'u1',
+				verdict: 'committing',
+				hasFileHash: false,
+				hasFileSize: false
+			}
+		]);
+	});
+
 	it('migrates a pre-0034 sweep scan to the collect phase and then clears it', async () => {
 		const insertCollectingScan =
 			"INSERT INTO garbage_collection_scan (cache, revision, phase, cursor, reference_cursor, allow_empty_sweep) VALUES ('builds', 7, 'sweep', 'aa', -1, 1)";

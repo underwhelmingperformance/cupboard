@@ -440,7 +440,13 @@ export const pendingUploads = sqliteTable(
 		// has enough subrequest allowance to apply it. A recorded verdict prevents another
 		// consumer from claiming the row and repeating the decode. Rows created
 		// before this column was added contain null.
-		recordedVerdictJson: text('recorded_verdict_json')
+		recordedVerdictJson: text('recorded_verdict_json'),
+		// The compressed object's SHA-256 and byte length that the client declared
+		// when it committed the upload. The first declaration is kept. Null for an
+		// upload committed without one, including every row created before these
+		// columns were added.
+		declaredFileHash: text('declared_file_hash').$type<NixSha256HashString>(),
+		declaredFileSize: integer('declared_file_size')
 	},
 	// Maintenance finds the soonest-expiring upload, probes for work awaiting
 	// verification, and checks listed staging keys for pending owners. Without

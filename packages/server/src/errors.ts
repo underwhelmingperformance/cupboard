@@ -1409,6 +1409,17 @@ export class UploadExpiredError extends ServerHttpError {
 	}
 }
 
+export class BlobDeclarationConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly uploadId: UploadId) {
+		super(
+			'The commit declared a different file hash or size from an earlier commit of the same upload.'
+		);
+		this.name = 'BlobDeclarationConflictError';
+	}
+}
+
 export class UploadCacheMismatchError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 

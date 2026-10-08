@@ -5,6 +5,8 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import {
+	blobDeclarationAttribute,
+	blobDeclarationAttributeValue,
 	commitBatchCapabilityToken,
 	commitCapabilitiesValue,
 	commitCapabilitiesValueWithCredit,
@@ -591,7 +593,7 @@ describe('commit session schemas', () => {
 			capability: 'commit-credit',
 			granted: 'commit-credit;grant=200',
 			saturated: 'commit-credit;grant=0',
-			header: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},renew-uploads,commit-credit;grant=200`
+			header: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},renew-uploads,commit-credit;grant=200`
 		});
 	});
 
@@ -634,16 +636,81 @@ describe('commit session schemas', () => {
 		).toBe(false);
 	});
 
-	it('advertises the retention-marker attribute on both tokens', () => {
+	it('advertises the retention-marker and blob-declaration attributes on both tokens', () => {
 		expect({
 			commitBatchCapabilityToken,
 			subscribeIdentityCapabilityToken,
 			commitCapabilitiesValue
 		}).toStrictEqual({
-			commitBatchCapabilityToken: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`,
-			subscribeIdentityCapabilityToken: `subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`,
-			commitCapabilitiesValue: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},renew-uploads`
+			commitBatchCapabilityToken: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue}`,
+			subscribeIdentityCapabilityToken: `subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue}`,
+			commitCapabilitiesValue: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue},renew-uploads`
 		});
+	});
+
+	it.each([
+		{
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: 'upload-1',
+					storePathHash,
+					narHash,
+					blob: { fileHash: narHash, fileSize: 4096 }
+				}
+			]
+		},
+		{
+			op: 'subscribe-identity',
+			entries: [
+				{
+					uploadId: 'upload-1',
+					storePathHash,
+					narHash,
+					retention: true,
+					blob: { fileHash: narHash, fileSize: 4096 }
+				}
+			]
+		}
+	])('accepts the $op request with a blob declaration', (value) => {
+		expect(commitSessionRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			shape: 'an empty file',
+			blob: { fileHash: narHash, fileSize: 0 },
+			path: ['commits', 0, 'blob', 'fileSize']
+		},
+		{
+			shape: 'a fractional size',
+			blob: { fileHash: narHash, fileSize: 1.5 },
+			path: ['commits', 0, 'blob', 'fileSize']
+		},
+		{
+			shape: 'a hash in another encoding',
+			blob: { fileHash: 'sha256-AAAA', fileSize: 4096 },
+			path: ['commits', 0, 'blob', 'fileHash']
+		},
+		{
+			shape: 'no size',
+			blob: { fileHash: narHash },
+			path: ['commits', 0, 'blob', 'fileSize']
+		},
+		{
+			shape: 'an unknown field',
+			blob: { fileHash: narHash, fileSize: 4096, compression: 'zstd' },
+			path: ['commits', 0, 'blob']
+		}
+	])('rejects a blob declaration with $shape', ({ blob, path }) => {
+		const parsed = commitSessionRequestSchema.safeParse({
+			op: 'commit-batch',
+			commits: [{ uploadId: 'upload-1', storePathHash, narHash, blob }]
+		});
+
+		expect(parsed.error?.issues.map((issue) => issue.path)).toStrictEqual([
+			path
+		]);
 	});
 
 	it.each([

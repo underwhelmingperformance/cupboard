@@ -342,12 +342,22 @@ export const commitBatchMaxEntries = 100;
 export const retentionMarkerAttribute = 'retention';
 export const retentionMarkerAttributeValue = '1';
 
+// The server includes this attribute in both tokens below to show that it
+// accepts the optional `blob` declaration on a `commitBatchEntrySchema` entry.
+// A client must send the declaration only to a server that advertises this
+// attribute, because an older server's strict schema rejects the field.
+export const blobDeclarationAttribute = 'blob';
+export const blobDeclarationAttributeValue = '1';
+
+const commitEntryAttributes = `${retentionMarkerAttribute}=${retentionMarkerAttributeValue};${blobDeclarationAttribute}=${blobDeclarationAttributeValue}`;
+
 // The parameterised capability token the server includes in the 101 header.
 // Carries the entry cap so a client receiving it knows the maximum batch size
 // this server accepts without needing a separate negotiation round-trip, and
-// the retention-marker attribute so it knows the entry schema accepts the
-// marker. Build from the shared constants; never hand-code the string.
-export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String(commitBatchMaxEntries)};${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`;
+// the retention-marker and blob-declaration attributes so it knows which
+// optional entry fields the schema accepts. Build from the shared constants;
+// never hand-code the string.
+export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String(commitBatchMaxEntries)};${commitEntryAttributes}`;
 
 // The capability name for `subscribe-identity`. A client looks this up in the
 // parsed capability map; the server advertises it so a capable client replays
@@ -361,10 +371,10 @@ export const subscribeIdentityCapability = 'subscribe-identity';
 
 // The capability token the server includes in the 101 header alongside the
 // commit-batch token. The entry shape and bound are shared with `commit-batch`
-// and are already encoded in that token; the retention-marker attribute is
-// repeated here since a `subscribe-identity` op is sent without a
-// `commit-batch` op ever having been.
-export const subscribeIdentityCapabilityToken = `${subscribeIdentityCapability};${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`;
+// and are already encoded in that token. The entry attributes are repeated
+// here because a client can send `subscribe-identity` without ever sending
+// `commit-batch`.
+export const subscribeIdentityCapabilityToken = `${subscribeIdentityCapability};${commitEntryAttributes}`;
 
 // The capability for `renew-uploads`. A client sends the op only when the server
 // advertises this token. The op extends the expiry of uploads whose bytes are
@@ -400,6 +410,14 @@ export function commitCapabilitiesValueWithCredit(
 	return `${commitCapabilitiesValue},${commitCreditCapabilityToken(openingGrant)}`;
 }
 
+export const commitBlobDeclarationSchema = z.strictObject({
+	fileHash: uploadBlobMetadataShape.fileHash,
+	fileSize: uploadBlobMetadataShape.fileSize
+});
+export type CommitBlobDeclaration = z.output<
+	typeof commitBlobDeclarationSchema
+>;
+
 // Entries for `commit-batch` and `subscribe-identity` include the upload and the
 // path identity from negotiation. A reconnect can therefore resend an entry
 // whose reply was lost. If the pending row has gone, the server can compare the
@@ -407,6 +425,11 @@ export function commitCapabilitiesValueWithCredit(
 // could only fail as unknown. When the server advertised the retention marker,
 // `retention` also records that this upload accepted grace facts. The
 // `already-present` response can then include the path's durable grace fact.
+// When the server advertised the blob-declaration attribute, `blob` gives the
+// SHA-256 and byte length of the compressed object that the client uploaded.
+// The server stores the first declaration for an upload and refuses a
+// different one. A `subscribe-identity` entry may repeat the declaration, but
+// the server ignores it there.
 //
 // Any change to this schema's shape or the `commitBatchMaxEntries`
 // bound is a breaking change that requires a new capability token for each op
@@ -415,7 +438,8 @@ export const commitBatchEntrySchema = z.strictObject({
 	uploadId: uploadIdSchema,
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
-	retention: z.literal(true).optional()
+	retention: z.literal(true).optional(),
+	blob: commitBlobDeclarationSchema.optional()
 });
 export type CommitBatchEntry = z.output<typeof commitBatchEntrySchema>;
 

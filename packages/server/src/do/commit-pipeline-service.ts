@@ -15,6 +15,7 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import {
+	type CommitBlobDeclaration,
 	type CommitResponse,
 	type SessionId,
 	type UploadGraceFact,
@@ -48,6 +49,7 @@ import {
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	BlobDeclarationConflictError,
 	NarTooLargeError,
 	QuotaExceededError,
 	TenantUsageMissingError,
@@ -324,6 +326,38 @@ export class CommitPipelineService {
 				status: status === 'committed' ? 'servable' : 'absent',
 				...(grace !== undefined && { grace })
 			});
+		}
+	}
+
+	// A declaration is written once. A verification pass may already have claimed
+	// the upload with the first declaration, so a later commit cannot replace it.
+	private recordBlobDeclaration(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		blob: CommitBlobDeclaration
+	): void {
+		if (pending.declaredFileHash === null) {
+			this.context.db
+				.update(schema.pendingUploads)
+				.set({
+					declaredFileHash: blob.fileHash,
+					declaredFileSize: blob.fileSize
+				})
+				.where(
+					and(
+						eq(schema.pendingUploads.id, pending.id),
+						isNull(schema.pendingUploads.declaredFileHash)
+					)
+				)
+				.run();
+
+			return;
+		}
+
+		if (
+			pending.declaredFileHash !== blob.fileHash ||
+			pending.declaredFileSize !== blob.fileSize
+		) {
+			throw new BlobDeclarationConflictError(pending.id);
 		}
 	}
 
@@ -1496,7 +1530,8 @@ export class CommitPipelineService {
 		advisory?: {
 			readonly prefetched?: PrefetchedMaterialisationFacts;
 			readonly account?: TenantAccount;
-		}
+		},
+		blob?: CommitBlobDeclaration
 	): Promise<CommitOutcome> {
 		// Do not defer a commit after offboarding begins. It could otherwise be
 		// restored after the drain has removed this tenant's references.
@@ -1542,6 +1577,10 @@ export class CommitPipelineService {
 			);
 
 			throw new UploadExpiredError(uploadId);
+		}
+
+		if (blob !== undefined) {
+			this.recordBlobDeclaration(pending, blob);
 		}
 
 		const renewedExpiry = new Date(Date.now() + 15 * 60 * 1000);
