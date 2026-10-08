@@ -109,6 +109,10 @@ interface HarnessOptions {
 	readonly vanished?: ReadonlySet<StorePathString>;
 	readonly failCommitsOnce?: ReadonlySet<StorePathString>;
 	readonly failNegotiate?: boolean;
+	/**
+	 * Rejects every upload with this error.
+	 */
+	readonly uploadFailure?: Error;
 	readonly decisions?: (
 		paths: NegotiateBody['paths']
 	) => UploadNegotiateResponse['uploads'];
@@ -196,6 +200,10 @@ function harness(options: HarnessOptions = {}): Harness {
 			events.push(`upload:${r2Key}`);
 			minutes += options.uploadMinutes ?? 0;
 
+			if (options.uploadFailure !== undefined) {
+				return Promise.reject(options.uploadFailure);
+			}
+
 			return Promise.resolve();
 		},
 		commit: (target) => {
@@ -234,7 +242,13 @@ function harness(options: HarnessOptions = {}): Harness {
 		runRoot,
 		createNarArchive: () => emptyStream(),
 		compressNar: () => ({
-			body: emptyStream(),
+			body: new ReadableStream<Uint8Array>({
+				cancel: (reason) => {
+					events.push(
+						`cancel:${reason instanceof Error ? reason.message : 'unknown'}`
+					);
+				}
+			}),
 			digest: () => ({ narHash, narSize: 4 })
 		}),
 		...(options.maxEntries !== undefined && { maxEntries: options.maxEntries }),
@@ -523,6 +537,26 @@ describe('BuildOutputBatcher', () => {
 			outcomes: [{ outcome: 'published', storePath: pathA }],
 			candidates: []
 		});
+	});
+
+	it('cancels the NAR body when its upload fails', async () => {
+		const { batcher, events } = harness({
+			uploadFailure: new Error('upload refused')
+		});
+
+		batcher.enqueue(pathA);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.settled();
+
+		expect(events).toStrictEqual([
+			'open',
+			`root:${StorePath.basename(pathA)}`,
+			`info:${StorePath.basename(pathA)}`,
+			'negotiate',
+			`upload:staging/${StorePath.basename(pathA)}`,
+			'cancel:upload refused',
+			'close'
+		]);
 	});
 
 	it('does not enqueue a path whose outcome is recorded', async () => {

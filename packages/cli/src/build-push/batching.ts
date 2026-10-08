@@ -13,7 +13,7 @@ import type { CommitOptions } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
 import { PushNarMetadataMismatchError } from '../errors.ts';
-import { compressNarToStream } from '../nix/blob.ts';
+import { compressNarToStream, sendCompressedNar } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import { type NegotiatedPath, publishJustInTime } from '../push/negotiation.ts';
@@ -306,12 +306,18 @@ export class BuildOutputBatcher {
 			const createNarArchive =
 				this.options.createNarArchive ??
 				((storePath: string) => new NarArchive(storePath));
-			const upload = compressNar(createNarArchive(info.storePath));
+			const upload = compressNar(
+				createNarArchive(info.storePath),
+				info.narSize
+			);
 
 			const durationMs = await sendUpload(
 				this.options.session,
 				decision.uploadId,
-				() => this.options.client.uploadNar(decision.r2Key, upload.body),
+				() =>
+					sendCompressedNar(upload.body, (body) =>
+						this.options.client.uploadNar(decision.r2Key, body)
+					),
 				this.options.uploadClock
 			);
 			assertNarMetadata(info, upload.digest());

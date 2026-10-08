@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Returns `length` bytes from a xorshift generator. The same seed always gives
  * the same bytes, and zstd cannot compress them.
@@ -14,4 +16,19 @@ export function pseudoRandomBytes(length: number, seed: number): Uint8Array {
 	}
 
 	return new Uint8Array(words.buffer, words.byteOffset, length);
+}
+
+/**
+ * Returns the length and SHA-256 digest of `bytes`. Tests compare these
+ * instead of multi-megabyte buffers, which take seconds to compare element by
+ * element.
+ */
+export function fingerprint(bytes: Uint8Array): {
+	readonly size: number;
+	readonly sha256: string;
+} {
+	return {
+		size: bytes.byteLength,
+		sha256: createHash('sha256').update(bytes).digest('hex')
+	};
 }
