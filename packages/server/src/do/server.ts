@@ -46,7 +46,10 @@ import {
 	uploadIdSchema,
 	uploadRequestMaxPathsHeader
 } from '@cupboard/protocol/upload';
-import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import {
+	CountingSemaphore,
+	mapWithConcurrency
+} from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
@@ -435,37 +438,6 @@ export function verifyBackstopReuseSettleLimit(
 }
 
 type MaintenanceKind = 'gc' | 'verify' | 'local-step';
-
-class CountingSemaphore {
-	private slots: number;
-	private readonly waiters: ((value: undefined) => void)[] = [];
-
-	constructor(limit: number) {
-		this.slots = limit;
-	}
-
-	acquire(): Promise<undefined> {
-		if (this.slots > 0) {
-			this.slots -= 1;
-			return Promise.resolve(undefined);
-		}
-
-		const { promise, resolve } = Promise.withResolvers<undefined>();
-		this.waiters.push(resolve);
-		return promise;
-	}
-
-	release(): void {
-		const next = this.waiters.shift();
-
-		if (next === undefined) {
-			this.slots += 1;
-			return;
-		}
-
-		next(undefined);
-	}
-}
 
 // The migration whose assertions require every cache to record its access.
 const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';

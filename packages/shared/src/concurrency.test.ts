@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { drainWithConcurrency, mapWithConcurrency } from './concurrency.ts';
+import {
+	CountingSemaphore,
+	drainWithConcurrency,
+	mapWithConcurrency
+} from './concurrency.ts';
 
 describe('mapWithConcurrency', () => {
 	it('resolves each value in input order, even when the first settles last', async () => {
@@ -292,6 +296,84 @@ async function* values<T>(items: readonly T[]): AsyncGenerator<T> {
 		yield item;
 	}
 }
+
+describe('CountingSemaphore', () => {
+	it.each([
+		{
+			ends: 'resolves',
+			end: (task: ReturnType<typeof deferred<string>>) => {
+				task.resolve('done');
+			}
+		},
+		{
+			ends: 'rejects',
+			end: (task: ReturnType<typeof deferred<string>>) => {
+				task.reject(new Error('failed'));
+			}
+		}
+	])(
+		'starts a waiting task only after a running task $ends',
+		async ({ end }) => {
+			const semaphore = new CountingSemaphore(2);
+			const tasks = [
+				deferred<string>(),
+				deferred<string>(),
+				deferred<string>()
+			];
+			const started: number[] = [];
+			const runs = tasks.map(async (task, index) => {
+				try {
+					return await semaphore.run(() => {
+						started.push(index);
+
+						return task.promise;
+					});
+				} catch {
+					return 'failed';
+				}
+			});
+
+			await flushMicrotasks();
+			const startedAtLimit = [...started];
+			const [first, second, third] = tasks;
+			if (first === undefined || second === undefined || third === undefined) {
+				throw new Error('three tasks are needed');
+			}
+			end(first);
+			await flushMicrotasks();
+			second.resolve('second');
+			third.resolve('third');
+			await Promise.all(runs);
+
+			expect({ startedAtLimit, started }).toStrictEqual({
+				startedAtLimit: [0, 1],
+				started: [0, 1, 2]
+			});
+		}
+	);
+
+	it('starts a task before returning when a slot is free', async () => {
+		const semaphore = new CountingSemaphore(1);
+		const started: string[] = [];
+		const first = semaphore.run(() => {
+			started.push('first');
+
+			return Promise.resolve();
+		});
+		const second = semaphore.run(() => {
+			started.push('second');
+
+			return Promise.resolve();
+		});
+		const startedAtOnce = [...started];
+		await Promise.all([first, second]);
+
+		expect({ startedAtOnce, started }).toStrictEqual({
+			startedAtOnce: ['first'],
+			started: ['first', 'second']
+		});
+	});
+});
 
 function deferred<T>(): {
 	readonly promise: Promise<T>;
