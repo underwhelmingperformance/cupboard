@@ -25,10 +25,12 @@ export { chunk } from '@cupboard/shared/collections';
 // toolchain enforces cannot drift apart unnoticed.
 export const maxBoundParameters = 100;
 
-// Cloudflare allows a Durable Object six simultaneous outgoing connections per
-// request. The commit-batch fan-out runs this many tasks concurrently; after
-// the batch-level prefetch each task holds at most one live connection at a time
-// (its per-path R2 head), so the pool stays within the platform cap.
+// Cloudflare allows each invocation six simultaneous outgoing connections that
+// are waiting for response headers. The commit-batch fan-out runs this many
+// tasks concurrently; after the batch-level prefetch each task has at most one
+// live connection at a time (its per-path R2 head), so the pool stays within the
+// platform cap. The queue consumer's `ConnectionLimitedBucket` enforces the same
+// limit on its R2 requests.
 export const maxOutgoingConnections = 6;
 
 // R2 deletes up to 1000 keys in a single `delete` call; a larger set is split.

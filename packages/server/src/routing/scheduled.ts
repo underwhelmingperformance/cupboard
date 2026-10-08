@@ -23,6 +23,10 @@ import {
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
+import {
+	ConnectionLimitedBucket,
+	type R2ObjectStore
+} from '../blob/connection-limited-bucket.ts';
 import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import {
 	type NarVerification,
@@ -62,7 +66,7 @@ import {
 	type NarInfoDemotion,
 	type ObjectReaperPhase
 } from '../do/blob-reaper-service.ts';
-import { batchNonEmpty } from '../do/bulk.ts';
+import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import type { VerificationRecordRpcResult } from '../do/server.ts';
 import {
@@ -1141,7 +1145,7 @@ type FreshVerificationOutcome =
  */
 async function verifyFreshClaim(
 	logger: Logger,
-	blobs: R2Bucket,
+	blobs: R2ObjectStore,
 	buffers: NarReadBufferPool,
 	claim: PendingVerification,
 	firstGet: SubrequestHold,
@@ -1319,6 +1323,10 @@ export async function verifyTenant(
 
 				const reuseClaims = claims.filter((claim) => claim.reuse);
 				const freshClaims = claims.filter((claim) => !claim.reuse);
+				const blobs = new ConnectionLimitedBucket(
+					env.BLOBS,
+					maxOutgoingConnections
+				);
 
 				// Reuse rows need no decode. The Durable Object checks the canonical object
 				// and performs every shared write while it still owns the claim.
@@ -1345,7 +1353,7 @@ export async function verifyTenant(
 						({ claim, firstGet }) =>
 							verifyFreshClaim(
 								logger,
-								env.BLOBS,
+								blobs,
 								buffers,
 								claim,
 								firstGet,

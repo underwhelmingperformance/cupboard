@@ -113,3 +113,68 @@ export async function drainWithConcurrency<T>(
 		throw firstFailure.error;
 	}
 }
+
+/**
+ * Admits at most `limit` holders at once. `acquire` resolves when a slot is
+ * free, and each holder must call `release` once. Waiters are admitted in the
+ * order in which they called `acquire`.
+ */
+export class CountingSemaphore {
+	private slots: number;
+	private readonly waiters: ((value: undefined) => void)[] = [];
+
+	constructor(limit: number) {
+		this.slots = limit;
+	}
+
+	private async runInSlot<T>(task: () => Promise<T>): Promise<T> {
+		try {
+			return await task();
+		} finally {
+			this.release();
+		}
+	}
+
+	private async runWhenAdmitted<T>(task: () => Promise<T>): Promise<T> {
+		await this.acquire();
+
+		return this.runInSlot(task);
+	}
+
+	acquire(): Promise<undefined> {
+		if (this.slots > 0) {
+			this.slots -= 1;
+			return Promise.resolve(undefined);
+		}
+
+		const { promise, resolve } = Promise.withResolvers<undefined>();
+		this.waiters.push(resolve);
+		return promise;
+	}
+
+	release(): void {
+		const next = this.waiters.shift();
+
+		if (next === undefined) {
+			this.slots += 1;
+			return;
+		}
+
+		next(undefined);
+	}
+
+	/**
+	 * Runs `task` in a slot and releases the slot when the task's promise
+	 * resolves or rejects. When a slot is free, `task` starts before `run` returns;
+	 * otherwise it starts once a slot is released to it.
+	 */
+	run<T>(task: () => Promise<T>): Promise<T> {
+		if (this.slots > 0) {
+			this.slots -= 1;
+
+			return this.runInSlot(task);
+		}
+
+		return this.runWhenAdmitted(task);
+	}
+}

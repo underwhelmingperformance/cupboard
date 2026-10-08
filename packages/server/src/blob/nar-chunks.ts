@@ -9,6 +9,7 @@ import {
 } from '../errors.ts';
 import { type R2ObjectKey } from '../http/http.ts';
 
+import { type R2ObjectStore } from './connection-limited-bucket.ts';
 import {
 	type NarReadBufferLease,
 	type NarReadBufferPool
@@ -177,7 +178,7 @@ async function abortableGet<T extends R2ObjectBody | R2Object | null>(
  * so all parts come from the same object.
  */
 interface StoredObject {
-	readonly blobs: R2Bucket;
+	readonly blobs: R2ObjectStore;
 	readonly r2Key: R2ObjectKey;
 	readonly etag: string;
 	readonly size: number;
@@ -645,7 +646,7 @@ class StoredNarChunks implements NarChunkSource {
  * different object or none, or when a body ends early.
  */
 export async function openStoredNarChunks(
-	blobs: R2Bucket,
+	blobs: R2ObjectStore,
 	r2Key: R2ObjectKey,
 	{ buffers, watch, progress, firstGet }: StoredNarChunksOptions
 ): Promise<NarChunkSource> {

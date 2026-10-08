@@ -14,9 +14,13 @@ import {
 	StoredObjectInconsistentError,
 	SubrequestTimeoutError
 } from '../errors.ts';
-import { r2ObjectKeySchema } from '../http/http.ts';
+import { type R2ObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { resetTestServer } from '../test-support.ts';
 
+import {
+	ConnectionLimitedBucket,
+	type R2ObjectStore
+} from './connection-limited-bucket.ts';
 import {
 	type NarChunkSource,
 	openStoredNarChunks,
@@ -907,6 +911,80 @@ const noStallTimer: ReadWatch = {
 
 describe('verifyStoredNar with ranged reads', () => {
 	beforeEach(resetTestServer);
+
+	it('sends the first get, every ranged get and every head reopen through the connection limit', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-connection-limit');
+		await env.BLOBS.put(r2Key, compressed);
+		const connections = { open: 0, peak: 0, gets: 0 };
+		// Each get stays open for a moment so that concurrent gets overlap.
+		const store: R2ObjectStore = {
+			get: async (key: R2ObjectKey, options?: R2GetOptions) => {
+				connections.open += 1;
+				connections.gets += 1;
+				connections.peak = Math.max(connections.peak, connections.open);
+
+				try {
+					await scheduler.wait(20);
+
+					return await (options === undefined
+						? env.BLOBS.get(key)
+						: env.BLOBS.get(key, options));
+				} finally {
+					connections.open -= 1;
+				}
+			},
+			put: (key, value, options) => env.BLOBS.put(key, value, options)
+		};
+		const direct = vi.spyOn(env.BLOBS, 'get');
+		const progress = narVerifyProgress();
+
+		try {
+			const verification = await verifyStoredNar(
+				new ConnectionLimitedBucket(store, 2),
+				r2Key,
+				expected,
+				{ buffers: new NarReadBufferPool(), progress }
+			);
+			const bypassingGets = direct.mock.calls.length - connections.gets;
+
+			expect({
+				ok: verification.ok,
+				ranges: progress.ranges,
+				peak: connections.peak,
+				bypassingGets
+			}).toStrictEqual({ ok: true, ranges: 2, peak: 2, bypassingGets: 0 });
+		} finally {
+			direct.mockRestore();
+		}
+	});
+
+	// The source admits up to four ranges in one synchronous step, before the
+	// connection limit has made any of their gets.
+	it('counts a ranged get against the slice when the connection limit admits it', async () => {
+		const { compressed, expected } = compressedNar();
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-range-admission');
+		await env.BLOBS.put(r2Key, compressed);
+		const buffers = new NarReadBufferPool({ bufferSize: 2 * mebibyte });
+		const progress = narVerifyProgress();
+		const bucket = new ConnectionLimitedBucket(boundedBlobs(env.BLOBS), 6);
+
+		const settled = await withSubrequestSlice(
+			() =>
+				settle(verifyStoredNar(bucket, r2Key, expected, { buffers, progress })),
+			{ subrequests: 3, reserve: 0 }
+		);
+
+		expect({
+			outcome: outcomeOf(settled),
+			ranges: progress.ranges,
+			pool: buffers.state
+		}).toStrictEqual({
+			outcome: 'ok',
+			ranges: 1,
+			pool: { free: 4, allocations: 1 }
+		});
+	});
 
 	it('delivers ranges in order when they complete out of order', async () => {
 		const { compressed, expected } = compressedNar();

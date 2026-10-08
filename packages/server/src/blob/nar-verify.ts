@@ -8,6 +8,7 @@ import { raceVerificationOperation } from '../do/verification-claim-lease.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { type R2ObjectKey, verifiableMaxBytes } from '../http/http.ts';
 
+import { type R2ObjectStore } from './connection-limited-bucket.ts';
 import {
 	BodyChunks,
 	type NarChunk,
@@ -407,7 +408,7 @@ export async function verifyDecompressedNar(
  * the verifier cancels the returned body without decoding it.
  */
 export async function verifyStoredNar(
-	blobs: R2Bucket,
+	blobs: R2ObjectStore,
 	r2Key: R2ObjectKey,
 	expected: ExpectedNar,
 	{
