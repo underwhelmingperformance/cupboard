@@ -48,6 +48,7 @@ import {
 	type CanonicalIncarnation,
 	type StagedBlobPromotion
 } from '../blob/promote-blob.ts';
+import { r2BadDigestCode, r2ErrorCode } from '../blob/r2-errors.ts';
 import {
 	type CacheId,
 	cacheScopeFromRow,
@@ -94,6 +95,11 @@ import {
 } from './grace-decision.ts';
 import { type JsonValueList, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import {
+	logPromotionAttemptFailed,
+	type PromotedPath,
+	type PromotionRecord
+} from './promotion-record.ts';
 import {
 	ReconcileQueueService,
 	type ReconcileTarget,
@@ -423,6 +429,81 @@ function declaredBlob(
 	};
 }
 
+// A copy replaces the facts of the previous attempt. It keeps a reservation
+// that an earlier fused write may still have used.
+function copyAttempt(
+	current: PromotionRecord | undefined,
+	attempt: Omit<PromotionRecord, 'mode' | 'reservation'>
+): PromotionRecord {
+	return {
+		mode: 'copy',
+		...attempt,
+		...(current?.reservation !== undefined && {
+			reservation: current.reservation
+		})
+	};
+}
+
+// The written incarnation is live, so the upload no longer gives it up.
+function withoutReservation(
+	current: PromotionRecord | undefined,
+	incarnation: number
+): PromotionRecord {
+	if (current === undefined) {
+		return { mode: 'fused' };
+	}
+
+	if (current.reservation?.incarnation !== incarnation) {
+		return current;
+	}
+
+	const { reservation: _activated, ...rest } = current;
+
+	return rest;
+}
+
+// The facts of a fused write that a verdict reports. The write's incarnation
+// stays reserved until a promotion activates it.
+function writtenAttempt(
+	owner: string,
+	verdict: VerificationVerdict
+): PromotionRecord | undefined {
+	if (
+		(verdict.kind !== 'verified' && verdict.kind !== 'abandoned') ||
+		verdict.canonicalWrite === undefined
+	) {
+		return undefined;
+	}
+
+	const { incarnation, bytes, durationMs } = verdict.canonicalWrite;
+	const code =
+		verdict.kind === 'abandoned'
+			? verdict.r2ErrorCode
+			: !verdict.verification.ok &&
+				  verdict.verification.reason === 'file-hash-mismatch'
+				? r2BadDigestCode
+				: undefined;
+
+	return {
+		mode: 'fused',
+		bytes,
+		durationMs,
+		...(code !== undefined && { r2ErrorCode: code }),
+		reservation: { incarnation, owner }
+	};
+}
+
+function promotedPath(
+	pending: PendingUploadRow,
+	metadata: UploadPathNegotiation
+): PromotedPath {
+	return {
+		uploadId: pending.id,
+		storePathHash: metadata.storePathHash,
+		narHash: metadata.narHash
+	};
+}
+
 /**
  * An object that the queue consumer wrote at a reserved incarnation for an
  * upload that will not be published from it.
@@ -459,19 +540,25 @@ export interface PendingVerificationBatch {
 type PendingVerificationChunk = Omit<PendingVerificationBatch, 'owner'>;
 
 /**
- * The canonical object that the queue consumer wrote while it verified a
- * declared upload. The Durable Object reserved `incarnation` for the claim
- * owner before the consumer started writing.
+ * The consumer's write of a declared upload's canonical object, made while it
+ * verified the upload. The Durable Object reserved `incarnation` for the claim
+ * owner before the consumer started writing. `bytes` counts the compressed
+ * bytes that the consumer read, and `durationMs` is the time from the start of
+ * the read until the write ended.
  */
 export interface CanonicalWrite {
 	readonly incarnation: number;
+	readonly bytes: number;
+	readonly durationMs: number;
 }
 
 // The queue consumer's verdict for one claimed upload. Older consumers can
 // report `promoted` after writing the canonical object. Current consumers report
-// `verified`. A `verified` verdict includes `canonicalWrite` when the
-// consumer wrote the canonical object itself; otherwise the Durable Object
-// copies the staged object.
+// `verified`. A `verified` verdict includes `canonicalWrite` when the consumer
+// streamed the staged object into a reserved incarnation; the object exists
+// only if verification succeeded. Otherwise the Durable Object copies the
+// staged object. An `abandoned` verdict includes `canonicalWrite` when the
+// write failed, and `r2ErrorCode` when an R2 error stopped it.
 export type VerificationVerdict =
 	| {
 			readonly kind: 'verified';
@@ -480,7 +567,11 @@ export type VerificationVerdict =
 	  }
 	| { readonly kind: 'promoted' }
 	| { readonly kind: 'missing' }
-	| { readonly kind: 'abandoned' };
+	| {
+			readonly kind: 'abandoned';
+			readonly canonicalWrite?: CanonicalWrite;
+			readonly r2ErrorCode?: number;
+	  };
 
 /**
  * How a verified upload's canonical object comes to exist: the Durable Object
@@ -528,7 +619,9 @@ const narVerificationSchema = z.union([
 ]);
 
 const canonicalWriteSchema = z.strictObject({
-	incarnation: z.number().int().positive()
+	incarnation: z.number().int().positive(),
+	bytes: z.number().int().nonnegative(),
+	durationMs: z.number().nonnegative()
 });
 
 const heldVerdictSchema = z.discriminatedUnion('kind', [
@@ -755,6 +848,7 @@ export class VerificationService {
 	) {}
 
 	private async finishExhaustedUpload(
+		logger: Logger,
 		pending: PendingUploadRow,
 		owner: string,
 		signal?: AbortSignal
@@ -836,7 +930,11 @@ export class VerificationService {
 		await this.uploadState.clearDeliveredNarRefresh(pending.id);
 		if (
 			!this.ownsActiveClaim(owner, pending, signal) ||
-			!this.uploadState.clearPendingUpload(pending.id, owner)
+			!(await this.uploadState.clearPendingUpload(
+				pending.id,
+				{ logger, outcome: resolution.verdict },
+				owner
+			))
 		) {
 			return false;
 		}
@@ -989,6 +1087,7 @@ export class VerificationService {
 	}
 
 	private async prepareRecordedVerdict(
+		logger: Logger,
 		captured: PendingUploadRow,
 		verification: DeclaredNarVerification,
 		promotion: PromotionState,
@@ -1023,6 +1122,7 @@ export class VerificationService {
 				? { kind: 'already-promoted' }
 				: promotion;
 		const reservation = await this.reservePendingRow(
+			logger,
 			pending,
 			metadata,
 			owner,
@@ -1035,6 +1135,7 @@ export class VerificationService {
 		const { generation } = reservation;
 
 		const finalised = await this.finaliseIfAlreadyCommitted(
+			logger,
 			pending,
 			metadata,
 			generation,
@@ -1047,6 +1148,7 @@ export class VerificationService {
 		}
 
 		const promotionResult = await this.promoteForCommit(
+			logger,
 			pending,
 			metadata,
 			generation,
@@ -1067,6 +1169,7 @@ export class VerificationService {
 	}
 
 	private async prepareWithoutDecode(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		owner: string,
 		signal?: AbortSignal
@@ -1110,6 +1213,7 @@ export class VerificationService {
 		}
 
 		const reservation = await this.reservePendingRow(
+			logger,
 			pending,
 			metadata,
 			owner,
@@ -1121,6 +1225,7 @@ export class VerificationService {
 		}
 
 		const finalised = await this.finaliseIfAlreadyCommitted(
+			logger,
 			pending,
 			metadata,
 			reservation.generation,
@@ -1137,6 +1242,7 @@ export class VerificationService {
 		}
 
 		const promotion = await this.promoteForCommit(
+			logger,
 			pending,
 			metadata,
 			reservation.generation,
@@ -1188,6 +1294,7 @@ export class VerificationService {
 	}
 
 	private async reservePendingRow(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		owner: string,
@@ -1216,6 +1323,7 @@ export class VerificationService {
 				pending.id,
 				pending.r2Key,
 				metadata.narHash,
+				{ logger, outcome: 'absent' },
 				owner
 			);
 
@@ -1234,6 +1342,7 @@ export class VerificationService {
 	// successful upload into a mismatch, so finish the remaining bookkeeping from
 	// the committed reference and narinfo object.
 	private async finaliseIfAlreadyCommitted(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
@@ -1242,6 +1351,7 @@ export class VerificationService {
 	): Promise<FinaliseCommittedResult> {
 		const result = await this.context.criticalSection(() =>
 			this.finaliseIfAlreadyCommittedLocked(
+				logger,
 				pending,
 				metadata,
 				generation,
@@ -1258,6 +1368,7 @@ export class VerificationService {
 	}
 
 	private async finaliseIfAlreadyCommittedLocked(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
@@ -1320,7 +1431,11 @@ export class VerificationService {
 		);
 		if (
 			!this.ownsActiveClaim(owner, pending, signal) ||
-			!this.uploadState.clearPendingUpload(pending.id, owner)
+			!(await this.uploadState.clearPendingUpload(
+				pending.id,
+				{ logger, outcome: verdict },
+				owner
+			))
 		) {
 			return 'ignored';
 		}
@@ -1331,6 +1446,7 @@ export class VerificationService {
 	}
 
 	private async promoteForCommit(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
@@ -1343,6 +1459,7 @@ export class VerificationService {
 
 		if (!verification.ok) {
 			const didApply = await this.failReservedUpload(
+				logger,
 				pending,
 				metadata,
 				generation,
@@ -1363,6 +1480,7 @@ export class VerificationService {
 			}
 
 			const isStillOwned = () => this.ownsActiveClaim(owner, pending, signal);
+			const startedAt = Date.now();
 			let staged: StagedBlobPromotion | undefined;
 
 			try {
@@ -1382,11 +1500,33 @@ export class VerificationService {
 								isStillOwned
 							);
 			} catch (error) {
-				if (!(error instanceof StagedObjectDigestMismatchError)) {
+				if (promotion.kind === 'written') {
+					throw error;
+				}
+
+				const isMismatch = error instanceof StagedObjectDigestMismatchError;
+				const code = r2ErrorCode(isMismatch ? error.cause : error);
+				const attempt = {
+					bytes: verification.fileSize ?? 0,
+					durationMs: Date.now() - startedAt,
+					...(code !== undefined && { r2ErrorCode: code })
+				};
+				this.uploadState.recordPromotion(pending.id, owner, (current) =>
+					copyAttempt(current, attempt)
+				);
+
+				if (!isMismatch) {
+					logPromotionAttemptFailed(logger, promotedPath(pending, metadata), {
+						mode: 'copy',
+						outcome: 'failed',
+						...attempt
+					});
+
 					throw error;
 				}
 
 				const didApply = await this.failReservedUpload(
+					logger,
 					pending,
 					metadata,
 					generation,
@@ -1402,6 +1542,16 @@ export class VerificationService {
 				!this.ownsActiveClaim(owner, pending, signal)
 			) {
 				return 'ignored';
+			}
+
+			if (promotion.kind === 'copy') {
+				const attempt = {
+					bytes: staged.canonical.fileSize,
+					durationMs: Date.now() - startedAt
+				};
+				this.uploadState.recordPromotion(pending.id, owner, (current) =>
+					copyAttempt(current, attempt)
+				);
 			}
 
 			if (staged.requiresNarInfoRefresh) {
@@ -1434,6 +1584,12 @@ export class VerificationService {
 			});
 
 			if (activation.wasActivated) {
+				if (promotion.kind === 'written') {
+					this.uploadState.recordPromotion(pending.id, owner, (current) =>
+						withoutReservation(current, promotion.incarnation)
+					);
+				}
+
 				await this.uploadState.clearCanonicalNarMissing(metadata.narHash);
 
 				if (this.uploadState.hasPendingNarRefresh(pending.id)) {
@@ -1567,6 +1723,7 @@ export class VerificationService {
 			// Reclaim the reserved narinfo row so reconciliation cannot restore a path
 			// without a reference or a corresponding tenant charge.
 			return this.failReservedUpload(
+				logger,
 				pending,
 				metadata,
 				generation,
@@ -1636,7 +1793,11 @@ export class VerificationService {
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
 					return false;
 				}
-				const didApply = this.uploadState.clearPendingUpload(pending.id, owner);
+				const didApply = await this.uploadState.clearPendingUpload(
+					pending.id,
+					{ logger, outcome: verdict },
+					owner
+				);
 
 				if (didApply) {
 					this.notifyWaiters(pending, verdict);
@@ -1653,6 +1814,7 @@ export class VerificationService {
 				pending.id,
 				pending.r2Key,
 				metadata.narHash,
+				{ logger, outcome: 'absent' },
 				owner
 			);
 
@@ -1703,7 +1865,11 @@ export class VerificationService {
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
 				return false;
 			}
-			const wasCleared = this.uploadState.clearPendingUpload(pending.id, owner);
+			const wasCleared = await this.uploadState.clearPendingUpload(
+				pending.id,
+				{ logger, outcome: verdict },
+				owner
+			);
 
 			if (wasCleared) {
 				this.notifyWaiters(pending, verdict);
@@ -1718,7 +1884,11 @@ export class VerificationService {
 		signal?.throwIfAborted();
 		if (
 			!this.ownsActiveClaim(owner, pending, signal) ||
-			!this.uploadState.clearPendingUpload(pending.id, owner)
+			!(await this.uploadState.clearPendingUpload(
+				pending.id,
+				{ logger, outcome: 'absent' },
+				owner
+			))
 		) {
 			return false;
 		}
@@ -1764,6 +1934,7 @@ export class VerificationService {
 	// ownership of the upload row, root and waiter. This prevents a late failure
 	// from retiring a servable path.
 	private async failReservedUpload(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
@@ -1798,9 +1969,10 @@ export class VerificationService {
 		}
 
 		signal?.throwIfAborted();
-		const isSettled = this.uploadState.markUploadTerminal(
+		const isSettled = await this.uploadState.markUploadTerminal(
 			pending.id,
 			verdict,
+			logger,
 			owner
 		);
 
@@ -2677,6 +2849,12 @@ export class VerificationService {
 				continue;
 			}
 
+			const written = writtenAttempt(owner, verdict);
+
+			if (written !== undefined) {
+				this.uploadState.recordPromotion(uploadId, owner, () => written);
+			}
+
 			if (verdict.kind === 'abandoned') {
 				const pending = this.context.db
 					.select()
@@ -3433,7 +3611,7 @@ export class VerificationService {
 						owner,
 						pendings.slice(index).map((row) => row.id),
 						(claimSignal) =>
-							this.prepareWithoutDecode(pending, owner, claimSignal),
+							this.prepareWithoutDecode(logger, pending, owner, claimSignal),
 						signal
 					);
 
@@ -3447,7 +3625,9 @@ export class VerificationService {
 					signal?.throwIfAborted();
 					if (error instanceof UploadedObjectNotFoundError) {
 						// A missing canonical object is terminal for this reuse attempt.
-						if (await this.recordMissingObject(pending, owner, signal)) {
+						if (
+							await this.recordMissingObject(logger, pending, owner, signal)
+						) {
 							settled += 1;
 						}
 						continue;
@@ -3542,7 +3722,37 @@ export class VerificationService {
 			return { kind: 'declined' };
 		}
 
-		return this.uploadState.reserveCanonicalWrite(pending.narHash, owner);
+		const reservation = await this.uploadState.reserveCanonicalWrite(
+			pending.narHash,
+			owner
+		);
+
+		if (reservation.kind !== 'reserved') {
+			return reservation;
+		}
+
+		// The upload row records the reservation, so the upload gives up the
+		// incarnation if it leaves verification without activating it.
+		const isRecorded = this.uploadState.recordPromotion(
+			uploadId,
+			owner,
+			() => ({
+				mode: 'fused',
+				reservation: { incarnation: reservation.incarnation, owner }
+			})
+		);
+
+		if (!isRecorded) {
+			await this.uploadState.abandonWrittenBlob(
+				pending.narHash,
+				reservation.incarnation,
+				owner
+			);
+
+			return { kind: 'revoked' };
+		}
+
+		return reservation;
 	}
 
 	/**
@@ -3652,7 +3862,7 @@ export class VerificationService {
 				continue;
 			}
 			try {
-				if (await this.finishExhaustedUpload(pending, owner, signal)) {
+				if (await this.finishExhaustedUpload(logger, pending, owner, signal)) {
 					completed += 1;
 				}
 			} catch {
@@ -3788,6 +3998,7 @@ export class VerificationService {
 
 					if (verdict.kind === 'missing') {
 						const didApply = await this.recordMissingObject(
+							logger,
 							pending,
 							owner,
 							signal
@@ -3806,6 +4017,7 @@ export class VerificationService {
 						verdict.kind === 'promoted' ? { ok: true } : verdict.verification;
 					const promotion = promotionOf(verdict);
 					const prepared = await this.prepareRecordedVerdict(
+						logger,
 						pending,
 						verification,
 						promotion,
@@ -3844,6 +4056,7 @@ export class VerificationService {
 					signal?.throwIfAborted();
 					if (error instanceof UploadedObjectNotFoundError) {
 						const didApply = await this.recordMissingObject(
+							logger,
 							pending,
 							owner,
 							signal
@@ -3932,6 +4145,7 @@ export class VerificationService {
 	// cannot reappear. A missing shared object does not invalidate the client's NAR,
 	// so remove the reuse row and report `absent` to trigger a new upload.
 	async recordMissingObject(
+		logger: Logger,
 		pending: PendingUploadRow,
 		owner: string,
 		signal?: AbortSignal
@@ -4023,8 +4237,9 @@ export class VerificationService {
 					if (!this.ownsActiveClaim(owner, pending, signal)) {
 						return false;
 					}
-					const didApply = this.uploadState.clearPendingUpload(
+					const didApply = await this.uploadState.clearPendingUpload(
 						pending.id,
+						{ logger, outcome: verdict },
 						owner
 					);
 
@@ -4041,6 +4256,7 @@ export class VerificationService {
 				pending.id,
 				pending.r2Key,
 				metadata.narHash,
+				{ logger, outcome: 'absent' },
 				owner
 			);
 
@@ -4064,9 +4280,10 @@ export class VerificationService {
 		}
 
 		signal?.throwIfAborted();
-		const isSettled = this.uploadState.markUploadTerminal(
+		const isSettled = await this.uploadState.markUploadTerminal(
 			pending.id,
 			'mismatch',
+			logger,
 			owner
 		);
 

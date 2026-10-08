@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
 	type TenantId
@@ -30,6 +31,12 @@ import { armAlarmNoLaterThan } from './alarm.ts';
 import { chunk, maxOutgoingConnections, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
+import {
+	concludePromotion,
+	parsePromotionRecord,
+	type PromotionRecord,
+	type UploadConclusion
+} from './promotion-record.ts';
 import { requireSubrequestsFor } from './subrequest-slice.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
@@ -358,8 +365,17 @@ export class UploadStateService {
 		return presentNarObjects(this.context.env.BLOBS, states.values().toArray());
 	}
 
-	clearPendingUpload(uploadId: UploadId, owner?: string): boolean {
-		const deleted = this.context.db
+	/**
+	 * Removes the upload row while `owner` owns its claim, or while nobody does
+	 * when `owner` is absent. When the row was still in verification, this
+	 * concludes the upload's promotion with `conclusion`.
+	 */
+	async clearPendingUpload(
+		uploadId: UploadId,
+		conclusion: UploadConclusion,
+		owner?: string
+	): Promise<boolean> {
+		const [deleted] = this.context.db
 			.delete(schema.pendingUploads)
 			.where(
 				and(
@@ -369,10 +385,52 @@ export class UploadStateService {
 						: eq(schema.pendingUploads.claimOwner, owner)
 				)
 			)
-			.returning({ id: schema.pendingUploads.id })
+			.returning()
 			.all();
 
-		return deleted.length === 1;
+		if (deleted === undefined) {
+			return false;
+		}
+
+		// A terminal row concluded its promotion when it became terminal.
+		if (deleted.verdict === 'pending' || deleted.verdict === 'committing') {
+			await concludePromotion(this.context.d1, deleted, conclusion);
+		}
+
+		return true;
+	}
+
+	/**
+	 * Replaces the upload's promotion record while `owner` owns its claim.
+	 * Returns whether the record was replaced.
+	 */
+	recordPromotion(
+		uploadId: UploadId,
+		owner: string,
+		update: (current: PromotionRecord | undefined) => PromotionRecord
+	): boolean {
+		const owned = and(
+			eq(schema.pendingUploads.id, uploadId),
+			eq(schema.pendingUploads.claimOwner, owner)
+		);
+		const row = this.context.db
+			.select({ promotionJson: schema.pendingUploads.promotionJson })
+			.from(schema.pendingUploads)
+			.where(owned)
+			.get();
+
+		if (row === undefined) {
+			return false;
+		}
+
+		const next = update(parsePromotionRecord(row.promotionJson));
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ promotionJson: JSON.stringify(next) })
+			.where(owned)
+			.run();
+
+		return true;
 	}
 
 	// Remove an abandoned upload row only while the caller owns its claim, then
@@ -383,9 +441,10 @@ export class UploadStateService {
 		uploadId: UploadId,
 		r2Key: R2ObjectKey,
 		narHash: NixSha256HashString,
+		conclusion: UploadConclusion,
 		owner?: string
 	): Promise<boolean> {
-		if (!this.clearPendingUpload(uploadId, owner)) {
+		if (!(await this.clearPendingUpload(uploadId, conclusion, owner))) {
 			return false;
 		}
 
@@ -454,6 +513,7 @@ export class UploadStateService {
 				.set({
 					verdict: 'committing',
 					commitStartedSequence: sql`coalesce(${schema.pendingUploads.commitStartedSequence}, ${new WorkSequenceService(tx).allocate()})`,
+					committedAt: sql`coalesce(${schema.pendingUploads.committedAt}, ${isoTimestamp(new Date())})`,
 					claimedAt: sql`null`,
 					claimOwner: sql`null`
 				})
@@ -465,11 +525,12 @@ export class UploadStateService {
 	// Keep a deferred upload's terminal verdict so `push --wait` and the status
 	// endpoint can report it. The distinct mismatch and over-quota values prevent
 	// a quota refusal from being reported as invalid content.
-	markUploadTerminal(
+	async markUploadTerminal(
 		uploadId: UploadId,
 		verdict: 'servable' | 'mismatch' | 'over-quota',
+		logger: Logger,
 		owner?: string
-	): boolean {
+	): Promise<boolean> {
 		// Start a new observation window because verification can finish after the
 		// upload's original expiry. GC removes the row after this window.
 		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
@@ -492,10 +553,20 @@ export class UploadStateService {
 			.where(
 				and(eq(schema.pendingUploads.id, uploadId), awaitingFilter, ownerFilter)
 			)
-			.returning({ id: schema.pendingUploads.id })
+			.returning()
 			.all();
+		const [settled] = updated;
 
-		return updated.length === 1;
+		if (settled === undefined) {
+			return false;
+		}
+
+		await concludePromotion(this.context.d1, settled, {
+			logger,
+			outcome: verdict
+		});
+
+		return true;
 	}
 
 	// Preview must not change a reaper timer merely by reporting possible reuse, so

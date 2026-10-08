@@ -396,10 +396,11 @@ describe('batched verify fault isolation', () => {
 				1,
 				Number.MAX_SAFE_INTEGER
 			);
-			await runInDurableObject(currentServer(), (instance) => {
+			await runInDurableObject(currentServer(), async (instance) => {
 				expect(
-					new UploadStateService(instance.context).clearPendingUpload(
+					await new UploadStateService(instance.context).clearPendingUpload(
 						stale.uploadId,
+						{ logger: rootLogger(), outcome: 'servable' },
 						replacement.owner
 					)
 				).toBe(true);

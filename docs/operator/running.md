@@ -136,6 +136,42 @@ Both log lines identify the upload by its upload ID and store path hash, and
 include the NAR hash and NAR size that the client declared (`uploadId`,
 `storePathHash`, `narHash` and `narSize`).
 
+Each newly uploaded NAR whose promotion to a canonical object has started logs
+exactly one `nar promotion finished` event, when its upload leaves verification.
+The event includes the upload ID, store path hash and NAR hash. `outcome` is the
+upload's final status: `servable`, `absent`, `over-quota` or `mismatch`. An
+upload that leaves verification before a promotion starts, for example because
+its bytes failed verification, logs no event.
+
+`mode` describes the upload's last promotion attempt. It is `copy` when the
+tenant Worker attempts to copy the staged object after verification, including
+when it finds the canonical object already present. It is `fused` when the queue
+consumer attempts to write the canonical object while verifying the upload,
+which happens only for a commit that declared the compressed object's hash and
+size. The CLI does not declare them yet.
+
+The event also includes these fields when the last attempt reported them:
+
+- `bytes`: for `fused`, the compressed bytes that the consumer read; for `copy`,
+  the size of the compressed object;
+- `durationMs`: for `fused`, the time from the start of the staged read until
+  the write ended; for `copy`, the duration of the copy;
+- `r2ErrorCode`, R2's error code when R2 refused or failed the write or the
+  copy, such as 10037 when the bytes don't match the expected SHA-256.
+
+A `fused` attempt has no `bytes` or `durationMs` when the queue consumer stopped
+during the write without reporting it. For a servable upload,
+`commitToServableMs` is the time in milliseconds from the client's first commit
+to publication.
+
+The tenant Worker logs `nar promotion attempt failed` when a copy throws an
+exception other than a digest mismatch. The queue consumer logs the same event
+when a write throws an exception or the verification pass ends during a `fused`
+write. Mismatch verdicts produce no attempt-failure event. The event includes
+the same identifiers, `mode`, `bytes`, `durationMs` and `r2ErrorCode`. Its
+`outcome` is `failed` for an exception or `aborted` when the pass ends during
+the write.
+
 Upload verification and attestation inheritance stop after twelve failed
 attempts or 24 hours of eligible time. Eligible time starts with the first
 attempt and includes active backoff time. Suspension stops this clock. Budget

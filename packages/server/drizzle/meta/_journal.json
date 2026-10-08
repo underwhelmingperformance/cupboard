@@ -533,6 +533,13 @@
 			"when": 1791499075900,
 			"tag": "0075_pending_upload_blob_declaration",
 			"breakpoints": true
+		},
+		{
+			"idx": 76,
+			"version": "6",
+			"when": 1791499117285,
+			"tag": "0076_pending_upload_promotion",
+			"breakpoints": true
 		}
 	]
 }

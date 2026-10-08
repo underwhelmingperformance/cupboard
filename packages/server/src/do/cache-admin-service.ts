@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	cacheGenerationSchema,
@@ -75,6 +76,7 @@ import {
 } from './deletion-queue-service.ts';
 import { jsonValueLists } from './json-list.ts';
 import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
+import { concludePromotion } from './promotion-record.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
@@ -429,7 +431,7 @@ export class CacheAdminService {
 		// Remove every narinfo row in the same transaction that queues its
 		// retirement. A later recommit creates a new generation that the queued
 		// deletion cannot remove.
-		this.context.db.transaction((tx) => {
+		const removedUploads = this.context.db.transaction((tx) => {
 			tx.insert(schema.cacheTeardowns)
 				.values({ cacheId: cache.id })
 				.onConflictDoNothing()
@@ -475,9 +477,11 @@ export class CacheAdminService {
 				.where(eq(schema.legacyRetentionPolicies.cacheId, cache.id))
 				.run();
 			// Remove in-flight uploads so a later commit cannot recreate the cache.
-			tx.delete(schema.pendingUploads)
+			const removed = tx
+				.delete(schema.pendingUploads)
 				.where(eq(schema.pendingUploads.cacheId, cache.id))
-				.run();
+				.returning()
+				.all();
 			tx.delete(schema.pendingAttestations)
 				.where(eq(schema.pendingAttestations.cacheId, cache.id))
 				.run();
@@ -487,7 +491,18 @@ export class CacheAdminService {
 			tx.delete(schema.garbageCollectionTenantRuns)
 				.where(eq(schema.garbageCollectionTenantRuns.cacheId, cache.id))
 				.run();
+
+			return removed;
 		});
+
+		for (const upload of removedUploads) {
+			if (upload.verdict === 'pending' || upload.verdict === 'committing') {
+				await concludePromotion(this.context.d1, upload, {
+					logger: rootLogger(),
+					outcome: 'absent'
+				});
+			}
+		}
 
 		await this.context.ctx.storage.put(this.teardownKey(cache), origin ?? {});
 		await this.context.ctx.storage.setAlarm(Date.now());

@@ -731,10 +731,16 @@ requests below are all under the tenant URL.
    writes the signed narinfo to R2, and sends the result to the CLI over the
    waiting WebSocket.
 
-   If a written object will not be published, for example because another pass
-   has claimed the upload, the tenant's object marks its version absent and
-   queues it for deletion after the late-write horizon. A later pass verifies
-   the upload again.
+   When a received verdict reports a write for a claim that the consumer no
+   longer owns, the tenant's object marks its version absent only while that
+   version is still pending for the same owner. It then queues the object for
+   deletion after the late-write horizon. A recorded verdict discarded before
+   promotion leaves its reservation on the upload row. The upload row records
+   each reserved version until a promotion activates it. When the upload leaves
+   verification, the tenant's object gives up a recorded version under the same
+   pending-owner condition, also when the consumer stopped during the write
+   without reporting a verdict. A newer reservation also queues the older
+   version for deletion. A later pass verifies the upload again.
 
    If the bytes don't match, the object deletes the staged object and records a
    final `mismatch` result. The same happens when R2 refuses the copy because

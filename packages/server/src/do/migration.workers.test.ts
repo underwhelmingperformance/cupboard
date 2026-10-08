@@ -2109,11 +2109,11 @@ describe('migrations', () => {
 		expect(migrated).toStrictEqual([{ id: 'u1', hasRecordedVerdict: false }]);
 	});
 
-	it('leaves the blob declaration null for a pending upload created before 0075', async () => {
+	it('leaves the blob declaration, commit time and promotion record null for a pending upload created before 0075', async () => {
 		const insertUndeclaredPendingUpload =
 			"INSERT INTO pending_upload (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('u1', 0, 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', 'committing')";
 		const selectDeclarations =
-			'SELECT id, verdict, declared_file_hash, declared_file_size FROM pending_upload';
+			'SELECT id, verdict, declared_file_hash, declared_file_size, committed_at, promotion_json FROM pending_upload';
 
 		const migrated = await runInDurableObject(
 			testServerFor('migration-blob-declaration'),
@@ -2129,7 +2129,9 @@ describe('migrations', () => {
 					id: row.id,
 					verdict: row.verdict,
 					hasFileHash: row.declared_file_hash !== null,
-					hasFileSize: row.declared_file_size !== null
+					hasFileSize: row.declared_file_size !== null,
+					hasCommittedAt: row.committed_at !== null,
+					hasPromotion: row.promotion_json !== null
 				}));
 			}
 		);
@@ -2139,7 +2141,9 @@ describe('migrations', () => {
 				id: 'u1',
 				verdict: 'committing',
 				hasFileHash: false,
-				hasFileSize: false
+				hasFileSize: false,
+				hasCommittedAt: false,
+				hasPromotion: false
 			}
 		]);
 	});

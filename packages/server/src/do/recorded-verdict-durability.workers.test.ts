@@ -1,4 +1,4 @@
-import { rootLogger } from '@cupboard/logger';
+import { type Logger, rootLogger } from '@cupboard/logger';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { subrequestSafetyReserve } from '@cupboard/protocol/platform';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -330,6 +330,7 @@ describe('recorded verdict durability', () => {
 						).verification;
 						const preparation = verification as unknown as {
 							prepareRecordedVerdict: (
+								logger: Logger,
 								pending: typeof pendingUploads.$inferSelect
 							) => Promise<unknown>;
 						};
@@ -360,7 +361,7 @@ describe('recorded verdict durability', () => {
 								.orderBy(pendingUploads.id)
 								.all();
 							return {
-								attempts: prepare.mock.calls.map(([pending]) => pending.id),
+								attempts: prepare.mock.calls.map(([, pending]) => pending.id),
 								failures
 							};
 						} finally {
