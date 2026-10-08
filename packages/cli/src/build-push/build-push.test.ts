@@ -27,7 +27,12 @@ import {
 	uploadDecisionSchema,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
-import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import {
+	formatBytes,
+	formatDuration,
+	type Reporter,
+	type ResultPayload
+} from '@cupboard/reporter';
 import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -63,6 +68,7 @@ import {
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
+import type { NarCompressionFacts } from '../nix/blob.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import type { PushClient } from '../push/push.ts';
 
@@ -399,6 +405,10 @@ interface FlowConfig {
 	readonly ultimatePaths?: readonly StorePathString[];
 	readonly action?: UploadDecisionInput['action'];
 	readonly uploadFailure?: Error;
+	/**
+	 * Compression facts for every compressed NAR.
+	 */
+	readonly compression?: NarCompressionFacts;
 	readonly negotiateFailure?: Error;
 	readonly unwritableReceipt?: boolean;
 	readonly preflightFailure?: Error;
@@ -608,6 +618,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	let batchSessions = 0;
 	let protectionCalls = 0;
 	const sessionOpenFailure = config.sessionOpenFailure;
+	const compression = config.compression;
 	const runtimeRemovalFailure = config.runtimeRemovalFailure;
 	const isStreamed = config.preflightFailure === undefined;
 	const environment =
@@ -834,8 +845,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		createNarArchive: () => emptyStream(),
 		compressNar: () => ({
 			body: emptyStream(),
-			digest: () => ({ narHash, narSize: 4 })
+			digest: () => ({ narHash, narSize: 4 }),
+			...(compression !== undefined && { compression: () => compression })
 		}),
+		peakRss: () => 300_000_000,
 		...(environment !== undefined && { environment }),
 		nextAttemptId: () => {
 			attemptIdsIssued += 1;
@@ -3304,6 +3317,62 @@ describe('runBuildPush', () => {
 			{ label: 'Upload failed', value: StorePath.basename(pathA) },
 			{ label: 'First upload failure', value: formatHumanError(cause) }
 		]);
+	});
+
+	it("reports each NAR's compression at debug level and the totals in the summary", async () => {
+		const compression = {
+			narBytes: 64_000_000,
+			compressedBytes: 8_000_000,
+			frames: 4,
+			compressionMs: 500
+		};
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			action: 'upload',
+			compression
+		});
+		// The fake negotiation asks for an upload every time, so the path is
+		// uploaded when its build event arrives and again during reconciliation.
+		const summary = run.results.find(
+			(result) => result.kind === 'build-summary'
+		);
+
+		expect({
+			info: run.info.filter((message) => message.includes('compressed')),
+			compression: z.object({ compression: z.unknown() }).parse(summary?.data)
+				.compression,
+			rows: summary?.rows.filter((row) =>
+				[
+					'NAR bytes compressed',
+					'Compressed bytes',
+					'Compression rate per upload worker',
+					'Peak memory'
+				].includes(row.label)
+			)
+		}).toStrictEqual({
+			info: Array.from(
+				{ length: 2 },
+				() =>
+					`${StorePath.basename(pathA)}: compressed ${formatBytes(64_000_000)} of NAR to ${formatBytes(8_000_000)} in 4 frames; the upload waited ${formatDuration(500)} for the NAR to be read and compressed`
+			),
+			compression: {
+				narBytes: 128_000_000,
+				compressedBytes: 16_000_000,
+				frames: 8,
+				compressionMs: 1000,
+				peakRssBytes: 300_000_000
+			},
+			rows: [
+				{ label: 'NAR bytes compressed', value: formatBytes(128_000_000) },
+				{ label: 'Compressed bytes', value: formatBytes(16_000_000) },
+				{
+					label: 'Compression rate per upload worker',
+					value: `${formatBytes(128_000_000)}/s`
+				},
+				{ label: 'Peak memory', value: formatBytes(300_000_000) }
+			]
+		});
 	});
 
 	it('preserves the cause of a publication failure', async () => {

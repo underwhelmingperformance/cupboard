@@ -13,7 +13,11 @@ import type { CommitOptions } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
 import { commitOverSession } from '../client/commit-via.ts';
 import { PushNarMetadataMismatchError } from '../errors.ts';
-import { compressNarToStream, sendCompressedNar } from '../nix/blob.ts';
+import {
+	compressNarToStream,
+	type NarCompressionFacts,
+	sendCompressedNar
+} from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import { type NegotiatedPath, publishJustInTime } from '../push/negotiation.ts';
@@ -87,7 +91,8 @@ export interface BuildOutputBatcherOptions {
 	readonly uploadClock?: UploadClock;
 	readonly onUploaded?: (
 		storePath: StorePathString,
-		durationMs: number
+		durationMs: number,
+		compression: NarCompressionFacts | undefined
 	) => void;
 	readonly onOutcome?: (outcome: BatchPathOutcome) => void;
 	readonly onFailure?: (failure: BatchPathFailure) => void;
@@ -321,7 +326,11 @@ export class BuildOutputBatcher {
 				this.options.uploadClock
 			);
 			assertNarMetadata(info, upload.digest());
-			this.options.onUploaded?.(info.storePath, durationMs);
+			this.options.onUploaded?.(
+				info.storePath,
+				durationMs,
+				upload.compression?.()
+			);
 		}
 
 		await commitOverSession(this.options, {

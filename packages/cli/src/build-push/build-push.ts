@@ -83,7 +83,15 @@ import {
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
+import type { NarCompressionFacts } from '../nix/blob.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
+import {
+	compressionRows,
+	CompressionTotals,
+	type PeakRssSampler,
+	processPeakRss,
+	reportNarCompression
+} from '../push/compression-report.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import {
 	type CompressNar,
@@ -190,6 +198,11 @@ export interface BuildPushDependencies {
 	readonly signalSource?: SignalSource;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
+	/**
+	 * Reads the process's peak RSS for the summary. Defaults to
+	 * `processPeakRss`.
+	 */
+	readonly peakRss?: PeakRssSampler;
 	readonly nextAttemptId?: () => string;
 	readonly startDelay?: StartDelay;
 	readonly removeRuntimeDirectory?: (directory: string) => Promise<void>;
@@ -358,6 +371,8 @@ async function runProtectedStreamedBuildPush(
 	let listener: BuildEventListener;
 
 	let maxQueueDepth = 0;
+	const compression = new CompressionTotals();
+	const reportUpload = uploadReporter(reporter, compression);
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
 	// Share one commit session between streaming and reconciliation so the server
 	// applies one credit budget across the whole run.
@@ -413,13 +428,7 @@ async function runProtectedStreamedBuildPush(
 			...(options.uploadConcurrency !== undefined && {
 				uploadConcurrency: options.uploadConcurrency
 			}),
-			onUploaded: (storePath, durationMs) => {
-				reportUploadDuration(
-					reporter,
-					StorePath.basename(storePath),
-					durationMs
-				);
-			}
+			onUploaded: reportUpload
 		});
 		listener = await BuildEventListener.listen({
 			socketPath: plan.socketPath,
@@ -534,6 +543,8 @@ async function runProtectedStreamedBuildPush(
 			mode: 'streamed',
 			exit,
 			batcher,
+			compression,
+			reportUpload,
 			commitOptions,
 			...(session !== undefined && { session }),
 			maxQueueDepth,
@@ -1527,6 +1538,8 @@ interface RunFacts {
 	readonly mode: BuildSummaryInput['mode'];
 	readonly exit: ChildExit;
 	readonly batcher: BuildOutputBatcher;
+	readonly compression: CompressionTotals;
+	readonly reportUpload: UploadReporter;
 	readonly commitOptions: CommitOptions;
 	readonly session?: CommitSession;
 	readonly maxQueueDepth: number;
@@ -1669,13 +1682,7 @@ async function settleRun(
 						compressNar: dependencies.compressNar
 					}),
 					...(facts.subjects.length > 0 && { subjects: facts.subjects }),
-					onUploaded: (storePath, durationMs) => {
-						reportUploadDuration(
-							reporter,
-							StorePath.basename(storePath),
-							durationMs
-						);
-					},
+					onUploaded: facts.reportUpload,
 					copiedFrom: facts.copiedFrom,
 					childExitStatus: childExitCode(exit),
 					...(facts.terminalFailure !== undefined && {
@@ -1801,6 +1808,9 @@ function reportSummary(
 ): void {
 	const { receipt } = result;
 	const uploaded = receipt.uploaded?.length ?? 0;
+	const compressionSummary = facts.compression.summary(
+		(dependencies.peakRss ?? processPeakRss)()
+	);
 
 	reportBuildSummary(
 		reporter,
@@ -1813,10 +1823,37 @@ function reportSummary(
 			uploadedPaths: uploaded,
 			skipped: Math.max(receipt.paths.length - uploaded, 0),
 			childExitStatus: childExitCode(facts.exit),
-			unconfirmedPaths: [...(receipt.failed ?? [])]
+			unconfirmedPaths: [...(receipt.failed ?? [])],
+			...(compressionSummary !== undefined && {
+				compression: compressionSummary
+			})
 		},
 		result.failures
 	);
+}
+
+type UploadReporter = (
+	storePath: StorePathString,
+	durationMs: number,
+	compression: NarCompressionFacts | undefined
+) => void;
+
+// Reports one upload at debug level and adds its compression to the run's
+// totals.
+function uploadReporter(
+	reporter: Reporter,
+	totals: CompressionTotals
+): UploadReporter {
+	return (storePath, durationMs, compression) => {
+		const name = StorePath.basename(storePath);
+
+		if (compression !== undefined) {
+			totals.add(compression);
+			reportNarCompression(reporter, name, compression);
+		}
+
+		reportUploadDuration(reporter, name, durationMs);
+	};
 }
 
 const failureRowLabels: Readonly<
@@ -1899,6 +1936,7 @@ function reportBuildSummary(
 	summary: BuildSummaryInput,
 	failures: readonly ReconcileFailure[]
 ): void {
+	const { compression } = summary;
 	const rows: ResultRow[] = [
 		{ label: 'Store', value: summary.store },
 		{ label: 'Targets', value: formatCount(summary.targetPaths) },
@@ -1908,6 +1946,7 @@ function reportBuildSummary(
 			label: 'Build exit status',
 			value: formatCount(summary.childExitStatus)
 		},
+		...(compression === undefined ? [] : compressionRows(compression)),
 		...(summary.unconfirmedPaths.length > 0
 			? [
 					{

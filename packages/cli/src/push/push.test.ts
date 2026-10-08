@@ -863,6 +863,105 @@ describe('runPush', () => {
 		]);
 	});
 
+	it("reports each NAR's compression at debug level and the totals in the summary", async () => {
+		const infos: { message: string; level?: string }[] = [];
+		const payloads: ResultPayload[] = [];
+		const compression = {
+			narBytes: 64_000_000,
+			compressedBytes: 8_000_000,
+			frames: 4,
+			compressionMs: 500
+		};
+
+		await runPush(
+			publication([appPath]),
+			{
+				...reporter([], [], payloads),
+				info: (message, presentation) => {
+					infos.push({
+						message,
+						...(presentation?.level !== undefined && {
+							level: presentation.level
+						})
+					});
+				}
+			},
+			{
+				command: 'cupboard push',
+				credential: 'cupboard-login',
+				uploadClock: { now: () => 0, schedule: scheduleNothing },
+				peakRss: () => 300_000_000,
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: (body) =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: 'upload-app',
+									r2Key: 'nar/app.nar.zst',
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}))
+							})
+						),
+					async uploadNar(_r2Key, body) {
+						await collectReadableStream(body);
+					},
+					commit: () => Promise.resolve(fallbackCommitResponse()),
+					setRoot: (rootName, body) =>
+						Promise.resolve(rootSummary({ name: rootName, ...body }))
+				} satisfies PushClient,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: (nar) => ({
+					...fakeNarUpload(nar, appDigest),
+					compression: () => compression
+				})
+			}
+		);
+
+		const summary = payloads.find(
+			(payload) => payload.kind === pushSummaryResultKind
+		);
+
+		expect({
+			infos,
+			compression: z.object({ compression: z.unknown() }).parse(summary?.data)
+				.compression,
+			rows: summary?.rows.filter((row) =>
+				[
+					'NAR bytes compressed',
+					'Compressed bytes',
+					'Compression rate per upload worker',
+					'Peak memory'
+				].includes(row.label)
+			)
+		}).toStrictEqual({
+			infos: [
+				{
+					message: `${StorePath.basename(appPath)}: compressed ${formatBytes(64_000_000)} of NAR to ${formatBytes(8_000_000)} in 4 frames; the upload waited ${formatDuration(500)} for the NAR to be read and compressed`,
+					level: 'debug'
+				},
+				{
+					message: `${StorePath.basename(appPath)}: uploaded in ${formatDuration(0)}`,
+					level: 'debug'
+				}
+			],
+			compression: { ...compression, peakRssBytes: 300_000_000 },
+			rows: [
+				{ label: 'NAR bytes compressed', value: formatBytes(64_000_000) },
+				{ label: 'Compressed bytes', value: formatBytes(8_000_000) },
+				{
+					label: 'Compression rate per upload worker',
+					value: `${formatBytes(128_000_000)}/s`
+				},
+				{ label: 'Peak memory', value: formatBytes(300_000_000) }
+			]
+		});
+	});
+
 	it('marks each commit for retention from its own negotiation', async () => {
 		const commits: { uploadId: string; retention?: true }[] = [];
 		let negotiations = 0;

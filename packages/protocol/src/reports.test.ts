@@ -170,6 +170,14 @@ describe('verifyReportSchema', () => {
 	});
 });
 
+const compressionFacts = {
+	narBytes: 1000,
+	compressedBytes: 10,
+	frames: 1,
+	compressionMs: 20,
+	peakRssBytes: 300_000_000
+};
+
 describe('pushSummarySchema', () => {
 	const storePath = `/nix/store/${storePathHash}-app`;
 
@@ -222,6 +230,18 @@ describe('pushSummarySchema', () => {
 				failures: [],
 				paths: []
 			}
+		},
+		{
+			name: 'a summary with compression facts',
+			value: {
+				uploadedPaths: 1,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 10,
+				failures: [],
+				paths: [],
+				compression: compressionFacts
+			}
 		}
 	])('accepts $name', ({ value }) => {
 		expect(pushSummarySchema.parse(value)).toStrictEqual(value);
@@ -260,6 +280,18 @@ describe('pushSummarySchema', () => {
 				uploadedBytes: 0,
 				failures: [],
 				paths: []
+			}
+		},
+		{
+			name: 'a compression fact with a fractional duration',
+			value: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [],
+				paths: [],
+				compression: { ...compressionFacts, compressionMs: 1.5 }
 			}
 		},
 		{
@@ -306,6 +338,10 @@ describe('buildSummarySchema', () => {
 		{
 			name: 'a run that built locally and published once',
 			value: { ...summary, mode: 'reconciled-local', queueDepth: 0 }
+		},
+		{
+			name: 'a run with compression facts',
+			value: { ...summary, compression: compressionFacts }
 		}
 	])('accepts $name', ({ value }) => {
 		expect(buildSummarySchema.parse(value)).toStrictEqual(value);
@@ -338,6 +374,13 @@ describe('buildSummarySchema', () => {
 		{
 			name: 'a negative child exit status',
 			value: { ...summary, childExitStatus: -1 }
+		},
+		{
+			name: 'compression facts with an unknown field',
+			value: {
+				...summary,
+				compression: { ...compressionFacts, ratio: 0.5 }
+			}
 		},
 		{
 			name: 'an unconfirmed path outside the store',

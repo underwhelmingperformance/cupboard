@@ -11,6 +11,7 @@ import {
 
 import {
 	compressNarToStream,
+	defaultNarCompression,
 	type NarCompressionOptions,
 	NarSizeChangedError,
 	sendCompressedNar
@@ -144,6 +145,28 @@ describe('compressNarToStream frames', () => {
 			peakActive: 1,
 			largestWrite: mebibyte,
 			written: narSize
+		});
+	});
+
+	it('reports the NAR and compressed bytes, frames and time waited for compression', async () => {
+		const narSize = 2 * frameSize + 5;
+		let tick = 0;
+		const upload = compressNarToStream(
+			pieces(new Uint8Array(narSize), mebibyte),
+			narSize,
+			{ ...new RecordingCompressors().options(), now: () => (tick += 1) }
+		);
+
+		await drainStream(upload.body);
+
+		// `now` returns one more on each call, so each wait measures 1 ms. The
+		// meter times 34 waits: one for each of the 33 chunks and one for the
+		// end.
+		expect(upload.compression?.()).toStrictEqual({
+			narBytes: narSize,
+			compressedBytes: narSize,
+			frames: 3,
+			compressionMs: 34
 		});
 	});
 
@@ -375,7 +398,10 @@ class RecordingCompressors {
 	}
 
 	options(): NarCompressionOptions {
-		return { createFrameCompressor: (length) => this.create(length) };
+		return {
+			...defaultNarCompression,
+			createFrameCompressor: (length) => this.create(length)
+		};
 	}
 
 	summary(): {

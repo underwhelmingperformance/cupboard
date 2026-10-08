@@ -36,7 +36,11 @@ import {
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
-import { compressNarToStream, sendCompressedNar } from '../nix/blob.ts';
+import {
+	compressNarToStream,
+	type NarCompressionFacts,
+	sendCompressedNar
+} from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import {
@@ -120,7 +124,8 @@ export interface ReconcileOptions {
 	readonly uploadClock?: UploadClock;
 	readonly onUploaded?: (
 		storePath: StorePathString,
-		durationMs: number
+		durationMs: number,
+		compression: NarCompressionFacts | undefined
 	) => void;
 	readonly childExitStatus?: number;
 	readonly terminalFailure?: TerminalBuildFailureInput;
@@ -407,7 +412,7 @@ async function uploadAndAcknowledge(
 				options.uploadClock
 			);
 			assertNarMetadata(info, upload.digest());
-			options.onUploaded?.(info.storePath, durationMs);
+			options.onUploaded?.(info.storePath, durationMs, upload.compression?.());
 		} catch (error) {
 			if (isVanishedPathError(error)) {
 				settleLocallyMissing(info.storePath, isTarget, options, ledger);
