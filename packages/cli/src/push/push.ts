@@ -96,6 +96,7 @@ import { formatHumanError } from '../human-errors.ts';
 import { countingByteStream } from '../io/byte-stream.ts';
 import {
 	compressNarToStream,
+	type NarCompressionFacts,
 	type NarUploadStream,
 	sendCompressedNar
 } from '../nix/blob.ts';
@@ -103,6 +104,13 @@ import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { capacityWaitReporter } from './capacity-wait.ts';
+import {
+	compressionRows,
+	CompressionTotals,
+	type PeakRssSampler,
+	processPeakRss,
+	reportNarCompression
+} from './compression-report.ts';
 import { narDivergence } from './divergence.ts';
 import {
 	exactUploadDecisions,
@@ -178,6 +186,11 @@ export interface PushDependencies {
 	Times uploads and schedules their renewals. Defaults to the system clock.
 	*/
 	readonly uploadClock?: UploadClock;
+	/**
+	 * Reads the process's peak RSS for the summary. Defaults to
+	 * `processPeakRss`.
+	 */
+	readonly peakRss?: PeakRssSampler;
 	readonly dryRun?: boolean;
 	/**
 	 * The command that `PushIncompleteError` tells the user to run again.
@@ -468,6 +481,7 @@ interface PushRuntimeDependencies {
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly uploadConcurrency?: number;
 	readonly uploadClock?: UploadClock;
+	readonly peakRss?: PeakRssSampler;
 	readonly dryRun?: boolean;
 	readonly buildStore?: string;
 	readonly referenceReceipt?: boolean;
@@ -888,6 +902,26 @@ async function runPushFlow(
 		uploadedBytes += count;
 	};
 	const uploadClock = dependencies.uploadClock ?? systemUploadClock;
+	const compressionTotals = new CompressionTotals();
+	const reportUpload = (
+		storePath: string,
+		upload: CompletedNarUpload
+	): void => {
+		if (upload.compression !== undefined) {
+			compressionTotals.add(upload.compression);
+			reportNarCompression(
+				reporter,
+				StorePath.basename(storePath),
+				upload.compression
+			);
+		}
+
+		reportUploadDuration(
+			reporter,
+			StorePath.basename(storePath),
+			upload.durationMs
+		);
+	};
 	const uploadContext: UploadContext = {
 		client,
 		session,
@@ -913,13 +947,9 @@ async function runPushFlow(
 		}),
 		clock: uploadClock,
 		onBytes,
-		onUploaded: (storePathHash, durationMs) => {
+		onUploaded: (storePathHash, upload) => {
 			completedUploads.add(storePathHash);
-			reportUploadDuration(
-				reporter,
-				StorePath.basename(storePathByHash.get(storePathHash) ?? storePathHash),
-				durationMs
-			);
+			reportUpload(storePathByHash.get(storePathHash) ?? storePathHash, upload);
 		},
 		onRedriven: (fresh) => {
 			effectiveActions.set(fresh.storePathHash, fresh.action);
@@ -1006,14 +1036,10 @@ async function runPushFlow(
 
 					if (isUpload(decision)) {
 						try {
-							const durationMs = await streamNarUpload(decision, uploadContext);
+							const upload = await streamNarUpload(decision, uploadContext);
 							completedUploads.add(decision.storePathHash);
 							uploaded += 1;
-							reportUploadDuration(
-								reporter,
-								StorePath.basename(storePath),
-								durationMs
-							);
+							reportUpload(storePath, upload);
 						} catch (error) {
 							if (isAbortError(error)) {
 								throw error;
@@ -1276,13 +1302,17 @@ async function runPushFlow(
 				outcome: 'collected' as const
 			}))
 		];
+		const compression = compressionTotals.summary(
+			(dependencies.peakRss ?? processPeakRss)()
+		);
 		const summary = {
 			uploadedPaths,
 			reusedBlobs,
 			skipped,
 			uploadedBytes,
 			failures: failures.map((failure) => summaryFailure(failure)),
-			paths: summaryPaths
+			paths: summaryPaths,
+			...(compression !== undefined && { compression })
 		};
 		// Server data can make a locally assembled failure entry invalid, for
 		// example by leaving only a hash where the schema expects a store path.
@@ -1320,6 +1350,7 @@ async function runPushFlow(
 				{ label: 'Reused stored content', value: formatCount(reusedBlobs) },
 				{ label: 'Already available', value: formatCount(skipped) },
 				{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
+				...(compression === undefined ? [] : compressionRows(compression)),
 				...(collected.length > 0
 					? [
 							{
@@ -1973,14 +2004,20 @@ interface UploadContext {
 	readonly onBytes: (count: number) => void;
 }
 
+interface CompletedNarUpload {
+	readonly durationMs: number;
+	readonly compression: NarCompressionFacts | undefined;
+}
+
 // Stream compression keeps large closures out of the runner's temporary
 // storage. Once the stream ends, compare its uncompressed hash and size with
 // the negotiated metadata so changed source bytes cannot be committed under
-// stale path metadata. Returns how long the bytes took to send.
+// stale path metadata. Returns how long the bytes took to send and the NAR's
+// compression facts.
 async function streamNarUpload(
 	decision: UploadDecisionOf<'upload'>,
 	context: UploadContext
-): Promise<number> {
+): Promise<CompletedNarUpload> {
 	const pathInfo = requireLocalPathInfo(
 		findNegotiatedPath(context.negotiated, decision)
 	);
@@ -2001,7 +2038,7 @@ async function streamNarUpload(
 	);
 	verifyNarMetadata(pathInfo, upload.digest());
 
-	return durationMs;
+	return { durationMs, compression: upload.compression?.() };
 }
 
 interface CommitContext {
@@ -2017,7 +2054,7 @@ interface CommitContext {
 	readonly onBytes: (count: number) => void;
 	readonly onUploaded: (
 		storePathHash: StorePathHash,
-		durationMs: number
+		upload: CompletedNarUpload
 	) => void;
 	readonly onRedriven: (fresh: UploadDecision) => void;
 }
@@ -2164,7 +2201,10 @@ async function redriveExpiredCommit(
 		context.clock
 	);
 	verifyNarMetadata(pathInfo, upload.digest());
-	context.onUploaded(fresh.storePathHash, durationMs);
+	context.onUploaded(fresh.storePathHash, {
+		durationMs,
+		compression: upload.compression?.()
+	});
 
 	return commitVia(context, commitTarget(fresh, hasGraceFacts));
 }

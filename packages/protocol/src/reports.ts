@@ -129,6 +129,22 @@ export const pushSummaryPathSchema = z.strictObject({
 });
 export type PushSummaryPath = z.output<typeof pushSummaryPathSchema>;
 
+// What the CLI compressed during a run. `narBytes` and `compressedBytes` count
+// the bytes of the uploaded NARs before and after compression, and `frames`
+// counts their zstd frames. `compressionMs` is the time that the uploads spent
+// waiting for the NARs to be read and compressed, summed over the NARs.
+// `peakRssBytes` is the process's peak resident set size when the summary was
+// written. A CLI that compressed nothing, or that predates these facts, omits
+// them.
+export const compressionSummarySchema = z.strictObject({
+	narBytes: countSchema,
+	compressedBytes: countSchema,
+	frames: countSchema,
+	compressionMs: countSchema,
+	peakRssBytes: countSchema
+});
+export type CompressionSummary = z.output<typeof compressionSummarySchema>;
+
 // The push-summary result data a `cupboard push` emits, parsed back by the
 // actions so they can read uploaded/reused/skipped counts, failures, and each
 // path's retention fact without casting the reporter's untyped JSON.
@@ -138,7 +154,8 @@ export const pushSummarySchema = z.strictObject({
 	skipped: countSchema,
 	uploadedBytes: countSchema,
 	failures: z.array(pushFailureSchema),
-	paths: z.array(pushSummaryPathSchema)
+	paths: z.array(pushSummaryPathSchema),
+	compression: compressionSummarySchema.optional()
 });
 export type PushSummary = z.output<typeof pushSummarySchema>;
 
@@ -222,7 +239,8 @@ export const buildSummarySchema = z.strictObject({
 	uploadedPaths: countSchema,
 	skipped: countSchema,
 	childExitStatus: z.number().int().nonnegative(),
-	unconfirmedPaths: z.array(storePathSchema)
+	unconfirmedPaths: z.array(storePathSchema),
+	compression: compressionSummarySchema.optional()
 });
 export type BuildSummary = z.output<typeof buildSummarySchema>;
 
@@ -240,3 +258,4 @@ export type AttestationAttachSummaryInput = z.input<
 	typeof attestationAttachSummarySchema
 >;
 export type BuildSummaryInput = z.input<typeof buildSummarySchema>;
+export type CompressionSummaryInput = z.input<typeof compressionSummarySchema>;

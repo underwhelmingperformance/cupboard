@@ -14,6 +14,22 @@ import { NarError, NixSha256Hash } from './nar.ts';
 export interface NarUploadStream {
 	readonly body: ReadableStream<Uint8Array>;
 	digest(): NarDigest;
+	/**
+	 * Returns the NAR's compression facts. They are complete once the body has
+	 * been read to the end.
+	 */
+	compression?(): NarCompressionFacts;
+}
+
+export interface NarCompressionFacts {
+	readonly narBytes: number;
+	readonly compressedBytes: number;
+	readonly frames: number;
+	/**
+	 * How long the body's reader waited for the NAR to be read and compressed,
+	 * in milliseconds.
+	 */
+	readonly compressionMs: number;
 }
 
 /**
@@ -24,6 +40,10 @@ export type ZstdFrameCompressorFactory = (frameLength: number) => Transform;
 
 export interface NarCompressionOptions {
 	readonly createFrameCompressor: ZstdFrameCompressorFactory;
+	/**
+	 * Returns the current time in milliseconds.
+	 */
+	readonly now: () => number;
 }
 
 /**
@@ -59,7 +79,8 @@ export const defaultNarCompression: NarCompressionOptions = {
 			// Do not set ZSTD_c_nbWorkers. With it set, Node's asynchronous and
 			// streaming zstd APIs return empty or truncated output without an error.
 			params: { [constants.ZSTD_c_checksumFlag]: 1 }
-		})
+		}),
+	now: () => performance.now()
 };
 
 /**
@@ -82,15 +103,21 @@ export function compressNarToStream(
 	options: NarCompressionOptions = defaultNarCompression
 ): NarUploadStream {
 	const hasher = new NarHasher();
-	const frames = compressedFrames(new NarReader(nar, narSize, hasher), options);
+	const meter = new CompressionMeter(options.now);
+	const frames = compressedFrames(
+		new NarReader(nar, narSize, hasher),
+		options,
+		meter
+	);
 
 	return {
-		body: byteStream(frames),
+		body: byteStream(meter.timed(frames)),
 		digest: () => {
 			const digest = hasher.digest();
 
 			return { narHash: digest.hash, narSize: digest.size };
-		}
+		},
+		compression: () => meter.facts(hasher.digest().size)
 	};
 }
 
@@ -118,10 +145,12 @@ export async function sendCompressedNar<T>(
 
 async function* compressedFrames(
 	reader: NarReader,
-	options: NarCompressionOptions
+	options: NarCompressionOptions,
+	meter: CompressionMeter
 ): AsyncIterable<Uint8Array> {
 	try {
 		for (const frameLength of frameLengths(reader.narSize)) {
+			meter.startFrame();
 			yield* compressedFrame(
 				reader,
 				options.createFrameCompressor(frameLength),
@@ -278,6 +307,52 @@ class NarReader {
 
 async function* chunksOf(source: ByteSource): AsyncIterable<Uint8Array> {
 	yield* source;
+}
+
+class CompressionMeter {
+	private frames = 0;
+
+	private compressedBytes = 0;
+
+	private compressionMs = 0;
+
+	constructor(private readonly now: () => number) {}
+
+	startFrame(): void {
+		this.frames += 1;
+	}
+
+	// Times each wait of the body's reader for the next compressed chunk. The
+	// time between chunks, while the reader handles one, is not counted.
+	async *timed(chunks: AsyncIterable<Uint8Array>): AsyncIterable<Uint8Array> {
+		const iterator = chunks[Symbol.asyncIterator]();
+
+		try {
+			for (;;) {
+				const startedAt = this.now();
+				const next = await iterator.next();
+				this.compressionMs += this.now() - startedAt;
+
+				if (next.done === true) {
+					return;
+				}
+
+				this.compressedBytes += next.value.byteLength;
+				yield next.value;
+			}
+		} finally {
+			await iterator.return?.();
+		}
+	}
+
+	facts(narBytes: number): NarCompressionFacts {
+		return {
+			narBytes,
+			compressedBytes: this.compressedBytes,
+			frames: this.frames,
+			compressionMs: this.compressionMs
+		};
+	}
 }
 
 class NarHasher {

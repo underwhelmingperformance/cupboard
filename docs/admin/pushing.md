@@ -72,6 +72,21 @@ When it finishes, `push` prints a summary that counts each case:
 | Reused stored content    | Store paths published by reusing a NAR that the tenant already had. |
 | Already available        | Store paths that were already in this cache.                        |
 
+When `push` compressed at least one NAR, the summary also has these rows. The
+`build-push` summary has them too.
+
+| Summary label                      | Meaning                                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| NAR bytes compressed               | The size of the uploaded NARs before compression.                                                                  |
+| Compressed bytes                   | The size of the uploaded NARs after compression.                                                                   |
+| Compression rate per upload worker | NAR bytes compressed, divided by the summed time that the uploads waited for their NARs to be read and compressed. |
+| Peak memory                        | The CLI process's peak resident set size when the summary was written.                                             |
+
+The waits of concurrent uploads are added together, so the compression rate is
+the average rate of one upload worker, not of the whole run. The JSON result's
+`compression` object has `narBytes`, `compressedBytes`, `frames`,
+`compressionMs` (the summed wait) and `peakRssBytes`.
+
 ### Publishing captured cache metadata
 
 `--reference-manifest <path>` publishes existing tenant NARs from captured
@@ -160,6 +175,9 @@ store path. After every store path is accepted, it waits for verification. Each
 wait has a limit of ten minutes. To change the limit, use `--wait-timeout`.
 
 With `--debug`, `push` and `build-push` report how long each NAR took to upload.
+They also report each NAR's size before and after compression, its number of
+zstd frames, and how long the upload waited for the NAR to be read and
+compressed.
 
 To return sooner, add `--no-wait`. `push` then returns once every store path is
 accepted and its root or pin is set, without waiting for verification. If a
