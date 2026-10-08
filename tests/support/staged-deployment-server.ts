@@ -405,6 +405,15 @@ function currentOptions(
 				queueProducers: {
 					MAINTENANCE_QUEUE: { queueName: maintenanceQueue }
 				},
+				ratelimits: Object.fromEntries(
+					artifact.config.control.rateLimits.map((rateLimit) => [
+						rateLimit.binding,
+						{
+							namespace_id: rateLimit.namespaceId,
+							simple: { limit: rateLimit.limit, period: rateLimit.period }
+						}
+					])
+				),
 				// The control Worker consumes the maintenance queue, so a wake
 				// reaches the tenant objects as it does in production.
 				queueConsumers: {

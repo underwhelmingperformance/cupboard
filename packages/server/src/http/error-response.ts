@@ -33,7 +33,7 @@ import { oauthJsonResponse } from './oauth-response.ts';
 // is not ours to map and returns undefined.
 function errorResponse(error: unknown): Response | undefined {
 	if (error instanceof OAuthError) {
-		return oauthJsonResponse(
+		const response = oauthJsonResponse(
 			{
 				error: error.error,
 				error_description: error.message,
@@ -42,6 +42,12 @@ function errorResponse(error: unknown): Response | undefined {
 			},
 			{ status: error.status }
 		);
+
+		if (error.retryAfterSeconds !== undefined) {
+			response.headers.set('retry-after', String(error.retryAfterSeconds));
+		}
+
+		return response;
 	}
 
 	if (error instanceof ServerHttpError) {

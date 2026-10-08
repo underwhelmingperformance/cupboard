@@ -157,6 +157,11 @@ export const tokenRevocationRequestSchema = z.object({
 	token_type_hint: z.string().min(1).optional()
 });
 
+// The budget of one client at the token, signup and revocation endpoints of one
+// surface. A surface is the control plane or one tenant. Keep the limit and
+// period equal to `TOKEN_RATE_LIMITER.simple` in `wrangler.jsonc`.
+export const tokenRateLimit = { limit: 120, periodSeconds: 60 } as const;
+
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the Cupboard JWT; `issued_token_type` is present for the
 // token-exchange grant. A sign-in receives a refresh token, which rotates on

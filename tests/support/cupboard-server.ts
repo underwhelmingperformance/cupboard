@@ -22,6 +22,7 @@ import {
 import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
+	tokenRateLimit,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import { Miniflare } from 'miniflare';
@@ -230,6 +231,15 @@ export class CupboardTestServer {
 						},
 						queueConsumers: {
 							'cupboard-maintenance': { maxBatchSize: 1, maxBatchTimeout: 0 }
+						},
+						ratelimits: {
+							TOKEN_RATE_LIMITER: {
+								namespace_id: '1',
+								simple: {
+									limit: tokenRateLimit.limit,
+									period: tokenRateLimit.periodSeconds
+								}
+							}
 						}
 					},
 					{

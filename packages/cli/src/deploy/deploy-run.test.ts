@@ -69,6 +69,7 @@ function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 		r2Buckets: [{ binding: 'BLOBS', bucketName: 'cupboard-blobs' }],
 		kvNamespaces: [],
 		d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
+		rateLimits: [],
 		queueProducers: [],
 		queueConsumers: [],
 		services: [],

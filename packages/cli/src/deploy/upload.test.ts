@@ -4,6 +4,7 @@ import type { WorkerConfig } from './config.ts';
 import {
 	databaseIdSchema,
 	kvNamespaceIdSchema,
+	rateLimitNamespaceIdSchema,
 	scriptNameSchema
 } from './identifiers.ts';
 import {
@@ -43,6 +44,14 @@ const controlConfig: WorkerConfig = {
 	r2Buckets: [{ binding: 'BLOBS', bucketName: 'cupboard-blobs' }],
 	kvNamespaces: [{ binding: 'TENANT_CACHE', title: 'cupboard-tenant-cache' }],
 	d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
+	rateLimits: [
+		{
+			binding: 'TOKEN_RATE_LIMITER',
+			namespaceId: rateLimitNamespaceIdSchema.parse('1001'),
+			limit: 120,
+			period: 60
+		}
+	],
 	queueProducers: [
 		{ binding: 'MAINTENANCE_QUEUE', queue: 'cupboard-maintenance' }
 	],
@@ -129,6 +138,12 @@ describe('buildScriptMetadata', () => {
 				{ type: 'r2_bucket', name: 'BLOBS', bucket_name: 'cupboard-blobs' },
 				{ type: 'kv_namespace', name: 'TENANT_CACHE', namespace_id: 'kv-id-1' },
 				{ type: 'd1', name: 'CUPBOARD_DB', database_id: 'db-id-1' },
+				{
+					type: 'ratelimit',
+					name: 'TOKEN_RATE_LIMITER',
+					namespace_id: '1001',
+					simple: { limit: 120, period: 60 }
+				},
 				{
 					type: 'queue',
 					name: 'MAINTENANCE_QUEUE',

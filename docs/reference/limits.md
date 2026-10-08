@@ -73,6 +73,18 @@ See [Signing in](../admin/signing-in.md) and
 | Operator access token                                | 10 minutes. The CLI renews it.   |
 | Old access-token key or control key after a rotation | Retired after about 20 minutes   |
 
+## Request rates
+
+See [Rate limiting](../operator/deploying.md#rate-limiting).
+
+| Requests from one IPv4 address or IPv6 /64 prefix                         | Limit                               |
+| ------------------------------------------------------------------------- | ----------------------------------- |
+| To `POST /token`, `POST /signup` and `POST /revoke` at the deployment URL | 120 a minute for the three together |
+| To `POST /token` and `POST /revoke` at one tenant URL                     | 120 a minute for the two together   |
+
+Cloudflare counts the requests at each of its locations separately. A request
+over the limit receives status 429 with `Retry-After: 60`.
+
 ## Trust rules
 
 See [Trust rules](../ci/trust-rules.md).

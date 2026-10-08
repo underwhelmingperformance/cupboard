@@ -89,6 +89,15 @@ function bindingsFor(
 		});
 	}
 
+	for (const rateLimit of worker.rateLimits) {
+		bindings.push({
+			type: 'ratelimit',
+			name: rateLimit.binding,
+			namespace_id: rateLimit.namespaceId,
+			simple: { limit: rateLimit.limit, period: rateLimit.period }
+		});
+	}
+
 	for (const producer of worker.queueProducers) {
 		bindings.push({
 			type: 'queue',

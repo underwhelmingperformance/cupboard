@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
+import { tokenRateLimit } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
 import { parseDeploymentConfig, WranglerConfigError } from './config.ts';
@@ -19,6 +20,9 @@ const controlSource = `{
 	"r2_buckets": [{ "binding": "BLOBS", "bucket_name": "cupboard-blobs" }],
 	"kv_namespaces": [{ "binding": "TENANT_CACHE", "id": "0000" }],
 	"d1_databases": [{ "binding": "CUPBOARD_DB", "database_name": "cupboard" }],
+	"ratelimits": [
+		{ "name": "TOKEN_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 100, "period": 10 } }
+	],
 	"queues": {
 		"producers": [{ "binding": "MAINTENANCE_QUEUE", "queue": "cupboard-maintenance" }],
 		"consumers": [
@@ -69,6 +73,23 @@ describe('parseDeploymentConfig', () => {
 		]);
 	});
 
+	it('matches the production rate-limit binding to the protocol limit', async () => {
+		const productionControlSource = await readFile(
+			new URL('../../../server/wrangler.jsonc', import.meta.url),
+			'utf8'
+		);
+		const config = parseDeploymentConfig(productionControlSource, tenantSource);
+
+		expect(config.control.rateLimits).toStrictEqual([
+			{
+				binding: 'TOKEN_RATE_LIMITER',
+				namespaceId: '28726273',
+				limit: tokenRateLimit.limit,
+				period: tokenRateLimit.periodSeconds
+			}
+		]);
+	});
+
 	it('parses both workers, deriving KV titles and normalising bindings', () => {
 		expect(parseDeploymentConfig(controlSource, tenantSource)).toStrictEqual({
 			control: {
@@ -92,6 +113,14 @@ describe('parseDeploymentConfig', () => {
 					{ binding: 'TENANT_CACHE', title: 'cupboard-tenant-cache' }
 				],
 				d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
+				rateLimits: [
+					{
+						binding: 'TOKEN_RATE_LIMITER',
+						namespaceId: '1001',
+						limit: 100,
+						period: 10
+					}
+				],
 				queueProducers: [
 					{ binding: 'MAINTENANCE_QUEUE', queue: 'cupboard-maintenance' }
 				],
@@ -137,6 +166,7 @@ describe('parseDeploymentConfig', () => {
 				r2Buckets: [{ binding: 'BLOBS', bucketName: 'cupboard-blobs' }],
 				kvNamespaces: [],
 				d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
+				rateLimits: [],
 				queueProducers: [],
 				queueConsumers: [],
 				services: [],
@@ -290,6 +320,16 @@ describe('wrangler config validation', () => {
 			'a cron trigger with stray characters',
 			'"crons": ["0 * * * *"]',
 			'"crons": ["0 * * * *; rm"]'
+		],
+		[
+			'a rate-limit period other than 10 or 60 seconds',
+			'"period": 10',
+			'"period": 30'
+		],
+		[
+			'a rate-limit namespace ID that is not a positive integer',
+			'"namespace_id": "1001"',
+			'"namespace_id": "tokens"'
 		],
 		[
 			'a compatibility date that is not a date',

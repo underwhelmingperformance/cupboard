@@ -73,6 +73,20 @@
 			}
 		]
 	},
+	"ratelimits": [
+		// Limits requests to the token, signup and revocation endpoints. Every
+		// rate-limit binding in the account with the same `namespace_id` shares
+		// its counters, so no other Worker in the account may use this ID. The
+		// limit and period must match `tokenRateLimit` in `@cupboard/protocol/oidc`.
+		{
+			"name": "TOKEN_RATE_LIMITER",
+			"namespace_id": "28726273",
+			"simple": {
+				"limit": 120,
+				"period": 60
+			}
+		}
+	],
 	"d1_databases": [
 		{
 			"binding": "CUPBOARD_DB",

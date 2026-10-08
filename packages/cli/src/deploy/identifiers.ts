@@ -26,3 +26,11 @@ export type ZoneId = z.infer<typeof zoneIdSchema>;
 
 export const queueIdSchema = z.string().brand('QueueId');
 export type QueueId = z.infer<typeof queueIdSchema>;
+
+// Cloudflare identifies a rate-limit namespace by a positive integer, written
+// as a string.
+export const rateLimitNamespaceIdSchema = z
+	.string()
+	.regex(/^[1-9]\d*$/)
+	.brand('RateLimitNamespaceId');
+export type RateLimitNamespaceId = z.infer<typeof rateLimitNamespaceIdSchema>;
