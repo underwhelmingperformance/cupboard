@@ -1,5 +1,7 @@
 import { env } from 'node:process';
 
+import { canonicalHref } from '@cupboard/nix-store/url';
+import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
 import {
 	readResponseJson,
 	readResponseText,
@@ -11,6 +13,8 @@ import { z } from 'zod';
 import { isAbortError, throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { authExitCode, CliError, transientExitCode } from '../errors.ts';
+
+import { isBindingRefusal } from './bound-sign-in.ts';
 
 const maximumGithubOidcResponseBytes = 1024 * 1024;
 const unauthorisedStatus: number = StatusCodes.UNAUTHORIZED;
@@ -84,6 +88,56 @@ export class GithubOidcResponseError extends CliError {
 	override get exitCode(): number {
 		return transientExitCode;
 	}
+}
+
+/**
+ * The server at `target` refused a GitHub Actions token with
+ * `subject-token-unbound`. The server accepts a token without a nonce binding
+ * only when the token's audience is the server's own URL.
+ */
+export class GithubOidcAudienceRefusedError extends CliError {
+	override readonly humanMessage: string;
+
+	constructor(
+		public readonly target: string,
+		public readonly audience: string,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`${target} refused the GitHub Actions token because its audience is ` +
+				`${audience}. The server accepts this token only when its audience ` +
+				"is the server's own URL. Set --audience to the tenant URL, or to " +
+				'the deployment URL for a control-plane command, and use the same ' +
+				'audience in the trust rule.',
+			options
+		);
+		this.name = 'GithubOidcAudienceRefusedError';
+		this.humanMessage = this.message;
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
+	}
+}
+
+/**
+ * Returns the error to throw when the server at `target` refuses a GitHub
+ * Actions token with the audience `audience`. A `subject-token-unbound`
+ * refusal becomes `GithubOidcAudienceRefusedError`, and any other error is
+ * returned unchanged.
+ */
+export function githubOidcExchangeFailure(
+	error: unknown,
+	target: URL,
+	audience: string
+): unknown {
+	if (!isBindingRefusal(error, subjectBindingProblems.unbound)) {
+		return error;
+	}
+
+	return new GithubOidcAudienceRefusedError(canonicalHref(target), audience, {
+		cause: error
+	});
 }
 
 class GithubOidcTransportError extends CliError {

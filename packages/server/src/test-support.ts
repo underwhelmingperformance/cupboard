@@ -595,8 +595,10 @@ export function currentOrigin(): string {
 // The issuer and audience the Durable Object is configured with and issues under in
 // low-level tests. A fixed value, independent of the per-test origin, so a token
 // stays valid when a test switches origin via useTestServer. Route-level behaviour
-// (a provisioned tenant's path-based issuer) is proved separately.
-export const tenantTestIssuer = 'cupboard';
+// (a provisioned tenant's path-based issuer) is proved separately. It is a
+// canonical tenant URL, because the targets of a nonce-bound subject token must
+// include the tenant's issuer.
+export const tenantTestIssuer = 'https://cupboard.test/t/v1';
 
 // Configures a Durable Object as the fixture tenant, the way provisioning would,
 // with the fixed legacy issuer for low-level token round-trips.

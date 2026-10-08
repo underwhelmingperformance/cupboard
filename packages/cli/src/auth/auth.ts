@@ -13,7 +13,8 @@ import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 
 import {
 	fetchGithubOidcToken,
-	type GithubOidcEnvironment
+	type GithubOidcEnvironment,
+	githubOidcExchangeFailure
 } from './github-oidc.ts';
 import { hasOAuthErrorCode } from './oauth-error.ts';
 import {
@@ -300,12 +301,23 @@ class GithubOidcTokenProvider implements TokenProvider {
 			fetcher: this.client.fetcher,
 			signal: this.client.signal
 		});
-		const { access_token, expires_in } = await this.client.tokenExchange(
-			subjectToken,
-			subjectTokenTypeIdToken,
-			this.authorizationDetails
-		);
+		let response: TokenResponse;
 
+		try {
+			response = await this.client.tokenExchange(
+				subjectToken,
+				subjectTokenTypeIdToken,
+				this.authorizationDetails
+			);
+		} catch (error) {
+			throw githubOidcExchangeFailure(
+				error,
+				this.client.baseUrl,
+				this.audience
+			);
+		}
+
+		const { access_token, expires_in } = response;
 		this.#token = access_token;
 		this.#expiresAtMs = this.now() + expires_in * 1000;
 

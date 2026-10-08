@@ -98,7 +98,6 @@ import {
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
 import { isAudienceBound } from '../oidc/audience-binding.ts';
 import {
-	logUnboundSubjectToken,
 	type SubjectBinding,
 	subjectBinding,
 	type SubjectNonce,
@@ -272,10 +271,6 @@ export class TokenExchangeService {
 			selection.grants ??
 			this.implicitGrants(selection.rule, verified, requested);
 
-		if (binding.kind === 'unbound') {
-			logUnboundSubjectToken(logger, selection.rule);
-		}
-
 		return this.issuedResponse(
 			logger,
 			verified,
@@ -386,10 +381,6 @@ export class TokenExchangeService {
 
 		if (typeof verified.sub !== 'string' || verified.sub === '') {
 			throw new TenantSubjectTokenUntrustedError();
-		}
-
-		if (binding.kind === 'unbound') {
-			logUnboundSubjectToken(logger, selection.rule);
 		}
 
 		const token = await this.issueRuleToken(

@@ -10,9 +10,8 @@ import { type RepositoryIdentity } from '../oidc-trust/github.ts';
 import { githubActionsIssuer } from './claims.ts';
 
 /**
- * A job token whose audience is not the tenant URL is bound to the tenant only
- * by a nonce. A tenant that refuses unbound subject tokens refuses such a token
- * without one.
+ * A tenant accepts a job token only when its audience is the tenant URL. A job
+ * cannot request a token with a target-bound nonce.
  */
 function unboundAudienceRules(
 	rules: readonly OidcTrustRule[],
@@ -42,7 +41,7 @@ export function warnUnboundAudienceRules(
 	for (const rule of unboundAudienceRules(rules, identity, tenant)) {
 		reporter.warn(
 			`Trust rule ${rule.id} expects the audience ${rule.audience}, which is not the tenant URL. ` +
-				'Jobs that request this audience without a target-bound nonce will fail if the tenant refuses unbound subject tokens. ' +
+				'The tenant refuses the tokens of jobs that request this audience, because a job token cannot have a target-bound nonce. ' +
 				"To keep these jobs working, set the rule's audience and the audience input or --audience option of each job that uses the rule " +
 				`to ${tenantUrl}.`
 		);

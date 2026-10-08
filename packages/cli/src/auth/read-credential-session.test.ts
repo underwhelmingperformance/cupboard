@@ -3,11 +3,18 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { canonicalHref } from '@cupboard/nix-store/url';
+import { readTokenPasswordPrefix } from '@cupboard/protocol/read-access';
+import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
+import { StatusCodes } from 'http-status-codes';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { abortable } from '../abort.ts';
-import { CupboardHttpError } from '../errors.ts';
+import { audienceSchema } from '../audience.ts';
+import { authExitCode, CupboardHttpError } from '../errors.ts';
 
+import { GithubOidcAudienceRefusedError } from './github-oidc.ts';
+import { issueGithubReadCredential } from './github-read-credential.ts';
 import {
 	type ReadCredentialFile,
 	type ReadCredentialLease,
@@ -17,6 +24,107 @@ import {
 } from './read-credential-session.ts';
 
 const url = new URL('https://cupboard.example.workers.dev/t/acme');
+const audience = audienceSchema.parse('https://cache.example.workers.dev');
+
+const readAccessGranted = {
+	access_token: 'read-token',
+	token_type: 'Bearer',
+	expires_in: 10,
+	authorization_details: [],
+	read_resources: [
+		{
+			type: 'cupboard_cache',
+			cache: { kind: 'default' },
+			mode: 'content',
+			state: { kind: 'existing', access: 'private', priority: 40 }
+		}
+	]
+};
+
+function requestHref(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	return input instanceof URL ? input.href : input.url;
+}
+
+/**
+ * A GitHub Actions token endpoint and a tenant token endpoint. The tenant
+ * endpoint returns the bodies of `responses` in order: a body with an
+ * `access_token` succeeds, and any other body is a 400 refusal.
+ */
+function readAccessServer(responses: readonly Record<string, unknown>[]): {
+	readonly fetcher: typeof fetch;
+	readonly exchanges: () => number;
+} {
+	let exchanges = 0;
+	const fetcher = (input: string | URL | Request): Promise<Response> => {
+		if (new URL(requestHref(input)).origin === 'https://actions.example.com') {
+			return Promise.resolve(Response.json({ value: 'github-subject' }));
+		}
+
+		const body = responses[exchanges] ?? {};
+		exchanges += 1;
+
+		return Promise.resolve(
+			'access_token' in body
+				? Response.json(body)
+				: Response.json(body, { status: StatusCodes.BAD_REQUEST })
+		);
+	};
+
+	return { fetcher, exchanges: () => exchanges };
+}
+
+function issueFromGithub(
+	fetcher: typeof fetch,
+	signal: AbortSignal
+): Promise<ReadCredentialLease> {
+	return issueGithubReadCredential({
+		tenantUrl: url,
+		audience,
+		resources: [
+			{ type: 'cupboard_cache', cache: { kind: 'default' }, mode: 'content' }
+		],
+		signal,
+		fetcher,
+		environment: {
+			requestUrl: 'https://actions.example.com/token',
+			requestToken: 'request-bearer'
+		}
+	});
+}
+
+function httpRefusal(error: unknown): unknown {
+	if (!(error instanceof CupboardHttpError)) {
+		return error;
+	}
+
+	return { status: error.status, oauthError: error.oauthError };
+}
+
+function describeFailure(error: unknown): unknown {
+	if (error instanceof GithubOidcAudienceRefusedError) {
+		return {
+			name: error.name,
+			target: error.target,
+			audience: error.audience,
+			cause: httpRefusal(error.cause),
+			exitCode: error.exitCode
+		};
+	}
+
+	if (error instanceof ReadCredentialRenewalError) {
+		return {
+			name: error.name,
+			cause: httpRefusal(error.cause),
+			exitCode: error.exitCode
+		};
+	}
+
+	return error;
+}
 
 function lease(password: string, expiresAtMs: number): ReadCredentialLease {
 	return { user: 'cupboard-oidc', password, expiresAtMs };
@@ -184,6 +292,122 @@ describe('withRenewingReadCredential', () => {
 			});
 		}
 	);
+
+	it.each([
+		{
+			refusal: {
+				error: 'invalid_grant',
+				problem: subjectBindingProblems.unbound
+			},
+			expected: {
+				name: 'GithubOidcAudienceRefusedError',
+				target: canonicalHref(url),
+				audience,
+				cause: {
+					status: StatusCodes.BAD_REQUEST,
+					oauthError: {
+						error: 'invalid_grant',
+						problem: subjectBindingProblems.unbound
+					}
+				},
+				exitCode: authExitCode
+			}
+		},
+		{
+			refusal: { error: 'invalid_request', problem: 'subject-token-untrusted' },
+			expected: {
+				name: 'ReadCredentialRenewalError',
+				cause: {
+					status: StatusCodes.BAD_REQUEST,
+					oauthError: {
+						error: 'invalid_request',
+						problem: 'subject-token-untrusted'
+					}
+				},
+				exitCode: authExitCode
+			}
+		}
+	])(
+		'stops without a retry when renewal of a GitHub read credential is refused with $refusal.problem',
+		async ({ refusal, expected }) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(0);
+			const fixture = file();
+			const entered = Promise.withResolvers<undefined>();
+			const server = readAccessServer([readAccessGranted, refusal]);
+			const session = withRenewingReadCredential(
+				options(
+					(signal) => issueFromGithub(server.fetcher, signal),
+					fixture.credentialFile
+				),
+				async ({ signal }) => {
+					entered.resolve(undefined);
+					await abortable(Promise.withResolvers<undefined>().promise, signal);
+				}
+			);
+			await entered.promise;
+			const outcome = failureOf(session);
+			await vi.advanceTimersByTimeAsync(9000);
+
+			expect({
+				error: describeFailure(await outcome),
+				exchanges: server.exchanges(),
+				writes: fixture.writes,
+				removed: fixture.isRemoved()
+			}).toStrictEqual({
+				error: expected,
+				exchanges: 2,
+				writes: [`${readTokenPasswordPrefix}read-token`],
+				removed: true
+			});
+		}
+	);
+
+	it('reports a GitHub read credential refused as unbound before work starts', async () => {
+		const fixture = file();
+		const server = readAccessServer([
+			{ error: 'invalid_grant', problem: subjectBindingProblems.unbound }
+		]);
+		let isEntered = false;
+
+		const error = await failureOf(
+			withRenewingReadCredential(
+				options(
+					(signal) => issueFromGithub(server.fetcher, signal),
+					fixture.credentialFile
+				),
+				() => {
+					isEntered = true;
+
+					return Promise.resolve();
+				}
+			)
+		);
+
+		expect({
+			error: describeFailure(error),
+			exchanges: server.exchanges(),
+			isEntered,
+			writes: fixture.writes
+		}).toStrictEqual({
+			error: {
+				name: 'GithubOidcAudienceRefusedError',
+				target: canonicalHref(url),
+				audience,
+				cause: {
+					status: StatusCodes.BAD_REQUEST,
+					oauthError: {
+						error: 'invalid_grant',
+						problem: subjectBindingProblems.unbound
+					}
+				},
+				exitCode: authExitCode
+			},
+			exchanges: 1,
+			isEntered: false,
+			writes: []
+		});
+	});
 
 	it('installs the first credential before work, renews independently, and removes the file after work', async () => {
 		vi.useFakeTimers();

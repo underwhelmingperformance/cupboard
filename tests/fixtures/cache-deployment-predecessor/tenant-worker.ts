@@ -142,12 +142,16 @@ export class CupboardServer extends DurableObject<FixtureEnvironment> {
 
 		// Every tenant is configured when it is created, which is long before the
 		// earliest watermark here, so a sleeping object carries its identity as
-		// well as its schema. Only the data below depends on how far it got.
+		// well as its schema. Only the data below depends on how far it got. The
+		// predecessor provisions each tenant with its tenant URL as its issuer.
+		const issuer = `https://cupboard.invalid/t/${tenant}`;
 		this.ctx.storage.sql.exec(
 			`INSERT INTO tenant_identity (id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version)
-			 VALUES ('singleton', ?, 'cupboard', 'cupboard', ?, ?, ?, 1)
+			 VALUES ('singleton', ?, ?, ?, ?, ?, ?, 1)
 			 ON CONFLICT (id) DO NOTHING`,
 			tenant,
+			issuer,
+			issuer,
 			owner.issuer,
 			owner.subject,
 			owner.audience

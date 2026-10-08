@@ -1,5 +1,4 @@
 import { rootLogger } from '@cupboard/logger';
-import { startCapture } from '@cupboard/logger/testing';
 import { bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import {
 	issuedAccessTokenType,
@@ -54,11 +53,22 @@ function oauthErrorShape(value: unknown): z.infer<typeof oauthErrorSchema> {
 	return oauthErrorSchema.parse(value);
 }
 
+// The binding parameters of each token from `StubIssuer.sign` with a nonce for
+// the deployment URL. The request helpers send them with the token, as the CLI
+// does, unless the form gives its own.
+const tokenBindings = new Map<string, Readonly<Record<string, string>>>();
+
+function withBinding(form: Record<string, string>): Record<string, string> {
+	const binding = tokenBindings.get(form.subject_token ?? '');
+
+	return binding === undefined ? form : { ...binding, ...form };
+}
+
 function postSignup(
 	form: Record<string, string>,
 	envOverride: Readonly<Record<string, string>> = claimEnv
 ): Promise<Response> {
-	const body = new URLSearchParams(form);
+	const body = new URLSearchParams(withBinding(form));
 	return controlFetch(
 		'/signup',
 		{
@@ -74,12 +84,12 @@ function postToken(form: Record<string, string>): Promise<Response> {
 	return controlFetch('/token', {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams(form).toString()
+		body: new URLSearchParams(withBinding(form)).toString()
 	});
 }
 
 function formRequest(path: string, form: Record<string, string>): Request {
-	const body = new URLSearchParams(form);
+	const body = new URLSearchParams(withBinding(form));
 	return new Request(new URL(path, currentOrigin()), {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -91,8 +101,7 @@ async function signupError(form: Record<string, string>): Promise<unknown> {
 	try {
 		return await handleSignup(
 			formRequest('/signup', form),
-			Object.assign({}, env, testControlEnv, claimEnv),
-			rootLogger()
+			Object.assign({}, env, testControlEnv, claimEnv)
 		);
 	} catch (error: unknown) {
 		return error;
@@ -152,6 +161,11 @@ interface StubIssuer {
 		readonly audience: string | readonly string[];
 		readonly claims?: Readonly<Record<string, unknown>>;
 		readonly issuedAt?: number;
+		/**
+		 * False for a token without the default nonce for the deployment URL. A
+		 * token whose audience is the deployment URL never has it.
+		 */
+		readonly isNonceBound?: boolean;
 	}): Promise<string>;
 }
 
@@ -194,17 +208,30 @@ async function stubIssuer(
 	return {
 		issuer,
 		fetched,
-		sign: ({ subject, audience, claims, issuedAt }) =>
-			new SignJWT({ ...claims })
+		sign: async ({ subject, audience, claims, issuedAt, isNonceBound }) => {
+			const audiences = typeof audience === 'string' ? [audience] : audience;
+			const binding =
+				isNonceBound === false || audiences.includes(currentOrigin())
+					? undefined
+					: await subjectTokenBinding([currentOrigin()]);
+			const signed = await new SignJWT({
+				...(binding !== undefined && { nonce: binding.nonce }),
+				...claims
+			})
 				.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 				.setIssuer(issuer)
-				.setAudience([
-					...(typeof audience === 'string' ? [audience] : audience)
-				])
+				.setAudience([...audiences])
 				.setSubject(subject)
 				.setIssuedAt(issuedAt)
 				.setExpirationTime('5m')
-				.sign(privateKey)
+				.sign(privateKey);
+
+			if (binding !== undefined) {
+				tokenBindings.set(signed, binding.form);
+			}
+
+			return signed;
+		}
 	};
 }
 
@@ -792,6 +819,25 @@ interface BoundSignup {
 	readonly token: string;
 }
 
+interface SubjectTokenBinding {
+	readonly nonce: string;
+	readonly form: Readonly<Record<string, string>>;
+}
+
+async function subjectTokenBinding(
+	targets: readonly string[]
+): Promise<SubjectTokenBinding> {
+	const seed = bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+
+	return {
+		nonce: await subjectBindingNonce(targets, seed),
+		form: {
+			cupboard_binding_seed: seed,
+			cupboard_binding_targets: JSON.stringify(targets)
+		}
+	};
+}
+
 async function boundSignup(
 	idp: StubIssuer,
 	targets: readonly string[],
@@ -802,6 +848,7 @@ async function boundSignup(
 	const token = await idp.sign({
 		subject: 'founder',
 		audience: 'cupboard-client',
+		isNonceBound: false,
 		...(options.hasNonce !== false && { claims: { nonce } }),
 		...(options.issuedAt !== undefined && { issuedAt: options.issuedAt })
 	});
@@ -1044,50 +1091,55 @@ describe('target-bound signup', () => {
 
 	it.each([
 		{
-			name: 'an unbound signup, logs it and starts a session',
-			isAudienceBound: false
+			name: 'a nonce-bound token sent without its binding parameters',
+			hasNonce: true
 		},
-		{
-			name: 'an audience-bound signup without a warning or a session',
-			isAudienceBound: true
-		}
-	])('accepts $name', async ({ isAudienceBound }) => {
+		{ name: 'a token with neither binding', hasNonce: false }
+	])('refuses $name', async ({ hasNonce }) => {
+		const idp = await stubIssuer();
+		const bound = await boundSignup(idp, [currentOrigin()], { hasNonce });
+		const response = await postSignup({
+			subject_token: bound.token,
+			claim_secret: claimSecret
+		});
+
+		expect({
+			refusal: await refusalOf(response),
+			...(await seededAdmin()),
+			consumed: await consumedControlNonces()
+		}).toStrictEqual({
+			refusal: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'subject-token-unbound'
+			},
+			admin: undefined,
+			trust: [],
+			consumed: []
+		});
+	});
+
+	it('accepts an audience-bound signup without a session', async () => {
 		const idp = await stubIssuer();
 		const subjectToken = await idp.sign({
 			subject: 'founder',
-			audience: isAudienceBound ? currentOrigin() : 'cupboard-client'
+			audience: currentOrigin()
 		});
-		const capture = startCapture();
-		let response: Response;
-
-		try {
-			response = await postSignup({
-				subject_token: subjectToken,
-				claim_secret: claimSecret
-			});
-		} finally {
-			capture.stop();
-		}
-
+		const response = await postSignup({
+			subject_token: subjectToken,
+			claim_secret: claimSecret
+		});
 		const { hasRefreshToken } = signupShape(await response.json());
-		const families = await controlRefreshFamilies();
 
 		expect({
 			status: response.status,
-			warnings: capture.logs
-				.filter((entry) => entry.message === 'unbound subject token accepted')
-				.map((entry) => ({
-					level: entry.level,
-					rule: entry.properties.rule
-				})),
 			hasRefreshToken,
-			families: families.length,
+			families: await controlRefreshFamilies(),
 			consumed: await consumedControlNonces()
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			warnings: isAudienceBound ? [] : [{ level: 'warning', rule: 'signup' }],
-			hasRefreshToken: !isAudienceBound,
-			families: isAudienceBound ? 0 : 1,
+			hasRefreshToken: false,
+			families: [],
 			consumed: []
 		});
 	});

@@ -23,7 +23,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { runAction } from '../../actions/src/program.ts';
-import { parseAudience } from '../../packages/cli/src/audience.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { createBuildPushDaemon } from '../../packages/cli/src/commands/build-push.ts';
 import { githubBranchAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
@@ -80,11 +79,18 @@ const consumerClaims = {
 const rootPrefix = `github:${consumerRepository.fullName}/${consumerBranch}`;
 const rootGrantPrefix = 'github:cupboard-test/';
 
-// The preset case publishes under roots of its own beneath the same prefix, and
-// authenticates with an audience of its own so rule selection can never confuse
-// its rule with the hand-written one above.
-const presetRootPrefix = `${rootPrefix}/preset`;
-const presetAudience = 'https://cupboard-test.example/preset';
+// The preset case publishes from a branch of its own. The preset rule pins that
+// branch's `ref`, so tokens from the default branch never match the preset
+// rule. Tokens from the preset branch match both rules. The preset rule pins
+// more claims than the hand-written rule, so rule selection uses only the
+// preset rule for these tokens.
+const presetBranch = 'preset';
+const presetClaims = {
+	...consumerClaims,
+	sub: `repo:${consumerRepository.fullName}:ref:refs/heads/${presetBranch}`,
+	ref: `refs/heads/${presetBranch}`
+};
+const presetRootPrefix = `github:${consumerRepository.fullName}/${presetBranch}`;
 
 // The packaged-installation leg publishes two cohorts under prefixes of its
 // own: one from this checkout's sources, and one from the release archive.
@@ -104,6 +110,7 @@ interface Fixture {
 	readonly workspace: string;
 	readonly server: CupboardTestServer;
 	readonly runner: StubRunnerTokenEndpoint;
+	readonly presetRunner: StubRunnerTokenEndpoint;
 	readonly cupboard: CupboardCommand;
 	readonly system: string;
 	readonly streams: boolean;
@@ -394,7 +401,6 @@ function planArguments(options: {
 	readonly url: string;
 	readonly cupboardPath: string;
 	readonly rootPrefix: string;
-	readonly audience: string;
 	readonly store: string;
 	readonly rebuild: boolean;
 }): readonly string[] {
@@ -417,7 +423,7 @@ function planArguments(options: {
 		'--read-password',
 		'',
 		'--audience',
-		options.audience,
+		'',
 		'--plan-file',
 		'',
 		'--optimise',
@@ -435,7 +441,6 @@ function buildCohortArguments(options: {
 	readonly cohortJson: string;
 	readonly url: string;
 	readonly cupboardPath: string;
-	readonly audience: string;
 	readonly store: string;
 	readonly push: boolean;
 	readonly rebuild: boolean;
@@ -456,7 +461,7 @@ function buildCohortArguments(options: {
 		'--ttl',
 		'',
 		'--audience',
-		options.audience,
+		'',
 		'--read-user',
 		'',
 		'--read-password',
@@ -555,10 +560,10 @@ interface PublishOptions {
 	 */
 	readonly cupboardPath?: string;
 	/**
-	 * The audience the run requests OIDC tokens with. An empty value defaults to
-	 * the tenant URL.
+	 * The endpoint that issues the run's OIDC tokens. Defaults to the endpoint
+	 * for the consumer's default branch.
 	 */
-	readonly audience?: string;
+	readonly runner?: StubRunnerTokenEndpoint;
 }
 
 async function runPublication(
@@ -566,9 +571,22 @@ async function runPublication(
 	options: PublishOptions
 ): Promise<PublishOutcome> {
 	const prepared = fixture();
+	Object.assign(process.env, (options.runner ?? prepared.runner).environment);
+
+	try {
+		return await publish(name, options);
+	} finally {
+		Object.assign(process.env, prepared.runner.environment);
+	}
+}
+
+async function publish(
+	name: string,
+	options: PublishOptions
+): Promise<PublishOutcome> {
+	const prepared = fixture();
 	const url = prepared.server.tenantUrl.href;
 	const publishRootPrefix = options.rootPrefix ?? rootPrefix;
-	const audience = options.audience ?? '';
 	const job = await startJob(name);
 	const cupboardPath = await fixtureCapacityCommand(
 		options.cupboardPath ?? prepared.cupboard.path,
@@ -587,7 +605,6 @@ async function runPublication(
 			url,
 			cupboardPath,
 			rootPrefix: publishRootPrefix,
-			audience,
 			store: options.store,
 			rebuild: options.rebuild
 		})
@@ -605,7 +622,6 @@ async function runPublication(
 				cohortJson: JSON.stringify(entry),
 				url,
 				cupboardPath,
-				audience,
 				store: options.store,
 				push: true,
 				rebuild: options.rebuild,
@@ -956,6 +972,10 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			issuer: server.issuer,
 			claims: consumerClaims
 		});
+		const presetRunner = await StubRunnerTokenEndpoint.start({
+			issuer: server.issuer,
+			claims: presetClaims
+		});
 		const cupboard = await CupboardCommand.start({
 			directory: path.join(workspace, 'bin'),
 			stage: (key, bytes) => server.stageObject(key, bytes)
@@ -1005,6 +1025,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			workspace,
 			server,
 			runner,
+			presetRunner,
 			cupboard,
 			system: system(),
 			streams: await canStreamLocalBuild()
@@ -1026,6 +1047,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 
 		await prepared.cupboard.stop();
 		await prepared.runner.stop();
+		await prepared.presetRunner.stop();
 		await prepared.server.stop();
 		await rm(prepared.workspace, { force: true, recursive: true });
 	}, 120_000);
@@ -1152,8 +1174,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			consumerRepository,
 			{
 				repo: consumerRepository.fullName,
-				branch: consumerBranch,
-				audience: parseAudience(presetAudience)
+				branch: presetBranch
 			}
 		);
 		// The preset pins GitHub's issuer, but the harness signs the tokens
@@ -1176,7 +1197,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			flakeDirectory,
 			store: '',
 			rootPrefix: presetRootPrefix,
-			audience: presetAudience,
+			runner: prepared.presetRunner,
 			rebuild: false
 		};
 
@@ -1194,7 +1215,8 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			rerun,
 			served: await servedStatuses(built),
 			runRoots: await runRoots(presetRootPrefix),
-			targetRoots: presetTargetRoots
+			targetRoots: presetTargetRoots,
+			audiences: [...new Set(prepared.presetRunner.audiences)]
 		}).toStrictEqual({
 			first: {
 				planStatus: 0,
@@ -1244,7 +1266,8 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 					name: `${presetRootPrefix}/${prepared.system}/beta`,
 					targets: [built[1]?.storePath]
 				}
-			]
+			],
+			audiences: [canonicalHref(prepared.server.tenantUrl)]
 		});
 	});
 
