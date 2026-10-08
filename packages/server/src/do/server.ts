@@ -30,6 +30,7 @@ import {
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CommitBatchEntry,
+	type CommitBlobDeclaration,
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
 	commitCapabilitiesValueWithCredit,
@@ -1246,7 +1247,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		advisory?: {
 			readonly prefetched?: PrefetchedMaterialisationFacts;
 			readonly account?: TenantAccount;
-		}
+		},
+		blob?: CommitBlobDeclaration
 	): Promise<void> {
 		try {
 			// Record the session before the commit can defer, so a verdict reached
@@ -1255,7 +1257,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			const outcome = await this.metered('commit', (logger) =>
 				this.afterHotMutation(cache.scope, () =>
-					this.commitPipeline.commit(logger, cache, uploadId, advisory)
+					this.commitPipeline.commit(logger, cache, uploadId, advisory, blob)
 				)
 			);
 
@@ -3587,7 +3589,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 								{
 									prefetched: batchPrefetched?.get(entry.narHash),
 									account: batchAccount
-								}
+								},
+								entry.blob
 							);
 							answered.add(entry.uploadId);
 						} finally {

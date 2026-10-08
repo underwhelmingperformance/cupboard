@@ -15,6 +15,7 @@ import {
 	isoTimestampSchema
 } from '@cupboard/protocol/scalars';
 import {
+	type CommitBlobDeclaration,
 	type SessionId,
 	type UploadGraceFact,
 	type UploadId,
@@ -361,7 +362,9 @@ function reconcileCounts(outcome: ReconcileOutcome): ReconcileCounts {
 /**
  * The consumer must fetch and verify `r2Key` unless `reuse` is true. A reuse
  * claim refers to canonical bytes that were verified when they were promoted,
- * so the consumer must not decode them again.
+ * so the consumer must not decode them again. `blob` is the client's
+ * declaration of the staged object's file hash and size, present only for a
+ * fresh upload committed with one.
  */
 export interface PendingVerification {
 	readonly uploadId: UploadId;
@@ -370,6 +373,20 @@ export interface PendingVerification {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
 	readonly reuse: boolean;
+	readonly blob?: CommitBlobDeclaration;
+}
+
+function declaredBlob(
+	pending: PendingUploadRow
+): CommitBlobDeclaration | undefined {
+	if (pending.declaredFileHash === null || pending.declaredFileSize === null) {
+		return undefined;
+	}
+
+	return {
+		fileHash: pending.declaredFileHash,
+		fileSize: pending.declaredFileSize
+	};
 }
 
 // The owner must accompany every later renewal and verdict. `truncated` means
@@ -602,13 +619,16 @@ function chunkClaims(
 			return { claims, truncated: true };
 		}
 
+		const blob = isReuse ? undefined : declaredBlob(pending);
+
 		claims.push({
 			uploadId: pending.id,
 			storePathHash: metadata.storePathHash,
 			r2Key: pending.r2Key,
 			narHash: metadata.narHash,
 			narSize: metadata.narSize,
-			reuse: isReuse
+			reuse: isReuse,
+			...(blob !== undefined && { blob })
 		});
 		bytes += cost;
 		hasFresh ||= cost > 0;
