@@ -21,6 +21,7 @@ import type {
 	CommitSession,
 	CommitSessionTarget
 } from '../client/commit-socket.ts';
+import { SequentialNarSource } from '../nix/nar-source.ts';
 import type { PushClient } from '../push/push.ts';
 
 import {
@@ -240,7 +241,7 @@ function harness(options: HarnessOptions = {}): Harness {
 		store,
 		client,
 		runRoot,
-		createNarArchive: () => emptyStream(),
+		createNarArchive: () => new SequentialNarSource(emptyStream),
 		compressNar: () => ({
 			body: new ReadableStream<Uint8Array>({
 				cancel: (reason) => {

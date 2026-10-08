@@ -6,6 +6,7 @@ import { type ByteSource, byteStream } from '../io/byte-stream.ts';
 
 import type { NarDigest } from './nar.ts';
 import { NarError, NixSha256Hash } from './nar.ts';
+import type { NarSource } from './nar-source.ts';
 
 // A NAR compressed on the fly: the compressed bytes stream straight to the
 // uploader, and the uncompressed NAR's hash and size, accumulated as the bytes
@@ -98,14 +99,14 @@ export const defaultNarCompression: NarCompressionOptions = {
  * or fewer bytes than `narSize`.
  */
 export function compressNarToStream(
-	nar: ByteSource,
+	nar: NarSource,
 	narSize: number,
 	options: NarCompressionOptions = defaultNarCompression
 ): NarUploadStream {
 	const hasher = new NarHasher();
 	const meter = new CompressionMeter(options.now);
 	const frames = compressedFrames(
-		new NarReader(nar, narSize, hasher),
+		new NarReader(nar.open(0), narSize, hasher),
 		options,
 		meter
 	);

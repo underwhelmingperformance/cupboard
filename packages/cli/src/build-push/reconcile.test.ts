@@ -41,6 +41,7 @@ import {
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
+import { SequentialNarSource } from '../nix/nar-source.ts';
 import type { PushClient } from '../push/push.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
@@ -336,7 +337,7 @@ function reconcileWith(
 		snapshot: { derivations: new Map() },
 		store: harnessed.store,
 		client: harnessed.client,
-		createNarArchive: () => emptyStream(),
+		createNarArchive: () => new SequentialNarSource(emptyStream),
 		compressNar: () => ({
 			body: emptyStream(),
 			digest: () => ({ narHash, narSize: 4 })
@@ -1643,7 +1644,7 @@ describe('reconcileBuild over a shared commit session', () => {
 			store: harnessed.store,
 			client: harnessed.client,
 			session,
-			createNarArchive: () => emptyStream(),
+			createNarArchive: () => new SequentialNarSource(emptyStream),
 			compressNar: () => ({
 				body: emptyStream(),
 				digest: () => ({ narHash, narSize: 4 })

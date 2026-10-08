@@ -225,6 +225,54 @@ describe('NarArchive', () => {
 	});
 });
 
+describe('NarArchive.open', () => {
+	it('yields the suffix of the NAR from offsets at and next to every string boundary and from sampled offsets', async () => {
+		await withTemporaryDirectory('cupboard-nar-', async (directory) => {
+			await writeSeekTree(directory);
+
+			const archive = new NarArchive(directory);
+			const nar = Buffer.concat(await collect(archive.open(0)));
+			const offsets = seekOffsets(nar);
+			// Each open waits mostly on file system calls, so several run at once.
+			const matches = await mapConcurrently(offsets, 16, (offset) =>
+				isSuffix(archive.open(offset), nar, offset)
+			);
+			const mismatches = offsets.filter((_, index) => matches[index] !== true);
+
+			expect({ checked: offsets.length > 500, mismatches }).toStrictEqual({
+				checked: true,
+				mismatches: []
+			});
+		});
+	}, 30_000);
+
+	// Root can read a file without read permission, so the test could not tell
+	// whether the archive opened the file.
+	it.skipIf(process.getuid?.() === 0)(
+		'does not open the files that end before the offset',
+		async () => {
+			await withTemporaryDirectory(
+				'cupboard-nar-',
+				async (directory) => {
+					const unreadable = pathModule.join(directory, 'a-unreadable');
+					await writeFile(unreadable, pseudoRandomBytes(200_000, 1));
+					await writeFile(pathModule.join(directory, 'b-readable'), 'after');
+					const nar = Buffer.concat(await collectNar(directory));
+					await chmod(unreadable, 0o000);
+					const offset = nar.byteLength - 64;
+
+					const suffix = Buffer.concat(
+						await collect(new NarArchive(directory).open(offset))
+					);
+
+					expect(suffix).toStrictEqual(nar.subarray(offset));
+				},
+				{ makeWritableBeforeCleanup: true }
+			);
+		}
+	);
+});
+
 describe('toNixBase32', () => {
 	it('encodes SHA-256 bytes using the Nix base32 alphabet', () => {
 		const emptySha256 = Buffer.from(
@@ -292,6 +340,122 @@ async function collect(source: AsyncIterable<Uint8Array>): Promise<Buffer[]> {
 	}
 
 	return chunks;
+}
+
+// Applies `map` to every item, with at most `limit` calls in progress, and
+// returns the results in item order.
+async function mapConcurrently<T, R>(
+	items: readonly T[],
+	limit: number,
+	map: (item: T) => Promise<R>
+): Promise<R[]> {
+	const results: R[] = [];
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		for (let index = next; index < items.length; index = next) {
+			next += 1;
+			const item = items[index];
+
+			if (item !== undefined) {
+				results[index] = await map(item);
+			}
+		}
+	};
+
+	await Promise.all(Array.from({ length: limit }, worker));
+
+	return results;
+}
+
+// Whether `source` yields exactly the bytes of `nar` from `offset` to the end.
+// It compares each chunk as it arrives, without copying or hashing the suffix.
+async function isSuffix(
+	source: AsyncIterable<Uint8Array>,
+	nar: Buffer,
+	offset: number
+): Promise<boolean> {
+	let position = offset;
+
+	for await (const chunk of source) {
+		const expected = nar.subarray(position, position + chunk.byteLength);
+
+		if (!expected.equals(chunk)) {
+			return false;
+		}
+
+		position += chunk.byteLength;
+	}
+
+	return position === nar.byteLength;
+}
+
+// Every NAR token is a length-prefixed string padded to a multiple of 8
+// bytes. Returns the start of each length prefix, the start and end of each
+// string's bytes, the position of each 64 KiB read of a file's contents, and
+// the end of the NAR.
+function narBoundaries(nar: Buffer): number[] {
+	const boundaries: number[] = [];
+	let position = 0;
+
+	while (position < nar.byteLength) {
+		const length = Number(nar.readBigUInt64LE(position));
+		const reads = Array.from(
+			{ length: Math.floor(length / 65_536) },
+			(_, index) => position + 8 + (index + 1) * 65_536
+		);
+		boundaries.push(position, position + 8, ...reads, position + 8 + length);
+		position += 8 + length + ((8 - (length % 8)) % 8);
+	}
+
+	boundaries.push(position);
+
+	return boundaries;
+}
+
+// The offsets at and next to each boundary, and a pseudo-random sample of the
+// rest.
+function seekOffsets(nar: Buffer): number[] {
+	const sample = pseudoRandomBytes(4 * 64, 7);
+	const view = new DataView(sample.buffer, sample.byteOffset, 4 * 64);
+	const offsets = [
+		...narBoundaries(nar).flatMap((position) => [
+			position - 1,
+			position,
+			position + 1
+		]),
+		...Array.from(
+			{ length: 64 },
+			(_, index) => view.getUint32(index * 4, true) % nar.byteLength
+		)
+	];
+
+	return [...new Set(offsets)]
+		.filter((offset) => offset >= 0 && offset <= nar.byteLength)
+		.toSorted((left, right) => left - right);
+}
+
+// Files on each side of the 8-byte padding boundary and of the 64 KiB
+// synchronous-read limit, an executable, symlinks, an empty directory and a
+// file that takes several 64 KiB reads.
+async function writeSeekTree(directory: string): Promise<void> {
+	const nested = pathModule.join(directory, 'd', 'e');
+	await mkdir(nested, { recursive: true });
+
+	for (const [index, size] of narTreeFileSizes.entries()) {
+		await writeFile(
+			pathModule.join(nested, `f${String(index)}`),
+			pseudoRandomBytes(size, index + 1)
+		);
+	}
+
+	await chmod(pathModule.join(nested, 'f3'), 0o755);
+	await symlink('f1', pathModule.join(nested, 'link'));
+	await mkdir(pathModule.join(directory, 'empty'));
+	await writeFile(
+		pathModule.join(directory, 'large'),
+		pseudoRandomBytes(300_003, 99)
+	);
+	await writeFile(pathModule.join(directory, 'z'), 'last');
 }
 
 async function narText(path: string): Promise<string> {

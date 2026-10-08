@@ -42,6 +42,7 @@ import {
 	sendCompressedNar
 } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
+import type { NarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import {
 	exactUploadDecisions,
@@ -52,8 +53,7 @@ import { publishedSubjects } from '../push/origin.ts';
 import {
 	type CompressNar,
 	defaultUploadConcurrency,
-	type PushClient,
-	type PushNarArchive
+	type PushClient
 } from '../push/push.ts';
 import { sendUpload, type UploadClock } from '../push/upload-transfer.ts';
 
@@ -115,7 +115,7 @@ export interface ReconcileOptions {
 	 * budget across all phases.
 	 */
 	readonly session?: CommitSession;
-	readonly createNarArchive?: (storePath: string) => PushNarArchive;
+	readonly createNarArchive?: (storePath: string) => NarSource;
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
 	/**

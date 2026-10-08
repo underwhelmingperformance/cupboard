@@ -84,6 +84,7 @@ import {
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
 import type { NarCompressionFacts } from '../nix/blob.ts';
+import type { NarSource } from '../nix/nar-source.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import {
 	compressionRows,
@@ -96,7 +97,6 @@ import { PublicationCollection } from '../push/publication.ts';
 import {
 	type CompressNar,
 	type PushClient,
-	type PushNarArchive,
 	type PushStore,
 	runPush
 } from '../push/push.ts';
@@ -196,7 +196,7 @@ export interface BuildPushDependencies {
 	readonly runtime?: Omit<InvocationRuntimeOptions, 'invocationId'>;
 	readonly environment?: ChildEnvironment;
 	readonly signalSource?: SignalSource;
-	readonly createNarArchive?: (storePath: string) => PushNarArchive;
+	readonly createNarArchive?: (storePath: string) => NarSource;
 	readonly compressNar?: CompressNar;
 	/**
 	 * Reads the process's peak RSS for the summary. Defaults to
