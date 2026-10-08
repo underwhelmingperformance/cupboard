@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Transform } from 'node:stream';
+import { PassThrough, Transform } from 'node:stream';
 
 import { ZstdDecoder } from '@cupboard/nix-store/zstd';
 import { describe, expect, it } from 'vitest';
@@ -8,14 +8,21 @@ import {
 	fingerprint,
 	pseudoRandomBytes
 } from '../../../../tests/support/bytes.ts';
+import { MemoryNarSource } from '../../../../tests/support/nar-source.ts';
 import { type ByteSource, byteStream } from '../io/byte-stream.ts';
 
 import {
+	CheckpointUnavailableError,
+	type CompressedCheckpoint,
 	compressNarToStream,
 	defaultNarCompression,
+	FramedNarCompressor,
 	type NarCompressionOptions,
+	NarHashStateMissingError,
 	NarSizeChangedError,
-	sendCompressedNar
+	RecompressedNarMismatchError,
+	sendCompressedNar,
+	zstdCompressBound
 } from './blob.ts';
 import { type NarDigest, NixSha256Hash } from './nar.ts';
 import type { NarSource } from './nar-source.ts';
@@ -267,6 +274,427 @@ describe('compressNarToStream frames', () => {
 			frames: before.frames,
 			active: 0
 		});
+	});
+});
+
+describe('FramedNarCompressor', () => {
+	// 20 MiB that zstd cannot compress, then 20 MiB of text that it can: two
+	// 16 MiB frames and one of 8 MiB, with frame 1 straddling the change.
+	const nar = Buffer.concat([
+		pseudoRandomBytes(20 * mebibyte, 3),
+		Buffer.from('compressible NAR text '.repeat(1_000_000)).subarray(
+			0,
+			20 * mebibyte
+		)
+	]);
+
+	// The first read yields pieces of 100,003 bytes and later reads yield
+	// 1 MiB pieces, so recompressed frames are written to zstd in pieces of a
+	// different size. A store with one connection refuses a second open while
+	// the first is still being read.
+	function source(
+		contents: (open: number) => Uint8Array = () => nar
+	): MemoryNarSource {
+		return new MemoryNarSource({
+			contents,
+			pieceSize: (open) => (open === 0 ? 100_003 : mebibyte),
+			isExclusive: true
+		});
+	}
+
+	interface FirstPass {
+		readonly compressor: FramedNarCompressor;
+		readonly output: Buffer;
+		readonly checkpoint: CompressedCheckpoint;
+	}
+
+	// Reads the first pass a chunk at a time. Takes a checkpoint at the first
+	// position of at least `from.position` bytes, or at the start of frame
+	// `from.frame`, and stops at the first position of at least `to` bytes or
+	// at the end.
+	async function firstPass(
+		compressor: FramedNarCompressor,
+		from: { readonly position: number } | { readonly frame: number },
+		to: number
+	): Promise<FirstPass> {
+		const chunks: Uint8Array[] = [];
+		let checkpoint: CompressedCheckpoint | undefined;
+
+		while (compressor.position < to && (await compressor.hasMore())) {
+			const candidate = compressor.checkpoint();
+			const isStart =
+				'frame' in from
+					? candidate.frame === from.frame && candidate.frameOffset === 0
+					: candidate.position >= from.position;
+			checkpoint ??= isStart ? candidate : undefined;
+			chunks.push((await compressor.read(Infinity)) ?? new Uint8Array());
+		}
+
+		if (checkpoint === undefined) {
+			throw new RangeError('the first pass never reached the checkpoint');
+		}
+
+		return { compressor, output: Buffer.concat(chunks), checkpoint };
+	}
+
+	// Reads the rest of the compressed NAR, up to `until` bytes in all.
+	async function readOn(
+		compressor: FramedNarCompressor,
+		until = Infinity
+	): Promise<Buffer> {
+		const chunks: Uint8Array[] = [];
+
+		while (compressor.position < until && (await compressor.hasMore())) {
+			chunks.push(
+				(await compressor.read(until - compressor.position)) ?? new Uint8Array()
+			);
+		}
+
+		return Buffer.concat(chunks);
+	}
+
+	it.each([
+		{
+			name: 'within one frame',
+			from: { position: 2 * mebibyte },
+			to: 9 * mebibyte
+		},
+		{
+			name: 'across a frame boundary',
+			from: { position: 10 * mebibyte },
+			to: 18 * mebibyte
+		},
+		{
+			name: 'from the start of a frame',
+			from: { frame: 1 },
+			to: 19 * mebibyte
+		},
+		{
+			name: 'to the end of the NAR',
+			from: { position: 17 * mebibyte },
+			to: Infinity
+		}
+	])(
+		'rewinds $name to a checkpoint and recompresses from the frame that contains it, with one open at a time',
+		async ({ from, to }) => {
+			const narSource = source();
+			const pass = await firstPass(
+				new FramedNarCompressor(narSource, nar.byteLength),
+				from,
+				to
+			);
+			const reached = pass.compressor.position;
+			await pass.compressor.rewind(pass.checkpoint);
+			const recompressed = await readOn(pass.compressor, reached);
+			const rest = await readOn(pass.compressor);
+			const whole = Buffer.concat([
+				pass.output.subarray(0, pass.checkpoint.position),
+				recompressed,
+				rest
+			]);
+
+			expect({
+				recompressed: fingerprint(recompressed),
+				whole: fingerprint(whole),
+				opens: narSource.opens,
+				closed: narSource.closed,
+				digest: pass.compressor.digest()
+			}).toStrictEqual({
+				recompressed: fingerprint(
+					pass.output.subarray(pass.checkpoint.position)
+				),
+				whole: fingerprint(await compressedOf(nar)),
+				opens: [0, pass.checkpoint.frame * frameSizeBytes],
+				closed: 2,
+				digest: expectedDigest(nar)
+			});
+		}
+	);
+
+	it('refuses to rewind when the bytes before the checkpoint changed', async () => {
+		const changed = Buffer.from(nar);
+		changed[1000] = (changed[1000] ?? 0) ^ 0xff;
+		const pass = await firstPass(
+			new FramedNarCompressor(
+				source((open) => (open === 0 ? nar : changed)),
+				nar.byteLength
+			),
+			{ position: 2 * mebibyte },
+			4 * mebibyte
+		);
+
+		const error = await rejectionOf(pass.compressor.rewind(pass.checkpoint));
+
+		expect(mismatchOf(error)).toStrictEqual({
+			name: 'RecompressedNarMismatchError',
+			frame: 0,
+			position: pass.checkpoint.position
+		});
+	});
+
+	it('rejects while it recompresses a frame that changed after the checkpoint', async () => {
+		const changed = Buffer.from(nar);
+		const index = 18 * mebibyte;
+		changed[index] = (changed[index] ?? 0) ^ 0xff;
+		const pass = await firstPass(
+			new FramedNarCompressor(
+				source((open) => (open === 0 ? nar : changed)),
+				nar.byteLength
+			),
+			{ position: 2 * mebibyte },
+			19 * mebibyte
+		);
+		const reached = pass.compressor.position;
+		await pass.compressor.rewind(pass.checkpoint);
+		const returned: number[] = [];
+
+		const error = await rejectionOf(
+			(async () => {
+				while (pass.compressor.position < reached) {
+					const chunk = await pass.compressor.read(reached);
+					returned.push(chunk?.byteLength ?? 0);
+				}
+			})()
+		);
+
+		// The last chunk before the position that the first read reached is
+		// checked before it is returned, so the changed bytes are never handed
+		// out.
+		expect({
+			mismatch: mismatchOf(error),
+			returnedAll:
+				returned.reduce((total, length) => total + length, 0) ===
+				reached - pass.checkpoint.position
+		}).toStrictEqual({
+			mismatch: {
+				name: 'RecompressedNarMismatchError',
+				frame: 1,
+				position: reached
+			},
+			returnedAll: false
+		});
+	});
+});
+
+// Frame compressors that pass the NAR bytes through unchanged, so a
+// compressed position is also a NAR offset. Each one buffers up to 4 MiB, so
+// the compressor reads pieces ahead of the bytes that it returns, as zstd
+// does.
+const identity: NarCompressionOptions = {
+	createFrameCompressor: () => new PassThrough({ highWaterMark: 4 * mebibyte }),
+	now: () => 0
+};
+
+describe('FramedNarCompressor NAR hash after a rewind', () => {
+	it('continues after a rewind to the current checkpoint at a frame boundary', async () => {
+		const nar = pseudoRandomBytes(17 * mebibyte, 45);
+		const source = MemoryNarSource.of(nar);
+		const compressor = new FramedNarCompressor(
+			source,
+			nar.byteLength,
+			identity
+		);
+		await readTo(compressor, 16 * mebibyte);
+		await compressor.hasMore();
+		const current = compressor.checkpoint();
+
+		await compressor.rewind(current);
+		const rest = await readTo(compressor);
+
+		expect({
+			rest: fingerprint(rest),
+			digest: compressor.digest(),
+			opens: source.opens,
+			closed: source.closed
+		}).toStrictEqual({
+			rest: fingerprint(nar.subarray(16 * mebibyte)),
+			digest: expectedDigest(nar),
+			opens: [0, 16 * mebibyte],
+			closed: 2
+		});
+	});
+
+	it('hashes the bytes that it reads again after the position that the first read reached', async () => {
+		const nar = pseudoRandomBytes(3 * mebibyte, 41);
+		// The first read returns bytes up to `reached`, but it has already
+		// hashed the rest of the 1 MiB piece that contains `reached`. The NAR
+		// changes in that piece before it is read again.
+		const reached = 2 * mebibyte + 1000;
+		const changed = Buffer.from(nar);
+		changed[reached + 10] = (changed[reached + 10] ?? 0) ^ 0xff;
+		const compressor = new FramedNarCompressor(
+			new MemoryNarSource({
+				contents: (open) => (open === 0 ? nar : changed)
+			}),
+			nar.byteLength,
+			identity
+		);
+		await compressor.hasMore();
+		const start = compressor.checkpoint();
+		await readTo(compressor, reached);
+
+		await compressor.rewind(start);
+		const stored = await readTo(compressor);
+
+		expect({
+			stored: fingerprint(stored),
+			digest: compressor.digest()
+		}).toStrictEqual({
+			stored: fingerprint(changed),
+			digest: expectedDigest(changed)
+		});
+	});
+
+	it('hashes each NAR byte once when a read finishes while the rewind closes the source', async () => {
+		const nar = pseudoRandomBytes(3 * mebibyte, 42);
+		const arrived = Promise.withResolvers<undefined>();
+		const released = Promise.withResolvers<undefined>();
+		// The first read waits for the piece at 2 MiB until the rewind has
+		// started to close the source.
+		const compressor = new FramedNarCompressor(
+			new MemoryNarSource({
+				contents: () => nar,
+				beforePiece: async (open, offset) => {
+					if (open !== 0 || offset !== 2 * mebibyte) {
+						return;
+					}
+
+					arrived.resolve(undefined);
+					await released.promise;
+				}
+			}),
+			nar.byteLength,
+			identity
+		);
+		await compressor.hasMore();
+		const start = compressor.checkpoint();
+		await readTo(compressor, 2 * mebibyte);
+		await arrived.promise;
+
+		const rewinding = compressor.rewind(start);
+		await new Promise((resolve) => setImmediate(resolve));
+		released.resolve(undefined);
+		await rewinding;
+		const stored = await readTo(compressor);
+
+		expect({
+			stored: fingerprint(stored),
+			digest: compressor.digest()
+		}).toStrictEqual({
+			stored: fingerprint(nar),
+			digest: expectedDigest(nar)
+		});
+	});
+});
+
+describe('FramedNarCompressor saved hash states', () => {
+	it('keeps no state for the frames before a discarded checkpoint', async () => {
+		const nar = pseudoRandomBytes(40 * mebibyte, 44);
+		const compressor = new FramedNarCompressor(
+			MemoryNarSource.of(nar),
+			nar.byteLength,
+			identity
+		);
+		await compressor.hasMore();
+		const first = compressor.checkpoint();
+		await readTo(compressor, 33 * mebibyte);
+		await compressor.hasMore();
+		const late = compressor.checkpoint();
+		compressor.discardBefore(late);
+
+		const error = await rejectionOf(compressor.rewind(first));
+
+		expect({ error, late: late.frame }).toStrictEqual({
+			error: new NarHashStateMissingError(0),
+			late: 2
+		});
+	});
+});
+
+describe('FramedNarCompressor misuse', () => {
+	it('refuses a checkpoint before it has a compressed byte to follow it', () => {
+		const compressor = new FramedNarCompressor(
+			MemoryNarSource.of(new Uint8Array(10)),
+			10
+		);
+
+		expect(rejectionOfSync(() => compressor.checkpoint())).toStrictEqual(
+			new CheckpointUnavailableError(0)
+		);
+	});
+
+	it('refuses to rewind to a frame that the NAR hash has not reached', async () => {
+		const nar = pseudoRandomBytes(mebibyte, 43);
+		const compressor = new FramedNarCompressor(
+			MemoryNarSource.of(nar),
+			nar.byteLength
+		);
+		await compressor.hasMore();
+
+		const error = await rejectionOf(
+			compressor.rewind({
+				position: 0,
+				frame: 1,
+				frameOffset: 0,
+				digest: ''
+			})
+		);
+
+		expect(error).toStrictEqual(new NarHashStateMissingError(16 * mebibyte));
+	});
+});
+
+function rejectionOfSync(operation: () => unknown): unknown {
+	try {
+		operation();
+	} catch (error) {
+		return error;
+	}
+
+	return undefined;
+}
+
+// Reads until the compressed position reaches `to` and returns the bytes.
+async function readTo(
+	compressor: FramedNarCompressor,
+	to = Infinity
+): Promise<Buffer> {
+	const chunks: Uint8Array[] = [];
+
+	while (compressor.position < to && (await compressor.hasMore())) {
+		chunks.push(
+			(await compressor.read(to - compressor.position)) ?? new Uint8Array()
+		);
+	}
+
+	return Buffer.concat(chunks);
+}
+
+function mismatchOf(error: unknown): unknown {
+	if (!(error instanceof RecompressedNarMismatchError)) {
+		return error;
+	}
+
+	return { name: error.name, frame: error.frame, position: error.position };
+}
+
+async function compressedOf(nar: Uint8Array): Promise<Buffer> {
+	const upload = compressNarToStream(MemoryNarSource.of(nar), nar.byteLength);
+
+	return Buffer.from(await new Response(upload.body).arrayBuffer());
+}
+
+describe('zstdCompressBound', () => {
+	// The values follow ZSTD_COMPRESSBOUND in zstd.h, which adds a margin to
+	// inputs smaller than 128 KiB.
+	it.each([
+		{ length: 0, bound: 64 },
+		{ length: 1, bound: 64 },
+		{ length: 2048, bound: 2119 },
+		{ length: 128 * 1024, bound: 128 * 1024 + 512 },
+		{ length: 16 * mebibyte, bound: 16 * mebibyte + 65_536 }
+	])('bounds a frame of $length bytes at $bound bytes', ({ length, bound }) => {
+		expect(zstdCompressBound(length)).toBe(bound);
 	});
 });
 
