@@ -365,6 +365,7 @@ function reconcileCounts(outcome: ReconcileOutcome): ReconcileCounts {
  */
 export interface PendingVerification {
 	readonly uploadId: UploadId;
+	readonly storePathHash: StorePathHash;
 	readonly r2Key: R2ObjectKey;
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
@@ -603,6 +604,7 @@ function chunkClaims(
 
 		claims.push({
 			uploadId: pending.id,
+			storePathHash: metadata.storePathHash,
 			r2Key: pending.r2Key,
 			narHash: metadata.narHash,
 			narSize: metadata.narSize,
