@@ -8,12 +8,14 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as d1Schema from '../db/d1-schema.ts';
 import { type CanonicalBlob, canonicalBlobOf } from '../do/upload-metadata.ts';
 import {
+	ObjectIncarnationReservationContendedError,
 	StagedObjectDigestMismatchError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 import {
+	abandonObjectIncarnation,
 	activateObjectIncarnation,
 	isObjectIncarnationLive,
 	promotableStateIncarnation,
@@ -184,6 +186,139 @@ export type BlobStateUpsert = BatchItem<'sqlite'> & {
 	run: () => Promise<unknown>;
 };
 
+// The NAR's incarnation when `blob_state` and the registry both record it as
+// live.
+async function liveBlobIncarnation(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	narHash: NixSha256HashString
+): Promise<{ readonly incarnation: number } | undefined> {
+	const [claimed] = await d1
+		.select({ incarnation: d1Schema.blobState.incarnation })
+		.from(d1Schema.blobState)
+		.where(
+			and(
+				eq(d1Schema.blobState.narHash, narHash),
+				registeredLiveObjectIncarnation(
+					d1,
+					'nar',
+					narHash,
+					d1Schema.blobState.incarnation
+				)
+			)
+		)
+		.limit(1);
+
+	return claimed;
+}
+
+/**
+ * Whether verification can write a NAR's canonical object itself. `existing`
+ * means that a live object is already recorded for the NAR. `reserved` gives
+ * the incarnation to write, reserved for `reservationOwner`. `contended` means
+ * that another promoter changed the registry during the reservation.
+ */
+export type CanonicalIncarnation =
+	| { readonly kind: 'existing' }
+	| { readonly kind: 'reserved'; readonly incarnation: number }
+	| { readonly kind: 'contended' };
+
+/**
+ * Reserves the incarnation that verification writes while it reads the staged
+ * object. {@link commitStagedBlobPromotion} activates it after
+ * {@link stageWrittenBlob} prepares it for the same owner.
+ */
+export async function reserveCanonicalIncarnation(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	narHash: NixSha256HashString,
+	reservationOwner: string
+): Promise<CanonicalIncarnation> {
+	if ((await liveBlobIncarnation(d1, narHash)) !== undefined) {
+		return { kind: 'existing' };
+	}
+
+	try {
+		const reserved = await reserveObjectIncarnation(
+			d1,
+			'nar',
+			narHash,
+			reservationOwner
+		);
+
+		// A live registry row without a matching `blob_state` row belongs to an
+		// object that a copy can adopt. It is not a reservation for this owner.
+		if (reserved.state === 'live') {
+			return { kind: 'existing' };
+		}
+
+		return { kind: 'reserved', incarnation: reserved.incarnation };
+	} catch (error) {
+		if (error instanceof ObjectIncarnationReservationContendedError) {
+			return { kind: 'contended' };
+		}
+
+		throw error;
+	}
+}
+
+/**
+ * Gives up an incarnation that verification wrote for `reservationOwner` when
+ * the upload will not be published from it.
+ */
+export function abandonWrittenBlob(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	narHash: NixSha256HashString,
+	incarnation: number,
+	reservationOwner: string
+): Promise<void> {
+	return abandonObjectIncarnation(
+		d1,
+		'nar',
+		narHash,
+		incarnation,
+		reservationOwner
+	);
+}
+
+/**
+ * Prepares the promotion of a canonical object that verification has already
+ * written at a reserved incarnation. It reads only the object's metadata.
+ * Returns `undefined` when the caller no longer owns the upload or when the
+ * object is missing, so that a later pass verifies the staged bytes again.
+ */
+export async function stageWrittenBlob(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	blobs: R2Bucket,
+	target: PromotionTarget,
+	incarnation: number,
+	reservationOwner: string,
+	isStillOwned: () => boolean
+): Promise<StagedBlobPromotion | undefined> {
+	const canonicalKey = narObjectKey(target.narHash, incarnation);
+	const written = await blobs.head(canonicalKey);
+
+	if (written === null || !isStillOwned()) {
+		return undefined;
+	}
+
+	const canonical = canonicalBlobOf(canonicalKey, written);
+	const referenced = await d1
+		.select({ narHash: d1Schema.blobReference.narHash })
+		.from(d1Schema.blobReference)
+		.where(eq(d1Schema.blobReference.narHash, target.narHash))
+		.limit(1)
+		.get();
+
+	return {
+		canonical,
+		upsert: blobStateUpsert(d1, target, canonical, incarnation),
+		narHash: target.narHash,
+		incarnation,
+		reservationOwner,
+		requiresActivation: true,
+		requiresNarInfoRefresh: referenced !== undefined
+	};
+}
+
 /**
  * Performs the R2 promotion and returns the `blob_state` upsert. The caller must
  * execute the upsert directly or include it in a D1 batch.
@@ -213,21 +348,7 @@ export async function stagePromotedBlob(
 	reservationOwner?: string,
 	isStillOwned?: () => boolean
 ): Promise<StagedBlobPromotion | undefined> {
-	let [claimed] = await d1
-		.select({ incarnation: d1Schema.blobState.incarnation })
-		.from(d1Schema.blobState)
-		.where(
-			and(
-				eq(d1Schema.blobState.narHash, target.narHash),
-				registeredLiveObjectIncarnation(
-					d1,
-					'nar',
-					target.narHash,
-					d1Schema.blobState.incarnation
-				)
-			)
-		)
-		.limit(1);
+	let claimed = await liveBlobIncarnation(d1, target.narHash);
 	let reserved =
 		claimed ??
 		(await reserveObjectIncarnation(

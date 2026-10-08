@@ -14,9 +14,13 @@ import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import {
+	abandonWrittenBlob,
+	type CanonicalIncarnation,
 	commitStagedBlobPromotion,
+	reserveCanonicalIncarnation,
 	type StagedBlobPromotion,
-	stagePromotedBlob
+	stagePromotedBlob,
+	stageWrittenBlob
 } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -551,6 +555,48 @@ export class UploadStateService {
 			blob,
 			reservationOwner,
 			isStillOwned
+		);
+	}
+
+	reserveCanonicalWrite(
+		narHash: NixSha256HashString,
+		reservationOwner: string
+	): Promise<CanonicalIncarnation> {
+		return reserveCanonicalIncarnation(
+			this.context.d1,
+			narHash,
+			reservationOwner
+		);
+	}
+
+	// Prepare the promotion of an object that verification wrote at a reserved
+	// incarnation. The caller commits it only while it still owns the claim.
+	stageWrittenBlob(
+		metadata: UploadPathNegotiation,
+		incarnation: number,
+		reservationOwner: string,
+		isStillOwned: () => boolean
+	): Promise<StagedBlobPromotion | undefined> {
+		return stageWrittenBlob(
+			this.context.d1,
+			this.context.env.BLOBS,
+			{ narHash: metadata.narHash, narSize: metadata.narSize },
+			incarnation,
+			reservationOwner,
+			isStillOwned
+		);
+	}
+
+	abandonWrittenBlob(
+		narHash: NixSha256HashString,
+		incarnation: number,
+		reservationOwner: string
+	): Promise<void> {
+		return abandonWrittenBlob(
+			this.context.d1,
+			narHash,
+			incarnation,
+			reservationOwner
 		);
 	}
 

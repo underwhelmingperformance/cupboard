@@ -203,6 +203,62 @@ function lateWriteRemovalDeadline(now: Date): IsoTimestamp {
 }
 
 /**
+ * Gives up a reservation whose object will not be published. If `incarnation`
+ * is still pending for `reservationOwner`, it becomes absent, so the next
+ * reservation takes a newer one. When the registry then records `incarnation`
+ * as absent, its object is queued for deletion after the late-write horizon. A
+ * live incarnation stays, and a reservation that superseded `incarnation` has
+ * already queued it.
+ */
+export async function abandonObjectIncarnation(
+	database: DrizzleD1Database<typeof d1Schema>,
+	kind: SharedObjectKind,
+	objectId: string,
+	incarnation: number,
+	reservationOwner: string
+): Promise<void> {
+	const now = new Date();
+	const retire = database
+		.update(d1Schema.objectIncarnation)
+		.set({
+			state: 'absent',
+			reservationOwner: sql`null`,
+			updatedAt: isoTimestamp(now)
+		})
+		.where(
+			and(
+				eq(d1Schema.objectIncarnation.kind, kind),
+				eq(d1Schema.objectIncarnation.objectId, objectId),
+				eq(d1Schema.objectIncarnation.incarnation, incarnation),
+				eq(d1Schema.objectIncarnation.state, 'pending'),
+				eq(d1Schema.objectIncarnation.reservationOwner, reservationOwner)
+			)
+		);
+	const deadline = lateWriteRemovalDeadline(now);
+	const absentFilter = and(
+		eq(d1Schema.objectIncarnation.kind, kind),
+		eq(d1Schema.objectIncarnation.objectId, objectId),
+		eq(d1Schema.objectIncarnation.incarnation, incarnation),
+		eq(d1Schema.objectIncarnation.state, 'absent')
+	);
+	const absent = database
+		.select({
+			kind: d1Schema.objectIncarnation.kind,
+			objectId: d1Schema.objectIncarnation.objectId,
+			incarnation: d1Schema.objectIncarnation.incarnation,
+			removeAfter: sql<typeof deadline>`${deadline}`.as('remove_after')
+		})
+		.from(d1Schema.objectIncarnation)
+		.where(absentFilter);
+	const queue = database
+		.insert(d1Schema.objectDeletion)
+		.select(absent)
+		.onConflictDoNothing();
+
+	await database.batch([retire, queue]);
+}
+
+/**
  * Records the exact physical object version for the deletion retry pass.
  */
 export async function queueObjectDeletion(
