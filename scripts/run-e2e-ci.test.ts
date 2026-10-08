@@ -268,6 +268,31 @@ describe('owned Nix daemon socket cleanup', () => {
 	});
 });
 
+// The default socket wait watches the socket's directory. On macOS, closing
+// that watch blocks the event loop, and on a loaded host the block can last
+// several seconds.
+function unopenedDaemonSocket() {
+	const waiting = Promise.withResolvers<AbortSignal>();
+
+	return {
+		waiting: waiting.promise,
+		wait: async (
+			_child: ChildProcess,
+			_socketPath: string,
+			_diagnostics: () => string,
+			signal: AbortSignal
+		): Promise<void> => {
+			waiting.resolve(signal);
+
+			if (!signal.aborted) {
+				await once(signal, 'abort');
+			}
+
+			signal.throwIfAborted();
+		}
+	};
+}
+
 async function inheritedDaemonProcess(
 	directory: string,
 	shouldExitLeader: boolean
@@ -299,7 +324,8 @@ async function inheritedDaemonProcess(
 	const exited = once(child, 'exit');
 	const daemon = RunningCiNixDaemon.observe(
 		child,
-		path.join(directory, 'daemon.sock')
+		path.join(directory, 'daemon.sock'),
+		unopenedDaemonSocket().wait
 	);
 	await once(child, 'message');
 
@@ -374,9 +400,11 @@ describe('owned daemon process groups', () => {
 				'cupboard-denied-startup-',
 				async (directory) => {
 					const child = Object.assign(new ChildProcess(), { pid: 888_888 });
+					const socket = unopenedDaemonSocket();
 					const daemon = RunningCiNixDaemon.observe(
 						child,
-						path.join(directory, 'daemon.sock')
+						path.join(directory, 'daemon.sock'),
+						socket.wait
 					);
 					const permissionError = Object.assign(new Error('kill EPERM'), {
 						code: 'EPERM'
@@ -389,14 +417,7 @@ describe('owned daemon process groups', () => {
 							}
 							return true;
 						});
-					vi.useFakeTimers({
-						toFake: [
-							'setTimeout',
-							'clearTimeout',
-							'setInterval',
-							'clearInterval'
-						]
-					});
+					vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 					const controller = new AbortController();
 					const outcome: { hasSettled: boolean; error: unknown } = {
 						hasSettled: false,
@@ -414,9 +435,7 @@ describe('owned daemon process groups', () => {
 					const startup = observeStartup();
 
 					try {
-						await vi.waitFor(() => {
-							expect(vi.getTimerCount()).toBe(1);
-						});
+						await socket.waiting;
 						controller.abort(new Error('cancelled startup'));
 						await vi.advanceTimersByTimeAsync(5000);
 						await expect(daemon.stop()).rejects.toBe(permissionError);

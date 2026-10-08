@@ -36,6 +36,13 @@ export interface CiEndToEndDependencies {
 	readonly reportFailure: (diagnostics: string) => void;
 }
 
+type DaemonSocketWait = (
+	child: ChildProcess,
+	socketPath: string,
+	diagnostics: () => string,
+	signal: AbortSignal
+) => Promise<void>;
+
 export class CiEndToEndPrerequisiteError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -179,8 +186,12 @@ export class RunningCiNixDaemon implements CiEndToEndDaemon {
 		return daemon;
 	}
 
-	static observe(child: ChildProcess, socketPath: string): RunningCiNixDaemon {
-		return new RunningCiNixDaemon(child, socketPath);
+	static observe(
+		child: ChildProcess,
+		socketPath: string,
+		waitForSocket: DaemonSocketWait = waitForDaemonSocket
+	): RunningCiNixDaemon {
+		return new RunningCiNixDaemon(child, socketPath, waitForSocket);
 	}
 
 	readonly #stderr: Buffer[] = [];
@@ -196,7 +207,8 @@ export class RunningCiNixDaemon implements CiEndToEndDaemon {
 
 	private constructor(
 		private readonly child: ChildProcess,
-		private readonly socketPath: string
+		private readonly socketPath: string,
+		private readonly waitForSocket: DaemonSocketWait
 	) {
 		const onError = (error: Error): void => {
 			this.#processError = error;
@@ -284,7 +296,7 @@ export class RunningCiNixDaemon implements CiEndToEndDaemon {
 		}
 
 		try {
-			await waitForDaemonSocket(
+			await this.waitForSocket(
 				this.child,
 				this.socketPath,
 				this.diagnostics,
