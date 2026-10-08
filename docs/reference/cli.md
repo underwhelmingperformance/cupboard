@@ -191,11 +191,11 @@ Options:
                             database does not record the admin's client (PKCE,
                             no client secret) (default:
                             "6c915db1f16ece47255821ee6ca1d538")
-  --headless                sign in as the admin with a code in a browser on
-                            another device, instead of opening one here, on a
-                            first deploy or when an update signs you in as the
-                            admin. Signing in to Cloudflare for the account can
-                            still open a browser.
+  --headless                print the URL for signing in as the admin and accept
+                            the redirect URL pasted from a browser on another
+                            machine, on a first deploy or when an update signs
+                            you in as the admin. Signing in to Cloudflare for
+                            the account can still open a browser.
   --github-oidc             authorise an update with the workflow's GitHub
                             Actions OIDC token, through a control trust rule,
                             instead of a `cupboard login` session
@@ -344,8 +344,9 @@ Options:
   --client-id <id>        the public OAuth client ID to sign in with (PKCE, no
                           client secret) (default:
                           "6c915db1f16ece47255821ee6ca1d538")
-  --headless              sign in with a code in a browser on another device,
-                          instead of opening one here (for SSH or containers)
+  --headless              print the sign-in URL instead of opening a browser,
+                          and accept the redirect URL pasted from a browser on
+                          another machine (for SSH or containers)
   -h, --help              display help for command
 ```
 
@@ -409,8 +410,9 @@ Options:
   --client-id <id>        the public OAuth client ID to sign in with (PKCE, no
                           client secret) (default:
                           "6c915db1f16ece47255821ee6ca1d538")
-  --headless              sign in with a code in a browser on another device,
-                          instead of opening one here (for SSH or containers)
+  --headless              print the sign-in URL instead of opening a browser,
+                          and accept the redirect URL pasted from a browser on
+                          another machine (for SSH or containers)
   -h, --help              display help for command
 
 Without --provider, whoami reads only the cached sessions and sends

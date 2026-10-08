@@ -1,10 +1,11 @@
+import type { TextEditOptions } from '@cupboard/cli-ui';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import { subjectBindingNonce } from '@cupboard/protocol/subject-binding';
 import lockfile from 'proper-lockfile';
 import { describe, expect, it, vi } from 'vitest';
 
 import { BoundSignIn } from '../auth/bound-sign-in.ts';
-import { DeviceAuthorizationRequestError } from '../auth/oidc-login.ts';
+import { PastedRedirectRefusedError } from '../auth/oidc-login.ts';
 import {
 	type CachedSession,
 	readCachedSession,
@@ -22,11 +23,10 @@ import { testWithConfigHome } from '../test-support.ts';
 
 import {
 	cacheLoginSession,
-	DeviceGrantNotEnabledError,
 	identitySignIn,
 	LoginIdTokenMissingError,
 	loginScopeForClient,
-	mapDeviceLoginError,
+	pastedRedirectReader,
 	signInTo
 } from './login.ts';
 
@@ -52,74 +52,6 @@ function tokenResponse(name: string): TokenResponse {
 		refresh_token: `refresh-${name}`
 	};
 }
-
-describe('mapDeviceLoginError', () => {
-	it.each([[400], [401], [403]])(
-		'maps a refused device authorization (HTTP %i) for the built-in client',
-		(status) => {
-			const mapped = mapDeviceLoginError(
-				new DeviceAuthorizationRequestError(status),
-				cloudflareOauthClientId
-			);
-
-			expect(mapped).toBeInstanceOf(DeviceGrantNotEnabledError);
-
-			if (!(mapped instanceof DeviceGrantNotEnabledError)) {
-				return;
-			}
-
-			expect(mapped.cause).toBeInstanceOf(DeviceAuthorizationRequestError);
-
-			if (mapped.cause instanceof DeviceAuthorizationRequestError) {
-				expect({
-					name: mapped.name,
-					causeStatus: mapped.cause.status
-				}).toStrictEqual({
-					name: 'DeviceGrantNotEnabledError',
-					causeStatus: status
-				});
-			}
-		}
-	);
-
-	it('passes the error through for other clients', () => {
-		const error = new DeviceAuthorizationRequestError(403);
-		const mapped = mapDeviceLoginError(error, 'someone-else');
-
-		expect(mapped).toBeInstanceOf(DeviceAuthorizationRequestError);
-
-		if (mapped instanceof DeviceAuthorizationRequestError) {
-			expect({
-				name: mapped.name,
-				status: mapped.status,
-				passedThrough: mapped === error
-			}).toStrictEqual({
-				name: 'DeviceAuthorizationRequestError',
-				status: 403,
-				passedThrough: true
-			});
-		}
-	});
-
-	it.each([
-		['a server error', new DeviceAuthorizationRequestError(500)],
-		['an unrelated failure', new Error('network down')]
-	])('passes %s through for the built-in client', (_name, error) => {
-		const mapped = mapDeviceLoginError(error, cloudflareOauthClientId);
-
-		expect(mapped).toBeInstanceOf(Error);
-
-		if (mapped instanceof Error) {
-			expect({
-				name: mapped.name,
-				passedThrough: mapped === error
-			}).toStrictEqual({
-				name: error.name,
-				passedThrough: true
-			});
-		}
-	});
-});
 
 describe('loginScopeForClient', () => {
 	it('uses the registered Cloudflare scopes without offline_access for the built-in client', () => {
@@ -313,17 +245,209 @@ describe('identitySignIn', () => {
 
 			expect({
 				rejected: rejected instanceof LoginIdTokenMissingError,
-				bindsNonce: method.bindsNonce,
 				infos: infos.length,
 				grant: await readCachedGrant()
 			}).toStrictEqual({
 				rejected: true,
-				bindsNonce: true,
 				infos: 1,
 				grant: undefined
 			});
 		}
 	);
+});
+
+describe('headless identitySignIn', () => {
+	const pasteHint =
+		'After you authorise, the browser opens a localhost URL. If that page ' +
+		'does not load, copy the URL from the address bar and paste it here.';
+
+	it.each([
+		{
+			name: 'the Cloudflare client',
+			options: {
+				oidcIssuer: cloudflareDashIssuer,
+				clientId: cloudflareOauthClientId,
+				headless: true
+			},
+			redirect: { host: 'localhost', path: '/oauth/callback' },
+			scope: signInScopes.join(' '),
+			requests: ['https://dash.cloudflare.com/oauth2/token']
+		},
+		{
+			name: 'an --oidc-issuer client',
+			options: {
+				oidcIssuer: 'https://idp.example.com',
+				clientId: 'cupboard-cli',
+				headless: true
+			},
+			redirect: { host: '127.0.0.1', path: '/callback' },
+			scope: 'openid',
+			requests: [
+				'https://idp.example.com/.well-known/openid-configuration',
+				'https://idp.example.com/token'
+			]
+		}
+	])(
+		'signs in with $name from a pasted redirect, and opens no browser',
+		async ({ options, redirect, scope, requests }) => {
+			const infos: string[] = [];
+			const opened: string[] = [];
+			const requested: string[] = [];
+			const authorizeUrl = (): URL =>
+				new URL(/https:\/\/\S+/u.exec(infos[0] ?? '')?.[0] ?? '');
+			const fetcher: typeof fetch = (input) => {
+				const url = requestUrl(input);
+				requested.push(url);
+
+				if (url.endsWith('/.well-known/openid-configuration')) {
+					return Promise.resolve(
+						Response.json({
+							issuer: 'https://idp.example.com',
+							authorization_endpoint: 'https://idp.example.com/authorize',
+							token_endpoint: 'https://idp.example.com/token',
+							authorization_response_iss_parameter_supported: true,
+							response_types_supported: ['code'],
+							subject_types_supported: ['public'],
+							id_token_signing_alg_values_supported: ['RS256']
+						})
+					);
+				}
+
+				return Promise.resolve(
+					Response.json({
+						access_token: 'access',
+						expires_in: 3600,
+						id_token: 'headless.id.token'
+					})
+				);
+			};
+			const method = identitySignIn(options, {
+				openBrowser: (target) => {
+					opened.push(target);
+				},
+				info: (message) => {
+					infos.push(message);
+				},
+				readPastedRedirect: () => {
+					const authorize = authorizeUrl();
+					const callback = new URL(
+						authorize.searchParams.get('redirect_uri') ?? ''
+					);
+					callback.searchParams.set('code', 'pasted-code');
+					callback.searchParams.set(
+						'state',
+						authorize.searchParams.get('state') ?? ''
+					);
+					callback.searchParams.set('iss', options.oidcIssuer);
+
+					return Promise.resolve(callback.href);
+				},
+				fetcher,
+				loopbackPorts: [0]
+			});
+
+			const idToken = await method.signIn('nonce-1');
+			const authorize = authorizeUrl();
+			const redirectUri = new URL(
+				authorize.searchParams.get('redirect_uri') ?? ''
+			);
+
+			expect({
+				idToken,
+				opened,
+				infos,
+				authorize: {
+					nonce: authorize.searchParams.get('nonce'),
+					scope: authorize.searchParams.get('scope'),
+					redirect: { host: redirectUri.hostname, path: redirectUri.pathname }
+				},
+				requested
+			}).toStrictEqual({
+				idToken: 'headless.id.token',
+				opened: [],
+				infos: [
+					`To sign in, open this URL in a browser: ${authorize.href}`,
+					pasteHint
+				],
+				authorize: { nonce: 'nonce-1', scope, redirect },
+				requested: requests
+			});
+		}
+	);
+});
+
+describe('pastedRedirectReader', () => {
+	it('reads the URL through a prompt that the sign-in can close', async () => {
+		const prompts: TextEditOptions[] = [];
+		const read = pastedRedirectReader({
+			interactive: true,
+			editText: (options) => {
+				prompts.push(options);
+
+				return Promise.resolve({
+					kind: 'set',
+					value: 'http://localhost:8377/oauth/callback?code=c&state=s'
+				});
+			}
+		});
+		const controller = new AbortController();
+
+		const pasted = await read?.(controller.signal);
+		const [prompt] = prompts;
+
+		expect({
+			pasted,
+			signal: prompt?.signal === controller.signal,
+			problems: ['not a URL', 'http://localhost:8377/oauth/callback'].map(
+				(value) => prompt?.problem?.(value)
+			)
+		}).toStrictEqual({
+			pasted: 'http://localhost:8377/oauth/callback?code=c&state=s',
+			signal: true,
+			problems: [expect.any(String), undefined]
+		});
+	});
+
+	it('reports the problem of a refused paste when it asks again', async () => {
+		const messages: string[] = [];
+		const read = pastedRedirectReader({
+			interactive: true,
+			editText: (options) => {
+				messages.push(options.message);
+
+				return Promise.resolve({ kind: 'cancelled' });
+			}
+		});
+		const { signal } = new AbortController();
+
+		await read?.(signal);
+		await read?.(signal, new PastedRedirectRefusedError('other-sign-in'));
+
+		expect({
+			count: messages.length,
+			reportsProblem: messages.map((message) =>
+				message.includes('other-sign-in')
+			)
+		}).toStrictEqual({ count: 2, reportsProblem: [false, true] });
+	});
+
+	it('returns undefined when the prompt is cancelled', async () => {
+		const read = pastedRedirectReader({
+			interactive: true,
+			editText: () => Promise.resolve({ kind: 'cancelled' })
+		});
+
+		expect(await read?.(new AbortController().signal)).toBeUndefined();
+	});
+
+	it('offers no prompt in a run that cannot prompt', () => {
+		const read = pastedRedirectReader({
+			interactive: false,
+			editText: () => Promise.resolve({ kind: 'cancelled' })
+		});
+
+		expect(read).toBeUndefined();
+	});
 });
 
 describe('login session cache', () => {

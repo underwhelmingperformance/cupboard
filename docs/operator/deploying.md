@@ -431,9 +431,12 @@ When there is a terminal, `init` signs you in for the claim, before it changes
 anything. By default it signs you in to Cloudflare in the browser. This sign-in
 is separate from the Cloudflare sign-in that `init` uses for the account, and it
 is never saved. `--oidc-issuer` and `--client-id` select another OIDC issuer and
-OAuth client, with the same defaults as `cupboard login`. `--headless` uses the
-device flow, without a browser on this machine. The Cloudflare sign-in for the
+OAuth client, with the same defaults as `cupboard login`. `--headless` prints
+the sign-in URL and accepts the redirect URL that you paste, as described in
+[Signing in without a browser][headless-sign-in]. The Cloudflare sign-in for the
 account can still open a browser.
+
+[headless-sign-in]: ../admin/signing-in.md#signing-in-without-a-browser
 
 The ID token from the sign-in has a nonce that commits to the deployment URL and
 to the first tenant's URL. The deployment and the tenant each accept the token

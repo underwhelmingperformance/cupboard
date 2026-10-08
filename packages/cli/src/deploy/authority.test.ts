@@ -130,7 +130,6 @@ function signInReturning(
 ): BoundSignIn {
 	return new BoundSignIn(
 		{
-			bindsNonce: true,
 			signIn: (nonce) => {
 				const idToken = boundIdToken(claims, nonce);
 				issued?.(idToken);
@@ -1777,7 +1776,6 @@ describe('adminLogin', () => {
 				},
 				signInFor: () =>
 					new BoundSignIn({
-						bindsNonce: true,
 						signIn: (nonce) => {
 							calls.push('login');
 

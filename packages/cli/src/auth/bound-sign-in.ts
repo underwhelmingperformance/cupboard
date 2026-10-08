@@ -46,19 +46,14 @@ export interface SubjectTokenBinding {
 
 export interface BoundIdToken {
 	readonly idToken: string;
-	/**
-	 * Undefined when the sign-in method cannot request a nonce. The device flow
-	 * has no `nonce` parameter.
-	 */
-	readonly binding: SubjectTokenBinding | undefined;
+	readonly binding: SubjectTokenBinding;
 }
 
 /**
- * Opens one sign-in with the identity provider and returns its ID token.
- * `bindsNonce` is false for a method that cannot send `nonce` to the provider.
+ * Opens one sign-in with the identity provider, with `nonce` in the
+ * authorisation request, and returns its ID token.
  */
 export interface SignInMethod {
-	readonly bindsNonce: boolean;
 	signIn(nonce: string): Promise<string>;
 }
 
@@ -192,13 +187,12 @@ export class BoundSignIn {
 		}
 
 		const ageSeconds = this.now() / 1000 - issuedAt;
-		const isCovered = (target: CanonicalTarget): boolean =>
-			binding === undefined || binding.targets.includes(target);
 
 		return (
 			ageSeconds < reusableSignInAgeSeconds &&
 			targets.every(
-				(target) => isCovered(target) && !held.presentedAt.has(target)
+				(target) =>
+					binding.targets.includes(target) && !held.presentedAt.has(target)
 			)
 		);
 	}
@@ -222,20 +216,14 @@ export class BoundSignIn {
 		const idToken = await this.method.signIn(nonce);
 		const claims = idTokenClaimsSchema.safeParse(decodeJwtPayload(idToken));
 
-		if (
-			this.method.bindsNonce &&
-			(!claims.success || claims.data.nonce !== nonce)
-		) {
+		if (!claims.success || claims.data.nonce !== nonce) {
 			throw new NonceNotBoundError();
 		}
 
-		const token = {
-			idToken,
-			binding: this.method.bindsNonce ? binding : undefined
-		};
+		const token = { idToken, binding };
 		this.#held = {
 			token,
-			issuedAtSeconds: claims.success ? claims.data.iat : undefined,
+			issuedAtSeconds: claims.data.iat,
 			presentedAt: new Set()
 		};
 

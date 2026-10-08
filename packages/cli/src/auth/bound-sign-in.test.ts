@@ -42,7 +42,7 @@ interface Browser {
 
 // Each sign-in returns a token with the requested nonce, issued at the clock's
 // current time.
-function browser(options: { readonly bindsNonce?: boolean } = {}): Browser {
+function browser(): Browser {
 	const nonces: string[] = [];
 	const clock = { nowMs: 1_700_000_000_000 };
 
@@ -50,7 +50,6 @@ function browser(options: { readonly bindsNonce?: boolean } = {}): Browser {
 		nonces,
 		clock,
 		method: {
-			bindsNonce: options.bindsNonce ?? true,
 			signIn: (nonce) => {
 				nonces.push(nonce);
 
@@ -90,9 +89,7 @@ async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
 }
 
 async function bindingNonceOf(token: BoundIdToken): Promise<string> {
-	return token.binding === undefined
-		? 'unbound'
-		: subjectBindingNonce(token.binding.targets, token.binding.seed);
+	return subjectBindingNonce(token.binding.targets, token.binding.seed);
 }
 
 describe('BoundSignIn', () => {
@@ -106,7 +103,7 @@ describe('BoundSignIn', () => {
 
 		expect({
 			second,
-			targets: first.binding?.targets,
+			targets: first.binding.targets,
 			nonces: world.nonces
 		}).toStrictEqual({
 			second: first,
@@ -147,7 +144,7 @@ describe('BoundSignIn', () => {
 		const second = await signIn.idTokenFor(requested);
 
 		expect({
-			targets: second.binding?.targets,
+			targets: second.binding.targets,
 			isNewToken: second.idToken !== first.idToken,
 			nonces: world.nonces
 		}).toStrictEqual({
@@ -251,7 +248,7 @@ describe('BoundSignIn', () => {
 
 		const rejected = await rejectionOf(
 			signIn.present([tenant], tenant, (token) => {
-				presentedTargets.push(token.binding?.targets ?? []);
+				presentedTargets.push(token.binding.targets);
 
 				return Promise.reject(unbound);
 			})
@@ -367,7 +364,6 @@ describe('BoundSignIn', () => {
 	it('refuses an ID token without the requested nonce, and keeps nothing', async () => {
 		let signIns = 0;
 		const signIn = new BoundSignIn({
-			bindsNonce: true,
 			signIn: () => {
 				signIns += 1;
 
@@ -383,21 +379,5 @@ describe('BoundSignIn', () => {
 			second: second instanceof NonceNotBoundError,
 			signIns
 		}).toStrictEqual({ first: true, second: true, signIns: 2 });
-	});
-
-	it('returns an unbound token from a sign-in that cannot request a nonce', async () => {
-		const world = browser({ bindsNonce: false });
-		const signIn = signInWith(world);
-
-		const token = await signIn.idTokenFor([deployment]);
-
-		expect(token).toStrictEqual({
-			idToken: idToken({
-				nonce: world.nonces[0],
-				iat: Math.floor(world.clock.nowMs / 1000),
-				sign_in: 1
-			}),
-			binding: undefined
-		});
 	});
 });

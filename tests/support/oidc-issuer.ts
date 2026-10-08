@@ -85,7 +85,6 @@ function route(
 			jwks_uri: `${issuer}/jwks`,
 			token_endpoint: `${issuer}/token`,
 			authorization_endpoint: `${issuer}/authorize`,
-			device_authorization_endpoint: `${issuer}/device`,
 			response_types_supported: ['id_token'],
 			subject_types_supported: ['public'],
 			id_token_signing_alg_values_supported: ['RS256']

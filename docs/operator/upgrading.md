@@ -64,8 +64,9 @@ and uses the routed URL.
    It always starts a new sign-in through the admin's issuer for this, so you
    can complete it as the admin even if your cached Cloudflare sign-in belongs
    to someone else. The ID token from that sign-in is bound to the deployment
-   URL. `--headless` uses the device flow. If the sign-in returns another
-   identity, `init` stops before it changes anything.
+   URL. `--headless` prints the sign-in URL and accepts the redirect URL that
+   you paste. If the sign-in returns another identity, `init` stops before it
+   changes anything.
 
 `init` never exchanges the ID token of the cached Cloudflare sign-in. That
 sign-in is only for the Cloudflare API.

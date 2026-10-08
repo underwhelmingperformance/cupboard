@@ -95,7 +95,6 @@ describe('OIDC federation', () => {
 		withFederation('cupboard-e2e-bound-', async ({ server }) => {
 			const signIn = (): BoundSignIn =>
 				new BoundSignIn({
-					bindsNonce: true,
 					signIn: (nonce) =>
 						Promise.resolve(
 							server.issuer.sign({

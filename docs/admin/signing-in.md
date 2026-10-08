@@ -72,12 +72,21 @@ On a machine that has no browser, such as a server that you reach over SSH, add
 cupboard login https://cupboard.example.workers.dev/t/acme --headless
 ```
 
-The CLI prints a code, which you enter on another device to finish signing in.
+The CLI prints the sign-in URL instead of opening a browser. Open the URL in a
+browser on any machine and sign in. The identity provider redirects the browser
+to a `localhost` URL that contains the authorisation code and the state. On
+another machine that page doesn't load, so copy the URL from the browser's
+address bar and paste it at the CLI's prompt.
 
-A headless sign-in uses the device flow. The device flow can't request a nonce,
-so its ID token isn't bound to the tenant URL. The CLI renews the session with
-its refresh token, as for any other sign-in. Once the refresh token expires, the
-CLI asks you to sign in again.
+For a pasted URL, the CLI checks the state and the issuer and rejects repeated
+callback parameters. It therefore refuses a URL from any other sign-in or from
+another issuer. After it refuses a URL, it says why and asks again, until the
+sign-in finishes, times out or you cancel the prompt. The ID token is bound to
+the tenant URL, as for any other sign-in.
+
+The CLI also waits for the redirect on its own machine. If the browser can reach
+that machine's `localhost`, for example through an SSH port forward, the sign-in
+finishes without a paste.
 
 ## Signing in with another identity provider
 

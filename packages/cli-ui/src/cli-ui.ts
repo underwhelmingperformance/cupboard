@@ -155,6 +155,10 @@ export interface TextEditOptions {
 	Why the value is unacceptable, or undefined when it is fine.
 	*/
 	readonly problem?: (value: string) => string | undefined;
+	/**
+	Closes the prompt, which then returns `cancelled`.
+	*/
+	readonly signal?: AbortSignal;
 }
 
 export interface PrefixedTextOptions {
@@ -538,6 +542,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			const answer = await text({
 				message: options.message,
 				output,
+				signal: options.signal,
 				initialValue: options.initial ?? '',
 				...(options.placeholder !== undefined && {
 					placeholder: options.placeholder

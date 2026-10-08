@@ -95,7 +95,7 @@ export function registerDeployCommand(
 		)
 		.option(
 			'--headless',
-			'sign in as the admin with a code in a browser on another device, instead of opening one here, on a first deploy or when an update signs you in as the admin. Signing in to Cloudflare for the account can still open a browser.'
+			'print the URL for signing in as the admin and accept the redirect URL pasted from a browser on another machine, on a first deploy or when an update signs you in as the admin. Signing in to Cloudflare for the account can still open a browser.'
 		)
 		.option(
 			'--github-oidc',
