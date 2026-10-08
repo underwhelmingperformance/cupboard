@@ -72,13 +72,13 @@ import {
 import { byteStream } from '../io/byte-stream.ts';
 import type { NarUploadStream } from '../nix/blob.ts';
 import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
+import type { NarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { PublicationCollection } from './publication.ts';
 import {
 	type PushClient,
 	type PushDependencies,
-	type PushNarArchive,
 	RootTargetLimitError,
 	runPush
 } from './push.ts';
@@ -5801,7 +5801,7 @@ function deferredDependencies() {
 	return {
 		nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 		createNarArchive: () => new FakeNarArchive(appDigest),
-		compressNar: (nar: PushNarArchive) => fakeNarUpload(nar, appDigest)
+		compressNar: (nar: NarSource) => fakeNarUpload(nar, appDigest)
 	} satisfies Partial<PushDependencies>;
 }
 
@@ -5811,21 +5811,21 @@ async function* narBytes(digestValue: NarDigest): AsyncIterable<Uint8Array> {
 	yield digestValue.narHash.digestBytes();
 }
 
-class FakeNarArchive {
+class FakeNarArchive implements NarSource {
 	iterations = 0;
 
 	constructor(readonly digestValue: NarDigest) {}
 
-	async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+	async *open(offset: number): AsyncIterable<Uint8Array> {
 		this.iterations += 1;
 		await Promise.resolve();
 
-		yield this.digestValue.narHash.digestBytes();
+		yield this.digestValue.narHash.digestBytes().subarray(offset);
 	}
 }
 
 function fakeNarUpload(
-	nar: PushNarArchive,
+	nar: NarSource,
 	narDigest: NarDigest,
 	body: Uint8Array = compressedNarBytes
 ): NarUploadStream {
@@ -5841,8 +5841,8 @@ function fakeNarUpload(
 	};
 }
 
-async function drain(source: PushNarArchive): Promise<void> {
-	await collectReadableStream(byteStream(source));
+async function drain(source: NarSource): Promise<void> {
+	await collectReadableStream(byteStream(source.open(0)));
 }
 
 async function collectReadableStream(
@@ -6010,7 +6010,7 @@ function http(status: number): CupboardHttpError {
 	return new CupboardHttpError('PUT', '/nar', status, '');
 }
 
-function digestForNar(nar: PushNarArchive): NarDigest {
+function digestForNar(nar: NarSource): NarDigest {
 	if (!(nar instanceof FakeNarArchive)) {
 		throw new TypeError('expected a FakeNarArchive');
 	}

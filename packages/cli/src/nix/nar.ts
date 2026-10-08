@@ -18,6 +18,8 @@ import { withIterableCleanup } from '@cupboard/shared/cleanup';
 
 import { ByteAccumulator, byteStream } from '../io/byte-stream.ts';
 
+import type { NarSource } from './nar-source.ts';
+
 export {
 	InvalidNixSha256HashError,
 	InvalidSha256DigestLengthError
@@ -83,11 +85,20 @@ const nodesBetweenTurns = 64;
 
 const bytesBetweenTurns = pieceSize;
 
-export class NarArchive implements AsyncIterable<Uint8Array> {
+/**
+ * The NAR of a path on the local filesystem. Opening it at an offset walks the
+ * tree's metadata to find the node that contains the offset, without reading
+ * the contents of the files before it.
+ */
+export class NarArchive implements AsyncIterable<Uint8Array>, NarSource {
 	constructor(public readonly path: string) {}
 
 	[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
 		return narFromPath(this.path)[Symbol.asyncIterator]();
+	}
+
+	open(offset: number): AsyncIterable<Uint8Array> {
+		return narFromPath(this.path, offset);
 	}
 
 	stream(): ReadableStream<Uint8Array> {
@@ -99,8 +110,14 @@ export class NarArchive implements AsyncIterable<Uint8Array> {
 	}
 }
 
-export async function* narFromPath(path: string): AsyncIterable<Uint8Array> {
-	const writer = new NarWriter();
+/**
+ * Serialises the tree at `path` as a NAR and yields its bytes from `offset`.
+ */
+export async function* narFromPath(
+	path: string,
+	offset = 0
+): AsyncIterable<Uint8Array> {
+	const writer = new NarWriter(offset);
 	const turns = new EventLoopTurns();
 	const directories: OpenDirectory[] = [];
 	let next: string | undefined = path;
@@ -236,6 +253,15 @@ async function* narNode(
 
 	writer.string('contents');
 
+	if (writer.skips(stats.size + 8 + paddingLength(stats.size))) {
+		writer.length(stats.size);
+		writer.skip(stats.size);
+		writer.padding(stats.size);
+		closeNode(writer, directories);
+		yield* writer.complete();
+		return;
+	}
+
 	const contents =
 		stats.size <= syncReadMaxBytes ? readSmallFile(path) : undefined;
 
@@ -320,7 +346,7 @@ async function* narFileContents(
 
 	writer.length(size);
 
-	for (let position = 0; position < size;) {
+	for (let position = writer.skip(size); position < size;) {
 		const { bytesRead } = await file.read(
 			buffer,
 			0,
@@ -342,12 +368,37 @@ async function* narFileContents(
 
 // Copies the NAR's bytes into pieces of `pieceSize` bytes, so a consumer
 // receives one 1 MiB piece in place of many short length prefixes, strings and
-// paddings.
+// paddings. The bytes before `start` are counted and discarded.
 class NarWriter {
 	private readonly pieces = new ByteAccumulator(pieceSize);
 
+	private position = 0;
+
+	constructor(private readonly start: number) {}
+
+	/**
+	 * The NAR offset after the bytes written so far.
+	 */
 	get written(): number {
-		return this.pieces.written;
+		return this.position;
+	}
+
+	/**
+	 * Whether the next `length` bytes are all before the start.
+	 */
+	skips(length: number): boolean {
+		return this.position + length <= this.start;
+	}
+
+	/**
+	 * Counts up to `length` of the next bytes without writing them, as far as
+	 * the start, and returns how many it counted.
+	 */
+	skip(length: number): number {
+		const skipped = Math.max(0, Math.min(length, this.start - this.position));
+		this.position += skipped;
+
+		return skipped;
 	}
 
 	// Writes the length, the bytes and the padding of a NAR byte string.
@@ -376,7 +427,10 @@ class NarWriter {
 	}
 
 	raw(bytes: Uint8Array): void {
-		this.pieces.write(bytes);
+		const skipped = this.skip(bytes.byteLength);
+
+		this.position += bytes.byteLength - skipped;
+		this.pieces.write(skipped === 0 ? bytes : bytes.subarray(skipped));
 	}
 
 	complete(): Iterable<Uint8Array> {

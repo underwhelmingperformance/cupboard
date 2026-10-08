@@ -8,6 +8,7 @@ import {
 	fingerprint,
 	pseudoRandomBytes
 } from '../../../../tests/support/bytes.ts';
+import { type ByteSource, byteStream } from '../io/byte-stream.ts';
 
 import {
 	compressNarToStream,
@@ -17,6 +18,7 @@ import {
 	sendCompressedNar
 } from './blob.ts';
 import { type NarDigest, NixSha256Hash } from './nar.ts';
+import type { NarSource } from './nar-source.ts';
 
 const mebibyte = 1024 * 1024;
 
@@ -60,7 +62,10 @@ describe('compressNarToStream', () => {
 	it.each(cases)(
 		'hashes the uncompressed NAR for $name and caches the digest',
 		async ({ input }) => {
-			const stream = compressNarToStream([input], input.byteLength);
+			const stream = compressNarToStream(
+				narSourceOf([input]),
+				input.byteLength
+			);
 
 			await drainStream(stream.body);
 
@@ -105,7 +110,7 @@ describe('compressNarToStream frames', () => {
 		'writes one checksummed frame per 16 MiB of NAR for $name',
 		async ({ size, frames }) => {
 			const input = pseudoRandomBytes(size, 1);
-			const upload = compressNarToStream(pieces(input, 100_000), size);
+			const upload = compressNarToStream(pieceSource(input, 100_000), size);
 			const chunks = await Array.fromAsync(upload.body);
 			const compressed = Buffer.concat(chunks);
 
@@ -134,7 +139,7 @@ describe('compressNarToStream frames', () => {
 		const narSize = 2 * frameSize + 5;
 
 		const upload = compressNarToStream(
-			pieces(new Uint8Array(narSize), mebibyte),
+			pieceSource(new Uint8Array(narSize), mebibyte),
 			narSize,
 			compressors.options()
 		);
@@ -152,7 +157,7 @@ describe('compressNarToStream frames', () => {
 		const narSize = 2 * frameSize + 5;
 		let tick = 0;
 		const upload = compressNarToStream(
-			pieces(new Uint8Array(narSize), mebibyte),
+			pieceSource(new Uint8Array(narSize), mebibyte),
 			narSize,
 			{ ...new RecordingCompressors().options(), now: () => (tick += 1) }
 		);
@@ -193,7 +198,7 @@ describe('compressNarToStream frames', () => {
 		'fails with NarSizeChangedError when the NAR has $name',
 		async ({ actual, declared, ending }) => {
 			const upload = compressNarToStream(
-				pieces(new Uint8Array(actual), mebibyte),
+				pieceSource(new Uint8Array(actual), mebibyte),
 				declared
 			);
 
@@ -217,7 +222,7 @@ describe('compressNarToStream frames', () => {
 
 		try {
 			const upload = compressNarToStream(
-				pieces(new Uint8Array(narSize), mebibyte),
+				pieceSource(new Uint8Array(narSize), mebibyte),
 				narSize,
 				compressors.options()
 			);
@@ -240,7 +245,7 @@ describe('compressNarToStream frames', () => {
 		const source = new RecordingSource(8 * 16);
 		const compressors = new RecordingCompressors();
 		const upload = compressNarToStream(
-			source,
+			narSourceOf(source),
 			8 * frameSize,
 			compressors.options()
 		);
@@ -270,7 +275,7 @@ describe('sendCompressedNar', () => {
 		const source = new RecordingSource(8 * 16);
 		const failure = new UploadFailedError();
 		const upload = compressNarToStream(
-			source,
+			narSourceOf(source),
 			8 * frameSizeBytes,
 			new RecordingCompressors().options()
 		);
@@ -304,6 +309,24 @@ describe('sendCompressedNar', () => {
 });
 
 const frameSizeBytes = 16 * mebibyte;
+
+function pieceSource(input: Uint8Array, length: number): NarSource {
+	return narSourceOf(pieces(input, length));
+}
+
+// A NAR source that serves `source` from offset 0, the only offset that
+// `compressNarToStream` opens.
+function narSourceOf(source: ByteSource): NarSource {
+	return {
+		open: (offset) => {
+			if (offset !== 0) {
+				throw new RangeError(`unexpected offset ${String(offset)}`);
+			}
+
+			return byteStream(source);
+		}
+	};
+}
 
 class UploadFailedError extends Error {
 	constructor() {

@@ -69,6 +69,7 @@ import {
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
 import type { NarCompressionFacts } from '../nix/blob.ts';
+import { SequentialNarSource } from '../nix/nar-source.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import type { PushClient } from '../push/push.ts';
 
@@ -842,7 +843,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			config.preflightFailure === undefined
 				? Promise.resolve(preflight)
 				: Promise.reject(config.preflightFailure),
-		createNarArchive: () => emptyStream(),
+		createNarArchive: () => new SequentialNarSource(emptyStream),
 		compressNar: () => ({
 			body: emptyStream(),
 			digest: () => ({ narHash, narSize: 4 }),

@@ -101,6 +101,7 @@ import {
 	sendCompressedNar
 } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
+import { type NarSource, SequentialNarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { capacityWaitReporter } from './capacity-wait.ts';
@@ -179,7 +180,7 @@ export interface PushDependencies {
 	 * An ssh-ng store streams NAR content through the store client instead of
 	 * reading the runner's filesystem.
 	 */
-	readonly createNarArchive?: (storePath: string) => PushNarArchive;
+	readonly createNarArchive?: (storePath: string) => NarSource;
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
 	/**
@@ -259,13 +260,7 @@ export interface PushClient extends Partial<AttestationBundleClient> {
 
 const defaultWaitTimeoutSeconds = waitTimeoutSecondsSchema.parse(600);
 
-export type PushNarArchive =
-	ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
-
-export type CompressNar = (
-	nar: PushNarArchive,
-	narSize: number
-) => NarUploadStream;
+export type CompressNar = (nar: NarSource, narSize: number) => NarUploadStream;
 
 type UploadDecisionOf<A extends UploadDecision['action']> = Extract<
 	UploadDecision,
@@ -443,7 +438,8 @@ export async function runPush(
 	// machine, so stream their NARs through the store client.
 	const narSource =
 		nix?.storeKind === 'ssh-ng'
-			? (storePath: string): PushNarArchive => nix.narFromPath(storePath)
+			? (storePath: string): NarSource =>
+					new SequentialNarSource(() => nix.narFromPath(storePath))
 			: createNarArchive;
 	const compressNar = dependencies.compressNar ?? compressNarToStream;
 
@@ -469,7 +465,7 @@ interface PushRuntimeDependencies {
 	readonly referenceSource?: ReferenceSource;
 	readonly fetchReferenceMetadata?: typeof fetchReferenceMetadataFromSource;
 	readonly signal?: AbortSignal;
-	readonly createNarArchive: (storePath: string) => PushNarArchive;
+	readonly createNarArchive: (storePath: string) => NarSource;
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
 	readonly waitTimeoutSeconds: WaitTimeoutSeconds;
@@ -1998,7 +1994,7 @@ interface UploadContext {
 	readonly client: PushClient;
 	readonly session: CommitSession | undefined;
 	readonly negotiated: NegotiatedPaths;
-	readonly createNarArchive: (storePath: string) => PushNarArchive;
+	readonly createNarArchive: (storePath: string) => NarSource;
 	readonly compressNar: CompressNar;
 	readonly clock: UploadClock;
 	readonly onBytes: (count: number) => void;
@@ -2045,7 +2041,7 @@ interface CommitContext {
 	readonly client: PushClient;
 	readonly session: CommitSession | undefined;
 	readonly negotiated: NegotiatedPaths;
-	readonly createNarArchive: (storePath: string) => PushNarArchive;
+	readonly createNarArchive: (storePath: string) => NarSource;
 	readonly compressNar: CompressNar;
 	readonly options: CommitOptions;
 	// Re-drives must attach the replacement pending row to the same run root.
