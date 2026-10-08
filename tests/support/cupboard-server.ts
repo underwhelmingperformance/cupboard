@@ -25,6 +25,7 @@ import {
 	tokenRateLimit,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
+import { pushCredentialSchema } from '@cupboard/protocol/upload';
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
@@ -32,9 +33,11 @@ import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 import type { AccessCredential } from '../../packages/cli/src/client/credentials.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
+import { r2BlobUploader } from '../../packages/cli/src/push/r2-upload.ts';
 import { fixtureTenant } from '../../packages/server/src/routing/tenant-routing.test-support.ts';
 
 import { sharedWorkerBundle, type TestWorkerBundle } from './e2e-artifacts.ts';
+import { FakeS3 } from './fake-s3.ts';
 import {
 	type ManualAlarmControl,
 	withManualAlarmControl
@@ -358,6 +361,8 @@ export class CupboardTestServer {
 		}
 	}
 
+	private s3: Promise<FakeS3> | undefined;
+
 	private constructor(
 		readonly url: URL,
 		readonly issuer: StubOidcIssuer,
@@ -371,6 +376,14 @@ export class CupboardTestServer {
 			status: number;
 		}[]
 	) {}
+
+	private objectStore(): Promise<FakeS3> {
+		this.s3 ??= FakeS3.start({
+			onObject: (key, bytes) => this.stageObject(key, bytes)
+		});
+
+		return this.s3;
+	}
 
 	// Mints a control admin token at the bare-host `/token`, the control issuer,
 	// exchanging the harness admin's external subject token.
@@ -514,10 +527,11 @@ export class CupboardTestServer {
 
 	/**
 	 * Builds the push client an e2e test drives. Negotiation, commit and
-	 * retention speak to the running worker; the streamed NAR bytes are written
-	 * straight into the bound R2 bucket the worker verifies against, standing in
-	 * for the temporary-credential upload to Cloudflare's S3 endpoint that the
-	 * SDK cannot reach under Miniflare.
+	 * retention speak to the running worker. Miniflare does not serve
+	 * Cloudflare's S3 endpoint, so the CLI's uploader sends each NAR to a
+	 * loopback S3 endpoint, which writes the completed object into the bound R2
+	 * bucket that the worker verifies against. Other objects, such as
+	 * attestation bundles, are written into the bucket directly.
 	 */
 	pushClient(
 		credential: AccessCredential,
@@ -530,7 +544,16 @@ export class CupboardTestServer {
 		return {
 			...base,
 			uploadNar: async (r2Key, body) =>
-				this.stageObject(r2Key, await collectStreamBytes(body))
+				this.stageObject(r2Key, await collectStreamBytes(body)),
+			uploadCompressedNar: async (r2Key, source, narSize, observer) => {
+				const s3 = await this.objectStore();
+
+				return r2BlobUploader({
+					endpoint: s3.endpoint,
+					bucket: r2Credentials.bucketName,
+					provider: () => Promise.resolve(stagingCredential)
+				}).uploadNar(r2Key, source, narSize, observer);
+			}
 		};
 	}
 
@@ -622,7 +645,8 @@ export class CupboardTestServer {
 		await Promise.all([
 			closeServer(this.server),
 			this.worker.dispose(),
-			this.issuer.stop()
+			this.issuer.stop(),
+			stopObjectStore(this.s3)
 		]);
 	}
 }
@@ -656,6 +680,27 @@ class InstanceInitialisationFailedError extends Error {
 		this.name = 'InstanceInitialisationFailedError';
 	}
 }
+
+async function stopObjectStore(s3: Promise<FakeS3> | undefined): Promise<void> {
+	if (s3 === undefined) {
+		return;
+	}
+
+	const started = await s3;
+	await started.stop();
+}
+
+// The loopback S3 endpoint ignores signatures, so the uploader signs with a
+// fixed credential.
+const stagingCredential = pushCredentialSchema.parse({
+	pushId: 'e2e-staging',
+	accessKeyId: 'e2e-staging',
+	secretAccessKey: 'e2e-staging',
+	sessionToken: 'e2e-staging',
+	endpoint: 'http://127.0.0.1',
+	bucket: r2Credentials.bucketName,
+	expiresAt: '2099-01-01T00:00:00.000Z'
+});
 
 async function collectStreamBytes(
 	stream: ReadableStream<Uint8Array>

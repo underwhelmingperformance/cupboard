@@ -36,11 +36,7 @@ import {
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
-import {
-	compressNarToStream,
-	type NarCompressionFacts,
-	sendCompressedNar
-} from '../nix/blob.ts';
+import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import type { NarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
@@ -55,7 +51,12 @@ import {
 	defaultUploadConcurrency,
 	type PushClient
 } from '../push/push.ts';
-import { sendUpload, type UploadClock } from '../push/upload-transfer.ts';
+import {
+	systemUploadClock,
+	type UploadClock,
+	uploadNarFromSource,
+	type UploadReport
+} from '../push/upload-transfer.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
 import { requireMatchingBuildOutput } from './divergence.ts';
@@ -122,11 +123,7 @@ export interface ReconcileOptions {
 	Times uploads and schedules their renewals. Defaults to the system clock.
 	*/
 	readonly uploadClock?: UploadClock;
-	readonly onUploaded?: (
-		storePath: StorePathString,
-		durationMs: number,
-		compression: NarCompressionFacts | undefined
-	) => void;
+	readonly uploadReport?: UploadReport;
 	readonly childExitStatus?: number;
 	readonly terminalFailure?: TerminalBuildFailureInput;
 	/**
@@ -397,22 +394,20 @@ async function uploadAndAcknowledge(
 
 	if (decision.action === 'upload') {
 		try {
-			const upload = compressNar(
+			const upload = await uploadNarFromSource(
+				{
+					client: options.client,
+					session: options.session,
+					clock: options.uploadClock ?? systemUploadClock,
+					compressNar,
+					observer: options.uploadReport?.observe(info.storePath) ?? {}
+				},
+				decision,
 				createNarArchive(info.storePath),
 				info.narSize
 			);
-
-			const durationMs = await sendUpload(
-				options.session,
-				decision.uploadId,
-				() =>
-					sendCompressedNar(upload.body, (body) =>
-						options.client.uploadNar(decision.r2Key, body)
-					),
-				options.uploadClock
-			);
-			assertNarMetadata(info, upload.digest());
-			options.onUploaded?.(info.storePath, durationMs, upload.compression?.());
+			assertNarMetadata(info, upload.digest);
+			options.uploadReport?.completed(info.storePath, upload);
 		} catch (error) {
 			if (isVanishedPathError(error)) {
 				settleLocallyMissing(info.storePath, isTarget, options, ledger);

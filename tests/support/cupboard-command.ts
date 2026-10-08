@@ -1,16 +1,10 @@
 import { constants } from 'node:fs';
 import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
-import {
-	createServer,
-	type IncomingMessage,
-	type Server,
-	type ServerResponse
-} from 'node:http';
-import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
+import { FakeS3 } from './fake-s3.ts';
 import { runCommand } from './process.ts';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '../..');
@@ -23,7 +17,6 @@ const hookHelperSource = path.join(
 	repositoryRoot,
 	'packages/cli/hook-helper/cupboard-hook-relay.c'
 );
-const objectKeyHeader = 'x-cupboard-object-key';
 
 export type StageObject = (key: string, bytes: Uint8Array) => Promise<void>;
 
@@ -35,22 +28,19 @@ export type StageObject = (key: string, bytes: Uint8Array) => Promise<void>;
  *
  * One part of it is not the production path. A push signs its blob uploads with
  * a temporary R2 credential and sends them to Cloudflare's S3 endpoint, which
- * Miniflare does not serve, so a module hook replaces the S3 uploader with one
- * that PUTs the same bytes to a loopback bridge. The bridge stages them in the
- * bucket the worker verifies against, which is what
- * `CupboardTestServer.pushClient` does for the suites that drive a push
- * directly. Everything else the command does, including issuing the upload
- * credential it would have signed with, runs unchanged.
+ * Miniflare does not serve. A module hook therefore wraps the CLI's uploader so
+ * that it sends the same requests to a loopback S3 endpoint, which writes each
+ * completed object into the bucket that the worker verifies against.
+ * `CupboardTestServer.pushClient` does the same for the suites that drive a
+ * push directly. Everything else the command does, including issuing the upload
+ * credential that it signs with, runs unchanged.
  */
 export class CupboardCommand {
 	static async start(options: {
 		readonly directory: string;
 		readonly stage: StageObject;
 	}): Promise<CupboardCommand> {
-		const bridge = createServer((request, response) => {
-			void receiveObject(request, response, options.stage);
-		});
-		const bridgeUrl = await listen(bridge);
+		const s3 = await FakeS3.start({ onObject: options.stage });
 
 		await mkdir(options.directory, { recursive: true });
 		const uploaderPath = path.join(options.directory, 'blob-uploader.mjs');
@@ -71,48 +61,43 @@ export class CupboardCommand {
 			hookHelperSource
 		]);
 		await Promise.all([
-			writeFile(uploaderPath, blobUploaderSource(bridgeUrl)),
+			writeFile(uploaderPath, blobUploaderSource(s3.endpoint)),
 			writeFile(hooksPath, moduleHooksSource(uploaderPath)),
 			writeFile(registerPath, registerHooksSource(hooksPath)),
 			writeFile(commandPath, commandSource(nodePath, registerPath))
 		]);
 		await Promise.all([chmod(commandPath, 0o755), chmod(nodePath, 0o755)]);
 
-		return new CupboardCommand(commandPath, bridge);
+		return new CupboardCommand(commandPath, s3);
 	}
 
 	private constructor(
 		readonly path: string,
-		private readonly bridge: Server
+		private readonly s3: FakeS3
 	) {}
 
 	async stop(): Promise<void> {
-		await closeServer(this.bridge);
+		await this.s3.stop();
 	}
 }
 
-// The CLI imports `r2BlobUploader` and nothing else from the module this
-// replaces, so the replacement exports that one function.
-function blobUploaderSource(bridgeUrl: string): string {
-	return `export function r2BlobUploader() {
-	return async (key, body) => {
-		const response = await fetch(${JSON.stringify(bridgeUrl)}, {
-			method: 'PUT',
-			headers: { ${JSON.stringify(objectKeyHeader)}: key },
-			body,
-			duplex: 'half'
-		});
+// Wraps the real module: `r2BlobUploader` builds the real uploader, with the
+// loopback S3 endpoint in place of the one in the push credential.
+function blobUploaderSource(endpoint: string): string {
+	const real = JSON.stringify(pathToFileURL(blobModule).href);
 
-		if (!response.ok) {
-			throw new Error(
-				\`The staging bridge refused \${key} with \${String(response.status)}\`
-			);
-		}
-	};
+	return `import { r2BlobUploader as realUploader } from ${real};
+
+export * from ${real};
+
+export function r2BlobUploader(options) {
+	return realUploader({ ...options, endpoint: ${JSON.stringify(endpoint)} });
 }
 `;
 }
 
+// Resolves the CLI's import of the uploader module to the wrapper. The
+// wrapper's own import of that module resolves normally.
 function moduleHooksSource(uploaderPath: string): string {
 	return `const replaced = ${JSON.stringify(pathToFileURL(blobModule).href)};
 const replacement = ${JSON.stringify(pathToFileURL(uploaderPath).href)};
@@ -120,7 +105,7 @@ const replacement = ${JSON.stringify(pathToFileURL(uploaderPath).href)};
 export async function resolve(specifier, context, nextResolve) {
 	const resolution = await nextResolve(specifier, context);
 
-	if (resolution.url !== replaced) {
+	if (resolution.url !== replaced || context.parentURL === replacement) {
 		return resolution;
 	}
 
@@ -147,72 +132,4 @@ function commandSource(nodePath: string, registerPath: string): string {
 	].join(' ');
 
 	return `#!/bin/sh\nexec ${command}\n`;
-}
-
-async function receiveObject(
-	request: IncomingMessage,
-	response: ServerResponse,
-	stage: StageObject
-): Promise<void> {
-	const key = request.headers[objectKeyHeader];
-
-	if (typeof key !== 'string' || key === '') {
-		response.writeHead(400);
-		response.end();
-
-		return;
-	}
-
-	try {
-		await stage(key, await collectBody(request));
-		response.writeHead(200, { etag: '"staged"' });
-		response.end();
-	} catch (error) {
-		response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
-		response.end(`${error instanceof Error ? error.message : String(error)}\n`);
-	}
-}
-
-function collectBody(request: IncomingMessage): Promise<Uint8Array> {
-	return new Promise((resolve, reject) => {
-		const chunks: Buffer[] = [];
-
-		request.on('data', (chunk: Buffer) => {
-			chunks.push(chunk);
-		});
-		request.once('error', reject);
-		request.once('end', () => {
-			resolve(Buffer.concat(chunks));
-		});
-	});
-}
-
-function listen(server: Server): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const onError = (error: Error): void => {
-			reject(error);
-		};
-
-		server.once('error', onError);
-		server.listen(0, '127.0.0.1', () => {
-			server.removeListener('error', onError);
-			const address = server.address() as AddressInfo;
-
-			resolve(`http://127.0.0.1:${String(address.port)}/`);
-		});
-	});
-}
-
-function closeServer(server: Server): Promise<void> {
-	return new Promise((resolve, reject) => {
-		server.close((error) => {
-			if (error !== undefined) {
-				reject(error);
-
-				return;
-			}
-
-			resolve();
-		});
-	});
 }

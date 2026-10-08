@@ -83,7 +83,6 @@ import {
 } from '../errors.ts';
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
-import type { NarCompressionFacts } from '../nix/blob.ts';
 import type { NarSource } from '../nix/nar-source.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import {
@@ -91,7 +90,10 @@ import {
 	CompressionTotals,
 	type PeakRssSampler,
 	processPeakRss,
-	reportNarCompression
+	reportNarCompression,
+	transferRows,
+	TransferTotals,
+	uploadObserver
 } from '../push/compression-report.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import {
@@ -100,7 +102,10 @@ import {
 	type PushStore,
 	runPush
 } from '../push/push.ts';
-import { reportUploadDuration } from '../push/upload-transfer.ts';
+import {
+	reportUploadDuration,
+	type UploadReport
+} from '../push/upload-transfer.ts';
 
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
 import { buildPushModeDescription, selectBuildPushMode } from './mode.ts';
@@ -372,7 +377,8 @@ async function runProtectedStreamedBuildPush(
 
 	let maxQueueDepth = 0;
 	const compression = new CompressionTotals();
-	const reportUpload = uploadReporter(reporter, compression);
+	const transfer = new TransferTotals();
+	const reportUpload = uploadReporter(reporter, compression, transfer);
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
 	// Share one commit session between streaming and reconciliation so the server
 	// applies one credit budget across the whole run.
@@ -428,7 +434,7 @@ async function runProtectedStreamedBuildPush(
 			...(options.uploadConcurrency !== undefined && {
 				uploadConcurrency: options.uploadConcurrency
 			}),
-			onUploaded: reportUpload
+			uploadReport: reportUpload
 		});
 		listener = await BuildEventListener.listen({
 			socketPath: plan.socketPath,
@@ -544,6 +550,7 @@ async function runProtectedStreamedBuildPush(
 			exit,
 			batcher,
 			compression,
+			transfer,
 			reportUpload,
 			commitOptions,
 			...(session !== undefined && { session }),
@@ -1539,7 +1546,8 @@ interface RunFacts {
 	readonly exit: ChildExit;
 	readonly batcher: BuildOutputBatcher;
 	readonly compression: CompressionTotals;
-	readonly reportUpload: UploadReporter;
+	readonly transfer: TransferTotals;
+	readonly reportUpload: UploadReport;
 	readonly commitOptions: CommitOptions;
 	readonly session?: CommitSession;
 	readonly maxQueueDepth: number;
@@ -1682,7 +1690,7 @@ async function settleRun(
 						compressNar: dependencies.compressNar
 					}),
 					...(facts.subjects.length > 0 && { subjects: facts.subjects }),
-					onUploaded: facts.reportUpload,
+					uploadReport: facts.reportUpload,
 					copiedFrom: facts.copiedFrom,
 					childExitStatus: childExitCode(exit),
 					...(facts.terminalFailure !== undefined && {
@@ -1811,6 +1819,7 @@ function reportSummary(
 	const compressionSummary = facts.compression.summary(
 		(dependencies.peakRss ?? processPeakRss)()
 	);
+	const transferSummary = facts.transfer.summary();
 
 	reportBuildSummary(
 		reporter,
@@ -1826,33 +1835,37 @@ function reportSummary(
 			unconfirmedPaths: [...(receipt.failed ?? [])],
 			...(compressionSummary !== undefined && {
 				compression: compressionSummary
-			})
+			}),
+			...(transferSummary !== undefined && { transfer: transferSummary })
 		},
 		result.failures
 	);
 }
 
-type UploadReporter = (
-	storePath: StorePathString,
-	durationMs: number,
-	compression: NarCompressionFacts | undefined
-) => void;
-
-// Reports one upload at debug level and adds its compression to the run's
-// totals.
+// Reports each upload as it happens and when it completes, and adds its
+// compression and transfer facts to the run's totals.
 function uploadReporter(
 	reporter: Reporter,
-	totals: CompressionTotals
-): UploadReporter {
-	return (storePath, durationMs, compression) => {
-		const name = StorePath.basename(storePath);
+	compression: CompressionTotals,
+	transfer: TransferTotals
+): UploadReport {
+	return {
+		observe: (storePath) =>
+			uploadObserver(reporter, StorePath.basename(storePath)),
+		completed: (storePath, upload) => {
+			const name = StorePath.basename(storePath);
 
-		if (compression !== undefined) {
-			totals.add(compression);
-			reportNarCompression(reporter, name, compression);
+			if (upload.transfer !== undefined) {
+				transfer.add(upload.transfer);
+			}
+
+			if (upload.compression !== undefined) {
+				compression.add(upload.compression);
+				reportNarCompression(reporter, name, upload.compression);
+			}
+
+			reportUploadDuration(reporter, name, upload.durationMs);
 		}
-
-		reportUploadDuration(reporter, name, durationMs);
 	};
 }
 
@@ -1936,7 +1949,7 @@ function reportBuildSummary(
 	summary: BuildSummaryInput,
 	failures: readonly ReconcileFailure[]
 ): void {
-	const { compression } = summary;
+	const { compression, transfer } = summary;
 	const rows: ResultRow[] = [
 		{ label: 'Store', value: summary.store },
 		{ label: 'Targets', value: formatCount(summary.targetPaths) },
@@ -1947,6 +1960,7 @@ function reportBuildSummary(
 			value: formatCount(summary.childExitStatus)
 		},
 		...(compression === undefined ? [] : compressionRows(compression)),
+		...(transfer === undefined ? [] : transferRows(transfer)),
 		...(summary.unconfirmedPaths.length > 0
 			? [
 					{

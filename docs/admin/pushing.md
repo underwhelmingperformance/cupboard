@@ -87,6 +87,30 @@ the average rate of one upload worker, not of the whole run. The JSON result's
 `compression` object has `narBytes`, `compressedBytes`, `frames`,
 `compressionMs` (the summed wait) and `peakRssBytes`.
 
+A NAR that compresses to one part or less is uploaded with one request. A larger
+NAR is uploaded in parts of 8 MiB. The first part is compressed into memory
+before it is sent. Before each later part, the CLI estimates how many compressed
+bytes remain. While at least two parts of compressed bytes are expected to
+remain, the CLI sends the part as it compresses it. Otherwise it compresses the
+part into memory first. The summary has these rows when `push` uploaded at least
+one NAR, and the `build-push` summary has them too. The last four rows appear
+only when their totals are not zero.
+
+| Summary label          | Meaning                                                                                                                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Single-request uploads | NARs that were uploaded with one request.                                                                                                                                        |
+| Parts sent             | Parts of the NARs that were uploaded in parts.                                                                                                                                   |
+| Buffered parts         | Parts that were compressed into memory before they were sent.                                                                                                                    |
+| Streamed parts         | Parts that were sent while they were compressed.                                                                                                                                 |
+| Requests sent again    | Requests that failed and were sent again.                                                                                                                                        |
+| Parts recompressed     | Streamed parts that failed and were recompressed from the store so that they could be sent again.                                                                                |
+| Bytes sent again       | Bytes sent beyond the size of the stored objects: the bytes that failed requests had already sent.                                                                               |
+| Padding bytes          | Bytes of the zstd skippable frames that filled streamed parts whose compressed bytes ended early. Decoders skip these frames, and the cache stores and serves them with the NAR. |
+
+The JSON result's `transfer` object has `singleRequestUploads`, `partsSent`,
+`bufferedParts`, `streamedParts`, `retries`, `recompressions`, `resentBytes` and
+`paddingBytes`.
+
 ### Publishing captured cache metadata
 
 `--reference-manifest <path>` publishes existing tenant NARs from captured
@@ -177,7 +201,10 @@ wait has a limit of ten minutes. To change the limit, use `--wait-timeout`.
 With `--debug`, `push` and `build-push` report how long each NAR took to upload.
 They also report each NAR's size before and after compression, its number of
 zstd frames, and how long the upload waited for the NAR to be read and
-compressed.
+compressed. They report each part's number, size, duration and number of
+attempts, and each request that failed and was sent again. With or without
+`--debug`, they warn about each part that was recompressed from the store, with
+the reason that its request failed, and about each part that was padded.
 
 To return sooner, add `--no-wait`. `push` then returns once every store path is
 accepted and its root or pin is set, without waiting for verification. If a
@@ -192,7 +219,9 @@ store path later fails verification, it's removed from its roots.
   bundles aren't attached to store paths that are still being verified. You can
   attach them later with `cupboard attest attach`.
 - `--store ssh-ng://...` reads the store paths from a remote Nix store instead
-  of the local one.
+  of the local one. The remote store can only send a NAR from its start, so when
+  a part of a large NAR has to be recompressed, every byte of the NAR before
+  that part is sent over SSH again.
 - `--upload-concurrency` sets how many uploads run in parallel. The default
   is 6.
 

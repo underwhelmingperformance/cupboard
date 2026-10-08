@@ -107,6 +107,16 @@ export class ByteAccumulator {
 	}
 }
 
+/**
+ * Returns `source` as an async iterable, so chunks that are already in memory
+ * can go where a stream of chunks is read with `for await`.
+ */
+export function asyncChunks(
+	source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>
+): AsyncIterable<Uint8Array> {
+	return { [Symbol.asyncIterator]: () => byteIterator(source) };
+}
+
 function asyncIterableByteStream(
 	source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>
 ): ReadableStream<Uint8Array> {

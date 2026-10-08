@@ -93,13 +93,7 @@ import {
 } from '../errors.ts';
 import { classifyFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
-import { countingByteStream } from '../io/byte-stream.ts';
-import {
-	compressNarToStream,
-	type NarCompressionFacts,
-	type NarUploadStream,
-	sendCompressedNar
-} from '../nix/blob.ts';
+import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { type NarSource, SequentialNarSource } from '../nix/nar-source.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
@@ -110,9 +104,13 @@ import {
 	CompressionTotals,
 	type PeakRssSampler,
 	processPeakRss,
-	reportNarCompression
+	reportNarCompression,
+	transferRows,
+	TransferTotals,
+	uploadObserver
 } from './compression-report.ts';
 import { narDivergence } from './divergence.ts';
+import type { CompressedNarUpload, NarUploadObserver } from './nar-upload.ts';
 import {
 	exactUploadDecisions,
 	type NegotiatedGroup,
@@ -131,10 +129,11 @@ import {
 } from './reference.ts';
 import { ReferenceSnapshotDivergedError } from './reference-manifest.ts';
 import {
+	type CompletedNarUpload,
 	reportUploadDuration,
-	sendUpload,
 	systemUploadClock,
-	type UploadClock
+	type UploadClock,
+	uploadNarFromSource
 } from './upload-transfer.ts';
 
 export type PushStore = Pick<
@@ -244,9 +243,19 @@ export interface PushClient extends Partial<AttestationBundleClient> {
 	// Checks a route supported by every server version. This distinguishes an
 	// unknown tenant from an old server without the preview route.
 	tenantServes?(): Promise<boolean>;
-	// Streams one compressed NAR to its staging key. The request body contains
-	// only bytes; the server computes the file hash and size.
+	// Streams one compressed NAR, or another object such as an attestation
+	// bundle, to its staging key. The request body contains only bytes; the
+	// server computes the file hash and size.
 	uploadNar(r2Key: string, body: ReadableStream<Uint8Array>): Promise<void>;
+	// Compresses a NAR from its source and uploads it to its staging key. It can
+	// read the source again to send part of the upload again. A client without
+	// it receives the compressed bytes through `uploadNar`.
+	uploadCompressedNar?(
+		r2Key: string,
+		source: NarSource,
+		narSize: number,
+		observer: NarUploadObserver
+	): Promise<CompressedNarUpload>;
 	commit(target: CommitTarget, options: CommitOptions): Promise<CommitOutcome>;
 	// Opens a shared commit session. Minimal clients may omit this method and use
 	// the per-path `commit` operation instead.
@@ -899,10 +908,17 @@ async function runPushFlow(
 	};
 	const uploadClock = dependencies.uploadClock ?? systemUploadClock;
 	const compressionTotals = new CompressionTotals();
+	const transferTotals = new TransferTotals();
+	const observe = (storePath: string): NarUploadObserver =>
+		uploadObserver(reporter, StorePath.basename(storePath), onBytes);
 	const reportUpload = (
 		storePath: string,
 		upload: CompletedNarUpload
 	): void => {
+		if (upload.transfer !== undefined) {
+			transferTotals.add(upload.transfer);
+		}
+
 		if (upload.compression !== undefined) {
 			compressionTotals.add(upload.compression);
 			reportNarCompression(
@@ -925,7 +941,7 @@ async function runPushFlow(
 		createNarArchive,
 		compressNar,
 		clock: uploadClock,
-		onBytes
+		observe
 	};
 	const completedUploads = new Set<StorePathHash>();
 	// A re-drive replaces the original outcome for the same store path. The
@@ -942,7 +958,7 @@ async function runPushFlow(
 			runRoot: dependencies.runRoot
 		}),
 		clock: uploadClock,
-		onBytes,
+		observe,
 		onUploaded: (storePathHash, upload) => {
 			completedUploads.add(storePathHash);
 			reportUpload(storePathByHash.get(storePathHash) ?? storePathHash, upload);
@@ -1301,6 +1317,7 @@ async function runPushFlow(
 		const compression = compressionTotals.summary(
 			(dependencies.peakRss ?? processPeakRss)()
 		);
+		const transfer = transferTotals.summary();
 		const summary = {
 			uploadedPaths,
 			reusedBlobs,
@@ -1308,7 +1325,8 @@ async function runPushFlow(
 			uploadedBytes,
 			failures: failures.map((failure) => summaryFailure(failure)),
 			paths: summaryPaths,
-			...(compression !== undefined && { compression })
+			...(compression !== undefined && { compression }),
+			...(transfer !== undefined && { transfer })
 		};
 		// Server data can make a locally assembled failure entry invalid, for
 		// example by leaving only a hash where the schema expects a store path.
@@ -1347,6 +1365,7 @@ async function runPushFlow(
 				{ label: 'Already available', value: formatCount(skipped) },
 				{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
 				...(compression === undefined ? [] : compressionRows(compression)),
+				...(transfer === undefined ? [] : transferRows(transfer)),
 				...(collected.length > 0
 					? [
 							{
@@ -1997,19 +2016,14 @@ interface UploadContext {
 	readonly createNarArchive: (storePath: string) => NarSource;
 	readonly compressNar: CompressNar;
 	readonly clock: UploadClock;
-	readonly onBytes: (count: number) => void;
-}
-
-interface CompletedNarUpload {
-	readonly durationMs: number;
-	readonly compression: NarCompressionFacts | undefined;
+	readonly observe: (storePath: string) => NarUploadObserver;
 }
 
 // Stream compression keeps large closures out of the runner's temporary
-// storage. Once the stream ends, compare its uncompressed hash and size with
-// the negotiated metadata so changed source bytes cannot be committed under
-// stale path metadata. Returns how long the bytes took to send and the NAR's
-// compression facts.
+// storage. Once the upload ends, compare the NAR's uncompressed hash and size
+// with the negotiated metadata so changed source bytes cannot be committed
+// under stale path metadata. Returns how long the bytes took to send and the
+// NAR's compression and transfer facts.
 async function streamNarUpload(
 	decision: UploadDecisionOf<'upload'>,
 	context: UploadContext
@@ -2017,24 +2031,15 @@ async function streamNarUpload(
 	const pathInfo = requireLocalPathInfo(
 		findNegotiatedPath(context.negotiated, decision)
 	);
-	const upload = context.compressNar(
+	const upload = await uploadNarFromSource(
+		{ ...context, observer: context.observe(pathInfo.storePath) },
+		decision,
 		context.createNarArchive(pathInfo.storePath),
 		pathInfo.narSize
 	);
+	verifyNarMetadata(pathInfo, upload.digest);
 
-	const durationMs = await sendUpload(
-		context.session,
-		decision.uploadId,
-		() =>
-			sendCompressedNar(
-				countingByteStream(upload.body, context.onBytes),
-				(body) => context.client.uploadNar(decision.r2Key, body)
-			),
-		context.clock
-	);
-	verifyNarMetadata(pathInfo, upload.digest());
-
-	return { durationMs, compression: upload.compression?.() };
+	return upload;
 }
 
 interface CommitContext {
@@ -2047,7 +2052,7 @@ interface CommitContext {
 	// Re-drives must attach the replacement pending row to the same run root.
 	readonly runRoot?: UploadAttachRootInput;
 	readonly clock: UploadClock;
-	readonly onBytes: (count: number) => void;
+	readonly observe: (storePath: string) => NarUploadObserver;
 	readonly onUploaded: (
 		storePathHash: StorePathHash,
 		upload: CompletedNarUpload
@@ -2181,26 +2186,14 @@ async function redriveExpiredCommit(
 	// The replacement upload must read the NAR again. Reference entries have no
 	// local NAR source, so `requireLocalPathInfo` rejects this recovery path.
 	const pathInfo = requireLocalPathInfo(resolved);
-	const upload = context.compressNar(
+	const upload = await uploadNarFromSource(
+		{ ...context, observer: context.observe(pathInfo.storePath) },
+		fresh,
 		context.createNarArchive(pathInfo.storePath),
 		pathInfo.narSize
 	);
-
-	const durationMs = await sendUpload(
-		context.session,
-		fresh.uploadId,
-		() =>
-			sendCompressedNar(
-				countingByteStream(upload.body, context.onBytes),
-				(body) => context.client.uploadNar(fresh.r2Key, body)
-			),
-		context.clock
-	);
-	verifyNarMetadata(pathInfo, upload.digest());
-	context.onUploaded(fresh.storePathHash, {
-		durationMs,
-		compression: upload.compression?.()
-	});
+	verifyNarMetadata(pathInfo, upload.digest);
+	context.onUploaded(fresh.storePathHash, upload);
 
 	return commitVia(context, commitTarget(fresh, hasGraceFacts));
 }

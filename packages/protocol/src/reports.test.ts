@@ -178,6 +178,17 @@ const compressionFacts = {
 	peakRssBytes: 300_000_000
 };
 
+const transferFacts = {
+	singleRequestUploads: 1,
+	partsSent: 5,
+	bufferedParts: 3,
+	streamedParts: 2,
+	retries: 1,
+	recompressions: 1,
+	resentBytes: 4_194_304,
+	paddingBytes: 1000
+};
+
 describe('pushSummarySchema', () => {
 	const storePath = `/nix/store/${storePathHash}-app`;
 
@@ -241,6 +252,19 @@ describe('pushSummarySchema', () => {
 				failures: [],
 				paths: [],
 				compression: compressionFacts
+			}
+		},
+		{
+			name: 'a summary with transfer facts',
+			value: {
+				uploadedPaths: 1,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 10,
+				failures: [],
+				paths: [],
+				compression: compressionFacts,
+				transfer: transferFacts
 			}
 		}
 	])('accepts $name', ({ value }) => {
@@ -342,6 +366,10 @@ describe('buildSummarySchema', () => {
 		{
 			name: 'a run with compression facts',
 			value: { ...summary, compression: compressionFacts }
+		},
+		{
+			name: 'a run with transfer facts',
+			value: { ...summary, transfer: transferFacts }
 		}
 	])('accepts $name', ({ value }) => {
 		expect(buildSummarySchema.parse(value)).toStrictEqual(value);
@@ -381,6 +409,10 @@ describe('buildSummarySchema', () => {
 				...summary,
 				compression: { ...compressionFacts, ratio: 0.5 }
 			}
+		},
+		{
+			name: 'transfer facts with a negative count',
+			value: { ...summary, transfer: { ...transferFacts, retries: -1 } }
 		},
 		{
 			name: 'an unconfirmed path outside the store',

@@ -69,8 +69,12 @@ import {
 import { classifyPublicationFailures } from '../exit-code.ts';
 import { formatHumanError } from '../human-errors.ts';
 import type { NarCompressionFacts } from '../nix/blob.ts';
-import { SequentialNarSource } from '../nix/nar-source.ts';
+import { type NarSource, SequentialNarSource } from '../nix/nar-source.ts';
 import { capacityWaitReporter } from '../push/capacity-wait.ts';
+import type {
+	NarTransferFacts,
+	NarUploadObserver
+} from '../push/nar-upload.ts';
 import type { PushClient } from '../push/push.ts';
 
 import {
@@ -410,6 +414,11 @@ interface FlowConfig {
 	 * Compression facts for every compressed NAR.
 	 */
 	readonly compression?: NarCompressionFacts;
+	/**
+	 * When set, the client compresses each NAR itself, reports padding in its
+	 * second part and returns these transfer facts.
+	 */
+	readonly transfer?: NarTransferFacts;
 	readonly negotiateFailure?: Error;
 	readonly unwritableReceipt?: boolean;
 	readonly preflightFailure?: Error;
@@ -620,6 +629,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	let protectionCalls = 0;
 	const sessionOpenFailure = config.sessionOpenFailure;
 	const compression = config.compression;
+	const transfer = config.transfer;
 	const runtimeRemovalFailure = config.runtimeRemovalFailure;
 	const isStreamed = config.preflightFailure === undefined;
 	const environment =
@@ -668,6 +678,31 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			config.uploadFailure === undefined
 				? Promise.resolve()
 				: Promise.reject(config.uploadFailure),
+		...(transfer !== undefined && {
+			uploadCompressedNar: (
+				_r2Key: string,
+				_source: NarSource,
+				_narSize: number,
+				observer: NarUploadObserver
+			) => {
+				observer.onPadding?.({
+					partNumber: 2,
+					bytes: 1000,
+					continuesIntoNextPart: false
+				});
+
+				return Promise.resolve({
+					digest: { narHash, narSize: 4 },
+					compression: config.compression ?? {
+						narBytes: 4,
+						compressedBytes: 4,
+						frames: 1,
+						compressionMs: 0
+					},
+					transfer
+				});
+			}
+		}),
 		commit: (target) =>
 			Promise.resolve({
 				storePathHash: target.storePathHash,
@@ -3372,6 +3407,65 @@ describe('runBuildPush', () => {
 					value: `${formatBytes(128_000_000)}/s`
 				},
 				{ label: 'Peak memory', value: formatBytes(300_000_000) }
+			]
+		});
+	});
+
+	it('reports padded parts as warnings and the transfer totals in the summary', async () => {
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			action: 'upload',
+			transfer: {
+				isSingleRequest: false,
+				bufferedParts: 2,
+				streamedParts: 1,
+				retries: 0,
+				recompressions: 0,
+				resentBytes: 0,
+				paddingBytes: 1000
+			}
+		});
+		// The fake negotiation asks for an upload every time, so the path is
+		// uploaded when its build event arrives and again during reconciliation.
+		const summary = run.results.find(
+			(result) => result.kind === 'build-summary'
+		);
+
+		expect({
+			warnings: run.warnings,
+			transfer: z.object({ transfer: z.unknown() }).parse(summary?.data)
+				.transfer,
+			rows: summary?.rows.filter((row) =>
+				[
+					'Single-request uploads',
+					'Parts sent',
+					'Buffered parts',
+					'Streamed parts',
+					'Padding bytes'
+				].includes(row.label)
+			)
+		}).toStrictEqual({
+			warnings: Array.from({ length: 2 }, () => ({
+				label: StorePath.basename(pathA),
+				value: `the compressed NAR ended inside part 2, so a skippable frame of ${formatBytes(1000)} filled the rest of the part`
+			})),
+			transfer: {
+				singleRequestUploads: 0,
+				partsSent: 6,
+				bufferedParts: 4,
+				streamedParts: 2,
+				retries: 0,
+				recompressions: 0,
+				resentBytes: 0,
+				paddingBytes: 2000
+			},
+			rows: [
+				{ label: 'Single-request uploads', value: '0' },
+				{ label: 'Parts sent', value: '6' },
+				{ label: 'Buffered parts', value: '4' },
+				{ label: 'Streamed parts', value: '2' },
+				{ label: 'Padding bytes', value: formatBytes(2000) }
 			]
 		});
 	});
