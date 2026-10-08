@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -137,6 +139,52 @@ describe('Nix substitution', () => {
 			);
 
 			expect(fingerprint(realised)).toStrictEqual(fingerprint(contents));
+		}));
+
+	it('substitutes a path whose stored object ends with a skippable frame', () =>
+		withHarness('cupboard-e2e-padded-', async (harness) => {
+			// The CLI pads a streamed part with a zstd skippable frame when the
+			// compressed NAR ends before the part does.
+			// Nix must skip the frame when it decompresses the stored object.
+			const storePath = await harness.source.add(contentAddressedFixture);
+			const upload = await negotiateUpload(pushContext(harness), storePath);
+			const padded = Buffer.concat([
+				upload.compressed,
+				skippableFrame(3 * 1024 * 1024 + 5)
+			]);
+			await harness.server.stageObject(upload.r2Key, padded);
+
+			const outcome = await harness.client.commit(
+				{
+					uploadId: upload.uploadId,
+					storePathHash: upload.storePathHash,
+					narHash: upload.narHash
+				},
+				{}
+			);
+			await outcome.settled;
+			await harness.target.realise(
+				storePath,
+				signedBy(harness, harness.publicKey)
+			);
+			const narInfo = await fetchNarInfo(harness.server, storePath);
+			const paddedHash = NixSha256Hash.fromDigest(
+				createHash('sha256').update(padded).digest()
+			);
+			const message = await readFile(
+				path.join(harness.target.physicalPath(storePath), 'message.txt'),
+				'utf8'
+			);
+
+			expect({
+				fileSize: narInfo.fileSize,
+				fileHash: narInfo.fileHash.toString(),
+				message
+			}).toStrictEqual({
+				fileSize: padded.byteLength,
+				fileHash: paddedHash.toString(),
+				message: 'cupboard fixture\n'
+			});
 		}));
 
 	it('substitutes an input-addressed path and its references under require-sigs', () =>
@@ -307,6 +355,17 @@ async function fetchNarInfo(
 	);
 
 	return NarInfo.parse(await response.text());
+}
+
+// A zstd skippable frame of `size` bytes: the magic number, the payload
+// length and a payload of zeros.
+function skippableFrame(size: number): Buffer {
+	const frame = Buffer.alloc(size);
+
+	frame.writeUInt32LE(0x18_4d_2a_50, 0);
+	frame.writeUInt32LE(size - 8, 4);
+
+	return frame;
 }
 
 function singleReference(info: NixPathInfo): string {
