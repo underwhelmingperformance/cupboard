@@ -146,9 +146,9 @@ establish a new session from a saved Cloudflare sign-in when it is still valid;
 otherwise, sign in again.
 
 A deployment session renews in the same way, and each renewal checks the
-deployment's control-plane trust rules. The control plane issues no refresh
-token when the sign-in token's audience is the deployment URL, as for a GitHub
-Actions job.
+deployment's control-plane trust rules. Neither a tenant nor the control plane
+issues a refresh token when the sign-in token's audience is the tenant or
+deployment URL, as for a GitHub Actions job.
 
 If the CLI has saved a Cloudflare sign-in on the machine, it can also start a
 new session from that sign-in, for a tenant URL or the deployment URL.

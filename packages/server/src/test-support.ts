@@ -596,7 +596,7 @@ export function currentOrigin(): string {
 // low-level tests. A fixed value, independent of the per-test origin, so a token
 // stays valid when a test switches origin via useTestServer. Route-level behaviour
 // (a provisioned tenant's path-based issuer) is proved separately.
-const tenantTestIssuer = 'cupboard';
+export const tenantTestIssuer = 'cupboard';
 
 // Configures a Durable Object as the fixture tenant, the way provisioning would,
 // with the fixed legacy issuer for low-level token round-trips.

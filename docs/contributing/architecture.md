@@ -624,12 +624,14 @@ matches, the object issues an access token: a JWT signed with EdDSA, whose
 issuer is `https://<host>/t/<tenant>`. The token contains the rule's grants as
 RFC 9396 `authorization_details`.
 
-How long a token lasts depends on the rule that matched:
+How long a token lasts depends on the subject token's audience and the requested
+grants:
 
-- A rule for interactive sign-in normally gives a token that lasts 10 minutes,
-  and a refresh token. The refresh token's family expires after 30 days.
-- A rule for CI, or an OIDC exchange that requests only content-read grants,
-  gives a token that lasts 15 minutes, and no refresh token.
+- A sign-in gives a token that lasts 10 minutes, and a refresh token. The
+  refresh token's family expires after 30 days.
+- An exchange whose verified audience matches the tenant URL after trailing
+  slashes are removed gets a 15-minute access token and no refresh token. So
+  does an OIDC exchange that requests only content-read grants.
 
 Explicit external exchanges can combine grants from eligible rules, including
 separate actions for the same resource. The response grants only the requested
@@ -641,7 +643,7 @@ rule covers the response, `cb_rule` remains an audit claim. Request
 authorisation uses the issued grants and does not depend on that audit claim.
 
 Implicit interactive exchanges keep their existing single-rule selection.
-Composition does not create refresh sessions for CI or read acquisition.
+Composition creates no refresh session for a CI exchange or a read acquisition.
 
 Interactive refresh credentials contain a versioned, tenant-bound identity and
 maximum grant set. Their complete opaque value is authenticated against the
