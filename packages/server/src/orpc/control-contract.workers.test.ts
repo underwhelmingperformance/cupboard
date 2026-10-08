@@ -23,6 +23,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { controlAuthenticate } from '../control/control-plane.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	adminGrants,
@@ -328,6 +329,8 @@ describe('control contract round trip', () => {
 			prefix: '/control',
 			context: {
 				request,
+				authenticate: () =>
+					controlAuthenticate(request, Object.assign({}, env, testControlEnv)),
 				env: Object.assign({}, env, testControlEnv),
 				logger: rootLogger()
 			}

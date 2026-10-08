@@ -4,10 +4,16 @@ import { Hono } from 'hono';
 import { serverErrorHandler } from '../http/error-response.ts';
 import { notFoundResponse } from '../http/http.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
+import {
+	authenticateOnce,
+	ContractRequest,
+	contractRequestMaxBytes
+} from '../orpc/contract-request.ts';
 import { controlOrpcHandler } from '../orpc/handler.ts';
 
 import {
 	controlAsMetadata,
+	controlAuthenticate,
 	controlJwks,
 	controlRevoke,
 	controlTokenExchange
@@ -33,12 +39,21 @@ function buildControlApp() {
 	app.use(loggerMiddleware);
 
 	app.use('/control/*', async (context, next) => {
-		const { matched: isMatched, response } = await controlOrpcHandler.handle(
+		const authenticate = authenticateOnce(() =>
+			controlAuthenticate(context.req.raw, context.env)
+		);
+		const contract = new ContractRequest(
 			context.req.raw,
+			authenticate,
+			contractRequestMaxBytes
+		);
+		const { matched: isMatched, response } = await controlOrpcHandler.handle(
+			contract.request,
 			{
 				prefix: '/control',
 				context: {
 					request: context.req.raw,
+					authenticate,
 					env: context.env,
 					logger: context.get('logger')
 				}
@@ -46,6 +61,7 @@ function buildControlApp() {
 		);
 
 		if (isMatched) {
+			contract.refuseOversizeBody();
 			return response;
 		}
 

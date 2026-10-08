@@ -2,8 +2,8 @@ import { type Logger } from '@cupboard/logger';
 import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
+import { type AccessClaims } from '../auth/auth.ts';
 import {
-	controlAuthenticate,
 	controlCheck,
 	controlInstance,
 	controlInstanceInitialise,
@@ -40,6 +40,8 @@ import { bridgedError } from './error-bridge.ts';
 
 export interface ControlOrpcContext {
 	readonly request: Request;
+	// Verifies the request's bearer token. Every call returns the same result.
+	readonly authenticate: () => Promise<AccessClaims>;
 	readonly env: Env;
 	readonly logger: Logger;
 	readonly resHeaders?: Headers;
@@ -57,7 +59,7 @@ const os = implement(controlContract)
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {
-		const claims = await controlAuthenticate(context.request, context.env);
+		const claims = await context.authenticate();
 
 		await authoriseRequest(
 			claims,
