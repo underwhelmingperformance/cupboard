@@ -2550,7 +2550,11 @@ describe('attestation attach and reads', () => {
 							case 'renewed-after-deletion': {
 								const state = new UploadStateService(instance.context);
 								state.markUploadPending(decision.uploadId);
-								state.markUploadTerminal(decision.uploadId, 'servable');
+								await state.markUploadTerminal(
+									decision.uploadId,
+									'servable',
+									rootLogger()
+								);
 								break;
 							}
 							default: {

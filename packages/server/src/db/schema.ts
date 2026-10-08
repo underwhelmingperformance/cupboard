@@ -446,7 +446,14 @@ export const pendingUploads = sqliteTable(
 		// upload committed without one, including every row created before these
 		// columns were added.
 		declaredFileHash: text('declared_file_hash').$type<NixSha256HashString>(),
-		declaredFileSize: integer('declared_file_size')
+		declaredFileSize: integer('declared_file_size'),
+		// When the client first committed the upload. Null for rows committed
+		// before this column was added.
+		committedAt: text('committed_at').$type<IsoTimestamp>(),
+		// JSON: the latest attempt to create the upload's canonical object, and a
+		// reservation that a write may still have used. Null until an attempt
+		// starts.
+		promotionJson: text('promotion_json')
 	},
 	// Maintenance finds the soonest-expiring upload, probes for work awaiting
 	// verification, and checks listed staging keys for pending owners. Without

@@ -1,3 +1,5 @@
+import { rootLogger } from '@cupboard/logger';
+import { type CapturedLog, startCapture } from '@cupboard/logger/testing';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -14,23 +16,31 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import {
 	lateWriteTombstoneHorizonMs,
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
+import { abandonWrittenBlob } from '../blob/promote-blob.ts';
+import { r2BadDigestCode } from '../blob/r2-errors.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { pendingUploads } from '../db/schema.ts';
 import {
+	internalOrigin,
 	maxVerificationRpcRows,
 	narInfoObjectKey,
 	narObjectKey,
 	narObjectKeyPrefix,
-	verifyClaimLeaseMs
+	verifyClaimBatchSize,
+	verifyClaimLeaseMs,
+	verifyClaimMaxNarBytes
 } from '../http/http.ts';
+import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	clearBlobStorage,
 	currentServer,
+	currentServerTenant,
 	expectSingleUploadDecision,
 	initialise,
 	negotiateUploads,
@@ -48,6 +58,7 @@ import {
 	withoutAlarmArming
 } from '../test-support.ts';
 
+import { CacheAdminService } from './cache-admin-service.ts';
 import { type VerificationResult } from './verification-service.ts';
 
 interface NegotiatedUpload {
@@ -338,7 +349,11 @@ function writtenVerdict(
 		verdict: {
 			kind: 'verified',
 			verification: { ok: true },
-			canonicalWrite: { incarnation }
+			canonicalWrite: {
+				incarnation,
+				bytes: claim.nar.narBytes.byteLength,
+				durationMs: 0
+			}
 		}
 	};
 }
@@ -537,7 +552,11 @@ describe('canonical writes during verification', () => {
 				verdict: {
 					kind: 'verified',
 					verification: { ok: true },
-					canonicalWrite: { incarnation: reservation.incarnation }
+					canonicalWrite: {
+						incarnation: reservation.incarnation,
+						bytes: claim.nar.narBytes.byteLength,
+						durationMs: 0
+					}
 				}
 			}
 		]);
@@ -564,6 +583,30 @@ describe('canonical writes during verification', () => {
 				}
 			],
 			registry: [{ incarnation: reservation.incarnation, state: 'live' }]
+		});
+	});
+
+	it('queues no deletion when it gives up an incarnation that is already live', async () => {
+		const claim = await declaredClaim('abandon-live');
+		const incarnation = await reserveFor(claim);
+		await controlDatabase()
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'live', reservationOwner: sql`null` })
+			.where(eq(d1Schema.objectIncarnation.objectId, claim.entry.narHash));
+
+		await abandonWrittenBlob(
+			controlDatabase(),
+			claim.entry.narHash,
+			incarnation,
+			claim.owner
+		);
+
+		expect({
+			registry: await registryRows(claim.entry.narHash),
+			deletions: await deletionRows(claim.entry.narHash)
+		}).toStrictEqual({
+			registry: [{ incarnation, state: 'live' }],
+			deletions: []
 		});
 	});
 
@@ -642,45 +685,46 @@ describe('canonical writes during verification', () => {
 		}
 	])(
 		'deletes a written incarnation after the late-write horizon when $change',
-		async ({ change, arrange, registry }) => {
-			const claim = await declaredClaim(
-				`abandoned-${change.replaceAll(/\W+/gu, '-')}`
-			);
-			const reservation = await currentServer().reserveCanonicalWrite(
-				claim.owner,
-				claim.entry.uploadId
-			);
+		async ({ change, arrange, registry }) =>
+			withoutAlarmArming(async () => {
+				const claim = await declaredClaim(
+					`abandoned-${change.replaceAll(/\W+/gu, '-')}`
+				);
+				const reservation = await currentServer().reserveCanonicalWrite(
+					claim.owner,
+					claim.entry.uploadId
+				);
 
-			if (reservation.kind !== 'reserved') {
-				throw new Error('the declared upload must reserve an incarnation');
-			}
+				if (reservation.kind !== 'reserved') {
+					throw new Error('the declared upload must reserve an incarnation');
+				}
 
-			await writeCanonicalObject(claim.nar, reservation.incarnation);
-			const owner = await arrange(claim);
-			const abandonedAt = lateWriteDeadline();
-			await currentServer().recordVerifications(claim.owner, [
-				writtenVerdict(claim, reservation.incarnation)
-			]);
-			const narInfo = await env.BLOBS.head(
-				narInfoObjectKey(fixtureTenant, claim.entry.storePathHash, {
-					kind: 'default'
-				})
-			);
+				await writeCanonicalObject(claim.nar, reservation.incarnation);
+				const owner = await arrange(claim);
+				const abandonedAt = lateWriteDeadline();
+				await currentServer().recordVerifications(claim.owner, [
+					writtenVerdict(claim, reservation.incarnation)
+				]);
+				const narInfo = await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, claim.entry.storePathHash, {
+						kind: 'default'
+					})
+				);
 
-			expect({
-				verdict: await pendingUploadVerdict(claim.entry.uploadId),
-				isNarInfoWritten: narInfo !== null,
-				blobState: await blobStateRows(claim.entry.narHash),
-				registry: await registryRows(claim.entry.narHash),
-				deletions: await deletionRows(claim.entry.narHash)
-			}).toStrictEqual({
-				verdict: 'committing',
-				isNarInfoWritten: false,
-				blobState: [],
-				registry: registry(owner ?? undefined),
-				deletions: [{ incarnation: 2, removeAfter: abandonedAt }]
-			});
-		}
+				expect({
+					verdict: await pendingUploadVerdict(claim.entry.uploadId),
+					isNarInfoWritten: narInfo !== null,
+					blobState: await blobStateRows(claim.entry.narHash),
+					registry: await registryRows(claim.entry.narHash),
+					deletions: await deletionRows(claim.entry.narHash)
+				}).toStrictEqual({
+					verdict: 'committing',
+					isNarInfoWritten: false,
+					blobState: [],
+					registry: registry(owner ?? undefined),
+					deletions: [{ incarnation: 2, removeAfter: abandonedAt }]
+				});
+			})
 	);
 });
 
@@ -931,3 +975,792 @@ describe('verifying a declared upload in the queue consumer', () => {
 		});
 	});
 });
+
+// Reserves the canonical incarnation for the claim and returns it.
+async function reserveFor(claim: DeclaredClaim): Promise<number> {
+	const reservation = await currentServer().reserveCanonicalWrite(
+		claim.owner,
+		claim.entry.uploadId
+	);
+
+	if (reservation.kind !== 'reserved') {
+		throw new Error('the declared upload must reserve an incarnation');
+	}
+
+	return reservation.incarnation;
+}
+
+// Records the written verdict while R2 fails the promotion's first read of the
+// canonical object, so the verdict stays on the upload row for a later pass.
+async function holdWrittenVerdict(
+	claim: DeclaredClaim,
+	incarnation: number
+): Promise<void> {
+	const canonicalKey = narObjectKey(claim.entry.narHash, incarnation);
+	const originalHead = env.BLOBS.head.bind(env.BLOBS);
+	const head = vi
+		.spyOn(env.BLOBS, 'head')
+		.mockImplementation((key) =>
+			key === canonicalKey
+				? Promise.reject(new Error('head: internal error (10001)'))
+				: originalHead(key)
+		);
+
+	try {
+		await currentServer().recordVerifications(claim.owner, [
+			writtenVerdict(claim, incarnation)
+		]);
+	} finally {
+		head.mockRestore();
+	}
+
+	if (!(await hasRecordedVerdict(claim.entry.uploadId))) {
+		throw new Error('the written verdict must stay on the upload row');
+	}
+}
+
+function narMismatchVerdict(claim: DeclaredClaim): VerificationResult {
+	return {
+		uploadId: claim.entry.uploadId,
+		verdict: {
+			kind: 'verified',
+			verification: {
+				ok: false,
+				reason: 'nar-hash-mismatch',
+				actualNarHash: nixSha256Hash('9')
+			}
+		}
+	};
+}
+
+function pathOf(upload: NegotiatedUpload): object {
+	return {
+		uploadId: upload.entry.uploadId,
+		storePathHash: upload.entry.storePathHash,
+		narHash: upload.entry.narHash
+	};
+}
+
+describe('logging each promotion', () => {
+	beforeEach(async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		vi.setSystemTime(testBase);
+		await resetTestServer();
+	});
+
+	it.each([
+		{
+			promotion: 'a declared upload written during verification',
+			seed: 'promotion-fused',
+			arrange: async (upload: NegotiatedUpload) => {
+				await commitEntry(upload.token, {
+					...upload.entry,
+					blob: declarationOf(upload.nar)
+				});
+				await verifyCurrentTenant();
+			},
+			event: (upload: NegotiatedUpload) => ({
+				mode: 'fused',
+				outcome: 'servable',
+				bytes: upload.nar.narBytes.byteLength,
+				durationMs: 0,
+				commitToServableMs: 0
+			})
+		},
+		{
+			promotion: 'an undeclared upload copied after verification',
+			seed: 'promotion-copy',
+			arrange: async (upload: NegotiatedUpload) => {
+				await commitEntry(upload.token, upload.entry);
+				await verifyCurrentTenant();
+			},
+			event: (upload: NegotiatedUpload) => ({
+				mode: 'copy',
+				outcome: 'servable',
+				bytes: upload.nar.narBytes.byteLength,
+				durationMs: 0,
+				commitToServableMs: 0
+			})
+		},
+		{
+			promotion: 'a write that R2 refuses for its declared hash',
+			seed: 'promotion-fused-refused',
+			arrange: async (upload: NegotiatedUpload) => {
+				await commitEntry(upload.token, {
+					...upload.entry,
+					blob: { ...declarationOf(upload.nar), fileHash: nixSha256Hash('1') }
+				});
+				await verifyCurrentTenant();
+			},
+			event: (upload: NegotiatedUpload) => ({
+				mode: 'fused',
+				outcome: 'mismatch',
+				bytes: upload.nar.narBytes.byteLength,
+				durationMs: 0,
+				r2ErrorCode: r2BadDigestCode
+			})
+		},
+		{
+			promotion: 'a copy that R2 refuses for the verified hash',
+			seed: 'promotion-copy-refused',
+			arrange: async (upload: NegotiatedUpload) => {
+				await commitEntry(upload.token, upload.entry);
+				const claim = await currentServer().claimVerificationBatch(
+					maxVerificationRpcRows,
+					Number.MAX_SAFE_INTEGER
+				);
+				await currentServer().recordVerifications(claim.owner, [
+					{
+						uploadId: upload.entry.uploadId,
+						verdict: {
+							kind: 'verified',
+							verification: {
+								ok: true,
+								fileHash: nixSha256Hash('1'),
+								fileSize: upload.nar.narBytes.byteLength
+							}
+						}
+					}
+				]);
+			},
+			event: (upload: NegotiatedUpload) => ({
+				mode: 'copy',
+				outcome: 'mismatch',
+				bytes: upload.nar.narBytes.byteLength,
+				durationMs: 0,
+				r2ErrorCode: r2BadDigestCode
+			})
+		}
+	])('logs one event for $promotion', async ({ seed, arrange, event }) => {
+		const upload = await stagedUpload(seed);
+		const capture = startCapture();
+
+		try {
+			await arrange(upload);
+		} finally {
+			capture.stop();
+		}
+
+		const events = capture.logs
+			.filter((record) => record.message === 'nar promotion finished')
+			.map((record) => ({
+				level: record.level,
+				properties: record.properties
+			}));
+
+		expect(events).toStrictEqual([
+			{
+				level: 'info',
+				properties: {
+					method: 'record-verifications',
+					uploadId: upload.entry.uploadId,
+					storePathHash: upload.entry.storePathHash,
+					narHash: upload.entry.narHash,
+					...event(upload)
+				}
+			}
+		]);
+	});
+
+	it('logs a failed write attempt and one event when a copy publishes the upload', async () => {
+		const upload = await stagedUpload('promotion-write-failed');
+		const failure = new Error(
+			'put: We encountered an internal error. Please try again. (10001)'
+		);
+		const capture = startCapture();
+
+		try {
+			await withoutAlarmArming(async () => {
+				await commitEntry(upload.token, {
+					...upload.entry,
+					blob: declarationOf(upload.nar)
+				});
+				const originalPut = env.BLOBS.put.bind(env.BLOBS);
+				const put = vi
+					.spyOn(env.BLOBS, 'put')
+					.mockImplementation((key, value, options) =>
+						key.startsWith(narObjectKeyPrefix)
+							? Promise.reject(failure)
+							: originalPut(key, value, options)
+					);
+
+				try {
+					await verifyCurrentTenant();
+				} finally {
+					put.mockRestore();
+				}
+
+				vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+				await verifyCurrentTenant();
+			});
+		} finally {
+			capture.stop();
+		}
+
+		const path = {
+			uploadId: upload.entry.uploadId,
+			storePathHash: upload.entry.storePathHash,
+			narHash: upload.entry.narHash
+		};
+
+		expect({
+			attempts: attemptEvents(capture.logs),
+			events: promotionEvents(capture.logs),
+			verdict: await pendingUploadVerdict(upload.entry.uploadId)
+		}).toStrictEqual({
+			attempts: [
+				{
+					level: 'info',
+					properties: {
+						...path,
+						mode: 'fused',
+						outcome: 'failed',
+						bytes: upload.nar.narBytes.byteLength,
+						durationMs: 0,
+						r2ErrorCode: 10_001
+					}
+				}
+			],
+			events: [
+				{
+					level: 'info',
+					properties: {
+						method: 'record-verifications',
+						...path,
+						mode: 'copy',
+						outcome: 'servable',
+						bytes: upload.nar.narBytes.byteLength,
+						durationMs: 0,
+						commitToServableMs: 10 * 60 * 1000
+					}
+				}
+			],
+			verdict: undefined
+		});
+	});
+
+	it('logs a failed copy attempt and one event when a later copy publishes the upload', async () => {
+		const upload = await stagedUpload('promotion-copy-retried');
+		const capture = startCapture();
+
+		try {
+			await withoutAlarmArming(async () => {
+				await commitEntry(upload.token, upload.entry);
+				const claim = await currentServer().claimVerificationBatch(
+					maxVerificationRpcRows,
+					Number.MAX_SAFE_INTEGER
+				);
+				const originalPut = env.BLOBS.put.bind(env.BLOBS);
+				const failure = { isPending: true };
+				const put = vi
+					.spyOn(env.BLOBS, 'put')
+					.mockImplementation((key, value, options) => {
+						if (!key.startsWith(narObjectKeyPrefix) || !failure.isPending) {
+							return originalPut(key, value, options);
+						}
+
+						failure.isPending = false;
+
+						return Promise.reject(new Error('put: internal error (10001)'));
+					});
+
+				try {
+					await currentServer().recordVerifications(claim.owner, [
+						{
+							uploadId: upload.entry.uploadId,
+							verdict: {
+								kind: 'verified',
+								verification: {
+									ok: true,
+									fileHash: upload.nar.fileHash,
+									fileSize: upload.nar.narBytes.byteLength
+								}
+							}
+						}
+					]);
+					vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+					await currentServer().recordVerifications(claim.owner, []);
+				} finally {
+					put.mockRestore();
+				}
+			});
+		} finally {
+			capture.stop();
+		}
+
+		const promotion = {
+			method: 'record-verifications',
+			uploadId: upload.entry.uploadId,
+			storePathHash: upload.entry.storePathHash,
+			narHash: upload.entry.narHash,
+			mode: 'copy',
+			bytes: upload.nar.narBytes.byteLength,
+			durationMs: 0
+		};
+
+		expect({
+			attempts: attemptEvents(capture.logs),
+			events: promotionEvents(capture.logs)
+		}).toStrictEqual({
+			attempts: [
+				{
+					level: 'info',
+					properties: { ...promotion, outcome: 'failed', r2ErrorCode: 10_001 }
+				}
+			],
+			events: [
+				{
+					level: 'info',
+					properties: {
+						...promotion,
+						outcome: 'servable',
+						commitToServableMs: 10 * 60 * 1000
+					}
+				}
+			]
+		});
+	});
+
+	it('logs a written object once when its promotion is retried', async () =>
+		withoutAlarmArming(async () => {
+			const claim = await declaredClaim('promotion-retried');
+			const reservation = await currentServer().reserveCanonicalWrite(
+				claim.owner,
+				claim.entry.uploadId
+			);
+
+			if (reservation.kind !== 'reserved') {
+				throw new Error('the declared upload must reserve an incarnation');
+			}
+
+			await writeCanonicalObject(claim.nar, reservation.incarnation);
+			const canonicalKey = narObjectKey(
+				claim.entry.narHash,
+				reservation.incarnation
+			);
+			const originalHead = env.BLOBS.head.bind(env.BLOBS);
+			const failure = { isPending: true };
+			const head = vi.spyOn(env.BLOBS, 'head').mockImplementation((key) => {
+				if (key !== canonicalKey || !failure.isPending) {
+					return originalHead(key);
+				}
+
+				failure.isPending = false;
+
+				return Promise.reject(new Error('head: internal error (10001)'));
+			});
+			const capture = startCapture();
+
+			try {
+				await currentServer().recordVerifications(claim.owner, [
+					writtenVerdict(claim, reservation.incarnation)
+				]);
+				head.mockRestore();
+				vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+				await currentServer().recordVerifications(claim.owner, []);
+			} finally {
+				head.mockRestore();
+				capture.stop();
+			}
+
+			expect({
+				events: promotionEvents(capture.logs),
+				verdict: await pendingUploadVerdict(claim.entry.uploadId)
+			}).toStrictEqual({
+				events: [
+					{
+						level: 'info',
+						properties: {
+							method: 'record-verifications',
+							uploadId: claim.entry.uploadId,
+							storePathHash: claim.entry.storePathHash,
+							narHash: claim.entry.narHash,
+							mode: 'fused',
+							outcome: 'servable',
+							bytes: claim.nar.narBytes.byteLength,
+							durationMs: 0,
+							commitToServableMs: 10 * 60 * 1000
+						}
+					}
+				],
+				verdict: undefined
+			});
+		}));
+
+	it.each([
+		{
+			change: 'another pass claimed the upload',
+			arrange: async () => {
+				await claimAgain();
+			},
+			isWritten: true
+		},
+		{
+			change: 'the incarnation was retired',
+			arrange: async (claim: DeclaredClaim) => {
+				await controlDatabase()
+					.update(d1Schema.objectIncarnation)
+					.set({ state: 'absent', reservationOwner: sql`null` })
+					.where(eq(d1Schema.objectIncarnation.objectId, claim.entry.narHash));
+			},
+			isWritten: true
+		},
+		{
+			change: 'the written object is missing',
+			arrange: () => Promise.resolve(),
+			isWritten: false
+		}
+	])(
+		'logs no event yet for a written object that is not published when $change',
+		async ({ change, arrange, isWritten }) =>
+			withoutAlarmArming(async () => {
+				const claim = await declaredClaim(
+					`unpublished-${change.replaceAll(/\W+/gu, '-')}`
+				);
+				const reservation = await currentServer().reserveCanonicalWrite(
+					claim.owner,
+					claim.entry.uploadId
+				);
+
+				if (reservation.kind !== 'reserved') {
+					throw new Error('the declared upload must reserve an incarnation');
+				}
+
+				if (isWritten) {
+					await writeCanonicalObject(claim.nar, reservation.incarnation);
+				}
+
+				await arrange(claim);
+				const capture = startCapture();
+
+				try {
+					await currentServer().recordVerifications(claim.owner, [
+						writtenVerdict(claim, reservation.incarnation)
+					]);
+				} finally {
+					capture.stop();
+				}
+
+				expect({
+					events: promotionEvents(capture.logs),
+					verdict: await pendingUploadVerdict(claim.entry.uploadId)
+				}).toStrictEqual({ events: [], verdict: 'committing' });
+			})
+	);
+
+	it('logs a write attempt that the pass abandons when its budget ends', async () => {
+		const upload = await stagedUpload('promotion-aborted');
+		await commitEntry(upload.token, {
+			...upload.entry,
+			blob: declarationOf(upload.nar)
+		});
+		const originalPut = env.BLOBS.put.bind(env.BLOBS);
+		const put = vi
+			.spyOn(env.BLOBS, 'put')
+			.mockImplementation((key, value, options) =>
+				key.startsWith(narObjectKeyPrefix)
+					? Promise.withResolvers<R2Object>().promise
+					: originalPut(key, value, options)
+			);
+		const capture = startCapture();
+
+		try {
+			await settle(
+				verifyTenant(
+					rootLogger(),
+					env,
+					new NarReadBufferPool(),
+					currentServerTenant(),
+					verifyClaimBatchSize,
+					verifyClaimMaxNarBytes,
+					3000
+				)
+			);
+			// The pass rejects as soon as its budget ends. The verification of the
+			// upload logs its outcome once it has stopped reading.
+			for (
+				let attempt = 0;
+				attempt < 100 && !hasVerificationFinished(capture.logs);
+				attempt += 1
+			) {
+				await scheduler.wait(10);
+			}
+		} finally {
+			put.mockRestore();
+			capture.stop();
+		}
+
+		expect({
+			attempts: attemptEvents(capture.logs),
+			events: promotionEvents(capture.logs)
+		}).toStrictEqual({
+			attempts: [
+				{
+					level: 'info',
+					properties: {
+						uploadId: upload.entry.uploadId,
+						storePathHash: upload.entry.storePathHash,
+						narHash: upload.entry.narHash,
+						mode: 'fused',
+						outcome: 'aborted',
+						bytes: upload.nar.narBytes.byteLength,
+						durationMs: 0
+					}
+				}
+			],
+			events: []
+		});
+	});
+
+	it('logs one event when a verdict arrives again after its upload became terminal', async () => {
+		const claim = await declaredClaim('promotion-resent');
+		const reservation = await reserveFor(claim);
+		const verdict: VerificationResult = {
+			uploadId: claim.entry.uploadId,
+			verdict: {
+				kind: 'verified',
+				verification: { ok: false, reason: 'file-hash-mismatch' },
+				canonicalWrite: {
+					incarnation: reservation,
+					bytes: claim.nar.narBytes.byteLength,
+					durationMs: 0
+				}
+			}
+		};
+		const capture = startCapture();
+
+		try {
+			await withoutAlarmArming(async () => {
+				await currentServer().recordVerifications(claim.owner, [verdict]);
+				await currentServer().recordVerifications(claim.owner, [verdict]);
+			});
+		} finally {
+			capture.stop();
+		}
+
+		expect({
+			events: promotionEvents(capture.logs),
+			verdict: await pendingUploadVerdict(claim.entry.uploadId)
+		}).toStrictEqual({
+			events: [
+				{
+					level: 'info',
+					properties: {
+						method: 'record-verifications',
+						...pathOf(claim),
+						mode: 'fused',
+						outcome: 'mismatch',
+						bytes: claim.nar.narBytes.byteLength,
+						durationMs: 0,
+						r2ErrorCode: r2BadDigestCode
+					}
+				}
+			],
+			verdict: 'mismatch'
+		});
+	});
+
+	it.each([
+		{
+			write: 'after claim revocation discarded its recorded verdict',
+			arrange: async (claim: DeclaredClaim, incarnation: number) => {
+				await holdWrittenVerdict(claim, incarnation);
+				// A client re-drive revokes the claim and leaves the verdict, which
+				// no longer matches the claim owner.
+				await runInDurableObject(currentServer(), (_instance, state) =>
+					drizzle(state.storage, { schema: { pendingUploads } })
+						.update(pendingUploads)
+						.set({ claimedAt: sql`null`, claimOwner: sql`null` })
+						.where(eq(pendingUploads.id, claim.entry.uploadId))
+						.run()
+				);
+			},
+			facts: (claim: DeclaredClaim) => ({
+				bytes: claim.nar.narBytes.byteLength,
+				durationMs: 0
+			})
+		},
+		{
+			write: 'whose consumer stopped before it recorded a verdict',
+			arrange: () => Promise.resolve(),
+			facts: () => ({})
+		}
+	])(
+		'logs one event and gives up a write $write when the upload then fails verification',
+		async ({ write, arrange, facts }) =>
+			withoutAlarmArming(async () => {
+				const claim = await declaredClaim(
+					`orphaned-${write.replaceAll(/\W+/gu, '-')}`
+				);
+				const incarnation = await reserveFor(claim);
+				await writeCanonicalObject(claim.nar, incarnation);
+				await arrange(claim, incarnation);
+				const owner = await claimAgain();
+				const abandonedAt = lateWriteDeadline();
+				const capture = startCapture();
+
+				try {
+					await currentServer().recordVerifications(owner, [
+						narMismatchVerdict(claim)
+					]);
+				} finally {
+					capture.stop();
+				}
+
+				expect({
+					events: promotionEvents(capture.logs),
+					verdict: await pendingUploadVerdict(claim.entry.uploadId),
+					registry: await registryRows(claim.entry.narHash),
+					deletions: await deletionRows(claim.entry.narHash)
+				}).toStrictEqual({
+					events: [
+						{
+							level: 'info',
+							properties: {
+								method: 'record-verifications',
+								...pathOf(claim),
+								mode: 'fused',
+								outcome: 'mismatch',
+								...facts(claim)
+							}
+						}
+					],
+					verdict: 'mismatch',
+					registry: [{ incarnation, state: 'absent' }],
+					deletions: [{ incarnation, removeAfter: abandonedAt }]
+				});
+			})
+	);
+
+	it('logs one event and gives up the write when an upload with a held write runs out of retries', async () =>
+		withoutAlarmArming(async () => {
+			const claim = await declaredClaim('promotion-exhausted');
+			const incarnation = await reserveFor(claim);
+			await writeCanonicalObject(claim.nar, incarnation);
+			await holdWrittenVerdict(claim, incarnation);
+			await runInDurableObject(currentServer(), (_instance, state) =>
+				drizzle(state.storage, { schema: { pendingUploads } })
+					.update(pendingUploads)
+					.set({
+						settleExhaustion: 'attempt-limit',
+						settleRetryAfter: isoTimestamp(new Date()),
+						recordedVerdictJson: sql`null`,
+						claimedAt: sql`null`,
+						claimOwner: sql`null`
+					})
+					.where(eq(pendingUploads.id, claim.entry.uploadId))
+					.run()
+			);
+			const abandonedAt = lateWriteDeadline();
+			const capture = startCapture();
+
+			try {
+				await currentServer().recordVerifications(claim.owner, []);
+			} finally {
+				capture.stop();
+			}
+
+			expect({
+				events: promotionEvents(capture.logs),
+				verdict: await pendingUploadVerdict(claim.entry.uploadId),
+				registry: await registryRows(claim.entry.narHash),
+				deletions: await deletionRows(claim.entry.narHash)
+			}).toStrictEqual({
+				events: [
+					{
+						level: 'info',
+						properties: {
+							method: 'record-verifications',
+							...pathOf(claim),
+							mode: 'fused',
+							outcome: 'absent',
+							bytes: claim.nar.narBytes.byteLength,
+							durationMs: 0
+						}
+					}
+				],
+				verdict: undefined,
+				registry: [{ incarnation, state: 'absent' }],
+				deletions: [{ incarnation, removeAfter: abandonedAt }]
+			});
+		}));
+
+	it('logs one event and gives up the write when the cache is deleted while a write waits', async () =>
+		withoutAlarmArming(async () => {
+			const claim = await declaredClaim('promotion-cache-deleted');
+			const incarnation = await reserveFor(claim);
+			await writeCanonicalObject(claim.nar, incarnation);
+			await holdWrittenVerdict(claim, incarnation);
+			const abandonedAt = lateWriteDeadline();
+			const capture = startCapture();
+
+			try {
+				await runInDurableObject(currentServer(), async (instance) => {
+					const cacheAdmin: unknown = Reflect.get(instance, 'cacheAdmin');
+
+					if (!(cacheAdmin instanceof CacheAdminService)) {
+						throw new TypeError('The test server has no cache admin service.');
+					}
+
+					await cacheAdmin.tearDownCache(
+						instance.context.cacheRepository.require({ kind: 'default' }),
+						internalOrigin
+					);
+				});
+			} finally {
+				capture.stop();
+			}
+
+			expect({
+				events: promotionEvents(capture.logs),
+				verdict: await pendingUploadVerdict(claim.entry.uploadId),
+				registry: await registryRows(claim.entry.narHash),
+				deletions: await deletionRows(claim.entry.narHash)
+			}).toStrictEqual({
+				events: [
+					{
+						level: 'info',
+						properties: {
+							...pathOf(claim),
+							mode: 'fused',
+							outcome: 'absent',
+							bytes: claim.nar.narBytes.byteLength,
+							durationMs: 0
+						}
+					}
+				],
+				verdict: undefined,
+				registry: [{ incarnation, state: 'absent' }],
+				deletions: [{ incarnation, removeAfter: abandonedAt }]
+			});
+		}));
+});
+
+function hasVerificationFinished(logs: readonly CapturedLog[]): boolean {
+	return logs.some(
+		(record) => record.message === 'pending upload verification finished'
+	);
+}
+
+// Waits for an operation that the test expects to reject.
+async function settle(operation: Promise<unknown>): Promise<void> {
+	try {
+		await operation;
+	} catch {
+		// The test examines what the operation logged.
+	}
+}
+
+function eventsNamed(logs: readonly CapturedLog[], message: string): unknown[] {
+	return logs
+		.filter((record) => record.message === message)
+		.map((record) => ({ level: record.level, properties: record.properties }));
+}
+
+function promotionEvents(logs: readonly CapturedLog[]): unknown[] {
+	return eventsNamed(logs, 'nar promotion finished');
+}
+
+function attemptEvents(logs: readonly CapturedLog[]): unknown[] {
+	return eventsNamed(logs, 'nar promotion attempt failed');
+}

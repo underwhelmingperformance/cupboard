@@ -35,6 +35,7 @@ import {
 	verifyAndWriteStoredNar,
 	verifyStoredNar
 } from '../blob/nar-verify.ts';
+import { r2ErrorCode } from '../blob/r2-errors.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	controlRefreshPrunePageSize,
@@ -70,6 +71,7 @@ import {
 } from '../do/blob-reaper-service.ts';
 import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
+import { logPromotionAttemptFailed } from '../do/promotion-record.ts';
 import type { VerificationRecordRpcResult } from '../do/server.ts';
 import {
 	holdSubrequests,
@@ -1203,7 +1205,7 @@ async function verifyFreshBytes(
 		};
 	}
 
-	const canonicalWrite = { incarnation: reservation.incarnation };
+	const startedAt = Date.now();
 	const verification = await verifyAndWriteStoredNar(
 		blobs,
 		claim.r2Key,
@@ -1216,7 +1218,14 @@ async function verifyFreshBytes(
 		{ buffers, firstGet, canonicalPut, signal, progress }
 	);
 
-	return verification.ok ? { verification, canonicalWrite } : { verification };
+	return {
+		verification,
+		canonicalWrite: {
+			incarnation: reservation.incarnation,
+			bytes: progress.compressedBytes,
+			durationMs: Date.now() - startedAt
+		}
+	};
 }
 
 /**
@@ -1236,6 +1245,8 @@ async function verifyFreshClaim(
 	const progress = narVerifyProgress();
 	const startedAt = Date.now();
 	let outcome: FreshVerificationOutcome = 'aborted';
+	let write:
+		{ readonly incarnation: number; readonly startedAt: number } | undefined;
 
 	try {
 		signal.throwIfAborted();
@@ -1250,6 +1261,10 @@ async function verifyFreshClaim(
 				verdict: { kind: 'abandoned' }
 			});
 			return;
+		}
+
+		if (reservation?.kind === 'reserved') {
+			write = { incarnation: reservation.incarnation, startedAt: Date.now() };
 		}
 
 		const { verification, canonicalWrite } = await verifyFreshBytes(
@@ -1270,6 +1285,35 @@ async function verifyFreshClaim(
 			}
 		});
 	} catch (error) {
+		const code = r2ErrorCode(error);
+		// A missing staged object stops the verification before the write.
+		const failedWrite =
+			write === undefined || error instanceof UploadedObjectNotFoundError
+				? undefined
+				: {
+						incarnation: write.incarnation,
+						bytes: progress.compressedBytes,
+						durationMs: Date.now() - write.startedAt
+					};
+
+		if (failedWrite !== undefined) {
+			logPromotionAttemptFailed(
+				logger,
+				{
+					uploadId: claim.uploadId,
+					storePathHash: claim.storePathHash,
+					narHash: claim.narHash
+				},
+				{
+					mode: 'fused',
+					outcome: signal.aborted ? 'aborted' : 'failed',
+					bytes: failedWrite.bytes,
+					durationMs: failedWrite.durationMs,
+					...(code !== undefined && { r2ErrorCode: code })
+				}
+			);
+		}
+
 		if (signal.aborted) {
 			throw error;
 		}
@@ -1291,7 +1335,15 @@ async function verifyFreshClaim(
 			stage: progress.stage,
 			error
 		});
-		recorder.add({ uploadId: claim.uploadId, verdict: { kind: 'abandoned' } });
+		recorder.add({
+			uploadId: claim.uploadId,
+			verdict: {
+				kind: 'abandoned',
+				...(failedWrite !== undefined && { canonicalWrite: failedWrite }),
+				...(failedWrite !== undefined &&
+					code !== undefined && { r2ErrorCode: code })
+			}
+		});
 	} finally {
 		firstGet.release();
 		canonicalPut?.release();

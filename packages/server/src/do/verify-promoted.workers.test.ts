@@ -61,7 +61,10 @@ describe('recording an older promoted verdict', () => {
 			async (instance) => {
 				const uploads = new UploadStateService(instance.context);
 				await uploads.markPendingNarRefresh(upload.uploadId);
-				const wasCleared = uploads.clearPendingUpload(upload.uploadId);
+				const wasCleared = await uploads.clearPendingUpload(upload.uploadId, {
+					logger: rootLogger(),
+					outcome: 'servable'
+				});
 				return {
 					wasCleared,
 					refreshPending: uploads.hasPendingNarRefresh(upload.uploadId)

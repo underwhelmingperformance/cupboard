@@ -465,7 +465,10 @@ export class CommitPipelineService {
 				generation
 			);
 			this.notifyUploadWaiters(uploadId, committingSessionId, status);
-			this.uploadState.clearPendingUpload(uploadId);
+			await this.uploadState.clearPendingUpload(uploadId, {
+				logger,
+				outcome: 'servable'
+			});
 
 			return {
 				kind: 'settled',
@@ -504,7 +507,10 @@ export class CommitPipelineService {
 					metadata.narHash
 				)
 			);
-			this.uploadState.clearPendingUpload(uploadId);
+			await this.uploadState.clearPendingUpload(uploadId, {
+				logger,
+				outcome: 'absent'
+			});
 
 			throw new TenantWritesStoppedError(
 				this.context.requireTenant(),
@@ -563,7 +569,10 @@ export class CommitPipelineService {
 				generation
 			);
 			this.notifyUploadWaiters(uploadId, committingSessionId, status);
-			this.uploadState.clearPendingUpload(uploadId);
+			await this.uploadState.clearPendingUpload(uploadId, {
+				logger,
+				outcome: 'servable'
+			});
 
 			return {
 				kind: 'settled',
@@ -578,7 +587,10 @@ export class CommitPipelineService {
 			};
 		}
 
-		this.uploadState.clearPendingUpload(uploadId);
+		await this.uploadState.clearPendingUpload(uploadId, {
+			logger,
+			outcome: 'absent'
+		});
 
 		throw new UploadedObjectNotFoundError(canonicalKey);
 	}
@@ -1455,7 +1467,8 @@ export class CommitPipelineService {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
 				stagingKey,
-				metadata.narHash
+				metadata.narHash,
+				{ logger, outcome: 'servable' }
 			);
 
 			return {
@@ -1573,7 +1586,8 @@ export class CommitPipelineService {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
 				pending.r2Key,
-				pending.narHash
+				pending.narHash,
+				{ logger, outcome: 'absent' }
 			);
 
 			throw new UploadExpiredError(uploadId);
@@ -1683,7 +1697,8 @@ export class CommitPipelineService {
 				await this.uploadState.clearPendingUploadAndStaging(
 					uploadId,
 					pending.r2Key,
-					metadata.narHash
+					metadata.narHash,
+					{ logger, outcome: 'servable' }
 				);
 
 				return {
@@ -1798,7 +1813,8 @@ export class CommitPipelineService {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
 				pending.r2Key,
-				metadata.narHash
+				metadata.narHash,
+				{ logger, outcome: 'absent' }
 			);
 
 			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);

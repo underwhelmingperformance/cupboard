@@ -75,6 +75,7 @@ import m0072 from './0072_staging_cleanup.sql';
 import m0073 from './0073_refresh_family_owner.sql';
 import m0074 from './0074_subject_nonces.sql';
 import m0075 from './0075_pending_upload_blob_declaration.sql';
+import m0076 from './0076_pending_upload_promotion.sql';
 
 export default {
 	journal,
@@ -154,6 +155,7 @@ export default {
 		m0072,
 		m0073,
 		m0074,
-		m0075
+		m0075,
+		m0076
 	}
 };
