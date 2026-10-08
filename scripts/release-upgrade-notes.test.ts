@@ -1,10 +1,20 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	realpath,
+	rm,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { expect, it, onTestFinished } from 'vitest';
+import { expect, it, onTestFinished, vi } from 'vitest';
+
+import { isolateGitEnvironment } from '../tests/support/git.ts';
 
 import {
 	collectReleaseUpgradeNotes,
@@ -16,6 +26,7 @@ const repository = { owner: 'acme', repo: 'app' };
 const prefix = 'docs/operator/upgrade-notes/';
 
 async function fixture() {
+	isolateGitEnvironment();
 	const directory = await mkdtemp(path.join(tmpdir(), 'release-upgrades-'));
 	onTestFinished(() => rm(directory, { recursive: true, force: true }));
 	const git = async (...arguments_: string[]) => {
@@ -40,6 +51,29 @@ async function fixture() {
 	};
 	return { directory, git, note, commit };
 }
+
+it("creates the fixture's repository in the temporary directory when GIT_DIR points at another repository", async () => {
+	const decoy = await mkdtemp(path.join(tmpdir(), 'release-upgrades-decoy-'));
+	onTestFinished(() => rm(decoy, { recursive: true, force: true }));
+	await execute('git', ['init', '--bare', '--initial-branch=main', decoy]);
+	const snapshot = async () => {
+		const entries = await readdir(decoy, { recursive: true });
+		return {
+			config: await readFile(path.join(decoy, 'config'), 'utf8'),
+			entries: entries.toSorted((left, right) => left.localeCompare(right))
+		};
+	};
+	const before = await snapshot();
+	vi.stubEnv('GIT_DIR', decoy);
+	const { directory, git } = await fixture();
+	expect({
+		gitDirectory: await git('rev-parse', '--absolute-git-dir'),
+		decoy: await snapshot()
+	}).toStrictEqual({
+		gitDirectory: path.join(await realpath(directory), '.git'),
+		decoy: before
+	});
+});
 
 it('reads all first-release fragments from the exact commit, with release-tag links', async () => {
 	const { directory, note, commit } = await fixture();

@@ -12,6 +12,8 @@ import { parseBaseUrl } from '@cupboard/nix-store/url';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
+import { isolateGitEnvironment } from '../tests/support/git.ts';
+
 import {
 	assertCanonicalVersion,
 	assetContentType,
@@ -352,6 +354,7 @@ it.each(['release metadata', 'target Git metadata'] as const)(
 );
 
 it('publishes without preparation from the exact commit and preserves draft edits on retry', async () => {
+	isolateGitEnvironment();
 	const directory = await mkdtemp(path.join(tmpdir(), 'release-publish-'));
 	const git = async (...arguments_: string[]) => {
 		const result = await execFileAsync('git', arguments_, { cwd: directory });
