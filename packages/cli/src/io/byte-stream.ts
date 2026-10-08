@@ -28,6 +28,85 @@ export function countingByteStream(
 	);
 }
 
+/**
+ * Copies written bytes into pieces of exactly `size` bytes. A piece is
+ * allocated when its first byte is written, and the last, shorter piece is
+ * returned in a buffer of its own length.
+ */
+export class ByteAccumulator {
+	private piece: Buffer | undefined;
+
+	private filled = 0;
+
+	private readonly complete: Buffer[] = [];
+
+	private total = 0;
+
+	constructor(private readonly size: number) {}
+
+	/**
+	 * How many bytes have been written in total.
+	 */
+	get written(): number {
+		return this.total;
+	}
+
+	write(bytes: Uint8Array): void {
+		this.total += bytes.byteLength;
+
+		for (let offset = 0; offset < bytes.byteLength;) {
+			this.piece ??= Buffer.allocUnsafeSlow(this.size);
+
+			const copied = Math.min(
+				this.size - this.filled,
+				bytes.byteLength - offset
+			);
+			this.piece.set(bytes.subarray(offset, offset + copied), this.filled);
+			this.filled += copied;
+			offset += copied;
+
+			if (this.filled < this.size) {
+				continue;
+			}
+
+			this.complete.push(this.piece);
+			this.piece = undefined;
+			this.filled = 0;
+		}
+	}
+
+	/**
+	 * Returns the complete pieces and removes them from the accumulator.
+	 */
+	*takeComplete(): Iterable<Uint8Array> {
+		for (
+			let piece = this.complete.shift();
+			piece !== undefined;
+			piece = this.complete.shift()
+		) {
+			yield piece;
+		}
+	}
+
+	/**
+	 * Returns the complete pieces and then the remaining bytes, and removes
+	 * them from the accumulator.
+	 */
+	*takeAll(): Iterable<Uint8Array> {
+		yield* this.takeComplete();
+
+		if (this.piece === undefined) {
+			return;
+		}
+
+		const remainder = new Uint8Array(this.piece.subarray(0, this.filled));
+		this.piece = undefined;
+		this.filled = 0;
+
+		yield remainder;
+	}
+}
+
 function asyncIterableByteStream(
 	source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>
 ): ReadableStream<Uint8Array> {
