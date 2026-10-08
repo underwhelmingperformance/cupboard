@@ -139,6 +139,15 @@ export default defineConfig(async () => {
 								queueProducers: {
 									MAINTENANCE_QUEUE: 'cupboard-maintenance'
 								},
+								// Most tests send their requests without a client address, so
+								// they would all share one budget. This limiter never refuses a
+								// request, and the rate-limit tests supply a limiter of their own.
+								ratelimits: {
+									TOKEN_RATE_LIMITER: {
+										namespace_id: '1',
+										simple: { limit: Number.MAX_SAFE_INTEGER, period: 60 }
+									}
+								},
 								compatibilityDate: '2026-08-18'
 							},
 							wrangler: {

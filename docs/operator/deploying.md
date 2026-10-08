@@ -307,6 +307,51 @@ and other clients still send such a request, and the Worker refuses it only
 after the credential has been sent. Use `https://` URLs in every Nix
 configuration.
 
+### Rate limiting
+
+For each client, the control Worker allows 120 `POST` requests per minute across
+`/token`, `/signup` and `/revoke` at the deployment URL. Each tenant has a
+separate 120-request budget across `POST /token` and `POST /revoke`. A client is
+one IPv4 address or one IPv6 /64 prefix, because an IPv6 client usually controls
+a whole /64. The Worker counts an IPv4-mapped IPv6 address as its IPv4 address.
+It refuses a request over the limit with status 429 and `Retry-After: 60`.
+Cloudflare counts the requests at each of its locations separately, so a client
+whose requests reach several locations can send more than this in total. This
+works on workers.dev and on a custom domain.
+
+Machines that share one public address share one budget. For example,
+self-hosted CI runners behind one NAT address share the 120 requests a minute to
+a tenant URL. Each `cupboard` command that signs in with GitHub OIDC sends one
+token request, and a publishing job runs several such commands, so many jobs
+that start in the same minute can receive status 429.
+
+The Worker counts the requests with the Workers rate-limiting binding
+`TOKEN_RATE_LIMITER` and the namespace ID `28726273`. Every Worker in the
+account with a rate-limiting binding for that namespace ID shares the counts, so
+don't use that namespace ID in another Worker.
+
+For a custom domain, you can also add a [rate limiting rule][zone-rate-limit] to
+the zone, which Cloudflare applies before a request reaches the Worker. On the
+Free plan, a zone has one rate limiting rule. The rule counts requests by IP
+address over 10 seconds, and its expression can match only the request path and
+verified bots. This expression matches paths ending in `/token` or `/revoke`,
+plus the exact `/signup` path:
+
+```text
+ends_with(http.request.uri.path, "/token")
+or ends_with(http.request.uri.path, "/revoke")
+or http.request.uri.path eq "/signup"
+```
+
+Twenty requests in 10 seconds has the same average rate as 120 per minute. The
+zone rule uses a shorter window and counts every request that matches its
+expression, with any HTTP method. It also counts requests at each Cloudflare
+location separately. Like the zone settings for HTTPS, the rule applies to every
+host in the zone, and `init` doesn't change it.
+
+[zone-rate-limit]:
+  https://developers.cloudflare.com/waf/rate-limiting-rules/create-zone-dashboard/
+
 ### Moving to a new URL
 
 Changing the custom domain later moves the deployment to a new URL, and so does

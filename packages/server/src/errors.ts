@@ -19,7 +19,8 @@ import { type AuthorizationDetail } from '@cupboard/protocol/grants';
 import {
 	type OidcIssuer,
 	type SubjectTokenProblem,
-	subjectTokenProblems
+	subjectTokenProblems,
+	tokenRateLimit
 } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
@@ -875,7 +876,8 @@ export type OAuthErrorCode =
 	| 'invalid_grant'
 	| 'invalid_authorization_details'
 	| 'unsupported_grant_type'
-	| 'unsupported_token_type';
+	| 'unsupported_token_type'
+	| 'temporarily_unavailable';
 
 /**
  * An OAuth 2.0 error (RFC 6749 §5.2). The JSON response uses the error code and
@@ -960,6 +962,26 @@ export class TokenRequestBodyTooLargeError extends OAuthError {
 			'Form body exceeds 131072 bytes, or Content-Length declares more than 131072 bytes'
 		);
 		this.name = 'TokenRequestBodyTooLargeError';
+	}
+}
+
+/**
+ * RFC 6749 defines `temporarily_unavailable` for an overloaded authorization
+ * endpoint. Here it reports a temporary rate-limit refusal at the token, signup
+ * and revocation endpoints. RFC 8628 restricts `slow_down` to device-flow
+ * polling; a client that receives it adds five seconds to its polling interval.
+ */
+export class TokenRateLimitedError extends OAuthError {
+	readonly status = StatusCodes.TOO_MANY_REQUESTS;
+	readonly error = 'temporarily_unavailable';
+	readonly problem = 'rate-limited';
+	override readonly retryAfterSeconds = tokenRateLimit.periodSeconds;
+
+	constructor() {
+		super(
+			`Too many requests from this address. Retry after ${String(tokenRateLimit.periodSeconds)} seconds.`
+		);
+		this.name = 'TokenRateLimitedError';
 	}
 }
 

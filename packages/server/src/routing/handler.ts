@@ -76,6 +76,7 @@ import {
 	parseNamedCachePath,
 	parseTenantPath
 } from './tenant-routing.ts';
+import { limitTokenRequests } from './token-rate-limit.ts';
 
 const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
@@ -125,6 +126,16 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// Add the tenant field only after the slug is admitted.
 	app.use(loggerMiddleware);
 	app.use(httpsOnly);
+	app.on('POST', ['/token', '/signup', '/revoke'], (context, next) =>
+		limitTokenRequests(context, { kind: 'control' }, next)
+	);
+	app.on('POST', ['/t/:tenant/token', '/t/:tenant/revoke'], (context, next) =>
+		limitTokenRequests(
+			context,
+			{ kind: 'tenant', tenant: context.req.param('tenant') },
+			next
+		)
+	);
 	app.use('/t/:tenant/*', async (context, next) => {
 		await next();
 		if (

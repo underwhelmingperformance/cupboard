@@ -3,6 +3,8 @@ import { z } from 'zod';
 
 import {
 	kvNamespaceIdSchema,
+	type RateLimitNamespaceId,
+	rateLimitNamespaceIdSchema,
 	type ScriptName,
 	scriptNameSchema
 } from './identifiers.ts';
@@ -37,6 +39,17 @@ export interface KvBinding {
 export interface D1Binding {
 	readonly binding: string;
 	readonly databaseName: string;
+}
+
+/**
+ * A Workers rate-limit binding with a `simple` limit: `limit` requests for
+ * each key in each `period` seconds.
+ */
+export interface RateLimitBinding {
+	readonly binding: string;
+	readonly namespaceId: RateLimitNamespaceId;
+	readonly limit: number;
+	readonly period: 10 | 60;
 }
 
 export interface QueueProducerBinding {
@@ -98,6 +111,7 @@ export interface WorkerConfig {
 	readonly r2Buckets: readonly R2Binding[];
 	readonly kvNamespaces: readonly KvBinding[];
 	readonly d1Databases: readonly D1Binding[];
+	readonly rateLimits: readonly RateLimitBinding[];
 	readonly queueProducers: readonly QueueProducerBinding[];
 	readonly queueConsumers: readonly QueueConsumerConfig[];
 	readonly services: readonly ServiceBinding[];
@@ -206,6 +220,17 @@ const d1DatabaseBinding = z.object({
 	database_name: databaseName
 });
 
+const rateLimitSimple = z.object({
+	limit: z.number().int().positive(),
+	period: z.literal([10, 60])
+});
+
+const rateLimitBinding = z.object({
+	name: z.string(),
+	namespace_id: rateLimitNamespaceIdSchema,
+	simple: rateLimitSimple
+});
+
 const queueProducer = z.object({ binding: z.string(), queue: queueName });
 
 const serviceBinding = z.object({
@@ -283,6 +308,7 @@ const rawWranglerSchema = z
 		r2_buckets: z.array(r2BucketBinding).default([]),
 		kv_namespaces: z.array(kvNamespaceBinding).default([]),
 		d1_databases: z.array(d1DatabaseBinding).default([]),
+		ratelimits: z.array(rateLimitBinding).default([]),
 		queues: z
 			.object({
 				producers: z.array(queueProducer).default([]),
@@ -367,6 +393,12 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 		d1Databases: raw.d1_databases.map((database) => ({
 			binding: database.binding,
 			databaseName: database.database_name
+		})),
+		rateLimits: raw.ratelimits.map((rateLimit) => ({
+			binding: rateLimit.name,
+			namespaceId: rateLimit.namespace_id,
+			limit: rateLimit.simple.limit,
+			period: rateLimit.simple.period
 		})),
 		queueProducers: raw.queues?.producers ?? [],
 		queueConsumers: (raw.queues?.consumers ?? []).map((consumer) => ({

@@ -343,8 +343,9 @@ last response from `/signup`:
   includes the server's reason. Sign in with an issuer and client whose ID
   tokens meet the conditions in
   [Signing in for the claim](./operator/deploying.md#signing-in-for-the-claim).
-- 429: Cloudflare limited the rate of requests. Wait a few minutes and run
-  `cupboard init` again.
+- 429: the deployment or Cloudflare limited the rate of requests from your IP
+  address. See [Rate limiting](./operator/deploying.md#rate-limiting). Wait a
+  few minutes and run `cupboard init` again.
 - A 5xx status: the control Worker failed. The deploy prints its log for the
   request when Cloudflare has it.
 - 403, repeated: the claim secret didn't take effect on the Worker in time. Run
