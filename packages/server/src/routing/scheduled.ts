@@ -23,6 +23,7 @@ import {
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
+import { type NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import {
 	type NarVerification,
 	narVerifyProgress,
@@ -56,6 +57,10 @@ import {
 import { batchNonEmpty } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import type { VerificationRecordRpcResult } from '../do/server.ts';
+import {
+	holdSubrequests,
+	type SubrequestHold
+} from '../do/subrequest-slice.ts';
 import {
 	ActiveVerificationClaims,
 	raceVerificationOperation,
@@ -373,7 +378,8 @@ export async function sendQueueMessages(
 
 export async function handleMaintenanceQueue(
 	batch: MessageBatch,
-	env: Env
+	env: Env,
+	buffers: NarReadBufferPool
 ): Promise<void> {
 	const logger = rootLogger().with({ worker: 'scheduled', queue: batch.queue });
 
@@ -393,6 +399,7 @@ export async function handleMaintenanceQueue(
 		const decision = await executeMaintenanceQueueMessage(
 			messageLogger,
 			env,
+			buffers,
 			parsed.data
 		);
 
@@ -409,6 +416,7 @@ export async function handleMaintenanceQueue(
 export async function executeMaintenanceQueueMessage(
 	logger: Logger,
 	env: Env,
+	buffers: NarReadBufferPool,
 	message: MaintenanceQueueMessage,
 	options: ExecuteMaintenanceQueueOptions = {}
 ): Promise<MaintenanceQueueDecision> {
@@ -432,11 +440,11 @@ export async function executeMaintenanceQueueMessage(
 			case 'tenant-verify': {
 				// A commit asked for this pass because it stored a blob pending
 				// verification, so it runs regardless of the maintenance cadence.
-				await (options.verifyTenant ?? verifyTenant)(
-					logger,
-					env,
-					message.tenant
-				);
+				const verify: MaintainTenant =
+					options.verifyTenant ??
+					((passLogger, passEnv, tenant) =>
+						verifyTenant(passLogger, passEnv, buffers, tenant));
+				await verify(logger, env, message.tenant);
 				return { action: 'ack' };
 			}
 			case 'offboard': {
@@ -1111,7 +1119,9 @@ type FreshVerificationOutcome =
 async function verifyFreshClaim(
 	logger: Logger,
 	blobs: R2Bucket,
+	buffers: NarReadBufferPool,
 	claim: PendingVerification,
+	firstGet: SubrequestHold,
 	recorder: VerdictRecorder,
 	signal: AbortSignal
 ): Promise<void> {
@@ -1125,7 +1135,7 @@ async function verifyFreshClaim(
 			blobs,
 			claim.r2Key,
 			{ narHash: claim.narHash, narSize: claim.narSize },
-			{ signal, progress }
+			{ buffers, firstGet, signal, progress }
 		);
 		signal.throwIfAborted();
 		outcome = verification.ok ? 'verified' : verification.reason;
@@ -1158,6 +1168,7 @@ async function verifyFreshClaim(
 		});
 		recorder.add({ uploadId: claim.uploadId, verdict: { kind: 'abandoned' } });
 	} finally {
+		firstGet.release();
 		logger.info('pending upload verification finished', {
 			uploadId: claim.uploadId,
 			storePathHash: claim.storePathHash,
@@ -1167,6 +1178,12 @@ async function verifyFreshClaim(
 			compressedBytes: progress.compressedBytes,
 			narBytes: progress.narBytes,
 			reads: progress.reads,
+			ranges: progress.ranges,
+			rangeBufferMisses: progress.rangeBufferMisses,
+			rangeBudgetSkips: progress.rangeBudgetSkips,
+			lostRangeBuffers: progress.lostRangeBuffers,
+			peakRangeBuffers: progress.peakRangeBuffers,
+			rangeBufferAllocations: buffers.state.allocations,
 			durationMs: Date.now() - startedAt
 		});
 	}
@@ -1179,6 +1196,7 @@ async function verifyFreshClaim(
 export async function verifyTenant(
 	logger: Logger,
 	env: Env,
+	buffers: NarReadBufferPool,
 	id: TenantId,
 	batchSize: number = verifyClaimBatchSize,
 	maxNarBytes: number = verifyClaimMaxNarBytes,
@@ -1289,12 +1307,34 @@ export async function verifyTenant(
 					});
 				}
 
-				await mapWithConcurrency(
-					freshClaims,
-					verifyDecodeConcurrency,
-					(claim) =>
-						verifyFreshClaim(logger, env.BLOBS, claim, recorder, signal)
-				);
+				// Set aside every upload's first get before any verification starts,
+				// so ranged reads for earlier uploads cannot spend the subrequests that
+				// later uploads need.
+				const verifications = freshClaims.map((claim) => ({
+					claim,
+					firstGet: holdSubrequests(1)
+				}));
+
+				try {
+					await mapWithConcurrency(
+						verifications,
+						verifyDecodeConcurrency,
+						({ claim, firstGet }) =>
+							verifyFreshClaim(
+								logger,
+								env.BLOBS,
+								buffers,
+								claim,
+								firstGet,
+								recorder,
+								signal
+							)
+					);
+				} finally {
+					for (const { firstGet } of verifications) {
+						firstGet.release();
+					}
+				}
 
 				return recorder.finishRecording();
 			},

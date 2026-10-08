@@ -35,6 +35,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -1227,7 +1228,13 @@ describe('retention grace at publication', () => {
 		const beforeVerification = await graceDeadlineRows(defaultCache());
 
 		await clearDefaultCacheGrace();
-		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+		await verifyTenant(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			currentServerTenant(),
+			10
+		);
 
 		expect({
 			pendingDecision,

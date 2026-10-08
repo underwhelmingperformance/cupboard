@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { constants, zstdCompressSync } from 'node:zlib';
 
 import {
 	cloudflareTest,
@@ -10,6 +12,62 @@ import { defineConfig } from 'vitest/config';
 
 import { resolveTestWorkerBudget } from './src/test-worker-budget.ts';
 
+const mebibyte = 1024 * 1024;
+
+interface CompressedNarFixture {
+	readonly compressed: Uint8Array<ArrayBuffer>;
+	readonly narSha256: string;
+	readonly narSize: number;
+}
+
+/**
+ * A 24 MiB NAR, compressed in the CLI's format (concatenated independent zstd
+ * frames with content checksums) but with one frame per MiB, not one per
+ * 16 MiB. workerd's zstd compressor fails once its output exceeds about 40 KiB,
+ * so the verifier's workers tests receive this fixture as a binding. Most of
+ * each frame is pseudo-random and does not compress, so the compressed object
+ * is about 21 MiB and frame boundaries fall inside ranged reads.
+ */
+function compressedNarFixture(): CompressedNarFixture {
+	const frameCount = 24;
+	const nar = new Uint8Array(frameCount * mebibyte);
+	let state = 0x9e_37_79_b9;
+
+	for (let index = 0; index < nar.byteLength; index += 1) {
+		if (index % mebibyte >= (7 * mebibyte) / 8) {
+			nar[index] = 0x61 + (index % 26);
+			continue;
+		}
+
+		// xorshift32
+		state ^= state << 13;
+		state ^= state >>> 17;
+		state ^= state << 5;
+		nar[index] = state & 0xff;
+	}
+
+	const frames = Array.from({ length: frameCount }, (_, frame) =>
+		zstdCompressSync(nar.subarray(frame * mebibyte, (frame + 1) * mebibyte), {
+			params: { [constants.ZSTD_c_checksumFlag]: 1 }
+		})
+	);
+	const compressed = new Uint8Array(
+		frames.reduce((total, frame) => total + frame.byteLength, 0)
+	);
+	let offset = 0;
+
+	for (const frame of frames) {
+		compressed.set(frame, offset);
+		offset += frame.byteLength;
+	}
+
+	return {
+		compressed,
+		narSha256: createHash('sha256').update(nar).digest('hex'),
+		narSize: nar.byteLength
+	};
+}
+
 export default defineConfig(async () => {
 	const workerBudget = resolveTestWorkerBudget(
 		process.env.CUPBOARD_TEST_WORKERS
@@ -18,6 +76,7 @@ export default defineConfig(async () => {
 	// handed to the workers pool as a binding the setup file replays into D1.
 	const here = path.dirname(fileURLToPath(import.meta.url));
 	const migrations = await readD1Migrations(path.join(here, 'drizzle-d1'));
+	const narFixture = compressedNarFixture();
 
 	return {
 		test: {
@@ -61,7 +120,14 @@ export default defineConfig(async () => {
 									CUPBOARD_SUBREQUESTS_PER_INVOCATION: String(
 										workersInvocationAllowances.free.subrequests
 									),
-									TEST_MIGRATIONS: migrations
+									TEST_MIGRATIONS: migrations,
+									TEST_COMPRESSED_NAR: {
+										narSha256: narFixture.narSha256,
+										narSize: narFixture.narSize
+									}
+								},
+								dataBlobBindings: {
+									TEST_COMPRESSED_NAR_BYTES: narFixture.compressed
 								},
 								// The admission manifest KV the control handler reads and writes;
 								// it is control-plane state, supplied to the worker under test so

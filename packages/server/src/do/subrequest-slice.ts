@@ -147,6 +147,38 @@ export async function withHeldSubrequests<T>(
 }
 
 /**
+ * Subrequests that a pass sets aside for a call that it will make later.
+ * `hasSubrequestsFor` does not admit them for other work. Call `release` just
+ * before making the call, or once the call is no longer needed; a second call
+ * has no effect.
+ */
+export interface SubrequestHold {
+	release(): void;
+}
+
+/**
+ * Sets `subrequests` of the current slice aside until the returned
+ * `SubrequestHold` is released. Outside a slice nothing is metered, and
+ * releasing the hold has no effect.
+ */
+export function holdSubrequests(subrequests: number): SubrequestHold {
+	const slice = sliceScope.getStore();
+	let isReleased = false;
+	slice?.hold(subrequests);
+
+	return {
+		release: () => {
+			if (isReleased) {
+				return;
+			}
+
+			isReleased = true;
+			slice?.releaseHold(subrequests);
+		}
+	};
+}
+
+/**
  * Refuses a unit of work the current slice cannot afford. A caller uses this
  * where the unit was sized by the sender to fit one invocation, so a refusal
  * is a defect in that sizing and not a condition to defer on.

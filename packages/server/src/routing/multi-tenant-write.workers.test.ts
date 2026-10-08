@@ -5,6 +5,7 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import {
 	adminGrants,
 	blobReferenceRows,
@@ -318,7 +319,12 @@ async function runQueuedMaintenanceTick(): Promise<void> {
 	const messages = await enqueueMaintenanceJobs(env, queueCollector());
 
 	for (const message of messages) {
-		await executeMaintenanceQueueMessage(rootLogger(), env, message);
+		await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			message
+		);
 	}
 
 	await verifyTenants(
@@ -330,10 +336,15 @@ async function runQueuedMaintenanceTick(): Promise<void> {
 
 async function verifyTenants(ids: readonly string[]): Promise<void> {
 	for (const id of ids) {
-		await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'tenant-verify',
-			tenant: tenantIdSchema.parse(id)
-		});
+		await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			{
+				kind: 'tenant-verify',
+				tenant: tenantIdSchema.parse(id)
+			}
+		);
 	}
 }
 

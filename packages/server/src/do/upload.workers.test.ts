@@ -25,6 +25,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { buildVersion } from '../build-info.generated.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -2726,7 +2727,7 @@ describe('upload flow', () => {
 					message.kind === 'tenant-verify'
 			);
 
-		await verifyTenant(rootLogger(), env, tenant, 2);
+		await verifyTenant(rootLogger(), env, new NarReadBufferPool(), tenant, 2);
 		expect({
 			sent: continuationMessages(),
 			servable: await servableCount()
@@ -2735,7 +2736,7 @@ describe('upload flow', () => {
 			servable: 2
 		});
 
-		await verifyTenant(rootLogger(), env, tenant, 2);
+		await verifyTenant(rootLogger(), env, new NarReadBufferPool(), tenant, 2);
 		expect({
 			sent: continuationMessages(),
 			servable: await servableCount()
@@ -5009,7 +5010,12 @@ async function runQueuedMaintenanceTick(): Promise<void> {
 	const messages = await enqueueMaintenanceJobs(env, queueCollector());
 
 	for (const message of messages) {
-		await executeMaintenanceQueueMessage(rootLogger(), env, message);
+		await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			message
+		);
 	}
 }
 

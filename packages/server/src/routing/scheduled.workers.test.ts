@@ -8,6 +8,7 @@ import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -206,6 +207,7 @@ describe('scheduled tenant pass failure records', () => {
 		const decision = await executeMaintenanceQueueMessage(
 			rootLogger(),
 			env,
+			new NarReadBufferPool(),
 			{
 				kind: 'cache-catalogue-migration',
 				tenant: tenantIdSchema.parse('suspended-migration')
@@ -356,10 +358,15 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
 
-		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'local-step',
-			tenants: [tenantIdSchema.parse('acme'), tenantIdSchema.parse('beta')]
-		});
+		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			{
+				kind: 'local-step',
+				tenants: [tenantIdSchema.parse('acme'), tenantIdSchema.parse('beta')]
+			}
+		);
 
 		expect({
 			decision,
@@ -378,9 +385,14 @@ describe('scheduled tenant pass failure records', () => {
 		await recordTransition('cache-identity', 'complete');
 		await provisionNamedTenant('acme');
 
-		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'local-step-sweep'
-		});
+		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			{
+				kind: 'local-step-sweep'
+			}
+		);
 
 		expect({
 			decision,
@@ -473,6 +485,7 @@ describe('scheduled tenant pass failure records', () => {
 			executeMaintenanceQueueMessage(
 				rootLogger(),
 				env,
+				new NarReadBufferPool(),
 				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{
 					maintainTenant: (_logger, _env, id) => {
@@ -510,6 +523,7 @@ describe('scheduled tenant pass failure records', () => {
 			executeMaintenanceQueueMessage(
 				rootLogger(),
 				env,
+				new NarReadBufferPool(),
 				{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
 				{
 					verifyTenant: (_logger, _env, id) => {
@@ -531,6 +545,7 @@ describe('scheduled tenant pass failure records', () => {
 		const decision = await executeMaintenanceQueueMessage(
 			rootLogger(),
 			env,
+			new NarReadBufferPool(),
 			{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
 			{ verifyTenant: () => Promise.reject(new Error('verify failed')) }
 		);
@@ -550,6 +565,7 @@ describe('scheduled tenant pass failure records', () => {
 			executeMaintenanceQueueMessage(
 				rootLogger(),
 				env,
+				new NarReadBufferPool(),
 				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{
 					maintainTenant: () =>
@@ -579,6 +595,7 @@ describe('scheduled tenant pass failure records', () => {
 		const decision = await executeMaintenanceQueueMessage(
 			rootLogger(),
 			env,
+			new NarReadBufferPool(),
 			{ kind: 'blob-reaper' },
 			{ runBlobReaper: () => Promise.reject(new Error('r2 unavailable')) }
 		);
@@ -595,6 +612,7 @@ describe('scheduled tenant pass failure records', () => {
 		const decision = await executeMaintenanceQueueMessage(
 			rootLogger(),
 			env,
+			new NarReadBufferPool(),
 			{ kind: 'cas-reaper', phase: 'collect' },
 			{
 				runCasReaper: (_logger, _env, phase) => {
@@ -618,10 +636,15 @@ describe('scheduled tenant pass failure records', () => {
 			tenantIdSchema.parse('retiring')
 		);
 
-		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'offboard',
-			tenant: tenantIdSchema.parse('retiring')
-		});
+		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			new NarReadBufferPool(),
+			{
+				kind: 'offboard',
+				tenant: tenantIdSchema.parse('retiring')
+			}
+		);
 
 		expect({
 			decision,
@@ -643,6 +666,7 @@ describe('scheduled tenant pass failure records', () => {
 				executeMaintenanceQueueMessage(
 					rootLogger(),
 					env,
+					new NarReadBufferPool(),
 					{ kind: 'offboard', tenant: tenantIdSchema.parse(tenant) },
 					{
 						drainTenant: (_logger, _env, id) => {
