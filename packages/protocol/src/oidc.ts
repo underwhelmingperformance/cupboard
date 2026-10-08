@@ -157,9 +157,10 @@ export const tokenRevocationRequestSchema = z.object({
 
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the Cupboard JWT; `issued_token_type` is present for the
-// token-exchange grant. A tenant's interactive session receives a refresh token,
-// which rotates on every refresh. `authorization_details` (RFC 9396) reports the
-// grants the token carries. Field names use the OAuth spelling.
+// token-exchange grant. A sign-in receives a refresh token, which rotates on
+// every refresh, unless its subject token has the tenant or deployment URL as
+// its audience. `authorization_details` (RFC 9396) reports the grants of the
+// token. Field names use the OAuth spelling.
 export const tokenResponseSchema = z.strictObject({
 	access_token: z.string(),
 	token_type: z.literal('Bearer'),

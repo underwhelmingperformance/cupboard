@@ -86,6 +86,7 @@ import {
 	readFetch,
 	resetTestServer,
 	suspendTenant,
+	tenantTestIssuer,
 	testPushId,
 	underOneUnitOfWork,
 	uploadMetadata,
@@ -1624,6 +1625,7 @@ async function installTrustedIdp(
 	options: {
 		failFirstFetches?: number;
 		protectedType?: string;
+		audience?: string;
 		tokenAudience?: string | string[];
 		azp?: string;
 		issuer?: string;
@@ -1646,7 +1648,7 @@ async function installTrustedIdp(
 			})
 		})
 		.setIssuer(issuer)
-		.setAudience(options.tokenAudience ?? 'cupboard-aud')
+		.setAudience(options.tokenAudience ?? options.audience ?? 'cupboard-aud')
 		.setSubject('alice')
 		.setIssuedAt()
 		.setExpirationTime('5m')
@@ -1661,7 +1663,7 @@ async function installTrustedIdp(
 			.values({
 				id: trustRuleIdSchema.parse(`${scope}-rule`),
 				issuer,
-				audience: 'cupboard-aud',
+				audience: options.audience ?? 'cupboard-aud',
 				claimsJson: JSON.stringify({ sub: 'alice' }),
 				permittedGrantsJson: JSON.stringify(trustClassGrants[scope]),
 				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
@@ -3482,18 +3484,55 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('issues no refresh token for a write exchange', async () => {
+	it.each([
+		{ name: 'the tenant URL', audience: tenantTestIssuer },
+		{
+			name: 'the tenant URL with a trailing slash',
+			audience: `${tenantTestIssuer}/`
+		}
+	])(
+		'issues no refresh token when the audience is $name',
+		async ({ audience }) => {
+			const subjectToken = await installTrustedIdp('write', { audience });
+			const exchanged = await exchange(subjectToken, ciRequest);
+
+			expect({
+				exchangeStatus: exchanged.status,
+				expiresIn: exchanged.expires_in,
+				refreshToken: exchanged.refresh_token,
+				rows: await refreshTokenRows()
+			}).toStrictEqual({
+				exchangeStatus: StatusCodes.OK,
+				expiresIn: 900,
+				refreshToken: undefined,
+				rows: []
+			});
+		}
+	);
+
+	it('starts a session for a sign-in under a rule without the wildcard grant', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const exchanged = await exchange(subjectToken, ciRequest);
+		const families = await refreshTokenRows();
 
 		expect({
 			exchangeStatus: exchanged.status,
-			refreshToken: exchanged.refresh_token,
-			rows: await refreshTokenRows()
+			expiresIn: exchanged.expires_in,
+			refreshToken: typeof exchanged.refresh_token,
+			families: families.map((family) => ({
+				activeMemberId: family.activeMemberId,
+				generation: family.generation
+			}))
 		}).toStrictEqual({
 			exchangeStatus: StatusCodes.OK,
-			refreshToken: undefined,
-			rows: []
+			expiresIn: 600,
+			refreshToken: 'string',
+			families: [
+				{
+					activeMemberId: (exchanged.refresh_token ?? '').split('.', 1)[0],
+					generation: 0
+				}
+			]
 		});
 	});
 
@@ -3726,36 +3765,51 @@ describe('refresh grant', () => {
 		}
 	);
 
-	it('does not create a fresh refresh session when current policy permits only CI authority', async () => {
-		const subject = await installTrustedIdp('admin');
-		const outcome = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				const identity = new TenantIdentityService(instance.context);
-				const keys = new AuthKeysService(instance.context, identity);
-				const trust = new OidcTrustService(instance.context, identity);
-				const service = new TokenExchangeService(instance.context, keys, trust);
-				const activeAuthKey = keys.activeAuthKey.bind(keys);
-				const spy = vi
-					.spyOn(keys, 'activeAuthKey')
-					.mockImplementation(async () => {
-						const existing = trust.getRule(
-							trustRuleIdSchema.parse('admin-rule')
-						);
-						trust.removeRule(existing.id);
-						await trust.addRule({
-							issuer: existing.issuer,
-							audience: existing.audience,
-							claims: existing.claims,
-							permittedGrants: storedPermittedGrantsSchema.parse(
-								trustClassGrants.write
-							)
+	it.each([
+		{
+			change: 'removed',
+			expected: { result: 'refused', hasRefreshToken: false, families: 0 }
+		},
+		{
+			change: 'replaced by a rule with only write grants',
+			expected: { result: 'issued', hasRefreshToken: true, families: 1 }
+		}
+	] as const)(
+		'checks current policy before it stores a sign-in session when the rule is $change during signing',
+		async ({ change, expected }) => {
+			const subject = await installTrustedIdp('admin');
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const identity = new TenantIdentityService(instance.context);
+					const keys = new AuthKeysService(instance.context, identity);
+					const trust = new OidcTrustService(instance.context, identity);
+					const service = new TokenExchangeService(
+						instance.context,
+						keys,
+						trust
+					);
+					const activeAuthKey = keys.activeAuthKey.bind(keys);
+					const spy = vi
+						.spyOn(keys, 'activeAuthKey')
+						.mockImplementation(async () => {
+							const existing = trust.getRule(
+								trustRuleIdSchema.parse('admin-rule')
+							);
+							trust.removeRule(existing.id);
+							if (change !== 'removed') {
+								await trust.addRule({
+									issuer: existing.issuer,
+									audience: existing.audience,
+									claims: existing.claims,
+									permittedGrants: storedPermittedGrantsSchema.parse(
+										trustClassGrants.write
+									)
+								});
+							}
+							return activeAuthKey();
 						});
-						return activeAuthKey();
-					});
-				try {
-					const endpoint = new URL('/token', currentOrigin());
-					const request = new Request(endpoint, {
+					const request = new Request(new URL('/token', currentOrigin()), {
 						method: 'POST',
 						headers: { 'content-type': 'application/x-www-form-urlencoded' },
 						body: new URLSearchParams({
@@ -3765,31 +3819,40 @@ describe('refresh grant', () => {
 							authorization_details: JSON.stringify(ciRequest)
 						}).toString()
 					});
-					const response = await service.handleToken(rootLogger(), request);
-					const result = tokenResponseSchema.parse(await response.json());
+					let issued: {
+						readonly result: 'issued' | 'refused';
+						readonly hasRefreshToken: boolean;
+					};
+
+					try {
+						const response = await service.handleToken(rootLogger(), request);
+						const body = tokenResponseSchema.parse(await response.json());
+						issued = {
+							result: 'issued',
+							hasRefreshToken: body.refresh_token !== undefined
+						};
+					} catch (error) {
+						expect(error).toBeInstanceOf(TenantSubjectTokenUntrustedError);
+						issued = { result: 'refused', hasRefreshToken: false };
+					} finally {
+						spy.mockRestore();
+					}
+
 					return {
-						status: response.status,
-						refresh: result.refresh_token,
-						grants: result.authorization_details,
+						...issued,
 						families: drizzle(state.storage, {
 							schema: { refreshTokenFamilies }
 						})
 							.select()
 							.from(refreshTokenFamilies)
-							.all()
+							.all().length
 					};
-				} finally {
-					spy.mockRestore();
 				}
-			}
-		);
-		expect(outcome).toStrictEqual({
-			status: 200,
-			refresh: undefined,
-			grants: ciRequest,
-			families: []
-		});
-	});
+			);
+
+			expect(outcome).toStrictEqual(expected);
+		}
+	);
 
 	it('keeps the presented refresh token usable when loading the signing key fails during rotation', async () => {
 		const exchanged = await exchange(await installTrustedIdp('admin'));
@@ -4640,7 +4703,9 @@ describe('requested grants', () => {
 	});
 
 	it('issues a token confined to the requested grant', async () => {
-		const subjectToken = await installTrustedIdp('write');
+		const subjectToken = await installTrustedIdp('write', {
+			audience: tenantTestIssuer
+		});
 		const exchanged = await exchange(subjectToken, ciRequest);
 		const claims = decodeJwt(exchanged.access_token);
 
@@ -4690,7 +4755,9 @@ describe('requested grants', () => {
 	});
 
 	it('deterministically composes overlapping explicit authority', async () => {
-		const subjectToken = await installTrustedIdp('write');
+		const subjectToken = await installTrustedIdp('write', {
+			audience: tenantTestIssuer
+		});
 		const overlappingGrant: PermittedGrant = {
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
@@ -4698,7 +4765,9 @@ describe('requested grants', () => {
 				cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
 			}
 		};
-		await installAdditionalTrustRule('overlapping-rule', [overlappingGrant]);
+		await installAdditionalTrustRule('overlapping-rule', [overlappingGrant], {
+			audience: tenantTestIssuer
+		});
 
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
@@ -4727,17 +4796,23 @@ describe('requested grants', () => {
 	it.each(['run/1', 'other/1'])(
 		'composes actions for the same cache without extending root authority to %s',
 		async (root) => {
-			const subject = await installTrustedIdp('write');
-			await installAdditionalTrustRule('retain-rule', [
-				{
-					type: 'cupboard_cache',
-					actions: ['root:set'],
-					resources: {
-						cache: { kind: 'named', exact: 'ci', validate: 'cacheName' },
-						root: { exact: 'run/', validate: 'rootName' }
+			const subject = await installTrustedIdp('write', {
+				audience: tenantTestIssuer
+			});
+			await installAdditionalTrustRule(
+				'retain-rule',
+				[
+					{
+						type: 'cupboard_cache',
+						actions: ['root:set'],
+						resources: {
+							cache: { kind: 'named', exact: 'ci', validate: 'cacheName' },
+							root: { exact: 'run/', validate: 'rootName' }
+						}
 					}
-				}
-			]);
+				],
+				{ audience: tenantTestIssuer }
+			);
 			const requested = [
 				{
 					type: 'cupboard_cache',
@@ -4787,7 +4862,9 @@ describe('requested grants', () => {
 	);
 
 	it('composes exact explicit authority from separate rules without refresh', async () => {
-		const subjectToken = await installTrustedIdp('write');
+		const subjectToken = await installTrustedIdp('write', {
+			audience: tenantTestIssuer
+		});
 		const privateGrant: PermittedGrant = {
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
@@ -4795,7 +4872,9 @@ describe('requested grants', () => {
 				cache: { kind: 'named', exact: 'private', validate: 'cacheName' }
 			}
 		};
-		await installAdditionalTrustRule('private-rule', [privateGrant]);
+		await installAdditionalTrustRule('private-rule', [privateGrant], {
+			audience: tenantTestIssuer
+		});
 		const requested = [
 			...ciRequest,
 			{

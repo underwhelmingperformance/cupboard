@@ -356,8 +356,9 @@ against current policy. Removing a rule changes the policy; an equivalent
 matching rule can still permit the request.
 
 An exchange that omits explicit grants still requires a single matching rule.
-Only an interactive rule can issue implicit wildcard authority. CI composition
-does not create refresh tokens.
+Only an interactive rule can issue implicit wildcard authority. An exchange
+whose token has the tenant URL as its audience, as a CI job's token does, gets
+no refresh token.
 
 ## Writing a rule by hand
 

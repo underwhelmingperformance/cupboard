@@ -3032,12 +3032,13 @@ bound value would escape the namespace, is refused at issue time. The issued
 token can only ever reach the asking PR's own cache, so a build that reaches the
 token is confined to that cache whatever it does with it.
 
-Refresh tokens are only issued for interactive owner/admin sessions. A
-claim-bound CI exchange gets a short-lived access token and, when it needs
-another one, presents a fresh provider OIDC token so the server can re-check the
-current provider claims against the current trust rule. An owner/admin refresh
-re-reads the trust rule and reissues the grants it currently permits, so a rule
-change takes effect on the next refresh, and a refresh may present narrower
+Refresh tokens are issued for every human sign-in, whatever grants the matching
+trust rules permit. A CI exchange, whose subject token has the tenant URL as its
+audience, gets a short-lived access token and, when it needs another one,
+presents a fresh provider OIDC token so the server can re-check the current
+provider claims against the current trust rule. An owner/admin refresh re-reads
+the trust rule and reissues the grants it currently permits, so a rule change
+takes effect on the next refresh, and a refresh may present narrower
 `authorization_details` to step down just as attenuation does.
 
 Operator sign-ins at the control plane also receive a 30-day refresh family,

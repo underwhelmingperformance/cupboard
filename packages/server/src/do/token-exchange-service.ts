@@ -21,7 +21,6 @@ import {
 import {
 	firstClaimMismatch,
 	hasMatchingOidcTrustIdentity,
-	isRuleInteractive,
 	type OidcClaims,
 	type OidcTrustRule,
 	oidcTrustVerificationTarget,
@@ -96,6 +95,7 @@ import {
 	oauthJsonResponse
 } from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
+import { isAudienceBound } from '../oidc/audience-binding.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
@@ -782,11 +782,7 @@ export class TokenExchangeService {
 
 			const refreshToken = prepared.refreshToken;
 
-			if (
-				refreshToken === undefined ||
-				current.rule === undefined ||
-				!isRuleInteractive(current.rule)
-			) {
+			if (refreshToken === undefined) {
 				return false;
 			}
 
@@ -834,7 +830,8 @@ export class TokenExchangeService {
 			);
 		const isInteractive =
 			authority.kind === 'refresh' ||
-			(rule !== undefined && isRuleInteractive(rule) && !isContentReadOnly);
+			(!isAudienceBound(authority.identity, this.authKeys.authIssuer()) &&
+				!isContentReadOnly);
 		const ttlSeconds = isInteractive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
 		const accessToken = await this.issueRuleToken(
 			rule,
@@ -843,9 +840,10 @@ export class TokenExchangeService {
 			ttlSeconds
 		);
 
-		// Issue refresh tokens only for interactive rules. CI exchanges authenticate
-		// each run with a fresh external subject token. A refresh token would turn one
-		// federated CI exchange into a persistent session.
+		// A CI job's token has the tenant URL as its audience, and the job exchanges
+		// a fresh token for each run. A refresh token would turn one federated CI
+		// exchange into a persistent session, so an audience-bound exchange gets
+		// none.
 		const refreshToken = isInteractive
 			? await this.prepareRefreshToken(
 					authority.identity,

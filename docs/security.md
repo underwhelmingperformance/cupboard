@@ -124,8 +124,10 @@ authority. A token whose audience is the deployment URL, such as the token of a
 GitHub Actions job, gets only an access token, because the job can request a new
 token from GitHub whenever it needs one.
 
-A tenant issues the same kind of session to an administrator whose trust rule
-gives the wildcard grant. Other tenant sign-ins get only an access token.
+A tenant issues the same kind of session to everyone who signs in, whatever
+grants the matching trust rules permit. A token whose audience is the tenant
+URL, as for a CI job, gets only an access token. A tenant also issues no refresh
+token for a request for content-read grants only, such as a read acquisition.
 
 ## Revoking access
 
