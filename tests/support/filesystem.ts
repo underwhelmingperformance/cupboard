@@ -61,8 +61,7 @@ export async function makeWritable(target: string): Promise<void> {
 const missedEventCheckIntervalMs = 50;
 
 /**
-Resolves once a file exists. Filesystem events report it promptly, and a
-periodic check covers an event the watcher does not deliver.
+Resolves once a file exists.
 */
 export async function waitForFile(
 	filePath: string,
@@ -79,6 +78,8 @@ export async function waitForFile(
 			throw error;
 		}
 	}
+
+	signal?.throwIfAborted();
 
 	await new Promise<void>((resolve, reject) => {
 		const expectedName = path.basename(filePath);
