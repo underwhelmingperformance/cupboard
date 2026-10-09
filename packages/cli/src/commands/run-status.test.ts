@@ -4,6 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { readResourcesSchema } from '@cupboard/protocol/read-access';
+import { StatusCodes } from 'http-status-codes';
 import { expect, it, onTestFinished } from 'vitest';
 
 it.each([
@@ -141,11 +142,15 @@ it.each([
 		exitCode: 75,
 		oversizedIdentity: false
 	},
-	...[200, 401, 503].map((status) => ({
+	...[
+		{ status: StatusCodes.OK, exitCode: 1 },
+		{ status: StatusCodes.UNAUTHORIZED, exitCode: 77 },
+		{ status: StatusCodes.SERVICE_UNAVAILABLE, exitCode: 75 }
+	].map(({ status, exitCode }) => ({
 		status,
 		error: '',
 		problem: 'oversized-identity-response',
-		exitCode: status === 401 ? 77 : 75,
+		exitCode,
 		oversizedIdentity: true
 	}))
 ])(
