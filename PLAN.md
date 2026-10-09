@@ -6966,7 +6966,7 @@ Specific faults seen on a dotfiles pull-request run:
 3. [ ] Print the configure job's settings, the release or source that
        `resolve-cupboard` chose, and the operation that "select cache operation"
        chose. Remove the notice that a reuse view applies only to branch runs.
-4. [ ] Give cohort jobs readable names, such as
+4. [x] Give cohort jobs readable names, such as
        `x86_64-linux on nixbuild.net (8 targets)`. The matrix key remains the
        job's identity.
 5. [ ] In `build-push` and `build-cohort`, give each target's attribute and root

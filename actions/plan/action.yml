@@ -85,6 +85,12 @@ inputs:
       planning, so floating content-addressed outputs must be built on the
       runner instead.
     required: false
+  builders:
+    description:
+      Nix builders specification for targets with remote set to true. The plan
+      uses it only to show the builder's host in each cohort job's name and in
+      the job summary.
+    required: false
   build:
     description: >-
       Control when to build the requested outputs. `missing` uses an output from
@@ -203,6 +209,7 @@ runs:
         ENABLE_PACKING: ${{ inputs.enable-packing }}
         PACK_CAPACITY: ${{ inputs.pack-capacity }}
         STORE: ${{ inputs.store }}
+        BUILDERS: ${{ inputs.builders }}
         BUILD: ${{ inputs.build }}
         SUBSTITUTER: ${{ inputs.substituter }}
         PUBLISH: ${{ inputs.publish }}
@@ -221,7 +228,8 @@ runs:
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"
           --enable-packing "$ENABLE_PACKING"
-          --store "$STORE")
+          --store "$STORE"
+          --builders "$BUILDERS")
         args+=(--build "$BUILD" --substituter "$SUBSTITUTER" --publish "$PUBLISH")
         if [ -n "$PACK_CAPACITY" ]; then
           args+=(--pack-capacity "$PACK_CAPACITY")

@@ -791,6 +791,7 @@ jobs:
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
+          builders: ${{ inputs.store == '' && inputs.builders || '' }}
           build: ${{ inputs.build }}
           substituter: ${{ inputs.substituter }}
           publish: ${{ needs.configure.outputs.publish }}
@@ -813,7 +814,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.cohort-matrix) }}
-    name: ${{ matrix.key }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.runsOn }}
     timeout-minutes: 180
     permissions:

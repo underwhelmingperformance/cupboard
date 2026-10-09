@@ -789,6 +789,9 @@ describe('cohort planning and publication', () => {
 		const cohort = workflow.jobs.cohort;
 
 		expect({
+			// The plan gives each matrix entry a readable name. The key remains the
+			// cohort's identity for artifacts, receipts and cohort selection.
+			name: cohort?.name,
 			if: cohort?.if,
 			strategy: cohort?.strategy,
 			// A tolerated target failure is the action's decision, so neither the job
@@ -798,6 +801,7 @@ describe('cohort planning and publication', () => {
 				...(cohort?.steps ?? []).map((step) => step['continue-on-error'])
 			].filter((value) => value !== undefined)
 		}).toStrictEqual({
+			name: '${{ matrix.name }}',
 			if: "${{ needs.plan.outputs.cohort-count != '0' }}",
 			strategy: {
 				'fail-fast': false,
@@ -833,7 +837,8 @@ describe('cohort planning and publication', () => {
 					'${{ secrets.destination_read_password || secrets.read_password || secrets.fallback_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
-				store: '${{ inputs.store }}'
+				store: '${{ inputs.store }}',
+				builders: "${{ inputs.store == '' && inputs.builders || '' }}"
 			}
 		]);
 	});
