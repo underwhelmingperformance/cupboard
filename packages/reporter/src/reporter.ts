@@ -150,6 +150,30 @@ export interface ResultColumn<K extends string> {
 }
 
 /**
+ * A table cell that links to a page. The job summary renders it as a markdown
+ * link. Terminal and GitHub modes print {@link ResultLink.plainText}.
+ */
+export class ResultLink {
+	constructor(
+		readonly text: string,
+		readonly url: URL
+	) {}
+
+	/**
+	The link text followed by the URL in parentheses.
+	*/
+	get plainText(): string {
+		return `${this.text} (${this.url.href})`;
+	}
+}
+
+export type ResultCell = string | ResultLink;
+
+function plainCellText(cell: ResultCell): string {
+	return typeof cell === 'string' ? cell : cell.plainText;
+}
+
+/**
  * A display-only table with one cell in each row for every column, in column
  * order. Build one with {@link ResultTable.of}.
  */
@@ -161,7 +185,7 @@ export class ResultTable {
 	 */
 	static of<const K extends string>(
 		columns: readonly ResultColumn<K>[],
-		rows: readonly Readonly<Record<NoInfer<K>, string>>[]
+		rows: readonly Readonly<Record<NoInfer<K>, ResultCell>>[]
 	): ResultTable {
 		return new ResultTable(
 			columns.map((column) => column.label),
@@ -171,7 +195,7 @@ export class ResultTable {
 
 	private constructor(
 		readonly columns: readonly string[],
-		readonly rows: readonly (readonly string[])[]
+		readonly rows: readonly (readonly ResultCell[])[]
 	) {}
 
 	/**
@@ -179,14 +203,15 @@ export class ResultTable {
 	 * padded to align the columns. `measure` gives a cell's display width.
 	 */
 	lines(measure: (text: string) => number = (text) => text.length): string[] {
-		const widths = this.columns.map((label, index) =>
-			Math.max(
-				measure(label),
-				...this.rows.map((row) => measure(row[index] ?? ''))
-			)
+		const textRows = [
+			this.columns,
+			...this.rows.map((row) => row.map((cell) => plainCellText(cell)))
+		];
+		const widths = this.columns.map((_label, index) =>
+			Math.max(...textRows.map((row) => measure(row[index] ?? '')))
 		);
 
-		return [this.columns, ...this.rows].map((cells) =>
+		return textRows.map((cells) =>
 			cells
 				.map(
 					(cell, index) =>
@@ -203,10 +228,11 @@ export class ResultTable {
  * result event, and every mode appends them to `resultFile` when configured.
  * The other fields are display-only.
  *
- * Terminal mode renders `rows` and `table` as a card. GitHub mode writes the
- * title, then `rows` as `label: value` lines, then `table` as aligned columns.
- * When a phase reports the result through {@link PhaseContext.result}, GitHub
- * mode writes it inside the phase's group.
+ * Terminal mode renders `rows`, `table` and `code` as a card. GitHub mode
+ * writes the title, then `rows` as `label: value` lines, then `table` as
+ * aligned columns, then the lines of `code`. When a phase reports the result
+ * through {@link PhaseContext.result}, GitHub mode writes it inside the phase's
+ * group.
  */
 export interface ResultPayload<T = unknown> {
 	readonly kind: string;
@@ -215,17 +241,55 @@ export interface ResultPayload<T = unknown> {
 	readonly rows: readonly ResultRow[];
 	readonly table?: ResultTable;
 	/**
-	 * Terminal and GitHub modes render this text when neither `rows` nor
-	 * `table` has a row. JSON mode still emits the empty `data` value.
+	 * Text to print verbatim after the rows and the table, such as
+	 * configuration lines for the reader to copy.
+	 */
+	readonly code?: string;
+	/**
+	 * A sentence after `code`, made of text and links. The job summary writes it
+	 * as a paragraph with markdown links, and the other modes print each link as
+	 * {@link ResultLink.plainText}.
+	 */
+	readonly note?: readonly ResultCell[];
+	/**
+	 * Terminal and GitHub modes render this text when `rows`, `table`, `code`
+	 * and `note` are all empty. JSON mode still emits the empty `data` value.
 	 */
 	readonly empty?: string;
 	/**
 	 * When this is true and `GITHUB_STEP_SUMMARY` is set, GitHub mode also
 	 * appends the result to that file as markdown: a heading from the title, a
-	 * two-column table for `rows`, followed by a table for `table`. The other
-	 * modes ignore it.
+	 * two-column table for `rows`, a table for `table` and a fenced code block
+	 * for `code`. The other modes ignore it.
 	 */
 	readonly jobSummary?: boolean;
+}
+
+/**
+ * Returns a result's `note` as plain text, or `undefined` when it has none.
+ */
+export function resultNoteText(
+	payload: Pick<ResultPayload, 'note'>
+): string | undefined {
+	if (payload.note === undefined || payload.note.length === 0) {
+		return undefined;
+	}
+
+	return payload.note.map((cell) => plainCellText(cell)).join('');
+}
+
+/**
+ * Splits a result's `code` into lines and removes one trailing line break.
+ * Returns an empty list when `code` is missing or empty.
+ */
+export function resultCodeLines(
+	payload: Pick<ResultPayload, 'code'>
+): string[] {
+	if (payload.code === undefined || payload.code === '') {
+		return [];
+	}
+
+	return payload.code.replace(/\r?\n$/u, '').split(/\r?\n/u);
 }
 
 export interface Reporter {
@@ -756,7 +820,9 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 			...payload.rows.map((row) => `${row.label}: ${row.value}`),
 			...(payload.table === undefined || payload.table.rows.length === 0
 				? []
-				: payload.table.lines())
+				: payload.table.lines()),
+			...resultCodeLines(payload),
+			...[resultNoteText(payload)].filter((text) => text !== undefined)
 		];
 
 		if (lines.length === 0 && payload.empty !== undefined) {
@@ -1014,10 +1080,18 @@ function jobSummaryMarkdown(payload: ResultPayload): string {
 			? []
 			: [markdownTable(payload.table.columns, payload.table.rows)])
 	];
+	const code = resultCodeLines(payload);
+	const blocks = [
+		...tables,
+		...(code.length === 0 ? [] : [markdownCode(code)]),
+		...(payload.note === undefined || payload.note.length === 0
+			? []
+			: [payload.note.map((cell) => markdownCell(cell)).join('')])
+	];
 	const body =
-		tables.length === 0 && payload.empty !== undefined
+		blocks.length === 0 && payload.empty !== undefined
 			? [markdownText(payload.empty)]
-			: tables;
+			: blocks;
 
 	return [`### ${markdownText(payload.title ?? payload.kind)}`, ...body]
 		.map((block) => `${block}\n\n`)
@@ -1026,15 +1100,41 @@ function jobSummaryMarkdown(payload: ResultPayload): string {
 
 function markdownTable(
 	columns: readonly string[],
-	rows: readonly (readonly string[])[]
+	rows: readonly (readonly ResultCell[])[]
 ): string {
 	return [
 		markdownTableRow(columns.map((column) => markdownText(column))),
 		markdownTableRow(columns.map(() => '---')),
 		...rows.map((cells) =>
-			markdownTableRow(cells.map((cell) => markdownText(cell)))
+			markdownTableRow(cells.map((cell) => markdownCell(cell)))
 		)
 	].join('\n');
+}
+
+function markdownCell(cell: ResultCell): string {
+	if (typeof cell === 'string') {
+		return markdownText(cell);
+	}
+
+	// GitHub splits table cells at `|` before it parses links, and the URL
+	// serialiser leaves `|` unencoded.
+	const destination = cell.url.href.replaceAll('|', '%7C');
+
+	return `[${markdownText(cell.text)}](<${destination}>)`;
+}
+
+// The fence must be longer than any run of backticks in the code, or that run
+// would close the block early.
+function markdownCode(lines: readonly string[]): string {
+	const longestRun = Math.max(
+		0,
+		...lines.flatMap((text) =>
+			(text.match(/`+/gu) ?? []).map((run) => run.length)
+		)
+	);
+	const fence = '`'.repeat(Math.max(3, longestRun + 1));
+
+	return [fence, ...lines, fence].join('\n');
 }
 
 function markdownTableRow(cells: readonly string[]): string {

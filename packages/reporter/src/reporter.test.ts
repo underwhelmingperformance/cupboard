@@ -19,6 +19,7 @@ import {
 	parseReporterResults,
 	type Reporter,
 	type ReporterMode,
+	ResultLink,
 	ResultTable,
 	wasErrorReported
 } from './reporter.ts';
@@ -881,6 +882,62 @@ describe('createGithubReporter', () => {
 		]);
 	});
 
+	it('writes a link cell as its text and URL, and code after the table', () => {
+		const release = new URL('https://github.com/acme/app/releases/tag/vX.Y.Z');
+
+		createGithubReporter().result({
+			kind: 'settings',
+			title: 'Settings',
+			data: {},
+			rows: [],
+			table: ResultTable.of(
+				[
+					{ key: 'setting', label: 'Setting' },
+					{ key: 'value', label: 'Value' }
+				],
+				[
+					{
+						setting: 'Cupboard',
+						value: new ResultLink('vX.Y.Z', release)
+					},
+					{ setting: 'Cache', value: 'default' }
+				]
+			),
+			code: 'extra-substituters = https://cupboard.example.workers.dev/acme\n'
+		});
+
+		expect(written).toStrictEqual([
+			'Settings\n',
+			'Setting   Value\n',
+			'Cupboard  vX.Y.Z (https://github.com/acme/app/releases/tag/vX.Y.Z)\n',
+			'Cache     default\n',
+			'extra-substituters = https://cupboard.example.workers.dev/acme\n'
+		]);
+	});
+
+	it('writes a note after the code, with each link as its text and URL', () => {
+		const guide = new URL('https://github.com/acme/app/blob/main/guide.md');
+
+		createGithubReporter().result({
+			kind: 'nix-config',
+			title: 'nix.conf',
+			data: {},
+			rows: [],
+			code: 'extra-substituters = https://cupboard.example.workers.dev/acme',
+			note: [
+				'Readers also need a credential. See ',
+				new ResultLink('the guide', guide),
+				'.'
+			]
+		});
+
+		expect(written).toStrictEqual([
+			'nix.conf\n',
+			'extra-substituters = https://cupboard.example.workers.dev/acme\n',
+			'Readers also need a credential. See the guide (https://github.com/acme/app/blob/main/guide.md).\n'
+		]);
+	});
+
 	it('writes a phase error before closing its group', async () => {
 		const failure = new ReporterTestError('build-failed');
 
@@ -1142,6 +1199,136 @@ describe('job summary', () => {
 					'| --- | --- |',
 					'| hello | published |',
 					'| checks.fmt | failed |',
+					'',
+					''
+				].join('\n')
+			}
+		]);
+	});
+
+	it('renders a link cell as a markdown link and escapes only its text', () => {
+		const { appended, reporter } = summaryReporter({
+			GITHUB_STEP_SUMMARY: summaryFile
+		});
+		const release = new URL(
+			'https://github.com/acme/app_x/releases/tag/v1.2.3_rc1?a=b|c&d'
+		);
+
+		reporter.result({
+			kind: 'settings',
+			title: 'Settings',
+			data: {},
+			jobSummary: true,
+			rows: [],
+			table: ResultTable.of(
+				[
+					{ key: 'setting', label: 'Setting' },
+					{ key: 'value', label: 'Value' }
+				],
+				[
+					{
+						setting: 'Cupboard',
+						value: new ResultLink('v1.2.3_rc1', release)
+					}
+				]
+			)
+		});
+
+		expect(appended).toStrictEqual([
+			{
+				path: summaryFile,
+				text: [
+					'### Settings',
+					'',
+					'| Setting | Value |',
+					'| --- | --- |',
+					String.raw`| Cupboard | [v1.2.3\_rc1](<https://github.com/acme/app_x/releases/tag/v1.2.3_rc1?a=b%7Cc&d>) |`,
+					'',
+					''
+				].join('\n')
+			}
+		]);
+	});
+
+	it.each([
+		{
+			name: 'code',
+			code: 'extra-substituters = https://cupboard.example.workers.dev/acme\nextra-trusted-public-keys = cupboard-acme-1:abc=\n',
+			block: [
+				'```',
+				'extra-substituters = https://cupboard.example.workers.dev/acme',
+				'extra-trusted-public-keys = cupboard-acme-1:abc=',
+				'```'
+			]
+		},
+		{
+			name: 'code that contains a fence',
+			code: 'a\n````\nb',
+			block: ['`````', 'a', '````', 'b', '`````']
+		}
+	])('appends $name as a fenced block after the tables', ({ code, block }) => {
+		const { appended, reporter } = summaryReporter({
+			GITHUB_STEP_SUMMARY: summaryFile
+		});
+
+		reporter.result({
+			kind: 'nix-config',
+			title: 'nix.conf',
+			data: {},
+			jobSummary: true,
+			rows: [{ label: 'Cache', value: 'default' }],
+			code
+		});
+
+		expect(appended).toStrictEqual([
+			{
+				path: summaryFile,
+				text: [
+					'### nix.conf',
+					'',
+					'|  |  |',
+					'| --- | --- |',
+					'| Cache | default |',
+					'',
+					...block,
+					'',
+					''
+				].join('\n')
+			}
+		]);
+	});
+
+	it('appends a note after the code block as a paragraph with markdown links', () => {
+		const { appended, reporter } = summaryReporter({
+			GITHUB_STEP_SUMMARY: summaryFile
+		});
+		const guide = new URL('https://github.com/acme/app/blob/main/guide.md');
+
+		reporter.result({
+			kind: 'nix-config',
+			title: 'nix.conf',
+			data: {},
+			jobSummary: true,
+			rows: [],
+			code: 'extra-substituters = https://cupboard.example.workers.dev/acme',
+			note: [
+				'A read_credential is needed. See ',
+				new ResultLink('the guide', guide),
+				'.'
+			]
+		});
+
+		expect(appended).toStrictEqual([
+			{
+				path: summaryFile,
+				text: [
+					'### nix.conf',
+					'',
+					'```',
+					'extra-substituters = https://cupboard.example.workers.dev/acme',
+					'```',
+					'',
+					String.raw`A read\_credential is needed. See [the guide](<https://github.com/acme/app/blob/main/guide.md>).`,
 					'',
 					''
 				].join('\n')

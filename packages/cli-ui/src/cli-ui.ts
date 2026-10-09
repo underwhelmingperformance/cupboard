@@ -34,6 +34,8 @@ import {
 	type Reporter,
 	type ReporterMode,
 	type ReporterOptions,
+	resultCodeLines,
+	resultNoteText,
 	type ResultPayload,
 	type ResultRow,
 	type ResultTable,
@@ -117,13 +119,15 @@ function formatTable(table: ResultTable, colours: Colours): string {
 }
 
 function formatResult(
-	payload: Pick<ResultPayload, 'rows' | 'table'>,
+	payload: Pick<ResultPayload, 'rows' | 'table' | 'code' | 'note'>,
 	colours: Colours,
 	contentWidth: number
 ): string {
 	return [
 		formatRows(payload.rows, colours, contentWidth),
-		payload.table === undefined ? '' : formatTable(payload.table, colours)
+		payload.table === undefined ? '' : formatTable(payload.table, colours),
+		resultCodeLines(payload).join('\n'),
+		resultNoteText(payload) ?? ''
 	]
 		.filter((part) => part !== '')
 		.join('\n\n');
@@ -132,7 +136,7 @@ function formatResult(
 function writeRows(
 	output: Writable,
 	title: string,
-	payload: Pick<ResultPayload, 'rows' | 'table'>,
+	payload: Pick<ResultPayload, 'rows' | 'table' | 'code' | 'note'>,
 	colours: Colours
 ): void {
 	output.write(
@@ -769,7 +773,12 @@ function clackReporter(
 
 		const title = payload.title ?? resultTitle(payload.kind);
 
-		if (payload.rows.length === 0 && (payload.table?.rows.length ?? 0) === 0) {
+		if (
+			payload.rows.length === 0 &&
+			(payload.table?.rows.length ?? 0) === 0 &&
+			resultCodeLines(payload).length === 0 &&
+			resultNoteText(payload) === undefined
+		) {
 			if (payload.empty !== undefined) {
 				log.info(payload.empty, { output });
 			}

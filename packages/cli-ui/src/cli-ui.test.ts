@@ -8,6 +8,7 @@ import { S_BAR, S_ERROR, S_INFO } from '@clack/prompts';
 import {
 	parseReporterResults,
 	type ReporterMode,
+	ResultLink,
 	ResultTable
 } from '@cupboard/reporter';
 import pc from 'picocolors';
@@ -652,6 +653,88 @@ describe('createCliUi terminal results', () => {
 			'│ │  Attribute   Outcome                                                       │',
 			'│ │  hello       published                                                     │',
 			'│ │  checks.fmt  failed                                                        │',
+			'│ └────────────────────────────────────────────────────────────────────────────┘',
+			''
+		]);
+	});
+
+	it('renders a link cell as text and URL, and code below the table', async () => {
+		const release = new URL('https://github.com/acme/app/releases/tag/vX.Y.Z');
+		const rendered = await render((reporter) => {
+			reporter.result({
+				kind: 'settings',
+				title: 'Settings',
+				data: {},
+				rows: [],
+				table: ResultTable.of(
+					[
+						{ key: 'setting', label: 'Setting' },
+						{ key: 'value', label: 'Value' }
+					],
+					[
+						{
+							setting: 'Cupboard',
+							value: new ResultLink('vX.Y.Z', release)
+						}
+					]
+				),
+				code: 'extra-substituters = https://cupboard.example.workers.dev/acme'
+			});
+		});
+
+		expect(rendered.split('\n')).toStrictEqual([
+			'│ ┌─Settings───────────────────────────────────────────────────────────────────┐',
+			'│ │  Setting   Value                                                           │',
+			'│ │  Cupboard  vX.Y.Z (https://github.com/acme/app/releases/tag/vX.Y.Z)        │',
+			'│ │                                                                            │',
+			'│ │  extra-substituters = https://cupboard.example.workers.dev/acme            │',
+			'│ └────────────────────────────────────────────────────────────────────────────┘',
+			''
+		]);
+	});
+
+	it.each([undefined, 'No targets.'])(
+		'renders a standalone note with an empty fallback of %s',
+		async (empty) => {
+			const guide = new URL('https://github.com/acme/app/blob/main/guide.md');
+			const rendered = await render((reporter) => {
+				reporter.result({
+					kind: 'guide',
+					title: 'Guide',
+					data: {},
+					rows: [],
+					note: ['See ', new ResultLink('the guide', guide), '.'],
+					...(empty !== undefined && { empty })
+				});
+			});
+
+			expect(rendered.split('\n')).toStrictEqual([
+				'│ ┌─Guide──────────────────────────────────────────────────────────────────────┐',
+				'│ │  See the guide (https://github.com/acme/app/blob/main/guide.md).           │',
+				'│ └────────────────────────────────────────────────────────────────────────────┘',
+				''
+			]);
+		}
+	);
+
+	it('renders a note below the code', async () => {
+		const guide = new URL('https://github.com/acme/app/blob/main/guide.md');
+		const rendered = await render((reporter) => {
+			reporter.result({
+				kind: 'nix-config',
+				title: 'nix.conf',
+				data: {},
+				rows: [],
+				code: 'extra-substituters = https://cupboard.example.workers.dev/acme',
+				note: ['See ', new ResultLink('the guide', guide), '.']
+			});
+		});
+
+		expect(rendered.split('\n')).toStrictEqual([
+			'│ ┌─nix.conf───────────────────────────────────────────────────────────────────┐',
+			'│ │  extra-substituters = https://cupboard.example.workers.dev/acme            │',
+			'│ │                                                                            │',
+			'│ │  See the guide (https://github.com/acme/app/blob/main/guide.md).           │',
 			'│ └────────────────────────────────────────────────────────────────────────────┘',
 			''
 		]);
