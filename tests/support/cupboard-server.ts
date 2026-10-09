@@ -16,6 +16,7 @@ import {
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import {
+	schemaTransitions,
 	type TransitionId,
 	transitionIds
 } from '@cupboard/protocol/deployment';
@@ -224,7 +225,10 @@ export class CupboardTestServer {
 								useSQLite: true
 							}
 						},
-						d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
+						d1Databases: {
+							CUPBOARD_DB: 'cupboard-e2e',
+							CONTROL_DB: 'cupboard-control-e2e'
+						},
 						r2Buckets: { BLOBS: r2Credentials.bucketName },
 						kvNamespaces: { TENANT_CACHE: 'tenant-cache' },
 						// The maintenance queue, consumed by the control Worker as in
@@ -272,14 +276,44 @@ export class CupboardTestServer {
 			stage = 'database-binding';
 			const database = await worker.getD1Database('CUPBOARD_DB', 'cupboard');
 			stage = 'database-migrations';
-			await applyD1Migrations(database);
+			const controlDatabase = await worker.getD1Database(
+				'CONTROL_DB',
+				'cupboard'
+			);
+			await applyD1Migrations(database, {
+				directory: 'drizzle-d1',
+				phase: 'expand'
+			});
+			await applyD1Migrations(controlDatabase, {
+				directory: 'drizzle-control-d1',
+				phase: 'all'
+			});
+			await controlDatabase
+				.prepare(
+					"INSERT INTO control_database_ready (id, source_database_id, state) VALUES ('current', 'cupboard-e2e', 'ready')"
+				)
+				.run();
+			await database
+				.prepare(
+					"INSERT INTO control_database_split (id, target_database_id, frozen_at, copied_at) VALUES ('current', 'cupboard-control-e2e', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+				)
+				.run();
+			await applyD1Migrations(database, {
+				directory: 'drizzle-d1',
+				phase: 'contract'
+			});
 			stage = 'deployment-transitions';
 			const timestamp = new Date().toISOString();
 			const completedTransitions =
 				options.completedTransitions ?? transitionIds;
 
 			for (const transition of completedTransitions) {
-				await database
+				const target =
+					schemaTransitions.find(({ id }) => id === transition)?.database ===
+					'CONTROL_DB'
+						? controlDatabase
+						: database;
+				await target
 					.prepare(
 						'INSERT OR REPLACE INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (?, ?, ?, ?)'
 					)
@@ -624,7 +658,7 @@ export class CupboardTestServer {
 		readonly audience: string;
 		readonly claims?: Readonly<Record<string, string>>;
 	}): Promise<void> {
-		const d1 = await this.worker.getD1Database('CUPBOARD_DB', 'cupboard');
+		const d1 = await this.worker.getD1Database('CONTROL_DB', 'cupboard');
 		const now = new Date();
 
 		await d1
@@ -725,11 +759,21 @@ function byCodeUnit(a: string, b: string): number {
 // drizzle names migrations with a zero-padded numeric prefix, so filename order
 // is apply order; statements within a file are split on its breakpoint marker.
 async function applyD1Migrations(
-	d1: Awaited<ReturnType<Miniflare['getD1Database']>>
+	d1: Awaited<ReturnType<Miniflare['getD1Database']>>,
+	spec: {
+		readonly directory: string;
+		readonly phase: 'expand' | 'contract' | 'all';
+	}
 ): Promise<void> {
-	const directory = path.join(root, 'packages/server/drizzle-d1');
+	const directory = path.join(root, 'packages/server', spec.directory);
 	const files = readdirSync(directory)
-		.filter((name) => name.endsWith('.sql'))
+		.filter(
+			(name) =>
+				name.endsWith('.sql') &&
+				(spec.phase === 'all' ||
+					(spec.phase === 'contract') ===
+						(name === '0042_control_database_contract.sql'))
+		)
 		.toSorted(byCodeUnit);
 
 	for (const file of files) {

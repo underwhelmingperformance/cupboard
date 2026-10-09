@@ -7,7 +7,7 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
+import { env as tenantEnv } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NarReadBufferPool } from '../blob/nar-read-buffers.ts';
@@ -29,10 +29,13 @@ import {
 	pushPathToTenant,
 	resetTestServer,
 	testBase,
+	testControlEnv,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
+
+const env = Object.assign({}, tenantEnv, testControlEnv);
 
 // Remove tenant narinfo objects before deleting the shared `blob_state` row.
 // If a pass stops early, that row makes the next pass try again. Keep reference

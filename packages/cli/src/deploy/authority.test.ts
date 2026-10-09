@@ -1288,8 +1288,8 @@ async function decideWith(seeded: {
 	readonly planned: boolean;
 	readonly isControlDeployed?: boolean;
 }): Promise<unknown> {
-	const bound = await migratedDatabase('9999');
-	const planned = await migratedDatabase('9999');
+	const bound = await migratedDatabase('0042');
+	const planned = await migratedDatabase('0042');
 
 	try {
 		if (seeded.bound) {
@@ -1912,4 +1912,103 @@ describe('adminAccessFor', () => {
 			'https://cache.example.com:https://cupboard.example.workers.dev'
 		]);
 	});
+});
+
+describe('legacy control database transfer authority', () => {
+	it.each([undefined, emptyDatabase, claimedDatabase])(
+		'authorises the existing administrator before importing target %j',
+		async (targetDatabase) => {
+			const world = harness({
+				database: claimedDatabase,
+				plannedDatabaseName: 'cupboard-control',
+				interactive: false
+			});
+			const authority = await decideAuthority(
+				{ ...world.deployment, legacyTransfer: true },
+				{
+					...world.effects,
+					api: controlDatabaseApi(
+						{
+							cupboard: claimedDatabase,
+							...(targetDatabase !== undefined && {
+								'cupboard-control': targetDatabase
+							})
+						},
+						world.calls
+					)
+				}
+			);
+			expect(describeAuthority(authority)).toStrictEqual({
+				kind: 'admin',
+				admin
+			});
+			expect(world.calls.some((call) => call.startsWith('checkAdmin:'))).toBe(
+				true
+			);
+		}
+	);
+
+	it('refuses a copied target administrator whose identity differs', async () => {
+		const world = harness({
+			database: claimedDatabase,
+			plannedDatabaseName: 'cupboard-control',
+			interactive: false
+		});
+		const other = {
+			...claimedDatabase,
+			adminRow: JSON.stringify([
+				admin.issuer,
+				'another-operator',
+				admin.audience
+			])
+		};
+		await expect(
+			decideAuthority(
+				{ ...world.deployment, legacyTransfer: true },
+				{
+					...world.effects,
+					api: controlDatabaseApi(
+						{ cupboard: claimedDatabase, 'cupboard-control': other },
+						world.calls
+					)
+				}
+			)
+		).rejects.toBeInstanceOf(AdminDatabaseMismatchError);
+	});
+});
+
+it('resumes irreversible transfer without renewing a frozen source credential', async () => {
+	const world = harness({
+		database: claimedDatabase,
+		interactive: false,
+		credential: {
+			get: () => Promise.reject(new OwnerLoginRequiredError()),
+			refresh: () => Promise.reject(new OwnerLoginRequiredError())
+		}
+	});
+	const authority = await decideAuthority(
+		{ ...world.deployment, controlTransferRecovery: true },
+		world.effects
+	);
+	expect({
+		authority: describeAuthority(authority),
+		authentication: world.calls.filter(
+			(call) =>
+				call.startsWith('checkAdmin:') || call.startsWith('credentialFor:')
+		)
+	}).toStrictEqual({ authority: { kind: 'admin', admin }, authentication: [] });
+});
+
+it('refuses a deployment URL change during forward recovery', async () => {
+	const world = harness({
+		database: claimedDatabase,
+		interactive: false,
+		newUrl: newDomainUrl
+	});
+	await expect(
+		decideAuthority(
+			{ ...world.deployment, controlTransferRecovery: true },
+			world.effects
+		)
+	).rejects.toThrow('resume must keep');
 });

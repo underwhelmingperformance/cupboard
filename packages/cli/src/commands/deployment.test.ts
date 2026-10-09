@@ -59,7 +59,9 @@ const complete: ParsedDeploymentTransitionsResponse = {
 		{ id: 'tenant-retry-clock', state: 'complete', updatedAt: recorded },
 		{ id: 'tenant-schema-progress', state: 'complete', updatedAt: recorded },
 		{ id: 'control-refresh-sessions', state: 'complete', updatedAt: recorded },
-		{ id: 'control-subject-nonces', state: 'complete', updatedAt: recorded }
+		{ id: 'control-subject-nonces', state: 'complete', updatedAt: recorded },
+		{ id: 'control-database-split', state: 'complete', updatedAt: recorded },
+		{ id: 'control-database-initial', state: 'complete', updatedAt: recorded }
 	],
 	unrecognised: []
 };
@@ -327,8 +329,25 @@ it('shows active schema migration progress by default', async () => {
 	]);
 });
 
-// Rows that this build does not define, and what each command prints for them.
 const unrecognisedCases = [
+	{
+		name: 'a known transition expanded in another database',
+		row: { id: 'cache-identity', state: 'expanded' },
+		value: `expanded ${since}; this build defines this transition for a different database, and no contract migration of it has started, so cupboard deploy leaves it unchanged`,
+		isRefused: false,
+		keepDefined: true
+	},
+	{
+		name: 'a known transition with contract migrations started in another database',
+		row: {
+			id: 'cache-identity',
+			state: 'expanded',
+			contractedAt: recorded
+		},
+		value: `expanded ${since}; this build defines this transition for a different database, and cupboard deploy stops because its contract migrations have started and may have removed schema that this build needs`,
+		isRefused: true,
+		keepDefined: true
+	},
 	{
 		name: 'a later-release row in state expanded',
 		row: { id: 'later-transition', state: 'expanded' },
@@ -543,6 +562,14 @@ describe('runDeploymentStatus', () => {
 							label: 'Transition control-subject-nonces',
 							value: `complete ${since}`
 						},
+						{
+							label: 'Transition control-database-split',
+							value: `complete ${since}`
+						},
+						{
+							label: 'Transition control-database-initial',
+							value: `complete ${since}`
+						},
 						{ label: `Transition ${row.id}`, value },
 						{ label: 'Required local step', value: '5' },
 						{
@@ -738,12 +765,12 @@ describe('runDeploymentResume', () => {
 
 	it.each(unrecognisedCases)(
 		'lists $name and leaves it out of the transitions to complete',
-		async ({ row, value, isRefused }) => {
+		async ({ row, value, isRefused, keepDefined }) => {
 			const payloads: ResultPayload[] = [];
 			const infos: string[] = [];
 			const transitions = {
 				transitions: complete.transitions.filter(
-					(transition) => transition.id !== row.id
+					(transition) => keepDefined === true || transition.id !== row.id
 				),
 				unrecognised: [{ ...row, updatedAt: recorded }]
 			};

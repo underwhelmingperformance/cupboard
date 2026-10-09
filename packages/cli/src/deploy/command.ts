@@ -60,6 +60,12 @@ import {
 	resourceNameProblem
 } from './config.ts';
 import {
+	ControlDatabaseTransferError,
+	transferControlDatabase
+} from './control-database-transfer.ts';
+import { validateTransferredControlDatabase } from './control-database-validation.ts';
+import { type D1QueryApi } from './d1-query.ts';
+import {
 	collectResources,
 	deploymentReviewRows,
 	type DeployOptions,
@@ -1599,6 +1605,60 @@ async function deployFlow(
 		);
 	});
 
+	const migrateControlDatabase = async (transition: string): Promise<void> => {
+		if (transition !== 'control-database-split') {
+			return;
+		}
+		const sourceName = deployedConfig.control.d1Databases.find(
+			(binding) => binding.binding === 'CUPBOARD_DB'
+		)?.databaseName;
+		const targetName = deployedConfig.control.d1Databases.find(
+			(binding) => binding.binding === 'CONTROL_DB'
+		)?.databaseName;
+		const source =
+			sourceName === undefined
+				? undefined
+				: await agreedApi.findD1Database(sourceName);
+		const target =
+			targetName === undefined
+				? undefined
+				: await agreedApi.findD1Database(targetName);
+		if (source === undefined || target === undefined) {
+			throw new ControlDatabaseTransferError(
+				'both control database bindings must exist'
+			);
+		}
+		const queryApi: D1QueryApi = {
+			queryRows: (id, sql) => agreedApi.d1QueryRows(id, sql),
+			queryBatch: (id, statements) => agreedApi.d1QueryBatch(id, statements)
+		};
+		await transferControlDatabase({
+			api: queryApi,
+			source,
+			target,
+			now: new Date(),
+			validateKeys: async () => {
+				const url = await deploymentUrl(
+					agreedApi,
+					deployedConfig.control.name,
+					agreed.domain
+				);
+				if (url === undefined) {
+					throw new DeploymentSettlementUrlMissingError();
+				}
+				await validateTransferredControlDatabase({
+					api: agreedApi,
+					cleanupApi: claimSecretCleanupApi(clientWithSignal, agreed.accountId),
+					scriptName: deployedConfig.control.name,
+					validate: (secret) =>
+						controlRpc(new URL(url), {
+							signal: runtimeOptions.signal
+						}).database.validate({ secret })
+				});
+			}
+		});
+	};
+
 	const agreedPlan = reviewedPlan;
 	let outcome: OnboardOutcome;
 
@@ -1618,6 +1678,7 @@ async function deployFlow(
 			deploy: async () => {
 				await runDeploy({
 					plan: agreedPlan,
+					beforeContract: migrateControlDatabase,
 					...(migrateTenants !== undefined && {
 						settleTenants: migrateTenants
 					}),

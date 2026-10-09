@@ -75,10 +75,17 @@ describe('unboundable members', () => {
 		).toThrow(UnboundableIoError);
 	});
 
-	it('refuses a D1 session through the bounded database', () => {
-		const database = boundedD1(env.CUPBOARD_DB);
+	it('bounds and counts a primary D1 session', async () => {
+		const session = boundedD1(env.CUPBOARD_DB).withSession('first-primary');
+		const result = await withSubrequestSlice(
+			async () => {
+				const row = await session.prepare('SELECT 1 AS value').first();
+				return { row, remaining: hasSubrequestsFor(1) };
+			},
+			{ subrequests: 1, reserve: 0 }
+		);
 
-		expect(() => database.withSession()).toThrow(UnboundableIoError);
+		expect(result).toStrictEqual({ row: { value: 1 }, remaining: false });
 	});
 });
 

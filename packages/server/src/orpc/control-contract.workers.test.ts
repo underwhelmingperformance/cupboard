@@ -28,12 +28,14 @@ import * as d1Schema from '../db/d1-schema.ts';
 import {
 	adminGrants,
 	cacheWriteGrants,
+	controlFetch,
 	controlWorkerFetch,
 	currentOrigin,
 	issueControlAdminToken,
 	issueServerSignedToken,
 	recordTransition,
 	resetTestServer,
+	testControlDatabase,
 	testControlEnv
 } from '../test-support.ts';
 
@@ -130,6 +132,75 @@ function controlClient(token?: string): ControlClient {
 
 describe('control contract round trip', () => {
 	beforeEach(resetTestServer);
+
+	it('validates copied keys with a bearer token while legacy authority is frozen', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		await env.CUPBOARD_DB.prepare(
+			"INSERT INTO control_database_split (id, target_database_id, frozen_at) VALUES ('current', 'control', '2026-01-01T00:00:00.000Z')"
+		).run();
+
+		expect(await client.database.validate({})).toStrictEqual({ valid: true });
+		await expect(client.keys.rotate()).rejects.toMatchObject({
+			status: StatusCodes.SERVICE_UNAVAILABLE
+		});
+	});
+
+	it('restricts temporary secret authentication to copied-key validation', async () => {
+		const secret = 'temporary-deploy-validation-secret';
+		const configuration = { CONTROL_DATABASE_VALIDATION_SECRET: secret };
+		const validate = await controlFetch(
+			'/control/database/validate',
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ secret })
+			},
+			configuration
+		);
+		const wrong = await controlFetch(
+			'/control/database/validate',
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ secret: 'incorrect' })
+			},
+			configuration
+		);
+		const rotate = await controlFetch(
+			'/control/keys/rotate',
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ secret })
+			},
+			configuration
+		);
+
+		expect({
+			validate: { status: validate.status, body: await validate.json() },
+			wrong: wrong.status,
+			rotate: rotate.status
+		}).toStrictEqual({
+			validate: { status: StatusCodes.OK, body: { valid: true } },
+			wrong: StatusCodes.UNAUTHORIZED,
+			rotate: StatusCodes.UNAUTHORIZED
+		});
+	});
+
+	it('bounds the validation body before temporary secret authentication', async () => {
+		const secret = 'temporary-deploy-validation-secret';
+		const response = await controlFetch(
+			'/control/database/validate',
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: `${' '.repeat(512)}${JSON.stringify({ secret })}`
+			},
+			{ CONTROL_DATABASE_VALIDATION_SECRET: secret }
+		);
+
+		expect(response.status).toBe(StatusCodes.REQUEST_TOO_LONG);
+	});
 
 	it('initialises the immutable instance name idempotently', async () => {
 		await env.CUPBOARD_DB.prepare('DELETE FROM instance_config').run();
@@ -1205,5 +1276,29 @@ describe('control contract round trip', () => {
 			code: 'UNAUTHORIZED',
 			status: StatusCodes.UNAUTHORIZED
 		});
+	});
+});
+
+it('reports transitions from each database and classifies target rows by their role', async () => {
+	const updatedAt = '2026-01-01T00:00:00.000Z';
+	await testControlDatabase().batch([
+		testControlDatabase()
+			.prepare(
+				'INSERT INTO deployment_transition (id, state, updated_at) VALUES (?, ?, ?)'
+			)
+			.bind('control-database-initial', 'complete', updatedAt),
+		testControlDatabase()
+			.prepare(
+				'INSERT INTO deployment_transition (id, state, updated_at) VALUES (?, ?, ?)'
+			)
+			.bind('cache-identity', 'expanded', updatedAt)
+	]);
+	const client = controlClient(await issueControlAdminToken());
+	await expect(client.deployment.transitions()).resolves.toStrictEqual({
+		transitions: [
+			{ id: 'blob-reference-read-authority', state: 'complete', updatedAt },
+			{ id: 'control-database-initial', state: 'complete', updatedAt }
+		],
+		unrecognised: [{ id: 'cache-identity', state: 'expanded', updatedAt }]
 	});
 });

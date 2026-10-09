@@ -58,9 +58,15 @@ Other tenants refuse the token.
 Each tenant signs its narinfos with its own key. If a client trusts one tenant's
 key, that doesn't make it trust any other tenant.
 
-All tenants share one D1 database and one R2 bucket. Inside those, it's
-cupboard's code that keeps tenants apart, not Cloudflare's bindings. Tenants
-can't run code of their own.
+All tenants share the `CUPBOARD_DB` D1 database and one R2 bucket. Inside those
+resources, cupboard's code separates tenants. Tenant code is trusted with shared
+store references, usage accounting and the tenant registry. Tenants cannot run
+code of their own.
+
+Control signing keys, trust rules, operator sessions, consumed subject nonces,
+the administrator record and maintenance reports use a separate D1 database,
+`CONTROL_DB`. Only the control Worker binds that database. Tenant Workers and
+tenant Durable Objects cannot read or change control authority through D1.
 
 ### Shared storage
 
@@ -96,7 +102,7 @@ Attestations record where published store paths came from. See
 | What                                     | Where it's kept                                  | How it's protected                                                                                                            |
 | ---------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | Tenant signing and access-token keys     | The tenant's Durable Object storage              | Cloudflare's storage encryption. cupboard adds none.                                                                          |
-| Control keys, which sign operator tokens | D1                                               | Encrypted with `CONTROL_KEY_WRAP_SECRET`.                                                                                     |
+| Control keys, which sign operator tokens | `CONTROL_DB`                                     | Encrypted with `CONTROL_KEY_WRAP_SECRET`.                                                                                     |
 | `CONTROL_KEY_WRAP_SECRET`                | Only the control Worker, and the operator's copy | The tenant Worker never has it. HKDF also uses this secret to derive the keys that encrypt operator refresh tokens.           |
 | R2 access key                            | The tenant Worker                                | It gives access to every tenant's stored objects.                                                                             |
 | `PUSH_ID_SIGNING_KEY`                    | Both Workers                                     | It signs push IDs. HKDF also uses this secret to derive the keys that encrypt tenant refresh tokens.                          |

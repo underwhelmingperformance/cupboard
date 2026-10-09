@@ -15,6 +15,11 @@ import { withCleanupSync } from '@cupboard/shared/cleanup';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
+import {
+	mergeD1Bindings,
+	readD1Bindings
+} from '../packages/cli/src/deploy/config.ts';
+
 // Drizzle generates migrations by diffing the schema against the latest
 // snapshot, so a snapshot that has drifted from the live schema makes the next
 // `generate` re-emit an ALTER for a column that already exists. That ALTER is
@@ -112,6 +117,7 @@ export interface MigrationSet {
 	*/
 	readonly journal: readonly string[];
 	readonly sql: (file: string) => string;
+	readonly beforeMigration?: (database: DatabaseSync, file: string) => void;
 }
 
 export function readMigrationSet(directory: string): MigrationSet {
@@ -128,6 +134,23 @@ export function readMigrationSet(directory: string): MigrationSet {
 			.toSorted((left, right) => left.idx - right.idx)
 			.map((entry) => `${entry.tag}.sql`),
 		sql: (file) => readFileSync(path.join(directory, file), 'utf8')
+	};
+}
+
+export function withControlDatabaseTransfer(set: MigrationSet): MigrationSet {
+	return {
+		...set,
+		beforeMigration: (database, file) => {
+			set.beforeMigration?.(database, file);
+			if (file !== '0042_control_database_contract.sql') {
+				return;
+			}
+			database
+				.prepare(
+					"INSERT INTO control_database_split (id, target_database_id, frozen_at, copied_at) VALUES ('current', 'target', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+				)
+				.run();
+		}
 	};
 }
 
@@ -279,6 +302,7 @@ function replay(
 	return withCleanupSync(
 		() => {
 			for (const file of files) {
+				set.beforeMigration?.(database, file);
 				for (const statement of statementsOf(set, file)) {
 					try {
 						database.prepare(statement).run();
@@ -411,7 +435,9 @@ export interface MigrationCheckResult {
  */
 export function checkD1Migrations(
 	set: MigrationSet,
-	transitions: readonly SchemaTransition<string>[] = schemaTransitions
+	transitions: readonly SchemaTransition<string>[] = schemaTransitions.filter(
+		(transition) => (transition.database ?? 'CUPBOARD_DB') === 'CUPBOARD_DB'
+	)
 ): MigrationCheckResult {
 	if (!isSameSequence(set.files, set.journal)) {
 		throw new MigrationJournalOrderError(set.files, set.journal);
@@ -471,16 +497,32 @@ export function checkD1Migrations(
 }
 
 function main(): void {
-	const directory = path.resolve(
-		import.meta.dirname,
-		'..',
-		'packages/server/drizzle-d1'
+	const server = path.resolve(import.meta.dirname, '..', 'packages/server');
+	const bindings = mergeD1Bindings(
+		['wrangler.jsonc', 'wrangler.tenant.jsonc'].flatMap((file) =>
+			readD1Bindings(readFileSync(path.join(server, file), 'utf8'))
+		)
 	);
-	const result = checkD1Migrations(readMigrationSet(directory));
-
-	console.log(
-		`Applied ${String(result.applied)} D1 migrations cleanly${result.replayed.length === 0 ? '' : `, and replayed them with ${result.replayed.join(', ')} expanded before the earlier contract migrations`}.`
-	);
+	for (const binding of bindings) {
+		const directory = path.join(
+			server,
+			binding.migrationsDirectory ??
+				(binding.binding === 'CUPBOARD_DB' ? 'drizzle-d1' : 'migrations')
+		);
+		const set = readMigrationSet(directory);
+		const result = checkD1Migrations(
+			binding.binding === 'CUPBOARD_DB'
+				? withControlDatabaseTransfer(set)
+				: set,
+			schemaTransitions.filter(
+				(transition) =>
+					(transition.database ?? 'CUPBOARD_DB') === binding.binding
+			)
+		);
+		console.log(
+			`Applied ${String(result.applied)} ${binding.binding} migrations cleanly${result.replayed.length === 0 ? '' : `, and replayed them with ${result.replayed.join(', ')} expanded before the earlier contract migrations`}.`
+		);
+	}
 }
 
 if (

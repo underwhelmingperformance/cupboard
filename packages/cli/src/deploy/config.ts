@@ -39,6 +39,7 @@ export interface KvBinding {
 export interface D1Binding {
 	readonly binding: string;
 	readonly databaseName: string;
+	readonly migrationsDirectory?: string;
 }
 
 /**
@@ -217,8 +218,73 @@ const kvNamespaceBinding = z.object({
 
 const d1DatabaseBinding = z.object({
 	binding: z.string(),
-	database_name: databaseName
+	database_name: databaseName,
+	migrations_dir: z.string().optional()
 });
+
+export function readD1Bindings(source: string): readonly D1Binding[] {
+	const raw = z
+		.object({ d1_databases: z.array(d1DatabaseBinding).default([]) })
+		.parse(JSON5.parse(source));
+	return raw.d1_databases.map((database) => ({
+		binding: database.binding,
+		databaseName: database.database_name,
+		...(database.migrations_dir !== undefined && {
+			migrationsDirectory: database.migrations_dir
+		})
+	}));
+}
+
+export class D1BindingConflictError extends Error {
+	constructor(binding: string) {
+		super(
+			`D1 binding ${binding} has conflicting database names or migration directories.`
+		);
+		this.name = 'D1BindingConflictError';
+	}
+}
+
+export function mergeD1Bindings(
+	databases: readonly D1Binding[]
+): readonly D1Binding[] {
+	const bindings = new Map<string, D1Binding>();
+	for (const database of databases) {
+		const existing = bindings.get(database.binding);
+		const alias = bindings
+			.values()
+			.find(
+				(candidate) =>
+					candidate.databaseName === database.databaseName &&
+					candidate.binding !== database.binding
+			);
+		if (
+			alias !== undefined ||
+			(existing !== undefined &&
+				(existing.databaseName !== database.databaseName ||
+					(existing.migrationsDirectory !== undefined &&
+						database.migrationsDirectory !== undefined &&
+						existing.migrationsDirectory !== database.migrationsDirectory)))
+		) {
+			throw new D1BindingConflictError(database.binding);
+		}
+		bindings.set(
+			database.binding,
+			existing !== undefined && database.migrationsDirectory === undefined
+				? existing
+				: database
+		);
+	}
+	return bindings.values().toArray();
+}
+
+export function deploymentD1Bindings(
+	config: DeploymentConfig
+): readonly D1Binding[] {
+	return mergeD1Bindings([
+		...config.control.d1Databases,
+		...config.tenant.d1Databases
+	]);
+}
 
 const rateLimitSimple = z.object({
 	limit: z.number().int().positive(),
@@ -392,7 +458,10 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 		})),
 		d1Databases: raw.d1_databases.map((database) => ({
 			binding: database.binding,
-			databaseName: database.database_name
+			databaseName: database.database_name,
+			...(database.migrations_dir !== undefined && {
+				migrationsDirectory: database.migrations_dir
+			})
 		})),
 		rateLimits: raw.ratelimits.map((rateLimit) => ({
 			binding: rateLimit.name,

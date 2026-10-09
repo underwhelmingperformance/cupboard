@@ -4,8 +4,7 @@ import {
 	type DeploymentTransitionsResponse,
 	readTransitionRow,
 	schemaTransitions,
-	type TransitionId,
-	transitionIds
+	type TransitionId
 } from '@cupboard/protocol/deployment';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -23,35 +22,41 @@ import * as d1Schema from '../db/d1-schema.ts';
 export async function controlDeploymentTransitions(
 	env: Env
 ): Promise<DeploymentTransitionsResponse> {
-	const database: DrizzleD1Database<typeof d1Schema> = drizzleD1(
-		env.CUPBOARD_DB,
-		{ schema: d1Schema }
-	);
-	const rows = await database
-		.select()
-		.from(d1Schema.deploymentTransition)
-		.all();
 	const recorded = new Map<TransitionId, DeploymentTransition>();
 	const unrecognised: DeploymentTransitionsResponse['unrecognised'] = [];
-
-	for (const row of rows) {
-		const reading = readTransitionRow(transitionIds, row);
-
-		if (reading.kind !== 'defined') {
-			unrecognised.push({
-				id: row.id,
-				state: row.state,
-				updatedAt: row.updatedAt,
-				...(row.contractedAt !== null && { contractedAt: row.contractedAt })
-			});
-			continue;
-		}
-
-		recorded.set(reading.id, {
-			id: reading.id,
-			state: reading.state,
-			updatedAt: row.updatedAt
+	for (const [binding, client] of [
+		['CUPBOARD_DB', env.CUPBOARD_DB],
+		['CONTROL_DB', env.CONTROL_DB]
+	] as const) {
+		const database: DrizzleD1Database<typeof d1Schema> = drizzleD1(client, {
+			schema: d1Schema
 		});
+		const ids = schemaTransitions
+			.filter(
+				(transition) => (transition.database ?? 'CUPBOARD_DB') === binding
+			)
+			.map((transition) => transition.id);
+		const rows = await database
+			.select()
+			.from(d1Schema.deploymentTransition)
+			.all();
+		for (const row of rows) {
+			const reading = readTransitionRow(ids, row);
+			if (reading.kind !== 'defined') {
+				unrecognised.push({
+					id: row.id,
+					state: row.state,
+					updatedAt: row.updatedAt,
+					...(row.contractedAt !== null && { contractedAt: row.contractedAt })
+				});
+				continue;
+			}
+			recorded.set(reading.id, {
+				id: reading.id,
+				state: reading.state,
+				updatedAt: row.updatedAt
+			});
+		}
 	}
 
 	return {

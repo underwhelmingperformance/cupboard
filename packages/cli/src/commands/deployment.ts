@@ -21,7 +21,10 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { readStoredTransition } from '../deploy/deployment-state.ts';
+import {
+	readStoredTransition,
+	type StoredTransitionReading
+} from '../deploy/deployment-state.ts';
 import {
 	pendingText,
 	stalledTenantText,
@@ -68,13 +71,21 @@ function tenantSummary(status: LocalStepStatus): string {
 	].join(', ');
 }
 
+// The server classifies each row against the database that contains it.
+function readUnrecognisedTransition(
+	row: StoredTransitionRow
+): StoredTransitionReading {
+	const reading = readStoredTransition(transitionIds, row);
+	return reading.kind === 'defined' ? readStoredTransition([], row) : reading;
+}
+
 function readinessRows(
 	status: LocalStepStatus,
 	transitions: ParsedDeploymentTransitionsResponse,
 	url?: URL
 ): ResultRow[] {
 	const isIncompatible = transitions.unrecognised.some(
-		(row) => readStoredTransition(transitionIds, row).kind === 'refused'
+		(row) => readUnrecognisedTransition(row).kind === 'refused'
 	);
 
 	const completed = new Set(
@@ -122,18 +133,20 @@ function readinessRows(
 	];
 }
 
-// What this build's `cupboard deploy` does with a row that the server lists
-// under `unrecognised`.
 function unrecognisedRowText(row: StoredTransitionRow): string {
 	const since = `${row.state} since ${formatTimestamp(row.updatedAt)}`;
-	const reading = readStoredTransition(transitionIds, row);
+	const reading = readUnrecognisedTransition(row);
+	const definition =
+		readStoredTransition(transitionIds, row).kind === 'defined'
+			? 'this build defines this transition for a different database'
+			: 'this build does not define this transition';
 
 	if (reading.kind === 'unrecognised') {
-		return `${since}; this build does not define this transition, and no contract migration of it has started, so cupboard deploy leaves it unchanged`;
+		return `${since}; ${definition}, and no contract migration of it has started, so cupboard deploy leaves it unchanged`;
 	}
 
 	if (reading.kind === 'refused' && reading.reason === 'contracted') {
-		return `${since}; this build does not define this transition, and cupboard deploy stops because its contract migrations have started and may have removed schema that this build needs`;
+		return `${since}; ${definition}, and cupboard deploy stops because its contract migrations have started and may have removed schema that this build needs`;
 	}
 
 	if (reading.kind === 'refused' && reading.reason === 'unknown-state') {
@@ -273,9 +286,7 @@ export async function runDeploymentResume(
 		]
 	});
 	const refused = unrecognised
-		.filter(
-			(row) => readStoredTransition(transitionIds, row).kind === 'refused'
-		)
+		.filter((row) => readUnrecognisedTransition(row).kind === 'refused')
 		.map((row) => row.id);
 	const reached = `Every active or suspended tenant has reached local step ${String(status.required)}.`;
 	const humanReached =

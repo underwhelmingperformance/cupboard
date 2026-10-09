@@ -25,6 +25,7 @@ import {
 	AdminDatabaseMismatchError,
 	AdminTokenRequiredError,
 	type AuthorityApi,
+	ControlDatabaseAuthorityError,
 	type DeployAuthority,
 	establishAuthority,
 	removeLeftoverClaimSecret,
@@ -1589,6 +1590,173 @@ describe('establishAuthority', () => {
 	}
 
 	const freshDatabaseName: TextEdit = { kind: 'set', value: 'fresh' };
+
+	it.each([
+		{
+			name: 'a matching frozen copy',
+			state: 'copying' as const,
+			result: 'admin'
+		},
+		{ name: 'a matching ready copy', state: 'ready' as const, result: 'admin' },
+		{
+			name: 'a completed shared transition with retained markers',
+			state: 'ready' as const,
+			transitionState: 'complete',
+			result: 'admin-token'
+		},
+		{ name: 'no target marker', marker: false, result: 'admin-token' },
+		{ name: 'no source freeze marker', frozen: false, result: 'admin-token' },
+		{
+			name: 'no shared contract timestamp',
+			contracted: false,
+			result: 'admin-token'
+		},
+		{
+			name: 'another recorded source',
+			source: 'other-id',
+			result: 'database-authority'
+		},
+		{
+			name: 'another recorded target',
+			target: 'other-id',
+			result: 'admin-token'
+		},
+		{
+			name: 'another planned target',
+			plannedTarget: 'fresh',
+			result: 'database-authority'
+		},
+		{
+			name: 'another planned shared database',
+			plannedShared: 'fresh',
+			result: 'database'
+		},
+		{
+			name: 'another deployment URL',
+			domain: 'cache.example.com',
+			result: 'database-authority'
+		}
+	])('checks the provider recovery proof with $name', async (options) => {
+		const sharedId = databaseIdSchema.parse('cupboard-id');
+		const controlId = databaseIdSchema.parse('control-id');
+		const freshId = databaseIdSchema.parse('fresh-id');
+		const calls: string[] = [];
+		const base = claimedAccount(calls);
+		const splitConfig = parseDeploymentConfig(
+			JSON.stringify({
+				name: 'cupboard',
+				compatibility_date: '2026-05-15',
+				d1_databases: [
+					{
+						binding: 'CUPBOARD_DB',
+						database_name: options.plannedShared ?? 'cupboard'
+					},
+					{
+						binding: 'CONTROL_DB',
+						database_name: options.plannedTarget ?? 'control'
+					}
+				]
+			}),
+			JSON.stringify({
+				name: 'cupboard-tenant',
+				compatibility_date: '2026-05-15'
+			})
+		);
+		const api: AuthorityApi = {
+			...base,
+			findD1Database: (name) =>
+				Promise.resolve(
+					name === 'cupboard'
+						? sharedId
+						: name === 'control'
+							? controlId
+							: freshId
+				),
+			findD1DatabaseName: (id) =>
+				Promise.resolve(id === sharedId ? 'cupboard' : 'control'),
+			getScriptConfiguration: async (script) => {
+				const configuration = await base.getScriptConfiguration(script);
+
+				return configuration === undefined
+					? undefined
+					: {
+							...configuration,
+							bindings: [
+								...configuration.bindings,
+								{ type: 'd1', name: 'CONTROL_DB', database_id: controlId }
+							]
+						};
+			},
+			d1QueryRows: (id, sql) => {
+				if (sql.includes('control_database_ready')) {
+					return Promise.resolve(
+						options.marker === false
+							? []
+							: sql.includes('pragma_table_info')
+								? ['id', 'source_database_id', 'state']
+								: [
+										JSON.stringify([
+											options.source ?? sharedId,
+											options.state ?? 'copying'
+										])
+									]
+					);
+				}
+
+				if (sql.includes('control_database_split')) {
+					if (sql.includes('pragma_table_info')) {
+						return Promise.resolve(['id', 'target_database_id', 'frozen_at']);
+					}
+
+					return Promise.resolve(
+						options.frozen === false ||
+							options.contracted === false ||
+							(options.transitionState === 'complete' &&
+								sql.includes("state = 'expanded'"))
+							? []
+							: [options.target ?? controlId]
+					);
+				}
+
+				return base.d1QueryRows(id === controlId ? sharedId : id, sql);
+			}
+		};
+		const getToken = vi.fn(() => Promise.reject(new OwnerLoginRequiredError()));
+		const checkAdmin = vi.fn(() => Promise.resolve());
+		const result = await settled(
+			establishAuthority(
+				{ agreed: { config: splitConfig, domain: options.domain } },
+				{
+					ui: pickerUi(),
+					api,
+					adminAccess: () => ({
+						credentialFor: () => ({ get: getToken, refresh: getToken })
+					}),
+					checkAdmin,
+					signIn: new BoundSignIn(undefined),
+					chooseFirstTenantSlug: noSlugPrompt,
+					servesCupboard: () => Promise.resolve(true),
+					confirmClaim: () => Promise.resolve(true),
+					interactive: false
+				}
+			)
+		);
+		const described =
+			result instanceof ControlDatabaseAuthorityError
+				? { kind: 'database-authority' }
+				: describeResult(result);
+		const kind = z.object({ kind: z.string() }).parse(described).kind;
+
+		expect({
+			kind,
+			tokenRequests: getToken.mock.calls.length,
+			adminChecks: checkAdmin.mock.calls.length
+		}).toStrictEqual({
+			kind: options.result,
+			tokenRequests: options.result === 'admin-token' ? 1 : 0,
+			adminChecks: 0
+		});
+	});
 
 	it.each([
 		{

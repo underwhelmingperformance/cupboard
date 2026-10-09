@@ -45,6 +45,7 @@ import {
 	controlSubjectNoncePrunePageSize,
 	pruneControlSubjectNonces
 } from '../control/control-subject-nonces.ts';
+import { writableControlDatabase } from '../control/database.ts';
 import {
 	enqueueLocalStepWakes,
 	localStepWakeBatchSize,
@@ -808,7 +809,12 @@ export async function runOffboardBatch(
 		tenants.map(({ id }) => drain(logger, env, id, drainLimit, rounds))
 	);
 
-	await recordTenantPassOutcomes(database, 'offboard', tenants, results);
+	await recordTenantPassOutcomes(
+		await writableControlDatabase(env),
+		'offboard',
+		tenants,
+		results
+	);
 
 	const failures = results.flatMap((result): unknown[] =>
 		result.status === 'rejected' ? [result.reason] : []
@@ -909,7 +915,12 @@ export async function runMaintenanceBatch(
 		({ id }) => maintain(logger, env, id)
 	);
 
-	await recordTenantPassOutcomes(database, 'maintenance', batch, results);
+	await recordTenantPassOutcomes(
+		await writableControlDatabase(env),
+		'maintenance',
+		batch,
+		results
+	);
 	await stampMaintained(database, batch);
 
 	const failures = results.flatMap((result): unknown[] =>
@@ -1591,7 +1602,7 @@ async function executeTenantMaintenanceMessage(
 	}
 
 	await recordTenantPassOutcomes(
-		database,
+		await writableControlDatabase(env),
 		'maintenance',
 		[{ id: tenant }],
 		[result]
@@ -1628,7 +1639,7 @@ async function executeOffboardMessage(
 		}
 
 		await recordTenantPassOutcomes(
-			database,
+			await writableControlDatabase(env),
 			'offboard',
 			[{ id: tenant }],
 			[result]
@@ -1797,9 +1808,12 @@ async function settleAuthKeyRetirement(
 	}
 }
 
-function runControlKeyRetirement(logger: Logger, env: Env): Promise<number> {
+async function runControlKeyRetirement(
+	logger: Logger,
+	env: Env
+): Promise<number> {
 	return retireScheduledControlKeys(
-		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		await writableControlDatabase(env),
 		isoTimestamp(new Date())
 	);
 }
@@ -1808,7 +1822,7 @@ async function runControlSessionPruning(
 	logger: Logger,
 	env: Env
 ): Promise<void> {
-	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const database = await writableControlDatabase(env);
 	const now = isoTimestamp(new Date());
 	const pruned = await pruneControlRefreshSessions(database, now);
 	const noncesDeleted = await pruneControlSubjectNonces(database, now);

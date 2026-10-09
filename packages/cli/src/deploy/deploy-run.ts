@@ -24,7 +24,7 @@ import {
 	liveD1BindingSchema,
 	type WorkerSecret
 } from './cloudflare-api.ts';
-import type { DeploymentConfig } from './config.ts';
+import { type DeploymentConfig, deploymentD1Bindings } from './config.ts';
 import type { D1QueryApi } from './d1-query.ts';
 import {
 	type DeploymentDatabase,
@@ -42,7 +42,8 @@ import {
 	completeTransitions,
 	prepareTransitions,
 	type TransitionEvent,
-	type TransitionWalk
+	type TransitionWalk,
+	validateTransitions
 } from './transitions.ts';
 import {
 	buildScriptMetadata,
@@ -102,6 +103,7 @@ export interface DeployDependencies {
 	readonly signal?: AbortSignal;
 	readonly settleTenants?: (requiredStep: LocalStep) => Promise<void>;
 	readonly now?: () => Date;
+	readonly beforeContract?: (transition: string) => Promise<void>;
 }
 
 interface ResourcePlan {
@@ -187,7 +189,15 @@ export function derivedPlanRows(
 			value: `${(artifact.tenantBundle.code.length / 1024).toFixed(0)} KiB`
 		},
 		{ label: 'KV namespaces', value: resources.kvTitles.join(', ') },
-		{ label: 'D1 migrations', value: String(artifact.d1Migrations.length) },
+		{
+			label: 'D1 migrations',
+			value: String(
+				Object.values({
+					CUPBOARD_DB: artifact.d1Migrations,
+					...artifact.d1MigrationSets
+				}).reduce((count, migrations) => count + migrations.length, 0)
+			)
+		},
 		{ label: 'Secrets', value: secretNames.join(', ') || '(none)' }
 	];
 }
@@ -565,29 +575,45 @@ async function performDeploy(
 		collectResources(artifact.config)
 	);
 
-	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
-	const databaseId =
-		d1Name === undefined ? undefined : resources.d1.get(d1Name);
-	const d1Database =
-		databaseId === undefined || d1Name === undefined
-			? undefined
-			: { name: d1Name, id: databaseId };
-
-	if (d1Database !== undefined) {
-		// The walk runs its checks before any migration or upload. A recorded
-		// row that this build refuses, such as a transition whose contract
-		// migrations a newer release has started, stops the deploy with an
-		// error here, before this build's Workers run against that release's
-		// schema.
+	const databases = deploymentD1Bindings(artifact.config)
+		.flatMap((binding) => {
+			const id = resources.d1.get(binding.databaseName);
+			return id === undefined
+				? []
+				: [{ binding: binding.binding, name: binding.databaseName, id }];
+		})
+		.toSorted(
+			(left, right) =>
+				Number(left.binding === 'CUPBOARD_DB') -
+				Number(right.binding === 'CUPBOARD_DB')
+		);
+	const d1Database = databases.find(
+		(database) => database.binding === 'CUPBOARD_DB'
+	);
+	if (databases.length > 0) {
 		await reporter.phase(
 			'Preparing schema transitions',
-			async (context) =>
-				prepareTransitions(
-					transitionWalk(dependencies, d1Database, context),
-					await isFreshDeployment(d1QueryApiOf(api), d1Database.id, () =>
+			async (context) => {
+				const isFresh =
+					d1Database !== undefined &&
+					(await isFreshDeployment(d1QueryApiOf(api), d1Database.id, () =>
 						hasWorkerScripts(api, artifact)
-					)
-				),
+					));
+				if (databases.length > 1) {
+					for (const database of databases) {
+						await validateTransitions(
+							transitionWalk(dependencies, database, context),
+							isFresh
+						);
+					}
+				}
+				for (const database of databases) {
+					await prepareTransitions(
+						transitionWalk(dependencies, database, context),
+						isFresh
+					);
+				}
+			},
 			{ humanLabel: 'Preparing the upgrade' }
 		);
 	}
@@ -769,11 +795,16 @@ async function performDeploy(
 
 	await configureTriggers(dependencies);
 
-	if (d1Database !== undefined) {
+	if (databases.length > 0) {
 		await reporter.phase(
 			'Completing schema transitions',
-			(context) =>
-				completeTransitions(transitionWalk(dependencies, d1Database, context)),
+			async (context) => {
+				for (const database of databases) {
+					await completeTransitions(
+						transitionWalk(dependencies, database, context)
+					);
+				}
+			},
 			{ humanLabel: 'Completing the upgrade' }
 		);
 		if (dependencies.settleTenants !== undefined) {
@@ -784,14 +815,13 @@ async function performDeploy(
 	const rows: ResultRow[] = [
 		{ label: 'Control worker', value: artifact.config.control.name },
 		{ label: 'Tenant worker', value: artifact.config.tenant.name },
-		...(d1Database === undefined
-			? []
-			: [
-					{
-						label: 'D1 database',
-						value: `${d1Database.name} · ${d1Database.id}`
-					}
-				]),
+		...databases.map((database) => ({
+			label:
+				databases.length === 1
+					? 'D1 database'
+					: `D1 database ${database.binding}`,
+			value: `${database.name} · ${database.id}`
+		})),
 		...(options.domain === undefined
 			? []
 			: [{ label: 'Cache URL', value: `https://${options.domain}` }])
@@ -803,7 +833,11 @@ async function performDeploy(
 		data: {
 			controlWorker: artifact.config.control.name,
 			tenantWorker: artifact.config.tenant.name,
-			d1Database,
+			d1Database:
+				d1Database === undefined
+					? undefined
+					: { name: d1Database.name, id: d1Database.id },
+			...(databases.length > 1 && { d1Databases: databases }),
 			cacheUrl:
 				options.domain === undefined ? undefined : `https://${options.domain}`
 		},
@@ -851,7 +885,7 @@ function transitionEventText(event: TransitionEvent): string {
 
 function transitionWalk(
 	dependencies: DeployDependencies,
-	database: DeploymentDatabase,
+	database: DeploymentDatabase & { readonly binding: string },
 	context: PhaseContext
 ): TransitionWalk {
 	const { api, plan } = dependencies;
@@ -859,11 +893,15 @@ function transitionWalk(
 	return {
 		api: d1QueryApiOf(api),
 		database,
-		transitions: plan.transitions,
+		transitions: plan.transitions.filter(
+			(planned) =>
+				(planned.transition.database ?? 'CUPBOARD_DB') === database.binding
+		),
 		hooks: {
 			now: dependencies.now ?? (() => new Date()),
 			checkServing: () => checkServing(api, plan.artifact),
 			wakeTenants: dependencies.settleTenants,
+			beforeContract: dependencies.beforeContract,
 			report: (event) => {
 				context.fact(event.transition, transitionEventText(event), {
 					level: 'debug'

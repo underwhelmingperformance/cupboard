@@ -1,5 +1,6 @@
 // The `cupboard` control-plane Worker entrypoint. The tenant Durable Object lives
 // in the separate `cupboard-tenant` script and is reached through a binding; this
 // script serves the control surface and the tenant read/dispatch front.
+export { ControlDatabaseRollbackGuard } from './control-database-rollback-guard.ts';
 export { PathReadAuthorityRollbackGuard } from './path-read-authority-rollback-guard.ts';
 export { default } from './routing/handler.ts';

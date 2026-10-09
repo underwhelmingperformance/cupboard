@@ -72,3 +72,84 @@ it('publishes new deployment build-info without changing an existing reader', as
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
+it('reads each database migration directory from its binding', async () => {
+	const root = await mkdtemp(path.join(tmpdir(), 'cupboard-artifact-d1-'));
+	const server = path.join(root, 'packages/server');
+	try {
+		await mkdir(path.join(server, 'src'), { recursive: true });
+		await mkdir(path.join(server, 'shared-migrations'));
+		await mkdir(path.join(server, 'control-migrations'));
+		await Promise.all([
+			writeFile(
+				path.join(server, 'wrangler.jsonc'),
+				JSON.stringify({
+					d1_databases: [
+						{
+							binding: 'CONTROL_DB',
+							database_name: 'control',
+							migrations_dir: 'control-migrations'
+						}
+					]
+				})
+			),
+			writeFile(
+				path.join(server, 'wrangler.tenant.jsonc'),
+				JSON.stringify({
+					d1_databases: [
+						{
+							binding: 'CUPBOARD_DB',
+							database_name: 'shared',
+							migrations_dir: 'shared-migrations'
+						}
+					]
+				})
+			),
+			writeFile(
+				path.join(server, 'shared-migrations/0000_shared.sql'),
+				'SELECT 1;'
+			),
+			writeFile(
+				path.join(server, 'control-migrations/0000_control.sql'),
+				'SELECT 2;'
+			)
+		]);
+		const payload = await buildEmbeddedPayload(root, {
+			bundle: (_entry, mainModule) =>
+				Promise.resolve({ mainModule, code: 'code' })
+		});
+		expect({
+			shared: payload.d1Migrations,
+			sets: payload.d1MigrationSets
+		}).toStrictEqual({
+			shared: [
+				{
+					name: '0000_shared.sql',
+					sha256:
+						'17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a',
+					statements: ['SELECT 1;']
+				}
+			],
+			sets: {
+				CUPBOARD_DB: [
+					{
+						name: '0000_shared.sql',
+						sha256:
+							'17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a',
+						statements: ['SELECT 1;']
+					}
+				],
+				CONTROL_DB: [
+					{
+						name: '0000_control.sql',
+						sha256:
+							'8e7003d62f9d8cbd28da2f243bb0d215bfd4622c716be09be89a8764d9f4c7cb',
+						statements: ['SELECT 2;']
+					}
+				]
+			}
+		});
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});

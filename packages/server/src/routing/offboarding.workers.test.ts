@@ -13,7 +13,7 @@ import {
 	createExecutionContext,
 	waitOnExecutionContext
 } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
+import { env as tenantEnv } from 'cloudflare:workers';
 import { sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -47,12 +47,15 @@ import {
 	tenantObjectKeys,
 	tenantRow,
 	testBase,
+	testControlEnv,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
 
 import { runCronTick, runOffboardBatch } from './scheduled.ts';
+
+const env = Object.assign({}, tenantEnv, testControlEnv);
 
 // Offboarding is a quiesce-then-drain state machine. The control plane marks the
 // tenant `offboarding`, which stops new reads and writes as soon as the D1 update

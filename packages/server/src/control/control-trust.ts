@@ -226,10 +226,10 @@ const noTenantCaches = (): ReturnType<CacheAccessLookup> => undefined;
  * scope spelling is stored.
  */
 async function storedGrantsJson(
-	database: Database,
-	body: OidcTrustAddBody
+	body: OidcTrustAddBody,
+	transitionDatabase: Database
 ): Promise<string> {
-	if (await hasContracted(database)) {
+	if (await hasContracted(transitionDatabase)) {
 		return JSON.stringify(body.permittedGrants);
 	}
 
@@ -242,7 +242,8 @@ export async function addControlTrust(
 	database: Database,
 	body: OidcTrustAddBody,
 	now: IsoTimestamp,
-	canUseLoopbackHttp = false
+	canUseLoopbackHttp = false,
+	transitionDatabase: Database = database
 ): Promise<OidcTrustSummary> {
 	if (!isAllowedIssuerTransport(body.issuer, canUseLoopbackHttp)) {
 		throw new OidcIssuerTransportRequiredError(body.issuer);
@@ -256,7 +257,7 @@ export async function addControlTrust(
 	}
 
 	const id = trustRuleIdSchema.parse(crypto.randomUUID());
-	const permittedGrantsJson = await storedGrantsJson(database, body);
+	const permittedGrantsJson = await storedGrantsJson(body, transitionDatabase);
 
 	await database
 		.insert(d1Schema.controlTrust)

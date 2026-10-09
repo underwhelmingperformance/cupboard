@@ -1,4 +1,5 @@
 import { type Logger } from '@cupboard/logger';
+import { controlContract } from '@cupboard/protocol/contract';
 import { Hono } from 'hono';
 
 import { serverErrorHandler } from '../http/error-response.ts';
@@ -18,6 +19,7 @@ import {
 	controlRevoke,
 	controlTokenExchange
 } from './control-plane.ts';
+import { requestControlEnv } from './database.ts';
 import { handleSignup } from './signup.ts';
 
 interface ControlHonoEnv {
@@ -37,15 +39,24 @@ function buildControlApp() {
 	// Seed the request logger before any control route runs, so a fault raised in
 	// the handlers or the error handler is logged with the request's fields.
 	app.use(loggerMiddleware);
+	app.use(async (context, next) => {
+		context.env = requestControlEnv(context.env);
+		await next();
+	});
 
 	app.use('/control/*', async (context, next) => {
 		const authenticate = authenticateOnce(() =>
 			controlAuthenticate(context.req.raw, context.env)
 		);
+		const validationRoute = controlContract.database.validate['~orpc'].route;
+		const isDatabaseValidation =
+			validationRoute.path !== undefined &&
+			context.req.method === validationRoute.method &&
+			new URL(context.req.url).pathname === `/control${validationRoute.path}`;
 		const contract = new ContractRequest(
 			context.req.raw,
-			authenticate,
-			contractRequestMaxBytes
+			isDatabaseValidation ? () => Promise.resolve() : authenticate,
+			isDatabaseValidation ? 512 : contractRequestMaxBytes
 		);
 		const { matched: isMatched, response } = await controlOrpcHandler.handle(
 			contract.request,

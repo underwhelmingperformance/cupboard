@@ -24,6 +24,7 @@ import type { DeployDependencies } from './deploy-run.ts';
 import {
 	collectResources,
 	deploymentReviewRows,
+	derivedPlanRows,
 	hasMatchingBindings,
 	runDeploy as runPlannedDeploy
 } from './deploy-run.ts';
@@ -341,9 +342,16 @@ function recordingApi(
 				return Promise.resolve(queueId(`qid-${name}`));
 			},
 			d1QueryBatch(_databaseId, statements) {
-				calls.push(`d1q:${statements[0]?.slice(0, 12) ?? ''}`);
+				const first = statements[0];
+				calls.push(
+					`d1q:${(typeof first === 'string' ? first : first?.sql)?.slice(0, 12) ?? ''}`
+				);
 				for (const statement of statements) {
-					database.exec(statement);
+					if (typeof statement === 'string') {
+						database.exec(statement);
+						continue;
+					}
+					database.prepare(statement.sql).run(...statement.params);
 				}
 				return Promise.resolve();
 			},
@@ -1496,9 +1504,10 @@ describe('runDeploy', () => {
 			},
 			d1QueryBatch(database, statements) {
 				for (const statement of statements) {
+					const sql = typeof statement === 'string' ? statement : statement.sql;
 					const [, migration] =
 						/^INSERT INTO d1_migrations \(name, sha256, verification_state\) VALUES \('([^']+)'/.exec(
-							statement
+							sql
 						) ?? [];
 
 					if (migration !== undefined) {
@@ -1793,24 +1802,25 @@ describe('contract migrations within a deploy', () => {
 			},
 			async d1QueryBatch(database, statements) {
 				for (const statement of statements) {
-					if (statement === contractMigration.statements[0]) {
+					const sql = typeof statement === 'string' ? statement : statement.sql;
+					if (sql === contractMigration.statements[0]) {
 						events.push('contract');
 					}
-					if (statement.startsWith('INSERT INTO deployment_phase')) {
+					if (sql.startsWith('INSERT INTO deployment_phase')) {
 						events.push(
-							statement.includes("VALUES ('current', 'native-reads'")
+							sql.includes("VALUES ('current', 'native-reads'")
 								? 'phase:native-reads'
 								: 'phase:contracted'
 						);
 					}
 					if (
-						statement.startsWith('INSERT INTO deployment_transition') &&
-						statement.includes("'cache-identity'")
+						sql.startsWith('INSERT INTO deployment_transition') &&
+						sql.includes("'cache-identity'")
 					) {
 						events.push(
-							statement.includes("VALUES ('cache-identity', 'complete'")
+							sql.includes("VALUES ('cache-identity', 'complete'")
 								? 'cache-identity:complete'
-								: statement.includes(', NULL)')
+								: sql.includes(', NULL)')
 									? 'cache-identity:expanded'
 									: 'cache-identity:contract-started'
 						);
@@ -1931,7 +1941,10 @@ describe('deployments that stop before any change', () => {
 });
 
 describe('reviewed deployment plan', () => {
-	const releaseMigrations = schemaTransitions
+	const sharedTransitions = schemaTransitions.filter(
+		(transition) => transition.database === undefined
+	);
+	const releaseMigrations = sharedTransitions
 		.flatMap((transition) => [...transition.expand, ...transition.contract])
 		.map((name) => ({ name, sha256: 'digest', statements: ['SELECT 1;'] }));
 
@@ -1970,7 +1983,7 @@ describe('reviewed deployment plan', () => {
 			})),
 			artifact: plan.artifact
 		}).toStrictEqual({
-			transitions: schemaTransitions.map((transition) => ({
+			transitions: sharedTransitions.map((transition) => ({
 				id: transition.id,
 				expand: transition.expand,
 				contract: transition.contract
@@ -2249,4 +2262,171 @@ describe('deployment review for operators', () => {
 			{ label: 'Maintenance queue', value: 'maintenance' }
 		]);
 	});
+});
+
+function databases() {
+	const recording = recordingApi();
+	const control = new DatabaseSync(':memory:');
+	const writes: string[] = [];
+	const api: CloudflareApi = {
+		...recording.api,
+		ensureD1Database: (name) =>
+			Promise.resolve(
+				databaseId(name === 'cupboard-control' ? 'control-id' : 'db-id')
+			),
+		findD1Database: (name) =>
+			Promise.resolve(
+				databaseId(name === 'cupboard-control' ? 'control-id' : 'db-id')
+			),
+		d1QueryRows: (id, sql) => {
+			if (id !== 'control-id') {
+				return recording.api.d1QueryRows(id, sql);
+			}
+			return Promise.resolve(
+				control
+					.prepare(sql)
+					.all()
+					.flatMap((row) =>
+						Object.values(row).filter(
+							(value): value is string => typeof value === 'string'
+						)
+					)
+			);
+		},
+		d1QueryBatch: (id, statements) => {
+			writes.push(id);
+			if (id !== 'control-id') {
+				return recording.api.d1QueryBatch(id, statements);
+			}
+			for (const statement of statements) {
+				if (typeof statement === 'string') {
+					control.exec(statement);
+					continue;
+				}
+				control.prepare(statement.sql).run(...statement.params);
+			}
+			return Promise.resolve();
+		}
+	};
+	return { ...recording, control, api, writes };
+}
+
+describe('database-specific transitions', () => {
+	const controlMigration: D1Migration = {
+		name: '0000_control.sql',
+		sha256: 'a'.repeat(64),
+		statements: ['CREATE TABLE control_only (id TEXT PRIMARY KEY);']
+	};
+	const controlTransition: SchemaTransition = {
+		id: 'control-database-initial',
+		database: 'CONTROL_DB',
+		expand: [controlMigration.name],
+		contract: [],
+		independent: true
+	};
+	const source: DeploymentArtifact = {
+		...artifact,
+		config: {
+			...artifact.config,
+			control: {
+				...artifact.config.control,
+				d1Databases: [
+					{ binding: 'CONTROL_DB', databaseName: 'cupboard-control' },
+					...artifact.config.control.d1Databases
+				]
+			}
+		},
+		d1MigrationSets: { CONTROL_DB: [controlMigration] }
+	};
+	const transitions = [...testTransitions, controlTransition];
+
+	it('counts the shared fallback alongside additional migration sets', () => {
+		expect(
+			derivedPlanRows(source, { control: [], tenant: [] }).filter(
+				(row) => row.label === 'D1 migrations'
+			)
+		).toStrictEqual([{ label: 'D1 migrations', value: '4' }]);
+	});
+
+	it('prepares the control database first and applies each migration to its own ID', async () => {
+		const world = databases();
+		try {
+			await runPlannedDeploy({
+				plan: planDeployment(source, { kind: 'new' }, undefined, transitions),
+				api: world.api,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } },
+				now: fixedNow
+			});
+			expect({
+				firstWrite: world.writes[0],
+				sharedTables: world.database
+					.prepare(
+						"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tenant', 'control_only') ORDER BY name"
+					)
+					.all()
+					.map((row) => ({ ...row })),
+				controlTables: world.control
+					.prepare(
+						"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tenant', 'control_only') ORDER BY name"
+					)
+					.all()
+					.map((row) => ({ ...row })),
+				controlStates: world.control
+					.prepare('SELECT id, state FROM deployment_transition ORDER BY id')
+					.all()
+					.map((row) => ({ ...row }))
+			}).toStrictEqual({
+				firstWrite: 'control-id',
+				sharedTables: [{ name: 'tenant' }],
+				controlTables: [{ name: 'control_only' }],
+				controlStates: [{ id: 'control-database-initial', state: 'complete' }]
+			});
+		} finally {
+			world.database.close();
+			world.control.close();
+		}
+	});
+
+	it.each(['observe', 'deploy'])(
+		'refuses an incompatible control row before %s changes either database',
+		async (operation) => {
+			const world = databases();
+			try {
+				world.control.exec(
+					"CREATE TABLE deployment_transition (id TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at TEXT NOT NULL, contracted_at TEXT); INSERT INTO deployment_transition VALUES ('future', 'complete', '2026-01-01', '2026-01-01');"
+				);
+				const run =
+					operation === 'observe'
+						? observeDeployment(world.api, source, transitions)
+						: runPlannedDeploy({
+								plan: planDeployment(
+									source,
+									{ kind: 'new' },
+									undefined,
+									transitions
+								),
+								api: world.api,
+								reporter: silentReporter,
+								options: {
+									domain: undefined,
+									secrets: { control: [], tenant: [] }
+								}
+							});
+				await expect(run).rejects.toStrictEqual(
+					new UnrecognisedTransitionContractedError(
+						'future',
+						'cupboard-control'
+					)
+				);
+				expect({
+					writes: world.writes,
+					uploads: world.calls.filter((call) => call.startsWith('upload:'))
+				}).toStrictEqual({ writes: [], uploads: [] });
+			} finally {
+				world.database.close();
+				world.control.close();
+			}
+		}
+	);
 });

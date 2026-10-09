@@ -10,6 +10,7 @@ import {
 import { subrequestsPerInvocation } from './policy/subrequests.ts';
 import { tenantReadFetch } from './routing/tenant-read-handler.ts';
 
+export { ControlDatabaseRollbackGuard } from './control-database-rollback-guard.ts';
 export { CupboardServer } from './do/server.ts';
 export { PathReadAuthorityRollbackGuard } from './path-read-authority-rollback-guard.ts';
 

@@ -16,6 +16,7 @@ import { completingReleases, TransitionIncompleteError } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
+import { deploymentD1Bindings } from './config.ts';
 import type { LocalStepReadiness } from './deployment-state.ts';
 import {
 	isFreshDeployment,
@@ -67,11 +68,34 @@ export function planDeployment(
 	allowanceSource?: WorkersAllowanceSource,
 	transitions: readonly SchemaTransition[] = schemaTransitions
 ): DeploymentPlan {
+	const configured = new Set(
+		deploymentD1Bindings(artifact.config).map((database) => database.binding)
+	);
+	const bindings = new Set([
+		...transitions.map((transition) => transition.database ?? 'CUPBOARD_DB'),
+		...Object.keys(artifact.d1MigrationSets ?? {})
+	]);
+	const planned = [...bindings]
+		.filter(
+			(binding) =>
+				binding === 'CUPBOARD_DB' ||
+				configured.has(binding) ||
+				artifact.d1MigrationSets?.[binding] !== undefined
+		)
+		.flatMap((binding) =>
+			planTransitions(
+				artifact.d1MigrationSets?.[binding] ??
+					(binding === 'CUPBOARD_DB' ? artifact.d1Migrations : []),
+				transitions.filter(
+					(transition) => (transition.database ?? 'CUPBOARD_DB') === binding
+				)
+			)
+		);
 	return {
 		artifact,
 		allowanceSource: allowanceSource ?? { kind: 'configuration' },
 		observation,
-		transitions: planTransitions(artifact.d1Migrations, transitions)
+		transitions: planned
 	};
 }
 
@@ -108,7 +132,9 @@ function transitionStageText(
 	}
 
 	if (observation.kind === 'new') {
-		return 'new deployment; expand and contract before upload';
+		return transition.contractAfterUpload === true
+			? `new deployment; ${expand}; ${contract}`
+			: 'new deployment; expand and contract before upload';
 	}
 
 	const { blocked } = observation;
@@ -223,25 +249,39 @@ export async function observeDeployment(
 	artifact: DeploymentArtifact,
 	transitions: readonly SchemaTransition[] = schemaTransitions
 ): Promise<DeploymentObservation> {
-	const name = artifact.config.tenant.d1Databases[0]?.databaseName;
-	if (name === undefined) {
-		return { kind: 'new' };
-	}
-	const database = await api.findD1Database(name);
-	if (database === undefined) {
-		return { kind: 'new' };
-	}
 	const d1QueryApi = {
 		queryRows: api.d1QueryRows.bind(api),
 		queryBatch: api.d1QueryBatch.bind(api)
 	};
-	// Reading the rows first refuses a row that this build cannot deploy over,
-	// before the plan can report a new deployment.
-	const { states, unrecognised } = await readReconciledTransitions(
-		d1QueryApi,
-		{ id: database, name },
-		transitions
-	);
+	const states = new Map<SchemaTransition['id'], 'expanded' | 'complete'>();
+	const unrecognised: StoredTransitionRow[] = [];
+	let blocked: DeferredTransition | undefined;
+	let database: Awaited<ReturnType<CloudflareApi['findD1Database']>>;
+	for (const binding of deploymentD1Bindings(artifact.config)) {
+		const id = await api.findD1Database(binding.databaseName);
+		if (id === undefined) {
+			continue;
+		}
+		const roleTransitions = transitions.filter(
+			(transition) => (transition.database ?? 'CUPBOARD_DB') === binding.binding
+		);
+		const observed = await readReconciledTransitions(
+			d1QueryApi,
+			{ id, name: binding.databaseName },
+			roleTransitions
+		);
+		for (const [transition, state] of observed.states) {
+			states.set(transition, state);
+		}
+		unrecognised.push(...observed.unrecognised);
+		blocked ??= deferredTransition(roleTransitions, observed.states);
+		if (binding.binding === 'CUPBOARD_DB') {
+			database = id;
+		}
+	}
+	if (database === undefined) {
+		return { kind: 'new' };
+	}
 	const columns = await readTenantColumns(d1QueryApi, database);
 	if (
 		await isFreshDeployment(
@@ -253,7 +293,6 @@ export async function observeDeployment(
 	) {
 		return { kind: 'new' };
 	}
-	const blocked = deferredTransition(transitions, states);
 	if (columns.includes('local_step')) {
 		return {
 			kind: 'existing',

@@ -288,6 +288,20 @@
 			"when": 1791424725609,
 			"tag": "0040_control_subject_nonces",
 			"breakpoints": true
+		},
+		{
+			"idx": 41,
+			"version": "6",
+			"when": 1791526930255,
+			"tag": "0041_control_database_split",
+			"breakpoints": true
+		},
+		{
+			"idx": 42,
+			"version": "6",
+			"when": 1791526946879,
+			"tag": "0042_control_database_contract",
+			"breakpoints": true
 		}
 	]
 }

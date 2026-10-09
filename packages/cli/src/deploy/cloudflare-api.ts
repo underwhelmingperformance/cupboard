@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { CliError } from '../errors.ts';
 
 import type { WorkerBundle } from './bundle.ts';
+import type { D1Statement } from './d1-query.ts';
 import {
 	type CloudflareAccountId,
 	cloudflareAccountIdSchema,
@@ -208,7 +209,7 @@ export interface CloudflareApi {
 
 	d1QueryBatch(
 		databaseId: DatabaseId,
-		statements: readonly string[]
+		statements: readonly D1Statement[]
 	): Promise<void>;
 	/**
 	 * Runs one read query and returns the first column of each row. A row whose
@@ -755,10 +756,17 @@ export function createCloudflareApi(
 		},
 
 		async d1QueryBatch(databaseId, statements) {
-			await client.d1.database.query(databaseId, {
-				...account,
-				batch: statements.map((sql) => ({ sql }))
-			});
+			const batch = statements.map((statement) =>
+				typeof statement === 'string' ? { sql: statement } : statement
+			);
+
+			// The generated SDK accepts only string parameters. Request options
+			// preserve the numeric and null bindings supported by D1.
+			await client.d1.database.query(
+				databaseId,
+				{ ...account, batch: batch.map(({ sql }) => ({ sql })) },
+				{ body: { batch } }
+			);
 		},
 
 		async d1QueryRows(databaseId, sql) {

@@ -3,7 +3,7 @@ import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { currentLocalStep } from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { env } from 'cloudflare:workers';
+import { env as tenantEnv } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,6 +20,7 @@ import {
 	scheduledController,
 	suspendTenant,
 	tenantMaintenanceFailureRow,
+	testControlEnv,
 	wasTenantMaintained
 } from '../test-support.ts';
 import worker from '../worker.ts';
@@ -34,6 +35,8 @@ import {
 	sendQueueMessages
 } from './scheduled.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
+
+const env = Object.assign({}, tenantEnv, testControlEnv);
 
 function aggregateErrorShape(error: unknown): {
 	readonly name: string;

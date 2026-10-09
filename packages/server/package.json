@@ -36,8 +36,7 @@
 		"cf:typegen": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env --include-runtime false worker-configuration.d.ts && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false worker-configuration.tenant.d.ts",
 		"cf:typegen:check": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env --include-runtime false --check worker-configuration.d.ts && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false --check worker-configuration.tenant.d.ts",
 		"check:types": "pnpm cf:typegen:check && tsc --noEmit",
-		"deploy": "pnpm cf:typegen && pnpm deploy:migrations && wrangler deploy -c wrangler.tenant.jsonc && wrangler deploy",
-		"deploy:migrations": "wrangler d1 migrations apply CUPBOARD_DB --remote",
+		"deploy": "pnpm --filter @cupboard/cli cli deploy --from-tree",
 		"dev": "pnpm cf:typegen && wrangler dev -c wrangler.jsonc -c wrangler.tenant.jsonc",
 		"test": "pnpm build-info && vitest run --passWithNoTests"
 	},

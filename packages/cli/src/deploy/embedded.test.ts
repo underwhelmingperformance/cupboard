@@ -133,3 +133,15 @@ describe('parseEmbeddedPayload', () => {
 		});
 	});
 });
+
+it('preserves migration sets keyed by database binding', () => {
+	const legacy = parseEmbeddedPayload(payloadJson);
+	const d1MigrationSets = { CONTROL_DB: legacy.d1Migrations };
+	const payload = { ...legacy, d1MigrationSets };
+
+	expect(parseEmbeddedPayload(JSON.stringify(payload))).toStrictEqual(payload);
+	expect(payloadToArtifact(payload)).toStrictEqual({
+		...payloadToArtifact(legacy),
+		d1MigrationSets
+	});
+});

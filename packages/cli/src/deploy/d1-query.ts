@@ -1,12 +1,19 @@
 import type { DatabaseId } from './identifiers.ts';
 
+export interface D1BoundStatement {
+	readonly sql: string;
+	readonly params: readonly (string | number | null)[];
+}
+
+export type D1Statement = string | D1BoundStatement;
+
 /**
 The D1 query endpoints that the deploy uses for migrations and its own records.
 */
 export interface D1QueryApi {
 	queryBatch(
 		databaseId: DatabaseId,
-		statements: readonly string[]
+		statements: readonly D1Statement[]
 	): Promise<void>;
 	queryRows(databaseId: DatabaseId, sql: string): Promise<readonly string[]>;
 }

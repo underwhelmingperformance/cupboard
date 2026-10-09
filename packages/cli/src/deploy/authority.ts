@@ -672,6 +672,8 @@ export interface AuthorityDeployment {
 	 * The name of the control database selected in the plan.
 	 */
 	readonly plannedDatabaseName: string | undefined;
+	readonly legacyTransfer?: true;
+	readonly controlTransferRecovery?: true;
 	readonly controlScriptName: string;
 	/**
 	 * Whether the control Worker exists on the account.
@@ -798,7 +800,14 @@ export async function decideAuthority(
 		);
 	}
 
-	if (isOtherDatabase) {
+	const canTransferLegacy =
+		deployment.legacyTransfer === true &&
+		boundAdmin !== undefined &&
+		(plannedAdmin === undefined ||
+			(isSamePrincipal(boundAdmin, plannedAdmin) &&
+				boundAdmin.audience === plannedAdmin.audience));
+
+	if (isOtherDatabase && !canTransferLegacy) {
 		throw new AdminDatabaseMismatchError(
 			bound.name,
 			plannedName,
@@ -814,12 +823,23 @@ export async function decideAuthority(
 	}
 
 	const access = effects.adminAccess(url);
-	await checkAdminToken(deployment, effects, access, url, admin);
+	if (deployment.controlTransferRecovery !== true) {
+		await checkAdminToken(deployment, effects, access, url, admin);
+	}
 
 	const newUrl = await effects.newUrl();
 
 	if (newUrl === undefined) {
 		throw new AdminNewUrlMissingError(admin);
+	}
+
+	if (
+		deployment.controlTransferRecovery === true &&
+		newUrl.origin !== url.origin
+	) {
+		throw new ControlDatabaseAuthorityError(
+			'resume must keep the current deployment URL'
+		);
 	}
 
 	if (newUrl.origin === url.origin) {
@@ -1314,21 +1334,28 @@ export function adminAccessFor(
 }
 
 // The Workers' binding for the control database, which records the admin.
-const controlDatabaseBinding = 'CUPBOARD_DB';
+const controlDatabaseBinding = 'CONTROL_DB';
+const legacyDatabaseBinding = 'CUPBOARD_DB';
 
 function controlDatabaseName(config: DeploymentConfig): string | undefined {
-	return config.control.d1Databases.find(
-		(database) => database.binding === controlDatabaseBinding
+	return (
+		config.control.d1Databases.find(
+			(database) => database.binding === controlDatabaseBinding
+		) ??
+		config.control.d1Databases.find(
+			(database) => database.binding === legacyDatabaseBinding
+		)
 	)?.databaseName;
 }
 
 function boundDatabaseId(
-	configuration: ScriptConfiguration | undefined
+	configuration: ScriptConfiguration | undefined,
+	bindingName: string = legacyDatabaseBinding
 ): DatabaseId | undefined {
 	return configuration?.bindings.flatMap((binding) => {
 		const parsed = liveD1BindingSchema.safeParse(binding);
 
-		return parsed.success && parsed.data.name === controlDatabaseBinding
+		return parsed.success && parsed.data.name === bindingName
 			? [parsed.data.database_id]
 			: [];
 	})[0];
@@ -1408,10 +1435,64 @@ export async function establishAuthority(
 	const control = await api.getScriptConfiguration(controlName);
 	// Without the control Worker, the tenant Worker's binding shows which
 	// database the deployment used.
-	const boundId = boundDatabaseId(
+	const legacyConfiguration =
 		control ??
-			(await api.getScriptConfiguration(plans.agreed.config.tenant.name))
-	);
+		(await api.getScriptConfiguration(plans.agreed.config.tenant.name));
+	const legacyId = boundDatabaseId(legacyConfiguration);
+	const controlId = boundDatabaseId(control, controlDatabaseBinding);
+	const sharedName = plans.agreed.config.control.d1Databases.find(
+		(binding) => binding.binding === legacyDatabaseBinding
+	)?.databaseName;
+	const plannedControlName = plans.agreed.config.control.d1Databases.find(
+		(binding) => binding.binding === controlDatabaseBinding
+	)?.databaseName;
+	const plannedControlId =
+		plannedControlName === undefined
+			? undefined
+			: await api.findD1Database(plannedControlName);
+	const targetId = controlId ?? plannedControlId;
+	const ready =
+		targetId === undefined
+			? undefined
+			: await controlDatabaseReadiness(api, targetId);
+	if (ready !== undefined && ready.source !== legacyId) {
+		throw new ControlDatabaseAuthorityError(
+			'the control database records another source database'
+		);
+	}
+	if (controlId !== undefined && legacyId === undefined) {
+		throw new ControlDatabaseAuthorityError(
+			'the deployed control Worker has no shared database binding'
+		);
+	}
+	const boundId =
+		controlId !== undefined && ready?.state === 'ready' ? controlId : legacyId;
+	const isSameSharedDatabase =
+		plannedControlName !== undefined &&
+		legacyId !== undefined &&
+		sharedName !== undefined &&
+		(await api.findD1Database(sharedName)) === legacyId;
+	const canTransferLegacy = isSameSharedDatabase && ready?.state !== 'ready';
+	if (
+		canTransferLegacy &&
+		controlId !== undefined &&
+		plannedControlId !== controlId
+	) {
+		throw new ControlDatabaseAuthorityError(
+			'the plan changes a partially copied control database'
+		);
+	}
+	const canResumeTransfer =
+		isSameSharedDatabase &&
+		controlId !== undefined &&
+		controlId === plannedControlId &&
+		ready !== undefined &&
+		(await isFrozenControlTransfer(api, legacyId, controlId));
+	if (canResumeTransfer) {
+		ui.info(
+			'Resuming the frozen control database transfer with Cloudflare deployment credentials. Administrator sign-in is checked after cutover.'
+		);
+	}
 	const boundName =
 		boundId === undefined ? undefined : await api.findD1DatabaseName(boundId);
 	const currentUrl = async (): Promise<URL | undefined> => {
@@ -1459,6 +1540,8 @@ export async function establishAuthority(
 					? undefined
 					: { id: boundId, name: boundName },
 			plannedDatabaseName: controlDatabaseName(plans.agreed.config),
+			...(canTransferLegacy && { legacyTransfer: true }),
+			...(canResumeTransfer && { controlTransferRecovery: true }),
 			controlScriptName: controlName,
 			isControlDeployed: control !== undefined,
 			interactive: world.interactive
@@ -1521,4 +1604,61 @@ export async function establishAuthority(
 	}
 
 	return authority;
+}
+
+export class ControlDatabaseAuthorityError extends CliError {
+	constructor(detail: string) {
+		super(
+			`The control database cannot be selected: ${detail}. No deployment changes were made.`
+		);
+		this.name = 'ControlDatabaseAuthorityError';
+	}
+}
+
+async function controlDatabaseReadiness(
+	api: Pick<AuthorityApi, 'd1QueryRows'>,
+	database: DatabaseId
+): Promise<{ source: string; state: 'copying' | 'ready' } | undefined> {
+	const columns = await api.d1QueryRows(
+		database,
+		"SELECT name FROM pragma_table_info('control_database_ready');"
+	);
+	if (columns.length === 0) {
+		return undefined;
+	}
+	const rows = await api.d1QueryRows(
+		database,
+		"SELECT json_array(source_database_id, state) FROM control_database_ready WHERE id = 'current';"
+	);
+	if (rows.length === 0) {
+		return undefined;
+	}
+	if (rows.length !== 1) {
+		throw new ControlDatabaseAuthorityError(
+			'the control readiness record is ambiguous'
+		);
+	}
+	const [source, state] = z
+		.tuple([z.string(), z.enum(['copying', 'ready'])])
+		.parse(JSON.parse(rows[0] ?? 'null'));
+	return { source, state };
+}
+
+async function isFrozenControlTransfer(
+	api: Pick<AuthorityApi, 'd1QueryRows'>,
+	source: DatabaseId,
+	target: DatabaseId
+): Promise<boolean> {
+	const columns = await api.d1QueryRows(
+		source,
+		"SELECT name FROM pragma_table_info('control_database_split');"
+	);
+	if (columns.length === 0) {
+		return false;
+	}
+	const targets = await api.d1QueryRows(
+		source,
+		"SELECT target_database_id FROM control_database_split WHERE id = 'current' AND EXISTS (SELECT 1 FROM deployment_transition WHERE id = 'control-database-split' AND state = 'expanded' AND contracted_at IS NOT NULL);"
+	);
+	return targets.length === 1 && targets[0] === target;
 }

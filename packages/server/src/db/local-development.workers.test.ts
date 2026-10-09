@@ -3,13 +3,14 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import { transitionIds } from '@cupboard/protocol/deployment';
+import { schemaTransitions } from '@cupboard/protocol/deployment';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { testControlDatabase } from '../control-database.test-support.ts';
 import { PathReadAuthorityMigrationPendingError } from '../errors.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 
@@ -20,6 +21,7 @@ import {
 import * as schema from './d1-schema.ts';
 import {
 	bootstrapLocalDevelopment,
+	bootstrapLocalDevelopmentDatabases,
 	LocalDevelopmentBootstrapRefusedError,
 	type LocalDevelopmentDatabase
 } from './local-development.ts';
@@ -34,6 +36,11 @@ const database: LocalDevelopmentDatabase = {
 	}
 };
 const now = '2026-01-01T00:00:00.000Z';
+const transitionIds = schemaTransitions
+	.filter(
+		(transition) => (transition.database ?? 'CUPBOARD_DB') === 'CUPBOARD_DB'
+	)
+	.map(({ id }) => id);
 
 function applyMigrations(): Promise<void> {
 	return applyD1Migrations(env.CUPBOARD_DB, env.TEST_MIGRATIONS);
@@ -102,6 +109,51 @@ describe('local development bootstrap', () => {
 					cache_kind: 'default',
 					access: 'public',
 					generation: 1
+				}
+			]
+		});
+	});
+
+	it('refuses populated control state before either database applies migrations', async () => {
+		const binding = testControlDatabase();
+		const control: LocalDevelopmentDatabase = {
+			binding: 'CONTROL_DB',
+			async query(sql) {
+				const result = await binding.prepare(sql).all();
+				return result.results;
+			},
+			async execute(sql) {
+				await binding.exec(sql);
+			}
+		};
+		await control.execute(
+			"INSERT INTO global_admin (id, issuer, subject, audience, claimed_at) VALUES ('singleton', 'issuer', 'subject', 'audience', '2026-01-01T00:00:00.000Z')"
+		);
+		const sharedMigrate = vi.fn(applyMigrations);
+		const controlMigrate = vi.fn();
+		await expect(
+			bootstrapLocalDevelopmentDatabases([
+				{ database, applyMigrations: sharedMigrate },
+				{ database: control, applyMigrations: controlMigrate }
+			])
+		).rejects.toStrictEqual(new LocalDevelopmentBootstrapRefusedError());
+		expect({
+			sharedMigrationCalls: sharedMigrate.mock.calls,
+			controlMigrationCalls: controlMigrate.mock.calls,
+			sharedTransitions: await transitions(),
+			controlAdmin: await control.query(
+				'SELECT id, issuer, subject, audience FROM global_admin'
+			)
+		}).toStrictEqual({
+			sharedMigrationCalls: [],
+			controlMigrationCalls: [],
+			sharedTransitions: [],
+			controlAdmin: [
+				{
+					id: 'singleton',
+					issuer: 'issuer',
+					subject: 'subject',
+					audience: 'audience'
 				}
 			]
 		});

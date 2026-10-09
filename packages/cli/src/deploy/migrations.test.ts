@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import type { D1QueryApi } from './d1-query.ts';
+import type { D1QueryApi, D1Statement } from './d1-query.ts';
 import { databaseIdSchema } from './identifiers.ts';
 import {
 	applyD1Migrations,
@@ -83,8 +83,8 @@ function fakeApi(
 		'verification_state'
 	],
 	hasTable = true
-): { api: D1QueryApi; batches: string[][] } {
-	const batches: string[][] = [];
+): { api: D1QueryApi; batches: D1Statement[][] } {
+	const batches: D1Statement[][] = [];
 
 	return {
 		batches,
@@ -218,7 +218,7 @@ describe('applyD1Migrations', () => {
 			throw new Error('The retry fixture migration is missing.');
 		}
 
-		const batches: string[][] = [];
+		const batches: D1Statement[][] = [];
 		let attempt = 0;
 		const api: D1QueryApi = {
 			queryBatch(_databaseId, statements) {

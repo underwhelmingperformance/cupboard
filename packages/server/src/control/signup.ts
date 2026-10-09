@@ -14,11 +14,9 @@ import {
 	signupRequestSchema,
 	type SignupResponseInput
 } from '@cupboard/protocol/signup';
-import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
 import { isConstantTimeEqual, sha256Hex } from '../crypto/crypto.ts';
-import * as d1Schema from '../db/d1-schema.ts';
 import {
 	SignupForbiddenError,
 	SubjectTokenAudienceInvalidError,
@@ -41,9 +39,8 @@ import { subjectBinding, subjectTokenLimits } from '../oidc/subject-binding.ts';
 
 import { controlIssuer, issueControlSession } from './control-plane.ts';
 import { controlTrustRules } from './control-trust.ts';
+import { writableControlDatabase } from './database.ts';
 import { claimGlobalAdmin } from './global-admin.ts';
-
-type Database = DrizzleD1Database<typeof d1Schema>;
 
 // Issuer discovery cached across requests in this Worker instance. Here the
 // verifier resolves the issuer in the presented token's `iss`.
@@ -91,7 +88,7 @@ export async function handleSignup(
 	);
 	const subject = verifiedSubject(verified);
 	const binding = await subjectBinding(verified, controlIssuer(request), body);
-	const database = controlDatabase(env);
+	const database = await writableControlDatabase(env);
 
 	const now = new Date();
 	const { claimed: isClaimed } = await claimGlobalAdmin(
@@ -207,8 +204,4 @@ function verifiedSubject(verified: VerifiedOidcClaims): string {
 	}
 
 	return verified.sub;
-}
-
-function controlDatabase(env: Env): Database {
-	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }

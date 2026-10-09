@@ -126,6 +126,7 @@ export interface TransitionHooks<Id extends string = TransitionId> {
 	 */
 	readonly wakeTenants?: (contractStep: LocalStep) => Promise<void>;
 	readonly report?: (event: TransitionEvent<Id>) => void;
+	readonly beforeContract?: (transition: Id) => Promise<void>;
 }
 
 /**
@@ -361,6 +362,8 @@ async function contract<Id extends string>(
 		});
 	}
 
+	await hooks.beforeContract?.(id);
+
 	const applied =
 		planned.contract.length === 0
 			? []
@@ -416,37 +419,10 @@ function throwIfMigrationsMissing<Id extends string>(
 	}
 }
 
-/**
- * The walk before the Workers are uploaded.
- *
- * The walk writes nothing until these checks pass:
- *
- * - every migration file matches the digest recorded when it was applied,
- *   including the migrations of complete transitions;
- * - every recorded row is one that `readStoredTransition` does not refuse: a
- *   transition and state that this build defines, or a transition that this
- *   build does not define and whose contract migrations have not started,
- *   which the walk leaves unchanged;
- * - every transition that the deployment records as complete has all of its
- *   migrations recorded in `d1_migrations`;
- * - every incomplete transition can expand after the earlier transitions
- *   expand and its required earlier contracts complete. A transition without
- *   `independent` or `expandAfter` requires every earlier contract. A fresh
- *   database is exempt, because every transition completes on it before the
- *   upload.
- *
- * No Workers of an earlier build serve a fresh database and it has no tenants,
- * so every transition's expand and contract migrations run now and each
- * transition is recorded complete. On any other database each incomplete
- * transition's expand migrations run and the transition is recorded
- * `expanded`. A transition with no contract migrations and no contract step is
- * then complete immediately. {@link completeTransitions} continues the others
- * after the upload.
- */
-export async function prepareTransitions<Id extends string>(
+async function validatePreparation<Id extends string>(
 	walk: TransitionWalk<Id>,
 	isFresh: boolean
-): Promise<TransitionStates<Id>> {
+): Promise<WalkStates<Id>> {
 	const applied = await readAppliedD1Migrations(walk.api, walk.database.id);
 
 	verifyD1MigrationDigests(applied, allMigrations(walk));
@@ -471,6 +447,51 @@ export async function prepareTransitions<Id extends string>(
 		);
 	}
 
+	return walkStates;
+}
+
+/**
+Checks migration digests and transition progress without writing to D1.
+*/
+export async function validateTransitions<Id extends string>(
+	walk: TransitionWalk<Id>,
+	isFresh: boolean
+): Promise<void> {
+	await validatePreparation(walk, isFresh);
+}
+
+/**
+ * The walk before the Workers are uploaded.
+ *
+ * The walk writes nothing until these checks pass:
+ *
+ * - every migration file matches the digest recorded when it was applied,
+ *   including the migrations of complete transitions;
+ * - every recorded row is one that `readStoredTransition` does not refuse: a
+ *   transition and state that this build defines, or a transition that this
+ *   build does not define and whose contract migrations have not started,
+ *   which the walk leaves unchanged;
+ * - every transition that the deployment records as complete has all of its
+ *   migrations recorded in `d1_migrations`;
+ * - every incomplete transition can expand after the earlier transitions
+ *   expand and its required earlier contracts complete. A transition without
+ *   `independent` or `expandAfter` requires every earlier contract. A fresh
+ *   database is exempt, because its schema does not need an earlier build.
+ *
+ * No Workers of an earlier build serve a fresh database and it has no tenants,
+ * so transitions without `contractAfterUpload` complete before the upload. On any other database each incomplete
+ * transition's expand migrations run and the transition is recorded
+ * `expanded`. A transition with no contract migrations and no contract step is
+ * then complete immediately. {@link completeTransitions} continues the others
+ * after the upload.
+ */
+export async function prepareTransitions<Id extends string>(
+	walk: TransitionWalk<Id>,
+	isFresh: boolean
+): Promise<TransitionStates<Id>> {
+	const walkStates = await validatePreparation(walk, isFresh);
+	const { states } = walkStates;
+
 	await recordReconciledStates(walk, walkStates);
 
 	for (const planned of walk.transitions) {
@@ -480,7 +501,10 @@ export async function prepareTransitions<Id extends string>(
 
 		await expand(walk, states, planned);
 
-		if (isFresh || isCompleteOnExpand(planned.transition)) {
+		if (
+			(isFresh && planned.transition.contractAfterUpload !== true) ||
+			isCompleteOnExpand(planned.transition)
+		) {
 			await contract(walk, states, planned);
 		}
 	}

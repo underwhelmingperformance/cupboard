@@ -79,6 +79,18 @@ export const controlContract = {
 		.route({ method: 'GET', path: '/check' })
 		.output(controlCheckReportSchema),
 
+	database: {
+		validate: controlProcedure
+			.meta({
+				requires: 'control:check',
+				replaySafety: 'replay-safe',
+				acceptsControlDatabaseValidationSecret: true
+			})
+			.route({ method: 'POST', path: '/database/validate' })
+			.input(z.strictObject({ secret: z.string().min(1).max(256).optional() }))
+			.output(z.strictObject({ valid: z.literal(true) }))
+	},
+
 	instance: {
 		get: controlProcedure
 			.meta({ requires: 'instance:read', replaySafety: 'replay-safe' })

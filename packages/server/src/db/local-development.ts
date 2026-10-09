@@ -1,7 +1,8 @@
-import { transitionIds } from '@cupboard/protocol/deployment';
+import { schemaTransitions } from '@cupboard/protocol/deployment';
 import { z } from 'zod';
 
 export interface LocalDevelopmentDatabase {
+	readonly binding?: string;
 	query(sql: string): Promise<readonly unknown[]>;
 	execute(sql: string): Promise<void>;
 }
@@ -18,7 +19,15 @@ export class LocalDevelopmentBootstrapRefusedError extends Error {
 const tableRows = z.array(z.object({ name: z.string() }));
 const transitionRows = z.array(z.object({ id: z.string(), state: z.string() }));
 const phaseRows = z.array(z.object({ id: z.string(), phase: z.string() }));
-const knownTransitions = new Set<string>(transitionIds);
+function transitionsFor(database: LocalDevelopmentDatabase): readonly string[] {
+	return schemaTransitions
+		.filter(
+			(transition) =>
+				(transition.database ?? 'CUPBOARD_DB') ===
+				(database.binding ?? 'CUPBOARD_DB')
+		)
+		.map(({ id }) => id);
+}
 
 function sqlString(value: string): string {
 	return `'${value.replaceAll("'", "''")}'`;
@@ -27,6 +36,8 @@ function sqlString(value: string): string {
 async function checkLocalState(
 	database: LocalDevelopmentDatabase
 ): Promise<void> {
+	const transitionIds = transitionsFor(database);
+	const knownTransitions = new Set(transitionIds);
 	const tables = tableRows.parse(
 		await database.query("SELECT name FROM sqlite_master WHERE type = 'table'")
 	);
@@ -83,20 +94,41 @@ async function checkLocalState(
 	}
 }
 
+export interface LocalDevelopmentSetup {
+	readonly database: LocalDevelopmentDatabase;
+	readonly applyMigrations: () => Promise<void>;
+}
+
+export async function bootstrapLocalDevelopmentDatabases(
+	setups: readonly LocalDevelopmentSetup[],
+	completeMigrations?: () => Promise<void>
+): Promise<void> {
+	for (const { database } of setups) {
+		await checkLocalState(database);
+	}
+	for (const { applyMigrations } of setups) {
+		await applyMigrations();
+	}
+	for (const { database } of setups) {
+		await checkLocalState(database);
+	}
+	await completeMigrations?.();
+	const now = sqlString(new Date().toISOString());
+	for (const { database } of setups) {
+		await database.execute(
+			transitionsFor(database)
+				.map(
+					(id) =>
+						`INSERT INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (${sqlString(id)}, 'complete', ${now}, ${now}) ON CONFLICT(id) DO NOTHING;`
+				)
+				.join('\n')
+		);
+	}
+}
+
 export async function bootstrapLocalDevelopment(
 	database: LocalDevelopmentDatabase,
 	applyMigrations: () => Promise<void>
 ): Promise<void> {
-	await checkLocalState(database);
-	await applyMigrations();
-	await checkLocalState(database);
-	const now = sqlString(new Date().toISOString());
-	await database.execute(
-		transitionIds
-			.map(
-				(id) =>
-					`INSERT INTO deployment_transition (id, state, updated_at, contracted_at) VALUES (${sqlString(id)}, 'complete', ${now}, ${now}) ON CONFLICT(id) DO NOTHING;`
-			)
-			.join('\n')
-	);
+	await bootstrapLocalDevelopmentDatabases([{ database, applyMigrations }]);
 }

@@ -8,9 +8,13 @@ import type { Context, ErrorHandler } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
-import { isD1Overload } from '../db/transient.ts';
+import {
+	isControlDatabaseMigrationPending,
+	isD1Overload
+} from '../db/transient.ts';
 import {
 	AttestationInfoHttpError,
+	ControlDatabaseMigrationPendingError,
 	DatabaseOverloadedError,
 	InsufficientScopeError,
 	InvalidAccessTokenError,
@@ -32,6 +36,10 @@ import { oauthJsonResponse } from './oauth-response.ts';
 // body, any other `ServerHttpError` to its status and message. Anything else
 // is not ours to map and returns undefined.
 function errorResponse(error: unknown): Response | undefined {
+	if (isControlDatabaseMigrationPending(error)) {
+		return serverHttpErrorResponse(new ControlDatabaseMigrationPendingError());
+	}
+
 	if (error instanceof OAuthError) {
 		const response = oauthJsonResponse(
 			{

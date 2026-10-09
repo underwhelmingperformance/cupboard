@@ -24,27 +24,31 @@ function states(
 }
 
 describe('schemaTransitions', () => {
-	it("lists every migration once, in name order, with each transition's contract migrations after its expand migrations", () => {
-		const sequence = schemaTransitions.flatMap((transition) => [
-			...transition.expand,
-			...transition.contract
-		]);
-
-		expect({
-			sorted: [...sequence].toSorted(byCodeUnit),
-			distinct: new Set(sequence).size,
-			contractsAfterExpands: schemaTransitions.map((transition) => {
-				const lastExpand = transition.expand.at(-1) ?? '';
-				const firstContract = transition.contract[0];
-
-				return firstContract === undefined || lastExpand < firstContract;
-			})
-		}).toStrictEqual({
-			sorted: sequence,
-			distinct: sequence.length,
-			contractsAfterExpands: schemaTransitions.map(() => true)
-		});
-	});
+	it.each(['CUPBOARD_DB', 'CONTROL_DB'])(
+		'lists every %s migration once, in name order',
+		(binding) => {
+			const transitions = schemaTransitions.filter(
+				(transition) => (transition.database ?? 'CUPBOARD_DB') === binding
+			);
+			const sequence = transitions.flatMap((transition) => [
+				...transition.expand,
+				...transition.contract
+			]);
+			expect({
+				sorted: sequence.toSorted(byCodeUnit),
+				distinct: new Set(sequence).size,
+				contractsAfterExpands: transitions.map((transition) => {
+					const lastExpand = transition.expand.at(-1) ?? '';
+					const firstContract = transition.contract[0];
+					return firstContract === undefined || lastExpand < firstContract;
+				})
+			}).toStrictEqual({
+				sorted: sequence,
+				distinct: sequence.length,
+				contractsAfterExpands: transitions.map(() => true)
+			});
+		}
+	);
 
 	// A deployment that recorded a transition complete never applies a
 	// migration added to it later, so a released transition's lists are fixed.
