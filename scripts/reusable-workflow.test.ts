@@ -1933,6 +1933,7 @@ interface SimplePublicationEvent {
 	readonly managed?: boolean;
 	readonly publish?: string;
 	readonly cache?: string;
+	readonly onOutput?: (stdout: string) => void;
 }
 
 async function resolveSimplePublicationEvent(
@@ -1953,7 +1954,7 @@ async function resolveSimplePublicationEvent(
 	const output = path.join(directory, 'output');
 
 	try {
-		await execFileAsync('bash', ['-c', script], {
+		const { stdout } = await execFileAsync('bash', ['-c', script], {
 			env: {
 				...process.env,
 				EVENT_NAME: event.eventName ?? 'pull_request',
@@ -1969,6 +1970,7 @@ async function resolveSimplePublicationEvent(
 				GITHUB_OUTPUT: output
 			}
 		});
+		event.onOutput?.(stdout);
 		const written = await readFile(output, 'utf8');
 
 		return Object.fromEntries(
@@ -2010,6 +2012,33 @@ describe('simple publication cache lifecycle', () => {
 			operation
 		});
 	});
+
+	it.each([
+		{ event: {}, log: 'Cache operation: publish\n' },
+		{ event: { action: 'closed' }, log: 'Cache operation: close\n' },
+		{
+			event: { action: 'closed', managed: false },
+			log: 'Cache operation: skip, because the pull request is closed\n'
+		},
+		{
+			event: { headRepositoryId: '5678' },
+			log: 'Cache operation: skip, because the pull request comes from a fork\n'
+		}
+	])(
+		'prints the operation that it selects for $event',
+		async ({ event, log }) => {
+			let printed = '';
+
+			await resolveSimplePublicationEvent({
+				...event,
+				onOutput: (stdout) => {
+					printed = stdout;
+				}
+			});
+
+			expect(printed).toBe(log);
+		}
+	);
 
 	it.each(['nnoe', 'wrong', ''])(
 		'rejects publication mode %j before closed-request closure',
@@ -2250,6 +2279,7 @@ async function resolvePublicationEvent(event: {
 	readonly preset?: string;
 	readonly cache?: string;
 	readonly cacheAccessMode?: string;
+	readonly reuseView?: string;
 	readonly publish?: 'none' | 'outputs' | 'closure';
 	readonly push?: boolean;
 	readonly credentials?: Readonly<Record<string, string | undefined>>;
@@ -2277,6 +2307,7 @@ async function resolvePublicationEvent(event: {
 				PRESET: event.preset ?? 'pull-request-and-branch',
 				CACHE: event.cache ?? '',
 				CACHE_ACCESS_MODE: event.cacheAccessMode ?? '',
+				REUSE_VIEW: event.reuseView ?? '',
 				ROOT_PREFIX: event.preset === '' ? 'release' : '',
 				BUILD: 'missing',
 				SUBSTITUTER: 'copy',
@@ -2507,6 +2538,23 @@ describe('pull-request cache lifecycle', () => {
 			throw new Error('Expected the workflow to reject the static read pair');
 		}
 	);
+
+	it('drops a reuse view on a pull-request run without printing anything', async () => {
+		let diagnostics: string | undefined;
+		const outputs = await resolvePublicationEvent({
+			action: 'opened',
+			merged: false,
+			reuseView: 'pull-requests-1234',
+			onOutput: (stdout) => {
+				diagnostics = stdout;
+			}
+		});
+
+		expect({ reuseView: outputs['reuse-view'], diagnostics }).toStrictEqual({
+			reuseView: '',
+			diagnostics: ''
+		});
+	});
 
 	it.each([{ publish: 'none' as const }, { push: false }])(
 		'uses the default cache without provisioning or removal for read-only input %s',
