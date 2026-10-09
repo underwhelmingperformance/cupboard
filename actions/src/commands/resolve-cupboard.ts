@@ -1,8 +1,10 @@
 import { env } from 'node:process';
 
+import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import {
+	describeResolvedCupboard,
 	resolveCupboard,
 	type ResolveCupboardOptions,
 	serialiseResolvedCupboard
@@ -22,6 +24,7 @@ export interface ResolveCupboardCommandOptions {
 
 interface ResolveCupboardCommandDependencies {
 	readonly resolve: typeof resolveCupboard;
+	readonly reporter?: Reporter;
 }
 
 const defaultDependencies: ResolveCupboardCommandDependencies = {
@@ -67,8 +70,20 @@ export async function resolveCupboardAction(
 	dependencies: ResolveCupboardCommandDependencies = defaultDependencies
 ): Promise<void> {
 	const resolved = await dependencies.resolve(resolveOptions(options));
+	const reporter =
+		dependencies.reporter ?? createGithubReporter({ environment });
 
 	await setOutput(environment, 'cupboard', serialiseResolvedCupboard(resolved));
+	reporter.result({
+		kind: 'resolved-cupboard',
+		title: 'Resolved cupboard',
+		data: resolved,
+		rows: [
+			{ label: 'Cupboard', value: describeResolvedCupboard(resolved) },
+			{ label: 'Repository', value: resolved.repository },
+			{ label: 'Commit', value: resolved.sourceCommit }
+		]
+	});
 }
 
 function resolveOptions(

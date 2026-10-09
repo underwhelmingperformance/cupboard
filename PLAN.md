@@ -6963,7 +6963,7 @@ Specific faults seen on a dotfiles pull-request run:
        per target in each cohort job. A cohort row gives the attribute, root,
        outcome, paths and bytes uploaded, duration, root expiry and attestation
        link.
-3. [ ] Print the configure job's settings, the release or source that
+3. [x] Print the configure job's settings, the release or source that
        `resolve-cupboard` chose, and the operation that "select cache operation"
        chose. Remove the notice that a reuse view applies only to branch runs.
 4. [x] Give cohort jobs readable names, such as
