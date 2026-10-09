@@ -18,6 +18,10 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { batchNonEmpty } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { type NegotiateHints } from '../do/negotiate-hints.ts';
+import {
+	readableReferenceSelect,
+	reusableReference
+} from '../do/reuse-authority.ts';
 
 import { tenantServer } from './durable-object.ts';
 
@@ -132,22 +136,6 @@ export function blobStateHintSelect(
 		.where(inArray(d1Schema.blobState.narHash, narHashes));
 }
 
-export function ownedBlobHintSelect(
-	database: HintDatabase,
-	tenant: TenantId,
-	narHashes: JsonValueList<NixSha256HashString>
-) {
-	return database
-		.select({ narHash: d1Schema.tenantBlob.narHash })
-		.from(d1Schema.tenantBlob)
-		.where(
-			and(
-				eq(d1Schema.tenantBlob.tenant, tenant),
-				inArray(d1Schema.tenantBlob.narHash, narHashes)
-			)
-		);
-}
-
 export function committedEdgeHintSelect(
 	database: HintDatabase,
 	tenant: TenantId,
@@ -186,22 +174,24 @@ async function readHints(
 	const blobStateQueries = jsonValueLists(narHashes).map((list) =>
 		blobStateHintSelect(database, list)
 	);
-	const ownedQueries = jsonValueLists(narHashes).map((list) =>
-		ownedBlobHintSelect(database, tenant, list)
+	const referenceQueries = jsonValueLists(narHashes).map((list) =>
+		readableReferenceSelect(database, tenant, list)
 	);
 	const edgeQueries = jsonValueLists(storePathHashes).map((list) =>
 		committedEdgeHintSelect(database, tenant, cache, list)
 	);
 
-	const [blobStatePages, ownedPages, edgePages] = await Promise.all([
+	const [blobStatePages, referencePages, edgePages] = await Promise.all([
 		batchNonEmpty(database, blobStateQueries),
-		batchNonEmpty(database, ownedQueries),
+		batchNonEmpty(database, referenceQueries),
 		batchNonEmpty(database, edgeQueries)
 	]);
 
 	return {
 		blobStates: blobStatePages.flat(),
-		ownedNarHashes: ownedPages.flat().map((row) => row.narHash),
+		reusableReferences: referencePages
+			.flat()
+			.map((row) => reusableReference(row)),
 		committedEdges: edgePages.flat()
 	};
 }

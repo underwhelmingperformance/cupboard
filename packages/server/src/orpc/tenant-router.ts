@@ -499,19 +499,21 @@ function negotiateUpload(
 		},
 		origin,
 		context.services.takeNegotiateHints(context.request),
-		hasAcceptedCapability(context.request, uploadGraceFactsCapability)
+		hasAcceptedCapability(context.request, uploadGraceFactsCapability),
+		context.claims.grants
 	);
 }
 
 function previewUpload(
-	context: TenantOrpcContext,
+	context: TenantOrpcContext & { readonly claims: AccessClaims },
 	paths: UploadPreviewRequest['paths']
 ) {
 	return context.services.uploads.preview(
 		context.cache,
 		{ paths },
 		context.services.takeNegotiateHints(context.request),
-		hasAcceptedCapability(context.request, uploadGraceFactsCapability)
+		hasAcceptedCapability(context.request, uploadGraceFactsCapability),
+		context.claims.grants
 	);
 }
 

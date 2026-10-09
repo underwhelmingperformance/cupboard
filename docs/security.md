@@ -81,6 +81,21 @@ only serves NARs that its own store paths refer to.
 One weak signal remains. After an upload, a NAR that another tenant had already
 stored may become available sooner than a new one.
 
+Within a tenant, a push reuses a NAR that the tenant already stores only if the
+push can already read it. The push can read a NAR that one of these caches
+refers to:
+
+- the destination cache;
+- a public cache in the tenant;
+- a cache that its token has `cache:content-read` for;
+- a cache in a reuse view that its token has `view:content-read` for.
+
+Otherwise the push uploads the bytes. cupboard asks for them in the same way as
+for a NAR that the tenant doesn't store, so the answer doesn't reveal that a
+private cache has the NAR. If a NAR has references only in private caches that
+the token cannot read, the job must upload the bytes before publishing to a
+public cache.
+
 ## How cupboard checks what it serves
 
 cupboard verifies every upload before publishing it. A client uploads to a

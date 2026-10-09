@@ -9,7 +9,7 @@ import {
 
 const hints: NegotiateHints = {
 	blobStates: [],
-	ownedNarHashes: []
+	reusableReferences: []
 };
 
 describe('NegotiateHintStore', () => {

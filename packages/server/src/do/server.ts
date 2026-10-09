@@ -58,6 +58,7 @@ import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
+import { type AccessClaims } from '../auth/auth.ts';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
@@ -161,6 +162,7 @@ import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import {
 	CommitCreditService,
+	type CommitSessionAttachment,
 	commitSocketIdleMs,
 	hasPacedSession,
 	isSessionClosing,
@@ -169,11 +171,13 @@ import {
 } from './commit-credit-service.ts';
 import {
 	CommitPipelineService,
+	type PrefetchedCommitFacts,
 	type PrefetchedMaterialisationFacts,
 	type TenantAccount,
 	verifyBackstopDelayMs,
 	verifyBackstopKey
 } from './commit-pipeline-service.ts';
+import { CommitReuseGrantsService } from './commit-reuse-grants-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type GarbageCollectionOutcome,
@@ -221,6 +225,10 @@ import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RefreshSessionsService } from './refresh-sessions-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RetryClockService } from './retry-clock-service.ts';
+import {
+	type ReusableReference,
+	type ReuseAuthority
+} from './reuse-authority.ts';
 import {
 	type ResolvedReuseView,
 	ReuseViewAdminService
@@ -825,7 +833,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.commitSession(
 					context.req.raw,
 					context.get('cache'),
-					context.get('claims').expiresAt
+					context.get('claims')
 				)
 		);
 		this.app.on(
@@ -1106,7 +1114,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async commitSession(
 		request: Request,
 		cache: CacheScope,
-		authenticatedUntil: Date
+		claims: AccessClaims
 	): Promise<Response> {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
@@ -1138,10 +1146,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const server = pair[1];
 		const sessionId = sessionIdSchema.parse(crypto.randomUUID());
 
+		await new CommitReuseGrantsService(this.ctx.storage).save(
+			sessionId,
+			claims.expiresAt.getTime(),
+			claims.grants
+		);
 		this.ctx.acceptWebSocket(server, [sessionId]);
 		const openingGrant = this.commitCredit.openSession(
 			server,
-			{ cache, sessionId, authenticatedUntil: authenticatedUntil.getTime() },
+			{
+				cache,
+				sessionId,
+				authenticatedUntil: claims.expiresAt.getTime(),
+				reuseGrantsStored: true
+			},
 			hasNegotiatedCredit,
 			Date.now()
 		);
@@ -1204,6 +1222,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await armAlarmNoLaterThan(this.ctx.storage, nextClose);
 	}
 
+	private async sessionReuseAuthority(
+		cache: ResolvedCache,
+		attachment: CommitSessionAttachment
+	): Promise<ReuseAuthority> {
+		const grants = await new CommitReuseGrantsService(this.ctx.storage).read(
+			attachment,
+			Date.now()
+		);
+
+		return this.reuseLookup.reuseAuthority(cache.scope, grants);
+	}
+
+	private async clearClosedSessionReuseGrants(): Promise<void> {
+		const store = new CommitReuseGrantsService(this.ctx.storage);
+
+		for (const socket of this.ctx.getWebSockets()) {
+			const attachment = readCommitSessionAttachment(socket);
+
+			if (attachment !== undefined && isSessionClosing(attachment)) {
+				await store.clear(attachment);
+			}
+		}
+	}
+
 	// Fail only the affected upload and keep the session open for other entries.
 	// An identity-bearing retry can resolve a missing pending row against the
 	// current committed narinfo generation.
@@ -1213,6 +1255,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: ResolvedCache,
 		sessionId: SessionId,
 		uploadId: UploadId,
+		authority: ReuseAuthority,
 		identity?: Pick<
 			CommitBatchEntry,
 			'storePathHash' | 'narHash' | 'retention'
@@ -1220,6 +1263,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		advisory?: {
 			readonly prefetched?: PrefetchedMaterialisationFacts;
 			readonly account?: TenantAccount;
+			readonly reuseReferences?: readonly ReusableReference[];
 		},
 		blob?: CommitBlobDeclaration
 	): Promise<void> {
@@ -1230,7 +1274,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			const outcome = await this.metered('commit', (logger) =>
 				this.afterHotMutation(cache.scope, () =>
-					this.commitPipeline.commit(logger, cache, uploadId, advisory, blob)
+					this.commitPipeline.commit(
+						logger,
+						cache,
+						uploadId,
+						authority,
+						advisory,
+						blob
+					)
 				)
 			);
 
@@ -2835,6 +2886,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.commitCredit.closeIdleSessions(now, () =>
 			this.uploadState.sessionsAwaitingVerdict()
 		);
+		await this.clearClosedSessionReuseGrants();
+		await new CommitReuseGrantsService(this.ctx.storage).cleanupExpired(now);
 		await this.armCommitSocketClose();
 		await this.armVerifyBackstopAlarm();
 		await new CachePurgeQueueService(this.context).runOnce();
@@ -3418,6 +3471,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				Date.now()
 			)
 		) {
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
 			return;
 		}
 
@@ -3488,6 +3542,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// protocol error, so close with 1002.
 			this.commitCredit.closeSession(sessionId, Date.now());
 			socket.close(1002, 'commit credit exceeded');
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
 			return;
 		}
 
@@ -3496,6 +3551,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// close code 1013 so the client reconnects and negotiates again.
 			this.commitCredit.closeSession(sessionId, Date.now());
 			socket.close(1013, 'too many unpaced commit sessions');
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
 			return;
 		}
 
@@ -3515,7 +3571,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					socket,
 					cache,
 					sessionId,
-					request.uploadId
+					request.uploadId,
+					await this.sessionReuseAuthority(cache, attachment)
 				);
 			} finally {
 				this.commitEntrySemaphore.release();
@@ -3537,13 +3594,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// Prefetch D1 facts once for the batch. They remain advisory; the charge
 			// batch decides status and quota. On failure, each entry reads fresh facts.
 			const narHashes = request.commits.map((entry) => entry.narHash);
-			let batchPrefetched:
-				Map<string, PrefetchedMaterialisationFacts> | undefined;
+			const authority = await this.sessionReuseAuthority(cache, attachment);
+			let batchPrefetched: Map<string, PrefetchedCommitFacts> | undefined;
 			let batchAccount: TenantAccount | undefined;
 
 			try {
 				const [prefetched, account] = await Promise.all([
-					this.commitPipeline.prefetchMaterialisationFacts(narHashes),
+					this.commitPipeline.prefetchCommitFacts(narHashes),
 					this.commitPipeline.readTenantAccount()
 				]);
 				batchPrefetched = prefetched;
@@ -3571,14 +3628,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 								cache,
 								sessionId,
 								entry.uploadId,
+								authority,
 								{
 									storePathHash: entry.storePathHash,
 									narHash: entry.narHash,
 									retention: entry.retention
 								},
 								{
-									prefetched: batchPrefetched?.get(entry.narHash),
-									account: batchAccount
+									prefetched: batchPrefetched?.get(entry.narHash)
+										?.materialisation,
+									account: batchAccount,
+									reuseReferences: batchPrefetched?.get(entry.narHash)
+										?.reuseReferences
 								},
 								entry.blob
 							);
@@ -3652,14 +3713,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// Return the session's remaining credit when the peer closes the socket.
-	webSocketClose(socket: WebSocket): void {
+	async webSocketClose(socket: WebSocket): Promise<void> {
+		const attachment = readCommitSessionAttachment(socket);
 		reclaimCommitCredit(this.commitCredit, socket);
 		socket.close();
+
+		if (attachment !== undefined) {
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+		}
 	}
 
-	webSocketError(socket: WebSocket): void {
+	async webSocketError(socket: WebSocket): Promise<void> {
+		const attachment = readCommitSessionAttachment(socket);
 		reclaimCommitCredit(this.commitCredit, socket);
 		socket.close(1011, 'socket error');
+
+		if (attachment !== undefined) {
+			await new CommitReuseGrantsService(this.ctx.storage).clear(attachment);
+		}
 	}
 }
 

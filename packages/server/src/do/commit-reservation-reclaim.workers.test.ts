@@ -13,11 +13,12 @@ import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { cacheIdentityColumns } from '../db/cache.ts';
+import { cacheIdentityColumns, type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { UploadExpiredError } from '../errors.ts';
 import {
+	adminGrants,
 	commitPath,
 	currentNarObjectKey,
 	currentServer,
@@ -45,8 +46,17 @@ import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
+import { ReuseAuthority } from './reuse-authority.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
+
+function ownerAuthority(cache: ResolvedCache): ReuseAuthority {
+	return new ReuseAuthority({
+		destination: cache.scope,
+		grants: adminGrants(),
+		views: []
+	});
+}
 
 describe('while checking whether a narinfo is committed', () => {
 	beforeEach(resetTestServer);
@@ -189,7 +199,12 @@ describe('when a commit retry finds an abandoned reservation', () => {
 			let didFail = false;
 
 			try {
-				await pipeline.commit(rootLogger(), cache, doomed.uploadId);
+				await pipeline.commit(
+					rootLogger(),
+					cache,
+					doomed.uploadId,
+					ownerAuthority(cache)
+				);
 			} catch {
 				didFail = true;
 			}
@@ -217,7 +232,8 @@ describe('when a commit retry finds an abandoned reservation', () => {
 				pipelineFor(instance.context).commit(
 					rootLogger(),
 					resolvedCache(instance.context),
-					fresh.uploadId
+					fresh.uploadId,
+					ownerAuthority(resolvedCache(instance.context))
 				)
 		);
 
@@ -271,7 +287,8 @@ describe('when a commit resumes its existing reservation', () => {
 				pipelineFor(instance.context).commit(
 					rootLogger(),
 					resolvedCache(instance.context),
-					reuse.uploadId
+					reuse.uploadId,
+					ownerAuthority(resolvedCache(instance.context))
 				)
 		);
 
@@ -324,7 +341,8 @@ describe('when a commit arrives after its upload expired', () => {
 			pipelineFor(instance.context).commit(
 				rootLogger(),
 				resolvedCache(instance.context),
-				upload.uploadId
+				upload.uploadId,
+				ownerAuthority(resolvedCache(instance.context))
 			)
 		);
 
@@ -370,7 +388,8 @@ describe('when a commit arrives after its upload expired', () => {
 					pipelineFor(instance.context).commit(
 						rootLogger(),
 						resolvedCache(instance.context),
-						upload.uploadId
+						upload.uploadId,
+						ownerAuthority(resolvedCache(instance.context))
 					)
 			);
 			const row = await pendingUploadSnapshot(upload.uploadId);

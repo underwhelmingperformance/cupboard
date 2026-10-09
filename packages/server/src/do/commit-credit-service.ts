@@ -1,5 +1,9 @@
 import { type CacheScope, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
+import {
 	commitAuthenticationExpiredCloseCode,
 	commitAuthenticationExpiredCloseReason,
 	commitBatchMaxEntries,
@@ -46,6 +50,9 @@ export const commitSessionAttachmentSchema = z.object({
 	cache: cacheScopeSchema,
 	sessionId: sessionIdSchema,
 	authenticatedUntil: epochMillisSchema.optional(),
+	// Older sessions store grants inline; new sessions use durable storage.
+	reuseGrants: authorizationDetailsSchema.optional(),
+	reuseGrantsStored: z.literal(true).optional(),
 	isClosing: z.boolean().optional(),
 	credit: commitCreditStateSchema.optional(),
 	lastActivityAt: epochMillisSchema.optional()
@@ -347,6 +354,8 @@ export class CommitCreditService {
 			readonly cache: CacheScope;
 			readonly sessionId: SessionId;
 			readonly authenticatedUntil: number;
+			readonly reuseGrants?: AuthorizationDetails;
+			readonly reuseGrantsStored?: true;
 		},
 		hasNegotiated: boolean,
 		now: number

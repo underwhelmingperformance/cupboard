@@ -23,7 +23,9 @@ import {
 	armBlobReaperTimer,
 	authorisedFetch,
 	blobStateArmTimes,
+	cacheWriteGrants,
 	commitPath,
+	commitSharedPath,
 	CommitSocketError,
 	commitUploadRejection,
 	currentNarObjectKey,
@@ -39,6 +41,8 @@ import {
 	namedCache,
 	narInfoDeletionRows,
 	narInfoGeneration,
+	pushPath,
+	putTestCache,
 	resetTestServer,
 	seedCanonicalBlob,
 	testPushId,
@@ -130,7 +134,7 @@ describe('computing negotiate hints', () => {
 		);
 
 		expect({ signed, forged }).toStrictEqual({
-			signed: { blobStates: [], ownedNarHashes: [], committedEdges: [] },
+			signed: { blobStates: [], reusableReferences: [], committedEdges: [] },
 			forged: undefined
 		});
 	});
@@ -151,7 +155,7 @@ describe('computing negotiate hints', () => {
 
 		expect(hints).toStrictEqual({
 			blobStates: [],
-			ownedNarHashes: [],
+			reusableReferences: [],
 			committedEdges: []
 		});
 	});
@@ -679,6 +683,19 @@ describe('negotiate hints', () => {
 		});
 
 		await commitPath(token, committed, nar);
+		// Another path keeps a readable reference to the NAR, so negotiation can
+		// still offer reuse.
+		await commitSharedPath(
+			token,
+			uploadMetadata({
+				name: 'edge-sibling',
+				storePathHash: 'f'.repeat(32),
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				narSize: nar.narSize
+			})
+		);
 
 		// Leave a narinfo row without its committed edge.
 		const generation = await narInfoGeneration(committed.storePathHash);
@@ -725,7 +742,8 @@ describe('negotiate hints', () => {
 		// A global blob without this tenant's ownership row must not be reusable.
 		await seedCanonicalBlob(nar);
 
-		// Stage stale facts that claim ownership the tenant does not have.
+		// Stage stale facts that report a public reference to a NAR that this
+		// tenant does not own.
 		const staged = await currentServer().stageNegotiateHints({
 			blobStates: [
 				{
@@ -737,7 +755,9 @@ describe('negotiate hints', () => {
 					deleteAfter: new Date(Date.now() + 60_000).toISOString()
 				}
 			],
-			ownedNarHashes: [nar.narHash]
+			reusableReferences: [
+				{ narHash: nar.narHash, cache: defaultCache(), access: 'public' }
+			]
 		});
 		const hintedResponse = await authorisedFetch('/uploads', token, {
 			method: 'POST',
@@ -814,5 +834,63 @@ describe('negotiate hints', () => {
 		expect(await blobStateArmTimes()).toStrictEqual([
 			{ narHash: nar.narHash, deleteAfter: undefined }
 		]);
+	});
+
+	it('never lets hints offer reuse of a NAR that the token cannot read', async () => {
+		const owner = await initialise();
+		const privateCache = namedCache('falcon');
+		await putTestCache(owner, privateCache, 'private');
+		const { metadata, nar } = await verifiablePath('hints-private', {
+			storePathHash: 'c'.repeat(32),
+			name: 'private'
+		});
+		await pushPath(owner, metadata, privateCache, nar);
+
+		const sibling = uploadMetadata({
+			name: 'sibling',
+			storePathHash: 'd'.repeat(32),
+			narHash: metadata.narHash,
+			fileHash: metadata.fileHash,
+			fileSize: metadata.fileSize,
+			narSize: metadata.narSize
+		});
+		const token = await issueServerSignedToken(cacheWriteGrants());
+		const body = JSON.stringify({
+			pushId: testPushId,
+			paths: [uploadPathNegotiation(sibling)]
+		});
+		const hints = await computeNegotiateHints(
+			new Request(`https://cache.example/t/${fixtureTenant}/uploads`, {
+				method: 'POST',
+				headers: {
+					authorization: `Bearer ${token}`,
+					'content-type': 'application/json'
+				},
+				body
+			}),
+			env,
+			fixtureTenant,
+			defaultCache()
+		);
+
+		if (hints === undefined) {
+			throw new TypeError('Expected the Worker to compute hints');
+		}
+
+		const staged = await currentServer().stageNegotiateHints(hints);
+		const response = await authorisedFetch('/uploads', token, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				[negotiateHintsHeader]: staged
+			},
+			body
+		});
+
+		expect(response.status).toBe(StatusCodes.OK);
+		expectSingleUploadDecision(
+			uploadNegotiateResponseSchema.parse(await response.json()),
+			sibling
+		);
 	});
 });

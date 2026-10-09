@@ -18,6 +18,10 @@ import {
 	cacheMetadataMaxCandidateBytes
 } from '@cupboard/protocol/cache-metadata';
 import {
+	type AuthorizationDetails,
+	isCoveredByToken
+} from '@cupboard/protocol/grants';
+import {
 	type ReuseViewName,
 	type ReuseViewRevision,
 	type ReuseViewSelector
@@ -33,7 +37,11 @@ import {
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
-import { cacheSelectorsCondition, type ResolvedCache } from '../db/cache.ts';
+import {
+	cacheScopeFromRow,
+	cacheSelectorsCondition,
+	type ResolvedCache
+} from '../db/cache.ts';
 import { authorisedByPathGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -53,6 +61,7 @@ import { renderCacheMetadataEntry } from '../read/metadata-read.ts';
 import { batchNonEmpty, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type JsonRowList, jsonRowLists, jsonValueLists } from './json-list.ts';
+import { ReuseAuthority, type ReuseViewMembership } from './reuse-authority.ts';
 import { reuseViewSelectorsFromRows } from './reuse-view-selectors.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 import {
@@ -382,8 +391,15 @@ export class ReuseViewLookupService {
 		access: CacheAccessMode,
 		hashFilter: SQL
 	): SQL | undefined {
+		return and(hashFilter, this.includedCacheFilter(selectors, access));
+	}
+
+	// A view includes only live caches with its own access.
+	private includedCacheFilter(
+		selectors: readonly ReuseViewSelector[],
+		access: CacheAccessMode
+	): SQL | undefined {
 		return and(
-			hashFilter,
 			eq(schema.cacheIdentities.access, access),
 			isNull(schema.cacheIdentities.deletedAt),
 			cacheSelectorsCondition(
@@ -392,6 +408,26 @@ export class ReuseViewLookupService {
 				selectors
 			)
 		);
+	}
+
+	private membership(
+		view: ReuseViewName,
+		access: CacheAccessMode
+	): ReuseViewMembership {
+		const caches = this.context.db
+			.select({
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name
+			})
+			.from(schema.cacheIdentities)
+			.where(this.includedCacheFilter(this.viewSelectors(view), access))
+			.all();
+
+		return {
+			view,
+			access,
+			caches: caches.map((cache) => cacheScopeFromRow(cache))
+		};
 	}
 
 	private requireMetadataCandidateBudget(
@@ -1064,6 +1100,36 @@ export class ReuseViewLookupService {
 		} catch (error) {
 			throw new SharedFactsUnavailableError(error);
 		}
+	}
+
+	/**
+	 * Builds the authority that decides which stored NARs a push into
+	 * `destination` may reuse. The authority includes the membership of each
+	 * reuse view that the grants cover for `view:content-read`.
+	 */
+	reuseAuthority(
+		destination: CacheScope,
+		grants: AuthorizationDetails
+	): ReuseAuthority {
+		// Only a view grant can make a view's membership matter. A wildcard grant
+		// already covers every cache for `cache:content-read`.
+		if (grants.every((grant) => grant.type !== 'cupboard_view')) {
+			return new ReuseAuthority({ destination, grants, views: [] });
+		}
+
+		const views = this.context.db
+			.select({
+				name: schema.reuseViews.name,
+				access: schema.reuseViews.access
+			})
+			.from(schema.reuseViews)
+			.all()
+			.filter((view) =>
+				isCoveredByToken(grants, 'view:content-read', { view: view.name })
+			)
+			.map((view) => this.membership(view.name, view.access));
+
+		return new ReuseAuthority({ destination, grants, views });
 	}
 
 	/**

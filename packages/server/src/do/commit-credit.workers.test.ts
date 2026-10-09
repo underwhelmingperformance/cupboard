@@ -451,14 +451,14 @@ describe('commit session credit', () => {
 
 		const outcome = await runInDurableObject(
 			currentServer(),
-			(instance, state) => {
+			async (instance, state) => {
 				const socket = state.getWebSockets()[0];
 
 				if (socket === undefined) {
 					throw new Error('expected the uncredited session to be listed');
 				}
 
-				instance.webSocketClose(socket);
+				await instance.webSocketClose(socket);
 
 				return 'reclaimed';
 			}

@@ -4,6 +4,7 @@ import {
 	type RootName,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type PushCredentialInput,
@@ -64,6 +65,8 @@ import {
 	subrequestsPerReconcileRemoval
 } from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import { type ReuseAuthority } from './reuse-authority.ts';
+import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { type RootsService } from './roots-service.ts';
 import { hasSubrequestsFor } from './subrequest-slice.ts';
 import { commitMetadataFromPathAndBlob } from './upload-metadata.ts';
@@ -312,9 +315,11 @@ export class UploadsService {
 		cache: ResolvedCache,
 		body: ClosureRequest,
 		hints: NegotiateHints | undefined,
-		shouldClaim: boolean
+		shouldClaim: boolean,
+		authority: ReuseAuthority
 	): Promise<ClosureClassification> {
-		const facts = hints === undefined ? undefined : factsFromHints(hints);
+		const facts =
+			hints === undefined ? undefined : factsFromHints(hints, authority);
 
 		const existingByStorePathHash = this.existingNarInfos(
 			cache,
@@ -357,8 +362,11 @@ export class UploadsService {
 			await this.uploadState.withoutMissingCanonicalNars(
 				facts?.reusableByNarHash ??
 					(await (shouldClaim
-						? this.uploadState.findReusableBlobs(candidateNarHashes)
-						: this.uploadState.peekReusableBlobs(candidateNarHashes)))
+						? this.uploadState.findReusableBlobs(candidateNarHashes, authority)
+						: this.uploadState.peekReusableBlobs(
+								candidateNarHashes,
+								authority
+							)))
 			);
 		const missingCanonicalNarStrings = new Set<string>(missingCanonicalNars);
 		const presentReusable = new Map(
@@ -376,6 +384,16 @@ export class UploadsService {
 			skippable,
 			reusableByNarHash: presentReusable
 		};
+	}
+
+	private reuseAuthority(
+		destination: CacheScope,
+		grants: AuthorizationDetails
+	): ReuseAuthority {
+		return new ReuseViewLookupService(this.context).reuseAuthority(
+			destination,
+			grants
+		);
 	}
 
 	uploadStatus(uploadId: UploadId): UploadStatusResponse {
@@ -444,7 +462,8 @@ export class UploadsService {
 		body: UploadNegotiateRequest,
 		origin: RequestOrigin,
 		hints: NegotiateHints | undefined,
-		shouldReportGrace: boolean
+		shouldReportGrace: boolean,
+		grants: AuthorizationDetails
 	): Promise<UploadNegotiateResponse> {
 		if (!(await this.context.pushCredentials().verify(body.pushId))) {
 			throw new InvalidPushIdError();
@@ -479,7 +498,13 @@ export class UploadsService {
 			skippableRows,
 			skippable,
 			reusableByNarHash
-		} = await this.classifyClosure(cache, body, hints, true);
+		} = await this.classifyClosure(
+			cache,
+			body,
+			hints,
+			true,
+			this.reuseAuthority(cache.scope, grants)
+		);
 
 		const missingRows = body.paths.filter((metadata) => {
 			const existing = existingByStorePathHash.get(metadata.storePathHash);
@@ -653,7 +678,8 @@ export class UploadsService {
 		cacheScope: CacheScope,
 		body: UploadPreviewRequest,
 		hints: NegotiateHints | undefined,
-		shouldReportGrace: boolean
+		shouldReportGrace: boolean,
+		grants: AuthorizationDetails
 	): Promise<UploadPreviewResponse> {
 		if (body.paths.length === 0) {
 			return { uploads: [] };
@@ -665,13 +691,16 @@ export class UploadsService {
 			cache === undefined
 				? undefined
 				: this.retention.resolveGraceSeconds(cache);
+		const authority = this.reuseAuthority(cacheScope, grants);
 
 		if (cache === undefined) {
-			const facts = hints === undefined ? undefined : factsFromHints(hints);
+			const facts =
+				hints === undefined ? undefined : factsFromHints(hints, authority);
 			const reusableByNarHash =
 				facts?.reusableByNarHash ??
 				(await this.uploadState.peekReusableBlobs(
-					body.paths.map((path) => path.narHash)
+					body.paths.map((path) => path.narHash),
+					authority
 				));
 			const plannedGraceFact: UploadGraceFact =
 				resolvedGraceSeconds === undefined
@@ -696,7 +725,7 @@ export class UploadsService {
 		}
 
 		const { existingByStorePathHash, skippable, reusableByNarHash } =
-			await this.classifyClosure(cache, body, hints, false);
+			await this.classifyClosure(cache, body, hints, false, authority);
 		const plannedGraceFact: UploadGraceFact =
 			resolvedGraceSeconds === undefined
 				? {}

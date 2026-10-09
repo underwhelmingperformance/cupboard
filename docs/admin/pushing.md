@@ -57,10 +57,14 @@ what the argument after the tenant URL is in this order:
 For each store path, `push` does one of three things:
 
 - If the cache already has the store path, `push` skips it.
-- If the tenant already stores the same NAR (the store path's contents)
-  somewhere else, such as in another cache, `push` reuses that NAR and doesn't
-  upload it again.
+- If the tenant already stores the same NAR (the store path's contents) and the
+  push can already read it, `push` reuses that NAR and doesn't upload it again.
+  The push can read a NAR in the destination cache or in a public cache, and in
+  any cache or reuse view that its token can read. See [Shared
+  storage][shared-storage].
 - Otherwise, `push` compresses the NAR and uploads it.
+
+[shared-storage]: ../security.md#shared-storage
 
 When it finishes, `push` prints a summary that counts each case:
 

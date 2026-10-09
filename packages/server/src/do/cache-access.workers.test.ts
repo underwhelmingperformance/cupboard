@@ -23,6 +23,7 @@ import {
 	type TenantReadCredential,
 	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
+import { uploadNegotiateResponseSchema } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -39,19 +40,25 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedWorkerFetch,
+	cacheWriteGrants,
+	commitUploadViaWorker,
+	expectSingleUploadDecision,
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
+	issueWorkerSignedToken,
 	namedCache,
 	narDigestHex,
 	narHash,
 	provisionFixtureTenant,
 	pushPathToTenant,
+	putNarBytes,
 	readFetch,
 	recordTransition,
 	resetTestServer,
 	sigstoreBundleBytes,
 	testPushId,
+	testPushIdFor,
 	uploadMetadata,
 	uploadPathNegotiation
 } from '../test-support.ts';
@@ -505,6 +512,48 @@ describe('private cache access', () => {
 		}).toStrictEqual({
 			anonymousNar: StatusCodes.OK,
 			privateNar: StatusCodes.OK
+		});
+	});
+
+	it('makes a write-only token upload a NAR that only the private cache references', async () => {
+		const published = await publishToPrivateCache();
+		const shared = uploadMetadata({
+			fileSize: 1234,
+			storePathHash: 'b'.repeat(32)
+		});
+		const writer = await issueWorkerSignedToken(cacheWriteGrants());
+		const pushId = await testPushIdFor(tenant);
+
+		const negotiated = await handlerFetch(`/t/${tenant}/uploads`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${writer}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({
+				pushId,
+				paths: [uploadPathNegotiation(shared)]
+			})
+		});
+		const decision = expectSingleUploadDecision(
+			uploadNegotiateResponseSchema.parse(await negotiated.json()),
+			shared,
+			pushId
+		);
+		const beforeUpload = await readFetch(`/${published.narUrl}`);
+
+		await putNarBytes(decision.r2Key);
+		const committed = await commitUploadViaWorker(writer, decision.uploadId);
+		const afterUpload = await readFetch(`/${published.narUrl}`);
+
+		expect({
+			committed: committed.status,
+			beforeUpload: beforeUpload.status,
+			afterUpload: afterUpload.status
+		}).toStrictEqual({
+			committed: 'committed',
+			beforeUpload: StatusCodes.NOT_FOUND,
+			afterUpload: StatusCodes.OK
 		});
 	});
 

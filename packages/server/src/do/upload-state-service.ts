@@ -11,7 +11,16 @@ import {
 	type UploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	getTableColumns,
+	inArray,
+	isNotNull,
+	isNull,
+	or,
+	sql
+} from 'drizzle-orm';
 import { z } from 'zod';
 
 import {
@@ -28,7 +37,12 @@ import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
-import { chunk, maxOutgoingConnections, presentNarObjects } from './bulk.ts';
+import {
+	batchNonEmpty,
+	chunk,
+	maxOutgoingConnections,
+	presentNarObjects
+} from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 import {
@@ -37,6 +51,12 @@ import {
 	type PromotionRecord,
 	type UploadConclusion
 } from './promotion-record.ts';
+import {
+	readableReferenceSelect,
+	type ReusableReference,
+	reusableReference,
+	type ReuseAuthority
+} from './reuse-authority.ts';
 import { requireSubrequestsFor } from './subrequest-slice.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
@@ -77,9 +97,12 @@ export class UploadStateService {
 	// Reuse visibility is tenant-scoped. Joining through `tenant_blob` exposes a
 	// canonical blob only after this tenant has established its own presence edge,
 	// so another tenant's identical bytes cannot become an existence oracle.
-	private async ownedBlobStates(
+	// Within the tenant, a blob is reusable only through a reference that the
+	// authority permits, so a push cannot publish bytes that it cannot read.
+	private async reusableBlobStates(
 		tenant: TenantId,
-		narHashes: readonly NixSha256HashString[]
+		narHashes: readonly NixSha256HashString[],
+		authority: ReuseAuthority
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
 		const batches = await mapWithConcurrency(
 			jsonValueLists(narHashes),
@@ -95,16 +118,28 @@ export class UploadStateService {
 					d1Schema.tenantBlob.narHash
 				);
 
-				return this.context.d1
-					.select()
-					.from(d1Schema.tenantBlob)
-					.innerJoin(d1Schema.blobState, joinOn)
-					.where(filter)
-					.all();
+				// A D1 batch returns each row as an object keyed by column name, so a
+				// name that both joined tables use, such as `nar_hash`, appears once
+				// and shifts the remaining columns. Select only `blob_state` columns.
+				return this.context.d1.batch([
+					this.context.d1
+						.select(getTableColumns(d1Schema.blobState))
+						.from(d1Schema.tenantBlob)
+						.innerJoin(d1Schema.blobState, joinOn)
+						.where(filter),
+					readableReferenceSelect(this.context.d1, tenant, list)
+				]);
 			}
 		);
 
-		const rows = batches.flat().map((row) => row.blob_state);
+		const permitted = authority.permittedNarHashes(
+			batches.flatMap(([, references]) =>
+				references.map((row) => reusableReference(row))
+			)
+		);
+		const rows = batches
+			.flatMap(([owned]) => owned)
+			.filter((row) => permitted.has(row.narHash));
 
 		return new Map(rows.map((row) => [row.narHash, row]));
 	}
@@ -569,10 +604,30 @@ export class UploadStateService {
 		return true;
 	}
 
+	/**
+	 * The readable references to the listed NARs, from every cache in the
+	 * tenant.
+	 */
+	async readableReferences(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<ReusableReference[]> {
+		const unique = [...new Set(narHashes)];
+		const tenant = this.context.requireTenant();
+		const pages = await batchNonEmpty(
+			this.context.d1,
+			jsonValueLists(unique).map((list) =>
+				readableReferenceSelect(this.context.d1, tenant, list)
+			)
+		);
+
+		return pages.flat().map((row) => reusableReference(row));
+	}
+
 	// Preview must not change a reaper timer merely by reporting possible reuse, so
 	// it reads tenant-visible canonical blobs without claiming them.
 	async peekReusableBlobs(
-		narHashes: readonly NixSha256HashString[]
+		narHashes: readonly NixSha256HashString[],
+		authority: ReuseAuthority
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
 		const unique = [...new Set(narHashes)];
 
@@ -582,7 +637,7 @@ export class UploadStateService {
 
 		const tenant = this.context.requireTenant();
 
-		return this.ownedBlobStates(tenant, unique);
+		return this.reusableBlobStates(tenant, unique, authority);
 	}
 
 	// Negotiate can direct the client to commit against each returned canonical
@@ -590,9 +645,10 @@ export class UploadStateService {
 	// until commit binds the new reference. Read-only callers must use
 	// {@link peekReusableBlobs}.
 	async findReusableBlobs(
-		narHashes: readonly NixSha256HashString[]
+		narHashes: readonly NixSha256HashString[],
+		authority: ReuseAuthority
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
-		const blobStates = await this.peekReusableBlobs(narHashes);
+		const blobStates = await this.peekReusableBlobs(narHashes, authority);
 
 		if (blobStates.size === 0) {
 			return blobStates;

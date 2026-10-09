@@ -22,6 +22,7 @@ import {
 	type UploadId,
 	type UploadPathNegotiation
 } from '@cupboard/protocol/upload';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	and,
 	eq,
@@ -68,7 +69,7 @@ import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import { type AttestationsService } from './attestations-service.ts';
-import { batchNonEmpty } from './bulk.ts';
+import { batchNonEmpty, maxOutgoingConnections } from './bulk.ts';
 import { CacheClosureService } from './cache-closure-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
@@ -84,10 +85,21 @@ import {
 	storedGraceDeadlines,
 	storedGraceFact
 } from './grace-decision.ts';
-import { jsonRowLists, jsonValueLists } from './json-list.ts';
+import {
+	jsonRowLists,
+	type JsonValueList,
+	jsonValueLists
+} from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { PathReadAuthorityService } from './path-read-authority-service.ts';
+import { ProtectedInheritanceService } from './protected-inheritance-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import {
+	readableReferenceSelect,
+	type ReusableReference,
+	reusableReference,
+	type ReuseAuthority
+} from './reuse-authority.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { affordableSubrequestOperations } from './subrequest-slice.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
@@ -242,6 +254,11 @@ export interface MaterialisationProbe {
 export interface PrefetchedMaterialisationFacts {
 	readonly blob: CanonicalBlobFacts | undefined;
 	readonly isOwned: boolean;
+}
+
+export interface PrefetchedCommitFacts {
+	readonly materialisation: PrefetchedMaterialisationFacts;
+	readonly reuseReferences: readonly ReusableReference[];
 }
 
 function isOverQuota(
@@ -664,6 +681,53 @@ export class CommitPipelineService {
 			.get();
 
 		return owned !== undefined;
+	}
+
+	private async canonicalBlobFacts(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Map<NixSha256HashString, CanonicalBlobFacts>> {
+		const pages = await batchNonEmpty(
+			this.context.d1,
+			jsonValueLists(narHashes).map((list) =>
+				this.context.d1
+					.select({
+						narHash: d1Schema.blobState.narHash,
+						fileHash: d1Schema.blobState.fileHash,
+						fileSize: d1Schema.blobState.fileSize,
+						compression: d1Schema.blobState.compression,
+						incarnation: d1Schema.blobState.incarnation
+					})
+					.from(d1Schema.blobState)
+					.where(inArray(d1Schema.blobState.narHash, list))
+			)
+		);
+
+		return new Map(
+			pages.flat().map((row) => [
+				row.narHash,
+				{
+					fileHash: row.fileHash,
+					fileSize: row.fileSize,
+					compression: row.compression,
+					incarnation: row.incarnation
+				}
+			])
+		);
+	}
+
+	private ownedNarHashSelect(
+		tenant: TenantId,
+		narHashes: JsonValueList<NixSha256HashString>
+	) {
+		return this.context.d1
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					inArray(d1Schema.tenantBlob.narHash, narHashes)
+				)
+			);
 	}
 
 	// Keep the usage updates, reference and ownership inserts, and reaper disarm
@@ -1538,11 +1602,13 @@ export class CommitPipelineService {
 		logger: Logger,
 		cache: ResolvedCache,
 		uploadId: UploadId,
+		authority: ReuseAuthority,
 		// Batch callers may reuse these advisory reads. The charge batch still
 		// makes the authoritative status and quota decision.
 		advisory?: {
 			readonly prefetched?: PrefetchedMaterialisationFacts;
 			readonly account?: TenantAccount;
+			readonly reuseReferences?: readonly ReusableReference[];
 		},
 		blob?: CommitBlobDeclaration
 	): Promise<CommitOutcome> {
@@ -1741,13 +1807,37 @@ export class CommitPipelineService {
 		}
 
 		const canonicalKey = narObjectKey(metadata.narHash);
+		const isReuse = pending.r2Key === canonicalKey;
 
-		const [probe, stagedObject] = await Promise.all([
+		const [probe, stagedObject, reuseReferences] = await Promise.all([
 			this.probeMaterialisation(metadata, advisory?.prefetched),
-			pending.r2Key === canonicalKey
-				? undefined
-				: this.context.env.BLOBS.head(pending.r2Key)
+			isReuse ? undefined : this.context.env.BLOBS.head(pending.r2Key),
+			isReuse
+				? (advisory?.reuseReferences ??
+					this.uploadState.readableReferences([metadata.narHash]))
+				: []
 		]);
+
+		// The reference that permitted reuse at negotiation can be removed before
+		// commit. An explicit deletion after this upload was accepted protects the
+		// upload, as it does for attestation inheritance. Any other loss refuses
+		// the commit as for a vanished blob, so the client negotiates again.
+		if (
+			isReuse &&
+			!authority.permitsAny(reuseReferences) &&
+			!authority.permitsAny(
+				new ProtectedInheritanceService(
+					this.context
+				).deletedSourcesAfterAcceptance(uploadId, metadata.storePathHash)
+			)
+		) {
+			await this.uploadState.clearPendingUpload(uploadId, {
+				logger,
+				outcome: 'absent'
+			});
+
+			throw new UploadedObjectNotFoundError(pending.r2Key);
+		}
 
 		const stagedSize =
 			pending.r2Key === canonicalKey
@@ -2068,64 +2158,68 @@ export class CommitPipelineService {
 		const tenant = this.context.requireTenant();
 		const unique = [...new Set(narHashes)];
 
-		const blobByHash = new Map<NixSha256HashString, CanonicalBlobFacts>();
-		const ownedHashes = new Set<NixSha256HashString>();
-
-		const blobStateQueries = jsonValueLists(unique).map((list) =>
-			this.context.d1
-				.select({
-					narHash: d1Schema.blobState.narHash,
-					fileHash: d1Schema.blobState.fileHash,
-					fileSize: d1Schema.blobState.fileSize,
-					compression: d1Schema.blobState.compression,
-					incarnation: d1Schema.blobState.incarnation
-				})
-				.from(d1Schema.blobState)
-				.where(inArray(d1Schema.blobState.narHash, list))
-		);
-
-		const tenantBlobQueries = jsonValueLists(unique).map((list) =>
-			this.context.d1
-				.select({ narHash: d1Schema.tenantBlob.narHash })
-				.from(d1Schema.tenantBlob)
-				.where(
-					and(
-						eq(d1Schema.tenantBlob.tenant, tenant),
-						inArray(d1Schema.tenantBlob.narHash, list)
-					)
+		const [blobByHash, ownedPages] = await Promise.all([
+			this.canonicalBlobFacts(unique),
+			batchNonEmpty(
+				this.context.d1,
+				jsonValueLists(unique).map((list) =>
+					this.ownedNarHashSelect(tenant, list)
 				)
-		);
-
-		const [blobResults, ownedResults] = await Promise.all([
-			batchNonEmpty(this.context.d1, blobStateQueries),
-			batchNonEmpty(this.context.d1, tenantBlobQueries)
+			)
 		]);
+		const ownedHashes = new Set(ownedPages.flat().map((row) => row.narHash));
 
-		for (const rows of blobResults) {
-			for (const row of rows) {
-				blobByHash.set(row.narHash, {
-					fileHash: row.fileHash,
-					fileSize: row.fileSize,
-					compression: row.compression,
-					incarnation: row.incarnation
-				});
-			}
-		}
-
-		for (const rows of ownedResults) {
-			for (const row of rows) {
-				ownedHashes.add(row.narHash);
-			}
-		}
-
-		const facts = unique.map(
-			(narHash): [NixSha256HashString, PrefetchedMaterialisationFacts] => [
+		return new Map(
+			unique.map((narHash) => [
 				narHash,
 				{ blob: blobByHash.get(narHash), isOwned: ownedHashes.has(narHash) }
-			]
+			])
+		);
+	}
+
+	/**
+	 * Prefetches the facts of {@link prefetchMaterialisationFacts} for a commit
+	 * batch, and the readable references that decide whether each reuse commit
+	 * is still permitted. The ownership and reference reads share one D1 batch.
+	 */
+	async prefetchCommitFacts(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Map<NixSha256HashString, PrefetchedCommitFacts>> {
+		const tenant = this.context.requireTenant();
+		const unique = [...new Set(narHashes)];
+
+		const [blobByHash, pages] = await Promise.all([
+			this.canonicalBlobFacts(unique),
+			mapWithConcurrency(
+				jsonValueLists(unique),
+				maxOutgoingConnections,
+				(list) =>
+					this.context.d1.batch([
+						this.ownedNarHashSelect(tenant, list),
+						readableReferenceSelect(this.context.d1, tenant, list)
+					])
+			)
+		]);
+		const ownedHashes = new Set(
+			pages.flatMap(([owned]) => owned.map((row) => row.narHash))
+		);
+		const references = Map.groupBy(
+			pages.flatMap(([, rows]) => rows.map((row) => reusableReference(row))),
+			(reference) => reference.narHash
 		);
 
-		return new Map(facts);
+		return new Map(
+			unique.map((narHash) => [
+				narHash,
+				{
+					materialisation: {
+						blob: blobByHash.get(narHash),
+						isOwned: ownedHashes.has(narHash)
+					},
+					reuseReferences: references.get(narHash) ?? []
+				}
+			])
+		);
 	}
 
 	async publicationStatus(

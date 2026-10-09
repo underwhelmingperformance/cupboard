@@ -48,6 +48,7 @@ import {
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	adminGrants,
 	asOneInvocation,
 	authorisedFetch,
 	bootstrap,
@@ -106,6 +107,7 @@ import {
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
+import { ReuseAuthority } from './reuse-authority.ts';
 import { RootsService } from './roots-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -2535,7 +2537,8 @@ describe('retention grace facts reported to clients', () => {
 					},
 					requestOriginSchema.parse('https://cupboard.example'),
 					undefined,
-					shouldReportGrace
+					shouldReportGrace,
+					adminGrants()
 				);
 			}
 		);
@@ -2654,7 +2657,7 @@ describe('retention grace facts reported to clients', () => {
 					...instance.context.env,
 					CUPBOARD_DB: prepareTappingD1(
 						instance.context.env.CUPBOARD_DB,
-						(query) => query.includes('blob_ref_storage'),
+						(query) => query.startsWith('insert into "blob_ref_storage"'),
 						() => {
 							if (hasAttached) {
 								return;
@@ -2673,7 +2676,12 @@ describe('retention grace facts reported to clients', () => {
 				const settled = await drivenDirectly(pipelineFor(context)).commit(
 					rootLogger(),
 					cache,
-					reuse.uploadId
+					reuse.uploadId,
+					new ReuseAuthority({
+						destination: cache.scope,
+						grants: adminGrants(),
+						views: []
+					})
 				);
 
 				return { settled, hasAttached };

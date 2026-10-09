@@ -6,6 +6,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import {
+	reusableReferenceSchema,
+	type ReuseAuthority
+} from './reuse-authority.ts';
+
 // The header carrying a staged hint set's single-use token from the front
 // Worker into the Durable Object's negotiate route. The Worker strips any
 // inbound value at its dispatch choke point and sets it only when it staged
@@ -40,12 +45,13 @@ export type CommittedEdgeHint = z.infer<typeof committedEdgeHintSchema>;
 /**
  * Shared facts prefetched by the front Worker for one negotiation. The Worker
  * reads every NAR hash in the request, so absence from a list means that no row
- * existed at the time of the read. Reuse still requires this tenant's ownership
- * row; global blob state alone never proves availability.
+ * existed at the time of the read. Reuse requires a readable reference that the
+ * negotiating token may reuse; global blob state alone never proves
+ * availability.
  */
 export const negotiateHintsSchema = z.object({
 	blobStates: z.array(blobStateHintSchema),
-	ownedNarHashes: z.array(nixSha256HashSchema),
+	reusableReferences: z.array(reusableReferenceSchema),
 	// An older Worker, or a request with no resolved cache, can omit this field.
 	// The Durable Object must then read the edges itself.
 	committedEdges: z.array(committedEdgeHintSchema).optional()
@@ -58,14 +64,17 @@ export interface NegotiateFacts {
 	readonly committedEdges: readonly CommittedEdgeHint[] | undefined;
 }
 
-export function factsFromHints(hints: NegotiateHints): NegotiateFacts {
-	const owned = new Set(hints.ownedNarHashes);
+export function factsFromHints(
+	hints: NegotiateHints,
+	authority: ReuseAuthority
+): NegotiateFacts {
+	const permitted = authority.permittedNarHashes(hints.reusableReferences);
 
 	return {
 		backedNarHashes: new Set(hints.blobStates.map((state) => state.narHash)),
 		reusableByNarHash: new Map(
 			hints.blobStates
-				.filter((state) => owned.has(state.narHash))
+				.filter((state) => permitted.has(state.narHash))
 				.map((state) => [state.narHash, state])
 		),
 		committedEdges: hints.committedEdges

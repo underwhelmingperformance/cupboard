@@ -2936,9 +2936,11 @@ A tenant-DO cache write reaches only the caches a grant names: a token
 negotiates, commits, sets roots, and files attestations cache by cache. The
 shared content store deduplicates bytes across caches, but that is a storage
 fact, not an authority a token holds; a push reuses an existing blob without any
-tenant-wide grant. The domain verbs sit outside this boundary, scoped to the
-tenant rather than a cache. That per-cache boundary on writes is exactly what a
-per-repository CI rule needs.
+tenant-wide grant, but only when it can already read the blob through the
+destination, a public cache, or a cache or reuse view that its token can read
+(see "Access-checked blob reuse"). The domain verbs sit outside this boundary,
+scoped to the tenant rather than a cache. That per-cache boundary on writes is
+exactly what a per-repository CI rule needs.
 
 A grant is carried as an RFC 9396 `authorization_details` object with a cupboard
 `type`: its `actions` are the operations and its type-specific fields are the
@@ -3436,8 +3438,9 @@ Each step keeps a working deployment.
 ### Verification
 
 - A commit is refused when no grant names the cache; a commit into a cache the
-  grant names succeeds, and reusing a blob another cache already holds needs no
-  extra grant.
+  grant names succeeds, and reusing a blob that another cache already references
+  needs no tenant-wide grant, provided that the token can read the blob through
+  that cache, a public cache or a reuse view.
 - A rule issues a token confined to the PR's own cache when the requested cache
   satisfies the claim binding; a request for a grant whose claim does not
   satisfy the binding is rejected whole with `invalid_authorization_details`; a
@@ -6824,6 +6827,81 @@ store and registry.
 - [x] Test populated predecessor upgrades, fresh deploys, interruption, replay,
       concurrent mutations, mismatched rows and rollback refusal.
 - [x] Update security, architecture and operator upgrade documentation.
+
+## Access-checked blob reuse
+
+Land this before any other work on publication reuse, and release it on its own.
+
+### Context
+
+Before this change, negotiation returned `commit` whenever the tenant stored the
+NAR, and the client uploaded nothing. The Durable Object lookup and the Worker's
+negotiate hints filtered by tenant and NAR hash alone, and neither checked
+whether the push token could read a referencing cache. The commit then added a
+readable reference for the destination cache.
+
+A job that could write to a public cache could therefore make a NAR that only a
+private cache referenced readable by anonymous clients. It needed only the NAR
+hash and the narinfo fields, which any reader of the private cache can see. In
+the dotfiles repository, pull-request runs write to public pull-request caches,
+and their trust rule grants `cache:content-read` on the private `falcon` cache.
+
+The intent recorded earlier in this plan was that reusing a blob needed no grant
+beyond write access to the destination. The existence-oracle defence kept that
+reuse inside one tenant, but within a tenant the access of the source cache was
+not considered.
+
+### Decision
+
+A push into cache X may reuse a stored NAR only when a readable `blob_reference`
+for that NAR hash belongs to one of these caches:
+
+- X itself, for an earlier generation of a path;
+- a public cache in the tenant;
+- a cache that the token covers for `cache:content-read`;
+- a cache included in a reuse view that the token covers for
+  `view:content-read`.
+
+Otherwise negotiation returns `upload`, the same decision as for a NAR that the
+tenant does not store, so the response reveals nothing about private caches. The
+client uploads the bytes, the server verifies them as for any upload, and the
+commit adds a reference to the existing canonical object. Deduplication at rest,
+the cross-tenant existence-oracle defence and attestation inheritance do not
+change.
+
+Commit checks the same rule again, because the authorising reference can be
+deleted between negotiation and commit. A commit that has lost its authority is
+refused in the same way as a reuse whose blob has gone, and the client
+negotiates again.
+
+### Implementation sequence
+
+1. [x] Pass the caller's claims from `negotiateUpload` and the commit session
+       guard into the upload services. Add the reuse-authority predicate, using
+       `isCoveredByToken` for grants and the reuse-view selector code for view
+       membership. A wildcard grant covers every cache.
+2. [x] Filter reusable blobs by that predicate on the Durable Object path and on
+       the Worker hint path, so that a hint cannot widen authority.
+3. [x] Check authority again at commit.
+4. [ ] Report a reference publication that receives `upload` for each target in
+       `build-cohort`, through the existing `ReferenceUploadRequiredError`.
+5. [ ] Add an operator report that lists NARs referenced by both a public and a
+       private cache in a tenant, for review. The report removes nothing.
+6. [x] Update `docs/security.md` and the pushing and reuse pages, and add an
+       upgrade note: some pushes that skipped the upload now upload.
+
+### Verification
+
+- A token granted only on public cache X pushes a NAR that only private cache Y
+  references. Negotiation returns `upload`, and before that upload an anonymous
+  request for the NAR through X returns 404.
+- The same push with `cache:content-read` on Y, or with `view:content-read` on a
+  view that includes Y, returns `commit`.
+- A hint cannot produce `commit` without authority.
+- A commit fails when Y's reference is removed after negotiation.
+- A token with a wildcard grant still reuses the NAR.
+- For each behaviour, write a failing test first, and require `pnpm check` to
+  pass after the change.
 
 ## Later features
 

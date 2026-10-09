@@ -119,13 +119,20 @@ labels that you'll see in the job's log.
 
 Publishing by reference means the destination cache starts serving a store path
 that your tenant already stores in another cache. The bytes aren't uploaded
-again. A target published this way gets no new build provenance from this run,
-because this run didn't build it. If the source cache is public, the destination
-can inherit its eligible attestations for the path. Inheritance preserves the
+again. The push must be able to read the stored NAR through the destination
+cache, a public cache, a cache covered by `cache:content-read`, or a reuse view
+covered by `view:content-read`. Otherwise cupboard asks for the bytes, and
+publishing that target by reference fails because the run has no bytes to send.
+See [Shared storage][shared-storage].
+
+A target published this way gets no new build provenance from this run, because
+this run didn't build it. If the source cache is public, the destination can
+inherit its eligible attestations for the path. Inheritance preserves the
 original bundle and signature. See [Attestations of reused
 paths][reused-attestations].
 
 [reused-attestations]: ./attestation.md#attestations-of-reused-paths
+[shared-storage]: ../security.md#shared-storage
 
 If an earlier run published a target but its signing step failed, a later run
 with `build: missing` can still reuse the target. Set `build: rebuild` to build
