@@ -1482,6 +1482,8 @@ describe('narinfo deletion queue', () => {
 		const contractResults = await env.CUPBOARD_DB.batch(
 			contract.queries.map((query) => env.CUPBOARD_DB.prepare(query))
 		);
+		// DDL counters include sqlite_schema scans and rewrites, so unrelated
+		// schema additions change these counts.
 		expect(
 			contractResults.map((result) => ({
 				rows: result.results,
@@ -1489,14 +1491,14 @@ describe('narinfo deletion queue', () => {
 				written: result.meta.rows_written
 			}))
 		).toStrictEqual([
-			{ rows: [], read: 93, written: 0 },
-			{ rows: [], read: 92, written: 0 },
-			{ rows: [], read: 376, written: 49 },
-			{ rows: [], read: 372, written: 47 },
+			{ rows: [], read: 116, written: 0 },
+			{ rows: [], read: 115, written: 0 },
+			{ rows: [], read: 489, written: 71 },
+			{ rows: [], read: 485, written: 69 },
 			{ rows: [], read: 1, written: 2 },
 			{ rows: [], read: 1, written: 2 },
-			{ rows: [], read: 93, written: 0 },
-			{ rows: [], read: 365, written: 42 },
+			{ rows: [], read: 116, written: 0 },
+			{ rows: [], read: 478, written: 64 },
 			{ rows: [], read: 1, written: 2 }
 		]);
 
