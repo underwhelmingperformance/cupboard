@@ -727,6 +727,7 @@ type PendingReservation =
 
 type FinaliseCommittedResult = 'continue' | 'applied' | 'ignored';
 type PromotionResult = 'ready' | 'applied' | 'ignored';
+type MaterialiseVerifiedResult = 'applied' | 'deferred' | 'ignored';
 
 // Terminal rows remain authoritative during their observation window.
 // Overlapping verification passes must not reopen them.
@@ -1650,7 +1651,7 @@ export class VerificationService {
 		prefetched: PrefetchedMaterialisationFacts | undefined,
 		owner: string,
 		signal?: AbortSignal
-	): Promise<boolean> {
+	): Promise<MaterialiseVerifiedResult> {
 		signal?.throwIfAborted();
 		// Promotion creates the object and `blob_state` row, so probe afterwards.
 		const probe = await this.commitPipeline.probeMaterialisation(
@@ -1660,7 +1661,7 @@ export class VerificationService {
 		signal?.throwIfAborted();
 
 		if (!this.ownsActiveClaim(owner, pending, signal)) {
-			return false;
+			return 'ignored';
 		}
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 
@@ -1682,8 +1683,12 @@ export class VerificationService {
 			isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
 		});
 
-		if (outcome.kind === 'gone' || outcome.kind === 'deferred') {
-			return false;
+		if (outcome.kind === 'deferred') {
+			return 'deferred';
+		}
+
+		if (outcome.kind === 'gone') {
+			return 'ignored';
 		}
 
 		// Over quota on the canonical size: if the probe came from a prefetch batch,
@@ -1697,7 +1702,7 @@ export class VerificationService {
 			signal?.throwIfAborted();
 
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
-				return false;
+				return 'ignored';
 			}
 
 			const retried = await this.commitPipeline.materialiseBatched(logger, {
@@ -1712,8 +1717,12 @@ export class VerificationService {
 				isStillSettleable: () => this.ownsActiveClaim(owner, pending, signal)
 			});
 
-			if (retried.kind === 'gone' || retried.kind === 'deferred') {
-				return false;
+			if (retried.kind === 'deferred') {
+				return 'deferred';
+			}
+
+			if (retried.kind === 'gone') {
+				return 'ignored';
 			}
 
 			outcome = retried;
@@ -1722,7 +1731,7 @@ export class VerificationService {
 		if (outcome.kind === 'over-quota') {
 			// Reclaim the reserved narinfo row so reconciliation cannot restore a path
 			// without a reference or a corresponding tenant charge.
-			return this.failReservedUpload(
+			const isSettled = await this.failReservedUpload(
 				logger,
 				pending,
 				metadata,
@@ -1731,6 +1740,8 @@ export class VerificationService {
 				owner,
 				signal
 			);
+
+			return isSettled ? 'applied' : 'ignored';
 		}
 
 		// Reclaim the reservation after publication stops before the charge fence.
@@ -1791,7 +1802,7 @@ export class VerificationService {
 					generation
 				);
 				if (!this.ownsActiveClaim(owner, pending, signal)) {
-					return false;
+					return 'ignored';
 				}
 				const didApply = await this.uploadState.clearPendingUpload(
 					pending.id,
@@ -1799,16 +1810,18 @@ export class VerificationService {
 					owner
 				);
 
-				if (didApply) {
-					this.notifyWaiters(pending, verdict);
+				if (!didApply) {
+					return 'ignored';
 				}
 
-				return didApply;
+				this.notifyWaiters(pending, verdict);
+
+				return 'applied';
 			}
 
 			signal?.throwIfAborted();
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
-				return false;
+				return 'ignored';
 			}
 			const didApply = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
@@ -1819,7 +1832,7 @@ export class VerificationService {
 			);
 
 			if (!didApply) {
-				return false;
+				return 'ignored';
 			}
 
 			this.notifyWaiters(pending, 'absent');
@@ -1834,7 +1847,7 @@ export class VerificationService {
 				);
 			}
 
-			return true;
+			return 'applied';
 		}
 
 		if (outcome.kind === 'materialised') {
@@ -1850,7 +1863,7 @@ export class VerificationService {
 			);
 
 			if (!wasPublished) {
-				return false;
+				return 'ignored';
 			}
 
 			signal?.throwIfAborted();
@@ -1863,7 +1876,7 @@ export class VerificationService {
 				generation
 			);
 			if (!this.ownsActiveClaim(owner, pending, signal)) {
-				return false;
+				return 'ignored';
 			}
 			const wasCleared = await this.uploadState.clearPendingUpload(
 				pending.id,
@@ -1871,12 +1884,14 @@ export class VerificationService {
 				owner
 			);
 
-			if (wasCleared) {
-				this.notifyWaiters(pending, verdict);
-				await this.deleteStagingObjectBestEffort(pending, signal);
+			if (!wasCleared) {
+				return 'ignored';
 			}
 
-			return wasCleared;
+			this.notifyWaiters(pending, verdict);
+			await this.deleteStagingObjectBestEffort(pending, signal);
+
+			return 'applied';
 		}
 
 		// A concurrent commit took the path or the blob disappeared. Remove this
@@ -1890,13 +1905,13 @@ export class VerificationService {
 				owner
 			))
 		) {
-			return false;
+			return 'ignored';
 		}
 
 		this.notifyWaiters(pending, 'absent');
 		await this.deleteStagingObject(pending);
 
-		return true;
+		return 'applied';
 	}
 
 	// Never delete a reuse row's shared canonical object. Other paths can refer to
@@ -3656,7 +3671,7 @@ export class VerificationService {
 			for (const [index, item] of ready.entries()) {
 				try {
 					signal?.throwIfAborted();
-					const didApply = await this.renewClaimsWhile(
+					const result = await this.renewClaimsWhile(
 						owner,
 						ready.slice(index).map((row) => row.pending.id),
 						(signal) =>
@@ -3672,7 +3687,7 @@ export class VerificationService {
 						signal
 					);
 
-					if (didApply) {
+					if (result === 'applied') {
 						settled += 1;
 					}
 				} catch (error) {
@@ -3915,11 +3930,10 @@ export class VerificationService {
 	 * Applies recorded verdicts within the invocation's subrequest slice. It prepares
 	 * the verdicts concurrently and flushes their materialisations together.
 	 *
-	 * A completed attempt clears the verdict. If the attempt does not settle the
-	 * row, clearing the verdict makes the row available for a new claim. An error
-	 * leaves the verdict in place, so the next pass retries application without
-	 * repeating the decode. The D1 binding can return such an error when the
-	 * subrequest slice is exhausted.
+	 * Keep a deferred verdict and its lease so a later page can apply it without
+	 * another decode. Release an ignored upload's lease only after clearing the
+	 * same recorded verdict; a concurrent replacement must remain untouched.
+	 * An error also leaves the verdict in place for a later application attempt.
 	 */
 	async applyRecordedVerdicts(
 		logger: Logger,
@@ -4100,7 +4114,7 @@ export class VerificationService {
 				const item = entry.settle;
 				try {
 					signal?.throwIfAborted();
-					const didApply = await this.materialiseVerified(
+					const result = await this.materialiseVerified(
 						logger,
 						item.pending,
 						item.metadata,
@@ -4110,14 +4124,23 @@ export class VerificationService {
 						signal
 					);
 
-					if (didApply) {
+					if (result === 'applied') {
 						applied += 1;
+						this.clearRecordedVerdict(entry.held);
+						return;
 					}
 
-					const isCleared = this.clearRecordedVerdict(entry.held);
-					if (!didApply && !isCleared) {
+					if (result === 'deferred') {
 						unresolved += 1;
+						return;
 					}
+
+					if (!this.clearRecordedVerdict(entry.held)) {
+						unresolved += 1;
+						return;
+					}
+
+					this.releaseLease(entry.held.id, item.owner);
 				} catch (error) {
 					signal?.throwIfAborted();
 					unresolved += 1;

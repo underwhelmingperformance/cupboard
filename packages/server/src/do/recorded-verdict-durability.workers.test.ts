@@ -33,8 +33,17 @@ import {
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
+import {
+	type BatchedMaterialiseOutcome,
+	CommitPipelineService
+} from './commit-pipeline-service.ts';
+import type { ServerContext } from './context.ts';
 import { maintenancePassCursorKey } from './server.ts';
-import { withSubrequestSlice } from './subrequest-slice.ts';
+import {
+	subrequestsAvailable,
+	withHeldSubrequests,
+	withSubrequestSlice
+} from './subrequest-slice.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import {
 	pendingSettlePrefetchSubrequests,
@@ -118,6 +127,35 @@ function verifiedResults(
 			}
 		} satisfies VerificationResult;
 	});
+}
+
+function commitPipelineOf(instance: object): CommitPipelineService {
+	const pipeline: unknown = Reflect.get(instance, 'commitPipeline');
+	if (!(pipeline instanceof CommitPipelineService)) {
+		throw new TypeError('The test server has no commit pipeline.');
+	}
+
+	return pipeline;
+}
+
+function pendingRowStates(context: ServerContext): {
+	readonly verdict: (typeof pendingUploads.$inferSelect)['verdict'];
+	readonly claimOwner: string | undefined;
+	readonly recorded: string | undefined;
+}[] {
+	return context.db
+		.select({
+			verdict: pendingUploads.verdict,
+			claimOwner: pendingUploads.claimOwner,
+			recorded: pendingUploads.recordedVerdictJson
+		})
+		.from(pendingUploads)
+		.all()
+		.map((row) => ({
+			verdict: row.verdict,
+			claimOwner: row.claimOwner ?? undefined,
+			recorded: row.recorded ?? undefined
+		}));
 }
 
 async function driveInterruptedVerdict(server: string): Promise<{
@@ -746,6 +784,155 @@ describe('recorded verdict durability', () => {
 					{ verdict: 'pending', claimOwner: undefined, recorded: undefined }
 				],
 				afterNextClaim: []
+			});
+		});
+	});
+
+	it('keeps a deferred verdict for the next drain page without another claim', async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const upload = await deferFreshUpload(
+				token,
+				'deferred-materialisation',
+				'h'.repeat(32)
+			);
+			const measured = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const pipeline = commitPipelineOf(instance);
+					const materialise = pipeline.materialiseBatched.bind(pipeline);
+					const outcomes: BatchedMaterialiseOutcome[] = [];
+					const deferral = vi
+						.spyOn(pipeline, 'materialiseBatched')
+						.mockImplementationOnce(async (logger, request) => {
+							const outcome = await withHeldSubrequests(
+								subrequestsAvailable(),
+								() => materialise(logger, request)
+							);
+							outcomes.push(outcome);
+							return outcome;
+						});
+
+					try {
+						const first = await instance.claimVerificationBatch(
+							1,
+							Number.MAX_SAFE_INTEGER
+						);
+						const results = verifiedResults(first.claims, [upload]);
+						const deferredApplied = await instance.recordVerifications(
+							first.owner,
+							results
+						);
+						const afterDeferral = pendingRowStates(instance.context);
+						const whileHeld = await instance.claimVerificationBatch(
+							1,
+							Number.MAX_SAFE_INTEGER
+						);
+						const drainedApplied = await instance.recordVerifications(
+							first.owner,
+							[]
+						);
+
+						return {
+							owner: first.owner,
+							recorded: JSON.stringify({
+								owner: first.owner,
+								verdict: results[0]?.verdict
+							}),
+							outcomes,
+							deferredApplied,
+							afterDeferral,
+							claimedWhileHeld: whileHeld.claims,
+							drainedApplied,
+							afterDrain: pendingRowStates(instance.context)
+						};
+					} finally {
+						deferral.mockRestore();
+					}
+				}
+			);
+
+			expect(measured).toStrictEqual({
+				owner: measured.owner,
+				recorded: measured.recorded,
+				outcomes: [{ kind: 'deferred' }],
+				deferredApplied: 0,
+				afterDeferral: [
+					{
+						verdict: 'pending',
+						claimOwner: measured.owner,
+						recorded: measured.recorded
+					}
+				],
+				claimedWhileHeld: [],
+				drainedApplied: 1,
+				afterDrain: []
+			});
+		});
+	});
+
+	it("releases the pending upload's claim when an abort stops its materialisation", async () => {
+		await withoutAlarmArming(async () => {
+			const token = await initialise();
+			const upload = await deferFreshUpload(
+				token,
+				'aborted-materialisation',
+				'k'.repeat(32)
+			);
+			const measured = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const verification: unknown = Reflect.get(instance, 'verification');
+					if (!(verification instanceof VerificationService)) {
+						throw new TypeError('The test server has no verification service.');
+					}
+					const pipeline = commitPipelineOf(instance);
+					const materialise = pipeline.materialiseBatched.bind(pipeline);
+					const controller = new AbortController();
+					const timeout = new SubrequestTimeoutError('verification.record');
+					const abort = vi
+						.spyOn(pipeline, 'materialiseBatched')
+						.mockImplementationOnce((logger, request) => {
+							controller.abort(timeout);
+							return materialise(logger, request);
+						});
+
+					try {
+						const first = await instance.claimVerificationBatch(
+							1,
+							Number.MAX_SAFE_INTEGER
+						);
+						await expect(
+							asOneInvocation(() =>
+								verification.recordVerifications(
+									rootLogger(),
+									first.owner,
+									verifiedResults(first.claims, [upload]),
+									controller.signal
+								)
+							)
+						).rejects.toBe(timeout);
+						const afterAbort = pendingRowStates(instance.context);
+						const next = await instance.claimVerificationBatch(
+							1,
+							Number.MAX_SAFE_INTEGER
+						);
+
+						return {
+							afterAbort,
+							reclaimed: next.claims.map((claim) => claim.uploadId)
+						};
+					} finally {
+						abort.mockRestore();
+					}
+				}
+			);
+
+			expect(measured).toStrictEqual({
+				afterAbort: [
+					{ verdict: 'pending', claimOwner: undefined, recorded: undefined }
+				],
+				reclaimed: [upload.uploadId]
 			});
 		});
 	});
