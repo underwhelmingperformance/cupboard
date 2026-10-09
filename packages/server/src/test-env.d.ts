@@ -6,6 +6,8 @@
 declare namespace Cloudflare {
 	interface Env {
 		readonly TEST_MIGRATIONS: import('cloudflare:test').D1Migration[];
+		readonly TEST_CONTROL_MIGRATIONS: import('cloudflare:test').D1Migration[];
+		readonly TEST_CONTROL_DATABASE: Fetcher;
 		readonly TEST_COMPRESSED_NAR: {
 			readonly narSha256: string;
 			readonly narSize: number;

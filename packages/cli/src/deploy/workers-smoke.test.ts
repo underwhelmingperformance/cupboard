@@ -17,6 +17,10 @@ const state: {
 	miniflare?: Miniflare;
 	tenantExports?: Readonly<Record<string, DurableObjectExport>>;
 	controlExports?: Readonly<Record<string, DurableObjectExport>>;
+	controlDatabaseGuards?: {
+		readonly control: boolean;
+		readonly tenant: boolean;
+	};
 	pathAuthorityGuards?: { readonly control: boolean; readonly tenant: boolean };
 	hasVersionedR2ObjectRollbackGuardExport?: boolean;
 } = {};
@@ -58,6 +62,14 @@ beforeAll(async () => {
 		artifact.config.control,
 		resources
 	).exports;
+	state.controlDatabaseGuards = {
+		control: /export \{[\s\S]*\bControlDatabaseRollbackGuard\b[\s\S]*\};/.test(
+			artifact.controlBundle.code
+		),
+		tenant: /export \{[\s\S]*\bControlDatabaseRollbackGuard\b[\s\S]*\};/.test(
+			artifact.tenantBundle.code
+		)
+	};
 	state.pathAuthorityGuards = {
 		control:
 			/export \{[\s\S]*\bPathReadAuthorityRollbackGuard\b[\s\S]*\};/.test(
@@ -88,7 +100,7 @@ beforeAll(async () => {
 				},
 				r2Buckets: ['BLOBS'],
 				kvNamespaces: ['TENANT_CACHE', 'CRON_STATE'],
-				d1Databases: ['CUPBOARD_DB'],
+				d1Databases: ['CUPBOARD_DB', 'CONTROL_DB'],
 				queueProducers: { MAINTENANCE_QUEUE: 'cupboard-maintenance' },
 				bindings: { ...artifact.config.control.vars }
 			},
@@ -131,6 +143,10 @@ it('couples versioned R2 object keys to declarative class lifecycle', () => {
 		hasRollbackGuardExport: state.hasVersionedR2ObjectRollbackGuardExport
 	}).toStrictEqual({
 		exports: {
+			ControlDatabaseRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			},
 			CupboardServer: { type: 'durable-object', storage: 'sqlite' },
 			VersionedR2ObjectRollbackGuard: {
 				type: 'durable-object',
@@ -152,12 +168,20 @@ it('protects path read authority with both Worker class lifecycles', () => {
 		exported: state.pathAuthorityGuards
 	}).toStrictEqual({
 		control: {
+			ControlDatabaseRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			},
 			PathReadAuthorityRollbackGuard: {
 				type: 'durable-object',
 				storage: 'sqlite'
 			}
 		},
 		tenant: {
+			ControlDatabaseRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			},
 			CupboardServer: { type: 'durable-object', storage: 'sqlite' },
 			VersionedR2ObjectRollbackGuard: {
 				type: 'durable-object',
@@ -169,5 +193,12 @@ it('protects path read authority with both Worker class lifecycles', () => {
 			}
 		},
 		exported: { control: true, tenant: true }
+	});
+});
+
+it('exports control database rollback guards from both Worker bundles', () => {
+	expect(state.controlDatabaseGuards).toStrictEqual({
+		control: true,
+		tenant: true
 	});
 });

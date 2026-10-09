@@ -126,6 +126,7 @@ import {
 	invalidateTenantRow,
 	refreshTenantMembership
 } from './control/tenant-membership.ts';
+import { testControlDatabase } from './control-database.test-support.ts';
 import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
 import {
 	cacheIdentityColumns,
@@ -193,12 +194,15 @@ import {
 import { fixtureTenant } from './routing/tenant-routing.test-support.ts';
 import worker from './worker.ts';
 
+export { testControlDatabase } from './control-database.test-support.ts';
+
 // The control-plane bindings live only on the public `cupboard` Worker in
 // production, never on the `cupboard-tenant` script the Durable Object runs in. The
 // test harness mirrors that: these are absent from the Durable Object's env (the
 // pool binds the tenant config) and are supplied only to the control handler when
 // a test drives a bare-host control route.
 export const testControlEnv = {
+	CONTROL_DB: testControlDatabase(),
 	CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
 	CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control'
 } as const;

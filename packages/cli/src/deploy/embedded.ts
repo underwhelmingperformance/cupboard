@@ -27,6 +27,7 @@ const payloadSchema = z.object({
 	controlBundle: workerBundleSchema,
 	tenantBundle: workerBundleSchema,
 	d1Migrations: z.array(d1MigrationSchema),
+	d1MigrationSets: z.record(z.string(), z.array(d1MigrationSchema)).optional(),
 	buildVersion: z.string()
 });
 

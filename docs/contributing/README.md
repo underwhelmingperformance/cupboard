@@ -138,13 +138,13 @@ You can run the whole server on your own machine:
    also set `CUPBOARD_SIGNUP_SECRET`. The claim is refused without it, even with
    `CUPBOARD_LOCAL_DEV` set.
 
-2. Stop any local Workers and initialise the local database:
+2. Stop any local Workers and initialise the local databases:
 
    ```sh
    pnpm dev:setup
    ```
 
-   This command applies all local D1 migrations and records the completed
+   This command prepares both local D1 databases and records the completed
    deployment transitions. Applying only the SQL migrations leaves lifecycle
    writes unavailable. `pnpm dev` does not run setup automatically.
 
@@ -209,9 +209,10 @@ make it bundle the working tree instead.
 
 There's also a `deploy` script, which you run with `pnpm run deploy`. On its
 own, `pnpm deploy` runs pnpm's built-in `deploy` command, which is unrelated.
-The script isn't a way to set up a deployment. It applies the D1 migrations and
-then runs `wrangler deploy` for both Workers. The Wrangler configuration files
-contain placeholder resource IDs, and `cupboard deploy` never edits them.
+The script runs the same guarded `cupboard deploy` command from the working
+tree. Use that command for schema preparation, control database transfer and
+Worker uploads. Applying both D1 migration directories directly cannot perform
+the validated cutover.
 
 ## Checking your change
 
@@ -316,11 +317,13 @@ toolchain from the repository's pins.
 
 ### Database schemas and migrations
 
-cupboard has two databases, and each has its own schema and migrations. The
-shared D1 database's schema is in `packages/server/src/db/d1-schema.ts`, and its
-migrations are in `packages/server/drizzle-d1`, configured by
-`drizzle.config.d1.ts`. Each tenant's Durable Object has its own SQLite
-database. Its schema is in `packages/server/src/db/schema.ts`, and its
+cupboard has two D1 databases. The shared schema is selected by
+`packages/server/src/db/shared-d1-schema.ts`, with migrations in
+`packages/server/drizzle-d1` and configuration in `drizzle.config.d1.ts`. The
+control schema is in `packages/server/src/db/control-d1-schema.ts`, with
+migrations in `packages/server/drizzle-control-d1` and configuration in
+`drizzle.config.control-d1.ts`. Each tenant's Durable Object also has its own
+SQLite database. Its schema is in `packages/server/src/db/schema.ts`, and its
 migrations are in `packages/server/drizzle`, configured by `drizzle.config.ts`.
 [Architecture](./architecture.md) explains what each database contains.
 

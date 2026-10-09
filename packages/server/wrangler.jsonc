@@ -93,6 +93,12 @@
 			"database_name": "cupboard",
 			"database_id": "00000000-0000-0000-0000-000000000000",
 			"migrations_dir": "drizzle-d1"
+		},
+		{
+			"binding": "CONTROL_DB",
+			"database_name": "cupboard-control",
+			"database_id": "00000000-0000-0000-0000-000000000001",
+			"migrations_dir": "drizzle-control-d1"
 		}
 	],
 	"vars": {
@@ -109,6 +115,10 @@
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},
 	"exports": {
+		"ControlDatabaseRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
 		"PathReadAuthorityRollbackGuard": {
 			"type": "durable-object",
 			"storage": "sqlite"

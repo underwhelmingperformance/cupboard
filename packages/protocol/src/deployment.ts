@@ -65,7 +65,9 @@ export const transitionIdSchema = z.enum([
 	'tenant-retry-clock',
 	'tenant-schema-progress',
 	'control-refresh-sessions',
-	'control-subject-nonces'
+	'control-subject-nonces',
+	'control-database-split',
+	'control-database-initial'
 ]);
 export type TransitionId = z.infer<typeof transitionIdSchema>;
 
@@ -159,6 +161,14 @@ export function hasReachedTransitionState(
 export interface SchemaTransition<Id extends string = TransitionId> {
 	readonly id: Id;
 	/**
+	The D1 binding whose database applies this transition. Defaults to CUPBOARD_DB.
+	*/
+	readonly database?: string;
+	/**
+	Requires both Workers to serve this build before contracting a fresh database too.
+	*/
+	readonly contractAfterUpload?: true;
+	/**
 	 * The D1 migration files that the deploy applies before it uploads the
 	 * Workers. The deployed Workers keep serving while these run, and after a
 	 * skip-level upgrade (for example from v0.0.33) the deployed build is older
@@ -172,7 +182,8 @@ export interface SchemaTransition<Id extends string = TransitionId> {
 	 * The D1 migration files that the deploy applies once both Workers serve the
 	 * build and every active or suspended tenant has recorded `contractStep`. On
 	 * a fresh database the deploy applies them before the upload, because no
-	 * Worker serves the preceding build and there are no tenants.
+	 * Worker serves the preceding build and there are no tenants, unless
+	 * `contractAfterUpload` is set.
 	 */
 	readonly contract: readonly string[];
 	/**
@@ -335,6 +346,20 @@ export const schemaTransitions: readonly SchemaTransition[] = [
 		expand: ['0040_control_subject_nonces.sql'],
 		contract: [],
 		independent: true
+	},
+	{
+		id: 'control-database-split',
+		expand: ['0041_control_database_split.sql'],
+		contract: ['0042_control_database_contract.sql'],
+		independent: true,
+		contractAfterUpload: true
+	},
+	{
+		id: 'control-database-initial',
+		database: 'CONTROL_DB',
+		expand: ['0000_control_database.sql'],
+		contract: [],
+		independent: true
 	}
 ];
 
@@ -392,13 +417,15 @@ export function requiredLocalStepAmong<Id extends string>(
 
 /**
  * Whether a transition is complete as soon as it has expanded, because it has
- * no contract migrations and no `contractStep`.
+ * no contract migrations, no `contractStep` and no `contractAfterUpload`.
  */
 export function isCompleteOnExpand(
 	transition: SchemaTransition<string>
 ): boolean {
 	return (
-		transition.contract.length === 0 && transition.contractStep === undefined
+		transition.contract.length === 0 &&
+		transition.contractStep === undefined &&
+		transition.contractAfterUpload !== true
 	);
 }
 

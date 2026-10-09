@@ -4,7 +4,12 @@ import path from 'node:path';
 import { writeBuildInfo } from './build-info.ts';
 import { resolveBuildVersion } from './build-version.ts';
 import type { Bundler, WorkerBundle } from './bundle.ts';
-import { type DeploymentConfig, parseDeploymentConfig } from './config.ts';
+import {
+	type DeploymentConfig,
+	mergeD1Bindings,
+	parseDeploymentConfig,
+	readD1Bindings
+} from './config.ts';
 import { type D1Migration, parseD1Migrations } from './migrations.ts';
 import { controlWorker, tenantWorker } from './source.ts';
 
@@ -18,6 +23,7 @@ export interface DeploymentArtifact {
 	readonly controlBundle: WorkerBundle;
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
+	readonly d1MigrationSets?: Readonly<Record<string, readonly D1Migration[]>>;
 	/**
 	The version the bundled Workers return from `/_version`.
 	*/
@@ -36,6 +42,7 @@ export interface EmbeddedPayload {
 	readonly controlBundle: WorkerBundle;
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
+	readonly d1MigrationSets?: Readonly<Record<string, readonly D1Migration[]>>;
 	readonly buildVersion: string;
 }
 
@@ -47,13 +54,15 @@ export function payloadToArtifact(
 		controlBundle: payload.controlBundle,
 		tenantBundle: payload.tenantBundle,
 		d1Migrations: payload.d1Migrations,
+		...(payload.d1MigrationSets !== undefined && {
+			d1MigrationSets: payload.d1MigrationSets
+		}),
 		buildVersion: payload.buildVersion
 	};
 }
 
 const serverDirectory = 'packages/server';
 const buildInfoPath = `${serverDirectory}/src/build-info.generated.ts`;
-const migrationsDirectory = `${serverDirectory}/drizzle-d1`;
 
 // The server entrypoints import an uncommitted generated build version.
 // Regenerate it before bundling because onboarding waits for `/_version` to
@@ -67,8 +76,15 @@ async function ensureBuildInfo(checkoutRoot: string): Promise<string> {
 	return version;
 }
 
-async function readMigrations(checkoutRoot: string): Promise<D1Migration[]> {
-	const directory = path.join(checkoutRoot, migrationsDirectory);
+async function readMigrations(
+	checkoutRoot: string,
+	migrationsDirectory: string
+): Promise<D1Migration[]> {
+	const directory = path.join(
+		checkoutRoot,
+		serverDirectory,
+		migrationsDirectory
+	);
 	const entries = await readdir(directory);
 	const sqlFiles = entries.filter((entry) => entry.endsWith('.sql'));
 
@@ -104,6 +120,28 @@ export async function buildEmbeddedPayload(
 		)
 	]);
 
+	const bindings = mergeD1Bindings([
+		...readD1Bindings(controlSource),
+		...readD1Bindings(tenantSource)
+	]);
+	const sharedDirectory =
+		bindings.find((database) => database.binding === 'CUPBOARD_DB')
+			?.migrationsDirectory ?? 'drizzle-d1';
+	const additionalSets = await Promise.all(
+		bindings
+			.filter((database) => database.binding !== 'CUPBOARD_DB')
+			.map(
+				async (database) =>
+					[
+						database.binding,
+						await readMigrations(
+							checkoutRoot,
+							database.migrationsDirectory ?? 'migrations'
+						)
+					] as const
+			)
+	);
+
 	const [controlBundle, tenantBundle, d1Migrations] = await Promise.all([
 		bundler.bundle(
 			path.join(checkoutRoot, controlWorker.entryFile),
@@ -113,7 +151,7 @@ export async function buildEmbeddedPayload(
 			path.join(checkoutRoot, tenantWorker.entryFile),
 			tenantWorker.mainModule
 		),
-		readMigrations(checkoutRoot)
+		readMigrations(checkoutRoot, sharedDirectory)
 	]);
 
 	return {
@@ -122,6 +160,12 @@ export async function buildEmbeddedPayload(
 		controlBundle,
 		tenantBundle,
 		d1Migrations,
+		...(additionalSets.length > 0 && {
+			d1MigrationSets: {
+				CUPBOARD_DB: d1Migrations,
+				...Object.fromEntries(additionalSets)
+			}
+		}),
 		buildVersion
 	};
 }

@@ -134,6 +134,7 @@ import {
 	listControlTrust,
 	removeControlTrust
 } from './control-trust.ts';
+import { controlDatabase, writableControlDatabase } from './database.ts';
 import {
 	initialiseInstanceConfig,
 	readInstanceConfig
@@ -169,7 +170,7 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 
 export async function controlInstance(env: Env): Promise<InstanceSummary> {
 	return (
-		(await readInstanceConfig(controlDatabase(env))) ?? {
+		(await readInstanceConfig(sharedDatabase(env))) ?? {
 			state: 'unconfigured'
 		}
 	);
@@ -180,7 +181,7 @@ export function controlInstanceInitialise(
 	name: InstanceName
 ): Promise<ConfiguredInstanceSummary> {
 	return initialiseInstanceConfig(
-		controlDatabase(env),
+		sharedDatabase(env),
 		name,
 		isoTimestamp(new Date())
 	);
@@ -208,12 +209,15 @@ export async function controlTokenExchange(
 			throw new RefreshTokenRequiredError();
 		}
 
-		return oauthJsonResponse(
-			await controlRefreshSessions(request, env).refresh(
-				logger,
-				parseFormValue(refreshTokenGrantRequestSchema, body)
-			)
+		await writableControlDatabase(env);
+		const sessions = await controlRefreshSessions(request, env);
+		const response = await sessions.refresh(
+			logger,
+			parseFormValue(refreshTokenGrantRequestSchema, body)
 		);
+		await writableControlDatabase(env);
+
+		return oauthJsonResponse(response);
 	}
 
 	if (body.grant_type !== tokenExchangeGrantType) {
@@ -236,7 +240,7 @@ export async function controlTokenExchange(
 	const wrappingSecret = controlWrappingSecret(env);
 	const audience = controlAudience(env);
 
-	const database = controlDatabase(env);
+	const database = await writableControlDatabase(env);
 	const now = new Date();
 
 	// Signature verification distinguishes a self-issued access token from an
@@ -266,6 +270,8 @@ export async function controlTokenExchange(
 			},
 			now
 		);
+
+		await writableControlDatabase(env);
 
 		return oauthJsonResponse(response);
 	}
@@ -383,13 +389,13 @@ export async function issueControlSession(
 	// A CI job exchanges a new token from its provider whenever it needs one,
 	// so only an exchange that is not bound to this deployment's URL starts a
 	// session.
-	const sessions = controlRefreshSessions(request, env);
+	const sessions = await controlRefreshSessions(request, env);
 	const session = isAudienceBound(verified, controlIssuer(request))
 		? undefined
 		: await sessions.create(verified, subject, selection.rule, grants, nonce);
 
 	if (session === undefined && nonce !== undefined) {
-		await recordControlSubjectNonce(controlDatabase(env), nonce);
+		await recordControlSubjectNonce(await writableControlDatabase(env), nonce);
 	}
 
 	const current = await selectControlTrust(env, verified, grants);
@@ -401,6 +407,8 @@ export async function issueControlSession(
 
 		throw new ControlSubjectTokenUntrustedError();
 	}
+
+	await writableControlDatabase(env);
 
 	return {
 		access_token: accessToken,
@@ -417,14 +425,14 @@ export async function controlRevoke(
 	env: Env,
 	logger: Logger
 ): Promise<Response> {
+	await writableControlDatabase(env);
+
 	const body = await parseFormBody(tokenRevocationRequestSchema, request);
 	const presented = RefreshCredential.parse(body.token);
 
 	if (presented !== undefined) {
-		await controlRefreshSessions(request, env).revokePresented(
-			logger,
-			presented
-		);
+		const sessions = await controlRefreshSessions(request, env);
+		await sessions.revokePresented(logger, presented);
 		return oauthEmptyResponse();
 	}
 
@@ -435,26 +443,30 @@ export async function controlRevoke(
 	return oauthEmptyResponse();
 }
 
-export function controlSessionList(
+export async function controlSessionList(
 	request: Request,
 	env: Env
 ): Promise<RefreshSessionListResponseInput> {
-	return controlRefreshSessions(request, env).list();
+	const sessions = await controlRefreshSessions(request, env);
+	return sessions.list();
 }
 
-export function controlSessionRevoke(
+export async function controlSessionRevoke(
 	request: Request,
 	env: Env,
 	id: RefreshSessionId
 ): Promise<RefreshSessionRevokeResponseInput> {
-	return controlRefreshSessions(request, env).revoke(id);
+	await writableControlDatabase(env);
+
+	const sessions = await controlRefreshSessions(request, env);
+	return sessions.revoke(id);
 }
 
-function controlRefreshSessions(
+async function controlRefreshSessions(
 	request: Request,
 	env: Env
-): ControlRefreshSessions {
-	const database = controlDatabase(env);
+): Promise<ControlRefreshSessions> {
+	const database = await controlDatabase(env);
 
 	return new ControlRefreshSessions({
 		database,
@@ -472,7 +484,7 @@ async function selectControlTrust(
 	grants: AuthorizationDetails
 ): Promise<OidcTrustSelection> {
 	const snapshots = await controlTrustRuleSnapshots(
-		controlDatabase(env),
+		await controlDatabase(env),
 		canUseLoopbackHttp(env)
 	);
 
@@ -490,7 +502,7 @@ async function issueControlAccessToken(
 	subject: OidcSubject,
 	grants: AuthorizationDetails
 ): Promise<string> {
-	const database = controlDatabase(env);
+	const database = await writableControlDatabase(env);
 	const wrappingSecret = controlWrappingSecret(env);
 	const now = new Date();
 
@@ -521,7 +533,7 @@ async function verifyControlSelfIssued(
 	env: Env,
 	token: string
 ): Promise<AccessClaims | undefined> {
-	const keys = await controlVerificationKeys(controlDatabase(env));
+	const keys = await controlVerificationKeys(await controlDatabase(env));
 
 	try {
 		return await verifyAccessJwt(
@@ -538,7 +550,7 @@ async function verifyControlSelfIssued(
 export async function controlJwks(env: Env): Promise<{
 	keys: (JsonWebKey & { kid: string; alg: string; use: string })[];
 }> {
-	const database = controlDatabase(env);
+	const database = await controlDatabase(env);
 
 	const now = new Date();
 	await ensureControlKey(
@@ -597,7 +609,7 @@ export async function controlAuthenticate(
 	}
 
 	const audience = controlAudience(env);
-	const keys = await controlVerificationKeys(controlDatabase(env));
+	const keys = await controlVerificationKeys(await controlDatabase(env));
 
 	try {
 		return await verifyAccessJwt(
@@ -628,7 +640,7 @@ export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 		return { db: databaseCheck, r2: { result: 'no-tenant' } };
 	}
 
-	const tenants = await listTenants(controlDatabase(env));
+	const tenants = await listTenants(sharedDatabase(env));
 	const live = tenants.find((tenant) => tenant.status !== 'offboarded');
 
 	const r2 =
@@ -643,7 +655,15 @@ async function controlDatabaseCheck(
 	env: Env
 ): Promise<ControlCheckReport['db']> {
 	try {
-		await env.CUPBOARD_DB.prepare('SELECT 1 FROM global_admin LIMIT 1').first();
+		await env.CUPBOARD_DB.prepare('SELECT 1 FROM tenant LIMIT 1').first();
+		await env.CONTROL_DB.prepare(
+			'SELECT 1 FROM control_database_ready LIMIT 1'
+		).first();
+		const database = await controlDatabase(env);
+		await database
+			.select({ id: d1Schema.globalAdmin.id })
+			.from(d1Schema.globalAdmin)
+			.limit(1);
 
 		return { result: 'ok' };
 	} catch {
@@ -654,13 +674,13 @@ async function controlDatabaseCheck(
 export async function controlKeys(
 	env: Env
 ): Promise<{ keys: ControlKeySummary[] }> {
-	return { keys: await controlKeySummaries(controlDatabase(env)) };
+	return { keys: await controlKeySummaries(await controlDatabase(env)) };
 }
 
-export function controlKeyRotate(env: Env): Promise<ControlKeyRotation> {
+export async function controlKeyRotate(env: Env): Promise<ControlKeyRotation> {
 	const now = new Date();
 	return rotateControlKey(
-		controlDatabase(env),
+		await writableControlDatabase(env),
 		controlWrappingSecret(env),
 		isoTimestamp(now)
 	);
@@ -672,7 +692,7 @@ export async function controlKeyRetire(
 ): Promise<{ kid: AuthKeyId; retired: boolean }> {
 	const now = new Date();
 	const isRetired = await didRetireControlKey(
-		controlDatabase(env),
+		await writableControlDatabase(env),
 		kid,
 		isoTimestamp(now)
 	);
@@ -681,7 +701,7 @@ export async function controlKeyRetire(
 }
 
 export async function controlTenantList(env: Env): Promise<TenantListResponse> {
-	return { tenants: await listTenants(controlDatabase(env)) };
+	return { tenants: await listTenants(sharedDatabase(env)) };
 }
 
 // The deploy reasserts every live tenant's membership marker and rebuilds the
@@ -693,36 +713,47 @@ export async function controlMembershipRebuild(
 	return { tenants: await refreshTenantMembership(env) };
 }
 
-export function controlOidcTrustList(env: Env): Promise<OidcTrustListResponse> {
-	return listControlTrust(controlDatabase(env), canUseLoopbackHttp(env));
+export async function controlOidcTrustList(
+	env: Env
+): Promise<OidcTrustListResponse> {
+	return listControlTrust(await controlDatabase(env), canUseLoopbackHttp(env));
 }
 
-export function controlOidcTrustGet(
+export async function controlOidcTrustGet(
 	env: Env,
 	id: TrustRuleId
 ): Promise<OidcTrustSummary> {
-	return getControlTrust(controlDatabase(env), id, canUseLoopbackHttp(env));
+	return getControlTrust(
+		await controlDatabase(env),
+		id,
+		canUseLoopbackHttp(env)
+	);
 }
 
-export function controlOidcTrustAdd(
+export async function controlOidcTrustAdd(
 	env: Env,
 	body: OidcTrustAddBody
 ): Promise<OidcTrustSummary> {
 	const now = new Date();
 	return addControlTrust(
-		controlDatabase(env),
+		await writableControlDatabase(env),
 		body,
 		isoTimestamp(now),
-		canUseLoopbackHttp(env)
+		canUseLoopbackHttp(env),
+		sharedDatabase(env)
 	);
 }
 
-export function controlOidcTrustRemove(
+export async function controlOidcTrustRemove(
 	env: Env,
 	id: TrustRuleId
 ): Promise<OidcTrustRemoveResponse> {
 	const now = new Date();
-	return removeControlTrust(controlDatabase(env), id, isoTimestamp(now));
+	return removeControlTrust(
+		await writableControlDatabase(env),
+		id,
+		isoTimestamp(now)
+	);
 }
 
 export async function controlTenantCreate(
@@ -735,7 +766,7 @@ export async function controlTenantCreate(
 		throw new OidcIssuerTransportRequiredError(body.ownerIssuer);
 	}
 
-	const database = controlDatabase(env);
+	const database = sharedDatabase(env);
 
 	// Provision in order: write the authoritative row, configure the Durable
 	// Object, write the tenant's membership marker, then publish the rebuilt
@@ -773,7 +804,7 @@ export async function controlTenantSuspend(
 	env: Env,
 	id: TenantId
 ): Promise<TenantMutateResponse> {
-	const database = controlDatabase(env);
+	const database = sharedDatabase(env);
 	const summary = await setTenantStatus(database, id, 'suspended');
 	await invalidateTenantRow(id);
 
@@ -784,7 +815,7 @@ export async function controlTenantResume(
 	env: Env,
 	id: TenantId
 ): Promise<TenantMutateResponse> {
-	const summary = await resumeTenant(controlDatabase(env), id);
+	const summary = await resumeTenant(sharedDatabase(env), id);
 	await invalidateTenantRow(id);
 
 	return { id: summary.id, status: summary.status };
@@ -799,7 +830,7 @@ export function controlTenantSetQuota(
 	quota: TenantQuota
 ): Promise<TenantQuotaResponse> {
 	return setTenantQuota(
-		controlDatabase(env),
+		sharedDatabase(env),
 		id,
 		quota,
 		isoTimestamp(new Date())
@@ -810,7 +841,7 @@ export function controlTenantGetQuota(
 	env: Env,
 	id: TenantId
 ): Promise<TenantQuotaResponse> {
-	return getTenantQuota(controlDatabase(env), id);
+	return getTenantQuota(sharedDatabase(env), id);
 }
 
 export async function controlTenantRotateReadCredential(
@@ -818,7 +849,7 @@ export async function controlTenantRotateReadCredential(
 	id: TenantId,
 	read: TenantReadCredential
 ): Promise<TenantReadCredentialResponse> {
-	const summary = await setTenantReadCredential(controlDatabase(env), id, read);
+	const summary = await setTenantReadCredential(sharedDatabase(env), id, read);
 	await invalidateTenantRow(id);
 
 	return { id: summary.id, hasCredential: true };
@@ -828,7 +859,7 @@ export async function controlTenantClearReadCredential(
 	env: Env,
 	id: TenantId
 ): Promise<TenantReadCredentialResponse> {
-	const summary = await clearTenantReadCredential(controlDatabase(env), id);
+	const summary = await clearTenantReadCredential(sharedDatabase(env), id);
 	await invalidateTenantRow(id);
 
 	return { id: summary.id, hasCredential: false };
@@ -841,7 +872,7 @@ export async function controlTenantRotateCacheReadCredential(
 	read: TenantReadCredential
 ): Promise<CacheReadCredentialResponse> {
 	await setCacheReadCredential(
-		controlDatabase(env),
+		sharedDatabase(env),
 		id,
 		cache,
 		read,
@@ -856,7 +887,7 @@ export async function controlTenantClearCacheReadCredential(
 	id: TenantId,
 	cache: CacheScope
 ): Promise<CacheReadCredentialResponse> {
-	await clearCacheReadCredential(controlDatabase(env), id, cache);
+	await clearCacheReadCredential(sharedDatabase(env), id, cache);
 
 	return { id, cache, hasCredential: false };
 }
@@ -865,7 +896,7 @@ export async function controlTenantOffboard(
 	env: Env,
 	id: TenantId
 ): Promise<TenantMutateResponse> {
-	const database = controlDatabase(env);
+	const database = sharedDatabase(env);
 	const summary = await setTenantStatus(database, id, 'offboarding');
 	await invalidateTenantRow(id);
 
@@ -882,7 +913,7 @@ export async function controlTenantOffboard(
 	return { id: summary.id, status: summary.status };
 }
 
-function controlDatabase(env: Env): Database {
+function sharedDatabase(env: Env): Database {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 

@@ -8,6 +8,7 @@ import {
 	type ParsedDeploymentTransitionsResponse,
 	type ParsedLocalStepStatus,
 	type ParsedLocalStepWakeResponse,
+	type SchemaTransition,
 	schemaTransitions
 } from '@cupboard/protocol/deployment';
 import {
@@ -27,7 +28,11 @@ import type { DeploymentArtifact } from '../../packages/cli/src/deploy/artifact.
 import { buildArtifactFromTree } from '../../packages/cli/src/deploy/artifact.ts';
 import { createEsbuildBundler } from '../../packages/cli/src/deploy/bundle.ts';
 import type { CloudflareApi } from '../../packages/cli/src/deploy/cloudflare-api.ts';
-import { databaseIdSchema } from '../../packages/cli/src/deploy/identifiers.ts';
+import { transferControlDatabase } from '../../packages/cli/src/deploy/control-database-transfer.ts';
+import {
+	type DatabaseId,
+	databaseIdSchema
+} from '../../packages/cli/src/deploy/identifiers.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
 import {
 	planTransitions,
@@ -60,6 +65,13 @@ const tenantScript = 'cupboard-tenant';
 const databaseBinding = 'CUPBOARD_DB';
 const databaseName = 'cupboard-upgrade';
 const databaseId = databaseIdSchema.parse('cupboard-upgrade-database');
+const controlDatabaseBinding = 'CONTROL_DB';
+const controlDatabaseName = 'cupboard-upgrade-control';
+const controlDatabaseId = databaseIdSchema.parse(
+	'cupboard-upgrade-control-database'
+);
+const schemaScript = 'cupboard-upgrade-schema';
+const databaseValidationSecret = 'upgrade-fixture-control-validation';
 const blobsBinding = 'BLOBS';
 const blobsBucket = 'cupboard-upgrade-blobs';
 const recoveryBucket = 'cupboard-upgrade-recovery';
@@ -254,7 +266,12 @@ function d1Api(
 	return {
 		async d1QueryBatch(_databaseId, statements) {
 			await database.batch(
-				statements.map((statement) => database.prepare(statement))
+				statements.map((statement) => {
+					if (typeof statement === 'string') {
+						return database.prepare(statement);
+					}
+					return database.prepare(statement.sql).bind(...statement.params);
+				})
 			);
 		},
 		async d1QueryRows(_databaseId, sql) {
@@ -312,6 +329,20 @@ export async function buildPredecessorBundles(
 	return { control: control.code, tenant: tenant.code };
 }
 
+function schemaWorker() {
+	return {
+		name: schemaScript,
+		modules: true,
+		script:
+			'export default { fetch() { return new Response(null, { status: 404 }); } };',
+		compatibilityDate: '2026-05-15',
+		d1Databases: {
+			[databaseBinding]: databaseName,
+			[controlDatabaseBinding]: controlDatabaseName
+		}
+	};
+}
+
 function predecessorOptions(
 	paths: StagedDeploymentPaths,
 	bundles: FixtureBundles
@@ -354,7 +385,8 @@ function predecessorOptions(
 					CUPBOARD_AUTH_ISSUER: 'cupboard',
 					CUPBOARD_AUTH_AUDIENCE: 'cupboard'
 				}
-			}
+			},
+			schemaWorker()
 		]
 	};
 }
@@ -368,7 +400,8 @@ function currentOptions(
 		...tenantBindings,
 		CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
 		CONTROL_KEY_WRAP_SECRET: controlWrapSecret,
-		CUPBOARD_SIGNUP_SECRET: ''
+		CUPBOARD_SIGNUP_SECRET: '',
+		CONTROL_DATABASE_VALIDATION_SECRET: databaseValidationSecret
 	};
 
 	return {
@@ -394,7 +427,14 @@ function currentOptions(
 						entrypoint: 'CachedTenantReads'
 					}
 				},
-				d1Databases: { [databaseBinding]: databaseName },
+				d1Databases: Object.fromEntries(
+					artifact.config.control.d1Databases.map((binding) => [
+						binding.binding,
+						binding.binding === controlDatabaseBinding
+							? controlDatabaseName
+							: databaseName
+					])
+				),
 				r2Buckets: {
 					[blobsBinding]: blobsBucket,
 					DEPLOYMENT_RECOVERY: recoveryBucket
@@ -446,7 +486,8 @@ function currentOptions(
 					MAINTENANCE_QUEUE: { queueName: maintenanceQueue }
 				},
 				bindings: tenantBindings
-			}
+			},
+			schemaWorker()
 		]
 	};
 }
@@ -827,7 +868,9 @@ export class StagedDeploymentServer {
 			intermediateTransitions.map((transition) => transition.id)
 		);
 		const later = schemaTransitions.filter(
-			(transition) => !completedIds.has(transition.id)
+			(transition) =>
+				(transition.database ?? databaseBinding) === databaseBinding &&
+				!completedIds.has(transition.id)
 		);
 
 		return [
@@ -849,19 +892,30 @@ export class StagedDeploymentServer {
 	 */
 	transitionWalk(
 		hooks: Partial<TransitionHooks> = {},
-		stage: 'intermediate' | 'current' = 'current'
+		stage: 'intermediate' | 'current' = 'current',
+		binding = databaseBinding
 	): TransitionWalk {
 		const artifact = stage === 'current' ? this.artifact : intermediateArtifact;
-		const transitions =
+		const stageTransitions: readonly SchemaTransition[] =
 			stage === 'current' ? schemaTransitions : intermediateTransitions;
+		const transitions = stageTransitions.filter(
+			(transition) => (transition.database ?? databaseBinding) === binding
+		);
 
 		return {
 			api: {
 				queryBatch: (id, statements) => this.api.d1QueryBatch(id, statements),
 				queryRows: (id, sql) => this.api.d1QueryRows(id, sql)
 			},
-			database: { id: databaseId, name: databaseName },
-			transitions: planTransitions(artifact.d1Migrations, transitions),
+			database:
+				binding === controlDatabaseBinding
+					? { id: controlDatabaseId, name: controlDatabaseName }
+					: { id: databaseId, name: databaseName },
+			transitions: planTransitions(
+				artifact.d1MigrationSets?.[binding] ??
+					(binding === databaseBinding ? artifact.d1Migrations : []),
+				transitions
+			),
 			hooks: {
 				now: () => new Date(),
 				checkServing: async () => {
@@ -889,17 +943,39 @@ export class StagedDeploymentServer {
 						);
 					}
 				},
+				beforeContract: async (transition) => {
+					if (transition !== 'control-database-split') {
+						return;
+					}
+					await transferControlDatabase({
+						api: {
+							queryBatch: (id, statements) =>
+								this.api.d1QueryBatch(id, statements),
+							queryRows: (id, sql) => this.api.d1QueryRows(id, sql)
+						},
+						source: databaseId,
+						target: controlDatabaseId,
+						now: hooks.now?.() ?? new Date(),
+						validateKeys: () => this.validateControlDatabase()
+					});
+				},
 				...hooks
 			}
 		};
 	}
 
+	async validateControlDatabase(): Promise<void> {
+		await controlRpc(new URL('https://cupboard.invalid'), {
+			fetcher: (input, init) => this.workerFetch(input, init)
+		}).database.validate({ secret: databaseValidationSecret });
+	}
+
 	get api(): Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> {
 		return {
 			d1QueryBatch: async (id, statements) =>
-				d1Api(await this.database()).d1QueryBatch(id, statements),
+				d1Api(await this.database(id)).d1QueryBatch(id, statements),
 			d1QueryRows: async (id, sql) =>
-				d1Api(await this.database()).d1QueryRows(id, sql)
+				d1Api(await this.database(id)).d1QueryRows(id, sql)
 		};
 	}
 
@@ -1209,8 +1285,22 @@ export class StagedDeploymentServer {
 		return this.workerFetch(pathname, init);
 	}
 
-	async database(): Promise<Awaited<ReturnType<Miniflare['getD1Database']>>> {
-		return this.miniflare.getD1Database(databaseBinding, controlScript);
+	async database(
+		id: DatabaseId = databaseId
+	): Promise<Awaited<ReturnType<Miniflare['getD1Database']>>> {
+		if (id !== databaseId && id !== controlDatabaseId) {
+			throw new Error(`Unknown staged database ${id}`);
+		}
+		return this.miniflare.getD1Database(
+			id === controlDatabaseId ? controlDatabaseBinding : databaseBinding,
+			schemaScript
+		);
+	}
+
+	async controlDatabase(): Promise<
+		Awaited<ReturnType<Miniflare['getD1Database']>>
+	> {
+		return this.database(controlDatabaseId);
 	}
 
 	async bucket(): Promise<Awaited<ReturnType<Miniflare['getR2Bucket']>>> {

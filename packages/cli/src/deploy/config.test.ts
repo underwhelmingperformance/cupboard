@@ -3,7 +3,12 @@ import { readFile } from 'node:fs/promises';
 import { tokenRateLimit } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
-import { parseDeploymentConfig, WranglerConfigError } from './config.ts';
+import {
+	D1BindingConflictError,
+	mergeD1Bindings,
+	parseDeploymentConfig,
+	WranglerConfigError
+} from './config.ts';
 
 const controlSource = `{
 	// the control-plane Worker
@@ -358,4 +363,47 @@ describe('wrangler config validation', () => {
 			parseDeploymentConfig(config, tenantSource).control.crons
 		).toStrictEqual(['*/15 0-6 1 JAN MON-FRI']);
 	});
+});
+
+it('preserves a database migration directory', () => {
+	const source = controlSource.replace(
+		'"database_name": "cupboard"',
+		'"database_name": "cupboard", "migrations_dir": "drizzle-d1"'
+	);
+	expect(
+		parseDeploymentConfig(source, tenantSource).control.d1Databases
+	).toStrictEqual([
+		{
+			binding: 'CUPBOARD_DB',
+			databaseName: 'cupboard',
+			migrationsDirectory: 'drizzle-d1'
+		}
+	]);
+});
+
+it.each([
+	[
+		{ binding: 'CUPBOARD_DB', databaseName: 'shared' },
+		{ binding: 'CUPBOARD_DB', databaseName: 'other' }
+	],
+	[
+		{
+			binding: 'CUPBOARD_DB',
+			databaseName: 'shared',
+			migrationsDirectory: 'first'
+		},
+		{
+			binding: 'CUPBOARD_DB',
+			databaseName: 'shared',
+			migrationsDirectory: 'second'
+		}
+	],
+	[
+		{ binding: 'CUPBOARD_DB', databaseName: 'shared' },
+		{ binding: 'CONTROL_DB', databaseName: 'shared' }
+	]
+])('refuses conflicting D1 bindings %j', (first, second) => {
+	expect(() => mergeD1Bindings([first, second])).toThrow(
+		D1BindingConflictError
+	);
 });

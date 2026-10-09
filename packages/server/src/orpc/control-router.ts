@@ -1,6 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
+import { z } from 'zod';
 
 import { type AccessClaims } from '../auth/auth.ts';
 import {
@@ -29,6 +30,10 @@ import {
 	controlTenantSetQuota,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
+import {
+	enforceControlDatabaseValidationSecret,
+	validateControlDatabase
+} from '../control/database-validation.ts';
 import { controlDeploymentTransitions } from '../control/deployment-transitions.ts';
 import {
 	controlLocalStepStatus,
@@ -59,6 +64,19 @@ const os = implement(controlContract)
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {
+		const secret = z.object({ secret: z.string() }).safeParse(input);
+
+		if (
+			procedure['~orpc'].meta.acceptsControlDatabaseValidationSecret === true &&
+			secret.success
+		) {
+			await enforceControlDatabaseValidationSecret(
+				context.env,
+				secret.data.secret
+			);
+			return next();
+		}
+
 		const claims = await context.authenticate();
 
 		await authoriseRequest(
@@ -69,11 +87,16 @@ const os = implement(controlContract)
 			noPendingCache
 		);
 
-		return next({ context: { claims } });
+		return next();
 	});
 
 export const controlRouter = os.router({
 	check: os.check.handler(({ context }) => controlCheck(context.env)),
+	database: {
+		validate: os.database.validate.handler(({ context }) =>
+			validateControlDatabase(context.env)
+		)
+	},
 	instance: {
 		get: os.instance.get.handler(({ context }) => controlInstance(context.env)),
 		initialise: os.instance.initialise.handler(({ input, context }) =>

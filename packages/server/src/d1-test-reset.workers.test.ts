@@ -1,10 +1,13 @@
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { getTableName, is } from 'drizzle-orm';
 import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { expect, it, vi } from 'vitest';
 
-import { resetD1TestState } from './d1-test-reset.ts';
+import { testControlDatabase } from './control-database.test-support.ts';
+import { resetControlD1TestState, resetD1TestState } from './d1-test-reset.ts';
 import * as schema from './db/d1-schema.ts';
+import { currentServer, resetTestServer } from './test-support.ts';
 
 it('clears shared D1 facts and restores the completed transition in one batch', async () => {
 	await env.CUPBOARD_DB.batch([
@@ -67,6 +70,7 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 		publication: 0,
 		cache_lifecycle_storage: 0,
 		control_auth_key: 0,
+		control_database_split: 0,
 		control_consumed_subject_nonce: 0,
 		control_trust: 0,
 		control_refresh_session_family: 0,
@@ -97,4 +101,59 @@ it('clears shared D1 facts and restores the completed transition in one batch', 
 			uncontracted: 1
 		}
 	]);
+});
+
+it('resets the isolated control database without changing shared state or exposing its binding to tenant objects', async () => {
+	const control = testControlDatabase();
+	await control.batch([
+		control.prepare(
+			"INSERT INTO global_admin (id, issuer, subject, audience, claimed_at) VALUES ('singleton', 'issuer', 'subject', 'audience', '2026-01-01T00:00:00.000Z')"
+		),
+		control.prepare(
+			"INSERT INTO control_database_ready (id, source_database_id, state) VALUES ('current', 'shared-test', 'ready')"
+		),
+		control.prepare(
+			"INSERT INTO control_consumed_subject_nonce (nonce, expires_at) VALUES ('nonce', '2026-01-01T00:05:00.000Z')"
+		)
+	]);
+	await env.CUPBOARD_DB.prepare(
+		"INSERT INTO global_admin (id, issuer, subject, audience, claimed_at) VALUES ('singleton', 'legacy-issuer', 'legacy-subject', 'legacy-audience', '2026-01-01T00:00:00.000Z')"
+	).run();
+	await resetControlD1TestState(control);
+	await resetTestServer();
+	const tenantBindings = await runInDurableObject(
+		currentServer(),
+		(instance) => ({
+			controlDatabase: Reflect.has(instance.context.env, 'CONTROL_DB'),
+			controlDatabaseService: Reflect.has(
+				instance.context.env,
+				'TEST_CONTROL_DATABASE'
+			)
+		})
+	);
+	const targetAdmin = await control
+		.prepare('SELECT id FROM global_admin')
+		.all();
+	const targetReady = await control
+		.prepare('SELECT id FROM control_database_ready')
+		.all();
+	const targetNonces = await control
+		.prepare('SELECT nonce FROM control_consumed_subject_nonce')
+		.all();
+	const sharedAdmin = await env.CUPBOARD_DB.prepare(
+		'SELECT issuer FROM global_admin'
+	).all();
+	expect({
+		targetAdmin: targetAdmin.results,
+		targetReady: targetReady.results,
+		targetNonces: targetNonces.results,
+		sharedAdmin: sharedAdmin.results,
+		tenantBindings
+	}).toStrictEqual({
+		targetAdmin: [],
+		targetReady: [],
+		targetNonces: [],
+		sharedAdmin: [{ issuer: 'legacy-issuer' }],
+		tenantBindings: { controlDatabase: false, controlDatabaseService: false }
+	});
 });

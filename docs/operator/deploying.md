@@ -1,7 +1,7 @@
 # Deploying cupboard
 
 cupboard runs on your own Cloudflare account. `cupboard init` creates what it
-needs there: two Workers, a database, a storage bucket and a few smaller
+needs there: two Workers, two databases, a storage bucket and a few smaller
 resources. It also makes you the deployment's **admin**, and creates the first
 **tenant**. A tenant is a separate space on the deployment with its own caches,
 signing keys and administrators.
@@ -61,8 +61,8 @@ separate sign-in, so the token doesn't decide who becomes the admin.
    advance with `--account` or the `CLOUDFLARE_ACCOUNT_ID` environment variable.
 
 4. Review the plan. `init` shows what it's going to create, and lets you change
-   the account, custom domain, R2 bucket name, D1 database, queue names and cron
-   triggers before you confirm. See
+   the account, custom domain, R2 bucket name, D1 database names, queue names
+   and cron triggers before you confirm. See
    [Resource names and cron triggers](#resource-names-and-cron-triggers).
 
    The default plan shows the release, deployment URL, intended changes, storage
@@ -408,10 +408,10 @@ control trust rule for the new URL.
 
 ## Claiming the deployment
 
-A deployment has one **admin**, recorded in the `global_admin` row of its D1
-database. The first identity to complete the claim becomes the admin. Once the
-row exists, nobody else can claim the deployment. The admin can then
-[add other operators](./operators.md#adding-operators).
+A deployment has one **admin**, recorded in the `global_admin` row of its
+`CONTROL_DB` database. The first identity to complete the claim becomes the
+admin. Once the row exists, nobody else can claim the deployment. The admin can
+then [add other operators](./operators.md#adding-operators).
 
 Whether `init` claims or updates the deployment depends on that row, not on
 whether Workers are already deployed. Before it changes anything, `init` reads
@@ -583,7 +583,8 @@ cupboard uses, not your Cloudflare subscription.
 | -------------------------------------- | ---------------------------------------------------------------------------- |
 | Control Worker, serving the deployment | `cupboard`                                                                   |
 | Tenant Worker and its Durable Objects  | `cupboard-tenant`                                                            |
-| D1 database                            | `cupboard`                                                                   |
+| Shared D1 database                     | `cupboard`                                                                   |
+| Control D1 database                    | `cupboard-control`                                                           |
 | R2 bucket                              | `cupboard-blobs`, with a rule that cleans up abandoned uploads daily         |
 | KV namespaces                          | `cupboard-tenant-cache`, `cupboard-cron-state`                               |
 | Queues                                 | `cupboard-maintenance`, and its dead-letter queue `cupboard-maintenance-dlq` |
@@ -595,7 +596,7 @@ cupboard uses, not your Cloudflare subscription.
 ### Resource names and cron triggers
 
 Before it changes anything, `init` shows the plan and a menu for changing it. In
-the menu you can choose the names of the R2 bucket, the D1 database, the
+the menu you can choose the names of the R2 bucket, both D1 databases, the
 maintenance queue and its dead-letter queue, and change the control Worker's
 cron triggers. The KV namespace names can't be changed. The list of cron
 triggers can't be empty, because the control Worker only runs maintenance when a
@@ -633,19 +634,28 @@ shows the release's defaults.
 
 ### Changing the control database
 
-`init` refuses a plan that selects a D1 database other than the one that the
-deployed Workers use, if either database records an admin. Deploying such a plan
-would either claim the deployment again while a database records an admin, or
-leave the admin in a database that the Workers no longer use. The refusal
-happens before any change.
+The upgrade from a shared control database to `CONTROL_DB` uses a guarded copy
+and an irreversible cutover. Follow [Control database
+split][control-database-split]. This recognised transfer preserves the existing
+administrator.
 
-To keep the current database, select it in the plan menu. To move the deployment
-to the other database, first bind the control Worker to it: in the Cloudflare
-dashboard, open the control Worker under Workers & Pages, change its
-`CUPBOARD_DB` binding under Settings > Bindings, and deploy the new version.
-Then run `cupboard init` again, as the admin that the other database records.
-When neither database records an admin, `init` claims the deployment with the
-database that the plan selects.
+[control-database-split]: ./upgrade-notes/control-database-split.md
+
+`init` otherwise refuses a plan that selects a D1 database other than the one
+that the deployed Workers use, if either database records an admin. Deploying
+such a plan would either claim the deployment again while a database records an
+admin, or leave the admin in a database that the Workers no longer use. The
+refusal happens before any change.
+
+To keep the current database, select it in the plan menu. If its binding was
+changed accidentally, restore the original `CONTROL_DB` binding in the control
+Worker’s Cloudflare dashboard. Select **Settings**, then **Bindings**, and
+deploy the new version before running `cupboard init` again.
+
+A replacement control database must already be ready and record the same shared
+source database. Binding an empty database or a control database from another
+deployment does not migrate its authority. cupboard has no general command for
+moving control authority between databases.
 
 ## Running `init` again
 
@@ -678,8 +688,10 @@ that you're deploying:
    own. The tenant Worker's settings in the Cloudflare dashboard list most of
    them.
    - `name`: the control Worker's script name;
-   - the `CUPBOARD_DB` binding's `database_name` and `database_id`: the database
-     that the error lists;
+   - the `CONTROL_DB` binding's `database_name` and `database_id`: the control
+     database that the error lists;
+   - the `CUPBOARD_DB` binding's `database_name` and `database_id`: the shared
+     database from the tenant Worker's bindings;
    - the `BLOBS` R2 bucket;
    - the `TENANT_CACHE` and `CRON_STATE` KV namespace IDs;
    - the `MAINTENANCE_QUEUE` producer, the queue consumer and its dead-letter

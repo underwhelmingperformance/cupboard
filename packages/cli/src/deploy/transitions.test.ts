@@ -181,15 +181,28 @@ function fixture(): Fixture {
 		queryBatch: (_id, statements) => {
 			if (
 				interruption !== undefined &&
-				statements.some((statement) => interruption?.(statement) === true)
+				statements.some(
+					(statement) =>
+						interruption?.(
+							typeof statement === 'string' ? statement : statement.sql
+						) === true
+				)
 			) {
 				interruption = undefined;
 				return Promise.reject(new InterruptedWriteError());
 			}
 
-			writes.push(...statements);
+			writes.push(
+				...statements.map((statement) =>
+					typeof statement === 'string' ? statement : statement.sql
+				)
+			);
 			for (const statement of statements) {
-				database.exec(statement);
+				if (typeof statement === 'string') {
+					database.exec(statement);
+				} else {
+					database.prepare(statement.sql).run(...statement.params);
+				}
 			}
 			return Promise.resolve();
 		},
@@ -421,7 +434,7 @@ describe('v0.0.35 path authority rollout', () => {
 			const directory = new URL('../../../server/drizzle-d1/', import.meta.url);
 			const actualMigrations = parseD1Migrations(
 				readdirSync(directory)
-					.filter((name) => name.endsWith('.sql'))
+					.filter((name) => name.endsWith('.sql') && name.slice(0, 4) < '0041')
 					.map((name) => ({
 						name,
 						sql: readFileSync(new URL(name, directory), 'utf8')
@@ -447,9 +460,16 @@ describe('v0.0.35 path authority rollout', () => {
 				world.database
 					.prepare("INSERT INTO deployment_phase VALUES ('current', ?, ?, ?)")
 					.run(compatibility, step, initial.toISOString());
-				const walk = world.walk(schemaTransitions, {
-					migrations: actualMigrations
-				});
+				const walk = world.walk(
+					schemaTransitions.filter(
+						(transition) =>
+							transition.database === undefined &&
+							transition.id !== 'control-database-split'
+					),
+					{
+						migrations: actualMigrations
+					}
+				);
 				if (blocked) {
 					await expect(prepareTransitions(walk, false)).rejects.toStrictEqual(
 						new TransitionIncompleteError(
@@ -1610,4 +1630,58 @@ describe('transition walk', () => {
 			});
 		});
 	});
+});
+
+it('defers an upload-dependent contract and records its boundary before the hook', async () => {
+	const world = fixture();
+	try {
+		const transition = {
+			...cacheIdentity,
+			contractStep: undefined,
+			contractAfterUpload: true as const
+		};
+		const original = world.walk([transition, independent]);
+		const calls: unknown[] = [];
+		const walk = {
+			...original,
+			hooks: {
+				...original.hooks,
+				beforeContract: (id: string) => {
+					calls.push({
+						id,
+						boundary: {
+							...world.database
+								.prepare(
+									'SELECT contracted_at FROM deployment_transition WHERE id = ?'
+								)
+								.get(id)
+						},
+						migrations: applied(world.database)
+					});
+					return Promise.resolve();
+				}
+			}
+		};
+		await prepareTransitions(walk, true);
+		expect(recorded(world.database)).toStrictEqual({
+			'cache-identity': `expanded@${initial.toISOString()}`,
+			'deployment-transitions': `complete@${initial.toISOString()}`
+		});
+		calls.length = 0;
+		await completeTransitions(walk);
+		expect(calls).toStrictEqual([
+			{
+				id: 'cache-identity',
+				boundary: { contracted_at: initial.toISOString() },
+				migrations: [
+					'0000_base.sql',
+					'0001_phase.sql',
+					'0002_expand.sql',
+					'0004_independent.sql'
+				]
+			}
+		]);
+	} finally {
+		world.database.close();
+	}
 });

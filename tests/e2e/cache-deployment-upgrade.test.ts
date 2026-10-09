@@ -1,6 +1,6 @@
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 
-import { capturingReporter } from '@cupboard/cli-ui/testing';
+import { capturingReporter, fakeCliUi } from '@cupboard/cli-ui/testing';
 import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
@@ -15,9 +15,17 @@ import { StatusCodes } from 'http-status-codes';
 import { expect, it, onTestFinished } from 'vitest';
 
 import { cacheCreateAuthorizationDetails } from '../../packages/cli/src/auth/attenuate.ts';
+import { BoundSignIn } from '../../packages/cli/src/auth/bound-sign-in.ts';
 import { githubPullRequestClaims } from '../../packages/cli/src/commands/github/claims.ts';
 import { pullRequestCacheName } from '../../packages/cli/src/commands/github/convention.ts';
 import { githubPrAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
+import {
+	AdminTokenRequiredError,
+	type AuthorityApi,
+	type AuthorityWorld,
+	establishAuthority
+} from '../../packages/cli/src/deploy/authority.ts';
+import { transferControlDatabase } from '../../packages/cli/src/deploy/control-database-transfer.ts';
 import type { D1QueryApi } from '../../packages/cli/src/deploy/d1-query.ts';
 import { readLocalStepReadiness } from '../../packages/cli/src/deploy/deployment-state.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
@@ -28,6 +36,7 @@ import {
 } from '../../packages/cli/src/deploy/transitions.ts';
 import {
 	LocalStepUnreachedError,
+	OwnerLoginRequiredError,
 	TransitionIncompleteError
 } from '../../packages/cli/src/errors.ts';
 import {
@@ -80,13 +89,17 @@ function recordedAs(
 	}));
 }
 
+const sharedTransitions = schemaTransitions.filter(
+	(transition) => (transition.database ?? 'CUPBOARD_DB') === 'CUPBOARD_DB'
+);
+
 const completedTransitions = {
 	transitions: recordedAs(() => 'complete'),
 	unrecognised: []
 };
 
 const terminalTransitions = Object.fromEntries(
-	schemaTransitions.map((transition) => [transition.id, 'complete'])
+	sharedTransitions.map((transition) => [transition.id, 'complete'])
 );
 
 // What the intermediate walk records before its upload. The first
@@ -162,6 +175,12 @@ async function deployOverPredecessor(
 ): Promise<void> {
 	const stage =
 		server.deploymentStage === 'current' ? 'current' : 'intermediate';
+	if (stage === 'current') {
+		await prepareTransitions(
+			server.transitionWalk({ now: () => now }, stage, 'CONTROL_DB'),
+			false
+		);
+	}
 	await prepareTransitions(
 		server.transitionWalk({ now: () => now }, stage),
 		false
@@ -186,6 +205,10 @@ async function contractOverPredecessor(
 	if (server.deploymentStage === 'intermediate') {
 		await completeTransitions(
 			server.transitionWalk({ now: () => now }, 'intermediate')
+		);
+		await prepareTransitions(
+			server.transitionWalk({ now: () => now }, 'current', 'CONTROL_DB'),
+			false
 		);
 		await prepareTransitions(server.transitionWalk({ now: () => now }), false);
 		await server.deployCurrent();
@@ -256,7 +279,7 @@ async function stoppedBeforeContract(
 
 it('defines the dependencies of the staged schema transitions', () => {
 	expect(
-		schemaTransitions.map((transition) => ({
+		sharedTransitions.map((transition) => ({
 			id: transition.id,
 			independent: transition.independent === true
 		}))
@@ -270,7 +293,8 @@ it('defines the dependencies of the staged schema transitions', () => {
 		{ id: 'tenant-retry-clock', independent: true },
 		{ id: 'tenant-schema-progress', independent: true },
 		{ id: 'control-refresh-sessions', independent: true },
-		{ id: 'control-subject-nonces', independent: true }
+		{ id: 'control-subject-nonces', independent: true },
+		{ id: 'control-database-split', independent: true }
 	]);
 });
 
@@ -757,6 +781,334 @@ it('lets a pull-request token create its cache on an upgraded tenant', async () 
 				left.localeCompare(right)
 			)
 		);
+	} finally {
+		await server.stop();
+	}
+});
+
+it('moves predecessor control authority to a separate database', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+		const client = await server.deploymentClient();
+		await wakeUntilStep(server, client, expansionLocalStep);
+		await contractOverPredecessor(server);
+		const control = await server.controlDatabase();
+		const shared = await server.database();
+		const ready = await control
+			.prepare(
+				"SELECT source_database_id, state FROM control_database_ready WHERE id = 'current'"
+			)
+			.first();
+		const authority = await control
+			.prepare(
+				"SELECT id, subject, audience FROM global_admin WHERE id = 'singleton'"
+			)
+			.first();
+		const sharedControlTables = await shared
+			.prepare(
+				"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('control_auth_key', 'control_trust', 'global_admin') ORDER BY name"
+			)
+			.all();
+		const targetTransitions = await control
+			.prepare('SELECT id, state FROM deployment_transition ORDER BY id')
+			.all();
+		expect({
+			ready,
+			authority,
+			sharedControlTables: sharedControlTables.results,
+			targetTransitions: targetTransitions.results
+		}).toStrictEqual({
+			ready: { source_database_id: stagedDeploymentDatabaseId, state: 'ready' },
+			authority: {
+				id: 'singleton',
+				subject: 'upgrade-deployment-operator',
+				audience: 'upgrade-deployment-client'
+			},
+			sharedControlTables: [],
+			targetTransitions: [{ id: 'control-database-initial', state: 'complete' }]
+		});
+		await server.restart();
+		const restarted = await server.deploymentClient();
+		expect(await restarted.transitions()).toStrictEqual(completedTransitions);
+	} finally {
+		await server.stop();
+	}
+});
+
+it('completes a transfer when another deploy contracts during a source schema read', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+		const client = await server.deploymentClient();
+		await wakeUntilStep(server, client, expansionLocalStep);
+		await completeTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
+		);
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'current', 'CONTROL_DB'),
+			false
+		);
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }),
+			false
+		);
+		await server.deployCurrent();
+		const controlWalk = server.transitionWalk({}, 'current', 'CONTROL_DB');
+		const other = server.transitionWalk({ now: () => deployedAt });
+		let didContract = false;
+		const api: D1QueryApi = {
+			queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
+			queryRows: async (id, sql) => {
+				if (
+					!didContract &&
+					id === stagedDeploymentDatabaseId &&
+					sql.includes('pragma_table_info')
+				) {
+					didContract = true;
+					await completeTransitions(other);
+				}
+				return server.api.d1QueryRows(id, sql);
+			}
+		};
+		const first = server.transitionWalk({
+			now: () => deployedAt,
+			beforeContract: async (id) => {
+				if (id !== 'control-database-split') {
+					return;
+				}
+				await transferControlDatabase({
+					api,
+					source: stagedDeploymentDatabaseId,
+					target: controlWalk.database.id,
+					now: deployedAt,
+					validateKeys: () =>
+						Promise.reject(
+							new Error(
+								'The completed transfer must use the other deploy validation'
+							)
+						)
+				});
+			}
+		});
+		const states = await completeTransitions(first);
+		const target = await server.controlDatabase();
+		const shared = await server.database();
+		expect({
+			didContract,
+			states: Object.fromEntries(states),
+			ready: await target
+				.prepare(
+					"SELECT source_database_id, state FROM control_database_ready WHERE id = 'current'"
+				)
+				.first(),
+			copied: await shared
+				.prepare(
+					"SELECT copied_at FROM control_database_split WHERE id = 'current'"
+				)
+				.first()
+		}).toStrictEqual({
+			didContract: true,
+			states: terminalTransitions,
+			ready: { source_database_id: stagedDeploymentDatabaseId, state: 'ready' },
+			copied: { copied_at: deployedAt.toISOString() }
+		});
+	} finally {
+		await server.stop();
+	}
+});
+
+it('uses Cloudflare recovery only while a real control transfer remains frozen', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+		const client = await server.deploymentClient();
+		await wakeUntilStep(server, client, expansionLocalStep);
+		await completeTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'intermediate')
+		);
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }, 'current', 'CONTROL_DB'),
+			false
+		);
+		await prepareTransitions(
+			server.transitionWalk({ now: () => deployedAt }),
+			false
+		);
+		await server.deployCurrent();
+		const target = server.transitionWalk({}, 'current', 'CONTROL_DB').database
+			.id;
+		const incomplete = server.transitionWalk({
+			now: () => deployedAt,
+			beforeContract: async (id) => {
+				if (id !== 'control-database-split') {
+					return;
+				}
+				await transferControlDatabase({
+					api: d1QueryApi(server),
+					source: stagedDeploymentDatabaseId,
+					target,
+					now: deployedAt,
+					validateKeys: () =>
+						Promise.reject(new Error('Interrupted before readiness'))
+				});
+			}
+		});
+		await expect(completeTransitions(incomplete)).rejects.toThrow(
+			'Interrupted before readiness'
+		);
+		await expect(server.deploymentClient()).rejects.toThrow('503');
+		const sharedName = server.artifact.config.control.d1Databases.find(
+			(binding) => binding.binding === 'CUPBOARD_DB'
+		)?.databaseName;
+		const targetName = server.artifact.config.control.d1Databases.find(
+			(binding) => binding.binding === 'CONTROL_DB'
+		)?.databaseName;
+		const api: AuthorityApi = {
+			findD1Database: (name) =>
+				Promise.resolve(
+					name === sharedName
+						? stagedDeploymentDatabaseId
+						: name === targetName
+							? target
+							: undefined
+				),
+			findD1DatabaseName: (id) =>
+				Promise.resolve(
+					id === stagedDeploymentDatabaseId ? sharedName : targetName
+				),
+			d1QueryRows: (id, sql) => server.api.d1QueryRows(id, sql),
+			findCustomDomain: () => Promise.resolve('cupboard.invalid'),
+			listCustomDomains: () => Promise.resolve(['cupboard.invalid']),
+			getWorkersDevSubdomain: () => Promise.resolve(undefined),
+			getScriptConfiguration: () =>
+				Promise.resolve({
+					bindings: [
+						{
+							type: 'd1',
+							name: 'CUPBOARD_DB',
+							database_id: stagedDeploymentDatabaseId
+						},
+						{ type: 'd1', name: 'CONTROL_DB', database_id: target }
+					],
+					cacheEnabled: false,
+					crossVersionCache: false
+				})
+		};
+		let credentialReads = 0;
+		const expired = () => {
+			credentialReads += 1;
+			return Promise.reject<string>(new OwnerLoginRequiredError());
+		};
+		const access = {
+			credentialFor: () => ({ get: expired, refresh: expired })
+		};
+		const world: AuthorityWorld = {
+			api,
+			ui: {
+				...fakeCliUi().ui,
+				chooseAccount: () => Promise.resolve(undefined)
+			},
+			adminAccess: () => access,
+			checkAdmin: async (_url, credential) => {
+				await credential.get();
+			},
+			servesCupboard: () => Promise.resolve(true),
+			signIn: new BoundSignIn(undefined),
+			chooseFirstTenantSlug: () => Promise.resolve(undefined),
+			confirmClaim: () => Promise.resolve(false),
+			interactive: false
+		};
+		const plans = {
+			agreed: { config: server.artifact.config, domain: 'cupboard.invalid' }
+		};
+		expect({
+			authority: await establishAuthority(plans, world),
+			credentialReads
+		}).toStrictEqual({
+			authority: {
+				kind: 'admin',
+				admin: {
+					issuer: server.issuerUrl,
+					subject: 'upgrade-deployment-operator',
+					audience: 'upgrade-deployment-client'
+				},
+				access
+			},
+			credentialReads: 0
+		});
+		const readyInterrupted = server.transitionWalk({
+			now: () => deployedAt,
+			beforeContract: async (id) => {
+				if (id !== 'control-database-split') {
+					return;
+				}
+				await transferControlDatabase({
+					api: {
+						queryRows: (database, sql) => server.api.d1QueryRows(database, sql),
+						queryBatch: (database, statements) => {
+							if (
+								database === stagedDeploymentDatabaseId &&
+								statements.some((statement) =>
+									(typeof statement === 'string'
+										? statement
+										: statement.sql
+									).startsWith('UPDATE control_database_split SET copied_at')
+								)
+							) {
+								return Promise.reject(new Error('Interrupted after readiness'));
+							}
+							return server.api.d1QueryBatch(database, statements);
+						}
+					},
+					source: stagedDeploymentDatabaseId,
+					target,
+					now: deployedAt,
+					validateKeys: () => server.validateControlDatabase()
+				});
+			}
+		});
+		await expect(completeTransitions(readyInterrupted)).rejects.toThrow(
+			'Interrupted after readiness'
+		);
+		const control = await server.controlDatabase();
+		const shared = await server.database();
+		const copied = await shared
+			.prepare(
+				"SELECT copied_at FROM control_database_split WHERE id = 'current'"
+			)
+			.first<{ copied_at: string | null }>();
+		expect({
+			authority: await establishAuthority(plans, world),
+			credentialReads,
+			ready: await control
+				.prepare(
+					"SELECT state FROM control_database_ready WHERE id = 'current'"
+				)
+				.first(),
+			copied: { copied_at: copied?.copied_at ?? undefined }
+		}).toStrictEqual({
+			authority: {
+				kind: 'admin',
+				admin: {
+					issuer: server.issuerUrl,
+					subject: 'upgrade-deployment-operator',
+					audience: 'upgrade-deployment-client'
+				},
+				access
+			},
+			credentialReads: 0,
+			ready: { state: 'ready' },
+			copied: { copied_at: undefined }
+		});
+		await completeTransitions(server.transitionWalk({ now: () => deployedAt }));
+		await expect(establishAuthority(plans, world)).rejects.toBeInstanceOf(
+			AdminTokenRequiredError
+		);
+		expect(credentialReads).toBe(1);
 	} finally {
 		await server.stop();
 	}

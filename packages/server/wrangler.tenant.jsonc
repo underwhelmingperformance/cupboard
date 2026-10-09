@@ -67,6 +67,10 @@
 		"CUPBOARD_SUBREQUESTS_PER_INVOCATION": ""
 	},
 	"exports": {
+		"ControlDatabaseRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
+		},
 		"CupboardServer": { "type": "durable-object", "storage": "sqlite" },
 		"VersionedR2ObjectRollbackGuard": {
 			"type": "durable-object",

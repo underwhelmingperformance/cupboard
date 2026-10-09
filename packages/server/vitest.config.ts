@@ -75,7 +75,15 @@ export default defineConfig(async () => {
 	// The D1 migrations production applies through `wrangler d1 migrations apply`,
 	// handed to the workers pool as a binding the setup file replays into D1.
 	const here = path.dirname(fileURLToPath(import.meta.url));
-	const migrations = await readD1Migrations(path.join(here, 'drizzle-d1'));
+	const sharedMigrations = await readD1Migrations(
+		path.join(here, 'drizzle-d1')
+	);
+	const migrations = sharedMigrations.filter(
+		({ name }) => name !== '0042_control_database_contract.sql'
+	);
+	const controlMigrations = await readD1Migrations(
+		path.join(here, 'drizzle-control-d1')
+	);
 	const narFixture = compressedNarFixture();
 
 	return {
@@ -121,11 +129,58 @@ export default defineConfig(async () => {
 										workersInvocationAllowances.free.subrequests
 									),
 									TEST_MIGRATIONS: migrations,
+									TEST_CONTROL_MIGRATIONS: controlMigrations,
 									TEST_COMPRESSED_NAR: {
 										narSha256: narFixture.narSha256,
 										narSize: narFixture.narSize
 									}
 								},
+								serviceBindings: {
+									TEST_CONTROL_DATABASE: 'test-control-database'
+								},
+								workers: [
+									{
+										name: 'test-control-database',
+										modules: true,
+										compatibilityDate: '2026-08-18',
+										d1Databases: { CONTROL_DB: 'cupboard-control-test' },
+										bindings: { TEST_MIGRATIONS: controlMigrations },
+										script: `export default {
+  async fetch(request, env) {
+    try {
+      const { operation, statements, columnNames, column, session } = await request.json();
+      if (operation === 'migrate') {
+        await env.CONTROL_DB.prepare('CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)').run();
+        const { results } = await env.CONTROL_DB.prepare('SELECT name FROM d1_migrations').all();
+        const applied = new Set(results.map(({ name }) => name));
+        for (const migration of env.TEST_MIGRATIONS) {
+          if (applied.has(migration.name)) continue;
+          await env.CONTROL_DB.batch([
+            ...migration.queries.map((sql) => env.CONTROL_DB.prepare(sql)),
+            env.CONTROL_DB.prepare('INSERT INTO d1_migrations (name) VALUES (?)').bind(migration.name)
+          ]);
+        }
+        return Response.json({ value: null, bookmark: null });
+      }
+      const database = session === undefined ? env.CONTROL_DB : env.CONTROL_DB.withSession(session);
+      const prepared = statements.map(({ sql, values }) => database.prepare(sql).bind(...values));
+      const result = operation === 'batch'
+        ? await database.batch(prepared)
+        : operation === 'exec'
+          ? await env.CONTROL_DB.exec(statements[0].sql)
+          : operation === 'raw'
+            ? await prepared[0].raw({ columnNames })
+            : operation === 'first'
+              ? await prepared[0].first(column)
+              : await prepared[0][operation]();
+      return Response.json({ value: result, bookmark: session === undefined ? null : database.getBookmark() });
+    } catch (error) {
+      return Response.json({ error: error.message }, { status: 500 });
+    }
+  }
+};`
+									}
+								],
 								dataBlobBindings: {
 									TEST_COMPRESSED_NAR_BYTES: narFixture.compressed
 								},

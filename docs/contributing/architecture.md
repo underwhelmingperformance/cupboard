@@ -30,8 +30,8 @@ platform before, these are the pieces that cupboard uses:
   reach every location.
 - A **queue** keeps jobs for a Worker to process later, with retries.
 
-A deployment has two Workers, one Durable Object class that serves tenants, one
-D1 database, one R2 bucket, two KV namespaces, and a queue with a dead-letter
+A deployment has two Workers, one Durable Object class that serves tenants, two
+D1 databases, one R2 bucket, two KV namespaces, and a queue with a dead-letter
 queue. The diagram shows how they connect:
 
 ```text
@@ -57,6 +57,9 @@ queue. The diagram shows how they connect:
  |   one per tenant, SQLite   |
  +----------------------------+
 ```
+
+The D1 box represents the shared `CUPBOARD_DB` database. The control Worker also
+binds a separate `CONTROL_DB` database, which the tenant Worker never receives.
 
 Every request arrives at the **control Worker**. Requests to the deployment
 itself, such as the operator's admin API, are handled there. Requests under a
@@ -191,11 +194,14 @@ Within a single Worker script, every binding is visible to every Durable Object
 class that the script defines, and that includes secrets. A D1 binding also
 gives access to the whole database, not just some tables.
 
-The control plane's signing key is stored in D1, wrapped (encrypted) with a
-secret called `CONTROL_KEY_WRAP_SECRET`. If the Durable Object lived in the
-control Worker's script, it could read both the wrapped key and the secret. In
-its own script, it never binds `CONTROL_KEY_WRAP_SECRET`. It can still read the
-D1 row that contains the wrapped key, but it can't unwrap the key.
+The control plane's signing key is stored in `CONTROL_DB`, wrapped with
+`CONTROL_KEY_WRAP_SECRET`. The tenant script binds neither the control database
+nor the wrapping secret. The separate database also prevents tenant code from
+inserting verification keys, trust rules or administrator records.
+
+Both scripts bind `CUPBOARD_DB`. Tenant code remains trusted with its shared
+store and registry. Commit batches check tenant status, charge usage and insert
+references in that database.
 
 ## The tenant Durable Object
 
@@ -232,30 +238,45 @@ applies them to its own database.
 
 ### D1
 
-D1 stores the state that spans tenants, and the state that the control Worker
-needs to read. The control Worker keeps no state of its own, so every decision
-that it makes has to be based on D1 or KV. The binding is `CUPBOARD_DB`, and the
-migrations are in `packages/server/drizzle-d1`.
+The shared `CUPBOARD_DB` database stores tenant registry and store state. Both
+Workers bind it. Its migrations are in `packages/server/drizzle-d1`.
 
-| Table                                                          | What it stores                                                                                                               |
-| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `tenant`                                                       | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
-| `tenant_cache_read_credential`                                 | The verifier for each cache that has its own read credential.                                                                |
-| `cache_lifecycle_storage`                                      | Each cache's access mode, generation, read revision and deletion time.                                                       |
-| `path_read_revocation`                                         | Per-path revocation fences and pending demotion of readable references.                                                      |
-| `blob_state`                                                   | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
-| `blob_ref_storage`                                             | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
-| `tenant_blob`, `tenant_cas_blob`                               | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
-| `tenant_usage`                                                 | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
-| `cas_object`, `attestation_ref_storage`                        | Stored attestation bundles and their references.                                                                             |
-| `object_incarnation`, `object_deletion`                        | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
-| `control_auth_key`, `control_trust`, `global_admin`            | The control plane's signing keys (with the private part wrapped), its trust rules, and the first operator.                   |
-| `deployment_transition`                                        | The state of each schema transition that the deploy has started.                                                             |
-| `deployment_phase`                                             | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.         |
-| `local_step_wake_cursor`                                       | No longer read. A later transition's contract migrations will drop it.                                                       |
-| `manifest_state`                                               | Kept for older databases. Nothing reads it.                                                                                  |
-| `tenant_maintenance_failure`, `tenant_maintenance_eligibility` | The results of maintenance runs, and hints about which tenants to wake.                                                      |
-| `instance_config`                                              | The deployment's instance name.                                                                                              |
+The control Worker alone binds `CONTROL_DB`. Its migrations are in
+`packages/server/drizzle-control-d1`. It contains `control_auth_key`,
+`control_trust`, `global_admin`, `control_refresh_session_family`,
+`control_refresh_session_member`, `control_consumed_subject_nonce` and
+`tenant_maintenance_failure`. Signup, refresh rotation, nonce consumption and
+revocation keep their complete batches within this database.
+
+Each database has its own migration digests and `deployment_transition` rows.
+The target's `control_database_ready` row identifies the source database and
+switches control requests to the target after copy and key validation. The
+shared `control_database_split` row freezes legacy mutations and records copy
+completion. See [Control database cutover][control-database-cutover] for upgrade
+and recovery requirements.
+
+[control-database-cutover]: ../operator/upgrade-notes/control-database-split.md
+
+The remaining tables in `CUPBOARD_DB` include:
+
+| Table                                   | What it stores                                                                                                               |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `tenant`                                | The list of tenants: status, owner identity, config version, the tenant read-credential verifier, and maintenance position.  |
+| `tenant_cache_read_credential`          | The verifier for each cache that has its own read credential.                                                                |
+| `cache_lifecycle_storage`               | Each cache's access mode, generation, read revision and deletion time.                                                       |
+| `path_read_revocation`                  | Per-path revocation fences and pending demotion of readable references.                                                      |
+| `blob_state`                            | The set of verified NARs, shared by all tenants: hashes, sizes, compression, and the deadline for reaping.                   |
+| `blob_ref_storage`                      | One reference for each committed narinfo version, from a tenant's cache to a NAR hash. These references authorise NAR reads. |
+| `tenant_blob`, `tenant_cas_blob`        | Which NARs and attestation bundles each tenant uses, for counting storage.                                                   |
+| `tenant_usage`                          | Each tenant's usage counters and quota. A `CHECK` constraint refuses a charge that would go over the quota.                  |
+| `cas_object`, `attestation_ref_storage` | Stored attestation bundles and their references.                                                                             |
+| `object_incarnation`, `object_deletion` | Bookkeeping for versions of R2 objects, and scheduled deletions.                                                             |
+| `deployment_transition`                 | The state of each schema transition that the deploy has started.                                                             |
+| `deployment_phase`                      | The deployment phase that v0.0.34 and v0.0.35 read. The deploy keeps it up to date for a rollback to those releases.         |
+| `local_step_wake_cursor`                | No longer read. A later transition's contract migrations will drop it.                                                       |
+| `manifest_state`                        | Kept for older databases. Nothing reads it.                                                                                  |
+| `tenant_maintenance_eligibility`        | Hints about which tenants to wake.                                                                                           |
+| `instance_config`                       | The deployment's instance name.                                                                                              |
 
 Some of these tables are written by only one party. A tenant's Durable Object is
 the only thing that writes that tenant's `blob_ref` and `tenant_blob` rows.

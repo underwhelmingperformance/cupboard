@@ -147,7 +147,11 @@ function sqliteApi(): D1QueryApi & { readonly database: DatabaseSync } {
 		database,
 		queryBatch: (_id, statements) => {
 			for (const statement of statements) {
-				database.exec(statement);
+				if (typeof statement === 'string') {
+					database.exec(statement);
+				} else {
+					database.prepare(statement.sql).run(...statement.params);
+				}
 			}
 			return Promise.resolve();
 		},

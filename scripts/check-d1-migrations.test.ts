@@ -17,7 +17,8 @@ import {
 	MigrationSchemaMismatchError,
 	type MigrationSet,
 	readMigrationSet,
-	TransitionSequenceError
+	TransitionSequenceError,
+	withControlDatabaseTransfer
 } from './check-d1-migrations.ts';
 
 const repositoryMigrations = path.resolve(
@@ -92,15 +93,19 @@ const laterTransitions: readonly SchemaTransition<string>[] = [
 	}
 ];
 
+const sharedTransitions = schemaTransitions.filter(
+	(transition) => transition.database === undefined
+);
+
 describe('checkD1Migrations', () => {
 	it("accepts the repository's migrations", () => {
 		const result = checkD1Migrations(
-			readMigrationSet(repositoryMigrations),
-			schemaTransitions
+			withControlDatabaseTransfer(readMigrationSet(repositoryMigrations)),
+			sharedTransitions
 		);
 
 		expect(result).toStrictEqual({
-			applied: schemaTransitions.flatMap((transition) => [
+			applied: sharedTransitions.flatMap((transition) => [
 				...transition.expand,
 				...transition.contract
 			]).length,
@@ -111,13 +116,14 @@ describe('checkD1Migrations', () => {
 				'tenant-retry-clock',
 				'tenant-schema-progress',
 				'control-refresh-sessions',
-				'control-subject-nonces'
+				'control-subject-nonces',
+				'control-database-split'
 			]
 		});
 	});
 
 	it('expands path authority after contracted cache identity and contracts the path index before renaming its table', () => {
-		const order = deployOrder(schemaTransitions, 1);
+		const order = deployOrder(sharedTransitions, 1);
 		expect(order).toStrictEqual({
 			files: [
 				...(schemaTransitions[0]?.expand ?? []),
@@ -130,8 +136,10 @@ describe('checkD1Migrations', () => {
 				'0038_tenant_schema_progress.sql',
 				'0039_control_refresh_sessions.sql',
 				'0040_control_subject_nonces.sql',
+				'0041_control_database_split.sql',
 				'0032_attestation_ref_path_index.sql',
-				'0036_path_read_authority_contract.sql'
+				'0036_path_read_authority_contract.sql',
+				'0042_control_database_contract.sql'
 			],
 			ahead: [
 				'local-step-attempts',
@@ -140,7 +148,8 @@ describe('checkD1Migrations', () => {
 				'tenant-retry-clock',
 				'tenant-schema-progress',
 				'control-refresh-sessions',
-				'control-subject-nonces'
+				'control-subject-nonces',
+				'control-database-split'
 			]
 		});
 	});
@@ -385,4 +394,23 @@ describe('deployOrder', () => {
 			});
 		}
 	);
+});
+
+it('checks the control database migration independently of the shared sequence', () => {
+	const directory = path.resolve(
+		import.meta.dirname,
+		'../packages/server/drizzle-control-d1'
+	);
+	const transitions = schemaTransitions.filter(
+		(transition) => transition.database === 'CONTROL_DB'
+	);
+	expect(
+		checkD1Migrations(readMigrationSet(directory), transitions)
+	).toStrictEqual({ applied: 1, replayed: [] });
+});
+
+it('refuses the shared contract before external control data work completes', () => {
+	expect(() =>
+		checkD1Migrations(readMigrationSet(repositoryMigrations), sharedTransitions)
+	).toThrow(MigrationApplyError);
 });

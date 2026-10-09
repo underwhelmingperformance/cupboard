@@ -2,7 +2,7 @@ import { ProgressiveCollectionLimitError } from '@cupboard/shared/collections';
 import Cloudflare, { NotFoundError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 
 import {
 	createCloudflareApi,
@@ -376,6 +376,53 @@ describe('rollApiTokenSecret', () => {
 });
 
 describe('d1QueryBatch', () => {
+	it('preserves bound text, number and null values in a mixed batch', async () => {
+		const path = '/accounts/acc-1/d1/database/db-1/query';
+		const { client, requests, bodies } = fakeCloudflare({
+			[`POST ${path}`]: []
+		});
+		const database = new DatabaseSync(':memory:');
+		let parameters: [string, number, null];
+		try {
+			const row = database
+				.prepare(
+					"SELECT 'an operator''s value' AS text, 42 AS number, NULL AS missing"
+				)
+				.get();
+			parameters = z
+				.tuple([z.string(), z.number(), z.null()])
+				.parse(Object.values(row ?? {}));
+		} finally {
+			database.close();
+		}
+		const statement = {
+			sql: 'INSERT INTO example VALUES (?, ?, ?);',
+			params: parameters
+		};
+
+		await createCloudflareApi(client, accountId('acc-1')).d1QueryBatch(
+			databaseIdSchema.parse('db-1'),
+			[
+				'CREATE TABLE example (text TEXT, number INTEGER, missing TEXT);',
+				statement
+			]
+		);
+
+		expect({ requests, bodies }).toStrictEqual({
+			requests: [{ method: 'POST', path }],
+			bodies: [
+				{
+					batch: [
+						{
+							sql: 'CREATE TABLE example (text TEXT, number INTEGER, missing TEXT);'
+						},
+						statement
+					]
+				}
+			]
+		});
+	});
+
 	it('sends one transactional batch to the D1 query endpoint', async () => {
 		const path = '/accounts/acc-1/d1/database/db-1/query';
 		const { client, requests, bodies } = fakeCloudflare({
@@ -1330,3 +1377,4 @@ describe('listAccountSubscriptions', () => {
 		).resolves.toStrictEqual({ kind: 'unparsed' });
 	});
 });
+import { DatabaseSync } from 'node:sqlite';

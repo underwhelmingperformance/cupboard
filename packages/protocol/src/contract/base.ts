@@ -29,6 +29,7 @@ export interface ResourceSpec {
  * set it. The authoriser denies a procedure that omits the declaration.
  */
 export interface AuthzMeta {
+	readonly acceptsControlDatabaseValidationSecret?: true;
 	readonly requires?: Operation;
 	readonly resource?: ResourceSpec;
 	readonly maintenance?: boolean;

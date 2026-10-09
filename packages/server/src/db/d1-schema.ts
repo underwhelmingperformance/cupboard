@@ -805,3 +805,10 @@ export const readableAttestationReference = sqliteView('attestation_ref').as(
 		 AND ${readableBlobReference.generation} = ${attestationReference.generation}
 	)`)
 );
+
+export const controlDatabaseSplit = sqliteTable('control_database_split', {
+	id: text('id').primaryKey(),
+	targetDatabaseId: text('target_database_id').notNull(),
+	frozenAt: text('frozen_at').notNull(),
+	copiedAt: text('copied_at')
+});

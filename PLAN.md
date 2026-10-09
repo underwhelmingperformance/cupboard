@@ -6740,6 +6740,91 @@ to the target URL.
       nonce-bound, with the problem `subject-token-unbound`.
 - [x] Rate-limit the token, signup and revoke endpoints.
 
+## Control database split
+
+Both Workers bind the same D1 database, `cupboard`, as `CUPBOARD_DB`. A D1
+binding grants access to the whole database, and Cloudflare offers no read-only
+or per-table binding. Code in the `cupboard-tenant` script can therefore write
+the control-plane tables. The control private key is wrapped under a secret that
+the tenant script never binds, but `controlVerificationKeys` trusts every
+`control_auth_key` row that is not retired. A tenant object that ran arbitrary
+SQL could insert its own key and sign control tokens, or add `control_trust` and
+`global_admin` rows. Operator authority then depends on the correctness of every
+part of the tenant-side code.
+
+Move the control-plane state into a second D1 database, `cupboard-control`,
+which only the control Worker binds. Tenant-side code never reads or writes
+these tables, so no batch or join crosses the cut:
+
+- `control_auth_key`, `control_trust`, `control_refresh_session_family`,
+  `control_refresh_session_member`, `control_consumed_subject_nonce`,
+  `global_admin` and `tenant_maintenance_failure`.
+
+The shared store, the per-tenant references and the tenant registry stay in
+`cupboard`. Tenant-side code is trusted with them by design: the commit gate
+checks status, charges usage and inserts references in one D1 batch, and
+deduplication shares objects across tenants. A store service with per-tenant
+capabilities would confine a confused-deputy bug to one tenant, but it would
+cost a rewrite of the data layer, so it is not part of this work.
+`docs/security.md` records that tenant-side code is trusted with the shared
+store and registry.
+
+### Design
+
+- Each D1 binding has its own migration set, Drizzle configuration, digest
+  tracking and transition rows. Deployment freshness comes from the shared
+  database and existing scripts. An empty control database does not make an
+  existing deployment fresh.
+- Only the control Worker binds `cupboard-control` as `CONTROL_DB`.
+  `instance_config`, the shared store, tenant registry and tenant local-step
+  progress remain in `CUPBOARD_DB`.
+- Existing deployments continue to use the legacy control tables during schema
+  expansion. The deploy authorises the existing administrator before creating
+  resources, including when the target database is absent or partly copied.
+- The cutover is forward-only. Both compatible Workers must serve before the
+  deploy records the shared transition's irreversible contract marker and
+  freezes mutations of the legacy control tables. An unbound Durable Object
+  lifecycle change prevents Cloudflare rollback across this release.
+- The deploy copies the frozen source through the authenticated Cloudflare D1
+  API in bounded pages with primary-key continuation. Source and target
+  identifiers are recorded. Repeated copies cannot overwrite target rows or
+  import rows after the target is ready. Complete source and target contents
+  must agree before readiness is published. An interrupted deploy resumes the
+  copy; it never unfreezes stale authority.
+- The control Worker validates copied key material with its wrapping secret.
+  Every private key must unwrap and match its public key; public columns must
+  contain no private material and key identifiers must be unique. These checks
+  establish consistency, not who inserted a row.
+- Migration assumes an uncompromised legacy database. Trust rules, administrator
+  records and key metadata have no authenticated writer provenance. Suspected
+  compromise requires an independently reviewed authority configuration or a
+  reset before migration.
+- One authoritative target readiness marker switches reads and writes to
+  `CONTROL_DB`. Until then, frozen legacy control mutations and token issuance
+  fail temporarily. Existing tenant cache traffic continues. The deploy then
+  drops the old control tables, after checking readiness again.
+- Nonces, spent refresh members, retry envelopes, revocations, disabled trust
+  rules and retired keys are copied without changing their contents. Every
+  existing refresh or signup batch remains within one database. No operation
+  writes the same authority mutation independently to both databases.
+- Runtime database selection, cron work and readiness probes use the correct
+  binding. Both D1 bindings receive deadline and subrequest accounting. Tenant
+  Workers and tenant Durable Objects never receive `CONTROL_DB`.
+
+### Progress
+
+- [x] Support database-specific artifacts, provisioning, transition walks,
+      migration checks and local bootstrap, including historical payloads.
+- [x] Add the isolated control schema, binding and test infrastructure.
+- [x] Implement source freeze, resumable bounded copy, key validation, exact
+      target verification and readiness publication.
+- [x] Switch the relevant control reads and writes, authority discovery,
+      readiness checks and cron persistence to the selected control database.
+- [x] Gate legacy-table removal and rollback refusal on the cutover.
+- [x] Test populated predecessor upgrades, fresh deploys, interruption, replay,
+      concurrent mutations, mismatched rows and rollback refusal.
+- [x] Update security, architecture and operator upgrade documentation.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.

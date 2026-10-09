@@ -747,6 +747,30 @@ export class ControlKeyMissingError extends ServerHttpError {
 	}
 }
 
+export class ControlDatabaseMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor() {
+		super(
+			'The control database is being migrated. Retry after the deployment completes.'
+		);
+		this.name = 'ControlDatabaseMigrationPendingError';
+	}
+}
+
+export class ControlDatabaseInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(message: string, options?: ErrorOptions) {
+		super(
+			`The control database cannot be activated: ${message}. Repair the copied control state before retrying deployment.`,
+			options
+		);
+		this.name = 'ControlDatabaseInvalidError';
+	}
+}
+
 export class ControlWrappingKeyInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

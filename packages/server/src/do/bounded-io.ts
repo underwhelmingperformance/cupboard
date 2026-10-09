@@ -19,7 +19,7 @@ function bounded<A extends unknown[], R>(
 	};
 }
 
-// A session or multipart handle issues requests outside these per-call proxies.
+// A multipart handle issues requests outside these per-call proxies.
 // Reject the member when the wrapper cannot apply a deadline to those requests.
 function unboundable(member: string): () => never {
 	return () => {
@@ -48,7 +48,11 @@ function passThrough(target: object, property: PropertyKey): unknown {
  * applies. Other bindings receive no deadline or accounting wrapper.
  */
 export function boundedWorkerEnv<
-	T extends { readonly BLOBS: R2Bucket; readonly CUPBOARD_DB: D1Database }
+	T extends {
+		readonly BLOBS: R2Bucket;
+		readonly CUPBOARD_DB: D1Database;
+		readonly CONTROL_DB?: D1Database;
+	}
 >(env: T): T {
 	// A proxy, not a spread: tests supply a service binding through a `get`
 	// trap, which a spread would not copy.
@@ -57,6 +61,11 @@ export function boundedWorkerEnv<
 			switch (property) {
 				case 'BLOBS': {
 					return boundedBlobs(target.BLOBS);
+				}
+				case 'CONTROL_DB': {
+					return target.CONTROL_DB === undefined
+						? undefined
+						: boundedD1(target.CONTROL_DB);
 				}
 				case 'CUPBOARD_DB': {
 					return boundedD1(target.CUPBOARD_DB);
@@ -144,12 +153,9 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 	return proxy;
 }
 
-/**
- * Wraps a {@link D1Database} with deadlines and subrequest accounting. Each
- * terminal statement method, batch, or exec call consumes one subrequest. A D1
- * batch remains atomic and consumes one call regardless of its member count.
- */
-export function boundedD1(database: D1Database): D1Database {
+function boundedD1Client<T extends D1Database | D1DatabaseSession>(
+	database: T
+): T {
 	return new Proxy(database, {
 		get(target, property) {
 			switch (property) {
@@ -172,17 +178,39 @@ export function boundedD1(database: D1Database): D1Database {
 						);
 					};
 				}
-				case 'exec': {
-					return bounded(target.exec.bind(target), 'd1.exec');
-				}
-				case 'withSession':
-				case 'dump': {
-					return unboundable(`d1.${property}`);
-				}
 				default: {
 					return passThrough(target, property);
 				}
 			}
+		}
+	});
+}
+
+/**
+ * Wraps a {@link D1Database} and its sessions with deadlines and subrequest
+ * accounting. Each terminal statement method, batch, or exec call consumes
+ * one subrequest. A batch remains atomic and consumes one call regardless
+ * of its member count.
+ */
+export function boundedD1(database: D1Database): D1Database {
+	const client = boundedD1Client(database);
+
+	return new Proxy(client, {
+		get(target, property) {
+			if (property === 'exec') {
+				return bounded(database.exec.bind(database), 'd1.exec');
+			}
+
+			if (property === 'withSession') {
+				return (constraint?: D1SessionBookmark): D1DatabaseSession =>
+					boundedD1Client(database.withSession(constraint));
+			}
+
+			if (property === 'dump') {
+				return unboundable('d1.dump');
+			}
+
+			return passThrough(target, property);
 		}
 	});
 }

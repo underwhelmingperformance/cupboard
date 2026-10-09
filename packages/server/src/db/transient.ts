@@ -40,3 +40,24 @@ export function isD1Overload(error: unknown): boolean {
 
 	return false;
 }
+
+/**
+Recognises the SQL trigger refusal, including Drizzle's wrapped cause.
+*/
+export function isControlDatabaseMigrationPending(error: unknown): boolean {
+	let current: unknown = error;
+
+	for (let depth = 0; depth < 5; depth += 1) {
+		if (!(current instanceof Error)) {
+			return false;
+		}
+
+		if (current.message.includes('control database migration pending')) {
+			return true;
+		}
+
+		current = current.cause;
+	}
+
+	return false;
+}

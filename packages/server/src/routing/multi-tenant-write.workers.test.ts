@@ -1,7 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
-import { env } from 'cloudflare:workers';
+import { env as tenantEnv } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,6 +26,7 @@ import {
 	tenantBlobRows,
 	tenantUploadStatus,
 	testBase,
+	testControlEnv,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar,
@@ -39,6 +40,8 @@ import {
 	runMaintenanceBatch
 } from './scheduled.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
+
+const env = Object.assign({}, tenantEnv, testControlEnv);
 
 function byCodeUnit(a: string, b: string): number {
 	if (a < b) {

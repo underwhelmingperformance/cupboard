@@ -17,7 +17,7 @@ import {
 	type CommitSessionFrame
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
-import { env } from 'cloudflare:workers';
+import { env as tenantEnv } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -115,6 +115,7 @@ import {
 	singleDecision,
 	syntheticNarHash,
 	testBase,
+	testControlEnv,
 	testPushId,
 	testPushIdFor,
 	uploadMetadata,
@@ -131,6 +132,8 @@ import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { type VerificationService } from './verification-service.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
+
+const env = Object.assign({}, tenantEnv, testControlEnv);
 
 function byUploadId(
 	left: { readonly uploadId: string },

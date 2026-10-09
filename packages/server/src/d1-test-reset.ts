@@ -1,6 +1,7 @@
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { drizzle } from 'drizzle-orm/d1';
 
+import * as controlSchema from './db/control-d1-schema.ts';
 import {
 	attestationReference,
 	blobReference,
@@ -9,6 +10,7 @@ import {
 	casObject,
 	controlAuthKey,
 	controlConsumedSubjectNonce,
+	controlDatabaseSplit,
 	controlRefreshSessionFamily,
 	controlRefreshSessionMember,
 	controlTrust,
@@ -34,6 +36,7 @@ export async function resetD1TestState(binding: D1Database): Promise<void> {
 	const database = drizzle(binding);
 	const now = isoTimestamp(new Date());
 	await database.batch([
+		database.delete(controlDatabaseSplit),
 		database.delete(attestationReference),
 		database.delete(blobReference),
 		database.delete(pathReadRevocation),
@@ -65,5 +68,22 @@ export async function resetD1TestState(binding: D1Database): Promise<void> {
 		database.delete(tenant),
 		database.delete(manifestState),
 		database.delete(localStepWakeCursor)
+	]);
+}
+
+export async function resetControlD1TestState(
+	binding: D1Database
+): Promise<void> {
+	const database = drizzle(binding);
+	await database.batch([
+		database.delete(controlSchema.controlAuthKey),
+		database.delete(controlSchema.controlConsumedSubjectNonce),
+		database.delete(controlSchema.controlRefreshSessionMember),
+		database.delete(controlSchema.controlRefreshSessionFamily),
+		database.delete(controlSchema.controlTrust),
+		database.delete(controlSchema.globalAdmin),
+		database.delete(controlSchema.tenantMaintenanceFailure),
+		database.delete(controlSchema.deploymentTransition),
+		database.delete(controlSchema.controlDatabaseReady)
 	]);
 }

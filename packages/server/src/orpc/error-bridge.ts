@@ -4,6 +4,7 @@ import { uploadRequestLimitErrorCode } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
+import { isControlDatabaseMigrationPending } from '../db/transient.ts';
 import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
@@ -13,6 +14,7 @@ import {
 	CacheRetentionMigrationPendingError,
 	CacheRetentionRuleLimitExceededError,
 	CacheRetirementTtlRequiredError,
+	ControlDatabaseMigrationPendingError,
 	OidcTrustRuleChangedError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
@@ -50,9 +52,13 @@ const codeByStatus: Record<number, string> = {
  */
 export function bridgedError(
 	logger: Logger,
-	error: unknown,
+	caught: unknown,
 	responseHeaders?: Headers
 ): unknown {
+	const error = isControlDatabaseMigrationPending(caught)
+		? new ControlDatabaseMigrationPendingError()
+		: caught;
+
 	if (responseHeaders !== undefined && error instanceof ServerHttpError) {
 		for (const [name, value] of serverHttpErrorHeaders(error)) {
 			responseHeaders.set(name, value);

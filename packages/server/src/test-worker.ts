@@ -17,7 +17,9 @@ export class CupboardServer extends ProductionCupboardServer {
 	*/
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		applyAlarmFence(ctx);
-		super(ctx, env);
+		const tenantEnv = { ...env };
+		Reflect.deleteProperty(tenantEnv, 'TEST_CONTROL_DATABASE');
+		super(ctx, tenantEnv);
 		this.#testState = ctx;
 	}
 
