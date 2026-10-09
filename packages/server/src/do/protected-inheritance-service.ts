@@ -11,6 +11,7 @@ import { cacheScopeFromRow, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 
 import { type SchemaWriter, type ServerContext } from './context.ts';
+import { type ReferencingCache } from './reuse-authority.ts';
 import { WorkSequenceService } from './work-sequence-service.ts';
 
 export const protectedSourcePageSize = 100;
@@ -319,6 +320,42 @@ export class ProtectedInheritanceService {
 			})
 			.where(this.queueFilter(cache, storePathHash, generation))
 			.run();
+	}
+
+	/**
+	 * The source caches of paths that an explicit deletion removed after the
+	 * pending upload of the same path and NAR was accepted. Deletion keeps such
+	 * an upload's right to reuse the NAR.
+	 */
+	deletedSourcesAfterAcceptance(
+		uploadId: UploadId,
+		storePathHash: StorePathHash
+	): ReferencingCache[] {
+		const deletion = schema.narInfoDeletions;
+		const pending = schema.pendingUploads;
+		const identity = schema.cacheIdentities;
+
+		return this.context.db
+			.select({
+				kind: identity.kind,
+				name: identity.name,
+				access: identity.access
+			})
+			.from(deletion)
+			.innerJoin(
+				pending,
+				and(eq(pending.id, uploadId), eq(pending.narHash, deletion.narHash))
+			)
+			.innerJoin(identity, eq(identity.id, deletion.cacheId))
+			.where(
+				and(
+					eq(deletion.storePathHash, storePathHash),
+					eq(deletion.explicit, true),
+					pendingAcceptedBeforeDeletion()
+				)
+			)
+			.all()
+			.map((row) => ({ cache: cacheScopeFromRow(row), access: row.access }));
 	}
 
 	capture(

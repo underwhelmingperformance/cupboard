@@ -141,7 +141,11 @@ caches it includes by name or by name prefix. A reuse view is read-only.
 The flake publish workflow reads through a reuse view to find out what other
 caches already have. When it finds a path that way, it can **publish it by
 reference**. This means the destination cache starts serving the path using
-bytes that the tenant already stores, without uploading them again.
+bytes that the tenant already stores, without uploading them again. The push
+must already be able to read those bytes, through a public cache or through a
+cache or view that its token can read. See [Shared storage][shared-storage].
+
+[shared-storage]: ./security.md#shared-storage
 
 See [Reuse views](./ci/reuse-views.md).
 

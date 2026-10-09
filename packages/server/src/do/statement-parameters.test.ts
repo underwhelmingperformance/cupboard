@@ -36,8 +36,7 @@ import * as schema from '../db/schema.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
 import {
 	blobStateHintSelect,
-	committedEdgeHintSelect,
-	ownedBlobHintSelect
+	committedEdgeHintSelect
 } from '../routing/negotiate-hints.ts';
 import { buildStampMaintainedStatement } from '../routing/scheduled.ts';
 
@@ -63,6 +62,7 @@ import {
 	buildTenantBlobDeleteStatement,
 	buildTenantCasBlobDeleteStatement
 } from './offboarding-service.ts';
+import { readableReferenceSelect } from './reuse-authority.ts';
 import {
 	reuseViewSelectorInsert,
 	type StoredReuseViewSelector
@@ -165,8 +165,8 @@ function blobStateParameters(hashes: number): number {
 		.length;
 }
 
-function ownedParameters(hashes: number): number {
-	return ownedBlobHintSelect(database, tenant, narHashList(hashes)).toSQL()
+function reusableReferenceParameters(hashes: number): number {
+	return readableReferenceSelect(database, tenant, narHashList(hashes)).toSQL()
 		.params.length;
 }
 
@@ -398,7 +398,10 @@ const listStatements: readonly {
 	readonly parameters: (values: number) => number;
 }[] = [
 	{ statement: 'negotiate blob_state SELECT', parameters: blobStateParameters },
-	{ statement: 'negotiate owned-blobs SELECT', parameters: ownedParameters },
+	{
+		statement: 'negotiate readable-reference SELECT',
+		parameters: reusableReferenceParameters
+	},
 	{ statement: 'negotiate committed-edge SELECT', parameters: edgeParameters },
 	{
 		statement: 'private narinfo reference SELECT',
