@@ -1,6 +1,8 @@
 import {
 	type CheckReport,
-	checkReportSchema
+	checkReportSchema,
+	type SharedAccessReport,
+	sharedAccessReportSchema
 } from '@cupboard/protocol/reports';
 import type {
 	MessagePresentation,
@@ -11,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CheckDiscrepanciesError } from '../errors.ts';
 
-import { type CheckClient, runCheck } from './check.ts';
+import { type CheckClient, runCheck, runSharedAccess } from './check.ts';
 
 interface Warning {
 	readonly label: string;
@@ -253,6 +255,42 @@ describe('runCheck', () => {
 						value: undefined
 					}
 				]
+			}
+		});
+	});
+});
+
+describe('shared-access report', () => {
+	it('follows every report page and lists shared NARs without changing them', async () => {
+		const secondHash = `sha256:${'2'.repeat(52)}`;
+		const calls: { cursor: SharedAccessReport['cursor'] }[] = [];
+		const pages = [
+			{ narHashes: [narHash], cursor: narHash },
+			{ narHashes: [secondHash], cursor: '' }
+		].map((page) => sharedAccessReportSchema.parse(page));
+		const captured: Captured = { results: [], infos: [], warnings: [] };
+		await runSharedAccess(reporter(captured), {
+			sharedAccess(input) {
+				calls.push(input);
+				const page = pages.shift();
+				if (page === undefined) {
+					throw new Error('Unexpected report page');
+				}
+				return Promise.resolve(page);
+			}
+		});
+		expect({ calls, captured }).toStrictEqual({
+			calls: [{ cursor: '' }, { cursor: narHash }],
+			captured: {
+				results: [
+					[
+						{ label: 'Shared NARs', value: '2' },
+						{ label: 'NAR', value: narHash },
+						{ label: 'NAR', value: secondHash }
+					]
+				],
+				infos: [],
+				warnings: []
 			}
 		});
 	});

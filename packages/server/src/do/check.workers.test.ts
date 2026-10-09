@@ -3,6 +3,7 @@ import { checkReportSchema } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -24,6 +25,7 @@ import {
 	defaultCache,
 	initialise,
 	issueServerSignedToken,
+	namedCache,
 	narBytes,
 	narHash,
 	pushPath,
@@ -72,6 +74,74 @@ async function runCheck(
 
 describe('storage check', () => {
 	beforeEach(resetTestServer);
+
+	it('reports NARs with both public and private readable references', async () => {
+		const token = await initialise();
+		const privateCache = namedCache('shared-access-report');
+		const created = await authorisedFetch(
+			'/caches/shared-access-report',
+			token,
+			{
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ access: 'private', priority: 40 })
+			}
+		);
+		expect(created.status).toBe(StatusCodes.OK);
+		const { metadata: shared, nar: sharedNar } = await verifiablePath(
+			'shared-access-nar',
+			{
+				storePathHash: 'h'.repeat(32),
+				name: 'shared-access'
+			}
+		);
+		const { metadata: privateOnly, nar: privateNar } = await verifiablePath(
+			'private-only-nar',
+			{
+				storePathHash: 'j'.repeat(32),
+				name: 'private-only'
+			}
+		);
+		await pushPath(token, shared, defaultCache(), sharedNar);
+		await pushPath(token, shared, privateCache, sharedNar);
+		await pushPath(token, privateOnly, privateCache, privateNar);
+
+		const response = await authorisedFetch('/check/shared-access', token);
+		expect({
+			status: response.status,
+			body: await response.json()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: { narHashes: [shared.narHash], cursor: '' }
+		});
+
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await database
+			.update(d1Schema.blobReference)
+			.set({ readable: false })
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, fixtureTenant),
+					eq(d1Schema.blobReference.narHash, shared.narHash),
+					eq(d1Schema.blobReference.cacheKind, 'default')
+				)
+			);
+		const revoked = await authorisedFetch('/check/shared-access', token);
+		expect({
+			status: revoked.status,
+			body: await revoked.json()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: { narHashes: [], cursor: '' }
+		});
+	});
+
+	it('refuses the shared-access report to a publishing token', async () => {
+		await initialise();
+		const token = await issueServerSignedToken(cacheWriteGrants());
+		const response = await authorisedFetch('/check/shared-access', token);
+		expect(response.status).toBe(StatusCodes.FORBIDDEN);
+	});
 
 	it.each([{ deep: false }, { deep: true }])(
 		'reports no discrepancies for a healthy cache (deep: $deep)',

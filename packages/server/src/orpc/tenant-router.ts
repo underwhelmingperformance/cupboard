@@ -233,6 +233,9 @@ export const tenantRouter = os.router({
 		)
 	},
 	check: {
+		sharedAccess: os.check.sharedAccess.handler(({ input, context }) =>
+			context.services.integrityCheck.sharedAccess(input.cursor)
+		),
 		run: os.check.run.handler(({ input, context }) =>
 			context.services.integrityCheck.check(input.deep, {
 				cache: input.cursorCache,
