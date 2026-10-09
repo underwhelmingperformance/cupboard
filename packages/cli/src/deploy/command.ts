@@ -1650,9 +1650,10 @@ async function deployFlow(
 					api: agreedApi,
 					cleanupApi: claimSecretCleanupApi(clientWithSignal, agreed.accountId),
 					scriptName: deployedConfig.control.name,
-					validate: (secret) =>
+					signal: runtimeOptions.signal,
+					validate: (secret, signal) =>
 						controlRpc(new URL(url), {
-							signal: runtimeOptions.signal
+							signal
 						}).database.validate({ secret })
 				});
 			}
