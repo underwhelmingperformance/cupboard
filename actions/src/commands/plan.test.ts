@@ -204,7 +204,7 @@ describe('planAction', () => {
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
 				'plan-artifact-name=cupboard-publish-plan-test\n' +
 				'target-matrix={"include":[{"attr":".#packages.x86_64-linux.app","system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"rootSuffix":"x86_64-linux/app","outputs":["out"],"root":"github:owner/repo/main/x86_64-linux/app","runsOn":"ubuntu-latest"}]}\n' +
-				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
+				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","name":"x86_64-linux/app on remote builders","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
 				'cohort-count=1\n' +
 				'retained-count=0\n' +
 				'target-count=1\n'
@@ -998,6 +998,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		enablePacking: false,
 		packCapacity: 0,
 		store: '',
+		builders: '',
 		build: 'missing',
 		substituter: 'leave',
 		publish: 'outputs',
@@ -1722,6 +1723,7 @@ describe('cohort-matrix output', () => {
 
 		expect(outputs).toContain(
 			'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe",' +
+				'"name":"x86_64-linux/app on remote builders",' +
 				'"attrs":[".#packages.x86_64-linux.app"],' +
 				'"installables":[".#packages.x86_64-linux.app^out"],' +
 				`"queryInstallables":["${targetRootDrvPath}^out"],` +

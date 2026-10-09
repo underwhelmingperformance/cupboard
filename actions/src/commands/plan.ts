@@ -36,6 +36,7 @@ import { type ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
+import { cohortBuildLocation, cohortJobName } from '../build-location.ts';
 import {
 	BuildRebuildRemoteDispatchError,
 	BuiltPublicationObservationUnsupportedError,
@@ -235,6 +236,7 @@ export interface PlanOptions {
 	readonly enablePacking?: string;
 	readonly packCapacity?: string;
 	readonly store?: string;
+	readonly builders?: string;
 	readonly build?: string;
 	readonly substituter?: string;
 	readonly publish?: string;
@@ -257,6 +259,11 @@ export interface PlanInputs {
 	readonly enablePacking: boolean;
 	readonly packCapacity: number;
 	readonly store: string;
+	/**
+	 * The Nix `builders` specification that remote cohorts use. The plan reads
+	 * it only to show the builder's host in job names.
+	 */
+	readonly builders: string;
 	readonly build: 'missing' | 'rebuild';
 	readonly substituter: 'leave' | 'copy';
 	readonly publish: 'none' | 'outputs' | 'built' | 'closure';
@@ -336,6 +343,10 @@ export function registerPlanCommand(
 		.option(
 			'--store <uri>',
 			'remote ssh-ng store for cohort builds; remote planning requires predictable output paths'
+		)
+		.option(
+			'--builders <spec>',
+			"Nix builders specification for remote cohorts, used to show each builder's host"
 		)
 		.option(
 			'--build <mode>',
@@ -434,6 +445,7 @@ export function resolvePlanInputs(
 		enablePacking: isPackingEnabled,
 		packCapacity: resolvePackCapacity(isPackingEnabled, options.packCapacity),
 		store: provided(options.store) ?? '',
+		builders: provided(options.builders) ?? '',
 		build: providedChoice(
 			'build',
 			options.build,
@@ -787,6 +799,10 @@ async function writePlan(
 	await setOutput(environment, 'target-count', String(plan.targets.length));
 }
 
+function cohortName(inputs: PlanInputs, cohort: Cohort): string {
+	return cohortJobName(cohort, cohortBuildLocation(cohort, inputs));
+}
+
 export async function ensureAvailableTargets(
 	inputs: PlanInputs,
 	evaluations: readonly TargetEvaluation[],
@@ -1137,6 +1153,7 @@ function cohortMatrix(
 
 	return cohorts.map((cohort) => ({
 		key: cohort.key,
+		name: cohortName(inputs, cohort),
 		attrs: cohort.targets.map((target) => target.attr),
 		installables: cohort.installables,
 		queryInstallables: cohort.targets.map((target) =>

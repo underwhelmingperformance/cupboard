@@ -196,8 +196,12 @@ they share the same run root as the original attempt.
 
 ## Where to look when something goes wrong
 
-- The plan job's summary shows the number of targets, and each cohort job is
-  named after its cohort.
+- The plan job's summary shows the number of targets.
+- Each cohort job's name gives its system, where it builds and its number of
+  targets, such as `x86_64-linux on ubuntu-latest (2 targets)`. A cohort with
+  one target gives the target's root suffix in place of the system and the
+  count, such as `aarch64-linux/hello on ubuntu-24.04-arm`. For a remote build,
+  the name gives the host of the builder or store in place of the runner.
 - Each cohort job's log shows how the targets were grouped, what the job built
   and published, and why it refused to build, if it did. For example, it refuses
   when the runner has too little disk for the closure, or when too many paths
