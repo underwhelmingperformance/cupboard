@@ -24,6 +24,7 @@ import {
 } from '@cupboard/protocol/build';
 import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import {
+	type CommitBlobDeclaration,
 	type UploadAttachRootInput,
 	type UploadDecision
 } from '@cupboard/protocol/upload';
@@ -392,6 +393,8 @@ async function uploadAndAcknowledge(
 		options.createNarArchive ??
 		((storePath: string) => new NarArchive(storePath));
 
+	let blob: CommitBlobDeclaration | undefined;
+
 	if (decision.action === 'upload') {
 		try {
 			const upload = await uploadNarFromSource(
@@ -407,6 +410,7 @@ async function uploadAndAcknowledge(
 				info.narSize
 			);
 			assertNarMetadata(info, upload.digest);
+			blob = upload.blob;
 			options.uploadReport?.completed(info.storePath, upload);
 		} catch (error) {
 			if (isVanishedPathError(error)) {
@@ -426,7 +430,8 @@ async function uploadAndAcknowledge(
 		outcome = await commitOverSession(options, {
 			uploadId: decision.uploadId,
 			storePathHash: decision.storePathHash,
-			narHash: decision.narHash
+			narHash: decision.narHash,
+			...(blob !== undefined && { blob })
 		});
 	} catch (error) {
 		return { info, verdict: Promise.resolve({ kind: 'failed', error }) };

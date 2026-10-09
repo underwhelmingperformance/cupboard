@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
@@ -21,6 +23,7 @@ import type {
 	CommitSession,
 	CommitSessionTarget
 } from '../client/commit-socket.ts';
+import { byteStream } from '../io/byte-stream.ts';
 import { SequentialNarSource } from '../nix/nar-source.ts';
 import type { PushClient } from '../push/push.ts';
 
@@ -129,6 +132,7 @@ interface HarnessOptions {
 	Use this shared session for every flush instead of opening another socket.
 	*/
 	readonly commitSession?: CommitSession;
+	readonly compressedBody?: Uint8Array;
 }
 
 function harness(options: HarnessOptions = {}): Harness {
@@ -197,15 +201,17 @@ function harness(options: HarnessOptions = {}): Harness {
 			});
 		},
 		preview: () => Promise.resolve({ uploads: [] }),
-		uploadNar: (r2Key) => {
+		uploadNar: async (r2Key, body) => {
 			events.push(`upload:${r2Key}`);
 			minutes += options.uploadMinutes ?? 0;
 
 			if (options.uploadFailure !== undefined) {
-				return Promise.reject(options.uploadFailure);
+				throw options.uploadFailure;
 			}
 
-			return Promise.resolve();
+			if (options.compressedBody !== undefined) {
+				await Array.fromAsync(body);
+			}
 		},
 		commit: (target) => {
 			const storePath = pathByHash.get(target.storePathHash);
@@ -243,13 +249,16 @@ function harness(options: HarnessOptions = {}): Harness {
 		runRoot,
 		createNarArchive: () => new SequentialNarSource(emptyStream),
 		compressNar: () => ({
-			body: new ReadableStream<Uint8Array>({
-				cancel: (reason) => {
-					events.push(
-						`cancel:${reason instanceof Error ? reason.message : 'unknown'}`
-					);
-				}
-			}),
+			body:
+				options.compressedBody === undefined
+					? new ReadableStream<Uint8Array>({
+							cancel: (reason) => {
+								events.push(
+									`cancel:${reason instanceof Error ? reason.message : 'unknown'}`
+								);
+							}
+						})
+					: byteStream([options.compressedBody]),
 			digest: () => ({ narHash, narSize: 4 })
 		}),
 		...(options.maxEntries !== undefined && { maxEntries: options.maxEntries }),
@@ -600,37 +609,57 @@ describe('BuildOutputBatcher', () => {
 // A run shares one commit session across every phase. Calling the client's
 // `commit` method from a flush would open a second socket for the same run.
 describe('BuildOutputBatcher over a shared commit session', () => {
-	it('commits over the session and never through the client', async () => {
-		const sessionCommits: CommitSessionTarget[] = [];
-		const commitSession: CommitSession = {
-			commit: (target) => {
-				sessionCommits.push(target);
+	it.each(['upload', 'commit'] as const)(
+		'commits %s entries over the session with a declaration only for uploaded bytes',
+		async (action) => {
+			const bytes = Buffer.from('compressed NAR');
+			const fileHash = NixSha256Hash.fromDigest(
+				createHash('sha256').update(bytes).digest()
+			).toString();
+			const sessionCommits: CommitSessionTarget[] = [];
+			const commitSession: CommitSession = {
+				commit: (target) => {
+					sessionCommits.push(target);
 
-				return Promise.resolve({
-					storePathHash: target.storePathHash,
-					narHash: target.narHash,
-					status: 'committed' as const,
-					settled: Promise.resolve()
-				});
-			},
-			close: () => {
-				throw new Error('the run closes the session, not a flush');
-			}
-		};
-		const { batcher, events, outcomes } = harness({ commitSession });
+					return Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'committed' as const,
+						settled: Promise.resolve()
+					});
+				},
+				close: () => {
+					throw new Error('the run closes the session, not a flush');
+				}
+			};
+			const { batcher, events, outcomes } = harness({
+				commitSession,
+				compressedBody: bytes,
+				actions: new Map([[pathA, action]])
+			});
 
-		batcher.enqueue(pathA);
-		await vi.advanceTimersByTimeAsync(500);
-		await batcher.settled();
+			batcher.enqueue(pathA);
+			await vi.advanceTimersByTimeAsync(500);
+			await batcher.settled();
 
-		expect({
-			sessionCommits: sessionCommits.map((target) => target.storePathHash),
-			clientCommits: events.filter((event) => event.startsWith('commit:')),
-			outcomes
-		}).toStrictEqual({
-			sessionCommits: [StorePath.hash(pathA)],
-			clientCommits: [],
-			outcomes: [{ outcome: 'published', storePath: pathA }]
-		});
-	});
+			expect({
+				sessionCommits,
+				clientCommits: events.filter((event) => event.startsWith('commit:')),
+				outcomes
+			}).toStrictEqual({
+				sessionCommits: [
+					{
+						uploadId: `upload-${StorePath.basename(pathA)}`,
+						storePathHash: StorePath.hash(pathA),
+						narHash: narHash.toString(),
+						...(action === 'upload' && {
+							blob: { fileHash, fileSize: bytes.byteLength }
+						})
+					}
+				],
+				clientCommits: [],
+				outcomes: [{ outcome: 'published', storePath: pathA }]
+			});
+		}
+	);
 });

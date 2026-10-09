@@ -5,6 +5,7 @@ import {
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 import {
 	commitBatchMaxEntries,
+	type CommitBlobDeclaration,
 	type UploadAttachRootInput,
 	type UploadDecision
 } from '@cupboard/protocol/upload';
@@ -303,6 +304,8 @@ export class BuildOutputBatcher {
 		decision: PublishableDecision,
 		info: NixValidPathInfo
 	): Promise<void> {
+		let blob: CommitBlobDeclaration | undefined;
+
 		if (decision.action === 'upload') {
 			const compressNar = this.options.compressNar ?? compressNarToStream;
 			const createNarArchive =
@@ -321,13 +324,15 @@ export class BuildOutputBatcher {
 				info.narSize
 			);
 			assertNarMetadata(info, upload.digest);
+			blob = upload.blob;
 			this.options.uploadReport?.completed(info.storePath, upload);
 		}
 
 		await commitOverSession(this.options, {
 			uploadId: decision.uploadId,
 			storePathHash: decision.storePathHash,
-			narHash: decision.narHash
+			narHash: decision.narHash,
+			...(blob !== undefined && { blob })
 		});
 	}
 

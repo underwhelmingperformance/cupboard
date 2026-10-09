@@ -622,6 +622,16 @@ requests below are all under the tenant URL.
    expired, the server sets the expiry to 15 minutes after the renewal, but
    never later than six hours after negotiation.
 
+   The uploader also hashes and measures the final compressed object, including
+   any skippable padding. Buffered retries reuse the hashed bytes; streamed
+   retries check recompressed bytes against the first read and hash only new
+   bytes. The CLI includes this file hash and size in a `commit-batch` entry
+   only when the current connection advertises `blob=1`. It repeats the
+   declaration on an unacknowledged commit after reconnecting, and on a
+   `subscribe-identity` entry when that operation advertises `blob=1`. An older
+   server receives the existing entry without the declaration. A replacement
+   upload after expiry declares the hash and size of its newly uploaded bytes.
+
    When the upload finishes, the upload worker commits it and waits for the
    server's acknowledgement before it takes another path. The CLI sends commits
    one at a time or in batches of up to 100. It waits for verdicts after every
@@ -632,7 +642,7 @@ requests below are all under the tenant URL.
    `subscribe-identity` capabilities, a batch entry can also declare the SHA-256
    and size of the compressed object that the CLI uploaded. The server keeps the
    first declaration for each upload and refuses a commit that declares
-   different values with 409. The CLI does not send a declaration yet.
+   different values with 409.
 
 5. The object records the upload as pending, and adds a `tenant-verify` job to
    the queue. A committed upload whose verdict is still `committing` or

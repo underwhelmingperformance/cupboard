@@ -1,12 +1,15 @@
-import type { UploadId } from '@cupboard/protocol/upload';
+import type {
+	CommitBlobDeclaration,
+	UploadId
+} from '@cupboard/protocol/upload';
 import { formatDuration, type Reporter } from '@cupboard/reporter';
 
 import type { CommitSession } from '../client/commit-socket.ts';
-import { countingByteStream } from '../io/byte-stream.ts';
 import { type NarCompressionFacts, sendCompressedNar } from '../nix/blob.ts';
 import type { NarDigest } from '../nix/nar.ts';
 import type { NarSource } from '../nix/nar-source.ts';
 
+import { CompressedBlobHasher } from './blob-hash.ts';
 import type { NarTransferFacts, NarUploadObserver } from './nar-upload.ts';
 import type { CompressNar, PushClient } from './push.ts';
 
@@ -123,6 +126,7 @@ export function reportUploadDuration(
 export interface CompletedNarUpload {
 	readonly durationMs: number;
 	readonly digest: NarDigest;
+	readonly blob: CommitBlobDeclaration;
 	readonly compression?: NarCompressionFacts;
 	readonly transfer?: NarTransferFacts;
 }
@@ -187,16 +191,24 @@ async function transferNar(
 
 	const upload = context.compressNar(source, narSize);
 	const { onBytes } = context.observer;
+	const blobHasher = new CompressedBlobHasher();
 	await sendCompressedNar(
-		onBytes === undefined
-			? upload.body
-			: countingByteStream(upload.body, onBytes),
+		upload.body.pipeThrough(
+			new TransformStream<Uint8Array, Uint8Array>({
+				transform(bytes, controller) {
+					blobHasher.update(bytes);
+					onBytes?.(bytes.byteLength);
+					controller.enqueue(bytes);
+				}
+			})
+		),
 		(body) => context.client.uploadNar(r2Key, body)
 	);
 	const compression = upload.compression?.();
 
 	return {
 		digest: upload.digest(),
+		blob: blobHasher.declaration(),
 		...(compression !== undefined && { compression })
 	};
 }
