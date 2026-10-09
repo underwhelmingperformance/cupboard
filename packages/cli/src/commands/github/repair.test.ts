@@ -52,6 +52,7 @@ import {
 	buildAddBody,
 	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildViewContentReadGrant,
 	collectSubstitutions,
 	jobWorkflowReferenceClaim
 } from '../oidc-trust/rule-builder.ts';
@@ -763,6 +764,59 @@ jobs:
 	);
 	expect(added.map(({ permittedGrants }) => permittedGrants)).toStrictEqual([
 		[buildCacheGrant({ cache: 'packages', allow: ['push', 'attest'] })]
+	]);
+});
+
+it('repairs a view read grant for publication from a private view read with a static pair', async () => {
+	const staticWorkflow = `
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: packages
+      root-prefix: builds
+      reuse-view: shared
+    secrets:
+      read_user: \${{ secrets.READ_USER }}
+      read_password: \${{ secrets.READ_PASSWORD }}
+`;
+	const view = reuseViewSummarySchema.parse({
+		name: 'shared',
+		access: 'private',
+		selectors: [{ kind: 'prefix', prefix: 'gh-' }],
+		priority: 50,
+		revision: 1,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z'
+	});
+	const { ui, added, client, dependencies, check } = await fixture(
+		{ interactive: true, confirm: 'yes' },
+		staticWorkflow,
+		{ views: [view] }
+	);
+
+	expect(check.repairableJobs.map(({ job }) => job)).toStrictEqual(['publish']);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+	expect(added.map(({ permittedGrants }) => permittedGrants)).toStrictEqual([
+		[
+			buildCacheGrant({
+				cache: 'packages',
+				root: 'builds/',
+				allow: ['push', 'attest', 'root', 'attach']
+			}),
+			buildViewContentReadGrant('shared')
+		]
 	]);
 });
 

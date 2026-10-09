@@ -75,6 +75,10 @@ function authenticationError(
 		return `You do not have permission to ${action} on root ${error.root}. Ask the tenant administrator to grant this access.`;
 	}
 
+	if (error instanceof errors.ReferenceSourceReadRefusedError) {
+		return `The trust rule refused this push token request, which includes read access to the private reference source ${error.sources.map((source) => source.href).join(', ')}. Run \`cupboard github check\` to check the source read grants and destination publication grants.`;
+	}
+
 	if (error instanceof GithubOidcUnavailableError) {
 		return 'This command needs a GitHub Actions job with `permissions: id-token: write`. Add that permission to the publishing job.';
 	}
@@ -410,7 +414,7 @@ function publicationError(error: unknown): string | undefined {
 	}
 
 	if (error instanceof errors.ReferenceUploadRequiredError) {
-		return `The destination no longer has the archive for ${error.storePath}. Publish the path from a Nix store that contains it before retrying publication by reference.`;
+		return `The destination requested an upload of ${error.storePath}, which this push publishes by reference and has no bytes for. Check that the push token can read the reference source and that the tenant still stores the NAR. Otherwise publish the path from a Nix store that contains it.`;
 	}
 
 	if (error instanceof errors.TokenProviderError) {

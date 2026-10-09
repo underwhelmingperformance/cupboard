@@ -201,6 +201,17 @@ If a destination uses its own credential, add the matching destination pair. The
 pair applies to both branch and pull-request runs, so use event-specific secrets
 if their selected caches require different credentials.
 
+A static credential lets the workflow read a private reuse view. To publish
+paths by reference from that view, `cupboard push` also requests
+`view:content-read` for its push token. For a private cache supplied through
+`--reference-source` or a reference manifest, it requests `cache:content-read`.
+The run's trust rule must permit the requested grant. `cupboard github check`
+reports a missing view grant for a publishing job, and its guided repair adds
+it. See [Matching trust rules][matching-rules] and [publishing by
+reference][by-reference].
+
+[by-reference]: ./how-it-works.md#the-four-groups-in-the-log
+
 ## Reading other private caches
 
 The `private_substituters` secret lists additional private cache URLs, one per

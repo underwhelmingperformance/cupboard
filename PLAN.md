@@ -6883,7 +6883,7 @@ negotiates again.
 2. [x] Filter reusable blobs by that predicate on the Durable Object path and on
        the Worker hint path, so that a hint cannot widen authority.
 3. [x] Check authority again at commit.
-4. [ ] Report a reference publication that receives `upload` for each target in
+4. [x] Report a reference publication that receives `upload` for each target in
        `build-cohort`, through the existing `ReferenceUploadRequiredError`.
 5. [ ] Add an operator report that lists NARs referenced by both a public and a
        private cache in a tenant, for review. The report removes nothing.

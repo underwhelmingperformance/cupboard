@@ -37,6 +37,7 @@ import {
 	buildAddBody,
 	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildViewContentReadGrant,
 	jobWorkflowReferenceClaim
 } from '../oidc-trust/rule-builder.ts';
 
@@ -3691,3 +3692,137 @@ it('warns about a repository rule whose audience is not the tenant URL', async (
 		"Trust rule custom expects the audience https://custom.example, which is not the tenant URL. The tenant refuses the tokens of jobs that request this audience, because a job token cannot have a target-bound nonce. To keep these jobs working, set the rule's audience and the audience input or --audience option of each job that uses the rule to https://cupboard.supply/t/laney."
 	]);
 });
+
+it.each([
+	{ label: 'without a view read grant', hasViewGrant: false },
+	{ label: 'with a view read grant', hasViewGrant: true }
+])(
+	'checks the view read grant for publication from a private view read with a static credential, $label',
+	async ({ hasViewGrant }) => {
+		const view = reuseViewSummarySchema.parse({
+			name: 'pull-requests-1234',
+			access: 'private',
+			selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+			priority: 70,
+			revision: 1,
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		});
+		const rule = oidcTrustSummarySchema.parse({
+			id: 'branch',
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenant.href,
+			claims: { repository_id: '1234', ref: 'refs/heads/main' },
+			permittedGrants: [
+				buildCacheGrant({
+					cache: 'packages',
+					root: 'builds/',
+					allow: ['push', 'attest', 'root', 'attach']
+				}),
+				...(hasViewGrant
+					? [buildViewContentReadGrant('pull-requests-1234')]
+					: [])
+			],
+			disabled: false
+		});
+		const { client, dependencies } = fixture({
+			rules: [rule],
+			views: [view],
+			dependencies: {
+				source: {
+					...source,
+					read: () =>
+						Promise.resolve(`
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: https://cupboard.supply/t/laney
+      cache: packages
+      root-prefix: builds
+      reuse-view: pull-requests-1234
+    secrets:
+      read_user: \${{ secrets.READ_USER }}
+      read_password: \${{ secrets.READ_PASSWORD }}
+`)
+				},
+				fetchCacheAccess: () => Promise.resolve('public'),
+				fetchCacheInfo: (url) => {
+					const priority = cachePrioritySchema.parse(
+						url.pathname.includes('/reuse/') ? 70 : 40
+					);
+
+					return Promise.resolve(
+						new CacheInfo(servedStoreDirectory, true, priority)
+					);
+				}
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
+
+		expect(
+			result.jobs.map((job) => ({
+				status: job.status,
+				findings: job.findings.map(({ trigger, finding }) => ({
+					...(trigger !== undefined && { trigger }),
+					finding: finding.toJSON()
+				}))
+			}))
+		).toStrictEqual([
+			{
+				status: hasViewGrant ? 'ready' : 'failed',
+				findings: [
+					{
+						finding: {
+							check: 'reuse view',
+							status: 'ok',
+							detail:
+								'the check verifies the priority and store directory of reuse view pull-requests-1234, not the caches that its selectors include'
+						}
+					},
+					...(hasViewGrant
+						? [
+								{
+									trigger: 'push',
+									finding: { check: 'trust rule', status: 'ok' }
+								},
+								{
+									trigger: 'push',
+									finding: { check: 'root grant', status: 'ok' }
+								}
+							]
+						: [
+								{
+									trigger: 'push',
+									finding: {
+										check: 'trust rule',
+										status: 'failed',
+										detail:
+											'rule branch matches the modelled claims but does not permit view:content-read on view pull-requests-1234; add a rule with the required grant, or add a corrected rule and remove this one'
+									}
+								}
+							]),
+					{
+						trigger: 'push',
+						finding: {
+							check: 'read authentication',
+							status: 'ok',
+							detail:
+								'the workflow declares a complete view read-secret pair; secret values are not inspected'
+						}
+					},
+					{ trigger: 'push', finding: { check: 'reuse view', status: 'ok' } }
+				]
+			}
+		]);
+	}
+);

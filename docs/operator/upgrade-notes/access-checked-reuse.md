@@ -12,7 +12,17 @@ the NAR. For example, a pull-request job that pushes to a public pull-request
 cache now uploads a path that only a private cache has.
 
 Publishing by reference from a private cache or a private reuse view needs the
-same grant on the publishing token. Without it, cupboard asks for the bytes, and
-publishing that path by reference fails.
+same grant on the push token when the source differs from the destination.
+`cupboard push` now requests `cache:content-read` or `view:content-read` for
+each private source in the same tenant, whether the source is given with
+`--reference-source` or in a reference manifest. A token request is all or
+nothing, so if the trust rule does not permit the grant, the push gets no token
+and reports the refused request with its private sources.
+
+A tenant whose flake publish workflow reuses paths from a private reuse view
+must permit `view:content-read` for that view in the trust rule of its branch
+runs. This applies whether the workflow reads the view through OIDC or with a
+static read credential. `cupboard github check` reports the missing grant, and
+its guided repair adds it.
 
 cupboard still stores each NAR once.
