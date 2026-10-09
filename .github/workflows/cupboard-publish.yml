@@ -102,9 +102,10 @@ on:
         description: >-
           Control which paths are published. `none` skips publication and
           retention updates. `outputs` publishes selected output paths. `built`
-          also publishes observed build intermediates. `closure` publishes all
-          their runtime references. If no outputs remain selected, `outputs` and
-          `closure` replace the retention root with an empty path list.
+          also publishes observed build intermediates and required dependency
+          outputs available from configured tenant caches. `closure` publishes
+          all their runtime references. If no outputs remain selected, `outputs`
+          and `closure` replace the retention root with an empty path list.
         required: false
         type: string
         default: built

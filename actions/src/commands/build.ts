@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process, { env } from 'node:process';
 
 import {
+	dependencyOutputs,
 	discoverNixStoreConfig,
 	Nix,
 	type NixBuildSettings,
@@ -12,10 +13,14 @@ import {
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
 	parseSshNgStoreUri,
-	selectPublicationPaths
+	selectPublicationPaths,
+	tenantDependencyReferences,
+	tenantReferenceSources
 } from '@cupboard/nix';
 import { receiptSubjects as observedReceiptSubjects } from '@cupboard/nix/build-observation';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
+import { derivationPathOf } from '@cupboard/nix-store/derivation';
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import {
 	autoBuildStore,
 	type BuildReceiptV2Input,
@@ -30,6 +35,8 @@ import { withCleanups } from '@cupboard/shared/cleanup';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
+import { republishedSubject } from '../../../packages/cli/src/push/origin.ts';
+import { parseReferenceManifest } from '../../../packages/cli/src/push/reference-manifest.ts';
 import { HookFailureDetector } from '../build-paths/hook-failure.ts';
 import {
 	createJobRoots,
@@ -124,6 +131,8 @@ export interface BuildDependencies {
 		signal?: AbortSignal
 	) => Promise<RunResult>;
 	readonly nix?: Pick<Nix, 'queryPathInfo'>;
+	readonly graphNix?: Pick<Nix, 'readDerivation'>;
+	readonly tenantDependencyReferences?: typeof tenantDependencyReferences;
 	readonly availabilityNix?: Pick<
 		Nix,
 		| 'resolveSubstitutableClosure'
@@ -707,6 +716,7 @@ export async function buildAction(
 	let remoteBuilderDerivations = new Set<string>();
 
 	await mkdir(path.dirname(receiptFile), { recursive: true });
+	await rm(`${receiptFile}.references.json`, { force: true });
 	const nix = dependencies.nix ?? Nix.open();
 	const protection =
 		dependencies.protection ??
@@ -1086,7 +1096,7 @@ export async function buildAction(
 		}
 		const observedPaths =
 			observation?.events.flatMap((event) => event.outputPaths) ?? [];
-		const intermediatePaths = [
+		let intermediatePaths = [
 			...new Set(
 				observedPaths.filter((storePath) => !finalPaths.includes(storePath))
 			)
@@ -1109,7 +1119,7 @@ export async function buildAction(
 			preExisting,
 			checkedPaths
 		);
-		const receipt = buildReceiptV3Schema.parse({
+		let receipt = buildReceiptV3Schema.parse({
 			version: 3,
 			paths: allPaths,
 			subjects: originSubjects(
@@ -1158,6 +1168,78 @@ export async function buildAction(
 				})
 			}
 		);
+		if (
+			publish === 'built' &&
+			tenantUrl !== undefined &&
+			publicationUrl !== undefined
+		) {
+			const roots = [
+				...new Set(
+					finalInfos
+						.filter((info) =>
+							selection.published.includes(
+								storePathSchema.parse(info.storePath)
+							)
+						)
+						.flatMap((info) => {
+							const derivation = derivationPathOf(
+								plannedInstallables.get(info.storePath) ?? ''
+							);
+							return derivation === undefined
+								? []
+								: [storePathSchema.parse(derivation)];
+						})
+				)
+			];
+			const graphNix = dependencies.graphNix ?? Nix.open();
+			const outputs = await dependencyOutputs(roots, {
+				readDerivation: (path) => graphNix.readDerivation(path),
+				...(dependencies.signal !== undefined && {
+					signal: dependencies.signal
+				})
+			});
+			const references = await (
+				dependencies.tenantDependencyReferences ?? tenantDependencyReferences
+			)(
+				outputs
+					.map((output) => output.storePath)
+					.filter((path) => !allPaths.includes(path)),
+				{
+					sources: tenantReferenceSources(tenantUrl, [
+						{ url: new URL(publicationUrl), paths: [] }
+					]),
+					...(dependencies.signal !== undefined && {
+						signal: dependencies.signal
+					})
+				}
+			);
+			if (references.length > 0) {
+				await writeFile(
+					`${receiptFile}.references.json`,
+					JSON.stringify({ version: 1, paths: references })
+				);
+			}
+			intermediatePaths = [
+				...intermediatePaths,
+				...references.map((reference) => reference.storePath)
+			];
+			receipt = buildReceiptV3Schema.parse({
+				...receipt,
+				paths: [
+					...receipt.paths,
+					...references.map((reference) => reference.storePath)
+				],
+				subjects: [
+					...receipt.subjects,
+					...parseReferenceManifest(
+						JSON.stringify({ version: 1, paths: references })
+					).map((reference) =>
+						republishedSubject(reference.metadata, reference.source.href)
+					)
+				]
+			});
+		}
+
 		const publishPaths = selection.published;
 		const builtSubjects = receipt.subjects.filter(
 			(subject) =>

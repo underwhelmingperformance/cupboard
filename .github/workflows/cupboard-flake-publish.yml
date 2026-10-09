@@ -172,9 +172,11 @@ on:
         description: >-
           Control which paths are published. `none` publishes no paths.
           `outputs` publishes selected requested outputs. `built` also publishes
-          intermediates built during this run. `closure` also publishes their
-          runtime references. With publication enabled, a successful run with no
-          selected outputs replaces its retention roots with empty path lists.
+          intermediates built during this run and required dependency outputs
+          already available from configured tenant caches. `closure` also
+          publishes their runtime references. With publication enabled, a
+          successful run with no selected outputs replaces its retention roots
+          with empty path lists.
         required: false
         default: built
         type: string

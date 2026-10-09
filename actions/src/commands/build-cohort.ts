@@ -7,6 +7,8 @@ import {
 	copySources,
 	createProcessNixDaemonConnector,
 	type DaemonCommandRunner,
+	type DependencyOutput,
+	dependencyOutputs,
 	discoverNixStoreConfig,
 	Nix,
 	type NixBuildMode,
@@ -19,7 +21,9 @@ import {
 	type NixDerivedPathString,
 	type NixValidPathInfo,
 	parseSshNgStoreUri,
-	selectPublicationPaths
+	selectPublicationPaths,
+	tenantDependencyReferences,
+	tenantReferenceSources
 } from '@cupboard/nix';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import { Derivation } from '@cupboard/nix-store/derivation';
@@ -744,6 +748,7 @@ export function registerBuildCohortCommand(
 }
 
 export interface BuildCohortDependencies {
+	readonly tenantDependencyReferences?: typeof tenantDependencyReferences;
 	readonly selectPublicationPaths?: typeof selectPublicationPaths;
 	readonly buildSettings?: NixBuildSettings;
 	readonly fetcher?: typeof fetch;
@@ -1028,6 +1033,10 @@ export async function buildCohortAction(
 		}
 
 		const context: SettleCohortBuildContext = {
+			dependencyOutputs: plannedGraph?.dependencyOutputs ?? [],
+			tenantDependencyReferences:
+				dependencies.tenantDependencyReferences ?? tenantDependencyReferences,
+			fetcher: dependencies.fetcher,
 			selectPublicationPaths:
 				dependencies.selectPublicationPaths ?? selectPublicationPaths,
 			inputs,
@@ -1638,6 +1647,9 @@ function remotePublicationDerivation(
 }
 
 interface SettleCohortBuildContext {
+	readonly dependencyOutputs: readonly DependencyOutput[];
+	readonly tenantDependencyReferences: typeof tenantDependencyReferences;
+	readonly fetcher: typeof fetch | undefined;
 	readonly selectPublicationPaths: typeof selectPublicationPaths;
 	readonly inputs: BuildCohortInputs;
 	readonly members: readonly CohortMember[];
@@ -1645,10 +1657,7 @@ interface SettleCohortBuildContext {
 	readonly result: PlanCohortResultData | undefined;
 	readonly reprobe: PlanReprobeResultData | undefined;
 	readonly provenanceRebuilds: ReadonlySet<string>;
-	readonly closureReferences: ReadonlyMap<
-		string,
-		readonly CachedClosureReference[]
-	>;
+	readonly closureReferences: Map<string, readonly CachedClosureReference[]>;
 	readonly isStreamed: boolean;
 	readonly environment: Environment;
 	readonly runCupboard: typeof defaultRunCupboard;
@@ -1764,6 +1773,99 @@ async function settleCohortBuild(
 						signal: cupboardRunDependencies.signal
 					})
 				});
+
+	if (
+		inputs.push &&
+		inputs.publish === 'built' &&
+		context.dependencyOutputs.length > 0
+	) {
+		const published = new Set([
+			...(streamedReceipt?.paths ?? []),
+			...publicationPaths
+		]);
+		const cached = new Set([
+			...(partition?.attachOnly ?? []),
+			...(partition?.publishByReference ?? [])
+		]);
+		const requiredRoots = new Set(
+			members.flatMap((member) => {
+				if (member.queryInstallable === undefined) {
+					return [];
+				}
+				const isRetained =
+					member.expectedPath !== undefined && cached.has(member.expectedPath);
+				const isCompleted = localBuilds.some(
+					(owned) =>
+						owned.installable === member.installable &&
+						owned.outputs.some((output) =>
+							selection.published.includes(storePathSchema.parse(output))
+						)
+				);
+				return isRetained || isCompleted
+					? [
+							derivationPathOf(
+								nixDerivedPathSchema.parse(member.queryInstallable)
+							)
+						]
+					: [];
+			})
+		);
+		const paths = context.dependencyOutputs
+			.filter(
+				(dependency) =>
+					dependency.requiredBy.some((root) => requiredRoots.has(root)) &&
+					!published.has(dependency.storePath)
+			)
+			.map((dependency) => dependency.storePath);
+		if (paths.length > 0) {
+			const sources = tenantReferenceSources(
+				parseTenantCacheUrl(inputs.url).tenantUrl,
+				[
+					{
+						url: cacheUrlFor(inputs.url, inputs.cache),
+						paths: [],
+						...(inputs.readUser !== '' && {
+							credential: {
+								user: readUserInputSchema.parse(inputs.readUser),
+								password: inputs.readPassword
+							}
+						})
+					},
+					...(inputs.reuseView === ''
+						? []
+						: [
+								{
+									url: new URL(
+										`reuse/${inputs.reuseView}`,
+										`${canonicalHref(inputs.url)}/`
+									),
+									paths: [],
+									...(inputs.fallbackReadUser !== '' && {
+										credential: {
+											user: readUserInputSchema.parse(inputs.fallbackReadUser),
+											password: inputs.fallbackReadPassword
+										}
+									})
+								}
+							])
+				]
+			);
+			const references = await context.tenantDependencyReferences(paths, {
+				sources,
+				...(context.fetcher !== undefined && { fetch: context.fetcher }),
+				...(cupboardRunDependencies?.signal !== undefined && {
+					signal: cupboardRunDependencies.signal
+				})
+			});
+			const grouped = Map.groupBy(references, (reference) => reference.source);
+			for (const [source, entries] of grouped) {
+				closureReferences.set(source, [
+					...(closureReferences.get(source) ?? []),
+					...entries
+				]);
+			}
+		}
+	}
 	const selectedTargets = selection.published;
 	const excludedTargets = new Set(selection.leftUpstream);
 	if (
@@ -1816,7 +1918,14 @@ async function settleCohortBuild(
 		...new Set([...(partition?.attachOnly ?? []), ...selectedTargets])
 	].toSorted(byCodeUnit);
 	const targetPathSet = new Set(targetPaths);
-	const intermediatePaths = [...new Set(selectedPublicationPaths)]
+	const intermediatePaths = [
+		...new Set([
+			...selectedPublicationPaths,
+			...closureReferences
+				.values()
+				.flatMap((entries) => entries.map((entry) => entry.storePath))
+		])
+	]
 		.filter((storePath) => !targetPathSet.has(storePath))
 		.toSorted(byCodeUnit);
 	const referencePaths = partition?.publishByReference ?? [];
@@ -3723,6 +3832,7 @@ export interface LocalDerivationOutput {
 The local derivation graph that the action passes to cohort planning.
 */
 export interface LocalDerivationGraph {
+	readonly dependencyOutputs?: readonly DependencyOutput[];
 	/**
 	The closure of the top-level derivations.
 	*/
@@ -3778,6 +3888,7 @@ export async function resolveLocalDerivationGraph(
 ): Promise<LocalDerivationGraph> {
 	if (derivations.length === 0) {
 		return {
+			dependencyOutputs: [],
 			closure: [],
 			floatingOutputs: [],
 			substitutableDerivations: [],
@@ -3801,7 +3912,20 @@ export async function resolveLocalDerivationGraph(
 		})
 	);
 
+	const terms = new Map(
+		parsedDerivations.map(({ derivation, term }) => [derivation, term])
+	);
+	const requiredOutputs = await dependencyOutputs(derivations, {
+		readDerivation: (path) => {
+			const term = terms.get(path);
+			return term === undefined
+				? nix.readDerivation(path)
+				: Promise.resolve(term);
+		},
+		...(signal !== undefined && { signal })
+	});
 	return {
+		dependencyOutputs: requiredOutputs,
 		closure: closure.map(({ storePath }) => storePath),
 		floatingOutputs: parsedDerivations.flatMap(({ derivation, term }) =>
 			term.outputs

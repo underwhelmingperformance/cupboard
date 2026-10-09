@@ -591,7 +591,7 @@ export async function planAction(
 	if (
 		inputs.optimise &&
 		inputs.build === 'missing' &&
-		(inputs.publish === 'outputs' || inputs.publish === 'built')
+		inputs.publish === 'outputs'
 	) {
 		const checked = await cohortPreFilter(
 			inputs,

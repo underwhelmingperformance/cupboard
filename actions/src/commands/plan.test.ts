@@ -1619,56 +1619,74 @@ describe('cohort-matrix output', () => {
 		});
 	});
 
-	it('excludes a pruned cohort from the emitted matrix and count, but not the target matrix', async () => {
-		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
-		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
-		const appNode = {
-			env: { out: appStorePath },
-			inputs: { drvs: {} },
-			outputs: { out: { path: `${'1'.repeat(32)}-app` } }
-		};
-		const evaluator: NixEvaluator = () =>
-			Promise.resolve({
-				stdout: JSON.stringify({
-					derivations: { [targetRootDrvPath]: appNode }
-				})
-			});
-		const runner: EnsureRunner = async (_command, arguments_) => {
-			if (arguments_.includes('targets')) {
+	it.each(['outputs', 'built'] as const)(
+		'prunes root-covered cohorts only with outputs publication, scope %s',
+		async (publish) => {
+			const planDirectory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-plan-')
+			);
+			const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+			const appNode = {
+				env: { out: appStorePath },
+				inputs: { drvs: {} },
+				outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+			};
+			const evaluator: NixEvaluator = () =>
+				Promise.resolve({
+					stdout: JSON.stringify({
+						derivations: { [targetRootDrvPath]: appNode }
+					})
+				});
+			const runner: EnsureRunner = async (_command, arguments_) => {
+				if (arguments_.includes('targets')) {
+					await writeFile(
+						resultFileArgument(arguments_),
+						rootTargetsResultLine([storePath(appStorePath)])
+					);
+					return { stdout: '', stderr: '' };
+				}
+
+				const root = rootCommandTarget(arguments_);
 				await writeFile(
 					resultFileArgument(arguments_),
-					rootTargetsResultLine([storePath(appStorePath)])
+					retainedResultLine(root)
 				);
 				return { stdout: '', stderr: '' };
-			}
+			};
 
-			const root = rootCommandTarget(arguments_);
-			await writeFile(resultFileArgument(arguments_), retainedResultLine(root));
-			return { stdout: '', stderr: '' };
-		};
+			await planAction(
+				{ ...baseOptions, optimise: 'true', publish },
+				{
+					GITHUB_RUN_ID: '12345',
+					RUNNER_TEMP: planDirectory,
+					GITHUB_OUTPUT: path.join(planDirectory, 'output')
+				},
+				undefined,
+				{
+					evaluator,
+					storeDirectory: storeDirectorySchema.parse('/nix/store'),
+					fetcher: alwaysAvailableFetcher,
+					runner
+				}
+			);
 
-		await planAction(
-			{ ...baseOptions, optimise: 'true' },
-			{
-				GITHUB_RUN_ID: '12345',
-				RUNNER_TEMP: planDirectory,
-				GITHUB_OUTPUT: path.join(planDirectory, 'output')
-			},
-			undefined,
-			{
-				evaluator,
-				storeDirectory: storeDirectorySchema.parse('/nix/store'),
-				fetcher: alwaysAvailableFetcher,
-				runner
-			}
-		);
+			const outputs = await readFile(
+				path.join(planDirectory, 'output'),
+				'utf8'
+			);
 
-		const outputs = await readFile(path.join(planDirectory, 'output'), 'utf8');
-
-		expect(outputs).toContain('target-matrix={"include":[]}\n');
-		expect(outputs).toContain('cohort-matrix={"include":[]}\n');
-		expect(outputs).toContain('cohort-count=0\n');
-	});
+			expect(outputs).toContain('target-matrix={"include":[]}\n');
+			expect({
+				emptyMatrix: outputs.includes('cohort-matrix={"include":[]}\n'),
+				count: outputs
+					.split('\n')
+					.find((line) => line.startsWith('cohort-count='))
+			}).toStrictEqual({
+				emptyMatrix: publish === 'outputs',
+				count: `cohort-count=${publish === 'outputs' ? '0' : '1'}`
+			});
+		}
+	);
 
 	it('includes the evaluated expected path and derived installable in a surviving cohort', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));

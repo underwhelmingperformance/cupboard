@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
@@ -585,11 +586,23 @@ export async function pushAction(
 		);
 	}
 
-	const argumentsPerPush = pushArgumentsForInvocations(
+	let argumentsPerPush = pushArgumentsForInvocations(
 		{ ...inputs, ...permanence },
 		pushes,
 		cacheSelectionSyntax(commandOptions)
 	);
+	const referenceManifest = `${inputs.buildReceiptFile}.references.json`;
+	if (inputs.buildReceiptFile !== '' && existsSync(referenceManifest)) {
+		const first = argumentsPerPush[0];
+		if (first !== undefined) {
+			argumentsPerPush = argumentsPerPush.map((arguments_, index) =>
+				index === 0
+					? [...arguments_, '--reference-manifest', referenceManifest]
+					: arguments_
+			);
+		}
+	}
+
 	const summaries: PushSummary[] = [];
 	const shouldWriteReceipt = inputs.buildReceiptFile !== '';
 	const receiptFiles = argumentsPerPush.map((_, index) =>

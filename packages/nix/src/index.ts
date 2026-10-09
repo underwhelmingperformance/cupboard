@@ -1,4 +1,9 @@
 export { activityLogRecords, copySources } from './activity-log.ts';
+export type {
+	DependencyOutput,
+	DependencyOutputOptions
+} from './dependency-outputs.ts';
+export { dependencyOutputs } from './dependency-outputs.ts';
 export { NarFileTooLargeError, UnexpectedNarShapeError } from './nar-file.ts';
 export type { NetrcCredential } from './netrc.ts';
 export { netrcCredentialFor } from './netrc.ts';
@@ -83,3 +88,8 @@ export {
 } from './substituter.ts';
 export type { SubstituterReach } from './substituter-reach.ts';
 export { isReachableElsewhere } from './substituter-reach.ts';
+export type { TenantDependencyReferenceOptions } from './tenant-publication.ts';
+export {
+	tenantDependencyReferences,
+	tenantReferenceSources
+} from './tenant-publication.ts';

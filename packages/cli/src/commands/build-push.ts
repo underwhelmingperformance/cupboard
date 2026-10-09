@@ -10,6 +10,7 @@ import {
 	type NixDaemonClientOptions,
 	type NixStoreConfig
 } from '@cupboard/nix';
+import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import {
 	type RootName,
@@ -46,6 +47,7 @@ import {
 	runCohortSequence
 } from '../build-push/cohorts.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
+import { referenceBuildPushClient } from '../build-push/reference-client.ts';
 import {
 	type ChildCommand,
 	type RunChild,
@@ -480,7 +482,7 @@ export function registerBuildPushCommand(
 		.addOption(
 			new Option(
 				'--publication-scope <scope>',
-				'choose which paths to publish for selected installables: `outputs` publishes their outputs; `built` includes intermediates built in this run; `closure` includes runtime dependencies. Publication starts after the build.'
+				'choose which paths to publish for selected installables: `outputs` publishes their outputs; `built` includes intermediates built in this run and required dependency outputs available from configured tenant caches; `closure` includes runtime dependencies. Publication starts after the build.'
 			)
 				.choices(['outputs', 'built', 'closure'])
 				.conflicts(['closure', 'intermediatePathsFile'])
@@ -685,6 +687,7 @@ export function registerBuildPushCommand(
 							invocation,
 							substituter: options.substituter,
 							tenantUrl: target.tenantUrl,
+							destinationUrl: cacheUrl(target.tenantUrl, cache),
 							...(cohorts.length === 1 &&
 								targetRoot !== undefined && {
 									root: targetRoot
@@ -723,6 +726,20 @@ export function registerBuildPushCommand(
 								signal: programOptions.signal
 							}),
 							client: pushClient,
+							referenceClient: (sources) =>
+								referenceBuildPushClient(sources, {
+									tenantUrl: target.tenantUrl,
+									cache,
+									client: pushClient,
+									auth: {
+										githubOidc: options.githubOidc,
+										audience:
+											options.audience ??
+											audienceSchema.parse(target.tenantUrl),
+										authorizationDetails
+									},
+									signal: programOptions.signal
+								}),
 							credential:
 								options.githubOidc === true ? 'github-oidc' : 'cupboard-login',
 							store: nix,

@@ -1456,14 +1456,7 @@ export class ComponentRootTargetLimitError extends UsageError {
 	}
 }
 
-export class ProbeTimeoutError extends CodedError {
-	constructor(public readonly url: string) {
-		super(
-			`Timed out probing ${url}; the cache did not return a response before the deadline`
-		);
-		this.name = 'ProbeTimeoutError';
-	}
-}
+export { ProbeTimeoutError } from '@cupboard/shared/timeout';
 
 export class CacheAvailabilityQueryError extends CodedError {
 	constructor(public readonly status: number) {
