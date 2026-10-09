@@ -192,6 +192,64 @@ describe('partSizeFor', () => {
 
 describe('the fake S3 endpoint', () => {
 	it.each([
+		{
+			name: 'a scoped credential',
+			authorization:
+				'AWS4-HMAC-SHA256 Credential=access-key/20261009/auto/s3/aws4_request, SignedHeaders=host, Signature=signature',
+			accessKeyId: 'access-key'
+		},
+		{
+			name: 'an empty credential followed by a scoped credential',
+			authorization: 'Credential=/ Credential=access-key/scope',
+			accessKeyId: 'access-key'
+		},
+		{ name: 'no credential', authorization: '', accessKeyId: undefined },
+		{
+			name: 'an empty credential',
+			authorization: 'Credential=/scope',
+			accessKeyId: undefined
+		},
+		{
+			name: 'no scope delimiter',
+			authorization: 'Credential=access-key',
+			accessKeyId: undefined
+		},
+		{
+			name: 'repeated incomplete credentials',
+			authorization: 'Credential=' + 'Credential=.'.repeat(1000),
+			accessKeyId: undefined
+		}
+	])(
+		'records the access key for $name',
+		async ({ authorization, accessKeyId }) => {
+			await withFake({}, async (fake) => {
+				const response = await fetch(`${fake.endpoint}/${bucket}/${key}`, {
+					method: 'PUT',
+					headers: { authorization },
+					body: 'body'
+				});
+				await response.arrayBuffer();
+
+				expect({
+					status: response.status,
+					requests: fake.requests
+				}).toStrictEqual({
+					status: StatusCodes.OK,
+					requests: [
+						{
+							operation: 'PutObject',
+							key,
+							bytes: 4,
+							outcome: 'ok',
+							...(accessKeyId !== undefined && { accessKeyId })
+						}
+					]
+				});
+			});
+		}
+	);
+
+	it.each([
 		{ name: 'a short part before the last', lengths: [10, 5, 10] },
 		{ name: 'a last part longer than the others', lengths: [10, 10, 11] }
 	])('refuses to complete an upload with $name', async ({ lengths }) => {

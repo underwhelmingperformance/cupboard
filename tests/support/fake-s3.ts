@@ -197,8 +197,6 @@ class FakeS3RequestError extends Error {
 	}
 }
 
-const credentialPattern = /Credential=(?<accessKeyId>[^/]+)\//u;
-
 /**
  * An S3 endpoint on the loopback interface that serves the operations of a
  * multipart upload and enforces the rules that R2 applies to them: every part
@@ -681,6 +679,28 @@ function isMatchingFault(
 	);
 }
 
+function accessKeyIdOf(authorization: string): string | undefined {
+	const marker = 'Credential=';
+	let offset = authorization.indexOf(marker);
+
+	while (offset !== -1) {
+		const start = offset + marker.length;
+		const end = authorization.indexOf('/', start);
+
+		if (end === -1) {
+			return undefined;
+		}
+
+		if (end > start) {
+			return authorization.slice(start, end);
+		}
+
+		offset = authorization.indexOf(marker, end + 1);
+	}
+
+	return undefined;
+}
+
 function targetOf(request: IncomingMessage): {
 	readonly operation: FakeS3Operation;
 	readonly key: string;
@@ -694,9 +714,7 @@ function targetOf(request: IncomingMessage): {
 		operation === 'UploadPart'
 			? Number(url.searchParams.get('partNumber'))
 			: undefined;
-	const accessKeyId = credentialPattern.exec(
-		request.headers.authorization ?? ''
-	)?.groups?.accessKeyId;
+	const accessKeyId = accessKeyIdOf(request.headers.authorization ?? '');
 
 	return {
 		operation,
