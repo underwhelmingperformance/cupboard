@@ -33,6 +33,7 @@ import {
 	describeUnknownPathsRefusal,
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
+import { pushSummaryResultKind } from '@cupboard/protocol/reports';
 import type { Reporter, ReporterResultEvent } from '@cupboard/reporter';
 import {
 	type ChildProcessEscalationScheduler,
@@ -3349,7 +3350,8 @@ interface RecordedProgress {
 function recordingReporter(
 	warnings: string[],
 	progress: RecordedProgress[] = [],
-	information: string[] = []
+	information: string[] = [],
+	warningMessages: { label: string; message: string | undefined }[] = []
 ): Reporter {
 	return {
 		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
@@ -3377,8 +3379,9 @@ function recordingReporter(
 			),
 		result: noop,
 		data: noop,
-		warn(label) {
+		warn(label, message) {
 			warnings.push(label);
+			warningMessages.push({ label, message });
 		},
 		info(message) {
 			information.push(message);
@@ -5738,6 +5741,11 @@ if (args.includes('--help')) {
 		readonly progress: readonly RecordedProgress[];
 		readonly informationCount: number;
 		readonly warnings: readonly string[];
+		readonly warningMessages: readonly {
+			label: string;
+			message: string | undefined;
+		}[];
+		readonly actionError: unknown;
 		readonly buildError: unknown;
 		readonly materialiseCalls: readonly unknown[];
 		readonly publicationTenantUrls: readonly (string | undefined)[];
@@ -5783,6 +5791,7 @@ if (args.includes('--help')) {
 			readonly attachOnly?: readonly string[];
 			readonly publishByReference?: readonly string[];
 			readonly referenceUploaded?: boolean;
+			readonly referenceUploadRequired?: boolean;
 			readonly closureTargets?: readonly string[];
 			readonly referencedClosure?: readonly StorePathString[];
 			readonly materialisedClosure?: readonly StorePathString[];
@@ -5800,6 +5809,11 @@ if (args.includes('--help')) {
 		const progress: RecordedProgress[] = [];
 		const information: string[] = [];
 		const warnings: string[] = [];
+		const warningMessages: {
+			label: string;
+			message: string | undefined;
+		}[] = [];
+		let actionError: unknown;
 		const signal = new AbortController().signal;
 		const cupboardCalls: {
 			readonly command: string | undefined;
@@ -5901,6 +5915,43 @@ if (args.includes('--help')) {
 				const manifestSources = new Map(
 					manifestEntries.map((entry) => [entry.storePath, entry.source])
 				);
+				const referencePaths = [
+					...(await readPaths('--reference-paths-file')),
+					...manifestEntries.map((entry) => entry.storePath)
+				];
+
+				if (
+					flowPlan.referenceUploadRequired === true &&
+					referencePaths.length > 0
+				) {
+					throw new CupboardReportedError(
+						1,
+						[
+							{
+								kind: pushSummaryResultKind,
+								data: {
+									uploadedPaths: 0,
+									reusedBlobs: 0,
+									skipped: 0,
+									uploadedBytes: 0,
+									failures: referencePaths.map((storePath) => ({
+										storePathHash: storePath.slice(
+											'/nix/store/'.length,
+											'/nix/store/'.length + 32
+										),
+										storePath,
+										stage: 'upload',
+										reason: 'the destination demanded an upload'
+									})),
+									paths: []
+								}
+							}
+						],
+						undefined,
+						true
+					);
+				}
+
 				if (referenceReceiptIndex !== -1) {
 					const references = [
 						...(await readPaths('--reference-paths-file')),
@@ -6215,92 +6266,107 @@ if (args.includes('--help')) {
 			}
 		);
 
-		await buildCohortAction(options, environment, {
-			selectPublicationPaths: (candidates, selectionOptions) => {
-				publicationTenantUrls.push(selectionOptions.tenantUrl?.href);
-				const leftUpstream =
-					selectionOptions.substituter === 'leave'
-						? (flowPlan.externallyServed ?? [])
-								.filter((storePath) =>
-									candidates.some(
-										(candidate) =>
-											candidate.storePath === storePath &&
-											candidate.origin !== 'built'
+		try {
+			await buildCohortAction(options, environment, {
+				selectPublicationPaths: (candidates, selectionOptions) => {
+					publicationTenantUrls.push(selectionOptions.tenantUrl?.href);
+					const leftUpstream =
+						selectionOptions.substituter === 'leave'
+							? (flowPlan.externallyServed ?? [])
+									.filter((storePath) =>
+										candidates.some(
+											(candidate) =>
+												candidate.storePath === storePath &&
+												candidate.origin !== 'built'
+										)
 									)
+									.map((storePath) => storePathSchema.parse(storePath))
+							: [];
+					return Promise.resolve({
+						published: candidates
+							.filter(
+								(candidate) =>
+									!leftUpstream.includes(
+										storePathSchema.parse(candidate.storePath)
+									)
+							)
+							.map((candidate) => storePathSchema.parse(candidate.storePath)),
+						leftUpstream
+					});
+				},
+				runCupboard: runCupboardMock,
+				runNixBuild,
+				runNixBuildWithResults,
+				runNixDerivationShow,
+				materialiseDerivationGraph: materialiseGraph,
+				resolveLocalDerivationGraph,
+				runNixCopy,
+				withLocalDerivationRoots,
+				withLocalStoreSession: (use) =>
+					use(
+						{
+							addTempRoot: () => Promise.resolve(),
+							buildPathsWithResults: () => Promise.resolve([]),
+							resolveClosure: () => Promise.resolve([])
+						},
+						flowPlan.localStore ?? 'daemon'
+					),
+				materialiseCachedClosure: (closureOptions) => {
+					materialiseCalls.push({
+						sources: closureOptions.sources,
+						store: closureOptions.store,
+						localStore: closureOptions.localStore
+					});
+					for (const source of closureOptions.sources) {
+						if (source.paths.length > 0) {
+							closureOptions.onReferenced(
+								source.url,
+								(flowPlan.referencedClosure ?? source.paths).map(
+									(storePath) => ({
+										storePath,
+										narinfo: NarInfo.fromFields({
+											storePath,
+											url: 'nar/fixture.nar.zst',
+											compression: 'zstd',
+											fileHash: NixSha256Hash.fromDigest(
+												Buffer.alloc(32, 0xaa)
+											).toString(),
+											fileSize: 1,
+											narHash: NixSha256Hash.fromDigest(
+												Buffer.alloc(32, 0xaa)
+											).toString(),
+											narSize: 1,
+											references: [],
+											sigs: []
+										}).render()
+									})
 								)
-								.map((storePath) => storePathSchema.parse(storePath))
-						: [];
-				return Promise.resolve({
-					published: candidates
-						.filter(
-							(candidate) =>
-								!leftUpstream.includes(
-									storePathSchema.parse(candidate.storePath)
-								)
-						)
-						.map((candidate) => storePathSchema.parse(candidate.storePath)),
-					leftUpstream
-				});
-			},
-			runCupboard: runCupboardMock,
-			runNixBuild,
-			runNixBuildWithResults,
-			runNixDerivationShow,
-			materialiseDerivationGraph: materialiseGraph,
-			resolveLocalDerivationGraph,
-			runNixCopy,
-			withLocalDerivationRoots,
-			withLocalStoreSession: (use) =>
-				use(
-					{
-						addTempRoot: () => Promise.resolve(),
-						buildPathsWithResults: () => Promise.resolve([]),
-						resolveClosure: () => Promise.resolve([])
-					},
-					flowPlan.localStore ?? 'daemon'
-				),
-			materialiseCachedClosure: (closureOptions) => {
-				materialiseCalls.push({
-					sources: closureOptions.sources,
-					store: closureOptions.store,
-					localStore: closureOptions.localStore
-				});
-				for (const source of closureOptions.sources) {
-					if (source.paths.length > 0) {
-						closureOptions.onReferenced(
-							source.url,
-							(flowPlan.referencedClosure ?? source.paths).map((storePath) => ({
-								storePath,
-								narinfo: NarInfo.fromFields({
-									storePath,
-									url: 'nar/fixture.nar.zst',
-									compression: 'zstd',
-									fileHash: NixSha256Hash.fromDigest(
-										Buffer.alloc(32, 0xaa)
-									).toString(),
-									fileSize: 1,
-									narHash: NixSha256Hash.fromDigest(
-										Buffer.alloc(32, 0xaa)
-									).toString(),
-									narSize: 1,
-									references: [],
-									sigs: []
-								}).render()
-							}))
-						);
+							);
+						}
 					}
-				}
 
-				return Promise.resolve(flowPlan.materialisedClosure ?? []);
-			},
-			reporter: recordingReporter(warnings, progress, information),
-			signal
-		});
+					return Promise.resolve(flowPlan.materialisedClosure ?? []);
+				},
+				reporter: recordingReporter(
+					warnings,
+					progress,
+					information,
+					warningMessages
+				),
+				signal
+			});
+		} catch (error: unknown) {
+			if (flowPlan.referenceUploadRequired !== true) {
+				throw error;
+			}
 
-		const outputRaw = await readFile(
-			path.join(directory, 'github-output'),
-			'utf8'
-		);
+			actionError = error;
+		}
+
+		const outputRaw =
+			actionError === undefined
+				? await readFile(path.join(directory, 'github-output'), 'utf8')
+				: '';
 		const cohortsFilePath = path.join(
 			directory,
 			`cupboard-build-cohorts-${cohortKey}.json`
@@ -6326,6 +6392,8 @@ if (args.includes('--help')) {
 			progress,
 			informationCount: information.length,
 			warnings,
+			warningMessages,
+			actionError,
 			buildError,
 			materialiseCalls,
 			publicationTenantUrls,
@@ -8570,6 +8638,77 @@ if (args.includes('--help')) {
 				],
 				uploaded: []
 			}
+		});
+	});
+
+	it('warns for each manifest path when the destination requests an upload', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'closure'
+			},
+			[],
+			[],
+			[],
+			undefined,
+			new Map(),
+			{
+				closureTargets: [appPath],
+				referencedClosure: [
+					storePathSchema.parse(appPath),
+					storePathSchema.parse(referencePath)
+				],
+				referenceUploadRequired: true
+			}
+		);
+
+		expect({
+			error: run.actionError instanceof CupboardReportedError,
+			warnings: run.warningMessages
+		}).toStrictEqual({
+			error: true,
+			warnings: [
+				{
+					label: 'cannot publish by reference',
+					message: `${referencePath} from ${url}: the destination requested an upload, but this run has no bytes for the path. Check the push token's read access to the source and whether the tenant still stores the NAR.`
+				}
+			]
+		});
+	});
+
+	it('warns for each reference target when the destination requests an upload', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				publish: 'outputs',
+				reuseView: 'release'
+			},
+			[],
+			[],
+			[],
+			undefined,
+			new Map(),
+			{
+				attachOnly: [],
+				publishByReference: [appPath],
+				referenceUploadRequired: true,
+				reprobedBuildSet: []
+			}
+		);
+
+		expect({
+			error: run.actionError instanceof CupboardReportedError,
+			warnings: run.warningMessages
+		}).toStrictEqual({
+			error: true,
+			warnings: [
+				{
+					label: 'cannot publish by reference',
+					message: `.#packages.x86_64-linux.app (${appPath}) from ${url}/reuse/release: the destination requested an upload, but this run has no bytes for the path. Check the push token's read access to the source and whether the tenant still stores the NAR.`
+				}
+			]
 		});
 	});
 

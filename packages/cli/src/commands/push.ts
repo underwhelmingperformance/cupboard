@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Nix } from '@cupboard/nix';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import {
+	type CacheAccessMode,
 	type CacheScope,
 	type RootName,
 	storePathSchema,
@@ -22,6 +23,8 @@ import { type Command, Option } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
+	contentReadAuthorizationDetails,
+	type ContentReadGrantIntent,
 	previewAuthorizationDetails,
 	pushAuthorizationDetails
 } from '../auth/attenuate.ts';
@@ -38,6 +41,7 @@ import {
 import {
 	AttestationsDisabledError,
 	CliUsageError,
+	CupboardHttpError,
 	EmptyPublicationError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
@@ -45,6 +49,7 @@ import {
 	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
+	ReferenceSourceReadRefusedError,
 	RootRetentionOptionConflictError,
 	RunRootRetentionWithoutRunRootError,
 	RunRootTtlWithoutRunRootError
@@ -52,12 +57,20 @@ import {
 import { PublicationCollection } from '../push/publication.ts';
 import { type PushStore, runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
-import { parseReferenceManifest } from '../push/reference-manifest.ts';
+import {
+	parseReferenceManifest,
+	type PreparedReference
+} from '../push/reference-manifest.ts';
+import {
+	referenceSourceReadIntents,
+	type ReferenceSourceReads
+} from '../push/reference-source-read.ts';
 import { parseReadUser } from '../read-user.ts';
 import { parseRootName } from '../root-name.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import { cacheAccessFetcher } from './github.ts';
 import { rootRetentionChoice } from './retention-choice.ts';
 
 interface PushOptions {
@@ -223,18 +236,63 @@ export async function observedCopiesFrom(
  */
 export function pushCommandAuthorizationDetails(
 	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root' | 'runRoot'>,
-	cache: CacheScope
+	cache: CacheScope,
+	sourceReads: readonly ContentReadGrantIntent[] = []
 ): AuthorizationDetails {
 	if (options.dryRun === true) {
 		return previewAuthorizationDetails({ cache });
 	}
 
-	return pushAuthorizationDetails({
-		cache,
-		attest: options.attest !== false,
-		...(options.root !== undefined && { root: options.root }),
-		...(options.runRoot !== undefined && { runRoot: options.runRoot })
-	});
+	return [
+		...pushAuthorizationDetails({
+			cache,
+			attest: options.attest !== false,
+			...(options.root !== undefined && { root: options.root }),
+			...(options.runRoot !== undefined && { runRoot: options.runRoot })
+		}),
+		...sourceReads.flatMap((intent) => contentReadAuthorizationDetails(intent))
+	];
+}
+
+function referenceSourceReads(
+	options: Pick<
+		PushOptions,
+		'dryRun' | 'referencePathsFile' | 'referenceSource'
+	>,
+	references: readonly PreparedReference[],
+	destination: { readonly tenantUrl: URL; readonly cache: CacheScope },
+	fetchCacheAccess: (url: URL) => Promise<CacheAccessMode>
+): Promise<ReferenceSourceReads> {
+	if (options.dryRun === true) {
+		return Promise.resolve({ intents: [], sources: [] });
+	}
+
+	return referenceSourceReadIntents(
+		[
+			...(options.referencePathsFile === undefined ||
+			options.referenceSource === undefined
+				? []
+				: [options.referenceSource]),
+			...references.map((reference) => reference.source)
+		],
+		destination,
+		fetchCacheAccess
+	);
+}
+
+// The token service refuses the whole request without saying which grant
+// failed, so a refusal of a request with source read grants points at them.
+function sourceReadRefusal(error: unknown, sources: readonly URL[]): unknown {
+	if (
+		sources.length === 0 ||
+		!(error instanceof CupboardHttpError) ||
+		error.oauthError?.error !== 'invalid_authorization_details' ||
+		error.oauthError.problem !== 'not-permitted'
+	) {
+		return error;
+	}
+
+	return new ReferenceSourceReadRefusedError(sources, { cause: error });
 }
 
 function collect(
@@ -329,6 +387,11 @@ interface PushCommandDependencies {
 	 * system store with `Nix.open`.
 	 */
 	readonly openStore?: () => PushStore;
+	/**
+	 * Reports whether a cache or reuse view URL is public or private. Defaults
+	 * to an unauthenticated `nix-cache-info` request.
+	 */
+	readonly fetchCacheAccess?: (url: URL) => Promise<CacheAccessMode>;
 }
 
 export function registerPushCommand(
@@ -337,6 +400,9 @@ export function registerPushCommand(
 	dependencies: PushCommandDependencies = {}
 ): void {
 	const authenticate = dependencies.authenticate ?? authenticateForPush;
+	const fetchCacheAccess =
+		dependencies.fetchCacheAccess ??
+		cacheAccessFetcher({ signal: programOptions.signal });
 
 	program
 		.command('push')
@@ -613,22 +679,35 @@ export function registerPushCommand(
 				minimumPayload: canAcceptEmptyPayload ? 0 : 1,
 				payloadDescription: 'a store path',
 				parsePayloadEntry: resolvePushStorePath,
-				authorise: (target) =>
-					authenticate(
-						CupboardClient.fromUrl(target.tenantUrl, {
-							cache: target.cache,
-							signal: programOptions.signal
-						}),
-						{
-							githubOidc: options.githubOidc,
-							audience:
-								options.audience ?? audienceSchema.parse(target.tenantUrl),
-							authorizationDetails: pushCommandAuthorizationDetails(
-								options,
-								target.cache
-							)
-						}
-					),
+				authorise: async (target) => {
+					const sourceReads = await referenceSourceReads(
+						options,
+						references ?? [],
+						target,
+						fetchCacheAccess
+					);
+
+					try {
+						return await authenticate(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache: target.cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: pushCommandAuthorizationDetails(
+									options,
+									target.cache,
+									sourceReads.intents
+								)
+							}
+						);
+					} catch (error) {
+						throw sourceReadRefusal(error, sourceReads.sources);
+					}
+				},
 				signal: programOptions.signal
 			});
 			const publication = PublicationCollection.of({

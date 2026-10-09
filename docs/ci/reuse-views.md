@@ -159,7 +159,8 @@ CI][private-ci] for the workflow's read options.
 Publishing a path [by reference][by-reference] from a private view needs the
 same `view:content-read` grant, or `cache:content-read` for the source cache, on
 the token that publishes. Without either grant, cupboard asks for the path's
-bytes.
+bytes. [Private caches in CI][private-ci] describes the trust rule that this
+needs.
 
 [by-reference]: ./how-it-works.md#the-four-groups-in-the-log
 [private-ci]: ./private-caches.md

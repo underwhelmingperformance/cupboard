@@ -221,6 +221,12 @@ export async function publicationReadAuthority(
 			.flatMap(({ cache }) => contentReadAuthorizationDetails({ cache }))
 	];
 
+	const referencePush = privateViewReferencePush(
+		publication,
+		view?.name,
+		viewAccess
+	);
+
 	return {
 		cache,
 		additionalCaches,
@@ -230,6 +236,44 @@ export async function publicationReadAuthority(
 		...(selectedViewAccess !== undefined && { selectedViewAccess }),
 		cacheWiring,
 		viewWiring,
-		requests: grants.length > 0 ? [grants] : []
+		requests: [
+			...(grants.length > 0 ? [grants] : []),
+			...(referencePush === undefined ? [] : [referencePush])
+		]
 	};
+}
+
+/**
+ * The token request of a push that publishes by reference from a private
+ * reuse view. The destination reuses a stored NAR only for a token that can
+ * read it, so the push requests `view:content-read` beside its push grants,
+ * whatever credential the run uses to read the view.
+ */
+function privateViewReferencePush(
+	publication: PublicationCase,
+	view: string | undefined,
+	viewAccess: CacheAccessMode | undefined
+): AuthorizationDetails | undefined {
+	if (view === undefined || viewAccess !== 'private') {
+		return;
+	}
+
+	const push = publication.requests.find((request) =>
+		request.some(
+			(detail) =>
+				detail.type === 'cupboard_cache' &&
+				detail.actions.includes('upload:commit')
+		)
+	);
+
+	if (push === undefined) {
+		return;
+	}
+
+	return [
+		...push,
+		...contentReadAuthorizationDetails({
+			view: reuseViewNameSchema.parse(view)
+		})
+	];
 }

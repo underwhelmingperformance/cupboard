@@ -337,6 +337,19 @@ function repairReference(
 	return `${parsed.owner}/${parsed.repo}/${parsed.path}@refs/tags/${pattern}`;
 }
 
+// A run reads a private view through OIDC unless a static pair is wired. A
+// run that publishes also needs the grant for its push token, because the
+// destination reuses a NAR from the view only for a token that can read it.
+function isViewReadRequired(
+	publication: PublicationCase,
+	read: PublicationReadAuthority
+): boolean {
+	return (
+		read.viewAccess === 'private' &&
+		(read.viewWiring === 'none' || publication.requests.length > 0)
+	);
+}
+
 function additionalReadGrants(
 	read: PublicationReadAuthority
 ): OidcTrustAddBodyInput['permittedGrants'] {
@@ -482,8 +495,7 @@ function grantsForJob(
 				]
 			: []),
 		...(publication.reuseView !== undefined &&
-		read.viewAccess === 'private' &&
-		read.viewWiring === 'none'
+		isViewReadRequired(publication, read)
 			? [buildViewContentReadGrant(publication.reuseView.name)]
 			: []),
 		...additionalReadGrants(read)
@@ -600,8 +612,7 @@ function bodyForCase(
 				readCache:
 					read.cacheAccess === 'private' && read.cacheWiring === 'none',
 				...(publication.reuseView !== undefined &&
-					read.viewAccess === 'private' &&
-					read.viewWiring === 'none' && {
+					isViewReadRequired(publication, read) && {
 						readView: publication.reuseView.name
 					})
 			}),

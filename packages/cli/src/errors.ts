@@ -1610,6 +1610,32 @@ export class ReferenceUploadRequiredError extends CliError {
 }
 
 /**
+ * The token service refused a push token request that included read access to
+ * private reference sources. The refusal does not say which grant failed, so
+ * the push reports the read grants as the likely cause.
+ */
+export class ReferenceSourceReadRefusedError extends CliError {
+	constructor(
+		public readonly sources: readonly URL[],
+		options?: ErrorOptions
+	) {
+		super(
+			`The trust rule refused this push's token request, which includes ` +
+				`read access to ${sources.map((source) => source.href).join(', ')}. ` +
+				'A push that publishes by reference from a private cache or reuse ' +
+				'view needs a trust rule that permits reading it. Run ' +
+				'`cupboard github check` to find and repair the missing grant.',
+			options
+		);
+		this.name = 'ReferenceSourceReadRefusedError';
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
+	}
+}
+
+/**
 The reference source served metadata for a different store path.
 */
 export class ReferencePathMismatchError extends CliError {

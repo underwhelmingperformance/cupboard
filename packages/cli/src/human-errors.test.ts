@@ -7,6 +7,7 @@ import {
 	CliError,
 	CupboardHttpError,
 	InvalidCacheCredentialsError,
+	ReferenceSourceReadRefusedError,
 	ScopeForbiddenError,
 	SessionRejectedError,
 	TransitionIncompleteError,
@@ -79,6 +80,21 @@ describe('human error presentation', () => {
 			),
 			expected:
 				'The server could not complete the request. Publication may be incomplete. Check its status before retrying.'
+		},
+		{
+			error: new ReferenceSourceReadRefusedError(
+				[new URL('https://cupboard.example.workers.dev/t/acme/reuse/prs')],
+				{
+					cause: new CupboardHttpError(
+						'POST',
+						'/t/acme/oauth/token',
+						400,
+						'{"error":"invalid_authorization_details","problem":"not-permitted"}'
+					)
+				}
+			),
+			expected:
+				'The trust rule refused this push token request, which includes read access to the private reference source https://cupboard.example.workers.dev/t/acme/reuse/prs. Run `cupboard github check` to check the source read grants and destination publication grants.'
 		},
 		{
 			error: new ORPCError('UNRECOGNISED', {

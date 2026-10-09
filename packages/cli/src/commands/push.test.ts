@@ -13,6 +13,7 @@ import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	type CacheAccessMode,
 	cacheNameSchema,
 	type CacheScope,
 	rootNameSchema,
@@ -28,12 +29,14 @@ import type { TokenProvider } from '../client/credentials.ts';
 import {
 	CliAbortError,
 	CommandPayloadRequiredError,
+	CupboardHttpError,
 	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
 	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
+	ReferenceSourceReadRefusedError,
 	RootRetentionOptionConflictError,
 	RunRootRetentionWithoutRunRootError,
 	RunRootTtlWithoutRunRootError
@@ -1071,6 +1074,233 @@ describe('push command', () => {
 			} finally {
 				rmSync(directory, { recursive: true, force: true });
 			}
+		}
+	);
+});
+
+async function requestedAuthority(
+	referenceArguments: (directory: string) => readonly string[],
+	accessOf: (url: string) => CacheAccessMode
+): Promise<{
+	readonly requested: readonly unknown[];
+	readonly probed: readonly string[];
+}> {
+	const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+	const requested: unknown[] = [];
+	const probed: string[] = [];
+	const program = new Command();
+
+	program.exitOverride();
+	registerPushCommand(program, interrupted, {
+		authenticate: (_client, options) => {
+			requested.push(options.authorizationDetails);
+
+			return Promise.resolve(fixedToken);
+		},
+		fetchCacheAccess: (url) => {
+			probed.push(url.href);
+
+			return Promise.resolve(accessOf(url.href));
+		}
+	});
+
+	try {
+		await program.parseAsync(
+			[
+				'push',
+				'https://cache.example.workers.dev/t/acme',
+				'--no-attest',
+				'--no-retain',
+				...referenceArguments(directory)
+			],
+			{ from: 'user' }
+		);
+	} catch {
+		// The interrupted run stops at its first remote call.
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+
+	return { requested, probed };
+}
+
+function referencePathsArguments(source: string) {
+	return (directory: string): readonly string[] => {
+		const referencePathsFile = path.join(directory, 'reference-paths.txt');
+		writeFileSync(
+			referencePathsFile,
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app\n'
+		);
+
+		return [
+			'--reference-paths-file',
+			referencePathsFile,
+			'--reference-source',
+			source
+		];
+	};
+}
+
+function referenceManifestArguments(
+	entries: readonly { readonly name: string; readonly source: string }[]
+) {
+	return (directory: string): readonly string[] => {
+		const manifest = path.join(directory, 'reference-manifest.json');
+		const hash = NixSha256Hash.fromDigest(Buffer.alloc(32)).toString();
+		const paths = entries.map(({ name, source }, index) => {
+			const storePath = storePathSchema.parse(
+				`/nix/store/${String(index)}123456789abcdfghijklmnpqrsvwxyz-${name}`
+			);
+
+			return {
+				storePath,
+				source,
+				kind: 'intermediate',
+				narinfo: NarInfo.fromFields({
+					storePath,
+					url: `nar/${name}.nar.zst`,
+					compression: 'zstd',
+					narHash: hash,
+					narSize: 20,
+					fileHash: hash,
+					fileSize: 10,
+					references: [],
+					sigs: []
+				}).render()
+			};
+		});
+		writeFileSync(manifest, JSON.stringify({ version: 1, paths }));
+
+		return ['--reference-manifest', manifest];
+	};
+}
+
+describe('reference source read authority', () => {
+	const pushGrant = {
+		type: 'cupboard_cache',
+		actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+		cache: defaultCache
+	};
+	const pullRequestView =
+		'https://cache.example.workers.dev/t/acme/reuse/pull-requests';
+	const privateCache = 'https://cache.example.workers.dev/t/acme/cache/falcon';
+	const publicCache = 'https://cache.example.workers.dev/t/acme/cache/releases';
+	const viewGrant = {
+		type: 'cupboard_view',
+		actions: ['view:content-read'],
+		view: 'pull-requests'
+	};
+	const cacheGrant = {
+		type: 'cupboard_cache',
+		actions: ['cache:content-read'],
+		cache: { kind: 'named', name: 'falcon' }
+	};
+
+	it.each([
+		{
+			name: 'a private reuse view adds a view read grant',
+			source: pullRequestView,
+			access: 'private' as const,
+			extra: [viewGrant]
+		},
+		{
+			name: 'a private destination needs no extra read grant',
+			source: 'https://cache.example.workers.dev/t/acme',
+			access: 'private' as const,
+			extra: []
+		},
+		{
+			name: 'a private named cache adds a cache read grant',
+			source: privateCache,
+			access: 'private' as const,
+			extra: [cacheGrant]
+		},
+		{
+			name: 'a public reuse view keeps the destination grant alone',
+			source: pullRequestView,
+			access: 'public' as const,
+			extra: []
+		}
+	])('$name', async ({ source, access, extra }) => {
+		expect(
+			await requestedAuthority(referencePathsArguments(source), () => access)
+		).toStrictEqual({
+			requested: [[pushGrant, ...extra]],
+			probed:
+				source === 'https://cache.example.workers.dev/t/acme' ? [] : [source]
+		});
+	});
+
+	it('adds a read grant for each private source in a reference manifest', async () => {
+		const run = await requestedAuthority(
+			referenceManifestArguments([
+				{ name: 'app', source: pullRequestView },
+				{ name: 'lib', source: publicCache },
+				{ name: 'tool', source: pullRequestView },
+				{ name: 'data', source: privateCache }
+			]),
+			(url) => (url === publicCache ? 'public' : 'private')
+		);
+
+		expect(run).toStrictEqual({
+			requested: [[pushGrant, viewGrant, cacheGrant]],
+			probed: [pullRequestView, publicCache, privateCache]
+		});
+	});
+});
+
+describe('a refused reference source read grant', () => {
+	const source = 'https://cache.example.workers.dev/t/acme/reuse/pull-requests';
+	const refusal = new CupboardHttpError(
+		'POST',
+		'/t/acme/oauth/token',
+		400,
+		JSON.stringify({
+			error: 'invalid_authorization_details',
+			problem: 'not-permitted'
+		})
+	);
+
+	it.each([
+		{
+			access: 'private' as const,
+			expected: new ReferenceSourceReadRefusedError([new URL(source)], {
+				cause: refusal
+			})
+		},
+		{ access: 'public' as const, expected: refusal }
+	])(
+		'reports the refusal of a push from a $access source',
+		async ({ access, expected }) => {
+			const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+			const program = new Command();
+
+			program.exitOverride();
+			registerPushCommand(program, interrupted, {
+				authenticate: () => Promise.reject(refusal),
+				fetchCacheAccess: () => Promise.resolve(access)
+			});
+
+			let result: unknown;
+
+			try {
+				await program.parseAsync(
+					[
+						'push',
+						'https://cache.example.workers.dev/t/acme',
+						'--no-attest',
+						'--no-retain',
+						...referencePathsArguments(source)(directory)
+					],
+					{ from: 'user' }
+				);
+			} catch (error: unknown) {
+				result = error;
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+
+			expect(result).toStrictEqual(expected);
 		}
 	);
 });
