@@ -7,7 +7,7 @@ import {
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
 } from '@cupboard/nix';
-import { Derivation } from '@cupboard/nix-store/derivation';
+import { Derivation, derivationPathOf } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	nixSha256HashSchema,
@@ -389,6 +389,11 @@ interface ConstructedFlowConfig {
 }
 
 interface FlowConfig {
+	readonly tenantDependency?: boolean;
+	readonly tenantDependencySource?: string;
+	readonly requireReferenceAuthority?: boolean;
+	readonly referenceClientFailure?: Error;
+	readonly recordedDeriver?: string;
 	readonly daemonless?: boolean;
 	readonly command?: ChildCommand;
 	readonly constructed?: ConstructedFlowConfig;
@@ -439,6 +444,7 @@ interface FlowRun extends RecordedRun {
 	readonly sleeps: readonly number[];
 	readonly attemptIdsIssued: number;
 	readonly negotiatedPaths: readonly (readonly StorePathString[])[];
+	readonly referenceSources: readonly (readonly string[])[];
 	readonly rootSets: readonly string[];
 	readonly rootRequests: readonly {
 		readonly name: string;
@@ -618,6 +624,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 	const sleeps: number[] = [];
 	const negotiatedPaths: StorePathString[][] = [];
+	const referenceSources: string[][] = [];
 	const rootSets: string[] = [];
 	const rootRequests: {
 		name: string;
@@ -756,6 +763,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	const infoFor = (storePath: StorePathString): NixValidPathInfo => ({
 		...pathInfo(storePath, ultimatePaths.has(storePath)),
 		deriver:
+			config.recordedDeriver ??
 			config.constructed?.targets?.find((target) =>
 				target.paths.includes(storePath)
 			)?.derivation ??
@@ -799,6 +807,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		readDerivation: (derivation) => {
 			recordCall('readDerivation');
 			const outputs = (
+				(derivation === drvB && config.tenantDependency === true
+					? [pathC]
+					: undefined) ??
 				config.constructed?.targets?.find(
 					(target) => target.derivation === derivation
 				)?.paths ??
@@ -813,7 +824,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 			return Promise.resolve(
 				Derivation.parse(
-					`Derive([${outputs}],[],[],"aarch64-darwin","/bin/sh",[],[])`
+					`Derive([${outputs}],[${derivation === drvA && config.tenantDependency === true ? `("${drvB}",["out"])` : ''}],[],"aarch64-darwin","/bin/sh",[],[])`
 				)
 			);
 		},
@@ -853,7 +864,51 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				leftUpstream
 			});
 		},
-		client,
+		targetDerivations: (installables) =>
+			Promise.resolve(
+				new Map(
+					installables.map((installable) => [
+						installable,
+						[storePathSchema.parse(derivationPathOf(installable) ?? drvA)]
+					])
+				)
+			),
+		tenantDependencyReferences: (paths, options) =>
+			Promise.resolve(
+				paths.map((storePath) => ({
+					storePath,
+					source:
+						config.tenantDependencySource ?? options.sources[0]?.url.href ?? '',
+					kind: 'intermediate' as const,
+					narinfo: `StorePath: ${storePath}\nURL: nar/file.nar\nCompression: zstd\nFileHash: ${narHash.toString()}\nFileSize: 4\nNarHash: ${narHash.toString()}\nNarSize: 4\nReferences: \n`
+				}))
+			),
+		client:
+			config.requireReferenceAuthority === true
+				? {
+						...client,
+						negotiate: (body) =>
+							body.paths.some((candidate) => candidate.storePath === pathC)
+								? Promise.resolve({
+										uploads: body.paths.map((candidate) =>
+											decisionFor(
+												storePathSchema.parse(candidate.storePath),
+												'upload'
+											)
+										)
+									})
+								: client.negotiate(body)
+					}
+				: client,
+		...((config.requireReferenceAuthority === true ||
+			config.referenceClientFailure !== undefined) && {
+			referenceClient: (sources: readonly URL[]) => {
+				referenceSources.push(sources.map((source) => source.href));
+				return config.referenceClientFailure === undefined
+					? Promise.resolve(client)
+					: Promise.reject(config.referenceClientFailure);
+			}
+		}),
 		credential: 'cupboard-login',
 		store,
 		batchStore: {
@@ -982,6 +1037,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		sleeps,
 		attemptIdsIssued,
 		negotiatedPaths,
+		referenceSources,
 		rootSets,
 		rootRequests,
 		settledTargets,
@@ -990,6 +1046,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		rootLinkDirectory
 	};
 }
+
+const parseReceipt = async (file: string) =>
+	buildReceiptV3Schema.parse(JSON.parse(await readFile(file, 'utf8')));
 
 function ignore(): void {
 	return;
@@ -2067,6 +2126,129 @@ describe('runBuildPush', () => {
 				collected: []
 			}
 		});
+	});
+
+	it.each([
+		{
+			cached: false,
+			recordedDeriver: drvA,
+			installable: `${drvA}^out`,
+			source: 'https://cache.example/t/acme',
+			requireAuthority: false
+		},
+		{
+			cached: true,
+			recordedDeriver: drvA,
+			installable: `${drvA}^out`,
+			source: 'https://cache.example/t/acme',
+			requireAuthority: false
+		},
+		{
+			cached: true,
+			recordedDeriver: drvB,
+			installable: `${drvA}^out`,
+			source: 'https://cache.example/t/acme',
+			requireAuthority: false
+		},
+		{
+			cached: true,
+			recordedDeriver: drvB,
+			installable: '.#app',
+			source: 'https://cache.example/t/acme',
+			requireAuthority: false
+		},
+		{
+			cached: true,
+			recordedDeriver: drvB,
+			installable: '.#app',
+			source: 'https://cache.example/t/acme/cache/pr',
+			requireAuthority: true
+		},
+		{
+			cached: true,
+			recordedDeriver: drvB,
+			installable: '.#app',
+			source: 'https://cache.example/t/acme/reuse/prs',
+			requireAuthority: true
+		}
+	])(
+		'publishes tenant-only build dependencies using the requested graph: $cached $recordedDeriver',
+		async ({
+			cached,
+			recordedDeriver,
+			installable,
+			source,
+			requireAuthority
+		}) => {
+			const run = await runFlow({
+				tenantDependency: true,
+				tenantDependencySource: source,
+				requireReferenceAuthority: requireAuthority,
+				recordedDeriver,
+				constructed: { succeedOn: 1, installables: [installable] },
+				declaredOutputs: [pathA],
+				valid: [pathA],
+				alreadyValid: cached ? [pathA] : [],
+				outPaths: [pathA],
+				options: {
+					publicationScope: 'built',
+					tenantUrl: new URL('https://cache.example/t/acme')
+				}
+			});
+			expect(run.error).toBeUndefined();
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+			expect({
+				paths: receipt.paths,
+				references: receipt.subjects.filter(
+					(subject) => subject.origin === 'republished'
+				),
+				targets: run.settledTargets,
+				referenceSources: run.referenceSources
+			}).toStrictEqual({
+				paths: [pathA, pathC],
+				references: [
+					{
+						origin: 'republished',
+						storePath: pathC,
+						narHash: narHash.digestHex(),
+						signatures: [],
+						metadataSource: source
+					}
+				],
+				targets: [pathA],
+				referenceSources: requireAuthority ? [[source]] : []
+			});
+		}
+	);
+
+	it('preserves the reconciled target receipt when reference authentication fails', async () => {
+		const fixture = {
+			tenantDependency: true,
+			constructed: { succeedOn: 1, installables: [`${drvA}^out`] },
+			declaredOutputs: [pathA],
+			valid: [pathA],
+			alreadyValid: [pathA],
+			outPaths: [pathA]
+		};
+		const baseline = await runFlow({
+			...fixture,
+			options: { publicationScope: 'outputs' }
+		});
+		const failed = await runFlow({
+			...fixture,
+			referenceClientFailure: new UnavailableTestError(),
+			options: {
+				publicationScope: 'built',
+				tenantUrl: new URL('https://cache.example/t/acme')
+			}
+		});
+		expect(failed.error).toBeInstanceOf(BuildPublicationFailedError);
+
+		expect(await parseReceipt(failed.receiptFile)).toStrictEqual(
+			await parseReceipt(baseline.receiptFile)
+		);
 	});
 
 	it.each([

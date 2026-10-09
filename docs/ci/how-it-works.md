@@ -67,13 +67,14 @@ before grouping the targets:
   `bestEffort` settings.
 - No target may go over the limits on retention roots.
 
-With `build: missing`, the plan can skip a target when its root already retains
-the outputs that the destination cache serves and `publish` is `outputs` or
-`built`. It can also skip a cohort when each target already has its required
-path in the destination. An attestation's presence does not decide whether to
-build. With `build: rebuild`, each requested output is built again on the
-configured builder, even if it is already available. Nix may still substitute
-dependencies.
+With `build: missing` and `publish: outputs`, the plan can omit a cohort when
+its requested roots already retain the outputs that the destination cache
+serves. With `publish: built`, cohort jobs still select required dependency
+outputs from the configured tenant sources, even when all requested outputs are
+cached. Available targets skip their builds inside the cohort. An attestation's
+presence does not decide whether to build. With `build: rebuild`, each requested
+output is built again on the configured builder, even if it is already
+available. Nix may still substitute dependencies.
 
 If you turn on `enable-packing`, the plan works differently. It measures the
 size of each target's closure, and packs small unlabelled cohorts into as few
@@ -95,8 +96,10 @@ Each cohort job goes through these steps:
    the output was already available.
 5. It builds the requested outputs that the selected build mode requires. With
    `publish: outputs`, it publishes the selected outputs. With `publish: built`,
-   it also publishes intermediates built during the run. With
-   `publish: closure`, it also publishes their runtime references. With
+   it also publishes intermediates built during the run and required dependency
+   outputs already available from configured tenant caches or reuse views.
+   Dependencies absent from those sources cause no additional build or download.
+   With `publish: closure`, it also publishes their runtime references. With
    `publish: none`, it publishes nothing.
 6. After publication succeeds, it sets each published target's retention root.
 7. With `attest: true`, it signs build provenance for builds observed on the
@@ -125,7 +128,7 @@ covered by `view:content-read`. Otherwise cupboard asks for the bytes, and
 publishing that target by reference fails because the run has no bytes to send.
 See [Shared storage][shared-storage].
 
-A target published this way gets no new build provenance from this run, because
+A path published this way gets no new build provenance from this run, because
 this run didn't build it. If the source cache is public, the destination can
 inherit its eligible attestations for the path. Inheritance preserves the
 original bundle and signature. See [Attestations of reused

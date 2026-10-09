@@ -11,8 +11,9 @@ inputs:
     default: 'true'
   publication-url:
     description: >-
-      Destination tenant or cache URL. Required with `substituter: leave` so
-      paths from the destination and its tenant reuse views remain selected for
+      Destination tenant or cache URL for selecting existing tenant dependencies
+      with `publish: built`. Required with `substituter: leave` so paths from
+      the destination and its tenant reuse views remain selected for
       publication.
     required: false
   cupboard-path:
@@ -74,7 +75,8 @@ inputs:
   publish:
     description: >-
       Publication scope: none, outputs, built, or closure. Built includes
-      completed intermediate outputs observed through the build hook. The
+      completed intermediate outputs observed through the build hook and
+      required dependency outputs available from configured tenant caches. The
       selected store must be local or a trusted local daemon, with no configured
       post-build hook.
     required: false

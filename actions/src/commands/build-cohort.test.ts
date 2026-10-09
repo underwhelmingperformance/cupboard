@@ -34,6 +34,7 @@ import {
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
 import { pushSummaryResultKind } from '@cupboard/protocol/reports';
+import { referencePublicationManifestSchema } from '@cupboard/protocol/upload';
 import type { Reporter, ReporterResultEvent } from '@cupboard/reporter';
 import {
 	type ChildProcessEscalationScheduler,
@@ -273,6 +274,20 @@ async function parsePushWithRealCli(
 		return;
 	});
 	await program.parseAsync(['node', 'cupboard', ...arguments_]);
+}
+
+function cacheNarInfo(storePath: StorePathString): string {
+	return NarInfo.fromFields({
+		storePath,
+		url: 'nar/fixture.nar.zst',
+		compression: 'zstd',
+		fileHash: NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa)).toString(),
+		fileSize: 1,
+		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa)).toString(),
+		narSize: 1,
+		references: [],
+		sigs: []
+	}).render();
 }
 
 function remoteDerivation(
@@ -1655,7 +1670,12 @@ describe('resolveLocalDerivationGraph', () => {
 			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
 		);
 		const derivations = new Map([
-			[appDerivation, Derivation.parse(remoteDerivation(appDerivation))],
+			[
+				appDerivation,
+				Derivation.parse(
+					remoteDerivation(appDerivation, [[libraryDerivation, ['out']]])
+				)
+			],
 			[
 				libraryDerivation,
 				Derivation.parse(
@@ -1692,6 +1712,12 @@ describe('resolveLocalDerivationGraph', () => {
 		);
 
 		expect(graph).toStrictEqual({
+			dependencyOutputs: [
+				{
+					storePath: storePathSchema.parse(libraryBuiltPath),
+					requiredBy: [appDerivation]
+				}
+			],
 			closure: [appDerivation, libraryDerivation],
 			floatingOutputs: [derivedPath(`${libraryDerivation}^dev`)],
 			substitutableDerivations: [appDerivation],
@@ -5776,6 +5802,7 @@ if (args.includes('--help')) {
 		// client records them and passes them to publication.
 		observedCopies: ReadonlyMap<StorePathString, readonly string[]> = new Map(),
 		flowPlan: {
+			readonly dependencyReferences?: readonly StorePathString[];
 			readonly dependencyBuilds?: readonly {
 				readonly path: StorePathString;
 				readonly installables: readonly NixDerivedPathString[];
@@ -6134,6 +6161,9 @@ if (args.includes('--help')) {
 			derivations: readonly StorePathString[]
 		) =>
 			Promise.resolve({
+				dependencyOutputs: (flowPlan.dependencyReferences ?? []).map(
+					(storePath) => ({ storePath, requiredBy: derivations })
+				),
 				closure: [...derivations, storePathSchema.parse(referencePath)],
 				floatingOutputs: [],
 				substitutableDerivations: derivations,
@@ -6268,6 +6298,17 @@ if (args.includes('--help')) {
 
 		try {
 			await buildCohortAction(options, environment, {
+				tenantDependencyReferences: (paths, referenceOptions) =>
+					Promise.resolve(
+						paths.map((storePath) => ({
+							storePath,
+							source:
+								referenceOptions.sources.at(-1)?.url.href ??
+								'https://cache.example.test/t/acme',
+							narinfo: cacheNarInfo(storePath),
+							kind: 'intermediate' as const
+						}))
+					),
 				selectPublicationPaths: (candidates, selectionOptions) => {
 					publicationTenantUrls.push(selectionOptions.tenantUrl?.href);
 					const leftUpstream =
@@ -6513,6 +6554,98 @@ if (args.includes('--help')) {
 		});
 	});
 
+	it.each(['destination', 'reuse', 'reprobe', 'build'] as const)(
+		'publishes tenant build dependencies by reference for a %s target',
+		async (source) => {
+			const options = {
+				...baseOptions(),
+				publish: 'built',
+				reuseView: 'prs',
+				runRoot: 'github:owner/repo/run/1',
+				cohortJson: remotelyQueryableCohortJson({
+					remote: false,
+					attrs: ['.#packages.x86_64-linux.app'],
+					installables: ['.#packages.x86_64-linux.app^out'],
+					queryInstallables: [appQueryInstallable],
+					expectedPaths: [appPath],
+					roots: ['github:owner/repo/main/app']
+				})
+			};
+			const run = await runPublicationFlow(
+				options,
+				source === 'build' ? [appPath] : [],
+				[],
+				source === 'build' || source === 'reprobe' ? [appQueryInstallable] : [],
+				undefined,
+				new Map(),
+				{
+					attachOnly: source === 'destination' ? [appPath] : [],
+					publishByReference: source === 'reuse' ? [appPath] : [],
+					...(source === 'reprobe' && {
+						reprobedBuildSet: [],
+						withdrawn: [
+							{
+								installable: appQueryInstallable,
+								storePath: appPath,
+								outcome: 'publishByReference'
+							}
+						]
+					}),
+					dependencyReferences: [storePathSchema.parse(referencePath)],
+					...(source === 'build' && { streamedBuilt: [appPath] })
+				}
+			);
+			const receiptContents = await readFile(
+				path.join(directory, 'cupboard-cohort-receipt.json'),
+				'utf8'
+			);
+			const receipt = buildReceiptV3Schema.parse(JSON.parse(receiptContents));
+			const referencePushes = run.calls.filter((call) =>
+				call.includes('--reference-manifest')
+			);
+			const intermediates = await Promise.all(
+				referencePushes.map(async (call) => {
+					const contents = await readFile(
+						argumentValue(call, '--reference-manifest') ?? '',
+						'utf8'
+					);
+					const manifest = referencePublicationManifestSchema.parse(
+						JSON.parse(contents)
+					);
+					return manifest.paths
+						.filter((entry) => entry.kind === 'intermediate')
+						.map((entry) => entry.storePath);
+				})
+			);
+			expect({
+				intermediates: intermediates.flat(),
+				paths: receipt.paths,
+				targetOrigins: receipt.subjects
+					.filter((subject) => subject.storePath === appPath)
+					.map((subject) => subject.origin),
+				origins: receipt.subjects
+					.filter((subject) => subject.storePath === referencePath)
+					.map((subject) => subject.origin),
+				runtimeWalks: run.materialiseCalls,
+				builds: run.nixBuilds.length,
+				runRoots: referencePushes.map((call) =>
+					argumentValue(call, '--run-root')
+				)
+			}).toStrictEqual({
+				intermediates: [referencePath],
+				paths:
+					source === 'destination' ? [referencePath] : [appPath, referencePath],
+				targetOrigins:
+					source === 'destination'
+						? []
+						: [source === 'build' ? 'built' : 'republished'],
+				origins: ['republished'],
+				runtimeWalks: [],
+				builds: source === 'build' ? 1 : 0,
+				runRoots: referencePushes.map(() => 'github:owner/repo/run/1')
+			});
+		}
+	);
 	it('publishes cached dependencies alongside a streamed target without retaining dependency roots', async () => {
 		const run = await runPublicationFlow(
 			{

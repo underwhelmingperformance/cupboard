@@ -735,10 +735,12 @@ Options:
   --publication-scope <scope>       choose which paths to publish for selected
                                     installables: `outputs` publishes their
                                     outputs; `built` includes intermediates
-                                    built in this run; `closure` includes
-                                    runtime dependencies. Publication starts
-                                    after the build. (choices: "outputs",
-                                    "built", "closure")
+                                    built in this run and required dependency
+                                    outputs available from configured tenant
+                                    caches; `closure` includes runtime
+                                    dependencies. Publication starts after the
+                                    build. (choices: "outputs", "built",
+                                    "closure")
   --substituter <mode>              Control whether to publish outputs available
                                     from external substituters. `copy` selects
                                     them for publication. `leave` keeps them

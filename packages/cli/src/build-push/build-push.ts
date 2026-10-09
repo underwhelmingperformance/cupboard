@@ -5,10 +5,13 @@ import path from 'node:path';
 import {
 	copySources,
 	defaultNixConfigEnvironment,
+	dependencyOutputs,
 	discoverNixStoreConfig,
 	type Nix,
 	type PublicationSelection,
-	selectPublicationPaths
+	selectPublicationPaths,
+	tenantDependencyReferences,
+	tenantReferenceSources
 } from '@cupboard/nix';
 import {
 	abortReason,
@@ -35,7 +38,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { StorePath } from '@cupboard/nix-store/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
 	autoBuildStore,
 	type BuildReceiptV3,
@@ -102,6 +105,7 @@ import {
 	type PushStore,
 	runPush
 } from '../push/push.ts';
+import { parseReferenceManifest } from '../push/reference-manifest.ts';
 import {
 	reportUploadDuration,
 	type UploadReport
@@ -126,6 +130,7 @@ import {
 	superviseBuild,
 	type SupervisedAttempt
 } from './supervisor.ts';
+import { targetDerivations } from './target-derivations.ts';
 
 export const hookScriptFileName = 'post-build-hook.sh';
 
@@ -177,6 +182,7 @@ export interface BuildPushRunOptions {
 	readonly publicationScope?: 'outputs' | 'built' | 'closure';
 	readonly substituter?: 'leave' | 'copy';
 	readonly tenantUrl?: URL;
+	readonly destinationUrl?: URL;
 	readonly intermediatePaths?: readonly StorePathString[];
 	readonly receiptFile?: string;
 	readonly wait?: boolean;
@@ -190,6 +196,9 @@ export type BuildPushStore = ReconcileOptions['store'] &
 
 export interface BuildPushDependencies {
 	readonly selectPublicationPaths?: typeof selectPublicationPaths;
+	readonly tenantDependencyReferences?: typeof tenantDependencyReferences;
+	readonly referenceClient?: (sources: readonly URL[]) => Promise<PushClient>;
+	readonly targetDerivations?: typeof targetDerivations;
 	readonly signal?: AbortSignal;
 	readonly client: PushClient;
 	readonly credential: PushCredential;
@@ -1584,6 +1593,119 @@ function requireCompleteProvenance(
 	}
 }
 
+async function publishTenantDependencies(
+	options: BuildPushRunOptions,
+	dependencies: BuildPushDependencies,
+	reporter: Reporter,
+	targets: readonly StorePathString[],
+	receipt: BuildReceiptV3
+): Promise<BuildReceiptV3> {
+	if (
+		options.publicationScope !== 'built' ||
+		options.tenantUrl === undefined ||
+		options.invocation.kind !== 'constructed'
+	) {
+		return receipt;
+	}
+	const roots = new Set<StorePathString>();
+	const terms = new Map<
+		StorePathString,
+		Awaited<ReturnType<BuildPushStore['readDerivation']>>
+	>();
+	const evaluated = await (dependencies.targetDerivations ?? targetDerivations)(
+		options.invocation.build.installables,
+		dependencies.environment ?? process.env,
+		dependencies.signal
+	);
+	for (const [installable, paths] of evaluated) {
+		for (const path of paths) {
+			const term =
+				terms.get(path) ?? (await dependencies.store.readDerivation(path));
+			terms.set(path, term);
+			const selection = installable.split('^', 2)[1];
+			const names =
+				selection === undefined || selection === '*'
+					? term.outputs.keys().toArray()
+					: selection.split(',');
+			if (
+				names.some((name) => {
+					const output = term.outputs.get(name);
+					return output === undefined
+						? receipt.subjects.some(
+								(subject) =>
+									subject.derivation === path &&
+									targets.includes(subject.storePath)
+							)
+						: targets.includes(output);
+				})
+			) {
+				roots.add(path);
+			}
+		}
+	}
+	const outputs = await dependencyOutputs([...roots], {
+		readDerivation: (path) => {
+			const term = terms.get(path);
+			return term === undefined
+				? dependencies.store.readDerivation(path)
+				: Promise.resolve(term);
+		},
+		...(dependencies.signal !== undefined && { signal: dependencies.signal })
+	});
+	const paths = outputs
+		.map((output) => output.storePath)
+		.filter((path) => !receipt.paths.includes(path));
+	const references = await (
+		dependencies.tenantDependencyReferences ?? tenantDependencyReferences
+	)(paths, {
+		sources: tenantReferenceSources(options.tenantUrl, [
+			{ url: options.destinationUrl ?? options.tenantUrl, paths: [] }
+		]),
+		...(dependencies.signal !== undefined && { signal: dependencies.signal })
+	});
+	if (references.length === 0) {
+		return receipt;
+	}
+	const prepared = parseReferenceManifest(
+		JSON.stringify({ version: 1, paths: references })
+	);
+	const collection = PublicationCollection.of({
+		targets: [],
+		references: prepared
+	});
+	const sources = references.map((reference) => new URL(reference.source));
+	const client =
+		(await dependencies.referenceClient?.(sources)) ?? dependencies.client;
+	const publication = await runPush(collection, reporter, {
+		command: 'cupboard build-push',
+		credential: dependencies.credential,
+		client,
+		nix: dependencies.store,
+		buildStore: autoBuildStore,
+		referenceReceipt: true,
+		retain: false,
+		...(options.runRoot !== undefined && { runRoot: options.runRoot }),
+		...(options.wait !== undefined && { wait: options.wait }),
+		...(options.waitTimeoutSeconds !== undefined && {
+			waitTimeoutSeconds: options.waitTimeoutSeconds
+		})
+	});
+	if (publication === undefined) {
+		throw new Error('Reference publication did not return a receipt');
+	}
+	return buildReceiptV3Schema.parse({
+		...receipt,
+		paths: [...receipt.paths, ...publication.paths].toSorted(byCodeUnit),
+		subjects: [...receipt.subjects, ...publication.subjects].toSorted(
+			(left, right) => byCodeUnit(left.storePath, right.storePath)
+		),
+		uploaded: [
+			...(receipt.uploaded ?? []),
+			...(publication.uploaded ?? [])
+		].toSorted(byCodeUnit)
+	});
+}
+
 async function settleRun(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
@@ -1657,7 +1779,7 @@ async function settleRun(
 			);
 		}
 
-		const result = await reporter.phase(
+		let result = await reporter.phase(
 			buildPushPhases.reconcile,
 			async (ctx) => {
 				const closureIntermediates = await closureExpansion(
@@ -1707,6 +1829,30 @@ async function settleRun(
 			},
 			{ humanLabel: 'Checking published outputs' }
 		);
+
+		if (
+			options.publicationScope === 'built' &&
+			options.tenantUrl !== undefined &&
+			options.invocation.kind === 'constructed'
+		) {
+			await writeReceiptFile(options.receiptFile, {
+				...result.receipt,
+				...(selection.leftUpstream.length > 0 && {
+					leftUpstream: [...selection.leftUpstream]
+				})
+			});
+		}
+
+		result = {
+			...result,
+			receipt: await publishTenantDependencies(
+				options,
+				dependencies,
+				reporter,
+				publishedTargets,
+				result.receipt
+			)
+		};
 
 		const clearedRoot =
 			result.failures.length === 0

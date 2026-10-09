@@ -16,6 +16,7 @@
 	},
 	"exports": {
 		".": "./src/index.ts",
+		"./cache-metadata": "./src/cache-metadata.ts",
 		"./build-observation": "./src/build-observation/index.ts"
 	},
 	"license": "AGPL-3.0-or-later",

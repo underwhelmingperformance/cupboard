@@ -18,6 +18,7 @@ import {
 	NixStorePathNotFoundError
 } from '@cupboard/nix';
 import { receiptSubjects as cliReceiptSubjects } from '@cupboard/nix/build-observation';
+import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storePathSchema,
@@ -2191,6 +2192,115 @@ describe('plannedOutputPaths', () => {
 });
 
 describe('built publication observation', () => {
+	it.each([
+		{ recordedDeriver: `${app}.drv`, hasGraph: true },
+		{ recordedDeriver: `${library}.drv`, hasGraph: true },
+		{ recordedDeriver: `${library}.drv`, hasGraph: false }
+	])(
+		'records tenant-only dependency metadata using the evaluated graph (recorded deriver: $recordedDeriver, graph: $hasGraph)',
+		async ({ recordedDeriver, hasGraph }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-tenant-deps-')
+			);
+			temporaryDirectories.push(directory);
+			const queryPathInfo = vi.fn((storePath: string) =>
+				storePath === app
+					? Promise.resolve(pathInfo(app, recordedDeriver))
+					: Promise.reject(new Error('Dependency must not be queried locally'))
+			);
+			const protectedPaths: string[][] = [];
+			await buildAction(
+				{
+					installables: [hasGraph ? '.#app' : app],
+					publish: 'built',
+					publicationUrl: 'https://cache.example/t/acme'
+				},
+				{ RUNNER_TEMP: directory },
+				{
+					nix: { queryPathInfo },
+					graphNix: {
+						readDerivation: (path) =>
+							Promise.resolve(
+								Derivation.parse(
+									path === `${app}.drv`
+										? `Derive([],[("${library}.drv",["out"])],[],"x86_64-linux","/bin/sh",[],[])`
+										: `Derive([("out","${library}","","")],[],[],"x86_64-linux","/bin/sh",[],[])`
+								)
+							)
+					},
+					protection: {
+						directory,
+						protect: (paths) => {
+							protectedPaths.push([...paths]);
+							return Promise.resolve();
+						}
+					},
+					createObservation: () =>
+						Promise.resolve({
+							environment: {},
+							events: [],
+							flush: () => Promise.resolve(),
+							close: () => Promise.resolve()
+						}),
+					runNix: ({ arguments: arguments_ }) =>
+						Promise.resolve({
+							status: 0,
+							stdout: arguments_.includes('--dry-run')
+								? JSON.stringify([
+										{
+											...(hasGraph && { drvPath: `${app}.drv` }),
+											outputs: { out: app }
+										}
+									])
+								: `${app}\n`
+						}),
+					tenantDependencyReferences: (paths) =>
+						Promise.resolve(
+							paths.map((storePath) => ({
+								storePath,
+								kind: 'intermediate' as const,
+								source: 'https://cache.example/t/acme/reuse/prs',
+								narinfo: `StorePath: ${storePath}\nURL: nar/file.nar.zst\nCompression: zstd\nFileHash: sha256:${'0'.repeat(52)}\nFileSize: 1\nNarHash: sha256:${'0'.repeat(52)}\nNarSize: 1\nReferences: \n`
+							}))
+						)
+				}
+			);
+			const receiptContents = await readFile(
+				path.join(directory, 'cupboard-build-receipt.json'),
+				'utf8'
+			);
+			const receipt = buildReceiptV3Schema.parse(JSON.parse(receiptContents));
+			expect({
+				paths: receipt.paths,
+				dependencies: receipt.subjects.filter(
+					(subject) => subject.origin === 'republished'
+				),
+				protectedDependencies: protectedPaths
+					.flat()
+					.filter((path) => path === library),
+				intermediates: await readFile(
+					path.join(directory, 'cupboard-intermediate-paths.txt'),
+					'utf8'
+				)
+			}).toStrictEqual({
+				paths: hasGraph ? [app, library] : [app],
+				dependencies: hasGraph
+					? [
+							{
+								origin: 'republished',
+								storePath: library,
+								narHash: '0'.repeat(64),
+								signatures: [],
+								metadataSource: 'https://cache.example/t/acme/reuse/prs'
+							}
+						]
+					: [],
+				protectedDependencies: [],
+				intermediates: hasGraph ? `${library}\n` : ''
+			});
+		}
+	);
+
 	it.each([false, true])(
 		'protects copied requested survivors before retry backoff (pre-existing: %s)',
 		async (isPreExisting) => {

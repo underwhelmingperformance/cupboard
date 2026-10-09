@@ -400,11 +400,18 @@ observation. If every attempt fails, the step fails. Set `allow-failure` to let
 the job continue anyway.
 
 The default `publish: built` includes selected requested outputs and successful
-intermediates reported by the post-build hook. Substituted intermediates are
-excluded. Pass `intermediate-paths-file` to `push` and specify a run root to
-retain those intermediates. `publish-paths-file` contains only selected
-requested outputs, so requested-output roots exclude intermediates. The receipt
-includes both sets of paths. With `allow-failure`, successful intermediates
+intermediates reported by the post-build hook. Derivation-backed builds also
+include required dependency outputs already available from configured tenant
+caches or reuse views. These outputs are published by reference, including when
+the target is cached. Dependencies absent from tenant sources cause no
+additional build or download. Arbitrary command wrappers use observed
+intermediates because they declare no target derivation graph. Other substituted
+intermediates are excluded. Pass `intermediate-paths-file` to `push` and specify
+a run root to retain those intermediates. `publish-paths-file` contains only
+selected requested outputs, so requested-output roots exclude intermediates. The
+receipt includes targets, observed intermediates and reused tenant dependencies.
+Pass `receipt-file` as `build-receipt-file` to `push` so the push uses the
+captured reference metadata. With `allow-failure`, successful intermediates
 remain available even if every requested target fails.
 
 `publish: built` requires `cupboard-path` from `setup` to resolve the hook

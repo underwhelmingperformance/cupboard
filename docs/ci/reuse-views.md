@@ -18,6 +18,13 @@ The flake publish workflow uses a view on `main` in two ways:
   to the default cache by reference. cupboard already stores the bytes, so
   nothing is uploaded again.
 
+With `publish: built`, the workflow also publishes required dependency outputs
+available through the view, including build-only tools. For example, reusing a
+profile can also publish its activation wrapper and deployment client into the
+main cache. Consumers then need only the main cache to obtain those tools.
+Dependencies absent from the configured tenant sources cause no additional build
+or download.
+
 `cupboard github setup`, in [the quickstart][quickstart], creates a view for
 each repository. It's called `pull-requests-<repository-id>`, and it combines
 that repository's pull-request caches. The view uses the access selected for new
