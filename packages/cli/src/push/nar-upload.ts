@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { setTimeout as sleepFor } from 'node:timers/promises';
 
 import { rootLogger } from '@cupboard/logger';
+import type { CommitBlobDeclaration } from '@cupboard/protocol/upload';
 
 import { abortable } from '../abort.ts';
 import { asyncChunks } from '../io/byte-stream.ts';
@@ -15,6 +16,8 @@ import {
 } from '../nix/blob.ts';
 import type { NarDigest } from '../nix/nar.ts';
 import type { NarSource } from '../nix/nar-source.ts';
+
+import { CompressedBlobHasher } from './blob-hash.ts';
 
 const mebibyte = 1024 * 1024;
 
@@ -277,6 +280,7 @@ export interface NarTransferFacts {
 }
 
 export interface CompressedNarUpload {
+	readonly blob: CommitBlobDeclaration;
 	readonly digest: NarDigest;
 	readonly compression: NarCompressionFacts;
 	readonly transfer: NarTransferFacts;
@@ -728,6 +732,8 @@ interface Recompression {
 }
 
 class NarUpload {
+	private readonly blobHasher = new CompressedBlobHasher();
+
 	private readonly compressor: FramedNarCompressor;
 
 	private readonly partSize: number;
@@ -769,6 +775,7 @@ class NarUpload {
 	private result(isSingleRequest: boolean): CompressedNarUpload {
 		return {
 			digest: this.compressor.digest(),
+			blob: this.blobHasher.declaration(),
 			compression: this.compressor.compression(),
 			transfer: this.counts.facts(isSingleRequest, this.storedBytes)
 		};
@@ -827,6 +834,7 @@ class NarUpload {
 				break;
 			}
 
+			this.blobHasher.update(chunk);
 			this.addStored(chunk.byteLength);
 			chunks.push(chunk);
 			length += chunk.byteLength;
@@ -914,6 +922,7 @@ class NarUpload {
 			}
 
 			if (isFirstRead) {
+				this.blobHasher.update(chunk);
 				this.addStored(chunk.byteLength);
 			}
 
@@ -959,6 +968,18 @@ class NarUpload {
 		view.setUint32(0, skippableFrameMagic, true);
 		view.setUint32(4, frameBytes - skippableFrameHeaderBytes, true);
 		this.padding = { partNumber, gap, header };
+		this.blobHasher.update(header);
+
+		for (
+			let remaining = frameBytes - skippableFrameHeaderBytes;
+			remaining > 0;
+			remaining -= zeros.byteLength
+		) {
+			this.blobHasher.update(
+				zeros.subarray(0, Math.min(remaining, zeros.byteLength))
+			);
+		}
+
 		this.counts.countPadding(frameBytes);
 		this.addStored(frameBytes);
 		this.observer.onPadding?.({

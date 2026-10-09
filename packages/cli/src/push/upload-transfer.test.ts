@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+
+import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
@@ -129,6 +132,10 @@ describe('uploadNarFromSource', () => {
 	const narHash = NixSha256Hash.fromDigest(new Uint8Array(32));
 	const upload: CompressedNarUpload = {
 		digest: { narHash, narSize: 4 },
+		blob: {
+			fileHash: nixSha256HashSchema.parse('sha256:' + '1'.repeat(52)),
+			fileSize: 3
+		},
 		compression: {
 			narBytes: 4,
 			compressedBytes: 3,
@@ -228,11 +235,19 @@ describe('uploadNarFromSource', () => {
 			4
 		);
 
+		const expectedFileHash = NixSha256Hash.fromDigest(
+			createHash('sha256').update(new Uint8Array(3)).digest()
+		).toString();
+
 		expect({ completed, events, sent, counted }).toStrictEqual({
 			completed: {
 				durationMs: 10,
 				digest: upload.digest,
-				compression: upload.compression
+				compression: upload.compression,
+				blob: {
+					fileHash: expectedFileHash,
+					fileSize: 3
+				}
 			},
 			events: ['upload nar/a.nar.zst'],
 			sent: [3],

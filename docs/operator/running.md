@@ -148,7 +148,7 @@ tenant Worker attempts to copy the staged object after verification, including
 when it finds the canonical object already present. It is `fused` when the queue
 consumer attempts to write the canonical object while verifying the upload,
 which happens only for a commit that declared the compressed object's hash and
-size. The CLI does not declare them yet.
+size. The CLI declares these values when `commit-batch` advertises `blob=1`.
 
 The event also includes these fields when the last attempt reported them:
 

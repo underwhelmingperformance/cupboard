@@ -425,12 +425,14 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 				expect({
 					requests: requestLog(fake),
 					object: storedObject(fake),
+					blob: result.blob,
 					parts: observer.parts.map((part) => part.mode),
 					handed: observer.bytes,
 					transfer: result.transfer
 				}).toStrictEqual({
 					requests: [`PutObject ok ${String(expected.byteLength)}`],
 					object: fingerprint(expected),
+					blob: blobDeclaration(expected),
 					parts: ['single-request'],
 					handed: expected.byteLength,
 					transfer: transferFacts({ isSingleRequest: true })
@@ -503,6 +505,10 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 			await withFake({}, async (fake) => {
 				const { nar, compression, compressedSize } = earlyEndingNar(gap);
 				const expected = await compressed(nar, compression);
+				const expectedObject = Buffer.concat([
+					expected,
+					skippableFrame(padding)
+				]);
 				const observer = new RecordingObserver();
 
 				const result = await uploader(fake, { compression }).uploadNar(
@@ -517,6 +523,7 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 					parts: observer.parts.map((part) => part.mode),
 					lengths: partLengths(fake),
 					object: storedObject(fake),
+					blob: result.blob,
 					padding: observer.padding,
 					handed: observer.bytes,
 					transfer: result.transfer
@@ -529,6 +536,7 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 					],
 					lengths: [partSize, partSize, ...(overflow > 0 ? [overflow] : [])],
 					object: paddedFingerprint(expected, padding),
+					blob: blobDeclaration(expectedObject),
 					padding:
 						padding > 0
 							? [
@@ -601,6 +609,7 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 
 				expect({
 					object: storedObject(fake),
+					blob: result.blob,
 					attempts: fake.requests
 						.filter((request) => request.partNumber === partNumber)
 						.map((request) => request.outcome),
@@ -613,6 +622,7 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 					})
 				}).toStrictEqual({
 					object: fingerprint(nar),
+					blob: blobDeclaration(nar),
 					attempts: ['reset', 'ok'],
 					retries: [{ kind: 'part', partNumber }],
 					handed: nar.byteLength,
@@ -649,10 +659,16 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 				response: { kind: 'reset' }
 			});
 
-			await uploader(fake).uploadNar(key, source, nar.byteLength, observer);
+			const result = await uploader(fake).uploadNar(
+				key,
+				source,
+				nar.byteLength,
+				observer
+			);
 			const padding = observer.padding.at(0)?.bytes ?? 0;
 			const decoded = await decode(fake.objects().get(key));
 			const expected = await compressed(nar);
+			const expectedObject = Buffer.concat([expected, skippableFrame(padding)]);
 
 			expect({
 				parts: observer.parts.map((part) => part.mode),
@@ -663,7 +679,8 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 				})),
 				paddedParts: observer.padding.map((report) => report.partNumber),
 				decoded: fingerprint(decoded),
-				object: storedObject(fake)
+				object: storedObject(fake),
+				blob: result.blob
 			}).toStrictEqual({
 				parts: ['buffered', 'streamed', 'streamed', 'streamed'],
 				recompressions: [
@@ -671,7 +688,8 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 				],
 				paddedParts: [4],
 				decoded: fingerprint(nar),
-				object: paddedFingerprint(expected, padding)
+				object: paddedFingerprint(expected, padding),
+				blob: blobDeclaration(expectedObject)
 			});
 		});
 	});
@@ -726,18 +744,22 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 				response: { kind: 'reset' }
 			});
 
-			await uploader(fake, { compression }).uploadNar(
+			const result = await uploader(fake, { compression }).uploadNar(
 				key,
 				MemoryNarSource.of(nar),
 				nar.byteLength,
 				observer
 			);
 
+			const expectedObject = Buffer.concat([expected, skippableFrame(1000)]);
+
 			expect({
+				blob: result.blob,
 				object: storedObject(fake),
 				recompressions: observer.recompressions.length,
 				padding: observer.padding
 			}).toStrictEqual({
+				blob: blobDeclaration(expectedObject),
 				object: paddedFingerprint(expected, 1000),
 				recompressions: 1,
 				padding: [{ partNumber: 2, bytes: 1000, continuesIntoNextPart: false }]
@@ -1556,18 +1578,22 @@ describe('r2BlobUploader', { timeout: 30_000 }, () => {
 				response: { kind: 'reset' }
 			});
 
-			await uploader(fake, { compression }).uploadNar(
+			const result = await uploader(fake, { compression }).uploadNar(
 				key,
 				MemoryNarSource.of(nar),
 				nar.byteLength
 			);
 
+			const expectedObject = Buffer.concat([expected, skippableFrame(8)]);
+
 			expect({
+				blob: result.blob,
 				part3: fake.requests
 					.filter((request) => request.partNumber === 3)
 					.map((request) => [request.outcome, request.bytes]),
 				object: storedObject(fake)
 			}).toStrictEqual({
+				blob: blobDeclaration(expectedObject),
 				part3: [
 					['reset', 0],
 					['ok', 5]
@@ -2026,4 +2052,13 @@ async function rejectionOf(operation: Promise<unknown>): Promise<unknown> {
 	}
 
 	return undefined;
+}
+
+function blobDeclaration(bytes: Uint8Array) {
+	return {
+		fileHash: NixSha256Hash.fromDigest(
+			createHash('sha256').update(bytes).digest()
+		).toString(),
+		fileSize: bytes.byteLength
+	};
 }

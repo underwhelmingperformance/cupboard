@@ -1407,6 +1407,165 @@ describe('retention marker', () => {
 	});
 });
 
+describe('blob declaration', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const blob = { fileHash: narHash, fileSize: 123 };
+
+	it.each([
+		{
+			label: 'a capable connection',
+			capabilities: 'commit-batch;blob=1',
+			declared: true
+		},
+		{
+			label: 'a legacy connection',
+			capabilities: 'commit-batch',
+			declared: false
+		},
+		{
+			label: 'another attribute version',
+			capabilities: 'commit-batch;blob=2',
+			declared: false
+		}
+	])(
+		'sends a declaration only on $label',
+		async ({ capabilities, declared }) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket);
+			const committed = session.commit({ ...target, blob });
+			socket.emit('upgrade', {
+				headers: { 'x-cupboard-commit-capabilities': capabilities }
+			});
+			socket.emit('open');
+			expect(
+				socket.sent.map((message): unknown => JSON.parse(message))
+			).toStrictEqual([
+				{
+					op: 'commit-batch',
+					commits: [{ ...target, ...(declared && { blob }) }]
+				}
+			]);
+			socket.emit(
+				'message',
+				frame({
+					ev: 'settled',
+					uploadId,
+					response: { storePathHash, narHash, status: 'already-present' }
+				})
+			);
+			await settledOf(committed);
+			session.close();
+		}
+	);
+
+	it.each([
+		{
+			label: 'unacknowledged commits',
+			acked: false,
+			capabilities: 'commit-batch;blob=1,subscribe-identity;blob=1',
+			declared: true
+		},
+		{
+			label: 'unacknowledged commits on a legacy connection',
+			acked: false,
+			capabilities: 'commit-batch,subscribe-identity',
+			declared: false
+		},
+		{
+			label: 'acknowledged identities',
+			acked: true,
+			capabilities: 'commit-batch;blob=1,subscribe-identity;blob=1',
+			declared: true
+		},
+		{
+			label: 'identity support without batch declaration support',
+			acked: true,
+			capabilities: 'commit-batch,subscribe-identity;blob=1',
+			declared: true
+		},
+		{
+			label: 'batch support without identity declaration support',
+			acked: true,
+			capabilities: 'commit-batch;blob=1,subscribe-identity',
+			declared: false
+		},
+		{
+			label: 'a legacy replacement connection',
+			acked: true,
+			capabilities: 'commit-batch,subscribe-identity',
+			declared: false
+		},
+		{
+			label: 'another identity attribute version',
+			acked: true,
+			capabilities: 'commit-batch;blob=1,subscribe-identity;blob=2',
+			declared: false
+		}
+	])(
+		'replays the declaration for $label according to the new connection',
+		async ({ acked, capabilities, declared }) => {
+			const first = new FakeCommitSocket();
+			const second = new FakeCommitSocket();
+			const session = openSessionOver([first, second]);
+			const committed = session.commit({ ...target, blob });
+			first.emit('upgrade', {
+				headers: {
+					'x-cupboard-commit-capabilities':
+						'commit-batch;blob=1,subscribe-identity;blob=1'
+				}
+			});
+			first.emit('open');
+			if (acked) {
+				first.emit(
+					'message',
+					frame({ ev: 'deferred', uploadId, storePathHash, narHash })
+				);
+			}
+			first.emit('close', 1006, '');
+			await vi.advanceTimersByTimeAsync(maxBackoffMs);
+			second.emit('upgrade', {
+				headers: {
+					'x-cupboard-commit-capabilities': capabilities
+				}
+			});
+			second.emit('open');
+			expect({
+				first: first.sent.map((message): unknown => JSON.parse(message)),
+				second: second.sent.map((message): unknown => JSON.parse(message))
+			}).toStrictEqual({
+				first: [{ op: 'commit-batch', commits: [{ ...target, blob }] }],
+				second: [
+					acked
+						? {
+								op: 'subscribe-identity',
+								entries: [{ ...target, ...(declared && { blob }) }]
+							}
+						: {
+								op: 'commit-batch',
+								commits: [{ ...target, ...(declared && { blob }) }]
+							}
+				]
+			});
+			second.emit(
+				'message',
+				frame({
+					ev: 'settled',
+					uploadId,
+					response: { storePathHash, narHash, status: 'already-present' }
+				})
+			);
+			await settledOf(committed);
+			session.close();
+		}
+	);
+});
+
 describe('parseCapabilities', () => {
 	it.each([
 		['empty string', '', []],

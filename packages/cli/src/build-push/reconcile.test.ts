@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type {
 	NixBuildResult,
 	NixDerivedPathString,
@@ -1438,6 +1440,10 @@ describe('reconcileBuild over a shared commit session', () => {
 	it.each(['acknowledgement', 'deferred verdict'] as const)(
 		'confirms a matching destination copy after an absent %s without retrying publication',
 		async (failurePhase) => {
+			const bytes = Buffer.from('compressed NAR');
+			const fileHash = NixSha256Hash.fromDigest(
+				createHash('sha256').update(bytes).digest()
+			).toString();
 			const fixture = harness({
 				valid: [pathA],
 				actions: new Map([[pathA, 'upload' as const]])
@@ -1450,6 +1456,10 @@ describe('reconcileBuild over a shared commit session', () => {
 			);
 			const client: PushClient = {
 				...fixture.client,
+				uploadNar: async (key, body) => {
+					await fixture.client.uploadNar(key, body);
+					await Array.fromAsync(body);
+				},
 				preview: (body) => {
 					previewRequests.push(body);
 					return Promise.resolve({ uploads: [decisionFor(pathA, 'skip')] });
@@ -1477,6 +1487,10 @@ describe('reconcileBuild over a shared commit session', () => {
 			const result = await reconcileWith(fixture, {
 				targets: [target(pathA, rootOne)],
 				client,
+				compressNar: () => ({
+					body: new Response(bytes).body ?? emptyStream(),
+					digest: () => ({ narHash, narSize: 4 })
+				}),
 				session
 			});
 
@@ -1523,7 +1537,8 @@ describe('reconcileBuild over a shared commit session', () => {
 					{
 						uploadId: `upload-${StorePath.basename(pathA)}`,
 						storePathHash: StorePath.hash(pathA),
-						narHash: narHash.toString()
+						narHash: narHash.toString(),
+						blob: { fileHash, fileSize: bytes.byteLength }
 					}
 				],
 				clientCommits: [],
@@ -1617,53 +1632,76 @@ describe('reconcileBuild over a shared commit session', () => {
 		expect(uploads).toStrictEqual([{ storePath: pathA, durationMs: 3000 }]);
 	});
 
-	it('commits over the session and never through the client', async () => {
-		const sessionCommits: CommitSessionTarget[] = [];
-		const session: CommitSession = {
-			commit: (target) => {
-				sessionCommits.push(target);
+	it.each(['upload', 'commit'] as const)(
+		'commits %s entries over the session with a declaration only for uploaded bytes',
+		async (action) => {
+			const bytes = Buffer.from('compressed NAR');
+			const fileHash = NixSha256Hash.fromDigest(
+				createHash('sha256').update(bytes).digest()
+			).toString();
+			const sessionCommits: CommitSessionTarget[] = [];
+			const session: CommitSession = {
+				commit: (target) => {
+					sessionCommits.push(target);
 
-				return Promise.resolve({
-					storePathHash: target.storePathHash,
-					narHash: target.narHash,
-					status: 'committed' as const,
-					settled: Promise.resolve()
-				});
-			},
-			close: () => {
-				throw new Error('reconciliation must not close the shared run session');
-			}
-		};
-		const harnessed = harness({
-			valid: [pathA],
-			actions: new Map([[pathA, 'upload' as const]])
-		});
+					return Promise.resolve({
+						storePathHash: target.storePathHash,
+						narHash: target.narHash,
+						status: 'committed' as const,
+						settled: Promise.resolve()
+					});
+				},
+				close: () => {
+					throw new Error(
+						'reconciliation must not close the shared run session'
+					);
+				}
+			};
+			const harnessed = harness({
+				valid: [pathA],
+				actions: new Map([[pathA, action]])
+			});
 
-		const result = await reconcileBuild({
-			targets: [target(pathA)],
-			outcomes: new Map<StorePathString, BatchPathOutcome>(),
-			candidates: [pathA],
-			snapshot: { derivations: new Map() },
-			store: harnessed.store,
-			client: harnessed.client,
-			session,
-			createNarArchive: () => new SequentialNarSource(emptyStream),
-			compressNar: () => ({
-				body: emptyStream(),
-				digest: () => ({ narHash, narSize: 4 })
-			})
-		});
+			const result = await reconcileBuild({
+				targets: [target(pathA)],
+				outcomes: new Map<StorePathString, BatchPathOutcome>(),
+				candidates: [pathA],
+				snapshot: { derivations: new Map() },
+				store: harnessed.store,
+				client: {
+					...harnessed.client,
+					uploadNar: async (_key, body) => {
+						await Array.fromAsync(body);
+					}
+				},
+				session,
+				createNarArchive: () => new SequentialNarSource(emptyStream),
+				compressNar: () => ({
+					body: new Response(bytes).body ?? emptyStream(),
+					digest: () => ({ narHash, narSize: 4 })
+				})
+			});
 
-		expect({
-			sessionCommits: sessionCommits.map((target) => target.storePathHash),
-			clientCommits: harnessed.clientCommits,
-			publishedPaths: result.receipt.paths.length
-		}).toStrictEqual({
-			sessionCommits: [StorePath.hash(pathA)],
-			clientCommits: [],
-			publishedPaths: 1
-		});
-	});
+			expect({
+				sessionCommits,
+				clientCommits: harnessed.clientCommits,
+				publishedPaths: result.receipt.paths.length
+			}).toStrictEqual({
+				sessionCommits: [
+					{
+						uploadId: `upload-${StorePath.basename(pathA)}`,
+						storePathHash: StorePath.hash(pathA),
+						narHash: narHash.toString(),
+						...(action === 'upload' && {
+							blob: { fileHash, fileSize: bytes.byteLength }
+						})
+					}
+				],
+				clientCommits: [],
+				publishedPaths: 1
+			});
+		}
+	);
 });
 
 async function flushMicrotasks(): Promise<void> {

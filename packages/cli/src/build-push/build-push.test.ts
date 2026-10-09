@@ -693,6 +693,12 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 				return Promise.resolve({
 					digest: { narHash, narSize: 4 },
+					blob: {
+						fileHash: narHash.toString(),
+						fileSize:
+							(config.compression?.compressedBytes ?? 4) +
+							(config.transfer?.paddingBytes ?? 0)
+					},
 					compression: config.compression ?? {
 						narBytes: 4,
 						compressedBytes: 4,

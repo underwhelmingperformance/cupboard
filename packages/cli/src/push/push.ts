@@ -35,6 +35,7 @@ import {
 	type RootSummaryInput
 } from '@cupboard/protocol/retention';
 import {
+	type CommitBlobDeclaration,
 	type UploadAttachRootInput,
 	type UploadDecision,
 	type UploadNegotiateRequestInput,
@@ -1046,9 +1047,12 @@ async function runPushFlow(
 						storePathByHash.get(decision.storePathHash) ??
 						decision.storePathHash;
 
+					let blob: CommitBlobDeclaration | undefined;
+
 					if (isUpload(decision)) {
 						try {
 							const upload = await streamNarUpload(decision, uploadContext);
+							blob = upload.blob;
 							completedUploads.add(decision.storePathHash);
 							uploaded += 1;
 							reportUpload(storePath, upload);
@@ -1097,7 +1101,8 @@ async function runPushFlow(
 						outcome = await commitNegotiated(
 							decision,
 							commitContext,
-							hasGraceFacts
+							hasGraceFacts,
+							blob
 						);
 					} catch (error) {
 						if (isAbortError(error)) {
@@ -2074,13 +2079,15 @@ function commitVia(
 
 function commitTarget(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
-	shouldReportGraceFacts: boolean
+	shouldReportGraceFacts: boolean,
+	blob?: CommitBlobDeclaration
 ): CommitTarget {
 	return {
 		uploadId: decision.uploadId,
 		storePathHash: decision.storePathHash,
 		narHash: decision.narHash,
-		...(shouldReportGraceFacts && { retention: true as const })
+		...(shouldReportGraceFacts && { retention: true as const }),
+		...(blob !== undefined && { blob })
 	};
 }
 
@@ -2100,10 +2107,14 @@ function isAbsentVerdict(error: unknown): boolean {
 async function commitNegotiated(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext,
-	hasGraceFacts: boolean
+	hasGraceFacts: boolean,
+	blob: CommitBlobDeclaration | undefined
 ): Promise<CommitOutcome> {
 	try {
-		return await commitVia(context, commitTarget(decision, hasGraceFacts));
+		return await commitVia(
+			context,
+			commitTarget(decision, hasGraceFacts, blob)
+		);
 	} catch (error) {
 		if (!isStaleUploadError(error) && !isAbsentVerdict(error)) {
 			throw error;
@@ -2195,7 +2206,7 @@ async function redriveExpiredCommit(
 	verifyNarMetadata(pathInfo, upload.digest);
 	context.onUploaded(fresh.storePathHash, upload);
 
-	return commitVia(context, commitTarget(fresh, hasGraceFacts));
+	return commitVia(context, commitTarget(fresh, hasGraceFacts, upload.blob));
 }
 
 function verifyNarMetadata(

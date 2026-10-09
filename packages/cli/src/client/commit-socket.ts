@@ -3,11 +3,14 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import {
+	blobDeclarationAttribute,
+	blobDeclarationAttributeValue,
 	commitAcceptCapabilitiesHeader,
 	commitAuthenticationExpiredCloseCode,
 	commitAuthenticationExpiredCloseReason,
 	commitBatchCapability,
 	commitBatchMaxEntries,
+	type CommitBlobDeclaration,
 	commitCapabilitiesHeader,
 	commitCreditCapability,
 	commitCreditGrantAttribute,
@@ -115,6 +118,7 @@ export interface CommitSessionTarget {
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
 	readonly retention?: boolean;
+	readonly blob?: CommitBlobDeclaration;
 }
 
 /**
@@ -423,6 +427,16 @@ function hasRetentionMarker(
 	);
 }
 
+function hasBlobDeclaration(
+	capabilities: AdvertisedCapabilities,
+	capability: string
+): boolean {
+	return (
+		capabilities.get(capability)?.[blobDeclarationAttribute] ===
+		blobDeclarationAttributeValue
+	);
+}
+
 // Keepalives preserve deferred waits without waking the Durable Object.
 // Transient drops reconnect with bounded back-off and replay work according to
 // whether the server had already acknowledged it.
@@ -472,6 +486,8 @@ export function runCommitSession(
 	// reconnect, the server can then return the stored grace fact.
 	let hasBatchRetentionMarker = false;
 	let hasIdentityRetentionMarker = false;
+	let hasBatchBlobDeclaration = false;
+	let hasIdentityBlobDeclaration = false;
 	// Send `renew-uploads` only when the current connection advertises it.
 	let hasUploadRenewal = false;
 	// Credit and declared demand belong to one connection. A new 101 supplies a
@@ -529,7 +545,9 @@ export function runCommitSession(
 				storePathHash: target.storePathHash,
 				narHash: target.narHash,
 				...(target.retention === true &&
-					hasBatchRetentionMarker && { retention: true as const })
+					hasBatchRetentionMarker && { retention: true as const }),
+				...(target.blob !== undefined &&
+					hasBatchBlobDeclaration && { blob: target.blob })
 			}))
 		});
 	};
@@ -1296,7 +1314,9 @@ export function runCommitSession(
 						storePathHash: target.storePathHash,
 						narHash: target.narHash,
 						...(target.retention === true &&
-							hasIdentityRetentionMarker && { retention: true as const })
+							hasIdentityRetentionMarker && { retention: true as const }),
+						...(target.blob !== undefined &&
+							hasIdentityBlobDeclaration && { blob: target.blob })
 					}))
 				});
 			}
@@ -1587,6 +1607,8 @@ export function runCommitSession(
 		hasSubscribeIdentity = false;
 		hasBatchRetentionMarker = false;
 		hasIdentityRetentionMarker = false;
+		hasBatchBlobDeclaration = false;
+		hasIdentityBlobDeclaration = false;
 		hasUploadRenewal = false;
 		// Window state from the previous connection is stale; replayOutstanding
 		// sends all outstanding work afresh through the new window.
@@ -1627,6 +1649,14 @@ export function runCommitSession(
 				commitBatchCapability
 			);
 			hasIdentityRetentionMarker = hasRetentionMarker(
+				connectionCaps,
+				subscribeIdentityCapability
+			);
+			hasBatchBlobDeclaration = hasBlobDeclaration(
+				connectionCaps,
+				commitBatchCapability
+			);
+			hasIdentityBlobDeclaration = hasBlobDeclaration(
 				connectionCaps,
 				subscribeIdentityCapability
 			);

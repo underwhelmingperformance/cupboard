@@ -30,6 +30,7 @@ import {
 import {
 	commitAcceptCapabilitiesHeader,
 	commitBatchCapability,
+	type CommitBlobDeclaration,
 	commitCreditCapability,
 	type PushId,
 	type UploadId
@@ -477,6 +478,7 @@ export interface CommitTarget {
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
 	readonly retention?: boolean;
+	readonly blob?: CommitBlobDeclaration;
 }
 
 export interface CommitOptions {

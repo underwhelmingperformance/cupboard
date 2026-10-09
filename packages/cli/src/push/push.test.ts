@@ -969,6 +969,11 @@ describe('runPush', () => {
 		const uploads: { r2Key: string; narSize: number; firstBytes: number[] }[] =
 			[];
 		const name = StorePath.basename(appPath);
+		const blob = {
+			fileHash: appDigest.narHash.toString(),
+			fileSize: 16_777_216
+		};
+		const commits: CommitTarget[] = [];
 
 		await runPush(
 			publication([appPath]),
@@ -1026,6 +1031,7 @@ describe('runPush', () => {
 
 						return {
 							digest: appDigest,
+							blob,
 							compression: {
 								narBytes: 64_000_000,
 								compressedBytes: 16_777_216,
@@ -1043,7 +1049,10 @@ describe('runPush', () => {
 							}
 						};
 					},
-					commit: () => Promise.resolve(fallbackCommitResponse()),
+					commit: (target) => {
+						commits.push(target);
+						return Promise.resolve(fallbackCommitResponse());
+					},
 					setRoot: (rootName, body) =>
 						Promise.resolve(rootSummary({ name: rootName, ...body }))
 				} satisfies PushClient,
@@ -1063,6 +1072,7 @@ describe('runPush', () => {
 			.parse(summary?.data);
 
 		expect({
+			commits,
 			uploads,
 			partInfo: infos.filter((info) => info.message.includes('part')),
 			warnings,
@@ -1081,6 +1091,15 @@ describe('runPush', () => {
 				].includes(row.label)
 			)
 		}).toStrictEqual({
+			commits: [
+				{
+					uploadId: 'upload-app',
+					storePathHash: StorePath.hash(appPath),
+					narHash: appDigest.narHash.toString(),
+					retention: true,
+					blob
+				}
+			],
 			uploads: [
 				{
 					r2Key: 'nar/app.nar.zst',
@@ -1340,7 +1359,8 @@ describe('runPush', () => {
 	it('re-negotiates and re-uploads when a commit slot expired', async () => {
 		let negotiations = 0;
 		const uploadedKeys: string[] = [];
-		const commitAttempts: string[] = [];
+		const replacementBytes = Buffer.from('replacement compressed nar');
+		const commitAttempts: CommitTarget[] = [];
 		const payloads: ResultPayload[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
@@ -1373,7 +1393,7 @@ describe('runPush', () => {
 					uploadedKeys.push(key);
 				},
 				commit(target) {
-					commitAttempts.push(target.uploadId);
+					commitAttempts.push(target);
 
 					if (target.uploadId === 'commit-stale') {
 						// Simulate expiry of the pending row and its staged bytes during a
@@ -1389,7 +1409,12 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+			compressNar: (nar) =>
+				fakeNarUpload(
+					nar,
+					digestForNar(nar),
+					negotiations === 1 ? compressedNarBytes : replacementBytes
+				)
 		});
 
 		expect({
@@ -1400,12 +1425,27 @@ describe('runPush', () => {
 		}).toStrictEqual({
 			negotiations: 2,
 			uploadedKeys: [r2Key, r2Key],
-			commitAttempts: ['commit-stale', 'commit-fresh'],
+			commitAttempts: [
+				{ uploadId: 'commit-stale', bytes: compressedNarBytes },
+				{ uploadId: 'commit-fresh', bytes: replacementBytes }
+			].map(({ uploadId, bytes }) => ({
+				uploadId,
+				storePathHash: StorePath.hash(appPath),
+				narHash: appDigest.narHash.toString(),
+				retention: true,
+				blob: {
+					fileHash: NixSha256Hash.fromDigest(
+						createHash('sha256').update(bytes).digest()
+					).toString(),
+					fileSize: bytes.byteLength
+				}
+			})),
 			summary: {
 				uploadedPaths: 1,
 				reusedBlobs: 0,
 				skipped: 0,
-				uploadedBytes: 28,
+				uploadedBytes:
+					compressedNarBytes.byteLength + replacementBytes.byteLength,
 				failures: [],
 				paths: [
 					{
