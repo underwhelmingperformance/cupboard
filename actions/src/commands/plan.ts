@@ -24,7 +24,9 @@ import {
 	createGithubReporter,
 	parseReporterResults,
 	type Reporter,
-	type ReporterResultEvent
+	type ReporterResultEvent,
+	type ResultPayload,
+	ResultTable
 } from '@cupboard/reporter';
 import {
 	type ClosedChildProcess,
@@ -36,7 +38,11 @@ import { type ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
-import { cohortBuildLocation, cohortJobName } from '../build-location.ts';
+import {
+	builderDescription,
+	cohortBuildLocation,
+	cohortJobName
+} from '../build-location.ts';
 import {
 	BuildRebuildRemoteDispatchError,
 	BuiltPublicationObservationUnsupportedError,
@@ -261,7 +267,7 @@ export interface PlanInputs {
 	readonly store: string;
 	/**
 	 * The Nix `builders` specification that remote cohorts use. The plan reads
-	 * it only to show the builder's host in job names.
+	 * it only to show the builder's host in job names and in the job summary.
 	 */
 	readonly builders: string;
 	readonly build: 'missing' | 'rebuild';
@@ -574,7 +580,7 @@ function parseTargets(source: string | undefined): readonly PublishTarget[] {
 export async function planAction(
 	options: PlanOptions,
 	environment: Environment = env,
-	reporter: Reporter = createGithubReporter(),
+	reporter: Reporter = createGithubReporter({ environment }),
 	dependencies: PlanDependencies = {}
 ): Promise<void> {
 	dependencies.signal?.throwIfAborted();
@@ -626,6 +632,7 @@ export async function planAction(
 	await writePlan(
 		environment,
 		inputs,
+		reporter,
 		plan,
 		cohortDecisions,
 		evaluations,
@@ -754,6 +761,7 @@ function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
 async function writePlan(
 	environment: Environment,
 	inputs: PlanInputs,
+	reporter: Reporter,
 	plan: PublishPlan,
 	cohortDecisions: readonly CohortPreFilterDecision[],
 	evaluations: readonly TargetEvaluation[],
@@ -797,6 +805,91 @@ async function writePlan(
 	await setOutput(environment, 'cohort-count', String(cohortEntries.length));
 	await setOutput(environment, 'retained-count', String(plan.retained.length));
 	await setOutput(environment, 'target-count', String(plan.targets.length));
+	reporter.result(
+		planSummary(
+			inputs,
+			plan.retained,
+			packedCohorts,
+			plan.cohorts.filter((cohort) => prunedKeys.has(cohort.key))
+		)
+	);
+}
+
+interface PlannedTargetSummary {
+	readonly job: string;
+	readonly attr: string;
+	readonly system: string;
+	readonly runner: string;
+	readonly builder: string;
+	readonly bestEffort: boolean;
+	readonly decision: 'retained' | 'cohort';
+}
+
+const planDecisionText: Readonly<
+	Record<PlannedTargetSummary['decision'], string>
+> = {
+	retained: 'Retained without building',
+	cohort: 'Checked by the cohort'
+};
+
+function planSummary(
+	inputs: PlanInputs,
+	retained: readonly PublishTarget[],
+	jobCohorts: readonly Cohort[],
+	prunedCohorts: readonly Cohort[]
+): ResultPayload<readonly PlannedTargetSummary[]> {
+	const retainedAttributes = new Set(retained.map((target) => target.attr));
+	const summarise = (
+		job: string,
+		target: PublishTarget,
+		isRetained: boolean
+	): PlannedTargetSummary => ({
+		job,
+		attr: target.attr,
+		system: target.system,
+		runner: target.os,
+		builder: builderDescription(cohortBuildLocation(target, inputs)),
+		bestEffort: target.bestEffort,
+		decision: isRetained ? 'retained' : 'cohort'
+	});
+	const targets = [
+		...jobCohorts.flatMap((cohort) =>
+			cohort.targets.map((target) =>
+				summarise(
+					cohortName(inputs, cohort),
+					target,
+					retainedAttributes.has(target.attr)
+				)
+			)
+		),
+		...prunedCohorts.flatMap((cohort) =>
+			cohort.targets.map((target) => summarise('None', target, true))
+		)
+	];
+
+	return {
+		kind: 'publication-plan',
+		title: 'Publication plan',
+		data: targets,
+		rows: [],
+		table: ResultTable.of(
+			[
+				{ key: 'job', label: 'Job' },
+				{ key: 'attr', label: 'Target' },
+				{ key: 'system', label: 'System' },
+				{ key: 'runner', label: 'Runner' },
+				{ key: 'builder', label: 'Builder' },
+				{ key: 'bestEffort', label: 'Best effort' },
+				{ key: 'decision', label: 'Decision' }
+			],
+			targets.map((target) => ({
+				...target,
+				bestEffort: target.bestEffort ? 'yes' : 'no',
+				decision: planDecisionText[target.decision]
+			}))
+		),
+		jobSummary: true
+	};
 }
 
 function cohortName(inputs: PlanInputs, cohort: Cohort): string {

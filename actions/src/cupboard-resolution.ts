@@ -225,6 +225,50 @@ export function parseResolvedCupboard(value: string): ResolvedCupboard {
 }
 
 /**
+ * Describes the resolved cupboard for a reader: `release <tag>` or
+ * `built from source`.
+ */
+export function describeResolvedCupboard(resolved: ResolvedCupboard): string {
+	return resolved.kind === 'release'
+		? `release ${resolved.tag}`
+		: 'built from source';
+}
+
+/**
+ * The GitHub page of the resolved cupboard: the release page for a release,
+ * and the commit page for a source build.
+ */
+export function resolvedCupboardPage(
+	resolved: ResolvedCupboard,
+	serverUrl: URL
+): URL {
+	const page =
+		resolved.kind === 'release'
+			? `releases/tag/${encodeURIComponent(resolved.tag)}`
+			: `commit/${resolved.sourceCommit}`;
+
+	return new URL(`${resolved.repository}/${page}`, serverUrl);
+}
+
+/**
+ * The GitHub page of a file in the resolved cupboard's source: at the release
+ * tag for a release, and at the commit for a source build. `file` is relative
+ * to the repository root and may end with a fragment.
+ */
+export function resolvedCupboardFile(
+	resolved: ResolvedCupboard,
+	serverUrl: URL,
+	file: string
+): URL {
+	const revision =
+		resolved.kind === 'release'
+			? encodeURIComponent(resolved.tag)
+			: resolved.sourceCommit;
+
+	return new URL(`${resolved.repository}/blob/${revision}/${file}`, serverUrl);
+}
+
+/**
  * Select an exact release tag and source commit, or the exact source commit
  * from the reusable workflow. The result must not contain `latest` or defer
  * any choice to acquisition.

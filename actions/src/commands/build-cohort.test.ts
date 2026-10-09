@@ -75,6 +75,10 @@ import {
 	RetentionChoiceConflictError
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
+import {
+	jobSummaryFile,
+	recordingGithubReporter
+} from '../reporter-testing.ts';
 
 import { provenancedSubjects } from './attest.ts';
 import {
@@ -9465,4 +9469,208 @@ if (args.includes('--help')) {
 			});
 		}
 	);
+});
+
+function cohortSummaryText(targetRows: readonly string[]): string {
+	return [
+		'### Targets',
+		'',
+		'|  |  |',
+		'| --- | --- |',
+		'| Duration | 12m 34.0s |',
+		'| Uploaded during the build | 1,968 paths |',
+		'',
+		'| Target | Root | Outcome | Uploaded paths | Uploaded bytes | Root expiry |',
+		'| --- | --- | --- | --- | --- | --- |',
+		...targetRows,
+		'',
+		''
+	].join('\n');
+}
+
+describe('cohort job summary', () => {
+	const libraryInstallable = '.#packages.x86_64-linux.lib^out';
+	const multiOutputInstallable = '.#packages.x86_64-linux.floating^out,dev';
+	const multiOutputQueryInstallable =
+		'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv^out,dev';
+	const uploadsByRoot: ReadonlyMap<string, readonly [number, number]> = new Map(
+		[
+			['github:owner/repo/main/app', [0, 0]],
+			['github:owner/repo/main/lib', [1, 2048]],
+			['github:owner/repo/main/floating', [2, 1_500_000]]
+		]
+	);
+	let directory: string;
+	let environment: Environment;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-cohort-summary-'));
+		environment = {
+			RUNNER_TEMP: directory,
+			GITHUB_OUTPUT: path.join(directory, 'github-output')
+		};
+	});
+
+	afterEach(async () => {
+		await rm(directory, { recursive: true, force: true });
+	});
+
+	function pushSummary(root: string | undefined): ReporterResultEvent[] {
+		const [uploadedPaths, uploadedBytes] = uploadsByRoot.get(root ?? '') ?? [
+			0, 0
+		];
+
+		return [
+			{
+				kind: 'push-summary',
+				data: {
+					uploadedPaths,
+					reusedBlobs: 0,
+					skipped: 0,
+					uploadedBytes,
+					failures: [],
+					paths: []
+				}
+			}
+		];
+	}
+
+	const buildSummary: ReporterResultEvent = {
+		kind: 'build-summary',
+		data: {
+			mode: 'streamed',
+			store: '/nix/store',
+			targetPaths: 3,
+			intermediatePaths: 1965,
+			queueDepth: 4,
+			uploadedPaths: 1968,
+			skipped: 0,
+			childExitStatus: 0,
+			unconfirmedPaths: []
+		}
+	};
+
+	async function summarise(failedTargets: readonly string[]): Promise<{
+		readonly summary: readonly unknown[];
+	}> {
+		const builtPaths = [
+			...(failedTargets.includes(libraryQueryInstallable)
+				? []
+				: [libraryBuiltPath]),
+			floatingBuiltPath,
+			floatingDevelopmentPath
+		];
+		const outputs = new Map<string, readonly string[]>([
+			[libraryInstallable, [libraryBuiltPath]],
+			[multiOutputInstallable, [floatingBuiltPath, floatingDevelopmentPath]]
+		]);
+		const runNixBuild = vi.fn((installables: readonly string[]) =>
+			Promise.resolve({
+				paths: [
+					...(installables.length === 1
+						? (outputs.get(installables[0] ?? '') ?? [])
+						: builtPaths)
+				],
+				status: 0,
+				copiedFrom: new Map()
+			})
+		);
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			async (binaryPath, arguments_, passedEnvironment) => {
+				if (arguments_[1] === 'push') {
+					return pushSummary(argumentValue(arguments_, '--root'));
+				}
+
+				if (arguments_[1] !== 'build-push') {
+					return cupboardStub({
+						plan: planCohortSuccess(measuredCapacity, [
+							libraryQueryInstallable,
+							multiOutputQueryInstallable
+						]),
+						reprobe: planReprobeSuccess(
+							[],
+							[libraryQueryInstallable, multiOutputQueryInstallable]
+						)
+					})(binaryPath, arguments_, passedEnvironment);
+				}
+
+				await writeFile(
+					argumentValue(arguments_, '--receipt-file') ?? '',
+					`${JSON.stringify({
+						version: 3,
+						paths: builtPaths,
+						subjects: [],
+						...(failedTargets.length > 0 && {
+							childExitStatus: 1,
+							terminalFailure: { kind: 'target-build', failedTargets }
+						})
+					})}\n`
+				);
+
+				if (failedTargets.length > 0) {
+					throw new CupboardReportedError(1, [buildSummary], undefined, true);
+				}
+
+				return [buildSummary];
+			}
+		);
+		const times = [1000, 755_000];
+		const { reporter, summary } = recordingGithubReporter();
+
+		await buildCohortAction(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson({
+					remote: false,
+					installables: [
+						'.#packages.x86_64-linux.app^out',
+						libraryInstallable,
+						multiOutputInstallable
+					],
+					queryInstallables: [
+						appQueryInstallable,
+						libraryQueryInstallable,
+						multiOutputQueryInstallable
+					]
+				}),
+				publish: 'outputs',
+				bestEffort: 'true',
+				ttl: '7d'
+			},
+			environment,
+			{
+				runCupboard: runCupboardMock,
+				runNixBuild,
+				reporter,
+				now: () => times.shift() ?? 755_000
+			}
+		);
+
+		return { summary };
+	}
+
+	it.each([
+		{
+			name: 'each target of a successful cohort',
+			failedTargets: [],
+			rows: [
+				String.raw`| .#packages.x86\_64-linux.app | github:owner/repo/main/app | Already served | 0 | 0 B | 7d after this run |`,
+				String.raw`| .#packages.x86\_64-linux.lib | github:owner/repo/main/lib | Built | 1 | 2.05 kB | 7d after this run |`,
+				String.raw`| .#packages.x86\_64-linux.floating | github:owner/repo/main/floating | Built | 2 | 1.5 MB | 7d after this run |`
+			]
+		},
+		{
+			name: 'a failed best-effort target with the targets that survived',
+			failedTargets: [libraryQueryInstallable],
+			rows: [
+				String.raw`| .#packages.x86\_64-linux.app | github:owner/repo/main/app | Already served | 0 | 0 B | 7d after this run |`,
+				String.raw`| .#packages.x86\_64-linux.lib | github:owner/repo/main/lib | Failed | - | - | Not set |`,
+				String.raw`| .#packages.x86\_64-linux.floating | github:owner/repo/main/floating | Built | 2 | 1.5 MB | 7d after this run |`
+			]
+		}
+	])('writes one row for $name', async ({ failedTargets, rows }) => {
+		expect(await summarise(failedTargets)).toStrictEqual({
+			summary: [{ path: jobSummaryFile, text: cohortSummaryText(rows) }]
+		});
+	});
 });

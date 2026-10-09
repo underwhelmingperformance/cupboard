@@ -843,6 +843,33 @@ describe('cohort planning and publication', () => {
 		]);
 	});
 
+	it('reports the settings that the configure job resolved', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+
+		expect({
+			jobs: stepsUsing(workflow, cupboardAction('publication-settings')).map(
+				({ job }) => job
+			),
+			inputs: inputsOf(workflow, cupboardAction('publication-settings'))
+		}).toStrictEqual({
+			jobs: ['configure'],
+			inputs: [
+				{
+					url: '${{ inputs.url }}',
+					cupboard: '${{ steps.resolve-cupboard.outputs.cupboard }}',
+					publish: '${{ steps.resolve.outputs.publish }}',
+					cache: '${{ steps.resolve.outputs.cache }}',
+					'cache-access-mode': '${{ steps.resolve.outputs.cache-access-mode }}',
+					'root-prefix': '${{ steps.resolve.outputs.root-prefix }}',
+					ttl: '${{ steps.resolve.outputs.ttl }}',
+					permanent: '${{ steps.resolve.outputs.permanent }}',
+					'reuse-view': '${{ steps.resolve.outputs.reuse-view }}',
+					'trusted-public-key': '${{ inputs.trusted-public-key }}'
+				}
+			]
+		});
+	});
+
 	it('plans once and fans out only over cohorts', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 
@@ -870,6 +897,7 @@ describe('cohort planning and publication', () => {
 		}).toStrictEqual({
 			cupboardActions: [
 				cupboardAction('resolve-cupboard'),
+				cupboardAction('publication-settings'),
 				cupboardAction('prepare'),
 				cupboardAction('setup'),
 				cupboardAction('plan'),

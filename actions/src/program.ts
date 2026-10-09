@@ -21,6 +21,7 @@ import { registerAttestStatusCommand } from './commands/attest-status.ts';
 import { registerBuildCommand } from './commands/build.ts';
 import { registerBuildCohortCommand } from './commands/build-cohort.ts';
 import { registerPlanCommand } from './commands/plan.ts';
+import { registerPublicationSettingsCommand } from './commands/publication-settings.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerResolveCupboardCommand } from './commands/resolve-cupboard.ts';
 import { registerSetupCommand } from './commands/setup.ts';
@@ -89,6 +90,7 @@ export function buildProgram(
 	registerBuildCommand(program, environment, signal);
 	registerBuildCohortCommand(program, environment, signal);
 	registerPlanCommand(program, environment, signal);
+	registerPublicationSettingsCommand(program, environment);
 
 	return program;
 }

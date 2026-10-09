@@ -627,6 +627,19 @@ jobs:
             echo "close-cache=${CLOSE_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
+      - uses: $/actions/publication-settings
+        with:
+          url: ${{ inputs.url }}
+          cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
+          publish: ${{ steps.resolve.outputs.publish }}
+          cache: ${{ steps.resolve.outputs.cache }}
+          cache-access-mode: ${{ steps.resolve.outputs.cache-access-mode }}
+          root-prefix: ${{ steps.resolve.outputs.root-prefix }}
+          ttl: ${{ steps.resolve.outputs.ttl }}
+          permanent: ${{ steps.resolve.outputs.permanent }}
+          reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+          trusted-public-key: ${{ inputs.trusted-public-key }}
+
   plan:
     name: Plan the publication
     needs: configure
@@ -795,18 +808,6 @@ jobs:
           build: ${{ inputs.build }}
           substituter: ${{ inputs.substituter }}
           publish: ${{ needs.configure.outputs.publish }}
-
-      - name: Summarise plan
-        env:
-          RETAINED: ${{ steps.plan.outputs.retained-count }}
-          PLAN_FILE: ${{ steps.plan.outputs.plan-file }}
-        run: |
-          {
-            echo '## Cupboard publication plan'
-            echo
-            echo "- Retained without building: ${RETAINED}"
-            echo "- Independent targets: $(jq '.targets | length' "${PLAN_FILE}")"
-          } >> "${GITHUB_STEP_SUMMARY}"
 
   cohort:
     needs: [configure, plan]

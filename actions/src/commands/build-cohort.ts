@@ -73,6 +73,15 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	addUploads,
+	type CohortRootSummary,
+	cohortSummaryResult,
+	outcomeOrder,
+	type TargetOutcome,
+	type UploadTally,
+	uploadTally
+} from '../cohort-summary.ts';
+import {
 	type CupboardRunDependencies,
 	runCupboard as defaultRunCupboard
 } from '../cupboard-run.ts';
@@ -126,6 +135,7 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import { rootRetention } from '../root-retention.ts';
 import { cacheUrlFor } from '../substituters.ts';
 
 import { buildActivities } from './build.ts';
@@ -773,6 +783,10 @@ export interface BuildCohortDependencies {
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly reporter?: Reporter;
 	readonly signal?: AbortSignal;
+	/**
+	Returns the current time in milliseconds, for the job's duration.
+	*/
+	readonly now?: () => number;
 }
 
 function cachedClosureSources(
@@ -830,6 +844,8 @@ export async function buildCohortAction(
 ): Promise<void> {
 	dependencies.signal?.throwIfAborted();
 
+	const now = dependencies.now ?? (() => Date.now());
+	const startedAt = now();
 	const inputs = resolveBuildCohortInputs(options, environment);
 	if (inputs.publish === 'built' && inputs.store !== '') {
 		throw new BuiltPublicationObservationUnsupportedError();
@@ -894,7 +910,8 @@ export async function buildCohortAction(
 		});
 	const materialiseClosure =
 		dependencies.materialiseCachedClosure ?? materialiseCachedClosure;
-	const reporter = dependencies.reporter ?? createGithubReporter();
+	const reporter =
+		dependencies.reporter ?? createGithubReporter({ environment });
 	const cupboardRunDependencies =
 		dependencies.signal === undefined
 			? dependencies.cupboardRunDependencies
@@ -1000,10 +1017,11 @@ export async function buildCohortAction(
 					readonly receipt: BuildReceiptV3;
 			  }
 			| undefined;
+		let buildUploads: UploadTally | undefined;
 
 		if (isStreamed) {
 			try {
-				await runBuildPushCohort(
+				buildUploads = await runBuildPushCohort(
 					inputs,
 					buildInstallables,
 					provenanceRebuilds,
@@ -1021,6 +1039,7 @@ export async function buildCohortAction(
 					error,
 					inputs.receiptFile
 				);
+				buildUploads = uploadTally(streamedFailure.error.results);
 
 				const terminalFailure = streamedFailure.receipt.terminalFailure;
 
@@ -1050,7 +1069,9 @@ export async function buildCohortAction(
 			environment,
 			runCupboard,
 			cupboardRunDependencies,
-			reporter
+			reporter,
+			duration: () => now() - startedAt,
+			buildUploads
 		};
 
 		if (execution.kind === 'remote') {
@@ -1663,6 +1684,8 @@ interface SettleCohortBuildContext {
 	readonly runCupboard: typeof defaultRunCupboard;
 	readonly cupboardRunDependencies: CupboardRunDependencies | undefined;
 	readonly reporter: Reporter;
+	readonly duration: () => number;
+	readonly buildUploads: UploadTally | undefined;
 }
 
 // Complete every operation that reads realised paths before returning. Remote
@@ -1970,15 +1993,18 @@ async function settleCohortBuild(
 	const isReconciled =
 		inputs.push && inputs.store !== '' && selectedPublicationPaths.length > 0;
 
+	let buildUploads = context.buildUploads;
+
 	if (isReconciled) {
 		const publicationPathsFile = `${inputs.targetPathsFile}.publication`;
 		await writeFile(publicationPathsFile, linesOf(selectedPublicationPaths));
-		await runCupboard(
+		const results = await runCupboard(
 			inputs.cupboardPath,
 			cohortReceiptPushArguments(inputs, publicationPathsFile, copiedFromFile),
 			environment,
 			cupboardRunDependencies
 		);
+		buildUploads = addUploads(buildUploads, uploadTally(results));
 	}
 
 	if (terminalFailure !== undefined) {
@@ -1989,9 +2015,13 @@ async function settleCohortBuild(
 		);
 	}
 
-	let publicationReceipts: readonly string[] = [];
+	let publication: CohortPublication = {
+		receiptFiles: [],
+		rootUploads: new Map(),
+		updatedRoots: new Set()
+	};
 	if (inputs.push) {
-		publicationReceipts = await publishCohort({
+		publication = await publishCohort({
 			inputs,
 			collectReceipts:
 				(partition?.closureTargets.length ?? 0) > 0 ||
@@ -2014,14 +2044,14 @@ async function settleCohortBuild(
 	await mergeCohortReceipts(
 		inputs.receiptFile,
 		isStreamed || isReconciled || terminalFailure !== undefined,
-		publicationReceipts
+		publication.receiptFiles
 	);
 
 	const receiptFile =
 		isStreamed ||
 		isReconciled ||
 		terminalFailure !== undefined ||
-		publicationReceipts.length > 0
+		publication.receiptFiles.length > 0
 			? inputs.receiptFile
 			: '';
 
@@ -2044,6 +2074,88 @@ async function settleCohortBuild(
 		'out-link-directory',
 		inputs.store === '' ? inputs.outLinkDirectory : ''
 	);
+
+	const uploadsBeforeRoots = addUploads(buildUploads, publication.otherUploads);
+	const roots = cohortRootSummaries({
+		inputs,
+		members,
+		owners: targetPathOwners(members, { resultBuilds, localBuilds }),
+		paths: {
+			attachOnly: new Set(partition?.attachOnly),
+			reference: new Set(referencePaths),
+			leftUpstream: new Set(leftUpstream),
+			known: [...targetPaths, ...referencePaths, ...leftUpstream]
+		},
+		incompleteRoots,
+		publication
+	});
+
+	context.reporter.result(
+		cohortSummaryResult({
+			durationMs: context.duration(),
+			...(uploadsBeforeRoots !== undefined && {
+				buildUploads: uploadsBeforeRoots
+			}),
+			roots
+		})
+	);
+}
+
+interface CohortRootSummaryInputs {
+	readonly inputs: BuildCohortInputs;
+	readonly members: readonly CohortMember[];
+	readonly owners: ReadonlyMap<string, ReadonlySet<string>>;
+	readonly paths: {
+		readonly attachOnly: ReadonlySet<string>;
+		readonly reference: ReadonlySet<string>;
+		readonly leftUpstream: ReadonlySet<string>;
+		readonly known: readonly string[];
+	};
+	readonly incompleteRoots: ReadonlySet<string>;
+	readonly publication: CohortPublication;
+}
+
+function cohortRootSummaries(
+	options: CohortRootSummaryInputs
+): readonly CohortRootSummary[] {
+	const { inputs, paths, publication } = options;
+	const retention = rootRetention(inputs.ttl, inputs.permanent);
+	const outcomeOf = (storePath: string): TargetOutcome => {
+		if (paths.leftUpstream.has(storePath)) {
+			return 'left-upstream';
+		}
+
+		if (paths.reference.has(storePath)) {
+			return 'reused';
+		}
+
+		return paths.attachOnly.has(storePath) ? 'already-served' : 'built';
+	};
+	const roots = [...new Set(options.members.map((member) => member.root))];
+
+	return roots.map((root) => {
+		const ownedOutcomes = new Set(
+			paths.known
+				.filter((storePath) => options.owners.get(storePath)?.has(root))
+				.map((storePath) => outcomeOf(storePath))
+		);
+		const outcomes: readonly TargetOutcome[] = options.incompleteRoots.has(root)
+			? ['failed']
+			: ownedOutcomes.size === 0
+				? ['not-built']
+				: outcomeOrder.filter((outcome) => ownedOutcomes.has(outcome));
+		const uploads = publication.rootUploads.get(root);
+
+		return {
+			attrs: options.members
+				.filter((member) => member.root === root)
+				.map((member) => member.attr),
+			root,
+			outcomes,
+			...(uploads !== undefined && { uploads }),
+			...(publication.updatedRoots.has(root) && { retention })
+		};
+	});
 }
 
 /**
@@ -2163,7 +2275,7 @@ async function runBuildPushCohort(
 	runCupboard: typeof defaultRunCupboard,
 	cupboardRunDependencies: CupboardRunDependencies | undefined,
 	dependencyBuilds: readonly RemoteDependencyBuild[] = []
-): Promise<void> {
+): Promise<UploadTally | undefined> {
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const cohortsFile = path.join(
 		runnerTemporary,
@@ -2186,11 +2298,13 @@ async function runBuildPushCohort(
 	);
 	await rm(inputs.receiptFile, { force: true });
 
-	await runCupboard(
-		inputs.cupboardPath,
-		cohortBuildPushArguments(inputs, cohortsFile),
-		environment,
-		cupboardRunDependencies
+	return uploadTally(
+		await runCupboard(
+			inputs.cupboardPath,
+			cohortBuildPushArguments(inputs, cohortsFile),
+			environment,
+			cupboardRunDependencies
+		)
 	);
 }
 
@@ -2278,6 +2392,45 @@ export function rootGroups(
 		return [];
 	}
 
+	const rootsByPath = targetPathOwners(members, grouping);
+
+	for (const targetPath of targetPaths) {
+		if (!rootsByPath.has(targetPath)) {
+			throw new CohortTargetOwnerMissingError(targetPath);
+		}
+	}
+
+	const referencePaths = new Set(grouping.referencePaths);
+	const leftUpstreamRoots = new Set(
+		(grouping.leftUpstreamPaths ?? []).flatMap((storePath) => [
+			...(rootsByPath.get(storePath) ?? [])
+		])
+	);
+
+	return uniqueRoots
+		.map((root) => ({
+			root,
+			paths: targetPaths.filter((targetPath) =>
+				rootsByPath.get(targetPath)?.has(root)
+			),
+			referencePaths: targetPaths.filter(
+				(targetPath) =>
+					referencePaths.has(targetPath) &&
+					rootsByPath.get(targetPath)?.has(root) === true
+			),
+			complete: grouping.incompleteRoots?.has(root) !== true
+		}))
+		.filter(
+			(group) =>
+				group.paths.length > 0 ||
+				(group.complete && leftUpstreamRoots.has(group.root))
+		);
+}
+
+function targetPathOwners(
+	members: readonly CohortMember[],
+	grouping: Pick<CohortRootGrouping, 'resultBuilds' | 'localBuilds'>
+): ReadonlyMap<string, ReadonlySet<string>> {
 	const rootsByPath = new Map<string, Set<string>>();
 	const addOwner = (targetPath: string, root: string): void => {
 		const owners = rootsByPath.get(targetPath) ?? new Set<string>();
@@ -2337,37 +2490,7 @@ export function rootGroups(
 		}
 	}
 
-	for (const targetPath of targetPaths) {
-		if (!rootsByPath.has(targetPath)) {
-			throw new CohortTargetOwnerMissingError(targetPath);
-		}
-	}
-
-	const referencePaths = new Set(grouping.referencePaths);
-	const leftUpstreamRoots = new Set(
-		(grouping.leftUpstreamPaths ?? []).flatMap((storePath) => [
-			...(rootsByPath.get(storePath) ?? [])
-		])
-	);
-
-	return uniqueRoots
-		.map((root) => ({
-			root,
-			paths: targetPaths.filter((targetPath) =>
-				rootsByPath.get(targetPath)?.has(root)
-			),
-			referencePaths: targetPaths.filter(
-				(targetPath) =>
-					referencePaths.has(targetPath) &&
-					rootsByPath.get(targetPath)?.has(root) === true
-			),
-			complete: grouping.incompleteRoots?.has(root) !== true
-		}))
-		.filter(
-			(group) =>
-				group.paths.length > 0 ||
-				(group.complete && leftUpstreamRoots.has(group.root))
-		);
+	return rootsByPath;
 }
 
 interface CohortPushExtras {
@@ -2567,9 +2690,16 @@ function manifestSources(
 	return new Map(entries.map((entry) => [entry.storePath, entry.source]));
 }
 
+interface CohortPublication {
+	readonly receiptFiles: readonly string[];
+	readonly rootUploads: ReadonlyMap<string, UploadTally>;
+	readonly updatedRoots: ReadonlySet<string>;
+	readonly otherUploads?: UploadTally;
+}
+
 async function publishCohort(
 	options: PublishCohortOptions
-): Promise<readonly string[]> {
+): Promise<CohortPublication> {
 	const {
 		inputs,
 		members,
@@ -2583,25 +2713,6 @@ async function publishCohort(
 		leftUpstreamPaths,
 		incompleteRoots
 	} = options;
-	// A failed push of reference paths reports each path that needed an upload
-	// before the failure ends the cohort. `sources` maps each reference path to
-	// its source URL.
-	const runReferencePush = async (
-		arguments_: readonly string[],
-		sources: ReadonlyMap<string, string>
-	): Promise<void> => {
-		try {
-			await runCupboard(
-				inputs.cupboardPath,
-				arguments_,
-				environment,
-				cupboardRunDependencies
-			);
-		} catch (error) {
-			reportReferenceUploads(reporter, error, members, sources);
-			throw error;
-		}
-	};
 	const allTargetPaths = [...paths.targetPaths, ...paths.referencePaths];
 	const groups = rootGroups(members, inputs.cohort.roots, allTargetPaths, {
 		resultBuilds,
@@ -2632,6 +2743,45 @@ async function publishCohort(
 	};
 	const hasIntermediates = paths.intermediatePaths.length > 0;
 	const receiptFiles: string[] = [];
+	const rootUploads = new Map<string, UploadTally>();
+	const updatedRoots = new Set<string>();
+	let otherUploads: UploadTally | undefined;
+	const push = async (
+		group: CohortRootGroup | undefined,
+		arguments_: readonly string[],
+		sources: ReadonlyMap<string, string>
+	): Promise<void> => {
+		let results: readonly ReporterResultEvent[];
+
+		try {
+			results = await runCupboard(
+				inputs.cupboardPath,
+				arguments_,
+				environment,
+				cupboardRunDependencies
+			);
+		} catch (error) {
+			reportReferenceUploads(reporter, error, members, sources);
+			throw error;
+		}
+
+		const uploads = uploadTally(results);
+
+		if (group === undefined) {
+			otherUploads = addUploads(otherUploads, uploads);
+			return;
+		}
+
+		const recorded = addUploads(rootUploads.get(group.root), uploads);
+
+		if (recorded !== undefined) {
+			rootUploads.set(group.root, recorded);
+		}
+
+		if (group.complete) {
+			updatedRoots.add(group.root);
+		}
+	};
 	const receiptForPush = (
 		index: number,
 		kind: string,
@@ -2683,7 +2833,8 @@ async function publishCohort(
 		await writeReferenceManifest(referenceManifestFile, referenceIntermediates);
 		const receiptFile = `${inputs.receiptFile}.closure`;
 		receiptFiles.push(receiptFile);
-		await runReferencePush(
+		await push(
+			undefined,
 			cohortPushArguments(
 				inputs,
 				{ root: '', paths: [], referencePaths: [], complete: false },
@@ -2715,7 +2866,8 @@ async function publishCohort(
 			await writeReferenceManifest(referenceManifestFile, cachedTargets);
 			const receiptFile = `${inputs.receiptFile}.${String(index)}.manifest`;
 			receiptFiles.push(receiptFile);
-			await runReferencePush(
+			await push(
+				group,
 				cohortPushArguments(
 					inputs,
 					{
@@ -2770,7 +2922,8 @@ async function publishCohort(
 				intermediatePathsFile
 			);
 			const targetExtras = await targetPathsFile(index, localPaths);
-			await runReferencePush(
+			await push(
+				group,
 				cohortPushArguments(
 					inputs,
 					{ ...group, paths: localPaths },
@@ -2794,7 +2947,8 @@ async function publishCohort(
 
 			const reusePathsFile = `${inputs.referencePathsFile}.reuse.${String(index)}`;
 			await writeFile(reusePathsFile, linesOf(group.referencePaths));
-			await runReferencePush(
+			await push(
+				{ ...group, complete: false },
 				cohortPushArguments(
 					inputs,
 					{ ...group, paths: [], complete: false },
@@ -2828,7 +2982,8 @@ async function publishCohort(
 		const intermediatePathsFile =
 			index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '';
 		const targetExtras = await targetPathsFile(index, localPaths);
-		await runReferencePush(
+		await push(
+			group,
 			cohortPushArguments(
 				inputs,
 				{
@@ -2853,7 +3008,12 @@ async function publishCohort(
 		);
 	}
 
-	return receiptFiles;
+	return {
+		receiptFiles,
+		rootUploads,
+		updatedRoots,
+		...(otherUploads !== undefined && { otherUploads })
+	};
 }
 
 function partitionCounts(partition: PartitionData): {
