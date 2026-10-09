@@ -20,6 +20,7 @@ import {
 import { receiptSubjects as observedReceiptSubjects } from '@cupboard/nix/build-observation';
 import { parseTenantCacheUrl } from '@cupboard/nix-store/cache-url';
 import { derivationPathOf } from '@cupboard/nix-store/derivation';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import {
 	autoBuildStore,
@@ -35,8 +36,6 @@ import { withCleanups } from '@cupboard/shared/cleanup';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
-import { republishedSubject } from '../../../packages/cli/src/push/origin.ts';
-import { parseReferenceManifest } from '../../../packages/cli/src/push/reference-manifest.ts';
 import { HookFailureDetector } from '../build-paths/hook-failure.ts';
 import {
 	createJobRoots,
@@ -1231,11 +1230,20 @@ export async function buildAction(
 				],
 				subjects: [
 					...receipt.subjects,
-					...parseReferenceManifest(
-						JSON.stringify({ version: 1, paths: references })
-					).map((reference) =>
-						republishedSubject(reference.metadata, reference.source.href)
-					)
+					...references.map((reference) => {
+						const narinfo = NarInfo.parse(reference.narinfo);
+						return {
+							origin: 'republished',
+							storePath: narinfo.storePath.value,
+							narHash: narinfo.narHash.digestHex(),
+							...(narinfo.deriver !== undefined && {
+								derivation: `${narinfo.storePath.storeDirectory}/${narinfo.deriver}`
+							}),
+							signatures: [...narinfo.sigs],
+							...(narinfo.ca !== undefined && { ca: narinfo.ca }),
+							metadataSource: reference.source
+						};
+					})
 				]
 			});
 		}
