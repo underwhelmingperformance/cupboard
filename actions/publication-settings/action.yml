@@ -1,0 +1,112 @@
+name: Report cupboard publication settings
+description:
+  Prints the publication settings that the flake publish workflow resolved, and
+  adds them to the job summary with the nix.conf lines for reading the
+  destination cache.
+inputs:
+  url:
+    description: Tenant URL to publish to.
+    required: true
+  cupboard:
+    description:
+      The cupboard output of actions/resolve-cupboard, which identifies the
+      release to install or the commit to build cupboard from.
+    required: true
+  publish:
+    description: The resolved publication scope.
+    required: false
+  cache:
+    description:
+      Named cache to publish to. Leave empty for the tenant's default cache.
+    required: false
+  cache-access-mode:
+    description:
+      Required access for the cache, public or private. Leave empty when the run
+      does not check it.
+    required: false
+  root-prefix:
+    description: Start of each target's root name.
+    required: true
+  ttl:
+    description: How long each target's root lasts after a run sets it.
+    required: false
+  permanent:
+    description: Whether each target's root is permanent.
+    required: false
+    default: 'false'
+  reuse-view:
+    description: Reuse view that the run reads through.
+    required: false
+  trusted-public-key:
+    description:
+      Nix public key of the tenant's caches. If empty, the action downloads the
+      tenant's current key from /pubkey.
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned toolchain
+      id: toolchain
+      shell: bash
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        node_version_file="$GITHUB_ACTION_PATH/../../.node-version"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        if [ -z "$version" ]; then
+          echo "::error::package.json declares no pnpm packageManager pin"
+          exit 1
+        fi
+        if [ ! -r "$node_version_file" ]; then
+          echo "::error::.node-version is not readable"
+          exit 1
+        fi
+        node_version="$(tr -d '\r\n' < "$node_version_file")"
+        if [ -z "$node_version" ]; then
+          echo "::error::.node-version declares no Node version"
+          exit 1
+        fi
+        echo "pnpm-version=$version" | tee -a "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" | tee -a "$GITHUB_OUTPUT"
+
+    - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      with:
+        version: ${{ steps.toolchain.outputs.pnpm-version }}
+        package_json_file: ${{ github.action_path }}/../../package.json
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ steps.toolchain.outputs.node-version }}
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../..
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+
+    - name: Report the publication settings
+      shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        CUPBOARD: ${{ inputs.cupboard }}
+        PUBLISH: ${{ inputs.publish }}
+        CACHE: ${{ inputs.cache }}
+        CACHE_ACCESS_MODE: ${{ inputs.cache-access-mode }}
+        ROOT_PREFIX: ${{ inputs.root-prefix }}
+        TTL: ${{ inputs.ttl }}
+        PERMANENT: ${{ inputs.permanent }}
+        REUSE_VIEW: ${{ inputs.reuse-view }}
+        TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
+      run: |
+        args=(publication-settings
+          --url "$URL"
+          --cupboard "$CUPBOARD"
+          --publish "$PUBLISH"
+          --cache "$CACHE"
+          --cache-access-mode "$CACHE_ACCESS_MODE"
+          --root-prefix "$ROOT_PREFIX"
+          --ttl "$TTL"
+          --permanent "$PERMANENT"
+          --reuse-view "$REUSE_VIEW"
+          --trusted-public-key "$TRUSTED_PUBLIC_KEY")
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

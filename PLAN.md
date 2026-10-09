@@ -6958,7 +6958,7 @@ Specific faults seen on a dotfiles pull-request run:
        group, and add job-summary output that writes results as markdown tables
        to `GITHUB_STEP_SUMMARY`. Terminal results still appear after the spinner
        stops, and JSON result events still follow the phase event.
-2. [ ] Write the job summaries: the configure job's settings and `nix.conf`
+2. [x] Write the job summaries: the configure job's settings and `nix.conf`
        lines, the plan job's cohorts and targets with each decision, and one row
        per target in each cohort job. A cohort row gives the attribute, root,
        outcome, paths and bytes uploaded, duration, root expiry and attestation

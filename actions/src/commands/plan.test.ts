@@ -38,6 +38,10 @@ import {
 	publishTargetsSchema,
 	type TargetEvaluation
 } from '../publish-plan.ts';
+import {
+	jobSummaryFile,
+	recordingGithubReporter
+} from '../reporter-testing.ts';
 
 import {
 	cohortPreFilter,
@@ -2121,6 +2125,127 @@ describe('packingMeasurer', () => {
 		expect({ measurements, warningCount: warnings.length }).toStrictEqual({
 			measurements: new Map(),
 			warningCount: 1
+		});
+	});
+});
+
+describe('plan job summary', () => {
+	const hashes: Readonly<Record<string, string>> = {
+		app: '1',
+		appb: '2',
+		tool: '3',
+		manual: '4'
+	};
+	const derivationPath = (name: string): StorePathString =>
+		storePath(`/nix/store/${(hashes[name] ?? '0').repeat(32)}-${name}.drv`);
+	const outputPath = (name: string): StorePathString =>
+		storePath(`/nix/store/${(hashes[name] ?? '0').repeat(31)}9-${name}`);
+	const planTarget = (
+		name: string,
+		overrides: Record<string, unknown> = {}
+	): Record<string, unknown> => ({
+		attr: `.#packages.x86_64-linux.${name}`,
+		rootDrvPath: derivationPath(name),
+		system: 'x86_64-linux',
+		os: 'ubuntu-latest',
+		remote: false,
+		rootSuffix: `x86_64-linux/${name}`,
+		...overrides
+	});
+	const derivation = (name: string) => ({
+		env: { out: outputPath(name) },
+		inputs: { drvs: {} },
+		outputs: { out: { path: outputPath(name) } }
+	});
+	const matrixEntrySchema = z.object({ name: z.string().optional() });
+	const matrixSchema = z.object({ include: z.array(matrixEntrySchema) });
+
+	it('lists each cohort job, its targets and what the plan decided for each', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const targets = [
+			planTarget('app', { cohort: 'apps' }),
+			planTarget('appb', { cohort: 'apps' }),
+			planTarget('tool', {
+				attr: '.#packages.aarch64-linux.tool',
+				system: 'aarch64-linux',
+				os: 'ubuntu-24.04-arm',
+				remote: true,
+				bestEffort: true,
+				rootSuffix: 'aarch64-linux/tool'
+			}),
+			planTarget('manual')
+		];
+		const derivations = Object.fromEntries(
+			['app', 'appb', 'tool', 'manual'].map((name) => [
+				derivationPath(name),
+				derivation(name)
+			])
+		);
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({ stdout: JSON.stringify({ derivations }) });
+		const appRoot = 'github:owner/repo/main/x86_64-linux/app';
+		const manualRoot = 'github:owner/repo/main/x86_64-linux/manual';
+		const runner = preFilterRunner({
+			targetsByRoot: new Map([
+				[appRoot, [outputPath('app')]],
+				[manualRoot, [outputPath('manual')]]
+			]),
+			ensureRetainedRoots: new Set([appRoot, manualRoot])
+		});
+		const { reporter, summary } = recordingGithubReporter();
+
+		await planAction(
+			{
+				...baseOptions,
+				optimise: 'true',
+				targets: JSON.stringify(targets),
+				builders:
+					'ssh://ci@eu.nixbuild.net aarch64-linux - 8 1 big-parallel; ssh://ci@x86.example.test x86_64-linux'
+			},
+			{
+				GITHUB_RUN_ID: '12345',
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			},
+			reporter,
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: alwaysAvailableFetcher,
+				runner
+			}
+		);
+
+		const outputs = await readFile(path.join(directory, 'output'), 'utf8');
+		const matrixLine = outputs
+			.split('\n')
+			.find((line) => line.startsWith('cohort-matrix='));
+		const jobNames = matrixSchema
+			.parse(JSON.parse(matrixLine?.slice('cohort-matrix='.length) ?? '{}'))
+			.include.map((entry) => entry.name);
+
+		expect({ jobNames, summary }).toStrictEqual({
+			jobNames: [
+				'aarch64-linux/tool on eu.nixbuild.net',
+				'x86_64-linux on ubuntu-latest (2 targets)'
+			],
+			summary: [
+				{
+					path: jobSummaryFile,
+					text: [
+						'### Publication plan',
+						'',
+						'| Job | Target | System | Runner | Builder | Best effort | Decision |',
+						'| --- | --- | --- | --- | --- | --- | --- |',
+						'| aarch64-linux/tool on eu.nixbuild.net | .#packages.aarch64-linux.tool | aarch64-linux | ubuntu-24.04-arm | eu.nixbuild.net | yes | Checked by the cohort |',
+						String.raw`| x86\_64-linux on ubuntu-latest (2 targets) | .#packages.x86\_64-linux.app | x86\_64-linux | ubuntu-latest | local | no | Retained without building |`,
+						String.raw`| x86\_64-linux on ubuntu-latest (2 targets) | .#packages.x86\_64-linux.appb | x86\_64-linux | ubuntu-latest | local | no | Checked by the cohort |`,
+						String.raw`| None | .#packages.x86\_64-linux.manual | x86\_64-linux | ubuntu-latest | local | no | Retained without building |`,
+						'',
+						''
+					].join('\n')
+				}
+			]
 		});
 	});
 });

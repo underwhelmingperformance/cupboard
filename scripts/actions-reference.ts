@@ -41,7 +41,8 @@ const internalActions = [
 	'build-cohort',
 	'attest-status',
 	'prepare',
-	'resolve-cupboard'
+	'resolve-cupboard',
+	'publication-settings'
 ] as const;
 
 const scalarSchema = z.union([z.string(), z.boolean(), z.number()]);

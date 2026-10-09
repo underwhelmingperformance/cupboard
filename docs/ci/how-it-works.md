@@ -196,7 +196,13 @@ they share the same run root as the original attempt.
 
 ## Where to look when something goes wrong
 
-- The plan job's summary shows the number of targets.
+- The run's summary page has a section for each job. The configure job lists the
+  publication settings and the `nix.conf` lines for reading the destination
+  cache. The plan job lists every target with its cohort job, runner and
+  builder, and says whether the plan retained the target without building it.
+  Each cohort job lists its targets with their outcome, the number of paths and
+  bytes uploaded by the pushes that set their roots, and when their roots
+  expire.
 - Each cohort job's name gives its system, where it builds and its number of
   targets, such as `x86_64-linux on ubuntu-latest (2 targets)`. A cohort with
   one target gives the target's root suffix in place of the system and the
