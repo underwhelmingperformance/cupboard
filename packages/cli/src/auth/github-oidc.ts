@@ -2,6 +2,7 @@ import { env } from 'node:process';
 
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { subjectBindingProblems } from '@cupboard/protocol/subject-binding';
+import { genericExitCode } from '@cupboard/shared/errors';
 import {
 	readResponseJson,
 	readResponseText,
@@ -12,7 +13,12 @@ import { z } from 'zod';
 
 import { isAbortError, throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
-import { authExitCode, CliError, transientExitCode } from '../errors.ts';
+import {
+	authExitCode,
+	CliError,
+	isTransientHttpStatus,
+	transientExitCode
+} from '../errors.ts';
 
 import { isBindingRefusal } from './bound-sign-in.ts';
 
@@ -64,9 +70,13 @@ export class GithubOidcRequestError extends CliError {
 	}
 
 	override get exitCode(): number {
-		return this.status === unauthorisedStatus || this.status === forbiddenStatus
-			? authExitCode
-			: transientExitCode;
+		if (this.status === unauthorisedStatus || this.status === forbiddenStatus) {
+			return authExitCode;
+		}
+
+		return isTransientHttpStatus(this.status)
+			? transientExitCode
+			: genericExitCode;
 	}
 }
 
@@ -86,7 +96,7 @@ export class GithubOidcResponseError extends CliError {
 	}
 
 	override get exitCode(): number {
-		return transientExitCode;
+		return this.kind === 'unreadable' ? transientExitCode : genericExitCode;
 	}
 }
 

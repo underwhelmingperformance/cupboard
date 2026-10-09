@@ -135,6 +135,49 @@ describe('fetchGithubOidcToken', () => {
 		}
 	});
 
+	it.each([
+		{ status: StatusCodes.MOVED_PERMANENTLY, exitCode: 1 },
+		{ status: StatusCodes.MOVED_TEMPORARILY, exitCode: 1 },
+		{ status: StatusCodes.SEE_OTHER, exitCode: 1 },
+		{ status: StatusCodes.TEMPORARY_REDIRECT, exitCode: 1 },
+		{ status: StatusCodes.PERMANENT_REDIRECT, exitCode: 1 },
+		{ status: StatusCodes.BAD_REQUEST, exitCode: 1 },
+		{ status: StatusCodes.NOT_FOUND, exitCode: 1 },
+		{ status: StatusCodes.UNPROCESSABLE_ENTITY, exitCode: 1 },
+		{ status: StatusCodes.REQUEST_TIMEOUT, exitCode: 75 }
+	])(
+		'returns exit code $exitCode for a $status response without retrying',
+		async ({ status, exitCode }) => {
+			let attempts = 0;
+			const failure = await failureOf(
+				fetchGithubOidcToken({
+					audience: 'aud',
+					environment,
+					fetcher: () => {
+						attempts += 1;
+
+						return Promise.resolve(new Response(undefined, { status }));
+					}
+				})
+			);
+
+			expect({
+				name: failure instanceof Error ? failure.name : undefined,
+				status:
+					failure instanceof GithubOidcRequestError
+						? failure.status
+						: undefined,
+				exitCode: failure instanceof CodedError ? failure.exitCode : undefined,
+				attempts
+			}).toStrictEqual({
+				name: GithubOidcRequestError.name,
+				status,
+				exitCode,
+				attempts: 1
+			});
+		}
+	);
+
 	it('requests a token for the audience and returns its value', async () => {
 		const requests: { url: string; authorization: string | undefined }[] = [];
 		const fetcher: typeof fetch = (input, init) => {
@@ -234,7 +277,7 @@ describe('fetchGithubOidcToken', () => {
 			error: {
 				name: 'GithubOidcResponseError',
 				kind: 'missing-token',
-				exitCode: 75
+				exitCode: 1
 			}
 		});
 	});
@@ -266,7 +309,7 @@ describe('fetchGithubOidcToken', () => {
 		})();
 
 		expect(outcome).toStrictEqual({
-			error: { name: 'GithubOidcResponseError', kind: 'non-json', exitCode: 75 }
+			error: { name: 'GithubOidcResponseError', kind: 'non-json', exitCode: 1 }
 		});
 	});
 
@@ -328,12 +371,20 @@ describe('fetchGithubOidcToken', () => {
 });
 
 it.each(
-	[200, 401, 503].flatMap((status) =>
-		['declared', 'received'].map((sizeSource) => ({ status, sizeSource }))
+	[
+		{ status: StatusCodes.OK, exitCode: 1 },
+		{ status: StatusCodes.UNAUTHORIZED, exitCode: 77 },
+		{ status: StatusCodes.SERVICE_UNAVAILABLE, exitCode: 75 }
+	].flatMap(({ status, exitCode }) =>
+		['declared', 'received'].map((sizeSource) => ({
+			status,
+			exitCode,
+			sizeSource
+		}))
 	)
 )(
 	'classifies an oversized $status $sizeSource OIDC body',
-	async ({ status, sizeSource }) => {
+	async ({ status, exitCode, sizeSource }) => {
 		const failure = await failureOf(
 			fetchGithubOidcToken({
 				audience: 'aud',
@@ -361,8 +412,10 @@ it.each(
 				failure.cause.name === 'RemoteBodyTooLargeError'
 		}).toStrictEqual({
 			name:
-				status === 200 ? 'GithubOidcResponseError' : 'GithubOidcRequestError',
-			exitCode: status === 401 ? 77 : 75,
+				status === StatusCodes.OK
+					? 'GithubOidcResponseError'
+					: 'GithubOidcRequestError',
+			exitCode,
 			hasSizeCause: true
 		});
 	}

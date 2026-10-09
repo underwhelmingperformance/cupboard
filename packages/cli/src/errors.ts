@@ -66,6 +66,20 @@ const tooManyRequestsStatusCode: number = StatusCodes.TOO_MANY_REQUESTS;
 const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
 
+/**
+ * Classifies an HTTP status as transient for the CLI exit code: a request
+ * timeout, a rate limit or a server error. The transport retries a narrower
+ * set of statuses, so do not use this function to decide whether to retry a
+ * request.
+ */
+export function isTransientHttpStatus(status: number): boolean {
+	return (
+		status === requestTimeoutStatusCode ||
+		status === tooManyRequestsStatusCode ||
+		status >= internalServerErrorStatusCode
+	);
+}
+
 export abstract class CliError extends CodedError {
 	readonly humanMessage?: string;
 }
@@ -857,11 +871,7 @@ export class CupboardHttpError extends CliError {
 			return genericExitCode;
 		}
 
-		if (
-			this.status === requestTimeoutStatusCode ||
-			this.status === tooManyRequestsStatusCode ||
-			this.status >= internalServerErrorStatusCode
-		) {
+		if (isTransientHttpStatus(this.status)) {
 			return transientExitCode;
 		}
 
