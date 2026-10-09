@@ -6885,7 +6885,7 @@ negotiates again.
 3. [x] Check authority again at commit.
 4. [x] Report a reference publication that receives `upload` for each target in
        `build-cohort`, through the existing `ReferenceUploadRequiredError`.
-5. [ ] Add an operator report that lists NARs referenced by both a public and a
+5. [x] Add an operator report that lists NARs referenced by both a public and a
        private cache in a tenant, for review. The report removes nothing.
 6. [x] Update `docs/security.md` and the pushing and reuse pages, and add an
        upgrade note: some pushes that skipped the upload now upload.

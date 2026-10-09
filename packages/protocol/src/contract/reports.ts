@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { checkReportSchema } from '../reports.ts';
+import { checkReportSchema, sharedAccessReportSchema } from '../reports.ts';
 
 import { baseProcedure } from './base.ts';
 
@@ -21,5 +21,14 @@ export const checkContract = {
 				cursorCache: z.coerce.number().int().nonnegative().default(0)
 			})
 		)
-		.output(checkReportSchema)
+		.output(checkReportSchema),
+	sharedAccess: baseProcedure
+		.meta({ requires: 'check:run', replaySafety: 'replay-safe' })
+		.route({ method: 'GET', path: '/check/shared-access' })
+		.input(
+			z.strictObject({
+				cursor: sharedAccessReportSchema.shape.cursor.default('')
+			})
+		)
+		.output(sharedAccessReportSchema)
 };

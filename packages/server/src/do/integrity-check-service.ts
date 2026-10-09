@@ -1,13 +1,22 @@
-import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import {
+	type NixSha256HashString,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import {
 	type CheckDiscrepancyInput,
-	type CheckReportInput
+	type CheckReportInput,
+	type SharedAccessReport
 } from '@cupboard/protocol/reports';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { asc, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
 import { verifyStoredBlob } from '../blob/upload-verification.ts';
+import {
+	authorisedByCacheGeneration,
+	referencedCacheLifecycle
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -23,7 +32,7 @@ import {
 
 import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
-import { jsonValueLists } from './json-list.ts';
+import { jsonValueList, jsonValueLists } from './json-list.ts';
 import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 /**
@@ -149,12 +158,44 @@ export class IntegrityCheckService {
 		);
 	}
 
+	async sharedAccess(
+		cursor: SharedAccessReport['cursor']
+	): Promise<SharedAccessReport> {
+		const tenant = this.context.requireTenant();
+		const owned = await this.context.d1
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					cursor === '' ? undefined : gt(d1Schema.tenantBlob.narHash, cursor)
+				)
+			)
+			.orderBy(asc(d1Schema.tenantBlob.narHash))
+			.limit(this.pageSize + 1);
+		const page = owned.slice(0, this.pageSize);
+		const nextCursor =
+			owned.length > this.pageSize ? (page.at(-1)?.narHash ?? '') : '';
+		if (page.length === 0) {
+			return { narHashes: [], cursor: nextCursor };
+		}
+
+		const shared = await sharedAccessReferenceSelect(
+			this.context.d1,
+			tenant,
+			page.map(({ narHash }) => narHash)
+		);
+		return {
+			narHashes: shared.map(({ narHash }) => narHash),
+			cursor: nextCursor
+		};
+	}
+
 	/**
-	 * Checks one page of narinfo rows in (cache, store path hash) order, starting
-	 * after the row the cursor names. The pass reads one row beyond its page;
-	 * when that row exists, or the pass stops on its subrequest slice, the report
-	 * names the last row checked as the cursor, and a caller checks every path
-	 * by passing it back until it comes back empty.
+	 * Checks narinfo rows in (cache, store path hash) order after the cursor.
+	 * When another row exists or the subrequest slice ends, the report's cursor
+	 * identifies the last checked row. Pass that cursor back until it is empty
+	 * to check every path.
 	 */
 	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReportInput> {
 		const isResuming = cursor.cache !== 0 || cursor.storePathHash !== '';
@@ -266,4 +307,28 @@ export class IntegrityCheckService {
 			discrepancies
 		};
 	}
+}
+
+export function sharedAccessReferenceSelect(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	narHashes: readonly NixSha256HashString[]
+) {
+	const reference = d1Schema.blobReference;
+	const hashes = jsonValueList(narHashes);
+	return database
+		.select({ narHash: reference.narHash })
+		.from(reference)
+		.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+		.where(
+			and(
+				eq(reference.tenant, tenant),
+				inArray(reference.narHash, hashes),
+				eq(reference.readable, true),
+				authorisedByCacheGeneration()
+			)
+		)
+		.groupBy(reference.narHash)
+		.having(sql`count(distinct ${d1Schema.cacheLifecycle.access}) = 2`)
+		.orderBy(asc(reference.narHash));
 }

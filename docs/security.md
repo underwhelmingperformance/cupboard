@@ -96,6 +96,11 @@ private cache has the NAR. If a NAR has references only in private caches that
 the token cannot read, the job must upload the bytes before publishing to a
 public cache.
 
+A tenant administrator can run `cupboard check --shared-access <tenant-url>` to
+list NAR hashes with readable references in both public and private caches. The
+report changes no references. Review the shared NARs before removing any
+publications; legitimate publications can share the same NAR.
+
 ## How cupboard checks what it serves
 
 cupboard verifies every upload before publishing it. A client uploads to a

@@ -46,6 +46,12 @@ export const checkReportSchema = z.strictObject({
 });
 export type CheckReport = z.output<typeof checkReportSchema>;
 
+export const sharedAccessReportSchema = z.strictObject({
+	narHashes: z.array(nixSha256HashSchema),
+	cursor: z.union([nixSha256HashSchema, z.literal('')])
+});
+export type SharedAccessReport = z.output<typeof sharedAccessReportSchema>;
+
 // One bounded background-verification pass. The report counts scanned narinfo
 // rows, reconstructed narinfo objects, and removed narinfos whose NAR is
 // missing. `cursorCache` and `cursor` identify the next row when another pass

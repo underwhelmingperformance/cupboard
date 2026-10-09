@@ -53,6 +53,7 @@ import {
 	teardownPresenceBatch
 } from './deletion-queue-service.ts';
 import { expiredRootTargetSelect } from './garbage-collection-service.ts';
+import { sharedAccessReferenceSelect } from './integrity-check-service.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import {
 	type AttestationReferenceKey,
@@ -401,6 +402,12 @@ const listStatements: readonly {
 	{
 		statement: 'negotiate readable-reference SELECT',
 		parameters: reusableReferenceParameters
+	},
+	{
+		statement: 'shared-access reference SELECT',
+		parameters: (count) =>
+			sharedAccessReferenceSelect(database, tenant, narHashes(count)).toSQL()
+				.params.length
 	},
 	{ statement: 'negotiate committed-edge SELECT', parameters: edgeParameters },
 	{

@@ -26,3 +26,7 @@ static read credential. `cupboard github check` reports the missing grant, and
 its guided repair adds it.
 
 cupboard still stores each NAR once.
+
+Use `cupboard check --shared-access <tenant-url>` to review NARs that public and
+private caches both reference. The report requires `check:run` and changes no
+publications.

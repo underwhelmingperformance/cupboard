@@ -2491,11 +2491,14 @@ Usage: cupboard check [options] <url>
 Check that every store path in the tenant still has all of its stored files.
 
 Arguments:
-  url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
+  url              tenant URL (e.g.
+                   https://cupboard.example.workers.dev/t/<slug>)
 
 Options:
-  --deep      recompute and compare each stored NAR file hash
-  -h, --help  display help for command
+  --deep           recompute and compare each stored NAR file hash
+  --shared-access  list NARs with readable references in both public and private
+                   caches
+  -h, --help       display help for command
 
 Exits 1 if any path has a discrepancy, after printing the report.
 ```

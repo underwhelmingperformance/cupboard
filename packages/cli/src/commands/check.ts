@@ -1,10 +1,11 @@
 import type {
 	CheckDiscrepancy,
 	CheckDiscrepancyKind,
-	CheckReport
+	CheckReport,
+	SharedAccessReport
 } from '@cupboard/protocol/reports';
 import { formatCount, type Reporter } from '@cupboard/reporter';
-import type { Command } from 'commander';
+import { type Command, Option } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
@@ -16,6 +17,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CheckOptions {
 	readonly deep?: boolean;
+	readonly sharedAccess?: boolean;
 }
 
 export interface CheckClient {
@@ -24,6 +26,12 @@ export interface CheckClient {
 		cursor: string;
 		cursorCache: number;
 	}): Promise<CheckReport>;
+}
+
+export interface SharedAccessClient {
+	sharedAccess(input: {
+		cursor: SharedAccessReport['cursor'];
+	}): Promise<SharedAccessReport>;
 }
 
 export function registerCheckCommand(
@@ -37,6 +45,12 @@ export function registerCheckCommand(
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
+		.addOption(
+			new Option(
+				'--shared-access',
+				'list NARs with readable references in both public and private caches'
+			).conflicts('deep')
+		)
 		.addHelpText(
 			'after',
 			'\nExits 1 if any path has a discrepancy, after printing the report.'
@@ -47,6 +61,11 @@ export function registerCheckCommand(
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
+
+			if (options.sharedAccess === true) {
+				await runSharedAccess(reporter, rpc.check);
+				return;
+			}
 
 			await runCheck(options.deep ?? false, reporter, rpc.check);
 		});
@@ -114,6 +133,31 @@ export async function runCheck(
 	}
 
 	throw new CheckDiscrepanciesError(discrepancies.length);
+}
+
+export async function runSharedAccess(
+	reporter: Reporter,
+	client: SharedAccessClient
+): Promise<void> {
+	let cursor: SharedAccessReport['cursor'] = '';
+	const narHashes: SharedAccessReport['narHashes'] = [];
+	do {
+		const page = await reporter.phase('Checking shared NAR access', () =>
+			client.sharedAccess({ cursor })
+		);
+		narHashes.push(...page.narHashes);
+		cursor = page.cursor;
+	} while (cursor !== '');
+
+	reporter.result({
+		kind: 'shared-access-report',
+		title: 'NARs shared by public and private caches',
+		data: { narHashes },
+		rows: [
+			{ label: 'Shared NARs', value: formatCount(narHashes.length) },
+			...narHashes.map((narHash) => ({ label: 'NAR', value: narHash }))
+		]
+	});
 }
 
 function describeDiscrepancy(discrepancy: CheckDiscrepancy): string {
