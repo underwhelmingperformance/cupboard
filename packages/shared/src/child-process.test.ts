@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import {
 	type AbortableChildProcessLifecycle,
@@ -126,6 +126,49 @@ describe('waitForChildProcess', () => {
 });
 
 describe('waitForAbortableChildProcess', () => {
+	it.each([false, true])(
+		'uses the default ten-second timer and cancels it on close (during grace: %s)',
+		async (closesDuringGrace) => {
+			vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+			onTestFinished(() => {
+				vi.useRealTimers();
+			});
+			const child = new ControlledAbortableChildProcess();
+			const controller = new AbortController();
+			const reason = new Error('cancel the child');
+			const settled = vi.fn();
+			const completion = waitForAbortableChildProcess(child, controller.signal);
+			void completion.then(settled).catch(settled);
+
+			controller.abort(reason);
+			await vi.advanceTimersByTimeAsync(9999);
+			expect({
+				signals: child.signals,
+				timers: vi.getTimerCount(),
+				settled: settled.mock.calls
+			}).toStrictEqual({ signals: ['SIGTERM'], timers: 1, settled: [] });
+
+			if (closesDuringGrace) {
+				child.emitClose(1, 'SIGTERM');
+				expect(vi.getTimerCount()).toBe(0);
+			}
+			await vi.advanceTimersByTimeAsync(1);
+			expect({
+				signals: child.signals,
+				settled: settled.mock.calls
+			}).toStrictEqual({
+				signals: closesDuringGrace ? ['SIGTERM'] : ['SIGTERM', 'SIGKILL'],
+				settled: closesDuringGrace ? [[reason]] : []
+			});
+
+			if (!closesDuringGrace) {
+				child.emitClose(1, 'SIGKILL');
+			}
+			await expect(completion).rejects.toBe(reason);
+			expect(vi.getTimerCount()).toBe(0);
+		}
+	);
+
 	it('terminates exactly once when the signal is already aborted', async () => {
 		const child = new ControlledAbortableChildProcess();
 		const scheduler = new ControlledScheduler();
