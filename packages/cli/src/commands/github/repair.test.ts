@@ -1329,7 +1329,7 @@ it('keeps a failed check unsuccessful when the repair is declined', async () => 
 	expect(added).toStrictEqual([]);
 });
 
-it('repairs a missing preset view without asking for a trust scope or adding rules', async () => {
+it('checks the preset without creating a prefix view or asking for a trust scope', async () => {
 	const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 	const identity = {
 		repositoryId: 1234,
@@ -1433,7 +1433,7 @@ jobs:
 		dependencies
 	);
 
-	await runDiscoveredGithubRepair(url, {}, ui, client, dependencies, check);
+	expect(check.jobs.map((job) => job.status)).toStrictEqual(['ready']);
 
 	expect({
 		added,
@@ -1441,18 +1441,8 @@ jobs:
 		confirms: captured.confirms.map((entry) => entry.message)
 	}).toStrictEqual({
 		added: [],
-		views: [
-			{
-				name: 'pull-requests-1234',
-				access: 'public',
-				selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
-				priority: 50,
-				revision: 1,
-				createdAt: '2026-01-01T00:00:00.000Z',
-				updatedAt: '2026-01-01T00:00:00.000Z'
-			}
-		],
-		confirms: ['Apply this tenant configuration?']
+		views: [],
+		confirms: []
 	});
 });
 
@@ -1579,7 +1569,7 @@ jobs:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
     with:
       url: https://cupboard.supply/t/laney
-      preset: pull-request-and-branch
+      root-prefix: github:iainlane/dotfiles/main
       reuse-view: shared
 `;
 
@@ -1758,7 +1748,7 @@ it.each([
 	}).toStrictEqual(expected);
 });
 
-const presetPushWorkflow = `
+const prefixViewPushWorkflow = `
 on:
   push:
     branches: [main]
@@ -1767,7 +1757,8 @@ jobs:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
     with:
       url: https://cupboard.supply/t/laney
-      preset: pull-request-and-branch
+      root-prefix: github:iainlane/dotfiles/main
+      reuse-view: pull-requests-1234
 `;
 
 it.each([
@@ -1776,7 +1767,7 @@ it.each([
 	{
 		name: 'the destination priority changes',
 		change: 'destination',
-		workflow: presetPushWorkflow
+		workflow: prefixViewPushWorkflow
 	}
 ])(
 	'stops without writing when $name during review',
@@ -3161,7 +3152,7 @@ it('reports an unconfirmed reuse-view write after a confirmed extension', async 
 	});
 	const { ui, client, dependencies, check } = await fixture(
 		undefined,
-		presetPushWorkflow,
+		prefixViewPushWorkflow,
 		{ rules: [expected] }
 	);
 	const lost = new Error('view response lost');
@@ -3423,10 +3414,10 @@ it('reports unverified jobs after the writes as an incomplete check', async () =
 	});
 });
 
-it('stops without writing a public preset view over private pull-request caches', async () => {
+it('stops without writing a public prefix view over private pull-request caches', async () => {
 	const { ui, added, client, dependencies, check } = await fixture(
 		undefined,
-		presetPushWorkflow
+		prefixViewPushWorkflow
 	);
 	const privateCaches = {
 		...client,
@@ -4331,3 +4322,202 @@ jobs:
 		}
 	});
 });
+
+it.each([false, true])(
+	'repairs private trusted-source reads with static metadata credentials %s',
+	async (configured) => {
+		const workflow = `on:\n  push:\n    branches: [main]\npermissions:\n  pull-requests: read\njobs:\n  build:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish-trusted.yml@v0.0.35\n    with:\n      url: ${url.href}\n      preset: pull-request-and-branch\n${configured ? '    secrets:\n      read_user: ${{ secrets.READ_USER }}\n      read_password: ${{ secrets.READ_PASSWORD }}\n' : ''}`;
+		const { ui, added, client, dependencies, check } = await fixture(
+			undefined,
+			workflow,
+			{ cacheAccess: 'private' }
+		);
+		await runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			client,
+			dependencies,
+			check
+		);
+		expect(added).toStrictEqual([
+			githubBranchAddBody(
+				url,
+				{
+					repositoryId: 1234,
+					repositoryOwnerId: 5678,
+					fullName: repository,
+					defaultBranch: 'main'
+				},
+				{
+					repo: repository,
+					branch: 'main',
+					jobWorkflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					readCache: !configured,
+					readPullRequestCaches: true
+				}
+			)
+		]);
+	}
+);
+
+it('repairs private default-cache publication reads with static metadata credentials', async () => {
+	const workflow = `
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+jobs:
+  build:
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@v0.0.35
+    with:
+      url: ${url.href}
+      preset: pull-request-and-branch
+    secrets:
+      read_user: \${{ secrets.READ_USER }}
+      read_password: \${{ secrets.READ_PASSWORD }}
+`;
+	const { ui, added, client, dependencies, check } = await fixture(
+		undefined,
+		workflow,
+		{ cacheAccess: 'private' }
+	);
+	await runDiscoveredGithubRepair(
+		url,
+		{ trustScope: 'exact' },
+		ui,
+		client,
+		dependencies,
+		check
+	);
+	const identity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: repository,
+		defaultBranch: 'main'
+	};
+	const options = {
+		repo: repository,
+		jobWorkflowRef:
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+	};
+	const publication = githubPrAddBody(url, identity, options);
+	expect(added).toStrictEqual([
+		{
+			...publication,
+			permittedGrants: [
+				...publication.permittedGrants,
+				buildCacheContentReadGrant({})
+			]
+		},
+		githubPrCloseAddBody(url, identity, options)
+	]);
+});
+
+const legacyFamilyRepairCases: readonly {
+	readonly label: string;
+	readonly existing: readonly {
+		readonly name: string;
+		readonly access: CacheAccessMode;
+	}[];
+	readonly requiresFamilyRead: boolean;
+	readonly laterPage?: boolean;
+}[] = [
+	{
+		label: 'legacy private',
+		existing: [{ name: 'gh-1234-pr-42', access: 'private' }],
+		requiresFamilyRead: true
+	},
+	{
+		label: 'later private page',
+		existing: [{ name: 'gh-1234-pr-42', access: 'private' }],
+		requiresFamilyRead: true,
+		laterPage: true
+	},
+	{
+		label: 'public family',
+		existing: [{ name: 'gh-1234-pr-42', access: 'public' }],
+		requiresFamilyRead: false
+	},
+	{
+		label: 'foreign and invalid private names',
+		existing: [
+			'gh-12345-pr-42',
+			'gh-1234-pr-0',
+			'gh-1234-pr-01',
+			'gh-1234-pr-42-extra',
+			'gh-1234-pr-x'
+		].map((name) => ({ name, access: 'private' })),
+		requiresFamilyRead: false
+	}
+];
+
+it.each(
+	legacyFamilyRepairCases.flatMap((profile) =>
+		[false, true].map((configured) => ({ ...profile, configured }))
+	)
+)(
+	'repairs $label PR-family authority with a public default and static metadata $configured',
+	async ({ existing, requiresFamilyRead, laterPage, configured }) => {
+		const workflow = `on:\n  push:\n    branches: [main]\npermissions:\n  pull-requests: read\njobs:\n  build:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish-trusted.yml@v0.0.35\n    with:\n      url: ${url.href}\n      preset: pull-request-and-branch\n${configured ? '    secrets:\n      read_user: ${{ secrets.READ_USER }}\n      read_password: ${{ secrets.READ_PASSWORD }}\n' : ''}`;
+		const { ui, added, client, dependencies } = await fixture(
+			undefined,
+			workflow
+		);
+		const familyClient = {
+			...client,
+			caches: {
+				list: (input?: { readonly cursor?: string }) => {
+					if (laterPage === true && input?.cursor === undefined) {
+						return Promise.resolve({ caches: [], cursor: 'next' });
+					}
+					return Promise.resolve(
+						cacheListResponseSchema.parse({
+							caches: existing.map((cache) => ({
+								scope: { kind: 'named', name: cache.name },
+								access: cache.access,
+								priority: 40,
+								storePaths: 0,
+								defaultRootRetention: { kind: 'permanent' },
+								grace: { kind: 'none' }
+							}))
+						})
+					);
+				}
+			}
+		};
+		const check = await inspectDiscoveredGithubCheck(
+			url,
+			{ repo: repository, branch: 'main' },
+			ui.reporter(),
+			familyClient,
+			dependencies
+		);
+		await runDiscoveredGithubRepair(
+			url,
+			{ trustScope: 'exact' },
+			ui,
+			familyClient,
+			dependencies,
+			check
+		);
+		expect(added).toStrictEqual([
+			githubBranchAddBody(
+				url,
+				{
+					repositoryId: 1234,
+					repositoryOwnerId: 5678,
+					fullName: repository,
+					defaultBranch: 'main'
+				},
+				{
+					repo: repository,
+					branch: 'main',
+					jobWorkflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					readPullRequestCaches: requiresFamilyRead
+				}
+			)
+		]);
+	}
+);

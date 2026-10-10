@@ -231,3 +231,45 @@ export class RootGrantPrefixUnverifiedFinding extends CheckFinding {
 		return `the selected rule permits only ${this.root}; the job also creates roots below its root prefix, and no grant covers them`;
 	}
 }
+
+export class TrustedContributorReuseFinding extends CheckFinding {
+	readonly status = 'ok' as const;
+	constructor(public readonly isEnabled: boolean) {
+		super('reuse direction');
+	}
+	detail(): string {
+		return this.isEnabled
+			? 'branch runs reuse only the merged PR cache; enable only for trusted contributors because a PR controls its Nix configuration and builders'
+			: 'PR runs reuse the default cache; branch runs build outputs without PR-cache reuse';
+	}
+}
+
+export class PullRequestsReadPermissionFinding extends CheckFinding {
+	readonly status: CheckStatus;
+	constructor(public readonly permission: 'granted' | 'missing' | 'unknown') {
+		super('pull request lookup permission');
+		this.status =
+			permission === 'granted'
+				? 'ok'
+				: permission === 'missing'
+					? 'failed'
+					: 'unverified';
+	}
+	detail(): string {
+		return this.permission === 'granted'
+			? 'the trusted-contributor caller grants pull-requests: read'
+			: 'set permissions.pull-requests: read on the job that calls cupboard-flake-publish-trusted.yml';
+	}
+}
+
+export class PullRequestCacheAccessMismatchFinding extends FailedCheckFinding {
+	constructor(
+		public readonly caches: readonly string[],
+		public readonly expectedAccess: string
+	) {
+		super('pull-request cache access');
+	}
+	detail(): string {
+		return `${this.caches.join(', ')} has access that differs from the selected ${this.expectedAccess} mode`;
+	}
+}

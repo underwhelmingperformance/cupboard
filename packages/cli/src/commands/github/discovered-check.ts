@@ -50,6 +50,10 @@ import {
 	type WorkflowSource
 } from './discovery.ts';
 import {
+	PullRequestsReadPermissionFinding,
+	TrustedContributorReuseFinding
+} from './finding.ts';
+import {
 	BranchWorkflowTrustFinding,
 	CheckFinding,
 	FailedCheckFinding,
@@ -63,7 +67,6 @@ import {
 } from './finding.ts';
 import {
 	isPresetJob,
-	isReadOnlyJob,
 	modelPublishingJob,
 	type PublicationCase,
 	type PublishingJobFinding,
@@ -513,11 +516,7 @@ async function inspectPublication(
 	dependencies: DiscoveredGithubCheckDependencies
 ): Promise<CheckFinding[]> {
 	const isPreset = isPresetJob(job);
-	const cacheMode = job.inputs['cache-access-mode'];
-	const accessSource: ReuseViewAccessModeMismatchFinding['source'] =
-		!isReadOnlyJob(job) && (cacheMode === 'public' || cacheMode === 'private')
-			? 'workflow-input'
-			: 'tenant-default';
+
 	const read = await publicationReadAuthority(
 		job,
 		publication,
@@ -535,7 +534,8 @@ async function inspectPublication(
 	);
 	for (const [resource, access, wiring] of [
 		['cache', read.cacheAccess, read.cacheWiring],
-		['view', read.viewAccess, read.viewWiring]
+		['view', read.viewAccess, read.viewWiring],
+		['cache', read.referenceAccess, read.referenceWiring ?? 'none']
 	] as const) {
 		if (access !== 'private' && wiring !== 'incomplete') {
 			continue;
@@ -558,8 +558,7 @@ async function inspectPublication(
 				'reuse view access',
 				publication.reuseView.name,
 				read.viewAccess,
-				read.selectedViewAccess,
-				accessSource
+				read.selectedViewAccess
 			)
 		);
 	}
@@ -589,8 +588,7 @@ async function inspectPublication(
 			await checkPullRequestCacheAccess(
 				identity,
 				client,
-				read.selectedViewAccess,
-				accessSource
+				read.selectedViewAccess
 			)
 		);
 	}
@@ -643,6 +641,26 @@ async function inspectJob(
 			? [{ finding: new BranchWorkflowTrustFinding(job.workflowRef) }]
 			: []),
 		...model.findings,
+		...(job.kind === 'flake' &&
+		isPresetJob(job) &&
+		job.trustedContributorReuse === true
+			? [
+					{
+						finding: new TrustedContributorReuseFinding(
+							job.trustedContributorReuse
+						)
+					}
+				]
+			: []),
+		...(job.trustedContributorReuse === true
+			? [
+					{
+						finding: new PullRequestsReadPermissionFinding(
+							job.pullRequestsReadPermission ?? 'unknown'
+						)
+					}
+				]
+			: []),
 		...pullRequestLifecycleFindings(
 			job,
 			identity,

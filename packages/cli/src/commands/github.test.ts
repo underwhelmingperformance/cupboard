@@ -92,7 +92,8 @@ const ruleCreated = `created: ${pinnedWorkflowReference}`;
 const options: GithubSetupOptions = {
 	repo: 'acme/app',
 	branch: 'main',
-	workflowRef: pinnedWorkflowReference
+	workflowRef: pinnedWorkflowReference,
+	trustedContributorReuse: false
 };
 
 const prBody = githubPrAddBody(url, identity, {
@@ -256,70 +257,6 @@ function expectRemovalError(
 }
 
 describe('runGithubSetup', () => {
-	describe('stored reuse-view access', () => {
-		it.each([
-			{
-				access: 'public' as const,
-				requested: { cacheAccessMode: 'private' as const },
-				detail: 'stored view is public; setup selected private access'
-			},
-			{
-				access: 'private' as const,
-				requested: {},
-				detail: 'stored view is private; setup selected public access'
-			}
-		])(
-			'reports incompatible $access access without writes',
-			async ({ access, requested, detail }) => {
-				const results: ResultRow[][] = [];
-				const { client, recorded } = setupClient({
-					views: [
-						{
-							access,
-							name: 'pull-requests-1234',
-							priority: 50,
-							selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-						}
-					],
-					rules: [
-						storedRule('pr', prBody),
-						storedRule('branch', branchBody),
-						storedRule('pr-close', prCloseBody)
-					]
-				});
-				let failure: unknown;
-
-				try {
-					await runGithubSetup(
-						url,
-						{ ...options, ...requested },
-						reporter(results),
-						client,
-						dependencies
-					);
-				} catch (error) {
-					failure = error;
-				}
-
-				expectDriftError(failure);
-				expect({
-					recorded,
-					steps: failure.steps,
-					outcomes: results
-				}).toStrictEqual({
-					recorded: {
-						graceAdds: [],
-						viewSets: [],
-						ruleAdds: [],
-						ruleRemoves: []
-					},
-					steps: ['reuse view'],
-					outcomes: [[{ label: 'reuse view', value: `drift: ${detail}` }]]
-				});
-			}
-		);
-	});
-
 	it('cancels stalled workflow verification with the command signal', async () => {
 		const controller = new AbortController();
 		const reason = new CliAbortError();
@@ -371,14 +308,7 @@ describe('runGithubSetup', () => {
 		expect({ recorded, results }).toStrictEqual({
 			recorded: {
 				graceAdds: [],
-				viewSets: [
-					{
-						access: 'public',
-						name: 'pull-requests-1234',
-						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
-						priority: 50
-					}
-				],
+				viewSets: [],
 				ruleAdds: [
 					prBody,
 					branchBody,
@@ -391,10 +321,6 @@ describe('runGithubSetup', () => {
 			},
 			results: [
 				[
-					{
-						label: 'reuse view',
-						value: 'created: public gh-1234-pr- caches at priority 50'
-					},
 					{ label: 'pull-request trust rule', value: ruleCreated },
 					{ label: 'main trust rule', value: ruleCreated },
 					{
@@ -421,14 +347,7 @@ describe('runGithubSetup', () => {
 			dependencies
 		);
 
-		expect(recorded.viewSets).toStrictEqual([
-			{
-				access: 'public',
-				name: 'pull-requests-1234',
-				selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
-				priority: 50
-			}
-		]);
+		expect(recorded.viewSets).toStrictEqual([]);
 	});
 
 	it('inherits private default-cache access without a static credential', async () => {
@@ -440,26 +359,19 @@ describe('runGithubSetup', () => {
 			views: recorded.viewSets,
 			grants: recorded.ruleAdds.map((rule) => rule.permittedGrants)
 		}).toStrictEqual({
-			views: [
-				{
-					access: 'private',
-					name: 'pull-requests-1234',
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
-					priority: 50
-				}
-			],
+			views: [],
 			grants: [
 				githubPrAddBody(url, identity, {
 					repo: options.repo,
 					jobWorkflowRef: options.workflowRef,
-					readCache: true
+					readCache: true,
+					readDefaultCache: true
 				}).permittedGrants,
 				githubBranchAddBody(url, identity, {
 					repo: options.repo,
 					branch: options.branch,
 					jobWorkflowRef: options.workflowRef,
-					readCache: true,
-					readView: 'pull-requests-1234'
+					readCache: true
 				}).permittedGrants,
 				prCloseBody.permittedGrants
 			]
@@ -509,11 +421,6 @@ describe('runGithubSetup', () => {
 							label: 'pull-request cache access',
 							value:
 								'drift: gh-1234-pr-7 already has access that differs from the selected public mode'
-						},
-						{
-							label: 'reuse view',
-							value:
-								'missing: setup would create it after the drift is resolved'
 						}
 					]
 				]
@@ -525,13 +432,7 @@ describe('runGithubSetup', () => {
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [
 				storedRule('previous-pr', previousPrBody),
 				storedRule('previous-branch', previousBranchBody)
@@ -554,7 +455,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
 				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
@@ -674,13 +574,7 @@ describe('runGithubSetup', () => {
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [
 				storedRule('pr', prBody),
 				storedRule('branch', branchBody),
@@ -698,7 +592,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
 				{ label: 'main trust rule', value: 'unchanged' },
 				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
@@ -720,13 +613,7 @@ describe('runGithubSetup', () => {
 		};
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [
 				storedRule('previous-pr', legacyPrBody),
 				storedRule('previous-branch', previousBranchBody)
@@ -754,7 +641,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
 				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
@@ -807,13 +693,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [
 				storedRule('previous-pr', previousPrBody),
 				storedRule('previous-branch', previousBranchBody)
@@ -859,7 +739,6 @@ describe('runGithubSetup', () => {
 				}
 			],
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
 				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
@@ -960,13 +839,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [dispatch]
 		});
 
@@ -986,7 +859,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'possibly conflicting trust rule dispatch',
 					value: `retained: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
@@ -1014,13 +886,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [dispatch]
 		});
 
@@ -1057,7 +923,6 @@ describe('runGithubSetup', () => {
 				}
 			],
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'possibly conflicting trust rule dispatch',
 					value: `removed: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
@@ -1102,22 +967,11 @@ describe('runGithubSetup', () => {
 		expect({ recorded, outcomes: results[0] }).toStrictEqual({
 			recorded: {
 				graceAdds: [],
-				viewSets: [
-					{
-						access: 'public',
-						name: 'pull-requests-1234',
-						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
-						priority: 50
-					}
-				],
+				viewSets: [],
 				ruleAdds: [prBody, branchBody, prCloseBody],
 				ruleRemoves: []
 			},
 			outcomes: [
-				{
-					label: 'reuse view',
-					value: 'created: public gh-1234-pr- caches at priority 50'
-				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
 				{ label: 'merged pull-request closure trust rule', value: ruleCreated }
@@ -1137,13 +991,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [
 				owner,
 				storedRule('pr', prBody),
@@ -1177,13 +1025,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [conflict, storedRule('branch', branchBody)]
 		});
 
@@ -1237,14 +1079,7 @@ describe('runGithubSetup', () => {
 		).rejects.toBe(failure);
 		expect(recorded).toStrictEqual({
 			graceAdds: [],
-			viewSets: [
-				{
-					access: 'public',
-					name: 'pull-requests-1234',
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
-					priority: 50
-				}
-			],
+			viewSets: [],
 			ruleAdds: [],
 			ruleRemoves: []
 		});
@@ -1263,13 +1098,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [
 				conflict,
 				storedRule('previous-pr', previousPrBody),
@@ -1296,7 +1125,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: ['conflict']
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule conflict',
 					value: `removed: pull requests and main pushes and merged pull requests; ${pinnedWorkflowReference}`
@@ -1334,13 +1162,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [legacy]
 		});
 
@@ -1386,7 +1208,6 @@ describe('runGithubSetup', () => {
 				}
 			],
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
 				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
@@ -1416,13 +1237,7 @@ describe('runGithubSetup', () => {
 		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [legacy]
 		});
 
@@ -1447,7 +1262,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
 				{ label: 'merged pull-request closure trust rule', value: ruleCreated },
@@ -1514,13 +1328,7 @@ describe('runGithubSetup', () => {
 			});
 			const { client, recorded } = setupClient({
 				gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-				views: [
-					{
-						name: 'pull-requests-1234',
-						priority: 50,
-						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-					}
-				],
+				views: [],
 				rules: [
 					storedRule('previous-pr', previousPrBody),
 					storedRule('previous-branch', previousBranchBody)
@@ -1576,7 +1384,6 @@ describe('runGithubSetup', () => {
 					ruleRemoves: earlierFailure === undefined ? ['previous-branch'] : []
 				},
 				outcomes: [
-					{ label: 'reuse view', value: 'unchanged' },
 					{ label: 'pull-request trust rule', value: ruleCreated },
 					{ label: 'main trust rule', value: ruleCreated },
 					{
@@ -1599,129 +1406,8 @@ describe('runGithubSetup', () => {
 		}
 	);
 
-	it('reports configuration setup would create alongside drift', async () => {
-		const results: ResultRow[][] = [];
-		const { client, recorded } = setupClient({
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 40,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
-			rules: [
-				storedRule('pr', prBody),
-				storedRule('branch', branchBody),
-				storedRule('pr-close', prCloseBody)
-			]
-		});
-
-		let failure: unknown;
-		try {
-			await runGithubSetup(
-				url,
-				options,
-				reporter(results),
-				client,
-				dependencies
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectDriftError(failure);
-		expect({
-			recorded,
-			steps: failure.steps,
-			outcomes: results[0]
-		}).toStrictEqual({
-			recorded: {
-				graceAdds: [],
-				viewSets: [],
-				ruleAdds: [],
-				ruleRemoves: []
-			},
-			steps: ['reuse view'],
-			outcomes: [
-				{
-					label: 'reuse view',
-					value:
-						"drift: stored priority 40 does not exceed the destination's 40"
-				}
-			]
-		});
-	});
-
-	it('reports view drift without changing configuration', async () => {
-		const results: ResultRow[][] = [];
-		const { ui, captured } = fakeCliUi({
-			interactive: true,
-			multiSelects: [['conflict'], ['previous-pr']]
-		});
-		const conflict = storedRule('conflict', {
-			...prBody,
-			permittedGrants: branchBody.permittedGrants
-		});
-		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 3600 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 40,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
-			rules: [
-				storedRule('pr', prBody),
-				storedRule('branch', branchBody),
-				conflict,
-				storedRule('previous-pr', previousPrBody)
-			]
-		});
-
-		let failure: unknown;
-		try {
-			await runGithubSetup(
-				url,
-				options,
-				{ ...ui, reporter: () => capturingReporter(results) },
-				client,
-				dependencies
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectDriftError(failure);
-		expect({
-			recorded,
-			prompts: captured.multiSelects,
-			steps: failure.steps,
-			outcomes: results[0]
-		}).toStrictEqual({
-			recorded: {
-				graceAdds: [],
-				viewSets: [],
-				ruleAdds: [],
-				ruleRemoves: []
-			},
-			prompts: [],
-			steps: ['reuse view'],
-			outcomes: [
-				{
-					label: 'reuse view',
-					value:
-						"drift: stored priority 40 does not exceed the destination's 40"
-				},
-				{
-					label: 'superseded trust rule previous-pr',
-					value: `retained: pull requests and main pushes and merged pull requests; ${previousWorkflowReference}`
-				}
-			]
-		});
-	});
-
 	it('replaces an exact rule admitted by a new tag pattern', async () => {
+		const patternDetail = String.raw`workflow references matching ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`;
 		const patternReference =
 			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
 		const patternPrBody = githubPrAddBody(url, identity, {
@@ -1737,17 +1423,10 @@ describe('runGithubSetup', () => {
 			...prBody,
 			permittedGrants: [{ type: 'cupboard_wildcard' }]
 		});
-		const patternDetail = String.raw`workflow references matching ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`;
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [exactRule]
 		});
 
@@ -1778,7 +1457,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: ['exact']
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule exact',
 					value: `removed: pull requests and main pushes and merged pull requests; ${pinnedWorkflowReference}`
@@ -1825,13 +1503,7 @@ describe('runGithubSetup', () => {
 			});
 			const { client, recorded } = setupClient({
 				gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-				views: [
-					{
-						name: 'pull-requests-1234',
-						priority: 50,
-						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-					}
-				],
+				views: [],
 				rules: [previousRule]
 			});
 
@@ -1875,82 +1547,10 @@ describe('runGithubSetup', () => {
 			branch: options.branch,
 			jobWorkflowRef: patternReference
 		});
-		const patternDetail = String.raw`workflow references matching ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`;
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			]
-		});
-
-		await runGithubSetup(
-			url,
-			{ ...options, workflowRef: patternReference },
-			reporter(results),
-			client,
-			{
-				...dependencies,
-				verifyWorkflowReference: () =>
-					Promise.reject(new Error('pattern verification should not run'))
-			}
-		);
-
-		expect({ recorded, outcomes: results[0] }).toStrictEqual({
-			recorded: {
-				graceAdds: [],
-				viewSets: [],
-				ruleAdds: [
-					patternPrBody,
-					patternBranchBody,
-					githubPrCloseAddBody(url, identity, {
-						repo: options.repo,
-						jobWorkflowRef: patternReference
-					})
-				],
-				ruleRemoves: []
-			},
-			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
-				{
-					label: 'pull-request trust rule',
-					value: `created: ${patternDetail}`
-				},
-				{ label: 'main trust rule', value: `created: ${patternDetail}` },
-				{
-					label: 'merged pull-request closure trust rule',
-					value: `created: ${patternDetail}`
-				}
-			]
-		});
-	});
-
-	it('performs no writes when stored tag-pattern rules match the desired ones', async () => {
-		const patternReference =
-			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
-		const patternPrBody = githubPrAddBody(url, identity, {
-			repo: options.repo,
-			jobWorkflowRef: patternReference
-		});
-		const patternBranchBody = githubBranchAddBody(url, identity, {
-			repo: options.repo,
-			branch: options.branch,
-			jobWorkflowRef: patternReference
-		});
-		const results: ResultRow[][] = [];
-		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
-				{
-					name: 'pull-requests-1234',
-					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
-				}
-			],
+			views: [],
 			rules: [
 				storedRule('pattern-pr', patternPrBody),
 				storedRule('pattern-branch', patternBranchBody),
@@ -1984,7 +1584,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
 				{ label: 'main trust rule', value: 'unchanged' },
 				{ label: 'merged pull-request closure trust rule', value: 'unchanged' }
@@ -2111,6 +1710,7 @@ describe('registerGithubCommands', () => {
 			'-y, --yes',
 			'--read-user <user>',
 			'--read-password <password>',
+			'--trusted-contributor-reuse',
 			'--access, --cache-access-mode <mode>'
 		]);
 	});
@@ -2648,5 +2248,37 @@ describe('cacheInfoFetcher', () => {
 		await expect(
 			fetch(new URL('https://cupboard.example/t/acme'))
 		).rejects.toBe(reason);
+	});
+});
+
+it('sets private trusted reuse grants on the core workflow without creating a prefix view', async () => {
+	const { client, recorded } = setupClient({ defaultCacheAccess: 'private' });
+	await runGithubSetup(
+		url,
+		{ ...options, trustedContributorReuse: true },
+		reporter([]),
+		client,
+		dependencies
+	);
+	expect(recorded).toStrictEqual({
+		graceAdds: [],
+		viewSets: [],
+		ruleRemoves: [],
+		ruleAdds: [
+			githubPrAddBody(url, identity, {
+				repo: options.repo,
+				jobWorkflowRef: pinnedWorkflowReference,
+				readCache: true,
+				readDefaultCache: true
+			}),
+			githubBranchAddBody(url, identity, {
+				repo: options.repo,
+				branch: options.branch,
+				jobWorkflowRef: pinnedWorkflowReference,
+				readCache: true,
+				readPullRequestCaches: true
+			}),
+			prCloseBody
+		]
 	});
 });

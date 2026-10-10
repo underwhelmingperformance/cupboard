@@ -2422,8 +2422,8 @@ Options:
   -h, --help             display help for command
 
 Commands:
-  setup [options] <url>  Add the trust rules and reuse view that cupboard's
-                         flake publish workflow needs for a GitHub repository.
+  setup [options] <url>  Add the trust rules that cupboard's flake publish
+                         workflow needs for a GitHub repository.
   check [options] <url>  Check that the tenant will accept the publishing jobs
                          in a GitHub repository's workflow files, and offer to
                          repair the tenant's settings.
@@ -2435,8 +2435,8 @@ Commands:
 ```text
 Usage: cupboard github setup [options] <url>
 
-Add the trust rules and reuse view that cupboard's flake publish workflow needs
-for a GitHub repository.
+Add the trust rules that cupboard's flake publish workflow needs for a GitHub
+repository.
 
 Arguments:
   url                                                       tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -2449,7 +2449,8 @@ Options:
   -y, --yes                                                 remove conflicting trust rules without asking. Rules that only might conflict, and rules for a different workflow reference, are kept.
   --read-user <user>                                        user name of a read credential for checking private cache information
   --read-password <password>                                password of the read credential
-  --access, --cache-access-mode <mode>                      read access for new pull-request caches and their reuse view: public or private (default: the tenant default cache access); does not change the default cache
+  --trusted-contributor-reuse                               allow branch runs to reuse only the merged PR cache; requires the trusted workflow and pull-requests: read
+  --access, --cache-access-mode <mode>                      read access for new pull-request caches: public or private (default: the tenant default cache access); does not change the default cache
   -h, --help                                                display help for command
 ```
 

@@ -27,7 +27,10 @@ import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { type ReadUser } from '@cupboard/shared/http';
 
 import { isAbortError } from '../../abort.ts';
-import { cacheLifecycleAuthorizationDetails } from '../../auth/attenuate.ts';
+import {
+	cacheLifecycleAuthorizationDetails,
+	contentReadAuthorizationDetails
+} from '../../auth/attenuate.ts';
 import { cacheLabel } from '../../client/client.ts';
 import {
 	GithubCheckFailedError,
@@ -49,6 +52,7 @@ import {
 } from './claims.ts';
 import {
 	parseExactWorkflowReference,
+	publicationWorkflowReference,
 	pullRequestCacheName,
 	pullRequestCachePrefix,
 	pullRequestViewName
@@ -57,15 +61,16 @@ import {
 	BranchWorkflowTrustFinding,
 	CheckFinding,
 	PassedCheckFinding,
-	ReuseViewAccessModeMismatchFinding,
-	ReuseViewCacheAccessMismatchFinding,
+	PullRequestCacheAccessMismatchFinding,
+	ReadAuthenticationUnverifiedFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
 	ReuseViewSelectorsMismatchFinding,
 	ReuseViewStoreDirectoryMismatchFinding,
 	ReuseViewUnreadableFinding,
 	RootPrefixOutsideGrantFinding,
-	RootPrefixUnspecifiedFinding
+	RootPrefixUnspecifiedFinding,
+	TrustedContributorReuseFinding
 } from './finding.ts';
 import { flakeRequests } from './publication.ts';
 import {
@@ -97,6 +102,7 @@ export interface GithubCheckClient {
 export interface GithubCheckDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
 	readonly fetchCacheInfo: (url: URL) => Promise<CacheInfo>;
+	readonly fetchCacheAccess?: (url: URL) => Promise<CacheAccessMode>;
 	readonly verifyWorkflowReference?: typeof verifyWorkflowReference;
 	readonly signal?: AbortSignal;
 }
@@ -299,29 +305,13 @@ export async function checkReuseViewCacheInfo(
 export async function checkPullRequestCacheAccess(
 	identity: RepositoryIdentity,
 	client: GithubCheckClient,
-	expectedAccess?: CacheAccessMode,
-	source: ReuseViewAccessModeMismatchFinding['source'] = 'workflow-input'
+	expectedAccess?: CacheAccessMode
 ): Promise<CheckFinding> {
+	if (expectedAccess === undefined) {
+		return new ReadAuthenticationUnverifiedFinding('cache');
+	}
 	const check = 'pull-request cache access';
-	const viewName = pullRequestViewName(identity.repositoryId);
 	const prefix = pullRequestCachePrefix(identity.repositoryId);
-	const { views } = await client.reuseViews.list();
-	const definition = views.find((view) => view.name === viewName);
-
-	if (definition === undefined) {
-		return new ReuseViewMissingFinding(check, viewName);
-	}
-
-	if (expectedAccess !== undefined && definition.access !== expectedAccess) {
-		return new ReuseViewAccessModeMismatchFinding(
-			check,
-			viewName,
-			definition.access,
-			expectedAccess,
-			source
-		);
-	}
-
 	const caches: CacheListEntry[] = [];
 	let cursor: string | undefined;
 
@@ -334,7 +324,7 @@ export async function checkPullRequestCacheAccess(
 		(summary) =>
 			summary.scope.kind === 'named' &&
 			summary.scope.name.startsWith(prefix) &&
-			summary.access !== definition.access
+			summary.access !== expectedAccess
 	);
 	const [first] = mismatched;
 
@@ -342,12 +332,9 @@ export async function checkPullRequestCacheAccess(
 		return new PassedCheckFinding(check);
 	}
 
-	return new ReuseViewCacheAccessMismatchFinding(
-		check,
-		viewName,
-		definition.access,
+	return new PullRequestCacheAccessMismatchFinding(
 		mismatched.map((summary) => cacheLabel(summary.scope)),
-		first.access
+		expectedAccess
 	);
 }
 
@@ -428,16 +415,30 @@ export async function runGithubCheck(
 	const branchCacheScope: CacheScope = { kind: 'default' };
 	// The default cache outlives runs, so only the pull-request rule needs
 	// lifecycle permissions.
+	const defaultAccess = await dependencies.fetchCacheAccess?.(url);
+	const isTrustedReuse = options.workflowRef.includes(
+		'/cupboard-flake-publish-trusted.yml@'
+	);
 	const pullRequestRequests = flakeRequests(
 		pullRequestCacheScope,
 		{ target: pullRequestRoot, run: pullRequestRunRoot },
 		true
 	);
+	if (defaultAccess === 'private') {
+		pullRequestRequests.push(
+			contentReadAuthorizationDetails({ cache: { kind: 'default' } })
+		);
+	}
 	const branchRequests = flakeRequests(
 		branchCacheScope,
 		{ target: branchRoot, run: branchRunRoot },
 		false
 	);
+	if (isTrustedReuse && defaultAccess === 'private') {
+		branchRequests.push(
+			contentReadAuthorizationDetails({ cache: pullRequestCacheScope })
+		);
+	}
 
 	const findings = await reporter.phase(
 		'Checking tenant configuration',
@@ -447,7 +448,9 @@ export async function runGithubCheck(
 				rules,
 				githubPullRequestClaims(url, identity, {
 					pullRequestNumber: 1,
-					workflowReference: workflowReference.reference
+					workflowReference: publicationWorkflowReference(
+						workflowReference.reference
+					)
 				}),
 				pullRequestRequests
 			),
@@ -458,19 +461,23 @@ export async function runGithubCheck(
 				githubBranchClaims(url, identity, {
 					branch: options.branch,
 					eventName: 'push',
-					workflowReference: workflowReference.reference
+					workflowReference: publicationWorkflowReference(
+						workflowReference.reference
+					)
 				}),
 				branchRequests
 			),
-			await checkReuseView(url, identity, client, dependencies.fetchCacheInfo),
-			await checkPullRequestCacheAccess(identity, client),
+			new TrustedContributorReuseFinding(isTrustedReuse),
+			await checkPullRequestCacheAccess(identity, client, defaultAccess),
 			checkRootPrefix(options, identity),
 			checkTrustRule(
 				'merged pull-request closure trust rule',
 				rules,
 				githubMergedPullRequestClaims(url, identity, {
 					baseBranch: identity.defaultBranch,
-					workflowReference: workflowReference.reference
+					workflowReference: publicationWorkflowReference(
+						workflowReference.reference
+					)
 				}),
 				[
 					cacheLifecycleAuthorizationDetails({

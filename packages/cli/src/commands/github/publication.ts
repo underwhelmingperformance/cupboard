@@ -30,7 +30,7 @@ import {
 	githubReleaseClaims,
 	githubTagPushClaims
 } from './claims.ts';
-import { pullRequestCacheName, pullRequestViewName } from './convention.ts';
+import { pullRequestCacheName } from './convention.ts';
 import {
 	type DiscoveredPublishingJob,
 	type ReferenceFilterKey,
@@ -91,6 +91,7 @@ export type PublicationCase = TriggerReference & {
 	};
 	readonly reuseView?: ReuseViewRequirement;
 	readonly readCaches?: readonly CacheScope[];
+	readonly trustedContributorReuse?: true;
 };
 
 export interface PublishingJobFinding {
@@ -1027,7 +1028,7 @@ export function modelPublishingJob(
 		);
 	}
 
-	if (reuseView !== '' && job.kind === 'flake') {
+	if (!isPreset && reuseView !== '' && job.kind === 'flake') {
 		findings.push({ finding: new CustomReuseViewFinding(reuseView) });
 	}
 
@@ -1187,12 +1188,32 @@ export function modelPublishingJob(
 				? []
 				: flakeRequests(publicationCache, roots, isPreset && isPullRequest);
 
-			const hasReuseView = isPreset ? !isPullRequest : reuseView !== '';
-			const additionalCaches = readCaches.caches.filter(
-				(selected) => !isSameCacheScope(selected, publicationCache)
-			);
+			const hasReuseView = !isPreset && reuseView !== '';
+			const referenceCaches: readonly CacheScope[] =
+				isPreset && isPullRequest
+					? [{ kind: 'default' }]
+					: isPreset &&
+						  job.trustedContributorReuse === true &&
+						  entry.trigger === 'push'
+						? [
+								{
+									kind: 'named',
+									name: cacheNameSchema.parse(
+										pullRequestCacheName(identity.repositoryId, 1)
+									)
+								}
+							]
+						: [];
+			const additionalCaches = [
+				...readCaches.caches,
+				...referenceCaches.filter((cache) =>
+					readCaches.caches.every(
+						(selected) => !isSameCacheScope(selected, cache)
+					)
+				)
+			].filter((selected) => !isSameCacheScope(selected, publicationCache));
 			if (
-				readCaches.caches.length > 0 &&
+				additionalCaches.length > 0 &&
 				!readResourcesSchema.safeParse([
 					...[publicationCache, ...additionalCaches].map((selected) => ({
 						type: 'cupboard_cache',
@@ -1203,10 +1224,7 @@ export function modelPublishingJob(
 						? [
 								{
 									type: 'cupboard_view',
-									view:
-										reuseView === ''
-											? pullRequestViewName(identity.repositoryId)
-											: reuseView
+									view: reuseView
 								}
 							]
 						: [])
@@ -1225,13 +1243,15 @@ export function modelPublishingJob(
 					cache: cache.scope
 				}),
 				requests,
+				...(isPreset &&
+					job.trustedContributorReuse === true &&
+					entry.trigger === 'push' && {
+						trustedContributorReuse: true as const
+					}),
 				...(additionalCaches.length > 0 && { readCaches: additionalCaches }),
 				...(hasReuseView && {
 					reuseView: {
-						name:
-							reuseView === ''
-								? pullRequestViewName(identity.repositoryId)
-								: reuseView,
+						name: reuseView,
 						destination: cacheUrl(tenant, cache.scope)
 					}
 				})

@@ -320,6 +320,22 @@ export function buildCacheContentReadGrant(
 	});
 }
 
+export function buildPullRequestContentReadGrant(
+	repositoryId: number
+): PermittedGrant {
+	return permittedGrantSchema.parse({
+		type: 'cupboard_cache',
+		actions: ['cache:content-read'],
+		resources: {
+			cache: {
+				kind: 'named',
+				pattern: `^gh-${String(repositoryId)}-pr-[1-9][0-9]*$`,
+				validate: 'cacheName'
+			}
+		}
+	});
+}
+
 export function buildViewContentReadGrant(view: string): PermittedGrant {
 	return permittedGrantSchema.parse({
 		type: 'cupboard_view',

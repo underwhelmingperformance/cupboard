@@ -63,6 +63,7 @@ import {
 	buildCacheContentReadGrant,
 	buildCacheGrant,
 	buildCacheGrants,
+	buildPullRequestContentReadGrant,
 	buildViewContentReadGrant,
 	collectSubstitutions,
 	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
@@ -84,6 +85,7 @@ interface GithubPrOptions extends GithubWorkflowOptions {
 	readonly rootTemplate?: string;
 	readonly attest?: boolean;
 	readonly readCache?: boolean;
+	readonly readDefaultCache?: boolean;
 }
 
 interface GithubPrCloseOptions extends GithubWorkflowOptions {
@@ -109,6 +111,7 @@ interface GithubBranchOptions extends GithubWorkflowOptions {
 	readonly attest?: boolean;
 	readonly readCache?: boolean;
 	readonly readView?: string;
+	readonly readPullRequestCaches?: boolean;
 }
 
 async function prepareGithubWorkflowReference(
@@ -420,6 +423,9 @@ export function githubPrAddBody(
 					captures: []
 				})
 			}),
+			...(options.readDefaultCache === true
+				? [buildCacheContentReadGrant({})]
+				: []),
 			...(options.readCache === true
 				? [
 						buildCacheContentReadGrant({
@@ -591,6 +597,9 @@ export function githubBranchAddBody(
 				root: `github:${identity.fullName}/${options.branch}/`
 			}),
 			...(options.readCache === true ? [buildCacheContentReadGrant({})] : []),
+			...(options.readPullRequestCaches === true
+				? [buildPullRequestContentReadGrant(identity.repositoryId)]
+				: []),
 			...(options.readView === undefined
 				? []
 				: [buildViewContentReadGrant(options.readView)])

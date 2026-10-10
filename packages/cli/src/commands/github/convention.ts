@@ -401,3 +401,20 @@ function canTagGlobsOverlap(left: string, right: string): boolean {
 
 	return false;
 }
+
+/**
+The publishing workflow that issues the OIDC token for a trusted wrapper.
+*/
+export function publicationWorkflowReference(reference: string): string {
+	return reference.replace(
+		'/cupboard-flake-publish-trusted.yml@',
+		'/cupboard-flake-publish.yml@'
+	);
+}
+
+export function trustedContributorWorkflowReference(reference: string): string {
+	return publicationWorkflowReference(reference).replace(
+		'/cupboard-flake-publish.yml@',
+		'/cupboard-flake-publish-trusted.yml@'
+	);
+}
