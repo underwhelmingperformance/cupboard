@@ -12,13 +12,29 @@ describe('check plan', () => {
 			tasks
 				.filter(({ group }) => group !== 'static')
 				.map(({ workerBudget }) => workerBudget)
-		).toStrictEqual([2, 2, 2, 2, 2, 2, 2]);
+		).toStrictEqual([2, 2, 2, 2, 1, 2, 2]);
 		expect(
 			tasks
 				.filter(({ group }) => group === 'static')
 				.every(({ workerBudget }) => workerBudget === undefined)
 		).toBe(true);
 	});
+	it.each([1, 4])(
+		'uses one script worker within a runtime budget of %i',
+		(workers) => {
+			expect(
+				CheckPlan.fromScripts(manifest.scripts, workers).select('scripts')
+			).toStrictEqual([
+				{
+					id: 'scripts',
+					group: 'scripts',
+					workerBudget: 1,
+					checks: [],
+					arguments: ['run', 'test:scripts', '--maxWorkers=1']
+				}
+			]);
+		}
+	);
 	it('accounts for every source check exactly once', () => {
 		const plan = CheckPlan.fromScripts(manifest.scripts, 2);
 		expect(
