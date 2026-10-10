@@ -3738,6 +3738,7 @@ jobs:
     with:
       url: https://cupboard.supply/t/laney
       cache: packages
+      cache-access-mode: private
       root-prefix: builds
       reuse-view: pull-requests-1234
     secrets:
