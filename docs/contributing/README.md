@@ -219,8 +219,9 @@ the validated cutover.
 `pnpm check` schedules all checks defined by the `check:*` scripts. It starts
 the server and end-to-end suites first and runs at most two checks at a time,
 with explicit CPU budgets for test workers. Each check reports its duration;
-failures do not prevent the remaining checks from running. You need Nix and
-Docker to run the full gate.
+failures do not prevent the remaining checks from running. The scripts suite
+uses one worker because its tests create additional build and database
+subprocesses. You need Nix and Docker to run the full gate.
 
 CI runs the source checks in separate jobs. The required `check` context
 succeeds only when all source jobs and every conformance platform succeed. A

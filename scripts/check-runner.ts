@@ -104,9 +104,9 @@ export class CheckPlan {
 			{
 				id: 'scripts',
 				group: 'scripts',
-				workerBudget: workers,
+				workerBudget: 1,
 				checks: [],
-				arguments: ['run', 'test:scripts', workerArgument]
+				arguments: ['run', 'test:scripts', '--maxWorkers=1']
 			},
 			{
 				id: 'check:e2e-remote-store',
