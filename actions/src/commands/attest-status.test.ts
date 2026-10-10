@@ -6,6 +6,7 @@ import path from 'node:path';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { buildReceiptSchema } from '@cupboard/protocol/build';
+import { ResultLink, ResultTable } from '@cupboard/reporter';
 import { UsageError } from '@cupboard/shared/errors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -54,7 +55,11 @@ afterEach(async () => {
 });
 
 async function fixture(
-	options: { readonly version?: 2 | 3; readonly subjectCount?: number } = {}
+	options: {
+		readonly version?: 2 | 3;
+		readonly subjectCount?: number;
+		readonly copied?: boolean;
+	} = {}
 ) {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-coverage-'));
 	directories.push(directory);
@@ -75,7 +80,13 @@ async function fixture(
 								attempt: 1,
 								attemptId: 'attempt-1'
 							}
-						: { origin: 'store-held', buildStore: 'auto' })
+						: storePath === unattested && options.copied === true
+							? {
+									origin: 'copied',
+									signatures: [],
+									copiedFrom: ['https://cache.nixos.org']
+								}
+							: { origin: 'store-held', buildStore: 'auto' })
 				}))
 		})
 	);
@@ -97,6 +108,11 @@ function entries() {
 					digest: freshDigest,
 					predicateType: 'https://slsa.dev/provenance/v1',
 					size: freshBundle.length
+				},
+				{
+					digest: oldDigest,
+					predicateType: 'https://slsa.dev/provenance/v1',
+					size: 123
 				}
 			]
 		},
@@ -165,15 +181,16 @@ describe('publication attestation coverage', () => {
 	});
 
 	it.each([
-		{ signed: true, version: 3 as const, subjectCount: 4 },
+		{ signed: true, version: 3 as const, subjectCount: 4, copied: false },
+		{ signed: true, version: 3 as const, subjectCount: 4, copied: true },
 		{ signed: false, version: 3 as const, subjectCount: 4 },
 		{ signed: false, version: 2 as const, subjectCount: 1 },
 		{ signed: false, version: 2 as const, subjectCount: 0 },
 		{ signed: false, version: 3 as const, subjectCount: 1 }
 	])(
 		'reports every receipt path with version $version, $subjectCount subjects and signing $signed',
-		async ({ signed, version, subjectCount }) => {
-			const files = await fixture({ version, subjectCount });
+		async ({ signed, version, subjectCount, copied }) => {
+			const files = await fixture({ version, subjectCount, copied });
 			let queried: readonly string[] = [];
 			let manifest = '';
 			mocks.runCupboard.mockImplementation(
@@ -192,7 +209,10 @@ describe('publication attestation coverage', () => {
 									)
 								),
 								covered: [StorePath.hash(app), StorePath.hash(dependency)],
-								withoutEvidence: [StorePath.hash(unattested)],
+								withoutEvidence:
+									copied === true ? [] : [StorePath.hash(unattested)],
+								fetchedUpstream:
+									copied === true ? [StorePath.hash(unattested)] : [],
 								missing: [StorePath.hash(absent)]
 							}
 						}
@@ -214,6 +234,35 @@ describe('publication attestation coverage', () => {
 				files.receipt,
 				...(signed ? ['--bundles-file', files.bundles] : [])
 			]);
+			const expectedTable = ResultTable.of(
+				[
+					{ key: 'path', label: 'Path' },
+					{ key: 'evidence', label: 'Stored attestation' }
+				],
+				[
+					{
+						path: app,
+						evidence: new ResultLink(
+							'Bundle',
+							new URL(
+								`https://cupboard.example.workers.dev/t/acme/cache/pr-1/attestation-bundles/${freshDigest}`
+							)
+						)
+					},
+					{
+						path: dependency,
+						evidence: new ResultLink(
+							'Bundle',
+							new URL(
+								`https://cupboard.example.workers.dev/t/acme/cache/pr-1/attestation-bundles/${oldDigest}`
+							)
+						)
+					},
+					{ path: unattested, evidence: 'No stored evidence' },
+					{ path: absent, evidence: 'Missing published path' }
+				]
+			);
+
 			expect({
 				queried,
 				results: mocks.result.mock.calls,
@@ -232,13 +281,19 @@ describe('publication attestation coverage', () => {
 					[
 						{
 							kind: 'publication-attestation-coverage',
+							title: 'Published attestation coverage (not verified)',
+							jobSummary: true,
+							table: expectedTable,
 							data: {
 								entries: entries(),
 								freshlySigned: signed ? [StorePath.hash(app)] : [],
 								previouslyStored: signed
 									? [StorePath.hash(dependency)]
 									: [StorePath.hash(app), StorePath.hash(dependency)],
-								withoutEvidence: [StorePath.hash(unattested)],
+								withoutEvidence:
+									copied === true ? [] : [StorePath.hash(unattested)],
+								fetchedUpstream:
+									copied === true ? [StorePath.hash(unattested)] : [],
 								missing: [StorePath.hash(absent)]
 							},
 							rows: [
@@ -250,7 +305,14 @@ describe('publication attestation coverage', () => {
 									label: 'Paths with previously stored evidence',
 									value: signed ? '1' : '2'
 								},
-								{ label: 'Paths without stored evidence', value: '1' },
+								{
+									label: 'Fetched upstream, not attested',
+									value: copied === true ? '1' : '0'
+								},
+								{
+									label: 'Other paths without stored evidence',
+									value: copied === true ? '0' : '1'
+								},
 								{ label: 'Missing published paths', value: '1' }
 							]
 						}

@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { env } from 'node:process';
 
 import { setOutput as setGithubOutput } from '@actions/core';
 import { maxAttestationBundleBytes } from '@cupboard/protocol/attestations';
@@ -27,13 +28,9 @@ import {
 	type AttestationSubject,
 	defaultSigningPolicy,
 	destinationAccessModes,
-	disclosureLines,
 	type GithubSignerOptions,
-	type ProducedEvidence,
-	producedLines,
 	type SignedAttestation,
 	type SigningDependencies,
-	signingDisclosure,
 	type SigningPolicy,
 	signingProfiles,
 	signStatement,
@@ -42,6 +39,10 @@ import {
 	subjectGroupings,
 	subjectsPerStatement
 } from '../attestation-signing.ts';
+import {
+	type SignedSubjectBundle,
+	signingSummary
+} from '../attestation-summary.ts';
 import {
 	AttestationBundleTooLargeForSubjectError,
 	AttestationPredicateFileError,
@@ -53,6 +54,7 @@ import {
 	PredicateSourceConflictError,
 	PredicateTypeRequiredError
 } from '../errors.ts';
+import type { Environment } from '../inputs.ts';
 import { isEnabled, provided, providedChoice } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
 import {
@@ -124,6 +126,7 @@ export interface AttestSignDependencies extends SigningDependencies {
 	 */
 	readonly setOutput?: (name: string, value: string) => Promise<void> | void;
 	readonly io?: AttestSignIo;
+	readonly environment?: Environment;
 }
 
 const predicateDocumentSchema = z.looseObject({});
@@ -382,18 +385,6 @@ export async function attestSignAction(
 					...builtSubjects.map((subject) => subject.name),
 					...custom.subjects.map((subject) => subject.name)
 				]);
-	const disclosed = disclosureLines(
-		signingDisclosure(inputs.policy, {
-			built: builtSubjects.length,
-			custom: custom === undefined ? 0 : custom.subjects.length
-		})
-	);
-
-	if (signedSubjects.length > 0) {
-		for (const line of disclosed) {
-			reporter.info(line);
-		}
-	}
 
 	const provenanceBundles =
 		builtSubjects.length === 0
@@ -450,45 +441,19 @@ export async function attestSignAction(
 	);
 	await setOutput('checksums-file', inputs.signedChecksumsFile);
 
-	const produced = producedLines(
-		inputs.policy.profile,
-		producedEvidence(bundles)
+	reporter.result(
+		signingSummary(
+			inputs.policy.profile,
+			bundles,
+			dependencies.environment ?? env
+		)
 	);
-
-	for (const line of produced) {
-		reporter.info(line);
-	}
 }
 
-interface SignedBundle {
-	readonly file: string;
-	readonly signed: SignedAttestation;
-}
+type SignedBundle = SignedSubjectBundle;
 
 function bundlePaths(bundles: readonly SignedBundle[]): string {
 	return bundles.map((bundle) => bundle.file).join('\n');
-}
-
-function producedEvidence(bundles: readonly SignedBundle[]): ProducedEvidence {
-	let tlogEntryCount = 0;
-	let timestampCount = 0;
-	let uploadedCount = 0;
-
-	for (const { signed } of bundles) {
-		tlogEntryCount += signed.evidence.tlogEntryCount;
-		timestampCount += signed.evidence.timestampCount;
-
-		if (signed.attestationId !== undefined) {
-			uploadedCount += 1;
-		}
-	}
-
-	return {
-		bundleCount: bundles.length,
-		tlogEntryCount,
-		timestampCount,
-		uploadedCount
-	};
 }
 
 type StatementFor = (
@@ -697,6 +662,11 @@ function soleSubjectPredicate(
 	return { subjects: kept };
 }
 
+interface SignedBatch {
+	readonly signed: SignedAttestation;
+	readonly subjects: readonly AttestationSubject[];
+}
+
 interface SubjectBatchSigning {
 	readonly subjects: readonly AttestationSubject[];
 	readonly statementFor: StatementFor;
@@ -708,6 +678,7 @@ interface SubjectBatchSigning {
 	readonly reporter: Reporter;
 	readonly signing: SigningDependencies;
 	readonly io: AttestSignIo;
+	readonly onSigned?: (subjects: readonly AttestationSubject[]) => void;
 }
 
 async function signSubjectBatches(
@@ -722,15 +693,38 @@ async function signSubjectBatches(
 		)
 	);
 
-	for (const subjects of subjectBatches) {
-		const signedBatches = await signFittingBatch(options, subjects);
-		for (const signed of signedBatches) {
-			const file = bundleFileForBatch(options.bundleFile, bundles.length);
+	await options.reporter.progress(
+		'Signing attestation subjects',
+		{ total: options.subjects.length },
+		async (progress) => {
+			const completed = new Set<string>();
+			const onSigned = (subjects: readonly AttestationSubject[]) => {
+				const before = completed.size;
+				for (const subject of subjects) {
+					completed.add(`${subject.name}:${subject.sha256}`);
+				}
+				if (completed.size > before) {
+					progress.advance(completed.size - before);
+				}
+			};
+			for (const subjects of subjectBatches) {
+				const signedBatches = await signFittingBatch(
+					{ ...options, onSigned },
+					subjects
+				);
+				for (const signed of signedBatches) {
+					const file = bundleFileForBatch(options.bundleFile, bundles.length);
 
-			await options.io.writeBundle(file, signed);
-			bundles.push({ file, signed });
+					await options.io.writeBundle(file, signed.signed);
+					bundles.push({
+						file,
+						signed: signed.signed,
+						subjects: signed.subjects
+					});
+				}
+			}
 		}
-	}
+	);
 
 	return bundles;
 }
@@ -738,7 +732,7 @@ async function signSubjectBatches(
 async function signFittingBatch(
 	options: SubjectBatchSigning,
 	subjects: readonly AttestationSubject[]
-): Promise<readonly SignedAttestation[]> {
+): Promise<readonly SignedBatch[]> {
 	const statement = options.statementFor(subjects);
 	const payloadBytes = Buffer.byteLength(
 		JSON.stringify(inTotoStatement(subjects, statement))
@@ -764,7 +758,8 @@ async function signFittingBatch(
 	const bundleBytes = Buffer.byteLength(signed.bundle);
 
 	if (bundleBytes <= maxAttestationBundleBytes) {
-		return [signed];
+		options.onSigned?.(subjects);
+		return [{ signed, subjects }];
 	}
 
 	const split = await splitFittingBatch(options, subjects, statement);
@@ -788,7 +783,7 @@ async function splitFittingBatch(
 	options: SubjectBatchSigning,
 	subjects: readonly AttestationSubject[],
 	statement: AttestationStatement
-): Promise<readonly SignedAttestation[] | undefined> {
+): Promise<readonly SignedBatch[] | undefined> {
 	if (subjects.length > 1) {
 		if (options.canSplitSubjects === false) {
 			throw new PredicateGroupingUnsupportedError(statement.predicateType);
@@ -811,7 +806,7 @@ async function splitFittingBatch(
 		report.attributes.slice(0, midpoint),
 		report.attributes.slice(midpoint)
 	];
-	const signed: SignedAttestation[] = [];
+	const signed: SignedBatch[] = [];
 	for (const attributes of partitions) {
 		signed.push(
 			...(await signFittingBatch(
@@ -832,7 +827,7 @@ async function splitFittingBatch(
 async function signSplitBatch(
 	options: SubjectBatchSigning,
 	subjects: readonly AttestationSubject[]
-): Promise<readonly SignedAttestation[]> {
+): Promise<readonly SignedBatch[]> {
 	const midpoint = Math.floor(subjects.length / 2);
 	const first = await signFittingBatch(options, subjects.slice(0, midpoint));
 	const second = await signFittingBatch(options, subjects.slice(midpoint));

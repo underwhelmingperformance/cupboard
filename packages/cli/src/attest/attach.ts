@@ -157,6 +157,10 @@ export interface CommittedAttestationSource {
 	readonly readPassword?: string;
 }
 
+export interface CommittedAttestationReadDependencies extends ReferenceFetchDependencies {
+	readonly onProgress?: (completed: number) => void;
+}
+
 /**
  * Reads the path identities from the destination's live narinfos. A path that
  * is absent during this initial read fails the command. The standalone attach
@@ -166,8 +170,9 @@ export interface CommittedAttestationSource {
 export async function readCommittedAttestationPathInfos(
 	paths: readonly StorePathString[],
 	source: CommittedAttestationSource,
-	dependencies: ReferenceFetchDependencies = {}
+	dependencies: CommittedAttestationReadDependencies = {}
 ): Promise<readonly AttestationPathInfo[]> {
+	let completed = 0;
 	const reference = {
 		url: cacheUrl(source.url, source.cache),
 		...(source.readUser !== undefined && { readUser: source.readUser }),
@@ -189,6 +194,9 @@ export async function readCommittedAttestationPathInfos(
 				metadata.upload.storePath
 			);
 		}
+
+		completed += 1;
+		dependencies.onProgress?.(completed);
 
 		return {
 			storePath,
@@ -272,7 +280,9 @@ function recordPreparedBundle(
 
 export interface AttestationAttachmentOptions {
 	readonly client: AttestationAttachClient;
-	readonly onPartial?: (outcome: AttestationAttachPartialOutcome) => void;
+	readonly onPartial?: (
+		outcome: AttestationAttachPartialOutcome
+	) => void | Promise<void>;
 	/**
 	 * Treats `NOT_FOUND` during attachment as an `unservable` outcome and
 	 * continues with the other bundles. The server uses this response when the
@@ -394,7 +404,7 @@ export async function runAttestationAttachment(
 		return await attachWithProgress(prepared, log, options, progress);
 	} catch (error) {
 		try {
-			options.onPartial?.(progress.snapshot());
+			await options.onPartial?.(progress.snapshot());
 		} catch {
 			throw error;
 		}
@@ -645,8 +655,12 @@ export async function runAttestAttach(
 				prepared: bundles,
 				outcome: await runAttestationAttachment(bundles, log, {
 					client: dependencies.client,
-					onPartial: (partial) => {
-						reportPartialAttestationAttachment(partial, reporter, pathInfos);
+					onPartial: async (partial) => {
+						await reportPartialAttestationAttachment(
+							partial,
+							reporter,
+							pathInfos
+						);
 					},
 					skipUnservable: true
 				})
@@ -684,6 +698,20 @@ export async function runAttestAttach(
 	// reporter, so reporting falls back to the unvalidated summary.
 	const validated = attestationAttachSummarySchema.safeParse(summary);
 
+	await reportAttachmentPaths(
+		reporter,
+		'Attached attestation paths',
+		summaryPaths.map((path): ResultRow => ({
+			label:
+				path.storePath === undefined
+					? path.storePathHash
+					: shouldShowDetails(reporter)
+						? path.storePath
+						: StorePath.basename(path.storePath),
+			value: attachPathRow(path.outcome)
+		}))
+	);
+
 	reporter.result({
 		kind: attestationAttachSummaryResultKind,
 		title: 'Attestation attachment',
@@ -699,18 +727,34 @@ export async function runAttestAttach(
 			{
 				label: 'Attestation upload',
 				value: formatBytes(outcome.uploadedBytes)
-			},
-			...summaryPaths.map((path): ResultRow => ({
-				label:
-					path.storePath === undefined
-						? path.storePathHash
-						: shouldShowDetails(reporter)
-							? path.storePath
-							: StorePath.basename(path.storePath),
-				value: attachPathRow(path.outcome)
-			}))
+			}
 		]
 	});
+}
+
+async function reportAttachmentPaths(
+	reporter: Reporter,
+	label: string,
+	rows: readonly ResultRow[]
+): Promise<void> {
+	await reporter.steps(
+		label,
+		(steps) => {
+			for (const row of rows.slice(0, 20)) {
+				steps.message(
+					row.label.includes('\n')
+						? `${row.label}\n${row.value}`
+						: `${row.label}: ${row.value}`
+				);
+			}
+			if (rows.length > 20) {
+				steps.message(
+					`${formatCount(rows.length - 20)} additional ${rows.length === 21 ? 'path' : 'paths'} in the machine result.`
+				);
+			}
+		},
+		{ showMessages: true }
+	);
 }
 
 function attachPathRow(outcome: AttestationAttachPathInput['outcome']): string {
@@ -729,12 +773,12 @@ function attachPathRow(outcome: AttestationAttachPathInput['outcome']): string {
 	}
 }
 
-export function reportPartialAttestationAttachment(
+export async function reportPartialAttestationAttachment(
 	partial: AttestationAttachPartialOutcome,
 	reporter: Reporter,
 	pathInfos: readonly AttestationPathInfo[],
 	requested: readonly PreparedAttestationBundle[] = []
-): void {
+): Promise<void> {
 	const storePathByHash = new Map(
 		pathInfos.map((info) => [StorePath.hash(info.storePath), info.storePath])
 	);
@@ -769,6 +813,24 @@ export function reportPartialAttestationAttachment(
 		bundles
 	};
 	const validated = attestationAttachPartialSchema.safeParse(summary);
+	await reportAttachmentPaths(
+		reporter,
+		'Incomplete attestation paths',
+		bundles.map((bundle): ResultRow => ({
+			label: shouldShowDetails(reporter)
+				? `${bundle.storePath ?? bundle.storePathHash}\n${bundle.digest}`
+				: bundle.storePath === undefined
+					? bundle.storePathHash
+					: StorePath.basename(bundle.storePath),
+			value:
+				bundle.outcome === 'unconfirmed'
+					? 'attachment outcome unknown'
+					: bundle.outcome === 'unattempted'
+						? 'not attempted'
+						: attachPathRow(bundle.outcome)
+		}))
+	);
+
 	reporter.result({
 		kind: attestationAttachPartialResultKind,
 		title: 'Incomplete attestation attachment',
@@ -782,19 +844,7 @@ export function reportPartialAttestationAttachment(
 				label: 'Attestation upload',
 				value: formatBytes(summary.uploadedBytes)
 			},
-			...bundles.map((bundle): ResultRow => ({
-				label: shouldShowDetails(reporter)
-					? `${bundle.storePath ?? bundle.storePathHash} ${bundle.digest}`
-					: bundle.storePath === undefined
-						? bundle.storePathHash
-						: StorePath.basename(bundle.storePath),
-				value:
-					bundle.outcome === 'unconfirmed'
-						? 'attachment outcome unknown'
-						: bundle.outcome === 'unattempted'
-							? 'not attempted'
-							: attachPathRow(bundle.outcome)
-			})),
+
 			{
 				label: 'Next step',
 				value:

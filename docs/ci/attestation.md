@@ -56,15 +56,23 @@ Authentication and storage failures fail the status check.
 Both publication workflows report coverage after publication and attachment,
 including when signing is disabled or produces no bundles. The report compares
 stored bundle digests with the manifest from the signing step. It lists paths
-with fresh bundles separately from paths with other stored evidence. A path can
-appear in both groups when the cache contains both kinds of evidence. All paths
-in the receipt are checked, including older receipts with build subjects for
-only some paths. The report compares the current NAR hash with the receipt's
-expected hash wherever a subject records that hash.
+with fresh bundles separately from paths with other stored evidence. A path with
+both kinds of evidence appears only in the fresh group. The coverage categories
+are exclusive, so their counts add up to the published path count. Copied paths
+without evidence are reported as fetched upstream and not attested. Other paths
+without evidence are reported separately. All paths in the receipt are checked,
+including older receipts with build subjects for only some paths. The report
+compares the current NAR hash with the receipt's expected hash wherever a
+subject records that hash.
 
 Discovery reports stored descriptors. Use `attest verify` to check the bundle's
 signature, signer, issuer, predicate and NAR subject. Stored evidence does not
 change build selection or suppress provenance for a fresh local rebuild.
+
+The signing summary reports the actual Sigstore instance, subject count, GitHub
+attestation links and Rekor log indices for the produced bundles. The coverage
+summary links to stored bundles; discovery does not verify those bundles. Long
+lists show at most 20 entries. The machine results retain every entry.
 
 ## How a bundle refers to a store path
 

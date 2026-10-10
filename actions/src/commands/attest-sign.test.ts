@@ -1096,69 +1096,28 @@ describe('attestSignAction', () => {
 	});
 
 	it.each([
+		{ destinationAccess: 'private' },
+		{ destinationAccess: 'public' },
 		{
-			destination: 'private',
-			given: {},
-			disclosed: [
-				'Signing with the public-good Sigstore instance.',
-				'Signing SLSA build provenance for 1 built path, one statement per path. Each bundle will contain one subject.',
-				'Signing custom predicate for 2 accepted paths, one statement per path. Each bundle will contain one subject.',
-				'Signing can contact the following external services.',
-				'  OIDC and Fulcio receive the workload identity and an ephemeral public key.',
-				'  Certificate transparency receives the signing certificate and the identity it certifies.',
-				'  An RFC 3161 timestamp authority receives the signature imprint and returns a signed timestamp.',
-				'Signing publishes evidence or complete bundles to the following destinations.',
-				'  The action writes the complete bundle to files on the runner. Attaching one to the destination cache makes it readable under the read policy of that cache.'
-			],
-			produced: [
-				'The bundles are in the trust domain of the public-good Sigstore instance.',
-				'The action signed 3 bundles that carry 0 Rekor entries and 3 RFC 3161 timestamps.',
-				"The action recorded no bundle in the repository's attestation store."
-			]
-		},
-		{
-			destination: 'private with an explicit public-good profile',
-			given: {
-				signingProfile: 'rekor-and-tsa',
-				uploadToGithub: 'true'
-			},
-			disclosed: [
-				'Signing with the public-good Sigstore instance.',
-				'Signing SLSA build provenance for 1 built path, one statement per path. Each bundle will contain one subject.',
-				'Signing custom predicate for 2 accepted paths, one statement per path. Each bundle will contain one subject.',
-				'Signing can contact the following external services.',
-				'  OIDC and Fulcio receive the workload identity and an ephemeral public key.',
-				'  Certificate transparency receives the signing certificate and the identity it certifies.',
-				'  An RFC 3161 timestamp authority receives the signature imprint and returns a signed timestamp.',
-				'  Rekor receives the signed statement, its signature and the signing certificate.',
-				'Signing publishes evidence or complete bundles to the following destinations.',
-				'  Rekor stores a permanent public record of the signature, and that record remains after the cache drops the path.',
-				"  The action writes the complete bundle to the repository's attestation store, where every reader of the repository can read it.",
-				'  The action writes the complete bundle to files on the runner. Attaching one to the destination cache makes it readable under the read policy of that cache.'
-			],
-			produced: [
-				'The bundles are in the trust domain of the public-good Sigstore instance.',
-				'The action signed 3 bundles that carry 3 Rekor entries and 3 RFC 3161 timestamps.',
-				"The action recorded 3 of 3 bundles in the repository's attestation store."
-			]
+			destinationAccess: 'private',
+			signingProfile: 'rekor-and-tsa',
+			uploadToGithub: 'true'
 		}
 	])(
-		'discloses the services a $destination destination contacts before signing',
-		async ({ given, disclosed, produced }) => {
+		'reports produced bundles without the fixed disclosure for $destinationAccess',
+		async (given) => {
 			const files = workspace();
 			const reported: string[] = [];
-
 			files.textFiles.set(
 				files.predicateFile,
 				`${JSON.stringify(runOriginPredicate)}\n`
 			);
 			await attestSignAction(
-				options(files, { destinationAccess: 'private', ...given }),
+				options(files, given),
 				recordingReporter(reported),
 				recordedSigning(files, []).dependencies
 			);
-
-			expect(reported).toStrictEqual([...disclosed, ...produced]);
+			expect(reported).toStrictEqual([]);
 		}
 	);
 
@@ -1492,13 +1451,14 @@ describe('attestSignAction', () => {
 			bundles: [],
 			manifest: '',
 			signedChecksums: '',
-			reported: ['This run signed no statement.']
+			reported: []
 		});
 	});
 
 	it('splits a signed bundle when its witness material exceeds the cache limit', async () => {
 		const files = workspace();
 		const batches: string[][] = [];
+		const advanced: number[] = [];
 		files.textFiles.set(
 			files.builtChecksumsFile,
 			`${appDigest}  ${appName}\n${runtimeDigest}  ${runtimeName}\n`
@@ -1506,7 +1466,19 @@ describe('attestSignAction', () => {
 
 		await attestSignAction(
 			options(files, { predicateFile: '', predicateType: '' }),
-			createGithubReporter(),
+			{
+				...recordingReporter([]),
+				progress: (_label, _options, body) =>
+					Promise.resolve(
+						body({
+							advance: (count = 1) => {
+								advanced.push(count);
+							},
+							fact: ignore,
+							warn: ignore
+						})
+					)
+			},
 			{
 				io: memoryIo(files),
 				setOutput: ignore,
@@ -1520,16 +1492,19 @@ describe('attestSignAction', () => {
 					() => {
 						batches.push(subjects.map((subject) => subject.name));
 						return Promise.resolve({
-							bundle: 'x'.repeat(
-								subjects.length === 1 ? 1024 : maxAttestationBundleBytes + 1
-							),
+							bundle: JSON.stringify({
+								padding: 'x'.repeat(
+									subjects.length === 1 ? 1024 : maxAttestationBundleBytes + 1
+								)
+							}),
 							evidence: { tlogEntryCount: 1, timestampCount: 0 }
 						});
 					}
 			}
 		);
 
-		expect({ batches, bundles: files.bundles.size }).toStrictEqual({
+		expect({ batches, advanced, bundles: files.bundles.size }).toStrictEqual({
+			advanced: [1, 1],
 			batches: [[appName, runtimeName], [appName], [runtimeName]],
 			bundles: 2
 		});

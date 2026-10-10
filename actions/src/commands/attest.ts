@@ -348,13 +348,21 @@ function readCredential(inputs: AttestInputs): BasicCredential | undefined {
 async function resolveAttestation(
 	receipt: BuildReceipt,
 	inputs: AttestInputs,
-	dependencies: AttestDependencies
+	dependencies: AttestDependencies,
+	reporter: Reporter
 ): Promise<AttestationSubjects> {
 	const paths =
 		receipt.version === 3
 			? receipt.subjects.map((subject) => subject.storePath)
 			: receipt.paths;
-	const infos = await committedPathInfos(paths, inputs, dependencies);
+	const infos = await reporter.progress(
+		'Checking published attestation subjects',
+		{ total: paths.length },
+		(progress) =>
+			committedPathInfos(paths, inputs, dependencies, () => {
+				progress.advance();
+			})
+	);
 
 	if (receipt.version === 3) {
 		return provenancedSubjects(
@@ -372,7 +380,8 @@ const maximumNarInfoBytes = 1024 * 1024;
 async function committedPathInfos(
 	paths: readonly StorePathString[],
 	inputs: AttestInputs,
-	dependencies: AttestDependencies
+	dependencies: AttestDependencies,
+	advance: () => void
 ): Promise<readonly CommittedPathInfo[]> {
 	const fetcher = retryingFetcher(
 		withReadAuthentication(dependencies.fetch ?? fetch, {
@@ -383,8 +392,19 @@ async function committedPathInfos(
 	const base = canonicalHref(cacheUrlFor(inputs.url, inputs.cache));
 	const credential = readCredential(inputs);
 
-	return mapWithConcurrency(paths, committedPathConcurrency, (storePath) =>
-		fetchCommittedPathInfo(fetcher, base, storePath, credential)
+	return mapWithConcurrency(
+		paths,
+		committedPathConcurrency,
+		async (storePath) => {
+			const info = await fetchCommittedPathInfo(
+				fetcher,
+				base,
+				storePath,
+				credential
+			);
+			advance();
+			return info;
+		}
 	);
 }
 
@@ -455,7 +475,8 @@ export async function attestAction(
 	const { subjects, built, reproduced, skipped } = await resolveAttestation(
 		receipt,
 		inputs,
-		{ ...dependencies, fetch: fetcher }
+		{ ...dependencies, fetch: fetcher },
+		reporter
 	);
 
 	for (const storePath of skipped) {

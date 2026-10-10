@@ -965,7 +965,9 @@ function clackReporter(
 					}
 				});
 
-				task.success(withElapsed(label, startedAt, colours));
+				task.success(withElapsed(label, startedAt, colours), {
+					showLog: display?.showMessages === true
+				});
 
 				return value;
 			} catch (error) {

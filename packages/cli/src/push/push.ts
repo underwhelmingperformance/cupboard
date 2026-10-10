@@ -1874,8 +1874,8 @@ async function attachPushedAttestations(
 
 		const outcome = await runAttestationAttachment(ready, log, {
 			client: requireAttestationAttachClient(dependencies.client),
-			onPartial: (partial) => {
-				reportPartialAttestationAttachment(
+			onPartial: async (partial) => {
+				await reportPartialAttestationAttachment(
 					partial,
 					reporter,
 					pathInfos,
