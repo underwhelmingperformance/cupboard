@@ -1,4 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync as readText, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -121,6 +124,31 @@ describe('composite action toolchain derivation', () => {
 		expect(derivedPnpmVersion()).toBe(manifestPnpmVersion());
 	});
 
+	it('resolves toolchain pins through the shared script without echoing outputs', () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-toolchain-'));
+		const output = path.join(directory, 'output');
+		try {
+			const stdout = execFileSync(
+				'bash',
+				[path.join(actionsDirectory, 'bootstrap.sh'), 'toolchain'],
+				{
+					env: {
+						...process.env,
+						GITHUB_ACTION_PATH: path.join(actionsDirectory, 'attest'),
+						GITHUB_OUTPUT: output
+					},
+					encoding: 'utf8'
+				}
+			);
+			expect({ stdout, output: readText(output, 'utf8') }).toStrictEqual({
+				stdout: '',
+				output: `pnpm-version=${manifestPnpmVersion()}\nnode-version=${readText(path.join(repositoryRoot, '.node-version'), 'utf8').trim()}\n`
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('pins a plain Node version for node-version-file', () => {
 		const nodeVersion = readFileSync(
 			path.join(repositoryRoot, '.node-version'),
@@ -144,7 +172,7 @@ describe('composite action toolchain derivation', () => {
 				derivesNode:
 					body.includes(
 						'node-version: ${{ steps.toolchain.outputs.node-version }}'
-					) && body.includes('echo "node-version=$node_version"'),
+					) && body.includes('bootstrap.sh" toolchain'),
 				usesCallerRelativeNodeVersionFile: body.includes('node-version-file:'),
 				versionLiterals: body
 					.matchAll(/(?:PNPM_VERSION|node-version): *'?[\d.]+'?/g)

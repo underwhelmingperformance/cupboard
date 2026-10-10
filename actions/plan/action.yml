@@ -148,25 +148,7 @@ runs:
       shell: bash
       # The workspace manifest's packageManager field is the single pnpm pin;
       # the release integrity suffix, when present, is not part of the version.
-      run: |
-        manifest="$GITHUB_ACTION_PATH/../../package.json"
-        node_version_file="$GITHUB_ACTION_PATH/../../.node-version"
-        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
-        if [ -z "$version" ]; then
-          echo "::error::package.json declares no pnpm packageManager pin"
-          exit 1
-        fi
-        if [ ! -r "$node_version_file" ]; then
-          echo "::error::.node-version is not readable"
-          exit 1
-        fi
-        node_version="$(tr -d '\r\n' < "$node_version_file")"
-        if [ -z "$node_version" ]; then
-          echo "::error::.node-version declares no Node version"
-          exit 1
-        fi
-        echo "pnpm-version=$version" | tee -a "$GITHUB_OUTPUT"
-        echo "node-version=$node_version" | tee -a "$GITHUB_OUTPUT"
+      run: bash "$GITHUB_ACTION_PATH/../bootstrap.sh" toolchain
 
     - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       with:
@@ -184,7 +166,7 @@ runs:
     - name: Install action dependencies
       shell: bash
       working-directory: ${{ github.action_path }}/../..
-      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+      run: bash "$GITHUB_ACTION_PATH/../bootstrap.sh" install
 
     - name: Plan publication
       id: plan

@@ -1,0 +1,61 @@
+name: Resolve workflow inputs
+description:
+  Validates publication options and resolves the selected cache operation.
+inputs:
+  mode:
+    description:
+      Select resolve-flake-inputs, resolve-cache-operation or
+      validate-publication-options.
+    required: true
+outputs:
+  publish:
+    description: Resolved publish value.
+    value: ${{ steps.resolve.outputs.publish }}
+  cache:
+    description: Resolved cache value.
+    value: ${{ steps.resolve.outputs.cache }}
+  cache-access-mode:
+    description: Resolved cache-access-mode value.
+    value: ${{ steps.resolve.outputs.cache-access-mode }}
+  root-prefix:
+    description: Resolved root-prefix value.
+    value: ${{ steps.resolve.outputs.root-prefix }}
+  ttl:
+    description: Resolved ttl value.
+    value: ${{ steps.resolve.outputs.ttl }}
+  permanent:
+    description: Resolved permanent value.
+    value: ${{ steps.resolve.outputs.permanent }}
+  reuse-view:
+    description: Resolved reuse-view value.
+    value: ${{ steps.resolve.outputs.reuse-view }}
+  provision-cache:
+    description: Resolved provision-cache value.
+    value: ${{ steps.resolve.outputs.provision-cache }}
+  provision-cache-ttl:
+    description: Resolved provision-cache-ttl value.
+    value: ${{ steps.resolve.outputs.provision-cache-ttl }}
+  close-cache:
+    description: Resolved close-cache value.
+    value: ${{ steps.resolve.outputs.close-cache }}
+  operation:
+    description: Resolved operation value.
+    value: ${{ steps.resolve.outputs.operation }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve publication inputs
+      id: resolve
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        case "$MODE" in
+          resolve-flake-inputs|resolve-cache-operation|validate-publication-options)
+            bash "$GITHUB_ACTION_PATH/$MODE.sh"
+            ;;
+          *)
+            echo "::error::Unknown workflow input operation: $MODE" >&2
+            exit 2
+            ;;
+        esac
