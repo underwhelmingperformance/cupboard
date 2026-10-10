@@ -143,6 +143,8 @@ export type PushStore = Pick<
 >;
 
 export interface PushDependencies {
+	readonly onUploaded?: (storePath: string, upload: CompletedNarUpload) => void;
+	readonly onResolved?: (infos: readonly NixValidPathInfo[]) => void;
 	readonly resultArtifact?: string;
 	readonly nix?: PushStore;
 	/**
@@ -471,6 +473,8 @@ export async function runPush(
 }
 
 interface PushRuntimeDependencies {
+	readonly onUploaded?: (storePath: string, upload: CompletedNarUpload) => void;
+	readonly onResolved?: (infos: readonly NixValidPathInfo[]) => void;
 	readonly resultArtifact?: string;
 	readonly nix?: PushStore;
 	readonly client: PushClient;
@@ -853,6 +857,8 @@ async function runPushFlow(
 		}
 	);
 
+	dependencies.onResolved?.(localPathInfos(resolved));
+
 	if (dependencies.dryRun === true) {
 		await reportDryRun(reporter, client, resolved, retention);
 		return undefined;
@@ -920,6 +926,7 @@ async function runPushFlow(
 		storePath: string,
 		upload: CompletedNarUpload
 	): void => {
+		dependencies.onUploaded?.(storePath, upload);
 		if (upload.transfer !== undefined) {
 			transferTotals.add(upload.transfer);
 		}
@@ -1289,9 +1296,7 @@ async function runPushFlow(
 		);
 
 		const actions = effectiveActions.values().toArray();
-		const uploadedPaths = actions.filter(
-			(action) => action === 'upload'
-		).length;
+		const uploadedPaths = completedUploads.size;
 		const reusedBlobs = actions.filter((action) => action === 'commit').length;
 		const skipped = actions.filter((action) => action === 'skip').length;
 		const failedStorePathHashes = new Set(

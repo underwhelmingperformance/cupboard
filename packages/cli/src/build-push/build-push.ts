@@ -8,6 +8,7 @@ import {
 	dependencyOutputs,
 	discoverNixStoreConfig,
 	type Nix,
+	type NixValidPathInfo,
 	type PublicationSelection,
 	selectPublicationPaths,
 	tenantDependencyReferences,
@@ -53,19 +54,26 @@ import {
 import {
 	type BuildSummaryInput,
 	buildSummaryResultKind,
-	buildSummarySchema
+	buildSummarySchema,
+	pushSummaryResultKind,
+	pushSummarySchema
 } from '@cupboard/protocol/reports';
 import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import type { UploadAttachRootInput } from '@cupboard/protocol/upload';
 import {
 	buildPushPhases,
+	formatBytes,
 	formatCount,
+	formatDuration,
+	formatTimestamp,
 	type Reporter,
+	type ResultPayload,
 	type ResultRow,
 	shouldShowDetails
 } from '@cupboard/reporter';
 import { withCleanups } from '@cupboard/shared/cleanup';
 import { genericExitCode } from '@cupboard/shared/errors';
+import { z } from 'zod';
 
 import { isAbortError } from '../abort.ts';
 import type { CommitOptions } from '../client/client.ts';
@@ -174,6 +182,7 @@ export type BuildInvocation =
 	| { readonly kind: 'constructed'; readonly build: ConstructedBuild };
 
 export interface BuildPushRunOptions {
+	readonly context?: string;
 	readonly invocation: BuildInvocation;
 	readonly root?: RootName;
 	readonly retention?: RootRetentionRequest;
@@ -217,6 +226,7 @@ export interface BuildPushDependencies {
 	 * `processPeakRss`.
 	 */
 	readonly peakRss?: PeakRssSampler;
+	readonly now?: () => number;
 	readonly nextAttemptId?: () => string;
 	readonly startDelay?: StartDelay;
 	readonly removeRuntimeDirectory?: (directory: string) => Promise<void>;
@@ -288,6 +298,16 @@ export async function runBuildPush(
 	) {
 		throw new PublicationScopeInvalidError();
 	}
+	const context =
+		options.context ??
+		buildOutputContext(
+			options.invocation,
+			dependencies.environment ?? process.env
+		);
+	reporter =
+		context === undefined
+			? reporter
+			: contextualBuildReporter(reporter, context);
 	const mode = await selectBuildPushMode(dependencies.preflight);
 
 	if (mode.kind === 'reconciled-local') {
@@ -322,6 +342,64 @@ function alreadyProtectedBatchStore(
 				protectPath: () => Promise.resolve(),
 				queryPathInfo: (storePath) => store.queryPathInfo(storePath)
 			})
+	};
+}
+
+const buildOutputContextSchema = z.strictObject({
+	installables: z.array(z.string()),
+	attr: z.string(),
+	root: z.string()
+});
+const buildOutputContextsSchema = z.array(buildOutputContextSchema);
+
+function buildOutputContext(
+	invocation: BuildInvocation,
+	environment: ChildEnvironment
+): string | undefined {
+	if (invocation.kind !== 'constructed') {
+		return undefined;
+	}
+	const supplied = environment.CUPBOARD_BUILD_CONTEXTS;
+	if (supplied === undefined) {
+		return undefined;
+	}
+	try {
+		const contexts = buildOutputContextsSchema.safeParse(
+			JSON.parse(supplied)
+		).data;
+		const selected = contexts
+			?.filter((context) =>
+				context.installables.some((installable) =>
+					invocation.build.installables.includes(installable)
+				)
+			)
+			.map(({ attr, root }) => `${attr} (root ${root})`);
+		return selected === undefined || selected.length === 0
+			? undefined
+			: [...new Set(selected)].join(', ');
+	} catch {
+		return undefined;
+	}
+}
+
+function contextualBuildReporter(
+	reporter: Reporter,
+	context: string
+): Reporter {
+	return {
+		...reporter,
+		phase(label, body, presentation) {
+			return reporter.phase(label, body, {
+				...presentation,
+				humanLabel: `${presentation?.humanLabel ?? label}: ${context}`
+			});
+		},
+		result(payload) {
+			reporter.result({
+				...payload,
+				title: `${payload.title ?? 'Result'}: ${context}`
+			});
+		}
 	};
 }
 
@@ -373,6 +451,7 @@ async function runProtectedStreamedBuildPush(
 		signal: AbortSignal
 	) => Promise<void>
 ): Promise<BuildReceiptV3> {
+	const startedAt = (dependencies.now ?? Date.now)();
 	const plan = preflight.runtimePlan;
 	const targetLinkDirectory = `${plan.directory}-targets`;
 	const childRuntimeDirectory = path.join(plan.directory, 'child');
@@ -387,7 +466,8 @@ async function runProtectedStreamedBuildPush(
 	let maxQueueDepth = 0;
 	const compression = new CompressionTotals();
 	const transfer = new TransferTotals();
-	const reportUpload = uploadReporter(reporter, compression, transfer);
+	const uploads = new BuildUploadTotals();
+	const reportUpload = uploadReporter(reporter, compression, transfer, uploads);
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
 	// Share one commit session between streaming and reconciliation so the server
 	// applies one credit budget across the whole run.
@@ -560,6 +640,8 @@ async function runProtectedStreamedBuildPush(
 			batcher,
 			compression,
 			transfer,
+			uploads,
+			startedAt,
 			reportUpload,
 			commitOptions,
 			...(session !== undefined && { session }),
@@ -1127,10 +1209,12 @@ async function runReconciledLocalBuildPush(
 	reason: UntrustedDaemonError
 ): Promise<BuildReceiptV3> {
 	const { invocation } = options;
-
 	if (invocation.kind !== 'constructed') {
 		throw reason;
 	}
+
+	const startedAt = (dependencies.now ?? Date.now)();
+	const uploadTotals = new BuildUploadTotals();
 
 	reporter.info(
 		buildPushModeDescription({ kind: 'reconciled-local', reason }),
@@ -1192,25 +1276,46 @@ async function runReconciledLocalBuildPush(
 		if (exit.status === 0) {
 			requireCompleteProvenance(invocation, realised, subjects);
 		}
-		const receipt = await publishRealised(
-			{
-				observedDerivations: new Set(
-					attempts.flatMap((attempt) =>
-						parseBuildActivities(attempt.log).map(
-							(activity) => activity.derivation
+		let publicationResult: ResultPayload | undefined;
+		const publicationReporter: Reporter = {
+			...reporter,
+			result(payload) {
+				if (payload.kind === pushSummaryResultKind) {
+					publicationResult = payload;
+					return;
+				}
+				reporter.result(payload);
+			}
+		};
+		let receipt: BuildReceiptV3;
+		try {
+			receipt = await publishRealised(
+				{
+					observedDerivations: new Set(
+						attempts.flatMap((attempt) =>
+							parseBuildActivities(attempt.log).map(
+								(activity) => activity.derivation
+							)
 						)
-					)
-				),
-				realised,
-				subjects,
-				copiedFrom: watchedCopySources(attemptLogs),
-				exit,
-				...(terminalFailure !== undefined && { terminalFailure })
-			},
-			options,
-			reporter,
-			dependencies
-		);
+					),
+					realised,
+					subjects,
+					copiedFrom: watchedCopySources(attemptLogs),
+					exit,
+					...(terminalFailure !== undefined && { terminalFailure })
+				},
+				options,
+				publicationReporter,
+				dependencies,
+				uploadTotals
+			);
+		} catch (error) {
+			if (publicationResult !== undefined) {
+				reporter.result(publicationResult);
+			}
+			throw error;
+		}
+
 		try {
 			await writeReceiptFile(options.receiptFile, receipt);
 		} catch (error) {
@@ -1221,7 +1326,11 @@ async function runReconciledLocalBuildPush(
 			throw publicationFailure(error);
 		}
 
-		const uploaded = receipt.uploaded?.length ?? 0;
+		const publication = pushSummarySchema.safeParse(
+			publicationResult?.data
+		).data;
+		const uploads = uploadTotals.summary();
+		const uploaded = uploads.length;
 		reportBuildSummary(
 			reporter,
 			{
@@ -1231,6 +1340,14 @@ async function runReconciledLocalBuildPush(
 				intermediatePaths: options.intermediatePaths?.length ?? 0,
 				queueDepth: 0,
 				uploadedPaths: uploaded,
+				uploadedBytes: uploads.reduce(
+					(bytes, upload) => bytes + upload.uploadedBytes,
+					0
+				),
+				uploads,
+				pathReferences: uploadTotals.references(),
+				durationMs: Math.max((dependencies.now ?? Date.now)() - startedAt, 0),
+				...(publication !== undefined && { publication }),
 				skipped: Math.max(receipt.paths.length - uploaded, 0),
 				childExitStatus: childExitCode(exit),
 				unconfirmedPaths: []
@@ -1419,7 +1536,8 @@ async function publishRealised(
 	built: RealisedBuild,
 	options: BuildPushRunOptions,
 	reporter: Reporter,
-	dependencies: BuildPushDependencies
+	dependencies: BuildPushDependencies,
+	uploadTotals: BuildUploadTotals
 ): Promise<BuildReceiptV3> {
 	const { exit } = built;
 	const selection = await selectRealisedTargets(
@@ -1467,6 +1585,14 @@ async function publishRealised(
 
 		published = await runPush(publication, reporter, {
 			command: 'cupboard build-push',
+			onResolved: (infos) => {
+				for (const info of infos) {
+					uploadTotals.resolved(info);
+				}
+			},
+			onUploaded: (storePath, upload) => {
+				uploadTotals.record(storePath, upload.blob.fileSize);
+			},
 			credential: dependencies.credential,
 			client: dependencies.client,
 			nix: dependencies.store,
@@ -1557,6 +1683,8 @@ interface RunFacts {
 	readonly compression: CompressionTotals;
 	readonly transfer: TransferTotals;
 	readonly reportUpload: UploadReport;
+	readonly uploads: BuildUploadTotals;
+	readonly startedAt: number;
 	readonly commitOptions: CommitOptions;
 	readonly session?: CommitSession;
 	readonly maxQueueDepth: number;
@@ -1862,20 +1990,22 @@ async function settleRun(
 			clearedRoot === undefined
 				? result
 				: { ...result, roots: [...result.roots, clearedRoot] };
-		await reporter.phase(
-			buildPushPhases.retention,
-			(ctx) => {
-				const applied = settledResult.roots.filter(
-					(root) => root.applied
-				).length;
+		if (settledResult.roots.length > 0) {
+			await reporter.phase(
+				buildPushPhases.retention,
+				(ctx) => {
+					const applied = settledResult.roots.filter(
+						(root) => root.applied
+					).length;
 
-				ctx.fact(
-					'roots',
-					`${formatCount(applied)}/${formatCount(settledResult.roots.length)} replaced`
-				);
-			},
-			{ humanLabel: 'Updating retention roots' }
-		);
+					ctx.fact(
+						'roots',
+						`${formatCount(applied)}/${formatCount(settledResult.roots.length)} replaced`
+					);
+				},
+				{ humanLabel: 'Updating retention roots' }
+			);
+		}
 
 		await writeReceiptFile(options.receiptFile, {
 			...result.receipt,
@@ -1961,7 +2091,8 @@ function reportSummary(
 	result: ReconcileResult
 ): void {
 	const { receipt } = result;
-	const uploaded = receipt.uploaded?.length ?? 0;
+	const uploads = facts.uploads.summary();
+	const uploaded = uploads.length;
 	const compressionSummary = facts.compression.summary(
 		(dependencies.peakRss ?? processPeakRss)()
 	);
@@ -1976,6 +2107,16 @@ function reportSummary(
 			intermediatePaths: facts.eventPaths.length - targetCount,
 			queueDepth: facts.maxQueueDepth,
 			uploadedPaths: uploaded,
+			uploadedBytes: uploads.reduce(
+				(bytes, upload) => bytes + upload.uploadedBytes,
+				0
+			),
+			uploads,
+			pathReferences: facts.uploads.references(),
+			durationMs: Math.max(
+				(dependencies.now ?? Date.now)() - facts.startedAt,
+				0
+			),
 			skipped: Math.max(receipt.paths.length - uploaded, 0),
 			childExitStatus: childExitCode(facts.exit),
 			unconfirmedPaths: [...(receipt.failed ?? [])],
@@ -1988,17 +2129,55 @@ function reportSummary(
 	);
 }
 
-// Reports each upload as it happens and when it completes, and adds its
-// compression and transfer facts to the run's totals.
+class BuildUploadTotals {
+	private readonly bytesByPath = new Map<StorePathString, number>();
+	private readonly referencesByPath = new Map<
+		StorePathString,
+		readonly StorePathString[]
+	>();
+
+	resolved(info: NixValidPathInfo): void {
+		this.referencesByPath.set(info.storePath, info.references);
+	}
+
+	references(): NonNullable<BuildSummaryInput['pathReferences']> {
+		return [...this.referencesByPath]
+			.toSorted(([left], [right]) => left.localeCompare(right))
+			.map(([storePath, references]) => ({
+				storePath,
+				references: [...references]
+			}));
+	}
+
+	record(storePath: string, uploadedBytes: number): void {
+		const path = storePathSchema.parse(storePath);
+		this.bytesByPath.set(
+			path,
+			(this.bytesByPath.get(path) ?? 0) + uploadedBytes
+		);
+	}
+
+	summary(): NonNullable<BuildSummaryInput['uploads']> {
+		return [...this.bytesByPath]
+			.toSorted(([left], [right]) => left.localeCompare(right))
+			.map(([storePath, uploadedBytes]) => ({ storePath, uploadedBytes }));
+	}
+}
+
 function uploadReporter(
 	reporter: Reporter,
 	compression: CompressionTotals,
-	transfer: TransferTotals
+	transfer: TransferTotals,
+	uploads: BuildUploadTotals
 ): UploadReport {
 	return {
+		resolved: (info) => {
+			uploads.resolved(info);
+		},
 		observe: (storePath) =>
 			uploadObserver(reporter, StorePath.basename(storePath)),
 		completed: (storePath, upload) => {
+			uploads.record(storePath, upload.blob.fileSize);
 			const name = StorePath.basename(storePath);
 
 			if (upload.transfer !== undefined) {
@@ -2097,10 +2276,19 @@ function reportBuildSummary(
 ): void {
 	const { compression, transfer } = summary;
 	const rows: ResultRow[] = [
-		{ label: 'Store', value: summary.store },
-		{ label: 'Targets', value: formatCount(summary.targetPaths) },
 		{ label: 'Uploaded paths', value: formatCount(summary.uploadedPaths) },
-		{ label: 'Paths without upload', value: formatCount(summary.skipped) },
+		{
+			label: 'Paths without upload',
+			value: `${formatCount(summary.skipped)} already available or published from a reusable blob`
+		},
+		...(summary.uploadedBytes === undefined
+			? []
+			: [
+					{ label: 'Bytes uploaded', value: formatBytes(summary.uploadedBytes) }
+				]),
+		...(summary.durationMs === undefined
+			? []
+			: [{ label: 'Duration', value: formatDuration(summary.durationMs) }]),
 		{
 			label: 'Build exit status',
 			value: formatCount(summary.childExitStatus)
@@ -2115,6 +2303,10 @@ function reportBuildSummary(
 					}
 				]
 			: []),
+		...(summary.publication?.roots ?? []).map((root) => ({
+			label: 'Root',
+			value: `${root.name}: ${root.expiresAt === undefined ? 'permanent' : formatTimestamp(root.expiresAt)}`
+		})),
 		...failureRows(reporter, failures)
 	];
 	const validated = buildSummarySchema.safeParse(summary);

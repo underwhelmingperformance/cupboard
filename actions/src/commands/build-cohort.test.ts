@@ -33,7 +33,10 @@ import {
 	describeUnknownPathsRefusal,
 	unknownPathsCeilingRefusalSchema
 } from '@cupboard/protocol/plan';
-import { pushSummaryResultKind } from '@cupboard/protocol/reports';
+import {
+	buildSummarySchema,
+	pushSummaryResultKind
+} from '@cupboard/protocol/reports';
 import { referencePublicationManifestSchema } from '@cupboard/protocol/upload';
 import type { Reporter, ReporterResultEvent } from '@cupboard/reporter';
 import {
@@ -9471,18 +9474,23 @@ if (args.includes('--help')) {
 	);
 });
 
-function cohortSummaryText(targetRows: readonly string[]): string {
+function cohortSummaryText(
+	targetRows: readonly string[],
+	uploaded = '1,968 paths'
+): string {
 	return [
 		'### Targets',
 		'',
 		'|  |  |',
 		'| --- | --- |',
 		'| Duration | 12m 34.0s |',
-		'| Uploaded during the build | 1,968 paths |',
+		`| Uploaded during the build | ${uploaded} |`,
 		'',
 		'| Target | Root | Outcome | Uploaded paths | Uploaded bytes | Root expiry |',
 		'| --- | --- | --- | --- | --- | --- |',
 		...targetRows,
+		'',
+		'Duration is for the shared cohort. Root rows include uploads with one established owner and subsequent root pushes. Shared uploads and paths with incomplete ownership remain in the cohort total.',
 		'',
 		''
 	].join('\n');
@@ -9517,11 +9525,12 @@ describe('cohort job summary', () => {
 
 	function pushSummary(
 		root: string | undefined,
-		shouldIncludeRootExpiry = false
+		shouldIncludeRootExpiry = false,
+		hasUploads = true
 	): ReporterResultEvent[] {
-		const [uploadedPaths, uploadedBytes] = uploadsByRoot.get(root ?? '') ?? [
-			0, 0
-		];
+		const [uploadedPaths, uploadedBytes] = hasUploads
+			? (uploadsByRoot.get(root ?? '') ?? [0, 0])
+			: [0, 0];
 
 		return [
 			{
@@ -9568,9 +9577,15 @@ describe('cohort job summary', () => {
 
 	async function summarise(
 		failedTargets: readonly string[],
-		shouldIncludeRootExpiry = false
+		shouldIncludeRootExpiry = false,
+		shouldIncludeLog = false,
+		options: {
+			readonly buildSummary?: ReporterResultEvent;
+			readonly hasRootUploads?: boolean;
+		} = {}
 	): Promise<{
 		readonly summary: readonly unknown[];
+		readonly log?: string;
 	}> {
 		const builtPaths = [
 			...(failedTargets.includes(libraryQueryInstallable)
@@ -9599,7 +9614,8 @@ describe('cohort job summary', () => {
 				if (arguments_[1] === 'push') {
 					return pushSummary(
 						argumentValue(arguments_, '--root'),
-						shouldIncludeRootExpiry
+						shouldIncludeRootExpiry,
+						options.hasRootUploads ?? true
 					);
 				}
 
@@ -9624,20 +9640,37 @@ describe('cohort job summary', () => {
 						subjects: [],
 						...(failedTargets.length > 0 && {
 							childExitStatus: 1,
-							terminalFailure: { kind: 'target-build', failedTargets }
+							terminalFailure: {
+								kind: 'target-build',
+								failedTargets,
+								...(shouldIncludeLog && {
+									failedDerivations: [
+										{
+											target: libraryQueryInstallable,
+											derivation:
+												'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-dependency.drv'
+										}
+									]
+								})
+							}
 						})
 					})}\n`
 				);
 
 				if (failedTargets.length > 0) {
-					throw new CupboardReportedError(1, [buildSummary], undefined, true);
+					throw new CupboardReportedError(
+						1,
+						[options.buildSummary ?? buildSummary],
+						undefined,
+						true
+					);
 				}
 
-				return [buildSummary];
+				return [options.buildSummary ?? buildSummary];
 			}
 		);
 		const times = [1000, 755_000];
-		const { reporter, summary } = recordingGithubReporter();
+		const { reporter, summary, log } = recordingGithubReporter();
 
 		await buildCohortAction(
 			{
@@ -9668,8 +9701,51 @@ describe('cohort job summary', () => {
 			}
 		);
 
-		return { summary };
+		return { summary, ...(shouldIncludeLog && { log: log() }) };
 	}
+
+	it('includes streamed uploads with established root ownership in target rows', async () => {
+		const data = buildSummarySchema.parse(buildSummary.data);
+		const summary: ReporterResultEvent = {
+			kind: 'build-summary',
+			data: {
+				...data,
+				uploadedPaths: 3,
+				uploadedBytes: 1_502_048,
+				uploads: [
+					{ storePath: libraryBuiltPath, uploadedBytes: 2048 },
+					{ storePath: floatingBuiltPath, uploadedBytes: 1_200_000 },
+					{ storePath: floatingDevelopmentPath, uploadedBytes: 300_000 }
+				],
+				pathReferences: [
+					appPath,
+					libraryBuiltPath,
+					floatingBuiltPath,
+					floatingDevelopmentPath
+				].map((storePath) => ({ storePath, references: [] }))
+			}
+		};
+		expect(
+			await summarise([], true, false, {
+				buildSummary: summary,
+				hasRootUploads: false
+			})
+		).toStrictEqual({
+			summary: [
+				{
+					path: jobSummaryFile,
+					text: cohortSummaryText(
+						[
+							String.raw`| .#packages.x86\_64-linux.app | github:owner/repo/main/app | Already served | 0 | 0 B | 2026-10-16T10:00:00.000Z |`,
+							String.raw`| .#packages.x86\_64-linux.lib | github:owner/repo/main/lib | Built | 1 | 2.05 kB | 2026-10-16T10:00:00.000Z |`,
+							String.raw`| .#packages.x86\_64-linux.floating | github:owner/repo/main/floating | Built | 2 | 1.5 MB | 2026-10-16T10:00:00.000Z |`
+						],
+						'3 paths, 1.5 MB'
+					)
+				}
+			]
+		});
+	});
 
 	it('reports expiry returned by the root update', async () => {
 		expect(await summarise([], true)).toStrictEqual({

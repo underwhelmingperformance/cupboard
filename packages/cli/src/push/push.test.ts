@@ -488,12 +488,13 @@ describe('runPush', () => {
 	});
 
 	it('cancels the NAR body when its upload fails', async () => {
+		const payloads: ResultPayload[] = [];
 		const failure = new Error('upload refused');
 		const cancellations: unknown[] = [];
 		let rejection: unknown;
 
 		try {
-			await runPush(publication([appPath]), reporter([]), {
+			await runPush(publication([appPath]), reporter([], [], payloads), {
 				command: 'cupboard push',
 				credential: 'cupboard-login',
 				client: {
@@ -534,6 +535,26 @@ describe('runPush', () => {
 
 		expect(rejection).toBeInstanceOf(PushIncompleteError);
 		expect(cancellations).toStrictEqual([failure]);
+		expect(payloads.map(({ kind, data }) => ({ kind, data }))).toStrictEqual([
+			{
+				kind: 'push-summary',
+				data: {
+					uploadedPaths: 0,
+					reusedBlobs: 0,
+					skipped: 0,
+					uploadedBytes: 0,
+					failures: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							stage: 'upload',
+							reason: 'upload refused'
+						}
+					],
+					paths: []
+				}
+			}
+		]);
 	});
 
 	it('includes the run root in the negotiation request', async () => {
@@ -1754,7 +1775,7 @@ describe('runPush', () => {
 			uploadedKeys: [r2Key],
 			commitAttempts: ['upload-defer'],
 			summary: {
-				uploadedPaths: 0,
+				uploadedPaths: 1,
 				reusedBlobs: 0,
 				skipped: 1,
 				uploadedBytes: 14,
@@ -3546,7 +3567,7 @@ describe('runPush', () => {
 		expect({ narReads, data: summary?.data }).toStrictEqual({
 			narReads: 0,
 			data: {
-				uploadedPaths: 1,
+				uploadedPaths: 0,
 				reusedBlobs: 0,
 				skipped: 0,
 				uploadedBytes: 0,
@@ -3711,7 +3732,7 @@ describe('runPush', () => {
 				errorClass: PushIncompleteError,
 				roots: [],
 				data: {
-					uploadedPaths: 1,
+					uploadedPaths: 0,
 					reusedBlobs: 0,
 					skipped: 1,
 					uploadedBytes: 0,
@@ -3992,7 +4013,7 @@ describe('runPush', () => {
 		);
 
 		expect(summary?.data).toStrictEqual({
-			uploadedPaths: 1,
+			uploadedPaths: 0,
 			reusedBlobs: 0,
 			skipped: 0,
 			uploadedBytes: 0,
@@ -4986,7 +5007,7 @@ describe('runPush', () => {
 					]
 				],
 				data: {
-					uploadedPaths: 2,
+					uploadedPaths: 1,
 					reusedBlobs: 0,
 					skipped: 0,
 					uploadedBytes: 28,

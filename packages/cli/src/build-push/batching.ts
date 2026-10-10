@@ -268,6 +268,7 @@ export class BuildOutputBatcher {
 		remaining: Set<StorePathString>
 	): Promise<void> {
 		const { storePath } = item.path;
+		this.options.uploadReport?.resolved?.(item.path);
 
 		if (item.kind === 'refused') {
 			this.settlePath(storePath, item.error, remaining);

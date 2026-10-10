@@ -263,6 +263,11 @@ export const buildSummaryResultKind = 'build-summary';
 // `streamed` published each completed output through the daemon's post-build
 // hook while the build ran; `reconciled-local` built without the hook and
 // published after reading the build's store.
+const buildPathReferencesSchema = z.strictObject({
+	storePath: storePathSchema,
+	references: z.array(storePathSchema)
+});
+
 export const buildSummarySchema = z.strictObject({
 	mode: z.enum(['streamed', 'reconciled-local']),
 	store: z.string().min(1),
@@ -270,6 +275,15 @@ export const buildSummarySchema = z.strictObject({
 	intermediatePaths: countSchema,
 	queueDepth: countSchema,
 	uploadedPaths: countSchema,
+	uploadedBytes: countSchema.optional(),
+	pathReferences: z.array(buildPathReferencesSchema).optional(),
+	uploads: z
+		.array(
+			z.strictObject({ storePath: storePathSchema, uploadedBytes: countSchema })
+		)
+		.optional(),
+	durationMs: countSchema.optional(),
+	publication: pushSummarySchema.optional(),
 	skipped: countSchema,
 	childExitStatus: z.number().int().nonnegative(),
 	unconfirmedPaths: z.array(storePathSchema),

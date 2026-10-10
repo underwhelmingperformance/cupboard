@@ -948,6 +948,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			...(compression !== undefined && { compression: () => compression })
 		}),
 		peakRss: () => 300_000_000,
+		now: () => 100,
 		...(environment !== undefined && { environment }),
 		nextAttemptId: () => {
 			attemptIdsIssued += 1;
@@ -1487,8 +1488,7 @@ describe('runBuildPush', () => {
 				'Building',
 				'Queueing completed paths',
 				'Uploading missing NARs',
-				'Reconciling build results',
-				'Recording retention'
+				'Reconciling build results'
 			],
 			resultKinds: ['build-summary']
 		});
@@ -1686,6 +1686,18 @@ describe('runBuildPush', () => {
 		);
 	});
 
+	it('combines a reconciled build and its publication in one result', async () => {
+		const run = await runFlow({
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			constructed: { succeedOn: 1 },
+			declaredOutputs: [pathA],
+			valid: [pathA]
+		});
+		expect(run.results.map((result) => result.kind)).toStrictEqual([
+			'build-summary'
+		]);
+	});
+
 	it('reports the reconciled local run in its summary', async () => {
 		const run = await runFlow({
 			preflightFailure: new UntrustedDaemonError('not-trusted'),
@@ -1704,8 +1716,26 @@ describe('runBuildPush', () => {
 			intermediatePaths: 0,
 			queueDepth: 0,
 			uploadedPaths: 0,
+			uploadedBytes: 0,
+			uploads: [],
+			pathReferences: [{ storePath: pathA, references: [] }],
+			durationMs: 0,
 			skipped: 1,
 			childExitStatus: 0,
+			publication: {
+				uploadedPaths: 0,
+				uploadedBytes: 0,
+				reusedBlobs: 0,
+				skipped: 1,
+				failures: [],
+				paths: [
+					{
+						storePath: pathA,
+						storePathHash: StorePath.hash(pathA),
+						outcome: 'already-present'
+					}
+				]
+			},
 			unconfirmedPaths: []
 		});
 	});
@@ -2055,6 +2085,72 @@ describe('runBuildPush', () => {
 		});
 	});
 
+	it('identifies the target attribute and root in its result title', async () => {
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			options: { context: '.#app (root main)' }
+		});
+		expect(run.results.map(({ title }) => title)).toStrictEqual([
+			'Build and publication result: .#app (root main)'
+		]);
+	});
+
+	it('does not count a reused blob as an upload', async () => {
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			action: 'commit'
+		});
+		expect(run.error).toBeUndefined();
+		const summary = run.results.find(
+			(result) => result.kind === 'build-summary'
+		);
+		const uploadSummarySchema = z.object({
+			uploadedPaths: z.number(),
+			uploadedBytes: z.number(),
+			uploads: z.array(z.unknown())
+		});
+		const uploads = uploadSummarySchema.parse(summary?.data);
+		expect(uploads).toStrictEqual({
+			uploadedPaths: 0,
+			uploadedBytes: 0,
+			uploads: []
+		});
+	});
+
+	it('reports successful streamed transfers with their paths and bytes', async () => {
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			action: 'upload',
+			transfer: {
+				isSingleRequest: true,
+				bufferedParts: 0,
+				streamedParts: 0,
+				retries: 0,
+				recompressions: 0,
+				resentBytes: 0,
+				paddingBytes: 0
+			}
+		});
+		expect(run.error).toBeUndefined();
+		const summary = run.results.find(
+			(result) => result.kind === 'build-summary'
+		);
+		const uploadSummarySchema = z.object({
+			uploadedPaths: z.number(),
+			uploadedBytes: z.number(),
+			uploads: z.array(z.unknown())
+		});
+		const uploads = uploadSummarySchema.parse(summary?.data);
+		expect(uploads).toStrictEqual({
+			uploadedPaths: 1,
+			uploadedBytes: 8,
+			uploads: [{ storePath: pathA, uploadedBytes: 8 }]
+		});
+	});
+
 	it('reports the run summary over the reconciled receipt', async () => {
 		const run = await runFlow({ emitEvent: true, valid: [pathA] });
 		const [summary] = run.results;
@@ -2066,6 +2162,10 @@ describe('runBuildPush', () => {
 			intermediatePaths: 0,
 			queueDepth: 1,
 			uploadedPaths: 0,
+			uploadedBytes: 0,
+			uploads: [],
+			pathReferences: [{ storePath: pathA, references: [] }],
+			durationMs: 0,
 			skipped: 1,
 			childExitStatus: 0,
 			unconfirmedPaths: []
