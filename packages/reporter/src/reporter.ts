@@ -961,9 +961,19 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 			// final line.
 			let lastEmitAt = startedAt;
 			let completed = 0;
+			let lastEmittedCompleted: number | undefined;
 
 			const summary = (): string =>
 				`${humanLabel}: ${String(completed)}/${String(options.total)}`;
+
+			const emitProgress = (): void => {
+				if (lastEmittedCompleted === completed) {
+					return;
+				}
+
+				line(summary());
+				lastEmittedCompleted = completed;
+			};
 
 			try {
 				const value = await body({
@@ -977,7 +987,7 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 						}
 
 						lastEmitAt = at;
-						line(summary());
+						emitProgress();
 					},
 					fact(factLabel, factValue, display) {
 						if (!shouldDisplay(presentation, display?.level)) {
@@ -992,7 +1002,7 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 				});
 
 				emitFacts(facts);
-				line(summary());
+				emitProgress();
 				commands.endGroup();
 
 				return value;

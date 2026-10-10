@@ -48,6 +48,7 @@ import {
 import {
 	formatBytes,
 	formatCount,
+	formatDuration,
 	formatTimestamp,
 	type PhaseContext,
 	type Reporter,
@@ -145,6 +146,7 @@ export type PushStore = Pick<
 export interface PushDependencies {
 	readonly onUploaded?: (storePath: string, upload: CompletedNarUpload) => void;
 	readonly onResolved?: (infos: readonly NixValidPathInfo[]) => void;
+	readonly now?: () => number;
 	readonly resultArtifact?: string;
 	readonly nix?: PushStore;
 	/**
@@ -475,6 +477,7 @@ export async function runPush(
 interface PushRuntimeDependencies {
 	readonly onUploaded?: (storePath: string, upload: CompletedNarUpload) => void;
 	readonly onResolved?: (infos: readonly NixValidPathInfo[]) => void;
+	readonly now?: () => number;
 	readonly resultArtifact?: string;
 	readonly nix?: PushStore;
 	readonly client: PushClient;
@@ -1033,16 +1036,27 @@ async function runPushFlow(
 				let uploaded = 0;
 				let committed = 0;
 				let skipped = 0;
+				const now = dependencies.now ?? Date.now;
+				const uploadingStartedAt = now();
 				const reportCounts = (): void => {
 					bar.fact('uploaded', formatCount(uploaded), {
 						humanLabel: 'uploaded'
 					});
 					bar.fact('committed', formatCount(committed), {
-						humanLabel: 'accepted'
+						humanLabel: 'newly available'
 					});
 					bar.fact('skip', formatCount(skipped), {
 						humanLabel: 'already available'
 					});
+					const elapsedMs = now() - uploadingStartedAt;
+					if (uploadedBytes === 0 || elapsedMs <= 0) {
+						return;
+					}
+					bar.fact('duration', formatDuration(elapsedMs));
+					bar.fact(
+						'throughput',
+						`${formatBytes((uploadedBytes * 1000) / elapsedMs)}/s`
+					);
 				};
 
 				const publishDecision = async (
