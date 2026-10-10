@@ -268,7 +268,7 @@ it('preserves a spawn failure after all stdio closes', async () => {
 	});
 });
 
-const stubbornEvaluation = `process.on('SIGTERM', () => process.send('ignored')); process.send('ready'); setInterval(() => {}, 1000);`;
+const stubbornEvaluation = `process.on('message', () => {}); process.on('SIGTERM', () => process.send('ignored')); process.send('ready');`;
 
 it.each([1, 3])(
 	'joins %i real stubborn evaluation processes after an external upgrade during grace',
@@ -278,6 +278,9 @@ it.each([1, 3])(
 		const failure = new Error('First target failure');
 		const trace: string[] = [];
 		const ready = Array.from({ length: count }, () =>
+			Promise.withResolvers<undefined>()
+		);
+		const ignored = Array.from({ length: count }, () =>
 			Promise.withResolvers<undefined>()
 		);
 		const results = ready.map((started, index) =>
@@ -291,6 +294,9 @@ it.each([1, 3])(
 						externalSignal: external.signal
 					},
 					{
+						escalationScheduler: {
+							schedule: () => ({ cancel: vi.fn() })
+						},
 						spawn(command) {
 							const child = spawn(command.executable, [...command.arguments], {
 								env: command.environment,
@@ -305,6 +311,7 @@ it.each([1, 3])(
 									started.resolve(undefined);
 								} else if (message === 'ignored') {
 									trace.push(`ignored ${String(index)}`);
+									ignored[index]?.resolve(undefined);
 								}
 							});
 							const stdout = child.stdout;
@@ -337,18 +344,17 @@ it.each([1, 3])(
 		);
 		await Promise.all(ready.map((started) => started.promise));
 		internal.abort(failure);
-		await vi.waitFor(() => {
-			expect(
-				trace
-					.filter((event) => event.startsWith('ignored'))
-					.toSorted((left, right) => left.localeCompare(right))
-			).toStrictEqual(
-				Array.from(
-					{ length: count },
-					(_, index) => `ignored ${String(index)}`
-				).toSorted((left, right) => left.localeCompare(right))
-			);
-		});
+		await Promise.all(ignored.map((notice) => notice.promise));
+		expect(
+			trace
+				.filter((event) => event.startsWith('ignored'))
+				.toSorted((left, right) => left.localeCompare(right))
+		).toStrictEqual(
+			Array.from(
+				{ length: count },
+				(_, index) => `ignored ${String(index)}`
+			).toSorted((left, right) => left.localeCompare(right))
+		);
 		external.abort(new Error('External interrupt'));
 		const errors = await Promise.all(results);
 		expect({
@@ -377,13 +383,18 @@ it.each([1, 3])(
 	}
 );
 
-it('uses the original ten-second escalation and joins a real stubborn child on internal failure', async () => {
+it('schedules ten-second escalation and joins a real stubborn child on internal failure', async () => {
 	const internal = new AbortController();
 	const failure = new Error('Internal evaluation failure');
 	const started = Promise.withResolvers<undefined>();
 	const trace: string[] = [];
 
-	let killedAt = 0;
+	const ignored = Promise.withResolvers<undefined>();
+	const escalation = Promise.withResolvers<{
+		run: () => void;
+		delayMs: number;
+	}>();
+	const cancel = vi.fn();
 	const result = resultOrError(
 		captureEvaluationProcess(
 			{
@@ -393,6 +404,12 @@ it('uses the original ten-second escalation and joins a real stubborn child on i
 				signal: internal.signal
 			},
 			{
+				escalationScheduler: {
+					schedule(run, delayMs) {
+						escalation.resolve({ run, delayMs });
+						return { cancel };
+					}
+				},
 				spawn(command) {
 					const child = spawn(command.executable, [...command.arguments], {
 						env: command.environment,
@@ -404,6 +421,8 @@ it('uses the original ten-second escalation and joins a real stubborn child on i
 					child.on('message', (message) => {
 						if (message === 'ready') {
 							started.resolve(undefined);
+						} else if (message === 'ignored') {
+							ignored.resolve(undefined);
 						}
 					});
 					const stdout = child.stdout;
@@ -414,9 +433,6 @@ it('uses the original ten-second escalation and joins a real stubborn child on i
 					return {
 						kill(signal) {
 							trace.push(signal);
-							if (signal === 'SIGKILL') {
-								killedAt = performance.now();
-							}
 							return lifecycle.kill(signal);
 						},
 						onceError(listener) {
@@ -437,16 +453,27 @@ it('uses the original ten-second escalation and joins a real stubborn child on i
 		)
 	);
 	await started.promise;
-	const startedAt = performance.now();
 	internal.abort(failure);
+	await ignored.promise;
+	const scheduled = await escalation.promise;
+	expect({
+		trace,
+		delayMs: scheduled.delayMs,
+		cancellations: cancel.mock.calls
+	}).toStrictEqual({
+		trace: ['SIGTERM'],
+		delayMs: 10_000,
+		cancellations: []
+	});
+	scheduled.run();
 	expect({
 		error: await result,
 		trace,
-		tenSecondGraceElapsed: killedAt - startedAt >= 10_000
+		cancellations: cancel.mock.calls
 	}).toStrictEqual({
 		error: failure,
 		trace: ['SIGTERM', 'SIGKILL', 'close'],
-		tenSecondGraceElapsed: true
+		cancellations: [[]]
 	});
 });
 
@@ -496,6 +523,7 @@ it('prevents output if cancellation arrives after the wrapper closes successfull
 it('stops all peers on a captured-byte overflow before the overflowing child closes', async () => {
 	const children = Array.from({ length: 4 }, () => new ControlledProcess());
 	const calls: number[] = [];
+	const started = Promise.withResolvers<undefined>();
 	onTestFinished(() => {
 		for (const child of children) {
 			child.close(1);
@@ -514,25 +542,26 @@ it('stops all peers on a captured-byte overflow before the overflowing child clo
 				if (child === undefined) {
 					return Promise.reject(new Error('A target launched after failure'));
 				}
-				return Promise.resolve(
-					captureEvaluationProcess(
-						{
-							executable: 'nix',
-							arguments: arguments_,
-							environment: {},
-							signal,
-							maximumOutputBytes: 3,
-							onFailure
-						},
-						{ spawn: () => child }
-					)
+				const captured = captureEvaluationProcess(
+					{
+						executable: 'nix',
+						arguments: arguments_,
+						environment: {},
+						signal,
+						maximumOutputBytes: 3,
+						onFailure
+					},
+					{ spawn: () => child }
 				);
+				if (calls.length === children.length) {
+					started.resolve(undefined);
+				}
+				return captured;
 			}
 		)
 	);
-	await vi.waitFor(() => {
-		expect(calls).toStrictEqual([0, 1, 2, 3]);
-	});
+	await started.promise;
+	expect(calls).toStrictEqual([0, 1, 2, 3]);
 	children[0]?.write('four');
 	expect(children.map((child) => child.events)).toStrictEqual(
 		Array.from({ length: 4 }, () => ['SIGTERM'])

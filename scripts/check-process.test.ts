@@ -1,5 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -32,14 +32,23 @@ it.skipIf(process.platform === 'win32')(
 		);
 		const socketPath = path.join(directory, 'control.sock');
 		const parent = Promise.withResolvers<number>();
-		const descendant = Promise.withResolvers<number>();
+		const descendant = Promise.withResolvers<{
+			pid: number;
+			closed: Promise<void>;
+			socket: Socket;
+		}>();
 		const noticeSchema = z.object({
 			role: z.enum(['parent', 'descendant']),
 			pid: z.int()
 		});
-		const sockets = new Set<import('node:net').Socket>();
+		const sockets = new Set<Socket>();
 		const server = createServer((socket) => {
 			sockets.add(socket);
+			const closed = new Promise<void>((resolve) => {
+				socket.once('close', () => {
+					resolve();
+				});
+			});
 			let buffer = '';
 			socket.on('data', (chunk: Buffer) => {
 				buffer += chunk.toString();
@@ -52,11 +61,12 @@ it.skipIf(process.platform === 'win32')(
 					parent.resolve(notice.pid);
 					return;
 				}
-				descendant.resolve(notice.pid);
+				descendant.resolve({ pid: notice.pid, closed, socket });
 			});
 		});
 		const controller = new AbortController();
 		let descendantPid: number | undefined;
+		let descendantSocket: Socket | undefined;
 		let running: Promise<number> | undefined;
 		await withCleanups(async () => {
 			await new Promise<void>((resolve, reject) => {
@@ -97,17 +107,13 @@ it.skipIf(process.platform === 'win32')(
 				Promise.all([parent.promise, descendant.promise]),
 				prematureExit()
 			]);
-			const [, pid] = await abortable(readiness, context.signal);
-			descendantPid = pid;
+			const [, observed] = await abortable(readiness, context.signal);
+			descendantPid = observed.pid;
+			descendantSocket = observed.socket;
 			const cancelled = expect(operation).rejects.toThrow('cancelled');
 			controller.abort(new Error('cancelled'));
 			await cancelled;
-			await vi.waitFor(
-				() => {
-					expect(() => process.kill(pid, 0)).toThrow();
-				},
-				{ timeout: 2000 }
-			);
+			await abortable(observed.closed, context.signal);
 		}, [
 			async () => {
 				controller.abort(new Error('test cleanup'));
@@ -116,7 +122,10 @@ it.skipIf(process.platform === 'win32')(
 					await bestEffort(() => completion);
 				}
 				vi.unstubAllEnvs();
-				if (descendantPid !== undefined) {
+				if (
+					descendantPid !== undefined &&
+					descendantSocket?.destroyed !== true
+				) {
 					try {
 						process.kill(descendantPid, 'SIGKILL');
 					} catch (error) {
@@ -181,72 +190,104 @@ it('passes the worker budget through the package-manager process', async () => {
 	]);
 });
 
-it.each([
+it.for([
 	{ runner: 'scheduler', status: 0 },
 	{ runner: 'scheduler', status: 7 },
 	{ runner: 'CI', status: 0 },
 	{ runner: 'CI', status: 7 }
 ])(
 	'cleans descendants after $runner exits with $status',
-	async ({ runner, status }) => {
+	async ({ runner, status }, context) => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-completed-check-')
 		);
 		const parentPath = path.join(directory, 'package-manager.mjs');
-		const resultPath = path.join(directory, 'result.json');
 		const socketPath = path.join(directory, 'descendant.sock');
-		const descendantScript = `
-		import { createServer } from 'node:net';
-		process.on('SIGTERM', () => {});
-		createServer().listen(${JSON.stringify(socketPath)}, () => process.send(process.pid));
-	`;
-		const parentScript = `
-		import { spawn } from 'node:child_process';
-		import { writeFileSync } from 'node:fs';
-		const child = spawn(process.execPath, ['--input-type=module', '--eval', ${JSON.stringify(descendantScript)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
-		child.once('message', (descendantPid) => {
-			writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ parentPid: process.pid, descendantPid }));
-			process.exit(${String(status)});
-		});
-	`;
-		const resultSchema = z.object({
+		const noticeSchema = z.object({
 			parentPid: z.int(),
 			descendantPid: z.int()
 		});
+		const connected = Promise.withResolvers<{
+			parentPid: number;
+			descendantPid: number;
+			socket: Socket;
+			closed: Promise<void>;
+		}>();
+		const sockets = new Set<Socket>();
 		let parentPid: number | undefined;
+		let descendantSocket: Socket | undefined;
+		const server = createServer((socket) => {
+			sockets.add(socket);
+			const closed = new Promise<void>((resolve) => {
+				socket.once('close', () => {
+					resolve();
+				});
+			});
+			let buffer = '';
+			socket.on('data', (chunk: Buffer) => {
+				buffer += chunk.toString();
+				const end = buffer.indexOf('\n');
+				if (end === -1) {
+					return;
+				}
+				const notice = noticeSchema.parse(JSON.parse(buffer.slice(0, end)));
+				parentPid = notice.parentPid;
+				descendantSocket = socket;
+				connected.resolve({ ...notice, socket, closed });
+			});
+		});
+		const descendantScript = `
+		import { createConnection } from 'node:net';
+		process.on('SIGTERM', () => {});
+		const control = createConnection(${JSON.stringify(socketPath)});
+		control.on('connect', () => control.write(JSON.stringify({ parentPid: process.ppid, descendantPid: process.pid }) + String.fromCharCode(10)));
+		control.once('data', () => process.send('exit'));
+	`;
+		const parentScript = `
+		import { spawn } from 'node:child_process';
+		const child = spawn(process.execPath, ['--input-type=module', '--eval', ${JSON.stringify(descendantScript)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+		child.once('message', () => process.exit(${String(status)}));
+	`;
+		const controller = new AbortController();
+		let running: Promise<number> | undefined;
 		const kill = vi.spyOn(process, 'kill');
 		await withCleanups(async () => {
+			await new Promise<void>((resolve, reject) => {
+				server.once('error', reject);
+				server.listen(socketPath, resolve);
+			});
 			await writeFile(parentPath, parentScript);
 			vi.stubEnv('npm_execpath', parentPath);
-			const signal = new AbortController().signal;
-			const code =
+			const signal = AbortSignal.any([controller.signal, context.signal]);
+			const operation =
 				runner === 'scheduler'
-					? await executeCheck(
+					? executeCheck(
 							{ id: 'completed', group: 'scripts', checks: [], arguments: [] },
 							signal
 						)
-					: await runTestCommand(
-							[process.execPath, parentPath],
-							process.env,
-							signal
-						);
-			const result = resultSchema.parse(
-				JSON.parse(await readFile(resultPath, 'utf8'))
+					: runTestCommand([process.execPath, parentPath], process.env, signal);
+			running = operation;
+			const prematureExit = async (): Promise<never> => {
+				await operation;
+				throw new Error('Check command exited before the descendant connected');
+			};
+			const observed = await abortable(
+				Promise.race([connected.promise, prematureExit()]),
+				context.signal
 			);
-			parentPid = result.parentPid;
-			expect(code).toBe(status);
-			expect(kill).toHaveBeenCalledWith(-parentPid, 'SIGKILL');
-			await vi.waitFor(
-				() => {
-					expect(() => process.kill(result.descendantPid, 0)).toThrow();
-				},
-				{ timeout: 2000 }
-			);
+			observed.socket.write('exit');
+			const code = await operation;
+			expect({ code, signals: kill.mock.calls }).toStrictEqual({
+				code: status,
+				signals: [[-observed.parentPid, 'SIGKILL']]
+			});
+			await abortable(observed.closed, context.signal);
 		}, [
-			() => {
+			async () => {
 				kill.mockRestore();
 				vi.unstubAllEnvs();
-				if (parentPid !== undefined) {
+				controller.abort(new Error('test cleanup'));
+				if (parentPid !== undefined && descendantSocket?.destroyed !== true) {
 					try {
 						process.kill(-parentPid, 'SIGKILL');
 					} catch (error) {
@@ -259,7 +300,20 @@ it.each([
 						}
 					}
 				}
-				return Promise.resolve();
+				const completion = running;
+				if (completion !== undefined) {
+					await bestEffort(() => completion);
+				}
+			},
+			async () => {
+				for (const socket of sockets) {
+					socket.destroy();
+				}
+				await new Promise<void>((resolve) => {
+					server.close(() => {
+						resolve();
+					});
+				});
 			},
 			() => rm(directory, { recursive: true, force: true })
 		]);
