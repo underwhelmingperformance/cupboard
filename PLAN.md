@@ -4444,11 +4444,12 @@ workflow.
 4. Event presets. The reusable workflow accepts a preset that derives the cache
    name, retention-root prefix, and TTL from the triggering event: pull-request
    runs get `pr-<number>`, a 14-day TTL, and the matching root prefix; branch
-   runs get the default cache and the branch's root prefix, with `reuse-view`
-   applied to branch runs only. A preset and the explicit inputs it replaces are
-   mutually exclusive, so a caller either states the arithmetic or delegates it,
-   never half of each. The caller workflow shrinks to the URL, the targets, the
-   version pin, and the retention mode.
+   runs get the default cache and the branch's root prefix. PR runs reuse the
+   default cache. Branch runs reuse only the merged PR's cache through the
+   optional trusted-contributor wrapper. A preset and the explicit inputs it
+   replaces are mutually exclusive, so a caller either states the arithmetic or
+   delegates it, never half of each. The caller workflow shrinks to the URL, the
+   targets, the version pin, and the retention mode.
 5. Grace made visible and pre-checked. The caches contract carries the
    grace-managed flag and the cache's earliest live grace deadline, and
    `cache list` and `cache inspect` render them, mirroring how roots surface
@@ -7091,5 +7092,5 @@ access-checked reuse release is a prerequisite for this change.
 - [x] D2: Disable branch PR reuse by default and add the trusted-contributor
       wrapper for a unique merged PR.
 - [x] D3: Update GitHub setup, checks and guided trust repair for both modes.
-- [ ] D4: Document the trust direction and required upgrade choices.
+- [x] D4: Document the trust direction and required upgrade choices.
 - [ ] D5: Record the future merge-queue verified publication mode.

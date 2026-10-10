@@ -7,8 +7,8 @@ builds your flake and publishes the results to cupboard. When you've finished:
   Closing the pull request expires its roots and starts its configured grace.
   Reads and reuse remain available during grace, including after a merge.
 - Each push to `main` publishes to your tenant's default cache. Nix users
-  normally read from that cache. If a pull request has already built exactly the
-  same outputs, the `main` run reuses them instead of building them again.
+  normally read from that cache. PR runs reuse matching outputs from the default
+  cache. The preset adds no PR reference source on branch runs by default.
 
 You don't need to write the build steps yourself. cupboard provides a reusable
 GitHub Actions workflow, `cupboard-flake-publish.yml`, that realises the
@@ -52,21 +52,27 @@ cupboard github setup https://cupboard.example.workers.dev/t/acme \
   --workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*'
 ```
 
-This adds three things to your tenant. Two of them are
-[trust rules](./trust-rules.md). A trust rule tells the tenant which GitHub
-Actions jobs to accept, and what each one is allowed to do.
+This adds three [trust rules][trust-rules] to your tenant. A trust rule tells
+the tenant which GitHub Actions jobs to accept, and what each job can do.
+
+[trust-rules]: ./trust-rules.md
 
 - The **pull-request trust rule** accepts pull-request runs from `acme/app`.
   Each run can create its pull request's cache, publish to it, close it, and
   reopen it. The cache is called `gh-<repository-id>-pr-<number>`, where
   `<repository-id>` is GitHub's numeric ID for the repository.
+- The **merged pull-request closure trust rule** lets a close event remove the
+  write access of the merged pull request's cache.
 - The **branch trust rule** accepts runs of the workflow on `main` and lets them
   publish to the default cache. This covers pushes, manual runs and scheduled
   runs.
-- The **reuse view**, `pull-requests-<repository-id>`, lets a `main` run look
-  inside all of the repository's pull-request caches at once. This is how `main`
-  finds outputs that a pull request has already built.
-  [Reuse views](./reuse-views.md) explains them in more detail.
+
+Setup also asks whether to enable [trusted-contributor reuse][trusted-reuse].
+The default leaves PR caches out of branch runs. Enable the mode only when you
+trust contributors' Nix configuration and builders; the caller then uses the
+trusted wrapper and grants `pull-requests: read`.
+
+[trusted-reuse]: ./flake-publish.md#reusing-a-merged-pull-requests-outputs
 
 Each rule also limits which retention roots a run can set. A retention root is a
 name that keeps store paths in a cache. While the root exists, cupboard won't
@@ -88,9 +94,8 @@ A few things to know about `github setup`:
   again. For a connection failure, also check your network connection.
 - The root names include the repository's name, so if you rename the repository,
   run `github setup` again.
-- It's safe to run again. It reports what's already in place. The exception is a
-  reuse view with the same name but a different definition: the command shows
-  you the difference, makes no changes, and exits with an error.
+- It's safe to run again. It reports existing trust rules and refuses a PR-cache
+  access mode that conflicts with stored caches. Setup does not create a view.
 
 [GitHub Status]: https://www.githubstatus.com/
 
@@ -231,15 +236,15 @@ For pull request `#42` and for `main`, the preset does this:
 
 Closing a cache rejects publication and retention extension. GC removes expired
 contents after grace and deletes the empty cache when pending work has finished.
-A `main` run can reuse PR outputs during grace and retain them in the default
-cache. Reopening restores writes; it does not extend the previous roots. See
-[Cache closure][cache-closure].
+A trusted-contributor `main` run can reuse the merged PR's outputs during grace
+and retain them in the default cache. Reopening restores writes; it does not
+extend the previous roots. See [Cache closure][cache-closure].
 
 [cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
-A pull-request run only reads from its own cache and from upstream caches such
-as cache.nixos.org. Only runs on `main` look through the reuse view. That way,
-one pull request never picks up another pull request's builds.
+A PR run reads its own cache, the default cache and upstream caches such as
+cache.nixos.org. The preset adds no other PR cache to a PR run and no PR
+reference source to a branch run by default.
 
 The preset fails any run that isn't either a pull request from this repository
 or a run on `main`. The `on:` section above keeps other branches and tags from
@@ -292,9 +297,9 @@ yet.
 
 The command reads the workflow files on the branch, and finds every job that
 publishes to this tenant. For each job, it works out what a run would present to
-the tenant and ask it for, and checks that against your trust rules and reuse
-view. After `cupboard github setup`, the job in the workflow file from step 4
-passes.
+the tenant and ask it for, and checks those claims and requests against your
+trust rules. After `cupboard github setup`, the job in the workflow file from
+step 4 passes.
 
 If a job fails, the command lists it and exits with status 1. For example, if no
 trust rule accepts the publishing job from step 4, this excerpt shows the failed
@@ -327,16 +332,17 @@ Open a pull request from the branch. Its run should publish to a cache called
 
 When you merge the pull request, the `main` run starts. Its work is split into
 jobs, one for each group of targets. Each job's log shows how many targets were
-already served by the destination, reused from the pull-request caches, left to
-upstream caches or built. When the derivations match, "Reused from the tenant"
-can show outputs published by reference without rebuilding them. A target that
-the destination already serves appears in "Already served by the cache" instead.
+already served by the destination, published by reference, left to upstream
+caches or built. With trusted-contributor reuse and matching derivations,
+"Reused from the tenant" can show outputs published by reference without
+rebuilding them. A target that the destination already serves appears in
+"Already served by the cache" instead.
 
-Publishing by reference requires `main` to have the same derivations as the pull
-request. The run may build an output if `main` has moved on, or if the output
-depends on the commit itself, for example through `self.rev`. Investigate
-unexpected rebuilding by comparing the derivations and publication logs from the
-pull request and `main`.
+With trusted-contributor reuse, publication by reference requires `main` to have
+the same derivations as the merged PR. The run may build an output if `main` has
+moved on, or if the output depends on the commit itself, for example through
+`self.rev`. Investigate unexpected rebuilding by comparing the derivations and
+publication logs from the pull request and `main`.
 
 If a run is refused, see
 [Troubleshooting](../troubleshooting.md#ci-publication).
@@ -353,5 +359,4 @@ If a run is refused, see
 - [Attestations](./attestation.md) explains what the signed provenance says and
   how to verify it.
 - [Trust rules](./trust-rules.md) and [Reuse views](./reuse-views.md) explain
-  what `github setup` created, and how to set up trust rules and reuse views by
-  hand.
+  how to configure trust rules and optional reuse views by hand.
