@@ -1,4 +1,8 @@
-export { activityLogRecords, copySources } from './activity-log.ts';
+export {
+	activityLogRecords,
+	copySources,
+	firstBuildFailure
+} from './activity-log.ts';
 export type {
 	DependencyOutput,
 	DependencyOutputOptions

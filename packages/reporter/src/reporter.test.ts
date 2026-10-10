@@ -595,6 +595,16 @@ describe('createReporter', () => {
 });
 
 describe('createGithubReporter', () => {
+	it('prints a deferred child failure without an error annotation', () => {
+		const sink = captureStream();
+		const reporter = createGithubReporter({
+			stream: sink.stream,
+			environment: { CUPBOARD_DEFER_ERROR_ANNOTATIONS: '1' }
+		});
+		reporter.error(new Error('target builder failed'));
+		expect(sink.lines()).toStrictEqual(['target builder failed\n']);
+	});
+
 	it('projects human labels and hides diagnostic facts without changing JSON', async () => {
 		const human = captureStream();
 		const machine = captureStream();

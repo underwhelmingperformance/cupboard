@@ -1,3 +1,5 @@
+import { stripVTControlCharacters } from 'node:util';
+
 import {
 	storePathSchema,
 	type StorePathString
@@ -77,4 +79,37 @@ function recordCopySources(
 
 		sources.set(storePath, recorded);
 	}
+}
+
+const buildFailureMessageSchema = z.object({
+	action: z.literal('msg'),
+	level: z.literal(0),
+	msg: z.string(),
+	raw_msg: z.string().optional()
+});
+
+/**
+ * Returns the first derivation whose builder failed in the supplied activity
+ * logs. Messages about failed dependencies do not identify a failed builder.
+ */
+export function firstBuildFailure(
+	logs: readonly string[]
+): StorePathString | undefined {
+	for (const log of logs) {
+		for (const record of activityLogRecords(log)) {
+			const parsed = buildFailureMessageSchema.safeParse(record).data;
+			if (parsed === undefined) {
+				continue;
+			}
+			const message = stripVTControlCharacters(parsed.raw_msg ?? parsed.msg);
+			const failed =
+				/builder for '([^']+\.drv)' failed/u.exec(message) ??
+				/Cannot build '([^']+\.drv)'\.\nReason: builder /u.exec(message);
+			const path = storePathSchema.safeParse(failed?.[1]).data;
+			if (path !== undefined) {
+				return path;
+			}
+		}
+	}
+	return undefined;
 }

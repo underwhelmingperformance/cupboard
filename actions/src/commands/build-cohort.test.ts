@@ -9704,6 +9704,20 @@ describe('cohort job summary', () => {
 		return { summary, ...(shouldIncludeLog && { log: log() }) };
 	}
 
+	it('warns once with the failed attribute, root and first failed builder', async () => {
+		const run = await summarise([libraryQueryInstallable], false, true);
+		expect(
+			run.log
+				?.split('\n')
+				.filter(
+					(line) =>
+						line.startsWith('::warning::') || line.startsWith('::error::')
+				)
+		).toStrictEqual([
+			'::warning::Target build failed: .#packages.x86_64-linux.lib (root github:owner/repo/main/lib); first failing derivation: /nix/store/0123456789abcdfghijklmnpqrsvwxyz-dependency.drv; nix log /nix/store/0123456789abcdfghijklmnpqrsvwxyz-dependency.drv'
+		]);
+	});
+
 	it('includes streamed uploads with established root ownership in target rows', async () => {
 		const data = buildSummarySchema.parse(buildSummary.data);
 		const summary: ReporterResultEvent = {

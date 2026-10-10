@@ -7,6 +7,7 @@ import {
 	defaultNixConfigEnvironment,
 	dependencyOutputs,
 	discoverNixStoreConfig,
+	firstBuildFailure,
 	type Nix,
 	type NixValidPathInfo,
 	type PublicationSelection,
@@ -1183,9 +1184,18 @@ function terminalFailureFor(
 		exit.status !== undefined &&
 		attempts.some((attempt) => parseBuildActivities(attempt.log).length > 0)
 	) {
+		const firstFailingDerivation = firstBuildFailure(
+			attempts.map((attempt) => attempt.log)
+		);
 		return {
 			kind: 'target-build',
-			failedTargets: [...invocation.build.installables]
+			failedTargets: [...invocation.build.installables],
+			...(firstFailingDerivation !== undefined && {
+				failedDerivations: invocation.build.installables.map((target) => ({
+					target,
+					derivation: firstFailingDerivation
+				}))
+			})
 		};
 	}
 

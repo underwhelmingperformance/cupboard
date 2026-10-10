@@ -1,7 +1,7 @@
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import { copySources } from './activity-log.ts';
+import { copySources, firstBuildFailure } from './activity-log.ts';
 
 const appPath = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -97,5 +97,28 @@ describe('copySources', () => {
 		}
 	])('extracts $name', ({ logs, expected }) => {
 		expect(copySources(logs)).toStrictEqual(expected);
+	});
+});
+
+describe('firstBuildFailure', () => {
+	it.each([
+		{
+			message: `Cannot build '${appPath}.drv'.\nReason: builder failed with exit code 1.`,
+			expected: `${appPath}.drv`
+		},
+		{
+			message: `error: builder for '${appPath}.drv' failed with exit code 1`,
+			expected: `${appPath}.drv`
+		},
+		{
+			message: `Cannot build '${appPath}.drv'.\nReason: 1 dependency failed.`,
+			expected: undefined
+		}
+	])('reads the failing builder from $message', ({ message, expected }) => {
+		expect(
+			firstBuildFailure([
+				`malformed\n${JSON.stringify({ action: 'msg', level: 0, msg: message })}\n${JSON.stringify({ action: 'msg', level: 0, msg: `builder for '${libraryPath}.drv' failed with exit code 1` })}`
+			])
+		).toBe(expected ?? `${libraryPath}.drv`);
 	});
 });
