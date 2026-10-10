@@ -1061,7 +1061,14 @@ export async function buildCohortAction(
 
 				if (terminalFailure?.kind === 'target-build') {
 					for (const target of terminalFailure.failedTargets) {
-						reporter.warn('target build failed', target);
+						reportTargetBuildFailure(
+							reporter,
+							members,
+							target,
+							terminalFailure.failedDerivations?.find(
+								(failure) => failure.target === target
+							)?.derivation
+						);
 					}
 				}
 			}
@@ -1206,9 +1213,12 @@ export async function buildCohortAction(
 
 				if (inputs.allBestEffort) {
 					for (const failure of targetFailures) {
-						reporter.warn(
-							'remote target build failed',
-							`${failure.target}: ${failure.message}`
+						reportTargetBuildFailure(
+							reporter,
+							members,
+							failure.target,
+							undefined,
+							failure.message
 						);
 					}
 				}
@@ -1494,6 +1504,29 @@ export async function buildCohortAction(
 	}
 
 	await planAndBuild({ kind: 'local' });
+}
+
+function reportTargetBuildFailure(
+	reporter: Reporter,
+	members: readonly CohortMember[],
+	target: string,
+	firstFailingDerivation?: string,
+	message?: string
+): void {
+	const failed = members.filter(
+		(member) =>
+			member.queryInstallable === target || member.installable === target
+	);
+	const derivation =
+		firstFailingDerivation ?? target.split('^', 1)[0] ?? target;
+	const description =
+		failed.length === 0
+			? target
+			: failed.map(({ attr, root }) => `${attr} (root ${root})`).join(', ');
+	reporter.warn(
+		'Target build failed',
+		`${description}; ${firstFailingDerivation === undefined ? 'build derivation' : 'first failing derivation'}: ${derivation}; nix log ${derivation}${message === undefined ? '' : `; ${message}`}`
+	);
 }
 
 async function settledTargetBuildFailure(
@@ -2355,7 +2388,10 @@ async function runBuildPushCohort(
 			...environment,
 			CUPBOARD_BUILD_CONTEXTS: JSON.stringify(buildContexts)
 		},
-		cupboardRunDependencies
+		{
+			...cupboardRunDependencies,
+			deferErrorAnnotations: inputs.allBestEffort
+		}
 	);
 	return uploadTally(results);
 }

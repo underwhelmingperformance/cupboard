@@ -41,6 +41,7 @@ export interface CupboardRunResult {
 }
 
 export interface CupboardRunDependencies {
+	readonly deferErrorAnnotations?: boolean;
 	readonly legacyCommands?: Pick<WorkflowCommands, 'warning'>;
 	readonly signal?: AbortSignal;
 }
@@ -97,13 +98,19 @@ export async function runCupboardWithProtocol(
 		binaryPath,
 		['--output-mode', 'github', '--result-file', resultFile, ...arguments_],
 		dependencies.signal,
-		environment
+		environment,
+		dependencies.deferErrorAnnotations ?? false
 	);
 
 	const results = await readResults(resultFile, status);
 
 	if (status !== 0) {
-		throw new CupboardReportedError(status, results, undefined, true);
+		throw new CupboardReportedError(
+			status,
+			results,
+			undefined,
+			dependencies.deferErrorAnnotations !== true
+		);
 	}
 
 	return { protocol: 'result-file', results };
@@ -369,7 +376,8 @@ async function spawnCupboard(
 	binaryPath: string,
 	arguments_: readonly string[],
 	signal: AbortSignal | undefined,
-	environment: Environment
+	environment: Environment,
+	shouldDeferErrorAnnotations: boolean
 ): Promise<number | null> {
 	signal?.throwIfAborted();
 
@@ -377,7 +385,10 @@ async function spawnCupboard(
 		stdio: 'inherit',
 		env: {
 			...process.env,
-			...environment
+			...environment,
+			CUPBOARD_DEFER_ERROR_ANNOTATIONS: shouldDeferErrorAnnotations
+				? '1'
+				: undefined
 		}
 	});
 	const result = await waitForAbortableChildProcess(

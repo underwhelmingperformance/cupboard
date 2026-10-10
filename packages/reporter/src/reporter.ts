@@ -879,8 +879,15 @@ function buildGithubReporter(options: ReporterOptions): Reporter {
 
 		// commands.error escapes newlines, so the multi-line text stays one
 		// annotation.
-		commands.error(formatError(reportedError));
 		markErrorReported(reportedError);
+		if (
+			(options.environment ?? process.env).CUPBOARD_DEFER_ERROR_ANNOTATIONS ===
+			'1'
+		) {
+			line(formatError(reportedError));
+			return reportedError;
+		}
+		commands.error(formatError(reportedError));
 
 		return reportedError;
 	};

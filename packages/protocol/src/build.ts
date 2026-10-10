@@ -271,10 +271,16 @@ export type SubstitutableSizes = z.output<typeof substitutableSizesSchema>;
 // before reporting a final result for every requested target.
 const failedBuildTargetsSchema = z.array(z.string().min(1)).min(1);
 
+const failedDerivationSchema = z.strictObject({
+	target: z.string().min(1),
+	derivation: derivationPathSchema
+});
+
 export const terminalBuildFailureSchema = z.discriminatedUnion('kind', [
 	z.strictObject({
 		kind: z.literal('target-build'),
-		failedTargets: failedBuildTargetsSchema
+		failedTargets: failedBuildTargetsSchema,
+		failedDerivations: z.array(failedDerivationSchema).optional()
 	}),
 	z.strictObject({ kind: z.literal('command') })
 ]);

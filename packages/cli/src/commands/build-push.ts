@@ -289,6 +289,9 @@ export function aggregateBuildReceipts(
 	const terminalFailures = parsed.flatMap((receipt) =>
 		receipt.terminalFailure === undefined ? [] : [receipt.terminalFailure]
 	);
+	const failedDerivations = terminalFailures.flatMap((failure) =>
+		failure.kind === 'target-build' ? (failure.failedDerivations ?? []) : []
+	);
 	const targetFailures = terminalFailures.flatMap((failure) =>
 		failure.kind === 'target-build' ? failure.failedTargets : []
 	);
@@ -298,7 +301,8 @@ export function aggregateBuildReceipts(
 			: terminalFailures.every((failure) => failure.kind === 'target-build')
 				? ({
 						kind: 'target-build',
-						failedTargets: unique(targetFailures)
+						failedTargets: unique(targetFailures),
+						...(failedDerivations.length > 0 && { failedDerivations })
 					} as const)
 				: ({ kind: 'command' } as const);
 	const firstFailedReceipt = parsed.find(

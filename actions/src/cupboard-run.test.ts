@@ -25,6 +25,7 @@ interface FakeCupboardOptions {
 	readonly exitCode: number;
 	readonly writeResultFile?: boolean;
 	readonly captureArgvFile?: string;
+	readonly captureEnvironmentFile?: string;
 	readonly holdOpen?: boolean;
 	readonly supportsResultFile?: boolean;
 	readonly pushHelp?: string;
@@ -49,6 +50,7 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		'#!/usr/bin/env node',
 		"const fs = require('node:fs');",
 		'const argv = process.argv.slice(2);',
+		`if (${JSON.stringify(options.captureEnvironmentFile ?? '')}) { fs.writeFileSync(${JSON.stringify(options.captureEnvironmentFile ?? '')}, JSON.stringify({deferred: process.env.CUPBOARD_DEFER_ERROR_ANNOTATIONS ?? ''})); }`,
 		"if (argv.includes('--help')) {",
 		`  if (argv[0] === 'push' && ${JSON.stringify(options.pushHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.pushHelp ?? '')}); process.exit(0); }`,
 		`  if (argv[0] === 'attest' && argv[1] === 'attach' && ${JSON.stringify(options.attachHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.attachHelp ?? '')}); process.exit(0); }`,
@@ -308,32 +310,52 @@ describe('runCupboard', () => {
 		});
 	});
 
-	it('includes recorded results and status when the binary exits non-zero', async () => {
-		const temporary = await runnerTemporary();
-		const binary = await fakeCupboard({ results: [summaryEvent], exitCode: 3 });
+	it.each([false, true])(
+		'includes recorded results and defers annotations: %s',
+		async (deferErrorAnnotations) => {
+			const temporary = await runnerTemporary();
+			const captureEnvironmentFile = path.join(temporary, 'environment.json');
+			const binary = await fakeCupboard({
+				results: [summaryEvent],
+				exitCode: 3,
+				captureEnvironmentFile
+			});
 
-		const error = await rejectionOf(
-			runCupboard(binary, [], { RUNNER_TEMP: temporary })
-		);
+			const error = await rejectionOf(
+				runCupboard(
+					binary,
+					[],
+					{ RUNNER_TEMP: temporary },
+					{ deferErrorAnnotations }
+				)
+			);
 
-		expect(error).toBeInstanceOf(CupboardReportedError);
+			expect(error).toBeInstanceOf(CupboardReportedError);
 
-		if (!(error instanceof CupboardReportedError)) {
-			throw error;
+			if (!(error instanceof CupboardReportedError)) {
+				throw error;
+			}
+
+			const childEnvironmentSchema = z.object({ deferred: z.string() });
+			const childEnvironment = childEnvironmentSchema.parse(
+				JSON.parse(await readFile(captureEnvironmentFile, 'utf8'))
+			);
+
+			expect({
+				environment: childEnvironment,
+				wasReported: error.wasReported,
+				status: error.status,
+				exitCode: error.exitCode,
+				results: error.results
+			}).toStrictEqual({
+				environment: { deferred: deferErrorAnnotations ? '1' : '' },
+				wasReported: !deferErrorAnnotations,
+				status: 3,
+				exitCode: 3,
+				results: [summaryEvent]
+			});
 		}
-
-		expect({
-			wasReported: error.wasReported,
-			status: error.status,
-			exitCode: error.exitCode,
-			results: error.results
-		}).toStrictEqual({
-			wasReported: true,
-			status: 3,
-			exitCode: 3,
-			results: [summaryEvent]
-		});
-	});
+	);
 
 	it('reports the failed exit when the binary creates no result file', async () => {
 		const temporary = await runnerTemporary();

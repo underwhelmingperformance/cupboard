@@ -9,7 +9,10 @@ import {
 	storePathSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
-import { buildReceiptV3Schema } from '@cupboard/protocol/build';
+import {
+	buildReceiptV3Schema,
+	derivationPathSchema
+} from '@cupboard/protocol/build';
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -230,7 +233,15 @@ describe('aggregateBuildReceipts', () => {
 					childExitStatus: 1,
 					terminalFailure: {
 						kind: 'target-build',
-						failedTargets: ['.#optional']
+						failedTargets: ['.#optional'],
+						failedDerivations: [
+							{
+								target: '.#optional',
+								derivation: derivationPathSchema.parse(
+									'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-dependency.drv'
+								)
+							}
+						]
 					}
 				}
 			])
@@ -241,7 +252,15 @@ describe('aggregateBuildReceipts', () => {
 			childExitStatus: 1,
 			terminalFailure: {
 				kind: 'target-build',
-				failedTargets: ['.#optional']
+				failedTargets: ['.#optional'],
+				failedDerivations: [
+					{
+						target: '.#optional',
+						derivation: derivationPathSchema.parse(
+							'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-dependency.drv'
+						)
+					}
+				]
 			},
 			uploaded: [],
 			failed: [],
@@ -264,7 +283,18 @@ describe('aggregateBuildReceipts', () => {
 				paths: [],
 				subjects: [],
 				childExitStatus: 1,
-				terminalFailure: { kind: 'target-build', failedTargets: ['.#optional'] }
+				terminalFailure: {
+					kind: 'target-build',
+					failedTargets: ['.#optional'],
+					failedDerivations: [
+						{
+							target: '.#optional',
+							derivation: derivationPathSchema.parse(
+								'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-dependency.drv'
+							)
+						}
+					]
+				}
 			});
 			const sequence = await runCohortSequence(
 				{
