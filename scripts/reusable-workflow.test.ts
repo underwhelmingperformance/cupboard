@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -189,10 +190,18 @@ function shellOf(workflow: Workflow, job: string, name: string): string {
 		(candidate) => candidate.name === name
 	);
 
+	if (step?.uses === cupboardAction('workflow-inputs')) {
+		return readFileSync(
+			new URL(
+				`../actions/workflow-inputs/${String(step.with?.mode)}.sh`,
+				import.meta.url
+			),
+			'utf8'
+		);
+	}
 	if (step?.run === undefined) {
 		throw new Error(`${job} has no step named "${name}" that runs a script`);
 	}
-
 	return step.run;
 }
 
@@ -892,6 +901,7 @@ describe('cohort planning and publication', () => {
 		}).toStrictEqual({
 			cupboardActions: [
 				cupboardAction('resolve-cupboard'),
+				cupboardAction('workflow-inputs'),
 				cupboardAction('publication-settings'),
 				cupboardAction('prepare'),
 				cupboardAction('setup'),
@@ -1970,13 +1980,7 @@ async function resolveSimplePublicationEvent(
 	event: SimplePublicationEvent
 ): Promise<Record<string, string>> {
 	const workflow = await loadWorkflow(publishWorkflow);
-	const script = workflow.jobs.configure?.steps.find(
-		(step) => step.name === 'Resolve cache operation'
-	)?.run;
-
-	if (script === undefined) {
-		throw new Error('The publishing workflow has no cache-operation script');
-	}
+	const script = shellOf(workflow, 'configure', 'Resolve cache operation');
 
 	const directory = await mkdtemp(
 		path.join(tmpdir(), 'cupboard-cache-operation-')
@@ -2320,16 +2324,17 @@ async function resolvePublicationEvent(event: {
 		(candidate) => candidate.name === 'Resolve inputs'
 	);
 
-	if (step?.run === undefined) {
-		throw new Error('The publication workflow has no input-resolution script');
+	if (step === undefined) {
+		throw new Error('The publication workflow has no input-resolution step');
 	}
+	const script = shellOf(workflow, 'configure', 'Resolve inputs');
 	const directory = await mkdtemp(
 		path.join(tmpdir(), 'cupboard-publication-event-')
 	);
 	const output = path.join(directory, 'output');
 
 	try {
-		const { stdout } = await execFileAsync('bash', ['-c', step.run], {
+		const { stdout } = await execFileAsync('bash', ['-c', script], {
 			env: {
 				...Object.fromEntries(
 					Object.keys(step.env ?? {}).map((key) => [key, ''])

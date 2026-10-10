@@ -169,35 +169,9 @@ jobs:
           MANAGE_PR_CACHE: ${{ inputs.manage-pr-cache }}
           PUBLISH: ${{ inputs.publish }}
           CACHE: ${{ inputs.cache }}
-        run: |
-          set -euo pipefail
-          case "$PUBLISH" in
-            none|outputs|built|closure) ;;
-            *) echo '::error::publish must be none, outputs, built, or closure' >&2; exit 2 ;;
-          esac
-          if [[ "$EVENT_NAME" == pull_request && "$HEAD_REPOSITORY_ID" != "$REPOSITORY_ID" ]]; then
-            echo 'Cache operation: skip, because the pull request comes from a fork'
-            echo 'operation=skip' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          operation=publish
-          reason=''
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            if [[ "$MANAGE_PR_CACHE" == true && "$PUBLISH" != none && -z "$CACHE" ]]; then
-              echo '::error::manage-pr-cache requires a named cache input' >&2
-              exit 2
-            fi
-            if [[ "$EVENT_ACTION" == closed ]]; then
-              operation=skip
-              reason=', because the pull request is closed'
-              if [[ "$MANAGE_PR_CACHE" == true && "$PUBLISH" != none ]]; then
-                operation=close
-                reason=''
-              fi
-            fi
-          fi
-          echo "Cache operation: ${operation}${reason}"
-          echo "operation=$operation" >> "$GITHUB_OUTPUT"
+        uses: $/actions/workflow-inputs
+        with:
+          mode: resolve-cache-operation
 
       - name: Validate publication options
         if: steps.operation.outputs.operation == 'publish'
@@ -206,19 +180,9 @@ jobs:
           SUBSTITUTER: ${{ inputs.substituter }}
           PUBLISH: ${{ inputs.publish }}
           ATTEST: ${{ inputs.attest }}
-        run: |
-          case "${BUILD}" in
-            missing|rebuild) ;;
-            *) echo '::error::build must be missing or rebuild'; exit 1 ;;
-          esac
-          case "${SUBSTITUTER}" in
-            leave|copy) ;;
-            *) echo '::error::substituter must be leave or copy'; exit 1 ;;
-          esac
-          case "${ATTEST}" in
-            true|false) ;;
-            *) echo '::error::attest must be true or false'; exit 1 ;;
-          esac
+        uses: $/actions/workflow-inputs
+        with:
+          mode: validate-publication-options
 
       - uses: $/actions/resolve-cupboard
         id: resolve-cupboard
