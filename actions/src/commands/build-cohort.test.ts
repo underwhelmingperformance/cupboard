@@ -9704,6 +9704,15 @@ describe('cohort job summary', () => {
 		return { summary, ...(shouldIncludeLog && { log: log() }) };
 	}
 
+	it('groups the materialisation and drift evaluation of cohort targets', async () => {
+		const run = await summarise([], false, true);
+		expect(
+			run.log
+				?.split('\n')
+				.filter((line) => line === '::group::Evaluating cohort targets')
+		).toStrictEqual(['::group::Evaluating cohort targets']);
+	});
+
 	it('warns once with the failed attribute, root and first failed builder', async () => {
 		const run = await summarise([libraryQueryInstallable], false, true);
 		expect(
