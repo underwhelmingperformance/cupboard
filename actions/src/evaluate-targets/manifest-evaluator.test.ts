@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
 	evaluateTargetManifest,
@@ -33,6 +33,7 @@ describe('target manifest evaluation', () => {
 		const pending = Array.from({ length: 6 }, () =>
 			Promise.withResolvers<string>()
 		);
+		const started = pending.map(() => Promise.withResolvers<undefined>());
 		const calls: string[][] = [];
 		const trace: string[] = [];
 		let active = 0;
@@ -50,39 +51,37 @@ describe('target manifest evaluation', () => {
 			active += 1;
 			maximumActive = Math.max(maximumActive, active);
 			trace.push(`start ${String(index)}`);
+			started[index]?.resolve(undefined);
 			const value = await result.promise;
 			active -= 1;
 			trace.push(`close ${String(index)}`);
 			return value;
 		};
 		const evaluation = evaluateTargetManifest(options, runner);
-		await vi.waitFor(() => {
-			expect(trace).toStrictEqual(['start 0', 'start 1', 'start 2', 'start 3']);
-		});
+		await Promise.all(started.slice(0, 4).map((notice) => notice.promise));
+		expect(trace).toStrictEqual(['start 0', 'start 1', 'start 2', 'start 3']);
 		pending[2]?.resolve(JSON.stringify(target(2)));
-		await vi.waitFor(() => {
-			expect(trace).toStrictEqual([
-				'start 0',
-				'start 1',
-				'start 2',
-				'start 3',
-				'close 2',
-				'start 4'
-			]);
-		});
+		await started[4]?.promise;
+		expect(trace).toStrictEqual([
+			'start 0',
+			'start 1',
+			'start 2',
+			'start 3',
+			'close 2',
+			'start 4'
+		]);
 		pending[0]?.resolve(JSON.stringify(target(0)));
-		await vi.waitFor(() => {
-			expect(trace).toStrictEqual([
-				'start 0',
-				'start 1',
-				'start 2',
-				'start 3',
-				'close 2',
-				'start 4',
-				'close 0',
-				'start 5'
-			]);
-		});
+		await started[5]?.promise;
+		expect(trace).toStrictEqual([
+			'start 0',
+			'start 1',
+			'start 2',
+			'start 3',
+			'close 2',
+			'start 4',
+			'close 0',
+			'start 5'
+		]);
 		for (const index of [5, 1, 4, 3]) {
 			pending[index]?.resolve(JSON.stringify(target(index)));
 		}
@@ -330,6 +329,7 @@ describe('target manifest evaluation', () => {
 	it('joins active evaluations before reporting the first failure', async () => {
 		const failure = new Error('First target failed');
 		const pending = Promise.withResolvers<string>();
+		const started = Promise.withResolvers<undefined>();
 		const trace: string[] = [];
 		const runner: ManifestRunner = async (arguments_, signal) => {
 			if (arguments_.at(-1) === 'builtins.length') {
@@ -340,7 +340,7 @@ describe('target manifest evaluation', () => {
 			if (index === 0) {
 				return pending.promise;
 			}
-			await new Promise<void>((resolve) => {
+			const aborted = new Promise<void>((resolve) => {
 				signal.addEventListener(
 					'abort',
 					() => {
@@ -350,13 +350,16 @@ describe('target manifest evaluation', () => {
 					{ once: true }
 				);
 			});
+			if (index === 3) {
+				started.resolve(undefined);
+			}
+			await aborted;
 			trace.push(`close ${String(index)}`);
 			throw signal.reason;
 		};
 		const result = resultOrError(evaluateTargetManifest(options, runner));
-		await vi.waitFor(() => {
-			expect(trace).toStrictEqual(['start 0', 'start 1', 'start 2', 'start 3']);
-		});
+		await started.promise;
+		expect(trace).toStrictEqual(['start 0', 'start 1', 'start 2', 'start 3']);
 		pending.reject(failure);
 		const error = await result;
 		expect({ error, trace }).toStrictEqual({
