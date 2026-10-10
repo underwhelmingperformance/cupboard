@@ -37,7 +37,8 @@ repos:
     hooks:
       - id: zizmor
         args:
-          - --offline
+          - --persona
+          - pedantic
           - .github/workflows
           - actions
 
