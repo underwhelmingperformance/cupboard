@@ -237,6 +237,8 @@ jobs:
     if: needs.configure.outputs.operation == 'publish'
     name: build and push
     runs-on: ${{ inputs.runs-on }}
+    env:
+      CUPBOARD_RESULT_ARTIFACT: cupboard-publication
     permissions:
       attestations: write # allow the attest action to upload bundles to the repository's attestation store
       contents: read # check out the flake source
@@ -403,6 +405,14 @@ jobs:
           audience: ${{ steps.setup.outputs.read-session-audience }}
           receipt-file: ${{ steps.push.outputs.receipt-file }}
           bundles-file: ${{ steps.attest.outputs.bundles-file }}
+
+      - name: Save complete publication results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: ${{ env.CUPBOARD_RESULT_ARTIFACT }}
+          path: ${{ runner.temp }}/cupboard-result-*.jsonl
+          if-no-files-found: ignore
 
   close-cache:
     name: close the pull request's cache

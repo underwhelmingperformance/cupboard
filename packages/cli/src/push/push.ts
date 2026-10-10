@@ -143,6 +143,7 @@ export type PushStore = Pick<
 >;
 
 export interface PushDependencies {
+	readonly resultArtifact?: string;
 	readonly nix?: PushStore;
 	/**
 	 * Opens the system store when `nix` is absent and the publication has local
@@ -455,6 +456,8 @@ export async function runPush(
 
 	return runPushFlow(publication, reporter, {
 		...dependencies,
+		resultArtifact:
+			dependencies.resultArtifact ?? process.env.CUPBOARD_RESULT_ARTIFACT,
 		retention,
 		nix,
 		createNarArchive: narSource,
@@ -468,6 +471,7 @@ export async function runPush(
 }
 
 interface PushRuntimeDependencies {
+	readonly resultArtifact?: string;
 	readonly nix?: PushStore;
 	readonly client: PushClient;
 	readonly retention: RetentionPlan;
@@ -1200,8 +1204,8 @@ async function runPushFlow(
 			);
 		}
 
-		const retentionRows = isIncomplete
-			? []
+		const recordedRetention: RecordedRetention = isIncomplete
+			? { rows: [], roots: [] }
 			: await reporter.phase(retentionPhaseLabel(retention), (ctx) =>
 					recordRetention(retention, client, ctx)
 				);
@@ -1330,6 +1334,9 @@ async function runPushFlow(
 			uploadedBytes,
 			failures: failures.map((failure) => summaryFailure(failure)),
 			paths: summaryPaths,
+			...(recordedRetention.roots.length > 0 && {
+				roots: recordedRetention.roots
+			}),
 			...(compression !== undefined && { compression }),
 			...(transfer !== undefined && { transfer })
 		};
@@ -1380,8 +1387,15 @@ async function runPushFlow(
 						]
 					: []),
 				...attestationRows,
-				...retentionRows,
-				...pushSummaryPathRows(summaryPaths, retention, reporter),
+				...recordedRetention.rows,
+				...pushSummaryPathRows(
+					summaryPaths,
+					retention,
+					reporter,
+					publication.targetPaths,
+					rootRetentionByPath(recordedRetention.roots, resolved),
+					dependencies.resultArtifact
+				),
 				...(failures.length > 0
 					? [{ label: 'Failed', value: formatCount(failures.length) }]
 					: [])
@@ -1501,7 +1515,8 @@ function graceRetainUntilRow(retainUntil: string): string {
 
 function pushSummaryPathRow(
 	path: PushSummaryPathInput,
-	reporter: Reporter
+	reporter: Reporter,
+	root: RootSummaryInput | undefined
 ): ResultRow {
 	const label =
 		path.storePath === undefined
@@ -1518,6 +1533,13 @@ function pushSummaryPathRow(
 
 	const availability =
 		path.outcome === 'pending' ? 'accepted; verification pending' : 'available';
+	if (root !== undefined) {
+		return {
+			label,
+			value: `${availability}; root ${root.name}, ${formatExpiry(root)}`
+		};
+	}
+
 	if (path.grace?.retainUntil !== undefined) {
 		return {
 			label,
@@ -1545,7 +1567,10 @@ function pushSummaryPathRow(
 function pushSummaryPathRows(
 	paths: readonly PushSummaryPathInput[],
 	retention: RetentionPlan,
-	reporter: Reporter
+	reporter: Reporter,
+	targets: readonly StorePathString[],
+	roots: ReadonlyMap<string, RootSummaryInput>,
+	resultArtifact?: string
 ): readonly ResultRow[] {
 	if (
 		retention.kind !== 'none' &&
@@ -1557,16 +1582,33 @@ function pushSummaryPathRows(
 		return [];
 	}
 
-	return cappedPathRows(
-		paths.map((path) => pushSummaryPathRow(path, reporter))
+	const byPath = new Map(paths.map((path) => [path.storePath, path]));
+	const targetSet = new Set<string>(targets);
+	const targetPaths = targets.flatMap((storePath) => {
+		const path = byPath.get(storePath);
+		return path === undefined ? [] : [path];
+	});
+	const otherPaths = paths.filter(
+		(path) => !targetSet.has(path.storePath ?? '')
 	);
+	const row = (path: PushSummaryPathInput): ResultRow =>
+		pushSummaryPathRow(path, reporter, roots.get(path.storePath ?? ''));
+
+	return [
+		...targetPaths.map((path) => row(path)),
+		...cappedPathRows(
+			otherPaths.map((path) => row(path)),
+			resultArtifact
+		)
+	];
 }
 
-// The human report caps the per-path rows; the JSON output always lists
-// every path.
 const maxPathRows = 20;
 
-function cappedPathRows(rows: readonly ResultRow[]): readonly ResultRow[] {
+function cappedPathRows(
+	rows: readonly ResultRow[],
+	resultArtifact?: string
+): readonly ResultRow[] {
 	if (rows.length <= maxPathRows) {
 		return rows;
 	}
@@ -1575,7 +1617,7 @@ function cappedPathRows(rows: readonly ResultRow[]): readonly ResultRow[] {
 		...rows.slice(0, maxPathRows),
 		{
 			label: '…',
-			value: `${formatCount(rows.length - maxPathRows)} more path(s); the full list is in the JSON output`
+			value: `${formatCount(rows.length - maxPathRows)} more path(s); the full list is in ${resultArtifact === undefined ? 'the JSON output' : `artifact ${resultArtifact}`}`
 		}
 	];
 }
@@ -1939,15 +1981,63 @@ function retentionPhaseLabel(retention: RetentionPlan): string {
 	}
 }
 
+interface RecordedRetention {
+	readonly rows: readonly ResultRow[];
+	readonly roots: readonly RootSummaryInput[];
+}
+
+function rootRetentionByPath(
+	roots: readonly RootSummaryInput[],
+	resolved: readonly ResolvedPushPath[]
+): ReadonlyMap<string, RootSummaryInput> {
+	const metadata = new Map<string, ResolvedPushPath>(
+		resolved.map((path) => [resolvedStorePath(path), path])
+	);
+	const byPath = new Map<string, RootSummaryInput>();
+
+	for (const root of roots) {
+		const pending = root.targets
+			.filter((target) => target.present)
+			.map((target) => target.storePath);
+		const visited = new Set<string>();
+
+		while (pending.length > 0) {
+			const storePath = pending.pop();
+			if (storePath === undefined || visited.has(storePath)) {
+				continue;
+			}
+			visited.add(storePath);
+			const previous = byPath.get(storePath);
+			if (
+				previous === undefined ||
+				(previous.expiresAt !== undefined &&
+					(root.expiresAt === undefined || root.expiresAt > previous.expiresAt))
+			) {
+				byPath.set(storePath, root);
+			}
+			const path = metadata.get(storePath);
+			if (path !== undefined) {
+				pending.push(
+					...(path.source === 'local'
+						? path.pathInfo.references
+						: path.metadata.upload.references)
+				);
+			}
+		}
+	}
+
+	return byPath;
+}
+
 async function recordRetention(
 	retention: RetentionPlan,
 	client: PushClient,
 	ctx: PhaseContext
-): Promise<readonly ResultRow[]> {
+): Promise<RecordedRetention> {
 	if (retention.kind === 'none') {
 		ctx.fact('retention', noRetainLabel);
 
-		return [{ label: 'Retention', value: noRetainLabel }];
+		return { rows: [{ label: 'Retention', value: noRetainLabel }], roots: [] };
 	}
 
 	if (retention.kind === 'root') {
@@ -1957,10 +2047,13 @@ async function recordRetention(
 		ctx.fact('root', retention.name);
 		ctx.fact('expiry', expiry);
 
-		return [
-			{ label: 'Root', value: retention.name },
-			{ label: 'Root expiry', value: expiry }
-		];
+		return {
+			rows: [
+				{ label: 'Root', value: retention.name },
+				{ label: 'Root expiry', value: expiry }
+			],
+			roots: [summary]
+		};
 	}
 
 	// Each pin is a separate root request, and the requests are independent, so
@@ -1981,10 +2074,15 @@ async function recordRetention(
 	ctx.fact('pins', formatCount(retention.requests.length));
 	ctx.fact('expiry', expiry);
 
-	return [
-		{ label: 'Pinned paths', value: formatCount(retention.requests.length) },
-		{ label: 'Pin expiry', value: expiry }
-	];
+	return {
+		rows: [
+			{ label: 'Pinned paths', value: formatCount(retention.requests.length) },
+			{ label: 'Pin expiry', value: expiry }
+		],
+		roots: summaries.toSorted((left, right) =>
+			byCodeUnit(left.name, right.name)
+		)
+	};
 }
 
 function formatExpiry(summary: RootSummaryInput): string {

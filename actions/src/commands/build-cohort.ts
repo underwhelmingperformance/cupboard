@@ -52,6 +52,7 @@ import {
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
+import type { RootSummary } from '@cupboard/protocol/retention';
 import {
 	type ReferencePublicationManifestInput,
 	referencePublicationManifestSchema
@@ -77,6 +78,7 @@ import {
 	type CohortRootSummary,
 	cohortSummaryResult,
 	outcomeOrder,
+	recordedRoots,
 	type TargetOutcome,
 	type UploadTally,
 	uploadTally
@@ -2018,7 +2020,8 @@ async function settleCohortBuild(
 	let publication: CohortPublication = {
 		receiptFiles: [],
 		rootUploads: new Map(),
-		updatedRoots: new Set()
+		updatedRoots: new Set(),
+		rootRetention: new Map()
 	};
 	if (inputs.push) {
 		publication = await publishCohort({
@@ -2153,6 +2156,9 @@ function cohortRootSummaries(
 			root,
 			outcomes,
 			...(uploads !== undefined && { uploads }),
+			...(publication.rootRetention.has(root) && {
+				recordedRetention: publication.rootRetention.get(root)
+			}),
 			...(publication.updatedRoots.has(root) && { retention })
 		};
 	});
@@ -2693,6 +2699,7 @@ function manifestSources(
 interface CohortPublication {
 	readonly receiptFiles: readonly string[];
 	readonly rootUploads: ReadonlyMap<string, UploadTally>;
+	readonly rootRetention: ReadonlyMap<string, RootSummary>;
 	readonly updatedRoots: ReadonlySet<string>;
 	readonly otherUploads?: UploadTally;
 }
@@ -2745,6 +2752,7 @@ async function publishCohort(
 	const receiptFiles: string[] = [];
 	const rootUploads = new Map<string, UploadTally>();
 	const updatedRoots = new Set<string>();
+	const rootRetention = new Map<string, RootSummary>();
 	let otherUploads: UploadTally | undefined;
 	const push = async (
 		group: CohortRootGroup | undefined,
@@ -2766,6 +2774,9 @@ async function publishCohort(
 		}
 
 		const uploads = uploadTally(results);
+		for (const root of recordedRoots(results)) {
+			rootRetention.set(root.name, root);
+		}
 
 		if (group === undefined) {
 			otherUploads = addUploads(otherUploads, uploads);
@@ -3011,6 +3022,7 @@ async function publishCohort(
 	return {
 		receiptFiles,
 		rootUploads,
+		rootRetention,
 		updatedRoots,
 		...(otherUploads !== undefined && { otherUploads })
 	};

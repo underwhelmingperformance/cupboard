@@ -196,6 +196,12 @@ they share the same run root as the original attempt.
 
 ## Where to look when something goes wrong
 
+The `cupboard-publication-<cohort key>` artifact contains the complete JSON
+results from each cohort job, including every publication path. The
+`cupboard-publish` workflow uses the artifact `cupboard-publication`. Failed
+jobs upload these results too. Older CLI releases that do not write result files
+skip the artifact.
+
 - The run's summary page has a section for each job. The configure job lists the
   publication settings and the `nix.conf` lines for reading the destination
   cache. The plan job lists every target with its cohort job, runner and

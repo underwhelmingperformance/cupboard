@@ -8,6 +8,7 @@ import {
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import { rootSummarySchema } from './retention.ts';
 import { uploadGraceFactSchema } from './upload.ts';
 
 // A storage check reconciles committed metadata against R2. Every check
@@ -185,6 +186,7 @@ export const pushSummarySchema = z.strictObject({
 	uploadedBytes: countSchema,
 	failures: z.array(pushFailureSchema),
 	paths: z.array(pushSummaryPathSchema),
+	roots: z.array(rootSummarySchema).optional(),
 	compression: compressionSummarySchema.optional(),
 	transfer: transferSummarySchema.optional()
 });
