@@ -289,17 +289,17 @@ describe('runCacheList', () => {
 				{
 					label: '(default)',
 					value:
-						'private; 0 store paths; Nix priority 40; Cleanup keeps paths if none are retained, except when a root has just expired'
+						'private; 0 store paths; Nix priority 40; Cleanup can delete paths outside the retained closure. It keeps all paths when the retained closure is empty, unless a root expired during this cleanup.'
 				},
 				{
 					label: 'builds',
 					value:
-						'public; 5 store paths; Nix priority 30; remove when empty; May be deleted after their grace periods expire'
+						'public; 5 store paths; Nix priority 30; remove when empty; Eligible for deletion after their grace periods expire.'
 				},
 				{
 					label: 'drained',
 					value:
-						'private; 0 store paths; Nix priority 45; May be deleted at the next cleanup; clearing grace does not disable cleanup'
+						'private; 0 store paths; Nix priority 45; Eligible for deletion at the next cleanup.'
 				}
 			]
 		]);
@@ -402,6 +402,7 @@ describe('runCacheCreate', () => {
 			results: [
 				[
 					{ label: 'Cache', value: 'builds' },
+					{ label: 'Status', value: 'Created' },
 					{ label: 'Access', value: 'private' },
 					{ label: 'Priority', value: '30' },
 					{ label: 'Store paths', value: '0' },
@@ -455,6 +456,7 @@ describe('runCacheCreate', () => {
 			results: [
 				[
 					{ label: 'Cache', value: 'pr-1' },
+					{ label: 'Status', value: 'Already existed' },
 					{ label: 'Access', value: 'public' },
 					{ label: 'Priority', value: '30' },
 					{ label: 'Store paths', value: '4' },
@@ -488,8 +490,8 @@ describe('runCacheCreate', () => {
 
 		expect(written).toStrictEqual([
 			'::group::Creating cache\n',
-			'Cache\n',
 			'Cache: pr-454\n',
+			'Status: Created\n',
 			'Access: private\n',
 			'Priority: 30\n',
 			'Store paths: 0\n',
@@ -910,8 +912,7 @@ describe('runCacheInspect', () => {
 					{ label: 'Retention by root prefix', value: 'none' },
 					{
 						label: 'Unretained paths',
-						value:
-							'May be deleted at the next cleanup; clearing grace does not disable cleanup'
+						value: 'Eligible for deletion at the next cleanup.'
 					},
 					{ label: 'Publication', value: 'Closed since 2026-03-01 00:00 UTC' },
 					{ label: 'Remove when empty', value: 'yes' },
@@ -972,11 +973,11 @@ describe('runCacheInspect', () => {
 				{ label: 'Access', value: 'public' },
 				{ label: 'Priority', value: '30' },
 				{ label: 'Store paths', value: '5' },
-				{ label: 'Default root retention', value: '1,209,600s' },
-				{ label: 'Grace', value: '86,400s' },
+				{ label: 'Default root retention', value: '14 days' },
+				{ label: 'Grace', value: '1 day' },
 				{
 					label: 'Retention by root prefix',
-					value: 'github:acme/ = 604,800s; release: = permanent'
+					value: 'github:acme/ = 7 days; release: = permanent'
 				}
 			]
 		]);
@@ -1015,8 +1016,7 @@ describe('runCacheInspect', () => {
 				{ label: 'Retention by root prefix', value: 'none' },
 				{
 					label: 'Unretained paths',
-					value:
-						'May be deleted at the next cleanup; clearing grace does not disable cleanup'
+					value: 'Eligible for deletion at the next cleanup.'
 				}
 			]
 		]);

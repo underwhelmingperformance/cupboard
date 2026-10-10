@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { acquireCupboard } from './cupboard-acquisition.ts';
 import type { ResolvedCupboard } from './cupboard-resolution.ts';
+import { recordingGithubReporter } from './reporter-testing.ts';
 
 const reporter = createGithubReporter();
 const baseOptions = {
@@ -98,6 +99,26 @@ describe('acquireCupboard', () => {
 			]
 		});
 		expect(installRelease).not.toHaveBeenCalled();
+	});
+
+	it('groups source build output and reports the installed source', async () => {
+		const cupboard = {
+			kind: 'source' as const,
+			repository: 'owner/cupboard',
+			sourceCommit: 'b'.repeat(40)
+		};
+		const { reporter, log } = recordingGithubReporter();
+		await acquireCupboard({ ...baseOptions, cupboard }, reporter, {
+			installRelease: vi.fn(),
+			installSource: () =>
+				Promise.resolve({
+					cupboard,
+					binaryPath: '/nix/store/cupboard/bin/cupboard'
+				})
+		});
+		expect(log()).toBe(
+			`::group::Building cupboard from source\nInstalled cupboard from owner/cupboard@${'b'.repeat(40)}\n::endgroup::\n`
+		);
 	});
 
 	it('forwards cancellation to source acquisition', async () => {

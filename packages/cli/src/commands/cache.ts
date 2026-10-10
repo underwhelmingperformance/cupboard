@@ -688,23 +688,32 @@ export async function runCacheCreate(
 	client: Pick<CacheClient, 'put' | 'get'>
 ): Promise<void> {
 	await reporter.phase('Creating cache', async (phase) => {
-		const summary = await createCache(request, client);
+		const { summary, created } = await createCache(request, client);
+		const rows = summaryRows(summary, reporter);
 
 		phase.result({
 			kind: 'cache',
-			title: 'Cache',
 			data: summary,
-			rows: summaryRows(summary, reporter)
+			rows: [
+				...rows.slice(0, 1),
+				{ label: 'Status', value: created ? 'Created' : 'Already existed' },
+				...rows.slice(1)
+			]
 		});
 	});
+}
+
+interface CreatedCache {
+	readonly summary: CacheSummary;
+	readonly created: boolean;
 }
 
 async function createCache(
 	request: CacheCreateRequest,
 	client: Pick<CacheClient, 'put' | 'get'>
-): Promise<CacheSummary> {
+): Promise<CreatedCache> {
 	try {
-		return await callInCache(client.put, request.cache, {
+		const summary = await callInCache(client.put, request.cache, {
 			access: request.access,
 			priority: request.priority,
 			defaultRootRetention:
@@ -715,12 +724,16 @@ async function createCache(
 				grace: { kind: 'duration', graceSeconds: request.grace }
 			})
 		});
+		return { summary, created: true };
 	} catch (error) {
 		if (request.ifAbsent !== true || !isRpcCacheAlreadyExistsError(error)) {
 			throw error;
 		}
 
-		return callInCache(client.get, request.cache, {});
+		return {
+			summary: await callInCache(client.get, request.cache, {}),
+			created: false
+		};
 	}
 }
 
@@ -1124,20 +1137,40 @@ function cleanupConsequence(
 	summary: Pick<CacheSummary, 'graceManaged' | 'grace'>
 ): string {
 	if (summary.graceManaged !== true) {
-		return 'Cleanup keeps paths if none are retained, except when a root has just expired';
+		return 'Cleanup can delete paths outside the retained closure. It keeps all paths when the retained closure is empty, unless a root expired during this cleanup.';
 	}
 
 	if (summary.grace.kind === 'none') {
-		return 'May be deleted at the next cleanup; clearing grace does not disable cleanup';
+		return 'Eligible for deletion at the next cleanup.';
 	}
 
-	return 'May be deleted after their grace periods expire';
+	return 'Eligible for deletion after their grace periods expire.';
+}
+
+function formatRetentionDuration(seconds: number): string {
+	let remaining = seconds;
+	const parts: string[] = [];
+	const units: readonly (readonly [number, string])[] = [
+		[86_400, 'day'],
+		[3600, 'hour'],
+		[60, 'minute'],
+		[1, 'second']
+	];
+	for (const [unitSeconds, unit] of units) {
+		const count = Math.floor(remaining / unitSeconds);
+		if (count === 0) {
+			continue;
+		}
+		parts.push(`${formatCount(count)} ${unit}${count === 1 ? '' : 's'}`);
+		remaining %= unitSeconds;
+	}
+	return parts.length === 0 ? '0 seconds' : parts.join(' ');
 }
 
 function rootRetentionLabel(retention: CacheRootRetention): string {
 	return retention.kind === 'permanent'
 		? 'permanent'
-		: `${formatCount(retention.seconds)}s`;
+		: formatRetentionDuration(retention.seconds);
 }
 
 function cacheRootRetention(
@@ -1155,7 +1188,9 @@ function cacheRootRetention(
 }
 
 function graceLabel(grace: CacheSummary['grace']): string {
-	return grace.kind === 'none' ? 'none' : `${formatCount(grace.graceSeconds)}s`;
+	return grace.kind === 'none'
+		? 'none'
+		: formatRetentionDuration(grace.graceSeconds);
 }
 
 function cacheCommandTarget(url: URL, name: string | undefined) {

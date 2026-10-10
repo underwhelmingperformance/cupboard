@@ -39,11 +39,18 @@ export async function acquireCupboard(
 	dependencies: AcquireCupboardDependencies = defaultDependencies
 ): Promise<AcquiredCupboard> {
 	if (options.cupboard.kind === 'source') {
-		return dependencies.installSource({
-			checkoutDirectory: options.checkoutDirectory,
-			installDirectory: options.installDirectory,
-			cupboard: options.cupboard,
-			...(options.signal !== undefined && { signal: options.signal })
+		const cupboard = options.cupboard;
+		return reporter.phase('Building cupboard from source', async () => {
+			const acquired = await dependencies.installSource({
+				checkoutDirectory: options.checkoutDirectory,
+				installDirectory: options.installDirectory,
+				cupboard,
+				...(options.signal !== undefined && { signal: options.signal })
+			});
+			reporter.info(
+				`Installed cupboard from ${cupboard.repository}@${cupboard.sourceCommit}`
+			);
+			return acquired;
 		});
 	}
 
