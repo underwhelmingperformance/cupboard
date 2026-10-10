@@ -49,6 +49,7 @@ import {
 	buildAddBody,
 	buildCacheContentReadGrant,
 	buildCacheGrant,
+	buildPullRequestContentReadGrant,
 	buildViewContentReadGrant,
 	collectSubstitutions,
 	jobWorkflowReferenceClaim
@@ -60,6 +61,7 @@ import { githubActionsIssuer } from './claims.ts';
 import {
 	parseExactWorkflowReference,
 	parseWorkflowReference,
+	pullRequestCacheName,
 	pullRequestCachePrefix,
 	pullRequestViewName,
 	workflowReferenceClaimsOverlap
@@ -356,9 +358,14 @@ function additionalReadGrants(
 	return read.additionalCaches
 		.filter(({ access }) => access === 'private')
 		.map(({ cache }) =>
-			buildCacheContentReadGrant({
-				...(cache.kind === 'named' && { cache: cache.name })
-			})
+			read.trustedContributorRepositoryId !== undefined &&
+			cache.kind === 'named' &&
+			cache.name ===
+				pullRequestCacheName(read.trustedContributorRepositoryId, 1)
+				? buildPullRequestContentReadGrant(read.trustedContributorRepositoryId)
+				: buildCacheContentReadGrant({
+						...(cache.kind === 'named' && { cache: cache.name })
+					})
 		);
 }
 

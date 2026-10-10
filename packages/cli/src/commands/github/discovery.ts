@@ -79,6 +79,8 @@ export interface DiscoveredPublishingJob {
 	readonly caller: string;
 	readonly job: string;
 	readonly kind: 'flake' | 'installable';
+	readonly trustedContributorReuse?: true;
+	readonly pullRequestsReadPermission?: 'granted' | 'missing' | 'unknown';
 	/**
 	 * Set only when the referenced push step specifies a nonempty run-root input.
 	 */
@@ -211,6 +213,7 @@ const jobSchema = z.looseObject({
 	uses: z.string().optional().catch(undefined),
 	with: mappingSchema.optional().catch(undefined),
 	secrets: z.unknown().optional(),
+	permissions: z.unknown().optional(),
 	steps: stepsSchema
 });
 const jobsSchema = z
@@ -224,7 +227,11 @@ const onSchema = z
 	.optional()
 	.catch(undefined);
 
-const workflowSchema = z.looseObject({ on: onSchema, jobs: jobsSchema });
+const workflowSchema = z.looseObject({
+	on: onSchema,
+	jobs: jobsSchema,
+	permissions: z.unknown().optional()
+});
 
 const actionSchema = z.looseObject({
 	runs: z
@@ -458,13 +465,40 @@ const cupboardAction =
 const publishingCommand =
 	/\bcupboard\s+(?:push|build-push|attest\s+attach|plan\s+cohort|cache\s+(?:create|remove|close|reopen)|root\s+ensure|confirm)\b|--github-oidc\b/u;
 
+function pullRequestsReadPermission(
+	value: unknown
+): 'granted' | 'missing' | 'unknown' {
+	if (value === 'read-all' || value === 'write-all') {
+		return 'granted';
+	}
+	if (value === undefined) {
+		return 'unknown';
+	}
+	const parsed = z.record(z.string(), z.string()).safeParse(value);
+	if (!parsed.success) {
+		return 'unknown';
+	}
+	const permission = parsed.data['pull-requests'];
+	if (permission?.includes('${{') === true) {
+		return 'unknown';
+	}
+	return permission === 'read' || permission === 'write'
+		? 'granted'
+		: 'missing';
+}
+
 function publicationKind(
 	uses: string
 ): DiscoveredPublishingJob['kind'] | undefined {
 	const reference = uses.toLowerCase();
 
 	if (
-		reference.startsWith(`${cupboardWorkflowPrefix}cupboard-flake-publish.yml@`)
+		reference.startsWith(
+			`${cupboardWorkflowPrefix}cupboard-flake-publish.yml@`
+		) ||
+		reference.startsWith(
+			`${cupboardWorkflowPrefix}cupboard-flake-publish-trusted.yml@`
+		)
 	) {
 		return 'flake';
 	}
@@ -654,6 +688,7 @@ interface VisitContext {
 	readonly conditions: readonly (string | boolean)[];
 	readonly dependencyGates: readonly JobDependencyGate[];
 	readonly ancestors: ReadonlySet<string>;
+	readonly pullRequestsPermission?: 'granted' | 'missing' | 'unknown';
 }
 
 function secretKeys(
@@ -955,6 +990,19 @@ export async function discoverPublishingJobs(
 
 			const supplied = resolveInputs(job.with, effectiveInputs);
 			const kind = publicationKind(uses);
+			const ownPermission = job.permissions ?? workflow.permissions;
+			const localPullRequests =
+				ownPermission === undefined
+					? (context.pullRequestsPermission ?? 'unknown')
+					: pullRequestsReadPermission(ownPermission);
+			const pullRequestsPermission =
+				context.pullRequestsPermission === 'missing'
+					? 'missing'
+					: localPullRequests === 'granted' &&
+						  context.pullRequestsPermission === 'unknown'
+						? 'unknown'
+						: localPullRequests;
+
 			const nested =
 				kind === undefined
 					? calledWorkflow(uses, repository, branch, revision, reference)
@@ -967,6 +1015,7 @@ export async function discoverPublishingJobs(
 					path: nested.path,
 					reference: nested.ref,
 					inputs: supplied,
+					pullRequestsPermission,
 					secretKeys: secretKeys(job.secrets, context.secretKeys),
 					triggers,
 					...(context.pullRequestTrigger !== undefined && {
@@ -1027,6 +1076,9 @@ export async function discoverPublishingJobs(
 					: 'cupboard-publish.yml';
 			let workflowReference: string | undefined;
 			try {
+				if (uses.includes('/cupboard-flake-publish-trusted.yml@')) {
+					await resolvePublishingReference(uses);
+				}
 				workflowReference = await resolvePublishingReference(
 					`${cupboardWorkflowPrefix}${workflowPath}@${pin}`
 				);
@@ -1162,6 +1214,10 @@ export async function discoverPublishingJobs(
 				caller,
 				job: label,
 				kind,
+				...(uses.includes('/cupboard-flake-publish-trusted.yml@') && {
+					trustedContributorReuse: true as const,
+					pullRequestsReadPermission: pullRequestsPermission
+				}),
 				...(hasInstallableRunRoot && { installableRunRoot: true as const }),
 				workflowRef: workflowReference,
 				...(!pin.startsWith('refs/') &&

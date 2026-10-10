@@ -3,7 +3,8 @@ import {
 	type CacheAccessMode,
 	cacheNameSchema,
 	cachePrioritySchema,
-	type CacheScope
+	type CacheScope,
+	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type ReadResourceState } from '@cupboard/protocol/read-access';
@@ -12,7 +13,11 @@ import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { contentReadAuthorizationDetails } from '../../auth/attenuate.ts';
 
 import { type GithubCheckClient } from './check.ts';
-import { pullRequestCacheName, pullRequestViewName } from './convention.ts';
+import {
+	pullRequestCacheName,
+	pullRequestCachePrefix,
+	pullRequestViewName
+} from './convention.ts';
 import {
 	type DiscoveredPublishingJob,
 	type ReadCredentialWiring
@@ -29,6 +34,7 @@ export interface PublicationReadAuthority {
 	readonly requests: readonly AuthorizationDetails[];
 	readonly resources: readonly ReadResourceState[];
 	readonly cacheAccess?: CacheAccessMode;
+	readonly trustedContributorRepositoryId?: number;
 	readonly additionalCaches: readonly {
 		readonly cache: CacheScope;
 		readonly access: CacheAccessMode;
@@ -37,6 +43,8 @@ export interface PublicationReadAuthority {
 	readonly selectedViewAccess?: CacheAccessMode;
 	readonly cacheWiring: ReadCredentialWiring;
 	readonly viewWiring: ReadCredentialWiring;
+	readonly referenceWiring?: ReadCredentialWiring;
+	readonly referenceAccess?: CacheAccessMode;
 }
 
 export async function publicationReadAuthority(
@@ -83,12 +91,14 @@ export async function publicationReadAuthority(
 		};
 	}
 
+	const isRepositoryView =
+		publication.reuseView?.name === pullRequestViewName(repositoryId);
 	const selectedViewAccess =
-		isPreset &&
 		!isReadOnly &&
+		(isPreset || isRepositoryView) &&
 		(cacheMode === 'public' || cacheMode === 'private')
 			? cacheMode
-			: isPreset
+			: isPreset || isRepositoryView
 				? await fetchCacheAccess(tenant)
 				: undefined;
 	let cacheAccess: CacheAccessMode;
@@ -97,28 +107,13 @@ export async function publicationReadAuthority(
 	} else if (isManagedPullRequest && cache.kind === 'named') {
 		const [prefix = '', suffix = ''] =
 			publication.pullRequestTemplates.cache.split('{pr}', 2);
-		let cursor: string | undefined;
-		let hasPrivateFamilyCache = false;
-		do {
-			const page = await client.caches.list({ namePrefix: prefix, cursor });
-			hasPrivateFamilyCache ||= page.caches.some((candidate) => {
-				if (
-					candidate.scope.kind !== 'named' ||
-					candidate.access !== 'private'
-				) {
-					return false;
-				}
-				const name = candidate.scope.name;
-				return (
-					name.startsWith(prefix) &&
-					name.endsWith(suffix) &&
-					/^[0-9]+$/u.test(
-						name.slice(prefix.length, name.length - suffix.length)
-					)
-				);
-			});
-			cursor = page.cursor;
-		} while (!hasPrivateFamilyCache && cursor !== undefined);
+		const hasPrivateFamilyCache = await hasPrivateCacheInFamily(client, {
+			prefix,
+			matches: (name) =>
+				name.startsWith(prefix) &&
+				name.endsWith(suffix) &&
+				/^[0-9]+$/u.test(name.slice(prefix.length, name.length - suffix.length))
+		});
 		const defaultAccess = await fetchCacheAccess(tenant);
 		cacheAccess = hasPrivateFamilyCache ? 'private' : defaultAccess;
 	} else {
@@ -148,13 +143,48 @@ export async function publicationReadAuthority(
 		}
 	}
 
+	const trustedReferenceAccess =
+		publication.trustedContributorReuse === true
+			? await trustedPullRequestCacheAccess(
+					client,
+					repositoryId,
+					selectedViewAccess ?? (await fetchCacheAccess(tenant))
+				)
+			: undefined;
+
 	const additionalCaches = await Promise.all(
 		(publication.readCaches ?? []).map(async (cache) => ({
 			cache,
-			access: await fetchCacheAccess(cacheUrl(tenant, cache))
+			access:
+				publication.trustedContributorReuse === true &&
+				cache.kind === 'named' &&
+				cache.name === pullRequestCacheName(repositoryId, 1)
+					? (trustedReferenceAccess ?? (await fetchCacheAccess(tenant)))
+					: await fetchCacheAccess(cacheUrl(tenant, cache))
 		}))
 	);
-	const isAdditionalContent = additionalCaches.some(
+	const automaticReference: CacheScope | undefined = isPresetPullRequest
+		? { kind: 'default' }
+		: publication.trustedContributorReuse === true
+			? {
+					kind: 'named',
+					name: cacheNameSchema.parse(pullRequestCacheName(repositoryId, 1))
+				}
+			: undefined;
+	const referenceAccess =
+		automaticReference === undefined
+			? undefined
+			: additionalCaches.find(({ cache }) =>
+					isSameCacheScope(cache, automaticReference)
+				)?.access;
+	const oidcAdditionalCaches = additionalCaches.filter(
+		({ cache }) =>
+			viewWiring !== 'configured' ||
+			automaticReference === undefined ||
+			!isSameCacheScope(cache, automaticReference)
+	);
+
+	const isAdditionalContent = oidcAdditionalCaches.some(
 		({ access }) => access === 'private'
 	);
 	const isCacheContent = cacheAccess === 'private' && cacheWiring === 'none';
@@ -184,7 +214,7 @@ export async function publicationReadAuthority(
 							}
 						]
 					: []),
-				...additionalCaches.map(({ cache, access }) => ({
+				...oidcAdditionalCaches.map(({ cache, access }) => ({
 					type: 'cupboard_cache' as const,
 					cache,
 					mode: 'content' as const,
@@ -216,7 +246,7 @@ export async function publicationReadAuthority(
 			...(isCacheContent && { cache }),
 			...(isViewContent && { view: reuseViewNameSchema.parse(view.name) })
 		}),
-		...additionalCaches
+		...oidcAdditionalCaches
 			.filter(({ access }) => access === 'private')
 			.flatMap(({ cache }) => contentReadAuthorizationDetails({ cache }))
 	];
@@ -227,8 +257,17 @@ export async function publicationReadAuthority(
 		viewAccess
 	);
 
+	const cacheReferencePush = privateCacheReferencePush(
+		publication,
+		automaticReference,
+		referenceAccess
+	);
+
 	return {
 		cache,
+		...(publication.trustedContributorReuse === true && {
+			trustedContributorRepositoryId: repositoryId
+		}),
 		additionalCaches,
 		resources,
 		cacheAccess,
@@ -236,9 +275,15 @@ export async function publicationReadAuthority(
 		...(selectedViewAccess !== undefined && { selectedViewAccess }),
 		cacheWiring,
 		viewWiring,
+		...(automaticReference !== undefined &&
+			viewWiring !== 'none' && {
+				referenceAccess,
+				referenceWiring: viewWiring
+			}),
 		requests: [
 			...(grants.length > 0 ? [grants] : []),
-			...(referencePush === undefined ? [] : [referencePush])
+			...(referencePush === undefined ? [] : [referencePush]),
+			...(cacheReferencePush === undefined ? [] : [cacheReferencePush])
 		]
 	};
 }
@@ -276,4 +321,77 @@ function privateViewReferencePush(
 			view: reuseViewNameSchema.parse(view)
 		})
 	];
+}
+
+function privateCacheReferencePush(
+	publication: PublicationCase,
+	cache: CacheScope | undefined,
+	access: CacheAccessMode | undefined
+): AuthorizationDetails | undefined {
+	if (cache === undefined || access !== 'private') {
+		return;
+	}
+
+	const push = publication.requests.find((request) =>
+		request.some(
+			(detail) =>
+				detail.type === 'cupboard_cache' &&
+				detail.actions.includes('upload:commit')
+		)
+	);
+
+	if (push === undefined) {
+		return;
+	}
+
+	return [...push, ...contentReadAuthorizationDetails({ cache })];
+}
+
+interface CacheFamily {
+	readonly prefix: string;
+	readonly matches: (name: string) => boolean;
+}
+
+async function hasPrivateCacheInFamily(
+	client: GithubCheckClient,
+	family: CacheFamily
+): Promise<boolean> {
+	let cursor: string | undefined;
+
+	do {
+		const page = await client.caches.list({
+			namePrefix: family.prefix,
+			cursor
+		});
+		if (
+			page.caches.some(
+				(candidate) =>
+					candidate.scope.kind === 'named' &&
+					candidate.access === 'private' &&
+					family.matches(candidate.scope.name)
+			)
+		) {
+			return true;
+		}
+
+		cursor = page.cursor;
+	} while (cursor !== undefined);
+
+	return false;
+}
+
+async function trustedPullRequestCacheAccess(
+	client: GithubCheckClient,
+	repositoryId: number,
+	inheritedAccess: CacheAccessMode
+): Promise<CacheAccessMode> {
+	const prefix = pullRequestCachePrefix(repositoryId);
+	const hasPrivateFamilyCache = await hasPrivateCacheInFamily(client, {
+		prefix,
+		matches: (name) =>
+			name.startsWith(prefix) &&
+			/^[1-9][0-9]*$/u.test(name.slice(prefix.length))
+	});
+
+	return hasPrivateFamilyCache ? 'private' : inheritedAccess;
 }

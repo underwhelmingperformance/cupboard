@@ -296,6 +296,7 @@ function checkDependencies(overrides: {
 }): Parameters<typeof runGithubCheck>[4] {
 	return {
 		lookupRepository: () => Promise.resolve(identity),
+		fetchCacheAccess: () => Promise.resolve('public' as const),
 		verifyWorkflowReference: () => Promise.resolve(),
 		fetchCacheInfo: (target: URL) => {
 			const priority = target.pathname.includes('/reuse/')
@@ -519,7 +520,11 @@ describe('runGithubCheck', () => {
 		expect(findings(results)).toStrictEqual([
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
-			{ label: 'reuse view', value: 'ok' },
+			{
+				label: 'reuse direction',
+				value:
+					'ok: PR runs reuse the default cache; branch runs build outputs without PR-cache reuse'
+			},
 			{ label: 'pull-request cache access', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' },
 			{ label: 'merged pull-request closure trust rule', value: 'ok' }
@@ -528,7 +533,7 @@ describe('runGithubCheck', () => {
 
 	// A cache whose access differs from the view's is absent from every lookup
 	// the view answers, and no other check reports it.
-	it('reports a pull-request cache the reuse view cannot aggregate', async () => {
+	it('reports a pull-request cache with access that differs from the selected mode', async () => {
 		const results: ResultRow[][] = [];
 
 		let failure: unknown;
@@ -556,11 +561,15 @@ describe('runGithubCheck', () => {
 			rows: [
 				{ label: 'pull-request trust rule', value: 'ok' },
 				{ label: 'main trust rule', value: 'ok' },
-				{ label: 'reuse view', value: 'ok' },
+				{
+					label: 'reuse direction',
+					value:
+						'ok: PR runs reuse the default cache; branch runs build outputs without PR-cache reuse'
+				},
 				{
 					label: 'pull-request cache access',
 					value:
-						'failed: gh-1234-pr-1 is private; the pull-requests-1234 view aggregates only public caches, so the view never serves it'
+						'failed: gh-1234-pr-1 has access that differs from the selected public mode'
 				},
 				{ label: 'root prefix', value: 'ok' },
 				{ label: 'merged pull-request closure trust rule', value: 'ok' }
@@ -599,11 +608,15 @@ describe('runGithubCheck', () => {
 			rows: [
 				{ label: 'pull-request trust rule', value: 'ok' },
 				{ label: 'main trust rule', value: 'ok' },
-				{ label: 'reuse view', value: 'ok' },
+				{
+					label: 'reuse direction',
+					value:
+						'ok: PR runs reuse the default cache; branch runs build outputs without PR-cache reuse'
+				},
 				{
 					label: 'pull-request cache access',
 					value:
-						'failed: gh-1234-pr-2 is private; the pull-requests-1234 view aggregates only public caches, so the view never serves it'
+						'failed: gh-1234-pr-2 has access that differs from the selected public mode'
 				},
 				{ label: 'root prefix', value: 'ok' },
 				{ label: 'merged pull-request closure trust rule', value: 'ok' }
@@ -637,165 +650,15 @@ describe('runGithubCheck', () => {
 		expect(findings(results)).toStrictEqual([
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
-			{ label: 'reuse view', value: 'ok' },
+			{
+				label: 'reuse direction',
+				value:
+					'ok: PR runs reuse the default cache; branch runs build outputs without PR-cache reuse'
+			},
 			{ label: 'pull-request cache access', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' },
 			{ label: 'merged pull-request closure trust rule', value: 'ok' }
 		]);
-	});
-
-	it('propagates an abort while reading the reuse view', async () => {
-		const reason = new CliAbortError();
-
-		await expect(
-			runGithubCheck(
-				url,
-				options,
-				reporter([]),
-				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
-				{
-					...checkDependencies({}),
-					fetchCacheInfo: (target) =>
-						target.pathname.includes('/reuse/')
-							? Promise.reject(reason)
-							: Promise.resolve(
-									new CacheInfo(
-										servedStoreDirectory,
-										true,
-										cachePrioritySchema.parse(40)
-									)
-								)
-				}
-			)
-		).rejects.toBe(reason);
-	});
-
-	it.each([
-		{
-			name: 'missing',
-			views: [],
-			detail: 'the pull-requests-1234 view is not defined',
-			// The access check reads the view's access, so a missing view fails
-			// that check as well as this one.
-			accessValue: 'failed: the pull-requests-1234 view is not defined',
-			alsoFails: ['pull-request cache access']
-		},
-		{
-			name: 'wrong selector',
-			views: [pullRequestView([{ kind: 'prefix', prefix: 'pull-' }])],
-			detail:
-				'stored selectors differ from the single gh-1234-pr- prefix setup would write',
-			accessValue: 'ok',
-			alsoFails: []
-		},
-		{
-			name: 'extra selector',
-			views: [
-				pullRequestView([
-					{ kind: 'prefix', prefix: 'gh-1234-pr-' },
-					{ kind: 'named', name: 'release' }
-				])
-			],
-			detail:
-				'stored selectors differ from the single gh-1234-pr- prefix setup would write',
-			accessValue: 'ok',
-			alsoFails: []
-		}
-	])(
-		'fails when the reuse-view definition is $name',
-		async ({ views, detail, accessValue, alsoFails }) => {
-			const results: ResultRow[][] = [];
-
-			let failure: unknown;
-			try {
-				await runGithubCheck(
-					url,
-					options,
-					reporter(results),
-					checkClient({
-						graceSeconds: 86_400,
-						rules: [prRule, branchRule],
-						views
-					}),
-					checkDependencies({})
-				);
-			} catch (error) {
-				failure = error;
-			}
-
-			expectFailed(failure);
-			expect({ checks: failure.checks, rows: findings(results) }).toStrictEqual(
-				{
-					checks: ['reuse view', ...alsoFails],
-					rows: [
-						{ label: 'pull-request trust rule', value: 'ok' },
-						{ label: 'main trust rule', value: 'ok' },
-						{ label: 'reuse view', value: `failed: ${detail}` },
-						{ label: 'pull-request cache access', value: accessValue },
-						{ label: 'root prefix', value: 'ok' },
-						{ label: 'merged pull-request closure trust rule', value: 'ok' }
-					]
-				}
-			);
-		}
-	);
-
-	it('reports every configuration failure before throwing', async () => {
-		const results: ResultRow[][] = [];
-		const misSpelled = storedRule(
-			'pr',
-			githubPrAddBody(url, identity, {
-				repo: options.repo,
-				jobWorkflowRef: 'acme/app/.github/workflows/publish.yml@refs/heads/main'
-			})
-		);
-
-		let failure: unknown;
-		try {
-			await runGithubCheck(
-				url,
-				{ ...options, rootPrefix: 'github:other/repo/main' },
-				reporter(results),
-				checkClient({ rules: [misSpelled] }),
-				checkDependencies({ viewPriority: 40 })
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectFailed(failure);
-		expect({ checks: failure.checks, rows: findings(results) }).toStrictEqual({
-			checks: [
-				'pull-request trust rule',
-				'main trust rule',
-				'reuse view',
-				'root prefix'
-			],
-			rows: [
-				{
-					label: 'pull-request trust rule',
-					value:
-						'failed: rule pr expects job_workflow_ref to match acme/app/.github/workflows/publish.yml@refs/heads/main; the modelled run uses ' +
-						pinnedWorkflowReference
-				},
-				{
-					label: 'main trust rule',
-					value:
-						'failed: rule pr-close expects event_name to match pull_request; the modelled run uses push'
-				},
-				{
-					label: 'reuse view',
-					value: "failed: view priority 40 does not exceed the destination's 40"
-				},
-				{ label: 'pull-request cache access', value: 'ok' },
-				{
-					label: 'root prefix',
-					value:
-						'failed: github:other/repo/main does not nest under the granted github:acme/app/main/'
-				},
-				{ label: 'merged pull-request closure trust rule', value: 'ok' }
-			]
-		});
 	});
 
 	it('reports the workflow-reference mismatch from the pull-request rule', async () => {
@@ -1147,7 +1010,11 @@ describe('runGithubCheck', () => {
 		expect(findings(results)).toStrictEqual([
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
-			{ label: 'reuse view', value: 'ok' },
+			{
+				label: 'reuse direction',
+				value:
+					'ok: PR runs reuse the default cache; branch runs build outputs without PR-cache reuse'
+			},
 			{ label: 'pull-request cache access', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' },
 			{ label: 'merged pull-request closure trust rule', value: 'ok' }

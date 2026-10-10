@@ -2,7 +2,6 @@ import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
-	type CachePriority,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import {
@@ -12,13 +11,6 @@ import {
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
-import {
-	isDestinationPreferred,
-	reuseViewNameSchema,
-	type ReuseViewPriority,
-	reuseViewPrioritySchema,
-	viewPriorityMargin
-} from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { genericExitCode } from '@cupboard/shared/errors';
@@ -61,8 +53,9 @@ import {
 import {
 	parseExactWorkflowReference,
 	parseWorkflowReference,
+	publicationWorkflowReference,
 	pullRequestCachePrefix,
-	pullRequestViewName,
+	trustedContributorWorkflowReference,
 	workflowReferenceClaimsOverlap
 } from './github/convention.ts';
 import { isDeepEqual } from './github/deep-equal.ts';
@@ -171,6 +164,7 @@ export interface GithubSetupOptions {
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly cacheAccessMode?: CacheAccessMode;
+	readonly trustedContributorReuse?: boolean;
 }
 
 export interface GithubSetupClient {
@@ -655,62 +649,6 @@ interface PlannedSetupStep {
 	readonly apply?: () => Promise<void>;
 }
 
-async function planReuseView(
-	client: GithubSetupClient,
-	identity: RepositoryIdentity,
-	destinationPriority: CachePriority,
-	access: CacheAccessMode
-): Promise<PlannedSetupStep> {
-	const prefix = pullRequestCachePrefix(identity.repositoryId);
-	const name = reuseViewNameSchema.parse(
-		pullRequestViewName(identity.repositoryId)
-	);
-	const selectors = [{ kind: 'prefix' as const, prefix }];
-	const { views } = await client.reuseViews.list();
-	const existing = views.find((view) => view.name === name);
-
-	if (existing === undefined) {
-		return {
-			step: {
-				step: 'reuse view',
-				outcome: 'created',
-				detail: `${access} ${prefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
-			},
-			apply: async () => {
-				await client.reuseViews.set({
-					name,
-					access,
-					selectors,
-					priority: reuseViewPrioritySchema.parse(
-						destinationPriority + viewPriorityMargin
-					)
-				});
-			}
-		};
-	}
-
-	if (
-		isDeepEqual([...existing.selectors], selectors) &&
-		existing.access === access &&
-		isDestinationPreferred(destinationPriority, existing.priority)
-	) {
-		return { step: { step: 'reuse view', outcome: 'unchanged' } };
-	}
-
-	return {
-		step: {
-			step: 'reuse view',
-			outcome: 'drift',
-			detail: reuseViewDrift({
-				existing,
-				access,
-				prefix,
-				destinationPriority
-			})
-		}
-	};
-}
-
 async function planPullRequestCacheAccess(
 	client: GithubSetupClient,
 	identity: RepositoryIdentity,
@@ -746,28 +684,6 @@ async function planPullRequestCacheAccess(
 			detail: `${mismatched.join(', ')} already has access that differs from the selected ${access} mode`
 		}
 	};
-}
-
-function reuseViewDrift(state: {
-	readonly existing: {
-		readonly access: CacheAccessMode;
-		readonly priority: ReuseViewPriority;
-	};
-	readonly access: CacheAccessMode;
-	readonly prefix: string;
-	readonly destinationPriority: CachePriority;
-}): string {
-	if (state.existing.access !== state.access) {
-		return `stored view is ${state.existing.access}; setup selected ${state.access} access`;
-	}
-
-	if (
-		!isDestinationPreferred(state.destinationPriority, state.existing.priority)
-	) {
-		return `stored priority ${String(state.existing.priority)} does not exceed the destination's ${String(state.destinationPriority)}`;
-	}
-
-	return `stored selectors differ from the ${state.prefix} prefix setup would write`;
 }
 
 function planTrustRule(
@@ -825,12 +741,21 @@ export async function runGithubSetup(
 ): Promise<void> {
 	const reporter = ui.reporter();
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
-	const fetchCacheInfo =
-		dependencies.fetchCacheInfo ?? cacheInfoFetcher(options);
 	const verifyReference =
 		dependencies.verifyWorkflowReference ?? verifyWorkflowReference;
 	const lookupOptions =
 		dependencies.signal === undefined ? {} : { signal: dependencies.signal };
+	const isTrustedContributorReuse =
+		options.trustedContributorReuse ??
+		(ui.interactive && options.yes !== true
+			? (await ui.confirm({
+					message: 'Reuse outputs from the merged pull request on branch runs?',
+					detail:
+						'Enable only for trusted contributors. A PR controls its Nix configuration and builders. The caller must use cupboard-flake-publish-trusted.yml and grant pull-requests: read.'
+				})) === 'yes'
+			: options.workflowRef.includes('/cupboard-flake-publish-trusted.yml@'));
+	const publishingReference = publicationWorkflowReference(options.workflowRef);
+
 	const workflowReference = parseWorkflowReference(options.workflowRef);
 
 	if (
@@ -870,6 +795,21 @@ export async function runGithubSetup(
 		'Reading repository identity from GitHub',
 		() => resolveRepository(options.repo, lookupOptions)
 	);
+	const trustedWorkflow =
+		trustedContributorWorkflowReference(publishingReference);
+	const callerWorkflow =
+		workflowReference.pin.kind === 'tag-pattern'
+			? `${trustedWorkflow.slice(0, trustedWorkflow.lastIndexOf('@'))}@vX.Y.Z`
+			: trustedWorkflow;
+	ui.note('Reuse direction', [
+		{ label: 'Pull requests', value: 'Reuse the default cache.' },
+		{
+			label: 'Branch runs',
+			value: isTrustedContributorReuse
+				? `Reuse only the merged PR cache. Call ${callerWorkflow} with pull-requests: read.`
+				: 'Build outputs without PR-cache reuse.'
+		}
+	]);
 	const defaultCache = await reporter.phase(
 		'Reading default cache access',
 		() => client.caches.get.inDefaultCache({})
@@ -881,17 +821,16 @@ export async function runGithubSetup(
 	);
 	const prBody = githubPrAddBody(url, identity, {
 		repo: options.repo,
-		jobWorkflowRef: options.workflowRef,
-		readCache: access === 'private'
+		jobWorkflowRef: publishingReference,
+		readCache: access === 'private',
+		readDefaultCache: defaultCache.access === 'private'
 	});
 	const branchBody = githubBranchAddBody(url, identity, {
 		repo: options.repo,
 		branch: options.branch,
-		jobWorkflowRef: options.workflowRef,
+		jobWorkflowRef: publishingReference,
 		readCache: defaultCache.access === 'private',
-		...(access === 'private' && {
-			readView: pullRequestViewName(identity.repositoryId)
-		})
+		readPullRequestCaches: isTrustedContributorReuse && access === 'private'
 	});
 	// These are the default claims that setup can determine without seeing a
 	// token. GitHub environments and custom subject templates can change `sub`,
@@ -905,7 +844,7 @@ export async function runGithubSetup(
 			body: prBody,
 			tokenClaims: githubPullRequestClaims(url, identity, {
 				...(workflowReference.pin.kind !== 'tag-pattern' && {
-					workflowReference: workflowReference.reference
+					workflowReference: publishingReference
 				})
 			})
 		},
@@ -917,7 +856,7 @@ export async function runGithubSetup(
 			tokenClaims: githubBranchClaims(url, identity, {
 				branch: options.branch,
 				...(workflowReference.pin.kind !== 'tag-pattern' && {
-					workflowReference: workflowReference.reference
+					workflowReference: publishingReference
 				})
 			})
 		},
@@ -927,13 +866,13 @@ export async function runGithubSetup(
 			trigger: 'merged pull requests',
 			body: githubPrCloseAddBody(url, identity, {
 				repo: options.repo,
-				jobWorkflowRef: options.workflowRef,
+				jobWorkflowRef: publishingReference,
 				allowBranchWorkflow: options.allowBranchWorkflow
 			}),
 			tokenClaims: githubMergedPullRequestClaims(url, identity, {
 				baseBranch: identity.defaultBranch,
 				...(workflowReference.pin.kind !== 'tag-pattern' && {
-					workflowReference: workflowReference.reference
+					workflowReference: publishingReference
 				})
 			})
 		}
@@ -974,16 +913,7 @@ export async function runGithubSetup(
 		);
 	}
 
-	const destination = await reporter.phase('Reading destination priority', () =>
-		fetchCacheInfo(url)
-	);
-	const configurationPlans = await reporter.phase(
-		'Reading tenant configuration',
-		async () => [
-			...(prCacheAccess === undefined ? [] : [prCacheAccess]),
-			await planReuseView(client, identity, destination.priority, access)
-		]
-	);
+	const configurationPlans = prCacheAccess === undefined ? [] : [prCacheAccess];
 	const drifted = configurationPlans.filter(
 		({ step }) => step.outcome === 'drift'
 	);
@@ -1211,7 +1141,7 @@ export function registerGithubCommands(
 	github
 		.command('setup')
 		.description(
-			"Add the trust rules and reuse view that cupboard's flake publish workflow needs for a GitHub repository."
+			"Add the trust rules that cupboard's flake publish workflow needs for a GitHub repository."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
@@ -1243,8 +1173,12 @@ export function registerGithubCommands(
 		)
 		.option('--read-password <password>', 'password of the read credential')
 		.option(
+			'--trusted-contributor-reuse',
+			'allow branch runs to reuse only the merged PR cache; requires the trusted workflow and pull-requests: read'
+		)
+		.option(
 			'--access, --cache-access-mode <mode>',
-			'read access for new pull-request caches and their reuse view: public or private (default: the tenant default cache access); does not change the default cache',
+			'read access for new pull-request caches: public or private (default: the tenant default cache access); does not change the default cache',
 			parseCacheAccess
 		)
 		.action(async (url: URL, options: GithubSetupOptions) => {

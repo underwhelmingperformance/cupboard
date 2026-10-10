@@ -1,4 +1,7 @@
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	cacheNameSchema
+} from '@cupboard/nix-store/scalars';
 import { cacheListResponseSchema } from '@cupboard/protocol/caches';
 import { oidcTrustSummarySchema } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
@@ -932,12 +935,12 @@ describe('modelPublishingJob', () => {
 							root: branchRoot
 						}),
 						confirmAuthorizationDetails({ cache: branchCache })
-					],
-					reuseView: { name: 'pull-requests-1234', destination: tenant }
+					]
 				},
 				{
 					trigger: 'pull_request',
 					ref: { kind: 'pull-request' },
+					readCaches: [{ kind: 'default' }],
 					claims: {
 						...repositoryClaims,
 						sub: 'repo:iainlane/dotfiles:pull_request',
@@ -1074,10 +1077,7 @@ describe('modelPublishingJob', () => {
 
 		expect(result).toStrictEqual({
 			cases: expected.cases,
-			findings: [
-				{ finding: new CustomReuseViewFinding('shared') },
-				...expected.findings
-			]
+			findings: expected.findings
 		});
 	});
 
@@ -1838,6 +1838,391 @@ it.each([
 						]
 					]
 				: []
+		});
+	}
+);
+
+it.each([false, true])(
+	'models branch reference reads only when trusted reuse is %s',
+	(enabled) => {
+		const result = modelPublishingJob(
+			{
+				...job,
+				triggers: triggers('push'),
+				...(enabled && { trustedContributorReuse: true as const })
+			},
+			identity,
+			tenant,
+			'main'
+		);
+		const normal = modelPublishingJob(
+			{ ...job, triggers: triggers('push') },
+			identity,
+			tenant,
+			'main'
+		);
+		expect(result).toStrictEqual(
+			enabled
+				? {
+						...normal,
+						cases: normal.cases.map((publication) => ({
+							...publication,
+							trustedContributorReuse: true,
+							readCaches: [
+								{ kind: 'named', name: cacheNameSchema.parse('gh-1234-pr-1') }
+							]
+						}))
+					}
+				: normal
+		);
+	}
+);
+
+it.each([
+	{ trigger: 'pull_request', access: 'private' },
+	{ trigger: 'pull_request', access: 'public' },
+	{ trigger: 'push', access: 'private' },
+	{ trigger: 'push', access: 'public' }
+] as const)(
+	'keeps $trigger publication authority for a $access automatic cache with static metadata credentials',
+	async ({ trigger, access }) => {
+		const configured: DiscoveredPublishingJob = {
+			...job,
+			triggers: triggers(trigger),
+			...(trigger === 'push' && { trustedContributorReuse: true as const }),
+			readCredentialWiring: { cache: 'configured', view: 'configured' }
+		};
+		const publication = modelPublishingJob(configured, identity, tenant, 'main')
+			.cases[0];
+		if (publication === undefined) {
+			throw new Error('Expected a publication case');
+		}
+		const read = await publicationReadAuthority(
+			configured,
+			publication,
+			tenant,
+			identity.repositoryId,
+			{
+				...unusedClient,
+				caches: { list: () => Promise.resolve({ caches: [] }) }
+			},
+			() => Promise.resolve(access)
+		);
+		const source =
+			trigger === 'pull_request'
+				? ({ kind: 'default' } as const)
+				: ({
+						kind: 'named',
+						name: cacheNameSchema.parse('gh-1234-pr-1')
+					} as const);
+		const destination =
+			trigger === 'pull_request'
+				? ({
+						kind: 'named',
+						name: cacheNameSchema.parse('gh-1234-pr-1')
+					} as const)
+				: ({ kind: 'default' } as const);
+		const root = parseRootName(
+			`github:${identity.fullName}/${trigger === 'pull_request' ? 'pr-1' : 'main'}`
+		);
+		expect(read).toStrictEqual({
+			cache: destination,
+			...(trigger === 'push' && {
+				trustedContributorRepositoryId: identity.repositoryId
+			}),
+			requests:
+				access === 'private'
+					? [
+							[
+								...pushAuthorizationDetails({
+									cache: destination,
+									attest: true,
+									root: parseRootName(`${root}/target`),
+									runRoot: parseRootName(`${root}/_cupboard-run/1`)
+								}),
+								...contentReadAuthorizationDetails({ cache: source })
+							]
+						]
+					: [],
+			resources: [],
+			additionalCaches: [{ cache: source, access }],
+			cacheAccess: access,
+			selectedViewAccess: access,
+			cacheWiring: 'configured',
+			viewWiring: 'configured',
+			referenceAccess: access,
+			referenceWiring: 'configured'
+		});
+	}
+);
+
+it.each(['branch', 'read-only', 'closed', 'merged-close'] as const)(
+	'adds no automatic publication read request for $0',
+	async (mode) => {
+		const configured: DiscoveredPublishingJob = {
+			...job,
+			triggers: triggers(mode === 'branch' ? 'push' : 'pull_request'),
+			inputs: {
+				...job.inputs,
+				...(mode === 'read-only' && { publish: 'none' })
+			},
+			readCredentialWiring: { cache: 'configured', view: 'configured' }
+		};
+		const publication = modelPublishingJob(configured, identity, tenant, 'main')
+			.cases[0];
+		if (publication === undefined) {
+			throw new Error('Expected a publication case');
+		}
+		const selected =
+			mode === 'closed' || mode === 'merged-close'
+				? { ...publication, lifecycle: mode }
+				: publication;
+		const read = await publicationReadAuthority(
+			configured,
+			selected,
+			tenant,
+			identity.repositoryId,
+			unusedClient,
+			() => Promise.resolve('private')
+		);
+		expect(read).toStrictEqual({
+			cache:
+				mode === 'closed' || mode === 'merged-close'
+					? { kind: 'named', name: cacheNameSchema.parse('gh-1234-pr-1') }
+					: { kind: 'default' },
+			requests: [],
+			resources: [],
+			additionalCaches: [],
+			...(mode !== 'closed' &&
+				mode !== 'merged-close' && {
+					cacheAccess: 'private',
+					selectedViewAccess: 'private'
+				}),
+			cacheWiring:
+				mode === 'closed' || mode === 'merged-close' ? 'none' : 'configured',
+			viewWiring:
+				mode === 'closed' || mode === 'merged-close' ? 'none' : 'configured'
+		});
+	}
+);
+
+const trustedReferenceCases: readonly {
+	readonly label: string;
+	readonly defaultAccess: CacheAccessMode;
+	readonly existing: readonly {
+		readonly name: string;
+		readonly access: CacheAccessMode;
+	}[];
+	readonly sourceAccess: CacheAccessMode;
+	readonly cacheMode?: CacheAccessMode;
+	readonly laterPage?: boolean;
+}[] = [
+	{
+		label: 'legacy private',
+		defaultAccess: 'public',
+		existing: [{ name: 'gh-1234-pr-42', access: 'private' }],
+		sourceAccess: 'private'
+	},
+	{
+		label: 'later private page',
+		defaultAccess: 'public',
+		existing: [{ name: 'gh-1234-pr-42', access: 'private' }],
+		sourceAccess: 'private',
+		laterPage: true
+	},
+	{
+		label: 'public family',
+		defaultAccess: 'public',
+		existing: [{ name: 'gh-1234-pr-42', access: 'public' }],
+		sourceAccess: 'public'
+	},
+	{
+		label: 'foreign and invalid private names',
+		defaultAccess: 'public',
+		existing: [
+			'gh-12345-pr-42',
+			'gh-1234-pr-0',
+			'gh-1234-pr-01',
+			'gh-1234-pr-42-extra',
+			'gh-1234-pr-x'
+		].map((name) => ({ name, access: 'private' })),
+		sourceAccess: 'public'
+	},
+	{
+		label: 'future default private',
+		defaultAccess: 'private',
+		existing: [],
+		sourceAccess: 'private'
+	},
+	{
+		label: 'explicit public with legacy private',
+		defaultAccess: 'public',
+		existing: [{ name: 'gh-1234-pr-42', access: 'private' }],
+		sourceAccess: 'private',
+		cacheMode: 'public'
+	},
+	{
+		label: 'explicit future private',
+		defaultAccess: 'public',
+		existing: [],
+		sourceAccess: 'private',
+		cacheMode: 'private'
+	}
+];
+
+it.each(
+	trustedReferenceCases.flatMap((profile) =>
+		[false, true].map((configured) => ({ ...profile, configured }))
+	)
+)(
+	'classifies $label trusted cache family with static metadata $configured',
+	async ({
+		defaultAccess,
+		existing,
+		sourceAccess,
+		cacheMode,
+		laterPage,
+		configured
+	}) => {
+		const configuredJob: DiscoveredPublishingJob = {
+			...job,
+			inputs: {
+				...job.inputs,
+				...(cacheMode !== undefined && { 'cache-access-mode': cacheMode })
+			},
+			triggers: triggers('push'),
+			trustedContributorReuse: true,
+			...(configured && {
+				readCredentialWiring: {
+					cache: 'configured' as const,
+					view: 'configured' as const
+				}
+			})
+		};
+		const publication = modelPublishingJob(
+			configuredJob,
+			identity,
+			tenant,
+			'main'
+		).cases[0];
+		if (publication === undefined) {
+			throw new Error('Expected a trusted branch publication case');
+		}
+		const queries: {
+			readonly namePrefix?: string;
+			readonly cursor?: string;
+		}[] = [];
+		const read = await publicationReadAuthority(
+			configuredJob,
+			publication,
+			tenant,
+			identity.repositoryId,
+			{
+				...unusedClient,
+				caches: {
+					list: (input) => {
+						queries.push({
+							namePrefix: input?.namePrefix,
+							cursor: input?.cursor
+						});
+						if (laterPage === true && input?.cursor === undefined) {
+							return Promise.resolve({ caches: [], cursor: 'next' });
+						}
+						return Promise.resolve(
+							cacheListResponseSchema.parse({
+								caches: existing.map((cache) => ({
+									scope: { kind: 'named', name: cache.name },
+									access: cache.access,
+									priority: 40,
+									storePaths: 0,
+									defaultRootRetention: { kind: 'permanent' },
+									grace: { kind: 'none' }
+								}))
+							})
+						);
+					}
+				}
+			},
+			() => Promise.resolve(defaultAccess)
+		);
+		const source = {
+			kind: 'named' as const,
+			name: cacheNameSchema.parse('gh-1234-pr-1')
+		};
+		const content = contentReadAuthorizationDetails({ cache: source });
+		expect({ read, queries }).toStrictEqual({
+			read: {
+				cache: { kind: 'default' },
+				trustedContributorRepositoryId: identity.repositoryId,
+				additionalCaches: [{ cache: source, access: sourceAccess }],
+				resources:
+					configured || sourceAccess === 'public'
+						? []
+						: [
+								{
+									type: 'cupboard_cache',
+									cache: { kind: 'default' },
+									mode: 'content',
+									state: {
+										kind: 'existing',
+										access: defaultAccess,
+										priority: 40
+									}
+								},
+								{
+									type: 'cupboard_cache',
+									cache: source,
+									mode: 'content',
+									state: {
+										kind: 'existing',
+										access: sourceAccess,
+										priority: 40
+									}
+								}
+							],
+				cacheAccess: defaultAccess,
+				selectedViewAccess: cacheMode ?? defaultAccess,
+				cacheWiring: configured ? 'configured' : 'none',
+				viewWiring: configured ? 'configured' : 'none',
+				...(configured && {
+					referenceAccess: sourceAccess,
+					referenceWiring: 'configured'
+				}),
+				requests:
+					sourceAccess === 'public'
+						? []
+						: [
+								...(configured
+									? []
+									: [
+											[
+												...(defaultAccess === 'private'
+													? contentReadAuthorizationDetails({
+															cache: { kind: 'default' }
+														})
+													: []),
+												...content
+											]
+										]),
+								[
+									...pushAuthorizationDetails({
+										cache: { kind: 'default' },
+										attest: true,
+										root: parseRootName('github:iainlane/dotfiles/main/target'),
+										runRoot: parseRootName(
+											'github:iainlane/dotfiles/main/_cupboard-run/1'
+										)
+									}),
+									...content
+								]
+							]
+			},
+			queries: [
+				{ namePrefix: 'gh-1234-pr-', cursor: undefined },
+				...(laterPage === true
+					? [{ namePrefix: 'gh-1234-pr-', cursor: 'next' }]
+					: [])
+			]
 		});
 	}
 );

@@ -2108,3 +2108,39 @@ jobs:
 		}
 	);
 });
+
+it.each([
+	{ permissions: 'permissions: read-all', permission: 'granted' },
+	{ permissions: 'permissions:\n  pull-requests: read', permission: 'granted' },
+	{ permissions: 'permissions:\n  contents: read', permission: 'missing' },
+	{ permissions: '', permission: 'unknown' }
+])(
+	'discovers trusted reuse and the caller permission: $permission',
+	async ({ permissions, permission }) => {
+		const result = await discoverPublishingJobs(
+			repository,
+			'main',
+			tenant,
+			source({
+				'.github/workflows/ci.yml': `on: push\n${permissions}\njobs:\n  publish:\n    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish-trusted.yml@v0.0.35\n    with:\n      url: ${tenant.href}\n      preset: pull-request-and-branch\n`
+			})
+		);
+		expect(result).toStrictEqual({
+			revision: 'a'.repeat(40),
+			jobs: [
+				{
+					caller: '.github/workflows/ci.yml',
+					job: 'publish',
+					kind: 'flake',
+					trustedContributorReuse: true,
+					pullRequestsReadPermission: permission,
+					workflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					inputs: { url: tenant.href, preset: 'pull-request-and-branch' },
+					triggers: triggers('push')
+				}
+			],
+			unverified: []
+		});
+	}
+);

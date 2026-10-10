@@ -54,10 +54,10 @@ import {
 import { type WorkflowSource } from './discovery.ts';
 import {
 	PassedCheckFinding,
+	PullRequestCacheAccessMismatchFinding,
 	ReadAuthenticationConfiguredFinding,
 	ReadAuthenticationIncompleteFinding,
 	ReadAuthenticationUnverifiedFinding,
-	ReuseViewAccessModeMismatchFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
 	RootGrantPrefixUnverifiedFinding
@@ -1026,33 +1026,28 @@ it.each([
 		selected: 'public' as const,
 		input: '',
 		details: [
-			"reuse view pull-requests-1234 is private; the tenant's default cache is public, so the workflow expects a public reuse view. Use a view with public access, or change the tenant's default cache access."
+			new PullRequestCacheAccessMismatchFinding(
+				['gh-1234-pr-42'],
+				'public'
+			).detail()
 		],
 		status: 'failed',
 		mismatches: [
-			new ReuseViewAccessModeMismatchFinding(
-				'pull-request cache access',
-				'pull-requests-1234',
-				'private',
-				'public',
-				'tenant-default'
-			)
+			new PullRequestCacheAccessMismatchFinding(['gh-1234-pr-42'], 'public')
 		]
 	},
 	{
 		selected: 'explicit public' as const,
 		input: '      cache-access-mode: public\n',
 		details: [
-			"reuse view pull-requests-1234 is private; the workflow's cache-access-mode input selects public. Use a view with public access, or set cache-access-mode to private."
+			new PullRequestCacheAccessMismatchFinding(
+				['gh-1234-pr-42'],
+				'public'
+			).detail()
 		],
 		status: 'failed',
 		mismatches: [
-			new ReuseViewAccessModeMismatchFinding(
-				'pull-request cache access',
-				'pull-requests-1234',
-				'private',
-				'public'
-			)
+			new PullRequestCacheAccessMismatchFinding(['gh-1234-pr-42'], 'public')
 		]
 	},
 	{
@@ -1062,45 +1057,47 @@ it.each([
 		status: 'ready',
 		mismatches: []
 	}
-])('compares the PR view with the $selected cache policy', async (scenario) => {
-	const view = reuseViewSummarySchema.parse({
-		name: 'pull-requests-1234',
-		access: 'private',
-		selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
-		priority: 50,
-		revision: 1,
-		createdAt: '2026-01-01T00:00:00.000Z',
-		updatedAt: '2026-01-01T00:00:00.000Z'
-	});
-	const cache: CacheSummaryInput = {
-		scope: { kind: 'named', name: 'gh-1234-pr-42' },
-		access: 'private',
-		priority: 30,
-		storePaths: 0,
-		defaultRootRetention: { kind: 'permanent' },
-		grace: { kind: 'none' },
-		rootRetentionOverrides: []
-	};
-	const rule = oidcTrustSummarySchema.parse({
-		...githubPrAddBody(
-			tenant,
-			{
-				repositoryId: 1234,
-				repositoryOwnerId: 5678,
-				fullName: repository,
-				defaultBranch: 'main'
-			},
-			{
-				repo: repository,
-				jobWorkflowRef:
-					'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
-				readCache: true
-			}
-		),
-		id: 'pr',
-		disabled: false
-	});
-	const content = `
+])(
+	'compares the PR caches with the $selected cache policy',
+	async (scenario) => {
+		const view = reuseViewSummarySchema.parse({
+			name: 'pull-requests-1234',
+			access: 'private',
+			selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+			priority: 50,
+			revision: 1,
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		});
+		const cache: CacheSummaryInput = {
+			scope: { kind: 'named', name: 'gh-1234-pr-42' },
+			access: 'private',
+			priority: 30,
+			storePaths: 0,
+			defaultRootRetention: { kind: 'permanent' },
+			grace: { kind: 'none' },
+			rootRetentionOverrides: []
+		};
+		const rule = oidcTrustSummarySchema.parse({
+			...githubPrAddBody(
+				tenant,
+				{
+					repositoryId: 1234,
+					repositoryOwnerId: 5678,
+					fullName: repository,
+					defaultBranch: 'main'
+				},
+				{
+					repo: repository,
+					jobWorkflowRef:
+						'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35',
+					readCache: true
+				}
+			),
+			id: 'pr',
+			disabled: false
+		});
+		const content = `
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
@@ -1111,67 +1108,70 @@ jobs:
       url: https://cupboard.supply/t/laney
       preset: pull-request-and-branch
 ${scenario.input}`;
-	const { client, dependencies } = fixture({
-		rules: [
-			rule,
-			oidcTrustSummarySchema.parse({
-				...githubPrCloseAddBody(
-					tenant,
-					{
-						repositoryId: 1234,
-						repositoryOwnerId: 5678,
-						fullName: repository,
-						defaultBranch: 'main'
-					},
-					{
-						repo: repository,
-						jobWorkflowRef:
-							'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
-					}
-				),
-				id: 'pr-close',
-				disabled: false
-			})
-		],
-		views: [view],
-		caches: [cache],
-		dependencies: {
-			source: { ...source, read: () => Promise.resolve(content) },
-			fetchCacheAccess: () => Promise.resolve('public')
-		}
-	});
-	const result = await inspectDiscoveredGithubCheck(
-		tenant,
-		{ repo: repository, branch: 'main' },
-		capturingReporter([]),
-		client,
-		dependencies
-	);
+		const { client, dependencies } = fixture({
+			rules: [
+				rule,
+				oidcTrustSummarySchema.parse({
+					...githubPrCloseAddBody(
+						tenant,
+						{
+							repositoryId: 1234,
+							repositoryOwnerId: 5678,
+							fullName: repository,
+							defaultBranch: 'main'
+						},
+						{
+							repo: repository,
+							jobWorkflowRef:
+								'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v0.0.35'
+						}
+					),
+					id: 'pr-close',
+					disabled: false
+				})
+			],
+			views: [view],
+			caches: [cache],
+			dependencies: {
+				source: { ...source, read: () => Promise.resolve(content) },
+				fetchCacheAccess: () => Promise.resolve('public')
+			}
+		});
+		const result = await inspectDiscoveredGithubCheck(
+			tenant,
+			{ repo: repository, branch: 'main' },
+			capturingReporter([]),
+			client,
+			dependencies
+		);
 
-	expect({
-		status: result.jobs.map((job) => job.status),
-		mismatches: result.jobs.flatMap((job) =>
-			job.findings
-				.map(({ finding }) => finding)
-				.filter(
-					(finding) => finding instanceof ReuseViewAccessModeMismatchFinding
-				)
-		),
-		details: result.jobs.flatMap((job) =>
-			job.findings
-				.filter(
-					({ finding }) => finding instanceof ReuseViewAccessModeMismatchFinding
-				)
-				.map(({ finding }) => finding.detail())
-		),
-		repairOffered: isRepairOffered(result)
-	}).toStrictEqual({
-		status: [scenario.status],
-		mismatches: scenario.mismatches,
-		details: scenario.details,
-		repairOffered: false
-	});
-});
+		expect({
+			status: result.jobs.map((job) => job.status),
+			mismatches: result.jobs.flatMap((job) =>
+				job.findings
+					.map(({ finding }) => finding)
+					.filter(
+						(finding) =>
+							finding instanceof PullRequestCacheAccessMismatchFinding
+					)
+			),
+			details: result.jobs.flatMap((job) =>
+				job.findings
+					.filter(
+						({ finding }) =>
+							finding instanceof PullRequestCacheAccessMismatchFinding
+					)
+					.map(({ finding }) => finding.detail())
+			),
+			repairOffered: isRepairOffered(result)
+		}).toStrictEqual({
+			status: [scenario.status],
+			mismatches: scenario.mismatches,
+			details: scenario.details,
+			repairOffered: false
+		});
+	}
+);
 
 it.each(
 	[
@@ -2200,10 +2200,6 @@ jobs:
 								{
 									trigger: 'push',
 									finding: new PassedCheckFinding('root grant')
-								},
-								{
-									trigger: 'push',
-									finding: new PassedCheckFinding('reuse view')
 								}
 							]
 						: [{ trigger: 'push', finding }]
