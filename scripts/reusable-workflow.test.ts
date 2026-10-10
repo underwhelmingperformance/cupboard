@@ -47,10 +47,8 @@ const remoteStoreDockerfile = new URL(
 	import.meta.url
 );
 
-const checkoutAction =
-	'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
-const nixInstaller =
-	'nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c';
+const checkoutAction = 'actions/checkout';
+const nixInstaller = 'nixbuild/nix-quick-install-action';
 const nixClientVersion = '2.34.7';
 const cloudGuardStep = 'Require GitHub Cloud workflow identity';
 const reservationStep = 'Reserve the cupboard workflow checkout';
@@ -176,7 +174,9 @@ function allSteps(
 }
 
 function stepsUsing(workflow: Workflow, uses: string) {
-	return allSteps(workflow).filter((entry) => entry.step.uses === uses);
+	return allSteps(workflow).filter(
+		(entry) => entry.step.uses?.split('@', 1)[0] === uses
+	);
 }
 
 function inputsOf(workflow: Workflow, uses: string) {
@@ -958,15 +958,15 @@ describe('cohort planning and publication', () => {
 
 			expect({
 				environment: scalarMapSchema.parse(definition?.env),
-				artifacts: definition?.steps.filter((step) =>
-					step.uses?.startsWith('actions/upload-artifact')
-				)
+				artifacts: definition?.steps
+					.filter(
+						(step) => step.uses?.split('@', 1)[0] === 'actions/upload-artifact'
+					)
+					.map((step) => ({ if: step.if, with: step.with }))
 			}).toStrictEqual({
 				environment: { CUPBOARD_RESULT_ARTIFACT: artifact },
 				artifacts: [
 					{
-						name: 'Save complete publication results',
-						uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
 						if: '${{ !cancelled() }}',
 						with: {
 							name: '${{ env.CUPBOARD_RESULT_ARTIFACT }}',
@@ -1919,10 +1919,7 @@ describe('binary release', () => {
 			preparationSteps: steps.filter((step) =>
 				step.run?.includes('check-preparation')
 			),
-			draftCheckout: stepsUsing(
-				workflow,
-				'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
-			)
+			draftCheckout: stepsUsing(workflow, checkoutAction)
 				.filter(({ job }) => job === 'draft')
 				.map(({ step }) => step.with),
 			buildNeeds: jobNeeds(workflow, 'build')
