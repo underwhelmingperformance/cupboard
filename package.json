@@ -20,7 +20,7 @@
 		"eslint": "10.11.0",
 		"eslint-config-prettier": "10.1.8",
 		"eslint-plugin-simple-import-sort": "14.0.0",
-		"eslint-plugin-unicorn": "76.0.0",
+		"eslint-plugin-unicorn": "77.0.0",
 		"globals": "^17.6.0",
 		"http-status-codes": "catalog:",
 		"jiti": "^2.7.0",
