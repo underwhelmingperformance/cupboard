@@ -237,13 +237,18 @@ describe('attest status subprocess', () => {
 				stdout: '',
 				stderr: [
 					'::group::Reading stored attestation coverage',
+					'::group::Checking stored attestation paths',
+					'Checking stored attestation paths: 3/3',
+					'::endgroup::',
+					'::group::Stored attestation paths',
+					`${paths[0] ?? ''}: 1 matching stored attestation`,
+					`${paths[1] ?? ''}: No matching stored evidence`,
+					`${paths[2] ?? ''}: Missing published path`,
+					'::endgroup::',
 					'Stored attestations (not verified)',
 					'Paths with matching stored attestations: 1',
 					'Paths without matching evidence: 1',
 					'Missing paths: 1',
-					`${paths[0] ?? ''}: 1 matching stored attestations`,
-					`${paths[1] ?? ''}: No matching stored evidence`,
-					`${paths[2] ?? ''}: Missing published path`,
 					'::endgroup::',
 					''
 				]

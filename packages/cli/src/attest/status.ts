@@ -38,6 +38,7 @@ export interface AttestationDiscoveryOptions {
 	readonly readPassword?: string;
 	readonly netrcFile?: string;
 	readonly signal?: AbortSignal;
+	readonly onProgress?: (completed: number) => void;
 }
 
 export class InvalidAttestationDiscoveryError extends CliError {
@@ -80,6 +81,12 @@ export async function readAttestationInfo(
 	options: AttestationDiscoveryOptions,
 	fetcher?: typeof fetch
 ): Promise<AttestationInfoEntry[]> {
+	let completed = 0;
+	const settled = (entry: AttestationInfoEntry): AttestationInfoEntry => {
+		completed += 1;
+		options.onProgress?.(completed);
+		return entry;
+	};
 	const fetchRead = cacheReadFetcher(options.url, fetcher, options.netrcFile);
 	const base = cacheUrl(options.url, options.cache);
 	const headers =
@@ -149,7 +156,7 @@ export async function readAttestationInfo(
 				const narResponse = await read(`${hash}.narinfo`);
 				if (narResponse.status === 404) {
 					await discardResponseBody(narResponse);
-					return { storePathHash: hash, status: 'missing' };
+					return settled({ storePathHash: hash, status: 'missing' });
 				}
 				const text = await discoveryText(narResponse, {
 					description: 'Attestation discovery narinfo',
@@ -168,7 +175,7 @@ export async function readAttestationInfo(
 				const response = await read(`attestations/${hash}`);
 				if (response.status === 404) {
 					await discardResponseBody(response);
-					return { ...found, attestations: [] };
+					return settled({ ...found, attestations: [] });
 				}
 				const value = await discoveryJson(response, {
 					description: 'Attestation list',
@@ -179,14 +186,14 @@ export async function readAttestationInfo(
 				if (!list.success) {
 					throw new InvalidAttestationDiscoveryError(list.error);
 				}
-				return {
+				return settled({
 					...found,
 					attestations: list.data.attestations.filter(
 						(descriptor) =>
 							options.predicateTypes === undefined ||
 							options.predicateTypes.includes(descriptor.predicateType)
 					)
-				};
+				});
 			}
 		);
 	}
@@ -240,6 +247,7 @@ export async function readAttestationInfo(
 			}
 			scopeVersion = page.scopeVersion;
 			entries.push(...page.entries);
+			options.onProgress?.(entries.length);
 			remaining =
 				page.nextIndex === undefined ? [] : remaining.slice(page.nextIndex);
 		}

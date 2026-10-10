@@ -42,6 +42,13 @@ export interface LabelPresentation {
 	readonly humanLabel?: string;
 }
 
+export interface StepsPresentation extends LabelPresentation {
+	/**
+	 * Prints the group's messages after successful completion in terminal mode.
+	 */
+	readonly showMessages?: boolean;
+}
+
 export interface MessagePresentation {
 	readonly humanMessage?: string;
 	readonly level?: 'details' | 'debug';
@@ -307,7 +314,7 @@ export interface Reporter {
 	steps<T>(
 		label: string,
 		body: (log: StepLog) => Promise<T> | T,
-		presentation?: LabelPresentation
+		presentation?: StepsPresentation
 	): Promise<T>;
 	result(payload: ResultPayload): void;
 	/**

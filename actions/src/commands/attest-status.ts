@@ -12,7 +12,9 @@ import { buildReceiptSchema } from '@cupboard/protocol/build';
 import {
 	createGithubReporter,
 	formatCount,
-	type Reporter
+	type Reporter,
+	ResultLink,
+	ResultTable
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { CodedError, UsageError } from '@cupboard/shared/errors';
@@ -137,6 +139,13 @@ async function attestStatusAction(
 			subject
 		])
 	);
+	const copiedPaths = new Set(
+		receipt.version === 3
+			? receipt.subjects
+					.filter((subject) => subject.origin === 'copied')
+					.map((subject) => StorePath.hash(subject.storePath))
+			: []
+	);
 	if (
 		new Set(pathHashes).size !== paths.length ||
 		receipt.subjects.some(
@@ -221,6 +230,7 @@ async function attestStatusAction(
 			.filter(
 				(entry) =>
 					entry.status === 'found' &&
+					!freshlySigned.includes(entry.storePathHash) &&
 					entry.attestations.some(
 						(attestation) => !freshlySignedDigests.has(attestation.digest)
 					)
@@ -228,19 +238,90 @@ async function attestStatusAction(
 			.map((entry) => entry.storePathHash);
 		const withoutEvidence = entries
 			.filter(
-				(entry) => entry.status === 'found' && entry.attestations.length === 0
+				(entry) =>
+					entry.status === 'found' &&
+					entry.attestations.length === 0 &&
+					!copiedPaths.has(entry.storePathHash)
+			)
+			.map((entry) => entry.storePathHash);
+		const fetchedUpstream = entries
+			.filter(
+				(entry) =>
+					entry.status === 'found' &&
+					entry.attestations.length === 0 &&
+					copiedPaths.has(entry.storePathHash)
 			)
 			.map((entry) => entry.storePathHash);
 		const missing = entries
 			.filter((entry) => entry.status === 'missing')
 			.map((entry) => entry.storePathHash);
+		const categories = [
+			{ label: 'Signed this run', hashes: freshlySigned },
+			{ label: 'Signed earlier', hashes: previouslyStored },
+			{ label: 'Fetched upstream, not attested', hashes: fetchedUpstream },
+			{ label: 'Other paths without stored evidence', hashes: withoutEvidence },
+			{ label: 'Missing published paths', hashes: missing }
+		];
+		await reporter.steps('Attestation coverage by path', (steps) => {
+			for (const category of categories) {
+				if (category.hashes.length === 0) {
+					continue;
+				}
+				const group = steps.group(
+					`${category.label}: ${formatCount(category.hashes.length)}`
+				);
+				for (const hash of category.hashes.slice(0, 20)) {
+					const storePath = paths[pathHashes.indexOf(hash)] ?? hash;
+					group.message(storePath);
+				}
+				group.success(
+					category.hashes.length > 20
+						? `${formatCount(category.hashes.length - 20)} additional ${category.hashes.length === 21 ? 'path' : 'paths'} in the machine result.`
+						: `${formatCount(category.hashes.length)} ${category.hashes.length === 1 ? 'path' : 'paths'} in this category.`
+				);
+			}
+		});
 		reporter.result({
 			kind: 'publication-attestation-coverage',
+			title: 'Published attestation coverage (not verified)',
+			jobSummary: true,
+			table: ResultTable.of(
+				[
+					{ key: 'path', label: 'Path' },
+					{ key: 'evidence', label: 'Stored attestation' }
+				],
+				entries.slice(0, 20).map((entry, index) => {
+					const digest =
+						entry.status === 'found'
+							? entry.attestations[0]?.digest
+							: undefined;
+					return {
+						path: paths[index] ?? entry.storePathHash,
+						evidence:
+							digest === undefined
+								? entry.status === 'missing'
+									? 'Missing published path'
+									: 'No stored evidence'
+								: new ResultLink(
+										'Bundle',
+										new URL(
+											`${canonicalHref(destination)}/attestation-bundles/${digest}`
+										)
+									)
+					};
+				})
+			),
+			...(entries.length > 20 && {
+				note: [
+					`Showing 20 of ${formatCount(entries.length)} paths. The machine result contains every path.`
+				]
+			}),
 			data: {
 				entries,
 				freshlySigned,
 				previouslyStored,
 				withoutEvidence,
+				fetchedUpstream,
 				missing
 			},
 			rows: [
@@ -253,7 +334,11 @@ async function attestStatusAction(
 					value: formatCount(previouslyStored.length)
 				},
 				{
-					label: 'Paths without stored evidence',
+					label: 'Fetched upstream, not attested',
+					value: formatCount(fetchedUpstream.length)
+				},
+				{
+					label: 'Other paths without stored evidence',
 					value: formatCount(withoutEvidence.length)
 				},
 				{ label: 'Missing published paths', value: formatCount(missing.length) }

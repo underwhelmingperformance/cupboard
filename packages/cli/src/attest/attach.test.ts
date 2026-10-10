@@ -105,6 +105,7 @@ function pathInfo(
 describe('readCommittedAttestationPathInfos', () => {
 	it('reads committed path identities from a private named cache', async () => {
 		const requests: { url: string; authorization?: string }[] = [];
+		const progress: number[] = [];
 		const infos = await readCommittedAttestationPathInfos(
 			[appPath],
 			{
@@ -114,6 +115,9 @@ describe('readCommittedAttestationPathInfos', () => {
 				readPassword: 'secret'
 			},
 			{
+				onProgress: (completed) => {
+					progress.push(completed);
+				},
 				fetch: (input, init) => {
 					requests.push({
 						url: requestUrl(input),
@@ -128,7 +132,8 @@ describe('readCommittedAttestationPathInfos', () => {
 			}
 		);
 
-		expect({ infos, requests }).toStrictEqual({
+		expect({ infos, requests, progress }).toStrictEqual({
+			progress: [1],
 			infos: [pathInfo(appPath, appHash)],
 			requests: [
 				{
@@ -243,7 +248,8 @@ describe('parseAttestationBundle', () => {
 function reporter(
 	results: ResultRow[][],
 	warnings: { label: string; value?: string }[] = [],
-	payloads: ResultPayload[] = []
+	payloads: ResultPayload[] = [],
+	steps: { label: string; message: string }[] = []
 ): Reporter {
 	const recordWarn = (label: string, value?: string): void => {
 		warnings.push({ label, value });
@@ -276,11 +282,11 @@ function reporter(
 					warn: recordWarn
 				})
 			),
-		steps: (_label, body) =>
+		steps: (label, body) =>
 			Promise.resolve(
 				body({
-					message() {
-						return;
+					message(message) {
+						steps.push({ label, message });
 					},
 					group: () => ({
 						message() {
@@ -1537,10 +1543,11 @@ describe('runAttestAttach', () => {
 		const warnings: { label: string; value?: string }[] = [];
 		const payloads: ResultPayload[] = [];
 		const readBundles: string[] = [];
+		const steps: { label: string; message: string }[] = [];
 
 		await runAttestAttach(
 			[appPath, runtimePath],
-			reporter(results, warnings, payloads),
+			reporter(results, warnings, payloads, steps),
 			{
 				client: recordedClient(record, {
 					decide: (bundle) =>
@@ -1570,7 +1577,8 @@ describe('runAttestAttach', () => {
 			uploads: record.uploads,
 			attached: record.attached,
 			warnings,
-			payloads
+			payloads,
+			steps
 		}).toStrictEqual({
 			negotiations: [
 				{
@@ -1595,6 +1603,16 @@ describe('runAttestAttach', () => {
 			],
 			attached: [`attestation-${StorePath.hash(appPath)}`],
 			warnings: [],
+			steps: [
+				{
+					label: 'Attached attestation paths',
+					message: `${StorePath.basename(appPath)}: attached`
+				},
+				{
+					label: 'Attached attestation paths',
+					message: `${StorePath.basename(runtimePath)}: already attached`
+				}
+			],
 			payloads: [
 				{
 					kind: 'attestation-attach-summary',
@@ -1625,15 +1643,51 @@ describe('runAttestAttach', () => {
 						{
 							label: 'Attestation upload',
 							value: expect.any(String) as string
-						},
-						{ label: StorePath.basename(appPath), value: 'attached' },
-						{
-							label: StorePath.basename(runtimePath),
-							value: 'already attached'
 						}
 					]
 				}
 			]
+		});
+	});
+
+	it('caps grouped path details and keeps every attachment in the machine result', async () => {
+		const paths = Array.from({ length: 21 }, (_, index) =>
+			storePathSchema.parse(`/nix/store/${String(index).padStart(32, '0')}-app`)
+		);
+		const steps: { label: string; message: string }[] = [];
+		const payloads: ResultPayload[] = [];
+		const bundle = sigstoreBundleBytes(bundleSubject(appPath, appHash));
+		await runAttestAttach(paths, reporter([], [], payloads, steps), {
+			client: recordedClient(
+				{ negotiations: [], uploads: [], attached: [] },
+				{ decide: () => 'skip' }
+			),
+			pathInfos: paths.map((path) => pathInfo(path, appHash)),
+			attestations: [{ path: 'shared' }],
+			readAttestationBundle: () => Promise.resolve(bundle)
+		});
+		expect({ steps, data: payloads[0]?.data }).toStrictEqual({
+			steps: [
+				...paths.slice(0, 20).map((path) => ({
+					label: 'Attached attestation paths',
+					message: `${StorePath.basename(path)}: already attached`
+				})),
+				{
+					label: 'Attached attestation paths',
+					message: '1 additional path in the machine result.'
+				}
+			],
+			data: {
+				attached: 0,
+				reused: 21,
+				unservable: 0,
+				uploadedBytes: 0,
+				paths: paths.map((storePath) => ({
+					storePath,
+					storePathHash: StorePath.hash(storePath),
+					outcome: 'reused'
+				}))
+			}
 		});
 	});
 

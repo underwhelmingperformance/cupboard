@@ -6,7 +6,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { AttestationInfoEntry } from '@cupboard/protocol/attestations';
-import { formatCount, type ResultPayload } from '@cupboard/reporter';
+import {
+	formatCount,
+	type Reporter,
+	type ResultPayload
+} from '@cupboard/reporter';
 import { type ReadUser } from '@cupboard/shared/http';
 import { type Command } from 'commander';
 
@@ -156,39 +160,57 @@ export function registerAttestStatusCommand(
 			const entries = await reporter.phase(
 				'Reading stored attestation coverage',
 				async (phase) => {
-					const coverage = await (options.githubOidc === true
-						? withRenewingReadCredential(
-								{
-									url: target.tenantUrl,
-									...renewal,
-									signal: programOptions.signal,
-									issue: (signal) =>
-										issueGithubReadCredential({
-											tenantUrl: target.tenantUrl,
-											cache: target.cache,
-											audience:
-												options.audience ??
-												audienceSchema.parse(target.tenantUrl),
-											resources: [
-												{
-													type: 'cupboard_cache',
-													cache: target.cache,
-													mode: 'content'
-												}
-											],
-											now: renewal.now,
-											signal
-										})
-								},
-								({ netrcFile, signal }) =>
-									readAttestationInfo({ ...discovery, netrcFile, signal })
-							)
-						: readAttestationInfo({
+					const coverage = await reporter.progress(
+						'Checking stored attestation paths',
+						{ total: hashes.length },
+						async (handle) => {
+							let completed = 0;
+							const progress = {
 								...discovery,
-								readUser: credential?.user,
-								readPassword: credential?.password
-							}));
-					phase.result(coverageResult(coverage, requested));
+								onProgress: (count: number) => {
+									if (count <= completed) {
+										return;
+									}
+									handle.advance(count - completed);
+									completed = count;
+								}
+							};
+							return options.githubOidc === true
+								? withRenewingReadCredential(
+										{
+											url: target.tenantUrl,
+											...renewal,
+											signal: programOptions.signal,
+											issue: (signal) =>
+												issueGithubReadCredential({
+													tenantUrl: target.tenantUrl,
+													cache: target.cache,
+													audience:
+														options.audience ??
+														audienceSchema.parse(target.tenantUrl),
+													resources: [
+														{
+															type: 'cupboard_cache',
+															cache: target.cache,
+															mode: 'content'
+														}
+													],
+													now: renewal.now,
+													signal
+												})
+										},
+										({ netrcFile, signal }) =>
+											readAttestationInfo({ ...progress, netrcFile, signal })
+									)
+								: readAttestationInfo({
+										...progress,
+										readUser: credential?.user,
+										readPassword: credential?.password
+									});
+						}
+					);
+					await reportCoveragePaths(reporter, coverage, requested);
+					phase.result(coverageResult(coverage));
 
 					return coverage;
 				}
@@ -208,8 +230,7 @@ function isCovered(entry: AttestationInfoEntry): boolean {
 }
 
 function coverageResult(
-	entries: readonly AttestationInfoEntry[],
-	requested: readonly string[]
+	entries: readonly AttestationInfoEntry[]
 ): ResultPayload {
 	const covered = entries.filter((entry) => isCovered(entry));
 	const withoutEvidence = entries.filter(
@@ -235,20 +256,41 @@ function coverageResult(
 				label: 'Paths without matching evidence',
 				value: formatCount(withoutEvidence.length)
 			},
-			{ label: 'Missing paths', value: formatCount(missing.length) },
-			...entries.map((entry) => ({
-				label:
-					requested.find((path) => path.includes(entry.storePathHash)) ??
-					entry.storePathHash,
-				value:
-					entry.status === 'missing'
-						? 'Missing published path'
-						: entry.attestations.length === 0
-							? 'No matching stored evidence'
-							: `${formatCount(entry.attestations.length)} matching stored attestations`
-			}))
+			{ label: 'Missing paths', value: formatCount(missing.length) }
 		]
 	};
+}
+
+async function reportCoveragePaths(
+	reporter: Reporter,
+	entries: readonly AttestationInfoEntry[],
+	requested: readonly string[]
+): Promise<void> {
+	const rows = entries.map((entry) => ({
+		label:
+			requested.find((path) => path.includes(entry.storePathHash)) ??
+			entry.storePathHash,
+		value:
+			entry.status === 'missing'
+				? 'Missing published path'
+				: entry.attestations.length === 0
+					? 'No matching stored evidence'
+					: `${formatCount(entry.attestations.length)} matching stored ${entry.attestations.length === 1 ? 'attestation' : 'attestations'}`
+	}));
+	await reporter.steps(
+		'Stored attestation paths',
+		(steps) => {
+			for (const row of rows.slice(0, 20)) {
+				steps.message(`${row.label}: ${row.value}`);
+			}
+			if (rows.length > 20) {
+				steps.message(
+					`${formatCount(rows.length - 20)} additional ${rows.length === 21 ? 'path' : 'paths'} in the machine result.`
+				);
+			}
+		},
+		{ showMessages: true }
+	);
 }
 
 async function statusPaths(

@@ -357,19 +357,27 @@ export function registerAttestCommands(
 			const reporter = commandUi(program, programOptions).reporter();
 			const cache = resolved.target.cache;
 			const resolvedPaths = [...resolved.payload, ...filePaths];
-			const pathInfos = await readCommittedAttestationPathInfos(
-				resolvedPaths,
-				{
-					url: resolved.target.tenantUrl,
-					cache,
-					...(readUser !== undefined && { readUser }),
-					...(readPassword !== undefined && { readPassword })
-				},
-				{
-					...(programOptions.signal !== undefined && {
-						signal: programOptions.signal
-					})
-				}
+			const pathInfos = await reporter.progress(
+				'Checking published attestation subjects',
+				{ total: resolvedPaths.length },
+				(progress) =>
+					readCommittedAttestationPathInfos(
+						resolvedPaths,
+						{
+							url: resolved.target.tenantUrl,
+							cache,
+							...(readUser !== undefined && { readUser }),
+							...(readPassword !== undefined && { readPassword })
+						},
+						{
+							onProgress: () => {
+								progress.advance();
+							},
+							...(programOptions.signal !== undefined && {
+								signal: programOptions.signal
+							})
+						}
+					)
 			);
 			await runAttestAttach(resolvedPaths, reporter, {
 				client: requireAttestationAttachClient(

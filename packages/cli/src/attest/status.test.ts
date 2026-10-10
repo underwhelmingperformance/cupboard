@@ -76,6 +76,51 @@ function capability(value?: string): void {
 }
 
 describe('attestation discovery client', () => {
+	it.each([undefined, attestationInfoCapability])(
+		'reports completed paths for capability %s',
+		async (advertised) => {
+			capability(advertised);
+			const progress: number[] = [];
+			use(
+				http.get(
+					`${url.href}/${hash}.narinfo`,
+					() => new HttpResponse(narinfo)
+				),
+				http.get(`${url.href}/attestations/${hash}`, () =>
+					HttpResponse.json({ attestations: [] })
+				),
+				http.post(`${url.href}/api/v1/attestation-info`, () =>
+					HttpResponse.json({
+						scopeVersion: '1',
+						entries: [
+							{
+								storePathHash: hash,
+								status: 'found',
+								narHash,
+								attestations: []
+							}
+						]
+					})
+				)
+			);
+			const entries = await readAttestationInfo(
+				{
+					...options,
+					onProgress: (completed) => {
+						progress.push(completed);
+					}
+				},
+				mockedFetch
+			);
+			expect({ entries, progress }).toStrictEqual({
+				entries: [
+					{ storePathHash: hash, status: 'found', narHash, attestations: [] }
+				],
+				progress: [1]
+			});
+		}
+	);
+
 	it('reads the current credential from an explicitly selected renewable netrc', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-status-netrc-')

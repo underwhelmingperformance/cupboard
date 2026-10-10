@@ -6,14 +6,11 @@ import { describe, expect, it, vi } from 'vitest';
 import {
 	type AttestationStatement,
 	defaultSigningPolicy,
-	disclosureLines,
 	githubStatementSigner,
 	isTransientSigningFailure,
 	maxSigningAttempts,
 	producedInstance,
-	producedLines,
 	type SignedAttestation,
-	signingDisclosure,
 	type SigningStageCode,
 	signStatement,
 	slsaProvenanceStatement,
@@ -316,229 +313,39 @@ describe('defaultSigningPolicy', () => {
 	);
 });
 
-describe('signingDisclosure', () => {
-	it.each([
-		{
-			profile: 'tsa-only',
-			uploadToGithub: false,
-			expected: {
-				instances: ['public-good'],
-				services: [
-					'oidc-and-fulcio',
-					'certificate-transparency',
-					'rfc-3161-tsa'
-				],
-				publications: ['bundle-files']
-			}
-		},
-		{
-			profile: 'tsa-only',
-			uploadToGithub: true,
-			expected: {
-				instances: ['public-good'],
-				services: [
-					'oidc-and-fulcio',
-					'certificate-transparency',
-					'rfc-3161-tsa'
-				],
-				publications: ['github-attestation-store', 'bundle-files']
-			}
-		},
-		{
-			profile: 'rekor-and-tsa',
-			uploadToGithub: false,
-			expected: {
-				instances: ['public-good'],
-				services: [
-					'oidc-and-fulcio',
-					'certificate-transparency',
-					'rfc-3161-tsa',
-					'rekor'
-				],
-				publications: ['rekor', 'bundle-files']
-			}
-		},
-		{
-			profile: 'rekor-and-tsa',
-			uploadToGithub: true,
-			expected: {
-				instances: ['public-good'],
-				services: [
-					'oidc-and-fulcio',
-					'certificate-transparency',
-					'rfc-3161-tsa',
-					'rekor'
-				],
-				publications: ['rekor', 'github-attestation-store', 'bundle-files']
-			}
-		},
-		{
-			profile: 'sigstore-default',
-			uploadToGithub: false,
-			expected: {
-				instances: ['public-good', 'github'],
-				services: [
-					'oidc-and-fulcio',
-					'certificate-transparency',
-					'rfc-3161-tsa',
-					'rekor'
-				],
-				publications: ['rekor', 'bundle-files']
-			}
-		},
-		{
-			profile: 'sigstore-default',
-			uploadToGithub: true,
-			expected: {
-				instances: ['public-good', 'github'],
-				services: [
-					'oidc-and-fulcio',
-					'certificate-transparency',
-					'rfc-3161-tsa',
-					'rekor'
-				],
-				publications: ['rekor', 'github-attestation-store', 'bundle-files']
-			}
-		}
-	] as const)(
-		'discloses $profile with upload-to-github $uploadToGithub',
-		({ profile, uploadToGithub, expected }) => {
-			expect(
-				signingDisclosure(
-					{ profile, uploadToGithub, grouping: 'run' },
-					{ built: 2, custom: 1 }
-				)
-			).toStrictEqual({
-				...expected,
-				grouping: 'run',
-				subjects: { built: 2, custom: 1 }
-			});
-		}
-	);
-
-	it('renders one line for each contact and each publication', () => {
-		const disclosure = signingDisclosure(
-			{ profile: 'sigstore-default', uploadToGithub: true, grouping: 'run' },
-			{ built: 2, custom: 1 }
-		);
-		const lines = disclosureLines(disclosure);
-		const listed = disclosure.services.length + disclosure.publications.length;
-
-		expect({
-			heading: lines[0],
-			scopes: lines.slice(1, 3),
-			total: lines.length,
-			listed: lines.filter((line) => line.startsWith('  ')).length
-		}).toStrictEqual({
-			heading:
-				"The repository's visibility selects the Sigstore instance: the public-good instance for a public repository, the GitHub instance otherwise. The lines below cover both.",
-			scopes: [
-				'Signing SLSA build provenance for 2 built paths in batches. Each bundle will contain the names and digests of its subjects.',
-				'Signing custom predicate for 1 accepted path in batches. Each bundle will contain the names and digests of its subjects.'
-			],
-			total: listed + 5,
-			listed
-		});
-	});
-});
-
-describe('producedLines', () => {
+describe('producedInstance', () => {
 	it.each([
 		{
 			profile: 'sigstore-default',
-			evidence: {
-				bundleCount: 2,
-				tlogEntryCount: 0,
-				timestampCount: 2,
-				uploadedCount: 0
-			},
-			instance: 'github',
-			lines: [
-				'The bundles are in the trust domain of the GitHub Sigstore instance.',
-				'The action signed 2 bundles that carry 0 Rekor entries and 2 RFC 3161 timestamps.',
-				"The action recorded no bundle in the repository's attestation store."
-			]
+			evidence: { tlogEntryCount: 0, timestampCount: 1 },
+			instance: 'github'
 		},
 		{
 			profile: 'sigstore-default',
-			evidence: {
-				bundleCount: 1,
-				tlogEntryCount: 1,
-				timestampCount: 0,
-				uploadedCount: 1
-			},
-			instance: 'public-good',
-			lines: [
-				'The bundle is in the trust domain of the public-good Sigstore instance.',
-				'The action signed 1 bundle that carries 1 Rekor entry and 0 RFC 3161 timestamps.',
-				"The action recorded 1 of 1 bundle in the repository's attestation store."
-			]
+			evidence: { tlogEntryCount: 1, timestampCount: 0 },
+			instance: 'public-good'
 		},
 		{
 			profile: 'sigstore-default',
-			evidence: {
-				bundleCount: 1,
-				tlogEntryCount: 0,
-				timestampCount: 0,
-				uploadedCount: 0
-			},
-			instance: undefined,
-			lines: [
-				'The bundle carries no Rekor entry and no RFC 3161 timestamp.',
-				'The action signed 1 bundle that carries 0 Rekor entries and 0 RFC 3161 timestamps.',
-				"The action recorded no bundle in the repository's attestation store."
-			]
+			evidence: { tlogEntryCount: 0, timestampCount: 0 },
+			instance: undefined
 		},
 		{
 			profile: 'tsa-only',
-			evidence: {
-				bundleCount: 1,
-				tlogEntryCount: 0,
-				timestampCount: 1,
-				uploadedCount: 0
-			},
-			instance: 'public-good',
-			lines: [
-				'The bundle is in the trust domain of the public-good Sigstore instance.',
-				'The action signed 1 bundle that carries 0 Rekor entries and 1 RFC 3161 timestamp.',
-				"The action recorded no bundle in the repository's attestation store."
-			]
+			evidence: { tlogEntryCount: 0, timestampCount: 1 },
+			instance: 'public-good'
 		},
 		{
 			profile: 'rekor-and-tsa',
-			evidence: {
-				bundleCount: 3,
-				tlogEntryCount: 3,
-				timestampCount: 3,
-				uploadedCount: 2
-			},
-			instance: 'public-good',
-			lines: [
-				'The bundles are in the trust domain of the public-good Sigstore instance.',
-				'The action signed 3 bundles that carry 3 Rekor entries and 3 RFC 3161 timestamps.',
-				"The action recorded 2 of 3 bundles in the repository's attestation store."
-			]
+			evidence: { tlogEntryCount: 1, timestampCount: 1 },
+			instance: 'public-good'
 		}
 	] as const)(
 		'reports the $instance trust domain for the $profile profile',
-		({ profile, evidence, instance, lines }) => {
-			expect({
-				instance: producedInstance(profile, evidence),
-				lines: producedLines(profile, evidence)
-			}).toStrictEqual({ instance, lines });
+		({ profile, evidence, instance }) => {
+			expect(producedInstance(profile, evidence)).toBe(instance);
 		}
 	);
-
-	it('reports a run that signed nothing as one line', () => {
-		expect(
-			producedLines('tsa-only', {
-				bundleCount: 0,
-				tlogEntryCount: 0,
-				timestampCount: 0,
-				uploadedCount: 0
-			})
-		).toStrictEqual(['This run signed no statement.']);
-	});
 });
 
 describe('githubStatementSigner', () => {

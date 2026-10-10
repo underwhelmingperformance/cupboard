@@ -351,6 +351,29 @@ describe('createCliUi machine narration', () => {
 		expect(ui.reporter()).toBe(ui.reporter());
 	});
 
+	it.each([undefined, false, true])(
+		'retains non-TTY terminal step messages only when showMessages=%s',
+		async (showMessages) => {
+			const { stream, written } = captureStream();
+			const ui = createCliUi({
+				mode: 'terminal',
+				colour: false,
+				stream,
+				out: stream
+			});
+			await ui.reporter().steps(
+				'Attestation paths',
+				(log) => {
+					log.message('app: attached');
+				},
+				{ showMessages }
+			);
+			expect({ retained: written().includes('app: attached') }).toStrictEqual({
+				retained: showMessages === true
+			});
+		}
+	);
+
 	it('emits JSON phase events for progress and grouped steps', async () => {
 		const { ui, stream } = machineUi();
 		const reporter = ui.reporter();
