@@ -57,7 +57,8 @@ import {
 	publishTargetSchema,
 	publishTargetsSchema,
 	type TargetCoverage,
-	type TargetEvaluation
+	type TargetEvaluation,
+	targetIdentityKey
 } from './publish-plan.ts';
 
 function storePath(value: string): StorePathString {
@@ -555,7 +556,7 @@ describe('cohortPreFilterDecision', () => {
 		expect(
 			cohortPreFilterDecision(
 				cohort,
-				coverageMap([
+				coverageMap(cohort.targets, [
 					{ attr: '.#first', status: 'covered' },
 					{ attr: '.#second', status: 'covered' }
 				])
@@ -570,7 +571,7 @@ describe('cohortPreFilterDecision', () => {
 		expect(
 			cohortPreFilterDecision(
 				cohort,
-				coverageMap([
+				coverageMap(cohort.targets, [
 					{ attr: '.#first', status: 'covered' },
 					{ attr: '.#second', status }
 				])
@@ -582,7 +583,7 @@ describe('cohortPreFilterDecision', () => {
 		expect(
 			cohortPreFilterDecision(
 				cohort,
-				coverageMap([
+				coverageMap(cohort.targets, [
 					{ attr: '.#first', status: 'covered' },
 					{ attr: '.#second', status: 'failed', reason: 'network error' }
 				])
@@ -1590,9 +1591,18 @@ function evaluation(
 }
 
 function coverageMap(
+	targets: readonly PublishTarget[],
 	entries: readonly TargetCoverage[]
 ): Map<string, TargetCoverage> {
-	return new Map(entries.map((entry) => [entry.attr, entry]));
+	return new Map(
+		entries.map((entry, index) => {
+			const target = targets[index];
+			if (target === undefined) {
+				throw new Error('Coverage entry has no target');
+			}
+			return [targetIdentityKey(target), entry];
+		})
+	);
 }
 
 function serialisePlan(plan: ReturnType<typeof planPublish>): unknown {

@@ -189,6 +189,17 @@ export const publishTargetsSchema = z
 export type PublishTarget = z.output<typeof publishTargetSchema>;
 
 /**
+ * A stable key for joining a target with its evaluated paths and coverage.
+ */
+export function targetIdentityKey(target: PublishTarget): string {
+	return JSON.stringify([
+		canonicalRootSuffix(target.rootSuffix),
+		target.attr,
+		target.outputs
+	]);
+}
+
+/**
  * Replaces each aggregate target with one synthetic target per component.
  * Components inherit the aggregate's execution context, failure policy, cohort
  * and root suffix, so they publish under one retention root. Targets without
@@ -998,11 +1009,11 @@ export interface CohortPreFilterDecision {
  */
 export function cohortPreFilterDecision(
 	cohort: Cohort,
-	coverageByAttribute: ReadonlyMap<string, TargetCoverage>
+	coverageByTarget: ReadonlyMap<string, TargetCoverage>
 ): CohortPreFilterDecision {
 	const coverage = cohort.targets.map(
 		(target): TargetCoverage =>
-			coverageByAttribute.get(target.attr) ?? {
+			coverageByTarget.get(targetIdentityKey(target)) ?? {
 				attr: target.attr,
 				status: 'not-covered'
 			}

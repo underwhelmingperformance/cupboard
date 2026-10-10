@@ -7046,7 +7046,7 @@ measured delays are:
 
 ### Implementation sequence
 
-1. [ ] In the plan job, probe the reuse source for each target's expected path,
+1. [x] In the plan job, probe the reuse source for each target's expected path,
        publish each match by reference, set its root, and drop cohorts that have
        no targets left. Record the publications and the pruned cohorts in the
        receipt and in the plan job's summary.
