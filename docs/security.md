@@ -239,11 +239,17 @@ cache therefore brings that cache's attestations with it. Attestations in
 another private cache stay in that cache. See
 [Attestations of reused paths](./ci/attestation.md#attestations-of-reused-paths).
 
-The pull-request preset gives each pull request its own cache, and refuses pull
-requests from forks. If a reuse view includes pull-request caches, any of those
-pull requests can offer store paths to readers of the view. When the caches in a
-view disagree about a path, the view treats it as missing rather than choosing
-between them.
+The pull-request preset gives each pull request its own cache and refuses pull
+requests from forks. PR runs reuse the default cache; branch runs build outputs
+without PR-cache reuse by default. A PR controls its own `nix-config` and
+builders, so matching a branch derivation does not establish a trusted build
+environment. The trusted-contributor workflow explicitly allows a branch run to
+reuse only its merged PR's cache. Enable it only when you trust those
+contributors.
+
+If a reuse view includes PR caches, every included PR can offer paths to the
+view's readers. When caches disagree about a path, the view treats the path as
+missing. Agreement does not establish that the bytes came from a trusted build.
 
 ## Runners
 

@@ -1,22 +1,19 @@
 # Reuse views
 
-When you merge a pull request, the run on `main` often builds exactly what the
-pull request's run already built. The pull request published those store paths
-to its own cache, such as `gh-123456-pr-7`, but `main` publishes to the default
-cache. Without help, `main` would build everything again.
+A **reuse view** is a read-only cache URL that combines several caches in one
+tenant. Nix can read from the view as a substituter and find store paths from
+any cache that the view includes.
 
-A **reuse view** solves this. It's a read-only cache URL that combines several
-of your tenant's caches. For example, a view can combine every pull-request
-cache of one repository. Nix can read from the view like any other substituter,
-and finds store paths in any of the caches that it combines.
+The flake publication preset uses cache URLs directly: PR runs reuse the
+tenant's default cache, and branch runs build outputs without PR-cache reuse by
+default. The [trusted-contributor workflow][trusted-reuse] can reuse the merged
+PR's cache. `cupboard github setup` creates trust rules and does not create a
+prefix view.
 
-The flake publish workflow uses a view on `main` in two ways:
-
-- Nix reads through the view, so `main` doesn't rebuild what a pull request
-  already built.
-- For each target that the view already has, the workflow publishes the target
-  to the default cache by reference. cupboard already stores the bytes, so
-  nothing is uploaded again.
+Use a view when you deliberately want to combine several caches for other runs.
+Every writer of an included cache can offer paths to the view's readers. A view
+that includes PR caches therefore trusts the build environments of all included
+PRs. A PR controls its own `nix-config` and builders.
 
 With `publish: built`, the workflow also publishes required dependency outputs
 available through the view, including build-only tools. For example, reusing a
@@ -25,13 +22,7 @@ main cache. Consumers then need only the main cache to obtain those tools.
 Dependencies absent from the configured tenant sources cause no additional build
 or download.
 
-`cupboard github setup`, in [the quickstart][quickstart], creates a view for
-each repository. It's called `pull-requests-<repository-id>`, and it combines
-that repository's pull-request caches. The view uses the access selected for new
-pull-request caches, which defaults to the tenant's default cache access. This
-page explains how views work and how to define them yourself.
-
-[quickstart]: ./quickstart.md
+[trusted-reuse]: ./flake-publish.md#reusing-a-merged-pull-requests-outputs
 
 ## Defining a view
 
@@ -127,19 +118,19 @@ Nix asks substituters in order of the priority that each one advertises, lowest
 number first. You want Nix to ask the destination cache before the view, so the
 view's priority must be a higher number than the destination's.
 
-| Created by                | Default priority                |
-| ------------------------- | ------------------------------- |
-| `cupboard cache create`   | 40                              |
-| `cupboard reuse-view set` | 50                              |
-| `cupboard github setup`   | The destination's priority + 10 |
+| Created by                | Default priority |
+| ------------------------- | ---------------- |
+| `cupboard cache create`   | 40               |
+| `cupboard reuse-view set` | 50               |
 
 To change a view's priority, run `reuse-view set` again with the view's full
 definition and the new `--priority`. To change a cache's priority, use
 `cupboard cache set-priority`.
 
-`actions/setup`, `cupboard github setup` and `cupboard github check` all refuse
-a view whose priority isn't greater than the destination's. If you raise a
-cache's priority number, raise the priority numbers of its views too.
+`actions/setup` refuses an explicitly configured view whose priority isn't
+greater than the destination's. `cupboard github check` reports this as a
+failure. If you raise a cache's priority number, raise the priority numbers of
+its views too.
 
 `actions/setup` reads both priorities from the `nix-cache-info` responses. It
 doesn't assume a default: it refuses a response that has no `Priority` line. If
@@ -186,7 +177,8 @@ destination also inherits that cache's attestations for the path. Bundles in a
 private cache stay in that cache. See
 [Attestations of reused paths](./attestation.md#attestations-of-reused-paths).
 
-With the `pull-request-and-branch` preset, only branch runs use a view.
+The `pull-request-and-branch` preset ignores `reuse-view`. Use an explicit cache
+and root prefix to configure a workflow that reads a view.
 
 A view does not extend retention. When a pull request closes, the preset closes
 its cache and starts the configured grace period from that close time. The view
@@ -196,10 +188,8 @@ pull request explicitly restores publication; new writes can renew retention.
 
 ### Sharing builds between repositories
 
-The view that `github setup` creates for a repository only includes that
-repository's pull-request caches. To let `main` in one repository reuse builds
-from another repository's pull requests, define a view that includes both. Then
-pass its name as the calling workflow's `reuse-view` input:
+To let `main` in one repository reuse builds from another repository's pull
+requests, create a view that includes both repositories' pull-request caches:
 
 ```sh
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme app-and-lib \
@@ -207,6 +197,10 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme app-and-lib 
 ```
 
 Both repositories' pull-request caches must have the same access as the view.
+
+Pass `app-and-lib` as the calling workflow's `reuse-view` input. Set `cache` to
+the destination cache (empty for the default cache) and set `root-prefix`
+explicitly. Omit `preset`, because the preset ignores `reuse-view`.
 
 Only do this if you trust both repositories' pull requests equally. Either
 repository's pull requests can then supply paths to the other's `main`.

@@ -33,6 +33,15 @@ contents, then removes the empty cache once pending work has finished. See
 
 [cache-closure]: ../admin/caches.md#closing-and-reopening-a-cache
 
+The preset uses the default cache as the reference source for PR runs. A
+matching target can be published to the PR cache by reference without
+downloading its NAR. Branch runs build outputs without reading PR caches by
+default. [Trusted-contributor reuse][trusted-reuse] selects only the cache of
+the merged PR whose merge commit matches the branch push SHA. A PR controls its
+own `nix-config` and builders, so this mode requires trust in contributors.
+
+[trusted-reuse]: ./flake-publish.md#reusing-a-merged-pull-requests-outputs
+
 Each job has a time limit:
 
 | Job         | Runs on            | Time limit  |

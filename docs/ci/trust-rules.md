@@ -490,7 +490,7 @@ that a real run would present. For the error messages themselves, see
 
 `cupboard github check` reads a repository's workflow files, works out the token
 and requests of each publishing job's runs, and checks them against the tenant's
-trust rules and reuse view. With `--fix`, it can add missing rules and extend
+trust rules and cache access. With `--fix`, it can add missing rules and extend
 matched GitHub rules with missing grants.
 [Checking publishing jobs](./github-check.md) describes what it checks and what
 its repair changes.
