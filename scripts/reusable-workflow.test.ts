@@ -481,6 +481,7 @@ describe('cupboard acquisition', () => {
 			configureOutput: 'resolve-cupboard',
 			setupInputs: setupInputs.map(() => ({
 				'read-caches': '${{ inputs.read-caches }}',
+				'reference-source': '${{ needs.configure.outputs.reference-source }}',
 				'cache-url': '${{ inputs.url }}',
 				audience: '${{ inputs.audience }}',
 				cache: '${{ needs.configure.outputs.cache }}',
@@ -850,6 +851,11 @@ describe('cohort planning and publication', () => {
 				'read-session-view': '${{ steps.setup.outputs.read-session-view }}',
 				'read-session-caches': '${{ steps.setup.outputs.read-session-caches }}',
 				audience: '${{ steps.setup.outputs.read-session-audience }}',
+				'reference-source': '${{ needs.configure.outputs.reference-source }}',
+				'fallback-read-user':
+					'${{ secrets.read_user || secrets.fallback_read_user }}',
+				'fallback-read-password':
+					'${{ secrets.read_password || secrets.fallback_read_password }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
@@ -988,6 +994,7 @@ describe('cohort planning and publication', () => {
 				audience: '${{ steps.setup.outputs.read-session-audience }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
+				'reference-source': '${{ needs.configure.outputs.reference-source }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
 				'read-user':
@@ -1718,7 +1725,7 @@ describe('resolved publication inputs', () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
 		const validation =
-			'for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do';
+			'for name in URL PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do';
 
 		expect({
 			validation: resolve.includes(validation),
@@ -2358,6 +2365,7 @@ async function resolvePublicationEvent(event: {
 				...Object.fromEntries(
 					Object.keys(step.env ?? {}).map((key) => [key, ''])
 				),
+				URL: 'https://cupboard.example.workers.dev/t/acme',
 				PRESET: event.preset ?? 'pull-request-and-branch',
 				CACHE: event.cache ?? '',
 				CACHE_ACCESS_MODE: event.cacheAccessMode ?? '',
@@ -2435,6 +2443,7 @@ describe('pull-request cache lifecycle', () => {
 				ttl: '',
 				permanent: 'false',
 				'reuse-view': '',
+				'reference-source': '',
 				'provision-cache': '',
 				'provision-cache-ttl': '',
 				'close-cache': ''
@@ -2494,6 +2503,10 @@ describe('pull-request cache lifecycle', () => {
 				ttl: selection.ttl,
 				permanent: selection.permanent,
 				'reuse-view': selection.view,
+				'reference-source':
+					selection.eventName === 'pull_request'
+						? 'https://cupboard.example.workers.dev/t/acme'
+						: '',
 				'provision-cache': selection.cache,
 				'provision-cache-ttl': selection.ttl,
 				'close-cache': ''
@@ -2544,6 +2557,7 @@ describe('pull-request cache lifecycle', () => {
 					ttl: '14d',
 					permanent: 'false',
 					'reuse-view': '',
+					'reference-source': 'https://cupboard.example.workers.dev/t/acme',
 					'provision-cache': 'gh-1234-pr-7',
 					'provision-cache-ttl': '14d',
 					'close-cache': ''
@@ -2627,6 +2641,7 @@ describe('pull-request cache lifecycle', () => {
 				ttl: '14d',
 				permanent: 'false',
 				'reuse-view': '',
+				'reference-source': 'https://cupboard.example.workers.dev/t/acme',
 				'provision-cache': '',
 				'provision-cache-ttl': '14d',
 				'close-cache': ''
@@ -2649,6 +2664,7 @@ describe('pull-request cache lifecycle', () => {
 				ttl: '14d',
 				permanent: 'false',
 				'reuse-view': '',
+				'reference-source': 'https://cupboard.example.workers.dev/t/acme',
 				'provision-cache': 'gh-1234-pr-7',
 				'provision-cache-ttl': '14d',
 				'close-cache': removed
@@ -2848,3 +2864,21 @@ it.each([flakeWorkflow, publishWorkflow])(
 		);
 	}
 );
+
+it('uses the default cache as the PR reference source', async () => {
+	const pr = await resolvePublicationEvent({ action: 'opened', merged: false });
+	const branch = await resolvePublicationEvent({
+		action: 'opened',
+		merged: false,
+		eventName: 'push'
+	});
+	expect({
+		pr: pr['reference-source'],
+		branch: branch['reference-source'],
+		view: branch['reuse-view']
+	}).toStrictEqual({
+		pr: 'https://cupboard.example.workers.dev/t/acme',
+		branch: '',
+		view: 'pull-requests-1234'
+	});
+});

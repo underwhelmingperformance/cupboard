@@ -44,7 +44,7 @@ fi
 if [ -n "${FALLBACK_READ_PASSWORD}" ]; then
   echo '::warning::fallback_read_password is deprecated. Use read_password.'
 fi
-for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do
+for name in URL PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH CACHE_ACCESS_MODE; do
   if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
     echo "::error::${name} must not contain line breaks"
     exit 1
@@ -120,6 +120,7 @@ if [ -n "${STORE}" ] && [[ ! "${STORE_KNOWN_HOSTS}" =~ [^[:space:]] ]]; then
     exit 1
   fi
 fi
+REFERENCE_SOURCE=''
 case "${PRESET}" in
   '')
     if [ -z "${ROOT_PREFIX}" ]; then
@@ -137,8 +138,6 @@ case "${PRESET}" in
         echo "::error::pull-request publication accepts only pull requests from this repository; guard the job with github.event.pull_request.head.repo.id == github.repository_id"
         exit 1
       fi
-      # Match pullRequestCacheTemplate and the prefix used by
-      # cupboard github setup's repository view.
       pr_cache="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
       TTL=14d
       PERMANENT=false
@@ -149,6 +148,7 @@ case "${PRESET}" in
           CLOSE_CACHE="${CACHE}"
         fi
       fi
+      REFERENCE_SOURCE="${URL%/}"
       REUSE_VIEW=''
       # Match pullRequestRootTemplate in packages/cli.
       ROOT_PREFIX="github:${REPOSITORY}/pr-${PR_NUMBER}"
@@ -182,6 +182,7 @@ fi
   echo "ttl=${TTL}"
   echo "permanent=${PERMANENT}"
   echo "reuse-view=${REUSE_VIEW}"
+  echo "reference-source=${REFERENCE_SOURCE}"
   echo "provision-cache=${PROVISION_CACHE:-}"
   echo "provision-cache-ttl=${TTL}"
   echo "close-cache=${CLOSE_CACHE:-}"

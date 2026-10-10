@@ -11,7 +11,10 @@ import {
 	reprobeAvailability
 } from '../plan/availability-reprobe.ts';
 import type { CohortTarget } from '../plan/cohort-target.ts';
-import { tenantProbesFor } from '../plan/destination-probe.ts';
+import {
+	cacheReferenceSource,
+	tenantProbesFor
+} from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -21,6 +24,7 @@ import { readCredentials } from './read-credentials.ts';
 export interface PlanReprobeOptions {
 	readonly targetsFile: string;
 	readonly reuseView?: string;
+	readonly referenceSource?: URL;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly viewReadUser?: ReadUser;
@@ -52,6 +56,11 @@ export function registerPlanReprobeCommand(
 		.requiredOption(
 			'--targets-file <path>',
 			'JSON file that describes the targets to be built'
+		)
+		.option(
+			'--reference-source <url>',
+			'cache URL to query for publication by reference',
+			parseWorkerUrl
 		)
 		.option(
 			'--reuse-view <name>',
@@ -96,6 +105,12 @@ export function registerPlanReprobeCommand(
 						baseUrl: target.tenantUrl,
 						cache: target.cache,
 						...(options.reuseView !== undefined && { view: options.reuseView }),
+						...(options.referenceSource !== undefined && {
+							referenceSource: cacheReferenceSource(
+								target.tenantUrl,
+								options.referenceSource
+							)
+						}),
 						...(credentials !== undefined && { credentials }),
 						...(viewCredentials !== undefined && { viewCredentials })
 					})

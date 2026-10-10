@@ -560,3 +560,7 @@ write access before the next publication. See [Cache creation defaults] and
 
 [Cache creation defaults]: ../admin/caches.md#defaults-for-new-caches
 [Closing and reopening caches]: ../admin/caches.md#closing-and-reopening-a-cache
+
+With the `pull-request-and-branch` preset, a publishing PR uses the tenant's
+default cache as its reference source. Available outputs can be published by
+reference without uploading their content.

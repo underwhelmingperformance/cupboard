@@ -7077,3 +7077,16 @@ measured delays are:
 - [ ] Web dashboard.
 - [ ] S3-compatible migration/export tooling.
 - [ ] `watch-store` mode in the CLI.
+
+## Publication runs: safer reuse direction
+
+PR publications use the tenant's default cache as their reference source. The
+server's access-checked reuse release is a prerequisite for this change.
+
+- [x] D1: Use the default cache as the PR reference source in availability
+      checks, plan publication and cohort pushes.
+- [ ] D2: Disable branch PR reuse by default and add the trusted-contributor
+      wrapper for a unique merged PR.
+- [ ] D3: Update GitHub setup, checks and guided trust repair for both modes.
+- [ ] D4: Document the trust direction and required upgrade choices.
+- [ ] D5: Record the future merge-queue verified publication mode.

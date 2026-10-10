@@ -3617,3 +3617,133 @@ it.each([
 		}
 	}
 );
+
+it.each([undefined, 'reader'])(
+	'keeps an automatic reference cache separate from destination setup with credential %s',
+	(reader) => {
+		const inputs = resolveSetupInputs(
+			{
+				cacheUrl: 'https://cache.example.test/t/acme',
+				cache: 'pr',
+				referenceSource: 'https://cache.example.test/t/acme',
+				...(reader !== undefined && {
+					readUser: reader,
+					readPassword: 'secret'
+				})
+			},
+			{ RUNNER_TEMP: '/tmp' }
+		);
+		expect({
+			caches: inputs.caches,
+			readCaches: inputs.readCaches,
+			referenceCache: inputs.referenceCache
+		}).toStrictEqual({
+			caches: [{ cache: namedCache('pr') }],
+			readCaches: [],
+			referenceCache: defaultCache
+		});
+	}
+);
+
+it.each([
+	{ status: 200, reader: undefined, session: false },
+	{ status: 401, reader: undefined, session: true },
+	{ status: 404, reader: undefined, session: false },
+	{ status: 200, reader: 'reader', session: false },
+	{ status: 404, reader: 'reader', session: false }
+])(
+	'configures reference source access $status with credential $reader',
+	async ({ status, reader, session }) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-reference-setup-')
+		);
+		onTestFinished(() => rm(directory, { recursive: true, force: true }));
+		const sessions: unknown[] = [];
+		await setupAction(
+			{
+				addToPath: 'false',
+				cacheUrl: 'https://cache.example.test/t/acme',
+				referenceSource: 'https://cache.example.test/t/acme/cache/source',
+				trustedPublicKey: 'acme:AAAA',
+				...(reader !== undefined && {
+					readUser: reader,
+					readPassword: 'secret'
+				})
+			},
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: path.join(directory, 'env'),
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			},
+			createGithubReporter(),
+			{
+				installRelease: () =>
+					Promise.resolve({
+						binaryPath: '/installed/cupboard',
+						version: 'v1.2.3',
+						sourceCommit: 'd'.repeat(40)
+					}),
+				fetch: stubFetch(() => cacheInfoBody(40), {
+					status: (url) => (url.includes('/cache/source/') ? status : 200)
+				}),
+				configureWithReadAccess: (_binary, inputs) => {
+					sessions.push(inputs.readResources);
+					return Promise.resolve();
+				}
+			}
+		);
+		expect(sessions).toStrictEqual(
+			session
+				? [
+						[
+							{
+								type: 'cupboard_cache',
+								cache: namedCache('source'),
+								mode: 'content'
+							},
+							{ type: 'cupboard_cache', cache: defaultCache, mode: 'content' }
+						]
+					]
+				: []
+		);
+	}
+);
+
+it.each([401, 403])(
+	'refuses failed static reference access %s',
+	async (status) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-reference-refusal-')
+		);
+		onTestFinished(() => rm(directory, { recursive: true, force: true }));
+		await expect(
+			setupAction(
+				{
+					addToPath: 'false',
+					cacheUrl: 'https://cache.example.test/t/acme',
+					referenceSource: 'https://cache.example.test/t/acme/cache/source',
+					trustedPublicKey: 'acme:AAAA',
+					readUser: 'reader',
+					readPassword: 'secret'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_ENV: path.join(directory, 'env'),
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				createGithubReporter(),
+				{
+					installRelease: () =>
+						Promise.resolve({
+							binaryPath: '/installed/cupboard',
+							version: 'v1.2.3',
+							sourceCommit: 'd'.repeat(40)
+						}),
+					fetch: stubFetch(() => cacheInfoBody(40), {
+						status: (url) => (url.includes('/cache/source/') ? status : 200)
+					})
+				}
+			)
+		).rejects.toThrow();
+	}
+);

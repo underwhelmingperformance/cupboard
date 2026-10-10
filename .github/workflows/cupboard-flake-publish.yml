@@ -163,8 +163,8 @@ on:
           substituters. `copy` selects them for publication. `leave` keeps them
           upstream if consumers can obtain matching NARs for the output and all
           its runtime references under the configured signature policy. Both
-          modes select outputs built in this run. The reuse view is part of this
-          tenant and can publish paths by reference.
+          modes select outputs built in this run. The configured reference
+          source is part of this tenant and can publish paths by reference.
         required: false
         default: leave
         type: string
@@ -333,7 +333,7 @@ on:
       read_user:
         description:
           User name of the default static read credential for the selected cache
-          and reuse view.
+          and reference source.
         required: false
       read_password:
         description: Password of the default static read credential.
@@ -357,7 +357,7 @@ on:
 permissions: {}
 
 jobs:
-  # Resolve cupboard, the cache, root prefix, TTL, and reuse view once. Every
+  # Resolve cupboard, the cache, root prefix, TTL, and reference source once. Every
   # later job uses these validated values. This job executes code only from the
   # reusable workflow's immutable checkout.
   configure:
@@ -375,6 +375,7 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+      reference-source: ${{ steps.resolve.outputs.reference-source }}
       provision-cache: ${{ steps.resolve.outputs.provision-cache }}
       provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
       close-cache: ${{ steps.resolve.outputs.close-cache }}
@@ -402,6 +403,7 @@ jobs:
       - name: Resolve inputs
         id: resolve
         env:
+          URL: ${{ inputs.url }}
           PRESET: ${{ inputs.preset }}
           BUILD: ${{ inputs.build }}
           SUBSTITUTER: ${{ inputs.substituter }}
@@ -524,6 +526,7 @@ jobs:
         with:
           cache-url: ${{ inputs.url }}
           read-caches: ${{ inputs.read-caches }}
+          reference-source: ${{ needs.configure.outputs.reference-source }}
           audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
@@ -578,6 +581,11 @@ jobs:
           read-session-view: ${{ steps.setup.outputs.read-session-view }}
           read-session-caches: ${{ steps.setup.outputs.read-session-caches }}
           audience: ${{ steps.setup.outputs.read-session-audience }}
+          reference-source: ${{ needs.configure.outputs.reference-source }}
+          fallback-read-user:
+            ${{ secrets.read_user || secrets.fallback_read_user }}
+          fallback-read-password:
+            ${{ secrets.read_password || secrets.fallback_read_password }}
           cache: ${{ needs.configure.outputs.cache }}
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
@@ -672,6 +680,7 @@ jobs:
         with:
           cache-url: ${{ inputs.url }}
           read-caches: ${{ inputs.read-caches }}
+          reference-source: ${{ needs.configure.outputs.reference-source }}
           audience: ${{ inputs.audience }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
@@ -703,6 +712,7 @@ jobs:
           audience: ${{ steps.setup.outputs.read-session-audience }}
           cache: ${{ needs.configure.outputs.cache }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
+          reference-source: ${{ needs.configure.outputs.reference-source }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
           read-user:

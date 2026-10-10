@@ -7,6 +7,7 @@ import type {
 	UnreachableSubstituter
 } from '@cupboard/nix';
 import {
+	type CacheScope,
 	type RootName,
 	storePathSchema,
 	type StorePathString
@@ -35,6 +36,10 @@ export interface AvailabilityTarget {
 	readonly plannedLocalDerivation?: StorePathString;
 	readonly root: RootName;
 }
+
+export type ReuseSource =
+	| { readonly kind: 'cache'; readonly cache: CacheScope }
+	| { readonly kind: 'view'; readonly view: string };
 
 export interface DestinationProbes {
 	readonly destinationServed: (
