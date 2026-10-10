@@ -7080,12 +7080,15 @@ measured delays are:
 
 ## Publication runs: safer reuse direction
 
-PR publications use the tenant's default cache as their reference source. The
-server's access-checked reuse release is a prerequisite for this change.
+PR publications use the tenant's default cache as their reference source. Branch
+publications add no PR reference source by default. The trusted-contributor
+wrapper uses only the cache of a unique same-repository merged PR for the pushed
+commit. Only that wrapper requires caller `pull-requests: read`. The server's
+access-checked reuse release is a prerequisite for this change.
 
 - [x] D1: Use the default cache as the PR reference source in availability
       checks, plan publication and cohort pushes.
-- [ ] D2: Disable branch PR reuse by default and add the trusted-contributor
+- [x] D2: Disable branch PR reuse by default and add the trusted-contributor
       wrapper for a unique merged PR.
 - [ ] D3: Update GitHub setup, checks and guided trust repair for both modes.
 - [ ] D4: Document the trust direction and required upgrade choices.

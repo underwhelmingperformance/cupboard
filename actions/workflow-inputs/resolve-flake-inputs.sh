@@ -121,6 +121,10 @@ if [ -n "${STORE}" ] && [[ ! "${STORE_KNOWN_HOSTS}" =~ [^[:space:]] ]]; then
   fi
 fi
 REFERENCE_SOURCE=''
+if [ -n "${MERGED_PULL_REQUEST}" ] && [[ ! "${MERGED_PULL_REQUEST}" =~ ^[1-9][0-9]*$ ]]; then
+  echo '::error::merged-pull-request must be a positive pull request number'
+  exit 1
+fi
 case "${PRESET}" in
   '')
     if [ -z "${ROOT_PREFIX}" ]; then
@@ -155,9 +159,9 @@ case "${PRESET}" in
     elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then
       ROOT_PREFIX="github:${REPOSITORY}/${BRANCH}"
       PERMANENT=true
-      # Match pullRequestViewName in packages/cli.
-      if [ -z "${REUSE_VIEW}" ]; then
-        REUSE_VIEW="pull-requests-${REPOSITORY_ID}"
+      REUSE_VIEW=''
+      if [ -n "${MERGED_PULL_REQUEST}" ]; then
+        REFERENCE_SOURCE="${URL%/}/cache/gh-${REPOSITORY_ID}-pr-${MERGED_PULL_REQUEST}"
       fi
     else
       echo "::error::preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}; got event '${EVENT_NAME}' on '${REF}'"

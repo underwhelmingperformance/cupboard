@@ -5,12 +5,9 @@ inputs:
   mode:
     description:
       Select resolve-flake-inputs, resolve-cache-operation or
-      validate-publication-options.
+      validate-publication-options or resolve-merged-pull-request.
     required: true
 outputs:
-  reference-source:
-    description: Reference cache URL selected by the publication preset.
-    value: ${{ steps.resolve.outputs.reference-source }}
   publish:
     description: Resolved publish value.
     value: ${{ steps.resolve.outputs.publish }}
@@ -32,6 +29,12 @@ outputs:
   reuse-view:
     description: Resolved reuse-view value.
     value: ${{ steps.resolve.outputs.reuse-view }}
+  reference-source:
+    description: Resolved reference-source value.
+    value: ${{ steps.resolve.outputs.reference-source }}
+  pull-request:
+    description: Unique merged pull request associated with the push commit.
+    value: ${{ steps.resolve.outputs.pull-request }}
   provision-cache:
     description: Resolved provision-cache value.
     value: ${{ steps.resolve.outputs.provision-cache }}
@@ -54,7 +57,7 @@ runs:
         MODE: ${{ inputs.mode }}
       run: |
         case "$MODE" in
-          resolve-flake-inputs|resolve-cache-operation|validate-publication-options)
+          resolve-flake-inputs|resolve-cache-operation|validate-publication-options|resolve-merged-pull-request)
             bash "$GITHUB_ACTION_PATH/$MODE.sh"
             ;;
           *)

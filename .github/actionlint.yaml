@@ -3,6 +3,9 @@
 # #732:
 # https://github.com/rhysd/actionlint/pull/732
 #
+# GitHub supports self-repository syntax in reusable workflow calls:
+# https://github.blog/changelog/2026-07-30-reference-same-repository-actions-with-self-repository-syntax/
+#
 # Ignore those two messages for the `$/` spellings alone, so a malformed
 # reference still fails.
 # Remove the entries once the pinned actionlint release parses the syntax.
@@ -32,5 +35,9 @@ paths:
   .github/workflows/cupboard-flake-publish.yml:
     ignore:
       - 'property "workflow_(repository|ref|sha)" is not defined in object type'
+      - 'specifying action "\$/[^"]*" in invalid format because ref is missing'
+      - 'reusable workflow call "\$/[^"]*" at "uses" is not following the format'
+  .github/workflows/cupboard-flake-publish-trusted.yml:
+    ignore:
       - 'specifying action "\$/[^"]*" in invalid format because ref is missing'
       - 'reusable workflow call "\$/[^"]*" at "uses" is not following the format'
