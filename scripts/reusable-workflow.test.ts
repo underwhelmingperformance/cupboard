@@ -2481,7 +2481,7 @@ describe('pull-request cache lifecycle', () => {
 				root: 'github:acme/infra/main',
 				ttl: '',
 				permanent: 'true',
-				view: 'pull-requests-1234'
+				view: ''
 			}))
 		)
 	] as const)(
@@ -2865,7 +2865,7 @@ it.each([flakeWorkflow, publishWorkflow])(
 	}
 );
 
-it('uses the default cache as the PR reference source', async () => {
+it('uses the default cache as the PR reference source and does not reuse PR outputs on branch runs', async () => {
 	const pr = await resolvePublicationEvent({ action: 'opened', merged: false });
 	const branch = await resolvePublicationEvent({
 		action: 'opened',
@@ -2879,6 +2879,150 @@ it('uses the default cache as the PR reference source', async () => {
 	}).toStrictEqual({
 		pr: 'https://cupboard.example.workers.dev/t/acme',
 		branch: '',
-		view: 'pull-requests-1234'
+		view: ''
+	});
+});
+
+it.each<{
+	kind: string;
+	patches: readonly Record<string, unknown>[];
+	expected: string;
+	isApiFailure?: boolean;
+	hasInvalidResponse?: boolean;
+}>([
+	{ kind: 'matching merged PR', patches: [{}], expected: '7' },
+	{ kind: 'API failure', patches: [], expected: '', isApiFailure: true },
+	{
+		kind: 'invalid API response',
+		patches: [],
+		expected: '',
+		hasInvalidResponse: true
+	},
+	{ kind: 'duplicate pagination results', patches: [{}, {}], expected: '7' },
+	{ kind: 'direct branch push', patches: [], expected: '' },
+	{ kind: 'unmerged PR', patches: [{ merged_at: undefined }], expected: '' },
+	{
+		kind: 'different commit',
+		patches: [{ merge_commit_sha: 'other' }],
+		expected: ''
+	},
+	{
+		kind: 'fork PR',
+		patches: [{ head: { repo: { id: 9999 } } }],
+		expected: ''
+	},
+	{
+		kind: 'different base branch',
+		patches: [{ base: { repo: { id: 1234 }, ref: 'other' } }],
+		expected: ''
+	},
+	{ kind: 'ambiguous merged PRs', patches: [{}, { number: 8 }], expected: '' }
+])(
+	'uses only the merged PR cache for $kind',
+	async ({ patches, expected, isApiFailure, hasInvalidResponse }) => {
+		const workflow = await loadWorkflow(
+			new URL(
+				'../.github/workflows/cupboard-flake-publish-trusted.yml',
+				import.meta.url
+			)
+		);
+		const lookup = shellOf(
+			workflow,
+			'lookup',
+			'Resolve the merged pull request'
+		);
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-merged-pr-'));
+		const output = path.join(directory, 'output');
+		try {
+			await writeFile(
+				path.join(directory, 'gh'),
+				`#!/bin/sh\nif [ "$API_FAILURE" = true ]; then exit 1; fi\nprintf '%s' "$PULLS"\n`,
+				{ mode: 0o755 }
+			);
+			await execFileAsync('bash', ['-c', lookup], {
+				env: {
+					...process.env,
+					PATH: `${directory}:${process.env.PATH ?? ''}`,
+					PRESET: 'pull-request-and-branch',
+					EVENT_NAME: 'push',
+					REF: 'refs/heads/main',
+					BRANCH: 'main',
+					REPOSITORY: 'acme/infra',
+					REPOSITORY_ID: '1234',
+					SHA: 'matching',
+					GITHUB_OUTPUT: output,
+					API_FAILURE: String(isApiFailure ?? false),
+					PULLS:
+						hasInvalidResponse === true
+							? 'invalid'
+							: JSON.stringify([
+									patches.map((patch) => ({
+										number: 7,
+										merged_at: '2026-10-09',
+										merge_commit_sha: 'matching',
+										head: { repo: { id: 1234 } },
+										base: { repo: { id: 1234 }, ref: 'main' },
+										...patch
+									}))
+								])
+				}
+			});
+			expect(await readFile(output, 'utf8')).toBe(`pull-request=${expected}\n`);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	}
+);
+
+it('restricts pull request lookup permission to callers of the trusted wrapper', async () => {
+	const normal = await loadWorkflow(flakeWorkflow);
+	const trusted = await loadWorkflow(
+		new URL(
+			'../.github/workflows/cupboard-flake-publish-trusted.yml',
+			import.meta.url
+		)
+	);
+	expect({
+		normal: normal.jobs.configure?.permissions,
+		lookup: trusted.jobs.lookup?.permissions
+	}).toStrictEqual({
+		normal: { contents: 'read' },
+		lookup: { 'pull-requests': 'read' }
+	});
+});
+
+it('forwards every public input and secret through the trusted wrapper', async () => {
+	const normal = await loadWorkflow(flakeWorkflow);
+	const trusted = await loadWorkflow(
+		new URL(
+			'../.github/workflows/cupboard-flake-publish-trusted.yml',
+			import.meta.url
+		)
+	);
+	const coreInputs = normal.on.workflow_call?.inputs ?? {};
+	const { 'merged-pull-request': _resolved, ...publicInputs } = coreInputs;
+	const secrets = normal.on.workflow_call?.secrets ?? {};
+	expect({
+		uses: trusted.jobs.publication?.uses,
+		inputs: trusted.on.workflow_call?.inputs,
+		secrets: trusted.on.workflow_call?.secrets,
+		forwarding: trusted.jobs.publication?.with,
+		secretForwarding: trusted.jobs.publication?.secrets
+	}).toStrictEqual({
+		uses: '$/.github/workflows/cupboard-flake-publish.yml',
+		inputs: publicInputs,
+		secrets,
+		forwarding: {
+			...Object.fromEntries(
+				Object.keys(publicInputs).map((key) => [
+					key,
+					'${{ inputs.' + key + ' }}'
+				])
+			),
+			'merged-pull-request': '${{ needs.lookup.outputs.pull-request }}'
+		},
+		secretForwarding: Object.fromEntries(
+			Object.keys(secrets).map((key) => [key, '${{ secrets.' + key + ' }}'])
+		)
 	});
 });

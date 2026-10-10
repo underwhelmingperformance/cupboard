@@ -113,13 +113,19 @@ on:
         required: false
         default: ''
         type: string
+      merged-pull-request:
+        description:
+          Merged pull request selected by the trusted-contributor wrapper. Leave
+          empty to build branch outputs without PR-cache reuse.
+        required: false
+        default: ''
+        type: string
       reuse-view:
         description:
           Reuse view to read through, for paths that the destination cache does
           not have. The workflow refuses a view unless its priority number is
-          greater than the destination's. With the preset, only runs on the
-          branch use a view, and they default to pull-requests-<repository-id>.
-          Leave empty for no view.
+          greater than the destination's. The preset ignores this input. Leave
+          empty for no view.
         required: false
         default: ''
         type: string
@@ -404,6 +410,7 @@ jobs:
         id: resolve
         env:
           URL: ${{ inputs.url }}
+          MERGED_PULL_REQUEST: ${{ inputs.merged-pull-request }}
           PRESET: ${{ inputs.preset }}
           BUILD: ${{ inputs.build }}
           SUBSTITUTER: ${{ inputs.substituter }}

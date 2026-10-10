@@ -24,6 +24,11 @@ const publicWorkflows: readonly PublicWorkflow[] = [
 			'Realises the targets in a flake manifest. The defaults are `build: missing`, `substituter: leave`, `publish: built` and `attest: true`. Each input can be set independently.'
 	},
 	{
+		file: 'cupboard-flake-publish-trusted',
+		summary:
+			'Opts the pull-request-and-branch preset into reuse from a unique merged pull request from the same repository. The caller grants `pull-requests: read`. Choose this workflow only when pull-request authors and their build configuration are trusted.'
+	},
+	{
 		file: 'cupboard-publish',
 		summary:
 			'Realises one flake installable on one runner. The defaults are `build: missing`, `substituter: copy`, `publish: built` and `attest: true`. For a private destination, the workflow can obtain a short-lived Cupboard read token through GitHub OIDC.'

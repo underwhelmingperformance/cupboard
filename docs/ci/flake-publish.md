@@ -564,3 +564,7 @@ write access before the next publication. See [Cache creation defaults] and
 With the `pull-request-and-branch` preset, a publishing PR uses the tenant's
 default cache as its reference source. Available outputs can be published by
 reference without uploading their content.
+
+Branch runs add no PR reference source by default. The trusted-contributor
+wrapper selects only the unique same-repository merged PR for the exact push
+commit, and requires `pull-requests: read` from its callers.
