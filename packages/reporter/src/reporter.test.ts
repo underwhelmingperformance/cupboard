@@ -1077,7 +1077,27 @@ describe('createGithubReporter', () => {
 			'::group::Uploading\n',
 			'Uploading: 20/100\n',
 			'Uploading: 40/100\n',
-			'Uploading: 40/100\n',
+			'::endgroup::\n'
+		]);
+	});
+
+	it('does not repeat progress when no more units have completed', async () => {
+		let clock = 0;
+
+		await createGithubReporter({ now: () => clock }).progress(
+			'Uploading',
+			{ total: 100 },
+			(bar) => {
+				clock = 2000;
+				bar.advance(10);
+				clock = 4000;
+				bar.advance(0);
+			}
+		);
+
+		expect(written).toStrictEqual([
+			'::group::Uploading\n',
+			'Uploading: 10/100\n',
 			'::endgroup::\n'
 		]);
 	});

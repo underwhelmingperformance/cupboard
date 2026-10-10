@@ -824,14 +824,28 @@ describe('runPush', () => {
 		}
 	});
 
-	it('reports how long each upload took at debug level', async () => {
+	it('reports upload timing, aggregate throughput and submission progress', async () => {
+		const facts = new Map<string, string | number>();
+		const progressTimes = [1000];
+		const baseReporter = reporter([]);
+		const progress: Reporter['progress'] = (label, options, body) =>
+			baseReporter.progress(label, options, (bar) =>
+				body({
+					...bar,
+					fact(label, value, display) {
+						facts.set(display?.humanLabel ?? label, value);
+						bar.fact(label, value, display);
+					}
+				})
+			);
 		const times = [1000, 4000];
 		const infos: { message: string; level?: string }[] = [];
 
 		await runPush(
 			publication([appPath]),
 			{
-				...reporter([]),
+				...baseReporter,
+				progress,
 				info: (message, presentation) => {
 					infos.push({
 						message,
@@ -843,6 +857,7 @@ describe('runPush', () => {
 			},
 			{
 				command: 'cupboard push',
+				now: () => progressTimes.shift() ?? 4000,
 				credential: 'cupboard-login',
 				uploadClock: {
 					now: () => times.shift() ?? 0,
@@ -876,6 +891,13 @@ describe('runPush', () => {
 			}
 		);
 
+		expect(Object.fromEntries(facts)).toStrictEqual({
+			uploaded: '1',
+			'newly available': '1',
+			'already available': '0',
+			duration: '3.0s',
+			throughput: `${formatBytes(compressedNarBytes.byteLength / 3)}/s`
+		});
 		expect(infos).toStrictEqual([
 			{
 				message: `${StorePath.basename(appPath)}: uploaded in ${formatDuration(3000)}`,
